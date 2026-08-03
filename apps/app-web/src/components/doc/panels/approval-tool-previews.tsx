@@ -33,11 +33,15 @@ const EMAIL_BODY_REMARK_PLUGINS = [remarkGfm];
 export function ToolPreview({
   preview,
   attachmentLines,
+  senderEmail,
 }: {
   preview: ToolPreviewData;
   /** Server-resolved attachment names + sizes (from `displayLines`), when
    *  available — richer than the raw refs in the arguments. */
   attachmentLines: string[];
+  /** Server-resolved connected account, when the input omitted an explicit
+   *  Gmail alias or IMAP account. */
+  senderEmail?: string | null;
 }) {
   switch (preview.kind) {
     case "email_send":
@@ -45,6 +49,7 @@ export function ToolPreview({
         <EmailSendPreview
           email={preview.email}
           attachmentLines={attachmentLines}
+          senderEmail={senderEmail}
         />
       );
     case "shopify_refund":
@@ -62,9 +67,11 @@ export function ToolPreview({
 function EmailSendPreview({
   email,
   attachmentLines,
+  senderEmail,
 }: {
   email: EmailSendPreviewData;
   attachmentLines: string[];
+  senderEmail?: string | null;
 }) {
   const t = useT();
   // Prefer the server-resolved names (real filename + size); fall back to
@@ -73,6 +80,7 @@ function EmailSendPreview({
     attachmentLines.length > 0
       ? attachmentLines
       : email.attachments.map(attachmentDisplayName);
+  const sender = email.from ?? senderEmail;
   return (
     <div className="w-full max-w-2xl mt-1 rounded-lg border border-border bg-background overflow-hidden shadow-sm">
       <div className="flex items-center gap-2 px-3 py-1.5 bg-muted/40 border-b border-border">
@@ -82,6 +90,17 @@ function EmailSendPreview({
         </span>
       </div>
       <div className="px-3 py-2 flex flex-col gap-1.5 border-b border-border">
+        <EnvelopeRow label={t.approvalsPage.emailPreview.from}>
+          {sender ? (
+            <span className="rounded-full bg-muted px-2 py-0.5 text-xs">
+              {sender}
+            </span>
+          ) : (
+            <span className="text-xs text-muted-foreground">
+              {t.approvalsPage.emailPreview.primaryAccount}
+            </span>
+          )}
+        </EnvelopeRow>
         <EnvelopeRow label={t.approvalsPage.emailPreview.to}>
           {email.to.length > 0 ? (
             <span className="flex flex-wrap gap-1">
@@ -128,13 +147,6 @@ function EmailSendPreview({
             </span>
           </EnvelopeRow>
         )}
-        {email.from && (
-          <EnvelopeRow label={t.approvalsPage.emailPreview.from}>
-            <span className="rounded-full bg-muted px-2 py-0.5 text-xs">
-              {email.from}
-            </span>
-          </EnvelopeRow>
-        )}
         <EnvelopeRow label={t.approvalsPage.emailPreview.subject}>
           {email.subject ? (
             <span className="text-sm font-medium">{email.subject}</span>
@@ -155,16 +167,19 @@ function EmailSendPreview({
           remarkPlugins={EMAIL_BODY_REMARK_PLUGINS}
         />
       </div>
-      {attachments.length > 0 && (
-        <div
-          className="px-3 py-2 border-t border-border flex flex-wrap items-center gap-1.5"
-          aria-label={t.approvalsPage.emailPreview.attachments}
-        >
+      <div
+        className="px-3 py-2 border-t border-border flex flex-wrap items-center gap-1.5"
+        aria-label={t.approvalsPage.emailPreview.attachments}
+      >
+        <span className="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground mr-0.5">
           <Paperclip
-            className="size-3.5 text-muted-foreground shrink-0"
+            className="size-3.5 shrink-0"
             aria-hidden
           />
-          {attachments.map((name, i) => (
+          {t.approvalsPage.emailPreview.attachments}
+        </span>
+        {attachments.length > 0 ? (
+          attachments.map((name, i) => (
             <span
               key={`${name}-${i}`}
               className="rounded-md border border-border bg-muted/50 px-2 py-0.5 text-[11px] font-mono max-w-[16rem] truncate"
@@ -172,9 +187,13 @@ function EmailSendPreview({
             >
               {name}
             </span>
-          ))}
-        </div>
-      )}
+          ))
+        ) : (
+          <span className="text-[11px] text-muted-foreground">
+            {t.approvalsPage.emailPreview.noAttachments}
+          </span>
+        )}
+      </div>
     </div>
   );
 }

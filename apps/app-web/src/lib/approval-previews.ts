@@ -107,7 +107,13 @@ export function parseToolPreview(
   toolName: string | null | undefined,
   args: Record<string, unknown> | null | undefined,
 ): ToolPreviewData | null {
-  const kind = toolName ? TOOL_PREVIEW_KINDS[toolName] : undefined;
+  // Built-in multi-account variants append `__<label>_<instance>` to the
+  // canonical tool name. Approval rows keep that concrete name, but the
+  // argument contract and preview kind stay the canonical tool's.
+  const canonicalToolName = toolName?.split("__", 1)[0];
+  const kind = canonicalToolName
+    ? TOOL_PREVIEW_KINDS[canonicalToolName]
+    : undefined;
   switch (kind) {
     case "email_send": {
       const email = parseEmailSendArgs(args ?? {});
@@ -146,11 +152,20 @@ export function parseEmailSendArgs(
     to: parseRecipients(args.to),
     cc: parseRecipients(args.cc),
     bcc: parseRecipients(args.bcc),
-    from: typeof args.from === "string" && args.from.trim() ? args.from : null,
+    from: firstNonBlankString(args.from, args.account),
     subject: subject ?? "",
     body: body ?? "",
     attachments,
   };
+}
+
+/** First non-blank string in precedence order. Gmail's explicit `from`
+ * alias and IMAP's selected `account` both describe the visible sender. */
+function firstNonBlankString(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return null;
 }
 
 /**
@@ -255,6 +270,18 @@ export function extractAttachmentLines(
   return (displayLines ?? [])
     .filter((l) => l.startsWith(prefix))
     .map((l) => l.slice(prefix.length));
+}
+
+/** Concrete sender resolved by the server-side confirmation hook. This is
+ * the primary connected Gmail/IMAP account when the model omitted an alias
+ * or explicit account. */
+export function extractEmailSender(
+  displayLines: string[] | undefined,
+): string | null {
+  const prefix = "• From: ";
+  const line = (displayLines ?? []).find((l) => l.startsWith(prefix));
+  const sender = line?.slice(prefix.length).trim();
+  return sender || null;
 }
 
 /**

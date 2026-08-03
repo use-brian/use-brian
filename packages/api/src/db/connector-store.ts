@@ -221,6 +221,8 @@ export type McpConnector = {
   userId: string
   connectorId: string
   name: string
+  /** Non-secret account identity captured at connect time. */
+  connectedEmail: string | null
   url: string | null
   custom: boolean
   connected: boolean
@@ -290,6 +292,7 @@ const PUBLIC_COLS = `
   user_id AS "userId",
   provider AS "connectorId",
   label AS name,
+  connected_email AS "connectedEmail",
   url, custom, connected,
   credentials_type AS "credentialsType",
   config,

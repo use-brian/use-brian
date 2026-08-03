@@ -2206,10 +2206,12 @@ export const zh: Dictionary = {
       cc: "副本",
       bcc: "密件副本",
       from: "寄件人",
+      primaryAccount: "主要已連接電郵帳戶",
       subject: "主旨",
       noSubject: "（無主旨）",
       noRecipient: "（無收件人）",
-      attachments: "附件",
+      attachments: "已附加文件",
+      noAttachments: "沒有附加文件",
     },
     shopifyRefundPreview: {
       title: "退款訂單",

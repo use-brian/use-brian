@@ -301,17 +301,21 @@ describe('[COMP:tools/gmail-attachments] gmailSendMessage attachments', () => {
       expect(lines).toContain('• Attachment: receipt.pdf (2 KB)')
     })
 
-    it('falls back to the generic renderer (null) without attachments', async () => {
+    it('shows the full draft without attachments', async () => {
       const tool = sendTool(gmailApi().api, filesApiFor([fakeFile()]))
 
-      expect(await tool.describeConfirmation!(SEND, makeContext())).toBeNull()
+      expect(await tool.describeConfirmation!(SEND, makeContext())).toEqual([
+        '• To: a@b.co',
+        '• Subject: Hi',
+        '• Body: Hello',
+      ])
     })
 
-    it('falls back to the generic renderer without a filesApi or workspace', async () => {
+    it('keeps raw attachment refs visible without a filesApi or workspace', async () => {
       const noFiles = sendTool(gmailApi().api)
       expect(
         await noFiles.describeConfirmation!({ ...SEND, attachments: ['x'] }, makeContext()),
-      ).toBeNull()
+      ).toContain('• Attachment: x')
 
       const noWs = sendTool(gmailApi().api, filesApiFor([fakeFile()]))
       expect(
@@ -319,7 +323,7 @@ describe('[COMP:tools/gmail-attachments] gmailSendMessage attachments', () => {
           { ...SEND, attachments: ['x'] },
           makeContext({ workspaceId: null }),
         ),
-      ).toBeNull()
+      ).toContain('• Attachment: x')
     })
 
     it('shows the raw ref for unresolvable attachments instead of dropping them', async () => {

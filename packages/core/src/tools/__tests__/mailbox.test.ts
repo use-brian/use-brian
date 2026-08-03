@@ -194,6 +194,21 @@ describe('[COMP:tools/mailbox-imap] Company mailbox tools', () => {
     expect(result.data).toEqual({ messageId: '<m1@corp.com>', from: EMAIL })
   })
 
+  it('shows the resolved primary mailbox in the approval preview', async () => {
+    const send = toolByName(toolsFor(makeApi()), 'imapSendMessage')
+    expect(
+      await send.describeConfirmation!(
+        { to: ['client@example.com'], subject: 'Proposal', body: 'Attached.' },
+        CTX,
+      ),
+    ).toEqual([
+      `• From: ${EMAIL}`,
+      '• To: client@example.com',
+      '• Subject: Proposal',
+      '• Body: Attached.',
+    ])
+  })
+
   it('forwards cc and bcc to the seam, omitting empty ones', async () => {
     const api = makeApi()
     const send = toolByName(toolsFor(api), 'imapSendMessage')

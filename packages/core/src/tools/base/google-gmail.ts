@@ -82,7 +82,15 @@ function formatRecipientField(value: unknown): string {
   return typeof value === 'string' ? value : ''
 }
 
-export function createGmailTools(api: GmailApi, opts?: { filesApi?: FilesApi }): Tool[] {
+export function createGmailTools(
+  api: GmailApi,
+  opts?: {
+    filesApi?: FilesApi
+    /** Connected account bound to this tool instance. Display-only: an
+     * explicit verified `from` alias still controls the outgoing header. */
+    senderEmail?: string
+  },
+): Tool[] {
   const listMessages = buildTool({
     name: 'gmailListMessages',
     description:
@@ -177,12 +185,11 @@ export function createGmailTools(api: GmailApi, opts?: { filesApi?: FilesApi }):
     requiresConfirmation: true,
     timeoutMs: 30_000,
 
-    // Approve/Deny preview. The model passes attachments as ids, so the
-    // generic key-value renderer would show raw UUIDs. With attachments
-    // present this takes over the WHOLE preview (displayLines replaces the
-    // generic renderer on every surface), so it must carry to/subject/body
-    // too. stat is metadata-only under the caller's read ceiling — the same
-    // projection the send itself applies. Null → generic renderer.
+    // Approve/Deny preview. Always identify the actual visible sender: an
+    // explicit verified alias wins, otherwise use the account bound by the
+    // injector. The model passes attachments as ids, so stat them into real
+    // names/sizes when possible. displayLines replaces the generic renderer
+    // on channel surfaces, therefore it carries the whole draft.
     async describeConfirmation(input, context) {
       const { to, cc, bcc, from, subject, body, attachments } = (input ?? {}) as {
         to?: unknown
@@ -193,16 +200,10 @@ export function createGmailTools(api: GmailApi, opts?: { filesApi?: FilesApi }):
         body?: unknown
         attachments?: unknown
       }
-      if (!Array.isArray(attachments) || attachments.length === 0) return null
-      const filesApi = opts?.filesApi
-      if (!filesApi || !context.workspaceId) return null
-
-      const ctx = ctxFor(context)
-      const refs = attachments.filter((r): r is string => typeof r === 'string')
-      const stats = await Promise.all(refs.map((ref) => filesApi.stat(ctx, ref)))
-
       const lines: string[] = []
-      if (typeof from === 'string') lines.push(`• From: ${from}`)
+      const explicitFrom = typeof from === 'string' ? from.trim() : ''
+      const sender = explicitFrom || opts?.senderEmail?.trim()
+      if (sender) lines.push(`• From: ${sender}`)
       const toLine = formatRecipientField(to)
       if (toLine) lines.push(`• To: ${toLine}`)
       const ccLine = formatRecipientField(cc)
@@ -212,6 +213,19 @@ export function createGmailTools(api: GmailApi, opts?: { filesApi?: FilesApi }):
       if (typeof subject === 'string') lines.push(`• Subject: ${subject}`)
       if (typeof body === 'string') lines.push(`• Body: ${body}`)
 
+      const refs = Array.isArray(attachments)
+        ? attachments.filter((r): r is string => typeof r === 'string')
+        : []
+      if (refs.length === 0) return lines.length > 0 ? lines : null
+
+      const filesApi = opts?.filesApi
+      if (!filesApi || !context.workspaceId) {
+        for (const ref of refs) lines.push(`• Attachment: ${ref}`)
+        return lines
+      }
+
+      const ctx = ctxFor(context)
+      const stats = await Promise.all(refs.map((ref) => filesApi.stat(ctx, ref)))
       const seen = new Set<string>()
       for (let i = 0; i < refs.length; i++) {
         const result = stats[i]
@@ -228,7 +242,7 @@ export function createGmailTools(api: GmailApi, opts?: { filesApi?: FilesApi }):
             : `• Attachment: ${f.name} (${formatSize(f.sizeBytes)})`,
         )
       }
-      return lines
+      return lines.length > 0 ? lines : null
     },
 
     async execute(input, context) {

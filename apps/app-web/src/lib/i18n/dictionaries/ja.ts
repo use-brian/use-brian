@@ -2222,10 +2222,12 @@ export const ja: Dictionary = {
       cc: "Cc",
       bcc: "Bcc",
       from: "差出人",
+      primaryAccount: "メインの接続済みメールアカウント",
       subject: "件名",
       noSubject: "（件名なし）",
       noRecipient: "（宛先なし）",
-      attachments: "添付ファイル",
+      attachments: "添付ドキュメント",
+      noAttachments: "添付ドキュメントなし",
     },
     shopifyRefundPreview: {
       title: "注文を返金",

@@ -24,6 +24,7 @@ import { cn } from "@/lib/utils";
 import { ToolPreview } from "@/components/doc/panels/approval-tool-previews";
 import {
   extractAttachmentLines,
+  extractEmailSender,
   parseToolPreview,
 } from "@/lib/approval-previews";
 
@@ -64,6 +65,7 @@ export function ChatConfirmationCard({
           <ToolPreview
             preview={preview}
             attachmentLines={extractAttachmentLines(confirmation.displayLines)}
+            senderEmail={extractEmailSender(confirmation.displayLines)}
           />
         ) : (
           <>
