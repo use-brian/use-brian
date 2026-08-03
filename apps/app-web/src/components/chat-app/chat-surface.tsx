@@ -146,6 +146,10 @@ import { PendingQuestionPanel } from "@/components/chrome/pending-question-panel
 import { ChatConfirmationCard } from "@/components/chrome/chat-confirmation-card";
 import { ChatContextPins } from "@/components/chat-app/chat-context-pins";
 import { resolveRequestedFreshAssistant } from "@/components/chat-app/assistant-deeplink";
+import {
+  coalesceAssistantRunMessages,
+  type ChatSurfaceMessage as SurfaceMessage,
+} from "@/components/chat-app/chat-transcript";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 const REMARK_PLUGINS = [remarkGfm];
@@ -156,17 +160,6 @@ const APP_ORIGIN = "chat";
 /** The dock's assistant-reply markdown wrapper, verbatim. */
 const MARKDOWN_CLS =
   "chat-markdown prose prose-sm dark:prose-invert max-w-none text-[14px] leading-[1.6] text-foreground break-words";
-
-/**
- * A transcript row. Widens `chat-ui`'s `Message` with the sender's display
- * name, which only shared threads carry — the package stays host-agnostic, so
- * per-surface fields live here rather than in its shared type.
- */
-type SurfaceMessage = Message & {
-  senderName?: string;
-  /** The ANSWERING assistant per reply (multi-assistant rooms, T9). */
-  senderAssistantId?: string | null;
-};
 
 /** Narrow an SSE `data` payload to an object without trusting its shape. */
 function coercePayload(data: unknown): Record<string, unknown> {
@@ -490,7 +483,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    *  turn lands — the SSE payload is a SIGNAL, never the data. */
   const loadTranscript = useCallback(async (sessionId: string) => {
     const rows = await fetchSessionMessages(sessionId);
-    const rendered: SurfaceMessage[] = rows
+    const persistedRows: SurfaceMessage[] = rows
       .filter((r) => r.role === "user" || r.role === "assistant")
       .map((r) => {
         const toolsUsed =
@@ -521,7 +514,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         };
       })
       .filter((m) => m.text.length > 0 || (m.toolsUsed?.length ?? 0) > 0);
-    chat.loadMessages(rendered);
+    chat.loadMessages(coalesceAssistantRunMessages(persistedRows));
     // `chat.loadMessages` is a stable useCallback from the hook.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tChat.toolNarration]);
