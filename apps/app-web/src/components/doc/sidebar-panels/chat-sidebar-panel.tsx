@@ -49,8 +49,10 @@ import {
   type WorkspaceAssistantSummary,
 } from "@/lib/api/views";
 import {
+  CHAT_SESSION_ACTIVITY_EVENT,
   CHAT_SESSIONS_REFRESH_EVENT,
   dispatchChatSessionsRefresh,
+  type ChatSessionActivityDetail,
 } from "@/lib/chat-session-events";
 import {
   createWorkspaceSession,
@@ -75,6 +77,14 @@ const rowCls = (active: boolean) =>
 const sectionHeaderCls =
   "px-1 pb-1.5 text-[11px] font-semibold uppercase tracking-wide text-sidebar-foreground/45";
 
+const ROOM_ACTIVITY_STATUS_POLL_MS = 3_000;
+const ROOM_ACTIVITY_OVERRIDE_GRACE_MS = 10_000;
+
+type RoomActivityOverride = {
+  working: boolean;
+  changedAt: number;
+};
+
 export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
   const t = useT().chatApp;
   const router = useRouter();
@@ -97,6 +107,38 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
   // threads are reachable, not top-of-mind.
   const [othersOpen, setOthersOpen] = useState(false);
   const [creatingShared, setCreatingShared] = useState(false);
+  /** Same-tab fast path for room work. A fresh mount falls back to each
+   *  workspace row's persisted `status`, so navigation/re-entry stays
+   *  authoritative even when this ephemeral signal was not observed. */
+  const [activityBySession, setActivityBySession] = useState<
+    Record<string, RoomActivityOverride>
+  >({});
+
+  /** Reconcile the immediate same-tab signal with persisted session status.
+   *  A short grace keeps a just-started turn pulsing while the chat route is
+   *  still in preflight and has not flipped the row to `running` yet. */
+  const applySharedRows = useCallback((shared: WorkspaceSession[]) => {
+    setSharedRows(shared);
+    const byId = new Map(shared.map((row) => [row.id, row]));
+    const now = Date.now();
+    setActivityBySession((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const [sessionId, override] of Object.entries(current)) {
+        const row = byId.get(sessionId);
+        const persistedWorking = row?.status === "running";
+        if (
+          !row ||
+          persistedWorking === override.working ||
+          now - override.changedAt >= ROOM_ACTIVITY_OVERRIDE_GRACE_MS
+        ) {
+          delete next[sessionId];
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -113,12 +155,12 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
         listWorkspaceSessions({ workspaceId }),
       ]);
       setRows(personal);
-      setSharedRows(shared);
+      applySharedRows(shared);
     } catch {
       setRows((prev) => prev ?? []);
       setSharedRows((prev) => prev ?? []);
     }
-  }, [workspaceId]);
+  }, [applySharedRows, workspaceId]);
 
   useEffect(() => {
     setRows(null);
@@ -133,6 +175,22 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
     window.addEventListener(CHAT_SESSIONS_REFRESH_EVENT, handler);
     return () => window.removeEventListener(CHAT_SESSIONS_REFRESH_EVENT, handler);
   }, [refresh]);
+
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<ChatSessionActivityDetail>).detail;
+      if (!detail || detail.workspaceId !== workspaceId) return;
+      setActivityBySession((current) => ({
+        ...current,
+        [detail.sessionId]: {
+          working: detail.working,
+          changedAt: Date.now(),
+        },
+      }));
+    };
+    window.addEventListener(CHAT_SESSION_ACTIVITY_EVENT, handler);
+    return () => window.removeEventListener(CHAT_SESSION_ACTIVITY_EVENT, handler);
+  }, [workspaceId]);
 
   const base = `/w/${workspaceId}/chat`;
   const onChatSurface = pathname === base;
@@ -179,6 +237,23 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
   // A search that hits an ambient thread must surface it — a collapsed match
   // reads as "not found".
   const showAmbient = othersOpen || (needle.length > 0 && visibleAmbient.length > 0);
+  const hasWorkingRoom =
+    (sharedRows ?? []).some((row) => row.status === "running") ||
+    Object.values(activityBySession).some((activity) => activity.working);
+
+  // A room may finish after the user switches to another room, at which point
+  // neither of the old room's page streams remains to deliver turn_completed.
+  // Poll only while work is known live; the authoritative list status then
+  // settles the old row and stops this interval.
+  useEffect(() => {
+    if (view !== "workspace" || !hasWorkingRoom) return;
+    const poll = window.setInterval(() => {
+      void listWorkspaceSessions({ workspaceId })
+        .then(applySharedRows)
+        .catch(() => {});
+    }, ROOM_ACTIVITY_STATUS_POLL_MS);
+    return () => window.clearInterval(poll);
+  }, [applySharedRows, hasWorkingRoom, view, workspaceId]);
 
   const onRename = useCallback(
     async (row: DocSession) => {
@@ -258,6 +333,9 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
       "startedByUserId" in row &&
       row.id !== activeSessionId &&
       isRoomUnread(workspaceId, row.id, row.lastActive);
+    const working =
+      "startedByUserId" in row &&
+      (activityBySession[row.id]?.working ?? row.status === "running");
     return (
     <div key={row.id} className="group relative">
       <Link
@@ -267,7 +345,24 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
       >
         <span className="flex min-w-0 items-center gap-2">
           {rowAssistant && (
-            <span className="shrink-0" title={rowAssistant.name}>
+            <span
+              className={cn(
+                "shrink-0",
+                working && "animate-pulse motion-reduce:animate-none",
+              )}
+              role={working ? "status" : undefined}
+              aria-label={
+                working
+                  ? format(t.workingAria, { name: rowAssistant.name })
+                  : undefined
+              }
+              title={
+                working
+                  ? format(t.workingAria, { name: rowAssistant.name })
+                  : rowAssistant.name
+              }
+              data-chat-working={working ? "true" : undefined}
+            >
               <AssistantAvatar
                 id={rowAssistant.id}
                 name={rowAssistant.name}

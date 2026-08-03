@@ -36,6 +36,19 @@ export type CitationSource = {
   title: string
 }
 
+/**
+ * Verbatim source text presented by the Chat operator app's read-only
+ * right-hand viewer. The id is the originating tool-use id, which makes live
+ * SSE re-emits and persisted-history restoration converge on one identity.
+ */
+export type DocumentAttachment = {
+  id: string
+  title: string
+  content: string
+  format: 'text' | 'markdown'
+  sourceName?: string
+}
+
 export type ToolUsed = {
   id: string
   name: string
@@ -98,6 +111,8 @@ export type Message = {
   activityDurationMs?: number
   /** Q5 (§16) — A2UI view payloads emitted via renderView tool calls in this message. */
   views?: ViewPayloadAttachment[]
+  /** Full source documents presented in the Chat app's split viewer. */
+  documents?: DocumentAttachment[]
   replyTo?: ReplyTo
   followUpQuestions?: string[]
 }

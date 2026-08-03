@@ -81,7 +81,9 @@ vi.mock("@/components/assistant-avatar", () => ({
 
 vi.mock("@/lib/chat-seen", () => ({ isRoomUnread: () => false }));
 vi.mock("@/lib/chat-session-events", () => ({
+  CHAT_SESSION_ACTIVITY_EVENT: "chat:session-activity",
   CHAT_SESSIONS_REFRESH_EVENT: "chat:sessions-refresh",
+  dispatchChatSessionActivity: vi.fn(),
   dispatchChatSessionsRefresh: vi.fn(),
 }));
 
@@ -175,5 +177,45 @@ describe("[COMP:app-web/sidebar-panel-chat] open-chat deletion", () => {
       "/w/workspace-1/chat?v=workspace",
       { scroll: false },
     );
+  });
+});
+
+describe("[COMP:app-web/sidebar-panel-chat] live room activity", () => {
+  it("pulses a running room avatar and settles from the same-tab activity signal", async () => {
+    sessionApi.listWorkspaceSessions.mockResolvedValueOnce([
+      {
+        id: "room-1",
+        title: "Workspace launch",
+        channelId: "channel-1",
+        lastActive: "2026-08-01T01:00:00.000Z",
+        appOrigin: "chat",
+        assistantId: "assistant-1",
+        status: "running",
+        startedByUserId: "user-1",
+        startedByName: "Alice",
+        startedByAvatarUrl: null,
+      },
+    ]);
+    await renderPanel();
+
+    const working = container!.querySelector('[data-chat-working="true"]');
+    expect(working).not.toBeNull();
+    expect(working?.classList.contains("animate-pulse")).toBe(true);
+    expect(working?.getAttribute("role")).toBe("status");
+    expect(working?.getAttribute("aria-label")).toBe("Brian is working");
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent("chat:session-activity", {
+          detail: {
+            workspaceId: "workspace-1",
+            sessionId: "room-1",
+            working: false,
+          },
+        }),
+      );
+    });
+
+    expect(container!.querySelector('[data-chat-working="true"]')).toBeNull();
   });
 });

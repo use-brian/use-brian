@@ -33,6 +33,7 @@
  */
 
 import { authFetch } from "@/lib/auth-fetch";
+import type { DocumentAttachment } from "@use-brian/chat-ui";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -521,6 +522,81 @@ export function extractToolUses(
     });
   }
   return uses;
+}
+
+/** Validate either a live document_payload or a persisted tool input. */
+export function parsePresentedDocumentPayload(
+  value: unknown,
+  fallbackId?: string,
+): DocumentAttachment | null {
+  if (!value || typeof value !== "object") return null;
+  const input = value as Record<string, unknown>;
+  const id =
+    typeof input.toolUseId === "string"
+      ? input.toolUseId
+      : typeof input.id === "string"
+        ? input.id
+        : fallbackId;
+  const title = typeof input.title === "string" ? input.title.trim() : "";
+  const sourceName =
+    typeof input.sourceName === "string" ? input.sourceName.trim() : "";
+  const documentContent = input.content;
+  const format = input.format === "markdown" ? "markdown" : "text";
+  if (
+    !id ||
+    !title ||
+    title.length > 512 ||
+    typeof documentContent !== "string" ||
+    documentContent.length === 0 ||
+    documentContent.length > 250_000 ||
+    sourceName.length > 512
+  ) {
+    return null;
+  }
+  return {
+    id,
+    title,
+    content: documentContent,
+    format,
+    ...(sourceName ? { sourceName } : {}),
+  };
+}
+
+/**
+ * Restore raw-document cards from persisted `presentDocument` tool-use
+ * inputs. The server validates the same shape before emitting a live payload;
+ * history is still untrusted JSON, so the client repeats the narrow boundary
+ * check before handing content to the renderer.
+ *
+ * Keep the 250k ceiling aligned with MAX_PRESENTED_DOCUMENT_CHARS in core.
+ * [COMP:app-web/chat-document-viewer]
+ */
+export function extractPresentedDocuments(content: unknown): DocumentAttachment[] {
+  if (!Array.isArray(content)) return [];
+  const documents: DocumentAttachment[] = [];
+  const seen = new Set<string>();
+  for (const block of content) {
+    if (!block || typeof block !== "object") continue;
+    const b = block as {
+      type?: unknown;
+      id?: unknown;
+      name?: unknown;
+      input?: unknown;
+    };
+    if (
+      b.type !== "tool_use" ||
+      b.name !== "presentDocument" ||
+      typeof b.id !== "string" ||
+      seen.has(b.id)
+    ) {
+      continue;
+    }
+    const document = parsePresentedDocumentPayload(b.input, b.id);
+    if (!document) continue;
+    seen.add(document.id);
+    documents.push(document);
+  }
+  return documents;
 }
 
 /** Join the text blocks of a message verbatim (wrappers NOT stripped). */

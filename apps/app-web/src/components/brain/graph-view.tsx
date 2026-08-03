@@ -119,7 +119,7 @@ import {
 } from "@/lib/graph-semantic-zoom";
 import { format, useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
-import { GraphLoadingConstellation } from "@/components/brain/graph-loading";
+import { BrainGraphLoadingSkeleton } from "@/components/brain/graph-loading";
 
 type Props = {
   graph: BrainGraph;
@@ -1242,7 +1242,7 @@ export function BrainGraphView({
     >
       {showGraphLoader && (
         <div className="absolute inset-0 z-20">
-          <GraphLoadingConstellation />
+          <BrainGraphLoadingSkeleton />
         </div>
       )}
       {!showGraphLoader &&

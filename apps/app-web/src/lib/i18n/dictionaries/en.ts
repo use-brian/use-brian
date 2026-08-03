@@ -4179,6 +4179,7 @@ export const en = {
     postFailed: "Could not post your message. Try again.",
     mentionInsertAria: "Mention {name}",
     unreadDotAria: "New activity",
+    workingAria: "{name} is working",
     confirmNotAllowed: "Only the member who asked this turn (or a workspace admin) can act on this.",
     captureIndicator: "Captured to the company brain",
     workBench: "Work Bench",
@@ -4194,6 +4195,14 @@ export const en = {
     liveWorkSteps: "{done} completed · {running} running",
     pinnedContext: "Pins",
     assistantClearanceBlocked: "That assistant is cleared above this room and cannot answer here.",
+    documentViewer: {
+      label: "Raw document",
+      open: "Open document",
+      openAria: "Open {title}",
+      copy: "Copy document",
+      copied: "Document copied",
+      close: "Close document viewer",
+    },
     pins: {
       rowAria: "Pinned context",
       add: "Add",
