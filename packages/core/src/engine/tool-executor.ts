@@ -93,6 +93,58 @@ export type ToolExecutorOptions = {
 
 // ── Error formatting ───────────────────────────────────────────
 
+/** One zod issue, duck-typed (see `formatToolError` on why not `instanceof`). */
+type ZodIssueLike = {
+  path?: unknown[]
+  message?: string
+  code?: string
+  unionErrors?: Array<{ issues?: ZodIssueLike[] }>
+}
+
+/** Branches rendered for one union issue. Beyond this the model is not
+ *  learning more, it is just paying tokens. */
+const MAX_UNION_BRANCHES = 3
+/** Issues rendered per branch. */
+const MAX_UNION_ISSUES_PER_BRANCH = 2
+/** Hard character budget for ONE union issue's rendered detail. */
+const MAX_UNION_DETAIL_CHARS = 320
+
+/**
+ * Turn an `invalid_union` issue's branch errors into a bounded, actionable
+ * suffix — or null when there is nothing useful to add.
+ *
+ * Zod renders a union mismatch as the bare word "Invalid input", which names
+ * neither what arrived nor what was allowed. The branch errors underneath do
+ * carry that (`Invalid enum value. Expected 'todo' | … , received '["todo"]'`),
+ * so the fix is to surface a capped slice of them rather than the recursive
+ * blob that caused the 2026-06-01 incident.
+ *
+ * Branch issues can sit DEEPER than the union's own path (an array-branch
+ * failure reports `status.1`, naming the offending element) and that is
+ * usually the most useful line of all, so paths are rendered per issue rather
+ * than filtered to the union's own depth.
+ */
+function describeUnionIssue(issue: ZodIssueLike): string | null {
+  const branches = issue.unionErrors
+  if (!Array.isArray(branches) || branches.length === 0) return null
+  const seen = new Set<string>()
+  for (const branch of branches.slice(0, MAX_UNION_BRANCHES)) {
+    for (const sub of (branch.issues ?? []).slice(0, MAX_UNION_ISSUES_PER_BRANCH)) {
+      const message = sub.message
+      if (!message) continue
+      // Re-path only when the branch blames something deeper than the union
+      // itself; at the same depth the caller already prints the path.
+      const deeper = (sub.path?.length ?? 0) > (issue.path?.length ?? 0)
+      seen.add(deeper ? `${(sub.path ?? []).join('.')}: ${message}` : message)
+    }
+  }
+  if (seen.size === 0) return null
+  const joined = [...seen].join(' OR ')
+  return joined.length > MAX_UNION_DETAIL_CHARS
+    ? `${joined.slice(0, MAX_UNION_DETAIL_CHARS)}…`
+    : joined
+}
+
 /**
  * Render a thrown tool error as a compact, model-actionable string.
  *
@@ -107,15 +159,25 @@ export type ToolExecutorOptions = {
  * is the single chokepoint for both `inputSchema.parse` failures and
  * ZodErrors thrown from inside a tool's own `execute()`.
  *
+ * Union issues get a **bounded** slice of their branch errors appended
+ * (`describeUnionIssue`). Dropping them wholesale was over-correction: a bare
+ * "status: Invalid input" is unactionable, so the model cannot retry and
+ * gives up — 35 silent `listTasks` failures between 2026-07-08 and 2026-08-03,
+ * each one dropping a person's section from the morning digest. The caps
+ * (3 branches × 2 issues, 320 chars per union issue, 20 issues overall) are
+ * what keep this from becoming the 2026-06-01 blob again.
+ *
  * Duck-typed on `.issues` rather than `instanceof ZodError` so a tool that
  * bundles its own zod copy (a different class identity) still matches.
  */
 export function formatToolError(err: unknown): string {
   if (err && typeof err === 'object' && Array.isArray((err as { issues?: unknown }).issues)) {
-    const issues = (err as { issues: Array<{ path?: unknown[]; message?: string }> }).issues
-    const lines = issues
-      .slice(0, 20)
-      .map((i) => `${(i.path ?? []).join('.') || '(root)'}: ${i.message ?? 'invalid'}`)
+    const issues = (err as { issues: ZodIssueLike[] }).issues
+    const lines = issues.slice(0, 20).map((i) => {
+      const path = (i.path ?? []).join('.') || '(root)'
+      const detail = i.code === 'invalid_union' ? describeUnionIssue(i) : null
+      return `${path}: ${detail ?? i.message ?? 'invalid'}`
+    })
     const more = issues.length > 20 ? `\n…and ${issues.length - 20} more issue(s)` : ''
     return `Validation failed:\n${lines.join('\n')}${more}`
   }

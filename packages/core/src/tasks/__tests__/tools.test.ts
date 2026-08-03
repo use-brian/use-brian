@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { buildCitationIndex } from '@use-brian/shared'
 import { createTaskTools, type TaskToolEvent } from '../tools.js'
+import { formatToolError } from '../../engine/tool-executor.js'
 import type { TaskRecord, TaskStore } from '../types.js'
 
 // The real store persists provenance (source*, mig 316/334) but does NOT
@@ -440,6 +441,40 @@ describe('[COMP:tasks/tools] listTasks', () => {
     const result = await listTasks.execute({ status: ['todo', 'in_progress'] }, ctx)
     const data = result.data as Array<{ status: string }>
     expect(data.map((r) => r.status).sort()).toEqual(['in_progress', 'todo'])
+  })
+
+  // Production regression (2026-07-08 → 2026-08-03, 35 occurrences): the model
+  // serialises this list param loosely and the strict `enum | enum[]` union
+  // rejected it as "status: Invalid input". Every occurrence was a workflow
+  // step that still reported `completed` while emptying one person's digest
+  // section, so the failure was invisible. See `tolerantEnumArray`.
+  it('accepts a status list the model serialised as a string', async () => {
+    const store = makeFakeStore()
+    await seed(store)
+    const { listTasks } = createTaskTools(store)
+
+    for (const loose of ['["todo","in_progress"]', 'todo,in_progress', 'todo, in_progress']) {
+      const parsed = listTasks.inputSchema.safeParse({ status: loose })
+      expect(parsed.success, `should accept ${loose}`).toBe(true)
+      const result = await listTasks.execute(
+        (parsed as { data: Record<string, unknown> }).data,
+        ctx,
+      )
+      expect(result.isError).toBeFalsy()
+      const data = result.data as Array<{ status: string }>
+      expect(data.map((r) => r.status).sort()).toEqual(['in_progress', 'todo'])
+    }
+  })
+
+  it('still rejects an unknown status, and now says what was allowed', () => {
+    const { listTasks } = createTaskTools(makeFakeStore())
+    const res = listTasks.inputSchema.safeParse({ status: 'pending' })
+    expect(res.success).toBe(false)
+    if (!res.success) {
+      // Tolerance is not coercion — an invalid member is still a hard failure,
+      // and the message has to name the legal set or the model cannot retry.
+      expect(formatToolError(res.error)).toContain('todo')
+    }
   })
 
   it('filters by assignee + tag together', async () => {
