@@ -13,7 +13,7 @@ import type { FilesApi, FilesContext } from '../workspace-files/api.js'
 import { ctxFor, errorMessage, workspaceGate } from '../workspace-files/tool-helpers.js'
 import { resolveDeckImages } from './image-resolve.js'
 import { writeDeckPptx } from './pptx-writer.js'
-import { extractDeckStyle } from './style-extract.js'
+import { derivePackTokens } from './pack-derive.js'
 
 /**
  * Deck tools — generatePowerpoint / updatePowerpoint / getPowerpoint.
@@ -79,15 +79,26 @@ export interface DeckToolOptions {
 }
 
 const STYLE_SCOPE_NOTE =
-  'Style extraction copies the reference deck\'s COLORS and FONTS onto the standard layouts; it does not clone its slide designs or images.'
+  "Style extraction copies the reference deck's COLORS, FONTS, type SIZE and caps treatment onto the standard layouts. " +
+  'It does NOT clone its slide designs, ornaments, spacing or images, so the result will read as the same art direction ' +
+  'rather than as the same deck. The result carries `styleNotes` listing what could not be measured - relay those to the ' +
+  'user instead of implying the deck matches their reference.'
 
 const LAYOUT_MANUAL =
   "Slide layouts: 'content' (title + bullets and/or a chart or image), 'statement' (one big centered claim), " +
-  "'stats' (row of 1-4 big-number tiles), 'quote' (testimonial), 'section' (divider). A title slide is added automatically. " +
+  "'stats' (row of 1-4 big-number tiles), 'quote' (testimonial), 'section' (divider), " +
+  "'hero' (full-bleed image with the title over it), 'split' (image filling one half, title + bullets on the other). " +
+  'A title slide is added automatically. ' +
   "Charts (bar/line for trends, pie/doughnut for shares) go on 'content' slides via `chart`. " +
   "Every 'content' slide MUST have `bullets`, `chart` and/or `image` — body text goes in `bullets` (there is no 'content'/'body' field); " +
   "use 'statement' or 'section' for title-only slides. One idea per slide. " +
-  'Images: prefer `image.path` (a workspace file); `image.url` must be a public http(s) png/jpeg/gif (max 10MB, 10 per deck).'
+  "'hero' and 'split' both REQUIRE `image`. Use 'hero' to open or close a section on a strong picture — it shows only the title and " +
+  "`subtext`, so put body content on the next slide; use 'split' when the picture and the words carry equal weight (consecutive " +
+  "'split' slides mirror sides automatically). " +
+  'Images: prefer `image.path` (a workspace file); `image.url` must be a public http(s) png/jpeg/gif (max 10MB, 20 per deck). ' +
+  "Set `pack` when the deck should look designed rather than neutral - 'minimal' (beige and black, ultra-heavy headings, " +
+  "bordered numbered rows, full-height image bands) or 'editorial' (warm paper and rust, asymmetric columns, headline cards " +
+  'over hero images). A pack restyles every layout; the layouts above are the same whichever you pick.'
 
 function preview(appOrigin: string | undefined, workspaceId: string, deckId: string): string | undefined {
   return appOrigin ? `${appOrigin.replace(/\/$/, '')}/w/${workspaceId}/decks/${deckId}` : undefined
@@ -97,11 +108,17 @@ async function resolveStyle(
   filesApi: FilesApi,
   ctx: FilesContext,
   styleFromFile: string,
-): Promise<{ style: DeckStyle; styleSource: string } | { error: string }> {
+): Promise<{ style: DeckStyle; styleSource: string; notes: string[] } | { error: string }> {
   const read = await filesApi.readBytes(ctx, styleFromFile)
   if (!read.ok) return { error: errorMessage(read.error) }
   try {
-    return { style: await extractDeckStyle(read.value.bytes), styleSource: read.value.file.path }
+    // Full derivation, not just the theme: palette observed from the slides
+    // (most producers leave theme1.xml at the Office default), plus the
+    // reference's type weight and caps treatment. `notes` travels with it so
+    // the model can tell the user what did NOT transfer rather than implying
+    // a full match.
+    const derived = await derivePackTokens(read.value.bytes)
+    return { style: derived.tokens.style, styleSource: read.value.file.path, notes: derived.notes }
   } catch (err) {
     return { error: err instanceof Error ? err.message : 'could not extract a style from that file' }
   }
@@ -181,11 +198,13 @@ export function createDeckTools(opts: DeckToolOptions): Tool[] {
 
       let style: DeckStyle | null = null
       let styleSource: string | null = null
+      let styleNotes: string[] = []
       if (styleFromFile) {
         const resolved = await resolveStyle(filesApi, ctx, styleFromFile)
         if ('error' in resolved) return { data: resolved.error, isError: true }
         style = resolved.style
         styleSource = resolved.styleSource
+        styleNotes = resolved.notes
       }
 
       const id = randomUUID()
@@ -208,6 +227,9 @@ export function createDeckTools(opts: DeckToolOptions): Tool[] {
           version: row.version,
           slideCount: parsed.data.slides.length + 1,
           styleSource: row.styleSource ?? undefined,
+          // what did NOT transfer from the reference — relay these rather than
+          // letting the user assume their deck matches it
+          styleNotes: styleNotes.length ? styleNotes : undefined,
           previewUrl: preview(appOrigin, ctx.workspaceId, row.id),
         },
       }

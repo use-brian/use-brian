@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
+  MAX_DECK_IMAGES,
   applyDeckOps,
   deckSpecSchema,
   type DeckOp,
   type DeckSpec,
 } from '../decks/spec.js';
 import {
+  DECK_PACK_STYLES,
   DECK_PRESET_STYLES,
   contrastRatio,
   deriveDeckStyle,
@@ -71,12 +73,37 @@ describe('[COMP:decks/spec] Deck spec schema', () => {
     ).not.toThrow();
   });
 
-  it('caps deck images at 10', () => {
-    const slides = Array.from({ length: 11 }, (_, i) => ({
+  it('caps deck images at MAX_DECK_IMAGES', () => {
+    const slides = Array.from({ length: MAX_DECK_IMAGES + 1 }, (_, i) => ({
       title: `S${i}`,
-      image: { url: `https://x.com/${i}.png` },
+      image: { url: `https://x.example/${i}.png` },
     }));
-    expect(() => deckSpecSchema.parse({ title: 'T', slides })).toThrow(/max 10/);
+    expect(() => deckSpecSchema.parse({ title: 'T', slides })).toThrow(
+      new RegExp(`max ${MAX_DECK_IMAGES}`),
+    );
+    expect(() => deckSpecSchema.parse({ title: 'T', slides: slides.slice(0, MAX_DECK_IMAGES) })).not.toThrow();
+  });
+
+  it('rejects image-led layouts without an image', () => {
+    for (const layout of ['hero', 'split'] as const) {
+      expect(() => deckSpecSchema.parse({ title: 'T', slides: [{ title: 'S', layout }] })).toThrow(
+        /requires an `image`/,
+      );
+    }
+    const ok = { title: 'T', slides: [{ title: 'S', layout: 'hero', image: { url: 'https://x.example/a.png' } }] };
+    expect(() => deckSpecSchema.parse(ok)).not.toThrow();
+  });
+
+  it('rejects body content on a hero, which has nowhere to render it', () => {
+    const hero = (extra: Record<string, unknown>) => ({
+      title: 'T',
+      slides: [{ title: 'S', layout: 'hero', image: { url: 'https://x.example/a.png' }, ...extra }],
+    });
+    expect(() => deckSpecSchema.parse(hero({ bullets: ['a'] }))).toThrow(/hero/);
+    expect(() => deckSpecSchema.parse(hero({ stats: [{ value: '1', label: 'one' }] }))).toThrow(/hero/);
+    expect(() => deckSpecSchema.parse(hero({ quote: { text: 'hi' } }))).toThrow(/hero/);
+    // subtext is the one body field a hero DOES render
+    expect(() => deckSpecSchema.parse(hero({ subtext: 'A supporting line' }))).not.toThrow();
   });
 
   it('rejects stats layout without stats and chart label/value mismatch', () => {
@@ -160,7 +187,10 @@ describe('[COMP:decks/style] Deck style resolution + derivation', () => {
   it('falls back to defaults on a garbage scheme', () => {
     const style = deriveDeckStyle({ accents: [] });
     expect(style.background).toBe(DECK_PRESET_STYLES.light.background);
-    expect(style.headingFont).toBe('Arial');
+    // assert against the preset, not a literal face — the pairing is a design
+    // choice that may change again, the "falls back to it" contract is not
+    expect(style.headingFont).toBe(DECK_PRESET_STYLES.light.headingFont);
+    expect(style.bodyFont).toBe(DECK_PRESET_STYLES.light.bodyFont);
     expect(style.chartCategorical.length).toBeGreaterThanOrEqual(6);
   });
 });
@@ -190,6 +220,8 @@ describe('[COMP:decks/layout] Deck layout engine', () => {
         { title: 'Quote', layout: 'quote', quote: { text: 'Nice.', attribution: 'CEO' } },
         { title: 'Bar', chart: { type: 'bar', labels: ['a', 'b'], values: [3, -2] } },
         { title: 'Pie', chart: { type: 'pie', labels: ['x', 'y'], values: [1, 3] } },
+        { title: 'Hero', layout: 'hero', subtext: 'Over the photo', image: { url: 'https://x.example/h.png' } },
+        { title: 'Split', layout: 'split', bullets: ['a', 'b'], image: { url: 'https://x.example/s.png' } },
       ],
     });
     for (const slide of layoutDeck(spec, style)) {
@@ -201,6 +233,148 @@ describe('[COMP:decks/layout] Deck layout engine', () => {
         expect(box.y + box.h).toBeLessThanOrEqual(DECK_PAGE_H + 0.01);
       }
     }
+  });
+
+  it('paints the hero scrim between the cover image and the text', () => {
+    const spec = deckSpecSchema.parse({
+      title: 'Launch',
+      slides: [{ title: 'Meet Brian', layout: 'hero', subtext: 'Shipping today', image: { url: 'https://x.example/h.png' } }],
+    });
+    const [, slide] = layoutDeck(spec, style);
+    const kinds = slide.primitives.map((p) => p.kind);
+    const image = slide.primitives.findIndex((p) => p.kind === 'image');
+    const scrim = slide.primitives.findIndex((p) => p.kind === 'rect' && p.transparency !== undefined);
+    const firstText = kinds.indexOf('text');
+    // paint order IS the legibility argument — a scrim under the image, or over
+    // the text, silently ruins contrast in both the .pptx and the preview
+    expect(image).toBeGreaterThanOrEqual(0);
+    expect(scrim).toBeGreaterThan(image);
+    expect(firstText).toBeGreaterThan(scrim);
+
+    const cover = slide.primitives.find((p): p is Extract<DeckPrimitive, { kind: 'image' }> => p.kind === 'image');
+    expect(cover!.fit).toBe('cover');
+    expect(cover!.frame).toEqual({ x: 0, y: 0, w: DECK_PAGE_W, h: DECK_PAGE_H }); // full bleed
+    expect(texts(slide.primitives)).toEqual(expect.arrayContaining(['Meet Brian', 'Shipping today']));
+  });
+
+  it('gives hero and split no header or footer chrome', () => {
+    const spec = deckSpecSchema.parse({
+      title: 'Deck Title',
+      slides: [
+        { title: 'Hero', layout: 'hero', image: { url: 'https://x.example/h.png' } },
+        { title: 'Split', layout: 'split', bullets: ['point'], image: { url: 'https://x.example/s.png' } },
+      ],
+    });
+    const [, hero, split] = layoutDeck(spec, style);
+    // the footer stamps the deck title + page number on every chromed layout;
+    // full-bleed layouts must carry neither (the page number would sit on the art)
+    for (const slide of [hero, split]) {
+      expect(texts(slide.primitives)).not.toContain('Deck Title');
+      expect(texts(slide.primitives)).not.toContain('2');
+      expect(texts(slide.primitives)).not.toContain('3');
+    }
+  });
+
+  it('mirrors successive split slides even when they are not adjacent', () => {
+    // deliberately NON-adjacent, at page parities that used to collide: keying
+    // the mirror off the slide index left both of these on the same side
+    const split = (n: string) => ({ title: n, layout: 'split' as const, image: { url: `https://x.example/${n}.png` } });
+    const spec = deckSpecSchema.parse({
+      title: 'Tour',
+      slides: [
+        split('one'),
+        { title: 'Filler', bullets: ['a'] },
+        split('two'),
+        { title: 'Filler2', bullets: ['b'] },
+        split('three'),
+      ],
+    });
+    const imageX = (s: (typeof slides)[number]) =>
+      s.primitives.find((p): p is Extract<DeckPrimitive, { kind: 'image' }> => p.kind === 'image')!.frame.x;
+    const [, ...slides] = layoutDeck(spec, style);
+    expect(imageX(slides[0])).toBeGreaterThan(0); // first split: image right
+    expect(imageX(slides[2])).toBe(0); // second split mirrors, despite a slide between
+    expect(imageX(slides[4])).toBe(imageX(slides[0])); // third: back to the right
+  });
+
+  it('gives the editorial pack its own compositions, not a recolour', () => {
+    const base = {
+      title: 'Launch',
+      subtitle: 'Q2',
+      slides: [
+        { title: 'Agenda', bullets: ['a', 'b'] },
+        { title: 'Traction', layout: 'stats' as const, stats: [{ value: '$1M', label: 'ARR' }] },
+      ],
+    };
+    const packStyle = resolveDeckStyle(undefined, null, 'editorial');
+    const classic = layoutDeck(deckSpecSchema.parse(base), style);
+    const editorial = layoutDeck(deckSpecSchema.parse({ ...base, pack: 'editorial' }), packStyle);
+
+    // a pack is an art direction: the title slide runs a full-bleed colour field
+    expect(classic[0].background).toBe(style.background);
+    expect(editorial[0].background).toBe(packStyle.accent);
+    // the standing slide numeral is the editorial motif and has no classic equivalent
+    expect(texts(editorial[1].primitives)).toContain('01');
+    expect(texts(classic[1].primitives)).not.toContain('01');
+    // stats are ruled columns, not filled tiles
+    const panelTiles = (ps: DeckPrimitive[]) =>
+      ps.filter((p) => p.kind === 'rect' && p.fill === packStyle.panel).length;
+    expect(panelTiles(editorial[2].primitives)).toBe(0);
+  });
+
+  it('keeps the minimal pack monochrome and builds its bordered table', () => {
+    const packStyle = resolveDeckStyle(undefined, null, 'minimal');
+    // monochrome is the design, not an oversight — accent must equal text
+    expect(packStyle.accent).toBe(packStyle.text);
+    const spec = deckSpecSchema.parse({
+      title: 'Project Brief',
+      pack: 'minimal',
+      slides: [{ title: 'Agenda', bullets: ['Overview', 'Goals', 'Timeline'] }],
+    });
+    const [cover, agenda] = layoutDeck(spec, packStyle);
+    // cover sets the title in caps, hung right
+    const coverTitle = cover.primitives.find(
+      (p): p is Extract<DeckPrimitive, { kind: 'text' }> =>
+        p.kind === 'text' && p.paragraphs[0]?.runs[0]?.text === 'PROJECT BRIEF',
+    );
+    expect(coverTitle?.align).toBe('right');
+    // one stroked row per bullet — the bordered table needs rect.stroke on both
+    // renderers, so a missing stroke means the preview and the .pptx disagree
+    const stroked = agenda.primitives.filter((p) => p.kind === 'rect' && p.stroke);
+    expect(stroked).toHaveLength(3);
+    // the black square carrying the heading
+    expect(agenda.primitives.some((p) => p.kind === 'rect' && p.fill === packStyle.text && p.box.w > 5)).toBe(true);
+    // and a rule that bleeds off the left page edge
+    expect(agenda.primitives.some((p) => p.kind === 'rect' && p.box.x < 0)).toBe(true);
+  });
+
+  it('floats an opaque card over the editorial hero image', () => {
+    const packStyle = resolveDeckStyle(undefined, null, 'editorial');
+    const spec = deckSpecSchema.parse({
+      title: 'Launch',
+      pack: 'editorial',
+      slides: [{ title: 'Meet Brian', layout: 'hero', image: { url: 'https://x.example/h.png' } }],
+    });
+    const [, slide] = layoutDeck(spec, packStyle);
+    const image = slide.primitives.findIndex((p) => p.kind === 'image');
+    const card = slide.primitives.findIndex(
+      (p) => p.kind === 'rect' && p.fill === packStyle.background,
+    );
+    expect(image).toBeGreaterThanOrEqual(0);
+    expect(card).toBeGreaterThan(image); // the card paints OVER the photo
+    // opaque, for the same reason the classic band is: we cannot inspect the image
+    for (const p of slide.primitives) {
+      if (p.kind === 'rect') expect(p.transparency).toBeUndefined();
+    }
+  });
+
+  it('resolves style precedence as extracted > pack > theme', () => {
+    const extracted = { ...DECK_PRESET_STYLES.dark, accent: 'ABCDEF' };
+    expect(resolveDeckStyle('light', extracted, 'editorial')).toBe(extracted);
+    expect(resolveDeckStyle('dark', null, 'editorial').background).toBe(
+      DECK_PACK_STYLES.editorial.background,
+    );
+    expect(resolveDeckStyle('dark', null, 'classic')).toBe(DECK_PRESET_STYLES.dark);
   });
 
   it('renders negative bars below the zero baseline (true range, not clamped)', () => {

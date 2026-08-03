@@ -15,6 +15,7 @@ import {
   tolerantInt,
   uuidId,
   tolerantObject,
+  tolerantEnumArray,
 } from '../schema-tolerance.js'
 
 describe('[COMP:engine/tool-input-tolerance] schema tolerance helpers', () => {
@@ -78,6 +79,61 @@ describe('[COMP:engine/tool-input-tolerance] schema tolerance helpers', () => {
     it('invalid JSON string still errors cleanly (raw value reaches the schema)', () => {
       expect(() => tolerantObject(shape).parse('{not json')).toThrow()
       expect(() => tolerantObject(shape).parse('"just a string"')).toThrow()
+    })
+  })
+
+  describe('tolerantEnumArray', () => {
+    // The listTasks `status` shape. A "single value or a list" param is exactly
+    // what a model serialises loosely, and this one failed validation 35 times
+    // in production between 2026-07-08 and 2026-08-03 — every occurrence inside
+    // a workflow step, each silently emptying one person's digest section.
+    const STATUSES = ['todo', 'in_progress', 'in_review', 'blocked', 'done', 'archived'] as const
+    const status = tolerantEnumArray(STATUSES)
+
+    it('accepts the strict forms unchanged — one member, or a real array', () => {
+      expect(status.parse('todo')).toBe('todo')
+      expect(status.parse(['todo', 'blocked'])).toEqual(['todo', 'blocked'])
+    })
+
+    it('does NOT wrap a valid single member into an array', () => {
+      // The union accepts both shapes, so preserving what the model sent keeps
+      // the recorded tool input honest.
+      expect(status.parse('in_progress')).toBe('in_progress')
+    })
+
+    it('accepts a JSON-stringified array — the production failure', () => {
+      expect(status.parse('["todo","in_progress","blocked"]')).toEqual([
+        'todo',
+        'in_progress',
+        'blocked',
+      ])
+    })
+
+    it('accepts a comma-separated list, with or without spaces', () => {
+      expect(status.parse('todo,blocked')).toEqual(['todo', 'blocked'])
+      expect(status.parse('todo, in_progress , blocked')).toEqual([
+        'todo',
+        'in_progress',
+        'blocked',
+      ])
+    })
+
+    it('still REJECTS a genuinely invalid member — tolerance is not coercion', () => {
+      expect(status.safeParse('pending').success).toBe(false)
+      expect(status.safeParse(['todo', 'pending']).success).toBe(false)
+      expect(status.safeParse('["todo","pending"]').success).toBe(false)
+      expect(status.safeParse(42).success).toBe(false)
+    })
+
+    it('a malformed JSON array falls through to a normal error, not a crash', () => {
+      expect(status.safeParse('["todo",').success).toBe(false)
+    })
+
+    it('rejects an empty or whitespace-only list instead of inventing an empty filter', () => {
+      // An empty array would silently mean "no status filter", quietly widening
+      // the query rather than reporting the bad input.
+      expect(status.safeParse('').success).toBe(false)
+      expect(status.safeParse(' , , ').success).toBe(false)
     })
   })
 })
