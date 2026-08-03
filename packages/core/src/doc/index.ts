@@ -6,7 +6,12 @@
 // See docs/plans/doc-v1-execution.md and
 // .claude/plans/snuggly-noodling-tiger.md.
 
-export { buildDocSkillBlock, buildAmbientDocSkillBlock } from './soul.js'
+export {
+  buildDocSkillBlock,
+  buildDocSupervisorSkillBlock,
+  buildDocEditAgentPrompt,
+  buildAmbientDocSkillBlock,
+} from './soul.js'
 export type {
   BuildDocSkillParams,
   BuildAmbientDocSkillParams,
@@ -26,6 +31,9 @@ export * from './undo.js'
 
 // Phase 0 turn-context instrumentation (doc_context_composition).
 export * from './context-meter.js'
+
+// Context-clean child runner + the single conversational mutation gateway.
+export * from './edit-agent.js'
 
 // Phase 2/3 large-page map: hierarchical section tree + relevance retrieval.
 export * from './outline-tree.js'

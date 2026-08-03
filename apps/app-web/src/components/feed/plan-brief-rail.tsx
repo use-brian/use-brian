@@ -41,6 +41,7 @@ import {
 } from "@/lib/feed-plan-proposal";
 import {
   PLAN_SLOT_STATUSES,
+  PLAN_RAIL_DOCK_CLEARANCE_CLASS,
   parseIsoDay,
   type FeedIdea,
   type PlanBrief,
@@ -435,7 +436,13 @@ export function PlanBriefRail({
       </div>
 
       {canEdit ? (
-        <div className="border-t border-border/60 p-3">
+        <div
+          data-plan-rail-footer
+          className={cn(
+            "border-t border-border/60 p-3",
+            PLAN_RAIL_DOCK_CLEARANCE_CLASS,
+          )}
+        >
           <button
             type="button"
             disabled={!dirty || busy}

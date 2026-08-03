@@ -36,7 +36,7 @@
  * [COMP:app-web/brain-detail-drawer]
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
@@ -52,6 +52,8 @@ import {
   getKnowledgeEntry,
 } from "@/lib/api/brain";
 import { getActiveAssistantId } from "@/lib/sidebar-cache";
+import { useWorkspaceContext } from "@/lib/workspace-context";
+import type { BrainContentCacheScope } from "@/lib/offline/brain-content-cache";
 import { requestBrainRefresh } from "@/lib/brain-events";
 import { authFetch } from "@/lib/auth-fetch";
 import {
@@ -211,6 +213,8 @@ type Props = {
    *  re-fetched by id. */
   skill?: WorkspaceSkillSummary | null;
   workspaceId: string;
+  /** Offline Brain is a last-known-good reader; all nested writes are gated. */
+  readOnly?: boolean;
   onClose: () => void;
 };
 
@@ -355,7 +359,13 @@ function brainKindToInboxPrimitive(
  *  finish before the DOM node disappears. */
 const ANIMATION_MS = 300;
 
-export function BrainDetailDrawer({ row, skill, workspaceId, onClose }: Props) {
+export function BrainDetailDrawer({
+  row,
+  skill,
+  workspaceId,
+  readOnly = false,
+  onClose,
+}: Props) {
   // User-adjustable drawer width — shared key with the skill drawer so one
   // adjustment applies everywhere; the operator peeks keep their own key.
   const {
@@ -365,6 +375,15 @@ export function BrainDetailDrawer({ row, skill, workspaceId, onClose }: Props) {
   } = usePeekResize("brain:drawer-width");
   const t = useT();
   const labels = t.brainPage.detailDrawer;
+  const { me } = useWorkspaceContext();
+  const viewpointAssistantId = getActiveAssistantId();
+  const cacheScope = useMemo<BrainContentCacheScope | null>(
+    () =>
+      me.id
+        ? { viewerId: me.id, workspaceId, viewpointAssistantId }
+        : null,
+    [me.id, workspaceId, viewpointAssistantId],
+  );
   // `displayRow` is what we *render*. It lingers after `row` clears so
   // the slide-out keyframe has a chance to play before unmount.
   const [displayRow, setDisplayRow] = useState<BrainRow | null>(null);
@@ -484,6 +503,7 @@ export function BrainDetailDrawer({ row, skill, workspaceId, onClose }: Props) {
         displayRow.id,
         workspaceId,
         getActiveAssistantId(),
+        cacheScope,
       ).then((result) => {
         if (!cancelled) setKnowledge(result);
       });
@@ -523,12 +543,17 @@ export function BrainDetailDrawer({ row, skill, workspaceId, onClose }: Props) {
       const inboxPrim = brainKindToInboxPrimitive(routedKind);
       const isEntity = ENTITY_KINDS.has(routedKind as EntityKind);
       if (isEntity) {
-        getEntity(routedId, workspaceId, getActiveAssistantId()).then((result) => {
+        getEntity(
+          routedId,
+          workspaceId,
+          getActiveAssistantId(),
+          cacheScope,
+        ).then((result) => {
           if (!cancelled) setEntity(result);
         });
       }
       if (inboxPrim) {
-        fetchBrainRow(workspaceId, inboxPrim, routedId).then((result) => {
+        fetchBrainRow(workspaceId, inboxPrim, routedId, cacheScope).then((result) => {
           if (!cancelled) setPrimitive(result);
         });
       } else if (!isEntity) {
@@ -541,7 +566,7 @@ export function BrainDetailDrawer({ row, skill, workspaceId, onClose }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [displayRow, workspaceId]);
+  }, [displayRow, workspaceId, cacheScope]);
 
   // Entity-rollup re-fetch on mutation. `entityRefreshTick` bumps after
   // an entity adjust / reclassify / promote / alias change — the
@@ -555,7 +580,12 @@ export function BrainDetailDrawer({ row, skill, workspaceId, onClose }: Props) {
     if (!displayRow) return;
     if (!ENTITY_KINDS.has(displayRow.kind as EntityKind)) return;
     let cancelled = false;
-    getEntity(displayRow.id, workspaceId, getActiveAssistantId()).then(
+    getEntity(
+      displayRow.id,
+      workspaceId,
+      getActiveAssistantId(),
+      cacheScope,
+    ).then(
       (result) => {
         if (!cancelled) setEntity(result);
       },
@@ -563,7 +593,7 @@ export function BrainDetailDrawer({ row, skill, workspaceId, onClose }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [entityRefreshTick, displayRow, workspaceId]);
+  }, [entityRefreshTick, displayRow, workspaceId, cacheScope]);
 
   // After the CRM primitive arrives (contact/company/deal), follow its
   // `entity_id` to fetch the canonical entity's rollup so we can render
@@ -588,13 +618,18 @@ export function BrainDetailDrawer({ row, skill, workspaceId, onClose }: Props) {
       return;
     }
     let cancelled = false;
-    getEntity(entityId, workspaceId, getActiveAssistantId()).then((result) => {
+    getEntity(
+      entityId,
+      workspaceId,
+      getActiveAssistantId(),
+      cacheScope,
+    ).then((result) => {
       if (!cancelled) setCrmEntity(result);
     });
     return () => {
       cancelled = true;
     };
-  }, [displayRow, primitive, workspaceId]);
+  }, [displayRow, primitive, workspaceId, cacheScope]);
 
   // Skill primitive — its own drawer shell (governance block + body + trust
   // actions). Rendered ahead of the row branch so a skill open short-circuits
@@ -604,6 +639,7 @@ export function BrainDetailDrawer({ row, skill, workspaceId, onClose }: Props) {
       <SkillDrawer
         skill={displaySkill}
         workspaceId={workspaceId}
+        readOnly={readOnly}
         closing={closing}
         onClose={onClose}
       />
@@ -661,7 +697,12 @@ export function BrainDetailDrawer({ row, skill, workspaceId, onClose }: Props) {
   // Toolbar actions target the same primitive the sections adjust. Knowledge
   // is read-only (no inbox primitive) → no actions, no composer.
   const actionPrim = isEntityKind ? ("entity" as InboxPrimitive) : inboxPrim;
-  const canAct = !loading && !notFound && Boolean(primitive) && actionPrim !== null;
+  const canAct =
+    !readOnly &&
+    !loading &&
+    !notFound &&
+    Boolean(primitive) &&
+    actionPrim !== null;
 
   async function handleConfirm() {
     if (!primitive || !actionPrim) return;
@@ -817,7 +858,11 @@ export function BrainDetailDrawer({ row, skill, workspaceId, onClose }: Props) {
           </div>
         </header>
 
-        <div className="flex-1 overflow-y-auto px-6 py-6 flex flex-col gap-4">
+        <fieldset
+          disabled={readOnly}
+          aria-disabled={readOnly || undefined}
+          className="m-0 flex min-w-0 flex-1 flex-col gap-4 overflow-y-auto border-0 px-6 py-6"
+        >
           {actionError && (
             <p className="text-xs text-red-500" role="alert">
               {actionError}
@@ -917,7 +962,7 @@ export function BrainDetailDrawer({ row, skill, workspaceId, onClose }: Props) {
               focusTick={askFocusTick}
             />
           )}
-        </div>
+        </fieldset>
       </aside>
     </>
   );
@@ -2972,11 +3017,13 @@ function FormActions({
 function SkillDrawer({
   skill,
   workspaceId,
+  readOnly,
   closing,
   onClose,
 }: {
   skill: WorkspaceSkillSummary;
   workspaceId: string;
+  readOnly: boolean;
   closing: boolean;
   onClose: () => void;
 }) {
@@ -3049,7 +3096,12 @@ function SkillDrawer({
         </header>
 
         <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
-          <SkillSection skill={skill} workspaceId={workspaceId} onClose={onClose} />
+          <SkillSection
+            skill={skill}
+            workspaceId={workspaceId}
+            readOnly={readOnly}
+            onClose={onClose}
+          />
         </div>
       </aside>
     </>
@@ -3067,10 +3119,12 @@ function SkillDrawer({
 function SkillSection({
   skill,
   workspaceId,
+  readOnly,
   onClose,
 }: {
   skill: WorkspaceSkillSummary;
   workspaceId: string;
+  readOnly: boolean;
   onClose: () => void;
 }) {
   const t = useT();
@@ -3191,7 +3245,7 @@ function SkillSection({
       </section>
 
       {/* Trust actions. */}
-      {mode === "view" && (
+      {!readOnly && mode === "view" && (
         <div className="flex flex-wrap items-center gap-2">
           {!isActive && (
             <button
@@ -3225,7 +3279,7 @@ function SkillSection({
         </div>
       )}
 
-      {mode === "edit" && (
+      {!readOnly && mode === "edit" && (
         <div className="flex flex-col gap-2">
           <textarea
             value={draftContent}

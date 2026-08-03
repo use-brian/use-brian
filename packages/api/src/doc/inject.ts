@@ -1,9 +1,10 @@
 /**
- * Per-turn injector that adds doc tools to a chat turn's tool map for any
+ * Per-turn injector that partitions Doc tools for any
  * assistant authoring on the doc SURFACE (`docSurface: true`) — the
  * workspace primary by default. Doc is a skill, not an app type.
  *
- * Injects twenty-two tools:
+ * Builds twenty-two raw tools for the context-clean editor, while exposing
+ * only nine reads + `delegateDocEdit` to the conversational model:
  *
  *   - 10 doc page tools (`packages/core/src/doc/tools.ts`):
  *     `renderPage` / `patchPage` / `getBlock` / `queryDataBlock` /
@@ -55,8 +56,8 @@
  * reason is that `renderView` writes the frozen `saved_views.page` column,
  * which the doc live editor never reads — it reads the Yjs doc — so any
  * data view authored via `renderView` would be invisible on doc. Doc
- * assistants author data views via `renderPage` / `patchPage`, which route to
- * the live Yjs doc through the `DocGateway`. `renderView` remains a
+ * the isolated editor authors data views via `renderPage` / `patchPage`, which
+ * route to the live Yjs doc through the `DocGateway`. `renderView` remains a
  * global tool for NON-doc surfaces (standard chat, `apps/web`, the
  * "+ New draft" flow) where there is no live Yjs doc and `saved_views.page`
  * IS the correct target. See `docs/architecture/features/doc.md`.
@@ -89,6 +90,11 @@ import {
   createResolveCommentTool,
   createGetCommentThreadTool,
   createIngestPageTool,
+  createDelegateDocEditTool,
+  DOC_MUTATION_TOOLS,
+  buildDocEditAgentPrompt,
+  buildOutline,
+  renderActivePageOutline,
   listBuiltInEntityTypes,
 } from '@use-brian/core'
 import { createDbDocEntityStore } from '../db/doc-entity-store.js'
@@ -125,9 +131,9 @@ export type InjectDocToolsOptions = {
    * approvals / knowledge-base), where the tools ride AMBIENTLY (the chat
    * route pairs them with the weak `buildAmbientDocSkillBlock` steering
    * instead of the page-first protocol). This is the ONLY gate for doc
-   * tools (doc is a skill, not an app type): when true, the doc tools
-   * inject onto that host assistant so it can author the page in the same loop
-   * it did the work in. `workspaceId` is still required.
+   * tools (doc is a skill, not an app type): when true, reads + the gateway
+   * inject onto that host assistant. Raw writes stay in the child. `workspaceId`
+   * is still required.
    */
   docSurface?: boolean
   /**
@@ -143,6 +149,9 @@ export type InjectDocToolsOptions = {
    */
   pageId?: string | null
   expectedVersion?: number | null
+  /** Cursor block the user targeted. Included in the freshly loaded child
+   * context so the parent can delegate placement intent without authoring ops. */
+  anchorBlockId?: string | null
   /**
    * The custom theme the user CURRENTLY HAS APPLIED, passed from the doc
    * client (a per-user `localStorage` value the server can't otherwise know).
@@ -151,11 +160,30 @@ export type InjectDocToolsOptions = {
    * Absent on built-in palettes → the tool isn't injected (tool-awareness rule).
    */
   activeThemeId?: string | null
-  /** Provider for `refineActiveTheme`'s seed-adjustment call. */
-  provider?: LLMProvider
+  /** Provider shared by the isolated Doc editor and theme refinement. */
+  provider: LLMProvider
   /** Servable background-lane model, resolved by the caller against the
-   * configured providers. Forwarded to the theme tool's LLM call. */
-  backgroundModel?: string
+   * configured providers. The Doc editor's default. */
+  backgroundModel: string
+  /** Servable Standard-lane fallback. Used once only when the background
+   * editor attempt made no mutation. */
+  fallbackModel?: string
+  /** Selects the full authoring protocol inside the isolated child. */
+  editMode?: 'page' | 'research'
+  /** Child-attempt metering hook (`overhead:doc-edit` in the chat route). */
+  onEditUsage?: (event: {
+    model: string
+    usage: import('@use-brian/core').TokenUsage
+    attempt: 'background' | 'standard_fallback'
+  }) => void | Promise<void>
+  /** Selected child tool results can be projected to live UI events without
+   * putting the child transcript back into the parent conversation. */
+  onChildToolResult?: (result: {
+    toolUseId: string
+    name: string
+    content: string
+    isError?: boolean
+  }) => void | Promise<void>
   /** Themes store for `refineActiveTheme`; falls back to the lazy singleton. */
   docThemesStore?: DocThemeStore
   /** Fired after a chat-driven theme refine so the route can stream the new
@@ -292,7 +320,8 @@ function defaultWorkspaceDirectory(): WorkspaceDirectoryStore {
 }
 
 /**
- * Build all 20 doc tools and inject them into the chat tool registry.
+ * Build the Doc tool set, capture writes behind the child gateway, and inject
+ * only reads + the gateway into the chat tool registry.
  * Gated upstream in `chat.ts` on `isDocSurface(session)` — any assistant on
  * the doc surface (`docSurface: true`).
  */
@@ -402,9 +431,9 @@ export async function injectDocTools(
   // thread discovery (the index is injected into the prompt by the chat route).
   const getCommentThread = createGetCommentThreadTool({ commentThreadStore })
 
-  // Push every tool into the chat session's registry. Order isn't
-  // load-bearing — the model sees the registry as a flat name→Tool map.
-  const allTools: Tool[] = [
+  // The exact child tool surface. The conversational model never receives
+  // this array directly; it is captured by the one delegation gateway below.
+  const childTools: Tool[] = [
     pageTools.renderPage,
     pageTools.patchPage,
     pageTools.getBlock,
@@ -429,12 +458,76 @@ export async function injectDocTools(
     getCommentThread,
   ]
 
+  // Narrow reads stay in the conversational loop so it can answer questions,
+  // inspect the requested section, and assemble a precise edit brief without
+  // paying a child call for every read. Raw writes are structurally absent.
+  const mainTools: Tool[] = [
+    pageTools.getBlock,
+    pageTools.queryDataBlock,
+    pageTools.getCurrentPage,
+    pageTools.getSection,
+    pageTools.getBlockRange,
+    pageTools.exportPage,
+    entityTools.listEntityTypes,
+    entityTools.queryEntities,
+    getCommentThread,
+  ]
+
+  const loadPageContext = async (instruction: string): Promise<string> => {
+    const pageId = options.pageId
+    if (!pageId) {
+      return [
+        'No page is currently open.',
+        'Create a new page only when the edit brief asks for one.',
+        'If the brief names an existing page id, inspect that page with the read tools before patching it.',
+      ].join('\n')
+    }
+
+    const current = await docPageStore.getVersionedPage(options.userId, pageId)
+    if (!current) {
+      return `The server-bound page ${pageId} is unavailable. Do not guess a replacement page.`
+    }
+
+    const pageForOutline = {
+      blocks: current.page.blocks,
+      version: current.version,
+      title: current.title,
+    }
+    const outline = buildOutline(pageForOutline, {
+      pageId,
+      pageVersion: current.version,
+      title: current.title,
+    })
+    const lines = renderActivePageOutline(pageForOutline, outline, instruction)
+    const anchorLine = options.anchorBlockId
+      ? `\nCursor anchor: block ${options.anchorBlockId}. Place new content at or immediately after this block unless the brief says otherwise.`
+      : ''
+
+    return [
+      `Active page: id=${pageId}, version=${current.version}`,
+      `Title: ${JSON.stringify(current.title)}`,
+      `Blocks:\n${lines || '  (empty page)'}`,
+      anchorLine,
+    ].filter(Boolean).join('\n')
+  }
+
+  mainTools.push(createDelegateDocEditTool({
+    provider: options.provider,
+    model: options.backgroundModel,
+    fallbackModel: options.fallbackModel,
+    systemPrompt: buildDocEditAgentPrompt({ mode: options.editMode ?? 'page' }),
+    tools: new Map(childTools.map((tool) => [tool.name, tool])),
+    loadPageContext,
+    onUsage: options.onEditUsage,
+    onToolResult: options.onChildToolResult,
+  }))
+
   // `ingestPage` (doc-page → brain distillation) — injected ONLY when the
   // runner is wired (Pipeline B present). Off in minimal/open builds so the
   // model never sees a tool that can't run (tool-awareness rule). Anchored to
   // the open page so "add this page to the brain" needs no explicit id.
   if (options.ingestPage) {
-    allTools.push(
+    mainTools.push(
       createIngestPageTool({
         ingestPage: options.ingestPage,
         anchorPageId: options.pageId ?? null,
@@ -447,7 +540,7 @@ export async function injectDocTools(
   // model never sees a tool whose storage half can't run (tool-awareness
   // rule). See docs/architecture/features/doc.md → "Image icons".
   if (options.filesApi) {
-    allTools.push(
+    mainTools.push(
       createFetchSiteIconTool({
         filesApi: options.filesApi,
         workspaceId,
@@ -455,8 +548,13 @@ export async function injectDocTools(
     )
   }
 
-  for (const tool of allTools) {
+  for (const tool of mainTools) {
     options.tools.set(tool.name, tool)
+  }
+  // Fail closed even if a future boot path pre-registers one of these names:
+  // the parent model must never retain a raw Doc mutation beside the gateway.
+  for (const mutationTool of DOC_MUTATION_TOOLS) {
+    options.tools.delete(mutationTool)
   }
 
   // Conversational theme iteration (refine-only). Injected ONLY when the doc
@@ -465,7 +563,7 @@ export async function injectDocTools(
   // the tool is absent on built-in palettes (kept off the system prompt, per
   // the tool-awareness rule). See docs/architecture/features/doc-custom-themes.md.
   let themeToolInjected = false
-  if (options.activeThemeId && options.provider) {
+  if (options.activeThemeId) {
     const refineActiveTheme = createRefineActiveThemeTool({
       themeId: options.activeThemeId,
       provider: options.provider,
@@ -494,8 +592,7 @@ export async function injectDocTools(
   // (apps/web standard chat, Telegram/Slack) keep `renderView`.
   options.tools.delete('renderView')
 
-  // `injectedCount` counts the doc tools merged into the map (the length
-  // of `allTools`), NOT the post-delete map size — deleting the global
-  // `renderView` here doesn't change how many doc tools we injected.
-  return { injected: true, injectedCount: allTools.length + (themeToolInjected ? 1 : 0) }
+  // Count only the tools visible to the conversational model. The raw child
+  // map is captured behind `delegateDocEdit` and is deliberately not counted.
+  return { injected: true, injectedCount: mainTools.length + (themeToolInjected ? 1 : 0) }
 }

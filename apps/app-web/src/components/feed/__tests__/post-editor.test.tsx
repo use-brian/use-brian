@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { replayProposals } from "../post-editor";
+import { compositionHasChanges, replayProposals } from "../post-editor";
 
 function turn(drafts: unknown) {
   return {
@@ -79,5 +79,51 @@ describe("[COMP:app-web/feed-post-editor] proposal replay", () => {
       turn([{ index: 1, text: "Copy.", imageBrief: "Close-up, soft light." }]),
     ]);
     expect(out[0].imageBrief).toBe("Close-up, soft light.");
+  });
+
+  it("does not mark a persisted article dirty when jsonb reordered its keys", () => {
+    expect(compositionHasChanges({
+      format: "article",
+      text: "Launch analysis",
+      threadSegments: ["", ""],
+      article: {
+        sourceUrl: "https://example.com/launch",
+        title: "What we learned",
+        description: "A practical guide.",
+      },
+      saved: {
+        draftText: "Launch analysis",
+        postedText: null,
+        postFormat: "article",
+        article: {
+          title: "What we learned",
+          description: "A practical guide.",
+          sourceUrl: "https://example.com/launch",
+        },
+      },
+    })).toBe(false);
+  });
+
+  it("requires saving when an article field changes", () => {
+    expect(compositionHasChanges({
+      format: "article",
+      text: "Launch analysis",
+      threadSegments: ["", ""],
+      article: {
+        sourceUrl: "https://example.com/launch",
+        title: "Updated title",
+        description: "A practical guide.",
+      },
+      saved: {
+        draftText: "Launch analysis",
+        postedText: null,
+        postFormat: "article",
+        article: {
+          sourceUrl: "https://example.com/launch",
+          title: "What we learned",
+          description: "A practical guide.",
+        },
+      },
+    })).toBe(true);
   });
 });

@@ -2,8 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   buildVersions,
   counterState,
+  isPostFormatForPlatform,
+  parseFeedPostBriefSeed,
   platformLimit,
+  postFormatsForPlatform,
   resolveSelectedVersion,
+  xWeightedLength,
   type ProposedDraft,
 } from "@/lib/feed-post-versions";
 
@@ -79,12 +83,40 @@ describe("[COMP:app-web/feed-post-versions] post version model", () => {
   it("knows each platform's copy limit", () => {
     expect(platformLimit("twitter")).toBe(280);
     expect(platformLimit("threads")).toBe(500);
+    expect(platformLimit("linkedin")).toBe(3000);
     expect(platformLimit("mastodon")).toBeNull();
   });
 
-  it("counts code points so an emoji is one character", () => {
-    // "🎉" is a surrogate pair: `.length` would say 2.
-    expect(counterState("🎉🎉", "twitter").count).toBe(2);
+  it("exposes only API-shaped formats for each platform", () => {
+    expect(postFormatsForPlatform("twitter")).toEqual(["post", "thread"]);
+    expect(postFormatsForPlatform("linkedin")).toEqual(["post", "article"]);
+    expect(postFormatsForPlatform("threads")).toEqual(["post"]);
+    expect(isPostFormatForPlatform("twitter", "article")).toBe(false);
+    expect(isPostFormatForPlatform("linkedin", "article")).toBe(true);
+  });
+
+  it("restores format and private brief from the seeded first message", () => {
+    expect(
+      parseFeedPostBriefSeed(
+        "Create an article link for LinkedIn.\n\nPrivate brief (not published):\nExplain the launch to operators.",
+      ),
+    ).toEqual({
+      format: "article",
+      brief: "Explain the launch to operators.",
+    });
+    expect(parseFeedPostBriefSeed("Create a thread for X.")).toEqual({
+      format: "thread",
+      brief: "",
+    });
+    expect(parseFeedPostBriefSeed("ordinary user message")).toBeNull();
+  });
+
+  it("uses X weighted characters, including t.co URL length", () => {
+    expect(xWeightedLength("abc")).toBe(3);
+    expect(xWeightedLength("🎉🎉")).toBe(4);
+    expect(xWeightedLength("漢字")).toBe(4);
+    expect(xWeightedLength("Read https://example.com/a/very/long/path now")).toBe(32);
+    expect(counterState("🎉🎉", "twitter").count).toBe(4);
   });
 
   it("flags over and near the limit", () => {

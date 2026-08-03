@@ -10,7 +10,7 @@
  * in the exact chrome `WorkspaceChrome`'s dock uses (`chrome/floating-chat.tsx`
  * launcher), so swapping docks on `/feed/*` is visually seamless. Click expands.
  * Expanded: mounts `<TuningChatPanel />` — the full tuning surface (SSE,
- * voice notes, copy, retry, model picker, research-mode toggle) — anchored
+ * shared live recorder, copy, retry, model picker, research-mode toggle) — anchored
  * flush to the corner (the launcher hides while open), global-dock idiom.
  *
  * The panel STAYS MOUNTED while collapsed (hidden via classes) so the
@@ -31,7 +31,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import { useFeedWorkspace } from "@/contexts/feed-profiles-context";
-import { feedSectionFromPathname } from "@/lib/feed-nav";
+import {
+  feedPostIdFromPathname,
+  feedSectionFromPathname,
+} from "@/lib/feed-nav";
 import { cn } from "@/lib/utils";
 import {
   TuningChatPanel,
@@ -47,6 +50,13 @@ import {
 import { FEED_CHAT_SEED_EVENT, type FeedChatSeed } from "@/lib/feed-chat-seed";
 import { AssistantAvatar } from "@/components/assistant-avatar";
 import { useT } from "@/lib/i18n/client";
+import {
+  DockRecorderButton,
+  DockRecorderNotice,
+  DockRecorderRecovery,
+  DockRecorderStrip,
+} from "@/components/chrome/dock-recorder";
+import { useGlobalDockRecorder } from "@/lib/recorder/dock-recorder-bridge";
 
 type ChatAssistant = { id: string; name: string; iconSeed?: number };
 
@@ -56,6 +66,9 @@ export function FeedFloatingChat() {
   // The collapsed pill reuses the global dock's surface nudge verbatim, so
   // the two docks read as one affordance across the surface swap.
   const tChat = useT().chat;
+  // Feed replaces only the global CHAT chrome. Rehost its one persistent
+  // recorder controller so capture survives entering/leaving this surface.
+  const dockRecorder = useGlobalDockRecorder();
 
   // One distinct assistant per id — a workspace may connect several
   // platforms, but they fan out from the same brand assistant. Dedupe so
@@ -86,6 +99,7 @@ export function FeedFloatingChat() {
   // (feed-revamp.md D9) — and it keeps a month of scheduling context out of
   // the voice-tuning thread the operator uses everywhere else.
   const pathname = usePathname() ?? "";
+  const postEditorOwnsChat = feedPostIdFromPathname(pathname) !== null;
   const channelId =
     feedSectionFromPathname(pathname) === "plan" ? "plan" : "tuning";
 
@@ -107,6 +121,9 @@ export function FeedFloatingChat() {
 
   const activeAssistant =
     assistants.find((a) => a.id === activeAssistantId) ?? assistants[0] ?? null;
+  const recorderOwnsPill =
+    dockRecorder?.phase.kind === "latched" ||
+    dockRecorder?.phase.kind === "finishing";
 
   // Surfaces (e.g. the Voice page's per-rule "Discuss") ask the chat to
   // open with a pre-filled composer via a one-shot CustomEvent.
@@ -161,7 +178,7 @@ export function FeedFloatingChat() {
 
   // No connected assistant yet — nothing to chat with. The feed home's
   // connect-account onboarding owns the empty state, so render nothing here.
-  if (!activeAssistant) return null;
+  if (!activeAssistant || postEditorOwnsChat) return null;
 
   return (
     <div ref={panelRef} className="fixed right-4 bottom-4 z-50 flex flex-col items-end gap-2">
@@ -220,42 +237,69 @@ export function FeedFloatingChat() {
             workspaceId={workspaceId}
             channelId={channelId}
             onClose={() => setExpanded(false)}
+            dockRecorder={expanded ? dockRecorder ?? undefined : undefined}
+            ownsDockRecorderTarget
           />
         </div>
       </div>
 
+      {!expanded && dockRecorder ? (
+        <>
+          <DockRecorderRecovery rec={dockRecorder} />
+          <DockRecorderNotice rec={dockRecorder} />
+          <DockRecorderStrip rec={dockRecorder} />
+        </>
+      ) : null}
+
       {/* Launcher — the app-standard compact pill (chrome/floating-chat.tsx
           idiom): the assistant's creature avatar beside a short text nudge.
-          Fades + scales out when the panel opens. */}
-      <button
-        type="button"
-        onClick={() => setExpanded(true)}
-        aria-hidden={expanded}
-        aria-label={t.openAria}
-        tabIndex={expanded ? -1 : 0}
-        className={cn(
-          "inline-flex items-center gap-2 rounded-full py-1.5 pl-1.5 pr-3.5 shadow-lg backdrop-blur",
-          "max-w-[min(260px,calc(100vw-3rem))] text-left text-sm",
-          "border border-border bg-background/90 text-foreground/80 hover:bg-accent hover:text-foreground",
-          "transition-[opacity,transform,background-color,box-shadow] duration-200 ease-out",
-          expanded ? "opacity-0 scale-95 pointer-events-none" : "opacity-100 scale-100",
-        )}
-      >
-        <span
-          aria-hidden
-          className="inline-flex size-7 shrink-0 overflow-hidden rounded-full ring-1 ring-black/10 dark:ring-white/15"
-        >
-          <AssistantAvatar
-            id={activeAssistant.id}
-            name={activeAssistant.name}
-            iconSeed={activeAssistant.iconSeed}
-            size="sm"
-          />
-        </span>
-        <span className="min-w-0 truncate text-muted-foreground">
-          {tChat.surfacePlaceholder}
-        </span>
-      </button>
+          Fades + scales out when the panel opens. The universal recorder rides
+          beside it exactly as it does beside the global launcher. */}
+      {!recorderOwnsPill ? (
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setExpanded(true)}
+            aria-hidden={expanded}
+            aria-label={t.openAria}
+            tabIndex={expanded ? -1 : 0}
+            className={cn(
+              "inline-flex items-center gap-2 rounded-full py-1.5 pl-1.5 pr-3.5 shadow-lg backdrop-blur",
+              "max-w-[min(260px,calc(100vw-3rem))] text-left text-sm",
+              "border border-border bg-background/90 text-foreground/80 hover:bg-accent hover:text-foreground",
+              "transition-[opacity,transform,background-color,box-shadow] duration-200 ease-out",
+              expanded ? "opacity-0 scale-95 pointer-events-none" : "opacity-100 scale-100",
+            )}
+          >
+            <span
+              aria-hidden
+              className="inline-flex size-7 shrink-0 overflow-hidden rounded-full ring-1 ring-black/10 dark:ring-white/15"
+            >
+              <AssistantAvatar
+                id={activeAssistant.id}
+                name={activeAssistant.name}
+                iconSeed={activeAssistant.iconSeed}
+                size="sm"
+              />
+            </span>
+            <span className="min-w-0 truncate text-muted-foreground">
+              {tChat.surfacePlaceholder}
+            </span>
+          </button>
+          {dockRecorder ? (
+            <DockRecorderButton
+              rec={dockRecorder}
+              variant="floating"
+              className={cn(
+                "transition-[opacity,transform] duration-200 ease-out",
+                expanded
+                  ? "opacity-0 scale-95 pointer-events-none"
+                  : "opacity-100 scale-100",
+              )}
+            />
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }

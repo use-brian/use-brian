@@ -1,32 +1,20 @@
 "use client";
 
 /**
- * Feed connection — the per-platform account lifecycle page, ported
- * faithfully from
- * `apps/feed-web/src/app/w/[workspaceId]/[platform]/connection/page.tsx`
- * (docs/plans/feed-web-consolidation.md §7.6): handle + enabled badge card,
- * admin-gated reconnect (OAuth) and disconnect, and the connect-account
- * dialog entry for the not-connected state.
+ * Feed connection — the reusable per-platform account lifecycle card.
+ * Platform Settings embeds it so account health and Connect/Reconnect/
+ * Disconnect no longer require a separate top-level page. The legacy
+ * `/connection` route remains a redirect for old deep links.
  *
- * Port deltas (disposition rules §6):
- *   - `useWorkspaceContext()` → `useFeedWorkspace()`; the post-disconnect
- *     `router.refresh()` (feed-web re-ran its server-layout profile fetch)
- *     → `team.refresh()` on the client provider, so the sidebar + context
- *     drop the profile immediately.
- *   - The reconnect OAuth URL rides `buildAuthorizeUrl` — `return_to` lands
- *     on the feed home (`/feed?connected=<platform>`, the one allowlisted
- *     landing with the connected banner + one-shot refresh) instead of
- *     feed-web's return to this page.
- *   - feed-web's `useConfirm()` (in-page dialog element) → the app-root
- *     `confirmDialog()` promise; the inline disconnect DELETE → the feed
- *     SDK (`disconnectFeedProfile`).
- *   - All copy via `useT().feedPage.connection` (+ shared `platformLabels`).
+ * Connect always carries the route platform into `openConnect(platform)`;
+ * this is the regression boundary that prevents X from reopening as Threads.
  *
  * [COMP:app-web/feed-connection]
  */
 
 import { useState } from "react";
 import Link from "next/link";
+import { useParams } from "next/navigation";
 import { authFetch } from "@/lib/auth-fetch";
 import { useFeedWorkspace } from "@/contexts/feed-profiles-context";
 import { disconnectFeedProfile } from "@/lib/api/feed";
@@ -34,14 +22,15 @@ import { buildAuthorizeUrl } from "@/lib/feed-connect-account";
 import { feedPath, isConnectableFeedPlatform } from "@/lib/feed-nav";
 import type { FeedPlatform } from "@/lib/feed-nav";
 import { useConnectAccount } from "@/components/feed/connect-account-dialog";
+import { PlatformIcon } from "@/components/feed/platform-icon";
+import { Button } from "@/components/ui/button";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
-import { useParams } from "next/navigation";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
-export function FeedConnection() {
+export function FeedConnection({ embedded = false }: { embedded?: boolean }) {
   const params = useParams<{ workspaceId: string; platform: string }>();
   const team = useFeedWorkspace();
   const t = useT().feedPage;
@@ -53,26 +42,44 @@ export function FeedConnection() {
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const { openConnect, dialog: connectDialog, isAdmin: canConnect } = useConnectAccount();
-
+  const {
+    openConnect,
+    dialog: connectDialog,
+    isAdmin: canConnect,
+  } = useConnectAccount();
   const isAdmin = team.role === "admin" || team.role === "owner";
 
-  // Coming-soon stub for create-only targets (instagram/xhs) — no OAuth
-  // integration yet; drafting + the ready queue already work for them
-  // (docs/plans/feed-create-split.md D11).
+  // Coming-soon targets already participate in drafting but have no OAuth
+  // integration. Settings still explains that state in the same account card.
   if (!isConnectableFeedPlatform(platform)) {
+    if (embedded) {
+      return (
+        <section className="rounded-xl border border-border/60 bg-card p-4 shadow-xs">
+          <div className="flex items-start gap-3">
+            <PlatformMark platform={platform} muted />
+            <div className="min-w-0 space-y-1">
+              <h2 className="text-sm font-medium">
+                {format(t.comingSoon.title, { platform: platformLabel })}
+              </h2>
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                {format(t.comingSoon.body, { platform: platformLabel })}
+              </p>
+            </div>
+          </div>
+        </section>
+      );
+    }
     return (
-      <div className="px-4 md:px-6 py-6 max-w-2xl space-y-4">
-        <h1
-          className="text-[15px] font-semibold"        >
+      <div className="max-w-2xl space-y-4 px-4 py-6 md:px-6">
+        <h1 className="text-[15px] font-semibold">
           {format(t.comingSoon.title, { platform: platformLabel })}
         </h1>
         <p className="text-sm text-muted-foreground">
           {format(t.comingSoon.body, { platform: platformLabel })}
         </p>
         <Link
-          href={feedPath(params.workspaceId, { segment: "drafts" })}
-          className="inline-flex items-center justify-center rounded-lg bg-primary px-3 h-8 text-[12.5px] font-medium text-primary-foreground hover:bg-primary/90"
+          href={feedPath(params.workspaceId, { platform, segment: "posts" })}
+          className="inline-flex h-8 items-center justify-center rounded-lg bg-foreground px-3 text-[12.5px] font-medium text-background transition-colors hover:bg-foreground/90"
         >
           {t.comingSoon.draftsCta}
         </Link>
@@ -103,7 +110,9 @@ export function FeedConnection() {
       const data = (await res.json()) as { redirect: string };
       window.location.href = data.redirect;
     } catch (err) {
-      setError(err instanceof Error ? err.message : t.connection.connectionFailed);
+      setError(
+        err instanceof Error ? err.message : t.connection.connectionFailed,
+      );
       setBusy(false);
     }
   }
@@ -130,111 +139,172 @@ export function FeedConnection() {
       }
       await team.refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : t.connection.disconnectFailed);
+      setError(
+        err instanceof Error ? err.message : t.connection.disconnectFailed,
+      );
     } finally {
       setBusy(false);
     }
   }
 
   if (!profile) {
-    return (
-      <div className="px-4 md:px-6 py-6 max-w-2xl space-y-4">
+    const content = (
+      <>
         {connectDialog}
-        <header>
-          <h1 className="text-[15px] font-semibold">
-            {format(t.connection.notConnectedTitle, { platform: platformLabel })}
-          </h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            {format(t.connection.notConnectedBody, { platform: platformLabel })}
-          </p>
-        </header>
-        {canConnect ? (
-          <button
-            type="button"
-            onClick={openConnect}
-            className="inline-flex items-center justify-center rounded-lg bg-primary px-3 h-8 text-[12.5px] font-medium text-primary-foreground hover:bg-primary/90"
-          >
-            {t.connection.connectCta}
-          </button>
-        ) : (
-          <p className="text-sm text-muted-foreground">{t.connection.adminOnlyConnect}</p>
-        )}
+        <section className="rounded-xl border border-border/60 bg-card p-4 shadow-xs">
+          <div className="flex items-start gap-3">
+            <PlatformMark platform={platform} muted />
+            <div className="min-w-0 flex-1">
+              <h2 className="text-sm font-medium">
+                {format(t.connection.notConnectedTitle, {
+                  platform: platformLabel,
+                })}
+              </h2>
+              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                {format(t.connection.notConnectedBody, {
+                  platform: platformLabel,
+                })}
+              </p>
+              <div className="mt-3">
+                {canConnect ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => void openConnect(platform)}
+                    className="border-foreground bg-foreground text-background hover:bg-foreground/90 hover:text-background"
+                  >
+                    {t.connection.connectCta}
+                  </Button>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    {t.connection.adminOnlyConnect}
+                  </p>
+                )}
+              </div>
+            </div>
+          </div>
+        </section>
+      </>
+    );
+    if (embedded) return <div className="space-y-3">{content}</div>;
+    return (
+      <div className="mx-auto max-w-2xl space-y-3 px-4 py-6 md:px-6">
+        {content}
       </div>
     );
   }
 
-  return (
-    <div className="px-4 md:px-6 py-5 max-w-4xl mx-auto space-y-5">
-      <header className="space-y-1.5">
-        <h1 className="text-[15px] font-semibold">
-          {format(t.connection.heading, { platform: platformLabel })}
-        </h1>
-        <p className="text-sm text-muted-foreground leading-relaxed">
-          {t.connection.subtitle}
-        </p>
-      </header>
-
+  const content = (
+    <>
       {error ? (
-        <div className="rounded-xl border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive animate-pop-in">
+        <div className="animate-pop-in rounded-xl border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
           {error}
         </div>
       ) : null}
 
-      <section className="rounded-xl border border-border bg-card p-5 space-y-4">
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <div className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-              {t.connection.handleLabel}
+      <section className="rounded-xl border border-border/60 bg-card p-4 shadow-xs">
+        <div className="flex items-start gap-3">
+          <PlatformMark platform={platform} />
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div>
+                <div className="text-sm font-medium">
+                  <span className="sr-only">{t.connection.handleLabel}: </span>@
+                  {profile.platformHandle}
+                </div>
+                <div className="mt-0.5 text-xs text-muted-foreground">
+                  {t.connection.assistantLabel}{" "}
+                  <span className="font-medium text-foreground/80">
+                    {profile.assistant.name}
+                  </span>
+                </div>
+              </div>
+              <span
+                className={
+                  "inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium " +
+                  (profile.enabled
+                    ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                    : "border-amber-500/20 bg-amber-500/10 text-amber-700 dark:text-amber-300")
+                }
+              >
+                <span
+                  className={
+                    "size-1.5 rounded-full " +
+                    (profile.enabled
+                      ? "bg-emerald-600/80 dark:bg-emerald-400/80"
+                      : "bg-amber-500/80 dark:bg-amber-400/80")
+                  }
+                />
+                {profile.enabled
+                  ? t.connection.statusEnabled
+                  : t.connection.statusDisabled}
+              </span>
             </div>
-            <div className="text-base font-medium mt-1">@{profile.platformHandle}</div>
+
+            <div className="mt-3 flex flex-wrap gap-2 border-t border-border/60 pt-3">
+              {isAdmin ? (
+                <>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => startConnect(profile.assistantId)}
+                    disabled={busy}
+                  >
+                    {busy ? t.connection.reconnecting : t.connection.reconnect}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="destructive"
+                    onClick={disconnect}
+                    disabled={busy}
+                  >
+                    {t.connection.disconnect}
+                  </Button>
+                </>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  {t.connection.adminOnlyManage}
+                </p>
+              )}
+            </div>
           </div>
-          <span
-            className={
-              "inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ring-1 ring-inset " +
-              (profile.enabled
-                ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 ring-emerald-400/25"
-                : "bg-amber-500/15 text-amber-700 dark:text-amber-300 ring-amber-400/25")
-            }
-          >
-            <span
-              className={
-                "h-1.5 w-1.5 rounded-full " +
-                (profile.enabled ? "bg-emerald-600/80 dark:bg-emerald-400/80" : "bg-amber-500/80 dark:bg-amber-400/80")
-              }
-            />
-            {profile.enabled ? t.connection.statusEnabled : t.connection.statusDisabled}
-          </span>
-        </div>
-        <div className="text-xs text-muted-foreground hairline pt-3 border-t border-border">
-          {t.connection.assistantLabel}{" "}
-          <span className="font-mono text-foreground/85">{profile.assistant.name}</span>
         </div>
       </section>
+    </>
+  );
 
-      {isAdmin ? (
-        <div className="flex gap-3">
-          <button
-            type="button"
-            onClick={() => startConnect(profile.assistantId)}
-            disabled={busy}
-            className="rounded-lg border border-border bg-card px-3 h-8 text-[12.5px] font-medium hover:bg-accent active:bg-accent/80 disabled:opacity-50 transition-colors press"
-          >
-            {busy ? t.connection.reconnecting : t.connection.reconnect}
-          </button>
-          <button
-            type="button"
-            onClick={disconnect}
-            disabled={busy}
-            className="rounded-lg border border-destructive/40 text-destructive px-3 h-8 text-[12.5px] font-medium hover:bg-destructive/10 active:bg-destructive/15 disabled:opacity-50 transition-colors press"
-          >
-            {t.connection.disconnect}
-          </button>
-        </div>
-      ) : (
-        <p className="text-xs text-muted-foreground">
-          {t.connection.adminOnlyManage}
+  if (embedded) return <div className="space-y-3">{content}</div>;
+
+  return (
+    <div className="mx-auto max-w-4xl space-y-5 px-4 py-5 md:px-6">
+      <header className="space-y-1.5">
+        <h1 className="text-[15px] font-semibold">
+          {format(t.connection.heading, { platform: platformLabel })}
+        </h1>
+        <p className="text-sm leading-relaxed text-muted-foreground">
+          {t.connection.subtitle}
         </p>
-      )}
+      </header>
+      {content}
     </div>
+  );
+}
+
+function PlatformMark({
+  platform,
+  muted = false,
+}: {
+  platform: FeedPlatform;
+  muted?: boolean;
+}) {
+  return (
+    <span
+      className={
+        "flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted " +
+        (muted ? "text-muted-foreground" : "text-foreground")
+      }
+    >
+      <PlatformIcon platform={platform} className="size-4" />
+    </span>
   );
 }

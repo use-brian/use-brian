@@ -38,8 +38,23 @@
 import { Router } from 'express'
 import { z } from 'zod'
 import { query } from '../db/client.js'
-import { loadBuiltinSkills, createRateLimiter, shouldInline, extractionSpecSchema, extractionSpecToBlocks } from '@use-brian/core'
-import type { SkillContent, LLMProvider, FileStore, ContentBlock } from '@use-brian/core'
+import {
+  loadBuiltinSkills,
+  createRateLimiter,
+  shouldInline,
+  extractionSpecSchema,
+  extractionSpecToBlocks,
+  transcribeFirstAudio,
+  voiceUnavailableNote,
+  TRANSCRIPTION_DISABLED_REASON,
+} from '@use-brian/core'
+import type {
+  SkillContent,
+  LLMProvider,
+  FileStore,
+  ContentBlock,
+  PreflightOptions,
+} from '@use-brian/core'
 import type { SkillStore, WorkspaceSkillStore, WorkspaceSkill } from '../db/skill-store.js'
 import type { PageTemplateStore } from '../db/page-templates-store.js'
 import { getWorkspacePlan as getWorkspacePlanDb, type WorkspaceStore } from '../db/workspace-store.js'
@@ -133,6 +148,9 @@ type SkillRouteOptions = {
   /** File cache for draft-turn attachments (`fileIds` on POST /draft).
    *  Absent → attachments are ignored. */
   fileStore?: FileStore
+  /** Voice-note transcription for audio `fileIds` on POST /draft. Mirrors the
+   *  chat route so the universal dock recorder can target this stateless chat. */
+  voiceTranscription?: PreflightOptions
   /** Plan + budget seams for the draft model-tier gate — default to the real
    *  DB-backed implementations (`getWorkspacePlan` / `checkCreditBudget`);
    *  injected by tests. */
@@ -218,6 +236,7 @@ export function skillRoutes({
   draftRateLimiter,
   researchRateLimiter,
   fileStore,
+  voiceTranscription,
   getWorkspacePlan = getWorkspacePlanDb,
   checkUsageBudget = allowAllBudget,
   connectorInstanceStore,
@@ -881,8 +900,9 @@ export function skillRoutes({
 
     // Attachments — the chat route's file block-building pattern
     // (chat.ts "Gate each client-supplied fileId by the turn's identity"):
-    // the access predicate closes the cross-tenant path; audio is stubbed
-    // out (no transcription on this path).
+    // the access predicate closes the cross-tenant path. Audio is transcribed
+    // just-in-time so the universal dock recorder's short lane can address
+    // this visible stateless draft chat.
     let attachments: SkillDraftAttachments | undefined
     if (fileIds && fileIds.length > 0 && fileStore) {
       const fileCtx = {
@@ -902,8 +922,23 @@ export function skillRoutes({
         const isPdf = file.mimeType === 'application/pdf'
         const isAudio = file.mimeType.startsWith('audio/')
         if (isAudio) {
+          const match = file.content.match(/^data:[^;]+;base64,(.+)$/)
+          const base64Data = match ? match[1] : file.content
+          let transcribeFailure: string | undefined
+          const transcription = voiceTranscription
+            ? await transcribeFirstAudio(
+                [{ buffer: Buffer.from(base64Data, 'base64'), mime: file.mimeType, index: 0 }],
+                {
+                  ...voiceTranscription,
+                  onFailure: (reason) => { transcribeFailure = reason },
+                },
+              )
+            : undefined
+          if (!voiceTranscription) transcribeFailure = TRANSCRIPTION_DISABLED_REASON
           textParts.push(
-            `<attached_file id="${file.id}" name="${file.fileName}" type="${file.mimeType}">[Audio attachments are not supported for skill drafting. Ask the user to paste the relevant text instead.]</attached_file>`,
+            transcription
+              ? `[voice] ${transcription.text}`
+              : `<attached_file id="${file.id}" name="${file.fileName}" type="${file.mimeType}">${voiceUnavailableNote(transcribeFailure)}</attached_file>`,
           )
         } else if (isImage || isPdf) {
           // Inline media must be stored as "data:<mime>;base64,<data>" —

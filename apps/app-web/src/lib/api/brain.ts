@@ -12,6 +12,14 @@
  */
 
 import { authFetch } from "@/lib/auth-fetch";
+import {
+  BrainContentHttpError,
+  deleteBrainContentCache,
+  isRecordValue,
+  readBrainContentCache,
+  writeBrainContentCache,
+  type BrainContentCacheScope,
+} from "@/lib/offline/brain-content-cache";
 import type {
   BrainInboxRow,
   BrainPrimitive as InboxPrimitive,
@@ -174,6 +182,9 @@ export type BrainListParams = {
   taskStatus?: TaskStatusFilter;
   cursor?: string;
   limit?: number;
+  /** Preserve a painted cache by throwing on HTTP failure instead of
+   *  translating the response into an authoritative-looking empty list. */
+  failOnError?: boolean;
 };
 
 export type BrainListResult = {
@@ -205,6 +216,9 @@ export async function listBrain(
   // `pendingOnly` filter (see the route doc in brain.ts).
   const res = await authFetch(`${API_URL}/api/brain/list?${q.toString()}`);
   if (!res.ok) {
+    if (params.failOnError) {
+      throw new BrainContentHttpError(res.status, "Brain list");
+    }
     return { rows: [], nextCursor: null };
   }
   const data = (await res.json()) as {
@@ -227,14 +241,37 @@ export async function getEntity(
   entityId: string,
   workspaceId: string,
   viewpointAssistantId?: string | null,
+  cacheScope?: BrainContentCacheScope | null,
 ): Promise<EntityRollup | null> {
   const q = new URLSearchParams({ workspaceId });
   if (viewpointAssistantId) q.set("assistantId", viewpointAssistantId);
-  const res = await authFetch(
-    `${API_URL}/api/brain/entities/${encodeURIComponent(entityId)}?${q.toString()}`,
-  );
-  if (!res.ok) return null;
-  return (await res.json()) as EntityRollup;
+  const resource = `entity:${entityId}`;
+  try {
+    const res = await authFetch(
+      `${API_URL}/api/brain/entities/${encodeURIComponent(entityId)}?${q.toString()}`,
+    );
+    // An HTTP denial/miss is authoritative — never resurrect cached content
+    // after access was removed or the row was deleted.
+    if (!res.ok) {
+      if (cacheScope && [401, 403, 404].includes(res.status)) {
+        void deleteBrainContentCache(cacheScope, resource);
+      }
+      return null;
+    }
+    const entity = (await res.json()) as EntityRollup;
+    if (cacheScope) {
+      void writeBrainContentCache(cacheScope, resource, entity);
+    }
+    return entity;
+  } catch (error) {
+    if (!cacheScope || !(error instanceof TypeError)) throw error;
+    const cached = await readBrainContentCache(
+      cacheScope,
+      resource,
+      isRecordValue,
+    );
+    return (cached?.value as EntityRollup | undefined) ?? null;
+  }
 }
 
 // ── Graph view ────────────────────────────────────────────────────────
@@ -254,7 +291,7 @@ export type BrainGraphNodeKind =
   | "connector"
   | "memory";
 
-export type BrainGraphNode = {
+type BrainGraphNodeBase = {
   id: string;
   kind: BrainGraphNodeKind;
   name: string;
@@ -263,6 +300,28 @@ export type BrainGraphNode = {
   degree: number;
 };
 
+type BrainGraphEntryNode = BrainGraphNodeBase & {
+  /** Older/small-graph responses omit this; absence means a real entry. */
+  nodeType?: "entry";
+};
+
+export type BrainGraphGroupNode = BrainGraphNodeBase & {
+  nodeType: "group";
+  groupId: string;
+  memberCount: number;
+  kindCounts: Partial<Record<BrainGraphNodeKind, number>>;
+  level: number;
+  expandable: true;
+};
+
+export type BrainGraphNode = BrainGraphEntryNode | BrainGraphGroupNode;
+
+export function isBrainGraphGroupNode(
+  node: BrainGraphNode,
+): node is BrainGraphGroupNode {
+  return node.nodeType === "group";
+}
+
 export type BrainGraphEdge = {
   id: string;
   source: string;
@@ -270,6 +329,8 @@ export type BrainGraphEdge = {
   /** edge_type from `entity_links` (e.g. "works_at", "discussed_in"). */
   type: string;
   sensitivity: Sensitivity;
+  /** Source relationships represented by an aggregate group edge. */
+  count?: number;
 };
 
 export type BrainGraph = {
@@ -277,6 +338,17 @@ export type BrainGraph = {
   edges: BrainGraphEdge[];
   /** True when the workspace has more entities than the node cap. */
   truncated: boolean;
+  /** Visible entries considered by the server-side hierarchy. */
+  totalNodes?: number;
+  /** Entries represented by group nodes in this response. */
+  groupedNodeCount?: number;
+  /** Current semantic-zoom group, null for the workspace overview. */
+  scopeId?: string | null;
+  parentScopeId?: string | null;
+  scopeLabel?: string | null;
+  /** Search matches visible in this bounded response. */
+  focusNodeIds?: string[];
+  renderBudget?: { nodes: number; edges: number };
 };
 
 /**
@@ -400,14 +472,35 @@ export async function getKnowledgeEntry(
   id: string,
   workspaceId: string,
   viewpointAssistantId?: string | null,
+  cacheScope?: BrainContentCacheScope | null,
 ): Promise<KnowledgeEntryDetail | null> {
   const q = new URLSearchParams({ workspaceId });
   if (viewpointAssistantId) q.set("assistantId", viewpointAssistantId);
-  const res = await authFetch(
-    `${API_URL}/api/brain/knowledge/${encodeURIComponent(id)}?${q.toString()}`,
-  );
-  if (!res.ok) return null;
-  return (await res.json()) as KnowledgeEntryDetail;
+  const resource = `knowledge:${id}`;
+  try {
+    const res = await authFetch(
+      `${API_URL}/api/brain/knowledge/${encodeURIComponent(id)}?${q.toString()}`,
+    );
+    if (!res.ok) {
+      if (cacheScope && [401, 403, 404].includes(res.status)) {
+        void deleteBrainContentCache(cacheScope, resource);
+      }
+      return null;
+    }
+    const entry = (await res.json()) as KnowledgeEntryDetail;
+    if (cacheScope) {
+      void writeBrainContentCache(cacheScope, resource, entry);
+    }
+    return entry;
+  } catch (error) {
+    if (!cacheScope || !(error instanceof TypeError)) throw error;
+    const cached = await readBrainContentCache(
+      cacheScope,
+      resource,
+      isRecordValue,
+    );
+    return (cached?.value as KnowledgeEntryDetail | undefined) ?? null;
+  }
 }
 
 // ── Knowledge edit proposals (entry reader) ──────────────────────────
@@ -550,6 +643,7 @@ export type BrainFacets = Record<BrainPrimitive, boolean>;
 export async function getBrainFacets(
   workspaceId: string,
   viewpointAssistantId?: string | null,
+  options?: { failOnError?: boolean },
 ): Promise<BrainFacets> {
   const allPresent: BrainFacets = {
     people: true,
@@ -564,7 +658,12 @@ export async function getBrainFacets(
   const q = new URLSearchParams({ workspaceId });
   if (viewpointAssistantId) q.set("assistantId", viewpointAssistantId);
   const res = await authFetch(`${API_URL}/api/brain/facets?${q.toString()}`);
-  if (!res.ok) return allPresent;
+  if (!res.ok) {
+    if (options?.failOnError) {
+      throw new BrainContentHttpError(res.status, "Brain facets");
+    }
+    return allPresent;
+  }
   const data = (await res.json()) as { present?: Partial<BrainFacets> };
   const present = data.present ?? {};
   return {
@@ -580,8 +679,9 @@ export async function getBrainFacets(
 }
 
 /**
- * Workspace-wide graph snapshot — every visible entity + every active
- * entity↔entity edge. Backed by `GET /api/brain/graph`. Returns an
+ * Bounded hierarchical graph projection. Backed by `GET /api/brain/graph`.
+ * `scopeId` opens a group; `focusQuery` asks the server to return the leaf
+ * scope containing the best matching entry. Returns an
  * empty graph on error so the view can render its empty state instead
  * of crashing.
  */
@@ -589,23 +689,66 @@ export async function getBrainGraph(params: {
   workspaceId: string;
   viewpointAssistantId?: string | null;
   limit?: number;
+  scopeId?: string | null;
+  focusQuery?: string | null;
   /** Opt into memory nodes (the Phase 3 `?include=memory` toggle). Only
    *  memories linked to a visible entity are returned. Default off. */
   showMemory?: boolean;
+  /** Throw on HTTP failure so stale-while-revalidate callers keep a last-good
+   *  graph instead of caching a synthetic empty graph. */
+  failOnError?: boolean;
+  signal?: AbortSignal;
 }): Promise<BrainGraph> {
   const q = new URLSearchParams({ workspaceId: params.workspaceId });
   if (params.viewpointAssistantId) q.set("assistantId", params.viewpointAssistantId);
   if (params.limit) q.set("limit", String(params.limit));
+  if (params.scopeId) q.set("scope", params.scopeId);
+  if (params.focusQuery?.trim()) q.set("focus", params.focusQuery.trim());
   if (params.showMemory) q.set("include", "memory");
-  const res = await authFetch(`${API_URL}/api/brain/graph?${q.toString()}`);
+  const res = await authFetch(`${API_URL}/api/brain/graph?${q.toString()}`, {
+    signal: params.signal,
+  });
   if (!res.ok) {
-    return { nodes: [], edges: [], truncated: false };
+    if (params.failOnError) {
+      throw new BrainContentHttpError(res.status, "Brain graph");
+    }
+    return {
+      nodes: [],
+      edges: [],
+      truncated: false,
+      totalNodes: 0,
+      groupedNodeCount: 0,
+      scopeId: null,
+      parentScopeId: null,
+      focusNodeIds: [],
+    };
   }
   const data = (await res.json()) as Partial<BrainGraph>;
   return {
     nodes: Array.isArray(data.nodes) ? data.nodes : [],
     edges: Array.isArray(data.edges) ? data.edges : [],
     truncated: data.truncated === true,
+    totalNodes:
+      typeof data.totalNodes === "number"
+        ? data.totalNodes
+        : Array.isArray(data.nodes)
+          ? data.nodes.length
+          : 0,
+    groupedNodeCount:
+      typeof data.groupedNodeCount === "number" ? data.groupedNodeCount : 0,
+    scopeId: typeof data.scopeId === "string" ? data.scopeId : null,
+    parentScopeId:
+      typeof data.parentScopeId === "string" ? data.parentScopeId : null,
+    scopeLabel: typeof data.scopeLabel === "string" ? data.scopeLabel : null,
+    focusNodeIds: Array.isArray(data.focusNodeIds)
+      ? data.focusNodeIds.filter((id): id is string => typeof id === "string")
+      : [],
+    renderBudget:
+      data.renderBudget &&
+      typeof data.renderBudget.nodes === "number" &&
+      typeof data.renderBudget.edges === "number"
+        ? data.renderBudget
+        : undefined,
   };
 }
 

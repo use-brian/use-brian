@@ -327,6 +327,8 @@ export function contentPlanningRoutes(
             imageBrief: draft.imageBrief,
             approvedBy: draft.resolvedBy,
             sessionId: draft.sessionId,
+            postFormat: draft.postFormat,
+            ...draft.formatData,
           },
           createdAt: draft.resolvedAt ?? draft.createdAt,
         })),
@@ -565,7 +567,26 @@ export function parseContentDraftSeed(
   }
   const kind = value.kind as ContentDraftSeedKind
   if (kind === 'freeform') {
-    if (value.link === undefined) return { kind }
+    const brief = typeof value.brief === 'string'
+      ? value.brief.trim().slice(0, 4_000)
+      : value.brief === undefined
+        ? undefined
+        : null
+    if (brief === null) return 'invalid'
+    const format = typeof value.format === 'string' ? value.format : undefined
+    const validFormats = platform === 'twitter'
+      ? ['post', 'thread']
+      : platform === 'linkedin'
+        ? ['post', 'article']
+        : ['post']
+    if (format && !validFormats.includes(format)) return 'invalid'
+    if (value.link === undefined) {
+      return {
+        kind,
+        ...(brief ? { brief } : {}),
+        ...(format ? { format: format as ContentDraftSeed['format'] } : {}),
+      }
+    }
     if (
       typeof value.link !== 'string'
       || value.link.length > 2_048
@@ -573,7 +594,12 @@ export function parseContentDraftSeed(
     ) {
       return 'invalid'
     }
-    return { kind, link: value.link }
+    return {
+      kind,
+      link: value.link,
+      ...(brief ? { brief } : {}),
+      ...(format ? { format: format as ContentDraftSeed['format'] } : {}),
+    }
   }
   if (!isRecord(value.candidate)) return 'invalid'
   const candidate = value.candidate
@@ -619,6 +645,13 @@ export function parseContentDraftBody(value: unknown):
       platform: ContentPlanningPlatform
       imageBrief?: string
       topicTag?: string
+      postFormat?: 'post' | 'thread' | 'article'
+      threadSegments?: string[]
+      article?: {
+        sourceUrl: string
+        title: string
+        description: string
+      }
       reply?: {
         externalId: string
         authorHandle: string
@@ -631,10 +664,41 @@ export function parseContentDraftBody(value: unknown):
     !isRecord(value)
     || typeof value.text !== 'string'
     || !value.text.trim()
-    || value.text.length > 4_000
+    || value.text.length > 10_000
     || !isContentPlanningPlatform(value.platform)
   ) {
     return 'invalid'
+  }
+  const postFormat = value.postFormat === 'thread' || value.postFormat === 'article'
+    ? value.postFormat
+    : 'post'
+  if (postFormat === 'thread') {
+    if (
+      value.platform !== 'twitter'
+      || !Array.isArray(value.threadSegments)
+      || value.threadSegments.length < 2
+      || value.threadSegments.length > 25
+      || value.threadSegments.some(
+        (part) => typeof part !== 'string' || !part.trim() || xWeightedLength(part) > 280,
+      )
+    ) return 'invalid'
+  }
+  let article: { sourceUrl: string; title: string; description: string } | undefined
+  if (postFormat === 'article') {
+    if (
+      value.platform !== 'linkedin'
+      || !isRecord(value.article)
+      || typeof value.article.sourceUrl !== 'string'
+      || !isHttpUrl(value.article.sourceUrl)
+      || typeof value.article.title !== 'string'
+      || !value.article.title.trim()
+      || typeof value.article.description !== 'string'
+    ) return 'invalid'
+    article = {
+      sourceUrl: value.article.sourceUrl.slice(0, 2_048),
+      title: value.article.title.trim().slice(0, 300),
+      description: value.article.description.trim().slice(0, 1_000),
+    }
   }
   if (
     value.imageBrief !== undefined
@@ -696,6 +760,11 @@ export function parseContentDraftBody(value: unknown):
       ? { topicTag: value.topicTag.trim() }
       : {}),
     ...(reply ? { reply } : {}),
+    postFormat,
+    ...(postFormat === 'thread'
+      ? { threadSegments: (value.threadSegments as string[]).map((part) => part.trim()) }
+      : {}),
+    ...(article ? { article } : {}),
   }
 }
 
@@ -716,6 +785,13 @@ function toSavedDraftWire(draft: SavedContentDraft) {
     status: draft.status,
     createdAt: draft.createdAt,
     resolvedAt: draft.resolvedAt,
+    postFormat: draft.postFormat,
+    ...(Array.isArray(draft.formatData.threadSegments)
+      ? { threadSegments: draft.formatData.threadSegments }
+      : {}),
+    ...(isRecord(draft.formatData.article)
+      ? { article: draft.formatData.article }
+      : {}),
   }
 }
 
@@ -733,6 +809,8 @@ function toApprovalWire(draft: SavedContentDraft) {
       replyPermalink: draft.replyPermalink ?? undefined,
       sessionId: draft.sessionId,
       imageBrief: draft.imageBrief ?? undefined,
+      postFormat: draft.postFormat,
+      ...draft.formatData,
     },
     createdAt: draft.createdAt,
   }
@@ -749,4 +827,34 @@ function isHttpUrl(value: string): boolean {
   } catch {
     return false
   }
+}
+
+/**
+ * Mirror X's published weighted-length rules at the HTTP boundary: links
+ * count as 23 and Unicode ranges use the platform's one/two-weight model.
+ */
+function xWeightedLength(text: string): number {
+  let count = 0
+  let cursor = 0
+  for (const match of text.matchAll(/https?:\/\/[^\s]+/gu)) {
+    const index = match.index ?? cursor
+    count += weightedXCodePoints(text.slice(cursor, index))
+    count += 23
+    cursor = index + match[0].length
+  }
+  return count + weightedXCodePoints(text.slice(cursor))
+}
+
+function weightedXCodePoints(text: string): number {
+  let count = 0
+  for (const char of text) {
+    const point = char.codePointAt(0) ?? 0
+    const single =
+      (point >= 0 && point <= 4_351)
+      || (point >= 8_192 && point <= 8_205)
+      || (point >= 8_208 && point <= 8_223)
+      || (point >= 8_242 && point <= 8_247)
+    count += single ? 1 : 2
+  }
+  return count
 }

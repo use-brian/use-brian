@@ -24,8 +24,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const api = vi.hoisted(() => ({ listBrain: vi.fn() }));
 vi.mock("@/lib/api/brain", () => ({ listBrain: api.listBrain }));
 
+const offlineCache = vi.hoisted(() => ({
+  read: vi.fn(),
+  write: vi.fn(),
+  remove: vi.fn(),
+}));
+vi.mock("@/lib/offline/brain-content-cache", async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import("@/lib/offline/brain-content-cache")
+  >()),
+  readBrainContentCache: offlineCache.read,
+  writeBrainContentCache: offlineCache.write,
+  deleteBrainContentCache: offlineCache.remove,
+}));
+
 import { useBrainEntries } from "@/lib/use-brain-entries";
 import type { BrainRow } from "@/lib/api/brain";
+import { BrainContentHttpError } from "@/lib/offline/brain-content-cache";
 
 const row = (id: string): BrainRow =>
   ({ id, kind: "memories", name: `Row ${id}`, sensitivity: "internal" }) as BrainRow;
@@ -45,6 +60,7 @@ let latest: ReturnType<typeof useBrainEntries>;
 function Probe({ search }: { search: string }) {
   latest = useBrainEntries({
     workspaceId: "w1",
+    viewerId: "u1",
     primitives: [],
     search,
     viewpointAssistantId: null,
@@ -64,6 +80,9 @@ async function render(search = "") {
 describe("[COMP:app-web/brain-entries] Chunked Brain entries", () => {
   beforeEach(() => {
     api.listBrain.mockReset();
+    offlineCache.read.mockReset().mockResolvedValue(null);
+    offlineCache.write.mockReset().mockResolvedValue(undefined);
+    offlineCache.remove.mockReset().mockResolvedValue(undefined);
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -201,5 +220,64 @@ describe("[COMP:app-web/brain-entries] Chunked Brain entries", () => {
     expect(container.textContent).toBe("a");
     // Paging stops rather than retrying into a broken endpoint.
     expect(latest.hasMore).toBe(false);
+  });
+
+  it("hydrates cached rows when the network is unavailable", async () => {
+    offlineCache.read.mockResolvedValue({
+      value: page(["cached"], "C2"),
+      updatedAt: Date.now(),
+    });
+    api.listBrain.mockRejectedValue(new Error("offline"));
+    await render();
+    expect(container.textContent).toBe("cached");
+    expect(latest.loading).toBe(false);
+    // The opaque cursor cannot be used while the network is down.
+    expect(latest.hasMore).toBe(false);
+  });
+
+  it("projects a filtered query from the cached default corpus", async () => {
+    offlineCache.read.mockResolvedValue({
+      value: {
+        rows: [
+          row("alpha"),
+          { ...row("beta"), name: "Zebra account" },
+        ],
+        nextCursor: null,
+      },
+      updatedAt: Date.now(),
+    });
+    api.listBrain.mockRejectedValue(new Error("offline"));
+    await render("zebra");
+    expect(container.textContent).toBe("beta");
+  });
+
+  it("evicts cached rows after an authoritative access denial", async () => {
+    offlineCache.read.mockResolvedValue({
+      value: page(["cached"], null),
+      updatedAt: Date.now(),
+    });
+    api.listBrain.mockRejectedValue(new BrainContentHttpError(403, "Brain list"));
+    await render();
+    expect(container.textContent).toBe("");
+    expect(offlineCache.remove).toHaveBeenCalledWith(
+      expect.objectContaining({ viewerId: "u1", workspaceId: "w1" }),
+      "entries:default",
+    );
+  });
+
+  it("persists the accumulated default query after every successful chunk", async () => {
+    api.listBrain
+      .mockResolvedValueOnce(page(["a"], "C2"))
+      .mockResolvedValueOnce(page(["b"], null));
+    await render();
+    await act(async () => {
+      latest.loadMore();
+      await settle();
+    });
+    expect(offlineCache.write).toHaveBeenLastCalledWith(
+      expect.objectContaining({ viewerId: "u1", workspaceId: "w1" }),
+      "entries:default",
+      { rows: [row("a"), row("b")], nextCursor: null },
+    );
   });
 });

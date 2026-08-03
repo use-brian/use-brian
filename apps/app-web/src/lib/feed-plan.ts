@@ -31,6 +31,13 @@ export const PLAN_SLOT_STATUSES: readonly PlanSlotStatus[] = [
   "skipped",
 ];
 
+/**
+ * The collapsed Feed dock is fixed 1rem from the viewport bottom and can be
+ * roughly 3rem tall. Plan's right-rail footers reserve one 5rem lane so their
+ * primary action always remains fully visible above it.
+ */
+export const PLAN_RAIL_DOCK_CLEARANCE_CLASS = "pb-20";
+
 export type PlanSlot = {
   id: string;
   assistantId: string;

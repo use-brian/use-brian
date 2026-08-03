@@ -75,7 +75,7 @@ export function browserDocExtensions(opts?: {
         case "callout":
           return ext.extend({ addNodeView: () => ReactNodeViewRenderer(CalloutView) });
         case "table":
-          // Rendering-only node-view (the hover row/column control bar). The
+          // Rendering-only node-view (the hover row/column edge controls). The
           // node spec is untouched, so the server-derived schema stays
           // byte-for-byte identical — table cells remain ProseMirror-managed
           // CRDT nodes; only the surrounding chrome is React.

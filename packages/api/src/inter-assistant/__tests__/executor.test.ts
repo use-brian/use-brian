@@ -1241,7 +1241,7 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
       // Make the doc injector actually add a tool to the live map, like the
       // real one does — proving injection precedes filterToolsByAllowList.
       mockInjectDoc.mockImplementationOnce(async (opts: { tools: Map<string, unknown> }) => {
-        opts.tools.set('patchPage', { name: 'patchPage' })
+        opts.tools.set('delegateDocEdit', { name: 'delegateDocEdit' })
         return { injected: true, injectedCount: 1 } as never
       })
       const base = new Map([['search', { name: 'search' }]])
@@ -1250,10 +1250,12 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
         base,
       )
 
+      // Existing workflow definitions may still pin the historical raw verb;
+      // page-anchored execution maps that intent onto the gateway.
       await callee({ ...baseParams, pageAnchorId: PAGE_ID, allowedTools: ['patchPage'] })
 
       const passedTools = mockQueryLoop.mock.calls[0][0].tools as Map<string, unknown>
-      expect(passedTools.has('patchPage')).toBe(true) // injected, then allowed
+      expect(passedTools.has('delegateDocEdit')).toBe(true) // injected, then allowed
       expect(passedTools.has('search')).toBe(false) // narrowed away by the allow-list
     })
   })

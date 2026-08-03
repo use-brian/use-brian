@@ -37,7 +37,7 @@ import {
   pageIdFromPathname,
   surfaceFromPathname,
 } from "@/lib/doc-page-url";
-import { useT } from "@/lib/i18n/client";
+import { useT, format } from "@/lib/i18n/client";
 import { SurfaceTransition } from "@/components/chrome/surface-transition";
 import { usePrimaryAssistant } from "@/contexts/primary-assistant";
 import { routeProgress } from "@/lib/route-progress";
@@ -105,7 +105,7 @@ export function WorkspaceChrome({
   // so the global offline flag + write-queue flush run app-wide, not just on
   // the doc page. The collab socket signal reaches it via the module store
   // (`publishCollabConnected`, published by doc-shell).
-  useOfflineSync();
+  const offlineState = useOfflineSync();
   // The ONE workspace realtime EventSource per tab (realtime-sync). Routes
   // server change signals to per-domain CustomEvents; surfaces refetch via
   // their existing listeners. Mounted on the chrome so every surface —
@@ -332,6 +332,30 @@ export function WorkspaceChrome({
 
   return (
     <div className="relative flex h-full w-full overflow-hidden">
+      {offlineState.offline && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="pointer-events-none fixed bottom-3 left-1/2 z-[70] flex max-w-[min(34rem,calc(100vw-1.5rem))] -translate-x-1/2 items-start gap-2.5 rounded-xl border border-amber-300/60 bg-amber-50/95 px-3.5 py-2.5 text-amber-950 shadow-lg backdrop-blur dark:border-amber-700/60 dark:bg-amber-950/95 dark:text-amber-100"
+        >
+          <span
+            aria-hidden
+            className="mt-1.5 size-2 shrink-0 rounded-full bg-amber-500"
+          />
+          <span className="min-w-0">
+            <strong className="block text-xs font-semibold">
+              {t.offlineBannerTitle}
+            </strong>
+            <span className="block text-[11px] leading-relaxed opacity-80">
+              {offlineState.pending > 0
+                ? format(t.offlineBannerPending, {
+                    count: offlineState.pending,
+                  })
+                : t.offlineBannerBody}
+            </span>
+          </span>
+        </div>
+      )}
       {/* Backdrop — mobile only, dismisses the drawer on tap. */}
       {sidebarOpen && (
         <button

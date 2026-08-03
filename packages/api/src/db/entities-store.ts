@@ -818,12 +818,12 @@ export async function listEntities(
   ctx: AccessContext,
   opts: { kind?: EntityKind; limit?: number; offset?: number; asOf?: Date } = {},
 ): Promise<EntityListRow[]> {
-  // Ceiling 1001 = the graph route's max ask (`nodeLimit + 1` at its 1000
+  // Ceiling 5001 = the graph route's max ask (`nodeLimit + 1` at its 5000
   // cap — the +1 is the truncation sentinel). The old 200 ceiling silently
   // starved `GET /api/brain/graph` on entity-heavy workspaces: a 560-entity
   // brain rendered 200 nodes with `truncated: false` (no badge), because the
   // route never saw enough candidates to know the cap had tripped.
-  const limit = Math.min(Math.max(opts.limit ?? 50, 1), 1001)
+  const limit = Math.min(Math.max(opts.limit ?? 50, 1), 5001)
   const offset = Math.max(opts.offset ?? 0, 0)
   const ap = buildAccessPredicate(ctx)
   const asOfIdx = ap.nextIdx

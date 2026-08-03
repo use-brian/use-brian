@@ -106,3 +106,22 @@ describe('[COMP:brain/entity-links] idempotent create (mig 354)', () => {
     await expect(store.create(PARAMS)).rejects.toThrow(/raced a concurrent retract/)
   })
 })
+
+describe('[COMP:brain/entity-links-workspace] graph edge sweep', () => {
+  it('accepts the graph route ceiling while clamping larger callers at 30000', async () => {
+    mockQueryWithRLS.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+
+    await store.listForWorkspace(
+      { userId: USER, workspaceId: WS, clearance: 'internal' } as never,
+      { limit: 999999 },
+    )
+
+    const [, sql, params] = mockQueryWithRLS.mock.calls[0] as [
+      string,
+      string,
+      unknown[],
+    ]
+    expect(sql).toContain('LIMIT $4')
+    expect(params[3]).toBe(30000)
+  })
+})

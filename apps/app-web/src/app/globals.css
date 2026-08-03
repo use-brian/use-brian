@@ -339,6 +339,77 @@
   --graph-entity-other: #94A0B2;
 }
 
+/* Graph-native loading state — shared by the route fallback and the live
+   Brain canvas. Fine edges/nodes preview the surface's relationship grammar;
+   the travelling scan says "mapping" without a fake percentage or a pile of
+   unrelated oversized skeleton circles. */
+@keyframes brain-graph-node-breathe {
+  0%, 100% { opacity: 0.42; transform: scale(0.88); }
+  50% { opacity: 0.92; transform: scale(1.08); }
+}
+@keyframes brain-graph-edge-flow {
+  to { stroke-dashoffset: -18; }
+}
+@keyframes brain-graph-ring-travel {
+  0% { opacity: 0; transform: scale(0.55); }
+  28% { opacity: 0.32; }
+  100% { opacity: 0; transform: scale(1.55); }
+}
+@keyframes brain-graph-scan {
+  0% { transform: translate3d(-26vw, -18vh, 0); opacity: 0; }
+  20% { opacity: 0.45; }
+  80% { opacity: 0.3; }
+  100% { transform: translate3d(108vw, 82vh, 0); opacity: 0; }
+}
+.brain-graph-loading {
+  background-image: radial-gradient(color-mix(in srgb, var(--graph-muted) 24%, transparent) 0.7px, transparent 0.7px);
+  background-size: 24px 24px;
+}
+.brain-graph-loading-edges line {
+  stroke: color-mix(in srgb, var(--graph-border) 76%, transparent);
+  stroke-width: 0.26;
+  stroke-dasharray: 2.5 4.5;
+  vector-effect: non-scaling-stroke;
+  animation: brain-graph-edge-flow 2.8s linear infinite;
+}
+.brain-graph-loading-node {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: brain-graph-node-breathe 2.4s ease-in-out infinite;
+}
+.brain-graph-loading-node-knowledge { fill: var(--graph-entity-knowledge); }
+.brain-graph-loading-node-person { fill: var(--graph-entity-person); }
+.brain-graph-loading-node-company { fill: var(--graph-entity-company); }
+.brain-graph-loading-ring {
+  fill: none;
+  stroke: var(--graph-muted);
+  stroke-width: 0.22;
+  vector-effect: non-scaling-stroke;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: brain-graph-ring-travel 3.4s ease-out infinite;
+}
+.brain-graph-loading-scan {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 18rem;
+  height: 18rem;
+  border-radius: 9999px;
+  background: radial-gradient(circle, color-mix(in srgb, var(--graph-entity-person) 12%, transparent), transparent 68%);
+  filter: blur(10px);
+  animation: brain-graph-scan 5.8s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .brain-graph-loading-node,
+  .brain-graph-loading-ring,
+  .brain-graph-loading-edges line,
+  .brain-graph-loading-scan {
+    animation: none !important;
+  }
+  .brain-graph-loading-scan { display: none; }
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;
@@ -1221,38 +1292,228 @@
     background: color-mix(in srgb, var(--primary) 14%, transparent);
     pointer-events: none;
   }
-  /* Hover control bar (`table-view.tsx`): add/delete row+column + header
-     toggle. Hidden until the table is hovered/focused, pinned above it. */
-  .doc-collab-editor .ProseMirror .doc-table-controls {
+  /* Notion-style simple-table edge chrome (`table-view.tsx`). The top/left
+     gutters and right/bottom append rails are real padding INSIDE one frame,
+     not detached absolute controls above it. Moving from a cell to a handle
+     therefore never crosses an unowned hover gap (the old text toolbar vanished
+     mid-reach and overlapped the preceding paragraph). */
+  .doc-collab-editor .ProseMirror .doc-table-block {
+    position: relative;
+    width: fit-content;
+    max-width: 100%;
+    margin: 0.75rem 0;
+  }
+  .doc-collab-editor .ProseMirror .doc-table-frame {
+    position: relative;
+    display: inline-block;
+    max-width: 100%;
+    padding: 22px 18px 18px 22px;
+  }
+  .doc-collab-editor .ProseMirror .doc-table {
+    margin: 0;
+  }
+  .doc-collab-editor .ProseMirror .doc-table-column-handle-slot,
+  .doc-collab-editor .ProseMirror .doc-table-row-handle-slot {
     position: absolute;
-    top: -1.9rem;
-    right: 0;
+    z-index: 4;
     display: flex;
-    gap: 0.25rem;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+  }
+  .doc-collab-editor .ProseMirror .doc-table-column-handle-slot {
+    top: 0;
+    height: 22px;
+  }
+  .doc-collab-editor .ProseMirror .doc-table-row-handle-slot {
+    left: 0;
+    width: 22px;
+  }
+  .doc-collab-editor .ProseMirror .doc-table-axis-cue {
+    position: absolute;
+    pointer-events: none;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--muted-foreground) 52%, transparent);
+    transition: opacity 0.1s ease, background 0.1s ease;
+  }
+  .doc-collab-editor .ProseMirror .doc-table-column-handle-slot .doc-table-axis-cue {
+    bottom: -1px;
+    width: 28px;
+    height: 3px;
+  }
+  .doc-collab-editor .ProseMirror .doc-table-row-handle-slot .doc-table-axis-cue {
+    right: -1px;
+    width: 3px;
+    height: 28px;
+  }
+  .doc-collab-editor .ProseMirror .doc-table-column-handle-slot:hover .doc-table-axis-cue,
+  .doc-collab-editor .ProseMirror .doc-table-row-handle-slot:hover .doc-table-axis-cue,
+  .doc-collab-editor .ProseMirror .doc-table-column-handle-slot[data-active="true"] .doc-table-axis-cue,
+  .doc-collab-editor .ProseMirror .doc-table-row-handle-slot[data-active="true"] .doc-table-axis-cue {
+    opacity: 0;
+  }
+  .doc-collab-editor .ProseMirror .doc-table-axis-handle {
+    position: absolute;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 0;
+    touch-action: none;
+    user-select: none;
+    border-radius: 6px;
+    background: var(--primary);
+    color: var(--primary-foreground);
+    box-shadow: 0 1px 2px color-mix(in srgb, var(--foreground) 18%, transparent);
+    cursor: grab;
     opacity: 0;
     pointer-events: none;
-    transition: opacity 0.12s ease;
-    z-index: 2;
+    transform: scale(0.88);
+    transition: opacity 0.1s ease, transform 0.1s ease, box-shadow 0.1s ease;
   }
-  .doc-collab-editor .ProseMirror .doc-table-block:hover .doc-table-controls,
-  .doc-collab-editor .ProseMirror .doc-table-block:focus-within .doc-table-controls {
+  .doc-collab-editor .ProseMirror .doc-table-column-handle {
+    bottom: -11px;
+    width: 44px;
+    height: 22px;
+  }
+  .doc-collab-editor .ProseMirror .doc-table-row-handle {
+    right: -11px;
+    width: 22px;
+    height: 44px;
+  }
+  .doc-collab-editor .ProseMirror .doc-table-column-handle-slot:hover .doc-table-axis-handle,
+  .doc-collab-editor .ProseMirror .doc-table-row-handle-slot:hover .doc-table-axis-handle,
+  .doc-collab-editor .ProseMirror .doc-table-column-handle-slot[data-active="true"] .doc-table-axis-handle,
+  .doc-collab-editor .ProseMirror .doc-table-row-handle-slot[data-active="true"] .doc-table-axis-handle {
+    opacity: 1;
+    pointer-events: auto;
+    transform: scale(1);
+  }
+  .doc-collab-editor .ProseMirror .doc-table-axis-handle:hover,
+  .doc-collab-editor .ProseMirror .doc-table-axis-handle[aria-expanded="true"] {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 18%, transparent);
+  }
+  .doc-collab-editor .ProseMirror .doc-table-axis-handle:active {
+    cursor: grabbing;
+  }
+  .doc-collab-editor .ProseMirror .doc-table-axis-handle[data-drop-target="true"] {
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 35%, transparent);
+  }
+  .doc-collab-editor .ProseMirror .doc-table-axis-handle svg {
+    width: 15px;
+    height: 15px;
+  }
+  .doc-collab-editor .ProseMirror .doc-table-drop-indicator {
+    position: absolute;
+    z-index: 3;
+    pointer-events: none;
+    border: 2px solid var(--primary);
+    background: color-mix(in srgb, var(--primary) 7%, transparent);
+    border-radius: 2px;
+  }
+  .doc-collab-editor .ProseMirror .doc-table-drop-indicator-row {
+    right: 18px;
+    left: 22px;
+  }
+  .doc-collab-editor .ProseMirror .doc-table-drop-indicator-column {
+    top: 22px;
+    bottom: 18px;
+  }
+  .doc-collab-editor .ProseMirror .doc-table-frame[data-selected-axis="row"] tr:has(.selectedCell) > .selectedCell {
+    box-shadow: inset 0 2px var(--primary), inset 0 -2px var(--primary);
+  }
+  .doc-collab-editor .ProseMirror .doc-table-frame[data-selected-axis="row"] tr:has(.selectedCell) > .selectedCell:first-child {
+    box-shadow: inset 2px 0 var(--primary), inset 0 2px var(--primary), inset 0 -2px var(--primary);
+  }
+  .doc-collab-editor .ProseMirror .doc-table-frame[data-selected-axis="row"] tr:has(.selectedCell) > .selectedCell:last-child {
+    box-shadow: inset -2px 0 var(--primary), inset 0 2px var(--primary), inset 0 -2px var(--primary);
+  }
+  .doc-collab-editor .ProseMirror .doc-table-frame[data-selected-axis="column"] .selectedCell {
+    box-shadow: inset 2px 0 var(--primary), inset -2px 0 var(--primary);
+  }
+  .doc-collab-editor .ProseMirror .doc-table-frame[data-selected-axis="column"] tr:first-child > .selectedCell {
+    box-shadow: inset 2px 0 var(--primary), inset -2px 0 var(--primary), inset 0 2px var(--primary);
+  }
+  .doc-collab-editor .ProseMirror .doc-table-frame[data-selected-axis="column"] tr:last-child > .selectedCell {
+    box-shadow: inset 2px 0 var(--primary), inset -2px 0 var(--primary), inset 0 -2px var(--primary);
+  }
+  .doc-table-action-menu .doc-table-action-search {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0.125rem 0.125rem 0.375rem;
+    padding: 0 0.625rem;
+    height: 2.25rem;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    background: var(--background);
+    color: var(--muted-foreground);
+  }
+  .doc-table-action-menu .doc-table-action-search:focus-within {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 18%, transparent);
+  }
+  .doc-table-action-menu .doc-table-action-search svg {
+    width: 15px;
+    height: 15px;
+    flex: none;
+  }
+  .doc-table-action-menu .doc-table-action-search input {
+    min-width: 0;
+    flex: 1;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: var(--foreground);
+    font-size: 0.875rem;
+  }
+  .doc-table-action-menu .doc-table-action-search input::placeholder {
+    color: var(--muted-foreground);
+  }
+  .doc-table-action-menu .doc-table-action-empty {
+    padding: 0.625rem 0.75rem;
+    color: var(--muted-foreground);
+    font-size: 0.8125rem;
+  }
+  .doc-collab-editor .ProseMirror .doc-table-add-rail {
+    position: absolute;
+    z-index: 3;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--muted-foreground);
+    cursor: pointer;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.1s ease, background 0.1s ease, color 0.1s ease;
+  }
+  .doc-collab-editor .ProseMirror .doc-table-frame:hover .doc-table-add-rail,
+  .doc-collab-editor .ProseMirror .doc-table-frame:focus-within .doc-table-add-rail,
+  .doc-collab-editor .ProseMirror .doc-table-frame[data-menu-open="true"] .doc-table-add-rail {
     opacity: 1;
     pointer-events: auto;
   }
-  .doc-collab-editor .ProseMirror .doc-table-control {
-    font-size: 0.72rem;
-    line-height: 1;
-    padding: 0.25rem 0.45rem;
-    border: 1px solid var(--border);
-    border-radius: 0.3rem;
-    background: var(--background);
-    color: var(--muted-foreground);
-    white-space: nowrap;
-    cursor: pointer;
-  }
-  .doc-collab-editor .ProseMirror .doc-table-control:hover {
+  .doc-collab-editor .ProseMirror .doc-table-add-rail:hover {
     background: var(--muted);
     color: var(--foreground);
+  }
+  .doc-collab-editor .ProseMirror .doc-table-add-column {
+    top: 22px;
+    right: 0;
+    bottom: 18px;
+    width: 16px;
+  }
+  .doc-collab-editor .ProseMirror .doc-table-add-row {
+    right: 18px;
+    bottom: 0;
+    left: 22px;
+    height: 16px;
+  }
+  .doc-collab-editor .ProseMirror .doc-table-add-rail svg {
+    width: 13px;
+    height: 13px;
   }
   /* Node-view blocks (callout / toggle / data+chart embed) carry tight
      Tailwind `my-1`/`my-2` margins; give them consistent breathing room

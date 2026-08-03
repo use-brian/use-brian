@@ -397,6 +397,45 @@ describe('[COMP:api/brain-mcp] authenticateBrainRequest', () => {
       }),
     ).toBeNull()
   })
+
+  it('attributes an OAuth token to the consenting user', async () => {
+    const id = randomUUID()
+    const secret = 'oauth-secret'
+    const accessTokenHash = await hashSecret(secret)
+    const { store: brainKeyStore } = await fakeKeyStore()
+    const authorizationStore = {
+      getByIdSystem: vi.fn().mockResolvedValue({
+        id,
+        clientId: 'client-1',
+        userId: 'user-1',
+        workspaceId: '11111111-1111-1111-1111-111111111111',
+        scope: 'read_write',
+        createdAt: new Date(),
+        lastUsedAt: null,
+        revokedAt: null,
+        accessTokenExpiresAt: new Date(Date.now() + 60_000),
+        refreshTokenExpiresAt: new Date(Date.now() + 120_000),
+        accessTokenHash,
+      }),
+      touchLastUsedAt: vi.fn().mockResolvedValue(undefined),
+    }
+    const auth = await authenticateBrainRequest(
+      reqWith(`Bearer oat_${id}_${secret}`),
+      {
+        brainKeyStore,
+        authorizationStore: authorizationStore as never,
+      },
+    )
+
+    expect(auth).toEqual({
+      keyId: id,
+      workspaceId: '11111111-1111-1111-1111-111111111111',
+      scope: 'read_write',
+      maxClearance: 'internal',
+      authKind: 'oauth_token',
+      actingUserId: 'user-1',
+    })
+  })
 })
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i

@@ -47,6 +47,16 @@ describe('[COMP:feed/content-planning-store] pure planning helpers', () => {
       'Draft posts from this link: https://www.example.com/launch',
     )
   })
+
+  it('materializes the private brief with the selected deliverable', () => {
+    expect(seedFirstContentDraftMessage({
+      kind: 'freeform',
+      format: 'article',
+      brief: 'Show operators why the workflow changed.',
+    })).toBe(
+      'Create an article link for LinkedIn.\n\nPrivate brief (not published):\nShow operators why the workflow changed.',
+    )
+  })
 })
 
 describe('[COMP:feed/content-planning-store] platform title prefix', () => {

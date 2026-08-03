@@ -1,14 +1,10 @@
-// [COMP:app-web/graph-communities]
+// [COMP:brain/graph-communities]
 /**
  * Community detection for the Brain graph — deterministic multi-level
  * Louvain (modularity local-moving + aggregation), no dependencies.
  *
- * Powers the Obsidian-style cluster rendering in `graph-view.tsx`: the
- * detected communities feed (1) the cluster-gravity force + the
- * intra/inter link split (so communities form spatially separated
- * "firework" blobs instead of one mass) and (2) the optional group color
- * mode (color = community, the way Obsidian's path-groups color its
- * vault graph).
+ * Shared by the API's bounded hierarchy projection and the canvas's local
+ * color/physics pass over the already-bounded response.
  *
  * WHY NOT LABEL PROPAGATION. LPA needs random tie-breaking to work; any
  * deterministic tie rule (e.g. smallest label) floods one label across
@@ -34,7 +30,7 @@
  * member id) so id 0 is always the largest community — the group
  * palette assigns its most distinct hues to the biggest clusters.
  *
- * Spec: docs/architecture/brain/graph-view.md → "Frontend".
+ * Spec: docs/architecture/brain/graph-view.md → "Server-side hierarchy".
  */
 
 export type CommunityResult = {

@@ -297,7 +297,10 @@ export async function listEntityLinksForWorkspace(
     limit?: number
   } = {},
 ): Promise<EntityLinkRecord[]> {
-  const limit = Math.min(Math.max(opts.limit ?? 1000, 1), 5000)
+  // The graph route loads up to 5000 raw nodes and budgets six edges per node.
+  // A fixed 5000-edge clamp made the expanded snapshot look artificially
+  // isolated, which also corrupted the client's community projection.
+  const limit = Math.min(Math.max(opts.limit ?? 1000, 1), 30000)
   const sourceKinds = opts.sourceKinds ?? (['entity'] as const)
   const targetKinds = opts.targetKinds ?? (['entity'] as const)
   const ap = buildAccessPredicate(ctx, { startIdx: 5 })

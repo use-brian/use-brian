@@ -7,7 +7,7 @@ import { query } from '../db/client.js'
 import { buildPinnedContextBlock } from '../resolve-session-pins.js'
 import { getSelfEntityId } from '../db/memories.js'
 import { getRecording } from '../db/recordings-store.js'
-import { queryLoop, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, decodeExternalCostMeta, buildWorkspaceFilesContext, SensitivityAccumulator, CompartmentAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, type MediaBackend } from '@use-brian/core'
+import { queryLoop, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, decodeExternalCostMeta, buildWorkspaceFilesContext, SensitivityAccumulator, CompartmentAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSupervisorSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, type MediaBackend } from '@use-brian/core'
 import { insertClaimProvenance, getClaimsForLatestAssistantMessage } from '../db/claim-provenance-store.js'
 import type { ToolResultMeta, SessionStateStore, SessionStateRecord, PlanStore, AmbientSurface } from '@use-brian/core'
 import { runProactiveCompaction } from './proactive-compaction.js'
@@ -722,8 +722,8 @@ export function isAppSurface(session: { appOrigin: string | null }): boolean {
  * The steering line appended under "# Active doc page" when a doc turn
  * carries the id of a page the user is currently looking at (a comment-thread
  * reply, the floating dock, or Space→AI all send `docViewId`). The user is
- * LOOKING AT this page, so the work belongs here via `patchPage` — which routes
- * through the live Yjs doc and streams onto the editor they see.
+ * LOOKING AT this page, so the edit brief must keep the work here. The isolated
+ * editor owns the raw `patchPage` call and streams it through the live Yjs doc.
  *
  * `renderPage` mints a SECOND, separate page the user is NOT viewing; it lands
  * as an orphan draft they won't find. That was the 2026-06-02 incident: a user
@@ -750,31 +750,24 @@ export function buildActivePageInstruction(args: {
     // `patchPage` routes through the Yjs doc, `renderPage` does not and would
     // spawn a second, separate page.
     return (
-      'This page is open and EMPTY. Build it **in place**: call `patchPage` with this ' +
-      'pageId and the version above as `expectedVersion`, using `add` ops to append the ' +
-      'blocks (open with a heading, frame it with a line of text, add the content, close ' +
-      'with a takeaway). Do NOT call `renderPage` — that creates a second, separate page, ' +
-      'but the user is already looking at this one. ' +
-      'Whatever you have to say this turn belongs on THIS page, not in chat: even a short ' +
-      'answer, a clarifying question, or "I could not find X" must be written onto the page ' +
-      'with `patchPage` (a heading + a line of text is enough). Never end the turn with only ' +
-      'a chat reply and an empty page.'
+      'This page is open and EMPTY. Build it **in place**: call `delegateDocEdit` once and ' +
+      'tell the isolated editor to use this page id/version, open with framing, add the ' +
+      'requested content, and close with a takeaway. Do not ask it to create a second page. ' +
+      'Whatever you have to say this turn belongs on THIS page, not in a chat-only reply.'
     )
   }
   // Non-empty: the user is looking at a page that already has content (often
   // their own pasted notes). Organize / rewrite / extend it IN PLACE. Offering
   // `renderPage` here orphans the work onto a page they aren't viewing.
   return (
-    'To edit this page call `patchPage` with this pageId and the version above as ' +
-    '`expectedVersion`, addressing blocks by the ids listed. The user is looking at THIS ' +
-    'page, so organize, rewrite, or extend it in place — even when they paste raw notes and ' +
-    'ask you to "create" or "structure" something from them, that means restructure THIS ' +
-    'page (replace/extend the blocks below), not start over elsewhere. Do NOT call ' +
-    '`renderPage` unless the user EXPLICITLY asks for a separate, new page; it mints a ' +
-    'second page the user is not looking at and will not find.' +
+    'To edit this page call `delegateDocEdit` once with this page id/version and the desired ' +
+    'finished result. The user is looking at THIS page, so tell the isolated editor to ' +
+    'organize, rewrite, or extend it in place — even when they paste raw notes and ask you ' +
+    'to "create" or "structure" something from them. Request a separate new page only when ' +
+    'the user explicitly asks for one.' +
     (args.isCommentThread
       ? ' This turn is a comment-thread reply anchored to this page, so the request is ' +
-        'about this page — never call `renderPage` here.'
+        'about this page — the brief must require an in-place edit.'
       : '')
   )
 }
@@ -3202,7 +3195,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         // surface: the compact AMBIENT block — tools present, chat-first,
         // author a page only on an explicit ask. `null` everywhere else.
         docSkillBlock: docSkillTurn
-          ? (docSkillBlockStr = buildDocSkillBlock({
+          ? (docSkillBlockStr = buildDocSupervisorSkillBlock({
               mode: researchMode ? 'research' : 'page',
               teamName: workspaceIdentity?.name,
               teamPurpose: workspaceIdentity?.purpose ?? undefined,
@@ -3391,10 +3384,9 @@ export function chatRoutes(options: WebChatOptions): Router {
 
             // Insertion anchor (app-web "Space for AI" on an empty line):
             // the user parked their cursor on a specific block and wants the
-            // generation to land THERE, not at the page end. Tell the model to
-            // chain `add` ops off that block's id. Only when a concrete anchor
-            // rode in on the request — the non-anchored path is byte-identical
-            // to before.
+            // generation to land THERE, not at the page end. The raw operation
+            // mechanics now live in the isolated editor; the parent only needs
+            // to preserve the placement constraint in its one delegation.
             if (
               typeof requestedDocAnchorBlockId === 'string' &&
               requestedDocAnchorBlockId
@@ -3402,14 +3394,10 @@ export function chatRoutes(options: WebChatOptions): Router {
               userVisibleContextParts.push(
                 `## Insertion anchor\n` +
                 `The user placed their cursor on block \`${requestedDocAnchorBlockId}\` and asked you ` +
-                `to generate content there. You MUST apply the change with \`patchPage\` this turn — ` +
-                `do NOT describe the change in prose or ask to confirm first; generate the blocks. ` +
-                `Insert them immediately after that block: use \`patchPage\` \`add\` ops with ` +
-                `\`after: "${requestedDocAnchorBlockId}"\` for the first, then chain each subsequent ` +
-                `\`add\` after the previously-added block's id so they land in order at that spot. ` +
-                `Do NOT append at the end of the page or call \`renderPage\` unless the user explicitly ` +
-                `asks to rebuild the whole page. Whatever you have to say this turn belongs on the page ` +
-                `via \`patchPage\`, not as a chat-only reply.`,
+                `to generate content there. Call \`delegateDocEdit\` once and preserve this exact block id ` +
+                `and placement constraint in the brief. Do not describe the change in prose or ask to ` +
+                `confirm first. The isolated editor receives this anchor again from the server and owns ` +
+                `the block operations.`,
               )
             }
           }
@@ -3725,9 +3713,14 @@ export function chatRoutes(options: WebChatOptions): Router {
       if (docToolsTurn) {
         try {
           const { injectDocTools } = await import('../doc/inject.js')
+          const standardDocEditModel = resolveModel('standard', userPlan, 'ok')
           await injectDocTools({
             tools: allTools,
             backgroundModel: backgroundModelFor(options.configuredProviders),
+            fallbackModel: options.configuredProviders
+              ? ensureServableModel(standardDocEditModel, options.configuredProviders)
+              : standardDocEditModel,
+            editMode: researchMode ? 'research' : 'page',
             userId: user.id,
             assistant: {
               id: assistant.id,
@@ -3752,6 +3745,10 @@ export function chatRoutes(options: WebChatOptions): Router {
               typeof requestedDocViewId === 'string' && requestedDocViewId
                 ? requestedDocViewId
                 : null,
+            anchorBlockId:
+              typeof requestedDocAnchorBlockId === 'string' && requestedDocAnchorBlockId
+                ? requestedDocAnchorBlockId
+                : null,
             // Theme iteration from chat (refine-only). The active custom theme
             // id is a per-user client value; when present we inject
             // `refineActiveTheme` and stream the rebuilt tokens back via the
@@ -3761,6 +3758,50 @@ export function chatRoutes(options: WebChatOptions): Router {
                 ? requestedActiveThemeId
                 : null,
             provider: options.provider,
+            onEditUsage: ({ model: editModel, usage }) => recordOverheadUsage({
+              usageStore: options.usageStore,
+              userId: user.id,
+              assistantId: assistant.id,
+              sessionId: session.id,
+              userMessageId: storedUserMsg.id,
+              model: editModel,
+              usage,
+              source: 'overhead:doc-edit',
+              triggerKey: 'doc_edit_worker',
+            }),
+            onChildToolResult: (result) => {
+              if (result.isError) return
+              try {
+                const parsed = JSON.parse(result.content) as {
+                  kind?: string
+                  pageId?: string
+                  threadId?: string
+                  anchorBlockId?: string | null
+                  isNew?: boolean
+                }
+                if (result.name === 'createSubPage' && parsed.kind === 'doc_sub_page' && parsed.pageId) {
+                  sendEvent('sub_page_created', {
+                    toolUseId: result.toolUseId,
+                    pageId: parsed.pageId,
+                  })
+                } else if (result.name === 'postComment' && parsed.kind === 'comment_posted' && parsed.threadId) {
+                  sendEvent('comment_posted', {
+                    toolUseId: result.toolUseId,
+                    threadId: parsed.threadId,
+                    pageId: parsed.pageId,
+                    anchorBlockId: parsed.anchorBlockId ?? null,
+                    isNew: parsed.isNew ?? false,
+                  })
+                } else if (result.name === 'resolveComment' && parsed.kind === 'thread_resolved' && parsed.threadId) {
+                  sendEvent('comment_resolved', {
+                    toolUseId: result.toolUseId,
+                    threadId: parsed.threadId,
+                  })
+                }
+              } catch {
+                // A malformed child result cannot break the edit receipt.
+              }
+            },
             onThemeRefined: (themeId, tokens, appearance) => {
               if (!res.writableEnded) {
                 sendEvent('doc_theme_update', { themeId, tokens, appearance })
@@ -4479,6 +4520,10 @@ export function chatRoutes(options: WebChatOptions): Router {
       const COORDINATOR_ALLOWED_TOOLS_BASE = new Set([
         'spawnWorker', 'sendWorkerMessage', 'stopWorker',
         'saveMemory', 'getMemory', 'askQuestion',
+        // Present only on app-web surfaces. Keeps the ambient prompt/tool
+        // contract valid after research workers drain: the coordinator hands
+        // their compact findings to the isolated Doc editor.
+        'delegateDocEdit',
       ])
       const COORDINATOR_RESEARCH_EXTRA_TOOLS = new Set([
         // Write tools — for ingesting research findings.
@@ -6086,14 +6131,13 @@ export function chatRoutes(options: WebChatOptions): Router {
             .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
             .map((b) => b.text)
             .join('\n\n')
-          const patchPageTool = allTools.get('patchPage')
-          if (replyText.trim() && patchPageTool) {
-            const [{ createDbDocPageStore }, { placeReplyOnEmptyPage, placeReplyAtAnchor }] =
-              await Promise.all([
-                import('../db/doc-page-store.js'),
-                import('../doc/reply-fallback.js'),
-              ])
-            const docPageStore = createDbDocPageStore()
+          const delegateDocEdit = allTools.get('delegateDocEdit')
+          if (replyText.trim() && delegateDocEdit) {
+            const { createDbDocPageStore } = await import('../db/doc-page-store.js')
+            const current = await createDbDocPageStore().getVersionedPage(
+              user.id,
+              requestedDocViewId,
+            )
             const fallbackContext = {
               userId: user.id,
               assistantId: assistant.id,
@@ -6109,40 +6153,34 @@ export function chatRoutes(options: WebChatOptions): Router {
               typeof requestedDocAnchorBlockId === 'string' && requestedDocAnchorBlockId
                 ? requestedDocAnchorBlockId
                 : undefined
-            // Space-for-AI: the user invoked AI on a specific block of a
-            // possibly-populated page and expects content THERE, so try the
-            // anchored net first (it lands after the anchor regardless of page
-            // emptiness). If no anchor rode in, or the anchor vanished from the
-            // page this turn, fall through to the empty-page net (a no-op on a
-            // populated page). See doc.md → "Reply-to-page safety net".
-            let placed = anchorBlockId
-              ? await placeReplyAtAnchor({
-                  pageId: requestedDocViewId,
-                  anchorBlockId,
+            // Preserve the old net's scope: an anchored Space-for-AI response
+            // always belongs at the cursor; otherwise only rescue an empty
+            // open page. The rescue itself crosses the same context-clean
+            // gateway as the primary edit — no raw write tool leaks back into
+            // the conversational registry.
+            if (anchorBlockId || current?.page.blocks.length === 0) {
+              const placement = anchorBlockId
+                ? `Insert the content immediately after block ${anchorBlockId}.`
+                : 'The open page is empty; build it in place.'
+              const result = await delegateDocEdit.execute({
+                instruction: [
+                  `Edit page ${requestedDocViewId} in place.`,
+                  placement,
+                  'Turn the following assistant draft into concise, readable Doc blocks. Do not include this wrapper text.',
+                  '',
                   replyText,
-                  docPageStore,
-                  patchPageTool,
-                  context: fallbackContext,
-                })
-              : undefined
-            if (!placed || (!placed.placed && placed.reason === 'anchor-missing')) {
-              placed = await placeReplyOnEmptyPage({
-                pageId: requestedDocViewId,
-                replyText,
-                docPageStore,
-                patchPageTool,
-                context: fallbackContext,
+                ].join('\n'),
+              }, fallbackContext)
+              options.analytics?.logEvent({
+                userId: user.id, assistantId: assistant.id, sessionId: session.id,
+                eventName: 'doc_reply_to_page', channelType: 'web',
+                metadata: {
+                  placed: result.isError !== true,
+                  reason: sanitize(result.isError ? 'delegate_failed' : 'ok'),
+                  anchored: Boolean(anchorBlockId),
+                },
               })
             }
-            options.analytics?.logEvent({
-              userId: user.id, assistantId: assistant.id, sessionId: session.id,
-              eventName: 'doc_reply_to_page', channelType: 'web',
-              metadata: {
-                placed: placed.placed,
-                reason: sanitize(placed.placed ? 'ok' : placed.reason),
-                anchored: Boolean(anchorBlockId),
-              },
-            })
           }
         } catch (err) {
           console.error('[chat] doc reply-to-page fallback failed:', err)

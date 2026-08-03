@@ -9,8 +9,9 @@
  * A marketing operator works inside one platform at a time, so the platform
  * selects the context rather than sitting in a filter chip.
  *
- * The hosted **Platforms** group (insights / inspiration / connection / policy
- * / settings for a connected account) is unchanged.
+ * Hosted account tools are scoped by the SAME platform switcher: Insights /
+ * Inspiration / Settings. Settings owns connection lifecycle and links to the
+ * deeper policy/member editors; the duplicate all-platform group is retired.
  *
  * The keys index into the i18n `feedPage.sections` / `feedPage.groups`
  * dictionaries; the `segment` is the child route under
@@ -83,7 +84,9 @@ export type FeedGroup = {
  *   platform  — scoped by the sidebar's platform switcher: that platform's
  *               voice. Its post list is rendered by the sidebar panel itself
  *               (the "Platform drafts" group, D14) rather than being a row.
- *   platforms — the hosted integration side, scoped to one connected account.
+ *   platforms — hosted rows appended beneath the current platform. This data
+ *               remains a separate group so OSS can omit it at render time;
+ *               it is not rendered as a second visual group or platform list.
  *
  * Plan owns the bare `/feed` index rather than a `/feed/plan` segment
  * (feed-revamp.md D5): one URL per surface, and the zero-brand-voice
@@ -112,8 +115,6 @@ export const FEED_GROUPS: readonly FeedGroup[] = [
     sections: [
       { key: "insights", segment: "insights" },
       { key: "inspiration", segment: "inspiration" },
-      { key: "connection", segment: "connection" },
-      { key: "policy", segment: "policy" },
       { key: "settings", segment: "settings" },
     ],
   },
@@ -223,9 +224,9 @@ export function defaultFeedPlatform(
 
 /**
  * Resolve the active feed section from a pathname. `/feed` → `plan`;
- * `/feed/posts` → `posts`; `/feed/<platform>/<segment>[/...]` → the matching
- * platform section. Null when the path isn't inside the feed surface or the
- * segment is unknown.
+ * `/feed/<platform>/<segment>[/...]` → the matching platform section, with
+ * policy/legacy connection inheriting Settings. Null for retired queue routes,
+ * post-detail routes, unknown segments, and paths outside Feed.
  */
 export function feedSectionFromPathname(
   pathname: string | null | undefined,
@@ -238,6 +239,9 @@ export function feedSectionFromPathname(
   const [first, second] = rest;
   if (isFeedPlatform(first)) {
     if (!second) return null;
+    // Account management is one visible Settings row. The deeper policy
+    // editor and the legacy connection redirect inherit that row's identity.
+    if (second === "policy" || second === "connection") return "settings";
     for (const group of FEED_GROUPS) {
       if (!group.perPlatform) continue;
       for (const section of group.sections) {
@@ -288,7 +292,10 @@ export function feedPostIdFromPathname(
 const currentPlatformKey = (workspaceId: string) =>
   `feed:current-platform:${workspaceId}`;
 
-export function getCurrentFeedPlatform(
+/** Same-tab signal: StorageEvent only fires in other tabs. */
+export const FEED_CURRENT_PLATFORM_EVENT = "feed:current-platform-changed";
+
+function getCurrentFeedPlatform(
   workspaceId: string,
 ): FeedPlatform | null {
   const storage = pickStorage();
@@ -306,11 +313,19 @@ export function setCurrentFeedPlatform(
   platform: FeedPlatform,
 ): void {
   const storage = pickStorage();
-  if (!storage) return;
-  try {
-    storage.setItem(currentPlatformKey(workspaceId), platform);
-  } catch {
-    /* private mode / quota — the choice just isn't remembered */
+  if (storage) {
+    try {
+      storage.setItem(currentPlatformKey(workspaceId), platform);
+    } catch {
+      /* private mode / quota — the choice just isn't remembered */
+    }
+  }
+  if (typeof window !== "undefined" && typeof CustomEvent !== "undefined") {
+    window.dispatchEvent(
+      new CustomEvent(FEED_CURRENT_PLATFORM_EVENT, {
+        detail: { workspaceId, platform },
+      }),
+    );
   }
 }
 

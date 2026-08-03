@@ -65,6 +65,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ArrowDownToLine, Plus, Sparkles } from "lucide-react";
 import { useWorkspaces } from "@/contexts/workspace-context";
+import { useWorkspaceContext } from "@/lib/workspace-context";
 import { useT, format } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 import {
@@ -78,6 +79,7 @@ import {
   primitivesToGraphKinds,
   projectInboxRowToBrainRow,
   type BrainFacets,
+  type BrainGraph,
   type BrainRow,
 } from "@/lib/api/brain";
 import { fetchBrainRow } from "@/lib/api/brain-inbox";
@@ -135,12 +137,26 @@ import {
   type BrainSection,
 } from "@/contexts/brain-surface-context";
 import { Button } from "@/components/ui/button";
+import { useIsOffline } from "@/lib/offline/use-offline-sync";
+import {
+  deleteBrainContentCache,
+  isArrayValue,
+  isAuthoritativeBrainDenial,
+  isBrainGraph,
+  isRecordValue,
+  projectCachedBrainRows,
+  readBrainContentCache,
+  writeBrainContentCache,
+  type BrainContentCacheScope,
+} from "@/lib/offline/brain-content-cache";
 
 function BrainPageInner() {
   const { activeId } = useWorkspaces();
+  const { me } = useWorkspaceContext();
   const router = useRouter();
   const searchParams = useSearchParams();
   const t = useT();
+  const offline = useIsOffline();
   // The Brain controls live in the sidebar (`BrainSidebarPanel`); this page
   // reads + reacts to their shared state. The mobile inline strip below also
   // binds to these setters. `pendingOnly` is derived (section === 'reviews').
@@ -163,6 +179,25 @@ function BrainPageInner() {
     search,
     setSearch,
   } = useBrainSurface();
+
+  // Active assistant caps the returned rows (clearance ceiling) and is part of
+  // every persistent cache key; a changed viewpoint must never reuse another
+  // assistant's snapshot.
+  const [viewpointAssistantId, setViewpointAssistantId] = useState<string | null>(
+    () => getActiveAssistantId(),
+  );
+  useEffect(() => onActiveAssistantChanged(setViewpointAssistantId), []);
+  const cacheScope = useMemo<BrainContentCacheScope | null>(
+    () =>
+      activeId && me.id
+        ? {
+            viewerId: me.id,
+            workspaceId: activeId,
+            viewpointAssistantId,
+          }
+        : null,
+    [activeId, me.id, viewpointAssistantId],
+  );
 
   // Seed section/view from the URL ONCE on mount — deep links (memories/review
   // → `?pending=true`, a bookmarked `?view=graph`, the `/studio/skills`
@@ -210,7 +245,12 @@ function BrainPageInner() {
     deepLinkedRef.current = link.rowId;
 
     let cancelled = false;
-    void fetchBrainRow(activeId, link.primitive, link.rowId).then((detail) => {
+    void fetchBrainRow(
+      activeId,
+      link.primitive,
+      link.rowId,
+      cacheScope,
+    ).then((detail) => {
       if (cancelled || !detail) return;
       setSelected({
         ...projectInboxRowToBrainRow(detail),
@@ -223,7 +263,7 @@ function BrainPageInner() {
     return () => {
       cancelled = true;
     };
-  }, [activeId, searchParams]);
+  }, [activeId, searchParams, cacheScope]);
   // Completed (done / archived) tasks — fetched separately from the main list
   // (which hides them) so the grouped view can tuck them behind a "Show
   // completed" disclosure that leads with live work. Only fetched when tasks
@@ -259,12 +299,6 @@ function BrainPageInner() {
   const [reviewItems, setReviewItems] = useState<PendingReviewItem[] | null>(
     null,
   );
-  // Active assistant — caps what brain rows are returned (clearance ceiling).
-  // app-web has no chrome picker writing it yet, so this is null by default
-  // (= no viewpoint cap). See sidebar-cache.ts.
-  const [viewpointAssistantId, setViewpointAssistantId] = useState<string | null>(() => getActiveAssistantId());
-  useEffect(() => onActiveAssistantChanged(setViewpointAssistantId), []);
-
   const [refreshTick, setRefreshTick] = useState(0);
 
   const [facets, setFacets] = useState<BrainFacets | null>(null);
@@ -305,14 +339,41 @@ function BrainPageInner() {
   useEffect(() => {
     if (!activeId || section !== "reviews") return;
     let cancelled = false;
-    fetchReviewItems(activeId, reviewFilters).then((items) => {
-      if (cancelled) return;
-      setReviewItems(items);
-    });
+    const resource = `reviews:${[...reviewFilters].sort().join(",")}`;
+    void (async () => {
+      let hasCached = false;
+      if (cacheScope) {
+        const cached = await readBrainContentCache(
+          cacheScope,
+          resource,
+          isArrayValue,
+        );
+        if (!cancelled && cached) {
+          hasCached = true;
+          setReviewItems(cached.value as PendingReviewItem[]);
+        }
+      }
+      try {
+        const items = await fetchReviewItems(activeId, reviewFilters);
+        if (cancelled) return;
+        setReviewItems(items);
+        if (cacheScope) {
+          void writeBrainContentCache(cacheScope, resource, items);
+        }
+      } catch (error) {
+        if (cancelled) return;
+        if (isAuthoritativeBrainDenial(error)) {
+          setReviewItems([]);
+          if (cacheScope) void deleteBrainContentCache(cacheScope, resource);
+        } else if (!hasCached) {
+          setReviewItems([]);
+        }
+      }
+    })();
     return () => {
       cancelled = true;
     };
-  }, [activeId, section, reviewFilters, refreshTick]);
+  }, [activeId, section, reviewFilters, refreshTick, cacheScope]);
 
   // Entries — CHUNKED. The list accumulates page by page and asks for the next
   // chunk as the user scrolls toward the end, instead of the old single
@@ -320,6 +381,7 @@ function BrainPageInner() {
   // the rest ([COMP:app-web/brain-entries]).
   const entries = useBrainEntries({
     workspaceId: activeId ?? null,
+    viewerId: me.id || null,
     primitives,
     search,
     viewpointAssistantId,
@@ -351,21 +413,68 @@ function BrainPageInner() {
       return;
     }
     let cancelled = false;
-    listBrain({
-      workspaceId: activeId,
-      primitives: ["tasks"],
-      taskStatus: "completed",
-      search: search || undefined,
-      viewpointAssistantId,
-      limit: 100,
-    }).then((result) => {
-      if (cancelled) return;
-      setCompletedTasks(result.rows);
-    });
+    void (async () => {
+      let hasCached = false;
+      if (cacheScope) {
+        const cached = await readBrainContentCache(
+          cacheScope,
+          "completed-tasks",
+          isArrayValue,
+        );
+        if (!cancelled && cached) {
+          hasCached = true;
+          setCompletedTasks(
+            projectCachedBrainRows(
+              cached.value as BrainRow[],
+              ["tasks"],
+              search,
+            ),
+          );
+        }
+      }
+      try {
+        const result = await listBrain({
+          workspaceId: activeId,
+          primitives: ["tasks"],
+          taskStatus: "completed",
+          search: search || undefined,
+          viewpointAssistantId,
+          limit: 100,
+          failOnError: true,
+        });
+        if (cancelled) return;
+        setCompletedTasks(result.rows);
+        if (cacheScope && !search.trim()) {
+          void writeBrainContentCache(
+            cacheScope,
+            "completed-tasks",
+            result.rows,
+          );
+        }
+      } catch (error) {
+        if (cancelled) return;
+        if (isAuthoritativeBrainDenial(error)) {
+          setCompletedTasks([]);
+          if (cacheScope) {
+            void deleteBrainContentCache(cacheScope, "completed-tasks");
+          }
+        } else if (!hasCached) {
+          setCompletedTasks([]);
+        }
+      }
+    })();
     return () => {
       cancelled = true;
     };
-  }, [activeId, section, tasksInScope, search, viewpointAssistantId, refreshTick]);
+  }, [
+    activeId,
+    section,
+    tasksInScope,
+    search,
+    viewpointAssistantId,
+    refreshTick,
+    cacheScope,
+  ]);
 
   // Workspace graph snapshot — needed by BOTH browse modes: the grouped default
   // decorates its entity rows with degree + neighbour-kind dots, and the graph
@@ -386,10 +495,41 @@ function BrainPageInner() {
     getBrainGraph({
       workspaceId: activeId!,
       viewpointAssistantId,
+      // The API returns the bounded semantic-zoom overview. Raw source entries
+      // and community detection remain server-side.
       showMemory: true,
+      failOnError: true,
     }),
   );
-  const graph = graphResource.data ?? null;
+  const [persistedGraph, setPersistedGraph] = useState<BrainGraph | null>(null);
+  useEffect(() => {
+    if (!cacheScope) {
+      setPersistedGraph(null);
+      return;
+    }
+    let cancelled = false;
+    void readBrainContentCache(cacheScope, "graph", isBrainGraph).then(
+      (cached) => {
+        if (!cancelled) setPersistedGraph(cached?.value ?? null);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [cacheScope]);
+  useEffect(() => {
+    if (!cacheScope || !graphResource.data) return;
+    setPersistedGraph(graphResource.data);
+    void writeBrainContentCache(cacheScope, "graph", graphResource.data);
+  }, [cacheScope, graphResource.data]);
+  useEffect(() => {
+    if (!cacheScope || !isAuthoritativeBrainDenial(graphResource.error)) return;
+    setPersistedGraph(null);
+    void deleteBrainContentCache(cacheScope, "graph");
+  }, [cacheScope, graphResource.error]);
+  const graph = isAuthoritativeBrainDenial(graphResource.error)
+    ? null
+    : (graphResource.data ?? persistedGraph);
 
   // `refreshTick` (the BRAIN_REFRESH_EVENT bus) must force a revalidation. Skip
   // the first run: the hook already loads on mount, and forcing one here would
@@ -409,28 +549,74 @@ function BrainPageInner() {
   useEffect(() => {
     if (!activeId) return;
     let cancelled = false;
-    getBrainFacets(activeId, viewpointAssistantId).then((result) => {
-      if (cancelled) return;
-      setFacets(result);
-    });
+    void (async () => {
+      if (cacheScope) {
+        const cached = await readBrainContentCache(
+          cacheScope,
+          "facets",
+          isRecordValue,
+        );
+        if (!cancelled && cached) setFacets(cached.value as BrainFacets);
+      }
+      try {
+        const result = await getBrainFacets(activeId, viewpointAssistantId, {
+          failOnError: true,
+        });
+        if (cancelled) return;
+        setFacets(result);
+        if (cacheScope) void writeBrainContentCache(cacheScope, "facets", result);
+      } catch (error) {
+        if (cancelled) return;
+        if (isAuthoritativeBrainDenial(error)) {
+          setFacets(null);
+          if (cacheScope) void deleteBrainContentCache(cacheScope, "facets");
+        }
+      }
+    })();
     return () => {
       cancelled = true;
     };
-  }, [activeId, viewpointAssistantId, refreshTick]);
+  }, [activeId, viewpointAssistantId, refreshTick, cacheScope]);
 
   // Workspace skills (the procedural-brain primitive) — refetched on every
   // brain refresh so confirm / edit / delete from the detail panel converge.
   useEffect(() => {
     if (!activeId) return;
     let cancelled = false;
-    listWorkspaceSkills(activeId).then((result) => {
-      if (cancelled) return;
-      setSkills(result);
-    });
+    void (async () => {
+      let hasCached = false;
+      if (cacheScope) {
+        const cached = await readBrainContentCache(
+          cacheScope,
+          "skills",
+          isArrayValue,
+        );
+        if (!cancelled && cached) {
+          hasCached = true;
+          setSkills(cached.value as WorkspaceSkillSummary[]);
+        }
+      }
+      try {
+        const result = await listWorkspaceSkills(activeId, {
+          failOnError: true,
+        });
+        if (cancelled) return;
+        setSkills(result);
+        if (cacheScope) void writeBrainContentCache(cacheScope, "skills", result);
+      } catch (error) {
+        if (cancelled) return;
+        if (isAuthoritativeBrainDenial(error)) {
+          setSkills([]);
+          if (cacheScope) void deleteBrainContentCache(cacheScope, "skills");
+        } else if (!hasCached) {
+          setSkills([]);
+        }
+      }
+    })();
     return () => {
       cancelled = true;
     };
-  }, [activeId, refreshTick]);
+  }, [activeId, refreshTick, cacheScope]);
 
   // Workspace blueprints (fillable templates) — fetched on every brain refresh,
   // the same contract as skills, so a create/delete from the library converges.
@@ -439,20 +625,52 @@ function BrainPageInner() {
   useEffect(() => {
     if (!activeId) return;
     let cancelled = false;
-    listCustomPageTemplates(activeId).then((result) => {
-      if (cancelled) return;
-      setBlueprints(result);
-    });
+    void (async () => {
+      let hasCached = false;
+      if (cacheScope) {
+        const cached = await readBrainContentCache(
+          cacheScope,
+          "blueprints",
+          isArrayValue,
+        );
+        if (!cancelled && cached) {
+          hasCached = true;
+          setBlueprints(cached.value as CustomPageTemplateSummary[]);
+        }
+      }
+      try {
+        const result = await listCustomPageTemplates(activeId);
+        if (cancelled) return;
+        setBlueprints(result);
+        if (cacheScope) {
+          void writeBrainContentCache(cacheScope, "blueprints", result);
+        }
+      } catch (error) {
+        if (cancelled) return;
+        if (isAuthoritativeBrainDenial(error)) {
+          setBlueprints([]);
+          if (cacheScope) {
+            void deleteBrainContentCache(cacheScope, "blueprints");
+          }
+        } else if (!hasCached) {
+          setBlueprints([]);
+        }
+      }
+    })();
     return () => {
       cancelled = true;
     };
-  }, [activeId, refreshTick]);
+  }, [activeId, refreshTick, cacheScope]);
 
   // Skill row clicks (library + sidebar quick-list) open the FULL editor page
   // (brain-skill-management-ux.md §3.1); only the graph-node click path keeps
   // the quick-look drawer.
   const openSkillEditor = (skill: WorkspaceSkillSummary) => {
     if (!activeId) return;
+    if (offline) {
+      setSelectedSkill(skill);
+      return;
+    }
     router.push(`/w/${activeId}/brain/skills/${skill.rowId}`);
   };
 
@@ -462,7 +680,7 @@ function BrainPageInner() {
   // create flow (createDraft -> navigate). The author saves it as a template
   // (with its extraction spec) from the editor's "Save as template" path.
   const openNewBlueprint = async () => {
-    if (!activeId) return;
+    if (!activeId || offline) return;
     try {
       const created = await createDraft({
         workspaceId: activeId,
@@ -488,7 +706,7 @@ function BrainPageInner() {
   // Delete a blueprint (a page template) after the library's confirm resolved.
   // Optimistically drop it, then refetch to converge with the server.
   const deleteBlueprint = async (template: CustomPageTemplateSummary) => {
-    if (!activeId) return;
+    if (!activeId || offline) return;
     setBlueprints((prev) => prev?.filter((b) => b.id !== template.id) ?? prev);
     await deleteCustomPageTemplate(activeId, template.id).catch(() => {});
     requestBrainRefresh(activeId);
@@ -692,24 +910,27 @@ function BrainPageInner() {
         )}
         <button
           type="button"
+          disabled={offline}
           onClick={() => setGroupsOpen(true)}
-          className="inline-flex h-7 items-center gap-1 rounded-md border border-border px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          className="inline-flex h-7 items-center gap-1 rounded-md border border-border px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
         >
           <Sparkles className="size-3.5" aria-hidden />
           {t.brainPage.skillGroups.cta}
         </button>
         <button
           type="button"
+          disabled={offline}
           onClick={() => setImportOpen(true)}
-          className="inline-flex h-7 items-center gap-1 rounded-md border border-border px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          className="inline-flex h-7 items-center gap-1 rounded-md border border-border px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
         >
           <ArrowDownToLine className="size-3.5" aria-hidden />
           {t.brainPage.skillImport.importCta}
         </button>
         <button
           type="button"
+          disabled={offline}
           onClick={openSkillCreator}
-          className="inline-flex h-7 items-center gap-1 rounded-md border border-border px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          className="inline-flex h-7 items-center gap-1 rounded-md border border-border px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
         >
           <Plus className="size-3.5" aria-hidden />
           {t.brainPage.skills.newSkill}
@@ -728,8 +949,9 @@ function BrainPageInner() {
         )}
         <button
           type="button"
+          disabled={offline}
           onClick={() => void openNewBlueprint()}
-          className="inline-flex h-7 items-center gap-1 rounded-md border border-border px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          className="inline-flex h-7 items-center gap-1 rounded-md border border-border px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
         >
           <Plus className="size-3.5" aria-hidden />
           {t.brainPage.blueprints.newBlueprint}
@@ -745,7 +967,7 @@ function BrainPageInner() {
         right={topbarRight}
       />
 
-      {activeId && (
+      {activeId && !offline && (
         <>
         <SkillGroupsDialog
           workspaceId={activeId}
@@ -831,6 +1053,7 @@ function BrainPageInner() {
               item={currentReview}
               onActed={handleReviewActed}
               onMoreOptions={() => setSelected(currentReview.row)}
+              readOnly={offline}
             />
           ) : null
         ) : section === "skills" ? (
@@ -844,7 +1067,8 @@ function BrainPageInner() {
              (BackButton → library), and as the LANDING hero when the
              workspace has no skills (the creator IS the empty state). */
           activeId ? (
-            skillCreatorOpen || (skills !== null && skills.length === 0) ? (
+            !offline &&
+            (skillCreatorOpen || (skills !== null && skills.length === 0)) ? (
               <SkillCreator
                 /* The key re-seeds the creator's mount state when an import
                    lands (or a fresh one replaces it) — its doc-stage fields
@@ -877,6 +1101,7 @@ function BrainPageInner() {
                 skills={skills}
                 onNewSkill={openSkillCreator}
                 onOpenSkill={openSkillEditor}
+                readOnly={offline}
               />
             )
           ) : null
@@ -893,6 +1118,7 @@ function BrainPageInner() {
               search={search}
               onNewBlueprint={() => void openNewBlueprint()}
               onDeleteBlueprint={(template) => void deleteBlueprint(template)}
+              readOnly={offline}
             />
           ) : null
         ) : viewMode === "graph" && !showNoData ? (
@@ -900,6 +1126,9 @@ function BrainPageInner() {
              the onboarding nudge below, not an empty canvas. */
           <BrainGraphView
             graph={graph ?? { nodes: [], edges: [], truncated: false }}
+            workspaceId={activeId!}
+            viewpointAssistantId={viewpointAssistantId}
+            showMemory
             loading={graph === null}
             focusQuery={search}
             filterKinds={graphFilterKinds}
@@ -942,6 +1171,7 @@ function BrainPageInner() {
           row={selected}
           skill={selectedSkill}
           workspaceId={activeId}
+          readOnly={offline}
           onClose={() => {
             setSelected(null);
             setSelectedSkill(null);

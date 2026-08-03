@@ -5,6 +5,7 @@ import {
   isoDay,
   monthGridDays,
   monthKey,
+  PLAN_RAIL_DOCK_CLEARANCE_CLASS,
   parseIsoDay,
   parseMonthKey,
   planCounts,
@@ -35,6 +36,10 @@ function slot(overrides: Partial<PlanSlot> = {}): PlanSlot {
 // interaction itself is web-QA) and [COMP:app-web/plan-calendar] (the
 // month-grid math; drag is web-QA). Their component-map rows point here.
 describe("[COMP:app-web/feed-plan] marketing plan helpers", () => {
+  it("reserves a bottom lane for the collapsed Feed dock", () => {
+    expect(PLAN_RAIL_DOCK_CLEARANCE_CLASS).toBe("pb-20");
+  });
+
   it("formats local calendar days, never UTC", () => {
     // Late-evening local time is the next day in UTC. A slot is a day, so
     // `toISOString()` would move the chip for anyone west of UTC.

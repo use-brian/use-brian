@@ -40,6 +40,7 @@ import { listCompanies, listContacts, listDeals } from '../db/crm.js'
 import { listTasks as listWorkspaceTasks } from '../db/tasks.js'
 import { resolveWorkspaceViewpoint } from '../db/workspace-viewpoint.js'
 import type { KnowledgeStore } from '../db/knowledge-store.js'
+import { projectBrainGraphHierarchy } from '../brain-graph-hierarchy.js'
 
 const BLOCKED_KNOWLEDGE_URL_PROTOCOLS = new Set([
   'about:', 'blob:', 'chrome:', 'chrome-extension:', 'data:', 'devtools:',
@@ -1001,7 +1002,7 @@ export function brainRoutes(deps: {
   })
 
   /**
-   * GET /graph?workspaceId=X&assistantId=Y&limit=500
+   * GET /graph?workspaceId=X&assistantId=Y&scope=GROUP_ID&focus=QUERY
    *
    * Workspace-wide graph snapshot: every entity the viewer can see plus
    * every active (non-retracted, non-expired) entity↔entity edge. Powers
@@ -1017,7 +1018,9 @@ export function brainRoutes(deps: {
    *     `kb_chunk` remain deferred.
    *   - `degree` is computed in-route from the edge list so the client
    *     can size nodes by connection count without a separate query.
-   *   - Capped at `limit` nodes (default 500, max 1000). When the cap
+   *   - The clearance-scoped source sweep is capped at 5000 entries, then the
+   *     API projects it into a fixed-budget overview/scope response before any
+   *     data crosses the network. When the source cap
    *     trips, `truncated: true` so the client can surface "showing N of
    *     M most-connected" — the v1 store query orders by `created_at`,
    *     so the truncation today is recency, not centrality. Once
@@ -1043,7 +1046,18 @@ export function brainRoutes(deps: {
         ? req.query.assistantId
         : null
     const limitRaw = typeof req.query.limit === 'string' ? Number(req.query.limit) : NaN
-    const nodeLimit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 1000) : 500
+    // `limit` remains accepted for API compatibility, but the app no longer
+    // sends it: render density is controlled by the hierarchy response, while
+    // this value is only the server-side source safety boundary.
+    const nodeLimit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 5000) : 5000
+    const scopeId =
+      typeof req.query.scope === 'string' && req.query.scope.length <= 160
+        ? req.query.scope
+        : null
+    const focusQuery =
+      typeof req.query.focus === 'string'
+        ? req.query.focus.trim().slice(0, 200)
+        : null
     // Opt-in node kinds (Phase 3). `?include=memory` adds entity-linked memory
     // nodes; `file` / `kb_chunk` are reserved for later. Comma-separated.
     const includeKinds = new Set(
@@ -1076,7 +1090,10 @@ export function brainRoutes(deps: {
         entityLinksStore.listForWorkspace(ctx, {
           sourceKinds: ['entity', 'skill'],
           targetKinds: ['entity', 'memory', 'kb_chunk', 'connector'],
-          limit: 5000,
+          // Preserve enough relationships for the source universe. Starving
+          // this scan would make later entries look artificially isolated and
+          // corrupt the server-side community projection.
+          limit: Math.max(5000, Math.min(nodeLimit * 6, 30000)),
         }),
         knowledgeStore.listForGraph(ctx, nodeLimit + 1),
         workspaceSkillStore
@@ -1303,7 +1320,15 @@ export function brainRoutes(deps: {
         })),
       ]
 
-      res.status(200).json({ nodes, edges: visibleEdges, truncated })
+      res.status(200).json(
+        projectBrainGraphHierarchy({
+          nodes,
+          edges: visibleEdges,
+          truncated,
+          scopeId,
+          focusQuery,
+        }),
+      )
     } catch (err) {
       console.error('[brain] graph fetch failed:', err)
       res.status(500).json({ error: 'Internal error' })
