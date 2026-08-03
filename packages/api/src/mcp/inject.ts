@@ -916,6 +916,60 @@ export async function injectMcpTools(params: {
       for (const g of grants) {
         if (!g.instance.connected) continue
         const p = g.instance.provider
+
+        // IMAP is one provider-level tool set with an `account` router, so the
+        // usual first-instance-per-provider overlay would discard the user's
+        // other exposed mailboxes before that router was built. Preserve the
+        // existing one-GRANTOR-per-provider precedence (the first/oldest grant
+        // wins), but aggregate every explicitly exposed IMAP instance owned by
+        // that same grantor. Never pass connectorStore.list(grantor) here: it
+        // contains unexposed personal mailboxes too.
+        if (p === 'imap') {
+          if (overlaidByGrant.has(p)) continue
+          overlaidByGrant.add(p)
+          const sameGrantorMailboxes = grants.filter((candidate) =>
+            candidate.instance.provider === 'imap' &&
+            candidate.instance.connected &&
+            candidate.grantedByUserId === g.grantedByUserId,
+          )
+          const usableMailboxes: Array<{
+            connectorId: string
+            connected: boolean
+            id: string
+            name: string
+            createdAt: Date
+          }> = []
+          for (const mailbox of sameGrantorMailboxes) {
+            if (mailbox.instance.healthStatus === 'auth_failed') {
+              unavailable.push(connectorReconnectNotice('imap', mailbox.instance.label))
+              continue
+            }
+            usableMailboxes.push({
+              connectorId: 'imap',
+              connected: true,
+              id: mailbox.instance.id,
+              name: mailbox.instance.label,
+              createdAt: mailbox.instance.createdAt,
+            })
+          }
+          if (usableMailboxes.length > 0) {
+            await injectMailboxTools({
+              connectors: usableMailboxes,
+              settingsStore,
+              userId: g.grantedByUserId,
+              assistantId,
+              assistantConnectorStore,
+              tools,
+              connectorInstanceStore,
+              connectorActionAudit,
+              assistantConnectorGrantsStore,
+              healthProbe: { report: reportHealth },
+              filesApi,
+            })
+          }
+          continue
+        }
+
         if (overlaidByGrant.has(p)) continue    // first grant per provider wins
         overlaidByGrant.add(p)
         // Health gate (migration 294): a granted connector whose credentials
@@ -984,18 +1038,6 @@ export async function injectMcpTools(params: {
               await connectorInstanceStore.updateCredentialsSystem(g.instance.id, { client_id: 'msgraph_oauth', client_secret: encoded })
             },
           )
-        } else if (p === 'imap') {
-          // The user's corporate mailbox exposed to the workspace. Bind to
-          // the EXACT exposed instance (the typed 'imap' credentials blob) —
-          // the same instance-binding rule as the incident-2026-07-08 fix.
-          await injectMailboxTools({
-            connectors: grantorConnectors, settingsStore, userId: g.grantedByUserId, assistantId,
-            assistantConnectorStore, tools,
-            connectorInstanceStore, connectorActionAudit, assistantConnectorGrantsStore,
-            instanceIdOverride: g.instance.id,
-            healthProbe: { report: reportHealth },
-            filesApi,
-          })
         } else if (p === 'gcal' || p === 'gmail' || p === 'gdrive') {
           // Scope the injector to the GRANTED provider only. `injectGoogleTools`
           // injects every connected Google provider it sees in `connectors`, so
@@ -1049,6 +1091,53 @@ export async function injectMcpTools(params: {
         // Assistant Email instances are one-per-inbox (decision D1) and inject
         // as ONE tool set over ALL inboxes below — not first-instance-wins.
         if (p === 'agentmail') continue
+
+        // Company Email has the same one-tool-set/many-accounts shape. Build
+        // the router once from every workspace-owned IMAP instance; provider-
+        // level workspace policy still governs the resulting tool set.
+        if (p === 'imap') {
+          if (overlaidByTeam.has(p)) continue
+          overlaidByTeam.add(p)
+          const usableMailboxes: Array<{
+            connectorId: string
+            connected: boolean
+            id: string
+            name: string
+            createdAt: Date
+          }> = []
+          for (const mailbox of teamNative.filter((candidate) =>
+            candidate.provider === 'imap' && candidate.connected,
+          )) {
+            if (mailbox.healthStatus === 'auth_failed') {
+              unavailable.push(connectorReconnectNotice('imap', mailbox.label))
+              continue
+            }
+            usableMailboxes.push({
+              connectorId: 'imap',
+              connected: true,
+              id: mailbox.id,
+              name: mailbox.label,
+              createdAt: mailbox.createdAt,
+            })
+          }
+          if (usableMailboxes.length > 0) {
+            await injectMailboxTools({
+              connectors: usableMailboxes,
+              settingsStore: teamPolicyStore,
+              userId,
+              assistantId,
+              assistantConnectorStore,
+              tools,
+              connectorInstanceStore,
+              connectorActionAudit,
+              assistantConnectorGrantsStore,
+              healthProbe: { report: reportHealth },
+              filesApi,
+            })
+          }
+          continue
+        }
+
         if (overlaidByTeam.has(p)) continue    // first team-native per provider wins
         overlaidByTeam.add(p)
         // Health gate (migration 294): a team-native connector whose credentials
@@ -1132,23 +1221,6 @@ export async function injectMcpTools(params: {
             { report: reportHealth, instanceId: inst.id },
             assistantConnectorGrantsStore,
           )
-        } else if (p === 'imap') {
-          // A workspace-owned mailbox. `transferToWorkspace` DELETES the
-          // instance's grants (a team-scoped row is visible by scope and needs
-          // none), so this branch is the transferred mailbox's ONLY route to a
-          // workspace assistant — without it, transferring makes the mailbox
-          // vanish from the assistant while Studio still shows it connected.
-          // The synthetic row carries `id`, which `injectMailboxTools` matches
-          // against `instanceIdOverride` to bind credentials to this exact row.
-          await injectMailboxTools({
-            connectors: [{ connectorId: 'imap', connected: true, id: inst.id, name: inst.label, createdAt: inst.createdAt }],
-            settingsStore: teamPolicyStore,   // team-owned: policy from workspace_tool_policy
-            userId, assistantId, assistantConnectorStore, tools,
-            connectorInstanceStore, connectorActionAudit, assistantConnectorGrantsStore,
-            instanceIdOverride: inst.id,
-            healthProbe: { report: reportHealth },
-            filesApi,
-          })
         } else if (p === 'msgraph') {
           // A workspace-owned Microsoft identity. Reads and the rotated tuple
           // both bind to this team-scoped row; the shared workspace policy
@@ -3253,7 +3325,7 @@ async function injectMailboxTools(params: {
   connectorInstanceStore?: import('../db/connector-instance-store.js').ConnectorInstanceStore
   connectorActionAudit?: ConnectorActionAudit
   assistantConnectorGrantsStore?: import('../db/assistant-connector-grants-store.js').AssistantConnectorGrantsStore
-  /** Grant-overlay path: bind to this EXACT exposed instance id. */
+  /** Legacy single-instance overlay path: bind to this EXACT instance id. */
   instanceIdOverride?: string | null
   healthProbe?: { report: HealthReporter }
   /**
@@ -3278,12 +3350,10 @@ async function injectMailboxTools(params: {
   if (!connectorInstanceStore) return  // credentials live only on the instance row — nothing to bind
   const store = connectorInstanceStore
 
-  // Which instances to bind. The grant overlay pins ONE exposed instance
-  // (`instanceIdOverride`, same one-per-provider limit every other connector's
-  // grant overlay has); the base path binds EVERY connected mailbox — this is
-  // the multi-account surface (D11 retired), the AgentMail `fromInbox` router
-  // ported. Primary = first-connected (createdAt asc): the default when the
-  // model omits `account`.
+  // Which instances to bind. Normal personal injection and both workspace
+  // overlays pass EVERY authorized connected mailbox; the optional override is
+  // retained for legacy/single-instance callers. Primary = first-connected
+  // (createdAt asc): the default when the model omits `account`.
   const rows = (instanceIdOverride
     ? imapConnectors.filter((c) => c.id === instanceIdOverride)
     : [...imapConnectors])
