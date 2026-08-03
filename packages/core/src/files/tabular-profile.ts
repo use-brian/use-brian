@@ -56,28 +56,92 @@ export function isTabular(mime: string, fileName: string): boolean {
   return TABULAR_EXTS.some((e) => lower.endsWith(e))
 }
 
-/** Quote-aware split of one delimited line. Accounting exports quote freely. */
-function splitDelimited(line: string, delim: string): string[] {
-  const out: string[] = []
+const DELIMITER_CANDIDATES = [',', ';', '\t', '|'] as const
+
+/**
+ * Full quote-aware reader. Splits on rows AND fields in one pass, so a newline
+ * inside a quoted field does not start a new row.
+ *
+ * Splitting on `\n` first (the previous approach) inflated the row count of
+ * any export with a multi-line note field. The row count is the profile's
+ * central claim, so an inflated one is exactly the confident wrong number this
+ * whole lane exists to prevent: a 2,000-row file reported 4,000.
+ */
+function readDelimited(text: string, delim: string): string[][] {
+  const rows: string[][] = []
+  let row: string[] = []
   let cur = ''
   let inQuotes = false
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i]
+  let sawField = false
+
+  const endField = () => {
+    row.push(cur.trim())
+    cur = ''
+    sawField = true
+  }
+  const endRow = () => {
+    endField()
+    if (row.length > 1 || row[0].length > 0) rows.push(row)
+    row = []
+    sawField = false
+  }
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
     if (inQuotes) {
       if (ch === '"') {
-        if (line[i + 1] === '"') {
+        if (text[i + 1] === '"') {
           cur += '"'
           i++
         } else inQuotes = false
       } else cur += ch
-    } else if (ch === '"') inQuotes = true
-    else if (ch === delim) {
-      out.push(cur)
-      cur = ''
+      continue
+    }
+    if (ch === '"') inQuotes = true
+    else if (ch === delim) endField()
+    else if (ch === '\n') endRow()
+    else if (ch === '\r') {
+      /* CRLF: the \n does the work */
     } else cur += ch
   }
-  out.push(cur)
-  return out.map((s) => s.trim())
+  if (cur.length > 0 || sawField || row.length > 0) endRow()
+  return rows
+}
+
+/** Rows that look like a comment preamble or a blank spacer, not data. */
+function isPreamble(line: string): boolean {
+  const t = line.trim()
+  return t.length === 0 || t.startsWith('#')
+}
+
+/**
+ * Pick the delimiter by how well it explains the file, not by whether the
+ * character merely appears. `text.includes('\t')` used to switch an entire
+ * comma CSV to tab-splitting because one field contained a stray tab, which
+ * collapsed real files (GA4 exports, 44k rows) to a single column.
+ */
+function detectDelimiter(text: string): string {
+  const sample = text
+    .split('\n')
+    .filter((l) => !isPreamble(l))
+    .slice(0, 50)
+    .join('\n')
+  let best = ','
+  let bestScore = 0
+  for (const d of DELIMITER_CANDIDATES) {
+    const rows = readDelimited(sample, d).slice(0, 50)
+    if (rows.length === 0) continue
+    const counts = rows.map((r) => r.length)
+    const modal = counts.sort((a, b) => counts.filter((c) => c === a).length - counts.filter((c) => c === b).length).pop()!
+    if (modal < 2) continue
+    const consistent = counts.filter((c) => c === modal).length / counts.length
+    const score = modal * consistent
+    if (score > bestScore) {
+      bestScore = score
+      best = d
+    }
+  }
+  return best
 }
 
 function rowsFromMarkdownTable(text: string): string[][] {
@@ -102,11 +166,31 @@ export function tabularRowsFromText(text: string, mime: string): string[][] {
     const md = rowsFromMarkdownTable(text)
     if (md.length > 0) return md
   }
-  const delim = mime === 'text/tab-separated-values' || text.includes('\t') ? '\t' : ','
-  return text
-    .split('\n')
-    .filter((l) => l.trim().length > 0)
-    .map((l) => splitDelimited(l, delim))
+  // Strip a UTF-8 BOM so it does not ride into the first header cell.
+  let body = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text
+  // Drop a leading comment/blank preamble. Analytics exports (GA4 and friends)
+  // open with several `#` banner lines; treating the first of them as the
+  // header yields a one-column file and a meaningless profile.
+  const lines = body.split('\n')
+  let start = 0
+  while (start < lines.length && isPreamble(lines[start])) start++
+  body = lines.slice(start).join('\n')
+
+  const delim = mime === 'text/tab-separated-values' ? '\t' : detectDelimiter(body)
+  const rows = readDelimited(body, delim)
+
+  // A header must have the same shape as the data under it. Anything above the
+  // first row matching the modal field count is residual preamble.
+  if (rows.length > 2) {
+    const counts = rows.slice(0, 50).map((r) => r.length)
+    const modal = counts
+      .slice()
+      .sort((a, b) => counts.filter((c) => c === a).length - counts.filter((c) => c === b).length)
+      .pop()!
+    const headerIdx = rows.findIndex((r) => r.length === modal)
+    if (headerIdx > 0) return rows.slice(headerIdx)
+  }
+  return rows
 }
 
 const INT_RE = /^-?\d+$/
@@ -195,6 +279,37 @@ export function profileTable(rows: string[][]): TableProfile {
   }
 }
 
+export type SheetProfile = { name?: string; profile: TableProfile }
+
+/**
+ * Profile a file as a LIST of tables, one per worksheet.
+ *
+ * A workbook is not one table. The xlsx parser emits `## <sheet>` sections, and
+ * flattening them stacks unrelated rows under the first sheet's header: a real
+ * 4-sheet finance workbook (27 / 26 / 113 / 633 rows) profiled as a single
+ * 798-row table with every column typed `text`, because no column was
+ * consistent across sheets. Any figure queried from that shape is meaningless.
+ */
+export function profileWorkbook(text: string, mime: string): SheetProfile[] {
+  const isWorkbook = mime === XLSX_MIME || /^\s*##\s/m.test(text)
+  if (!isWorkbook) return [{ profile: profileTable(tabularRowsFromText(text, mime)) }]
+
+  const sections: { name?: string; body: string[] }[] = []
+  for (const line of text.split('\n')) {
+    const heading = /^##\s+(.*)$/.exec(line.trim())
+    if (heading) sections.push({ name: heading[1].trim(), body: [] })
+    else if (sections.length > 0) sections[sections.length - 1].body.push(line)
+  }
+  if (sections.length === 0) return [{ profile: profileTable(tabularRowsFromText(text, mime)) }]
+
+  return sections
+    .map((s) => ({
+      ...(s.name ? { name: s.name } : {}),
+      profile: profileTable(rowsFromMarkdownTable(s.body.join('\n'))),
+    }))
+    .filter((s) => s.profile.columns.length > 0)
+}
+
 export type TabularProfileMeta = {
   fileId?: string
   fileName: string
@@ -206,7 +321,7 @@ export type TabularProfileMeta = {
  * Render the profile as the attachment block. Stays small regardless of file
  * size: columns and three sample rows, never the data.
  */
-export function renderTabularProfile(profile: TableProfile, meta: TabularProfileMeta): string {
+function openTag(meta: TabularProfileMeta): string {
   const attrs = [
     'kind="tabular"',
     meta.fileId ? `id="${meta.fileId}"` : '',
@@ -216,15 +331,26 @@ export function renderTabularProfile(profile: TableProfile, meta: TabularProfile
   ]
     .filter(Boolean)
     .join(' ')
+  return `<attached_file ${attrs}>`
+}
 
-  const cols = profile.columns
-    .map((c) => `${c.name} (${c.type}${c.nullCount > 0 ? `, ${c.nullCount} blank` : ''})`)
-    .join(', ')
+/**
+ * Describe one table. Bounded at ANY shape, wide as well as long: a 29-column
+ * workbook overran the size budget by listing every column in full. Trim the
+ * list, never the count, so the model still knows how wide the table is.
+ */
+function describeTable(profile: TableProfile, budget: { columns: number; columnChars: number; sampleRows: number }): string[] {
+  const described = profile.columns.map(
+    (c) => `${c.name} (${c.type}${c.nullCount > 0 ? `, ${c.nullCount} blank` : ''})`,
+  )
+  let listed = described.slice(0, budget.columns)
+  while (listed.join(', ').length > budget.columnChars && listed.length > 1) listed = listed.slice(0, -1)
+  const hidden = profile.columns.length - listed.length
+  const cols = listed.join(', ') + (hidden > 0 ? `, and ${hidden} more` : '')
 
   const lines: string[] = []
-  lines.push(`<attached_file ${attrs}>`)
   lines.push(`rows: ${profile.rowCount}`)
-  lines.push(`columns: ${cols}`)
+  lines.push(`columns: ${profile.columns.length} total: ${cols}`)
   if (profile.dateRange) {
     lines.push(
       profile.dateRange.format === 'ambiguous'
@@ -232,20 +358,63 @@ export function renderTabularProfile(profile: TableProfile, meta: TabularProfile
         : `date column "${profile.dateRange.column}" [${profile.dateRange.format}]: ${profile.dateRange.min} to ${profile.dateRange.max}`,
     )
   }
-  if (profile.sampleRows.length > 0) {
-    lines.push(`sample rows (illustrative only, ${profile.sampleRows.length} of ${profile.rowCount}):`)
-    for (const r of profile.sampleRows) lines.push(`  ${r.join(' | ')}`)
+  const samples = profile.sampleRows.slice(0, budget.sampleRows)
+  if (samples.length > 0) {
+    lines.push(`sample rows (illustrative only, ${samples.length} of ${profile.rowCount}):`)
+    const MAX_SAMPLE_CHARS = 260
+    for (const r of samples) {
+      const joined = r.join(' | ')
+      lines.push(`  ${joined.length > MAX_SAMPLE_CHARS ? `${joined.slice(0, MAX_SAMPLE_CHARS)} ...` : joined}`)
+    }
+  }
+  return lines
+}
+
+function closingInstruction(meta: TabularProfileMeta, subject: string): string {
+  return (
+    `The rows of ${subject} are NOT in this message and cannot be read from it. ` +
+    'Do NOT compute or state any total, sum, count, average, maximum, or trend ' +
+    'from the sample rows above: they are a handful of rows and describe nothing. ' +
+    (meta.fileId
+      ? 'Query the file for any figure, and report the figure with the rows it matched.'
+      : 'No file handle is available, so say you cannot compute exact figures for this file.')
+  )
+}
+
+export function renderTabularProfile(profile: TableProfile, meta: TabularProfileMeta): string {
+  const lines: string[] = [openTag(meta)]
+  lines.push(...describeTable(profile, { columns: 18, columnChars: 700, sampleRows: 3 }))
+  lines.push('')
+  lines.push(closingInstruction(meta, 'this file'))
+  lines.push('</attached_file>')
+  return lines.join('\n')
+}
+
+/**
+ * Render one block covering every worksheet. Each sheet keeps its own row
+ * count, columns and date range, so a figure can be attributed to the sheet it
+ * came from.
+ */
+export function renderWorkbookProfile(sheets: SheetProfile[], meta: TabularProfileMeta): string {
+  if (sheets.length === 1 && !sheets[0].name) return renderTabularProfile(sheets[0].profile, meta)
+
+  // Share the budget across sheets so a many-sheet workbook stays bounded.
+  const perSheet = Math.max(4, Math.floor(24 / Math.max(1, sheets.length)))
+  const lines: string[] = [openTag(meta)]
+  lines.push(`sheets: ${sheets.length}`)
+  for (const s of sheets) {
+    lines.push('')
+    lines.push(`### sheet "${s.name ?? 'unnamed'}"`)
+    lines.push(
+      ...describeTable(s.profile, {
+        columns: perSheet,
+        columnChars: Math.max(160, Math.floor(1200 / sheets.length)),
+        sampleRows: sheets.length > 3 ? 1 : 2,
+      }),
+    )
   }
   lines.push('')
-  lines.push(
-    'The rows of this file are NOT in this message and cannot be read from it. ' +
-      'Do NOT compute or state any total, sum, count, average, maximum, or trend ' +
-      'from the sample rows above: they are three rows out of ' +
-      `${profile.rowCount} and describe nothing. ` +
-      (meta.fileId
-        ? 'Query the file for any figure, and report the figure with the rows it matched.'
-        : 'No file handle is available, so say you cannot compute exact figures for this file.'),
-  )
+  lines.push(closingInstruction(meta, 'these sheets'))
   lines.push('</attached_file>')
   return lines.join('\n')
 }

@@ -22,11 +22,14 @@ export {
   tabularRowsFromText,
   profileTable,
   renderTabularProfile,
+  profileWorkbook,
+  renderWorkbookProfile,
   type ColumnType,
   type ColumnProfile,
   type DateRange,
   type TableProfile,
   type TabularProfileMeta,
+  type SheetProfile,
 } from './tabular-profile.js'
 export { createReadFileTool } from './tool.js'
 export { docxToBlocks } from './docx-convert.js'

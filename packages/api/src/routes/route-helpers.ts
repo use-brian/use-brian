@@ -6,7 +6,7 @@
 
 import { findOrCreateUser, findUserById } from '../db/users.js'
 import { query } from '../db/client.js'
-import { loadBuiltinSkills, formatSkillListing, createUseSkillTool, expandSkillPointers, parseFileContent, shouldInline, isTabular, tabularRowsFromText, profileTable, renderTabularProfile } from '@use-brian/core'
+import { loadBuiltinSkills, formatSkillListing, createUseSkillTool, expandSkillPointers, parseFileContent, shouldInline, isTabular, profileWorkbook, renderWorkbookProfile } from '@use-brian/core'
 import type { Tool, UsageStore, BudgetStatus, ContentBlock, FileStore, McpSettingsStore, KnowledgeStoreInterface, KnowledgeRepoWriter, GDriveFilesStore, SkillContent, EngineHooks, FilesApi } from '@use-brian/core'
 import type { ActorIdentity } from '../mcp/auth-headers.js'
 // NOTE: the real DB-backed credit gate (`checkCreditBudget`, closed billing/)
@@ -922,7 +922,7 @@ export async function buildFileContentBlocks(
       // date range, so a wrong range is not expressible. Figures come from
       // querying the stored file, not from the prompt.
       if (!isSmall && isTabular(file.mimeType, file.fileName)) {
-        const profile = profileTable(tabularRowsFromText(text, file.mimeType))
+        const sheets = profileWorkbook(text, file.mimeType)
         // Resolve a durable handle so the model can query the rows. Promotion
         // first (outlives the cache TTL), then the session cache, then none.
         let handleId: string | undefined = file.id
@@ -948,7 +948,7 @@ export async function buildFileContentBlocks(
           if (cached) handleId = cached.id
         }
         textParts.push(
-          renderTabularProfile(profile, {
+          renderWorkbookProfile(sheets, {
             ...(handleId ? { fileId: handleId } : {}),
             fileName: file.fileName,
             mime: file.mimeType,
