@@ -11,7 +11,10 @@ import {
 import { primaryAuthUrl } from "@/lib/primary-auth";
 import { computeDocRedirect } from "@/lib/doc-redirect";
 import { isAppHost, isGuardedPath, normalizeHostHeader } from "@/lib/site-hosts";
-import { ossSignedOutRedirect } from "@/lib/oss-entry";
+import {
+  ossPublicAppOrigin,
+  ossSignedOutRedirect,
+} from "@/lib/oss-entry";
 
 import { INTERNAL_API_URL as API_URL } from "@/lib/internal-api-url";
 
@@ -102,7 +105,9 @@ export async function proxy(request: NextRequest) {
       request.nextUrl.pathname + request.nextUrl.search,
     );
     if (ossEntry) {
-      return NextResponse.redirect(new URL(ossEntry, request.url));
+      return NextResponse.redirect(
+        new URL(ossEntry, ossPublicAppOrigin(request.url)),
+      );
     }
     if (primary) {
       // Cross-origin to the primary's /login. Carries the original URL
@@ -135,7 +140,10 @@ export async function proxy(request: NextRequest) {
       request.nextUrl.pathname + request.nextUrl.search,
     );
     const res = NextResponse.redirect(
-      new URL(ossEntry ?? "/login", request.url),
+      new URL(
+        ossEntry ?? "/login",
+        ossEntry ? ossPublicAppOrigin(request.url) : request.url,
+      ),
     );
     applyClearedCookies(res);
     return res;

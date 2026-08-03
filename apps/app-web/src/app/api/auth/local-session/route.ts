@@ -35,7 +35,7 @@ import {
 } from "@/lib/auth-cookies";
 import { primaryAuthUrl } from "@/lib/primary-auth";
 import { isOssEdition } from "@/lib/edition";
-import { sanitizeNext } from "@/lib/oss-entry";
+import { ossPublicAppOrigin, sanitizeNext } from "@/lib/oss-entry";
 import { authorizeCloudflareOwner } from "@/lib/cloudflare-access";
 
 // Same resolution as the app-web OAuth callback + refresh bridges:
@@ -46,7 +46,7 @@ export async function GET(request: Request) {
   // Behind a reverse proxy (Cloudflare Tunnel) Next resolves request.url to the
   // bound address (localhost:PORT), so absolute redirects must be built from the
   // configured public origin instead.
-  const appOrigin = process.env.APP_URL ?? request.url;
+  const appOrigin = ossPublicAppOrigin(request.url);
   const nextPath = sanitizeNext(new URL(request.url).searchParams.get("next"));
 
   if (primaryAuthUrl() !== null || !isOssEdition()) {
