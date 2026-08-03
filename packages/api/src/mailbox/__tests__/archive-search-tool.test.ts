@@ -61,6 +61,22 @@ describe('[COMP:tools/email-archive-search] searchEmailArchive tool', () => {
     expect(search).toHaveBeenCalledTimes(2)
   })
 
+  it('account-bound variants omit the selector and always search their fixed archive', async () => {
+    const search = vi.fn(async () => [])
+    const boundAccount = { instanceId: 'inst-ops', email: 'ops@corp.com', isPrimary: true }
+    const tool = createSearchEmailArchiveTool({
+      ownerUserId: 'owner-1',
+      accounts: [boundAccount],
+      boundAccount,
+      deps: { search: search as never },
+    })
+
+    expect((tool.inputSchema as unknown as { shape: Record<string, unknown> }).shape).not.toHaveProperty('account')
+    expect(tool.description).toContain('bound to ops@corp.com')
+    await tool.execute({ query: 'invoice' }, CTX)
+    expect(search).toHaveBeenCalledWith(expect.objectContaining({ instanceId: 'inst-ops' }), undefined)
+  })
+
   it('states the routing contract: archive for semantic recall, live imap tools for fresh mail, searchBrain for cross-source', () => {
     const tool = createSearchEmailArchiveTool({
       ownerUserId: 'o',

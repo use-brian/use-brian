@@ -214,6 +214,7 @@ import { accountRoutes, accountAvatarPublicRoutes } from './routes/account.js'
 import { memoryRoutes } from './routes/memories.js'
 import { createEntityMergeStore } from './db/entity-merge-store.js'
 import { assistantRoutes } from './routes/assistants.js'
+import { assistantConnectorGrantsRoutes } from './routes/assistant-connector-grants.js'
 import { skillRoutes } from './routes/skills.js'
 import { workspaceRoutes } from './routes/workspaces.js'
 import { invitationRoutes } from './routes/invitations.js'
@@ -3969,6 +3970,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     capabilityStore,
     assistantConnectorGrantsStore,
   }))
+  app.use(
+    '/api/assistant-connector-grants',
+    requireAuth(env.JWT_SECRET),
+    assistantConnectorGrantsRoutes({ store: assistantConnectorGrantsStore }),
+  )
 
   // Late-bound (origin-aware induction): the validated definition editor is
   // assembled with the workflows route options further down this function;

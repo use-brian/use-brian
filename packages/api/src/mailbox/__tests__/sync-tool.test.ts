@@ -60,6 +60,21 @@ describe('[COMP:tools/mailbox-sync-now] syncMailboxNow tool', () => {
     expect(r.data).toContain('up to date')
   })
 
+  it('account-bound variants omit the selector and sync their fixed instance', async () => {
+    const syncInstanceById = vi.fn(async () => ok(0))
+    const boundAccount = { instanceId: 'inst-ops', email: 'ops@corp.example', isPrimary: true }
+    const tool = createSyncMailboxNowTool({
+      accounts: [boundAccount],
+      boundAccount,
+      deps: { syncInstanceById },
+    })
+
+    expect((tool.inputSchema as unknown as { shape: Record<string, unknown> }).shape).not.toHaveProperty('account')
+    expect(tool.description).toContain('bound to ops@corp.example')
+    await tool.execute({}, CTX)
+    expect(syncInstanceById).toHaveBeenCalledWith('inst-ops')
+  })
+
   it('singular vs plural message count', async () => {
     const tool = createSyncMailboxNowTool({
       accounts: [{ instanceId: 'inst-1', email: 'me@corp.example', isPrimary: true }],

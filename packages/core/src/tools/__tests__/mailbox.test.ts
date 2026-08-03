@@ -297,6 +297,21 @@ describe('[COMP:tools/mailbox-imap] Multi-account routing (account param, defaul
     expect(result.isError).toBe(true)
     expect(result.data).toMatch(/no company mailbox/i)
   })
+
+  it('account-bound variants hide the router field and fix the sender identity', async () => {
+    const api = makeApi()
+    const tools = createMailboxTools(singleMailboxRouter(api, EMAIL), { boundAccountEmail: EMAIL })
+    for (const tool of tools) {
+      const shape = (tool.inputSchema as unknown as { shape: Record<string, unknown> }).shape
+      expect(shape).not.toHaveProperty('account')
+      expect(tool.description).toContain(`bound to ${EMAIL}`)
+    }
+
+    const send = toolByName(tools, 'imapSendMessage')
+    const result = await send.execute({ to: ['x@y.z'], subject: 's', body: 'b' }, CTX)
+    expect(api.sendMessage).toHaveBeenCalledTimes(1)
+    expect(result.data).toMatchObject({ from: EMAIL })
+  })
 })
 
 describe('[COMP:tools/imap-attachments] imapSaveAttachment (email bytes → workspace file)', () => {

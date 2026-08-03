@@ -129,7 +129,7 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
     expect(unavailable.join('\n')).toMatch(/Company email \(IMAP\)/)
   })
 
-  it('multi-account: several mailboxes surface ONE tool set, and `account` routes the send to the right sender', async () => {
+  it('multi-account: each mailbox gets an account-bound tool set with stable variant names', async () => {
     const primary = imapConnectorRow()  // inst-imap-1, maya@…, createdAt 07-01 → primary
     const second = {
       ...imapConnectorRow(),
@@ -164,29 +164,30 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
       connectorActionAudit: audit,
     })
 
-    // ONE set of tools (same names), not a namespaced set per mailbox.
-    expect([...tools.keys()].filter((k) => k.startsWith('imap'))).toEqual(
-      expect.arrayContaining(['imapSearchMessages', 'imapGetMessage', 'imapSendMessage']),
-    )
-    expect(tools.size).toBeGreaterThan(0)
-    const send = tools.get('imapSendMessage')!
+    const sendNames = [...tools.keys()].filter((name) => name === 'imapSendMessage' || name.startsWith('imapSendMessage__'))
+    expect(sendNames).toHaveLength(2)
+    const primarySend = tools.get('imapSendMessage')!
+    const opsSendName = sendNames.find((name) => name !== 'imapSendMessage')!
+    const opsSend = tools.get(opsSendName)!
+    expect(opsSendName).toMatch(/^imapSendMessage__opsharborlane/)
+    expect(opsSend.description).toMatch(/^\[ops@harborlane\.example\]/)
 
-    // Named non-primary account → audited from = that mailbox.
-    await send.execute({ to: ['x@y.z'], subject: 's', body: 'b', account: 'ops@harborlane.example' }, {} as never)
+    // The variant itself fixes the sender; no account router input is needed.
+    await opsSend.execute({ to: ['x@y.z'], subject: 's', body: 'b' }, {} as never)
     expect(emit).toHaveBeenLastCalledWith(
       { userId: 'u-1', assistantId: 'a-1' },
       expect.objectContaining({ status: 'denied', payload: expect.objectContaining({ from: 'ops@harborlane.example' }) }),
     )
 
-    // Omitted account → audited from = the primary (first-connected) mailbox.
-    await send.execute({ to: ['x@y.z'], subject: 's', body: 'b' }, {} as never)
+    // The primary retains canonical names for compatibility and is bound too.
+    await primarySend.execute({ to: ['x@y.z'], subject: 's', body: 'b' }, {} as never)
     expect(emit).toHaveBeenLastCalledWith(
       { userId: 'u-1', assistantId: 'a-1' },
       expect.objectContaining({ status: 'denied', payload: expect.objectContaining({ from: 'maya@harborlane.example' }) }),
     )
   })
 
-  it('workspace grant overlay routes every exposed mailbox from the winning grantor and no others', async () => {
+  it('workspace grant overlay binds a tool set for every exposed mailbox from the winning grantor and no others', async () => {
     const credsById: Record<string, typeof IMAP_CREDS> = {
       'imap-primary': IMAP_CREDS,
       'imap-ops': { ...IMAP_CREDS, email: 'ops@harborlane.example' },
@@ -251,22 +252,18 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
     expect(instanceStore.getAuthCredentialsSystem).not.toHaveBeenCalledWith('imap-teammate')
     expect(instanceStore.getAuthCredentialsSystem).not.toHaveBeenCalledWith('imap-unexposed')
 
-    const send = tools.get('imapSendMessage')!
-    await send.execute(
-      { to: ['x@y.z'], subject: 's', body: 'b', account: 'ops@harborlane.example' },
-      {} as never,
-    )
+    const sendNames = [...tools.keys()].filter((name) => name === 'imapSendMessage' || name.startsWith('imapSendMessage__'))
+    expect(sendNames).toHaveLength(2)
+    const opsSendName = sendNames.find((name) => name !== 'imapSendMessage')!
+    const opsSend = tools.get(opsSendName)!
+    await opsSend.execute({ to: ['x@y.z'], subject: 's', body: 'b' }, {} as never)
     expect(emit).toHaveBeenLastCalledWith(
       { userId: 'u-1', assistantId: 'a-1' },
       expect.objectContaining({ payload: expect.objectContaining({ from: 'ops@harborlane.example' }) }),
     )
-
-    const shadowed = await send.execute(
-      { to: ['x@y.z'], subject: 's', body: 'b', account: 'teammate@harborlane.example' },
-      {} as never,
-    )
-    expect(shadowed).toMatchObject({ isError: true })
-    expect(String(shadowed.data)).toMatch(/Connected mailboxes: maya@harborlane\.example, ops@harborlane\.example/)
+    const descriptions = sendNames.map((name) => tools.get(name)?.description ?? '').join('\n')
+    expect(descriptions).not.toContain('teammate@harborlane.example')
+    expect(descriptions).not.toContain('private@harborlane.example')
   })
 
   it('injects every workspace-owned mailbox for a workspace assistant (team-native overlay)', async () => {
@@ -315,6 +312,7 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
     expect(tools.has('imapSearchMessages')).toBe(true)
     expect(tools.has('imapGetMessage')).toBe(true)
     expect(tools.has('imapSendMessage')).toBe(true)
+    expect([...tools.keys()].filter((name) => name === 'imapSendMessage' || name.startsWith('imapSendMessage__'))).toHaveLength(2)
     // Bound to the team-owned row, not to whatever the acting user owns.
     expect(instanceStore.getAuthCredentialsSystem).toHaveBeenCalledWith('inst-imap-team')
     expect(instanceStore.getAuthCredentialsSystem).toHaveBeenCalledWith('inst-imap-team-2')

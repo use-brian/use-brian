@@ -306,6 +306,7 @@ export const INJECTED_BUILTIN_TOOLS_BY_CONNECTOR: Record<string, readonly string
     'imapSendMessage',
     'imapSaveAttachment',
     'searchEmailArchive',
+    'syncMailboxNow',
   ],
 }
 
@@ -1109,13 +1110,13 @@ export async function injectMcpTools(params: {
       for (const inst of teamNative) {
         if (!inst.connected) continue
         const p = inst.provider
-        // Assistant Email instances are one-per-inbox (decision D1) and inject
-        // as ONE tool set over ALL inboxes below — not first-instance-wins.
+        // Assistant Email instances are one-per-inbox (decision D1). Their
+        // injector owns its provider-specific multi-instance naming below.
         if (p === 'agentmail') continue
 
-        // Company Email has the same one-tool-set/many-accounts shape. Build
-        // the router once from every workspace-owned IMAP instance; provider-
-        // level workspace policy still governs the resulting tool set.
+        // Company Email builds one account-bound tool set per workspace-owned
+        // IMAP instance. Provider-level workspace policy still governs every
+        // set, so collect the full account list in one injection pass.
         if (p === 'imap') {
           if (overlaidByTeam.has(p)) continue
           overlaidByTeam.add(p)
@@ -3352,10 +3353,11 @@ async function injectMsGraphTools(
 //
 // The USER'S own corporate mailbox (mailbox-imap.md) — the third identity
 // lane beside gmail (the user's Google account) and agentmail (the
-// assistant's own address). Single account per user (D11, `single_instance`
-// in the registry). Credentials are the typed `type:'imap'` blob on the
-// user-scoped connector_instance; `imapSendMessage` reuses the Gmail
-// governance chain verbatim: `ask` classification + write-grant gate
+// assistant's own address). Multiple mailboxes inject as instance-bound tool
+// sets: primary canonical names plus stable suffixed variants. Credentials are
+// the typed `type:'imap'` blob on each connector_instance;
+// `imapSendMessage` reuses the Gmail governance chain verbatim: `ask`
+// classification + write-grant gate
 // (registry-derived), the connector_actions `send_email` audit with the
 // payload-classifier preflight before the network call, and the
 // confidential-turn egress refusal inside the core tool.
@@ -3399,7 +3401,7 @@ async function injectMailboxTools(params: {
   // Which instances to bind. Normal personal injection and both workspace
   // overlays pass EVERY authorized connected mailbox; the optional override is
   // retained for legacy/single-instance callers. Primary = first-connected
-  // (createdAt asc): the default when the model omits `account`.
+  // (createdAt asc), which keeps the canonical unsuffixed tool names.
   const rows = (instanceIdOverride
     ? imapConnectors.filter((c) => c.id === instanceIdOverride)
     : [...imapConnectors])
@@ -3505,8 +3507,8 @@ async function injectMailboxTools(params: {
 
   try {
     // Build a bound MailboxApi per connected mailbox + resolve its
-    // authoritative email (the value the model passes as `account`; the label
-    // can be renamed so it is NOT the identity). A creds-missing instance is
+    // authoritative email (the model-visible binding label; the instance label
+    // can be renamed, so it is NOT the identity). A creds-missing instance is
     // skipped rather than surfaced as a dead tool.
     const bound: Array<{ instanceId: string; email: string; api: MailboxApi }> = []
     for (const row of rows) {
@@ -3535,74 +3537,95 @@ async function injectMailboxTools(params: {
       return
     }
 
-    // One tool set over an account router — primary (first-connected) is the
-    // default sender; `account` selects a sibling by email.
-    const router: MailboxAccountRouter = {
-      list: () => bound.map((b, i) => ({ email: b.email, isPrimary: i === 0 })),
-      get: (email) => bound.find((b) => b.email.trim().toLowerCase() === email.trim().toLowerCase())?.api,
-    }
-    // Attachment saves (Phase 3) land bytes in the workspace file primitive
-    // and then ride the existing file-ingest queue so the saved document is
-    // searchable — the `channel-media-deps` persist shape, on request only (D15).
-    const built = gateToolsOnActionGrants(
-      createMailboxTools(router, {
-        ...(filesApi
-          ? {
-              attachments: {
-                filesApi,
-                enqueueIngest: async ({ fileId, workspaceId, actingUserId, assistantId: forAssistant }) => {
-                  await enqueueFileIngestJob({
-                    fileId,
-                    workspaceId,
-                    actingUserId,
-                    assistantId: forAssistant,
-                    sourceLabel: 'email-attachment',
-                  })
-                },
-              },
-            }
-          : {}),
-      }),
-      'imap',
-      assistantConnectorGrantsStore,
-      assistantId,
-    )
-
-    // Archive search (Phase 2) — injected only when boot wired the archive
-    // seam (DB + embedder). Read-only; a DB search must not flip connector
-    // health, so it rides OUTSIDE the per-instance api health wrap. Owner + the
-    // instance set are bound here, never model inputs.
+    // Build one complete tool set per mailbox. The first/oldest keeps canonical
+    // names for single-account compatibility; every later set uses the same
+    // stable instance suffix convention as Google/GitHub/etc. Every schema is
+    // bound to one identity (no model-selectable `account` field), while policy
+    // and write grants continue to resolve through the canonical base name.
     const archiveDeps = getGlobalMailboxArchiveDeps()
-    const withArchive = archiveDeps
-      ? [
-          ...built,
-          createSearchEmailArchiveTool({
-            ownerUserId: userId,
-            accounts: bound.map((b, i) => ({ instanceId: b.instanceId, email: b.email, isPrimary: i === 0 })),
-            deps: archiveDeps,
-          }),
-        ]
-      : built
-
-    // On-demand sync (sync-on-connect's twin) — injected only when boot wired
-    // the sync seam. Same bound account set as the archive tool; the instance
-    // is bound here, never a model input.
     const syncDeps = getGlobalMailboxSyncDeps()
-    const withSync = syncDeps
-      ? [
-          ...withArchive,
-          createSyncMailboxNowTool({
-            accounts: bound.map((b, i) => ({ instanceId: b.instanceId, email: b.email, isPrimary: i === 0 })),
-            deps: syncDeps,
-          }),
-        ]
-      : withArchive
-    for (const tool of withSync) {
-      if (await applyPolicyOrSkip(tool, 'imap', settingsStore, assistantId, userId, unavailable) === 'include') {
-        tools.set(tool.name, tool)
+    for (const [index, mailbox] of bound.entries()) {
+      const accountRef = {
+        instanceId: mailbox.instanceId,
+        email: mailbox.email,
+        isPrimary: true,
+      }
+      const router: MailboxAccountRouter = {
+        list: () => [{ email: mailbox.email, isPrimary: true }],
+        get: (email) => email.trim().toLowerCase() === mailbox.email.trim().toLowerCase()
+          ? mailbox.api
+          : undefined,
+      }
+      // Attachment saves (Phase 3) land bytes in the workspace file primitive
+      // and then ride the existing file-ingest queue so the saved document is
+      // searchable — the `channel-media-deps` persist shape, on request only.
+      const accountTools: Tool[] = gateToolsOnActionGrants(
+        createMailboxTools(router, {
+          boundAccountEmail: mailbox.email,
+          ...(filesApi
+            ? {
+                attachments: {
+                  filesApi,
+                  enqueueIngest: async ({ fileId, workspaceId, actingUserId, assistantId: forAssistant }) => {
+                    await enqueueFileIngestJob({
+                      fileId,
+                      workspaceId,
+                      actingUserId,
+                      assistantId: forAssistant,
+                      sourceLabel: 'email-attachment',
+                    })
+                  },
+                },
+              }
+            : {}),
+        }),
+        'imap',
+        assistantConnectorGrantsStore,
+        assistantId,
+      )
+
+      // Archive search + on-demand sync stay outside the live API health wrap,
+      // but each is bound to the SAME concrete instance as this variant set.
+      if (archiveDeps) {
+        accountTools.push(createSearchEmailArchiveTool({
+          ownerUserId: userId,
+          accounts: [accountRef],
+          boundAccount: accountRef,
+          deps: archiveDeps,
+        }))
+      }
+      if (syncDeps) {
+        accountTools.push(createSyncMailboxNowTool({
+          accounts: [accountRef],
+          boundAccount: accountRef,
+          deps: syncDeps,
+        }))
+      }
+
+      const suffix = index === 0 ? '' : instanceToolSuffix(mailbox.instanceId, mailbox.email)
+      for (const rawTool of accountTools) {
+        const canonicalName = rawTool.name
+        const tool: Tool = {
+          ...rawTool,
+          name: `${canonicalName}${suffix}`,
+          description: `[${mailbox.email}] ${rawTool.description}`,
+        }
+        if (
+          await applyPolicyOrSkip(
+            tool,
+            'imap',
+            settingsStore,
+            assistantId,
+            userId,
+            unavailable,
+            canonicalName,
+          ) === 'include'
+        ) {
+          tools.set(tool.name, tool)
+        }
       }
     }
-    console.debug(`[mcp-inject] Company mailbox (imap): injected tools for ${bound.length} mailbox(es)`)
+    console.debug(`[mcp-inject] Company mailbox (imap): injected ${bound.length} account-bound tool set(s)`)
   } catch (err) {
     console.error('[mcp-inject] Company mailbox (imap) injection failed:', err)
   }

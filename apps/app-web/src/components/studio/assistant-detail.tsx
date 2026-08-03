@@ -1341,8 +1341,8 @@ type UserConnector = {
   // Allow/Ask/Block edits for team-owned connectors.
   instanceId?: string;
   // Provider-level multi-account projection (currently Company Email). The
-  // connector toggle/policies remain shared; this list shows which concrete
-  // accounts the single routed tool set can address.
+  // connector toggle/policies remain shared, while each account renders its
+  // own table corresponding to one runtime-bound canonical/variant tool set.
   accounts?: Array<{
     instanceId: string;
     label: string;
@@ -1673,14 +1673,6 @@ function ConnectorsTab({ assistantId, workspaceId }: { assistantId: string; work
                     {c.custom && c.url && (
                       <div className="text-[11px] text-muted-foreground truncate">{c.url}</div>
                     )}
-                    {c.accounts && c.accounts.length > 0 && (
-                      <div
-                        className="text-[11px] text-muted-foreground truncate"
-                        title={c.accounts.map((account) => account.label).join(" · ")}
-                      >
-                        {c.accounts.map((account) => account.label).join(" · ")}
-                      </div>
-                    )}
                   </div>
                 </button>
 
@@ -1753,6 +1745,7 @@ function ConnectorsTab({ assistantId, workspaceId }: { assistantId: string; work
                       }
                       workspaceId={workspaceId}
                       instanceId={c.instanceId}
+                      accountGroups={c.id === "imap" ? c.accounts : undefined}
                     />
                   </div>
                 </div>
