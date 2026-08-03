@@ -21,6 +21,7 @@ import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
 import type { ConnectorInstanceStore } from '../db/connector-instance-store.js'
 import { injectMcpTools, type ConfirmationEnricher, type McpInjectionResult } from '../mcp/inject.js'
 import { renderArtifactManifest } from '../files/artifact-manifest.js'
+import { truncateForInline } from '../files/inline-truncation.js'
 
 // ── User resolution ────────────────────────────────────────────
 
@@ -857,8 +858,13 @@ export type FileContentBlocksResult = {
  * - Text/JSON/CSV (small) → inlined as <attached_file> text
  * - Large files → durable artifact manifest when `promoteArtifact` is wired
  *   (large-content-artifacts §Phase 2.3); else cached in fileStore (if
- *   provided) with a readFileContent reference; else the 20K truncation
- *   fallback.
+ *   provided) with a readFileContent reference; else the truncation fallback.
+ *
+ * **The manifest path is web-only today.** Every messaging-channel caller
+ * passes `files` alone, so a large channel attachment always lands in the
+ * truncation branch. Wiring `promoteArtifact` into those routes is the open
+ * fix; until then `truncateForInline` at least makes the loss legible to the
+ * model. See `docs/plans/channel-attachment-truncation.md`.
  *
  * @param files - Array of file inputs to process
  * @param fileStore - Optional file store for caching large files
@@ -947,7 +953,7 @@ export async function buildFileContentBlocks(
             `<attached_file id="${cached.id}" name="${file.fileName}" type="${file.mimeType}">[Large file. Use readFileContent with fileId="${cached.id}" to retrieve full content.]</attached_file>`,
           )
         } else {
-          const truncated = text.length > 20000 ? text.slice(0, 20000) + '\n... [truncated]' : text
+          const truncated = truncateForInline(text)
           textParts.push(
             `<attached_file${file.id ? ` id="${file.id}"` : ''} name="${file.fileName}" type="${file.mimeType}">\n${truncated}\n</attached_file>`,
           )
@@ -965,8 +971,9 @@ export async function buildFileContentBlocks(
           `<attached_file id="${cached.id}" name="${file.fileName}" type="${file.mimeType}">[Large file. Use readFileContent with fileId="${cached.id}" to retrieve full content.]</attached_file>`,
         )
       } else {
-        // No fileStore — inline a truncated version
-        const truncated = text.length > 20000 ? text.slice(0, 20000) + '\n... [truncated]' : text
+        // No fileStore — inline a truncated version. This is the branch every
+        // messaging channel takes for a large attachment.
+        const truncated = truncateForInline(text)
         textParts.push(
           `<attached_file${file.id ? ` id="${file.id}"` : ''} name="${file.fileName}" type="${file.mimeType}">\n${truncated}\n</attached_file>`,
         )
