@@ -44,11 +44,20 @@ describe('[COMP:brain/assistant-connector-grants-store] getForAssistantSystem', 
     } as never)
     const out = await store.getForAssistantSystem('a-1', 'gmail')
     expect(out?.allowedActions).toEqual(['gmailSendMessage'])
+    expect(mockQuery.mock.calls[0][1]).toEqual(['a-1', 'gmail', 'gmail'])
   })
 
   it('returns null when no row exists (the secure default)', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
     expect(await store.getForAssistantSystem('a-1', 'gmail')).toBeNull()
+  })
+
+  it('prefers an account grant and falls back to the legacy provider grant', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    await store.getForAssistantSystem('a-1', 'imap:mailbox-1', 'imap')
+    const [sql, params] = mockQuery.mock.calls[0]
+    expect(sql).toContain('ORDER BY CASE WHEN connector_id = $2 THEN 0 ELSE 1 END')
+    expect(params).toEqual(['a-1', 'imap:mailbox-1', 'imap'])
   })
 })
 

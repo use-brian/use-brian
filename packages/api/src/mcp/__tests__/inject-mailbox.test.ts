@@ -74,7 +74,14 @@ function filesApiStub() {
 }
 
 async function injectImap(
-  over: { audit?: ConnectorActionAudit; instanceStore?: ConnectorInstanceStore; withFiles?: boolean } = {},
+  over: {
+    audit?: ConnectorActionAudit
+    instanceStore?: ConnectorInstanceStore
+    withFiles?: boolean
+    settingsStore?: Record<string, unknown>
+    assistantConnectorStore?: Record<string, unknown>
+    assistantConnectorGrantsStore?: Record<string, unknown>
+  } = {},
 ) {
   const tools = new Map<string, Tool>()
   const result = await injectMcpTools({
@@ -82,7 +89,9 @@ async function injectImap(
     assistantId: 'a-1',
     tools,
     connectorStore: { list: vi.fn().mockResolvedValue([imapConnectorRow()]) } as never,
-    settingsStore: settingsStoreStub() as never,
+    settingsStore: (over.settingsStore ?? settingsStoreStub()) as never,
+    ...(over.assistantConnectorStore ? { assistantConnectorStore: over.assistantConnectorStore as never } : {}),
+    ...(over.assistantConnectorGrantsStore ? { assistantConnectorGrantsStore: over.assistantConnectorGrantsStore as never } : {}),
     connectorInstanceStore: over.instanceStore ?? instanceStoreStub(),
     keepBuiltinsDirect: true,
     ...(over.withFiles ? { filesApi: filesApiStub() } : {}),
@@ -187,6 +196,104 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
     )
   })
 
+  it('multi-account: enablement and L2 policy resolve independently per mailbox governance id', async () => {
+    const primary = imapConnectorRow()
+    const second = {
+      ...imapConnectorRow(),
+      id: 'inst-imap-2',
+      name: 'ops@harborlane.example',
+      createdAt: new Date('2026-07-05T00:00:00Z'),
+    }
+    const credsById: Record<string, typeof IMAP_CREDS> = {
+      'inst-imap-1': IMAP_CREDS,
+      'inst-imap-2': { ...IMAP_CREDS, email: 'ops@harborlane.example' },
+    }
+    const instanceStore = {
+      getAuthCredentialsSystem: vi.fn(async (id: string) => credsById[id]),
+      getCredentialsSystem: vi.fn(async () => null),
+    } as unknown as ConnectorInstanceStore
+    const isEnabled = vi.fn(async (_assistantId: string, governanceId: string) => governanceId !== 'imap:inst-imap-2')
+    const tools = new Map<string, Tool>()
+
+    await injectMcpTools({
+      userId: 'u-1', assistantId: 'a-1', tools,
+      connectorStore: { list: vi.fn().mockResolvedValue([primary, second]) } as never,
+      settingsStore: settingsStoreStub() as never,
+      assistantConnectorStore: { isEnabled } as never,
+      connectorInstanceStore: instanceStore,
+      keepBuiltinsDirect: true,
+    })
+
+    expect(isEnabled).toHaveBeenCalledWith('a-1', 'imap:inst-imap-1', 'imap')
+    expect(isEnabled).toHaveBeenCalledWith('a-1', 'imap:inst-imap-2', 'imap')
+    expect([...tools.keys()].filter((name) => name === 'imapSearchMessages' || name.startsWith('imapSearchMessages__'))).toEqual([
+      'imapSearchMessages',
+    ])
+
+    const getPolicy = vi.fn(async ({ assistantId, serverName, toolName }: {
+      assistantId: string; serverName: string; toolName: string
+    }) => (
+      assistantId === 'a-1'
+      && serverName === 'imap:inst-imap-2'
+      && toolName === 'imapSendMessage'
+        ? { policy: 'block' }
+        : null
+    ))
+    const policyTools = new Map<string, Tool>()
+    await injectMcpTools({
+      userId: 'u-1', assistantId: 'a-1', tools: policyTools,
+      connectorStore: { list: vi.fn().mockResolvedValue([primary, second]) } as never,
+      settingsStore: { getPolicy, setPolicy: vi.fn(), recordUsage: vi.fn(), recordUsageAndGetCount: vi.fn() } as never,
+      connectorInstanceStore: instanceStore,
+      keepBuiltinsDirect: true,
+    })
+
+    expect(policyTools.has('imapSendMessage')).toBe(true)
+    expect([...policyTools.keys()].some((name) => name.startsWith('imapSendMessage__'))).toBe(false)
+    expect(getPolicy).toHaveBeenCalledWith(expect.objectContaining({
+      assistantId: 'a-1', serverName: 'imap:inst-imap-2', toolName: 'imapSendMessage',
+    }))
+  })
+
+  it('multi-account: write grants are looked up per mailbox with legacy provider fallback', async () => {
+    const primary = imapConnectorRow()
+    const second = {
+      ...imapConnectorRow(), id: 'inst-imap-2', name: 'ops@harborlane.example',
+      createdAt: new Date('2026-07-05T00:00:00Z'),
+    }
+    const credsById: Record<string, typeof IMAP_CREDS> = {
+      'inst-imap-1': IMAP_CREDS,
+      'inst-imap-2': { ...IMAP_CREDS, email: 'ops@harborlane.example' },
+    }
+    const instanceStore = {
+      getAuthCredentialsSystem: vi.fn(async (id: string) => credsById[id]),
+      getCredentialsSystem: vi.fn(async () => null),
+    } as unknown as ConnectorInstanceStore
+    const getForAssistantSystem = vi.fn(async (_assistantId: string, governanceId: string) => ({
+      allowedActions: governanceId === 'imap:inst-imap-1' ? ['imapSendMessage'] : [],
+    }))
+    const audit = {
+      preflight: vi.fn(() => preflightResult({ shouldDeny: true, classifierMatches: ['test'] })),
+      emit: vi.fn(async () => ({ status: 'denied' as const })),
+    } as unknown as ConnectorActionAudit
+    const tools = new Map<string, Tool>()
+    await injectMcpTools({
+      userId: 'u-1', assistantId: 'a-1', tools,
+      connectorStore: { list: vi.fn().mockResolvedValue([primary, second]) } as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorInstanceStore: instanceStore,
+      assistantConnectorGrantsStore: { getForAssistantSystem } as never,
+      connectorActionAudit: audit,
+      keepBuiltinsDirect: true,
+    })
+
+    const sends = [...tools.entries()].filter(([name]) => name === 'imapSendMessage' || name.startsWith('imapSendMessage__'))
+    await sends[0][1].execute({ to: ['x@y.z'], subject: 's', body: 'b' }, {} as never)
+    await expect(sends[1][1].execute({ to: ['x@y.z'], subject: 's', body: 'b' }, {} as never)).rejects.toThrow(/cannot perform/)
+    expect(getForAssistantSystem).toHaveBeenCalledWith('a-1', 'imap:inst-imap-1', 'imap')
+    expect(getForAssistantSystem).toHaveBeenCalledWith('a-1', 'imap:inst-imap-2', 'imap')
+  })
+
   it('workspace grant overlay binds a tool set for every exposed mailbox from the winning grantor and no others', async () => {
     const credsById: Record<string, typeof IMAP_CREDS> = {
       'imap-primary': IMAP_CREDS,
@@ -266,7 +373,7 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
     expect(descriptions).not.toContain('private@harborlane.example')
   })
 
-  it('injects every workspace-owned mailbox for a workspace assistant (team-native overlay)', async () => {
+  it('injects every workspace-owned mailbox with independent workspace policy (team-native overlay)', async () => {
     // `POST /api/connector-instances/:id/transfer` moves a personal mailbox to
     // `scope='workspace'` AND DELETES its grants — a workspace-owned instance is
     // visible by scope, so it needs none. That leaves the team-native overlay as
@@ -297,6 +404,12 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
         },
       ]),
     } as unknown as ConnectorInstanceStore
+    const getPolicy = vi.fn(async (_workspaceId: string, serverName: string, toolName: string) => {
+      if (toolName !== 'imapSendMessage') return null
+      if (serverName === 'imap') return { policy: 'block', classification: 'write' }
+      if (serverName === 'imap:inst-imap-team-2') return { policy: 'allow', classification: 'write' }
+      return null
+    })
 
     await injectMcpTools({
       userId: 'u-1', assistantId: 'a-1', tools,
@@ -305,14 +418,18 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
       settingsStore: settingsStoreStub() as never,
       connectorInstanceStore: instanceStore,
       connectorGrantStore: { listForTargetSystem: vi.fn().mockResolvedValue([]) } as never,
+      workspaceToolPolicyStore: { getPolicy } as never,
       assistantTeamId: 'ws-1',
       keepBuiltinsDirect: true,
     })
 
     expect(tools.has('imapSearchMessages')).toBe(true)
     expect(tools.has('imapGetMessage')).toBe(true)
-    expect(tools.has('imapSendMessage')).toBe(true)
-    expect([...tools.keys()].filter((name) => name === 'imapSendMessage' || name.startsWith('imapSendMessage__'))).toHaveLength(2)
+    // Primary inherits the legacy provider block; the second account's exact
+    // allow row wins instead of being clamped by its sibling/provider policy.
+    expect(tools.has('imapSendMessage')).toBe(false)
+    expect([...tools.keys()].filter((name) => name.startsWith('imapSendMessage__'))).toHaveLength(1)
+    expect(getPolicy).toHaveBeenCalledWith('ws-1', 'imap:inst-imap-team-2', 'imapSendMessage')
     // Bound to the team-owned row, not to whatever the acting user owns.
     expect(instanceStore.getAuthCredentialsSystem).toHaveBeenCalledWith('inst-imap-team')
     expect(instanceStore.getAuthCredentialsSystem).toHaveBeenCalledWith('inst-imap-team-2')

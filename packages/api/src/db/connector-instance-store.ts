@@ -27,6 +27,20 @@ import type { ConnectorAuthType } from '@use-brian/shared'
 
 export type ConnectorScope = 'user' | 'workspace'
 
+/** Stable assistant-governance identity for one account-bound instance. */
+export function connectorInstanceGovernanceId(provider: string, instanceId: string): string {
+  return `${provider}:${instanceId}`
+}
+
+/** Recover the canonical provider + instance from an account governance id. */
+export function parseConnectorInstanceGovernanceId(
+  value: string,
+): { provider: string; instanceId: string } | null {
+  const separator = value.indexOf(':')
+  if (separator <= 0 || separator === value.length - 1) return null
+  return { provider: value.slice(0, separator), instanceId: value.slice(separator + 1) }
+}
+
 // (renamed from 'team' in migration 110)
 export type SensitivityTier = 'public' | 'internal' | 'confidential'
 

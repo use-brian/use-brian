@@ -41,7 +41,6 @@ import {
 import { useT } from "@/lib/i18n/client";
 import {
   ConnectorToolList,
-  type ConnectorToolAccountGroup,
   type ConnectorToolListItem,
   type ToolPolicy,
 } from "./connector-tool-list";
@@ -67,16 +66,18 @@ const WORKSPACE_POLICY_DEFAULT: ToolPolicy = "ask";
 export function ConnectorToolGovernance({
   assistantId,
   connectorId,
+  governanceId = connectorId,
   scope,
   tools,
   loading,
   onPolicyChange,
   workspaceId,
   instanceId,
-  accountGroups,
 }: {
   assistantId: string;
   connectorId: string;
+  /** Persisted governance key. Account-bound IMAP uses `imap:<instanceId>`. */
+  governanceId?: string;
   /** Connector scope from GET /api/assistants/:id/connectors. */
   scope?: string;
   tools: ConnectorToolListItem[];
@@ -87,8 +88,6 @@ export function ConnectorToolGovernance({
    *  shared policy routes are keyed by. */
   workspaceId?: string | null;
   instanceId?: string;
-  /** Multiple runtime-bound account tool sets sharing canonical governance. */
-  accountGroups?: ConnectorToolAccountGroup[];
 }) {
   const t = useT();
   const [allowed, setAllowed] = useState<Set<string>>(new Set());
@@ -112,12 +111,13 @@ export function ConnectorToolGovernance({
     authFetch(`${API_URL}/api/assistant-connector-grants/${assistantId}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((data: { grants?: Grant[] } | null) => {
-        const grant = data?.grants?.find((g) => g.connectorId === connectorId);
+        const grant = data?.grants?.find((g) => g.connectorId === governanceId)
+          ?? data?.grants?.find((g) => g.connectorId === connectorId);
         setAllowed(new Set(grant?.allowedActions ?? []));
       })
       .catch(() => setAllowed(new Set()))
       .finally(() => setGrantsLoading(false));
-  }, [assistantId, connectorId, grantsApply]);
+  }, [assistantId, connectorId, governanceId, grantsApply]);
 
   useEffect(() => {
     fetchGrant();
@@ -174,7 +174,7 @@ export function ConnectorToolGovernance({
     setSaving(true);
     try {
       const res = await authFetch(
-        `${API_URL}/api/assistant-connector-grants/${assistantId}/${connectorId}`,
+        `${API_URL}/api/assistant-connector-grants/${assistantId}/${encodeURIComponent(governanceId)}`,
         {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
@@ -233,7 +233,6 @@ export function ConnectorToolGovernance({
         loading={loading}
         onPolicyChange={teamNative ? handleWsPolicyChange : onPolicyChange}
         policyDisabled={teamNative && wsPolicyReadOnly}
-        accountGroups={accountGroups}
       />
     );
   }
@@ -266,7 +265,6 @@ export function ConnectorToolGovernance({
           onToggle: toggleAction,
         }}
         policyDisabled={teamNative && wsPolicyReadOnly}
-        accountGroups={accountGroups}
       />
     </div>
   );

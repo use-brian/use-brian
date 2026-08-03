@@ -27,11 +27,20 @@ describe('[COMP:api/assistant-connector-store] isEnabled', () => {
   it('returns the stored enabled flag when a row exists', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [{ enabled: false }], rowCount: 1 } as never)
     expect(await store.isEnabled('a-1', 'gmail')).toBe(false)
+    expect(mockQuery.mock.calls[0][1]).toEqual(['a-1', 'gmail', 'gmail'])
   })
 
   it('defaults to enabled when no row exists (opt-out model)', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
     expect(await store.isEnabled('a-1', 'gmail')).toBe(true)
+  })
+
+  it('prefers an account row and otherwise falls back to the legacy provider row', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ enabled: false }], rowCount: 1 } as never)
+    expect(await store.isEnabled('a-1', 'imap:mailbox-1', 'imap')).toBe(false)
+    const [sql, params] = mockQuery.mock.calls[0]
+    expect(sql).toContain('ORDER BY CASE WHEN connector_id = $2 THEN 0 ELSE 1 END')
+    expect(params).toEqual(['a-1', 'imap:mailbox-1', 'imap'])
   })
 })
 

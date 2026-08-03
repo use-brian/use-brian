@@ -49,13 +49,6 @@ export type ConnectorToolListItem = {
   minStrictness?: ToolPolicy;
 };
 
-export type ConnectorToolAccountGroup = {
-  instanceId: string;
-  label: string;
-  connected: boolean;
-  isPrimary: boolean;
-};
-
 export type ToolGrantState = {
   /** Write/destructive tool names currently granted to this assistant. */
   allowed: Set<string>;
@@ -72,7 +65,6 @@ export function ConnectorToolList({
   onPolicyChange,
   grants,
   policyDisabled,
-  accountGroups,
 }: {
   connectorId: string;
   tools: ConnectorToolListItem[];
@@ -80,11 +72,6 @@ export function ConnectorToolList({
   onPolicyChange: (toolName: string, policy: ToolPolicy) => void;
   grants?: ToolGrantState;
   policyDisabled?: boolean;
-  /**
-   * Account-bound runtime tool sets. Rows repeat by account while grant and
-   * policy state stay canonical/provider-level.
-   */
-  accountGroups?: ConnectorToolAccountGroup[];
 }) {
   const t = useT();
   if (loading) {
@@ -99,36 +86,6 @@ export function ConnectorToolList({
     return (
       <div className="rounded-lg border border-border px-4 py-5 text-center text-xs text-muted-foreground">
         {t.connectorToolList.noTools}
-      </div>
-    );
-  }
-
-  if (accountGroups && accountGroups.length > 0) {
-    return (
-      <div className="space-y-2">
-        {accountGroups.map((account) => (
-          <div
-            key={account.instanceId}
-            data-mailbox-tool-group={account.instanceId}
-            className="rounded-lg border border-border overflow-hidden"
-          >
-            <div className="bg-muted/40 px-4 py-2 border-b border-border">
-              <span className="text-[11px] font-semibold text-foreground">{account.label}</span>
-            </div>
-            <div className="divide-y divide-border">
-              {tools.map((tool) => (
-                <ToolRow
-                  key={`${account.instanceId}:${tool.name}`}
-                  tool={tool}
-                  onPolicyChange={onPolicyChange}
-                  grants={grants}
-                  policyDisabled={policyDisabled}
-                  connectorId={connectorId}
-                />
-              ))}
-            </div>
-          </div>
-        ))}
       </div>
     );
   }

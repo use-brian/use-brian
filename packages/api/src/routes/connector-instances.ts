@@ -5,7 +5,11 @@
  */
 import { Router, type Response } from 'express'
 import { z } from 'zod'
-import type { ConnectorInstanceStore, SensitivityTier } from '../db/connector-instance-store.js'
+import {
+  connectorInstanceGovernanceId,
+  type ConnectorInstanceStore,
+  type SensitivityTier,
+} from '../db/connector-instance-store.js'
 import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 import {
@@ -185,7 +189,19 @@ export function workspaceConnectorInstanceRoutes(opts: ConnectorInstanceRouteOpt
     if (!gate) return
     const workspaceId = (req.params as Record<string, string>).workspaceId
     const policies = await opts.workspaceToolPolicyStore.listForWorkspace(workspaceId)
-    res.json({ policies: policies.filter((policy) => policy.serverName === gate.instance.provider) })
+    const governanceId = gate.instance.provider === 'imap'
+      ? connectorInstanceGovernanceId('imap', gate.instance.id)
+      : gate.instance.provider
+    // Legacy provider rows seed an account until that concrete instance has an
+    // explicit row. Exact rows overwrite by tool, so sibling edits stay split.
+    const byTool = new Map<string, (typeof policies)[number]>()
+    for (const policy of policies) {
+      if (policy.serverName === gate.instance.provider) byTool.set(policy.toolName, policy)
+    }
+    for (const policy of policies) {
+      if (policy.serverName === governanceId) byTool.set(policy.toolName, policy)
+    }
+    res.json({ policies: [...byTool.values()] })
   })
 
   router.put('/:instanceId/tools/:toolName/policy', async (req, res) => {
@@ -197,9 +213,12 @@ export function workspaceConnectorInstanceRoutes(opts: ConnectorInstanceRouteOpt
       return
     }
     const workspaceId = (req.params as Record<string, string>).workspaceId
+    const governanceId = gate.instance.provider === 'imap'
+      ? connectorInstanceGovernanceId('imap', gate.instance.id)
+      : gate.instance.provider
     const policy = await opts.workspaceToolPolicyStore.setPolicy({
       workspaceId,
-      serverName: gate.instance.provider,
+      serverName: governanceId,
       toolName: req.params.toolName,
       policy: parsed.data.policy,
       classification: parsed.data.classification ?? null,
