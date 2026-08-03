@@ -337,6 +337,82 @@ describe('[COMP:engine/tool-executor] error result caps', () => {
     // The failing field path is surfaced, not buried.
     expect(content).toContain('count:')
   })
+
+  // A union mismatch renders in zod as the bare word "Invalid input", naming
+  // neither what arrived nor what was allowed. Collapsing the branch errors
+  // wholesale (the 2026-06-01 over-correction) made every union param
+  // unactionable: the model cannot retry what it cannot see, so it gives up.
+  // `listTasks({status})` failed this way 35 times between 2026-07-08 and
+  // 2026-08-03, silently dropping a person from each morning digest.
+  const STATUSES = ['todo', 'in_progress', 'in_review', 'blocked', 'done', 'archived'] as const
+  const statusUnion = z.enum(STATUSES).or(z.array(z.enum(STATUSES)))
+
+  async function formatFor(input: Record<string, unknown>): Promise<string> {
+    const tools = new Map<string, Tool>([
+      ['listish', buildTool({
+        name: 'listish',
+        description: 'Tool with a single-or-array enum param.',
+        inputSchema: z.object({ status: statusUnion.optional() }),
+        isConcurrencySafe: true,
+        isReadOnly: true,
+        async execute() { return { data: 'ok' } },
+      })],
+    ])
+    const executor = createToolExecutor({ tools, context: ctx, loopDetector: createLoopDetector() })
+    executor.addTool('call_1', 'listish', input)
+    const results = await drainResults(executor)
+    return String((results[0] as Extract<ContentBlock, { type: 'tool_result' }>).content)
+  }
+
+  it('names the received value and the allowed set on a union mismatch', async () => {
+    // The production shape: a JSON-stringified array.
+    const content = await formatFor({ status: '["todo","in_progress","blocked"]' })
+    expect(content).toContain('status:')
+    // The whole point — the bare zod message is no longer the entire story.
+    expect(content).not.toMatch(/status: Invalid input\s*$/)
+    // What was allowed…
+    expect(content).toContain('todo')
+    expect(content).toContain('archived')
+    // …and what actually arrived.
+    expect(content).toContain('received')
+  })
+
+  it('surfaces the offending ARRAY ELEMENT, which is a level deeper than the union', async () => {
+    const content = await formatFor({ status: ['todo', 'pending'] })
+    // The array branch blames `status.1`; that path is the most useful line in
+    // the whole error and must survive the collapse.
+    expect(content).toContain('status.1')
+    expect(content).toContain('pending')
+  })
+
+  it('stays bounded — the caps, not the detail, are what prevent the 2026-06-01 blob', async () => {
+    // A union whose branches are themselves large: without caps this is the
+    // recursive dump that cost ~60k tokens per loop iteration.
+    const fat = z.union([
+      z.object({ a: z.string(), b: z.string(), c: z.string(), d: z.string() }),
+      z.object({ e: z.string(), f: z.string(), g: z.string(), h: z.string() }),
+      z.object({ i: z.string(), j: z.string(), k: z.string(), l: z.string() }),
+      z.object({ m: z.string(), n: z.string(), o: z.string(), p: z.string() }),
+    ])
+    const tools = new Map<string, Tool>([
+      ['fat', buildTool({
+        name: 'fat',
+        description: 'Tool with a fat union param.',
+        inputSchema: z.object({ payload: fat }),
+        isConcurrencySafe: true,
+        isReadOnly: true,
+        async execute() { return { data: 'ok' } },
+      })],
+    ])
+    const executor = createToolExecutor({ tools, context: ctx, loopDetector: createLoopDetector() })
+    executor.addTool('call_1', 'fat', { payload: { zzz: 1 } })
+    const results = await drainResults(executor)
+    const content = String((results[0] as Extract<ContentBlock, { type: 'tool_result' }>).content)
+    expect(content).not.toContain('unionErrors')
+    // 320-char detail budget + the surrounding line, nowhere near the cap.
+    expect(content.length).toBeLessThan(1_000)
+    expect(content).not.toContain(TRUNCATION_MARKER)
+  })
 })
 
 describe('[COMP:engine/tool-executor] loop detector integration', () => {

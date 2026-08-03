@@ -3,7 +3,7 @@ import { extractCitations, formatStamp, type CitationIndex } from '@use-brian/sh
 import type { AccessContext } from '../security/access-context.js'
 import { unionCompartments } from '../security/compartments.js'
 import { buildTool, type Tool } from '../tools/types.js'
-import { tolerantBoolean, tolerantInt } from '../tools/schema-tolerance.js'
+import { tolerantBoolean, tolerantEnumArray, tolerantInt } from '../tools/schema-tolerance.js'
 import {
   applyExplicitCloses,
   applyExplicitLinks,
@@ -403,7 +403,10 @@ export function createTaskTools(
       'Default excludes archived tasks (set `include_archived: true` to include them). Default limit is 25 (max 100). Status accepts a single value or an array (e.g. `["todo", "in_progress"]`).',
     inputSchema: z.object({
       assignee_id: idShape.optional(),
-      status: statusEnum.or(z.array(statusEnum)).optional(),
+      // Tolerant because this is the param models serialise loosely — a
+      // stringified or comma-joined list reads as neither branch of the union
+      // and failed 35 times in production. See `tolerantEnumArray`.
+      status: tolerantEnumArray(TASK_STATUSES).optional(),
       due_before: isoDateOrDateTime.optional(),
       due_after: isoDateOrDateTime.optional(),
       tag: z.string().min(1).max(64).optional(),
