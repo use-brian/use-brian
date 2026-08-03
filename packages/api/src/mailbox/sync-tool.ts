@@ -38,15 +38,13 @@ export function getGlobalMailboxSyncDeps(): MailboxSyncNowDeps | null {
   return globalMailboxSyncDeps
 }
 
-const inputSchema = z.object({
-  account: z
-    .string()
-    .optional()
-    .describe(
-      'Which connected company mailbox to sync, by its email address. ' +
-      'Omit to sync the primary (first-connected) mailbox. Only needed when more than one mailbox is connected.',
-    ),
-})
+const syncAccountField = z
+  .string()
+  .optional()
+  .describe(
+    'Which connected company mailbox to sync, by its email address. ' +
+    'Omit to sync the primary (first-connected) mailbox. Only needed when more than one mailbox is connected.',
+  )
 
 /** A connected mailbox, primary first — bound at injection, never model input. */
 export type SyncAccountRef = {
@@ -58,10 +56,13 @@ export type SyncAccountRef = {
 export type CreateSyncMailboxNowToolOptions = {
   /** The owner's connected mailboxes, primary first — bound at injection. */
   accounts: SyncAccountRef[]
+  /** Fixed runtime variant identity. Omits `account` from the tool schema. */
+  boundAccount?: SyncAccountRef
   deps: MailboxSyncNowDeps
 }
 
 export function createSyncMailboxNowTool(opts: CreateSyncMailboxNowToolOptions): Tool {
+  const accountInputShape: z.ZodRawShape = opts.boundAccount ? {} : { account: syncAccountField }
   return buildTool({
     name: 'syncMailboxNow',
     description:
@@ -69,8 +70,10 @@ export function createSyncMailboxNowTool(opts: CreateSyncMailboxNowToolOptions):
       'The archive otherwise syncs on a few-minute delay, so call this first when the user asks about very recent mail and you intend to answer with searchEmailArchive. ' +
       'For a single fresh or exact lookup (a known sender, subject, or date), imapSearchMessages queries the live server directly and needs no sync. ' +
       'Returns how many new messages were pulled. ' +
-      'If more than one company mailbox is connected, pass `account` (the mailbox email) to choose which; omit it for the primary.',
-    inputSchema,
+      (opts.boundAccount
+        ? `This tool is bound to ${opts.boundAccount.email}; use the separately named tool set for another mailbox.`
+        : 'If more than one company mailbox is connected, pass `account` (the mailbox email) to choose which; omit it for the primary.'),
+    inputSchema: z.object(accountInputShape),
     isReadOnly: false,
     isConcurrencySafe: false,
     requiresConfirmation: false,
@@ -80,17 +83,21 @@ export function createSyncMailboxNowTool(opts: CreateSyncMailboxNowToolOptions):
       if (accounts.length === 0) {
         return { data: 'No company mailbox is connected. Connect one in Studio → Connectors, then try again.', isError: true }
       }
-      let target: SyncAccountRef | undefined
-      if (input.account) {
-        const wanted = input.account.trim().toLowerCase()
+      let target: SyncAccountRef | undefined = opts.boundAccount
+      const inputWithAccount = input as unknown as { account?: unknown }
+      const selectedAccount = typeof inputWithAccount.account === 'string'
+        ? inputWithAccount.account
+        : undefined
+      if (!target && selectedAccount) {
+        const wanted = selectedAccount.trim().toLowerCase()
         target = accounts.find((a) => a.email.trim().toLowerCase() === wanted)
         if (!target) {
           return {
-            data: `No connected company mailbox "${input.account}". Connected mailboxes: ${accounts.map((a) => a.email).join(', ')}.`,
+            data: `No connected company mailbox "${selectedAccount}". Connected mailboxes: ${accounts.map((a) => a.email).join(', ')}.`,
             isError: true,
           }
         }
-      } else {
+      } else if (!target) {
         target = accounts.find((a) => a.isPrimary) ?? accounts[0]
       }
       try {

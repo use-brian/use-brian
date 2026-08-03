@@ -140,7 +140,7 @@ describe('[COMP:routes/assistants-connector-scoping] GET /:assistantId/connector
     expect(gmail?.scope).toBe('team-grant')
   })
 
-  it('lists every exposed IMAP mailbox from the winning grantor on one provider-policy card', async () => {
+  it('projects every winning-grantor IMAP mailbox for separate tool tables on one provider-policy card', async () => {
     queueMembershipAndTeam('owner', 'ws-personal')
     connectorGrantStore.listForTargetSystem.mockResolvedValueOnce([
       {

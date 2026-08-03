@@ -250,19 +250,16 @@ function mailboxError(err: unknown): { data: string; isError: true } {
 
 /** A connected company mailbox, primary (first-connected) first. */
 export type MailboxAccountRef = {
-  /** The mailbox email address — the value the model passes as `account`. */
+  /** The mailbox email address — the router's authoritative identity key. */
   email: string
   /** True for the user's primary (first-connected) mailbox — the default sender. */
   isPrimary: boolean
 }
 
 /**
- * Multi-account router (D11 retired — the AgentMail `fromInbox` precedent):
- * the tools stay ONE set, an optional `account` picks one of the user's
- * connected mailboxes, and an omitted `account` resolves to the primary
- * (first-connected). The injector builds this over one per-instance
- * `MailboxApi` each; `list()` and `get()` are cheap (creds lazy-load on the
- * first real IMAP call).
+ * Mailbox router. It still supports the legacy multi-account `account`
+ * selector for direct factory consumers, while runtime injection now builds a
+ * one-account router per instance and hides that selector from the tool schema.
  */
 export type MailboxAccountRouter = {
   /** Every connected mailbox for this user, primary first. */
@@ -342,6 +339,12 @@ export type MailboxAttachmentDeps = {
 
 export type CreateMailboxToolsOptions = {
   attachments?: MailboxAttachmentDeps
+  /**
+   * Bind every generated tool to this mailbox and omit `account` from its
+   * model-facing schema. Runtime injection sets this for every per-instance
+   * canonical/variant tool set.
+   */
+  boundAccountEmail?: string
 }
 
 /** Filesystem-safe leaf name, mirroring the channel-media persist shape. */
@@ -358,6 +361,19 @@ export function createMailboxTools(
   opts?: CreateMailboxToolsOptions,
 ): Tool[] {
   const attachmentDeps = opts?.attachments
+  const boundAccountEmail = opts?.boundAccountEmail
+  const accountInputShape: z.ZodRawShape = boundAccountEmail ? {} : { account: accountField }
+  const resolveForInput = (input: unknown) => {
+    const selected = boundAccountEmail ?? (
+      typeof (input as { account?: unknown } | null)?.account === 'string'
+        ? (input as { account: string }).account
+        : undefined
+    )
+    return resolveMailboxAccount(router, selected)
+  }
+  const accountRoutingDescription = boundAccountEmail
+    ? `This tool is bound to ${boundAccountEmail}; use the separately named tool set for another mailbox.`
+    : 'If more than one company mailbox is connected, pass `account` (the mailbox email) to choose which; omit it for the primary.'
   const searchMessages = buildTool({
     name: 'imapSearchMessages',
     description:
@@ -366,7 +382,7 @@ export function createMailboxTools(
       'Server-side search is substring matching with no ranking — iterate like grep: start with 2-4 `keywords` (they are OR\'d in one round trip, so include synonyms), ' +
       'then refine by sender, subject, or date. Results come back grouped into conversation threads with snippets. ' +
       `Defaults to the last ${MAILBOX_DEFAULT_WINDOW_DAYS} days — pass \`since\` to search older mail. ` +
-      'If more than one company mailbox is connected, pass `account` (the mailbox email) to choose which; omit it for the primary.',
+      accountRoutingDescription,
     inputSchema: z.object({
       keywords: z
         .array(z.string())
@@ -392,14 +408,14 @@ export function createMailboxTools(
         .max(MAILBOX_MAX_LIMIT)
         .optional()
         .describe(`Max messages to return (default ${MAILBOX_DEFAULT_LIMIT}, max ${MAILBOX_MAX_LIMIT}).`),
-      account: accountField,
+      ...accountInputShape,
     }),
     isConcurrencySafe: true,
     isReadOnly: true,
     timeoutMs: 30_000,
 
     async execute(input) {
-      const resolved = resolveMailboxAccount(router, input.account)
+      const resolved = resolveForInput(input)
       if (!resolved.ok) return { data: resolved.error, isError: true }
       const api = resolved.api
       try {
@@ -435,17 +451,18 @@ export function createMailboxTools(
       // tool-awareness rule applied at the description level.
       (attachmentDeps
         ? 'To hand an attachment to the user, save it with imapSaveAttachment using its `partId`, then deliver it with sendFile.'
-        : 'Attachment contents cannot be fetched here.'),
+        : 'Attachment contents cannot be fetched here.') +
+      ` ${accountRoutingDescription}`,
     inputSchema: z.object({
       messageId: z.string().describe('The message id from imapSearchMessages results (`folder:uid`).'),
-      account: accountField,
+      ...accountInputShape,
     }),
     isConcurrencySafe: true,
     isReadOnly: true,
     timeoutMs: 20_000,
 
     async execute(input) {
-      const resolved = resolveMailboxAccount(router, input.account)
+      const resolved = resolveForInput(input)
       if (!resolved.ok) return { data: resolved.error, isError: true }
       try {
         const data = await resolved.api.getMessage(input.messageId)
@@ -464,7 +481,7 @@ export function createMailboxTools(
       'Call this tool directly — the user will see an Approve/Deny prompt. ' +
       'To reply on an existing thread, pass the original message\'s id as `inReplyTo` so the reply threads correctly. ' +
       'Copy additional people with `cc` (visible to every recipient) or `bcc` (hidden from the others); put an internal colleague you are looping in on `cc` unless the user asks to keep them hidden. ' +
-      'If more than one company mailbox is connected, pass `account` (the mailbox email) to choose which address to send AS; omit it for the primary.',
+      accountRoutingDescription,
     inputSchema: z.object({
       to: z.array(z.string()).min(1).max(20).describe('Recipient email addresses.'),
       cc: z.array(z.string()).max(20).optional().describe('CC addresses: copied recipients, visible to everyone on the email.'),
@@ -481,7 +498,7 @@ export function createMailboxTools(
         .string()
         .optional()
         .describe('Message id (`folder:uid`) of the message being replied to — threads the reply via In-Reply-To/References.'),
-      account: accountField,
+      ...accountInputShape,
     }),
     isConcurrencySafe: false,
     isReadOnly: false,
@@ -497,8 +514,7 @@ export function createMailboxTools(
         subject?: unknown
         body?: unknown
       }
-      const account = typeof draft.account === 'string' ? draft.account : undefined
-      const resolved = resolveMailboxAccount(router, account)
+      const resolved = resolveForInput(draft)
       if (!resolved.ok) return null
       const recipients = (value: unknown): string[] =>
         Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : []
@@ -517,7 +533,7 @@ export function createMailboxTools(
     },
 
     async execute(input, context) {
-      const resolved = resolveMailboxAccount(router, input.account)
+      const resolved = resolveForInput(input)
       if (!resolved.ok) return { data: resolved.error, isError: true }
       try {
         // Egress-safety gate (the gmailSendMessage / agentmail precedent):
@@ -566,7 +582,7 @@ export function createMailboxTools(
           "Save one attachment from an email in the user's company mailbox into the workspace as a real file, then attach it to your reply with sendFile. " +
           'Use this when the user asks for a document that arrived by email (a boarding pass, invoice, statement, contract) — read the message with imapGetMessage first, take the `partId` of the attachment you want from its attachment list, save it here, then pass the returned `fileId` to sendFile. ' +
           `One attachment per call, up to ${formatMb(MAILBOX_ATTACHMENT_MAX_BYTES)}. ` +
-          'If more than one company mailbox is connected, pass `account` (the mailbox email) to choose which; omit it for the primary.',
+          accountRoutingDescription,
         inputSchema: z.object({
           messageId: z.string().describe('The message id from imapSearchMessages or imapGetMessage (`folder:uid`).'),
           partId: z
@@ -578,7 +594,7 @@ export function createMailboxTools(
             .max(256)
             .optional()
             .describe('Display label for the saved file. Defaults to the attachment filename.'),
-          account: accountField,
+          ...accountInputShape,
         }),
         isConcurrencySafe: false,
         isReadOnly: false,
@@ -589,7 +605,7 @@ export function createMailboxTools(
         async execute(input, context) {
           const gate = workspaceGate(context.workspaceId)
           if (gate) return gate
-          const resolved = resolveMailboxAccount(router, input.account)
+          const resolved = resolveForInput(input)
           if (!resolved.ok) return { data: resolved.error, isError: true }
           try {
             // Both size gates (BODYSTRUCTURE pre-check + streamed byte count)

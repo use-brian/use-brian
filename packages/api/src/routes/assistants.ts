@@ -629,8 +629,8 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
         grantedByUserId?: string
         /**
          * Provider-level multi-account display. Policies and enablement remain
-         * keyed by `id` (`imap`); these rows make every routed mailbox visible
-         * without pretending each instance has an independent toggle.
+         * keyed by `id` (`imap`); app-web renders one table per account-bound
+         * runtime tool set without inventing per-instance policy records.
          */
         accounts?: Array<{
           instanceId: string
@@ -719,8 +719,8 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
             winningImapGrantor ??= g.grantedByUserId
             if (winningImapGrantor !== g.grantedByUserId) continue
             if (g.instance.healthStatus === 'auth_failed') continue
-            // Runtime aggregates only grants from the first (oldest) winning
-            // grantor, so the display must shadow later grantors the same way.
+            // Runtime emits separate tool sets only for grants from the first
+            // (oldest) winning grantor, so the display shadows later grantors.
             if (existing?.scope === 'team-grant') {
               if (existing.grantedByUserId !== g.grantedByUserId) continue
               existing.accounts?.push({

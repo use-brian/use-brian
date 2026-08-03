@@ -41,6 +41,7 @@ import {
 import { useT } from "@/lib/i18n/client";
 import {
   ConnectorToolList,
+  type ConnectorToolAccountGroup,
   type ConnectorToolListItem,
   type ToolPolicy,
 } from "./connector-tool-list";
@@ -72,6 +73,7 @@ export function ConnectorToolGovernance({
   onPolicyChange,
   workspaceId,
   instanceId,
+  accountGroups,
 }: {
   assistantId: string;
   connectorId: string;
@@ -85,6 +87,8 @@ export function ConnectorToolGovernance({
    *  shared policy routes are keyed by. */
   workspaceId?: string | null;
   instanceId?: string;
+  /** Multiple runtime-bound account tool sets sharing canonical governance. */
+  accountGroups?: ConnectorToolAccountGroup[];
 }) {
   const t = useT();
   const [allowed, setAllowed] = useState<Set<string>>(new Set());
@@ -229,6 +233,7 @@ export function ConnectorToolGovernance({
         loading={loading}
         onPolicyChange={teamNative ? handleWsPolicyChange : onPolicyChange}
         policyDisabled={teamNative && wsPolicyReadOnly}
+        accountGroups={accountGroups}
       />
     );
   }
@@ -261,6 +266,7 @@ export function ConnectorToolGovernance({
           onToggle: toggleAction,
         }}
         policyDisabled={teamNative && wsPolicyReadOnly}
+        accountGroups={accountGroups}
       />
     </div>
   );

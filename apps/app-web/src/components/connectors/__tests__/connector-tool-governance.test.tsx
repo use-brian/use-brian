@@ -108,6 +108,32 @@ describe("[COMP:app-web/connector-tool-list] granted toggle + policy segments", 
     expect(html).not.toContain("data-grant-toggle");
     expect(html).toContain('aria-pressed');
   });
+
+  it("renders one bound tool table per mailbox while sharing canonical grant state", () => {
+    const imapTools: ConnectorToolListItem[] = [
+      { name: "imapSearchMessages", description: "Search mailbox", classification: "read", currentPolicy: "allow" },
+      { name: "imapSendMessage", description: "Send email", classification: "write", currentPolicy: "ask" },
+    ];
+    const html = wrap(
+      <ConnectorToolList
+        connectorId="imap"
+        tools={imapTools}
+        onPolicyChange={() => {}}
+        grants={grants(["imapSendMessage"])}
+        accountGroups={[
+          { instanceId: "imap-primary", label: "primary@example.com", connected: true, isPrimary: true },
+          { instanceId: "imap-ops", label: "ops@example.com", connected: true, isPrimary: false },
+        ]}
+      />,
+    );
+
+    expect(html).toContain('data-mailbox-tool-group="imap-primary"');
+    expect(html).toContain('data-mailbox-tool-group="imap-ops"');
+    expect(html).toContain("primary@example.com");
+    expect(html).toContain("ops@example.com");
+    expect(html.match(/data-tool-row="imapSearchMessages"/g)).toHaveLength(2);
+    expect(html.match(/data-grant-toggle="imap:imapSendMessage"/g)).toHaveLength(2);
+  });
 });
 
 describe("[COMP:app-web/connector-tool-governance] governance wrapper", () => {

@@ -41,7 +41,7 @@ export function getGlobalMailboxArchiveDeps(): MailboxArchiveDeps | null {
   return globalMailboxArchiveDeps
 }
 
-const inputSchema = z.object({
+const archiveSearchShape = {
   query: z
     .string()
     .describe('What to look for across the synced mailbox, in natural language.'),
@@ -63,20 +63,21 @@ const inputSchema = z.object({
     .regex(/^\d{4}-\d{2}-\d{2}$/)
     .optional()
     .describe('Latest sent date (YYYY-MM-DD), exclusive.'),
-  account: z
-    .string()
-    .optional()
-    .describe(
-      'Which connected company mailbox to search, by its email address. ' +
-      'Omit to search the primary (first-connected) mailbox. Only needed when more than one mailbox is connected.',
-    ),
-})
+}
+
+const archiveAccountField = z
+  .string()
+  .optional()
+  .describe(
+    'Which connected company mailbox to search, by its email address. ' +
+    'Omit to search the primary (first-connected) mailbox. Only needed when more than one mailbox is connected.',
+  )
 
 /** A connected mailbox archive, primary first — bound at injection, never model input. */
 export type ArchiveAccountRef = {
   /** The imap connector instance owning this archive. */
   instanceId: string
-  /** The mailbox email — the value the model passes as `account`. */
+  /** The mailbox email - authoritative identity for binding or legacy routing. */
   email: string
   /** True for the primary (first-connected) mailbox — the default. */
   isPrimary: boolean
@@ -87,11 +88,14 @@ export type CreateArchiveSearchToolOptions = {
   ownerUserId: string
   /** The owner's connected mailboxes, primary first — bound at injection. */
   accounts: ArchiveAccountRef[]
+  /** Fixed runtime variant identity. Omits `account` from the tool schema. */
+  boundAccount?: ArchiveAccountRef
   deps: MailboxArchiveDeps
 }
 
 export function createSearchEmailArchiveTool(opts: CreateArchiveSearchToolOptions): Tool {
   const search = opts.deps.search ?? searchEmailArchive
+  const accountInputShape: z.ZodRawShape = opts.boundAccount ? {} : { account: archiveAccountField }
   return buildTool({
     name: 'searchEmailArchive',
     description:
@@ -100,8 +104,10 @@ export function createSearchEmailArchiveTool(opts: CreateArchiveSearchToolOption
       'Results carry a message id (`folder:uid`) usable with imapGetMessage for the full message. ' +
       'For fresh or exact lookups (new mail, a known sender/date), use imapSearchMessages instead — the archive syncs on a delay. ' +
       'For cross-source company knowledge, use searchBrain. ' +
-      'If more than one company mailbox is connected, pass `account` (the mailbox email) to choose which; omit it for the primary.',
-    inputSchema,
+      (opts.boundAccount
+        ? `This tool is bound to ${opts.boundAccount.email}; use the separately named tool set for another mailbox.`
+        : 'If more than one company mailbox is connected, pass `account` (the mailbox email) to choose which; omit it for the primary.'),
+    inputSchema: z.object({ ...archiveSearchShape, ...accountInputShape }),
     isReadOnly: true,
     isConcurrencySafe: true,
     requiresConfirmation: false,
@@ -111,17 +117,21 @@ export function createSearchEmailArchiveTool(opts: CreateArchiveSearchToolOption
       if (accounts.length === 0) {
         return { data: 'No company mailbox is connected. Connect one in Studio → Connectors, then try again.', isError: true }
       }
-      let target: ArchiveAccountRef | undefined
-      if (input.account) {
-        const wanted = input.account.trim().toLowerCase()
+      let target: ArchiveAccountRef | undefined = opts.boundAccount
+      const inputWithAccount = input as unknown as { account?: unknown }
+      const selectedAccount = typeof inputWithAccount.account === 'string'
+        ? inputWithAccount.account
+        : undefined
+      if (!target && selectedAccount) {
+        const wanted = selectedAccount.trim().toLowerCase()
         target = accounts.find((a) => a.email.trim().toLowerCase() === wanted)
         if (!target) {
           return {
-            data: `No connected company mailbox "${input.account}". Connected mailboxes: ${accounts.map((a) => a.email).join(', ')}.`,
+            data: `No connected company mailbox "${selectedAccount}". Connected mailboxes: ${accounts.map((a) => a.email).join(', ')}.`,
             isError: true,
           }
         }
-      } else {
+      } else if (!target) {
         target = accounts.find((a) => a.isPrimary) ?? accounts[0]
       }
       try {
