@@ -854,7 +854,11 @@ export async function injectMcpTools(params: {
         .filter((c) => c.connectorId === provider && c.connected)
         .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
       if (insts.length > 1) {
-        extrasByProvider.set(provider, insts.slice(1).map((c) => ({ id: c.id, label: c.name })))
+        extrasByProvider.set(provider, insts.slice(1).map((c) => ({
+          id: c.id,
+          label: c.name,
+          connectedEmail: c.connectedEmail,
+        })))
       }
     }
   }
@@ -1043,7 +1047,18 @@ export async function injectMcpTools(params: {
           // injects every connected Google provider it sees in `connectors`, so
           // passing the grantor's full list would let an ungranted sibling
           // service (e.g. a personal Calendar) ride along on a granted Gmail.
-          await injectGoogleTools([{ connectorId: p, connected: true }], connectorStore, settingsStore, g.grantedByUserId, assistantId, assistantConnectorStore, tools, userTimezone, undefined, gdriveFilesStore, { [p]: boundGrantCreds }, connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain, filesApi)
+          await injectGoogleTools(
+            [{
+              connectorId: p,
+              connected: true,
+              name: g.instance.label,
+              connectedEmail: g.instance.connectedEmail,
+            }],
+            connectorStore, settingsStore, g.grantedByUserId, assistantId,
+            assistantConnectorStore, tools, userTimezone, undefined,
+            gdriveFilesStore, { [p]: boundGrantCreds }, connectorActionAudit,
+            assistantConnectorGrantsStore, workspaceDomain, filesApi,
+          )
         } else if (g.instance.custom && g.instance.url) {
           // Custom remote MCP shared via a grant. Respect Layer-2 enablement
           // (keyed on the provider UUID, like the team-native custom path),
@@ -1083,7 +1098,13 @@ export async function injectMcpTools(params: {
       // one, so the per-provider injectors' enable checks and discovery
       // logic don't need to change. `credsOverride` / `credsOverridePerConnector`
       // reroute the actual credential reads.
-      const syntheticConnectors: Array<{ connectorId: string; connected: boolean; url?: string | null }> = []
+      const syntheticConnectors: Array<{
+        connectorId: string
+        connected: boolean
+        name?: string
+        connectedEmail?: string | null
+        url?: string | null
+      }> = []
 
       for (const inst of teamNative) {
         if (!inst.connected) continue
@@ -1149,7 +1170,13 @@ export async function injectMcpTools(params: {
           unavailable.push(connectorReconnectNotice(p, inst.label))
           continue
         }
-        syntheticConnectors.push({ connectorId: p, connected: true, url: inst.url ?? null })
+        syntheticConnectors.push({
+          connectorId: p,
+          connected: true,
+          name: inst.label,
+          connectedEmail: inst.connectedEmail,
+          url: inst.url ?? null,
+        })
 
         if (p === 'github') {
           await injectGitHubTools(
@@ -1617,7 +1644,11 @@ function baseToolName(name: string): string {
   return i === -1 ? name : name.slice(0, i)
 }
 
-export type ConnectorInstanceRef = { id: string; label: string }
+export type ConnectorInstanceRef = {
+  id: string
+  label: string
+  connectedEmail?: string | null
+}
 
 /**
  * Inject label-qualified tool variants for each additional connector instance.
@@ -1773,7 +1804,13 @@ function expiredCredentialsNotice(displayName: string): string {
 }
 
 async function injectGoogleTools(
-  connectors: Array<{ connectorId: string; connected: boolean; url?: string | null }>,
+  connectors: Array<{
+    connectorId: string
+    connected: boolean
+    name?: string
+    connectedEmail?: string | null
+    url?: string | null
+  }>,
   connectorStore: ConnectorStore,
   settingsStore: McpSettingsStore,
   userId: string,
@@ -2159,7 +2196,10 @@ async function injectGoogleTools(
       // variants, same shape as the gcal builder above). The grants gate,
       // audit wrap, and classifier preflight are provider-level — shared
       // across accounts by design.
-      const buildGmailToolSet = (getToken: () => Promise<string>) => gateToolsOnActionGrants(createGmailTools({
+      const buildGmailToolSet = (
+        getToken: () => Promise<string>,
+        senderEmail?: string | null,
+      ) => gateToolsOnActionGrants(createGmailTools({
         listMessages: async (params) => {
           const token = await getToken()
           return listGmailMessages(token, params)
@@ -2286,8 +2326,11 @@ async function injectGoogleTools(
             throw err
           }
         },
-      }, { filesApi }), 'gmail', assistantConnectorGrantsStore, assistantId)
-      const gmailTools = buildGmailToolSet(() => getAccessToken('gmail'))
+      }, { filesApi, senderEmail: senderEmail ?? undefined }), 'gmail', assistantConnectorGrantsStore, assistantId)
+      const gmailTools = buildGmailToolSet(
+        () => getAccessToken('gmail'),
+        gmail.connectedEmail,
+      )
       for (const tool of gmailTools) {
         if (await applyPolicyOrSkip(tool, 'gmail', settingsStore, assistantId, userId, unavailable) === 'include') {
           tools.set(tool.name, tool)
@@ -2305,7 +2348,10 @@ async function injectGoogleTools(
           buildToolsForInstance: (inst) => {
             const getToken = () => getAccessTokenForInstance(inst.id)
             instanceTokenBySuffix.set(instanceToolSuffix(inst.id, inst.label), getToken)
-            return probeVariant(buildGmailToolSet(getToken), inst.id)
+            return probeVariant(
+              buildGmailToolSet(getToken, inst.connectedEmail),
+              inst.id,
+            )
           },
         })
       }

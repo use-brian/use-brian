@@ -41,6 +41,7 @@ import {
 } from "@/lib/approvals-events";
 import {
   extractAttachmentLines,
+  extractEmailSender,
   parseToolPreview,
 } from "@/lib/approval-previews";
 import { ToolPreview } from "@/components/doc/panels/approval-tool-previews";
@@ -272,6 +273,9 @@ function RunApprovalActions({
           <ToolPreview
             preview={preview}
             attachmentLines={extractAttachmentLines(
+              approval.approvalPayload.displayLines,
+            )}
+            senderEmail={extractEmailSender(
               approval.approvalPayload.displayLines,
             )}
           />

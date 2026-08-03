@@ -713,8 +713,8 @@ describe('[COMP:api/mcp-inject] multi-account Google built-ins', () => {
   function googleStores() {
     const connectorStore = {
       list: vi.fn().mockResolvedValue([
-        { id: 'ci-gm1', connectorId: 'gmail', name: 'Gmail', connected: true, url: null, custom: false, createdAt: new Date('2026-01-01T00:00:00Z') },
-        { id: 'ci-gm2', connectorId: 'gmail', name: 'Work', connected: true, url: null, custom: false, createdAt: new Date('2026-02-01T00:00:00Z') },
+        { id: 'ci-gm1', connectorId: 'gmail', name: 'Gmail', connectedEmail: 'primary@example.com', connected: true, url: null, custom: false, createdAt: new Date('2026-01-01T00:00:00Z') },
+        { id: 'ci-gm2', connectorId: 'gmail', name: 'Work', connectedEmail: 'work@example.com', connected: true, url: null, custom: false, createdAt: new Date('2026-02-01T00:00:00Z') },
         { id: 'ci-gc1', connectorId: 'gcal', name: 'Google Calendar', connected: true, url: null, custom: false, createdAt: new Date('2026-01-01T00:00:00Z') },
         { id: 'ci-gc2', connectorId: 'gcal', name: 'Work', connected: true, url: null, custom: false, createdAt: new Date('2026-02-01T00:00:00Z') },
       ]),
@@ -776,6 +776,38 @@ describe('[COMP:api/mcp-inject] multi-account Google built-ins', () => {
     expect(exchanged).toContain('refresh-primary')
     expect(exchanged).not.toContain('refresh-ci-gm2')
     expect(exchanged).not.toContain('refresh-ci-gc2')
+  })
+
+  it('binds each Gmail confirmation preview to its concrete sender account', async () => {
+    const tools = new Map()
+    const { connectorStore, connectorInstanceStore } = googleStores()
+    await injectMcpTools({
+      userId: 'u-1',
+      assistantId: 'a-1',
+      tools,
+      connectorStore: connectorStore as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorInstanceStore: connectorInstanceStore as never,
+      keepBuiltinsDirect: true,
+    })
+
+    const input = { to: ['client@example.com'], subject: 'Hi', body: 'Hello' }
+    const primary = tools.get('gmailSendMessage') as {
+      describeConfirmation: (input: unknown, context: unknown) => Promise<string[] | null>
+    }
+    expect(await primary.describeConfirmation(input, {})).toContain(
+      '• From: primary@example.com',
+    )
+
+    const variantName = [...tools.keys()].find((name) =>
+      String(name).startsWith('gmailSendMessage__'),
+    )
+    const variant = tools.get(variantName) as {
+      describeConfirmation: (input: unknown, context: unknown) => Promise<string[] | null>
+    }
+    expect(await variant.describeConfirmation(input, {})).toContain(
+      '• From: work@example.com',
+    )
   })
 
   it('enriches a suffixed confirmation with THAT account\'s token, not the primary\'s', async () => {

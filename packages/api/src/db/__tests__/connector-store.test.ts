@@ -37,6 +37,7 @@ function connectorRow(over: Record<string, unknown> = {}): Record<string, unknow
     userId: 'u-1',
     connectorId: 'gmail',
     name: 'Gmail',
+    connectedEmail: 'sender@example.com',
     url: null,
     custom: false,
     connected: true,
@@ -60,6 +61,7 @@ describe('[COMP:api/connector-store] list', () => {
     const [userId, sql, params] = mockRls.mock.calls[0]
     expect(userId).toBe('u-1')
     expect(sql).toContain("scope = 'user'")
+    expect(sql).toContain('connected_email AS "connectedEmail"')
     expect(params).toEqual(['u-1'])
   })
 })

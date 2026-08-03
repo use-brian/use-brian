@@ -488,6 +488,34 @@ export function createMailboxTools(
     requiresConfirmation: true,
     timeoutMs: 30_000,
 
+    async describeConfirmation(input) {
+      const draft = (input ?? {}) as {
+        account?: unknown
+        to?: unknown
+        cc?: unknown
+        bcc?: unknown
+        subject?: unknown
+        body?: unknown
+      }
+      const account = typeof draft.account === 'string' ? draft.account : undefined
+      const resolved = resolveMailboxAccount(router, account)
+      if (!resolved.ok) return null
+      const recipients = (value: unknown): string[] =>
+        Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : []
+      const to = recipients(draft.to)
+      const cc = recipients(draft.cc)
+      const bcc = recipients(draft.bcc)
+      const lines = [
+        `• From: ${resolved.email}`,
+        ...(to.length > 0 ? [`• To: ${to.join(', ')}`] : []),
+      ]
+      if (cc.length > 0) lines.push(`• Cc: ${cc.join(', ')}`)
+      if (bcc.length > 0) lines.push(`• Bcc: ${bcc.join(', ')}`)
+      if (typeof draft.subject === 'string') lines.push(`• Subject: ${draft.subject}`)
+      if (typeof draft.body === 'string') lines.push(`• Body: ${draft.body}`)
+      return lines
+    },
+
     async execute(input, context) {
       const resolved = resolveMailboxAccount(router, input.account)
       if (!resolved.ok) return { data: resolved.error, isError: true }

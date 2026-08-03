@@ -2408,10 +2408,12 @@ export const en = {
       cc: "Cc",
       bcc: "Bcc",
       from: "From",
+      primaryAccount: "Primary connected email account",
       subject: "Subject",
       noSubject: "(no subject)",
       noRecipient: "(no recipient)",
-      attachments: "Attachments",
+      attachments: "Documents attached",
+      noAttachments: "No documents attached",
     },
     shopifyRefundPreview: {
       title: "Refund order",

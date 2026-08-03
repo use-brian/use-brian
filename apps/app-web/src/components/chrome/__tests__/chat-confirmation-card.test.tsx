@@ -65,6 +65,12 @@ function confirmation(
       body: "Hi Alice,\n\nThe **final** numbers are in.",
     },
     description: TOOL_DESCRIPTION,
+    displayLines: [
+      "• From: sender@company.example",
+      "• To: alice@example.com",
+      "• Subject: Q2 report",
+      "• Body: Hi Alice,\n\nThe **final** numbers are in.",
+    ],
     sessionId: "s-1",
     status: "pending",
     ...overrides,
@@ -92,6 +98,7 @@ describe("[COMP:app-web/chat-confirmation-card] ChatConfirmationCard", () => {
     renderCard(confirmation());
     const text = host!.textContent ?? "";
     expect(text).toContain("alice@example.com");
+    expect(text).toContain("sender@company.example");
     expect(text).toContain("Q2 report");
     expect(text).toContain("The final numbers are in.");
     // Markdown is rendered, not shown as raw markers.
@@ -99,6 +106,8 @@ describe("[COMP:app-web/chat-confirmation-card] ChatConfirmationCard", () => {
     expect(text).not.toContain("**final**");
     // The model-facing tool description is suppressed by the preview.
     expect(text).not.toContain("never guess an alias");
+    expect(text).toContain("Documents attached");
+    expect(text).toContain("No documents attached");
   });
 
   it("suppresses narrating displayLines when the preview renders, but keeps resolved attachment names", () => {
@@ -111,6 +120,7 @@ describe("[COMP:app-web/chat-confirmation-card] ChatConfirmationCard", () => {
           attachments: ["file-abc-123"],
         },
         displayLines: [
+          "• From: sender@company.example",
           "• To: alice@example.com",
           "• Subject: Q2 report",
           "• Body: Attached.",

@@ -9,6 +9,7 @@ import {
   attachmentDisplayName,
   emailBodyPreviewMarkdown,
   extractAttachmentLines,
+  extractEmailSender,
   parseEmailSendArgs,
   parseShopifyCancelArgs,
   parseShopifyRefundArgs,
@@ -59,6 +60,14 @@ describe("[COMP:app-web/approvals] parseToolPreview", () => {
         attachments: [],
       },
     });
+  });
+
+  it("recognises a concrete multi-account Gmail tool variant", () => {
+    const preview = parseToolPreview(
+      "gmailSendMessage__work_1a2b3c4d",
+      { to: ["ops@example.com"], subject: "Hi", body: "Hello" },
+    );
+    expect(preview?.kind).toBe("email_send");
   });
 
   it("returns null for tools without a specific preview (generic fallback)", () => {
@@ -202,6 +211,16 @@ describe("[COMP:app-web/approvals] parseEmailSendArgs", () => {
     expect(email?.from).toBe("team@x.com");
   });
 
+  it("uses the selected IMAP account as the sender when there is no Gmail alias", () => {
+    const email = parseEmailSendArgs({
+      to: ["client@example.com"],
+      account: "ops@company.example",
+      subject: "Hi",
+      body: "Hello",
+    });
+    expect(email?.from).toBe("ops@company.example");
+  });
+
   it("tolerates missing fields as long as one email field is present", () => {
     const email = parseEmailSendArgs({ body: "just a body" });
     expect(email).toEqual({
@@ -261,6 +280,16 @@ describe("[COMP:app-web/approvals] attachment helpers", () => {
   it("uses the basename for path refs and the raw ref otherwise", () => {
     expect(attachmentDisplayName("/reports/q2.pdf")).toBe("q2.pdf");
     expect(attachmentDisplayName("file-abc-123")).toBe("file-abc-123");
+  });
+
+  it("extracts the server-resolved sender account", () => {
+    expect(
+      extractEmailSender([
+        "• From: sender@company.example",
+        "• To: client@example.com",
+      ]),
+    ).toBe("sender@company.example");
+    expect(extractEmailSender(undefined)).toBeNull();
   });
 });
 

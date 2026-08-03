@@ -96,8 +96,8 @@ function gmailApi(): { api: GmailApi; sent: Array<{ to: string[]; cc?: string[];
   return { api, sent }
 }
 
-function sendTool(api: GmailApi, filesApi?: FilesApi) {
-  const tools = createGmailTools(api, filesApi ? { filesApi } : undefined)
+function sendTool(api: GmailApi, filesApi?: FilesApi, senderEmail?: string) {
+  const tools = createGmailTools(api, { filesApi, senderEmail })
   const tool = tools.find((t) => t.name === 'gmailSendMessage')
   if (!tool) throw new Error('gmailSendMessage not returned')
   return tool
@@ -161,13 +161,31 @@ describe('[COMP:tools/gmail-send-as] gmailSendMessage alias sending', () => {
       ])
     })
 
-    it('omits the From line when no alias was given', async () => {
+    it('omits the From line when neither an alias nor connected account was provided', async () => {
       const pdf = fakeFile()
       const tool = sendTool(gmailApi().api, filesApiFor([pdf]))
 
       const lines = await tool.describeConfirmation!({ ...SEND, attachments: [pdf.id] }, makeContext())
 
       expect(lines!.some((l) => l.startsWith('• From:'))).toBe(false)
+    })
+
+    it('shows the connected account without attachments, while an explicit alias wins', async () => {
+      const tool = sendTool(
+        gmailApi().api,
+        undefined,
+        'connected@company.example',
+      )
+
+      expect(await tool.describeConfirmation!(SEND, makeContext())).toContain(
+        '• From: connected@company.example',
+      )
+      expect(
+        await tool.describeConfirmation!(
+          { ...SEND, from: 'alias@company.example' },
+          makeContext(),
+        ),
+      ).toContain('• From: alias@company.example')
     })
   })
 })
