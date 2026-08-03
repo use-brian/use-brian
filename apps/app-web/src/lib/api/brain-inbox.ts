@@ -23,6 +23,14 @@
  */
 
 import { authFetch } from "@/lib/auth-fetch";
+import {
+  BrainContentHttpError,
+  deleteBrainContentCache,
+  isRecordValue,
+  readBrainContentCache,
+  writeBrainContentCache,
+  type BrainContentCacheScope,
+} from "@/lib/offline/brain-content-cache";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -70,6 +78,7 @@ export async function listBrainInbox(
     /** Surface Pipeline B extracted rows (source='extracted') in addition to
      *  chat-tool saves (source='model'). Default false — see docs/architecture/brain/corrections.md. */
     includeExtracted?: boolean;
+    failOnError?: boolean;
   },
 ): Promise<ListBrainInboxResult> {
   const q = new URLSearchParams();
@@ -80,7 +89,12 @@ export async function listBrainInbox(
   const res = await authFetch(
     `${API_URL}/api/brain-inbox/${encodeURIComponent(workspaceId)}?${q.toString()}`,
   );
-  if (!res.ok) return { rows: [], cursor: null };
+  if (!res.ok) {
+    if (options?.failOnError) {
+      throw new BrainContentHttpError(res.status, "Brain reviews");
+    }
+    return { rows: [], cursor: null };
+  }
   const data = (await res.json()) as Partial<ListBrainInboxResult>;
   return {
     rows: Array.isArray(data.rows) ? data.rows : [],
@@ -104,12 +118,33 @@ export async function fetchBrainRow(
   workspaceId: string,
   primitive: BrainPrimitive,
   rowId: string,
+  cacheScope?: BrainContentCacheScope | null,
 ): Promise<BrainInboxRowDetail | null> {
-  const res = await authFetch(
-    `${API_URL}/api/brain-inbox/${encodeURIComponent(workspaceId)}/${primitive}/${encodeURIComponent(rowId)}`,
-  );
-  if (!res.ok) return null;
-  return (await res.json()) as BrainInboxRowDetail;
+  const resource = `row:${primitive}:${rowId}`;
+  try {
+    const res = await authFetch(
+      `${API_URL}/api/brain-inbox/${encodeURIComponent(workspaceId)}/${primitive}/${encodeURIComponent(rowId)}`,
+    );
+    if (!res.ok) {
+      if (cacheScope && [401, 403, 404].includes(res.status)) {
+        void deleteBrainContentCache(cacheScope, resource);
+      }
+      return null;
+    }
+    const detail = (await res.json()) as BrainInboxRowDetail;
+    if (cacheScope) {
+      void writeBrainContentCache(cacheScope, resource, detail);
+    }
+    return detail;
+  } catch (error) {
+    if (!cacheScope || !(error instanceof TypeError)) throw error;
+    const cached = await readBrainContentCache(
+      cacheScope,
+      resource,
+      isRecordValue,
+    );
+    return (cached?.value as BrainInboxRowDetail | undefined) ?? null;
+  }
 }
 
 /** Total + per-primitive counts. Drives the chrome pill (total) and
@@ -118,7 +153,7 @@ export async function fetchBrainRow(
  *  passes whatever the user toggled. */
 export async function brainInboxCount(
   workspaceId: string,
-  options?: { includeExtracted?: boolean },
+  options?: { includeExtracted?: boolean; failOnError?: boolean },
 ): Promise<BrainInboxCounts> {
   const q = new URLSearchParams();
   if (options?.includeExtracted) q.set("includeExtracted", "true");
@@ -127,6 +162,9 @@ export async function brainInboxCount(
     `${API_URL}/api/brain-inbox/${encodeURIComponent(workspaceId)}/count${qs ? `?${qs}` : ""}`,
   );
   if (!res.ok) {
+    if (options?.failOnError) {
+      throw new BrainContentHttpError(res.status, "Brain review count");
+    }
     return {
       total: 0,
       byPrimitive: {

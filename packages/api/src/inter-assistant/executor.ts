@@ -36,7 +36,7 @@ import {
   queryLoop,
   buildMemoryContext,
   buildCalleeSystemPrompt,
-  buildDocSkillBlock,
+  buildDocSupervisorSkillBlock,
   calculateCost,
   sanitize,
   canRead,
@@ -50,6 +50,7 @@ import {
   runPreflight,
   buildPreflightPrompt,
   EvidenceAccumulator,
+  DOC_MUTATION_TOOLS,
 } from '@use-brian/core'
 import type { SavedViewStore, EngineHooks } from '@use-brian/core'
 import type { ResearchSynthesizeFn } from '../synthesis/research-synthesizer.js'
@@ -58,7 +59,7 @@ import {
   addSessionMessage,
   getSessionMessages,
 } from '../db/sessions.js'
-import { MODEL_MAP } from '../model-resolution.js'
+import { BACKGROUND_MODEL, MODEL_MAP } from '../model-resolution.js'
 import { notifyBrainWriteIfMatch, BRAIN_WRITE_TOOL_SIGNALS } from '../brain-stream/notify.js'
 import { runProactiveCompaction } from '../routes/proactive-compaction.js'
 import { registerSchedulerResolver, unregisterSchedulerResolver } from '../scheduling/confirmation-registry.js'
@@ -555,6 +556,9 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         },
         docSurface: true,
         pageId: params.pageAnchorId,
+        provider: options.provider,
+        backgroundModel: BACKGROUND_MODEL,
+        fallbackModel: MODEL_MAP.standard,
         savedViewStore: options.savedViewStore,
       })
     }
@@ -766,7 +770,13 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // (a workflow `assistant_call.tools` restriction), the callee is narrowed
     // to exactly that set — applied last so it overrides the default consult
     // surface and the memory default. Absent → unchanged.
-    const finalTools = filterToolsByAllowList(modeTools, params.allowedTools)
+    const effectiveAllowedTools =
+      params.pageAnchorId
+      && params.allowedTools
+      && params.allowedTools.some((name) => DOC_MUTATION_TOOLS.has(name))
+        ? [...new Set([...params.allowedTools, 'delegateDocEdit'])]
+        : params.allowedTools
+    const finalTools = filterToolsByAllowList(modeTools, effectiveAllowedTools)
 
     // Fail fast when a pinned allow-list survives as NOTHING — the step's
     // authored intent (those exact tools) cannot execute, and running the
@@ -968,7 +978,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // protocol) plus a short anchor note, mirroring how the chat route
     // steers doc-surface turns. Unanchored consults are unchanged.
     const docAnchorBlock = params.pageAnchorId
-      ? `\n\n${buildDocSkillBlock({ mode: 'page' })}\n## Anchored page\nThis session is anchored to page \`${params.pageAnchorId}\`. Read it with \`getCurrentPage\` before editing; edit it with \`patchPage\`. Do not create a new page unless the request explicitly asks for one.`
+      ? `\n\n${buildDocSupervisorSkillBlock({ mode: 'page' })}\n## Anchored page\nThis session is anchored to page \`${params.pageAnchorId}\`. Read it with \`getCurrentPage\` when needed, then submit one in-place edit brief through \`delegateDocEdit\`. Do not request a new page unless the request explicitly asks for one.`
       : ''
 
     // Memory continuity for recurring workflows: surface the facts previous

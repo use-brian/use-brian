@@ -187,9 +187,13 @@ export async function fetchReviewItems(
   if (scope.kind === "none") return [];
   const fetches =
     scope.kind === "all"
-      ? [listBrainInbox(workspaceId, { limit: 100 })]
+      ? [listBrainInbox(workspaceId, { limit: 100, failOnError: true })]
       : scope.primitives.map((p) =>
-          listBrainInbox(workspaceId, { primitive: p, limit: 100 }),
+          listBrainInbox(workspaceId, {
+            primitive: p,
+            limit: 100,
+            failOnError: true,
+          }),
         );
   const results = await Promise.all(fetches);
   return toReviewItems(results.flatMap((r) => r.rows));

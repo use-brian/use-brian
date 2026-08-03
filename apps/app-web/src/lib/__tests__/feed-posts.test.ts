@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { FeedDraftSessionSummary } from "@/lib/api/feed";
 import {
   buildPostQueue,
+  displayPostTitle,
   filterQueue,
   nextAfterAction,
   parseQueueFilter,
@@ -31,6 +32,13 @@ function session(
 }
 
 describe("[COMP:app-web/feed-posts-queue] merged post queue", () => {
+  it("hides every storage-level platform prefix from operator titles", () => {
+    expect(displayPostTitle("[twitter] Launch recap")).toBe("Launch recap");
+    expect(displayPostTitle("[linkedin] Article launch note")).toBe(
+      "Article launch note",
+    );
+  });
+
   it("maps every draft state onto one of the four lifecycle states", () => {
     expect(postQueueStatus(session())).toBe("drafting");
     expect(

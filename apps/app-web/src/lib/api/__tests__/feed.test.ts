@@ -419,6 +419,7 @@ describe("[COMP:app-web/feed-sdk] feed SDK", () => {
     const created = await createFeedDraftSession("a-1", {
       platform: "threads",
       seed,
+      title: "Launch lesson",
     });
     expect(created).toEqual({ ok: true, session: { id: "s-9" } });
     const [url, init] = authFetch.mock.calls[0] as [string, RequestInit];
@@ -427,6 +428,7 @@ describe("[COMP:app-web/feed-sdk] feed SDK", () => {
     expect(JSON.parse(init.body as string)).toEqual({
       platform: "threads",
       seed,
+      title: "Launch lesson",
     });
 
     authFetch.mockResolvedValueOnce(jsonResponse({ session: { id: "s-10" } }));

@@ -48,7 +48,7 @@
  * [COMP:app-web/sidebar-panel-brain]
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { Check, ListFilter, Plus } from "lucide-react";
@@ -99,6 +99,17 @@ import {
   getActiveAssistantId,
   onActiveAssistantChanged,
 } from "@/lib/sidebar-cache";
+import { useWorkspaceContext } from "@/lib/workspace-context";
+import { useIsOffline } from "@/lib/offline/use-offline-sync";
+import {
+  deleteBrainContentCache,
+  isArrayValue,
+  isAuthoritativeBrainDenial,
+  isRecordValue,
+  readBrainContentCache,
+  writeBrainContentCache,
+  type BrainContentCacheScope,
+} from "@/lib/offline/brain-content-cache";
 
 const SECTION_ORDER: BrainSection[] = [
   "entries",
@@ -147,6 +158,8 @@ const sectionHeaderCls =
 
 export function BrainSidebarPanel({ workspaceId }: { workspaceId: string }) {
   const t = useT();
+  const { me } = useWorkspaceContext();
+  const offline = useIsOffline();
   const brain = useBrainSurface();
   const router = useRouter();
   const pathname = usePathname() ?? "";
@@ -166,6 +179,13 @@ export function BrainSidebarPanel({ workspaceId }: { workspaceId: string }) {
     () => getActiveAssistantId(),
   );
   useEffect(() => onActiveAssistantChanged(setViewpointAssistantId), []);
+  const cacheScope = useMemo<BrainContentCacheScope | null>(
+    () =>
+      me.id
+        ? { viewerId: me.id, workspaceId, viewpointAssistantId }
+        : null,
+    [me.id, workspaceId, viewpointAssistantId],
+  );
 
   // The panel also mounts on Brain SUB-routes (the skill editor), where the
   // Brain page — the thing the context state drives — isn't rendered. Any
@@ -179,13 +199,36 @@ export function BrainSidebarPanel({ workspaceId }: { workspaceId: string }) {
   useEffect(() => {
     if (!workspaceId) return;
     let cancelled = false;
-    getBrainFacets(workspaceId, viewpointAssistantId).then((r) => {
-      if (!cancelled) setFacets(r);
-    });
+    void (async () => {
+      if (cacheScope) {
+        const cached = await readBrainContentCache(
+          cacheScope,
+          "facets",
+          isRecordValue,
+        );
+        if (!cancelled && cached) setFacets(cached.value as BrainFacets);
+      }
+      try {
+        const result = await getBrainFacets(workspaceId, viewpointAssistantId, {
+          failOnError: true,
+        });
+        if (cancelled) return;
+        setFacets(result);
+        if (cacheScope) {
+          void writeBrainContentCache(cacheScope, "facets", result);
+        }
+      } catch (error) {
+        if (cancelled) return;
+        if (isAuthoritativeBrainDenial(error)) {
+          setFacets(null);
+          if (cacheScope) void deleteBrainContentCache(cacheScope, "facets");
+        }
+      }
+    })();
     return () => {
       cancelled = true;
     };
-  }, [workspaceId, viewpointAssistantId]);
+  }, [workspaceId, viewpointAssistantId, cacheScope]);
 
   // Reviews badge count — refetched on mount and whenever the brain changes
   // (chat ingest, cross-tab write) so the badge never goes stale.
@@ -193,9 +236,43 @@ export function BrainSidebarPanel({ workspaceId }: { workspaceId: string }) {
     if (!workspaceId) return;
     let cancelled = false;
     const refresh = () => {
-      void brainInboxCount(workspaceId).then((c) => {
-        if (!cancelled) setUnconfirmed(c.total);
-      });
+      void (async () => {
+        let hasCached = false;
+        if (cacheScope) {
+          const cached = await readBrainContentCache(
+            cacheScope,
+            "review-count",
+            isRecordValue,
+          );
+          if (!cancelled && cached) {
+            const total = cached.value.total;
+            if (typeof total === "number") {
+              hasCached = true;
+              setUnconfirmed(total);
+            }
+          }
+        }
+        try {
+          const count = await brainInboxCount(workspaceId, {
+            failOnError: true,
+          });
+          if (cancelled) return;
+          setUnconfirmed(count.total);
+          if (cacheScope) {
+            void writeBrainContentCache(cacheScope, "review-count", count);
+          }
+        } catch (error) {
+          if (cancelled) return;
+          if (isAuthoritativeBrainDenial(error)) {
+            setUnconfirmed(0);
+            if (cacheScope) {
+              void deleteBrainContentCache(cacheScope, "review-count");
+            }
+          } else if (!hasCached) {
+            setUnconfirmed(0);
+          }
+        }
+      })();
     };
     refresh();
     window.addEventListener(BRAIN_REFRESH_EVENT, refresh);
@@ -203,7 +280,7 @@ export function BrainSidebarPanel({ workspaceId }: { workspaceId: string }) {
       cancelled = true;
       window.removeEventListener(BRAIN_REFRESH_EVENT, refresh);
     };
-  }, [workspaceId]);
+  }, [workspaceId, cacheScope]);
 
   // Skill quick-list for the Skills section body — same refresh contract as
   // the count, so a confirm/create/delete anywhere converges here too.
@@ -211,9 +288,40 @@ export function BrainSidebarPanel({ workspaceId }: { workspaceId: string }) {
     if (!workspaceId) return;
     let cancelled = false;
     const refresh = () => {
-      void listWorkspaceSkills(workspaceId).then((list) => {
-        if (!cancelled) setSkills(list);
-      });
+      void (async () => {
+        let hasCached = false;
+        if (cacheScope) {
+          const cached = await readBrainContentCache(
+            cacheScope,
+            "skills",
+            isArrayValue,
+          );
+          if (!cancelled && cached) {
+            hasCached = true;
+            setSkills(cached.value as WorkspaceSkillSummary[]);
+          }
+        }
+        try {
+          const list = await listWorkspaceSkills(workspaceId, {
+            failOnError: true,
+          });
+          if (cancelled) return;
+          setSkills(list);
+          if (cacheScope) {
+            void writeBrainContentCache(cacheScope, "skills", list);
+          }
+        } catch (error) {
+          if (cancelled) return;
+          if (isAuthoritativeBrainDenial(error)) {
+            setSkills([]);
+            if (cacheScope) {
+              void deleteBrainContentCache(cacheScope, "skills");
+            }
+          } else if (!hasCached) {
+            setSkills([]);
+          }
+        }
+      })();
     };
     refresh();
     window.addEventListener(BRAIN_REFRESH_EVENT, refresh);
@@ -221,7 +329,7 @@ export function BrainSidebarPanel({ workspaceId }: { workspaceId: string }) {
       cancelled = true;
       window.removeEventListener(BRAIN_REFRESH_EVENT, refresh);
     };
-  }, [workspaceId]);
+  }, [workspaceId, cacheScope]);
 
   // Pending list (the Reviews master) — fetched while the Reviews section is
   // open, scoped by the Reviews filter selection (the SAME `fetchReviewItems`
@@ -230,10 +338,43 @@ export function BrainSidebarPanel({ workspaceId }: { workspaceId: string }) {
   useEffect(() => {
     if (!workspaceId || brain.section !== "reviews") return;
     let cancelled = false;
+    const resource = `reviews:${[...brain.reviewFilters].sort().join(",")}`;
     const refresh = () => {
-      void fetchReviewItems(workspaceId, brain.reviewFilters).then((items) => {
-        if (!cancelled) setReviewItems(items);
-      });
+      void (async () => {
+        let hasCached = false;
+        if (cacheScope) {
+          const cached = await readBrainContentCache(
+            cacheScope,
+            resource,
+            isArrayValue,
+          );
+          if (!cancelled && cached) {
+            hasCached = true;
+            setReviewItems(cached.value as PendingReviewItem[]);
+          }
+        }
+        try {
+          const items = await fetchReviewItems(
+            workspaceId,
+            brain.reviewFilters,
+          );
+          if (cancelled) return;
+          setReviewItems(items);
+          if (cacheScope) {
+            void writeBrainContentCache(cacheScope, resource, items);
+          }
+        } catch (error) {
+          if (cancelled) return;
+          if (isAuthoritativeBrainDenial(error)) {
+            setReviewItems([]);
+            if (cacheScope) {
+              void deleteBrainContentCache(cacheScope, resource);
+            }
+          } else if (!hasCached) {
+            setReviewItems([]);
+          }
+        }
+      })();
     };
     refresh();
     window.addEventListener(BRAIN_REFRESH_EVENT, refresh);
@@ -241,7 +382,7 @@ export function BrainSidebarPanel({ workspaceId }: { workspaceId: string }) {
       cancelled = true;
       window.removeEventListener(BRAIN_REFRESH_EVENT, refresh);
     };
-  }, [workspaceId, brain.section, brain.reviewFilters]);
+  }, [workspaceId, brain.section, brain.reviewFilters, cacheScope]);
 
   const sectionLabel: Record<BrainSection, string> = {
     entries: t.brainPage.sections.entries,
@@ -308,7 +449,7 @@ export function BrainSidebarPanel({ workspaceId }: { workspaceId: string }) {
   // panel's partial-failure contract.
   const runReviewBulk = async (decision: "verify" | "delete") => {
     const keys = visibleReviewKeys.filter((k) => reviewSelected.has(k));
-    if (keys.length === 0 || !workspaceId) return;
+    if (keys.length === 0 || !workspaceId || offline) return;
     if (decision === "delete") {
       const ok = await confirmDialog({
         description: format(t.brainPage.reviewPanel.batch.deleteConfirmBody, {
@@ -402,11 +543,12 @@ export function BrainSidebarPanel({ workspaceId }: { workspaceId: string }) {
           {/* Quiet on-palette create — the page renders the creator. */}
           <button
             type="button"
+            disabled={offline}
             onClick={() => {
               brain.openSkillCreator();
               ensureBrainRoot();
             }}
-            className="flex w-full items-center justify-center gap-1.5 rounded-md border border-border px-2 py-1.5 text-[12px] font-medium text-sidebar-foreground/80 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+            className="flex w-full items-center justify-center gap-1.5 rounded-md border border-border px-2 py-1.5 text-[12px] font-medium text-sidebar-foreground/80 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Plus className="size-3.5" aria-hidden />
             {t.brainPage.skills.newSkill}
@@ -478,7 +620,16 @@ export function BrainSidebarPanel({ workspaceId }: { workspaceId: string }) {
               const status = skillStatus(skill);
               return (
                 <li key={skill.rowId}>
-                  <Link href={href} className={rowCls(pathname === href)}>
+                  <Link
+                    href={href}
+                    onClick={(event) => {
+                      if (!offline) return;
+                      event.preventDefault();
+                      brain.setSection("skills");
+                      ensureBrainRoot();
+                    }}
+                    className={rowCls(pathname === href)}
+                  >
                     <span
                       aria-hidden
                       className={cn(
@@ -558,13 +709,13 @@ export function BrainSidebarPanel({ workspaceId }: { workspaceId: string }) {
                       selectedVisibleCount > 0 && !allVisibleSelected
                     }
                     onCheckedChange={toggleReviewSelectAll}
-                    disabled={reviewBatchBusy}
+                    disabled={reviewBatchBusy || offline}
                     aria-label={t.brainPage.reviewPanel.batch.selectAll}
                   />
                   <button
                     type="button"
                     onClick={toggleReviewSelectAll}
-                    disabled={reviewBatchBusy}
+                    disabled={reviewBatchBusy || offline}
                     className="cursor-pointer disabled:cursor-not-allowed"
                   >
                     {format(t.brainPage.reviewPanel.batch.selected, {
@@ -576,7 +727,7 @@ export function BrainSidebarPanel({ workspaceId }: { workspaceId: string }) {
                   <div className="ml-auto flex items-center gap-1">
                     <button
                       type="button"
-                      disabled={reviewBatchBusy}
+                      disabled={reviewBatchBusy || offline}
                       onClick={() => void runReviewBulk("verify")}
                       className="rounded px-1.5 py-0.5 font-medium text-emerald-700 hover:bg-emerald-500/10 dark:text-emerald-400 disabled:opacity-50"
                     >
@@ -584,7 +735,7 @@ export function BrainSidebarPanel({ workspaceId }: { workspaceId: string }) {
                     </button>
                     <button
                       type="button"
-                      disabled={reviewBatchBusy}
+                      disabled={reviewBatchBusy || offline}
                       onClick={() => void runReviewBulk("delete")}
                       className="rounded px-1.5 py-0.5 font-medium text-red-600 hover:bg-red-500/10 dark:text-red-400 disabled:opacity-50"
                     >
@@ -642,7 +793,7 @@ export function BrainSidebarPanel({ workspaceId }: { workspaceId: string }) {
                   <Checkbox
                     checked={reviewSelected.has(key)}
                     onCheckedChange={() => toggleReviewSelect(key)}
-                    disabled={reviewBatchBusy}
+                    disabled={reviewBatchBusy || offline}
                     aria-label={item.row.name}
                     className={cn(
                       "absolute left-[5px] top-1/2 size-3.5 -translate-y-1/2",

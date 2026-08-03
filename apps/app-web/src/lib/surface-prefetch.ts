@@ -97,13 +97,14 @@ export function invalidateDocPage(pageId: string | null | undefined): void {
 }
 
 /**
- * Cache key for the Brain workspace graph snapshot.
+ * Cache key for the Brain workspace graph overview.
  *
  * Brain gets no `surfaceDataKey` entry because its landing is several fetches
  * driven by filter state, not one list. The GRAPH is the exception worth
  * caching on its own: it is the default view, its key depends only on the
  * workspace + viewpoint (so it is identical on every visit), and it is the
- * slowest thing the surface asks for.
+ * slowest thing the surface asks for. Drill-down scopes use the component-local
+ * semantic-zoom cache instead of this persistent overview key.
  */
 export function brainGraphCacheKey(
   workspaceId: string,

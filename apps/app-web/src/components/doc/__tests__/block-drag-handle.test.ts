@@ -43,6 +43,16 @@ const para = (text?: string): PMNode =>
 const li = (...children: PMNode[]): PMNode => schema.nodes.listItem.create(null, children);
 const bulletList = (...items: PMNode[]): PMNode =>
   schema.nodes.bulletList.create(null, items);
+const table = (...rows: string[][]): PMNode =>
+  schema.nodes.table.create(
+    { blockId: "table-grip" },
+    rows.map((cells) =>
+      schema.nodes.tableRow.create(
+        null,
+        cells.map((text) => schema.nodes.tableCell.create(null, para(text))),
+      ),
+    ),
+  );
 
 /** Position inside the textblock that contains `needle`. */
 function posInText(doc: PMNode, needle: string): number {
@@ -94,6 +104,17 @@ describe("[COMP:app-web/block-drag-handle] blockTargetAtPos", () => {
     const doc = schema.nodes.doc.create(null, [para("x")]);
     expect(() => blockTargetAtPos(doc, 9999)).not.toThrow();
     expect(() => blockTargetAtPos(doc, -5)).not.toThrow();
+  });
+
+  it("maps a paragraph inside a cell to the whole table block", () => {
+    const doc = schema.nodes.doc.create(null, [
+      para("before"),
+      table(["cell one", "cell two"], ["cell three", "cell four"]),
+    ]);
+    const target = blockTargetAtPos(doc, posInText(doc, "cell three"))!;
+    expect(target.node.type.name).toBe("table");
+    expect(target.node.attrs.blockId).toBe("table-grip");
+    expect(doc.nodeAt(target.pos)?.type.name).toBe("table");
   });
 });
 
@@ -738,6 +759,19 @@ describe("[COMP:app-web/block-drag-handle] hover reveal forces sync layout", () 
       /mousemove\(view, event\) \{\s*if \(!element \|\| locked\) return false;[\s\S]*ensurePopup\(view\.dom\)/,
     );
     expect(src).not.toContain("if (!element || !popup || locked) return false;");
+  });
+
+  it("guards the mousemove retarget scan with the current grip corridor", () => {
+    // A table's padded left edge is still inside view.dom, so mouseleave never
+    // fires while the pointer crosses toward the grip. The corridor check must
+    // therefore precede the rightward hit-test in mousemove itself; otherwise
+    // that scan can re-anchor/hide the grip before it can be reached.
+    const mousemove = src.indexOf("mousemove(view, event)");
+    const corridor = src.indexOf("pointerInGripCorridor", mousemove);
+    const retarget = src.indexOf("const hit = findElementNextToCoords", mousemove);
+    expect(mousemove).toBeGreaterThan(-1);
+    expect(corridor).toBeGreaterThan(mousemove);
+    expect(retarget).toBeGreaterThan(corridor);
   });
 });
 

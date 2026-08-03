@@ -28,6 +28,7 @@ import { authFetch } from "@/lib/auth-fetch";
 import {
   FEED_PLATFORMS,
   getFeedPlatformPick,
+  setCurrentFeedPlatform,
   setFeedPlatformPick,
   type FeedPlatform,
 } from "@/lib/feed-nav";
@@ -35,6 +36,7 @@ import { requestFeedChatSeed } from "@/lib/feed-chat-seed";
 import { PlatformIcon } from "@/components/feed/platform-icon";
 import { useT, format } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -84,6 +86,7 @@ export function FeedOnboarding({
 
   function confirmPick(platforms: readonly FeedPlatform[]) {
     setFeedPlatformPick(team.workspaceId, platforms);
+    if (platforms[0]) setCurrentFeedPlatform(team.workspaceId, platforms[0]);
     setVoiceState("offered");
     setPickState("done");
   }
@@ -133,6 +136,100 @@ export function FeedOnboarding({
     } finally {
       setBusy(false);
     }
+  }
+
+  if (brand && pickState === "needed") {
+    return (
+      <div className="grid min-h-full w-full bg-muted/15 lg:grid-cols-[minmax(0,1.08fr)_minmax(360px,0.92fr)]">
+        <main className="flex items-center border-b border-border/60 bg-background px-5 py-10 sm:px-8 lg:border-b-0 lg:border-r lg:px-12">
+          <div className="mx-auto w-full max-w-2xl space-y-8 lg:mx-0">
+            <header className="space-y-3">
+              <div className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
+                <Megaphone className="size-3.5" aria-hidden />
+                {t.home.setupEyebrow}
+                <span aria-hidden>·</span>
+                {t.home.pickStep}
+              </div>
+              <h1 className="text-xl font-semibold tracking-tight">{t.home.pickTitle}</h1>
+              <p className="max-w-xl text-sm leading-relaxed text-muted-foreground">
+                {t.home.pickBody}
+              </p>
+            </header>
+
+            <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+              {FEED_PLATFORMS.map((platform) => {
+                const active = picked.includes(platform);
+                return (
+                  <button
+                    key={platform}
+                    type="button"
+                    onClick={() =>
+                      setPicked((previous) =>
+                        previous.includes(platform)
+                          ? previous.filter((item) => item !== platform)
+                          : [...previous, platform],
+                      )
+                    }
+                    aria-pressed={active}
+                    className={cn(
+                      "flex min-h-20 items-start gap-3 rounded-xl border p-3.5 text-left transition-colors",
+                      active
+                        ? "border-foreground bg-foreground text-background"
+                        : "border-border/70 bg-background hover:bg-muted/50",
+                    )}
+                  >
+                    <span className={cn("inline-flex size-8 shrink-0 items-center justify-center rounded-lg border", active ? "border-background/20 bg-background/10" : "border-border/60 bg-muted/40")}>
+                      <PlatformIcon platform={platform} className="size-4" />
+                    </span>
+                    <span className="pt-1 text-[12.5px] font-medium">
+                      {t.platformLabels[platform]}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-3 border-t border-border/60 pt-5">
+              <Button
+                type="button"
+                onClick={() => confirmPick(picked)}
+                disabled={picked.length === 0}
+                className="bg-foreground text-background shadow-none hover:bg-foreground/90"
+              >
+                {t.home.pickCta}
+              </Button>
+              <Button variant="ghost" type="button" onClick={() => confirmPick(FEED_PLATFORMS)}>
+                {t.home.pickSkip}
+              </Button>
+            </div>
+          </div>
+        </main>
+
+        <aside className="flex items-center px-5 py-10 sm:px-8 lg:px-12">
+          <div className="mx-auto w-full max-w-md space-y-3">
+            <div className="rounded-2xl border border-border/60 bg-background p-5 shadow-xs">
+              <div className="flex items-start gap-3">
+                <span className="inline-flex size-9 shrink-0 items-center justify-center rounded-xl bg-foreground text-background">
+                  <Megaphone className="size-4" aria-hidden />
+                </span>
+                <div>
+                  <h2 className="text-[13px] font-semibold">{t.home.pickWhyTitle}</h2>
+                  <p className="mt-1.5 text-[12px] leading-relaxed text-muted-foreground">
+                    {t.home.pickWhyBody}
+                  </p>
+                </div>
+              </div>
+            </div>
+            <div className="rounded-2xl border border-border/60 bg-background/70 p-5">
+              <h2 className="text-[13px] font-semibold">{t.home.pickTipTitle}</h2>
+              <p className="mt-1.5 text-[12px] leading-relaxed text-muted-foreground">
+                {t.home.pickTipBody}
+              </p>
+            </div>
+          </div>
+        </aside>
+      </div>
+    );
   }
 
   return (

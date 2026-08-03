@@ -72,6 +72,55 @@ export function tolerantInt(opts?: { min?: number; max?: number }): z.ZodType<nu
   return schema
 }
 
+// ── tolerantEnumArray ────────────────────────────────────────────────────────
+
+/**
+ * Accepts ONE enum member, an array of members, a JSON-stringified array
+ * (`'["todo","in_progress"]'`), or a comma-separated list
+ * (`'todo, in_progress'`). Anything else falls through to normal validation.
+ *
+ * Use for any "single value or a list" filter param. The earlier tolerance
+ * sweep (2026-07-07) only covered *primitive* params, so a
+ * `status: enum | enum[]` union stayed strict — and it is precisely the shape
+ * a model serialises loosely, because a list is the thing worth serialising.
+ * `listTasks({status: ["todo","in_progress","blocked"]})` failed validation 35
+ * times between 2026-07-08 and 2026-08-03, every one of them inside a
+ * workflow step, each silently dropping one person's section from the morning
+ * digest (the step still reported `completed`).
+ *
+ * A value that is already a valid single member is returned **unchanged**, not
+ * wrapped into an array: the union accepts both, and preserving the model's
+ * own shape keeps the tool's returned/logged input honest.
+ */
+export function tolerantEnumArray<T extends readonly [string, ...string[]]>(
+  values: T,
+): z.ZodType<T[number] | T[number][], z.ZodTypeDef, unknown> {
+  const members = new Set<string>(values)
+  const enumSchema = z.enum(values as unknown as [string, ...string[]])
+  return z.preprocess((raw) => {
+    if (typeof raw !== 'string') return raw
+    const trimmed = raw.trim()
+    // Already exactly one member — leave the single-value shape alone.
+    if (members.has(trimmed)) return trimmed
+    if (trimmed.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(trimmed)
+        if (Array.isArray(parsed)) return parsed
+      } catch {
+        // Not JSON after all — fall through to the comma split / raw value.
+      }
+    }
+    if (trimmed.includes(',')) {
+      const parts = trimmed
+        .split(',')
+        .map((p) => p.trim())
+        .filter((p) => p.length > 0)
+      if (parts.length > 0) return parts
+    }
+    return raw
+  }, enumSchema.or(z.array(enumSchema))) as z.ZodType<T[number] | T[number][], z.ZodTypeDef, unknown>
+}
+
 // ── uuidId ───────────────────────────────────────────────────────────────────
 
 /**

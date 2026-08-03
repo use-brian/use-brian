@@ -20,6 +20,18 @@ export const DECK_PAGE_H = 7.5;
 const MARGIN = 0.9;
 const BODY_W = DECK_PAGE_W - 2 * MARGIN;
 
+/**
+ * The content band on a chromed slide, between the header rule and the footer.
+ * Body content is CENTERED in this band rather than top-anchored: boxes are
+ * sized for the maximum a slide may hold (10 bullets), so a realistic 3-bullet
+ * slide top-anchored in one leaves ~55% of the page visibly empty and the deck
+ * reads as unfinished. Centering costs nothing when a slide is full and fixes
+ * the common case.
+ */
+const BODY_TOP = 2.15;
+const BODY_BOTTOM = DECK_PAGE_H - 0.85;
+const BODY_H = BODY_BOTTOM - BODY_TOP;
+
 export interface DeckBox {
   x: number;
   y: number;
@@ -54,7 +66,20 @@ export type DeckPrimitive =
       paraSpaceAfterPt?: number;
       bulletIndentPt?: number;
     }
-  | { kind: 'rect'; box: DeckBox; fill: string; radiusIn?: number }
+  | {
+      kind: 'rect';
+      box: DeckBox;
+      fill: string;
+      radiusIn?: number;
+      /** pptx fill transparency, 0-100 (0/absent = opaque). Used for image scrims. */
+      transparency?: number;
+      /**
+       * Outline. pptx strokes centred on the boundary, CSS strokes inside with
+       * border-box — a sub-pixel difference at the hairline widths this is for
+       * (bordered tables, outlined cells), and the one acknowledged divergence.
+       */
+      stroke?: { color: string; widthPt: number };
+    }
   | { kind: 'lineSeg'; x1: number; y1: number; x2: number; y2: number; color: string; widthPt: number }
   | { kind: 'ellipse'; box: DeckBox; fill: string; outline?: { color: string; widthPt: number } }
   | {
@@ -70,8 +95,14 @@ export type DeckPrimitive =
     }
   | {
       kind: 'image';
-      /** The frame to center-fit the image into (aspect preserved). */
+      /** The frame to fit the image into. */
       frame: DeckBox;
+      /**
+       * 'contain' (default) center-fits inside the frame, preserving aspect and
+       * leaving letterbox gaps. 'cover' fills the frame edge to edge, cropping
+       * the overflow — what full-bleed layouts need.
+       */
+      fit?: 'contain' | 'cover';
       source: { url?: string; path?: string };
     };
 
@@ -81,8 +112,35 @@ export interface DeckSlideLayout {
   notes?: string;
 }
 
+/**
+ * Applies the resolved style's `typeScale` to every type size in the display
+ * list. One post-pass rather than threading a multiplier through forty call
+ * sites, and it keeps the packs' internal ratios exactly as designed — the
+ * whole system moves together or not at all.
+ */
+function applyTypeScale(slides: DeckSlideLayout[], style: DeckStyle): DeckSlideLayout[] {
+  const k = style.typeScale;
+  if (!k || Math.abs(k - 1) < 0.01) return slides;
+  return slides.map((slide) => ({
+    ...slide,
+    primitives: slide.primitives.map((p) =>
+      p.kind === 'text' ? { ...p, fontSizePt: Math.max(Math.round(p.fontSizePt * k), 6) } : p,
+    ),
+  }));
+}
+
 export function layoutDeck(spec: DeckSpec, style: DeckStyle): DeckSlideLayout[] {
+  return applyTypeScale(layoutDeckUnscaled(spec, style), style);
+}
+
+function layoutDeckUnscaled(spec: DeckSpec, style: DeckStyle): DeckSlideLayout[] {
+  if (spec.pack === 'editorial') return layoutEditorialDeck(spec, style);
+  if (spec.pack === 'minimal') return layoutMinimalDeck(spec, style);
   const slides: DeckSlideLayout[] = [layoutTitleSlide(spec, style)];
+  // Split slides mirror on how many splits came BEFORE them, not on their page
+  // number — splits are rarely adjacent, and two of them landing on the same
+  // page parity (say pages 4 and 6) would silently never mirror at all.
+  let splitOrdinal = 0;
   spec.slides.forEach((slide, i) => {
     const pageNum = i + 2;
     let out: DeckSlideLayout;
@@ -99,6 +157,15 @@ export function layoutDeck(spec: DeckSpec, style: DeckStyle): DeckSlideLayout[] 
       case 'quote':
         out = withFooter(layoutQuoteSlide(slide, style), style, spec.title, pageNum);
         break;
+      // hero/split run to the page edge, so they take no header and no footer —
+      // chrome inside a full-bleed image reads as a mistake, and the footer's
+      // right-aligned page number would land on top of the artwork.
+      case 'hero':
+        out = layoutHeroSlide(slide, style);
+        break;
+      case 'split':
+        out = layoutSplitSlide(slide, style, splitOrdinal++);
+        break;
       default:
         out = withFooter(layoutContentSlide(slide, style), style, spec.title, pageNum);
     }
@@ -112,7 +179,7 @@ export function layoutDeck(spec: DeckSpec, style: DeckStyle): DeckSlideLayout[] 
 // Text helpers
 // ---------------------------------------------------------------------------
 
-function plainText(
+export function plainText(
   text: string,
   color: string,
   box: DeckBox,
@@ -140,7 +207,13 @@ function plainText(
   };
 }
 
-function bulletBlock(style: DeckStyle, bullets: string[], box: DeckBox, fontSizePt = 18): DeckPrimitive {
+export function bulletBlock(
+  style: DeckStyle,
+  bullets: string[],
+  box: DeckBox,
+  fontSizePt = 22,
+  valign: 'top' | 'middle' = 'middle',
+): DeckPrimitive {
   return {
     kind: 'text',
     box,
@@ -148,11 +221,11 @@ function bulletBlock(style: DeckStyle, bullets: string[], box: DeckBox, fontSize
     fontFace: style.bodyFont,
     fontSizePt,
     align: 'left',
-    valign: 'top',
+    valign,
     shrinkToFit: true,
-    lineSpacingMultiple: 1.15,
-    paraSpaceAfterPt: 14,
-    bulletIndentPt: 14,
+    lineSpacingMultiple: 1.25,
+    paraSpaceAfterPt: Math.round(fontSizePt * 0.85),
+    bulletIndentPt: 16,
   };
 }
 
@@ -160,36 +233,52 @@ function bulletBlock(style: DeckStyle, bullets: string[], box: DeckBox, fontSize
 // Slide chrome
 // ---------------------------------------------------------------------------
 
+/**
+ * Title slide: a full-height accent spine on the left edge anchors the page so
+ * the generous whitespace reads as deliberate rather than as a slide nobody
+ * finished. Title block sits on the lower-middle third, the way a book cover
+ * carries its title.
+ */
 function layoutTitleSlide(spec: DeckSpec, style: DeckStyle): DeckSlideLayout {
   const primitives: DeckPrimitive[] = [
-    { kind: 'rect', box: { x: MARGIN, y: 2.35, w: 1.1, h: 0.14 }, fill: style.accent },
-    plainText(spec.title, style.text, { x: MARGIN, y: 2.65, w: BODY_W, h: 1.9 }, {
+    { kind: 'rect', box: { x: 0, y: 0, w: 0.32, h: DECK_PAGE_H }, fill: style.accent },
+    plainText(spec.title, style.text, { x: MARGIN, y: 2.75, w: BODY_W, h: 2.2 }, {
       fontFace: style.headingFont,
-      fontSizePt: 54,
+      fontSizePt: 60,
       bold: true,
+      valign: 'bottom',
       shrinkToFit: true,
+      lineSpacingMultiple: 1.05,
     }),
   ];
   if (spec.subtitle) {
     primitives.push(
-      plainText(spec.subtitle, style.muted, { x: MARGIN, y: 4.55, w: BODY_W, h: 0.9 }, {
+      plainText(spec.subtitle, style.muted, { x: MARGIN, y: 5.42, w: BODY_W, h: 0.8 }, {
         fontFace: style.bodyFont,
-        fontSizePt: 20,
+        fontSizePt: 22,
       }),
     );
   }
   return { background: style.background, primitives };
 }
 
+/**
+ * Header rule spans the full body width rather than the old 0.75" accent stub,
+ * which read as a stray artifact. The accent is the leading segment of the
+ * rule, so the motif survives while the line does real compositional work.
+ */
 function header(style: DeckStyle, title: string): DeckPrimitive[] {
+  const ruleY = 1.72;
   return [
-    plainText(title, style.text, { x: MARGIN, y: 0.5, w: BODY_W, h: 0.85 }, {
+    plainText(title, style.text, { x: MARGIN, y: 0.62, w: BODY_W, h: 1.0 }, {
       fontFace: style.headingFont,
-      fontSizePt: 28,
+      fontSizePt: 34,
       bold: true,
+      valign: 'bottom',
       shrinkToFit: true,
     }),
-    { kind: 'rect', box: { x: MARGIN + 0.02, y: 1.42, w: 0.75, h: 0.09 }, fill: style.accent },
+    { kind: 'rect', box: { x: MARGIN, y: ruleY, w: BODY_W, h: 0.02 }, fill: style.grid },
+    { kind: 'rect', box: { x: MARGIN, y: ruleY - 0.03, w: 1.6, h: 0.08 }, fill: style.accent },
   ];
 }
 
@@ -214,29 +303,31 @@ function withFooter(slide: DeckSlideLayout, style: DeckStyle, deckTitle: string,
 
 function layoutContentSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
   const primitives = header(style, slide.title);
-  const top = 1.85;
-  const bodyH = DECK_PAGE_H - top - 0.75;
   const hasBullets = !!slide.bullets?.length;
-  const sideBox: DeckBox = { x: 6.6, y: top, w: DECK_PAGE_W - 6.6 - MARGIN, h: bodyH };
-  const fullBox: DeckBox = { x: MARGIN, y: top, w: BODY_W, h: bodyH };
+  const textW = 5.5;
+  const sideBox: DeckBox = { x: MARGIN + textW + 0.5, y: BODY_TOP, w: DECK_PAGE_W - MARGIN * 2 - textW - 0.5, h: BODY_H };
+  const fullBox: DeckBox = { x: MARGIN, y: BODY_TOP, w: BODY_W, h: BODY_H };
+  const textBox: DeckBox = { x: MARGIN, y: BODY_TOP, w: textW, h: BODY_H };
 
   if (slide.chart && hasBullets) {
-    primitives.push(bulletBlock(style, slide.bullets!, { x: MARGIN, y: top + 0.1, w: 5.3, h: bodyH }, 16));
+    primitives.push(bulletBlock(style, slide.bullets!, textBox, 18));
     primitives.push(...layoutChart(slide.chart, style, sideBox));
   } else if (slide.chart) {
     primitives.push(...layoutChart(slide.chart, style, fullBox));
   } else if (slide.image && hasBullets) {
-    primitives.push(bulletBlock(style, slide.bullets!, { x: MARGIN, y: top + 0.1, w: 5.3, h: bodyH }, 16));
+    primitives.push(bulletBlock(style, slide.bullets!, textBox, 18));
     primitives.push(...layoutImage(slide.image, style, sideBox));
   } else if (slide.image) {
     primitives.push(...layoutImage(slide.image, style, fullBox));
   } else if (hasBullets) {
-    primitives.push(bulletBlock(style, slide.bullets!, { x: MARGIN, y: top + 0.1, w: BODY_W, h: bodyH }));
+    // few bullets => bigger type, so a 3-point slide still fills the band
+    const size = slide.bullets!.length <= 4 ? 26 : slide.bullets!.length <= 6 ? 22 : 19;
+    primitives.push(bulletBlock(style, slide.bullets!, fullBox, size));
   }
   return { background: style.background, primitives };
 }
 
-function layoutImage(image: DeckImage, style: DeckStyle, box: DeckBox): DeckPrimitive[] {
+export function layoutImage(image: DeckImage, style: DeckStyle, box: DeckBox): DeckPrimitive[] {
   const captionH = image.caption ? 0.45 : 0;
   const primitives: DeckPrimitive[] = [
     {
@@ -257,21 +348,125 @@ function layoutImage(image: DeckImage, style: DeckStyle, box: DeckBox): DeckPrim
   return primitives;
 }
 
+/**
+ * Full-bleed image with the headline under it. The image is `cover`-fit to the
+ * whole page, gets a light background-color wash, and an OPAQUE bottom band
+ * carries the text while the top ~57% stays photo.
+ *
+ * The band is the background color and the text the normal text color, so the
+ * palette's existing contrast guarantee (see deriveDeckStyle) carries over
+ * unchanged — no per-image color analysis needed. A soft top-to-bottom fade
+ * would be nicer, but pptxgenjs 4.x has no gradient fill.
+ *
+ * Paint order matters and is contractual: image, wash, band, then text.
+ */
+function layoutHeroSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
+  const bandY = 4.25;
+  const primitives: DeckPrimitive[] = [];
+  if (slide.image) {
+    primitives.push({
+      kind: 'image',
+      frame: { x: 0, y: 0, w: DECK_PAGE_W, h: DECK_PAGE_H },
+      fit: 'cover',
+      source: { url: slide.image.url, path: slide.image.path },
+    });
+  }
+  primitives.push(
+    // A light wash of the background color over the whole photo, pulling an
+    // arbitrary image toward the deck's palette. Subtle enough to keep the
+    // picture, and legibility never depends on it — the text sits on the solid
+    // band below.
+    {
+      kind: 'rect',
+      box: { x: 0, y: 0, w: DECK_PAGE_W, h: DECK_PAGE_H },
+      fill: style.background,
+      transparency: 85,
+    },
+    // The text bed is OPAQUE on purpose. We cannot inspect the image the author
+    // picked, and a partly transparent band lets a busy or text-bearing graphic
+    // (a screenshot, a marketing banner) bleed through behind the headline —
+    // which reads as a rendering fault, not a design. Solid is the only choice
+    // that is legible over every possible image.
+    {
+      kind: 'rect',
+      box: { x: 0, y: bandY, w: DECK_PAGE_W, h: DECK_PAGE_H - bandY },
+      fill: style.background,
+    },
+    // Same accent tick as the title slide — the motif is what ties the deck together.
+    { kind: 'rect', box: { x: MARGIN, y: bandY + 0.5, w: 1.1, h: 0.14 }, fill: style.accent },
+    plainText(slide.title, style.text, { x: MARGIN, y: bandY + 0.78, w: BODY_W, h: 1.25 }, {
+      fontFace: style.headingFont,
+      fontSizePt: 48,
+      bold: true,
+      shrinkToFit: true,
+    }),
+  );
+  if (slide.subtext) {
+    primitives.push(
+      plainText(slide.subtext, style.muted, { x: MARGIN, y: bandY + 2.05, w: BODY_W, h: 0.7 }, {
+        fontFace: style.bodyFont,
+        fontSizePt: 18,
+      }),
+    );
+  }
+  return { background: style.background, primitives };
+}
+
+/**
+ * Image filling one half of the page edge to edge, title + bullets on the
+ * other. Sides alternate on `splitOrdinal` (the count of split slides before
+ * this one) so successive splits mirror each other — the rhythm a designer
+ * would apply by hand, without spending a model-facing knob on it (primitives
+ * and composition stay internal).
+ */
+function layoutSplitSlide(slide: DeckSlide, style: DeckStyle, splitOrdinal: number): DeckSlideLayout {
+  const imageW = 6.43;
+  const imageOnRight = splitOrdinal % 2 === 0;
+  const imageX = imageOnRight ? DECK_PAGE_W - imageW : 0;
+  const textX = imageOnRight ? MARGIN : imageW + MARGIN * 0.7;
+  const textW = DECK_PAGE_W - imageW - MARGIN * 1.7;
+
+  const primitives: DeckPrimitive[] = [];
+  if (slide.image) {
+    primitives.push({
+      kind: 'image',
+      frame: { x: imageX, y: 0, w: imageW, h: DECK_PAGE_H },
+      fit: 'cover',
+      source: { url: slide.image.url, path: slide.image.path },
+    });
+  }
+  primitives.push(
+    plainText(slide.title, style.text, { x: textX, y: 1.5, w: textW, h: 1.5 }, {
+      fontFace: style.headingFont,
+      fontSizePt: 34,
+      bold: true,
+      valign: 'bottom',
+      shrinkToFit: true,
+    }),
+    { kind: 'rect', box: { x: textX, y: 3.2, w: 1.6, h: 0.08 }, fill: style.accent },
+  );
+  if (slide.bullets?.length) {
+    primitives.push(bulletBlock(style, slide.bullets, { x: textX, y: 3.6, w: textW, h: 2.9 }, 19, 'top'));
+  }
+  return { background: style.background, primitives };
+}
+
 function layoutSectionSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
   const primitives: DeckPrimitive[] = [
-    plainText(slide.title, style.background, { x: MARGIN, y: 2.75, w: BODY_W, h: 1.6 }, {
+    plainText(slide.title, style.background, { x: MARGIN, y: 2.55, w: BODY_W, h: 1.9 }, {
       fontFace: style.headingFont,
-      fontSizePt: 44,
+      fontSizePt: 54,
       bold: true,
       align: 'center',
+      valign: 'middle',
       shrinkToFit: true,
     }),
   ];
   if (slide.subtext) {
     primitives.push(
-      plainText(slide.subtext, style.background, { x: MARGIN, y: 4.4, w: BODY_W, h: 0.8 }, {
+      plainText(slide.subtext, style.background, { x: MARGIN + 1.5, y: 4.6, w: BODY_W - 3, h: 0.8 }, {
         fontFace: style.bodyFont,
-        fontSizePt: 18,
+        fontSizePt: 20,
         align: 'center',
       }),
     );
@@ -282,20 +477,22 @@ function layoutSectionSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout
 
 function layoutStatementSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
   const primitives: DeckPrimitive[] = [
-    { kind: 'rect', box: { x: DECK_PAGE_W / 2 - 0.55, y: 2.1, w: 1.1, h: 0.12 }, fill: style.accent },
-    plainText(slide.title, style.text, { x: MARGIN, y: 2.5, w: BODY_W, h: 2.0 }, {
+    { kind: 'rect', box: { x: DECK_PAGE_W / 2 - 0.8, y: 2.1, w: 1.6, h: 0.1 }, fill: style.accent },
+    plainText(slide.title, style.text, { x: MARGIN, y: 2.65, w: BODY_W, h: 2.1 }, {
       fontFace: style.headingFont,
-      fontSizePt: 40,
+      fontSizePt: 48,
       bold: true,
       align: 'center',
+      valign: 'middle',
       shrinkToFit: true,
+      lineSpacingMultiple: 1.1,
     }),
   ];
   if (slide.subtext) {
     primitives.push(
-      plainText(slide.subtext, style.muted, { x: MARGIN + 1.2, y: 4.6, w: BODY_W - 2.4, h: 0.9 }, {
+      plainText(slide.subtext, style.muted, { x: MARGIN + 1.5, y: 5.0, w: BODY_W - 3, h: 0.9 }, {
         fontFace: style.bodyFont,
-        fontSizePt: 18,
+        fontSizePt: 20,
         align: 'center',
       }),
     );
@@ -306,57 +503,68 @@ function layoutStatementSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayo
 function layoutStatsSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
   const primitives = header(style, slide.title);
   const stats: DeckStat[] = slide.stats ?? [];
-  const gap = 0.4;
+  const gap = 0.36;
   const tileW = (BODY_W - gap * (stats.length - 1)) / stats.length;
-  const tileY = 2.35;
-  const tileH = 2.7;
+  // A tile holds two lines, so it is capped rather than stretched to the band —
+  // a full-height tile ends up taller than it is wide and reads as an empty box
+  // with text floating in it. Cap, then centre the row in the band.
+  const notes = slide.bullets?.length ? 1.5 : 0;
+  const availH = BODY_H - notes;
+  const tileH = Math.min(availH, 3.3);
+  const tileY = BODY_TOP + (availH - tileH) / 2;
   stats.forEach((stat, i) => {
     const x = MARGIN + i * (tileW + gap);
     primitives.push(
-      { kind: 'rect', box: { x, y: tileY, w: tileW, h: tileH }, fill: style.panel, radiusIn: 0.08 },
-      plainText(stat.value, style.accent, { x, y: tileY + 0.45, w: tileW, h: 1.2 }, {
+      { kind: 'rect', box: { x, y: tileY, w: tileW, h: tileH }, fill: style.panel, radiusIn: 0.1 },
+      plainText(stat.value, style.accent, { x, y: tileY + tileH * 0.24, w: tileW, h: tileH * 0.34 }, {
         fontFace: style.headingFont,
-        fontSizePt: 40,
+        fontSizePt: 60,
         bold: true,
         align: 'center',
+        valign: 'middle',
         shrinkToFit: true,
       }),
-      plainText(stat.label, style.muted, { x: x + 0.15, y: tileY + 1.7, w: tileW - 0.3, h: 0.8 }, {
+      plainText(stat.label, style.muted, { x: x + 0.2, y: tileY + tileH * 0.6, w: tileW - 0.4, h: 0.65 }, {
         fontFace: style.bodyFont,
-        fontSizePt: 13,
+        fontSizePt: 16,
         align: 'center',
       }),
     );
   });
   if (slide.bullets?.length) {
-    primitives.push(bulletBlock(style, slide.bullets, { x: MARGIN, y: tileY + tileH + 0.35, w: BODY_W, h: 1.4 }, 14));
+    primitives.push(
+      bulletBlock(style, slide.bullets, { x: MARGIN, y: tileY + tileH + 0.3, w: BODY_W, h: notes - 0.3 }, 16),
+    );
   }
   return { background: style.background, primitives };
 }
 
+/**
+ * A pull quote is one idea, so it gets the whole page: no header, an accent
+ * rule instead of the old stranded 120pt glyph, and the block optically
+ * centered. The previous version left ~2.4" dead under the attribution.
+ */
 function layoutQuoteSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
   const quote = slide.quote;
-  const primitives = quote
-    ? [
-        plainText('“', style.accent, { x: MARGIN - 0.15, y: 0.9, w: 1.6, h: 1.6 }, {
-          fontFace: 'Georgia',
-          fontSizePt: 120,
-          bold: true,
-        }),
-        plainText(quote.text, style.text, { x: MARGIN + 0.7, y: 2.4, w: BODY_W - 1.4, h: 2.5 }, {
-          fontFace: style.bodyFont,
-          fontSizePt: 26,
-          italic: true,
-          shrinkToFit: true,
-          lineSpacingMultiple: 1.2,
-        }),
-      ]
-    : [];
-  if (quote?.attribution) {
+  if (!quote) return { background: style.background, primitives: [] };
+  const inset = MARGIN + 0.8;
+  const width = DECK_PAGE_W - inset - MARGIN - 0.8;
+  const primitives: DeckPrimitive[] = [
+    { kind: 'rect', box: { x: inset, y: 2.15, w: 1.6, h: 0.09 }, fill: style.accent },
+    plainText(quote.text, style.text, { x: inset, y: 2.75, w: width, h: 2.4 }, {
+      fontFace: style.headingFont,
+      fontSizePt: 34,
+      italic: true,
+      valign: 'middle',
+      shrinkToFit: true,
+      lineSpacingMultiple: 1.25,
+    }),
+  ];
+  if (quote.attribution) {
     primitives.push(
-      plainText(quote.attribution, style.muted, { x: MARGIN + 0.7, y: 5.1, w: BODY_W - 1.4, h: 0.5 }, {
+      plainText(quote.attribution, style.muted, { x: inset, y: 5.45, w: width, h: 0.5 }, {
         fontFace: style.bodyFont,
-        fontSizePt: 15,
+        fontSizePt: 17,
       }),
     );
   }
@@ -386,7 +594,7 @@ function trimZero(value: number): string {
   return value.toFixed(1).replace(/\.0$/, '');
 }
 
-function layoutChart(chart: DeckChart, style: DeckStyle, box: DeckBox): DeckPrimitive[] {
+export function layoutChart(chart: DeckChart, style: DeckStyle, box: DeckBox): DeckPrimitive[] {
   if (chart.type === 'pie' || chart.type === 'doughnut') return layoutPieChart(chart, style, box);
   if (chart.type === 'line') return layoutLineChart(chart, style, box);
   return layoutBarChart(chart, style, box);
@@ -555,4 +763,757 @@ function layoutPieChart(chart: DeckChart, style: DeckStyle, box: DeckBox): DeckP
     });
   });
   return primitives;
+}
+
+// ---------------------------------------------------------------------------
+// Editorial pack
+//
+// A design pack is an ART DIRECTION, not a color theme: its own palette (warm
+// paper + rust, in theme.ts), its own type treatment, and its own slide
+// compositions. Note that it introduces NO new primitives — full-bleed color
+// fields, hairline rules, standing numerals and cards floating over images are
+// all rect + text + image plus paint order, which the engine already had. The
+// gap this closes was art direction, not capability.
+//
+// House rules for this pack, kept consistent across every composition:
+//   - asymmetric grids, never a centered header stacked over a centered body
+//   - a standing slide numeral as the recurring motif, derived from page order
+//     so it costs no schema field
+//   - full-bleed color for dividers and statements; paper for working slides
+//   - rules are hairlines (0.02"), the accent bar is the only heavy mark
+// ---------------------------------------------------------------------------
+
+/** Left column of the editorial working grid; body sits to its right. */
+const ED_COL_X = 4.95;
+const ED_BODY_X = ED_COL_X + 0.95;
+const ED_BODY_W = DECK_PAGE_W - ED_BODY_X - MARGIN;
+
+function layoutEditorialDeck(spec: DeckSpec, style: DeckStyle): DeckSlideLayout[] {
+  const slides: DeckSlideLayout[] = [edTitleSlide(spec, style)];
+  let splitOrdinal = 0;
+  spec.slides.forEach((slide, i) => {
+    const num = String(i + 1).padStart(2, '0');
+    let out: DeckSlideLayout;
+    switch (slide.layout) {
+      case 'section':
+        out = edSectionSlide(slide, style);
+        break;
+      case 'statement':
+        out = edStatementSlide(slide, style);
+        break;
+      case 'stats':
+        out = edStatsSlide(slide, style, num);
+        break;
+      case 'quote':
+        out = edQuoteSlide(slide, style);
+        break;
+      case 'hero':
+        out = edHeroSlide(slide, style);
+        break;
+      case 'split':
+        out = edSplitSlide(slide, style, splitOrdinal++, num);
+        break;
+      default:
+        out = edContentSlide(slide, style, num);
+    }
+    if (slide.notes) out.notes = slide.notes;
+    slides.push(out);
+  });
+  return slides;
+}
+
+/** The recurring motif: a large accent numeral over a hairline, top of the left column. */
+function edNumeral(style: DeckStyle, num: string): DeckPrimitive[] {
+  return [
+    { kind: 'rect', box: { x: MARGIN, y: 1.35, w: 1.5, h: 0.06 }, fill: style.accent },
+    plainText(num, style.accent, { x: MARGIN, y: 1.5, w: 2.2, h: 1.1 }, {
+      fontFace: style.headingFont,
+      fontSizePt: 46,
+      bold: true,
+    }),
+  ];
+}
+
+/** Full-bleed accent field, paper text. The deck opens on its loudest slide. */
+function edTitleSlide(spec: DeckSpec, style: DeckStyle): DeckSlideLayout {
+  const primitives: DeckPrimitive[] = [
+    { kind: 'rect', box: { x: MARGIN, y: 2.5, w: 1.8, h: 0.1 }, fill: style.background },
+    plainText(spec.title, style.background, { x: MARGIN, y: 2.9, w: DECK_PAGE_W - MARGIN * 2 - 1.4, h: 2.5 }, {
+      fontFace: style.headingFont,
+      fontSizePt: 62,
+      bold: true,
+      valign: 'bottom',
+      shrinkToFit: true,
+      lineSpacingMultiple: 1.03,
+    }),
+  ];
+  if (spec.subtitle) {
+    primitives.push(
+      plainText(spec.subtitle, style.background, { x: MARGIN, y: 5.65, w: BODY_W, h: 0.7 }, {
+        fontFace: style.bodyFont,
+        fontSizePt: 21,
+      }),
+    );
+  }
+  return { background: style.accent, primitives };
+}
+
+/** Full-bleed ink. Different field color from the title slide, so the deck has rhythm. */
+function edSectionSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
+  const primitives: DeckPrimitive[] = [
+    { kind: 'rect', box: { x: MARGIN, y: 3.05, w: 1.8, h: 0.1 }, fill: style.accent },
+    plainText(slide.title, style.background, { x: MARGIN, y: 3.45, w: BODY_W - 1.5, h: 1.9 }, {
+      fontFace: style.headingFont,
+      fontSizePt: 52,
+      bold: true,
+      valign: 'top',
+      shrinkToFit: true,
+      lineSpacingMultiple: 1.05,
+    }),
+  ];
+  if (slide.subtext) {
+    primitives.push(
+      plainText(slide.subtext, style.muted, { x: MARGIN, y: 5.5, w: BODY_W - 1.5, h: 0.7 }, {
+        fontFace: style.bodyFont,
+        fontSizePt: 19,
+      }),
+    );
+  }
+  return { background: style.text, primitives };
+}
+
+/** One claim on paper, set large and hung on the left rather than centered. */
+function edStatementSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
+  const primitives: DeckPrimitive[] = [
+    { kind: 'rect', box: { x: MARGIN, y: 2.35, w: 1.8, h: 0.1 }, fill: style.accent },
+    plainText(slide.title, style.text, { x: MARGIN, y: 2.8, w: BODY_W - 1.8, h: 2.4 }, {
+      fontFace: style.headingFont,
+      fontSizePt: 46,
+      bold: true,
+      valign: 'middle',
+      shrinkToFit: true,
+      lineSpacingMultiple: 1.12,
+    }),
+  ];
+  if (slide.subtext) {
+    primitives.push(
+      plainText(slide.subtext, style.muted, { x: MARGIN, y: 5.45, w: BODY_W - 2.5, h: 0.8 }, {
+        fontFace: style.bodyFont,
+        fontSizePt: 19,
+      }),
+    );
+  }
+  return { background: style.background, primitives };
+}
+
+/** Asymmetric working grid: numeral + title stand in the left column, body to the right. */
+function edContentSlide(slide: DeckSlide, style: DeckStyle, num: string): DeckSlideLayout {
+  const primitives: DeckPrimitive[] = [
+    ...edNumeral(style, num),
+    plainText(slide.title, style.text, { x: MARGIN, y: 2.75, w: ED_COL_X - MARGIN - 0.4, h: 2.6 }, {
+      fontFace: style.headingFont,
+      fontSizePt: 30,
+      bold: true,
+      shrinkToFit: true,
+      lineSpacingMultiple: 1.1,
+    }),
+    // hairline gutter rule — the only thing separating the columns
+    { kind: 'rect', box: { x: ED_COL_X, y: 1.35, w: 0.014, h: DECK_PAGE_H - 2.5 }, fill: style.grid },
+  ];
+  const bodyBox: DeckBox = { x: ED_BODY_X, y: 1.5, w: ED_BODY_W, h: DECK_PAGE_H - 1.5 - 1.0 };
+  if (slide.chart) {
+    primitives.push(...layoutChart(slide.chart, style, bodyBox));
+  } else if (slide.image) {
+    primitives.push(...layoutImage(slide.image, style, bodyBox));
+  } else if (slide.bullets?.length) {
+    const size = slide.bullets.length <= 4 ? 22 : slide.bullets.length <= 6 ? 19 : 17;
+    primitives.push(bulletBlock(style, slide.bullets, bodyBox, size));
+  }
+  return { background: style.background, primitives };
+}
+
+/**
+ * Numbers on paper under hairlines — no tiles. A boxed tile is the generic
+ * dashboard treatment; a ruled column is what a printed report does, and it
+ * lets the figures themselves carry the slide.
+ */
+function edStatsSlide(slide: DeckSlide, style: DeckStyle, num: string): DeckSlideLayout {
+  const primitives: DeckPrimitive[] = [
+    ...edNumeral(style, num),
+    plainText(slide.title, style.text, { x: MARGIN, y: 2.75, w: BODY_W, h: 0.9 }, {
+      fontFace: style.headingFont,
+      fontSizePt: 30,
+      bold: true,
+      shrinkToFit: true,
+    }),
+  ];
+  const stats: DeckStat[] = slide.stats ?? [];
+  const gap = 0.55;
+  const colW = (BODY_W - gap * (stats.length - 1)) / stats.length;
+  const rowY = 4.15;
+  stats.forEach((stat, i) => {
+    const x = MARGIN + i * (colW + gap);
+    primitives.push(
+      { kind: 'rect', box: { x, y: rowY, w: colW, h: 0.02 }, fill: style.grid },
+      plainText(stat.value, style.accent, { x, y: rowY + 0.3, w: colW, h: 1.35 }, {
+        fontFace: style.headingFont,
+        fontSizePt: 64,
+        bold: true,
+        shrinkToFit: true,
+      }),
+      plainText(stat.label, style.muted, { x, y: rowY + 1.75, w: colW, h: 0.6 }, {
+        fontFace: style.bodyFont,
+        fontSizePt: 16,
+      }),
+    );
+  });
+  return { background: style.background, primitives };
+}
+
+/** Panel-tinted field so a pull quote reads as a pause in the deck. */
+function edQuoteSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
+  const quote = slide.quote;
+  if (!quote) return { background: style.panel, primitives: [] };
+  const inset = MARGIN + 1.1;
+  const width = DECK_PAGE_W - inset * 2;
+  const primitives: DeckPrimitive[] = [
+    { kind: 'rect', box: { x: inset, y: 2.1, w: 1.8, h: 0.1 }, fill: style.accent },
+    plainText(quote.text, style.text, { x: inset, y: 2.65, w: width, h: 2.5 }, {
+      fontFace: style.headingFont,
+      fontSizePt: 36,
+      italic: true,
+      valign: 'middle',
+      shrinkToFit: true,
+      lineSpacingMultiple: 1.3,
+    }),
+  ];
+  if (quote.attribution) {
+    primitives.push(
+      plainText(quote.attribution, style.muted, { x: inset, y: 5.45, w: width, h: 0.5 }, {
+        fontFace: style.bodyFont,
+        fontSizePt: 17,
+      }),
+    );
+  }
+  return { background: style.panel, primitives };
+}
+
+/**
+ * Magazine cover: full-bleed image with an opaque paper card OVERLAPPING its
+ * lower left. Overlap is the thing that makes a layout look composed rather
+ * than assembled, and it costs nothing — paint order is already contractual.
+ * The card is opaque for the same reason the classic hero band is: we cannot
+ * inspect the image, so nothing may depend on what is behind the text.
+ */
+function edHeroSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
+  const card: DeckBox = { x: 0.85, y: 3.75, w: 7.9, h: 2.95 };
+  const pad = 0.62;
+  const primitives: DeckPrimitive[] = [];
+  if (slide.image) {
+    primitives.push({
+      kind: 'image',
+      frame: { x: 0, y: 0, w: DECK_PAGE_W, h: DECK_PAGE_H },
+      fit: 'cover',
+      source: { url: slide.image.url, path: slide.image.path },
+    });
+  }
+  primitives.push(
+    { kind: 'rect', box: card, fill: style.background },
+    { kind: 'rect', box: { x: card.x, y: card.y, w: 0.1, h: card.h }, fill: style.accent },
+    plainText(slide.title, style.text, { x: card.x + pad, y: card.y + 0.5, w: card.w - pad * 2, h: 1.4 }, {
+      fontFace: style.headingFont,
+      fontSizePt: 40,
+      bold: true,
+      valign: 'middle',
+      shrinkToFit: true,
+      lineSpacingMultiple: 1.08,
+    }),
+  );
+  if (slide.subtext) {
+    primitives.push(
+      plainText(slide.subtext, style.muted, { x: card.x + pad, y: card.y + 2.0, w: card.w - pad * 2, h: 0.6 }, {
+        fontFace: style.bodyFont,
+        fontSizePt: 18,
+      }),
+    );
+  }
+  return { background: style.background, primitives };
+}
+
+/** Image to the page edge on one side; numeral, title and body on the other. */
+function edSplitSlide(slide: DeckSlide, style: DeckStyle, splitOrdinal: number, num: string): DeckSlideLayout {
+  const imageW = 6.1;
+  const imageOnRight = splitOrdinal % 2 === 0;
+  const imageX = imageOnRight ? DECK_PAGE_W - imageW : 0;
+  const textX = imageOnRight ? MARGIN : imageW + 0.85;
+  const textW = DECK_PAGE_W - imageW - MARGIN - 0.85;
+
+  const primitives: DeckPrimitive[] = [];
+  if (slide.image) {
+    primitives.push({
+      kind: 'image',
+      frame: { x: imageX, y: 0, w: imageW, h: DECK_PAGE_H },
+      fit: 'cover',
+      source: { url: slide.image.url, path: slide.image.path },
+    });
+  }
+  primitives.push(
+    { kind: 'rect', box: { x: textX, y: 1.35, w: 1.5, h: 0.06 }, fill: style.accent },
+    plainText(num, style.accent, { x: textX, y: 1.5, w: 2.2, h: 1.0 }, {
+      fontFace: style.headingFont,
+      fontSizePt: 40,
+      bold: true,
+    }),
+    plainText(slide.title, style.text, { x: textX, y: 2.7, w: textW, h: 1.5 }, {
+      fontFace: style.headingFont,
+      fontSizePt: 32,
+      bold: true,
+      shrinkToFit: true,
+      lineSpacingMultiple: 1.1,
+    }),
+  );
+  if (slide.bullets?.length) {
+    primitives.push(bulletBlock(style, slide.bullets, { x: textX, y: 4.35, w: textW, h: 2.3 }, 18, 'top'));
+  }
+  return { background: style.background, primitives };
+}
+
+// ---------------------------------------------------------------------------
+// Minimal pack — beige and black
+//
+// Built against a specific reference deck rather than invented, which is why it
+// commits to things an invented pack would hedge on:
+//   - MONOCHROME. No accent hue anywhere; contrast comes from solid black
+//     fields on warm paper. `style.accent` is the same near-black as `text`.
+//   - Ultra-heavy grotesque headings (Arial Black), often set in caps.
+//   - Composition motifs, used consistently: a black square carrying the
+//     heading, rules that bleed off the canvas edge, bordered numbered rows,
+//     full-height image bands, an "03/10" page indicator, hairline footer
+//     rules, and thin line-art ornaments built from lineSeg.
+//
+// Not reachable and deliberately not faked: the reference's paper TEXTURE (a
+// raster fill) and its star/arch icons (no icon pipeline). Everything else here
+// is rect + text + image + lineSeg.
+// ---------------------------------------------------------------------------
+
+/**
+ * The minimal pack sets its headlines in caps. A derived reference that does
+ * NOT can suppress that; nothing can add caps to a pack that never asked for
+ * them, because forcing caps onto a serif face looks worse than leaving it be.
+ */
+function packCaps(text: string, style: DeckStyle): string {
+  return style.headingCaps === false ? text : text.toUpperCase();
+}
+
+const MIN_MARGIN = 0.92;
+
+function minPageTag(style: DeckStyle, num: number, total: number): DeckPrimitive {
+  return plainText(
+    `${String(num).padStart(2, '0')}/${String(total).padStart(2, '0')}`,
+    style.text,
+    { x: DECK_PAGE_W - MIN_MARGIN - 2, y: 0.62, w: 2, h: 0.35 },
+    { fontFace: style.bodyFont, fontSizePt: 13, bold: true, align: 'right' },
+  );
+}
+
+/** Two hairlines across the foot — the reference's recurring closing mark. */
+function minFootRules(style: DeckStyle): DeckPrimitive[] {
+  return [
+    { kind: 'rect', box: { x: 0, y: 6.42, w: DECK_PAGE_W, h: 0.012 }, fill: style.grid },
+    { kind: 'rect', box: { x: 0, y: 6.86, w: DECK_PAGE_W, h: 0.012 }, fill: style.grid },
+  ];
+}
+
+/** Striped triangle, drawn as stacked bars (no polygon primitive needed). */
+function minTriangle(style: DeckStyle, cx: number, top: number): DeckPrimitive[] {
+  const rows = 5;
+  return Array.from({ length: rows }, (_, i) => {
+    const w = 0.44 * (1 - i / rows);
+    return {
+      kind: 'rect' as const,
+      box: { x: cx - w / 2, y: top + (rows - 1 - i) * 0.082, w, h: 0.045 },
+      fill: style.text,
+    };
+  });
+}
+
+/** Half-sunburst of thin rays over a baseline. */
+function minSunburst(style: DeckStyle, cx: number, baseY: number, r: number): DeckPrimitive[] {
+  const rays = 15;
+  const out: DeckPrimitive[] = Array.from({ length: rays }, (_, i) => {
+    const a = Math.PI + (i / (rays - 1)) * Math.PI;
+    return {
+      kind: 'lineSeg' as const,
+      x1: cx,
+      y1: baseY,
+      x2: cx + Math.cos(a) * r,
+      y2: baseY + Math.sin(a) * r * 0.92,
+      color: style.text,
+      widthPt: 0.9,
+    };
+  });
+  out.push({ kind: 'rect', box: { x: cx - r, y: baseY, w: r * 2, h: 0.014 }, fill: style.text });
+  return out;
+}
+
+/** Two rows of diagonal hatch marks. */
+function minHatches(style: DeckStyle, x: number, y: number): DeckPrimitive[] {
+  const out: DeckPrimitive[] = [];
+  for (let row = 0; row < 2; row++) {
+    for (let i = 0; i < 6; i++) {
+      const ox = x + i * 0.29 + row * 0.12;
+      const oy = y + row * 0.38;
+      out.push({ kind: 'lineSeg', x1: ox, y1: oy + 0.26, x2: ox + 0.19, y2: oy, color: style.text, widthPt: 1.4 });
+    }
+  }
+  return out;
+}
+
+function layoutMinimalDeck(spec: DeckSpec, style: DeckStyle): DeckSlideLayout[] {
+  const total = spec.slides.length + 1;
+  const slides: DeckSlideLayout[] = [minTitleSlide(spec, style)];
+  let splitOrdinal = 0;
+  spec.slides.forEach((slide, i) => {
+    const num = i + 2;
+    let out: DeckSlideLayout;
+    switch (slide.layout) {
+      case 'section':
+        out = minSectionSlide(slide, style);
+        break;
+      case 'statement':
+        out = minStatementSlide(slide, style);
+        break;
+      case 'stats':
+        out = minStatsSlide(slide, style, num, total);
+        break;
+      case 'quote':
+        out = minQuoteSlide(slide, style);
+        break;
+      case 'hero':
+        out = minHeroSlide(slide, style);
+        break;
+      case 'split':
+        out = minSplitSlide(slide, style, splitOrdinal++, num, total);
+        break;
+      default:
+        out = minContentSlide(slide, style, num, total);
+    }
+    if (slide.notes) out.notes = slide.notes;
+    slides.push(out);
+  });
+  return slides;
+}
+
+/** Cover: ultra-heavy caps hung on the RIGHT, ornaments at opposing corners. */
+function minTitleSlide(spec: DeckSpec, style: DeckStyle): DeckSlideLayout {
+  const primitives: DeckPrimitive[] = [
+    ...minTriangle(style, MIN_MARGIN + 0.22, 0.6),
+    plainText(packCaps(spec.title, style), style.text, { x: 3.6, y: 2.45, w: DECK_PAGE_W - 3.6 - MIN_MARGIN, h: 2.15 }, {
+      fontFace: style.headingFont,
+      fontSizePt: 54,
+      bold: true,
+      align: 'right',
+      valign: 'bottom',
+      shrinkToFit: true,
+      lineSpacingMultiple: 0.98,
+    }),
+  ];
+  if (spec.subtitle) {
+    primitives.push(
+      plainText(spec.subtitle, style.text, { x: 3.6, y: 4.72, w: DECK_PAGE_W - 3.6 - MIN_MARGIN, h: 0.55 }, {
+        fontFace: style.bodyFont,
+        fontSizePt: 19,
+        bold: true,
+        align: 'right',
+      }),
+    );
+  }
+  primitives.push(...minSunburst(style, DECK_PAGE_W - MIN_MARGIN - 0.62, 6.62, 0.62));
+  return { background: style.background, primitives };
+}
+
+/** Divider inverts to a full black field — the black square motif at page scale. */
+function minSectionSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
+  const primitives: DeckPrimitive[] = [
+    plainText(packCaps(slide.title, style), style.background, { x: MIN_MARGIN, y: 2.9, w: BODY_W - 1.2, h: 1.9 }, {
+      fontFace: style.headingFont,
+      fontSizePt: 48,
+      bold: true,
+      valign: 'middle',
+      shrinkToFit: true,
+      lineSpacingMultiple: 1.0,
+    }),
+  ];
+  if (slide.subtext) {
+    primitives.push(
+      plainText(slide.subtext, style.background, { x: MIN_MARGIN, y: 4.95, w: BODY_W - 2.5, h: 0.7 }, {
+        fontFace: style.bodyFont,
+        fontSizePt: 18,
+      }),
+    );
+  }
+  return { background: style.text, primitives };
+}
+
+function minStatementSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
+  const primitives: DeckPrimitive[] = [
+    { kind: 'rect', box: { x: 0, y: 2.2, w: DECK_PAGE_W, h: 0.012 }, fill: style.grid },
+    plainText(slide.title, style.text, { x: MIN_MARGIN, y: 2.6, w: BODY_W - 1.0, h: 2.3 }, {
+      fontFace: style.headingFont,
+      fontSizePt: 42,
+      bold: true,
+      valign: 'middle',
+      shrinkToFit: true,
+      lineSpacingMultiple: 1.08,
+    }),
+    { kind: 'rect', box: { x: 0, y: 5.15, w: DECK_PAGE_W, h: 0.012 }, fill: style.grid },
+  ];
+  if (slide.subtext) {
+    primitives.push(
+      plainText(slide.subtext, style.muted, { x: MIN_MARGIN, y: 5.45, w: BODY_W - 2.0, h: 0.7 }, {
+        fontFace: style.bodyFont,
+        fontSizePt: 18,
+      }),
+    );
+  }
+  return { background: style.background, primitives };
+}
+
+/**
+ * The signature composition: a black square carrying the heading with rules
+ * bleeding off the left edge, and the body as bordered numbered rows.
+ * Charts and images take simpler variants — the square would crowd them.
+ */
+function minContentSlide(slide: DeckSlide, style: DeckStyle, num: number, total: number): DeckSlideLayout {
+  if (slide.chart || slide.image) {
+    const primitives: DeckPrimitive[] = [
+      minPageTag(style, num, total),
+      plainText(slide.title, style.text, { x: MIN_MARGIN, y: 0.95, w: 6.4, h: 1.3 }, {
+        fontFace: style.headingFont,
+        fontSizePt: 34,
+        bold: true,
+        shrinkToFit: true,
+        lineSpacingMultiple: 1.02,
+      }),
+    ];
+    if (slide.image) {
+      // full-height image band to the right, hard to the page edge
+      primitives.push({
+        kind: 'image',
+        frame: { x: 7.35, y: 0, w: DECK_PAGE_W - 7.35, h: DECK_PAGE_H },
+        fit: 'cover',
+        source: { url: slide.image.url, path: slide.image.path },
+      });
+      if (slide.bullets?.length) {
+        primitives.push(bulletBlock(style, slide.bullets, { x: MIN_MARGIN, y: 2.5, w: 5.9, h: 3.9 }, 17));
+      }
+    } else if (slide.chart) {
+      primitives.push(...layoutChart(slide.chart, style, { x: MIN_MARGIN, y: 2.45, w: BODY_W, h: 3.75 }));
+      primitives.push(...minFootRules(style));
+    }
+    return { background: style.background, primitives };
+  }
+
+  const sq = { x: MIN_MARGIN, y: 1.15, w: 5.25, h: 5.25 };
+  // no page tag on this variant: the hatch ornament owns the top-right corner,
+  // and the two collide there (as does the reference, which omits the tag here)
+  const primitives: DeckPrimitive[] = [
+    { kind: 'rect', box: sq, fill: style.text },
+    plainText(slide.title, style.background, { x: sq.x + 0.34, y: sq.y + 0.5, w: sq.w - 0.68, h: 1.35 }, {
+      fontFace: style.headingFont,
+      fontSizePt: 34,
+      bold: true,
+      shrinkToFit: true,
+      lineSpacingMultiple: 1.02,
+    }),
+  ];
+  // paired bars: light inside the square, dark running off the left edge
+  for (let i = 0; i < 3; i++) {
+    const y = sq.y + 1.95 + i * 0.28;
+    primitives.push(
+      { kind: 'rect', box: { x: sq.x + 0.34, y, w: 2.7, h: 0.075 }, fill: style.background },
+      { kind: 'rect', box: { x: -0.55, y, w: 1.47, h: 0.075 }, fill: style.text },
+    );
+  }
+
+  const bullets = slide.bullets ?? [];
+  const tblX = 6.62;
+  const tblW = DECK_PAGE_W - tblX - MIN_MARGIN;
+  const tblY = 1.35;
+  const rowH = Math.min(0.66, 4.9 / Math.max(bullets.length, 1));
+  const numW = 0.92;
+  primitives.push(...minHatches(style, DECK_PAGE_W - MIN_MARGIN - 1.75, 0.28));
+  bullets.forEach((text, i) => {
+    const y = tblY + i * rowH;
+    primitives.push(
+      { kind: 'rect', box: { x: tblX, y, w: tblW, h: rowH }, fill: style.background, stroke: { color: style.text, widthPt: 1 } },
+      { kind: 'rect', box: { x: tblX + numW, y, w: 0.012, h: rowH }, fill: style.text },
+      plainText(String(i + 1).padStart(2, '0'), style.text, { x: tblX + 0.18, y, w: numW, h: rowH }, {
+        fontFace: style.bodyFont,
+        fontSizePt: 14,
+        bold: true,
+        valign: 'middle',
+      }),
+      plainText(text, style.text, { x: tblX + numW + 0.26, y, w: tblW - numW - 0.44, h: rowH }, {
+        fontFace: style.bodyFont,
+        fontSizePt: 14,
+        bold: true,
+        valign: 'middle',
+        shrinkToFit: true,
+      }),
+    );
+  });
+  return { background: style.background, primitives };
+}
+
+/** Figures as centred columns under hairlines, closed by the foot rules. */
+function minStatsSlide(slide: DeckSlide, style: DeckStyle, num: number, total: number): DeckSlideLayout {
+  const primitives: DeckPrimitive[] = [
+    minPageTag(style, num, total),
+    plainText(slide.title, style.text, { x: MIN_MARGIN, y: 0.95, w: 7.2, h: 1.3 }, {
+      fontFace: style.headingFont,
+      fontSizePt: 34,
+      bold: true,
+      shrinkToFit: true,
+      lineSpacingMultiple: 1.02,
+    }),
+  ];
+  if (slide.subtext) {
+    primitives.push(
+      plainText(slide.subtext, style.muted, { x: MIN_MARGIN, y: 2.3, w: 7.4, h: 0.5 }, {
+        fontFace: style.bodyFont,
+        fontSizePt: 16,
+      }),
+    );
+  }
+  const stats: DeckStat[] = slide.stats ?? [];
+  const gap = 0.6;
+  const colW = (BODY_W - gap * (stats.length - 1)) / stats.length;
+  const rowY = slide.subtext ? 3.35 : 2.8;
+  stats.forEach((stat, i) => {
+    const x = MIN_MARGIN + i * (colW + gap);
+    primitives.push(
+      { kind: 'rect', box: { x, y: rowY, w: colW, h: 0.02 }, fill: style.text },
+      plainText(stat.value, style.text, { x, y: rowY + 0.42, w: colW, h: 1.3 }, {
+        fontFace: style.headingFont,
+        fontSizePt: 54,
+        bold: true,
+        align: 'center',
+        shrinkToFit: true,
+      }),
+      plainText(stat.label, style.text, { x, y: rowY + 1.85, w: colW, h: 0.6 }, {
+        fontFace: style.bodyFont,
+        fontSizePt: 16,
+        bold: true,
+        align: 'center',
+      }),
+    );
+  });
+  primitives.push(...minFootRules(style));
+  return { background: style.background, primitives };
+}
+
+function minQuoteSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
+  const quote = slide.quote;
+  if (!quote) return { background: style.background, primitives: [] };
+  const inset = MIN_MARGIN + 0.9;
+  const width = DECK_PAGE_W - inset * 2;
+  const primitives: DeckPrimitive[] = [
+    { kind: 'rect', box: { x: inset, y: 2.15, w: width, h: 0.02 }, fill: style.text },
+    plainText(quote.text, style.text, { x: inset, y: 2.6, w: width, h: 2.4 }, {
+      fontFace: style.headingFont,
+      fontSizePt: 30,
+      bold: true,
+      valign: 'middle',
+      align: 'center',
+      shrinkToFit: true,
+      lineSpacingMultiple: 1.22,
+    }),
+    { kind: 'rect', box: { x: inset, y: 5.15, w: width, h: 0.02 }, fill: style.text },
+  ];
+  if (quote.attribution) {
+    primitives.push(
+      plainText(quote.attribution.toUpperCase(), style.muted, { x: inset, y: 5.45, w: width, h: 0.5 }, {
+        fontFace: style.bodyFont,
+        fontSizePt: 14,
+        bold: true,
+        align: 'center',
+      }),
+    );
+  }
+  return { background: style.background, primitives };
+}
+
+/** Full-bleed image under a solid black band — the monochrome hero. */
+function minHeroSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
+  const bandY = 4.55;
+  const primitives: DeckPrimitive[] = [];
+  if (slide.image) {
+    primitives.push({
+      kind: 'image',
+      frame: { x: 0, y: 0, w: DECK_PAGE_W, h: DECK_PAGE_H },
+      fit: 'cover',
+      source: { url: slide.image.url, path: slide.image.path },
+    });
+  }
+  primitives.push(
+    { kind: 'rect', box: { x: 0, y: bandY, w: DECK_PAGE_W, h: DECK_PAGE_H - bandY }, fill: style.text },
+    plainText(packCaps(slide.title, style), style.background, { x: MIN_MARGIN, y: bandY + 0.55, w: BODY_W - 1.0, h: 1.2 }, {
+      fontFace: style.headingFont,
+      fontSizePt: 40,
+      bold: true,
+      shrinkToFit: true,
+      lineSpacingMultiple: 1.0,
+    }),
+  );
+  if (slide.subtext) {
+    primitives.push(
+      plainText(slide.subtext, style.background, { x: MIN_MARGIN, y: bandY + 1.85, w: BODY_W - 1.0, h: 0.6 }, {
+        fontFace: style.bodyFont,
+        fontSizePt: 17,
+      }),
+    );
+  }
+  return { background: style.background, primitives };
+}
+
+/** Full-height image band on one side; heavy heading and numbered body on the other. */
+function minSplitSlide(
+  slide: DeckSlide,
+  style: DeckStyle,
+  splitOrdinal: number,
+  num: number,
+  total: number,
+): DeckSlideLayout {
+  const imageW = 5.95;
+  const imageOnRight = splitOrdinal % 2 === 0;
+  const imageX = imageOnRight ? DECK_PAGE_W - imageW : 0;
+  const textX = imageOnRight ? MIN_MARGIN : imageW + 0.9;
+  const textW = DECK_PAGE_W - imageW - MIN_MARGIN - 0.9;
+
+  const primitives: DeckPrimitive[] = [];
+  if (slide.image) {
+    primitives.push({
+      kind: 'image',
+      frame: { x: imageX, y: 0, w: imageW, h: DECK_PAGE_H },
+      fit: 'cover',
+      source: { url: slide.image.url, path: slide.image.path },
+    });
+  }
+  if (imageOnRight) primitives.push(minPageTag(style, num, total));
+  primitives.push(
+    plainText(slide.title, style.text, { x: textX, y: 1.75, w: textW, h: 1.5 }, {
+      fontFace: style.headingFont,
+      fontSizePt: 34,
+      bold: true,
+      valign: 'bottom',
+      shrinkToFit: true,
+      lineSpacingMultiple: 1.02,
+    }),
+    { kind: 'rect', box: { x: textX, y: 3.45, w: textW, h: 0.02 }, fill: style.text },
+  );
+  if (slide.bullets?.length) {
+    primitives.push(bulletBlock(style, slide.bullets, { x: textX, y: 3.8, w: textW, h: 2.5 }, 17, 'top'));
+  }
+  return { background: style.background, primitives };
 }

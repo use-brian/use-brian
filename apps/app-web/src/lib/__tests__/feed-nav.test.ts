@@ -10,6 +10,8 @@ import {
   getFeedPlatformPick,
   isConnectableFeedPlatform,
   isFeedPlatform,
+  resolveCurrentFeedPlatform,
+  setCurrentFeedPlatform,
   setFeedPlatformPick,
 } from "@/lib/feed-nav";
 
@@ -39,7 +41,7 @@ describe("[COMP:app-web/feed-nav] feed navigation config", () => {
 
   // Platform-led (feed-revamp.md §8a, D13): Company sits above a platform
   // switcher, and everything under it inherits that platform.
-  it("orders the groups company -> platform -> hosted platforms", () => {
+  it("keeps hosted tools scoped to the single current-platform switcher", () => {
     expect(FEED_GROUPS.map((g) => g.key)).toEqual([
       "company",
       "platform",
@@ -52,8 +54,6 @@ describe("[COMP:app-web/feed-nav] feed navigation config", () => {
     expect(FEED_GROUPS[2].sections.map((s) => s.key)).toEqual([
       "insights",
       "inspiration",
-      "connection",
-      "policy",
       "settings",
     ]);
   });
@@ -99,8 +99,13 @@ describe("[COMP:app-web/feed-nav] feed navigation config", () => {
     expect(feedSectionFromPathname("/w/w1/feed/threads/insights")).toBe(
       "insights",
     );
+    // Connection is redirect-only and policy is a deep editor; both inherit
+    // the one visible Settings row.
     expect(feedSectionFromPathname("/w/w1/feed/xhs/connection")).toBe(
-      "connection",
+      "settings",
+    );
+    expect(feedSectionFromPathname("/w/w1/feed/twitter/policy")).toBe(
+      "settings",
     );
     expect(feedSectionFromPathname("/w/w1/feed/threads/settings/members")).toBe(
       "settings",
@@ -142,5 +147,22 @@ describe("[COMP:app-web/feed-nav] feed navigation config", () => {
     expect(defaultFeedPlatform("w1", ["twitter"])).toBe("twitter");
     setFeedPlatformPick("w1", ["xhs"]);
     expect(defaultFeedPlatform("w1", ["twitter"])).toBe("xhs");
+  });
+
+  it("makes the first onboarding pick the current platform on company routes", () => {
+    localStorage.clear();
+    setFeedPlatformPick("w1", ["twitter", "linkedin"]);
+    setCurrentFeedPlatform("w1", "twitter");
+    expect(resolveCurrentFeedPlatform({
+      workspaceId: "w1",
+      pathname: "/w/w1/feed",
+      connectedPlatforms: [],
+    })).toBe("twitter");
+    // A platform-bearing URL remains authoritative.
+    expect(resolveCurrentFeedPlatform({
+      workspaceId: "w1",
+      pathname: "/w/w1/feed/linkedin/posts/new",
+      connectedPlatforms: [],
+    })).toBe("linkedin");
   });
 });

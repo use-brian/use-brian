@@ -22,7 +22,54 @@ const PLATFORM_LIMITS: Record<string, number> = {
   threads: 500,
   instagram: 2_200,
   xhs: 1_000,
+  linkedin: 3_000,
 };
+
+export type FeedPostFormat = "post" | "thread" | "article";
+
+export type FeedArticleFields = {
+  sourceUrl: string;
+  title: string;
+  description: string;
+};
+
+/**
+ * Formats the product can represent without inventing a provider capability.
+ * X long-form Notes are intentionally absent; LinkedIn `article` is the
+ * Posts API link-card shape, not a native long-form publishing endpoint.
+ */
+export function postFormatsForPlatform(platform: string): FeedPostFormat[] {
+  if (platform === "twitter") return ["post", "thread"];
+  if (platform === "linkedin") return ["post", "article"];
+  return ["post"];
+}
+
+export function isPostFormatForPlatform(
+  platform: string,
+  format: string,
+): format is FeedPostFormat {
+  return postFormatsForPlatform(platform).includes(format as FeedPostFormat);
+}
+
+/** Stable first-message parser for the private-brief seed written at create. */
+export function parseFeedPostBriefSeed(text: string | null | undefined): {
+  format: FeedPostFormat;
+  brief: string;
+} | null {
+  if (!text) return null;
+  const firstLine = text.split("\n", 1)[0]?.trim().toLowerCase() ?? "";
+  let format: FeedPostFormat | null = null;
+  if (firstLine.includes(" article link")) format = "article";
+  else if (firstLine.includes(" thread")) format = "thread";
+  else if (firstLine.includes(" post")) format = "post";
+  if (!format) return null;
+  const marker = "\n\nPrivate brief (not published):\n";
+  const markerIndex = text.indexOf(marker);
+  return {
+    format,
+    brief: markerIndex >= 0 ? text.slice(markerIndex + marker.length).trim() : "",
+  };
+}
 
 export function platformLimit(platform: string): number | null {
   return PLATFORM_LIMITS[platform] ?? null;
@@ -111,8 +158,40 @@ export type CounterState = {
   near: boolean;
 };
 
+/**
+ * X's public weighted-length rules: URLs become 23 characters; code points
+ * in the four legacy single-weight ranges count 1 and everything else 2.
+ * This keeps CJK/emoji previews honest without shipping a second editor
+ * model. The platform remains the final authority for exotic URL shapes.
+ */
+export function xWeightedLength(text: string): number {
+  let count = 0;
+  let cursor = 0;
+  for (const match of text.matchAll(/https?:\/\/[^\s]+/gu)) {
+    const index = match.index ?? cursor;
+    count += weightedCodePoints(text.slice(cursor, index));
+    count += 23;
+    cursor = index + match[0].length;
+  }
+  return count + weightedCodePoints(text.slice(cursor));
+}
+
+function weightedCodePoints(text: string): number {
+  let count = 0;
+  for (const char of text) {
+    const point = char.codePointAt(0) ?? 0;
+    const single =
+      (point >= 0 && point <= 4_351)
+      || (point >= 8_192 && point <= 8_205)
+      || (point >= 8_208 && point <= 8_223)
+      || (point >= 8_242 && point <= 8_247);
+    count += single ? 1 : 2;
+  }
+  return count;
+}
+
 export function counterState(text: string, platform: string): CounterState {
-  const count = [...text].length; // code points, so emoji count as one
+  const count = platform === "twitter" ? xWeightedLength(text) : [...text].length;
   const limit = platformLimit(platform);
   if (limit === null) return { count, limit: null, over: false, near: false };
   return {

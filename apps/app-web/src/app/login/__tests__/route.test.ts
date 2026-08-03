@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GET, resolveAppLoginReturn } from "../route";
 import { webAppUrl } from "@/lib/primary-auth";
 import { ossSignedOutRedirect } from "@/lib/oss-entry";
@@ -7,7 +7,10 @@ vi.mock("@/lib/primary-auth", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/primary-auth")>();
   return { ...actual, webAppUrl: vi.fn() };
 });
-vi.mock("@/lib/oss-entry", () => ({ ossSignedOutRedirect: vi.fn() }));
+vi.mock("@/lib/oss-entry", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/oss-entry")>();
+  return { ...actual, ossSignedOutRedirect: vi.fn() };
+});
 
 const mockedWebAppUrl = vi.mocked(webAppUrl);
 const mockedOssEntry = vi.mocked(ossSignedOutRedirect);
@@ -18,6 +21,8 @@ beforeEach(() => {
   mockedOssEntry.mockReset();
   mockedOssEntry.mockReturnValue(null);
 });
+
+afterEach(() => vi.unstubAllEnvs());
 
 describe("[COMP:app-web/login-delegation] GET /login", () => {
   it("server-redirects hosted users to the canonical login without rendering HTML", () => {
@@ -56,7 +61,8 @@ describe("[COMP:app-web/login-delegation] GET /login", () => {
     );
   });
 
-  it("routes the OSS edition to its local-owner session", () => {
+  it("routes a proxied OSS login to its public local-owner session", () => {
+    vi.stubEnv("APP_URL", "https://hinson.usebrian.ai");
     mockedOssEntry.mockReturnValue(
       "/api/auth/local-session?next=%2Fw%2Fabc%2Fp",
     );
@@ -67,7 +73,7 @@ describe("[COMP:app-web/login-delegation] GET /login", () => {
 
     expect(res.status).toBe(307);
     expect(res.headers.get("location")).toBe(
-      "http://localhost:3003/api/auth/local-session?next=%2Fw%2Fabc%2Fp",
+      "https://hinson.usebrian.ai/api/auth/local-session?next=%2Fw%2Fabc%2Fp",
     );
     expect(mockedWebAppUrl).not.toHaveBeenCalled();
   });

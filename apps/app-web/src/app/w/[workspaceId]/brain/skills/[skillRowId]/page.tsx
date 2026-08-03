@@ -65,6 +65,7 @@ import {
 } from "@/lib/skills-view";
 import { SKILL_BODY_MAX_CHARS } from "@/lib/skill-markdown";
 import { requestBrainRefresh } from "@/lib/brain-events";
+import { useIsOffline } from "@/lib/offline/use-offline-sync";
 import { SkillDocument } from "@/components/brain/skill-document";
 import { SkillFilesSection } from "@/components/brain/skill-files-section";
 import { SearchableSelect } from "@/components/ui/searchable-select";
@@ -164,6 +165,7 @@ function SkillEditor({
 }) {
   const t = useT();
   const router = useRouter();
+  const offline = useIsOffline();
   const skillsCopy = t.brainPage.skills;
   const copy = t.brainPage.skillEditor;
 
@@ -199,6 +201,7 @@ function SkillEditor({
   const dirty = Object.keys(patch).length > 0;
 
   async function save() {
+    if (offline) return;
     if (!name.trim()) {
       setError(skillsCopy.nameRequired);
       return;
@@ -253,7 +256,7 @@ function SkillEditor({
                 confidence to certified. The label + tooltip carry the consequence. */}
             <Button
               size="sm"
-              disabled={busy || !dirty}
+              disabled={busy || !dirty || offline}
               onClick={() => void save()}
               title={
                 unverified
@@ -273,7 +276,11 @@ function SkillEditor({
         }
       />
 
-      <div className="mx-auto w-full max-w-6xl px-6 py-8 lg:grid lg:grid-cols-[minmax(0,1fr)_300px] lg:gap-10">
+      <fieldset
+        disabled={offline}
+        aria-disabled={offline || undefined}
+        className="mx-auto my-0 w-full max-w-6xl border-0 px-6 py-8 lg:grid lg:grid-cols-[minmax(0,1fr)_300px] lg:gap-10"
+      >
         {/* ── Main column — the skill as a document ─────────────────── */}
         <div className="min-w-0 flex flex-col">
           {error && (
@@ -331,7 +338,7 @@ function SkillEditor({
             onDeleted={() => router.push(backHref)}
           />
         </aside>
-      </div>
+      </fieldset>
     </>
   );
 }

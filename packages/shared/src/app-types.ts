@@ -22,7 +22,7 @@
  * to `kind='app'` collapses these into one wrong rule.
  */
 
-export type AppType = 'distribution'
+export type AppType = 'distribution' | 'learn-japanese'
 // Future: 'crm' | 'tasks' | 'workflow' | 'trip' | ...
 // (Doc was removed: doc authoring is now a context-injected skill on any
 // surface assistant — the workspace primary by default — not an app type. See
@@ -46,6 +46,12 @@ export const APP_TYPES: Record<AppType, AppTypeMeta> = {
     label: 'Threads + X distribution',
     description: 'Publishes posts on behalf of the workspace',
     defaultClearance: 'public',
+  },
+  'learn-japanese': {
+    appType: 'learn-japanese',
+    label: 'Japanese Teacher',
+    description: 'Level-aware Japanese conversation and corrective teaching',
+    defaultClearance: 'internal',
   },
 }
 

@@ -72,6 +72,8 @@ export type BrainAuth = {
    * The viewer a custom Home app is acting for (`authKind: 'home_app'` only).
    * An app never acts as "the workspace" in the abstract — it acts inside a
    * page someone has open, and writes should be attributable to that person.
+   * OAuth grants carry the consenting user for the same reason: first-party
+   * install routes must recheck that person's live workspace role.
    */
   actingUserId?: string
 }
@@ -155,6 +157,7 @@ export async function authenticateBrainRequest(
         // oauth_authorizations grows a per-grant override (follow-up).
         maxClearance: 'internal',
         authKind: 'oauth_token',
+        actingUserId: row.userId,
       }
     }
   }

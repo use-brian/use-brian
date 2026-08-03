@@ -140,6 +140,80 @@ describe('[COMP:routes/assistants-connector-scoping] GET /:assistantId/connector
     expect(gmail?.scope).toBe('team-grant')
   })
 
+  it('lists every exposed IMAP mailbox from the winning grantor on one provider-policy card', async () => {
+    queueMembershipAndTeam('owner', 'ws-personal')
+    connectorGrantStore.listForTargetSystem.mockResolvedValueOnce([
+      {
+        grantedByUserId: 'u-owner',
+        instance: {
+          id: 'imap-newer', provider: 'imap', label: 'Newer label', connectedEmail: 'newer@example.com',
+          url: null, custom: false, connected: true, healthStatus: 'ok',
+          createdAt: new Date('2026-07-03T00:00:00Z'),
+        },
+      },
+      {
+        grantedByUserId: 'u-owner',
+        instance: {
+          id: 'imap-primary', provider: 'imap', label: 'Primary label', connectedEmail: 'primary@example.com',
+          url: null, custom: false, connected: true, healthStatus: 'ok',
+          createdAt: new Date('2026-07-01T00:00:00Z'),
+        },
+      },
+      {
+        // A later member's same-provider grant stays shadowed, matching the
+        // runtime's one-grantor-per-provider precedence.
+        grantedByUserId: 'u-teammate',
+        instance: {
+          id: 'imap-teammate', provider: 'imap', label: 'Teammate', connectedEmail: 'teammate@example.com',
+          url: null, custom: false, connected: true, healthStatus: 'ok',
+          createdAt: new Date('2026-07-02T00:00:00Z'),
+        },
+      },
+    ])
+
+    const res = await request(makeApp('u-owner')).get('/api/assistants/a-1/connectors')
+
+    expect(res.status).toBe(200)
+    const imap = (res.body.connectors as Array<{
+      id: string
+      name: string
+      scope: string
+      accounts?: Array<{ instanceId: string; label: string; isPrimary: boolean }>
+    }>).find((connector) => connector.id === 'imap')
+    expect(imap).toMatchObject({ name: 'Company Email (IMAP)', scope: 'team-grant' })
+    expect(imap?.accounts).toEqual([
+      { instanceId: 'imap-primary', label: 'primary@example.com', connected: true, isPrimary: true },
+      { instanceId: 'imap-newer', label: 'newer@example.com', connected: true, isPrimary: false },
+    ])
+  })
+
+  it('does not advertise a later grantor when the winning IMAP grantor needs reconnect', async () => {
+    queueMembershipAndTeam('owner', 'ws-personal')
+    connectorGrantStore.listForTargetSystem.mockResolvedValueOnce([
+      {
+        grantedByUserId: 'u-owner',
+        instance: {
+          id: 'imap-dead', provider: 'imap', label: 'owner@example.com',
+          url: null, custom: false, connected: true, healthStatus: 'auth_failed',
+          createdAt: new Date('2026-07-01T00:00:00Z'),
+        },
+      },
+      {
+        grantedByUserId: 'u-teammate',
+        instance: {
+          id: 'imap-shadowed', provider: 'imap', label: 'teammate@example.com',
+          url: null, custom: false, connected: true, healthStatus: 'ok',
+          createdAt: new Date('2026-07-02T00:00:00Z'),
+        },
+      },
+    ])
+
+    const res = await request(makeApp('u-owner')).get('/api/assistants/a-1/connectors')
+
+    expect(res.status).toBe(200)
+    expect((res.body.connectors as Array<{ id: string }>).some((connector) => connector.id === 'imap')).toBe(false)
+  })
+
   it('synthesizes an always-on built-in row (Workspace Files) with no backing connector row', async () => {
     queueMembershipAndTeam('admin', 'ws-shared')
     // No instances, no grants, no personal connectors — the built-in must

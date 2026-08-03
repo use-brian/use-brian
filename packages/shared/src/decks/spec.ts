@@ -15,6 +15,15 @@ export type DeckTheme = (typeof DECK_THEMES)[number];
 export const DECK_CHART_TYPES = ['bar', 'line', 'pie', 'doughnut'] as const;
 export type DeckChartType = (typeof DECK_CHART_TYPES)[number];
 
+/**
+ * A pack is an art direction: palette + type treatment + its own set of slide
+ * compositions. It is NOT a color theme — 'editorial' lays a content slide out
+ * as two asymmetric columns with a standing numeral, where 'classic' stacks a
+ * header over a centered body. The model picks a named pack, never geometry.
+ */
+export const DECK_PACKS = ['classic', 'editorial', 'minimal'] as const;
+export type DeckPackId = (typeof DECK_PACKS)[number];
+
 const statSchema = z.object({
   value: z.string().min(1).max(20).describe("The big number, e.g. '$2.1M' or '40%'"),
   label: z.string().min(1).max(60).describe("What it measures, e.g. 'ARR' or 'MoM growth'"),
@@ -77,7 +86,7 @@ export const deckSlideSchema = z
       .string()
       .max(300)
       .optional()
-      .describe('One supporting line under the headline (statement/section layouts)'),
+      .describe('One supporting line under the headline (statement/section/hero layouts)'),
     stats: z
       .array(statSchema)
       .min(1)
@@ -90,13 +99,15 @@ export const deckSlideSchema = z
       .describe('Optional chart rendered on a content slide (beside bullets, or full-width without them)'),
     image: imageSchema
       .optional()
-      .describe('Optional image on a content slide (beside bullets, or large without them); not combinable with chart'),
+      .describe(
+        "Image for the slide. On 'content': beside bullets, or large without them. Required by 'hero' (fills the slide, title over it) and 'split' (fills one half). Not combinable with chart.",
+      ),
     notes: z.string().max(4000).optional().describe('Speaker notes for the slide'),
     layout: z
-      .enum(['content', 'section', 'statement', 'stats', 'quote'])
+      .enum(['content', 'section', 'statement', 'stats', 'quote', 'hero', 'split'])
       .optional()
       .describe(
-        "'content' (default) = title + bullets and/or chart; 'section' = divider; 'statement' = one big centered claim; 'stats' = row of big-number tiles; 'quote' = testimonial",
+        "'content' (default) = title + bullets and/or chart; 'section' = divider; 'statement' = one big centered claim; 'stats' = row of big-number tiles; 'quote' = testimonial; 'hero' = full-bleed image with the title over it (requires `image`); 'split' = image filling one half, title + bullets on the other (requires `image`)",
       ),
   })
   // strict: silently dropping unknown fields (e.g. `content`, `body`) produces
@@ -108,6 +119,28 @@ export const deckSlideSchema = z
     }
     if (slide.layout === 'quote' && !slide.quote) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "layout 'quote' requires a `quote` object" });
+    }
+    // hero/split are image-led: the image IS the layout, so without one they
+    // would render as an empty page rather than degrading to a content slide.
+    if ((slide.layout === 'hero' || slide.layout === 'split') && !slide.image) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `slide "${slide.title}": layout '${slide.layout}' requires an \`image\` — add one, or use 'statement' (hero) / 'content' (split) instead`,
+      });
+    }
+    // A hero is a title + subtext surface over a full-bleed photo; body content
+    // has nowhere to go on it and would silently vanish.
+    if (slide.layout === 'hero') {
+      const extras = (['bullets', 'chart', 'stats', 'quote'] as const).filter((k) => {
+        const v = slide[k];
+        return Array.isArray(v) ? v.length > 0 : !!v;
+      });
+      if (extras.length) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `slide "${slide.title}": layout 'hero' shows only the title and \`subtext\` over the image — move ${extras.join('/')} to a following slide, or use 'split' to keep bullets beside the image`,
+        });
+      }
     }
     if (slide.chart && slide.image) {
       ctx.addIssue({
@@ -146,6 +179,19 @@ export const deckSpecShape = {
     .enum(DECK_THEMES)
     .optional()
     .describe("Preset theme: 'light' (default), 'dark', or 'brand'. Ignored when a reference style is applied."),
+  pack: z
+    .enum(DECK_PACKS)
+    .optional()
+    .describe(
+      "Design pack: 'classic' (default) is the clean corporate look - header over centered body, on white. " +
+        "'minimal' is beige-and-black minimalist - warm paper, no accent colour at all, ultra-heavy grotesque headings, " +
+        'a black square carrying the heading beside bordered numbered rows, full-height image bands and line-art marks. ' +
+        "'editorial' is a magazine treatment - warm paper and rust, asymmetric two-column slides with a standing slide " +
+        'numeral, full-bleed colour dividers, and headline cards floating over hero images. ' +
+        "Pick 'minimal' or 'editorial' when the deck should look designed rather than neutral (pitch, launch, brand, " +
+        'board narrative). A pack sets the palette, so it overrides `theme`; a reference style from `styleFromFile` ' +
+        'still wins over both.',
+    ),
   slides: z
     .array(deckSlideSchema)
     .min(1)
@@ -153,12 +199,20 @@ export const deckSpecShape = {
     .describe('Content slides, in order (1-50). The title slide is generated automatically.'),
 };
 
+/**
+ * Raised from 10 when the image-led hero/split layouts landed: the old cap was
+ * written when images were occasional decoration, and a deck alternating hero
+ * with content slides now passes 10 well before it passes the 50-slide limit.
+ * Still bounded — each image costs a fetch/read plus up to 10MB in the binary.
+ */
+export const MAX_DECK_IMAGES = 20;
+
 export const deckSpecSchema = z.object(deckSpecShape).superRefine((deck, ctx) => {
   const imageCount = deck.slides.filter((s) => s.image).length;
-  if (imageCount > 10) {
+  if (imageCount > MAX_DECK_IMAGES) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      message: `deck uses ${imageCount} images — max 10 per deck`,
+      message: `deck uses ${imageCount} images — max ${MAX_DECK_IMAGES} per deck`,
     });
   }
 });

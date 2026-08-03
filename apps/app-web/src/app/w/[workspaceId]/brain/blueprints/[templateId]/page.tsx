@@ -79,6 +79,7 @@ import {
 } from "@/lib/blueprint-editor";
 import { requestBrainRefresh } from "@/lib/brain-events";
 import { docPagePath } from "@/lib/doc-page-url";
+import { useIsOffline } from "@/lib/offline/use-offline-sync";
 import { useGenerateFromBrain } from "@/components/brain/use-generate-from-brain";
 import {
   createPageAction,
@@ -209,6 +210,7 @@ function BlueprintEditor({
 }) {
   const t = useT();
   const router = useRouter();
+  const offline = useIsOffline();
   const copy = t.brainPage.blueprintEditor;
   const libraryCopy = t.brainPage.blueprints;
 
@@ -249,6 +251,7 @@ function BlueprintEditor({
   };
 
   async function save() {
+    if (offline) return;
     if (issues.length > 0) {
       setShowIssues(true);
       return;
@@ -269,6 +272,7 @@ function BlueprintEditor({
   const generate = useGenerateFromBrain(workspaceId);
 
   async function handleDelete() {
+    if (offline) return;
     const ok = await confirmDialog({
       title: libraryCopy.deleteTitle,
       description: format(libraryCopy.deleteBody, { name: template.name }),
@@ -311,14 +315,22 @@ function BlueprintEditor({
                 {copy.unsaved}
               </span>
             )}
-            <Button size="sm" disabled={busy || !dirty} onClick={() => void save()}>
+            <Button
+              size="sm"
+              disabled={busy || !dirty || offline}
+              onClick={() => void save()}
+            >
               {copy.save}
             </Button>
           </>
         }
       />
 
-      <div className="mx-auto w-full max-w-6xl px-6 py-8 lg:grid lg:grid-cols-[minmax(0,1fr)_300px] lg:gap-10">
+      <fieldset
+        disabled={offline}
+        aria-disabled={offline || undefined}
+        className="mx-auto my-0 w-full max-w-6xl border-0 px-6 py-8 lg:grid lg:grid-cols-[minmax(0,1fr)_300px] lg:gap-10"
+      >
         {/* ── Main column — the blueprint as a document ─────────────────── */}
         <div className="flex min-w-0 flex-col">
           {(error || topIssues.length > 0) && (
@@ -481,7 +493,7 @@ function BlueprintEditor({
 
           <AboutCard template={template} sectionCount={draft.fields.length} />
         </aside>
-      </div>
+      </fieldset>
     </>
   );
 }

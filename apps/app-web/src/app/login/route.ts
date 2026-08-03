@@ -3,7 +3,10 @@ import {
   buildDelegatedLoginUrl,
   webAppUrl,
 } from "@/lib/primary-auth";
-import { ossSignedOutRedirect } from "@/lib/oss-entry";
+import {
+  ossPublicAppOrigin,
+  ossSignedOutRedirect,
+} from "@/lib/oss-entry";
 
 /**
  * Redirect-only compatibility entry for app-origin `/login`.
@@ -53,7 +56,9 @@ export function GET(request: Request): NextResponse {
 
   const ossEntry = ossSignedOutRedirect(returnPath);
   if (ossEntry) {
-    return NextResponse.redirect(new URL(ossEntry, requestUrl));
+    return NextResponse.redirect(
+      new URL(ossEntry, ossPublicAppOrigin(requestUrl)),
+    );
   }
 
   const rawError = requestUrl.searchParams.get("error");

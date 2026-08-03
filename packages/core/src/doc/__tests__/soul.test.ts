@@ -1,18 +1,46 @@
 import { describe, it, expect } from 'vitest'
-import { buildDocSkillBlock, buildAmbientDocSkillBlock } from '../soul.js'
+import {
+  buildDocSkillBlock,
+  buildDocSupervisorSkillBlock,
+  buildDocEditAgentPrompt,
+  buildAmbientDocSkillBlock,
+} from '../soul.js'
 
 // Doc authoring is a context-injected SKILL (`buildDocSkillBlock`),
 // appended after the host assistant's own Layer-1 on the doc surface — not an
 // assistant identity. These cases cover both the skill framing and the shared
 // page-authoring protocol the block composes.
 describe('[COMP:doc/soul] doc skill block', () => {
-  it('frames doc as a CAPABILITY, not an identity', () => {
-    // The block is appended after the host assistant's own Layer-1, so it must
-    // NOT claim the assistant IS a doc assistant — it says the assistant is
-    // currently WORKING ON a doc page. Guards against identity hijack of the
-    // workspace primary.
+  it('keeps the conversational supervisor compact and moves raw authoring mechanics to the editor', () => {
+    const supervisor = buildDocSupervisorSkillBlock({ mode: 'page', teamName: 'Acme' })
+    const editor = buildDocEditAgentPrompt({ mode: 'page', teamName: 'Acme' })
+
+    expect(supervisor).toContain('delegateDocEdit')
+    expect(supervisor).toMatch(/exactly once/i)
+    expect(supervisor).not.toContain('renderPage')
+    expect(supervisor).not.toContain('patchPage')
+    expect(supervisor).not.toContain('## Data-block')
+    expect(supervisor.length).toBeLessThan(editor.length / 5)
+
+    expect(editor).toContain('# Context-clean Doc editor')
+    expect(editor).toContain('renderPage')
+    expect(editor).toContain('patchPage')
+    expect(editor).toMatch(/no access to the parent conversation/i)
+    expect(buildDocSkillBlock({ mode: 'page' })).toBe(
+      buildDocEditAgentPrompt({ mode: 'page' }),
+    )
+  })
+
+  it('tells the research supervisor to carry evidence into the brief', () => {
+    const out = buildDocSupervisorSkillBlock({ mode: 'research' })
+    expect(out).toMatch(/research first/i)
+    expect(out).toMatch(/source URLs/i)
+    expect(out).toMatch(/cannot see your research transcript/i)
+  })
+
+  it('frames the full protocol as an internal editor, not a user-facing identity', () => {
     const out = buildDocSkillBlock({ mode: 'page', teamName: 'Acme' })
-    expect(out).toContain('# Working on a Doc page')
+    expect(out).toContain('# Context-clean Doc editor')
     expect(out).not.toContain('# Doc assistant')
     expect(out).not.toMatch(/You are a Doc assistant/)
   })
@@ -29,7 +57,7 @@ describe('[COMP:doc/soul] doc skill block', () => {
     // memory block, so a missing name must not crash or print an empty placeholder.
     const noTeam = buildDocSkillBlock({ mode: 'page' })
     expect(noTeam).not.toContain('Workspace: ****')
-    expect(noTeam).toContain('# Working on a Doc page')
+    expect(noTeam).toContain('# Context-clean Doc editor')
   })
 
   it('selects the page-mode block by default and the research block on mode=research', () => {
@@ -128,11 +156,12 @@ describe('[COMP:doc/soul] ambient doc skill block', () => {
     expect(out).not.toMatch(/never reply in chat/i)
   })
 
-  it('names the page tools so the capability is discoverable', () => {
+  it('names only the delegation gateway so the capability is discoverable', () => {
     const out = buildAmbientDocSkillBlock()
-    expect(out).toContain('renderPage')
-    expect(out).toContain('patchPage')
-    expect(out).toContain('createSubPage')
+    expect(out).toContain('delegateDocEdit')
+    expect(out).not.toContain('renderPage')
+    expect(out).not.toContain('patchPage')
+    expect(out).not.toContain('createSubPage')
   })
 
   it('stays compact — no authoring protocol, binding catalog, or comment protocol', () => {

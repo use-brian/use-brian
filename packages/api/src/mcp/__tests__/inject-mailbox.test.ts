@@ -186,7 +186,90 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
     )
   })
 
-  it('injects a workspace-owned mailbox for a workspace assistant (team-native overlay)', async () => {
+  it('workspace grant overlay routes every exposed mailbox from the winning grantor and no others', async () => {
+    const credsById: Record<string, typeof IMAP_CREDS> = {
+      'imap-primary': IMAP_CREDS,
+      'imap-ops': { ...IMAP_CREDS, email: 'ops@harborlane.example' },
+      'imap-teammate': { ...IMAP_CREDS, email: 'teammate@harborlane.example' },
+      'imap-unexposed': { ...IMAP_CREDS, email: 'private@harborlane.example' },
+    }
+    const instanceStore = {
+      getAuthCredentialsSystem: vi.fn(async (id: string) => credsById[id]),
+      getCredentialsSystem: vi.fn(async () => null),
+      listByWorkspaceSystem: vi.fn(async () => []),
+    } as unknown as ConnectorInstanceStore
+    const grant = (
+      id: string,
+      email: string,
+      grantedByUserId: string,
+      createdAt: string,
+    ) => ({
+      grantedByUserId,
+      instance: {
+        id,
+        provider: 'imap',
+        label: email,
+        connected: true,
+        healthStatus: 'ok',
+        createdAt: new Date(createdAt),
+      },
+    })
+    const connectorGrantStore = {
+      listForTargetSystem: vi.fn(async () => [
+        grant('imap-primary', IMAP_CREDS.email, 'u-1', '2026-07-01T00:00:00Z'),
+        grant('imap-ops', 'ops@harborlane.example', 'u-1', '2026-07-02T00:00:00Z'),
+        grant('imap-teammate', 'teammate@harborlane.example', 'u-2', '2026-07-03T00:00:00Z'),
+      ]),
+    }
+    const emit = vi.fn(async () => ({ status: 'denied' as const }))
+    const audit = {
+      preflight: vi.fn(() => preflightResult({ shouldDeny: true, classifierMatches: ['test'] })),
+      emit,
+    } as unknown as ConnectorActionAudit
+    const connectorStore = {
+      // The same owner has another personal mailbox, but it was not exposed.
+      // The overlay must never load this provider-wide list.
+      list: vi.fn(async () => [{
+        ...imapConnectorRow(), id: 'imap-unexposed', name: 'private@harborlane.example',
+      }]),
+    }
+    const tools = new Map<string, Tool>()
+
+    await injectMcpTools({
+      userId: 'u-1', assistantId: 'a-1', assistantTeamId: 'ws-1', tools,
+      connectorStore: connectorStore as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorInstanceStore: instanceStore,
+      connectorGrantStore: connectorGrantStore as never,
+      connectorActionAudit: audit,
+      keepBuiltinsDirect: true,
+    })
+
+    expect(connectorStore.list).not.toHaveBeenCalled()
+    expect(instanceStore.getAuthCredentialsSystem).toHaveBeenCalledWith('imap-primary')
+    expect(instanceStore.getAuthCredentialsSystem).toHaveBeenCalledWith('imap-ops')
+    expect(instanceStore.getAuthCredentialsSystem).not.toHaveBeenCalledWith('imap-teammate')
+    expect(instanceStore.getAuthCredentialsSystem).not.toHaveBeenCalledWith('imap-unexposed')
+
+    const send = tools.get('imapSendMessage')!
+    await send.execute(
+      { to: ['x@y.z'], subject: 's', body: 'b', account: 'ops@harborlane.example' },
+      {} as never,
+    )
+    expect(emit).toHaveBeenLastCalledWith(
+      { userId: 'u-1', assistantId: 'a-1' },
+      expect.objectContaining({ payload: expect.objectContaining({ from: 'ops@harborlane.example' }) }),
+    )
+
+    const shadowed = await send.execute(
+      { to: ['x@y.z'], subject: 's', body: 'b', account: 'teammate@harborlane.example' },
+      {} as never,
+    )
+    expect(shadowed).toMatchObject({ isError: true })
+    expect(String(shadowed.data)).toMatch(/Connected mailboxes: maya@harborlane\.example, ops@harborlane\.example/)
+  })
+
+  it('injects every workspace-owned mailbox for a workspace assistant (team-native overlay)', async () => {
     // `POST /api/connector-instances/:id/transfer` moves a personal mailbox to
     // `scope='workspace'` AND DELETES its grants — a workspace-owned instance is
     // visible by scope, so it needs none. That leaves the team-native overlay as
@@ -196,7 +279,9 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
     // assistant while Studio still shows it connected.
     const tools = new Map<string, Tool>()
     const instanceStore = {
-      getAuthCredentialsSystem: vi.fn(async () => IMAP_CREDS),
+      getAuthCredentialsSystem: vi.fn(async (id: string) => id === 'inst-imap-team-2'
+        ? { ...IMAP_CREDS, email: 'ops@harborlane.example' }
+        : IMAP_CREDS),
       getCredentialsSystem: vi.fn(async () => null),
       listByWorkspaceSystem: vi.fn(async () => [
         {
@@ -205,6 +290,13 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
           connected: true, healthStatus: 'ok', config: {}, sensitivity: 'internal',
           createdAt: new Date('2026-07-01T00:00:00Z'),
           updatedAt: new Date('2026-07-01T00:00:00Z'),
+        },
+        {
+          id: 'inst-imap-team-2', scope: 'workspace', userId: null, workspaceId: 'ws-1',
+          provider: 'imap', label: 'ops@harborlane.example', url: null, custom: false,
+          connected: true, healthStatus: 'ok', config: {}, sensitivity: 'internal',
+          createdAt: new Date('2026-07-02T00:00:00Z'),
+          updatedAt: new Date('2026-07-02T00:00:00Z'),
         },
       ]),
     } as unknown as ConnectorInstanceStore
@@ -225,6 +317,7 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
     expect(tools.has('imapSendMessage')).toBe(true)
     // Bound to the team-owned row, not to whatever the acting user owns.
     expect(instanceStore.getAuthCredentialsSystem).toHaveBeenCalledWith('inst-imap-team')
+    expect(instanceStore.getAuthCredentialsSystem).toHaveBeenCalledWith('inst-imap-team-2')
   })
 
   it('classifier preflight deny short-circuits the send BEFORE any network call and audits status=denied', async () => {

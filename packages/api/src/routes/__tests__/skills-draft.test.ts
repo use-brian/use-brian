@@ -12,7 +12,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import request from 'supertest'
 import { createTestApp } from './helpers.js'
-import { loadBuiltinSkills, type LLMProvider, type Message, type StreamChunk } from '@use-brian/core'
+import {
+  loadBuiltinSkills,
+  type LLMProvider,
+  type Message,
+  type PreflightOptions,
+  type StreamChunk,
+} from '@use-brian/core'
 
 import { skillRoutes } from '../skills.js'
 
@@ -77,6 +83,7 @@ type DraftAppOptions = {
   plan?: string
   budgetStatus?: 'ok' | 'downgraded' | 'blocked'
   fileStore?: { get: (id: string, ctx?: unknown) => Promise<unknown> }
+  voiceTranscription?: PreflightOptions
 }
 
 function draftApp(opts: DraftAppOptions = {}) {
@@ -92,6 +99,7 @@ function draftApp(opts: DraftAppOptions = {}) {
       getWorkspacePlan: async () => opts.plan ?? 'max_5x',
       checkUsageBudget: async () => ({ status: opts.budgetStatus ?? 'ok' }),
       fileStore: opts.fileStore as never,
+      voiceTranscription: opts.voiceTranscription,
     }),
     { userId: 'u-1' },
   )
@@ -311,6 +319,45 @@ describe('[COMP:api/skills-route] POST /draft', () => {
     expect(Array.isArray(last.content)).toBe(true)
     const blocks = last.content as Array<{ type: string; mimeType?: string }>
     expect(blocks.some((b) => b.type === 'image' && b.mimeType === 'image/png')).toBe(true)
+  })
+
+  it('transcribes a recorder voice file into the latest draft turn', async () => {
+    const capture: Captured = {}
+    const fetchFn = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          candidates: [{ content: { parts: [{ text: 'Make the trigger more specific' }] } }],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    ) as unknown as typeof fetch
+    const fileStore = {
+      get: vi.fn(async (id: string) => ({
+        id,
+        sessionId: null,
+        fileName: 'voice-message.webm',
+        mimeType: 'audio/webm',
+        content: `data:audio/webm;base64,${Buffer.from('voice-bytes').toString('base64')}`,
+        summary: null,
+        sizeBytes: 11,
+      })),
+    }
+    const res = await request(
+      draftApp({
+        provider: mockProvider(VALID_DRAFT, capture),
+        fileStore,
+        voiceTranscription: { enabled: true, apiKey: 'test-key', fetchFn },
+      }),
+    )
+      .post('/api/skills/draft')
+      .send(turnBody({ fileIds: ['f-voice'] }))
+
+    expect(res.status).toBe(200)
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(textOf(capture.messages!.at(-1))).toContain(
+      '[voice] Make the trigger more specific',
+    )
+    expect(textOf(capture.messages!.at(-1))).not.toContain('not supported')
   })
 })
 

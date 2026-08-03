@@ -24,10 +24,17 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderToString } from "react-dom/server";
 
 import type { FeedWorkspaceValue } from "@/contexts/feed-profiles-context";
+import type { DockRecorderApi } from "@/lib/recorder/use-dock-recorder";
 
 const ctxRef = vi.hoisted(() => ({
   workspace: null as unknown,
   state: null as unknown,
+}));
+const recorderRef = vi.hoisted(() => ({
+  current: null as DockRecorderApi | null,
+}));
+const pathnameRef = vi.hoisted(() => ({
+  current: "/w/ws-1/feed/voice",
 }));
 
 vi.mock("@/lib/auth-fetch", () => ({
@@ -40,13 +47,17 @@ vi.mock("@/contexts/feed-profiles-context", () => ({
   useFeedWorkspace: () => ctxRef.workspace,
   useFeedWorkspaceState: () => ctxRef.state,
 }));
+vi.mock("@/lib/recorder/dock-recorder-bridge", () => ({
+  useGlobalDockRecorder: () => recorderRef.current,
+  registerDockRecorderChatTarget: () => () => {},
+}));
 // The shell mounts the operator top bar above the gate; its router + layout
 // sidebar state don't exist under bare SSR, so mock the hooks it reads.
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ back: vi.fn(), forward: vi.fn() }),
   // The dock reads the pathname to pick its sticky channel: the Plan surface
   // gets its own `mode='plan'` conversation (feed-revamp.md D9).
-  usePathname: () => "/w/ws-1/feed/voice",
+  usePathname: () => pathnameRef.current,
 }));
 vi.mock("@/components/doc/doc-sidebar-data", () => ({
   useSidebarData: () => ({
@@ -71,6 +82,7 @@ const dict = en as unknown as Dictionary;
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  pathnameRef.current = "/w/ws-1/feed/voice";
 });
 
 function profile(handle: string, assistantId = `a-${handle}`): FeedProfile {
@@ -98,6 +110,27 @@ function workspace(profiles: FeedProfile[]): FeedWorkspaceValue {
 }
 
 function renderDock(profiles: FeedProfile[]): string {
+  recorderRef.current = {
+    phase: { kind: "idle" },
+    active: false,
+    elapsedMs: () => 0,
+    notice: null,
+    clearNotices: vi.fn(),
+    onPressStart: vi.fn(),
+    onPressEnd: vi.fn(),
+    stop: vi.fn(),
+    discard: vi.fn(),
+    pause: vi.fn(),
+    resume: vi.fn(),
+    level: () => 0,
+    computerAudioAvailable: false,
+    includeComputerAudio: false,
+    setIncludeComputerAudio: vi.fn(),
+    includesSystemAudio: () => false,
+    recovery: [],
+    saveRecovery: vi.fn(),
+    discardRecovery: vi.fn(),
+  };
   ctxRef.workspace = workspace(profiles);
   return renderToString(
     <I18nProvider locale="en" dict={dict}>
@@ -155,12 +188,27 @@ describe("[COMP:app-web/feed-tuning-chat] FeedFloatingChat", () => {
     expect(html).toContain(en.feedPage.tuningChat.title);
     expect(html).toContain(en.feedPage.tuningChat.emptyTitle);
     expect(html).toContain(en.feedPage.tuningChat.suggestion2);
+    // Feed replaces the global CHAT chrome, not the app-wide recorder. The
+    // same record-dot affordance must remain beside the Feed launcher.
+    expect(html).toContain(`aria-label="${en.recorder.start}"`);
+    // The rounded composite box owns focus. The inner textarea must suppress
+    // the global :focus-visible shadow or the composer gets a second, sharp
+    // blue rectangle inside its rounded ring.
+    expect(html).toContain("focus-visible:shadow-none");
   });
 
   it("no connected assistant: renders nothing (feed home owns the empty state)", () => {
     const html = renderDock([]);
     expect(html).not.toContain(en.feedPage.tuningChat.openAria);
     expect(html).not.toContain(en.feedPage.tuningChat.title);
+  });
+
+  it("post editor: suppresses the floating chat so the inline Refine rail is the only chat", () => {
+    pathnameRef.current = "/w/ws-1/feed/twitter/posts/session-1";
+    const html = renderDock([profile("acme")]);
+    expect(html).not.toContain(en.feedPage.tuningChat.openAria);
+    expect(html).not.toContain(en.chat.surfacePlaceholder);
+    expect(html).not.toContain(`aria-label="${en.recorder.start}"`);
   });
 });
 

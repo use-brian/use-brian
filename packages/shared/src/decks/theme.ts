@@ -21,9 +21,49 @@ export interface DeckStyle {
   chartCategorical: string[];
   headingFont: string;
   bodyFont: string;
+  /**
+   * Multiplier applied to every type size a pack emits, so a derived reference
+   * can set the deck's typographic WEIGHT without flattening the pack.
+   *
+   * A pack uses a dozen carefully-related sizes; mapping those onto a five-step
+   * token scale would collapse the hierarchy it depends on. Scaling preserves
+   * every ratio and only moves the whole system. Absent = 1 (no change).
+   */
+  typeScale?: number;
+  /**
+   * Whether the reference sets its headings in caps. Only ever used to SUPPRESS
+   * a pack's own caps treatment (`false` = "my reference isn't shouty"); it
+   * never adds caps to a pack that didn't ask for them, because forcing caps
+   * onto a serif face looks worse than leaving it alone.
+   */
+  headingCaps?: boolean;
 }
 
-const DEFAULT_FONT = 'Arial';
+/**
+ * The headline size the packs are tuned around. A derived reference's largest
+ * step is expressed relative to this to get `typeScale`. All three packs sit in
+ * the 54-62pt range, so this is an approximation with a known small error, not
+ * a measurement.
+ */
+export const DECK_CANONICAL_HEADLINE_PT = 54;
+
+/** Clamped so a bad derivation cannot produce absurd type. */
+export function deckTypeScaleFor(headlinePt: number): number {
+  return Math.min(Math.max(headlinePt / DECK_CANONICAL_HEADLINE_PT, 0.75), 1.25);
+}
+
+/**
+ * There is no font embedding (see the header note), so a face must be present
+ * on the opening machine or it silently falls back. Choices are therefore
+ * drawn from the Office/OS-bundled set — a web font (Inter, Söhne) would look
+ * WORSE than Arial wherever it isn't installed, which is most machines.
+ * Georgia and Calibri ship on Windows, macOS and Office; Georgia is already
+ * assumed present (the quote glyph in layout.ts hardcodes it).
+ */
+const DEFAULT_HEADING_FONT = 'Georgia';
+const DEFAULT_BODY_FONT = 'Calibri';
+/** Sans heading for saturated backgrounds, where a serif reads oddly. */
+const SANS_HEADING_FONT = 'Trebuchet MS';
 
 /** Preset palettes ported from sidanclaw-pptx-mcp (CVD + contrast validated). */
 export const DECK_PRESET_STYLES: Record<DeckTheme, DeckStyle> = {
@@ -35,8 +75,8 @@ export const DECK_PRESET_STYLES: Record<DeckTheme, DeckStyle> = {
     panel: 'F3F4F6',
     grid: 'E5E7EB',
     chartCategorical: ['2A78D6', '1BAF7A', 'EDA100', '4A3AA7', 'E34948', 'EB6834'],
-    headingFont: DEFAULT_FONT,
-    bodyFont: DEFAULT_FONT,
+    headingFont: DEFAULT_HEADING_FONT,
+    bodyFont: DEFAULT_BODY_FONT,
   },
   dark: {
     background: '111827',
@@ -46,8 +86,8 @@ export const DECK_PRESET_STYLES: Record<DeckTheme, DeckStyle> = {
     panel: '1F2937',
     grid: '374151',
     chartCategorical: ['3987E5', '199E70', 'C98500', '9085E9', 'E66767', 'D95926'],
-    headingFont: DEFAULT_FONT,
-    bodyFont: DEFAULT_FONT,
+    headingFont: SANS_HEADING_FONT,
+    bodyFont: DEFAULT_BODY_FONT,
   },
   brand: {
     background: '0B2545',
@@ -57,13 +97,63 @@ export const DECK_PRESET_STYLES: Record<DeckTheme, DeckStyle> = {
     panel: '13315C',
     grid: '1E3A5F',
     chartCategorical: ['0D9488', '3987E5', 'C98500', '9085E9', 'E66767', 'D95926'],
-    headingFont: DEFAULT_FONT,
-    bodyFont: DEFAULT_FONT,
+    headingFont: SANS_HEADING_FONT,
+    bodyFont: DEFAULT_BODY_FONT,
   },
 };
 
-export function resolveDeckStyle(theme: DeckTheme | undefined, style: DeckStyle | null | undefined): DeckStyle {
-  return style ?? DECK_PRESET_STYLES[theme ?? 'light'];
+/**
+ * Pack palettes. A pack is one art direction, so it has ONE palette rather than
+ * a light/dark/brand matrix — the whole point is a committed look. Warm paper
+ * instead of white is the single largest reason the editorial pack reads as
+ * designed rather than generated: a white background is the default nobody
+ * chose.
+ */
+export const DECK_PACK_STYLES: Record<'editorial' | 'minimal', DeckStyle> = {
+  /**
+   * Beige-and-black minimalist, built against a specific reference deck rather
+   * than invented. Deliberately MONOCHROME — `accent` is the same near-black as
+   * `text`, because the reference carries no accent hue at all and gets its
+   * contrast from solid black fields against warm paper instead. Charts run a
+   * greyscale ramp for the same reason.
+   *
+   * Arial Black is the heading face: the reference uses an ultra-heavy
+   * grotesque, and Arial Black is the only genuinely ultra-heavy sans in the
+   * Office/OS-bundled set (fonts are never embedded — see the header note).
+   */
+  minimal: {
+    background: 'EFEBE3', // warm paper
+    text: '111111',
+    muted: '5A554E',
+    accent: '111111', // monochrome by design, not an oversight
+    panel: 'E4DFD5',
+    grid: 'B0A89C',
+    chartCategorical: ['1A1A1A', '4D4D4D', '737373', '9C9C9C', '333333', '616161'],
+    headingFont: 'Arial Black',
+    bodyFont: 'Arial',
+  },
+  editorial: {
+    background: 'FAF6F0', // warm paper
+    text: '1F1B18', // deep ink
+    muted: '7D7168',
+    accent: 'B4451F', // rust
+    panel: 'F0E7DC',
+    grid: 'DCD0C2',
+    chartCategorical: ['B4451F', '5C6B5A', 'C98A3C', '7A5C4F', '8C6B8A', '4E6472'],
+    headingFont: 'Georgia',
+    bodyFont: 'Calibri',
+  },
+};
+
+/** Precedence: an extracted reference style wins, then the pack, then the theme preset. */
+export function resolveDeckStyle(
+  theme: DeckTheme | undefined,
+  style: DeckStyle | null | undefined,
+  pack?: 'classic' | 'editorial' | 'minimal',
+): DeckStyle {
+  if (style) return style;
+  if (pack && pack !== 'classic') return DECK_PACK_STYLES[pack];
+  return DECK_PRESET_STYLES[theme ?? 'light'];
 }
 
 // ---------------------------------------------------------------------------
@@ -114,8 +204,8 @@ export function deriveDeckStyle(scheme: ExtractedThemeScheme): DeckStyle {
     panel: mix(background, text, 0.07),
     grid: mix(background, text, 0.15),
     chartCategorical,
-    headingFont: scheme.majorFont?.trim() || DEFAULT_FONT,
-    bodyFont: scheme.minorFont?.trim() || DEFAULT_FONT,
+    headingFont: scheme.majorFont?.trim() || DEFAULT_HEADING_FONT,
+    bodyFont: scheme.minorFont?.trim() || DEFAULT_BODY_FONT,
   };
 }
 

@@ -83,13 +83,6 @@ export function useIsOffline(): boolean {
   return !online;
 }
 
-/** Reader hook: number of writes queued for replay (for the "N pending" badge). */
-export function usePendingWrites(): number {
-  const [pending, setPending] = useState(0);
-  useEffect(() => subscribePendingCount(setPending), []);
-  return pending;
-}
-
 /**
  * The single connectivity DRIVER — mount once high in the tree (WorkspaceChrome,
  * which is present on every `/w/[id]/*` surface). Watches `navigator.onLine`

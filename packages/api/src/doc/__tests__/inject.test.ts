@@ -28,6 +28,7 @@ import type {
   Tool,
   WorkflowRunStore,
   WorkspaceDirectoryStore,
+  LLMProvider,
 } from '@use-brian/core'
 
 // ── Minimal store stubs ─────────────────────────────────────────────
@@ -66,6 +67,9 @@ const baseOpts = {
   // host in these tests is the workspace primary. Doc is a skill, not an app
   // type — the gate is `docSurface`, not `appType==='doc'`.
   docSurface: true,
+  provider: noopStore<LLMProvider>(),
+  backgroundModel: 'cheap-doc-editor',
+  fallbackModel: 'standard-doc-editor',
   docPageStore,
   docEntityStore,
   savedViewStore,
@@ -80,47 +84,48 @@ beforeEach(() => {
 })
 
 describe('[COMP:api/doc-inject] injectDocTools', () => {
-  it('injects 22 tools and reports the count', async () => {
+  it('injects nine reads plus one edit gateway and reports the count', async () => {
     const tools = new Map<string, Tool>()
     const result = await injectDocTools({ ...baseOpts, tools })
 
     expect(result.injected).toBe(true)
-    // 10 page tools (incl. getSection / getBlockRange / exportPage /
-    // importToPage) + 9 entity tools + 3 comment tools (postComment /
-    // resolveComment / getCommentThread).
-    expect(result.injectedCount).toBe(22)
-    expect(tools.size).toBe(22)
+    expect(result.injectedCount).toBe(10)
+    expect(tools.size).toBe(10)
   })
 
-  it('registers every doc page tool by name', async () => {
+  it('keeps raw page mutations out of the conversational tool map', async () => {
     const tools = new Map<string, Tool>()
     await injectDocTools({ ...baseOpts, tools })
 
-    expect(tools.has('renderPage')).toBe(true)
-    expect(tools.has('patchPage')).toBe(true)
+    expect(tools.has('delegateDocEdit')).toBe(true)
+    expect(tools.has('renderPage')).toBe(false)
+    expect(tools.has('patchPage')).toBe(false)
     expect(tools.has('getBlock')).toBe(true)
     expect(tools.has('queryDataBlock')).toBe(true)
     expect(tools.has('getCurrentPage')).toBe(true)
     expect(tools.has('getSection')).toBe(true)
     expect(tools.has('getBlockRange')).toBe(true)
-    expect(tools.has('createSubPage')).toBe(true)
+    expect(tools.has('createSubPage')).toBe(false)
     expect(tools.has('exportPage')).toBe(true)
-    expect(tools.has('importToPage')).toBe(true)
+    expect(tools.has('importToPage')).toBe(false)
   })
 
-  it('registers every entity tool by name', async () => {
+  it('keeps entity reads but isolates entity mutations', async () => {
     const tools = new Map<string, Tool>()
     await injectDocTools({ ...baseOpts, tools })
 
     expect(tools.has('listEntityTypes')).toBe(true)
-    expect(tools.has('createEntityType')).toBe(true)
-    expect(tools.has('addProperty')).toBe(true)
-    expect(tools.has('removeProperty')).toBe(true)
-    expect(tools.has('renameProperty')).toBe(true)
-    expect(tools.has('createEntity')).toBe(true)
-    expect(tools.has('updateEntity')).toBe(true)
-    expect(tools.has('deleteEntity')).toBe(true)
+    expect(tools.has('createEntityType')).toBe(false)
+    expect(tools.has('addProperty')).toBe(false)
+    expect(tools.has('removeProperty')).toBe(false)
+    expect(tools.has('renameProperty')).toBe(false)
+    expect(tools.has('createEntity')).toBe(false)
+    expect(tools.has('updateEntity')).toBe(false)
+    expect(tools.has('deleteEntity')).toBe(false)
     expect(tools.has('queryEntities')).toBe(true)
+    expect(tools.has('postComment')).toBe(false)
+    expect(tools.has('resolveComment')).toBe(false)
+    expect(tools.has('getCommentThread')).toBe(true)
   })
 
   it('injects fetchSiteIcon only when a FilesApi is wired', async () => {
@@ -138,7 +143,7 @@ describe('[COMP:api/doc-inject] injectDocTools', () => {
       filesApi: noopStore<import('@use-brian/core').FilesApi>(),
     })
     expect(wired.has('fetchSiteIcon')).toBe(true)
-    expect(result.injectedCount).toBe(23)
+    expect(result.injectedCount).toBe(11)
   })
 
   it('removes the global renderView tool from the doc surface', async () => {
@@ -155,9 +160,9 @@ describe('[COMP:api/doc-inject] injectDocTools', () => {
     await injectDocTools({ ...baseOpts, tools })
 
     expect(tools.has('renderView')).toBe(false)
-    // The 15 doc tools still land — only the global renderView is removed.
-    expect(tools.has('renderPage')).toBe(true)
-    expect(tools.has('patchPage')).toBe(true)
+    // The compact gateway still lands — only the global renderView is removed.
+    expect(tools.has('delegateDocEdit')).toBe(true)
+    expect(tools.has('patchPage')).toBe(false)
   })
 
   it('no-ops off the doc surface and leaves a pre-seeded renderView intact', async () => {
@@ -194,8 +199,8 @@ describe('[COMP:api/doc-inject] injectDocTools', () => {
     })
 
     expect(result.injected).toBe(true)
-    expect(result.injectedCount).toBe(22)
-    expect(tools.has('renderPage')).toBe(true)
+    expect(result.injectedCount).toBe(10)
+    expect(tools.has('delegateDocEdit')).toBe(true)
   })
 
   it('no-ops when assistant has no workspaceId', async () => {
@@ -220,7 +225,19 @@ describe('[COMP:api/doc-inject] injectDocTools', () => {
 
     expect(tools.has('pre-existing')).toBe(true)
     expect(tools.get('pre-existing')).toBe(existing)
-    expect(tools.size).toBe(23) // 22 injected + 1 pre-existing
+    expect(tools.size).toBe(11) // 10 injected + 1 pre-existing
+  })
+
+  it('fails closed by removing a pre-seeded raw mutation tool', async () => {
+    const tools = new Map<string, Tool>()
+    tools.set('patchPage', { name: 'patchPage' } as Tool)
+    tools.set('postComment', { name: 'postComment' } as Tool)
+
+    await injectDocTools({ ...baseOpts, tools })
+
+    expect(tools.has('patchPage')).toBe(false)
+    expect(tools.has('postComment')).toBe(false)
+    expect(tools.has('delegateDocEdit')).toBe(true)
   })
 
 })

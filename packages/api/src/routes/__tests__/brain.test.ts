@@ -898,4 +898,79 @@ describe('[COMP:brain/graph-http] GET /api/brain/graph — knowledge nodes + edg
     expect(res.body.edges).toEqual([])
     expect(res.body.nodes).toHaveLength(1)
   })
+
+  it('projects an oversized source into a bounded overview and keeps the truncation sentinel', async () => {
+    mockQuery.mockResolvedValueOnce(memberRow).mockResolvedValueOnce(assistantRow)
+    const entityRows = Array.from({ length: 5001 }, (_, index) => ({
+      id: `entity-${index}`,
+      kind: 'person',
+      displayName: `Entity ${index}`,
+      sensitivity: 'internal',
+    }))
+    const entities = makeEntityStoreWithList(entityRows)
+    const knowledge = makeKnowledgeStore([])
+    const links = makeEntityLinksStore()
+    links.listForWorkspace = vi.fn(async () => [])
+
+    const res = await request(makeApp(entities, makeRetrievalStore(), links, knowledge))
+      .get('/api/brain/graph?workspaceId=ws-1&limit=999999')
+      .expect(200)
+
+    expect(entities.listForWorkspace).toHaveBeenCalledWith(
+      expect.anything(),
+      { limit: 5001 },
+    )
+    expect(knowledge.listForGraph).toHaveBeenCalledWith(expect.anything(), 5001)
+    expect(links.listForWorkspace).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ limit: 30000 }),
+    )
+    expect(res.body.nodes.length).toBeLessThanOrEqual(60)
+    expect(res.body.edges.length).toBeLessThanOrEqual(600)
+    expect(res.body.nodes.every((node: { nodeType?: string }) => node.nodeType === 'group')).toBe(true)
+    expect(res.body.totalNodes).toBe(5000)
+    expect(res.body.groupedNodeCount).toBe(5000)
+    expect(res.body.renderBudget).toEqual({ nodes: 200, edges: 600 })
+    expect(JSON.stringify(res.body)).not.toContain('members')
+    expect(res.body.truncated).toBe(true)
+  })
+
+  it('opens a group scope and reveals a server-side focus match without returning the source graph', async () => {
+    mockQuery
+      .mockResolvedValueOnce(memberRow)
+      .mockResolvedValueOnce(assistantRow)
+      .mockResolvedValueOnce(memberRow)
+      .mockResolvedValueOnce(assistantRow)
+      .mockResolvedValueOnce(memberRow)
+      .mockResolvedValueOnce(assistantRow)
+    const entityRows = Array.from({ length: 1_000 }, (_, index) => ({
+      id: `entity-${index}`,
+      kind: index % 2 === 0 ? 'person' : 'company',
+      displayName: `Entity ${index}`,
+      sensitivity: 'internal',
+    }))
+    const entities = makeEntityStoreWithList(entityRows)
+    const app = makeApp(entities)
+
+    const overview = await request(app)
+      .get('/api/brain/graph?workspaceId=ws-1')
+      .expect(200)
+    const group = overview.body.nodes.find(
+      (node: { nodeType?: string }) => node.nodeType === 'group',
+    )
+    expect(group).toBeDefined()
+
+    const scoped = await request(app)
+      .get(`/api/brain/graph?workspaceId=ws-1&scope=${encodeURIComponent(group.groupId)}`)
+      .expect(200)
+    expect(scoped.body.scopeId).toBe(group.groupId)
+    expect(scoped.body.nodes.length).toBeLessThanOrEqual(160)
+    expect(scoped.body.nodes.every((node: { nodeType?: string }) => node.nodeType !== 'group')).toBe(true)
+
+    const focused = await request(app)
+      .get('/api/brain/graph?workspaceId=ws-1&focus=Entity%20999')
+      .expect(200)
+    expect(focused.body.focusNodeIds).toContain('entity-999')
+    expect(focused.body.nodes.some((node: { id: string }) => node.id === 'entity-999')).toBe(true)
+  })
 })

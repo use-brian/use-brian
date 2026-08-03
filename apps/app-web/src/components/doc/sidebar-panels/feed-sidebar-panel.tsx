@@ -16,8 +16,9 @@
  *     the list dominates, per the locked review-queue idiom; selecting a row
  *     opens the post in place in the main pane (D15).
  *
- * The hosted **Platforms** integration group (insights / inspiration /
- * connection / policy / settings) is unchanged and still last.
+ * Hosted account tools join the current Platform group (insights /
+ * inspiration / settings). There is no second platform list: the switcher is
+ * the single source of platform context, and Settings owns connection state.
  *
  * [COMP:app-web/sidebar-panel-feed]
  */
@@ -31,10 +32,12 @@ import { isHostedEdition } from "@/lib/edition";
 import { cn } from "@/lib/utils";
 import {
   FEED_GROUPS,
+  FEED_CURRENT_PLATFORM_EVENT,
   FEED_PLATFORMS,
   feedPath,
   feedPlatformFromPathname,
   feedPostIdFromPathname,
+  feedSectionFromPathname,
   feedPostPath,
   isConnectableFeedPlatform,
   resolveCurrentFeedPlatform,
@@ -93,6 +96,24 @@ export function FeedSidebarPanel({ workspaceId }: { workspaceId: string }) {
       }),
     );
   }, [workspaceId, profiles]);
+  useEffect(() => {
+    const onPlatformChanged = (event: Event) => {
+      const detail = (event as CustomEvent<{
+        workspaceId?: string;
+        platform?: string;
+      }>).detail;
+      if (
+        detail?.workspaceId === workspaceId
+        && detail.platform
+        && FEED_PLATFORMS.includes(detail.platform as FeedPlatform)
+      ) {
+        setStoredPlatform(detail.platform as FeedPlatform);
+      }
+    };
+    window.addEventListener(FEED_CURRENT_PLATFORM_EVENT, onPlatformChanged);
+    return () =>
+      window.removeEventListener(FEED_CURRENT_PLATFORM_EVENT, onPlatformChanged);
+  }, [workspaceId]);
   const platform = urlPlatform ?? storedPlatform ?? FEED_PLATFORMS[0];
 
   function switchPlatform(next: FeedPlatform) {
@@ -196,6 +217,14 @@ export function FeedSidebarPanel({ workspaceId }: { workspaceId: string }) {
   const companyGroup = FEED_GROUPS[0];
   const platformGroup = FEED_GROUPS[1];
   const hostedSections = FEED_GROUPS[2].sections;
+  const currentProfile = profiles.find((p) => p.platform === platform);
+  const visibleHostedSections = platformIntegrationsEnabled
+    ? currentProfile
+      ? hostedSections
+      : isConnectableFeedPlatform(platform)
+        ? hostedSections.filter((section) => section.key === "settings")
+        : []
+    : [];
 
   return (
     <nav
@@ -230,7 +259,7 @@ export function FeedSidebarPanel({ workspaceId }: { workspaceId: string }) {
         </ul>
       </div>
 
-      {/* ── Platform (switcher + that platform's voice) ──────────────────── */}
+      {/* ── Platform (one switcher + scoped Create / hosted tools) ───────── */}
       <div className="flex flex-col gap-0.5">
         <div className={groupLabelCls}>{tf.groups.platform}</div>
         <DropdownMenu>
@@ -247,23 +276,26 @@ export function FeedSidebarPanel({ workspaceId }: { workspaceId: string }) {
           <DropdownMenuContent align="start" className="min-w-44">
             {FEED_PLATFORMS.map((p) => {
               const connected = profiles.some((x) => x.platform === p);
+              const status = connected
+                ? tf.platformStatusConnected
+                : isConnectableFeedPlatform(p)
+                  ? tf.platformStatusNotConnected
+                  : tf.platformStatusComingSoon;
               return (
                 <DropdownMenuItem key={p} onClick={() => switchPlatform(p)}>
                   <PlatformIcon platform={p} className="size-3.5 shrink-0" />
                   <span className="min-w-0 flex-1 truncate">
                     {tf.platformLabels[p]}
                   </span>
-                  {connected ? (
-                    <span className="text-[10px] text-muted-foreground">
-                      {tf.platformStatusConnected}
-                    </span>
-                  ) : null}
+                  <span className="text-[10px] text-muted-foreground">
+                    {status}
+                  </span>
                   {p === platform ? (
                     <Check className="size-3.5 shrink-0" aria-hidden />
                   ) : null}
                 </DropdownMenuItem>
-              );
-            })}
+            );
+          })}
           </DropdownMenuContent>
         </DropdownMenu>
         <ul className="flex flex-col gap-0.5">
@@ -283,6 +315,42 @@ export function FeedSidebarPanel({ workspaceId }: { workspaceId: string }) {
                   <span className="min-w-0 flex-1 truncate">
                     {tf.sections[s.key]}
                   </span>
+                </Link>
+              </li>
+              );
+            })}
+          {visibleHostedSections.map((s) => {
+            const href = feedPath(workspaceId, {
+              platform,
+              segment: s.segment,
+            });
+            const activeRow =
+              s.key === "settings"
+                ? feedSectionFromPathname(pathname) === "settings"
+                : pathname.startsWith(href);
+            return (
+              <li key={s.key}>
+                <Link
+                  href={href}
+                  aria-current={activeRow ? "page" : undefined}
+                  className={rowCls(activeRow)}
+                >
+                  <span className="min-w-0 flex-1 truncate">
+                    {!currentProfile && s.key === "settings"
+                      ? tf.connection.connectCta
+                      : tf.sections[s.key]}
+                  </span>
+                  {s.key === "settings" ? (
+                    <span
+                      aria-hidden
+                      className={cn(
+                        "size-1.5 shrink-0 rounded-full",
+                        currentProfile
+                          ? "bg-foreground/45"
+                          : "border border-sidebar-foreground/35",
+                      )}
+                    />
+                  ) : null}
                 </Link>
               </li>
             );
@@ -378,112 +446,6 @@ export function FeedSidebarPanel({ workspaceId }: { workspaceId: string }) {
           </li>
         </ul>
       </div>
-
-      {/* ── Platforms (hosted integration layer, unchanged) ──────────────── */}
-      {platformIntegrationsEnabled ? (
-        <div className="flex flex-col gap-0.5">
-          <div className={groupLabelCls}>{tf.groups.platforms}</div>
-          <ul className="flex flex-col gap-0.5">
-            {FEED_PLATFORMS.map((p) => {
-              const profile = profiles.find((x) => x.platform === p);
-              const connected = !!profile;
-              const connectable = isConnectableFeedPlatform(p);
-              const href = feedPath(workspaceId, {
-                platform: p,
-                segment: connected ? "insights" : "connection",
-              });
-              const isOpen = pathname.startsWith(
-                `${feedPath(workspaceId, { platform: p })}/`,
-              );
-              const statusLabel = connected
-                ? `@${profile.platformHandle}`
-                : connectable
-                  ? tf.platformStatusNotConnected
-                  : tf.platformStatusComingSoon;
-              return (
-                <li key={p}>
-                  <Link
-                    href={href}
-                    aria-current={isOpen ? "page" : undefined}
-                    className={rowCls(false)}
-                  >
-                    <PlatformAvatar platform={p} dimmed={!connected} />
-                    <span className="min-w-0 flex-1">
-                      <span
-                        className={cn(
-                          "block truncate text-[13px]",
-                          connected
-                            ? "font-medium"
-                            : "text-sidebar-foreground/70",
-                        )}
-                      >
-                        {tf.platformLabels[p]}
-                      </span>
-                      <span className="block truncate text-[11px] text-muted-foreground">
-                        {statusLabel}
-                      </span>
-                    </span>
-                    {connected ? (
-                      // Muted rather than a saturated dot: the sidebar is warm
-                      // grey chrome and a bright pip reads offbrand in it.
-                      <span
-                        aria-hidden
-                        className="size-1.5 shrink-0 rounded-full bg-foreground/45"
-                      />
-                    ) : null}
-                  </Link>
-                  {isOpen && connected ? (
-                    <ul className="mt-0.5 flex flex-col gap-0.5 pl-6">
-                      {hostedSections.map((s) => {
-                        const subHref = feedPath(workspaceId, {
-                          platform: p,
-                          segment: s.segment,
-                        });
-                        const activeRow = pathname.startsWith(subHref);
-                        return (
-                          <li key={s.key}>
-                            <Link
-                              href={subHref}
-                              aria-current={activeRow ? "page" : undefined}
-                              className={rowCls(activeRow)}
-                            >
-                              <span className="min-w-0 flex-1 truncate">
-                                {tf.sections[s.key]}
-                              </span>
-                            </Link>
-                          </li>
-                        );
-                      })}
-                    </ul>
-                  ) : null}
-                </li>
-              );
-            })}
-          </ul>
-        </div>
-      ) : null}
     </nav>
-  );
-}
-
-function PlatformAvatar({
-  platform,
-  dimmed,
-}: {
-  platform: FeedPlatform;
-  dimmed?: boolean;
-}) {
-  return (
-    <span
-      className={cn(
-        "flex size-6 shrink-0 items-center justify-center rounded-md",
-        platform === "twitter"
-          ? "bg-foreground text-background"
-          : "bg-muted text-foreground/70",
-        dimmed && "opacity-55",
-      )}
-    >
-      <PlatformIcon platform={platform} className="size-3.5" />
-    </span>
   );
 }

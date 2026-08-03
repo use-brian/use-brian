@@ -274,7 +274,8 @@ export function createConnectorGrantStore(): ConnectorGrantStore {
            ${INSTANCE_COLS_AS}
          FROM connector_grant cg
          JOIN connector_instance ci ON ci.id = cg.connector_instance_id
-         WHERE cg.target_type = $1 AND cg.target_id = $2`,
+         WHERE cg.target_type = $1 AND cg.target_id = $2
+         ORDER BY cg.granted_at ASC, ci.created_at ASC, ci.id ASC`,
         [targetType, targetId],
       )
       return result.rows.map(unflatten)

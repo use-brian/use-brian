@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { detectCommunities } from "../graph-communities";
+import { detectCommunities } from "../graph-communities.js";
 
 function nodes(...ids: string[]) {
   return ids.map((id) => ({ id }));
@@ -27,7 +27,7 @@ function clique(...ids: string[]) {
   return edges;
 }
 
-describe("[COMP:app-web/graph-communities] detectCommunities", () => {
+describe("[COMP:brain/graph-communities] detectCommunities", () => {
   it("separates two cliques joined by a single bridge edge", () => {
     const ns = nodes("a1", "a2", "a3", "a4", "b1", "b2", "b3");
     const es = [

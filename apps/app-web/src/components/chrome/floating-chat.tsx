@@ -69,6 +69,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -199,6 +200,11 @@ import {
 } from "@/lib/use-file-attachments";
 import { useRecordingUpload } from "@/lib/recordings/use-recording-upload";
 import { useDockRecorder } from "@/lib/recorder/use-dock-recorder";
+import {
+  getDockRecorderSessionId,
+  publishDockRecorderController,
+  sendDockRecorderVoiceClip,
+} from "@/lib/recorder/dock-recorder-bridge";
 import {
   DockRecorderButton,
   DockRecorderNotice,
@@ -2239,10 +2245,27 @@ export function FloatingChat({
     workspaceId,
     assistantId: activeAssistantId,
     captureNamePrefix: tRecorder.captureName,
-    getSessionId: () => sessionIdRef.current ?? undefined,
-    sendVoiceClip: (fileId: string) => sendMessage("", { fileIds: [fileId] }),
+    getSessionId: () =>
+      getDockRecorderSessionId(() => sessionIdRef.current ?? undefined),
+    sendVoiceClip: (fileId: string) =>
+      sendDockRecorderVoiceClip(
+        fileId,
+        (fallbackFileId) => sendMessage("", { fileIds: [fallbackFileId] }),
+      ),
     onMeetingCapture: (file: File) => rec.run(file, undefined, { kind: "meeting" }),
   });
+
+  // Feed replaces this dock's CHAT chrome, not its universal recorder. Publish
+  // the one persistent controller so the replacement dock can render the same
+  // button/strip without mounting a second capture engine that would reset on
+  // navigation.
+  useLayoutEffect(() => {
+    // The mobile drawer mounts another FloatingChat in side-panel mode. It
+    // consumes the recorder UI but must never replace the persistent desktop
+    // controller published by this floating instance.
+    if (isSidePanel) return;
+    return publishDockRecorderController(recorder);
+  }, [isSidePanel, recorder]);
 
   // ── Chat-seed: apply a prompt handed in from another surface ───────────
   // The default-viewer landing's chatter routes here through the shell

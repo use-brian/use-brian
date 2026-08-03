@@ -26,7 +26,7 @@
  * [COMP:app-web/brain-review-panel]
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Markdown from "react-markdown";
 import { CheckCircle2, ChevronLeft, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -41,6 +41,8 @@ import { reviewItemKey, type PendingReviewItem } from "@/lib/review-queue";
 import { RelationshipReview } from "@/components/brain/relationship-review";
 import { Button } from "@/components/ui/button";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
+import { useWorkspaceContext } from "@/lib/workspace-context";
+import { getActiveAssistantId } from "@/lib/sidebar-cache";
 
 /** Body fields that should never reach the user — provenance plumbing, not
  *  entry content (mirrors the detail drawer's list, plus the CRM back-link). */
@@ -69,13 +71,30 @@ type Props = {
   onActed: (actedKey: string) => void;
   /** Opens the existing BrainDetailDrawer on this item's projected row. */
   onMoreOptions: () => void;
+  /** Offline content remains readable, but trust mutations wait for reconnect. */
+  readOnly?: boolean;
 };
 
-export function ReviewPanel({ workspaceId, item, onActed, onMoreOptions }: Props) {
+export function ReviewPanel({
+  workspaceId,
+  item,
+  onActed,
+  onMoreOptions,
+  readOnly = false,
+}: Props) {
   const t = useT();
   const review = t.memoriesReview;
   const drawerLabels = t.brainPage.detailDrawer;
   const copy = t.brainPage.reviewPanel;
+  const { me } = useWorkspaceContext();
+  const viewpointAssistantId = getActiveAssistantId();
+  const cacheScope = useMemo(
+    () =>
+      me.id
+        ? { viewerId: me.id, workspaceId, viewpointAssistantId }
+        : null,
+    [me.id, workspaceId, viewpointAssistantId],
+  );
   // entity_link rows are graph edges — render them as a source → target
   // diagram (`RelationshipReview`) instead of the raw edge-field dump.
   const isRelationship = item.primitive === "entity_link";
@@ -93,13 +112,18 @@ export function ReviewPanel({ workspaceId, item, onActed, onMoreOptions }: Props
     let cancelled = false;
     setDetail(undefined);
     setError(null);
-    void fetchBrainRow(workspaceId, item.primitive, item.id).then((result) => {
+    void fetchBrainRow(
+      workspaceId,
+      item.primitive,
+      item.id,
+      cacheScope,
+    ).then((result) => {
       if (!cancelled) setDetail(result);
     });
     return () => {
       cancelled = true;
     };
-  }, [workspaceId, item.primitive, item.id]);
+  }, [workspaceId, item.primitive, item.id, cacheScope]);
 
   async function handleVerify() {
     setBusy(true);
@@ -186,7 +210,11 @@ export function ReviewPanel({ workspaceId, item, onActed, onMoreOptions }: Props
 
         {/* Action row — Verify is THE action; the drawer keeps the rest. */}
         <div className="flex items-center gap-2">
-          <Button size="sm" disabled={busy} onClick={() => void handleVerify()}>
+          <Button
+            size="sm"
+            disabled={busy || readOnly}
+            onClick={() => void handleVerify()}
+          >
             {review.confirm}
           </Button>
           <Button
@@ -200,7 +228,7 @@ export function ReviewPanel({ workspaceId, item, onActed, onMoreOptions }: Props
           <Button
             variant="ghost"
             size="sm"
-            disabled={busy}
+            disabled={busy || readOnly}
             onClick={() => void handleDelete()}
             className="ml-auto text-red-500 hover:bg-red-500/10 hover:text-red-600 dark:hover:text-red-400"
           >
