@@ -3979,6 +3979,7 @@ export const ja: Dictionary = {
     postFailed: "メッセージを投稿できませんでした。もう一度お試しください。",
     mentionInsertAria: "{name} をメンション",
     unreadDotAria: "新しいアクティビティ",
+    workingAria: "{name} が作業中です",
     confirmNotAllowed: "このターンで質問したメンバー（またはワークスペース管理者）のみ操作できます。",
     captureIndicator: "カンパニーブレインに記録されます",
     workBench: "ワークベンチ",
@@ -3994,6 +3995,14 @@ export const ja: Dictionary = {
     liveWorkSteps: "{done} 件完了・{running} 件進行中",
     pinnedContext: "ピン",
     assistantClearanceBlocked: "このアシスタントの権限レベルはこのルームより高いため、ここでは回答できません。",
+    documentViewer: {
+      label: "元のドキュメント",
+      open: "ドキュメントを開く",
+      openAria: "{title} を開く",
+      copy: "ドキュメントをコピー",
+      copied: "ドキュメントをコピーしました",
+      close: "ドキュメントビューアーを閉じる",
+    },
     pins: {
       rowAria: "ピン留めコンテキスト",
       add: "追加",

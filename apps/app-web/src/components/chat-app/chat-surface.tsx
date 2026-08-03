@@ -6,9 +6,12 @@
  *
  * NOT a fork of the floating dock (`components/chrome/floating-chat.tsx`).
  * That component is 3.9k lines because it carries every doc-authoring
- * affordance — page anchoring, theme refinement, deck previews, the
- * quick-capture recorder. None of that belongs to a standalone chat, and
- * copying it would mean two divergent chat clients. This surface is built on
+ * affordance — page anchoring, theme refinement, deck previews and floating
+ * panel lifecycle. None of that belongs to a standalone chat, and copying it
+ * would mean two divergent chat clients. Ordinary chat affordances DO belong
+ * here: attachment pick/drop/paste, research, citations, outbound files,
+ * retry/copy, and per-code-block copy all reuse the dock's shared seams.
+ * This surface is built on
  * the `@use-brian/chat-ui` primitives instead (`useChatSession` for state,
  * `useMessageStream` for the SSE-over-POST loop, `ChatComposer`,
  * `ChatMarkdown`), which is exactly what that package exists for
@@ -74,7 +77,9 @@ import {
   ChatMarkdown,
   useChatSession,
   useMessageStream,
-  type Message,
+  type ChatFileAttachment,
+  type CitationSource,
+  type DocumentAttachment,
   type PendingConfirmation,
   type ToolUsed,
 } from "@use-brian/chat-ui";
@@ -86,7 +91,9 @@ import {
   Check,
   ChevronDown,
   Copy,
+  Paperclip,
   Plus,
+  RotateCw,
   Sparkles,
   Square,
   User,
@@ -105,8 +112,11 @@ import {
 import {
   ChatActivityFeed,
   ChatActivitySummary,
+  ChatCitationList,
   type ResearchPhase,
 } from "@/components/chrome/chat-activity";
+import { ChatCodeBlock } from "@/components/chrome/chat-code-block";
+import { ChatFileAttachments } from "@/components/chrome/chat-file-attachment";
 import {
   appendReasoning,
   appendStep,
@@ -126,16 +136,22 @@ import {
 } from "@/lib/api/views";
 import {
   CHAT_SESSIONS_REFRESH_EVENT,
+  dispatchChatSessionActivity,
   dispatchChatSessionsRefresh,
+  shouldAcceptRoomMirror,
 } from "@/lib/chat-session-events";
 import {
   createWorkspaceSession,
   extractMessageText,
+  extractPresentedDocuments,
   extractToolUses,
   listSessionsForAssistants,
   listWorkspaceSessions,
   fetchSessionMessages,
+  parseMessageAttachments,
+  parsePresentedDocumentPayload,
   postRoomMessage,
+  type MessageAttachmentRef,
   type DocSession,
   type WorkspaceSession,
 } from "@/lib/api/sessions";
@@ -146,9 +162,34 @@ import { PendingQuestionPanel } from "@/components/chrome/pending-question-panel
 import { ChatConfirmationCard } from "@/components/chrome/chat-confirmation-card";
 import { ChatContextPins } from "@/components/chat-app/chat-context-pins";
 import { resolveRequestedFreshAssistant } from "@/components/chat-app/assistant-deeplink";
+import {
+  resolveMentionedAssistants,
+  resolveWorkBenchAssistant,
+} from "@/components/chat-app/multi-assistant-response";
+import {
+  imageFilesFromClipboard,
+  readyAttachments,
+  useFileAttachments,
+} from "@/lib/use-file-attachments";
+import { useFileDrop } from "@/lib/use-file-drop";
+import {
+  AttachmentChips,
+  FileDropOverlay,
+} from "@/components/doc/attachment-chips";
+import { MessageAttachments } from "@/components/doc/message-attachment-card";
+import { useRecordingUpload } from "@/lib/recordings/use-recording-upload";
+import {
+  ChatDocumentCard,
+  ChatDocumentViewer,
+} from "@/components/chat-app/chat-document-viewer";
+import {
+  coalesceAssistantRunMessages,
+  type ChatSurfaceMessage as SurfaceMessage,
+} from "@/components/chat-app/chat-transcript";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 const REMARK_PLUGINS = [remarkGfm];
+const CHAT_MARKDOWN_COMPONENTS = { pre: ChatCodeBlock };
 
 /** The surface tag stamped on sessions minted here (migration 255). */
 const APP_ORIGIN = "chat";
@@ -157,61 +198,9 @@ const APP_ORIGIN = "chat";
 const MARKDOWN_CLS =
   "chat-markdown prose prose-sm dark:prose-invert max-w-none text-[14px] leading-[1.6] text-foreground break-words";
 
-/**
- * A transcript row. Widens `chat-ui`'s `Message` with the sender's display
- * name, which only shared threads carry — the package stays host-agnostic, so
- * per-surface fields live here rather than in its shared type.
- */
-type SurfaceMessage = Message & {
-  senderName?: string;
-  /** The ANSWERING assistant per reply (multi-assistant rooms, T9). */
-  senderAssistantId?: string | null;
-};
-
 /** Narrow an SSE `data` payload to an object without trusting its shape. */
 function coercePayload(data: unknown): Record<string, unknown> {
   return data && typeof data === "object" ? (data as Record<string, unknown>) : {};
-}
-
-/**
- * Client-side half of the address decision (multiplayer chat T3): a typed /
- * autocomplete-inserted `@AssistantName`, case-insensitive. The SERVER
- * re-validates (`detectRoomAddress`), so this only picks which endpoint the
- * send takes — a wrong guess degrades to a post, never a phantom turn.
- */
-function mentionsAssistant(text: string, assistantName: string): boolean {
-  const name = assistantName.trim().toLowerCase();
-  if (!name) return false;
-  return text.toLowerCase().includes(`@${name}`);
-}
-
-/**
- * Which workspace assistant does this message mention? (Multi-assistant
- * rooms, T9.) The LAST `@Name` in the text wins; on a shared prefix at the
- * same position the longer name wins ("@Sales EU" over "@Sales"). `null`
- * when nobody is mentioned — the send is then a post (or an Ask at the
- * room's own assistant). The server re-validates the pick.
- */
-function resolveMentionedAssistant<T extends { id: string; name: string }>(
-  text: string,
-  roster: T[],
-): T | null {
-  const lower = text.toLowerCase();
-  let best: { assistant: T; index: number; length: number } | null = null;
-  for (const assistant of roster) {
-    const name = assistant.name.trim().toLowerCase();
-    if (!name) continue;
-    const index = lower.lastIndexOf(`@${name}`);
-    if (index < 0) continue;
-    if (
-      !best ||
-      index > best.index ||
-      (index === best.index && name.length > best.length)
-    ) {
-      best = { assistant, index, length: name.length };
-    }
-  }
-  return best?.assistant ?? null;
 }
 
 /** A pending write confirmation observed by a room VIEWER (T11/D8 — mirrored
@@ -231,6 +220,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   // The dock's chat dictionary — tool narration, activity copy, copy/stop
   // labels. Reused verbatim so the two surfaces never phrase one thing twice.
   const tChat = useT().chat;
+  const tAttach = useT().attachments;
+  const tRecordings = useT().recordings;
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -244,6 +235,13 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     workspaceId,
     "standard",
   );
+  const [researchMode, setResearchMode] = useState(false);
+  const [researchQuota, setResearchQuota] = useState<{
+    used: number;
+    quota: number;
+    isPaid: boolean;
+  } | null>(null);
+  const [researchExhausted, setResearchExhausted] = useState(false);
   const [assistants, setAssistants] = useState<WorkspaceAssistantSummary[]>([]);
   const primaryAssistant = useMemo(
     () => assistants.find((a) => a.kind === "primary") ?? assistants[0] ?? null,
@@ -266,6 +264,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [startingShared, setStartingShared] = useState(false);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  /** The source currently occupying the Chat app's right-hand split pane. */
+  const [openDocument, setOpenDocument] = useState<DocumentAttachment | null>(null);
   /** The viewer's own user id — filters this client's OWN turn out of the
    *  room's bus mirror (it streams over this client's POST already). */
   const meId = getUserInfo()?.id ?? null;
@@ -300,6 +300,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
 
   const chat = useChatSession();
   const stream = useMessageStream();
+  /** The room whose original POST stream this mounted surface is painting.
+   *  Cleared as soon as that ownership ends so the persistent room-follow
+   *  stream can take over, including for turns started by this same user. */
+  const directTurnSessionRef = useRef<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   /** The id the next turn should resume. Kept in a ref so the send closure
    *  reads the value at send time, not at render time. */
@@ -313,6 +317,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   /** The assistant ANSWERING my in-flight turn (T9 — `@Name` may pick a
    *  non-bound assistant); drives the streaming reply's avatar. */
   const turnAssistantRef = useRef<string | null>(null);
+  /** Stop applies to the whole explicit multi-assistant response group, not
+   *  just whichever serialized assistant is currently streaming. */
+  const responseGroupAbortRef = useRef(false);
 
   // ── Per-turn activity state (the dock's streaming model, trimmed) ───
   // The chronological build-event log (reasoning runs + tool steps in true
@@ -321,8 +328,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const [toolTimeline, setToolTimeline] = useState<ToolUsed[]>([]);
   const [streamingEvents, setStreamingEvents] = useState<BuildEvent[]>([]);
   const [researchPhase, setResearchPhase] = useState<ResearchPhase | null>(null);
+  const [citations, setCitations] = useState<CitationSource[]>([]);
   const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
   const turnToolsRef = useRef<ToolUsed[]>([]);
+  const turnDocumentsRef = useRef<DocumentAttachment[]>([]);
+  const turnCitationsRef = useRef<CitationSource[]>([]);
+  const turnFileAttachmentsRef = useRef<ChatFileAttachment[]>([]);
   const turnWorkerDescriptionsRef = useRef<Map<string, string>>(new Map());
   const eventLogRef = useRef<EventLog>(EMPTY_LOG);
   const eventSeqRef = useRef(0);
@@ -344,6 +355,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
 
   const resetTurnActivity = useCallback(() => {
     turnToolsRef.current = [];
+    turnDocumentsRef.current = [];
+    turnCitationsRef.current = [];
+    turnFileAttachmentsRef.current = [];
     turnWorkerDescriptionsRef.current = new Map();
     eventLogRef.current = EMPTY_LOG;
     eventSeqRef.current = 0;
@@ -355,6 +369,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     setToolTimeline([]);
     setStreamingEvents([]);
     setResearchPhase(null);
+    setCitations([]);
     setTurnStartedAt(null);
   }, []);
 
@@ -437,6 +452,30 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     return primaryAssistant;
   }, [activeSessionId, activeShared, personalSessions, assistants, pickedAssistantId, primaryAssistant]);
 
+  // The full-page surface uses the SAME attachment lanes as the dock:
+  // transient cache upload for ordinary files, direct recording ingestion for
+  // video / recording-length audio, and one tray for pick, drop, and paste.
+  const recordingUpload = useRecordingUpload(
+    workspaceId,
+    activeAssistant?.id ?? "",
+  );
+  const att = useFileAttachments(
+    () => sessionIdRef.current ?? undefined,
+    {
+      onRouteMedia: activeAssistant
+        ? (files) => {
+            void (async () => {
+              for (const file of files) await recordingUpload.run(file);
+            })();
+          }
+        : undefined,
+    },
+  );
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const drop = useFileDrop((files) => void att.upload(files), {
+    disabled: !!pendingQuestion,
+  });
+
   // ── Shared sessions ─────────────────────────────────────────────────
   // The rail itself lives in the sidebar panel; the surface still needs the
   // shared list to know whether the OPEN thread is shared (the header badge
@@ -490,9 +529,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    *  turn lands — the SSE payload is a SIGNAL, never the data. */
   const loadTranscript = useCallback(async (sessionId: string) => {
     const rows = await fetchSessionMessages(sessionId);
-    const rendered: SurfaceMessage[] = rows
+    const persistedRows: SurfaceMessage[] = rows
       .filter((r) => r.role === "user" || r.role === "assistant")
       .map((r) => {
+        const parsedUser =
+          r.role === "user" ? parseMessageAttachments(r.content) : null;
         const toolsUsed =
           r.role === "assistant"
             ? extractToolUses(r.content).map((use): ToolUsed => {
@@ -510,18 +551,34 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 };
               })
             : [];
+        const documents =
+          r.role === "assistant" ? extractPresentedDocuments(r.content) : [];
         return {
           id: r.id,
           role: r.role as "user" | "assistant",
-          text: extractMessageText(r.content),
+          text: parsedUser?.text ?? extractMessageText(r.content),
           timestamp: new Date(r.timestamp),
           ...(toolsUsed.length > 0 ? { toolsUsed } : {}),
+          ...(documents.length > 0 ? { documents } : {}),
+          ...(r.attachments && r.attachments.length > 0
+            ? { fileAttachments: r.attachments }
+            : {}),
+          ...(parsedUser && parsedUser.attachments.length > 0
+            ? { userAttachments: parsedUser.attachments }
+            : {}),
           ...(r.senderName ? { senderName: r.senderName } : {}),
           ...(r.senderAssistantId ? { senderAssistantId: r.senderAssistantId } : {}),
         };
       })
-      .filter((m) => m.text.length > 0 || (m.toolsUsed?.length ?? 0) > 0);
-    chat.loadMessages(rendered);
+      .filter(
+        (m) =>
+          m.text.length > 0 ||
+          (m.toolsUsed?.length ?? 0) > 0 ||
+          (m.userAttachments?.length ?? 0) > 0 ||
+          (m.fileAttachments?.length ?? 0) > 0 ||
+          (m.documents?.length ?? 0) > 0,
+      );
+    chat.loadMessages(coalesceAssistantRunMessages(persistedRows));
     // `chat.loadMessages` is a stable useCallback from the hook.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tChat.toolNarration]);
@@ -532,10 +589,14 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     // in-flight stream (if any) belongs to the OLD thread — kill it before
     // painting the new one, exactly what the old in-surface rail did on
     // row click.
+    responseGroupAbortRef.current = true;
+    directTurnSessionRef.current = null;
     stream.abort();
     chat.dispatch({ type: "stream/abort" });
     resetTurnActivity();
+    att.clear();
     setError(null);
+    setOpenDocument(null);
     hydratedRef.current = activeSessionId;
     sessionIdRef.current = activeSessionId;
     if (!activeSessionId) {
@@ -562,9 +623,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   // teammate's turn paints through the SAME feed pipeline the sender uses
   // (build-events + tool-narration), suspended turns surface, and settle
   // refetches the persisted transcript — events are signals, never data.
-  // This client's OWN turn is filtered out by `senderUserId` (it streams
-  // over this client's POST), so the subscription stays open even while
-  // sending.
+  // This client's OWN turn is filtered out only while this mounted surface's
+  // exact-room POST is still painting it. Navigation/re-entry releases that
+  // ownership, so the follow stream becomes the returning sender's live view.
   const [remoteActive, setRemoteActive] = useState(false);
   /** The assistant answering the REMOTE turn (from the turn_started /
    *  snapshot mirror) — viewers render the right avatar live. */
@@ -637,15 +698,37 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
 
     const handleRoomEvent = (event: string, payload: Record<string, unknown>) => {
       const sender = typeof payload.senderUserId === "string" ? payload.senderUserId : null;
+      const acceptsMirror = shouldAcceptRoomMirror({
+        senderUserId: sender,
+        viewerUserId: meId,
+        sessionId,
+        directTurnSessionId: directTurnSessionRef.current,
+        directStreamInFlight: stream.inFlight(),
+      });
+      const ownsDirectStream =
+        directTurnSessionRef.current === sessionId && stream.inFlight();
       switch (event) {
+        case "status": {
+          const working = payload.status === "running";
+          // A GET opened just before this page's POST may carry a stale `idle`
+          // frame after the optimistic start signal. Never let it erase live
+          // direct ownership; a returning page has no such owner and trusts
+          // the server status in both directions.
+          if (working || !ownsDirectStream) {
+            dispatchChatSessionActivity({ workspaceId, sessionId, working });
+          }
+          if (working && acceptsMirror) setRemoteActive(true);
+          break;
+        }
         case "user_message_saved": {
-          if (sender && meId && sender === meId) break;
+          if (!acceptsMirror) break;
           void loadTranscript(sessionId);
           markRoomSeen(workspaceId, sessionId);
           break;
         }
         case "turn_started": {
-          if (sender && meId && sender === meId) break;
+          dispatchChatSessionActivity({ workspaceId, sessionId, working: true });
+          if (!acceptsMirror) break;
           resetRemoteTurn();
           setRemoteActive(true);
           if (typeof payload.assistantId === "string") {
@@ -654,7 +737,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           break;
         }
         case "snapshot": {
-          if (sender && meId && sender === meId) break;
+          if (!acceptsMirror) break;
           setRemoteActive(true);
           if (typeof payload.assistantId === "string") {
             setRemoteAssistantId(payload.assistantId);
@@ -672,7 +755,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           break;
         }
         case "activity": {
-          if (sender && meId && sender === meId) break;
+          if (!acceptsMirror) break;
           setRemoteActive(true);
           const kind = typeof payload.event === "string" ? payload.event : "";
           const id = typeof payload.id === "string" ? payload.id : "";
@@ -772,6 +855,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           break;
         }
         case "turn_completed": {
+          dispatchChatSessionActivity({ workspaceId, sessionId, working: false });
+          // The sender's POST stream owns its optimistic transcript. Refetching
+          // the persisted reply here and then finalizing the same POST in
+          // `onDone` paints two identical replies until the next refresh.
+          if (!acceptsMirror) break;
           resetRemoteTurn();
           setRemoteConfirmation(null);
           setQueuedNotice(false);
@@ -839,16 +927,20 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   ]);
 
   const resetPane = useCallback(() => {
+    responseGroupAbortRef.current = true;
+    directTurnSessionRef.current = null;
     stream.abort();
     hydratedRef.current = null;
     sessionIdRef.current = null;
     setError(null);
     setInput("");
+    setOpenDocument(null);
+    att.clear();
     chat.loadMessages([]);
     chat.dispatch({ type: "stream/abort" });
     resetTurnActivity();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stream, resetTurnActivity]);
+  }, [stream, resetTurnActivity, att.clear]);
 
   const startNewChat = useCallback(() => {
     resetPane();
@@ -889,6 +981,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   /** Stop the in-flight turn. Aborted streams fire neither onDone nor
    *  onError, so the state resets here (the dock's `handleAbort`). */
   const handleAbort = useCallback(() => {
+    responseGroupAbortRef.current = true;
+    // A room turn is server-owned and continues after the page stream closes.
+    // Releasing direct ownership lets this room's follow stream immediately
+    // render our own mirrored progress instead of making Stop look like a
+    // completed server cancellation.
+    directTurnSessionRef.current = null;
     stream.abort();
     chat.dispatch({ type: "stream/abort" });
     turnTextRef.current = "";
@@ -908,23 +1006,50 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   /** Tracks whether the in-flight turn streamed an askQuestion step, so the
    *  settle can fetch the pending row and surface the answer panel. */
   const askedQuestionRef = useRef(false);
-  const send = useCallback(async () => {
-    const trimmed = input.trim();
+  const send = useCallback(async (override?: {
+    text?: string;
+    fileIds?: string[];
+    truncateFromMessageId?: string;
+    forceAddress?: boolean;
+  }) => {
+    const trimmed = (override?.text ?? input).trim();
+    const usesComposerTray = override?.fileIds === undefined;
+    const turnFileIds = override?.fileIds ?? att.fileIds();
     // Snapshot the interlocutor at send time — the turn belongs to it even
     // if the resolution inputs shift while the reply streams.
     const interlocutor = activeAssistant;
-    if (!trimmed || !interlocutor || chat.state.isStreaming) return;
+    if (
+      (!trimmed && turnFileIds.length === 0) ||
+      !interlocutor ||
+      chat.state.isStreaming ||
+      (usesComposerTray && att.uploading) ||
+      pendingQuestion
+    ) {
+      return;
+    }
 
     // The room decision (multiplayer chat D1/T3): in a room, send = POST
     // unless this message ADDRESSES the assistant (typed @mention or the
     // armed Ask affordance). The server re-validates either way, so this
     // only picks the endpoint.
     const isRoom = activeSessionId ? !!activeShared : view === "workspace";
-    // Multi-assistant rooms (T9): `@Name` picks WHICH workspace assistant
-    // answers this turn; the Ask affordance asks the room's own assistant.
-    const mentioned = isRoom ? resolveMentionedAssistant(trimmed, assistants) : null;
-    const target = mentioned ?? interlocutor;
-    const addressed = !isRoom || askArmed || mentioned !== null;
+    // Multi-assistant rooms (T9b): every distinct `@Name` answers, in the
+    // order written. Retry/truncate remains a single-assistant operation — a
+    // replay must not duplicate a previously completed response group.
+    const mentioned = isRoom && !override?.truncateFromMessageId
+      ? resolveMentionedAssistants(trimmed, assistants)
+      : [];
+    const targets = mentioned.length > 0 ? mentioned : [interlocutor];
+    // Room posts are text-only. A file-bearing send must address the
+    // assistant so the files reach `/api/chat` instead of being silently
+    // discarded by the durable-post path.
+    const addressed =
+      !isRoom ||
+      askArmed ||
+      mentioned.length > 0 ||
+      turnFileIds.length > 0 ||
+      researchMode ||
+      override?.forceAddress === true;
     setAskArmed(false);
     setMentionOpen(false);
 
@@ -967,6 +1092,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         timestamp: new Date(),
       });
       setInput("");
+      if (usesComposerTray) att.detach();
       setError(null);
       markRoomSeen(workspaceId, targetId);
       try {
@@ -983,24 +1109,57 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     // dropped — so we never fragment one chat across several rail rows.
     const channelId = sessionIdRef.current ? undefined : crypto.randomUUID();
 
+    const localUserId = `local-${Date.now()}`;
+    const userAttachments: MessageAttachmentRef[] = usesComposerTray
+      ? readyAttachments(att.attachments).map((attachment) => ({
+          id: attachment.fileId!,
+          name: attachment.fileName,
+          mime: attachment.mimeType,
+          ...(attachment.previewUrl ? { dataUrl: attachment.previewUrl } : {}),
+        }))
+      : [];
     chat.appendMessage({
-      id: `local-${Date.now()}`,
+      id: localUserId,
       role: "user",
       text: trimmed,
       timestamp: new Date(),
-    });
+      ...(userAttachments.length > 0 ? { userAttachments } : {}),
+    } satisfies SurfaceMessage);
     setInput("");
+    if (usesComposerTray) att.detach();
     setError(null);
     setQueuedNotice(false);
-    askedQuestionRef.current = false;
-    turnAssistantRef.current = target.id;
-    chat.dispatch({ type: "stream/start" });
-    turnTextRef.current = "";
-    resetTurnActivity();
-    turnStartedAtRef.current = Date.now();
-    setTurnStartedAt(turnStartedAtRef.current);
+    responseGroupAbortRef.current = false;
+    let sourceMessageId: string | null = null;
+    const responseAssistantIds = targets.map((assistant) => assistant.id);
 
-    await stream.start({
+    // One visible human message, then one serialized turn per named
+    // assistant. The first request persists the message and returns its id;
+    // every later request reuses that row as a validated continuation.
+    for (const [targetIndex, target] of targets.entries()) {
+      if (responseGroupAbortRef.current) break;
+      if (targetIndex > 0 && !sourceMessageId) break;
+
+      askedQuestionRef.current = false;
+      turnAssistantRef.current = target.id;
+      chat.dispatch({ type: "stream/start" });
+      turnTextRef.current = "";
+      resetTurnActivity();
+      turnStartedAtRef.current = Date.now();
+      setTurnStartedAt(turnStartedAtRef.current);
+
+      const directRoomSessionId = isRoom ? sessionIdRef.current : null;
+      if (directRoomSessionId) {
+        directTurnSessionRef.current = directRoomSessionId;
+        dispatchChatSessionActivity({
+          workspaceId,
+          sessionId: directRoomSessionId,
+          working: true,
+        });
+      }
+
+      let turnFailed = false;
+      await stream.start({
       url: `${API_URL}/api/chat`,
       authFetch: (url, init) => authFetch(String(url), init),
       body: {
@@ -1010,8 +1169,26 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         appOrigin: APP_ORIGIN,
         // The picked tier rides every turn; the server clamps to plan.
         model,
+        ...(researchMode ? { mode: "research" as const } : {}),
+        // The first persisted row owns the attachments. Later assistants see
+        // them through room history; re-sending file ids would transcribe /
+        // distil the same upload again.
+        ...(targetIndex === 0 && turnFileIds.length > 0
+          ? { fileIds: turnFileIds }
+          : {}),
+        ...(override?.truncateFromMessageId
+          ? { truncateFromMessageId: override.truncateFromMessageId }
+          : {}),
         // The Ask affordance marks address intent (T3) — the server decides.
         ...(isRoom && addressed ? { ask: true } : {}),
+        ...(isRoom && targets.length > 1
+          ? {
+              roomResponseGroup: {
+                assistantIds: responseAssistantIds,
+                ...(sourceMessageId ? { sourceMessageId } : {}),
+              },
+            }
+          : {}),
         ...(sessionIdRef.current ? { sessionId: sessionIdRef.current } : {}),
         ...(channelId ? { channelId } : {}),
       },
@@ -1033,6 +1210,20 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
               selectSession(id);
               // The fresh thread is now listable — tell the sidebar rail.
               dispatchChatSessionsRefresh(workspaceId);
+            }
+            break;
+          }
+          case "user_message_saved": {
+            const id = typeof payload.id === "string" ? payload.id : null;
+            if (id) {
+              sourceMessageId ??= id;
+              // Rekey only. Rebuilding this row would drop the optimistic
+              // attachment previews that now belong to the transcript.
+              chat.dispatch({
+                type: "message/rekey",
+                messageId: localUserId,
+                id,
+              });
             }
             break;
           }
@@ -1211,6 +1402,16 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             setToolTimeline(turnToolsRef.current);
             break;
           }
+          case "document_payload": {
+            const document = parsePresentedDocumentPayload(payload);
+            if (!document) break;
+            turnDocumentsRef.current = [
+              ...turnDocumentsRef.current.filter((item) => item.id !== document.id),
+              document,
+            ];
+            setOpenDocument(document);
+            break;
+          }
           case "status": {
             // Research / coordinator phase codes only — `message`-only
             // statuses stay silent, same as the dock.
@@ -1218,6 +1419,52 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             if (phase === "research_detected") setResearchPhase("detected");
             else if (phase === "research_starting") setResearchPhase("starting");
             else if (phase === "research_parallel") setResearchPhase("parallel");
+            break;
+          }
+          case "citation": {
+            if (!Array.isArray(payload.sources)) break;
+            for (const source of payload.sources as Array<{
+              url?: unknown;
+              title?: unknown;
+            }>) {
+              if (
+                typeof source.url !== "string" ||
+                typeof source.title !== "string" ||
+                turnCitationsRef.current.some((item) => item.url === source.url)
+              ) {
+                continue;
+              }
+              turnCitationsRef.current = [
+                ...turnCitationsRef.current,
+                { url: source.url, title: source.title },
+              ];
+            }
+            setCitations(turnCitationsRef.current);
+            break;
+          }
+          case "attachments": {
+            if (Array.isArray(payload.attachments)) {
+              turnFileAttachmentsRef.current =
+                payload.attachments as ChatFileAttachment[];
+            }
+            break;
+          }
+          case "research_quota": {
+            setResearchQuota({
+              used: typeof payload.used === "number" ? payload.used : 0,
+              quota: typeof payload.quota === "number" ? payload.quota : 0,
+              isPaid: payload.isPaid === true,
+            });
+            break;
+          }
+          case "research_quota_exhausted": {
+            setResearchExhausted(true);
+            setResearchMode(false);
+            setResearchQuota({
+              used: typeof payload.used === "number" ? payload.used : 0,
+              quota: typeof payload.quota === "number" ? payload.quota : 0,
+              isPaid: false,
+            });
             break;
           }
           case "queued": {
@@ -1230,6 +1477,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           case "posted": {
             // The server decided this message was a post, not an address
             // (T3 re-validation). The optimistic bubble already stands.
+            turnFailed = true;
             chat.dispatch({ type: "stream/abort" });
             resetTurnActivity();
             break;
@@ -1260,6 +1508,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             break;
           }
           case "error": {
+            turnFailed = true;
+            if (payload.code === "research_quota_exhausted") {
+              setResearchExhausted(true);
+              setResearchMode(false);
+            }
             if (payload.code === "assistant_clearance_exceeds_room") {
               setError(t.assistantClearanceBlocked);
               break;
@@ -1287,14 +1540,25 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             break;
           }
           default:
-            // Every other event (citations, confirmations, view payloads) is
-            // dock-only chrome for now. Ignoring an unknown event is the
-            // additive contract: a newer server must never break this client.
+            // Unknown events remain additive: a newer server must never break
+            // this client just because it emits chrome we do not know yet.
             break;
         }
       },
       onDone: () => {
+        const settledRoomSessionId = directTurnSessionRef.current;
+        directTurnSessionRef.current = null;
+        if (settledRoomSessionId) {
+          dispatchChatSessionActivity({
+            workspaceId,
+            sessionId: settledRoomSessionId,
+            working: false,
+          });
+        }
         const finalText = turnTextRef.current.trim();
+        const finalDocuments = turnDocumentsRef.current;
+        const finalCitations = turnCitationsRef.current;
+        const finalFileAttachments = turnFileAttachmentsRef.current;
         // Close any step the server never resolved, so the receipt shows a
         // finished turn rather than a spinner frozen mid-flight.
         const tools = turnToolsRef.current.map((tool) =>
@@ -1304,18 +1568,31 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           turnStartedAtRef.current != null
             ? Date.now() - turnStartedAtRef.current
             : undefined;
-        if (finalText || tools.length > 0) {
-          chat.dispatch({
-            type: "stream/finalize",
-            finalMessage: {
-              id: `assistant-${Date.now()}`,
-              role: "assistant",
-              text: finalText,
-              timestamp: new Date(),
-              ...(tools.length > 0 ? { toolsUsed: tools } : {}),
-              ...(activityDurationMs != null ? { activityDurationMs } : {}),
-            } satisfies Message,
-          });
+        if (
+          finalText ||
+          tools.length > 0 ||
+          finalDocuments.length > 0 ||
+          finalFileAttachments.length > 0
+        ) {
+          const finalMessage: SurfaceMessage = {
+            id: `assistant-${Date.now()}`,
+            role: "assistant",
+            text: finalText,
+            timestamp: new Date(),
+            senderAssistantId: target.id,
+            ...(tools.length > 0 ? { toolsUsed: tools } : {}),
+            ...(finalDocuments.length > 0
+              ? { documents: finalDocuments }
+              : {}),
+            ...(activityDurationMs != null ? { activityDurationMs } : {}),
+            ...(finalCitations.length > 0
+              ? { citations: finalCitations }
+              : {}),
+            ...(finalFileAttachments.length > 0
+              ? { fileAttachments: finalFileAttachments }
+              : {}),
+          };
+          chat.dispatch({ type: "stream/finalize", finalMessage });
         } else {
           chat.dispatch({ type: "stream/abort" });
         }
@@ -1336,14 +1613,86 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         dispatchChatSessionsRefresh(workspaceId);
       },
       onError: () => {
+        turnFailed = true;
+        directTurnSessionRef.current = null;
         chat.dispatch({ type: "stream/abort" });
         resetTurnActivity();
         setQueuedNotice(false);
         setError(t.errorGeneric);
+        // The room backend may still be running after a transport failure.
+        // Reconcile the rail from persisted session status instead of
+        // declaring it idle just because this page lost its POST stream.
+        dispatchChatSessionsRefresh(workspaceId);
       },
-    });
+      });
+      if (
+        turnFailed ||
+        askedQuestionRef.current ||
+        responseGroupAbortRef.current
+      ) {
+        break;
+      }
+    }
+    // Reconcile once after the whole serialized group, not after each member:
+    // this makes persisted sender attribution authoritative without letting
+    // an earlier fetch erase a later assistant's live/final row. It also
+    // catches teammate posts that arrived while this direct stream owned the
+    // room mirror and viewer identity had not hydrated yet.
+    if (isRoom && sourceMessageId && sessionIdRef.current) {
+      await loadTranscript(sessionIdRef.current);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [input, activeAssistant, activeSessionId, activeShared, askArmed, model, view, workspaceId, chat.state.isStreaming, refreshPendingQuestion, reloadShared, resetTurnActivity, selectSession, startingShared, stream, t, tChat.toolNarration]);
+  }, [input, activeAssistant, activeSessionId, activeShared, askArmed, model, researchMode, view, workspaceId, chat.state.isStreaming, refreshPendingQuestion, reloadShared, resetTurnActivity, selectSession, startingShared, stream, t, tChat.toolNarration, att.attachments, att.uploading, att.fileIds, att.detach, pendingQuestion, assistants]);
+
+  const retryUserMessage = useCallback(
+    (messageId: string) => {
+      if (stream.inFlight()) return;
+      const messages = chat.state.messages as SurfaceMessage[];
+      const index = messages.findIndex((message) => message.id === messageId);
+      if (index < 0) return;
+      const message = messages[index];
+      // Cached file ids are not carried on the render model after restore;
+      // never pretend a retry can replay an attachment-bearing turn.
+      if (
+        message.role !== "user" ||
+        !message.text.trim() ||
+        message.userAttachments?.length
+      ) {
+        return;
+      }
+      chat.loadMessages(messages.slice(0, index));
+      void send({
+        text: message.text,
+        truncateFromMessageId: message.id,
+        forceAddress: true,
+      });
+    },
+    [chat, send, stream],
+  );
+
+  const retryAssistantMessage = useCallback(
+    (messageId: string) => {
+      if (stream.inFlight()) return;
+      const messages = chat.state.messages as SurfaceMessage[];
+      const index = messages.findIndex((message) => message.id === messageId);
+      if (index <= 0) return;
+      const precedingUser = messages[index - 1];
+      if (
+        precedingUser.role !== "user" ||
+        !precedingUser.text.trim() ||
+        precedingUser.userAttachments?.length
+      ) {
+        return;
+      }
+      chat.loadMessages(messages.slice(0, index - 1));
+      void send({
+        text: precedingUser.text,
+        truncateFromMessageId: precedingUser.id,
+        forceAddress: true,
+      });
+    },
+    [chat, send, stream],
+  );
 
   // The Personal/Workspace segmented control. Deliberately louder than a
   // typical tab pair (icons + roomier hit area): posting into a shared thread
@@ -1386,6 +1735,15 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           : researchPhase
             ? tChat.researchStatus[researchPhase]
             : tChat.thinking);
+  const workBenchAssistant = resolveWorkBenchAssistant({
+    roster: assistants,
+    fallback: activeAssistant,
+    localActive: chat.state.isStreaming,
+    localAssistantId: turnAssistantRef.current,
+    remoteActive,
+    remoteAssistantId,
+    waitingForInput: workBenchWaiting,
+  });
 
   /** The reply avatar for a given ANSWERING assistant (multi-assistant
    *  rooms, T9) — falls back to the thread's bound assistant. */
@@ -1423,7 +1781,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     </div>
   );
 
-  const copyButton = (messageId: string, text: string, alignEnd: boolean) => (
+  const messageActions = (
+    messageId: string,
+    text: string,
+    alignEnd: boolean,
+    onRetry?: () => void,
+  ) => (
     <div
       className={cn(
         "flex items-center gap-1 pt-0.5 opacity-0 transition-opacity group-hover:opacity-100",
@@ -1443,6 +1806,17 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           <Copy className="size-3.5" aria-hidden />
         )}
       </button>
+      {onRetry ? (
+        <button
+          type="button"
+          onClick={onRetry}
+          aria-label={tChat.retry}
+          title={tChat.retry}
+          className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        >
+          <RotateCw className="size-3.5" aria-hidden />
+        </button>
+      ) : null}
     </div>
   );
 
@@ -1660,8 +2034,21 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         value={input}
         onChange={setInput}
         onSend={() => void send()}
-        sendDisabled={chat.state.isStreaming || !activeAssistant}
-        placeholder={t.composerPlaceholder}
+        disabled={!!pendingQuestion}
+        sendDisabled={chat.state.isStreaming || !activeAssistant || att.uploading}
+        allowEmptySend={att.hasReady}
+        onPaste={(event) => {
+          if (pendingQuestion) return;
+          const images = imageFilesFromClipboard(event.clipboardData);
+          if (images.length === 0) return;
+          event.preventDefault();
+          void att.upload(images);
+        }}
+        placeholder={
+          pendingQuestion
+            ? tChat.pendingQuestion.composerDisabled
+            : t.composerPlaceholder
+        }
         sendLabel={
           <>
             <ArrowUp className="size-4" aria-hidden />
@@ -1677,8 +2064,53 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           "bg-transparent px-1.5 pt-2.5 pb-1 text-sm leading-relaxed outline-none",
           "placeholder:text-muted-foreground focus-visible:shadow-none",
         )}
+        slotAttachments={
+          <>
+            <AttachmentChips
+              attachments={att.attachments}
+              onRemove={att.remove}
+            />
+            {recordingUpload.status !== "idle" ? (
+              <p
+                role="status"
+                className={cn(
+                  "px-1 py-0.5 text-xs",
+                  recordingUpload.status === "error"
+                    ? "text-destructive"
+                    : "text-muted-foreground",
+                )}
+              >
+                {recordingUpload.status === "uploading"
+                  ? tRecordings.uploading
+                  : recordingUpload.status === "processing"
+                    ? tRecordings.processing
+                    : recordingUpload.message}
+              </p>
+            ) : null}
+          </>
+        }
         slotPreInput={
           <div className="order-2 mr-auto flex min-w-0 items-center gap-0.5">
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={(event) => {
+                if (event.target.files) void att.upload(event.target.files);
+                event.target.value = "";
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={!!pendingQuestion}
+              aria-label={tAttach.attach}
+              title={tAttach.attach}
+              className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50 focus-visible:shadow-none"
+            >
+              <Paperclip className="size-[17px]" aria-hidden />
+            </button>
             {interlocutorControl}
             {/* Tier picker (Standard / Pro / Max) — the shared presentational
                 control; without research/metered props it renders just the
@@ -1687,10 +2119,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
               model={model}
               onModelChange={setModel}
               plan={workspacePlan}
-              researchMode={false}
-              onResearchModeChange={() => {}}
-              researchQuota={null}
-              researchExhausted={false}
+              researchMode={researchMode}
+              onResearchModeChange={setResearchMode}
+              researchQuota={researchQuota}
+              researchExhausted={researchExhausted}
+              showResearch
               selectSide="top"
             />
             {/* The Ask affordance (D1/T3) — rooms only. In a room, send =
@@ -1747,7 +2180,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   );
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div
+      className="relative flex h-full min-h-0 flex-col"
+      {...drop.dropProps}
+    >
+      <FileDropOverlay active={drop.isDragging} />
       <OperatorTopbar
         app="chat"
         center={
@@ -1834,7 +2271,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           </div>
         </section>
       ) : (
-      <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
+      <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
       <section className="flex min-h-0 min-w-0 flex-1 flex-col">
         <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-6">
           <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
@@ -1845,7 +2282,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                   {activeShared ? t.sharedTranscriptEmpty : t.transcriptEmpty}
                 </p>
               )}
-            {(chat.state.messages as SurfaceMessage[]).map((m) =>
+            {(chat.state.messages as SurfaceMessage[]).map((m, messageIndex) =>
               m.role === "user" ? (
                 <div key={m.id} className="group flex flex-col items-end">
                   {/* Attribution chip — only in a shared thread, and only for
@@ -1859,10 +2296,26 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                   {/* Neutral Notion-style bubble — the dock's `--secondary`
                       surface, NOT a saturated primary fill (white-on-blue
                       missed WCAG AA; the brand blue stays on small accents). */}
-                  <div className="max-w-[85%] rounded-2xl rounded-br-md bg-secondary px-3.5 py-2 text-[14px] leading-[1.5] break-words whitespace-pre-wrap text-secondary-foreground shadow-sm">
-                    {m.text}
-                  </div>
-                  {copyButton(m.id, m.text, true)}
+                  {m.text ? (
+                    <div className="max-w-[85%] rounded-2xl rounded-br-md bg-secondary px-3.5 py-2 text-[14px] leading-[1.5] break-words whitespace-pre-wrap text-secondary-foreground shadow-sm">
+                      {m.text}
+                    </div>
+                  ) : null}
+                  {m.userAttachments?.length ? (
+                    <div className="w-full max-w-[280px]">
+                      <MessageAttachments attachments={m.userAttachments} />
+                    </div>
+                  ) : null}
+                  {m.text
+                    ? messageActions(
+                        m.id,
+                        m.text,
+                        true,
+                        m.userAttachments?.length
+                          ? undefined
+                          : () => retryUserMessage(m.id),
+                      )
+                    : null}
                 </div>
               ) : (
                 <div key={m.id} className="group flex gap-2.5">
@@ -1876,10 +2329,40 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                     ) : null}
                     {m.text ? (
                       <div className={MARKDOWN_CLS}>
-                        <ChatMarkdown text={m.text} remarkPlugins={REMARK_PLUGINS} />
+                        <ChatMarkdown
+                          text={m.text}
+                          components={CHAT_MARKDOWN_COMPONENTS}
+                          remarkPlugins={REMARK_PLUGINS}
+                        />
                       </div>
                     ) : null}
-                    {m.text ? copyButton(m.id, m.text, false) : null}
+                    {m.fileAttachments?.length ? (
+                      <ChatFileAttachments attachments={m.fileAttachments} />
+                    ) : null}
+                    {m.citations?.length ? (
+                      <ChatCitationList
+                        citations={m.citations}
+                        label={tChat.citationLabel}
+                      />
+                    ) : null}
+                    {m.documents?.map((document) => (
+                      <ChatDocumentCard
+                        key={document.id}
+                        document={document}
+                        onOpen={setOpenDocument}
+                      />
+                    ))}
+                    {m.text
+                      ? messageActions(
+                          m.id,
+                          m.text,
+                          false,
+                          (chat.state.messages as SurfaceMessage[])[messageIndex - 1]
+                            ?.userAttachments?.length
+                            ? undefined
+                            : () => retryAssistantMessage(m.id),
+                        )
+                      : null}
                   </div>
                 </div>
               ),
@@ -1901,6 +2384,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                     <div className={MARKDOWN_CLS}>
                       <ChatMarkdown
                         text={chat.state.streamingText}
+                        components={CHAT_MARKDOWN_COMPONENTS}
                         remarkPlugins={REMARK_PLUGINS}
                       />
                       <span
@@ -1908,6 +2392,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                         className="ml-0.5 inline-block h-[16px] w-[2px] rounded-full bg-primary align-text-bottom shadow-[0_0_8px_var(--primary)] animate-pulse"
                       />
                     </div>
+                  ) : null}
+                  {citations.length > 0 ? (
+                    <ChatCitationList
+                      citations={citations}
+                      label={tChat.citationLabel}
+                    />
                   ) : null}
                 </div>
               </div>
@@ -1939,7 +2429,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                   )}
                   {remoteText ? (
                     <div className={MARKDOWN_CLS}>
-                      <ChatMarkdown text={remoteText} remarkPlugins={REMARK_PLUGINS} />
+                      <ChatMarkdown
+                        text={remoteText}
+                        components={CHAT_MARKDOWN_COMPONENTS}
+                        remarkPlugins={REMARK_PLUGINS}
+                      />
                     </div>
                   ) : null}
                 </div>
@@ -2015,13 +2509,18 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           <div className="mx-auto w-full max-w-3xl">{composerBox}</div>
         </div>
       </section>
-      {activeShared && activeSessionId && (
+      {openDocument ? (
+        <ChatDocumentViewer
+          document={openDocument}
+          onClose={() => setOpenDocument(null)}
+        />
+      ) : activeShared && activeSessionId ? (
         <ChatContextPins
           sessionId={activeSessionId}
           workspaceId={workspaceId}
           refreshKey={pinsEpoch}
           startedByName={activeShared.startedByName}
-          assistant={activeAssistant}
+          assistant={workBenchAssistant}
           turnActive={workBenchTurnActive}
           waitingForInput={workBenchWaiting}
           currentStep={workBenchCurrentStep}
@@ -2029,7 +2528,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           expanded={workBenchExpanded}
           onExpandedChange={setWorkBenchExpanded}
         />
-      )}
+      ) : null}
       </div>
       )}
     </div>

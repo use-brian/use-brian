@@ -3,6 +3,7 @@ export type {
   MessageAttachment,
   ChatFileAttachment,
   CitationSource,
+  DocumentAttachment,
   ToolUsed,
   ReplyTo,
   Session,

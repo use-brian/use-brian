@@ -3937,6 +3937,7 @@ export const zh: Dictionary = {
     postFailed: "無法發佈訊息，請再試一次。",
     mentionInsertAria: "提及 {name}",
     unreadDotAria: "新動態",
+    workingAria: "{name} 正在處理",
     confirmNotAllowed: "只有本回合發問的成員（或工作區管理員）可以操作。",
     captureIndicator: "已記錄到公司大腦",
     workBench: "工作台",
@@ -3952,6 +3953,14 @@ export const zh: Dictionary = {
     liveWorkSteps: "{done} 個已完成・{running} 個進行中",
     pinnedContext: "釘選",
     assistantClearanceBlocked: "該助理的權限層級高於此聊天室，無法在這裡回答。",
+    documentViewer: {
+      label: "原始文件",
+      open: "開啟文件",
+      openAria: "開啟 {title}",
+      copy: "複製文件",
+      copied: "已複製文件",
+      close: "關閉文件檢視器",
+    },
     pins: {
       rowAria: "釘選內容",
       add: "新增",

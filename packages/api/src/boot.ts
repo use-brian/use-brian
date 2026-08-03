@@ -63,6 +63,7 @@ import {
   type RecordingTranscriber,
   createIngestStoredFileTool,
   createReprocessRecordingTool,
+  createPresentDocumentTool,
   createWorkflowTools,
   createWorkflowBrainTools,
   createCorrectionTools,
@@ -2617,6 +2618,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   })
   allTools.set('renderView', renderView)
   allTools.set('saveView', saveView)
+  // The chat route removes this presentation-only tool unless the request is
+  // from the full Chat operator app. Registering it here keeps construction in
+  // the composition root while preventing docks/channels from seeing a UI
+  // affordance they cannot render.
+  allTools.set('presentDocument', createPresentDocumentTool())
 
   // ── Primitive tools (Tasks + CRM) ──
   // The admission gate runs on the `assistant` lane here: a workspace deny

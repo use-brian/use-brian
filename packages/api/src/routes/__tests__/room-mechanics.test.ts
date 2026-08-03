@@ -19,6 +19,7 @@
 
 import { describe, it, expect } from 'vitest'
 import {
+  buildRoomResponseCoordinationBlock,
   detectRoomAddress,
   mayAssistantAnswerInRoom,
   mayResolveRoomConfirmation,
@@ -269,6 +270,28 @@ describe('[COMP:api/room-mechanics] coalesceConsecutiveUserMessages (T4)', () =>
 })
 
 describe('[COMP:api/room-mechanics] multi-assistant rooms (T9)', () => {
+  it('gives each responder a separate, complementary coordination role', () => {
+    const assistants = [
+      { id: 'a-brian', name: 'Brian' },
+      { id: 'a-hinson', name: 'Hinson' },
+    ]
+    const first = buildRoomResponseCoordinationBlock({
+      assistants,
+      currentAssistantId: 'a-brian',
+    })
+    const second = buildRoomResponseCoordinationBlock({
+      assistants,
+      currentAssistantId: 'a-hinson',
+    })
+
+    expect(first).toContain('responder 1 of 2')
+    expect(first).toContain('will answer separately')
+    expect(first).toContain('do not speak for them')
+    expect(second).toContain('responder 2 of 2')
+    expect(second).toContain('have already replied')
+    expect(second).toContain('add distinct knowledge instead of repeating')
+  })
+
   it('an assistant may answer at or below the room clearance, never above', () => {
     expect(mayAssistantAnswerInRoom({ assistantClearance: 'internal', roomClearance: 'internal' })).toBe(true)
     expect(mayAssistantAnswerInRoom({ assistantClearance: 'public', roomClearance: 'internal' })).toBe(true)

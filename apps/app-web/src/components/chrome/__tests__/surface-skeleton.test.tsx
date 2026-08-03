@@ -10,6 +10,8 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { renderToStaticMarkup } from "react-dom/server";
+import { BrainGraphLoadingSkeleton } from "@/components/brain/graph-loading";
 import {
   surfaceSkeletonKind,
   type SurfaceSkeletonKind,
@@ -61,5 +63,19 @@ describe("[COMP:app-web/surface-skeleton] Surface skeleton shapes", () => {
     // `/w/<id>` redirects to `/p`, so the doc frame is the correct guess while
     // that redirect is in flight.
     expect(surfaceSkeletonKind(null)).toBe("page");
+  });
+
+  it("mirrors the rendered brain graph using only the skeleton treatment", () => {
+    const html = renderToStaticMarkup(<BrainGraphLoadingSkeleton />);
+
+    expect(html).toContain('data-brain-graph-skeleton="true"');
+    expect(html).toContain('data-brain-graph-edges="true"');
+    expect(html.match(/data-brain-graph-node=/g)).toHaveLength(19);
+    expect(html.match(/data-brain-graph-label=/g)).toHaveLength(19);
+    expect(html.match(/class="skeleton/g)).toHaveLength(38);
+    expect(html).not.toContain("--graph-entity-");
+    expect(html).not.toContain("brain-outline");
+    expect(html).not.toContain("brain-graph-loading-scan");
+    expect(html.replace(/<[^>]+>/g, "").trim()).toBe("");
   });
 });

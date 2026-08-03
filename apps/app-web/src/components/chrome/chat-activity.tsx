@@ -37,12 +37,63 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Check, ChevronRight, ExternalLink, RotateCcw } from "lucide-react";
-import type { ToolUsed } from "@use-brian/chat-ui";
+import type { CitationSource, ToolUsed } from "@use-brian/chat-ui";
 import type { BuildEvent } from "@/lib/build-events";
 import { cn } from "@/lib/utils";
 import { useT, format } from "@/lib/i18n/client";
 
 export type ResearchPhase = "detected" | "starting" | "parallel";
+
+/**
+ * Shared source chips for every chat transcript. Kept beside the other
+ * response chrome so the floating dock and the full-page Chat app cannot
+ * drift into different citation affordances.
+ */
+export function ChatCitationList({
+  citations,
+  label,
+}: {
+  citations: CitationSource[];
+  label: string;
+}) {
+  const VISIBLE = 4;
+  const [expanded, setExpanded] = useState(false);
+  const visible = expanded ? citations : citations.slice(0, VISIBLE);
+  const hidden = citations.length - VISIBLE;
+
+  if (citations.length === 0) return null;
+  return (
+    <div className="space-y-1">
+      <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
+        {label}
+      </div>
+      <div className="flex flex-wrap gap-1.5">
+        {visible.map((citation) => (
+          <a
+            key={citation.url}
+            href={citation.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex max-w-[220px] items-center gap-1 truncate rounded-md bg-muted/60 px-2 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            title={citation.url}
+          >
+            <ExternalLink className="size-2.5 shrink-0" aria-hidden />
+            <span className="truncate">{citation.title}</span>
+          </a>
+        ))}
+        {!expanded && hidden > 0 ? (
+          <button
+            type="button"
+            onClick={() => setExpanded(true)}
+            className="inline-flex items-center rounded-md bg-muted/40 px-2 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground"
+          >
+            +{hidden}
+          </button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
 
 /** Wall-clock duration → compact human form: 0.8s · 3.4s · 42s · 1m 12s. */
 export function formatDuration(ms: number): string {

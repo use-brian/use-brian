@@ -51,3 +51,10 @@ export { createIngestStoredFileTool } from './base/ingest-stored-file.js'
 export type { IngestStoredFileDeps } from './base/ingest-stored-file.js'
 export { createReprocessRecordingTool } from './base/reprocess-recording.js'
 export type { ReprocessRecordingDeps } from './base/reprocess-recording.js'
+export {
+  createPresentDocumentTool,
+  MAX_PRESENTED_DOCUMENT_CHARS,
+  parsePresentedDocumentInput,
+  presentedDocumentInputSchema,
+} from './base/present-document.js'
+export type { PresentedDocumentInput } from './base/present-document.js'
