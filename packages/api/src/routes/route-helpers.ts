@@ -6,7 +6,7 @@
 
 import { findOrCreateUser, findUserById } from '../db/users.js'
 import { query } from '../db/client.js'
-import { loadBuiltinSkills, formatSkillListing, createUseSkillTool, expandSkillPointers, parseFileContent, shouldInline } from '@use-brian/core'
+import { loadBuiltinSkills, formatSkillListing, createUseSkillTool, expandSkillPointers, parseFileContent, shouldInline, isTabular, tabularRowsFromText, profileTable, renderTabularProfile } from '@use-brian/core'
 import type { Tool, UsageStore, BudgetStatus, ContentBlock, FileStore, McpSettingsStore, KnowledgeStoreInterface, KnowledgeRepoWriter, GDriveFilesStore, SkillContent, EngineHooks, FilesApi } from '@use-brian/core'
 import type { ActorIdentity } from '../mcp/auth-headers.js'
 // NOTE: the real DB-backed credit gate (`checkCreditBudget`, closed billing/)
@@ -912,6 +912,50 @@ export async function buildFileContentBlocks(
     } else {
       const { text } = await parseFileContent(file.buffer, file.mimeType, file.fileName)
       const isSmall = shouldInline(text)
+
+      // ── Tabular lane (issue #273) ──
+      // A large CSV/XLSX contributes a SCHEMA PROFILE, never rows. Any row
+      // subset (truncated or retrieved) lets the model state a total it cannot
+      // support: a 4,159-row CSV delivered at 8% produced a total understated
+      // by 88.7% and a wrong personal record, both stated as fact. The profile
+      // is ~200 tokens at any file size and carries the true row count and
+      // date range, so a wrong range is not expressible. Figures come from
+      // querying the stored file, not from the prompt.
+      if (!isSmall && isTabular(file.mimeType, file.fileName)) {
+        const profile = profileTable(tabularRowsFromText(text, file.mimeType))
+        // Resolve a durable handle so the model can query the rows. Promotion
+        // first (outlives the cache TTL), then the session cache, then none.
+        let handleId: string | undefined = file.id
+        if (promoteArtifact) {
+          const promoted = await promoteArtifact({
+            fileName: file.fileName,
+            mime: file.mimeType,
+            bytes: file.buffer,
+            parsedText: text,
+          }).catch(() => null)
+          if (promoted) handleId = promoted.fileId
+        }
+        if (!handleId && fileStore && sessionId) {
+          const cached = await fileStore
+            .cache({
+              sessionId,
+              fileName: file.fileName,
+              mimeType: file.mimeType,
+              content: text,
+              sizeBytes: file.buffer.length,
+            })
+            .catch(() => null)
+          if (cached) handleId = cached.id
+        }
+        textParts.push(
+          renderTabularProfile(profile, {
+            ...(handleId ? { fileId: handleId } : {}),
+            fileName: file.fileName,
+            mime: file.mimeType,
+          }),
+        )
+        continue
+      }
 
       if (isSmall) {
         textParts.push(

@@ -172,3 +172,50 @@ describe('[COMP:files/parsers] shouldInline', () => {
     expect(shouldInline('中'.repeat(1_000))).toBe(true)
   })
 })
+
+describe('[COMP:files/parsers] Spreadsheet row fidelity', () => {
+  // Storage-affecting ceilings are forbidden: parseFileContent output IS what
+  // gets chunked into file_segments, so a row dropped here is lost permanently
+  // and no downstream tool can recover it. Presentation shaping happens later,
+  // at the inline gate. See issue #273 and
+  // docs/plans/channel-attachment-truncation.md.
+  async function buildSheet(rows: number): Promise<Buffer> {
+    const ExcelJS = (await import('exceljs')).default
+    const wb = new ExcelJS.Workbook()
+    const ws = wb.addWorksheet('Ledger')
+    ws.addRow(['id', 'account', 'amount'])
+    for (let i = 1; i <= rows; i++) ws.addRow([i, `000${i % 7}`, i * 3])
+    return Buffer.from(await wb.xlsx.writeBuffer())
+  }
+
+  it('keeps every row of a sheet far larger than the old 1000-row cap', async () => {
+    const buf = await buildSheet(4000)
+    const result = await parseFileContent(buf, XLSX_MIME, 'ledger.xlsx')
+    // First, last, and a row well past the old cap must all survive.
+    expect(result.text).toContain('| 1 | 0001 | 3 |')
+    expect(result.text).toContain('| 2500 | ')
+    expect(result.text).toContain('| 4000 | ')
+  })
+
+  it('emits no omission note, because nothing is omitted', async () => {
+    const buf = await buildSheet(4000)
+    const result = await parseFileContent(buf, XLSX_MIME, 'ledger.xlsx')
+    expect(result.text).not.toContain('rows omitted')
+    // The old note promised "ask to read the full sheet" — a capability that
+    // could not exist, because the rows were never parsed.
+    expect(result.text).not.toContain('ask to read the full sheet')
+  })
+
+  it('reports the true row count in the summary', async () => {
+    const buf = await buildSheet(4000)
+    const result = await parseFileContent(buf, XLSX_MIME, 'ledger.xlsx')
+    expect(result.summary).toContain('4001')
+  })
+
+  it('preserves zero-padded account codes as text, not coerced numbers', async () => {
+    const buf = await buildSheet(10)
+    const result = await parseFileContent(buf, XLSX_MIME, 'ledger.xlsx')
+    expect(result.text).toContain('0001')
+    expect(result.text).not.toContain('| 1 | 1 |')
+  })
+})

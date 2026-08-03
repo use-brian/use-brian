@@ -17,5 +17,16 @@ export {
   type DistillPdfResult,
   type VisionCaller,
 } from './pdf-distill.js'
+export {
+  isTabular,
+  tabularRowsFromText,
+  profileTable,
+  renderTabularProfile,
+  type ColumnType,
+  type ColumnProfile,
+  type DateRange,
+  type TableProfile,
+  type TabularProfileMeta,
+} from './tabular-profile.js'
 export { createReadFileTool } from './tool.js'
 export { docxToBlocks } from './docx-convert.js'
