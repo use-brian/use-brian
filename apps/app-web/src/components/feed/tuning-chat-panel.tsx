@@ -5,8 +5,8 @@
  * `apps/feed-web/src/components/tuning-chat-panel.tsx`
  * (docs/plans/feed-web-consolidation.md §7.3): the chat surface where the
  * operator teaches the assistant voice rules over `@use-brian/chat-ui` +
- * `POST /api/chat` SSE, with session resume (`channelId='tuning'`), voice
- * notes, copy/retry, a model-tier picker gated by the workspace plan, and
+ * `POST /api/chat` SSE, with session resume (`channelId='tuning'`), the shared
+ * dock recorder, copy/retry, a model-tier picker gated by the workspace plan, and
  * the research-mode toggle gated by the free-research quota.
  *
  * Port deltas (disposition rules §6):
@@ -42,8 +42,15 @@ import { fetchFeedSessionIdByChannel } from "@/lib/api/feed";
 import { fetchSessionMessages, extractMessageText } from "@/lib/api/sessions";
 import { getUsage } from "@/lib/api/usage";
 import { webAppUrl } from "@/lib/primary-auth";
-import { VoiceRecorder } from "@/components/feed/voice-recorder";
 import { AssistantAvatar } from "@/components/assistant-avatar";
+import {
+  DockRecorderButton,
+  DockRecorderNotice,
+  DockRecorderRecovery,
+  DockRecorderStrip,
+} from "@/components/chrome/dock-recorder";
+import type { DockRecorderApi } from "@/lib/recorder/use-dock-recorder";
+import { registerDockRecorderChatTarget } from "@/lib/recorder/dock-recorder-bridge";
 import {
   Select,
   SelectContent,
@@ -78,14 +85,6 @@ type ErrorEvent = { error?: string; code?: string };
 type ResearchQuotaEvent = { used?: number; quota?: number; isPaid?: boolean };
 type StatusEvent = { message?: string };
 
-type StagedAttachment = {
-  localId: string;
-  fileName: string;
-  fileId?: string;
-  status: "uploading" | "done" | "error";
-  error?: string;
-};
-
 export type TuningChatPanelHandle = {
   /** Drop a draft into the composer and focus it. Optionally flip research mode on. */
   insertPrompt(text: string, opts?: { researchMode?: boolean }): void;
@@ -111,6 +110,10 @@ export const TuningChatPanel = forwardRef<
     headline?: string;
     /** Suggested starter prompts shown in the empty state. */
     suggestions?: string[];
+    /** Post-bound refine rails replace the generic voice-memory empty copy. */
+    emptyTitle?: string;
+    emptyBody?: string;
+    emptySuggestionsLabel?: string;
     /** When provided, the header renders a collapse button (floating shell). */
     onClose?: () => void;
     /** Sticky channel to resume. Defaults to the tuning conversation. */
@@ -134,6 +137,10 @@ export const TuningChatPanel = forwardRef<
      * message falls through to the generic error strip.
      */
     renderPlanGate?: (message: string) => React.ReactNode;
+    /** The one app-wide live recorder, rehosted by the Feed replacement dock. */
+    dockRecorder?: DockRecorderApi;
+    /** Route short recorder captures into this visible tuning session. */
+    ownsDockRecorderTarget?: boolean;
   }
 >(function TuningChatPanel(props, ref) {
   const {
@@ -143,6 +150,9 @@ export const TuningChatPanel = forwardRef<
     workspaceId,
     headline,
     suggestions,
+    emptyTitle,
+    emptyBody,
+    emptySuggestionsLabel,
     onClose,
     channelId = TUNING_CHANNEL_ID,
     sessionId: fixedSessionId,
@@ -150,6 +160,8 @@ export const TuningChatPanel = forwardRef<
     renderPlanGate,
     title: titleOverride,
     composerPlaceholder,
+    dockRecorder,
+    ownsDockRecorderTarget = false,
   } = props;
 
   const t = useT().feedPage.tuningChat;
@@ -160,7 +172,6 @@ export const TuningChatPanel = forwardRef<
   // The server's machine code for the last error. `budget_exhausted` is a
   // billing STATE, not a stream crash, so the host renders it (D18).
   const [errorCode, setErrorCode] = useState<string | null>(null);
-  const [attachments, setAttachments] = useState<StagedAttachment[]>([]);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   // Model tier. Persisted across sessions; gated by the workspace plan
   // (pro/max disabled on lower plans) once `/api/usage` resolves.
@@ -294,7 +305,7 @@ export const TuningChatPanel = forwardRef<
   const sendMessage = useCallback(
     async (text: string, fileIds: string[], truncateFromMessageId?: string) => {
       const trimmed = text.trim();
-      if (!trimmed && fileIds.length === 0) return;
+      if (!trimmed && fileIds.length === 0) return false;
 
       const userMessage: Message = {
         id: `local-${Date.now()}`,
@@ -304,7 +315,6 @@ export const TuningChatPanel = forwardRef<
       };
       session.appendMessage(userMessage);
       setInput("");
-      setAttachments([]);
       setError(null);
       setErrorCode(null);
       setStatusMessage(null);
@@ -437,22 +447,27 @@ export const TuningChatPanel = forwardRef<
           session.dispatch({ type: "stream/abort" });
         },
       });
+      return true;
     },
     [assistantId, session, stream, model, researchMode, workspaceId, t],
   );
 
   const onSend = useCallback(async () => {
     if (stream.inFlight()) return;
-    const readyFileIds = attachments
-      .filter((a) => a.status === "done" && a.fileId)
-      .map((a) => a.fileId!);
-    if (!input.trim() && readyFileIds.length === 0) return;
-    if (attachments.some((a) => a.status === "uploading")) {
-      setError(t.waitUpload);
-      return;
-    }
-    await sendMessage(input, readyFileIds);
-  }, [attachments, input, sendMessage, stream, t]);
+    if (!input.trim()) return;
+    await sendMessage(input, []);
+  }, [input, sendMessage, stream]);
+
+  // Feed hides the global chat chrome but keeps its recorder controller alive.
+  // While this floating tuning panel owns the replacement dock, short captures
+  // must land in this visible sticky session instead of the hidden global chat.
+  useEffect(() => {
+    if (!ownsDockRecorderTarget) return;
+    return registerDockRecorderChatTarget({
+      sendVoiceClip: (fileId) => sendMessage("", [fileId]),
+      getSessionId: () => sessionIdRef.current ?? undefined,
+    });
+  }, [ownsDockRecorderTarget, sendMessage]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -462,50 +477,6 @@ export const TuningChatPanel = forwardRef<
       }
     },
     [onSend],
-  );
-
-  const uploadVoice = useCallback(
-    async (blob: Blob) => {
-      const ext = blob.type.includes("mp4") ? "mp4" : "webm";
-      const file = new File([blob], `voice-${Date.now()}.${ext}`, { type: blob.type });
-      const localId = `voice-${Date.now()}`;
-      setAttachments((prev) => [...prev, { localId, fileName: file.name, status: "uploading" }]);
-      setError(null);
-      setErrorCode(null);
-
-      const formData = new FormData();
-      formData.append("files", file);
-      if (sessionIdRef.current) formData.append("sessionId", sessionIdRef.current);
-
-      try {
-        const res = await authFetch(`${API_URL}/api/files/upload`, { method: "POST", body: formData });
-        if (!res.ok) throw new Error(t.uploadFailed);
-        const data = (await res.json()) as {
-          sessionId: string;
-          files: Array<{ id?: string; fileName: string; error?: string }>;
-        };
-        if (data.sessionId && !sessionIdRef.current) {
-          sessionIdRef.current = data.sessionId;
-          session.setSession(data.sessionId);
-        }
-        const result = data.files[0];
-        if (!result?.id) throw new Error(result?.error ?? t.uploadFailed);
-        setAttachments((prev) =>
-          prev.map((a) => a.localId === localId ? { ...a, status: "done", fileId: result.id } : a),
-        );
-        await sendMessage("", [result.id]);
-      } catch (err) {
-        setAttachments((prev) =>
-          prev.map((a) =>
-            a.localId === localId
-              ? { ...a, status: "error", error: err instanceof Error ? err.message : t.uploadFailed }
-              : a,
-          ),
-        );
-        setError(err instanceof Error ? err.message : t.voiceUploadFailed);
-      }
-    },
-    [sendMessage, session, t],
   );
 
   const handleCopy = useCallback(async (messageId: string, text: string) => {
@@ -584,10 +555,16 @@ export const TuningChatPanel = forwardRef<
       <div ref={containerRef} className="flex-1 min-h-0 overflow-y-auto">
         <div className="px-4 py-4 space-y-5">
           {showEmpty ? (
-            <EmptyState suggestions={suggestions} onPick={(s) => {
+            <EmptyState
+              suggestions={suggestions}
+              title={emptyTitle}
+              body={emptyBody}
+              suggestionsLabel={emptySuggestionsLabel}
+              onPick={(s) => {
               setInput(s);
               requestAnimationFrame(() => inputRef.current?.focus());
-            }} />
+              }}
+            />
           ) : null}
 
           {messages.map((msg) => {
@@ -687,28 +664,13 @@ export const TuningChatPanel = forwardRef<
       </div>
 
       <div className="shrink-0 border-t border-border/60 bg-card/60 backdrop-blur-sm px-3 pt-2.5 pb-3">
-        {attachments.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 mb-2">
-            {attachments.map((a) => (
-              <span
-                key={a.localId}
-                className={
-                  "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] " +
-                  (a.status === "error"
-                    ? "border-destructive/40 text-destructive"
-                    : a.status === "uploading"
-                      ? "border-border text-muted-foreground"
-                      : "border-emerald-500/40 text-emerald-700 dark:text-emerald-300")
-                }
-              >
-                <MicDot status={a.status} />
-                {a.fileName}
-                {a.status === "uploading" ? ` · ${t.uploading}` : null}
-                {a.status === "error" ? ` · ${a.error ?? t.attachmentFailed}` : null}
-              </span>
-            ))}
-          </div>
-        )}
+        {dockRecorder ? (
+          <>
+            <DockRecorderRecovery rec={dockRecorder} className="mb-1.5" />
+            <DockRecorderNotice rec={dockRecorder} className="mb-1.5" />
+            <DockRecorderStrip rec={dockRecorder} className="mb-1.5" />
+          </>
+        ) : null}
 
         <div className="rounded-xl border border-border/70 bg-background/60 shadow-sm focus-within:border-primary/50 focus-within:ring-2 focus-within:ring-primary/15 transition-all">
           <div className="px-3.5 pt-2.5">
@@ -722,14 +684,12 @@ export const TuningChatPanel = forwardRef<
               // list carries the thinking indicator.
               placeholder={composerPlaceholder ?? t.composerPlaceholder}
               rows={1}
-              className="w-full bg-transparent text-[14px] text-foreground placeholder:text-muted-foreground/60 resize-none outline-none min-h-[24px] max-h-[140px] py-0.5 leading-relaxed"
+              className="w-full bg-transparent text-[14px] text-foreground placeholder:text-muted-foreground/60 resize-none outline-none focus-visible:shadow-none min-h-[24px] max-h-[140px] py-0.5 leading-relaxed"
               style={{ fieldSizing: "content" } as React.CSSProperties}
             />
           </div>
           <div className="flex items-center gap-1.5 px-2.5 pb-2 pt-1">
-            {/* Recording mid-stream is fine — the note stages as an
-                attachment and rides the NEXT send, same as pre-typed text. */}
-            <VoiceRecorder onRecorded={(blob) => void uploadVoice(blob)} />
+            {dockRecorder ? <DockRecorderButton rec={dockRecorder} /> : null}
             <ResearchModeToggle
               active={researchMode}
               exhausted={researchExhausted}
@@ -784,7 +744,7 @@ export const TuningChatPanel = forwardRef<
             ) : (
               <button
                 onClick={() => void onSend()}
-                disabled={!input.trim() && attachments.filter((a) => a.status === "done").length === 0}
+                disabled={!input.trim()}
                 className="p-2 rounded-xl bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-30 disabled:cursor-not-allowed transition-colors shadow-sm shrink-0"
                 title={t.send}
               >
@@ -800,9 +760,15 @@ export const TuningChatPanel = forwardRef<
 
 function EmptyState({
   suggestions,
+  title,
+  body,
+  suggestionsLabel,
   onPick,
 }: {
   suggestions?: string[];
+  title?: string;
+  body?: string;
+  suggestionsLabel?: string;
   onPick: (s: string) => void;
 }) {
   const t = useT().feedPage;
@@ -817,18 +783,26 @@ function EmptyState({
             <SparkIcon />
           </span>
           <div className="space-y-1">
-            <p className="text-sm font-medium leading-snug">{t.tuningChat.emptyTitle}</p>
+            <p className="text-sm font-medium leading-snug">
+              {title ?? t.tuningChat.emptyTitle}
+            </p>
             <p className="text-[12px] leading-relaxed text-muted-foreground">
-              {t.tuningChat.emptyBodyBefore}{" "}
-              <span className="font-medium text-foreground">{t.voice.discuss}</span>{" "}
-              {t.tuningChat.emptyBodyAfter}
+              {body ? (
+                body
+              ) : (
+                <>
+                  {t.tuningChat.emptyBodyBefore}{" "}
+                  <span className="font-medium text-foreground">{t.voice.discuss}</span>{" "}
+                  {t.tuningChat.emptyBodyAfter}
+                </>
+              )}
             </p>
           </div>
         </div>
       </div>
       <div className="space-y-1.5">
         <p className="px-1 text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-          {t.tuningChat.trySuggestions}
+          {suggestionsLabel ?? t.tuningChat.trySuggestions}
         </p>
         <div className="flex flex-col gap-1.5">
           {items.map((s) => (
@@ -992,14 +966,4 @@ function ArrowRightIcon() {
       <polyline points="12 5 19 12 12 19" />
     </svg>
   );
-}
-
-function MicDot({ status }: { status: StagedAttachment["status"] }) {
-  const cls =
-    status === "error"
-      ? "bg-destructive"
-      : status === "uploading"
-        ? "bg-amber-400 animate-pulse"
-        : "bg-emerald-400";
-  return <span className={`inline-block h-1.5 w-1.5 rounded-full ${cls}`} />;
 }

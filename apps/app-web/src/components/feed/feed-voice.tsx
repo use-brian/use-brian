@@ -40,6 +40,7 @@ import {
 import { feedPath } from "@/lib/feed-nav";
 import { CardSkeletonList } from "@/components/skeleton";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
+import { Button } from "@/components/ui/button";
 import {
   Select,
   SelectContent,
@@ -468,8 +469,8 @@ export function FeedVoice({ scope }: { scope: VoiceScope }) {
   return (
     <div className="flex h-full min-h-0">
       <div className="min-w-0 flex-1 overflow-y-auto">
-        <div className="max-w-4xl space-y-5 px-4 py-5 md:px-6">
-          <header className="flex items-start justify-between gap-4">
+        <div className="w-full max-w-6xl space-y-5 px-4 py-5 md:px-6 lg:px-8">
+          <header className="flex flex-wrap items-start justify-between gap-4 border-b border-border/60 pb-5">
             <div className="space-y-1.5">
               <div className="flex items-center gap-2">
                 <h1 className="text-[15px] font-semibold">
@@ -485,27 +486,30 @@ export function FeedVoice({ scope }: { scope: VoiceScope }) {
                   : format(t.platformScopeSubtitle, { platform: scopeLabel })}
               </p>
             </div>
-            <div className="flex shrink-0 items-center gap-2">
+            <div className="flex shrink-0 flex-wrap items-center gap-1.5">
               {isAdmin ? (
-                <button
+                <Button
+                  variant="outline"
+                  size="sm"
                   type="button"
                   onClick={() => void importFromHandle()}
-                  className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-border px-3 text-[12.5px] font-medium transition-colors hover:bg-accent"
                 >
                   {t.importHandle}
-                </button>
+                </Button>
               ) : null}
               {isAdmin ? (
-                <button
+                <Button
+                  variant="outline"
+                  size="sm"
                   type="button"
                   onClick={() => void importFromSamples()}
-                  className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-border px-3 text-[12.5px] font-medium transition-colors hover:bg-accent"
                 >
                   {t.importSamples}
-                </button>
+                </Button>
               ) : null}
               {isAdmin && !showAdd ? (
-                <button
+                <Button
+                  size="sm"
                   type="button"
                   onClick={() => {
                     // A new rule inherits the rail's scope; the form's chips
@@ -516,11 +520,11 @@ export function FeedVoice({ scope }: { scope: VoiceScope }) {
                     });
                     setShowAdd(true);
                   }}
-                  className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-primary px-3 text-[12.5px] font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+                  className="bg-foreground text-background shadow-none hover:bg-foreground/90"
                 >
                   <PlusIcon />
                   {t.injectRule}
-                </button>
+                </Button>
               ) : null}
             </div>
           </header>

@@ -4,8 +4,8 @@
  *
  * vitest in app-web is node-only — `renderToString` + module mocks (the
  * feed-inbox test shape). The settings index is fully synchronous: the
- * three cards and their `feedPath` hrefs are asserted for connected and
- * not-connected platforms. The members page's effect never runs under SSR,
+ * inline connection card plus the two editor links are asserted for connected
+ * and not-connected platforms. The members page's effect never runs under SSR,
  * so it stays in the loading-skeleton contract; the admin gate banner and
  * the back link are static. The list-order / display-name / effective-
  * permission helpers (`sortMembersByRole`, `memberDisplayName`,
@@ -119,25 +119,28 @@ function member(
 }
 
 describe("[COMP:app-web/feed-settings] FeedSettings + FeedSettingsMembers", () => {
-  it("settings index (connected): heading, connected-as subtitle, three feedPath cards", () => {
+  it("settings (connected): embeds account management and links to two deeper editors", () => {
     const html = render(<FeedSettings />, [profile("threads", "acme")]);
     expect(html).toContain(format(td.heading, { platform: "Threads" }));
     expect(html).toContain(format(td.connectedAs, { handle: "acme" }));
     expect(html).toContain(td.policyTitle);
-    expect(html).toContain(format(td.connectionDescConnected, { handle: "acme" }));
+    expect(html).toContain(en.feedPage.connection.reconnect);
+    expect(html).toContain(en.feedPage.connection.disconnect);
     expect(html).toContain(td.membersTitle);
     expect(html).toContain('href="/w/ws-1/feed/threads/policy"');
-    expect(html).toContain('href="/w/ws-1/feed/threads/connection"');
+    expect(html).not.toContain('href="/w/ws-1/feed/threads/connection"');
     expect(html).toContain('href="/w/ws-1/feed/threads/settings/members"');
   });
 
-  it("settings index (not connected): not-connected subtitle + connect card copy", () => {
+  it("settings (not connected): embeds the platform-scoped connect action", () => {
     const html = render(<FeedSettings />, [], { platform: "twitter" });
     expect(html).toContain(format(td.heading, { platform: "X" }));
     expect(html).toContain(format(td.notConnectedSubtitle, { platform: "X" }));
     expect(html).toContain(
-      format(td.connectionDescNotConnected, { platform: "X" }),
+      format(en.feedPage.connection.notConnectedTitle, { platform: "X" }),
     );
+    expect(html).toContain(en.feedPage.connection.connectCta);
+    expect(html).not.toContain('href="/w/ws-1/feed/twitter/connection"');
     expect(html).toContain('href="/w/ws-1/feed/twitter/settings/members"');
   });
 

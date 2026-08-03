@@ -28,6 +28,8 @@ function draft(overrides: Partial<SavedContentDraft> = {}): SavedContentDraft {
     finalText: null,
     imageBrief: 'Product close-up in soft daylight.',
     topicTag: null,
+    postFormat: 'post',
+    formatData: {},
     replyExternalId: null,
     replyAuthor: null,
     replyText: null,
@@ -174,12 +176,45 @@ describe('[COMP:feed/content-planning-routes] planning input parsing', () => {
     })).toEqual({
       text: 'A thoughtful reply.',
       platform: 'twitter',
+      postFormat: 'post',
       reply: {
         externalId: '123',
         authorHandle: 'alice',
         permalink: 'https://x.com/alice/status/123',
       },
     })
+  })
+
+  it('accepts a private brief and platform-shaped format', () => {
+    expect(parseContentDraftSeed(
+      { kind: 'freeform', format: 'thread', brief: 'Explain the launch.' },
+      'twitter',
+    )).toEqual({
+      kind: 'freeform',
+      format: 'thread',
+      brief: 'Explain the launch.',
+    })
+    expect(parseContentDraftSeed(
+      { kind: 'freeform', format: 'article' },
+      'twitter',
+    )).toBe('invalid')
+  })
+
+  it('accepts long X threads and applies X weighted limits per segment', () => {
+    const segment = `${'a'.repeat(250)} https://example.com/an-extremely-long-path`
+    expect(parseContentDraftBody({
+      text: Array.from({ length: 20 }, () => segment).join('\n\n'),
+      platform: 'twitter',
+      postFormat: 'thread',
+      threadSegments: Array.from({ length: 20 }, () => segment),
+    })).not.toBe('invalid')
+
+    expect(parseContentDraftBody({
+      text: '中文'.repeat(71),
+      platform: 'twitter',
+      postFormat: 'thread',
+      threadSegments: ['中文'.repeat(71), 'A valid second post.'],
+    })).toBe('invalid')
   })
 
   it('rejects non-http links and missing draft text', () => {

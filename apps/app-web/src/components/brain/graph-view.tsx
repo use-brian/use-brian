@@ -8,10 +8,10 @@
  * canvas (in group colors); the grouped list (`grouped-view.tsx`) is the
  * view-toggle's alternate behind the topbar's List tab.
  *
- * Renders every visible entity as a node, every active entity↔entity edge
- * as a line. Sized by connection count, colored by entity kind. Click →
- * opens the shared `BrainDetailDrawer` (the parent owns the drawer state;
- * this component just calls `onSelect(row)`).
+ * Renders one bounded server projection at a time: overview groups unfold
+ * into child groups or real entries through click/semantic zoom, while the
+ * force simulation never receives the workspace-wide source graph. Real-entry
+ * clicks open the shared `BrainDetailDrawer`.
  *
  * Spec: docs/architecture/brain/graph-view.md.
  *
@@ -30,7 +30,7 @@
  *   80+ nodes instead of hairballing.
  * - `zoomToFit` on the first engine settle frames the whole layout —
  *   the old canvas opened wherever d3's initial transform landed.
- * - Warm start: node positions carry across snapshot refreshes
+ * - Warm start: node positions carry across scope and snapshot refreshes
  *   (`mergePositions`), so a brain-write → refresh nudges the layout
  *   instead of re-scrambling the user's mental map. (This replaced the
  *   `key={nodes:edges}` remount, which threw away every position.)
@@ -42,7 +42,7 @@
  *   kinds (nodes cap at a low alpha, edges with a ghosted endpoint cap
  *   lower, ambient particles off) instead of unmounting them, so a chip
  *   toggle never reshuffles the layout. See Props.filterKinds.
- * - Hover/search dim transitions EASE (per-frame lerp via `stepToward`
+ * - Search reveal is server-side; hover/search dim transitions EASE (per-frame lerp via `stepToward`
  *   driven by a bounded rAF tick) instead of snapping; the hovered
  *   node's incident edges run directional particles and emphasized
  *   discs get a soft kind-colored glow (`shadowBlur` — device-space,
@@ -74,12 +74,15 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ComponentType } from "react";
-import type {
-  BrainGraph,
-  BrainGraphEdge,
-  BrainGraphNode,
-  BrainGraphNodeKind,
-  BrainRow,
+import {
+  getBrainGraph,
+  isBrainGraphGroupNode,
+  type BrainGraphGroupNode,
+  type BrainGraph,
+  type BrainGraphEdge,
+  type BrainGraphNode,
+  type BrainGraphNodeKind,
+  type BrainRow,
 } from "@/lib/api/brain";
 import { BRAIN_ENTITY_COLORS } from "@/lib/brain-colors";
 import {
@@ -109,12 +112,20 @@ import {
   type CommunityHalo,
   type NodePosition,
 } from "@/lib/graph-canvas";
-import { detectCommunities } from "@/lib/graph-communities";
-import { useT } from "@/lib/i18n/client";
+import { detectCommunities } from "@use-brian/shared";
+import {
+  graphScopeCacheKey,
+  semanticZoomDecision,
+} from "@/lib/graph-semantic-zoom";
+import { format, useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
+import { GraphLoadingConstellation } from "@/components/brain/graph-loading";
 
 type Props = {
   graph: BrainGraph;
+  workspaceId: string;
+  viewpointAssistantId?: string | null;
+  showMemory?: boolean;
   /** Click handler — receives a synthetic BrainRow so the parent
    *  can hand it straight to `BrainDetailDrawer` without re-fetching.
    *  Only fired for `BrainRow`-shaped node kinds (entities + knowledge);
@@ -158,6 +169,18 @@ type GraphNodeWithPos = BrainGraphNode & {
   __phase?: number;
 };
 
+function displayKind(node: BrainGraphNode): BrainGraphNodeKind {
+  return node.kind;
+}
+
+function displayRadius(node: BrainGraphNode): number {
+  if (!isBrainGraphGroupNode(node)) return nodeRadius(node.degree);
+  // Count-bearing groups read as containers, but stay far below the old
+  // 14-unit hub blobs. Log growth means a 40-entry chunk is only modestly
+  // larger than a normal hub.
+  return Math.min(11.5, 7 + Math.log2(Math.max(node.memberCount, 1)) * 0.75);
+}
+
 type GraphEdgeWithRefs = Omit<BrainGraphEdge, "source" | "target"> & {
   // react-force-graph rewrites these to point at the resolved node objects
   // once the layout has run; the original ids are kept on `__sourceId`/
@@ -179,6 +202,7 @@ type ForceGraphInstance = {
   d3Force(name: string, force: ((alpha: number) => void) | null): unknown;
   zoomToFit(durationMs?: number, paddingPx?: number): void;
   zoom(): number;
+  graph2ScreenCoords(x: number, y: number): { x: number; y: number };
 };
 
 /** Node color source — detected community (default, the Obsidian
@@ -317,7 +341,10 @@ function nodeToRow(
 }
 
 export function BrainGraphView({
-  graph,
+  graph: sourceGraph,
+  workspaceId,
+  viewpointAssistantId,
+  showMemory = true,
   onSelect,
   onSelectSkillNode,
   focusQuery,
@@ -330,6 +357,15 @@ export function BrainGraphView({
   const [dims, setDims] = useState<{ w: number; h: number } | null>(null);
   const [colors, setColors] = useState<ThemeColors>(FALLBACK_COLORS);
   const [hoverId, setHoverId] = useState<string | null>(null);
+  const [scopedGraph, setScopedGraph] = useState<BrainGraph | null>(null);
+  const [scopeHistory, setScopeHistory] = useState<BrainGraph[]>([]);
+  const [scopeLoading, setScopeLoading] = useState(false);
+  const scopeCacheRef = useRef<Map<string, BrainGraph>>(new Map());
+  const requestRef = useRef<AbortController | null>(null);
+  const requestSequenceRef = useRef(0);
+  const transitionOriginRef = useRef<string | null>(null);
+  const pointerScreenRef = useRef<{ x: number; y: number } | null>(null);
+  const semanticZoomSuppressedUntilRef = useRef(0);
   // Imported in an effect instead of `next/dynamic` — dynamic() does not
   // forward refs, and this canvas needs the instance for zoomToFit + force
   // tuning. The import only runs client-side, so SSR stays safe.
@@ -350,6 +386,24 @@ export function BrainGraphView({
       cancelled = true;
     };
   }, []);
+
+  // A workspace/viewpoint switch invalidates every navigation scope. The
+  // cache key includes both values, but clearing also bounds retained memory.
+  useEffect(() => {
+    requestRef.current?.abort();
+    requestRef.current = null;
+    scopeCacheRef.current.clear();
+    setScopedGraph(null);
+    setScopeHistory([]);
+    transitionOriginRef.current = null;
+  }, [workspaceId, viewpointAssistantId, showMemory]);
+
+  useEffect(
+    () => () => {
+      requestRef.current?.abort();
+    },
+    [],
+  );
 
   // Read theme colors after mount + on theme change. The user can
   // toggle dark mode via the locale switcher / OS preference; without
@@ -387,6 +441,119 @@ export function BrainGraphView({
     return () => ro.disconnect();
   }, []);
 
+  const loadProjection = useCallback(
+    async (request: { scopeId?: string | null; focusQuery?: string | null }) => {
+      const cacheKey = graphScopeCacheKey({
+        workspaceId,
+        viewpointAssistantId,
+        showMemory,
+        scopeId: request.scopeId,
+        focusQuery: request.focusQuery,
+      });
+      const cached = scopeCacheRef.current.get(cacheKey);
+      if (cached) return cached;
+
+      requestRef.current?.abort();
+      const controller = new AbortController();
+      requestRef.current = controller;
+      const sequence = ++requestSequenceRef.current;
+      setScopeLoading(true);
+      try {
+        const next = await getBrainGraph({
+          workspaceId,
+          viewpointAssistantId,
+          showMemory,
+          scopeId: request.scopeId,
+          focusQuery: request.focusQuery,
+          failOnError: true,
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted || sequence !== requestSequenceRef.current) {
+          return null;
+        }
+        scopeCacheRef.current.set(cacheKey, next);
+        return next;
+      } catch (error) {
+        if (controller.signal.aborted) return null;
+        console.error("[brain-graph] semantic zoom fetch failed", error);
+        return null;
+      } finally {
+        if (sequence === requestSequenceRef.current) setScopeLoading(false);
+      }
+    },
+    [workspaceId, viewpointAssistantId, showMemory],
+  );
+
+  const activeProjection = scopedGraph ?? sourceGraph;
+  const groupLabel = t.brainPage.graphView.density.groupLabel;
+  // Group names are source anchors. The count-bearing canvas label is local.
+  const graph = useMemo(
+    () => ({
+      ...activeProjection,
+      nodes: activeProjection.nodes.map((node) =>
+        isBrainGraphGroupNode(node)
+          ? {
+              ...node,
+              name: format(groupLabel, {
+                name: node.name,
+                count: node.memberCount,
+              }),
+            }
+          : node,
+      ),
+    }),
+    [activeProjection, groupLabel],
+  );
+
+  const openGroup = useCallback(
+    async (groupId: string) => {
+      const group = graph.nodes.find(
+        (node): node is BrainGraphGroupNode =>
+          isBrainGraphGroupNode(node) && node.groupId === groupId,
+      );
+      if (!group || scopeLoading) return;
+      transitionOriginRef.current = group.id;
+      const next = await loadProjection({ scopeId: group.groupId });
+      if (!next) return;
+      setScopeHistory((current) => [...current, activeProjection]);
+      setScopedGraph(next);
+      semanticZoomSuppressedUntilRef.current = performance.now() + 900;
+    },
+    [graph.nodes, scopeLoading, loadProjection, activeProjection],
+  );
+
+  const returnToPreviousScope = useCallback(() => {
+    const previous = scopeHistory.at(-1);
+    if (!previous) return;
+    requestRef.current?.abort();
+    transitionOriginRef.current = null;
+    setScopedGraph(previous.scopeId ? previous : null);
+    setScopeHistory((current) => current.slice(0, -1));
+    semanticZoomSuppressedUntilRef.current = performance.now() + 700;
+  }, [scopeHistory]);
+
+  // Search reveal is server-side and debounced. Clearing it restores the
+  // cached overview immediately; obsolete requests are aborted.
+  useEffect(() => {
+    const query = (focusQuery ?? "").trim();
+    requestRef.current?.abort();
+    if (query.length === 0) {
+      setScopedGraph(null);
+      setScopeHistory([]);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void loadProjection({ focusQuery: query }).then((next) => {
+        if (!next) return;
+        transitionOriginRef.current = next.scopeId ?? null;
+        setScopeHistory([sourceGraph]);
+        setScopedGraph(next);
+        semanticZoomSuppressedUntilRef.current = performance.now() + 700;
+      });
+    }, 280);
+    return () => window.clearTimeout(timer);
+  }, [focusQuery, loadProjection, sourceGraph]);
+
   // Precompute neighbor index — keyed by node id, value is the Set of
   // neighbor ids. Used for hover-dim. O(E) on rebuild; recomputed only
   // when the graph identity changes.
@@ -406,12 +573,14 @@ export function BrainGraphView({
   const focusMatchIds = useMemo(() => {
     const q = (focusQuery ?? "").trim().toLowerCase();
     if (q.length === 0) return null;
-    const s = new Set<string>();
+    const s = new Set<string>(activeProjection.focusNodeIds ?? []);
     for (const n of graph.nodes) {
-      if (n.name.toLowerCase().includes(q)) s.add(n.id);
+      if (!isBrainGraphGroupNode(n) && n.name.toLowerCase().includes(q)) {
+        s.add(n.id);
+      }
     }
     return s.size > 0 ? s : null;
-  }, [graph, focusQuery]);
+  }, [graph, focusQuery, activeProjection.focusNodeIds]);
 
   // 1st-degree neighbours of the matched nodes — the "relevant" tier. These are
   // the connections that explain why a node is related to the search, so they
@@ -432,7 +601,7 @@ export function BrainGraphView({
   // that node's hue, not a black scaffold).
   const kindById = useMemo(() => {
     const m = new Map<string, BrainGraphNodeKind>();
-    for (const n of graph.nodes) m.set(n.id, n.kind);
+    for (const n of graph.nodes) m.set(n.id, displayKind(n));
     return m;
   }, [graph]);
 
@@ -443,7 +612,7 @@ export function BrainGraphView({
   // search spotlight above.
   const activeFilterKinds = useMemo(() => {
     if (!filterKinds || filterKinds.size === 0) return null;
-    return graph.nodes.some((n) => filterKinds.has(n.kind))
+    return graph.nodes.some((n) => filterKinds.has(displayKind(n)))
       ? filterKinds
       : null;
   }, [graph, filterKinds]);
@@ -562,7 +731,8 @@ export function BrainGraphView({
       const c = communities.byId.get(n.id);
       if (c == null || (communities.sizes[c] ?? 0) < CLUSTER_MIN_SIZE) continue;
       const kindCounts = counts.get(c) ?? new Map<BrainGraphNodeKind, number>();
-      kindCounts.set(n.kind, (kindCounts.get(n.kind) ?? 0) + 1);
+      const kind = displayKind(n);
+      kindCounts.set(kind, (kindCounts.get(kind) ?? 0) + 1);
       counts.set(c, kindCounts);
     }
     for (const [c, kindCounts] of counts) {
@@ -646,8 +816,19 @@ export function BrainGraphView({
         prev.set(id, { x: node.x, y: node.y, vx: node.vx, vy: node.vy });
       }
     }
+    // A server scope does not expose member ids in advance. When a group opens,
+    // bloom every newly returned child from the former group position.
+    const originId = transitionOriginRef.current;
+    const origin = originId ? lastNodesRef.current.get(originId) : null;
+    if (origin?.x != null && origin.y != null) {
+      for (const node of nodes) {
+        if (prev.has(node.id)) continue;
+        prev.set(node.id, { x: origin.x, y: origin.y, vx: 0, vy: 0 });
+      }
+    }
     mergePositions(nodes, graph.edges, prev);
-    lastNodesRef.current = new Map(nodes.map((n) => [n.id, n]));
+    for (const node of nodes) lastNodesRef.current.set(node.id, node);
+    transitionOriginRef.current = null;
     return {
       nodes,
       links: graph.edges.map((e) => ({
@@ -663,7 +844,7 @@ export function BrainGraphView({
   // swatch (and a KB-only brain doesn't advertise "Deals").
   const presentKinds = useMemo(() => {
     const seen = new Set<BrainGraphNodeKind>();
-    for (const n of graph.nodes) seen.add(n.kind);
+    for (const n of graph.nodes) seen.add(displayKind(n));
     return KIND_ORDER.filter((k) => seen.has(k));
   }, [graph]);
 
@@ -940,6 +1121,56 @@ export function BrainGraphView({
   // during the settle because the hub ramp passes at zoomRel ≥ ~1).
   const fitScaleRef = useRef(1);
 
+  useEffect(() => {
+    didFitRef.current = false;
+    fitScaleRef.current = 1;
+    semanticZoomSuppressedUntilRef.current = performance.now() + 700;
+  }, [activeProjection.scopeId, activeProjection.scopeLabel]);
+
+  const handleSemanticZoomEnd = useCallback(
+    (transform: { k: number }) => {
+      if (
+        scopeLoading ||
+        performance.now() < semanticZoomSuppressedUntilRef.current
+      ) {
+        return;
+      }
+      const instance = fgRef.current;
+      if (!instance || !dims) return;
+      const groups = graphData.nodes
+        .filter(
+          (node): node is GraphNodeWithPos & BrainGraphGroupNode =>
+            isBrainGraphGroupNode(node) && node.x != null && node.y != null,
+        )
+        .map((node) => {
+          const point = instance.graph2ScreenCoords(node.x!, node.y!);
+          return { id: node.groupId, x: point.x, y: point.y };
+        });
+      const decision = semanticZoomDecision({
+        relativeZoom: transform.k / (fitScaleRef.current || 1),
+        hasParentScope: scopeHistory.length > 0,
+        targetPoint: pointerScreenRef.current ?? {
+          x: dims.w / 2,
+          y: dims.h / 2,
+        },
+        groups,
+      });
+      if (decision.type === "expand") {
+        void openGroup(decision.groupId);
+      } else if (decision.type === "collapse") {
+        returnToPreviousScope();
+      }
+    },
+    [
+      scopeLoading,
+      dims,
+      graphData.nodes,
+      scopeHistory.length,
+      openGroup,
+      returnToPreviousScope,
+    ],
+  );
+
   /** Ref callback — fires when the instance exists, i.e. when the d3
    *  forces are live. Tunes charge/link and installs the collision
    *  force (radii + padding from graph-canvas). */
@@ -965,9 +1196,7 @@ export function BrainGraphView({
         : LINK_STRENGTH_INTER) as never);
     instance.d3Force(
       "collide",
-      makeCollideForce((n) =>
-        nodeRadius((n as GraphNodeWithPos).degree ?? 0),
-      ),
+      makeCollideForce((n) => displayRadius(n as GraphNodeWithPos)),
     );
     // Weak pull-to-origin so isolated nodes / disconnected fragments stop
     // drifting off and ballooning the zoomToFit bounding box.
@@ -981,7 +1210,7 @@ export function BrainGraphView({
     );
   };
 
-  if (graph.nodes.length === 0 && !loading) {
+  if (graph.nodes.length === 0 && !loading && !scopeLoading) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center text-center px-8 py-12 text-muted-foreground">
         <p className="text-sm">{t.brainPage.graphView.empty}</p>
@@ -992,19 +1221,61 @@ export function BrainGraphView({
     );
   }
 
+  const showGraphLoader = loading || scopeLoading || !dims || !ForceGraph2D;
+  const visibleGroupCount = graph.nodes.filter(isBrainGraphGroupNode).length;
+  const totalNodeCount = activeProjection.totalNodes ?? graph.nodes.length;
+
   return (
     <div
       ref={containerRef}
       className="relative flex-1 min-h-0 overflow-hidden bg-[var(--graph-bg)]"
+      onPointerMove={(event) => {
+        const rect = event.currentTarget.getBoundingClientRect();
+        pointerScreenRef.current = {
+          x: event.clientX - rect.left,
+          y: event.clientY - rect.top,
+        };
+      }}
+      onPointerLeave={() => {
+        pointerScreenRef.current = null;
+      }}
     >
-      {graph.truncated && (
-        <div className="absolute top-2 left-2 z-10 px-2.5 py-1 rounded-md border border-[var(--graph-overlay-border)] bg-[var(--graph-overlay)] text-[11px] text-[var(--graph-overlay-fg)] shadow-sm backdrop-blur-md">
-          {t.brainPage.graphView.truncated.replace(
-            "{count}",
-            String(graph.nodes.length),
-          )}
+      {showGraphLoader && (
+        <div className="absolute inset-0 z-20">
+          <GraphLoadingConstellation />
         </div>
       )}
+      {!showGraphLoader &&
+        (activeProjection.truncated ||
+          visibleGroupCount > 0 ||
+          scopeHistory.length > 0) && (
+          <div className="absolute left-2 top-2 z-10 flex flex-col items-start gap-1.5">
+            {activeProjection.truncated && (
+              <div className="rounded-md border border-[var(--graph-overlay-border)] bg-[var(--graph-overlay)] px-2.5 py-1 text-[11px] text-[var(--graph-overlay-fg)] shadow-sm backdrop-blur-md">
+                {format(t.brainPage.graphView.truncated, {
+                  count: totalNodeCount,
+                })}
+              </div>
+            )}
+            {visibleGroupCount > 0 && (
+              <div className="rounded-md border border-[var(--graph-overlay-border)] bg-[var(--graph-overlay)] px-2.5 py-1 text-[11px] text-[var(--graph-overlay-fg)] shadow-sm backdrop-blur-md">
+                {format(t.brainPage.graphView.semantic.overview, {
+                  total: totalNodeCount,
+                  groups: visibleGroupCount,
+                })}
+              </div>
+            )}
+            {scopeHistory.length > 0 && (
+              <button
+                type="button"
+                onClick={returnToPreviousScope}
+                className="rounded-md border border-[var(--graph-overlay-border)] bg-[var(--graph-overlay)] px-2.5 py-1 text-[11px] text-[var(--graph-overlay-fg)] shadow-sm backdrop-blur-md transition-colors hover:text-[var(--graph-fg)]"
+              >
+                {t.brainPage.graphView.semantic.back}
+              </button>
+            )}
+          </div>
+        )}
       {/* Kind legend — only meaningful while colors encode kinds. Glass
           chip over the canvas, themed by the --graph-overlay* tokens so it
           sits on the graph ground, not the page surface. */}
@@ -1091,6 +1362,7 @@ export function BrainGraphView({
               }, 450);
             }
           }}
+          onZoomEnd={handleSemanticZoomEnd}
           // Backdrop layers under the graph: screen-space dot grid +
           // vignette, then the graph-space community washes.
           onRenderFramePre={(
@@ -1118,7 +1390,7 @@ export function BrainGraphView({
             globalScale: number,
           ) => {
             const n = node;
-            const r = nodeRadius(n.degree);
+            const r = displayRadius(n);
             const isHovered = hoverId === n.id;
             const isHoverNeighbor =
               hoverId !== null && (neighbors.get(hoverId)?.has(n.id) ?? false);
@@ -1141,7 +1413,8 @@ export function BrainGraphView({
             // alike. The hovered node itself is exempt — pointer intent
             // beats the chip.
             const isFilteredOut =
-              activeFilterKinds !== null && !activeFilterKinds.has(n.kind);
+              activeFilterKinds !== null &&
+              !activeFilterKinds.has(displayKind(n));
             if (isFilteredOut && !isHovered) {
               target = Math.min(target, FILTER_DIM_NODE_ALPHA);
             }
@@ -1154,7 +1427,7 @@ export function BrainGraphView({
             // Ring + glow the anchor of attention — the hovered node and every
             // matched node — so it reads as the focus, not merely "less dim".
             const emphasize = isHovered || isMatch;
-            const fillColor = nodeColor(n.id, n.kind);
+            const fillColor = nodeColor(n.id, displayKind(n));
             const isHub = hubThreshold > 0 && n.degree >= hubThreshold;
 
             // Ambient twinkle — slow per-node luminance shimmer, phase
@@ -1262,7 +1535,7 @@ export function BrainGraphView({
             const n = node;
             ctx.fillStyle = color;
             ctx.beginPath();
-            ctx.arc(n.x ?? 0, n.y ?? 0, nodeRadius(n.degree) + 2, 0, 2 * Math.PI);
+            ctx.arc(n.x ?? 0, n.y ?? 0, displayRadius(n) + 2, 0, 2 * Math.PI);
             ctx.fill();
           }}
           // Edges at rest carry their community/kind tint when both
@@ -1404,6 +1677,10 @@ export function BrainGraphView({
           // (graph kind is singular `memory`, the BrainRow kind is `memories`).
           onNodeClick={(node: GraphNodeWithPos) => {
             const n = node;
+            if (isBrainGraphGroupNode(n)) {
+              void openGroup(n.groupId);
+              return;
+            }
             if (n.kind === "skill") {
               onSelectSkillNode?.(n.id);
               return;

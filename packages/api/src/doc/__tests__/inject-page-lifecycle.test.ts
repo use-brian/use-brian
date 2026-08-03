@@ -24,6 +24,7 @@ import type {
   Tool,
   WorkflowRunStore,
   WorkspaceDirectoryStore,
+  LLMProvider,
 } from '@use-brian/core'
 
 vi.mock('../../db/client.js', () => ({
@@ -61,6 +62,9 @@ const baseOpts = {
     workspaceId: 'ws-1',
   },
   docSurface: true,
+  provider: noopStore<LLMProvider>(),
+  backgroundModel: 'cheap-doc-editor',
+  fallbackModel: 'standard-doc-editor',
   docPageStore: noopStore<DocPageStore>(),
   docEntityStore: noopStore<DocEntityStore>(),
   taskStore: noopStore<TaskStore>(),

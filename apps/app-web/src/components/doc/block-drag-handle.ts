@@ -41,6 +41,7 @@ import { Plugin, PluginKey, TextSelection, type EditorState } from "@tiptap/pm/s
 import type { EditorView } from "@tiptap/pm/view";
 import type { Node as PMNode } from "@tiptap/pm/model";
 import type { Editor } from "@tiptap/core";
+import { CellSelection } from "@tiptap/pm/tables";
 import { NodeRangeSelection, isNodeRangeSelection } from "@tiptap/extension-node-range";
 import { sinkListItemOrJoin } from "./block-indent";
 import { isChangeOrigin } from "@tiptap/extension-collaboration";
@@ -157,7 +158,13 @@ export function blockDragSelection(
  *     `posAtCoords` refinement in the hover handler (the scan only knows the
  *     column, not which row).
  *
- * Body children and plain nested blocks resolve to themselves. Returns
+ * A paragraph inside a table cell is deliberately NOT an independent drag
+ * target. Simple-table rows/columns own their dedicated edge grips; the normal
+ * document grip represents the table block as a whole. This keeps a rich-text
+ * cell's required `paragraph+` structure from surfacing overlapping block
+ * controls that imply those paragraphs can be dragged out of the grid.
+ *
+ * Body children and other plain nested blocks resolve to themselves. Returns
  * `{ node, pos }` where `pos` is the position *before* the block.
  */
 export function blockTargetAtPos(
@@ -170,6 +177,14 @@ export function blockTargetAtPos(
   if (depth === 0) {
     const node = doc.nodeAt(pos);
     return node ? { node, pos } : null;
+  }
+  // Any descendant of a table resolves to the TABLE container. Rows and cells
+  // are positional structure, while their paragraphs are schema scaffolding;
+  // none of those should compete with the table's row/column edge grips.
+  for (let d = depth; d >= 1; d -= 1) {
+    if ($pos.node(d).type.spec.tableRole === "table") {
+      return { node: $pos.node(d), pos: $pos.before(d) };
+    }
   }
   while (
     depth > 1 &&
@@ -903,6 +918,17 @@ export function createBlockDragHandlePlugin({
           ensurePopup(innerView.dom);
           if (!popup) return; // ensurePopup guarantees it; this only narrows the type
           element.draggable = !locked;
+          // A row/column edge grip owns CellSelection. Suppress the ordinary
+          // document block grip while that structural selection/menu is active,
+          // otherwise the two draggable affordances sit beside the same table.
+          if (innerView.state.selection instanceof CellSelection && !locked) {
+            popup.hide();
+            element.style.visibility = "hidden";
+            currentNode = null;
+            currentNodePos = -1;
+            onNodeChange?.({ editor, node: null, pos: -1 });
+            return;
+          }
           if (innerView.state.doc.eq(oldState.doc) || currentNodePos === -1) return;
           // Reposition after a doc change (the position was already remapped in
           // `apply`). If the tracked block's DOM is gone — deleted, or replaced
@@ -1015,6 +1041,14 @@ export function createBlockDragHandlePlugin({
           // mousemove). A hover has no buttons pressed; while one is, leave the
           // current grip state untouched. See `block-area-select.ts`.
           if ((event as MouseEvent).buttons !== 0) return false;
+          if (view.state.selection instanceof CellSelection) {
+            popup?.hide();
+            element.style.visibility = "hidden";
+            currentNode = null;
+            currentNodePos = -1;
+            onNodeChange?.({ editor, node: null, pos: -1 });
+            return false;
+          }
           // Ensure a LIVE popup. The old guard bailed only on `!popup`, which a
           // destroyed-but-non-null instance (left by a recreated EditorView)
           // passed — so `show()` below no-op'd and the grip surfaced at the
@@ -1022,6 +1056,24 @@ export function createBlockDragHandlePlugin({
           ensurePopup(view.dom);
           if (!popup) return false; // ensurePopup guarantees it; this only narrows the type
           const e = event as MouseEvent;
+          // Freeze the current target while the pointer is travelling through
+          // the left-gutter corridor toward its grip. This check must happen
+          // BEFORE the rightward hit-test below: over a node-view's padded edge
+          // (most visibly a table) that scan can resolve a neighbouring block
+          // and hide/re-anchor the grip while the pointer is still inside
+          // `view.dom`, so the later `mouseleave` corridor guard never gets a
+          // chance to help. Once the pointer moves back into content (right of
+          // the block edge + tolerance), normal row targeting resumes.
+          if (element.style.visibility === "visible" && currentNodePos >= 0) {
+            const curDom = view.nodeDOM(currentNodePos);
+            if (curDom instanceof HTMLElement && view.dom.contains(curDom)) {
+              const grip = element.getBoundingClientRect();
+              const block = curDom.getBoundingClientRect();
+              if (pointerInGripCorridor({ x: e.clientX, y: e.clientY }, grip, block)) {
+                return false;
+              }
+            }
+          }
           const hit = findElementNextToCoords({ x: e.clientX, y: e.clientY, editor });
           if (hit.pos === null) return false;
           const scanTarget = blockTargetAtPos(view.state.doc, hit.pos);

@@ -62,6 +62,16 @@ import {
   AttachmentChips,
   FileDropOverlay,
 } from "@/components/doc/attachment-chips";
+import {
+  DockRecorderButton,
+  DockRecorderNotice,
+  DockRecorderRecovery,
+  DockRecorderStrip,
+} from "@/components/chrome/dock-recorder";
+import {
+  registerDockRecorderChatTarget,
+  useGlobalDockRecorder,
+} from "@/lib/recorder/dock-recorder-bridge";
 
 /** Statuses meaning "the draft engine isn't reachable" — hosts degrade
  *  (the creator shows its manual-authoring notice). */
@@ -110,6 +120,10 @@ export function SkillIterationChat({
   const controls = useComposerControls(workspaceId);
   const attachments = useFileAttachments();
   const { isDragging, dropProps } = useFileDrop(attachments.upload);
+  // The creator hides the global CHAT dock while this embedded chat is on
+  // screen. Rehost its persistent recorder controller instead of creating a
+  // second recorder (which would reset an active capture on navigation).
+  const dockRecorder = useGlobalDockRecorder();
 
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   useAutoGrowTextarea(textareaRef, input);
@@ -136,13 +150,22 @@ export function SkillIterationChat({
   }, [transcript, busy]);
 
   const sendText = useCallback(
-    async (raw: string, extraFileIds?: string[]) => {
+    async (
+      raw: string,
+      extraFileIds?: string[],
+      includeStagedAttachments = true,
+    ): Promise<boolean> => {
       const text = raw.trim();
-      if (!text || busyRef.current) return;
+      const stagedFileIds = includeStagedAttachments ? attachments.fileIds() : [];
+      const fileIds = [...(extraFileIds ?? []), ...stagedFileIds];
+      if ((!text && fileIds.length === 0) || busyRef.current) return false;
       const userTurn: SkillChatTurn = {
         id: crypto.randomUUID(),
         role: "user",
-        content: text,
+        // Recorder voice turns are files-only on the wire. Keep a readable,
+        // localized transcript bubble while the server replaces the audio
+        // attachment with its `[voice] <transcript>` model context.
+        content: text || copy.voiceMessage,
       };
       // Wire view BEFORE the optimistic append (it includes the new turn).
       const prior = transcriptRef.current;
@@ -151,8 +174,7 @@ export function SkillIterationChat({
       setError(null);
       // Files staged in this composer + any handed in by the caller (the
       // creator's intent-composer attachments on the auto-sent first turn).
-      const fileIds = [...(extraFileIds ?? []), ...attachments.fileIds()];
-      attachments.clear();
+      if (includeStagedAttachments) attachments.clear();
       setBusy(true);
       const draft = getDraft();
       const result = await draftSkillTurn({
@@ -175,7 +197,7 @@ export function SkillIterationChat({
         if (DRAFT_UNAVAILABLE_STATUSES.has(result.status)) {
           onUnavailable?.(result.status);
         }
-        return;
+        return false;
       }
       const note =
         result.kind === "draft"
@@ -186,6 +208,7 @@ export function SkillIterationChat({
         ...prev,
         { id: crypto.randomUUID(), role: "assistant", content: note },
       ]);
+      return true;
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [
@@ -198,6 +221,7 @@ export function SkillIterationChat({
       controls.researchMode,
       attachments,
       copy.draftApplied,
+      copy.voiceMessage,
     ],
   );
 
@@ -210,6 +234,18 @@ export function SkillIterationChat({
     if (autoSendFirst?.trim()) void sendText(autoSendFirst, initialFileIds);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // While the global chat chrome is suppressed, short recorder captures must
+  // address this visible draft conversation—not the hidden global chat. The
+  // endpoint is stateless, so there is deliberately no upload session id.
+  useEffect(
+    () =>
+      registerDockRecorderChatTarget({
+        sendVoiceClip: (fileId) => sendText("", [fileId], false),
+        getSessionId: () => undefined,
+      }),
+    [sendText],
+  );
 
   function submit() {
     if (busy || attachments.uploading) return;
@@ -274,6 +310,14 @@ export function SkillIterationChat({
         </p>
       )}
 
+      {dockRecorder ? (
+        <>
+          <DockRecorderRecovery rec={dockRecorder} className="mb-1.5" />
+          <DockRecorderNotice rec={dockRecorder} className="mb-1.5" />
+          <DockRecorderStrip rec={dockRecorder} className="mb-1.5" />
+        </>
+      ) : null}
+
       {/* ── Composer — the app's composer-card recipe ──────────────── */}
       <div
         {...dropProps}
@@ -329,6 +373,7 @@ export function SkillIterationChat({
           >
             <Paperclip className="size-4" aria-hidden />
           </button>
+          {dockRecorder ? <DockRecorderButton rec={dockRecorder} /> : null}
           <ComposerControls
             model={controls.model}
             onModelChange={controls.setModel}

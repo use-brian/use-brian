@@ -125,8 +125,6 @@ import { PageBuildIndicator } from "./page-build-indicator";
 import { subscribeBuildActivity } from "@/lib/build-activity";
 import { offlineWrite } from "@/lib/offline/offline-writes";
 import {
-  useIsOffline,
-  usePendingWrites,
   publishCollabConnected,
 } from "@/lib/offline/use-offline-sync";
 
@@ -224,11 +222,6 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
     publishCollabConnected(collab.status !== "disconnected");
     return () => publishCollabConnected(true);
   }, [collab.status]);
-
-  // App-level offline state, read from the global signal (the single driver
-  // lives in WorkspaceChrome).
-  const offline = useIsOffline();
-  const pendingWrites = usePendingWrites();
 
   // Whether the active page's body is empty, recomputed live off the synced Yjs
   // doc. Gates the draft landing (alongside the placeholder title): a fresh
@@ -1177,14 +1170,6 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
       data-sidebar-collapsed={sidebarCollapsed ? "true" : "false"}
       className="relative flex h-full w-full overflow-hidden"
     >
-      {/* Bundled-desktop offline indicator (gated; never shows on web/thin). */}
-      {offline && (
-        <div className="pointer-events-none fixed bottom-3 left-3 z-50 rounded-full border border-amber-300/40 bg-amber-100/90 px-3 py-1 text-[11px] font-medium text-amber-900 shadow-sm dark:border-amber-700/40 dark:bg-amber-950/80 dark:text-amber-200">
-          {pendingWrites > 0
-            ? format(t.offlinePending, { count: pendingWrites })
-            : t.offline}
-        </div>
-      )}
       <main className="relative flex h-full min-w-0 flex-1 flex-col bg-background">
         {/* Ambient "the assistant is working on this page" claw + status pill,
             behind the editor content. Visible only while a run is active. */}

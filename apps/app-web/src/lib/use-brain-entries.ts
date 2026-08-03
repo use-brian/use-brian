@@ -40,6 +40,16 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listBrain, type BrainPrimitive, type BrainRow } from "@/lib/api/brain";
+import {
+  BRAIN_ENTRIES_RESOURCE,
+  deleteBrainContentCache,
+  isBrainEntriesSnapshot,
+  isAuthoritativeBrainDenial,
+  projectCachedBrainRows,
+  readBrainContentCache,
+  writeBrainContentCache,
+  type BrainContentCacheScope,
+} from "@/lib/offline/brain-content-cache";
 
 /** Rows requested per arm, per page. See the route's `limit` semantics. */
 const BRAIN_PAGE_SIZE = 60;
@@ -61,6 +71,8 @@ export type BrainEntriesState = {
 
 export type BrainEntriesParams = {
   workspaceId: string | null;
+  /** Signed-in user id. Required for the persistent cache isolation key. */
+  viewerId: string | null;
   primitives: BrainPrimitive[];
   search: string;
   viewpointAssistantId?: string | null;
@@ -74,6 +86,7 @@ export type BrainEntriesParams = {
 function buildQueryKey(params: BrainEntriesParams): string {
   return JSON.stringify({
     w: params.workspaceId,
+    u: params.viewerId,
     p: [...params.primitives].sort(),
     q: params.search,
     v: params.viewpointAssistantId ?? null,
@@ -86,8 +99,14 @@ const rowKey = (row: BrainRow) => `${row.kind}:${row.id}`;
 export function useBrainEntries(
   params: BrainEntriesParams,
 ): BrainEntriesState {
-  const { workspaceId, primitives, search, viewpointAssistantId, enabled } =
-    params;
+  const {
+    workspaceId,
+    viewerId,
+    primitives,
+    search,
+    viewpointAssistantId,
+    enabled,
+  } = params;
   const queryKey = buildQueryKey(params);
 
   const [rows, setRows] = useState<BrainRow[] | null>(null);
@@ -102,6 +121,13 @@ export function useBrainEntries(
   // Guards against a scroll sentinel firing repeatedly while a chunk is out.
   const inFlightRef = useRef(false);
   const seenRef = useRef<Set<string>>(new Set());
+  const rowsRef = useRef<BrainRow[] | null>(null);
+
+  const cacheScope: BrainContentCacheScope | null =
+    workspaceId && viewerId
+      ? { workspaceId, viewerId, viewpointAssistantId }
+      : null;
+  const isDefaultQuery = primitives.length === 0 && search.trim().length === 0;
 
   const fetchPage = useCallback(
     async (pageCursor: string | null, key: string) => {
@@ -116,36 +142,60 @@ export function useBrainEntries(
           viewpointAssistantId,
           limit: BRAIN_PAGE_SIZE,
           cursor: pageCursor ?? undefined,
+          failOnError: true,
         });
         // The query moved on while this was in flight - drop it rather than
         // append one query's rows onto another's list.
         if (activeKeyRef.current !== key) return;
-        setRows((previous) => {
-          const base = pageCursor && previous ? previous : [];
-          if (!pageCursor) seenRef.current = new Set();
-          const fresh = result.rows.filter((row) => {
-            const id = rowKey(row);
-            if (seenRef.current.has(id)) return false;
-            seenRef.current.add(id);
-            return true;
-          });
-          setChunkStart(base.length);
-          return [...base, ...fresh];
+        const base = pageCursor && rowsRef.current ? rowsRef.current : [];
+        if (!pageCursor) seenRef.current = new Set();
+        const fresh = result.rows.filter((row) => {
+          const id = rowKey(row);
+          if (seenRef.current.has(id)) return false;
+          seenRef.current.add(id);
+          return true;
         });
+        const nextRows = [...base, ...fresh];
+        rowsRef.current = nextRows;
+        setChunkStart(base.length);
+        setRows(nextRows);
         setCursor(result.nextCursor);
         setHasMore(result.nextCursor !== null);
-      } catch {
+        if (cacheScope && isDefaultQuery) {
+          void writeBrainContentCache(cacheScope, BRAIN_ENTRIES_RESOURCE, {
+            rows: nextRows,
+            nextCursor: result.nextCursor,
+          });
+        }
+      } catch (error) {
         // A failed page leaves what is already on screen and stops paging;
         // the next filter change or refresh retries from the top.
         if (activeKeyRef.current !== key) return;
-        setRows((previous) => previous ?? []);
+        if (isAuthoritativeBrainDenial(error)) {
+          rowsRef.current = [];
+          seenRef.current = new Set();
+          setRows([]);
+          if (cacheScope) {
+            void deleteBrainContentCache(cacheScope, BRAIN_ENTRIES_RESOURCE);
+          }
+        } else if (rowsRef.current === null) {
+          rowsRef.current = [];
+          setRows([]);
+        }
         setHasMore(false);
       } finally {
         if (activeKeyRef.current === key) setLoadingMore(false);
         inFlightRef.current = false;
       }
     },
-    [workspaceId, primitives, search, viewpointAssistantId],
+    [
+      workspaceId,
+      primitives,
+      search,
+      viewpointAssistantId,
+      cacheScope,
+      isDefaultQuery,
+    ],
   );
 
   // First page. Re-runs whenever the query identity changes, which is also
@@ -153,11 +203,44 @@ export function useBrainEntries(
   useEffect(() => {
     if (!enabled || !workspaceId) return;
     setRows(null);
+    rowsRef.current = null;
     setCursor(null);
     setHasMore(false);
     setChunkStart(0);
     seenRef.current = new Set();
-    void fetchPage(null, queryKey);
+    let cancelled = false;
+    void (async () => {
+      if (cacheScope) {
+        const cached = await readBrainContentCache(
+          cacheScope,
+          BRAIN_ENTRIES_RESOURCE,
+          isBrainEntriesSnapshot,
+        );
+        if (cancelled || activeKeyRef.current !== queryKey) return;
+        if (cached) {
+          const projected = projectCachedBrainRows(
+            cached.value.rows,
+            primitives,
+            search,
+          );
+          rowsRef.current = projected;
+          seenRef.current = new Set(projected.map(rowKey));
+          setRows(projected);
+          setChunkStart(0);
+          // Only the default query can resume its opaque server cursor. A
+          // filtered local projection has no corresponding server position.
+          const nextCursor = isDefaultQuery ? cached.value.nextCursor : null;
+          setCursor(nextCursor);
+          setHasMore(nextCursor !== null);
+        }
+      }
+      if (!cancelled && activeKeyRef.current === queryKey) {
+        await fetchPage(null, queryKey);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
     // `fetchPage` is derived from the same inputs as `queryKey`; depending on
     // both would double-fire the first page on every filter change.
     // eslint-disable-next-line react-hooks/exhaustive-deps

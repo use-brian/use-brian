@@ -25,6 +25,10 @@ import type {
   PlanSlot,
   PlanSlotMark,
 } from "@/lib/feed-plan";
+import type {
+  FeedArticleFields,
+  FeedPostFormat,
+} from "@/lib/feed-post-versions";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -529,6 +533,10 @@ export type FeedDraftSessionSeed =
       /** Draft-from-link (feed-create-split.md D13): http(s) URL the session
        *  is seeded from; materializes as the seeded first message. */
       link?: string;
+      /** Private working context seeded into this post's refine session. */
+      brief?: string;
+      /** Platform-shaped deliverable selected before the session opens. */
+      format?: FeedPostFormat;
     }
   | {
       kind: "freeform-reply";
@@ -606,6 +614,10 @@ export type FeedSavedDraft = {
   status: FeedSavedDraftStatus;
   createdAt: string;
   resolvedAt: string | null;
+  /** API-shaped composition metadata; absent on legacy rows. */
+  postFormat?: FeedPostFormat;
+  threadSegments?: string[];
+  article?: FeedArticleFields;
 };
 
 /**
@@ -663,6 +675,7 @@ export async function createFeedDraftSession(
       body: JSON.stringify({
         platform: body.platform,
         ...(body.seed ? { seed: body.seed } : {}),
+        ...(body.title ? { title: body.title } : {}),
       }),
     },
   );
@@ -729,6 +742,9 @@ export async function saveFeedSessionDraft(
     topicTag?: string;
     /** Written brief of the visual for image-first platforms (D9). */
     imageBrief?: string;
+    postFormat?: FeedPostFormat;
+    threadSegments?: string[];
+    article?: FeedArticleFields;
     reply?: {
       externalId: string;
       authorHandle: string;
@@ -1214,12 +1230,6 @@ export async function updateFeedMemberDraftPermission(
 // ── Ready-to-post queue (docs/plans/feed-create-split.md D2/D6) ──────────
 
 /**
- * One ready-to-post row — an `approved / ready-manual` distribution event.
- * The caption is `finalText` (edits-on-approve included); `imageBrief` is
- * the written visual brief for image-first platforms, when the draft
- * carried one.
- */
-/**
  * Mark a ready post as posted by hand
  * (`POST /:assistantId/ready-posts/:eventId/mark-posted`). The optional
  * permalink is the live URL the operator pasted after posting.
@@ -1236,20 +1246,6 @@ export async function markFeedReadyPostPosted(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(opts.permalink ? { permalink: opts.permalink } : {}),
     },
-  );
-  if (res.ok) return { ok: true };
-  const data = (await res.json().catch(() => ({}))) as { error?: string };
-  return { ok: false, error: data.error ?? null };
-}
-
-/** Drop a ready post from the queue (`POST .../ready-posts/:eventId/discard`). */
-export async function discardFeedReadyPost(
-  assistantId: string,
-  eventId: string,
-): Promise<FeedDraftMutationResult> {
-  const res = await authFetch(
-    `${API_URL}/api/distribution/${assistantId}/ready-posts/${eventId}/discard`,
-    { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
   );
   if (res.ok) return { ok: true };
   const data = (await res.json().catch(() => ({}))) as { error?: string };

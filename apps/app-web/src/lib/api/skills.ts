@@ -25,6 +25,7 @@
  */
 
 import { authFetch } from "@/lib/auth-fetch";
+import { BrainContentHttpError } from "@/lib/offline/brain-content-cache";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -96,10 +97,16 @@ export type WorkspaceSkillSummary = {
  */
 export async function listWorkspaceSkills(
   workspaceId: string,
+  options?: { failOnError?: boolean },
 ): Promise<WorkspaceSkillSummary[]> {
   const q = new URLSearchParams({ workspaceId });
   const res = await authFetch(`${API_URL}/api/skills/workspace?${q.toString()}`);
-  if (!res.ok) return [];
+  if (!res.ok) {
+    if (options?.failOnError) {
+      throw new BrainContentHttpError(res.status, "Workspace skills");
+    }
+    return [];
+  }
   const data = (await res.json()) as { skills?: WorkspaceSkillSummary[] };
   return Array.isArray(data.skills) ? data.skills : [];
 }

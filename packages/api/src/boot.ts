@@ -150,6 +150,8 @@ import {
   resolveContentPlanningPrompt,
   resolveContentPlanningSoul,
 } from './content-planning/host-hooks.js'
+import { resolveJapaneseTeacherSoul } from './learn-japanese/prompt.js'
+import { learnJapaneseRoutes } from './routes/learn-japanese.js'
 import {
   getContentDraftTitlePrefix,
   isDefaultContentDraftTitle,
@@ -1041,7 +1043,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     return `${open}\n\n${hosted}`
   }
   const resolveAppSoul: ResolveAppSoul = (params) =>
-    ports.resolveAppSoul?.(params) ?? resolveContentPlanningSoul(params)
+    ports.resolveAppSoul?.(params)
+    ?? resolveJapaneseTeacherSoul(params)
+    ?? resolveContentPlanningSoul(params)
   const isPlaceholderTitle =
     ports.isPlaceholderTitle ?? isDefaultContentDraftTitle
   const getTitleChannelPrefix =
@@ -3647,6 +3651,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     webAppUrl: env.APP_URL,
     requireAuth: requireAuth(env.JWT_SECRET),
   }))
+  app.use('/api/apps/learn-japanese', learnJapaneseRoutes({
+    brainKeyStore,
+    authorizationStore: oauthAuthorizationStore,
+    workspaceStore,
+    webAppUrl: env.APP_URL,
+  }))
 
   // Room ambient capture (multiplayer chat P2/D9): every accepted room post
   // routes through the room ingest engine — hosted batches hourly digest
@@ -3991,6 +4001,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     draftProvider: provider,
     getDraftContext: getSkillDraftContext,
     fileStore,
+    voiceTranscription,
     checkUsageBudget: ports.checkCreditBudget,
     // Skill import (GitHub / URL): the connector stores back the GitHub
     // browse + PAT resolution; the files store backs imported support files.

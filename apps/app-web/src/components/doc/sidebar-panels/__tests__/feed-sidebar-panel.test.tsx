@@ -5,8 +5,8 @@
  * (next/navigation, the sidebar-data provider). Effects never run, so anything
  * effect-driven (the post list, the resolved current platform, the review
  * badge) stays at its initial value here; what is asserted is the platform-led
- * nav STRUCTURE (feed-revamp.md §8a, D13/D14): Company above a platform
- * switcher, then the platform-drafts group, then the hosted Platforms group.
+ * nav STRUCTURE: Company above one platform switcher with scoped hosted tools,
+ * then the platform-drafts group. The duplicate Platforms list is retired.
  */
 
 import { describe, expect, it, vi } from "vitest";
@@ -102,25 +102,26 @@ describe("[COMP:app-web/sidebar-panel-feed] FeedSidebarPanel", () => {
     expect(html).not.toContain('href="/w/ws-1/feed/inbox"');
   });
 
-  it("renders one hosted row per target platform with its connection state", () => {
-    const html = render([profile("threads", "acme")], "/w/ws-1/feed");
+  it("renders hosted tools for the current connected platform without a second platform list", () => {
+    const html = render(
+      [profile("threads", "acme"), profile("twitter", "acmex")],
+      "/w/ws-1/feed/threads/insights",
+    );
     expect(html).toContain('href="/w/ws-1/feed/threads/insights"');
-    expect(html).toContain("acme");
-    expect(html).toContain('href="/w/ws-1/feed/twitter/connection"');
-    expect(html).toContain('href="/w/ws-1/feed/instagram/connection"');
-    expect(html).toContain(en.feedPage.platformStatusComingSoon);
+    expect(html).toContain('href="/w/ws-1/feed/threads/inspiration"');
+    expect(html).toContain('href="/w/ws-1/feed/threads/settings"');
+    expect(html).not.toContain('href="/w/ws-1/feed/threads/connection"');
+    expect(html).not.toContain('href="/w/ws-1/feed/threads/policy"');
+    expect(html).not.toContain('href="/w/ws-1/feed/twitter/insights"');
+    expect(html).not.toContain(en.feedPage.groups.platforms);
   });
 
-  it("expands hosted sub-rows only inside a connected platform's path", () => {
-    const outside = render([profile("threads", "acme")], "/w/ws-1/feed");
-    expect(outside).not.toContain('href="/w/ws-1/feed/threads/inspiration"');
-    const inside = render(
-      [profile("threads", "acme"), profile("twitter", "acmex")],
-      "/w/ws-1/feed/twitter/insights",
-    );
-    expect(inside).toContain('href="/w/ws-1/feed/twitter/inspiration"');
-    expect(inside).toContain('href="/w/ws-1/feed/twitter/settings"');
-    expect(inside).not.toContain('href="/w/ws-1/feed/threads/inspiration"');
+  it("gives an unconnected X one settings-backed connect entry", () => {
+    const html = render([], "/w/ws-1/feed/twitter/voice");
+    expect(html).toContain('href="/w/ws-1/feed/twitter/settings"');
+    expect(html).toContain(en.feedPage.connection.connectCta);
+    expect(html).not.toContain('href="/w/ws-1/feed/twitter/connection"');
+    expect(html).not.toContain('href="/w/ws-1/feed/twitter/insights"');
   });
 
   it("keeps Company and Platform but hides the hosted group in OSS", () => {
@@ -131,7 +132,7 @@ describe("[COMP:app-web/sidebar-panel-feed] FeedSidebarPanel", () => {
       expect(html).toContain(en.feedPage.groups.company);
       expect(html).toContain(en.feedPage.groups.platform);
       expect(html).toContain(en.feedPage.groups.drafts);
-      expect(html).not.toContain('href="/w/ws-1/feed/threads/connection"');
+      expect(html).not.toContain('href="/w/ws-1/feed/instagram/settings"');
       expect(html).not.toContain(en.feedPage.groups.platforms);
     } finally {
       if (previous === undefined) {

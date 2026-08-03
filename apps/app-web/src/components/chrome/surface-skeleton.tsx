@@ -28,6 +28,7 @@
  */
 
 import { Skeleton } from "@/components/skeleton";
+import { GraphLoadingConstellation } from "@/components/brain/graph-loading";
 import type { WorkspaceSurface } from "@/lib/doc-page-url";
 import { cn } from "@/lib/utils";
 
@@ -301,21 +302,12 @@ export function RailSurfaceSkeleton({
 }
 
 /**
- * Brain - chrome row, the compact filter strip, then the entries canvas. Drawn
- * as a loose scatter of node chips rather than a list, because the default
- * Brain view is the force-directed graph.
+ * Brain - chrome row, the compact filter strip, then the graph-native loading
+ * constellation shared with the live canvas. The old loose scatter of large
+ * skeleton circles looked like unrelated final data and did not communicate
+ * that relationships/communities were being mapped.
  */
 export function BrainSurfaceSkeleton() {
-  const nodes = [
-    "left-[18%] top-[22%] size-16",
-    "left-[42%] top-[14%] size-10",
-    "left-[63%] top-[30%] size-14",
-    "left-[28%] top-[52%] size-12",
-    "left-[54%] top-[62%] size-20",
-    "left-[76%] top-[56%] size-9",
-    "left-[38%] top-[80%] size-11",
-    "left-[68%] top-[84%] size-8",
-  ];
   return (
     <div className="flex h-full w-full flex-col animate-fade-in">
       <SurfaceChromeSkeleton trailing={3} />
@@ -325,12 +317,7 @@ export function BrainSurfaceSkeleton() {
         <Skeleton className="ml-auto h-7 w-24 rounded-md" />
       </div>
       <div className="relative flex-1 overflow-hidden">
-        {nodes.map((pos, i) => (
-          <Skeleton
-            key={i}
-            className={cn("absolute rounded-full opacity-70", pos)}
-          />
-        ))}
+        <GraphLoadingConstellation />
       </div>
     </div>
   );

@@ -32,6 +32,7 @@ export function CaptionEditor({
   platform,
   readOnly,
   placeholder,
+  deferSave = false,
   onChange,
   onSave,
 }: {
@@ -39,6 +40,8 @@ export function CaptionEditor({
   platform: string;
   readOnly?: boolean;
   placeholder?: string;
+  /** Keep edits local until the parent commits the complete format payload. */
+  deferSave?: boolean;
   /** Every keystroke; the parent owns the text. */
   onChange: (next: string) => void;
   /** Debounced commit. Returns false to surface a save error. */
@@ -55,6 +58,7 @@ export function CaptionEditor({
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const flush = useCallback(async () => {
+    if (deferSave) return;
     const next = pendingRef.current;
     pendingRef.current = null;
     if (next === null || next === savedRef.current) return;
@@ -66,7 +70,7 @@ export function CaptionEditor({
     } else {
       setState("error");
     }
-  }, [onSave]);
+  }, [deferSave, onSave]);
 
   // Flush on unmount: navigating away mid-sentence must not drop the edit.
   useEffect(() => {
@@ -103,6 +107,12 @@ export function CaptionEditor({
   function handleChange(next: string) {
     emittedRef.current = next;
     onChange(next);
+    if (deferSave) {
+      pendingRef.current = null;
+      setState("idle");
+      if (timerRef.current) clearTimeout(timerRef.current);
+      return;
+    }
     pendingRef.current = next;
     setState("idle");
     if (timerRef.current) clearTimeout(timerRef.current);
@@ -119,6 +129,7 @@ export function CaptionEditor({
         readOnly={readOnly}
         onChange={(e) => handleChange(e.target.value)}
         onBlur={() => {
+          if (deferSave) return;
           if (timerRef.current) clearTimeout(timerRef.current);
           void flush();
         }}
@@ -126,7 +137,7 @@ export function CaptionEditor({
         rows={4}
         className={cn(
           "w-full resize-none border-0 bg-transparent p-0 text-[15px] leading-relaxed",
-          "placeholder:text-muted-foreground/50 focus:outline-none",
+          "placeholder:text-muted-foreground/50 focus:outline-none focus-visible:shadow-none",
           readOnly && "cursor-default opacity-80",
         )}
       />
@@ -153,7 +164,9 @@ export function CaptionEditor({
               ? t.saved
               : state === "error"
                 ? t.saveFailed
-                : t.autosaveHint}
+                : deferSave
+                  ? t.saveWithVersion
+                  : t.autosaveHint}
         </span>
       </div>
     </div>

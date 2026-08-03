@@ -41,6 +41,7 @@ import { useEffect, useState } from "react";
 import { BubbleMenu } from "@tiptap/react";
 import type { Editor } from "@tiptap/react";
 import { isNodeRangeSelection } from "@tiptap/extension-node-range";
+import { CellSelection } from "@tiptap/pm/tables";
 import { Bold, Italic, Code, Link as LinkIcon, MessageSquarePlus } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { TurnIntoMenu } from "./turn-into-menu";
@@ -70,6 +71,9 @@ type Props = {
  *    hide: the inline mark toolbar applies to a text run, not a stack of whole
  *    blocks. Notion shows a block menu there, not the text bar; suppressing it
  *    keeps the area-select clean (the bar would otherwise flash over the bands).
+ *  - **table-axis range** (`CellSelection`) → hide: a row/column grip owns that
+ *    structural selection and its menu. Inline text commands are not valid for
+ *    the axis as a whole and otherwise overlap the table action menu.
  *  - otherwise → show
  */
 export function shouldShowToolbar({
@@ -77,15 +81,18 @@ export function shouldShowToolbar({
   to,
   isInCodeBlock,
   isNodeRange,
+  isCellSelection,
 }: {
   from: number;
   to: number;
   isInCodeBlock: boolean;
   isNodeRange?: boolean;
+  isCellSelection?: boolean;
 }): boolean {
   if (from === to) return false;
   if (isInCodeBlock) return false;
   if (isNodeRange) return false;
+  if (isCellSelection) return false;
   return true;
 }
 
@@ -229,6 +236,7 @@ export function FloatingToolbar({ editor, className, onComment }: Props) {
             to,
             isInCodeBlock: ed.isActive("codeBlock"),
             isNodeRange: isNodeRangeSelection(ed.state.selection),
+            isCellSelection: ed.state.selection instanceof CellSelection,
           })
         }
         className={[

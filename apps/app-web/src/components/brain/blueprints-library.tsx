@@ -56,6 +56,8 @@ type Props = {
   onNewBlueprint: () => void;
   /** Delete a blueprint after a confirm resolves true (the page does the API call). */
   onDeleteBlueprint: (template: CustomPageTemplateSummary) => void;
+  /** Offline content is a read-only last-known-good list. */
+  readOnly?: boolean;
 };
 
 export function BlueprintsLibrary({
@@ -64,6 +66,7 @@ export function BlueprintsLibrary({
   search,
   onNewBlueprint,
   onDeleteBlueprint,
+  readOnly = false,
 }: Props) {
   const t = useT();
   const copy = t.brainPage.blueprints;
@@ -107,6 +110,7 @@ export function BlueprintsLibrary({
               variant="outline"
               size="sm"
               onClick={onNewBlueprint}
+              disabled={readOnly}
               className="mt-2"
             >
               {copy.newBlueprint}
@@ -125,6 +129,7 @@ export function BlueprintsLibrary({
                 blueprint={blueprint}
                 onGenerate={() => void handleGenerate(blueprint)}
                 onDelete={() => onDeleteBlueprint(blueprint)}
+                readOnly={readOnly}
               />
             ))}
           </ul>
@@ -139,11 +144,13 @@ function BlueprintRow({
   blueprint,
   onGenerate,
   onDelete,
+  readOnly,
 }: {
   workspaceId: string;
   blueprint: CustomPageTemplateSummary;
   onGenerate: () => void;
   onDelete: () => void;
+  readOnly: boolean;
 }) {
   const t = useT();
   const copy = t.brainPage.blueprints;
@@ -215,6 +222,7 @@ function BlueprintRow({
           type="button"
           aria-label={format(copy.recordsToggleAria, { name: blueprint.name })}
           aria-expanded={expanded}
+          disabled={readOnly}
           onClick={() => void toggleRecords()}
           className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
         >
@@ -230,6 +238,7 @@ function BlueprintRow({
       <button
         type="button"
         aria-label={format(copy.openAria, { name: blueprint.name })}
+        disabled={readOnly}
         onClick={() =>
           router.push(`/w/${workspaceId}/brain/blueprints/${blueprint.id}`)
         }
@@ -273,6 +282,7 @@ function BlueprintRow({
         <button
           type="button"
           aria-label={format(copy.generateAria, { name: blueprint.name })}
+          disabled={readOnly}
           title={copy.generateTitle}
           onClick={onGenerate}
           className={cn(
@@ -290,6 +300,7 @@ function BlueprintRow({
         <button
           type="button"
           aria-label={format(copy.deleteAria, { name: blueprint.name })}
+          disabled={readOnly}
           title={copy.deleteTitle}
           onClick={() => void handleDelete()}
           className={cn(

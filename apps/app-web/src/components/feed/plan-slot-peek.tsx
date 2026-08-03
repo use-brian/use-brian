@@ -25,7 +25,11 @@ import { PlatformIcon } from "@/components/feed/platform-icon";
 import { StatusLabel } from "@/components/feed/feed-status";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { FEED_PLATFORMS, type FeedPlatform } from "@/lib/feed-nav";
-import { parseIsoDay, type PlanSlot } from "@/lib/feed-plan";
+import {
+  PLAN_RAIL_DOCK_CLEARANCE_CLASS,
+  parseIsoDay,
+  type PlanSlot,
+} from "@/lib/feed-plan";
 
 export type PlanSlotDraft = {
   id: string | null;
@@ -186,7 +190,13 @@ export function PlanSlotPeek({
       </div>
 
       {canEdit ? (
-        <div className="space-y-2 border-t border-border/60 p-3">
+        <div
+          data-plan-rail-footer
+          className={cn(
+            "space-y-2 border-t border-border/60 p-3",
+            PLAN_RAIL_DOCK_CLEARANCE_CLASS,
+          )}
+        >
           {/* Exactly one primary action, and it changes with the state: name
               the slot, then write it, then open what you wrote. */}
           {isNew || dirty ? (

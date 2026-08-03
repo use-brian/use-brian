@@ -37,6 +37,20 @@ export function sanitizeNext(raw: string | null | undefined): string {
 }
 
 /**
+ * Public origin for an absolute OSS browser redirect.
+ *
+ * Cloudflare Tunnel forwards the remote app to its loopback listener, so
+ * Next.js sees `request.url` as `http://localhost:3003/...`. A configured
+ * self-host must therefore use its public APP_URL; the incoming origin is
+ * only the zero-config localhost fallback used by the local launcher.
+ */
+export function ossPublicAppOrigin(requestUrl: string | URL): string {
+  const configured = process.env.APP_URL?.trim();
+  if (configured) return new URL(configured).origin;
+  return new URL(requestUrl).origin;
+}
+
+/**
  * The path a signed-out visitor should be sent to, or `null` in the hosted
  * edition (caller keeps its existing `/login` behaviour).
  *

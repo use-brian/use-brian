@@ -45,13 +45,13 @@ export function parseQueueFilter(value: string | null): PostQueueFilter {
 /**
  * Strip the storage-level platform prefix from a session title.
  *
- * The content-planning store encodes the platform in a `[threads] …` title
+ * The content-planning store encodes the platform in a `[platform] …` title
  * prefix (that is how its platform-scoped queries filter). It is a storage
  * detail, and showing it is doubly redundant now that the sidebar is already
  * scoped to one platform.
  */
 export function displayPostTitle(title: string): string {
-  return title.replace(/^\[(instagram|threads|twitter|xhs)\]\s*/i, "");
+  return title.replace(/^\[(instagram|threads|twitter|xhs|linkedin)\]\s*/i, "");
 }
 
 export type PostQueueItem = {

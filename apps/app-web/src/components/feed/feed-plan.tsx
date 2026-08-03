@@ -77,7 +77,7 @@ export function FeedPlan() {
         <FeedOnboarding
           canCreateBrand={isAdmin}
           canConnect={canConnect}
-          onConnect={openConnect}
+          onConnect={() => void openConnect()}
           onReady={handleReady}
         />
       ) : (

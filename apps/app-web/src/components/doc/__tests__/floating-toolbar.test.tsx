@@ -123,6 +123,17 @@ describe("[COMP:app-web/floating-toolbar] shouldShowToolbar", () => {
       shouldShowToolbar({ from: 5, to: 40, isInCodeBlock: false, isNodeRange: true }),
     ).toBe(false);
   });
+
+  it("hides on a structural table row/column CellSelection", () => {
+    expect(
+      shouldShowToolbar({
+        from: 5,
+        to: 40,
+        isInCodeBlock: false,
+        isCellSelection: true,
+      }),
+    ).toBe(false);
+  });
 });
 
 // ── Render — buttons + active state ────────────────────────────────

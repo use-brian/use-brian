@@ -94,6 +94,7 @@ import {
   createAiGeneratingExtension,
   aiGeneratingKey,
 } from "./ai-generating-decoration";
+import { createTableTrailingParagraphExtension } from "./table-trailing-paragraph";
 import { subscribeBuildActivity } from "@/lib/build-activity";
 import { PagePicker } from "./page-picker";
 import { TemplateGallery } from "./template-gallery";
@@ -611,9 +612,12 @@ function CollabEditorInner({
       createPageMentionExtension({ workspaceId: ws.workspaceId }),
     ];
     // Empty-line affordances are edit-only: the placeholder hint + the
-    // Space-for-AI handoff make no sense to a read-only viewer.
+    // Space-for-AI handoff make no sense to a read-only viewer. The trailing
+    // table paragraph is also edit-only: a viewer must never mutate the Y.Doc
+    // merely by opening it.
     if (canEdit) {
       exts.push(
+        createTableTrailingParagraphExtension(),
         createDocPlaceholderExtension({
           aiHint: t.editorPlaceholder.aiHint,
           heading: t.editorPlaceholder.heading,

@@ -628,6 +628,17 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
         scope: 'personal' | 'team-native' | 'team-grant' | 'builtin'
         grantedByUserId?: string
         /**
+         * Provider-level multi-account display. Policies and enablement remain
+         * keyed by `id` (`imap`); these rows make every routed mailbox visible
+         * without pretending each instance has an independent toggle.
+         */
+        accounts?: Array<{
+          instanceId: string
+          label: string
+          connected: boolean
+          createdAt: Date
+        }>
+        /**
          * The backing connector_instance id — team-native rows only. Lets the
          * assistant Tools tab edit the SHARED allow/ask/block through the
          * clearance-gated workspace tool-policy routes
@@ -645,6 +656,37 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
           // WhatsApp channel infrastructure owns connector_instance rows for
           // credentials and attribution, but it exposes no assistant tools.
           if (inst.provider === 'whatsapp') continue
+          if (inst.provider === 'imap') {
+            // Mirror the runtime IMAP overlay: disconnected/auth-failed
+            // accounts are managed in Studio but are not routed tools here.
+            if (!inst.connected || inst.healthStatus === 'auth_failed') continue
+            const account = {
+              instanceId: inst.id,
+              label: inst.connectedEmail ?? inst.label,
+              connected: inst.connected,
+              createdAt: inst.createdAt,
+            }
+            const existing = byKey.get('imap')
+            if (existing?.scope === 'team-native') {
+              existing.accounts?.push(account)
+              existing.connected ||= inst.connected
+              continue
+            }
+            const official = OFFICIAL_CONNECTORS.find((connector) => connector.id === 'imap')
+            byKey.set('imap', {
+              id: 'imap',
+              name: official?.name ?? inst.label,
+              custom: false,
+              connected: inst.connected,
+              enabled: settingsMap.get('imap') ?? true,
+              icon_url: entry?.icon_url,
+              category: entry?.category,
+              scope: 'team-native',
+              instanceId: inst.id,
+              accounts: [account],
+            })
+            continue
+          }
           byKey.set(inst.provider, {
             id: inst.provider,
             name: inst.label,
@@ -662,10 +704,55 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
 
       if (assistantTeamId && options.connectorGrantStore) {
         const grants = await options.connectorGrantStore.listForTargetSystem('workspace', assistantTeamId)
+        // `undefined` means no connected IMAP grant has claimed provider
+        // precedence yet. Once set, even an auth-failed oldest grantor keeps
+        // the provider claim (runtime does the same and emits reconnect), so a
+        // later member's mailbox never appears callable when it is shadowed.
+        let winningImapGrantor: string | undefined
         for (const g of grants) {
-          if (byKey.has(g.instance.provider)) continue   // team-native wins
+          const existing = byKey.get(g.instance.provider)
+          if (existing?.scope === 'team-native') continue   // team-native wins
           const entry = registry.find((e) => e.id === g.instance.provider)
           if (g.instance.provider === 'whatsapp') continue
+          if (g.instance.provider === 'imap') {
+            if (!g.instance.connected) continue
+            winningImapGrantor ??= g.grantedByUserId
+            if (winningImapGrantor !== g.grantedByUserId) continue
+            if (g.instance.healthStatus === 'auth_failed') continue
+            // Runtime aggregates only grants from the first (oldest) winning
+            // grantor, so the display must shadow later grantors the same way.
+            if (existing?.scope === 'team-grant') {
+              if (existing.grantedByUserId !== g.grantedByUserId) continue
+              existing.accounts?.push({
+                instanceId: g.instance.id,
+                label: g.instance.connectedEmail ?? g.instance.label,
+                connected: g.instance.connected,
+                createdAt: g.instance.createdAt,
+              })
+              existing.connected ||= g.instance.connected
+              continue
+            }
+            const official = OFFICIAL_CONNECTORS.find((connector) => connector.id === 'imap')
+            byKey.set('imap', {
+              id: 'imap',
+              name: official?.name ?? g.instance.label,
+              custom: false,
+              connected: g.instance.connected,
+              enabled: settingsMap.get('imap') ?? true,
+              icon_url: entry?.icon_url,
+              category: entry?.category,
+              scope: 'team-grant',
+              grantedByUserId: g.grantedByUserId,
+              accounts: [{
+                instanceId: g.instance.id,
+                label: g.instance.connectedEmail ?? g.instance.label,
+                connected: g.instance.connected,
+                createdAt: g.instance.createdAt,
+              }],
+            })
+            continue
+          }
+          if (existing) continue
           byKey.set(g.instance.provider, {
             id: g.instance.provider,
             name: g.instance.label,
@@ -685,12 +772,26 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
       // claimed by team-native or grant, since the engine would shadow
       // them anyway.
       for (const c of userConnectors) {
-        if (byKey.has(c.connectorId)) continue
+        const existing = byKey.get(c.connectorId)
+        if (c.connectorId === 'imap' && existing?.scope === 'personal') {
+          existing.accounts?.push({
+            instanceId: c.id,
+            label: c.name,
+            connected: c.connected,
+            createdAt: c.createdAt,
+          })
+          existing.connected ||= c.connected
+          continue
+        }
+        if (existing) continue
         if (!BUILTIN_IDS.has(c.connectorId) && !c.connected) continue
         const entry = registry.find((e) => e.id === c.connectorId)
+        const official = c.connectorId === 'imap'
+          ? OFFICIAL_CONNECTORS.find((connector) => connector.id === 'imap')
+          : undefined
         byKey.set(c.connectorId, {
           id: c.connectorId,
-          name: c.name,
+          name: official?.name ?? c.name,
           url: c.url ?? undefined,
           custom: c.custom,
           connected: c.connected,
@@ -698,6 +799,16 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
           icon_url: entry?.icon_url,
           category: entry?.category ?? (c.custom ? undefined : 'community' as const),
           scope: 'personal',
+          ...(c.connectorId === 'imap'
+            ? {
+                accounts: [{
+                  instanceId: c.id,
+                  label: c.name,
+                  connected: c.connected,
+                  createdAt: c.createdAt,
+                }],
+              }
+            : {}),
         })
       }
 
@@ -729,7 +840,19 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
         })
       }
 
-      const connectors = Array.from(byKey.values())
+      const connectors = Array.from(byKey.values()).map(({ accounts, ...connector }) => ({
+        ...connector,
+        ...(accounts
+          ? {
+              accounts: [...accounts]
+                .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || a.instanceId.localeCompare(b.instanceId))
+                .map(({ createdAt: _createdAt, ...account }, index) => ({
+                  ...account,
+                  isPrimary: index === 0,
+                })),
+            }
+          : {}),
+      }))
       res.json({ connectors })
     } catch (err) {
       console.error('[assistants] list connectors failed:', err)

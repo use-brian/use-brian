@@ -1340,6 +1340,15 @@ type UserConnector = {
   // clearance-gated workspace tool-policy routes the governance table's
   // Allow/Ask/Block edits for team-owned connectors.
   instanceId?: string;
+  // Provider-level multi-account projection (currently Company Email). The
+  // connector toggle/policies remain shared; this list shows which concrete
+  // accounts the single routed tool set can address.
+  accounts?: Array<{
+    instanceId: string;
+    label: string;
+    connected: boolean;
+    isPrimary: boolean;
+  }>;
 };
 
 type ToolPerm = {
@@ -1663,6 +1672,14 @@ function ConnectorsTab({ assistantId, workspaceId }: { assistantId: string; work
                     </div>
                     {c.custom && c.url && (
                       <div className="text-[11px] text-muted-foreground truncate">{c.url}</div>
+                    )}
+                    {c.accounts && c.accounts.length > 0 && (
+                      <div
+                        className="text-[11px] text-muted-foreground truncate"
+                        title={c.accounts.map((account) => account.label).join(" · ")}
+                      >
+                        {c.accounts.map((account) => account.label).join(" · ")}
+                      </div>
                     )}
                   </div>
                 </button>

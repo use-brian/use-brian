@@ -24,7 +24,7 @@
  * [COMP:app-web/brain-entity]
  */
 
-import { Fragment, use, useEffect, useState } from "react";
+import { Fragment, use, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { BackButton } from "@/components/ui/back-button";
 import { useT } from "@/lib/i18n/client";
@@ -40,6 +40,7 @@ import {
 import { ProvenanceSheet } from "@/components/provenance/provenance-sheet";
 import { cn } from "@/lib/utils";
 import type { ProvenanceRow, ProvenanceSourceKind } from "@/lib/api/provenance";
+import { useWorkspaceContext } from "@/lib/workspace-context";
 
 function BrainEntityInner({
   workspaceId,
@@ -50,6 +51,14 @@ function BrainEntityInner({
 }) {
   const t = useT();
   const { activeId } = useWorkspaces();
+  const { me } = useWorkspaceContext();
+  const cacheScope = useMemo(
+    () =>
+      activeId && me.id
+        ? { viewerId: me.id, workspaceId: activeId }
+        : null,
+    [activeId, me.id],
+  );
   const [entity, setEntity] = useState<EntityRollup | null | undefined>(undefined);
   const { open } = useProvenance();
   const backHref = `/w/${workspaceId}/brain`;
@@ -57,14 +66,14 @@ function BrainEntityInner({
   useEffect(() => {
     if (!activeId) return;
     let cancelled = false;
-    getEntity(entityId, activeId).then((result) => {
+    getEntity(entityId, activeId, null, cacheScope).then((result) => {
       if (cancelled) return;
       setEntity(result);
     });
     return () => {
       cancelled = true;
     };
-  }, [entityId, activeId]);
+  }, [entityId, activeId, cacheScope]);
 
   if (entity === undefined) {
     return (

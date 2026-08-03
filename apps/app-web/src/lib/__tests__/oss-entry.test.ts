@@ -1,5 +1,9 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { ossSignedOutRedirect, sanitizeNext } from "@/lib/oss-entry";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  ossPublicAppOrigin,
+  ossSignedOutRedirect,
+  sanitizeNext,
+} from "@/lib/oss-entry";
 import { isOssEdition } from "@/lib/edition";
 
 vi.mock("@/lib/edition", () => ({ isOssEdition: vi.fn() }));
@@ -7,6 +11,25 @@ vi.mock("@/lib/edition", () => ({ isOssEdition: vi.fn() }));
 const mockedIsOss = vi.mocked(isOssEdition);
 
 beforeEach(() => mockedIsOss.mockReset());
+afterEach(() => vi.unstubAllEnvs());
+
+describe("[COMP:app-web/oss-entry] ossPublicAppOrigin", () => {
+  it("uses configured APP_URL instead of Cloudflare's loopback request origin", () => {
+    vi.stubEnv("APP_URL", "https://hinson.usebrian.ai");
+
+    expect(
+      ossPublicAppOrigin("http://localhost:3003/api/auth/local-session"),
+    ).toBe("https://hinson.usebrian.ai");
+  });
+
+  it("falls back to the incoming origin for zero-config local development", () => {
+    vi.stubEnv("APP_URL", "");
+
+    expect(ossPublicAppOrigin("http://localhost:3003/login?next=%2Fw")).toBe(
+      "http://localhost:3003",
+    );
+  });
+});
 
 describe("[COMP:app-web/oss-entry] sanitizeNext", () => {
   it("keeps a same-origin absolute path", () => {

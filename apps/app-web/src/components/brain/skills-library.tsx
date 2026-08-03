@@ -62,6 +62,8 @@ type Props = {
   onNewSkill: () => void;
   /** Row click → the editor route. */
   onOpenSkill: (skill: WorkspaceSkillSummary) => void;
+  /** Offline Brain is a last-known-good reader; governance writes wait. */
+  readOnly?: boolean;
 };
 
 /** Largest-unit relative time ("3 days ago"), locale-aware. Same shape as
@@ -85,6 +87,7 @@ export function SkillsLibrary({
   skills,
   onNewSkill,
   onOpenSkill,
+  readOnly = false,
 }: Props) {
   const t = useT();
   const locale = useLocale();
@@ -162,7 +165,13 @@ export function SkillsLibrary({
             <p className="max-w-md text-xs leading-relaxed text-muted-foreground">
               {skillsCopy.emptyBody}
             </p>
-            <Button variant="outline" size="sm" onClick={onNewSkill} className="mt-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onNewSkill}
+              disabled={readOnly}
+              className="mt-2"
+            >
               {skillsCopy.newSkill}
             </Button>
           </div>
@@ -188,6 +197,7 @@ export function SkillsLibrary({
                       skill={skill}
                       locale={locale}
                       confirming={confirmingId === skill.rowId}
+                      readOnly={readOnly}
                       onOpen={() => onOpenSkill(skill)}
                       onConfirm={() => void handleConfirm(skill)}
                     />
@@ -215,6 +225,7 @@ export function SkillsLibrary({
                       skill={skill}
                       locale={locale}
                       confirming={confirmingId === skill.rowId}
+                      readOnly={readOnly}
                       onOpen={() => onOpenSkill(skill)}
                       onConfirm={() => void handleConfirm(skill)}
                     />
@@ -235,12 +246,14 @@ function SkillRow({
   confirming,
   onOpen,
   onConfirm,
+  readOnly,
 }: {
   skill: WorkspaceSkillSummary;
   locale: string;
   confirming: boolean;
   onOpen: () => void;
   onConfirm: () => void;
+  readOnly: boolean;
 }) {
   const t = useT();
   const skillsCopy = t.brainPage.skills;
@@ -326,7 +339,7 @@ function SkillRow({
           <Button
             size="xs"
             variant="outline"
-            disabled={confirming}
+            disabled={confirming || readOnly}
             onClick={onConfirm}
             aria-label={skillsCopy.confirm}
           >

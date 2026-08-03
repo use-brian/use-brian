@@ -1,14 +1,28 @@
 "use client";
 
 /**
- * Feed connection route — connect / reconnect / disconnect for one platform
- * account. Thin wrapper: the meat lives in `@/components/feed/feed-connection`
- * (`[COMP:app-web/feed-connection]`) so the desktop SPA can import the client
- * component directly (docs/plans/feed-web-consolidation.md §6, §10).
+ * Legacy Feed connection route. Account lifecycle now lives inline in the
+ * platform Settings page; replace instead of pushing so Back skips this shim.
+ * Client navigation is intentional because the desktop SPA has no server-side
+ * redirect handler.
  */
 
-import { FeedConnection } from "@/components/feed/feed-connection";
+import { useEffect } from "react";
+import { useParams, useRouter } from "next/navigation";
+import { feedPath, type FeedPlatform } from "@/lib/feed-nav";
 
 export default function FeedConnectionPage() {
-  return <FeedConnection />;
+  const params = useParams<{ workspaceId: string; platform: FeedPlatform }>();
+  const router = useRouter();
+
+  useEffect(() => {
+    router.replace(
+      feedPath(params.workspaceId, {
+        platform: params.platform,
+        segment: "settings",
+      }),
+    );
+  }, [params.platform, params.workspaceId, router]);
+
+  return null;
 }

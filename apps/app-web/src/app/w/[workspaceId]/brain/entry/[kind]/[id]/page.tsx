@@ -34,6 +34,16 @@ import { ExternalLink, GitPullRequestArrow, Pencil } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT, format } from "@/lib/i18n/client";
 import { useWorkspaces } from "@/contexts/workspace-context";
+import { useWorkspaceContext } from "@/lib/workspace-context";
+import {
+  deleteBrainContentCache,
+  isAuthoritativeBrainDenial,
+  isBrainGraph,
+  readBrainContentCache,
+  writeBrainContentCache,
+  type BrainContentCacheScope,
+} from "@/lib/offline/brain-content-cache";
+import { useIsOffline } from "@/lib/offline/use-offline-sync";
 import { getActiveAssistantId } from "@/lib/sidebar-cache";
 import {
   getBrainGraph,
@@ -101,6 +111,54 @@ function useNodeNavigation(workspaceId: string | null) {
   };
 }
 
+/** The reader's connection diagram uses the same persisted graph as Brain. */
+function usePersistentBrainGraph(
+  workspaceId: string | null,
+  viewpointAssistantId: string | null,
+  cacheScope: BrainContentCacheScope | null,
+): BrainGraph | null {
+  const [graph, setGraph] = useState<BrainGraph | null>(null);
+
+  useEffect(() => {
+    if (!workspaceId) return;
+    let cancelled = false;
+    void (async () => {
+      if (cacheScope) {
+        const cached = await readBrainContentCache(
+          cacheScope,
+          "graph",
+          isBrainGraph,
+        );
+        if (!cancelled && cached) setGraph(cached.value);
+      }
+      try {
+        const result = await getBrainGraph({
+          workspaceId,
+          viewpointAssistantId,
+          showMemory: true,
+          failOnError: true,
+        });
+        if (cancelled) return;
+        setGraph(result);
+        if (cacheScope) {
+          void writeBrainContentCache(cacheScope, "graph", result);
+        }
+      } catch (error) {
+        if (cancelled) return;
+        if (isAuthoritativeBrainDenial(error)) {
+          setGraph(null);
+          if (cacheScope) void deleteBrainContentCache(cacheScope, "graph");
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId, viewpointAssistantId, cacheScope]);
+
+  return graph;
+}
+
 // ── Page entry ─────────────────────────────────────────────────────
 
 export default function BrainEntryReaderPage({
@@ -159,6 +217,16 @@ function KnowledgeReader({
   const t = useT();
   const copy = t.brainPage.entryReader;
   const { activeId } = useWorkspaces();
+  const offline = useIsOffline();
+  const { me } = useWorkspaceContext();
+  const viewpointAssistantId = getActiveAssistantId();
+  const cacheScope = useMemo<BrainContentCacheScope | null>(
+    () =>
+      activeId && me.id
+        ? { viewerId: me.id, workspaceId: activeId, viewpointAssistantId }
+        : null,
+    [activeId, me.id, viewpointAssistantId],
+  );
   const router = useRouter();
   const onNode = useNodeNavigation(activeId);
 
@@ -171,7 +239,11 @@ function KnowledgeReader({
     entry: KnowledgeEntryDetail | null;
   } | null>(null);
   const [capability, setCapability] = useState<KnowledgeEditCapability | null>(null);
-  const [graph, setGraph] = useState<BrainGraph | null>(null);
+  const graph = usePersistentBrainGraph(
+    activeId,
+    viewpointAssistantId,
+    cacheScope,
+  );
 
   // Suggest-an-edit flow state.
   const [editing, setEditing] = useState(false);
@@ -190,37 +262,33 @@ function KnowledgeReader({
     setEditing(false);
     setPrUrl(null);
     setSubmitError(null);
-    getKnowledgeEntry(entryId, activeId, getActiveAssistantId()).then((result) => {
+    getKnowledgeEntry(
+      entryId,
+      activeId,
+      viewpointAssistantId,
+      cacheScope,
+    ).then((result) => {
       if (!cancelled) setView({ forId: entryId, entry: result });
     });
-    getKnowledgeEditCapability(activeId, entryId).then((result) => {
-      if (!cancelled) setCapability(result);
-    });
+    if (!offline) {
+      getKnowledgeEditCapability(activeId, entryId)
+        .then((result) => {
+          if (!cancelled) setCapability(result);
+        })
+        .catch(() => {
+          if (!cancelled) setCapability(null);
+        });
+    }
     return () => {
       cancelled = true;
     };
-  }, [activeId, entryId]);
+  }, [activeId, entryId, viewpointAssistantId, cacheScope, offline]);
 
   // New entry swapped in → snap the scroller back to the top (the route
   // segment is stable across entry navigation, so it never resets itself).
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: 0 });
   }, [view?.forId, scrollRef]);
-
-  useEffect(() => {
-    if (!activeId) return;
-    let cancelled = false;
-    getBrainGraph({
-      workspaceId: activeId,
-      viewpointAssistantId: getActiveAssistantId(),
-      showMemory: true,
-    }).then((result) => {
-      if (!cancelled) setGraph(result);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [activeId]);
 
   const entry = view?.entry ?? null;
   const related = useMemo(() => entry?.related ?? [], [entry]);
@@ -239,7 +307,7 @@ function KnowledgeReader({
 
   const isGithubSynced = entry.source?.sourceType === "github";
   const isLocalSynced = entry.source?.sourceType === "local";
-  const canEdit = capability?.canEdit === true;
+  const canEdit = !offline && capability?.canEdit === true;
   const readOnly = !!entry.source && capability !== null && !canEdit;
   const sourceUrl = entry.source ? getKnowledgeSourceUrl(entry.source) : null;
   const entryNavigationUrl = getKnowledgeEntryNavigationUrl(entry.navigationUrl);
@@ -254,6 +322,7 @@ function KnowledgeReader({
   };
 
   const submit = async () => {
+    if (offline) return;
     if (draft.trim().length === 0) {
       setSubmitError(copy.contentRequired);
       return;
@@ -275,7 +344,12 @@ function KnowledgeReader({
       return;
     }
     if (isLocalSynced) {
-      const refreshed = await getKnowledgeEntry(entry.id, activeId, getActiveAssistantId());
+      const refreshed = await getKnowledgeEntry(
+        entry.id,
+        activeId,
+        viewpointAssistantId,
+        cacheScope,
+      );
       setView({ forId: entryId, entry: refreshed ?? { ...entry, content: draft } });
     } else if ("prUrl" in result) {
       setPrUrl(result.prUrl);
@@ -614,6 +688,15 @@ function MemoryReader({
   const t = useT();
   const copy = t.brainPage.entryReader;
   const { activeId } = useWorkspaces();
+  const { me } = useWorkspaceContext();
+  const viewpointAssistantId = getActiveAssistantId();
+  const cacheScope = useMemo<BrainContentCacheScope | null>(
+    () =>
+      activeId && me.id
+        ? { viewerId: me.id, workspaceId: activeId, viewpointAssistantId }
+        : null,
+    [activeId, me.id, viewpointAssistantId],
+  );
   const onNode = useNodeNavigation(activeId);
 
   // Same crossfade contract as the knowledge reader — the previous row
@@ -622,25 +705,22 @@ function MemoryReader({
     forId: string;
     row: BrainInboxRowDetail | null;
   } | null>(null);
-  const [graph, setGraph] = useState<BrainGraph | null>(null);
+  const graph = usePersistentBrainGraph(
+    activeId,
+    viewpointAssistantId,
+    cacheScope,
+  );
 
   useEffect(() => {
     if (!activeId) return;
     let cancelled = false;
-    fetchBrainRow(activeId, "memory", rowId).then((result) => {
+    fetchBrainRow(activeId, "memory", rowId, cacheScope).then((result) => {
       if (!cancelled) setView({ forId: rowId, row: result });
-    });
-    getBrainGraph({
-      workspaceId: activeId,
-      viewpointAssistantId: getActiveAssistantId(),
-      showMemory: true,
-    }).then((result) => {
-      if (!cancelled) setGraph(result);
     });
     return () => {
       cancelled = true;
     };
-  }, [activeId, rowId]);
+  }, [activeId, rowId, cacheScope]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: 0 });

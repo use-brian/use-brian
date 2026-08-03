@@ -145,6 +145,7 @@ import { fetchPendingQuestion } from "@/lib/api/pending-questions";
 import { PendingQuestionPanel } from "@/components/chrome/pending-question-panel";
 import { ChatConfirmationCard } from "@/components/chrome/chat-confirmation-card";
 import { ChatContextPins } from "@/components/chat-app/chat-context-pins";
+import { resolveRequestedFreshAssistant } from "@/components/chat-app/assistant-deeplink";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 const REMARK_PLUGINS = [remarkGfm];
@@ -396,6 +397,18 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       cancelled = true;
     };
   }, [workspaceId]);
+
+  // First-party installers can open a fresh standard chat with one assistant
+  // preselected. Existing sessions ignore this hint because their persisted
+  // assistant binding remains authoritative.
+  useEffect(() => {
+    if (activeSessionId) return;
+    const requested = resolveRequestedFreshAssistant(
+      searchParams?.get("assistant") ?? null,
+      assistants,
+    );
+    if (requested) setPickedAssistantId(requested);
+  }, [activeSessionId, assistants, searchParams]);
 
   /** The assistant the CURRENT pane talks to. Open thread → its bound
    *  assistant (adoption record → merged rail row → primary for shared /

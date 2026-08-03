@@ -223,28 +223,27 @@ describe('[COMP:api/chat-route] buildActivePageInstruction', () => {
   // untouched and the new page invisible to the user. Root cause: the
   // non-empty branch advertised renderPage ("To author a brand-new page call
   // renderPage") as a co-equal option. The fix steers every active-page turn
-  // to patchPage and gates renderPage behind an explicit new-page request.
-  it('empty page: builds in place and forbids renderPage', () => {
+  // to an in-place edit brief and keeps raw write verbs in the child context.
+  it('empty page: builds in place through the delegation gateway', () => {
     const out = buildActivePageInstruction({ isEmptyPage: true, isCommentThread: false })
     expect(out).toContain('EMPTY')
-    expect(out).toContain('`patchPage`')
-    expect(out).toContain('Do NOT call `renderPage`')
+    expect(out).toContain('`delegateDocEdit`')
+    expect(out).not.toContain('`patchPage`')
+    expect(out).not.toContain('`renderPage`')
   })
 
-  it('non-empty page: steers to patchPage and only permits renderPage on an explicit request', () => {
+  it('non-empty page: delegates an in-place result and only permits a new page explicitly', () => {
     const out = buildActivePageInstruction({ isEmptyPage: false, isCommentThread: false })
-    expect(out).toContain('`patchPage`')
+    expect(out).toContain('`delegateDocEdit`')
     expect(out).toContain('looking at THIS')
-    // renderPage is gated behind EXPLICIT user intent, never offered as the
-    // default "author a brand-new page" path that orphaned the user's work.
-    expect(out).toContain('Do NOT call `renderPage` unless the user EXPLICITLY asks')
-    expect(out).not.toContain('To author a brand-new page call `renderPage`')
+    expect(out).toMatch(/separate new page only when.*explicitly/i)
+    expect(out).not.toContain('`patchPage`')
   })
 
-  it('non-empty comment-thread reply: forbids renderPage outright (request is about this page)', () => {
+  it('non-empty comment-thread reply: requires the brief to stay in place', () => {
     const out = buildActivePageInstruction({ isEmptyPage: false, isCommentThread: true })
     expect(out).toContain('comment-thread reply')
-    expect(out).toContain('never call `renderPage` here')
+    expect(out).toMatch(/brief must require an in-place edit/i)
   })
 
   it('comment-thread flag is inert on an empty page (the empty guard already forbids renderPage)', () => {

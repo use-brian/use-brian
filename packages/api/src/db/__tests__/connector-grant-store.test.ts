@@ -192,6 +192,7 @@ describe('[COMP:api/connector-grant-store] createConnectorGrantStore', () => {
       expect(rows[0].instance.label).toBe("Alice's Calendar")
       const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]]
       expect(sql).toContain('JOIN connector_instance ci')
+      expect(sql).toContain('ORDER BY cg.granted_at ASC, ci.created_at ASC, ci.id ASC')
       expect(params).toEqual(['workspace', 't_1'])
     })
   })
