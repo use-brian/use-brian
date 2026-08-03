@@ -109,6 +109,7 @@ import {
   type MsGraphTokens,
 } from '../msgraph/token.js'
 import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTORS } from '@use-brian/shared'
+import { connectorInstanceGovernanceId } from '../db/connector-instance-store.js'
 // Built-in connector OAuth app creds come through getConnectorConfig (OPEN, file
 // or env), NOT getEnv (closed env schema) — so this open injector imports no
 // closed code. See connector-config.ts + oss-local-brain-wedge.md §12.2.
@@ -1114,9 +1115,9 @@ export async function injectMcpTools(params: {
         // injector owns its provider-specific multi-instance naming below.
         if (p === 'agentmail') continue
 
-        // Company Email builds one account-bound tool set per workspace-owned
-        // IMAP instance. Provider-level workspace policy still governs every
-        // set, so collect the full account list in one injection pass.
+        // Company Email builds one independently governed tool set per
+        // workspace-owned IMAP instance, so collect the full account list in
+        // one injection pass while retaining each instance id.
         if (p === 'imap') {
           if (overlaidByTeam.has(p)) continue
           overlaidByTeam.add(p)
@@ -1155,6 +1156,7 @@ export async function injectMcpTools(params: {
               assistantConnectorGrantsStore,
               healthProbe: { report: reportHealth },
               filesApi,
+              workspacePolicyScoped: true,
             })
           }
           continue
@@ -1567,15 +1569,22 @@ async function resolveEffectivePolicy(
   serverName: string,
   toolName: string,
   fallback: string,
+  appServerName: string = serverName,
+  assistantFallbackServerName?: string,
 ): Promise<'allow' | 'ask' | 'block'> {
   const l1 = await settingsStore.getPolicy({
-    assistantId: APP_LEVEL_ASSISTANT_ID, userId, serverName, toolName,
+    assistantId: APP_LEVEL_ASSISTANT_ID, userId, serverName: appServerName, toolName,
   })
   const appPolicy = l1?.policy ?? fallback
 
-  const l2 = await settingsStore.getPolicy({
+  let l2 = await settingsStore.getPolicy({
     assistantId, userId, serverName, toolName,
   })
+  if (!l2 && assistantFallbackServerName && assistantFallbackServerName !== serverName) {
+    l2 = await settingsStore.getPolicy({
+      assistantId, userId, serverName: assistantFallbackServerName, toolName,
+    })
+  }
   const assistantPolicy = l2?.policy ?? fallback
 
   return strictestPolicy(appPolicy, assistantPolicy)
@@ -1590,15 +1599,21 @@ async function applyPolicyOrSkip(
   unavailable?: string[],
   /**
    * Tool name to resolve policy against. Defaults to `tool.name`. Multi-instance
-   * variants pass the CANONICAL base name here so every instance of a provider
-   * shares the provider's single tool policy (no per-instance policy rows).
+   * variants pass the CANONICAL base name while `serverName` selects either the
+   * provider or one concrete instance-governance record.
    */
   policyToolName?: string,
+  /** Canonical provider key for app-level policy; defaults to `serverName`. */
+  appPolicyServerName?: string,
+  /** Legacy provider-level L2 key used only when the exact instance has no row. */
+  assistantFallbackServerName?: string,
 ): Promise<'skip' | 'include'> {
   const policyName = policyToolName ?? tool.name
   const fallback = tool.requiresConfirmation ? 'ask' : 'allow'
   const effective = await resolveEffectivePolicy(
     settingsStore, userId, assistantId, serverName, policyName, fallback,
+    appPolicyServerName ?? serverName,
+    assistantFallbackServerName,
   )
 
   if (effective === 'block') {
@@ -1611,6 +1626,8 @@ async function applyPolicyOrSkip(
   tool.resolveConfirmation = async () => {
     const current = await resolveEffectivePolicy(
       settingsStore, userId, assistantId, serverName, policyName, fallback,
+      appPolicyServerName ?? serverName,
+      assistantFallbackServerName,
     )
     return current === 'ask'
   }
@@ -3382,16 +3399,17 @@ async function injectMailboxTools(params: {
    * that always errors.
    */
   filesApi?: FilesApi
+  /** Team-owned rows resolve both policy layers from workspace_tool_policy. */
+  workspacePolicyScoped?: boolean
 }): Promise<void> {
   const {
     connectors, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable,
     connectorInstanceStore, connectorActionAudit, assistantConnectorGrantsStore, instanceIdOverride, healthProbe,
-    filesApi,
+    filesApi, workspacePolicyScoped = false,
   } = params
 
   const imapConnectors = connectors.filter((c) => c.connectorId === 'imap' && c.connected)
-  const imapEnabled = imapConnectors.length > 0 && (!assistantConnectorStore || await assistantConnectorStore.isEnabled(assistantId, 'imap'))
-  if (!imapEnabled) {
+  if (imapConnectors.length === 0) {
     unavailable?.push(notConnectedNotice('Company email (IMAP)', "searching, reading, and sending from the user's own corporate mailbox"))
     return
   }
@@ -3402,10 +3420,25 @@ async function injectMailboxTools(params: {
   // overlays pass EVERY authorized connected mailbox; the optional override is
   // retained for legacy/single-instance callers. Primary = first-connected
   // (createdAt asc), which keeps the canonical unsuffixed tool names.
-  const rows = (instanceIdOverride
+  const candidateRows = (instanceIdOverride
     ? imapConnectors.filter((c) => c.id === instanceIdOverride)
     : [...imapConnectors])
     .sort((a, b) => (a.createdAt?.getTime() ?? 0) - (b.createdAt?.getTime() ?? 0))
+  const rows: typeof candidateRows = []
+  for (const row of candidateRows) {
+    const instanceId = row.id ?? instanceIdOverride ?? null
+    if (!instanceId) continue
+    const governanceId = connectorInstanceGovernanceId('imap', instanceId)
+    if (
+      assistantConnectorStore
+      && !(await assistantConnectorStore.isEnabled(assistantId, governanceId, 'imap'))
+    ) continue
+    rows.push(row)
+  }
+  if (rows.length === 0) {
+    unavailable?.push(notConnectedNotice('Company email (IMAP)', "searching, reading, and sending from the user's own corporate mailbox"))
+    return
+  }
 
   // Health rides at the API level, per instance, so a mailbox whose auth died
   // flips ITS OWN row — never a sibling's — and the read-only archive tool
@@ -3541,10 +3574,11 @@ async function injectMailboxTools(params: {
     // names for single-account compatibility; every later set uses the same
     // stable instance suffix convention as Google/GitHub/etc. Every schema is
     // bound to one identity (no model-selectable `account` field), while policy
-    // and write grants continue to resolve through the canonical base name.
+    // and write grants resolve through that mailbox's governance id.
     const archiveDeps = getGlobalMailboxArchiveDeps()
     const syncDeps = getGlobalMailboxSyncDeps()
     for (const [index, mailbox] of bound.entries()) {
+      const governanceId = connectorInstanceGovernanceId('imap', mailbox.instanceId)
       const accountRef = {
         instanceId: mailbox.instanceId,
         email: mailbox.email,
@@ -3582,6 +3616,8 @@ async function injectMailboxTools(params: {
         'imap',
         assistantConnectorGrantsStore,
         assistantId,
+        governanceId,
+        'imap',
       )
 
       // Archive search + on-demand sync stay outside the live API health wrap,
@@ -3613,12 +3649,14 @@ async function injectMailboxTools(params: {
         if (
           await applyPolicyOrSkip(
             tool,
-            'imap',
+            governanceId,
             settingsStore,
             assistantId,
             userId,
             unavailable,
             canonicalName,
+            workspacePolicyScoped ? governanceId : 'imap',
+            'imap',
           ) === 'include'
         ) {
           tools.set(tool.name, tool)

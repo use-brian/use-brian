@@ -20,7 +20,9 @@ vi.mock('../client.js', () => ({
 }))
 
 import {
+  connectorInstanceGovernanceId,
   createConnectorInstanceStore,
+  parseConnectorInstanceGovernanceId,
   type ConnectorInstance,
 } from '../connector-instance-store.js'
 import { query, queryWithRLS } from '../client.js'
@@ -33,6 +35,15 @@ const key = randomBytes(32)
 
 beforeEach(() => {
   vi.clearAllMocks()
+})
+
+describe('[COMP:api/connector-instance-store] governance identity', () => {
+  it('round-trips a provider and concrete instance id', () => {
+    const id = connectorInstanceGovernanceId('imap', 'instance-123')
+    expect(id).toBe('imap:instance-123')
+    expect(parseConnectorInstanceGovernanceId(id)).toEqual({ provider: 'imap', instanceId: 'instance-123' })
+    expect(parseConnectorInstanceGovernanceId('imap')).toBeNull()
+  })
 })
 
 // ── Helpers ────────────────────────────────────────────────────

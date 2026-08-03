@@ -44,7 +44,11 @@ export type AssistantConnectorGrantsStore = {
    * the acting user is the message author, not the assistant owner,
    * and the audit decision must apply to all callers equally.
    */
-  getForAssistantSystem(assistantId: string, connectorId: string): Promise<AssistantConnectorGrant | null>
+  getForAssistantSystem(
+    assistantId: string,
+    connectorId: string,
+    fallbackConnectorId?: string,
+  ): Promise<AssistantConnectorGrant | null>
 
   /** List every grant row for an assistant. Used by the Studio panel. */
   listForAssistant(userId: string, assistantId: string): Promise<AssistantConnectorGrant[]>
@@ -72,11 +76,13 @@ const COLS = `
 
 export function createDbAssistantConnectorGrantsStore(): AssistantConnectorGrantsStore {
   return {
-    async getForAssistantSystem(assistantId, connectorId) {
+    async getForAssistantSystem(assistantId, connectorId, fallbackConnectorId) {
       const result = await query<AssistantConnectorGrant>(
         `SELECT ${COLS} FROM assistant_connector_grants
-         WHERE assistant_id = $1 AND connector_id = $2`,
-        [assistantId, connectorId],
+         WHERE assistant_id = $1 AND connector_id IN ($2, $3)
+         ORDER BY CASE WHEN connector_id = $2 THEN 0 ELSE 1 END
+         LIMIT 1`,
+        [assistantId, connectorId, fallbackConnectorId ?? connectorId],
       )
       return result.rows[0] ?? null
     },
