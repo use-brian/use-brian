@@ -18,6 +18,10 @@ export type PopupStatus = {
    * cannot invent a permission warning the user cannot act on.
    */
   hasControl?: boolean
+  /** The relay's verdict on the build we reported. Undefined from a background that predates it. */
+  staleBuild?: boolean
+  /** This build's source fingerprint, for the popup's footer. Null on builds predating the stamp. */
+  build?: string | null
 }
 
 const STATE_LABELS: Record<string, string> = {
@@ -36,6 +40,28 @@ const STOPPED_LABEL =
 
 const NO_CONTROL_LABEL =
   'Not allowed to manage this browser yet. Press Allow below — Chrome will ask you to confirm.'
+
+const STALE_BUILD_LABEL =
+  'This extension is out of date. Rebuild it and press Reload on chrome://extensions, then reconnect.'
+
+/**
+ * A separate line from `statusLine`, not a replacement for it.
+ *
+ * Staleness is a property of the install, not of what it is doing right now: a
+ * stale extension still connects, still holds consent, still reports a tab.
+ * Folding it into the one status line would mean choosing between telling the
+ * user their socket is healthy and telling them their build is old, and both
+ * are true. It ranks below the grant and Stop lines because those block work
+ * outright, where staleness only might.
+ */
+export function buildWarning(status: PopupStatus): string | null {
+  return status.staleBuild === true ? STALE_BUILD_LABEL : null
+}
+
+/** Footer text: which build is loaded. The question that took a SHA256 to answer. */
+export function buildLine(status: PopupStatus): string {
+  return status.build ? `Build ${status.build}` : 'Build unknown (predates build stamping)'
+}
 
 export function statusLine(status: PopupStatus): string {
   // A missing browser-control grant outranks everything, including a healthy

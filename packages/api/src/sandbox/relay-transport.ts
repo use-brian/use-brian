@@ -57,19 +57,13 @@ export function createRelayCommandTransport(opts: {
   }
 }
 
-/** Whether the user currently has a paired extension connection at the relay. */
-export async function relayExtensionConnected(opts: {
-  relayUrl: string
-  relaySecret: string
-  userId: string
-  fetchImpl?: typeof fetch
-}): Promise<boolean> {
-  return (await relayExtensionStatus(opts))?.connected === true
-}
-
 export type RelayExtensionStatus = {
   connected: boolean
   terminalEvent: 'stopped' | 'tab_closed' | null
+  /** Source fingerprint the connected extension reported; null when it reported none. */
+  build: string | null
+  /** The relay's verdict on that fingerprint. False when nothing is connected. */
+  staleBuild: boolean
 }
 
 /** Null means the relay status itself was unavailable; never infer disconnect from it. */
@@ -89,12 +83,21 @@ export async function relayExtensionStatus(opts: {
       },
     )
     if (!res.ok) return null
-    const body = (await res.json()) as { connected?: unknown; terminalEvent?: unknown }
+    const body = (await res.json()) as {
+      connected?: unknown
+      terminalEvent?: unknown
+      build?: unknown
+      staleBuild?: unknown
+    }
     if (typeof body.connected !== 'boolean') return null
     const terminalEvent = body.terminalEvent
     return {
       connected: body.connected,
       terminalEvent: terminalEvent === 'stopped' || terminalEvent === 'tab_closed' ? terminalEvent : null,
+      // Absent from a relay that predates build reporting. Read as "nothing to
+      // say", never as "up to date" — a missing field is not a verdict.
+      build: typeof body.build === 'string' ? body.build : null,
+      staleBuild: body.staleBuild === true,
     }
   } catch {
     return null

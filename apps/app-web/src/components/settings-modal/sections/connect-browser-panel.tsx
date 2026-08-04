@@ -217,6 +217,15 @@ export function ConnectBrowserPanel() {
       </div>
       <p className="mt-1 text-xs text-muted-foreground">{c.description}</p>
 
+      {/* Shown alongside the connected badge, never instead of it: a stale
+          extension is genuinely connected, and saying otherwise would send the
+          user to re-pair when the fix is to reload. */}
+      {status?.staleBuild ? (
+        <p className="mt-2 rounded-md bg-amber-500/10 px-2 py-1.5 text-[11px] text-amber-700 dark:text-amber-400">
+          {c.staleBuildWarning}
+        </p>
+      ) : null}
+
       {status && !status.configured ? (
         <p className="mt-3 text-xs text-muted-foreground">{c.notConfigured}</p>
       ) : connected ? (

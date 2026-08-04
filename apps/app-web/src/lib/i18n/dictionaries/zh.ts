@@ -6312,6 +6312,8 @@ export const zh: Dictionary = {
       gatedCta: "查看方案",
       statusConnected: "你的瀏覽器已連接",
       statusDisconnected: "你的瀏覽器未連接",
+      staleBuildWarning:
+        "這個瀏覽器上的擴充功能版本過舊，可能缺少已修正的問題。請重新建置擴充功能，開啟瀏覽器的擴充功能頁面並按「重新載入」。",
       connectedHint:
         "在下方將某個設定檔的瀏覽器設為「我的瀏覽器」，或在網站封鎖雲端瀏覽器時接受助理的提議，助理就會在你的Chrome中操作。",
       step1Title: "1. 安裝擴充功能",

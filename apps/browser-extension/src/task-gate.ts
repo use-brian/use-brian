@@ -4,6 +4,7 @@
  * everything in flight. Consent expires after inactivity so a forgotten
  * pairing can't act days later without a fresh allow.
  */
+import { RESTRICTED_TAB_MESSAGE } from './tab-eligibility.js'
 
 export const CONSENT_IDLE_RESET_MS = 10 * 60 * 1000
 export const CONSENT_PROMPT_TIMEOUT_MS = 60_000
@@ -33,8 +34,7 @@ const DENIAL_ERRORS: Record<ConsentDenialReason, { code: string; message: string
   },
   restricted_url: {
     code: 'no_eligible_tab',
-    message:
-      'Use Brian cannot act on a browser settings or extension page. Ask the user to switch to the website they want it to work on, then try again.',
+    message: RESTRICTED_TAB_MESSAGE,
   },
   no_active_tab: {
     code: 'no_eligible_tab',
