@@ -168,6 +168,7 @@ import {
   type NarrationDict,
 } from "@/lib/tool-narration";
 import { requestBrainRefresh } from "@/lib/brain-events";
+import { requestApprovalsRefresh } from "@/lib/approvals-events";
 import {
   SURFACE_CHAT_SEED_EVENT,
   type SurfaceChatSeed,
@@ -2426,6 +2427,11 @@ export function FloatingChat({
             status: action === "approve" ? "approved" : "denied",
             result: data.result,
           });
+          // Same-tab repair for every approval-backed surface (queue + Home
+          // dock). The durable row update also emits the workspace event for
+          // other tabs, but the click's own tab should not wait for that SSE
+          // round trip before removing the handled item.
+          requestApprovalsRefresh(workspaceId);
         } else {
           // Reset to pending so the user can retry (e.g. 404 resolver expired).
           session.updateConfirmation(toolCallId, { status: "pending" });
@@ -2434,7 +2440,7 @@ export function FloatingChat({
         session.updateConfirmation(toolCallId, { status: "pending" });
       }
     },
-    [session],
+    [session, workspaceId],
   );
 
   // ── Doc deep-link ────────────────────────────────────────────────────
