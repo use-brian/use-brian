@@ -7,6 +7,7 @@ import {
   MAILBOX_MAX_LIMIT,
   MAILBOX_SNIPPET_CHARS,
   MAILBOX_ATTACHMENT_MAX_BYTES,
+  MAX_MAILBOX_OUTGOING_ATTACHMENT_TOTAL_BYTES,
   type MailboxApi,
   type MailboxAccountRouter,
   type MailboxAttachmentDeps,
@@ -62,9 +63,12 @@ function makeApi(overrides: Partial<MailboxApi> = {}): MailboxApi {
 function storedFile(over: Partial<WorkspaceFile> = {}): WorkspaceFile {
   return {
     id: 'file-1',
+    workspaceId: 'ws-1',
     path: '/uploads/email/2026-07-29T10-00-00-q3.pdf',
+    name: 'q3.pdf',
     mime: 'application/pdf',
     sizeBytes: 4,
+    sensitivity: 'internal',
     ...over,
   } as WorkspaceFile
 }
@@ -73,6 +77,10 @@ function makeFilesApi(over: Partial<FilesApi> = {}): FilesApi {
   return {
     writeBytes: vi.fn(async () => ({ ok: true as const, value: storedFile() })),
     stat: vi.fn(async () => ({ ok: true as const, value: storedFile() })),
+    readBytes: vi.fn(async () => ({
+      ok: true as const,
+      value: { file: storedFile(), bytes: new Uint8Array([1, 2, 3, 4]) },
+    })),
     ...over,
   } as unknown as FilesApi
 }
@@ -311,6 +319,118 @@ describe('[COMP:tools/mailbox-imap] Multi-account routing (account param, defaul
     const result = await send.execute({ to: ['x@y.z'], subject: 's', body: 'b' }, CTX)
     expect(api.sendMessage).toHaveBeenCalledTimes(1)
     expect(result.data).toMatchObject({ from: EMAIL })
+  })
+})
+
+describe('[COMP:tools/imap-attachments] imapSendMessage (workspace file → SMTP)', () => {
+  it('resolves a workspace file to bytes and passes a real attachment across the seam', async () => {
+    const api = makeApi()
+    const filesApi = makeFilesApi()
+    const send = toolByName(
+      toolsFor(api, { attachments: { filesApi } }),
+      'imapSendMessage',
+    )
+
+    const result = await send.execute(
+      { to: ['client@example.com'], subject: 'Proposal', body: 'Attached.', attachments: ['file-1'] },
+      CTX,
+    )
+
+    expect(filesApi.stat).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: 'ws-1' }), 'file-1')
+    expect(filesApi.readBytes).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: 'ws-1' }), 'file-1')
+    expect(api.sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      attachments: [{
+        filename: 'q3.pdf',
+        mime: 'application/pdf',
+        data: new Uint8Array([1, 2, 3, 4]),
+      }],
+    }))
+    expect(result.data).toEqual({
+      messageId: '<m1@corp.com>',
+      from: EMAIL,
+      attached: ['q3.pdf'],
+    })
+  })
+
+  it('fails honestly when workspace files are unavailable', async () => {
+    const api = makeApi()
+    const send = toolByName(toolsFor(api), 'imapSendMessage')
+    const result = await send.execute(
+      { to: ['client@example.com'], subject: 'Proposal', body: 'Attached.', attachments: ['file-1'] },
+      CTX,
+    )
+
+    expect(result.isError).toBe(true)
+    expect(result.data).toContain('not available in this context')
+    expect(api.sendMessage).not.toHaveBeenCalled()
+  })
+
+  it('refuses confidential files before reading bytes or sending', async () => {
+    const api = makeApi()
+    const filesApi = makeFilesApi({
+      stat: vi.fn(async () => ({
+        ok: true as const,
+        value: storedFile({ path: '/hr/payroll.pdf', name: 'payroll.pdf', sensitivity: 'confidential' }),
+      })),
+    })
+    const send = toolByName(toolsFor(api, { attachments: { filesApi } }), 'imapSendMessage')
+    const result = await send.execute(
+      { to: ['client@example.com'], subject: 'Proposal', body: 'Attached.', attachments: ['file-1'] },
+      CTX,
+    )
+
+    expect(result.isError).toBe(true)
+    expect(result.data).toContain('/hr/payroll.pdf is confidential')
+    expect(filesApi.readBytes).not.toHaveBeenCalled()
+    expect(api.sendMessage).not.toHaveBeenCalled()
+  })
+
+  it('enforces the total-size cap before reading any attachment bytes', async () => {
+    const api = makeApi()
+    const first = storedFile({ id: 'file-1', sizeBytes: MAX_MAILBOX_OUTGOING_ATTACHMENT_TOTAL_BYTES })
+    const second = storedFile({ id: 'file-2', path: '/uploads/two.pdf', name: 'two.pdf', sizeBytes: 1 })
+    const filesApi = makeFilesApi({
+      stat: vi.fn(async (_ctx: unknown, ref: string) => ({
+        ok: true as const,
+        value: ref === 'file-1' ? first : second,
+      })),
+    })
+    const send = toolByName(toolsFor(api, { attachments: { filesApi } }), 'imapSendMessage')
+    const result = await send.execute(
+      {
+        to: ['client@example.com'],
+        subject: 'Proposal',
+        body: 'Attached.',
+        attachments: ['file-1', 'file-2'],
+      },
+      CTX,
+    )
+
+    expect(result.isError).toBe(true)
+    expect(result.data).toContain('over the 18 MB email limit')
+    expect(filesApi.readBytes).not.toHaveBeenCalled()
+    expect(api.sendMessage).not.toHaveBeenCalled()
+  })
+
+  it('shows the resolved filename and size in the approval preview', async () => {
+    const filesApi = makeFilesApi({
+      stat: vi.fn(async () => ({ ok: true as const, value: storedFile({ sizeBytes: 2048 }) })),
+    })
+    const send = toolByName(
+      toolsFor(makeApi(), { attachments: { filesApi } }),
+      'imapSendMessage',
+    )
+
+    expect(await send.describeConfirmation!(
+      { to: ['client@example.com'], subject: 'Proposal', body: 'Attached.', attachments: ['file-1'] },
+      CTX,
+    )).toEqual([
+      `• From: ${EMAIL}`,
+      '• To: client@example.com',
+      '• Subject: Proposal',
+      '• Body: Attached.',
+      '• Attachment: q3.pdf (2 KB)',
+    ])
   })
 })
 

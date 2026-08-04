@@ -16,9 +16,10 @@
  *
  * Attachment delivery (Phase 3, D15-D17): `imapGetMessage` lists parts with
  * their BODYSTRUCTURE ids, `imapSaveAttachment` lands one part's bytes in the
- * workspace file primitive, and the existing `sendFile` delivers it. The chain
- * always runs through the file layer — never a direct email-to-channel byte
- * pipe — so the sensitivity / size / quota gates stay in one place.
+ * workspace file primitive, and the existing `sendFile` delivers it. Outbound
+ * `imapSendMessage` attachments also resolve through that file primitive before
+ * crossing the seam as MIME-ready bytes, keeping access/sensitivity gates in
+ * core while the API layer owns SMTP composition.
  *
  * [COMP:tools/mailbox-imap]
  * [COMP:tools/imap-attachments]
@@ -28,7 +29,7 @@ import { z } from 'zod'
 import { buildTool, type Tool } from '../types.js'
 import type { FilesApi } from '../../workspace-files/api.js'
 import { MAX_EXTERNAL_DOCUMENT_BYTES } from '../../workspace-files/attachments.js'
-import { ctxFor, errorMessage, workspaceGate } from '../../workspace-files/tool-helpers.js'
+import { ctxFor, errorMessage, idOrPathShape, workspaceGate } from '../../workspace-files/tool-helpers.js'
 
 /** Default lookback window for searches with no explicit `since` (D12 #4). */
 export const MAILBOX_DEFAULT_WINDOW_DAYS = 90
@@ -44,6 +45,16 @@ export const MAILBOX_SNIPPET_CHARS = 200
  * strands a stored file the user asked to be sent.
  */
 export const MAILBOX_ATTACHMENT_MAX_BYTES = MAX_EXTERNAL_DOCUMENT_BYTES
+/** SMTP attachment caps mirror Gmail's reviewed raw-byte envelope. */
+export const MAX_MAILBOX_OUTGOING_ATTACHMENTS = 10
+export const MAX_MAILBOX_OUTGOING_ATTACHMENT_TOTAL_BYTES = 18 * 1024 * 1024
+
+/** Resolved outbound document crossing the core → SMTP seam. */
+export type MailboxOutgoingAttachment = {
+  filename: string
+  mime: string
+  data: Uint8Array
+}
 
 /** One search hit — already projected to documented fields by the seam impl. */
 export type MailboxSearchHit = {
@@ -154,6 +165,8 @@ export type MailboxApi = {
     subject: string
     /** Markdown source — the API layer renders it to multipart/alternative. */
     body: string
+    /** Resolved workspace files — the API layer composes real MIME parts. */
+    attachments?: MailboxOutgoingAttachment[]
     /** Provider id (`folder:uid`) of the message being replied to — sets In-Reply-To/References. */
     inReplyTo?: string
   }): Promise<{ messageId: string | null }>
@@ -322,7 +335,7 @@ const accountField = z
  * `gmailSendMessage` attachments conditioning.
  */
 export type MailboxAttachmentDeps = {
-  /** Workspace file primitive — the only place email bytes ever land (D17). */
+  /** Workspace file primitive — the authority for inbound saves and outbound sends. */
   filesApi: FilesApi
   /**
    * Make the saved file searchable (the API layer's file-ingest queue).
@@ -354,6 +367,11 @@ function safeAttachmentName(filename: string): string {
 
 function formatMb(bytes: number): string {
   return `${Math.round((bytes / (1024 * 1024)) * 10) / 10} MB`
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`
+  return formatMb(bytes)
 }
 
 export function createMailboxTools(
@@ -481,6 +499,9 @@ export function createMailboxTools(
       'Call this tool directly — the user will see an Approve/Deny prompt. ' +
       'To reply on an existing thread, pass the original message\'s id as `inReplyTo` so the reply threads correctly. ' +
       'Copy additional people with `cc` (visible to every recipient) or `bcc` (hidden from the others); put an internal colleague you are looping in on `cc` unless the user asks to keep them hidden. ' +
+      'Workspace files can be attached as real email attachments: pass their ids or absolute paths in `attachments`. ' +
+      'Only brain-saved files can be attached; confidential files are refused. Limits: 10 attachments, 18 MB total. ' +
+      'If attachment resolution fails, relay the reason honestly and never claim the document was attached. ' +
       accountRoutingDescription,
     inputSchema: z.object({
       to: z.array(z.string()).min(1).max(20).describe('Recipient email addresses.'),
@@ -494,6 +515,14 @@ export function createMailboxTools(
           '(headings, bold, lists, links, and tables become proper HTML, with a plain-text version ' +
           'generated automatically). Write it the way an email reads: greeting, short paragraphs, sign-off.',
         ),
+      attachments: z
+        .array(idOrPathShape)
+        .max(MAX_MAILBOX_OUTGOING_ATTACHMENTS)
+        .optional()
+        .describe(
+          'Workspace files to attach — each entry a file id or absolute workspace path. ' +
+          'The recipient receives real MIME parts, not storage links.',
+        ),
       inReplyTo: z
         .string()
         .optional()
@@ -505,7 +534,7 @@ export function createMailboxTools(
     requiresConfirmation: true,
     timeoutMs: 30_000,
 
-    async describeConfirmation(input) {
+    async describeConfirmation(input, context) {
       const draft = (input ?? {}) as {
         account?: unknown
         to?: unknown
@@ -513,6 +542,7 @@ export function createMailboxTools(
         bcc?: unknown
         subject?: unknown
         body?: unknown
+        attachments?: unknown
       }
       const resolved = resolveForInput(draft)
       if (!resolved.ok) return null
@@ -529,6 +559,32 @@ export function createMailboxTools(
       if (bcc.length > 0) lines.push(`• Bcc: ${bcc.join(', ')}`)
       if (typeof draft.subject === 'string') lines.push(`• Subject: ${draft.subject}`)
       if (typeof draft.body === 'string') lines.push(`• Body: ${draft.body}`)
+      const refs = Array.isArray(draft.attachments)
+        ? draft.attachments.filter((v): v is string => typeof v === 'string')
+        : []
+      if (refs.length > 0) {
+        if (!attachmentDeps || !context.workspaceId) {
+          for (const ref of refs) lines.push(`• Attachment: ${ref}`)
+          return lines
+        }
+        const seen = new Set<string>()
+        const ctx = ctxFor(context)
+        for (const ref of refs) {
+          const stat = await attachmentDeps.filesApi.stat(ctx, ref)
+          if (!stat.ok) {
+            lines.push(`• Attachment: ${ref} (not found)`)
+            continue
+          }
+          const file = stat.value
+          if (seen.has(file.id)) continue
+          seen.add(file.id)
+          lines.push(
+            file.sensitivity === 'confidential'
+              ? `• Attachment: ${file.name} (confidential: send will be refused)`
+              : `• Attachment: ${file.name} (${formatSize(file.sizeBytes)})`,
+          )
+        }
+      }
       return lines
     },
 
@@ -549,15 +605,80 @@ export function createMailboxTools(
             isError: true,
           }
         }
+        let attachments: MailboxOutgoingAttachment[] | undefined
+        if (input.attachments && input.attachments.length > 0) {
+          if (!attachmentDeps) {
+            return {
+              data:
+                'File attachments are not available in this context — workspace file storage is not wired here. ' +
+                'Send the email without attachments, or tell the user to share the file another way.',
+              isError: true,
+            }
+          }
+          const gate = workspaceGate(context.workspaceId)
+          if (gate) return gate
+          const ctx = ctxFor(context)
+
+          // Resolve every metadata row and run all gates before reading bytes.
+          const seen = new Set<string>()
+          const files: Array<{ id: string; path: string; name: string; mime: string; sizeBytes: number }> = []
+          for (const ref of input.attachments) {
+            const stat = await attachmentDeps.filesApi.stat(ctx, ref)
+            if (!stat.ok) return { data: errorMessage(stat.error), isError: true }
+            const file = stat.value
+            if (seen.has(file.id)) continue
+            seen.add(file.id)
+            if (file.sensitivity === 'confidential') {
+              return {
+                data:
+                  `${file.path} is confidential and cannot be emailed — email recipients are outside the workspace. ` +
+                  'Tell the user to share it from the web app instead.',
+                isError: true,
+              }
+            }
+            files.push({
+              id: file.id,
+              path: file.path,
+              name: file.name,
+              mime: file.mime,
+              sizeBytes: file.sizeBytes,
+            })
+          }
+
+          const totalBytes = files.reduce((sum, file) => sum + file.sizeBytes, 0)
+          if (totalBytes > MAX_MAILBOX_OUTGOING_ATTACHMENT_TOTAL_BYTES) {
+            return {
+              data:
+                `Attachments total ${formatMb(totalBytes)} — over the ${formatMb(MAX_MAILBOX_OUTGOING_ATTACHMENT_TOTAL_BYTES)} email limit. ` +
+                'Send fewer or smaller files, or tell the user to share the large ones from the web app.',
+              isError: true,
+            }
+          }
+
+          attachments = []
+          for (const file of files) {
+            const read = await attachmentDeps.filesApi.readBytes(ctx, file.id)
+            if (!read.ok) return { data: errorMessage(read.error), isError: true }
+            attachments.push({ filename: file.name, mime: file.mime, data: read.value.bytes })
+          }
+        }
+
         const data = await resolved.api.sendMessage({
           to: input.to,
           ...(input.cc?.length ? { cc: input.cc } : {}),
           ...(input.bcc?.length ? { bcc: input.bcc } : {}),
           subject: input.subject,
           body: input.body,
+          ...(attachments?.length ? { attachments } : {}),
           ...(input.inReplyTo ? { inReplyTo: input.inReplyTo } : {}),
         })
-        return { data: { messageId: data.messageId, from: resolved.email } }
+        return {
+          data: {
+            messageId: data.messageId,
+            from: resolved.email,
+            ...(attachments?.length ? { attached: attachments.map((file) => file.filename) } : {}),
+          },
+        }
       } catch (err) {
         return mailboxError(err)
       }

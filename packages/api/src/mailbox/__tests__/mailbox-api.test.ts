@@ -431,6 +431,33 @@ describe('[COMP:tools/imap-attachments] getAttachment byte fetch (D14 / D16)', (
 })
 
 describe('[COMP:api/mailbox-imap-client] sendMessage', () => {
+  it('composes attachments once and reuses the same MIME bytes for SMTP and Sent APPEND', async () => {
+    const { client, appends } = makeFakeClient(
+      {
+        INBOX: { uids: [], messages: {} },
+        Sent: { uids: [], messages: {} },
+      },
+      { specialUseSent: 'Sent' },
+    )
+    const sendComposed = vi.fn(async (..._args: unknown[]) => {})
+    const api = makeApi(client, { sendComposed })
+    await api.sendMessage({
+      to: ['ada@acme.com'],
+      subject: 'Receipt',
+      body: 'Attached.',
+      attachments: [{
+        filename: 'receipt.pdf',
+        mime: 'application/pdf',
+        data: new Uint8Array(Buffer.from('%PDF-fake')),
+      }],
+    })
+
+    const composed = sendComposed.mock.calls[0][1] as { raw: Buffer }
+    expect(composed.raw.toString('utf8')).toContain('receipt.pdf')
+    expect(appends).toHaveLength(1)
+    expect(appends[0].content.equals(composed.raw)).toBe(true)
+  })
+
   it('threads a reply: resolves the target Message-ID + References and appends a Sent copy', async () => {
     const target = msg(7, { messageId: '<root@x>' })
     target.headers = Buffer.from('References: <start@x> <mid@x>\r\n', 'utf8')
