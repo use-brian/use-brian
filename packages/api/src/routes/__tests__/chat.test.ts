@@ -1,6 +1,92 @@
-import { describe, it, expect } from 'vitest'
-import { appAssistantForbidsResearch, appAssistantForbidsCoordinator, isAdaptiveResearchEligible, isUserBlocked, sanitizeTitle, buildActivePageInstruction, buildViewingSkillBlock, buildViewingDeckBlock, resolveStickyChannelId, isDocSurface, isAppSurface, attachUserVisibleContext } from '../chat.js'
-import type { Message } from '@use-brian/core'
+import { describe, it, expect, vi } from 'vitest'
+import { appAssistantForbidsResearch, appAssistantForbidsCoordinator, isAdaptiveResearchEligible, isUserBlocked, sanitizeTitle, buildActivePageInstruction, buildViewingSkillBlock, buildViewingDeckBlock, resolveStickyChannelId, isDocSurface, isAppSurface, attachUserVisibleContext, settleInlineToolApproval } from '../chat.js'
+import type { ConfirmationResolver, Message } from '@use-brian/core'
+import type { PendingApproval, PendingApprovalsStore } from '../../db/pending-approvals-store.js'
+
+describe('[COMP:api/chat-route] inline approval durability', () => {
+  function resolver(resolve: ConfirmationResolver['resolve']): ConfirmationResolver {
+    return { resolve, waitForDecision: vi.fn() }
+  }
+
+  it('settles a durable rejection before waking the live resolver', async () => {
+    const order: string[] = []
+    const respond = vi.fn(async () => {
+      order.push('row')
+      return { status: 'rejected' } as PendingApproval
+    })
+    const resolve = vi.fn(() => order.push('resolver'))
+
+    await expect(
+      settleInlineToolApproval({
+        approvalId: 'approval-1',
+        toolCallId: 'tool-1',
+        decision: 'deny',
+        comment: 'Use the draft account instead',
+        responderUserId: 'user-1',
+        resolver: resolver(resolve),
+        pendingApprovalsStore: {
+          respond,
+          getByIdSystem: vi.fn(),
+        } as Pick<PendingApprovalsStore, 'respond' | 'getByIdSystem'>,
+      }),
+    ).resolves.toBe('durable')
+
+    expect(respond).toHaveBeenCalledWith(
+      'approval-1',
+      'rejected',
+      'user-1',
+      'Use the draft account instead',
+    )
+    expect(resolve).toHaveBeenCalledWith(
+      'tool-1',
+      'deny',
+      'Use the draft account instead',
+    )
+    expect(order).toEqual(['row', 'resolver'])
+  })
+
+  it('does not wake the live resolver when the durable update fails', async () => {
+    const resolve = vi.fn()
+    const failure = new Error('database unavailable')
+
+    await expect(
+      settleInlineToolApproval({
+        approvalId: 'approval-1',
+        toolCallId: 'tool-1',
+        decision: 'allow',
+        responderUserId: 'user-1',
+        resolver: resolver(resolve),
+        pendingApprovalsStore: {
+          respond: vi.fn().mockRejectedValue(failure),
+          getByIdSystem: vi.fn(),
+        } as Pick<PendingApprovalsStore, 'respond' | 'getByIdSystem'>,
+      }),
+    ).rejects.toThrow('database unavailable')
+
+    expect(resolve).not.toHaveBeenCalled()
+  })
+
+  it('keeps legacy confirmations working when no durable row was created', async () => {
+    const resolve = vi.fn()
+    const respond = vi.fn()
+
+    await expect(
+      settleInlineToolApproval({
+        toolCallId: 'tool-1',
+        decision: 'allow',
+        responderUserId: 'user-1',
+        resolver: resolver(resolve),
+        pendingApprovalsStore: {
+          respond,
+          getByIdSystem: vi.fn(),
+        } as Pick<PendingApprovalsStore, 'respond' | 'getByIdSystem'>,
+      }),
+    ).resolves.toBe('legacy')
+
+    expect(respond).not.toHaveBeenCalled()
+    expect(resolve).toHaveBeenCalledWith('tool-1', 'allow', undefined)
+  })
+})
 
 describe('[COMP:api/chat-route] sanitizeTitle', () => {
   it('strips bold markdown', () => {

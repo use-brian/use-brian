@@ -91,6 +91,10 @@ import {
 import { fetchFeedTeamProfiles, type FeedProfile } from "@/lib/api/feed";
 import { isHostedEdition } from "@/lib/edition";
 import { fetchHomeDock, type ResolvedDock } from "@/lib/api/home-dock";
+import {
+  APPROVALS_REFRESH_EVENT,
+  type ApprovalsRefreshDetail,
+} from "@/lib/approvals-events";
 import { isDesktopAuth } from "@/lib/desktop-auth-source";
 import { idbGet, idbSet } from "@/lib/offline/idb";
 import { dropPageFromDocTabsSession } from "@/lib/doc-tabs-session";
@@ -519,6 +523,22 @@ export function DocSidebarDataProvider({
       cancelled = true;
     };
   }, [workspaceId, dockTick, reloadTick]);
+
+  // Approval create/resolve events change the live approvals signal even
+  // though no page list changed. Listen at the provider (mounted across all
+  // workspace surfaces) so the persistent Suggested row, its badge, and the
+  // Home pane re-read the same dock immediately after an inline chat/queue
+  // response and after the cross-tab workspace event.
+  useEffect(() => {
+    if (!workspaceId || typeof window === "undefined") return;
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<ApprovalsRefreshDetail>).detail;
+      if (detail?.workspaceId && detail.workspaceId !== workspaceId) return;
+      reloadDock();
+    };
+    window.addEventListener(APPROVALS_REFRESH_EVENT, handler);
+    return () => window.removeEventListener(APPROVALS_REFRESH_EVENT, handler);
+  }, [workspaceId, reloadDock]);
 
   // Floating-chat bridge: a chat turn that persists a draft fires
   // `doc:draft-created`; refresh the lists so the new draft surfaces

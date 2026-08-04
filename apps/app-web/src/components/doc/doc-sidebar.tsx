@@ -747,6 +747,15 @@ export function DocSidebar(props: Props) {
       )}
 
       <div className="flex-1 min-h-0 overflow-y-auto px-2 pb-4">
+        {/* Suggested for you is the one persistent row shared by the whole
+            operator mini-app family. Keep it before each app's own sidebar
+            panel (and before Page's sections) so Tasks / CRM / Feed /
+            Browsers / Chat / custom apps never strand the needs-you badge in
+            Page alone. It remains absent on Brain / Studio / Workflow. */}
+        {activeOperatorApp !== null ? (
+          <HomeDock workspaceId={workspaceId} />
+        ) : null}
+
         {/* Surface-aware body. The page tree (Favorites / Drafts / search) shows
             ONLY on Home (`'p'`); Brain / Studio / Workflow / Tasks / CRM /
             Browsers / Chat each swap in their own panel; every other surface
@@ -831,12 +840,6 @@ export function DocSidebar(props: Props) {
             onDragStart={handleDragStart}
             onDragEnd={handleDragEnd}
           >
-            {/* Home Dock — single "Suggested for you" entry, pinned above the
-                sections, badged with the live needs-you total off the shared
-                dock. The suggestions render in the content pane
-                (SuggestedView). Spec: docs/architecture/features/home-dock.md. */}
-            <HomeDock workspaceId={workspaceId} />
-
             {/* "Teamspaces" group label — wraps every teamspace row, with a
                 hover `⋯` housing "New teamspace" (no collapse-all: the group
                 itself never folds, only individual teamspaces do). */}

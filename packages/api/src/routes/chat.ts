@@ -122,6 +122,76 @@ export function _getApprovalResolverIndexSize(): number {
 }
 
 /**
+ * Settle the durable `pending_approvals` row for a live inline chat decision
+ * before waking the in-memory resolver. A missing `approvalId` is the
+ * intentional legacy/fail-open path (personal assistants, or a DB blip while
+ * creating the row) and resolves in memory only.
+ *
+ * The ordering is load-bearing: if the resolver fires first, the tool can run
+ * or the model can consume a denial while the workspace queue still claims
+ * the same request is pending. A failed row update therefore leaves the
+ * resolver untouched so the user can retry safely.
+ *
+ * [COMP:api/chat-route]
+ */
+export async function settleInlineToolApproval(params: {
+  approvalId?: string
+  toolCallId: string
+  decision: ConfirmationDecision
+  comment?: string
+  responderUserId: string
+  resolver: ConfirmationResolver
+  pendingApprovalsStore: Pick<PendingApprovalsStore, 'respond' | 'getByIdSystem'>
+}): Promise<'durable' | 'legacy' | 'already_settled'> {
+  const {
+    approvalId,
+    toolCallId,
+    decision,
+    comment,
+    responderUserId,
+    resolver,
+    pendingApprovalsStore,
+  } = params
+
+  if (!approvalId) {
+    resolver.resolve(toolCallId, decision, comment)
+    return 'legacy'
+  }
+
+  const rowDecision =
+    decision === 'allow' || decision === 'always_allow' ? 'approved' : 'rejected'
+  const settled = await pendingApprovalsStore.respond(
+    approvalId,
+    rowDecision,
+    responderUserId,
+    rowDecision === 'rejected' ? comment : undefined,
+  )
+
+  if (settled) {
+    resolver.resolve(toolCallId, decision, comment)
+    return 'durable'
+  }
+
+  // A cross-channel response may have won the atomic update between the chat
+  // card click and this request. Resume from the row's authoritative outcome
+  // rather than applying the losing click's decision.
+  const current = await pendingApprovalsStore.getByIdSystem(approvalId)
+  if (!current || current.status === 'pending') {
+    throw new Error(`Inline approval ${approvalId} could not be settled`)
+  }
+  const authoritativeDecision: ConfirmationDecision =
+    current.status === 'approved' || current.status === 'auto_approved'
+      ? 'allow'
+      : 'deny'
+  resolver.resolve(
+    toolCallId,
+    authoritativeDecision,
+    authoritativeDecision === 'deny' ? current.rejectReason ?? undefined : undefined,
+  )
+  return 'already_settled'
+}
+
+/**
  * Maximum non-identity memory-index rows injected into the per-turn
  * system prompt. Sized for ~1,400 input tokens at 60 rows × ~80 chars
  * + footer. Memories beyond the cap are surfaced to the model via a
@@ -6609,7 +6679,33 @@ export function chatRoutes(options: WebChatOptions): Router {
         res.status(403).json({ error: 'Not authorized for this confirmation' })
         return
       }
-      resolver.resolve(toolCallId, decision, note)
+      // Q10 unified approvals: the interactive card and the async queue are
+      // two views over ONE durable row. Map this live tool call back to its
+      // approval id, settle the row first, then wake the resolver. Legacy
+      // confirmations without a row keep the in-memory-only path.
+      let approvalId: string | undefined
+      for (const [id, entry] of approvalResolverIndex) {
+        if (entry.sessionId === sessionId && entry.toolCallId === toolCallId) {
+          approvalId = id
+          break
+        }
+      }
+      try {
+        await settleInlineToolApproval({
+          approvalId,
+          toolCallId,
+          decision,
+          comment: note,
+          responderUserId: jwtUserId,
+          resolver,
+          pendingApprovalsStore: options.pendingApprovalsStore,
+        })
+        if (approvalId) approvalResolverIndex.delete(approvalId)
+      } catch (err) {
+        console.error('[chat] inline approval settlement failed:', err)
+        res.status(500).json({ error: 'Could not record confirmation; please retry' })
+        return
+      }
       // Tell room viewers the card is resolved so their pending state clears
       // without waiting for the next activity event (T13).
       if (isSharedChatSession(session)) {

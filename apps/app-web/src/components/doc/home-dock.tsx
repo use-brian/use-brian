@@ -1,10 +1,11 @@
 "use client";
 
 /**
- * Home Dock — the single "Suggested for you" entry in the sidebar, pinned above
- * Favorites on the Home surface. Deliberately quiet: one row, a sparkle, and a
- * "needs you" count. The actual suggestions live in the content pane
- * (`SuggestedView`, the Home landing), not here - the sidebar stays Notion-calm.
+ * Home Dock — the single "Suggested for you" entry in the sidebar, rendered
+ * before the surface-specific rows of every operator mini-app (and above the
+ * Page sections). Deliberately quiet: one row, a sparkle, and a "needs you"
+ * count. The actual suggestions live in the Page content pane (`SuggestedView`,
+ * the Home landing), not here - the sidebar stays Notion-calm.
  *
  * The badge is the live total of items waiting on the user — the sum of the
  * resolved dock's "Needs you" card counts (approvals + brain reviews +
