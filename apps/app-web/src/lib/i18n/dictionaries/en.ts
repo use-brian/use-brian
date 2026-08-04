@@ -1009,7 +1009,7 @@ export const en = {
       // Fallback — rendered when an unknown block kind reaches the renderer.
       unsupportedKind: "Unsupported block: {kind}",
     },
-    // Simple-table block — Notion-style edge controls and menus.
+    // Simple-table block: Notion-style edge controls and menus.
     table: {
       addRow: "Add row",
       addColumn: "Add column",
