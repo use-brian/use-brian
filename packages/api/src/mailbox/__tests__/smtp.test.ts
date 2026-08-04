@@ -19,6 +19,23 @@ describe('[COMP:api/mailbox-imap-client] SMTP compose (markdown → multipart/al
     expect(composed.envelope).toEqual({ from: 'me@corp.com', to: ['ada@acme.com'] })
   })
 
+  it('wraps the alternative body and resolved files in multipart/mixed MIME', async () => {
+    const bytes = new Uint8Array(Buffer.from('%PDF-1.7 fake'))
+    const composed = await composeMailboxMessage({
+      from: 'me@corp.com',
+      to: ['ada@acme.com'],
+      subject: 'Receipt',
+      body: 'Please see **attached**.',
+      attachments: [{ filename: 'receipt.pdf', mime: 'application/pdf', data: bytes }],
+    })
+    const raw = composed.raw.toString('utf8')
+    expect(raw).toContain('multipart/mixed')
+    expect(raw).toContain('multipart/alternative')
+    expect(raw).toContain('Content-Type: application/pdf')
+    expect(raw).toContain('receipt.pdf')
+    expect(raw).toContain(Buffer.from(bytes).toString('base64'))
+  })
+
   it('sets In-Reply-To and References for a reply', async () => {
     const composed = await composeMailboxMessage({
       from: 'me@corp.com',

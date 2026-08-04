@@ -12,9 +12,12 @@ import {
   HALO_PADDING,
   HUB_DEGREE_FLOOR,
   HUB_SMALL_GRAPH,
+  INITIAL_FIT_MAX_NODE_RADIUS_PX,
+  INITIAL_FIT_MAX_SCALE,
   NODE_RADIUS_MAX,
   NODE_RADIUS_MIN,
   PULSE_PERIOD_MS,
+  boundedViewportFit,
   clusterLabelAlpha,
   communityHalos,
   communityLabels,
@@ -30,6 +33,7 @@ import {
   nodePhase,
   nodeRadius,
   pulsePhase,
+  radialSeedPositions,
   shadeHex,
   smoothstep,
   stepToward,
@@ -38,6 +42,40 @@ import {
 } from "../graph-canvas";
 
 describe("[COMP:app-web/graph-canvas] graph canvas rendering math", () => {
+  describe("boundedViewportFit", () => {
+    it("keeps a sparse graph at a calm maximum scale", () => {
+      const fit = boundedViewportFit({
+        width: 1000,
+        height: 800,
+        bounds: { x: [-5, 5], y: [-5, 5] },
+        maxNodeRadius: 7,
+      });
+      expect(fit.center).toEqual({ x: 0, y: 0 });
+      expect(fit.scale).toBe(INITIAL_FIT_MAX_SCALE);
+      expect(fit.scale * 7).toBeLessThanOrEqual(INITIAL_FIT_MAX_NODE_RADIUS_PX);
+    });
+
+    it("lets a dense graph use its smaller geometric fit", () => {
+      const fit = boundedViewportFit({
+        width: 1000,
+        height: 800,
+        bounds: { x: [-200, 200], y: [-150, 150] },
+        maxNodeRadius: 7,
+      });
+      expect(fit.scale).toBeCloseTo(2.2);
+    });
+
+    it("reduces the fit further for a large group node", () => {
+      const fit = boundedViewportFit({
+        width: 1000,
+        height: 800,
+        bounds: { x: [-5, 5], y: [-5, 5] },
+        maxNodeRadius: 11.5,
+      });
+      expect(fit.scale).toBeCloseTo(INITIAL_FIT_MAX_NODE_RADIUS_PX / 11.5);
+    });
+  });
+
   describe("nodeRadius", () => {
     it("clamps to the [2.5, 7] range", () => {
       expect(nodeRadius(0)).toBe(NODE_RADIUS_MIN);
@@ -275,13 +313,32 @@ describe("[COMP:app-web/graph-canvas] graph canvas rendering math", () => {
       );
       const fresh = nodes[2];
       // Centroid (20, 30) plus the small ring offset.
-      expect(Math.hypot((fresh.x ?? 0) - 20, (fresh.y ?? 0) - 30)).toBeLessThanOrEqual(12.01);
+      expect(
+        Math.hypot((fresh.x ?? 0) - 20, (fresh.y ?? 0) - 30),
+      ).toBeLessThanOrEqual(12.01);
     });
 
     it("leaves an unconnected new node unplaced for engine default placement", () => {
       const nodes: Array<{ id: string; x?: number }> = [{ id: "orphan" }];
       mergePositions(nodes, [], prev);
       expect(nodes[0].x).toBeUndefined();
+    });
+  });
+
+  describe("radialSeedPositions", () => {
+    it("gives scope children stable, unique positions around their parent", () => {
+      const children = [{ id: "a" }, { id: "b" }, { id: "c" }];
+      const first = radialSeedPositions(children, { x: 20, y: -10 });
+      const second = radialSeedPositions(children, { x: 20, y: -10 });
+
+      expect(first).toEqual(second);
+      expect(
+        new Set([...first.values()].map((p) => `${p.x}:${p.y}`)).size,
+      ).toBe(3);
+      for (const position of first.values()) {
+        expect(Math.hypot(position.x - 20, position.y + 10)).toBeGreaterThan(0);
+        expect(position).toMatchObject({ vx: 0, vy: 0 });
+      }
     });
   });
 

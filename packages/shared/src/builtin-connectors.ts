@@ -208,10 +208,11 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
   imap: [
     { name: 'imapSearchMessages', description: "Search the user's company mailbox (INBOX + Sent)", classification: 'read', defaultPolicy: 'allow' },
     { name: 'imapGetMessage', description: 'Read a specific email from the company mailbox', classification: 'read', defaultPolicy: 'allow' },
-    { name: 'imapSendMessage', description: "Send an email from the user's company mailbox", classification: 'write', defaultPolicy: 'ask' },
+    { name: 'imapSendMessage', description: "Send an email with optional workspace-file attachments from the user's company mailbox", classification: 'write', defaultPolicy: 'ask' },
     // Read/allow like syncMailboxNow: it writes only inside the workspace
-    // (one email attachment becomes a workspace file). Outbound delivery of
-    // that file stays gated by sendFile. See mailbox-imap.md → "Attachments".
+    // (one inbound email attachment becomes a workspace file). Any later
+    // egress stays separately gated by sendFile or imapSendMessage.
+    // See mailbox-imap.md → "Attachments".
     { name: 'imapSaveAttachment', description: 'Save an email attachment into the workspace as a file', classification: 'read', defaultPolicy: 'allow' },
     { name: 'searchEmailArchive', description: 'Semantic search across the synced mailbox archive', classification: 'read', defaultPolicy: 'allow' },
     { name: 'syncMailboxNow', description: 'Pull new mail into the searchable archive now', classification: 'read', defaultPolicy: 'allow' },

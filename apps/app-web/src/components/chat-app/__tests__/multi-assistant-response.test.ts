@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  completeTrailingAssistantMention,
+  nextMentionSelectionIndex,
   resolveMentionedAssistants,
   resolveWorkBenchAssistant,
 } from "../multi-assistant-response";
@@ -12,6 +14,21 @@ const roster = [
 ];
 
 describe("[COMP:app-web/multi-assistant-response] room response group", () => {
+  it("cycles the active mention option in both directions", () => {
+    expect(nextMentionSelectionIndex(0, 2, 1)).toBe(1);
+    expect(nextMentionSelectionIndex(1, 2, 1)).toBe(0);
+    expect(nextMentionSelectionIndex(0, 2, -1)).toBe(1);
+  });
+
+  it("completes only the trailing partial mention", () => {
+    expect(completeTrailingAssistantMention("Ask @Br", "Brian")).toBe(
+      "Ask @Brian ",
+    );
+    expect(
+      completeTrailingAssistantMention("@Brian and @Hi", "Hinson"),
+    ).toBe("@Brian and @Hinson ");
+  });
+
   it("returns every distinct mentioned assistant in textual order", () => {
     expect(
       resolveMentionedAssistants("@HINSON and @Brian, what do you both know? @hinson", roster)

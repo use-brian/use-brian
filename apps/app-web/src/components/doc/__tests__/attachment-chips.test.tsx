@@ -19,10 +19,14 @@ import { AttachmentChips } from "../attachment-chips";
 
 const dict = en as unknown as Dictionary;
 
-function render(attachments: Attachment[]): string {
+function render(attachments: Attachment[], className?: string): string {
   return renderToStaticMarkup(
     <I18nProvider locale="en" dict={dict}>
-      <AttachmentChips attachments={attachments} onRemove={() => {}} />
+      <AttachmentChips
+        attachments={attachments}
+        onRemove={() => {}}
+        className={className}
+      />
     </I18nProvider>,
   );
 }
@@ -45,6 +49,22 @@ describe("[COMP:app-web/attachment-chips] AttachmentChips", () => {
       { localId: "b", fileName: "secret.txt", mimeType: "text/plain", sizeBytes: 1, status: "uploading" },
     ]);
     expect(markup).toContain(en.attachments.uploading);
+  });
+
+  it("accepts host spacing so a composite composer can inset the tray", () => {
+    const markup = render(
+      [
+        {
+          localId: "b",
+          fileName: "draft.txt",
+          mimeType: "text/plain",
+          sizeBytes: 1,
+          status: "uploading",
+        },
+      ],
+      "px-3 pt-2.5",
+    );
+    expect(markup).toContain("flex flex-wrap gap-1.5 px-3 pt-2.5");
   });
 
   it("applies destructive styling and an error title on failure", () => {

@@ -65,10 +65,24 @@ function preflightResult(over: Partial<ConnectorActionPreflight> = {}): Connecto
 
 /** Workspace-file primitive — present = `imapSaveAttachment` is built (D17). */
 function filesApiStub() {
+  const file = {
+    id: 'file-1',
+    workspaceId: 'ws-1',
+    path: '/uploads/proposal.pdf',
+    name: 'proposal.pdf',
+    sizeBytes: 3,
+    mime: 'application/pdf',
+    sensitivity: 'internal',
+  }
   return {
     writeBytes: vi.fn(async () => ({
       ok: true as const,
       value: { id: 'file-1', path: '/uploads/email/x.pdf', sizeBytes: 3, mime: 'application/pdf' },
+    })),
+    stat: vi.fn(async () => ({ ok: true as const, value: file })),
+    readBytes: vi.fn(async () => ({
+      ok: true as const,
+      value: { file, bytes: new Uint8Array([1, 2, 3]) },
     })),
   } as never
 }
@@ -456,6 +470,48 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
     // The deny threw before createMailboxApi's sendMessage — no IMAP/SMTP
     // connection was ever attempted (nothing here stubs the network; a real
     // attempt would reject with a connection error, not the classifier copy).
+  })
+
+  it('includes attachment metadata, never bytes, in classifier preflight and denied audit', async () => {
+    const emit = vi.fn(async () => ({ status: 'denied' as const }))
+    const preflight = vi.fn((_input: unknown) => preflightResult({
+      shouldDeny: true,
+      classifierMatches: ['proposal.pdf'],
+    }))
+    const audit = { preflight, emit } as unknown as ConnectorActionAudit
+    const { tools } = await injectImap({ audit, withFiles: true })
+    const send = tools.get('imapSendMessage')!
+
+    const result = await send.execute(
+      {
+        to: ['x@y.z'],
+        subject: 'Proposal',
+        body: 'Attached.',
+        attachments: ['file-1'],
+      },
+      { workspaceId: 'ws-1', userId: 'u-1', assistantId: 'a-1' } as never,
+    )
+
+    expect(result.isError).toBe(true)
+    const expectedAttachments = [{
+      name: 'proposal.pdf',
+      mime: 'application/pdf',
+      size_bytes: 3,
+    }]
+    expect(preflight).toHaveBeenCalledWith(expect.objectContaining({
+      payload: expect.objectContaining({
+        attachment_count: 1,
+        attachments: expectedAttachments,
+      }),
+    }))
+    expect(emit).toHaveBeenCalledWith(
+      { userId: 'u-1', assistantId: 'a-1' },
+      expect.objectContaining({
+        status: 'denied',
+        payload: expect.objectContaining({ attachments: expectedAttachments }),
+      }),
+    )
+    expect(JSON.stringify(preflight.mock.calls[0][0])).not.toContain('data')
   })
 })
 

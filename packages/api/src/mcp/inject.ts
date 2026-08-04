@@ -3487,6 +3487,12 @@ async function injectMailboxTools(params: {
         body_length: p.body?.length ?? 0,
         body: p.body ?? '',
         in_reply_to: p.inReplyTo ?? null,
+        attachment_count: p.attachments?.length ?? 0,
+        attachments: (p.attachments ?? []).map((attachment) => ({
+          name: attachment.filename,
+          mime: attachment.mime,
+          size_bytes: attachment.data.byteLength,
+        })),
       }
       let preflight: ConnectorActionPreflight | undefined
       if (connectorActionAudit) {
