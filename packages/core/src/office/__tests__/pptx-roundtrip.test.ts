@@ -1,13 +1,16 @@
 import JSZip from 'jszip'
 import { describe, expect, it } from 'vitest'
 import { exportOfficePresentation, importOfficePresentation, reparseOfficePresentation } from '../pptx/index.js'
-import { id, presentationSnapshot } from './fixtures.js'
+import { id, presentationSnapshot, resolveFixtureResource } from './fixtures.js'
 
 describe('[COMP:office/pptx-engine] PPTX engine', () => {
   it('exports, safely reparses, and preserves canonical semantics plus layout', async () => {
     const source = presentationSnapshot()
-    const exported = await exportOfficePresentation(source)
+    const exported = await exportOfficePresentation(source, resolveFixtureResource)
+    const imported = await importOfficePresentation(exported.bytes, { artifactId: source.artifactId, workspaceId: source.workspaceId, templateVersionId: source.templateVersionId, locale: source.locale, defaultLanguage: source.defaultLanguage, title: source.title })
     const reopened = await reparseOfficePresentation(exported.bytes)
+    expect(imported.ok).toBe(true)
+    expect(imported.snapshot).toEqual(source)
     expect(reopened.snapshot).toEqual(source)
     expect(reopened.semanticHash).toBe(exported.semanticHash)
     expect(reopened.layoutSerialization).toBe(exported.layoutSerialization)

@@ -110,7 +110,7 @@ export const OfficeChartSchema = NodeBaseSchema.extend({
   altText: z.string().min(1).max(2_000),
 }).strict()
 
-export const OfficeVideoSchema = NodeBaseSchema.extend({
+const OfficeVideoBaseSchema = NodeBaseSchema.extend({
   kind: z.literal('video'),
   resourceId: OfficeUuidSchema,
   posterResourceId: OfficeUuidSchema,
@@ -120,7 +120,9 @@ export const OfficeVideoSchema = NodeBaseSchema.extend({
   recipientAccessibleUrl: z.string().url().refine((url) => url.startsWith('https:'), {
     message: 'DOCX video links must use HTTPS',
   }).optional(),
-}).strict().refine((value) => Boolean(value.captionsResourceId || value.transcript), {
+}).strict()
+
+export const OfficeVideoSchema = OfficeVideoBaseSchema.refine((value) => Boolean(value.captionsResourceId || value.transcript), {
   message: 'Video requires captions or a transcript',
 })
 
@@ -210,9 +212,12 @@ export const PresentationChartSchema = OfficeChartSchema.omit({ kind: true }).ex
   locked: z.boolean().default(false),
 }).strict()
 
-export const PresentationVideoSchema = OfficeVideoSchema.and(
-  z.object({ geometry: OfficeGeometrySchema, locked: z.boolean().default(false) }).strict(),
-)
+export const PresentationVideoSchema = OfficeVideoBaseSchema.extend({
+  geometry: OfficeGeometrySchema,
+  locked: z.boolean().default(false),
+}).strict().refine((value) => Boolean(value.captionsResourceId || value.transcript), {
+  message: 'Video requires captions or a transcript',
+})
 
 export const PresentationObjectSchema = z.union([
   PresentationTextSchema,

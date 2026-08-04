@@ -127,7 +127,7 @@ export function preflightOfficeCandidate(input: unknown): OfficePreflightResult 
       if ((object.kind === 'image' || object.kind === 'video') && typeof object.resourceId === 'string' && !resourceIds.has(object.resourceId)) {
         diagnostics.push({ severity: 'error', code: 'resource.missing', path, message: `Referenced resource ${object.resourceId} is missing` })
       }
-      if (object.kind === 'image' && object.decorative !== true && !object.altText) {
+      if (object.kind === 'image' && typeof object.resourceId === 'string' && object.decorative !== true && !object.altText) {
         diagnostics.push({ severity: 'error', code: 'accessibility.alt_text', path, message: 'Non-decorative images require alt text', capabilityId: 'image' })
       }
     }

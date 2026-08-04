@@ -43,6 +43,10 @@ function findObject(value: unknown, id: string): Record<string, unknown> | null 
   return null
 }
 
+function assertSafePropertyPart(part: string): void {
+  if (part === '__proto__' || part === 'constructor' || part === 'prototype') throw new Error('Unsafe property path')
+}
+
 function deleteObject(value: unknown, id: string): boolean {
   if (!value || typeof value !== 'object') return false
   for (const child of Array.isArray(value) ? value : Object.values(value)) {
@@ -84,16 +88,18 @@ function applySingle(snapshot: OfficeArtifactSnapshot, command: Exclude<OfficeCo
       for (const slide of next.slides) slide.readingOrder = slide.readingOrder.filter((id) => id !== command.targetId)
     }
   } else if (command.kind === 'setObjectProperty') {
-    const target = findObject(next, command.targetId)
+    const target = command.targetId === next.rootId ? next as unknown as Record<string, unknown> : findObject(next, command.targetId)
     if (!target) throw new Error(`Object ${command.targetId} was not found`)
     let cursor = target
     for (const part of command.path.slice(0, -1)) {
-      if (part === '__proto__' || part === 'constructor' || part === 'prototype') throw new Error('Unsafe property path')
+      assertSafePropertyPart(part)
       const child = cursor[part]
       if (!child || typeof child !== 'object' || Array.isArray(child)) throw new Error(`Property path ${command.path.join('.')} was not found`)
       cursor = child as Record<string, unknown>
     }
-    cursor[command.path.at(-1)!] = command.value
+    const finalPart = command.path.at(-1)!
+    assertSafePropertyPart(finalPart)
+    cursor[finalPart] = command.value
   } else if (command.kind === 'addSlide') {
     if (next.family !== 'presentation') throw new Error('addSlide requires a presentation')
     next.slides.splice(Math.min(command.index, next.slides.length), 0, command.slide)

@@ -6658,14 +6658,4 @@ export const ja: Dictionary = {
       proxySave: "保存",
     },
   },
-  deckPage: {
-    back: "ホーム",
-    loading: "デッキを読み込み中...",
-    notFound: "このワークスペースにそのデッキは見つかりませんでした。別の場所で作成されたか、削除された可能性があります。",
-    slides: "スライド",
-    slideCount: "{count} 枚のスライド",
-    liveHint: "アシスタントの編集に合わせてライブ更新されます",
-    download: ".pptx をダウンロード",
-    downloadFailed: "ダウンロードに失敗しました。ファイルがまだ生成中の可能性があります。もう一度お試しください。",
-  },
 };

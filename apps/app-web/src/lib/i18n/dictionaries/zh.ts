@@ -6587,14 +6587,4 @@ export const zh: Dictionary = {
       proxySave: "儲存",
     },
   },
-  deckPage: {
-    back: "首頁",
-    loading: "正在載入簡報...",
-    notFound: "在此工作區找不到這份簡報。它可能在其他地方建立，或已被刪除。",
-    slides: "投影片",
-    slideCount: "{count} 張投影片",
-    liveHint: "會隨助理的編輯即時更新",
-    download: "下載 .pptx",
-    downloadFailed: "下載失敗。檔案可能仍在產生中，請再試一次。",
-  },
 };

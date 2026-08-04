@@ -6871,16 +6871,6 @@ export const en = {
       proxySave: "Save",
     },
   },
-  deckPage: {
-    back: "Home",
-    loading: "Loading deck...",
-    notFound: "This deck was not found in this workspace. It may have been created elsewhere or deleted.",
-    slides: "Slides",
-    slideCount: "{count} slides",
-    liveHint: "updates live as your assistant edits",
-    download: "Download .pptx",
-    downloadFailed: "Download failed. The deck file may still be building; try again.",
-  },
 };
 
 /**

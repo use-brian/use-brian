@@ -87,7 +87,6 @@ import {
   createRetrievalTools,
   createViewTools,
   createFileTools,
-  createDeckTools,
   createOfficeTools,
   type FileToolPolicy,
   createFindPageTool,
@@ -383,8 +382,6 @@ import { createDeliveryTargetResolver } from './scheduling/delivery-target.js'
 import { viewsRoutes } from './routes/views.js'
 import { teamspacesRoutes } from './routes/teamspaces.js'
 import { createTeamspaceStore } from './db/teamspace-store.js'
-import { decksRoutes } from './routes/decks.js'
-import { createDeckStore } from './db/deck-store.js'
 import { createOfficeArtifactStore } from './db/office-artifacts.js'
 import { createOfficeTemplateStore } from './db/office-templates.js'
 import { createOfficeGenerationStore } from './db/office-generation.js'
@@ -2064,7 +2061,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // TDZ-safe: pre-assignment access reads `null` and degrades honestly.
   let filesApi: ReturnType<typeof createFilesApi> | null = null
   let filesResolver: FilesClientResolver | null = null
-  let deckStore: ReturnType<typeof createDeckStore> | null = null
 
   const calleeExecutor = createCalleeExecutor({
     provider,
@@ -3106,23 +3102,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       saveFileBytes: fileTools.saveFileBytes,
     }
 
-    // ── Decks (first-party PPTX) ──
-    // Persistent deck artifacts: workspace_decks row (spec) + stable
-    // workspace file decks/<id>.pptx. Rides the files capability (output is
-    // a workspace file), so tools live inside the filesBlobClient guard.
-    // The read/export ROUTER mounts with the other authed routers at the
-    // END of boot — an early bare `/api` requireAuth guard here would 401
-    // every public mount registered after it (the Mini App outage class;
-    // graded by invariants/route-mount-order). See
-    // docs/architecture/features/deck-generation.md.
-    // previewUrl targets the AUTHENTICATED app origin (app.usebrian.ai) — the
-    // /w/… deck route lives in app-web, and the marketing site does NOT
-    // redirect /w/* (MOVED_TO_APP_PREFIXES covers only pre-consolidation
-    // paths). Same fallback chain as the computer-use take-over link below.
-    deckStore = createDeckStore()
-    for (const tool of createDeckTools({ filesApi, deckStore, appOrigin: env.AUTHED_APP_URL ?? env.APP_URL })) {
-      allTools.set(tool.name, tool)
-    }
     // Direct file ingest is open: store the original bytes, derive text, then
     // run the same boot-built Pipeline B ingestor used by brain MCP and docs.
     if (brainEpisodeIngestor) {
@@ -4703,12 +4682,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     resolveAccess: resolveOfficeAccess,
     appendCommand: officeLiveStore.appendCommand,
   }))
-  // Deck live-preview read + export surface (tools registered in the files
-  // block above; absent files backend = no decks, so the mount is guarded).
-  if (deckStore && filesApi) {
-    app.use('/api', requireAuth(env.JWT_SECRET), decksRoutes({ deckStore, filesApi }))
-  }
-
   // (The public /api/brain/stream SSE mount lives ABOVE the bare `/api`
   // requireAuth guards — see the block next to workflowWebhookRoutes.)
   app.use('/api/brain', requireAuth(env.JWT_SECRET), brainRoutes({ entitiesStore, entityLinksStore, retrievalStore, knowledgeStore, workspaceSkillStore, connectorInstanceStore }))

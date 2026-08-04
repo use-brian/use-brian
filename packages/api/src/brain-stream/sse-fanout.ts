@@ -74,7 +74,6 @@ export type BrainPrimitive =
   | 'approval'
   | 'skill'
   | 'scheduled_job'
-  | 'deck'
   | 'assistant'
   /**
    * WORKSPACE CONFIGURATION changed — today, the Home app-bar strip

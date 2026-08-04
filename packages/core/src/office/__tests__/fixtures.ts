@@ -1,7 +1,22 @@
 import type { DocumentSnapshot, OfficeTemplateBundle, PresentationSnapshot } from '@use-brian/office-model'
+import type { OfficeResourceResolver } from '../package.js'
 
 export const id = (value: number): string => `10000000-0000-4000-8000-${value.toString().padStart(12, '0')}`
 const style = (fontSizePt = 11) => ({ fontFamily: 'Arial', fontSizePt, bold: false, italic: false, underline: false, strike: false, color: '#111111' })
+const imageId = id(90)
+const videoId = id(91)
+const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64')
+
+export const resolveFixtureResource: OfficeResourceResolver = async (resourceId) => {
+  if (resourceId === imageId) return { bytes: png, mime: 'image/png' }
+  if (resourceId === videoId) return { bytes: Buffer.from('000000186674797069736f6d0000020069736f6d69736f32', 'hex'), mime: 'video/mp4' }
+  return null
+}
+
+const resources = [
+  { id: imageId, kind: 'image' as const, hash: 'a'.repeat(64), mime: 'image/png', sensitivity: 'internal' as const },
+  { id: videoId, kind: 'video' as const, hash: 'b'.repeat(64), mime: 'video/mp4', sensitivity: 'internal' as const },
+]
 
 export function documentSnapshot(): DocumentSnapshot {
   return {
@@ -15,7 +30,7 @@ export function documentSnapshot(): DocumentSnapshot {
     templateVersionId: id(3),
     rootId: id(4),
     title: 'Board update',
-    resources: [],
+    resources,
     accessibility: { title: 'Board update', description: 'Accessible quarterly update' },
     sections: [{
       id: id(5),
@@ -26,10 +41,16 @@ export function documentSnapshot(): DocumentSnapshot {
       nodes: [
         { id: id(7), kind: 'heading', level: 1, styleName: 'Heading 1', runs: [{ id: id(8), text: 'Quarterly update', style: { ...style(28), bold: true } }] },
         { id: id(9), kind: 'paragraph', styleName: 'Body', alignment: 'start', runs: [{ id: id(10), text: 'Revenue grew with evidence.', style: style(), href: 'https://example.com/evidence' }] },
+        { id: id(24), kind: 'list', ordered: true, level: 1, items: [{ id: id(25), runs: [{ id: id(26), text: 'Nested action', style: style() }] }] },
         { id: id(11), kind: 'table', headerRows: 1, rows: [
           { id: id(12), cells: [{ id: id(13), runs: [{ id: id(14), text: 'Metric', style: { ...style(), bold: true } }], rowSpan: 1, colSpan: 1 }, { id: id(15), runs: [{ id: id(16), text: 'Value', style: { ...style(), bold: true } }], rowSpan: 1, colSpan: 1 }] },
           { id: id(17), cells: [{ id: id(18), runs: [{ id: id(19), text: 'ARR', style: style() }], rowSpan: 1, colSpan: 1 }, { id: id(20), runs: [{ id: id(21), text: '$2m', style: style() }], rowSpan: 1, colSpan: 1 }] },
         ] },
+        { id: id(27), kind: 'image', resourceId: imageId, altText: 'Company mark', decorative: false, widthPt: 96, heightPt: 72 },
+        { id: id(28), kind: 'chart', chartType: 'bar', title: 'Revenue', categories: ['Q1', 'Q2'], series: [{ name: 'ARR', values: [1, 2] }], altText: 'ARR doubled from Q1 to Q2' },
+        { id: id(43), kind: 'video', resourceId: videoId, posterResourceId: imageId, altText: 'Product demo', transcript: 'A narrated product demo.', recipientAccessibleUrl: 'https://example.com/demo' },
+        { id: id(44), kind: 'pageBreak' },
+        { id: id(45), kind: 'sectionBreak' },
       ],
     }],
   }
@@ -49,20 +70,26 @@ export function presentationSnapshot(): PresentationSnapshot {
     templateVersionId: id(3),
     rootId: id(23),
     title: 'Pitch',
-    resources: [],
+    resources,
     accessibility: { title: 'Pitch' },
     slideSize: { widthPt: 960, heightPt: 540 },
     themeId: id(29),
     masters: [{ id: masterId, name: 'Master', lockedObjectIds: [] }],
-    layouts: [{ id: layoutId, masterId, name: 'Title', placeholderIds: [] }],
+    layouts: [{ id: layoutId, masterId, name: 'Title', placeholderIds: [id(34)] }],
     slides: [{
       id: id(32), title: 'Opening', masterId, layoutId, notes: [{ id: id(33), text: 'Introduce the company.', style: style() }],
       objects: [
-        { id: id(34), kind: 'text', geometry: { xPt: 72, yPt: 60, widthPt: 816, heightPt: 90, rotationDeg: 0 }, locked: false, alignment: 'start', verticalAlignment: 'top', runs: [{ id: id(35), text: 'A dependable pitch', style: { ...style(36), bold: true } }] },
-        { id: id(36), kind: 'shape', shape: 'roundedRectangle', geometry: { xPt: 72, yPt: 190, widthPt: 360, heightPt: 120, rotationDeg: 0 }, locked: false, fill: '#EAF2FF', stroke: '#3366CC', strokeWidthPt: 1, text: [{ id: id(37), text: 'Platform owned', style: style(20) }], altText: 'Platform ownership statement' },
-        { id: id(38), kind: 'chart', chartType: 'bar', title: 'Growth', categories: ['Q1', 'Q2'], series: [{ name: 'ARR', values: [1, 2] }], altText: 'ARR doubled', geometry: { xPt: 480, yPt: 190, widthPt: 390, heightPt: 240, rotationDeg: 0 }, locked: false },
+        { id: id(34), kind: 'text', geometry: { xPt: 36, yPt: 24, widthPt: 888, heightPt: 54, rotationDeg: 0 }, locked: false, alignment: 'start', verticalAlignment: 'top', runs: [{ id: id(35), text: 'A dependable pitch', style: { ...style(28), bold: true }, href: 'https://example.com' }] },
+        { id: id(36), kind: 'shape', shape: 'roundedRectangle', geometry: { xPt: 36, yPt: 100, widthPt: 180, heightPt: 90, rotationDeg: 0 }, locked: false, fill: '#EAF2FF', stroke: '#3366CC', strokeWidthPt: 1, text: [{ id: id(37), text: 'Platform owned', style: style(16) }], altText: 'Platform ownership statement' },
+        { id: id(38), kind: 'connector', connector: 'straight', fromObjectId: id(36), toObjectId: id(39), stroke: '#3366CC', geometry: { xPt: 220, yPt: 145, widthPt: 80, heightPt: 1, rotationDeg: 0 }, locked: false },
+        { id: id(39), kind: 'image', resourceId: imageId, altText: 'Company mark', decorative: false, geometry: { xPt: 305, yPt: 100, widthPt: 120, heightPt: 90, rotationDeg: 0 }, locked: false },
+        { id: id(46), kind: 'chart', chartType: 'bar', title: 'Growth', categories: ['Q1', 'Q2'], series: [{ name: 'ARR', values: [1, 2] }], altText: 'ARR doubled', geometry: { xPt: 445, yPt: 100, widthPt: 220, heightPt: 150, rotationDeg: 0 }, locked: false },
+        { id: id(47), kind: 'table', headerRows: 1, rows: [{ id: id(48), cells: [{ id: id(49), runs: [{ id: id(50), text: 'Metric', style: style() }], rowSpan: 1, colSpan: 1 }] }], geometry: { xPt: 680, yPt: 100, widthPt: 230, heightPt: 90, rotationDeg: 0 }, locked: false },
+        { id: id(51), kind: 'video', resourceId: videoId, posterResourceId: imageId, altText: 'Product demo', transcript: 'A narrated product demo.', geometry: { xPt: 36, yPt: 280, widthPt: 320, heightPt: 180, rotationDeg: 0 }, locked: false },
       ],
-      readingOrder: [id(34), id(36), id(38)],
+      readingOrder: [id(34), id(36), id(38), id(39), id(46), id(47), id(51)],
+    }, {
+      id: id(52), title: 'Closing', masterId, layoutId, notes: [], objects: [{ id: id(53), kind: 'text', geometry: { xPt: 72, yPt: 72, widthPt: 816, heightPt: 72, rotationDeg: 0 }, locked: false, alignment: 'center', verticalAlignment: 'middle', runs: [{ id: id(54), text: 'Thank you', style: style(32) }] }], readingOrder: [id(53)],
     }],
   }
 }

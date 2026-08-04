@@ -890,34 +890,6 @@ export function buildViewingSkillBlock(skill: {
 }
 
 /**
- * The `# Currently viewing — deck` turn-context block for a turn whose
- * request carried `viewingDeckId` (the app-web floating dock on the deck
- * preview route sends it, path-derived). Lets "this deck" / "slide 3"
- * resolve to what the user is watching; the preview refreshes live after
- * every deck edit. Tool-agnostic on purpose (tool-awareness rule) — the
- * deck id is the handle, not a capability promise. Kept pure + exported
- * for chat.test.ts. Spec: docs/architecture/features/deck-generation.md.
- */
-export function buildViewingDeckBlock(deck: {
-  id: string
-  title: string
-  version: number
-  slides: { title: string; layout?: string }[]
-}): string {
-  const outline = deck.slides
-    .map((s, i) => `${i}: ${JSON.stringify(s.title)}${s.layout && s.layout !== 'content' ? ` (${s.layout})` : ''}`)
-    .join('\n')
-  return (
-    `# Currently viewing — deck\n` +
-    `The user has this presentation deck open in the live preview right now. ` +
-    `When they say "this deck", "the presentation", or reference a slide by number or name, they mean this one. ` +
-    `The preview updates automatically whenever the deck changes.\n\n` +
-    `Deck: ${JSON.stringify(deck.title)} (deckId: ${deck.id}, version: ${deck.version})\n` +
-    `Slides (0-based index, title slide excluded):\n${outline}`
-  )
-}
-
-/**
  * The user-visible-context helper lives in `_prompt-builder.ts` so channel
  * routes can share the same provenance contract without importing this route
  * and creating a cycle. Re-exported here for existing route-level consumers.
@@ -1486,7 +1458,7 @@ export function chatRoutes(options: WebChatOptions): Router {
   const router = Router()
 
   router.post('/', async (req, res) => {
-    const { message: rawMessage, sessionId: requestedSessionId, model: requestedModel, fileIds, attachedRecordingIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, appOrigin: requestedAppOrigin, followupChips: requestedFollowupChips, viewingSkillRowId: requestedViewingSkillRowId, viewingDeckId: requestedViewingDeckId, meteredProfileId, meteredToolRounds, meteredAccepted, ask: requestedAsk, roomResponseGroup: rawRoomResponseGroup } = req.body as {
+    const { message: rawMessage, sessionId: requestedSessionId, model: requestedModel, fileIds, attachedRecordingIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, appOrigin: requestedAppOrigin, followupChips: requestedFollowupChips, viewingSkillRowId: requestedViewingSkillRowId, meteredProfileId, meteredToolRounds, meteredAccepted, ask: requestedAsk, roomResponseGroup: rawRoomResponseGroup } = req.body as {
       message?: string
       sessionId?: string
       model?: string
@@ -1571,13 +1543,6 @@ export function chatRoutes(options: WebChatOptions): Router {
        * user couldn't open.
        */
       viewingSkillRowId?: string
-      /**
-       * Deck id the app-web floating dock sends while the user is on the
-       * deck preview route (path-derived). Injected as turn context so
-       * "this deck" / "slide 3" resolve to what they are watching.
-       * Workspace-checked against the requesting assistant's workspace.
-       */
-      viewingDeckId?: string
       /**
        * Optional caller-supplied channel id. Used by per-surface chats
        * (feed-web tuning chat, draft iteration) that want a sticky
@@ -3701,33 +3666,6 @@ export function chatRoutes(options: WebChatOptions): Router {
           if (viewedSkill) userVisibleContextParts.push(buildViewingSkillBlock(viewedSkill))
         } catch (err) {
           console.error('[chat] viewing-skill context injection failed:', err)
-        }
-      }
-
-      // ── Viewing-deck context (deck live preview) ────────────────
-      // The app-web floating dock sends `viewingDeckId` while the user is
-      // on the deck preview route. Workspace-checked against the assistant's
-      // workspace so a foreign deck id injects nothing.
-      if (
-        typeof requestedViewingDeckId === 'string' &&
-        requestedViewingDeckId &&
-        assistant.workspaceId
-      ) {
-        try {
-          const { createDeckStore } = await import('../db/deck-store.js')
-          const viewedDeck = await createDeckStore().getSystem(requestedViewingDeckId)
-          if (viewedDeck && viewedDeck.workspaceId === assistant.workspaceId) {
-            userVisibleContextParts.push(
-              buildViewingDeckBlock({
-                id: viewedDeck.id,
-                title: viewedDeck.title,
-                version: viewedDeck.version,
-                slides: viewedDeck.spec.slides,
-              }),
-            )
-          }
-        } catch (err) {
-          console.error('[chat] viewing-deck context injection failed:', err)
         }
       }
 
