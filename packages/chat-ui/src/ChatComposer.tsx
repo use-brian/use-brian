@@ -32,6 +32,12 @@ export type ChatComposerProps = {
   /** Optional cap on character count, enforced by `onChange`. Falsy = unlimited. */
   maxLength?: number
   /**
+   * Host keyboard handling that runs before the composer's default Enter-to-send
+   * behavior. Calling `preventDefault()` lets an autocomplete consume Enter or
+   * Tab without accidentally submitting the draft.
+   */
+  onKeyDown?: (event: KeyboardEvent<HTMLTextAreaElement>) => void
+  /**
    * Slot rendered to the left of the textarea — hosts use this for attachment
    * pickers (e.g. drive picker trigger). Distribution-web ignores this.
    */
@@ -125,6 +131,9 @@ export function ChatComposer(props: ChatComposerProps) {
 
   const handleKeyDown = useCallback(
     (event: KeyboardEvent<HTMLTextAreaElement>) => {
+      props.onKeyDown?.(event)
+      if (event.defaultPrevented) return
+
       // Enter alone sends; Shift+Enter inserts a newline. Matches every other
       // chat UI; consumers can wrap and override if needed.
       if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {

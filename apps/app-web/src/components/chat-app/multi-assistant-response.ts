@@ -71,6 +71,25 @@ export function resolveMentionedAssistants<T extends AssistantLike>(
   return result;
 }
 
+/** Move the active autocomplete option, wrapping at either end. */
+export function nextMentionSelectionIndex(
+  current: number,
+  count: number,
+  direction: 1 | -1,
+): number {
+  if (count <= 0) return 0;
+  const safeCurrent = current >= 0 && current < count ? current : 0;
+  return (safeCurrent + direction + count) % count;
+}
+
+/** Replace the trailing partial `@` query with a confirmed assistant name. */
+export function completeTrailingAssistantMention(
+  text: string,
+  name: string,
+): string {
+  return text.replace(/@[^@]*$/, () => `@${name} `);
+}
+
 /** Select the assistant whose activity the Work Bench is rendering. */
 export function resolveWorkBenchAssistant<T extends AssistantLike>(params: {
   roster: T[];

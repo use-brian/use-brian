@@ -1,59 +1,49 @@
 import { describe, expect, it } from "vitest";
 import {
-  SEMANTIC_ZOOM_COLLAPSE_AT,
-  SEMANTIC_ZOOM_EXPAND_AT,
   graphScopeCacheKey,
-  semanticZoomDecision,
+  shouldShowGraphLoader,
 } from "@/lib/graph-semantic-zoom";
 
-describe("[COMP:app-web/graph-semantic-zoom] semantic zoom decisions", () => {
-  const groups = [
-    { id: "group-a", x: 100, y: 100 },
-    { id: "group-b", x: 400, y: 300 },
-  ];
-
-  it("expands the group nearest the zoom focal point above the threshold", () => {
+describe("[COMP:app-web/graph-semantic-zoom] graph drill-down lifecycle", () => {
+  it("shows the full skeleton during the initial graph load", () => {
     expect(
-      semanticZoomDecision({
-        relativeZoom: SEMANTIC_ZOOM_EXPAND_AT,
-        hasParentScope: false,
-        targetPoint: { x: 110, y: 105 },
-        groups,
+      shouldShowGraphLoader({
+        initialLoading: true,
+        scopeLoading: false,
+        hasDimensions: true,
+        hasRenderer: true,
       }),
-    ).toEqual({ type: "expand", groupId: "group-a" });
+    ).toBe(true);
   });
 
-  it("does not expand when the zoom ends away from a group", () => {
+  it("preserves the painted graph while a child scope loads", () => {
     expect(
-      semanticZoomDecision({
-        relativeZoom: 2,
-        hasParentScope: false,
-        targetPoint: { x: 700, y: 700 },
-        groups,
+      shouldShowGraphLoader({
+        initialLoading: false,
+        scopeLoading: true,
+        hasDimensions: true,
+        hasRenderer: true,
       }),
-    ).toEqual({ type: "none" });
+    ).toBe(false);
   });
 
-  it("uses a separate lower threshold to collapse the current scope", () => {
+  it("covers renderer and first-measure readiness without scope reloads", () => {
     expect(
-      semanticZoomDecision({
-        relativeZoom: SEMANTIC_ZOOM_COLLAPSE_AT,
-        hasParentScope: true,
-        targetPoint: { x: 0, y: 0 },
-        groups,
+      shouldShowGraphLoader({
+        initialLoading: false,
+        scopeLoading: false,
+        hasDimensions: false,
+        hasRenderer: true,
       }),
-    ).toEqual({ type: "collapse" });
-  });
-
-  it("does not collapse the workspace overview", () => {
+    ).toBe(true);
     expect(
-      semanticZoomDecision({
-        relativeZoom: 0.1,
-        hasParentScope: false,
-        targetPoint: { x: 0, y: 0 },
-        groups,
+      shouldShowGraphLoader({
+        initialLoading: false,
+        scopeLoading: false,
+        hasDimensions: true,
+        hasRenderer: false,
       }),
-    ).toEqual({ type: "none" });
+    ).toBe(true);
   });
 
   it("keys scope cache entries by viewer projection and normalized focus", () => {

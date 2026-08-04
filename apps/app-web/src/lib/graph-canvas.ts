@@ -27,6 +27,10 @@
  *   - `mergePositions` — warm-start: carry node positions across snapshot
  *     refreshes and seed NEW nodes at their positioned-neighbour centroid,
  *     so a brain-refresh nudges the layout instead of re-scrambling it.
+ *   - `boundedViewportFit` — initial camera framing with a scale ceiling, so
+ *     a sparse graph never turns a handful of nodes into giant discs.
+ *   - `radialSeedPositions` — deterministic parent-centred positions for a
+ *     drill-in, so children bloom outward instead of colliding from one point.
  *   - `mixHex` / `shadeHex` / `hexLuma` — palette-derived color math for
  *     the visual treatment (orb gradients, tinted edges, adaptive
  *     backdrop) so every shade traces back to a theme token.
@@ -42,6 +46,64 @@ export const NODE_RADIUS_MIN = 2.5;
 export const NODE_RADIUS_MAX = 7;
 /** Degree at which the radius curve saturates. */
 const NODE_DEGREE_CAP = 12;
+
+/** Sparse graphs can produce an enormous geometric fit scale. The initial
+ * camera is capped twice: an absolute ceiling keeps leaves calm, while the
+ * screen-radius ceiling keeps a large group or hub from dominating. */
+export const INITIAL_FIT_MAX_SCALE = 2.5;
+export const INITIAL_FIT_MAX_NODE_RADIUS_PX = 18;
+const INITIAL_FIT_PADDING_PX = 60;
+
+export type GraphBounds = {
+  x: [number, number];
+  y: [number, number];
+};
+
+export type ViewportFit = {
+  center: { x: number; y: number };
+  scale: number;
+};
+
+/**
+ * Compute the one-time initial framing for a settled graph.
+ *
+ * `zoomToFit()` is unbounded: a single node can fill nearly the whole canvas.
+ * This keeps the geometric fit for dense graphs, but caps sparse graphs at a
+ * calm reading distance. The caller animates both center and scale.
+ */
+export function boundedViewportFit(input: {
+  width: number;
+  height: number;
+  bounds: GraphBounds;
+  maxNodeRadius: number;
+  padding?: number;
+}): ViewportFit {
+  const padding = Math.max(0, input.padding ?? INITIAL_FIT_PADDING_PX);
+  const spanX = Math.max(1e-9, input.bounds.x[1] - input.bounds.x[0]);
+  const spanY = Math.max(1e-9, input.bounds.y[1] - input.bounds.y[0]);
+  const geometricScale = Math.max(
+    1e-12,
+    Math.min(
+      (Math.max(1, input.width) - padding * 2) / spanX,
+      (Math.max(1, input.height) - padding * 2) / spanY,
+    ),
+  );
+  const radiusScale =
+    input.maxNodeRadius > 0
+      ? INITIAL_FIT_MAX_NODE_RADIUS_PX / input.maxNodeRadius
+      : INITIAL_FIT_MAX_SCALE;
+
+  return {
+    center: {
+      x: (input.bounds.x[0] + input.bounds.x[1]) / 2,
+      y: (input.bounds.y[0] + input.bounds.y[1]) / 2,
+    },
+    scale: Math.max(
+      1e-12,
+      Math.min(geometricScale, INITIAL_FIT_MAX_SCALE, radiusScale),
+    ),
+  };
+}
 
 /**
  * Node radius in graph units — log curve so the visual difference between
@@ -379,6 +441,31 @@ export function mergePositions<T extends { id: string; x?: number; y?: number; v
     node.vy = 0;
   });
   return nodes;
+}
+
+/**
+ * Deterministically place newly revealed scope children around their former
+ * parent. A golden-angle spiral gives every child a unique starting point and
+ * stays stable for the same ordered projection; sqrt growth keeps density
+ * roughly uniform as the scope grows.
+ */
+export function radialSeedPositions<T extends { id: string }>(
+  nodes: T[],
+  origin: { x: number; y: number },
+  spacing = 16,
+): Map<string, NodePosition> {
+  const seeded = new Map<string, NodePosition>();
+  nodes.forEach((node, index) => {
+    const angle = index * 2.399963229728653;
+    const radius = Math.max(0, spacing) * Math.sqrt(index + 1);
+    seeded.set(node.id, {
+      x: origin.x + Math.cos(angle) * radius,
+      y: origin.y + Math.sin(angle) * radius,
+      vx: 0,
+      vy: 0,
+    });
+  });
+  return seeded;
 }
 
 /**

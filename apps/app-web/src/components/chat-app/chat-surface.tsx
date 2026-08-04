@@ -71,6 +71,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type KeyboardEvent,
 } from "react";
 import {
   ChatComposer,
@@ -163,6 +164,8 @@ import { ChatConfirmationCard } from "@/components/chrome/chat-confirmation-card
 import { ChatContextPins } from "@/components/chat-app/chat-context-pins";
 import { resolveRequestedFreshAssistant } from "@/components/chat-app/assistant-deeplink";
 import {
+  completeTrailingAssistantMention,
+  nextMentionSelectionIndex,
   resolveMentionedAssistants,
   resolveWorkBenchAssistant,
 } from "@/components/chat-app/multi-assistant-response";
@@ -277,6 +280,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const [queuedNotice, setQueuedNotice] = useState(false);
   /** `@` autocomplete popover (T12 — assistants only). */
   const [mentionOpen, setMentionOpen] = useState(false);
+  const [mentionSelectionIndex, setMentionSelectionIndex] = useState(0);
   /** A suspended askQuestion in the open room / thread (T11/D8). */
   const [pendingQuestion, setPendingQuestion] = useState<{
     approvalId: string;
@@ -1967,7 +1971,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       setMentionOpen(false);
       return;
     }
-    setMentionOpen(/(^|\s)@[^@]*$/.test(input));
+    const shouldOpen = /(^|\s)@[^@]*$/.test(input);
+    setMentionOpen(shouldOpen);
+    if (shouldOpen) setMentionSelectionIndex(0);
   }, [input, paneIsRoom, assistants.length]);
 
   /** The typed partial after the trailing `@`, for roster filtering. */
@@ -1985,9 +1991,44 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   );
 
   const insertMention = useCallback((name: string) => {
-    setInput((cur) => cur.replace(/@[^@]*$/, `@${name} `));
+    setInput((cur) => completeTrailingAssistantMention(cur, name));
     setMentionOpen(false);
   }, []);
+
+  const handleMentionKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLTextAreaElement>) => {
+      if (
+        !mentionOpen ||
+        mentionCandidates.length === 0 ||
+        event.nativeEvent.isComposing
+      ) {
+        return;
+      }
+      if (event.key === "Tab") {
+        event.preventDefault();
+        setMentionSelectionIndex((current) =>
+          nextMentionSelectionIndex(
+            current,
+            mentionCandidates.length,
+            event.shiftKey ? -1 : 1,
+          ),
+        );
+        return;
+      }
+      if (event.key === "Enter" && !event.shiftKey) {
+        const selected = mentionCandidates[mentionSelectionIndex];
+        if (!selected) return;
+        event.preventDefault();
+        insertMention(selected.name);
+      }
+    },
+    [
+      insertMention,
+      mentionCandidates,
+      mentionOpen,
+      mentionSelectionIndex,
+    ],
+  );
 
   /** The composer, styled as the app's composite-control box (globals.css
    *  contract): ONE bordered box carrying the focus ring via `focus-within`,
@@ -2002,22 +2043,31 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         "focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/35",
       )}
     >
-      {/* Mention autocomplete — one entry (the room's assistant; human
-          mentions are out of scope). Rendered above the box so it never
-          shifts the composer. */}
+      {/* Mention autocomplete — the workspace assistant roster; human mentions
+          are out of scope. Rendered above the box so it never shifts the
+          composer. */}
       {mentionOpen && mentionCandidates.length > 0 && (
-        <div className="absolute bottom-full left-2 z-20 mb-1 max-h-56 w-64 overflow-y-auto rounded-md border border-border bg-popover shadow-md">
-          {mentionCandidates.map((a) => (
+        <div
+          role="listbox"
+          className="absolute bottom-full left-2 z-20 mb-1 max-h-56 w-64 overflow-y-auto rounded-md border border-border bg-popover shadow-md"
+        >
+          {mentionCandidates.map((a, index) => (
             <button
               key={a.id}
               type="button"
+              role="option"
+              aria-selected={index === mentionSelectionIndex}
               onMouseDown={(e) => {
                 // mousedown, not click — keep the textarea focused.
                 e.preventDefault();
                 insertMention(a.name);
               }}
+              onMouseEnter={() => setMentionSelectionIndex(index)}
               aria-label={format(t.mentionInsertAria, { name: a.name })}
-              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-foreground hover:bg-accent"
+              className={cn(
+                "flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-foreground hover:bg-accent",
+                index === mentionSelectionIndex && "bg-accent",
+              )}
             >
               <AssistantAvatar
                 id={a.id}
@@ -2033,6 +2083,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       <ChatComposer
         value={input}
         onChange={setInput}
+        onKeyDown={handleMentionKeyDown}
         onSend={() => void send()}
         disabled={!!pendingQuestion}
         sendDisabled={chat.state.isStreaming || !activeAssistant || att.uploading}
@@ -2069,6 +2120,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             <AttachmentChips
               attachments={att.attachments}
               onRemove={att.remove}
+              className="px-3 pt-2.5"
             />
             {recordingUpload.status !== "idle" ? (
               <p
