@@ -1117,6 +1117,23 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     expect(message).not.toMatch(/\bnot found\b/)
   })
 
+  // The store resolves with `id::text LIKE $1 || '%'`, so `%` and `_` are
+  // metacharacters. Without a charset guard an "8-char prefix" of underscores
+  // is a pattern matching every visible run, and the ambiguity branch then
+  // hands back ids, workflow names and timings the caller never named.
+  // Parameterisation stops SQL injection; it does not stop wildcard injection.
+  it('getWorkflowRun rejects a non-hex prefix without querying the store (LIKE wildcard guard)', async () => {
+    const { tools, stores } = makeAllTools()
+    const spy = vi.spyOn(stores.runStore, 'resolveRunsByIdPrefix')
+    for (const wildcard of ['________', '%%%%%%%%', '090aa8%3']) {
+      const r = await tools.getWorkflowRun.execute({ runId: wildcard }, makeContext())
+      expect(r.isError).toBe(true)
+      expect(String(r.data)).toContain('not a run identifier')
+    }
+    expect(spy).not.toHaveBeenCalled()
+    spy.mockRestore()
+  })
+
   it("getWorkflowRun filters candidates to the caller's workspace BEFORE evaluating ambiguity (no cross-workspace leak)", async () => {
     const { tools, stores } = makeAllTools()
     const created = await tools.createWorkflow.execute({ name: 'mine', definition: SIMPLE_DEF }, makeContext())

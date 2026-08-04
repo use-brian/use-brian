@@ -266,6 +266,12 @@ const RUN_ID_PREFIX_MIN_LEN = 8
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
+/** The only characters a UUID prefix can contain. Guards the store's
+ *  `LIKE $1 || '%'` from wildcard injection — `%` and `_` are LIKE
+ *  metacharacters, so an unvalidated prefix is a pattern rather than a
+ *  prefix. See the rejection branch in `resolveRunId`. */
+const RUN_ID_PREFIX_RE = /^[0-9a-f-]+$/i
+
 /** Default bound on `getWorkflow`'s `recentRuns` — enough to answer "how did
  *  the last few runs go?" without flooding context with full history (the
  *  step trail stays behind `getWorkflowRun`, which has no such cap). */
@@ -1953,6 +1959,27 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
           data:
             `"${rawId}" is too short to resolve — a run id prefix needs at least ${RUN_ID_PREFIX_MIN_LEN} characters (the length the interface shows). ` +
             'Copy the id shown under the run, or call getWorkflow to see its recentRuns.',
+          isError: true,
+        },
+      }
+    }
+
+    // A run id is a UUID, so a legitimate prefix is hex + dashes and nothing
+    // else. Enforcing that here is not cosmetic: the store resolves with
+    // `id::text LIKE $1 || '%'`, where `%` and `_` are LIKE METACHARACTERS.
+    // An unvalidated prefix is therefore a pattern, not a prefix — eight
+    // underscores match every run the caller can see, turning a lookup into
+    // an enumeration whose ambiguity list hands back ids, workflow names and
+    // timings the caller never named. Parameterisation stops SQL injection;
+    // it does not stop wildcard injection. Reject at the edge so the store's
+    // "anchored prefix" contract is true rather than merely intended.
+    if (!RUN_ID_PREFIX_RE.test(rawId)) {
+      return {
+        ok: false,
+        result: {
+          data:
+            `"${rawId}" is not a run identifier — run ids are UUIDs, so an id or prefix contains only hex digits (0-9, a-f) and dashes. ` +
+            'Pass the id exactly as the interface showed it, or call getWorkflow to see that workflow\'s recentRuns.',
           isError: true,
         },
       }
