@@ -40,6 +40,7 @@ import type {
   AssistantCallStep,
   WorkflowDefinition,
   WorkflowRecord,
+  WorkflowRunRecord,
   WorkflowRunStore,
   WorkflowStepRunRecord,
   WorkflowStore,
@@ -233,6 +234,42 @@ export type WorkflowToolDeps = {
 }
 
 const idShape = z.string().uuid()
+
+/**
+ * `getWorkflowRun`'s `runId` — DELIBERATELY not `idShape`. The interface
+ * (`run-history.tsx`, the run-detail header) only ever shows an 8-character
+ * prefix, never a full UUID, so a strict-UUID schema made the id the user
+ * can actually see structurally invalid input. use-brian#278: the model
+ * worked around that by zero-padding a short id into a fake UUID
+ * (`090aa843` → `090aa843-0000-0000-0000-000000000000`), which the store
+ * then correctly failed to find — silently turning "I cannot resolve this"
+ * into "this run does not exist", a false claim about the user's own data.
+ *
+ * No `.min()` here: the "too short to resolve" rejection is a friendly,
+ * explicit tool error from `resolveRunId` (see below), not a raw zod
+ * validation failure — mirrors how `getMemory` / `saveMemory` accept a bare
+ * `z.string()` id/prefix and resolve it in `execute()`.
+ */
+const runIdShape = z
+  .string()
+  .describe(
+    'The run identifier: the full UUID, OR an identifier prefix of at least 8 characters — exactly what the interface shows under each run. ' +
+      'Pass it VERBATIM, exactly as the interface displayed it or the user typed it. NEVER pad, truncate-then-extend, or invent characters to force it into a full UUID shape: a fabricated id resolves to nothing, and this tool cannot tell "you made this up" apart from "the run does not exist" — so a made-up id becomes a false claim about the user\'s data. ' +
+      'If the id is too short, ambiguous, or does not resolve, this tool says so explicitly in its own words; trust that message over guessing the rest of the id yourself.',
+  )
+
+/** Minimum characters to attempt prefix resolution — matches exactly what
+ *  the interface renders (`run.id.slice(0, 8)`). Shorter input is rejected
+ *  outright rather than attempted, so a stray one- or two-character token
+ *  can never scan the run table (use-brian#278). */
+const RUN_ID_PREFIX_MIN_LEN = 8
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/** Default bound on `getWorkflow`'s `recentRuns` — enough to answer "how did
+ *  the last few runs go?" without flooding context with full history (the
+ *  step trail stays behind `getWorkflowRun`, which has no such cap). */
+const RECENT_RUNS_DEFAULT_LIMIT = 10
 
 /**
  * Zod surface for an inline trigger on the authoring tools. Loosened to a
@@ -1708,7 +1745,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
   const getWorkflow = buildTool({
     name: 'getWorkflow',
     description:
-      'Read one workflow in full — its name, description, enabled state, trigger kind, the complete definition (every step + startStepId), and `triggerJobs`: the ACTUAL scheduled-trigger rows firing it (any member\'s, with ownedByMe). If triggerJobs disagrees with triggerKind (e.g. kind "manual" but enabled cron rows listed), the firing rows are the truth — fix the mismatch with `updateWorkflow` (set the correct `trigger`, or `{ enabled: false }` to stop). Use this before editing a workflow with `updateWorkflow`; `listWorkflows` returns summaries (with each trigger). Webhook secrets are never returned.',
+      'Read one workflow in full — its name, description, enabled state, trigger kind, the complete definition (every step + startStepId), `triggerJobs`: the ACTUAL scheduled-trigger rows firing it (any member\'s, with ownedByMe), and `recentRuns`: its most recent runs (bounded, newest first) with each one\'s id, status, trigger kind, start/finish time, and error. If triggerJobs disagrees with triggerKind (e.g. kind "manual" but enabled cron rows listed), the firing rows are the truth — fix the mismatch with `updateWorkflow` (set the correct `trigger`, or `{ enabled: false }` to stop). Use `recentRuns` to answer "how did the last few runs go?" without a separate call, and to resolve a vague reference ("the 6am one") to a run id before calling `getWorkflowRun` for its full step trail. Use this before editing a workflow with `updateWorkflow`; `listWorkflows` returns summaries (with each trigger). Webhook secrets are never returned.',
     inputSchema: z.object({
       workflowId: idShape,
     }),
@@ -1740,6 +1777,25 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
           }))
         : undefined
 
+      // Bounded, newest-first — wraps the same `listRunsForWorkflow` the
+      // REST run-history endpoint already uses (only the tool layer was
+      // missing it, use-brian#278). Deliberately NOT the step trail; that
+      // stays behind getWorkflowRun so this read doesn't balloon. Always
+      // present (never omitted) so an empty history reads as "[]", never
+      // as a missing field the model might mistake for "not fetched".
+      const recentRuns = (
+        await deps.runStore.listRunsForWorkflow(context.userId, workflow.id, {
+          limit: RECENT_RUNS_DEFAULT_LIMIT,
+        })
+      ).map((r) => ({
+        id: r.id,
+        status: r.status,
+        triggerKind: r.triggerKind,
+        startedAt: r.startedAt.toISOString(),
+        finishedAt: r.finishedAt?.toISOString() ?? null,
+        error: r.error,
+      }))
+
       return {
         data: {
           id: workflow.id,
@@ -1754,6 +1810,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
           stepCount: workflow.definition.steps.length,
           summary: summarize(workflow.definition),
           definition: workflow.definition,
+          recentRuns,
           createdAt: workflow.createdAt.toISOString(),
           updatedAt: workflow.updatedAt.toISOString(),
         },
@@ -1857,12 +1914,106 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
     },
   })
 
+  /**
+   * Resolve `getWorkflowRun`'s `runId` input to exactly one run in the
+   * caller's workspace. use-brian#278 — three distinct outcomes, three
+   * distinct messages; never collapse an unresolved id into "does not
+   * exist" (that conflation was the original incident).
+   *
+   * A full UUID keeps the pre-existing exact-match path unchanged: same
+   * `getRunById` query, same cost, no behaviour change for callers that
+   * already pass one.
+   *
+   * Workspace filtering happens BEFORE the ambiguity check. RLS scopes
+   * `resolveRunsByIdPrefix` to every workspace the calling user belongs
+   * to — broader than this conversation's `context.workspaceId` for a
+   * multi-workspace user. Filtering after counting would both fake
+   * ambiguity from another workspace's run and leak that run's metadata
+   * (name, timing, status) into the ambiguity message.
+   */
+  async function resolveRunId(
+    context: ToolContext,
+    rawId: string,
+  ): Promise<
+    | { ok: true; run: WorkflowRunRecord }
+    | { ok: false; result: { data: unknown; isError: true } }
+  > {
+    if (UUID_RE.test(rawId)) {
+      const run = await deps.runStore.getRunById(context.userId, rawId)
+      if (!run || run.workspaceId !== context.workspaceId) {
+        return { ok: false, result: { data: `Run ${rawId} not found in workspace.`, isError: true } }
+      }
+      return { ok: true, run }
+    }
+
+    if (rawId.length < RUN_ID_PREFIX_MIN_LEN) {
+      return {
+        ok: false,
+        result: {
+          data:
+            `"${rawId}" is too short to resolve — a run id prefix needs at least ${RUN_ID_PREFIX_MIN_LEN} characters (the length the interface shows). ` +
+            'Copy the id shown under the run, or call getWorkflow to see its recentRuns.',
+          isError: true,
+        },
+      }
+    }
+
+    // RLS-scoped: may include runs from ANY workspace the user belongs to.
+    // Filter to this conversation's workspace BEFORE counting — see the
+    // doc comment above.
+    const rawCandidates = await deps.runStore.resolveRunsByIdPrefix(context.userId, rawId.toLowerCase())
+    const inWorkspace = rawCandidates.filter((r) => r.workspaceId === context.workspaceId)
+
+    if (inWorkspace.length === 0) {
+      return {
+        ok: false,
+        result: {
+          // "Could not resolve" ≠ a claim that the run is missing — only the
+          // first is warranted from a failed lookup. This wording (and the
+          // absence of any "not found" / non-existence phrasing) is the
+          // regression guard for the original false answer.
+          data:
+            `Could not resolve run identifier "${rawId}" in this workspace — the identifier could not be matched against any run. This is NOT a report on whether the run is present; it only means this identifier didn't resolve. ` +
+            'Call getWorkflow on the relevant workflow to see its recentRuns, or ask the user for the id shown in the interface.',
+          isError: true,
+        },
+      }
+    }
+
+    if (inWorkspace.length > 1) {
+      const candidates = await Promise.all(
+        inWorkspace.map(async (r) => {
+          const wf = await deps.workflowStore.getById(context.userId, r.workflowId)
+          return {
+            id: r.id,
+            workflowName: wf?.name ?? null,
+            startedAt: r.startedAt.toISOString(),
+            status: r.status,
+          }
+        }),
+      )
+      return {
+        ok: false,
+        result: {
+          data: {
+            error: `"${rawId}" matches more than one run in this workspace. Ask the user which one they meant (or use a longer / full id).`,
+            candidates,
+          },
+          isError: true,
+        },
+      }
+    }
+
+    return { ok: true, run: inWorkspace[0] }
+  }
+
   const getWorkflowRun = buildTool({
     name: 'getWorkflowRun',
     description:
-      'Inspect a workflow run — current status, step trail (with each step\'s truncated output), and any error. Use when the user asks "what happened with my X workflow?", and ALWAYS before asserting or re-asserting that a past run performed an action: the step `output` is the evidence of what actually happened, and a "completed" status alone is not proof of a side-effect.',
+      'Inspect a workflow run — current status, step trail (with each step\'s truncated output), and any error. Use when the user asks "what happened with my X workflow?", and ALWAYS before asserting or re-asserting that a past run performed an action: the step `output` is the evidence of what actually happened, and a "completed" status alone is not proof of a side-effect. ' +
+      'Accepts a short id copied straight from the interface (it shows only an 8-character prefix) as well as a full UUID — pass whatever the user gave you VERBATIM. NEVER pad, truncate-then-extend, or invent characters to force a short id into a full UUID: a fabricated id resolves to nothing, which this tool cannot distinguish from "you made this up". If the id you passed does not resolve, that is NOT proof the run does not exist — call getWorkflow for that workflow\'s recentRuns instead of guessing.',
     inputSchema: z.object({
-      runId: idShape,
+      runId: runIdShape,
     }),
     isConcurrencySafe: true,
     isReadOnly: true,
@@ -1870,10 +2021,10 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
 
-      const run = await deps.runStore.getRunById(context.userId, input.runId)
-      if (!run || run.workspaceId !== context.workspaceId) {
-        return { data: `Run ${input.runId} not found in workspace.`, isError: true }
-      }
+      const resolved = await resolveRunId(context, input.runId)
+      if (!resolved.ok) return resolved.result
+
+      const run = resolved.run
       const workflow = await deps.workflowStore.getById(context.userId, run.workflowId)
       const steps = await deps.runStore.listStepRuns(context.userId, run.id)
 

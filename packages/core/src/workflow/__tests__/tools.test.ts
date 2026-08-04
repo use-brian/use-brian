@@ -20,6 +20,14 @@ const WORKSPACE_ID = '00000000-0000-0000-0000-000000000001'
 const PRIMARY_ASSISTANT_ID = '00000000-0000-0000-0000-000000000002'
 const USER_ID = '00000000-0000-0000-0000-000000000003'
 
+/** Deterministic valid-UUID generator for seeding runs directly into the
+ *  fake store's Map (bypassing runWorkflow) — used by the getWorkflowRun
+ *  prefix-resolution and getWorkflow recentRuns tests below, where the
+ *  test cares about ordering/bounding, not the literal id shape. */
+function testRunUuid(n: number): string {
+  return `00000000-0000-0000-0000-${String(900000 + n).padStart(12, '0')}`
+}
+
 function makeContext(overrides: Partial<ToolContext> = {}): ToolContext {
   return {
     userId: USER_ID,
@@ -124,6 +132,12 @@ function fakeStores() {
       return filtered
         .sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime())
         .slice(0, opts?.limit ?? 50)
+    },
+    async resolveRunsByIdPrefix(_u, idPrefix, opts) {
+      return Array.from(runs.values())
+        .filter((r) => r.id.startsWith(idPrefix))
+        .sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime())
+        .slice(0, opts?.limit ?? 5)
     },
     listRunsForPage: async () => [],
     async getLatestOutcomeForWorkflowSystem(workflowId, excludeRunId) {
@@ -1009,6 +1023,151 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     expect(getSteps[0].output).toBe('hello')
   })
 
+  // ── getWorkflowRun prefix resolution (use-brian#278) ────────────────────
+  // The interface only ever shows an 8-char id (`run.id.slice(0, 8)`).
+  // Pasting it into chat must resolve the run, not read back as "the run
+  // does not exist" — the assistant zero-padding a fabricated UUID was the
+  // original incident. Runs are seeded directly into the fake store's Map
+  // rather than via runWorkflow so the id is a realistic, distinguishable
+  // prefix instead of the counter's shared "00000000..." stem.
+
+  it('getWorkflowRun resolves an 8-character prefix to the right run, with its step trail intact', async () => {
+    const { tools, stores } = makeAllTools()
+    const created = await tools.createWorkflow.execute({ name: 'x', definition: SIMPLE_DEF }, makeContext())
+    const wf = created.data as { id: string }
+
+    const runId = '090aa843-1111-1111-1111-111111111111'
+    const now = new Date('2026-08-03T06:00:00Z')
+    stores.runs.set(runId, {
+      id: runId, workflowId: wf.id, workspaceId: WORKSPACE_ID,
+      triggeredBy: USER_ID, triggerKind: 'manual', status: 'completed',
+      input: {}, vars: {}, currentStepId: null, error: null, outcome: null,
+      startedAt: now, finishedAt: now, lastActiveAt: now,
+    })
+    stores.stepRuns.push({
+      id: 'sr-1', runId, stepId: 's1', stepType: 'tool_call', status: 'completed',
+      input: {}, output: { value: 'ok' }, error: null, startedAt: now, finishedAt: now,
+    })
+
+    const r = await tools.getWorkflowRun.execute({ runId: '090aa843' }, makeContext())
+    expect(r.isError).toBeFalsy()
+    const data = r.data as Record<string, unknown>
+    expect(data.id).toBe(runId)
+    expect(data.workflowName).toBe('x')
+    expect((data.steps as unknown[]).length).toBe(1)
+  })
+
+  it('getWorkflowRun still resolves a full UUID via the unchanged exact-match path', async () => {
+    const { tools } = makeAllTools()
+    const created = await tools.createWorkflow.execute({ name: 'exact', definition: SIMPLE_DEF }, makeContext())
+    const wf = created.data as { id: string }
+    const ran = await tools.runWorkflow.execute({ workflowId: wf.id }, makeContext())
+    const runId = (ran.data as { runId: string }).runId
+
+    const r = await tools.getWorkflowRun.execute({ runId }, makeContext())
+    expect(r.isError).toBeFalsy()
+    expect((r.data as { id: string }).id).toBe(runId)
+  })
+
+  it('getWorkflowRun rejects a prefix shorter than 8 characters as too vague, without attempting a lookup', async () => {
+    const { tools, stores } = makeAllTools()
+    const resolveSpy = vi.spyOn(stores.runStore, 'resolveRunsByIdPrefix')
+    const r = await tools.getWorkflowRun.execute({ runId: '090aa8' }, makeContext())
+    expect(r.isError).toBe(true)
+    expect(String(r.data).toLowerCase()).toMatch(/too (short|vague)/)
+    expect(resolveSpy).not.toHaveBeenCalled()
+  })
+
+  it('getWorkflowRun reports ambiguity (not not-found) when a prefix matches more than one run, listing each candidate', async () => {
+    const { tools, stores } = makeAllTools()
+    const created = await tools.createWorkflow.execute({ name: 'dupe', definition: SIMPLE_DEF }, makeContext())
+    const wf = created.data as { id: string }
+    const now = new Date('2026-08-03T06:00:00Z')
+    const runA: WorkflowRunRecord = {
+      id: '090aa843-1111-1111-1111-111111111111', workflowId: wf.id, workspaceId: WORKSPACE_ID,
+      triggeredBy: USER_ID, triggerKind: 'manual', status: 'completed',
+      input: {}, vars: {}, currentStepId: null, error: null, outcome: null,
+      startedAt: now, finishedAt: now, lastActiveAt: now,
+    }
+    const runB: WorkflowRunRecord = { ...runA, id: '090aa843-2222-2222-2222-222222222222', status: 'failed' }
+    stores.runs.set(runA.id, runA)
+    stores.runs.set(runB.id, runB)
+
+    const r = await tools.getWorkflowRun.execute({ runId: '090aa843' }, makeContext())
+    expect(r.isError).toBe(true)
+    const data = r.data as {
+      candidates: Array<{ id: string; workflowName: string | null; startedAt: string; status: string }>
+    }
+    expect(data.candidates.map((c) => c.id).sort()).toEqual([runA.id, runB.id].sort())
+    expect(data.candidates.every((c) => c.workflowName === 'dupe')).toBe(true)
+    expect(data.candidates.every((c) => typeof c.startedAt === 'string')).toBe(true)
+    expect(data.candidates.map((c) => c.status).sort()).toEqual(['completed', 'failed'])
+  })
+
+  // The regression guard for the original incident: an unresolved prefix
+  // must never be phrased as non-existence. "Could not resolve" and "does
+  // not exist" are different claims; only the first is warranted here.
+  it('getWorkflowRun reports "could not resolve" (never "does not exist") when a prefix matches nothing', async () => {
+    const { tools } = makeAllTools()
+    const r = await tools.getWorkflowRun.execute({ runId: 'ffffffff' }, makeContext())
+    expect(r.isError).toBe(true)
+    const message = String(r.data).toLowerCase()
+    expect(message).toContain('could not resolve')
+    expect(message).not.toContain('does not exist')
+    expect(message).not.toMatch(/\bnot found\b/)
+  })
+
+  it("getWorkflowRun filters candidates to the caller's workspace BEFORE evaluating ambiguity (no cross-workspace leak)", async () => {
+    const { tools, stores } = makeAllTools()
+    const created = await tools.createWorkflow.execute({ name: 'mine', definition: SIMPLE_DEF }, makeContext())
+    const wf = created.data as { id: string }
+    const now = new Date('2026-08-03T06:00:00Z')
+    const mine: WorkflowRunRecord = {
+      id: '090aa843-1111-1111-1111-111111111111', workflowId: wf.id, workspaceId: WORKSPACE_ID,
+      triggeredBy: USER_ID, triggerKind: 'manual', status: 'completed',
+      input: {}, vars: {}, currentStepId: null, error: null, outcome: null,
+      startedAt: now, finishedAt: now, lastActiveAt: now,
+    }
+    // Same prefix, a DIFFERENT workspace — RLS would surface this to a
+    // multi-workspace user, but it must never count toward ambiguity nor
+    // leak into the response.
+    const other: WorkflowRunRecord = {
+      ...mine,
+      id: '090aa843-9999-9999-9999-999999999999',
+      workflowId: '00000000-0000-0000-0000-0000000000fe',
+      workspaceId: '00000000-0000-0000-0000-0000000000ff',
+    }
+    stores.runs.set(mine.id, mine)
+    stores.runs.set(other.id, other)
+
+    const r = await tools.getWorkflowRun.execute({ runId: '090aa843' }, makeContext())
+    expect(r.isError).toBeFalsy()
+    const data = r.data as Record<string, unknown>
+    expect(data.id).toBe(mine.id)
+    expect(JSON.stringify(data)).not.toContain(other.id)
+    expect(JSON.stringify(data)).not.toContain(other.workspaceId)
+  })
+
+  it('getWorkflowRun keeps the workspace gate on the exact-UUID path', async () => {
+    const { tools } = makeAllTools()
+    const r = await tools.getWorkflowRun.execute(
+      { runId: '00000000-0000-0000-0000-000000000100' },
+      makeContext({ workspaceId: null }),
+    )
+    expect(r.isError).toBe(true)
+    expect(String(r.data)).toContain('workspace')
+  })
+
+  it('getWorkflowRun keeps the workspace gate on the prefix path', async () => {
+    const { tools } = makeAllTools()
+    const r = await tools.getWorkflowRun.execute(
+      { runId: '090aa843' },
+      makeContext({ workspaceId: null }),
+    )
+    expect(r.isError).toBe(true)
+    expect(String(r.data)).toContain('workspace')
+  })
+
   it('step trail output is truncated to the preview cap', async () => {
     const stores = fakeStores()
     const longText = 'x'.repeat(2000)
@@ -1115,6 +1274,76 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
       makeContext({ workspaceId: '00000000-0000-0000-0000-0000000000ff' }),
     )
     expect(r.isError).toBe(true)
+  })
+
+  // ── getWorkflow recentRuns (use-brian#278) ───────────────────────────────
+  // Folded into the read the assistant already reaches for, rather than a
+  // 10th tool — so "how did the last few runs go?" and vague-reference
+  // resolution ("the 6am one") work without a prior getWorkflowRun call.
+
+  it('getWorkflow returns recentRuns most-recent-first, with status/triggerKind/error', async () => {
+    const { tools, stores } = makeAllTools()
+    const created = await tools.createWorkflow.execute({ name: 'reported', definition: SIMPLE_DEF }, makeContext())
+    const wf = created.data as { id: string }
+
+    const base = new Date('2026-08-03T00:00:00Z')
+    for (let i = 0; i < 3; i++) {
+      const runId = testRunUuid(i)
+      stores.runs.set(runId, {
+        id: runId, workflowId: wf.id, workspaceId: WORKSPACE_ID,
+        triggeredBy: USER_ID, triggerKind: 'manual', status: i === 1 ? 'failed' : 'completed',
+        input: {}, vars: {}, currentStepId: null,
+        error: i === 1 ? { message: 'boom' } : null, outcome: null,
+        startedAt: new Date(base.getTime() + i * 60_000),
+        finishedAt: new Date(base.getTime() + i * 60_000 + 1000),
+        lastActiveAt: base,
+      })
+    }
+
+    const r = await tools.getWorkflow.execute({ workflowId: wf.id }, makeContext())
+    expect(r.isError).toBeFalsy()
+    const data = r.data as {
+      recentRuns: Array<{ id: string; status: string; triggerKind: string; startedAt: string; finishedAt: string | null; error: unknown }>
+    }
+    expect(data.recentRuns.length).toBe(3)
+    // Most recent (highest i) first.
+    expect(data.recentRuns[0].id).toBe(testRunUuid(2))
+    expect(data.recentRuns[0].startedAt >= data.recentRuns[1].startedAt).toBe(true)
+    const failedEntry = data.recentRuns.find((r) => r.status === 'failed')
+    expect(failedEntry?.error).toEqual({ message: 'boom' })
+    expect(data.recentRuns.every((r) => r.triggerKind === 'manual')).toBe(true)
+  })
+
+  it('getWorkflow bounds recentRuns to a sensible default rather than flooding context with full history', async () => {
+    const { tools, stores } = makeAllTools()
+    const created = await tools.createWorkflow.execute({ name: 'chatty', definition: SIMPLE_DEF }, makeContext())
+    const wf = created.data as { id: string }
+    const base = new Date('2026-08-03T00:00:00Z')
+    for (let i = 0; i < 15; i++) {
+      const runId = testRunUuid(100 + i)
+      stores.runs.set(runId, {
+        id: runId, workflowId: wf.id, workspaceId: WORKSPACE_ID,
+        triggeredBy: USER_ID, triggerKind: 'manual', status: 'completed',
+        input: {}, vars: {}, currentStepId: null, error: null, outcome: null,
+        startedAt: new Date(base.getTime() + i * 60_000),
+        finishedAt: new Date(base.getTime() + i * 60_000 + 1000),
+        lastActiveAt: base,
+      })
+    }
+    const r = await tools.getWorkflow.execute({ workflowId: wf.id }, makeContext())
+    const data = r.data as { recentRuns: unknown[] }
+    expect(data.recentRuns.length).toBeLessThanOrEqual(10)
+    expect(data.recentRuns.length).toBeGreaterThan(0)
+  })
+
+  it('getWorkflow returns an empty recentRuns array (never a missing field) when the workflow has no runs', async () => {
+    const { tools } = makeAllTools()
+    const created = await tools.createWorkflow.execute({ name: 'fresh', definition: SIMPLE_DEF }, makeContext())
+    const wf = created.data as { id: string }
+    const r = await tools.getWorkflow.execute({ workflowId: wf.id }, makeContext())
+    const data = r.data as Record<string, unknown>
+    expect(data).toHaveProperty('recentRuns')
+    expect(data.recentRuns).toEqual([])
   })
 
   it('updateWorkflow replaces the definition (add + reorder a step) and emits workflow_updated', async () => {
