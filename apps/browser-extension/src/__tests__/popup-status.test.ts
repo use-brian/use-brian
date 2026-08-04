@@ -67,7 +67,7 @@ describe('[COMP:ext/agent] Popup status line', () => {
  * eleven days stale, from a folder orphaned by the open-core cutover, and
  * nothing on any surface said so.
  */
-describe('[COMP:ext/agent] Popup build status', () => {
+describe('[COMP:ext/build-stamp] Popup build status', () => {
   it('warns only when the relay actually said the build is stale', () => {
     expect(buildWarning({ staleBuild: true })).toMatch(/out of date/i)
     expect(buildWarning({ staleBuild: false })).toBeNull()
