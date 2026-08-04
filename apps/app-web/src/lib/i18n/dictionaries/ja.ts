@@ -2856,6 +2856,8 @@ export const ja: Dictionary = {
       eventMatchCapReached: "上限の {cap} 件に達しました。",
       // ── 実行履歴ドリルダウン ────────────────────────────────────────
       runsOpenRun: "実行を開く",
+      runsCopyId: "実行 ID をコピー",
+      runsIdCopied: "実行 ID をコピーしました",
       // ── ライブ実行アクティビティ（ボード上のバナー）──────────────────
       liveRunning: "実行中",
       livePausedWait: "タイマーの再開を待っています",
@@ -2887,6 +2889,8 @@ export const ja: Dictionary = {
         triggerKindLabel: "トリガー: {kind}",
         statusLabel: "ステータス",
         runIdLabel: "実行 ID",
+        runIdCopy: "実行 ID をコピー",
+        runIdCopied: "実行 ID をコピーしました",
         stepTrailHeading: "ステップトレース",
         stepTrailEmpty: "この実行に記録されたステップはありません。",
         stepDurationLabel: "{value}",

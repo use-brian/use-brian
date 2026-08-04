@@ -22,6 +22,7 @@ import type { Dictionary } from "@/lib/i18n";
 import type { WorkflowRunSummary } from "@/lib/api/workflow";
 import { elapsedLabel, isTerminalRunStatus } from "@/lib/workflow-live-run";
 import { cn } from "@/lib/utils";
+import { RunIdCopyButton } from "./run-id-copy-button";
 
 type Props = {
   workspaceId: string;
@@ -45,10 +46,18 @@ export function RunHistory({ workspaceId, workflowId, runs }: Props) {
       ) : (
         <ul className="divide-y divide-border max-h-64 overflow-y-auto">
           {runs.map((r) => (
-            <li key={r.id}>
+            // The copy control sits OUTSIDE the <Link> (a sibling, not
+            // nested inside the anchor) so copying an id can never be
+            // mistaken for opening the run — see run-id-copy-button.tsx.
+            // The hover highlight moves to the <li> so the row still reads
+            // as one hoverable unit with the button included.
+            <li
+              key={r.id}
+              className="flex items-center hover:bg-muted/40 transition-colors"
+            >
               <Link
                 href={`/w/${workspaceId}/workflow/${workflowId}/runs/${r.id}`}
-                className="px-3 py-1.5 flex items-center gap-2.5 text-xs hover:bg-muted/40 transition-colors"
+                className="flex-1 min-w-0 px-3 py-1.5 flex items-center gap-2.5 text-xs"
                 aria-label={t.workflowPage.builder.runsOpenRun}
               >
                 <StatusPill status={r.status} t={t} />
@@ -68,10 +77,19 @@ export function RunHistory({ workspaceId, workflowId, runs }: Props) {
                     </div>
                   )}
                 </div>
-                <code className="text-[10px] text-muted-foreground/70 font-mono truncate max-w-[10rem]">
+                <code
+                  className="text-[10px] text-muted-foreground/70 font-mono truncate max-w-[10rem]"
+                  title={r.id}
+                >
                   {r.id.slice(0, 8)}
                 </code>
               </Link>
+              <RunIdCopyButton
+                id={r.id}
+                copyLabel={t.workflowPage.builder.runsCopyId}
+                copiedLabel={t.workflowPage.builder.runsIdCopied}
+                className="mr-3"
+              />
             </li>
           ))}
         </ul>

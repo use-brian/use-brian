@@ -3050,6 +3050,8 @@ export const en = {
       eventMatchCapReached: "Reached the {cap}-item cap.",
       // ── Run history drill-down (clickable rows) ──────────────────────
       runsOpenRun: "Open run",
+      runsCopyId: "Copy run ID",
+      runsIdCopied: "Run ID copied",
       // ── Live run activity (banner over the board) ────────────────────
       liveRunning: "Running",
       livePausedWait: "Waiting for a timer to resume",
@@ -3081,6 +3083,8 @@ export const en = {
         triggerKindLabel: "Trigger: {kind}",
         statusLabel: "Status",
         runIdLabel: "Run ID",
+        runIdCopy: "Copy run ID",
+        runIdCopied: "Run ID copied",
         stepTrailHeading: "Step trail",
         stepTrailEmpty: "No steps recorded for this run.",
         stepDurationLabel: "{value}",

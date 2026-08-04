@@ -171,6 +171,9 @@ function fakeWorkflowRunStore(): WorkflowRunStore {
         },
       ]
     },
+    async resolveRunsByIdPrefix() {
+      return []
+    },
     listRunsForPage: async () => [],
     async getLatestOutcomeForWorkflowSystem() {
       return null

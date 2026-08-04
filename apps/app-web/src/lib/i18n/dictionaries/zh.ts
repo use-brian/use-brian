@@ -2827,6 +2827,8 @@ export const zh: Dictionary = {
       eventMatchCapReached: "已達到 {cap} 筆上限。",
       // ── 執行記錄展開 ─────────────────────────────────────────────
       runsOpenRun: "查看執行",
+      runsCopyId: "複製執行 ID",
+      runsIdCopied: "已複製執行 ID",
       // ── 即時執行動態（看板上方橫幅）───────────────────────────────
       liveRunning: "執行中",
       livePausedWait: "正在等待計時器恢復",
@@ -2858,6 +2860,8 @@ export const zh: Dictionary = {
         triggerKindLabel: "觸發：{kind}",
         statusLabel: "狀態",
         runIdLabel: "執行 ID",
+        runIdCopy: "複製執行 ID",
+        runIdCopied: "已複製執行 ID",
         stepTrailHeading: "步驟軌跡",
         stepTrailEmpty: "此執行沒有記錄到任何步驟。",
         stepDurationLabel: "{value}",

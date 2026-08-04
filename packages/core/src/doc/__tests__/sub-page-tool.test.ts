@@ -67,6 +67,7 @@ function fakeWorkflowRunStore(): WorkflowRunStore {
     updateStepRun: vi.fn(),
     listStepRuns: vi.fn(),
     listRunsForWorkflow: vi.fn().mockResolvedValue([]),
+    resolveRunsByIdPrefix: vi.fn().mockResolvedValue([]),
     listRunsForPage: vi.fn().mockResolvedValue([]),
     getLatestOutcomeForWorkflowSystem: vi.fn().mockResolvedValue(null),
   }
