@@ -18,6 +18,8 @@
     "@napi-rs/canvas": "^0.1.100",
     "@openai/codex": "0.146.0-alpha.10.1",
     "@use-brian/brian-kb": "workspace:*",
+    "@use-brian/office-model": "workspace:*",
+    "@use-brian/office-renderer": "workspace:*",
     "@use-brian/shared": "workspace:*",
     "docx": "^9.7.1",
     "e2b": "^2.32.0",

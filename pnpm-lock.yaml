@@ -638,6 +638,12 @@ importers:
       '@use-brian/brian-kb':
         specifier: workspace:*
         version: link:../brian-kb
+      '@use-brian/office-model':
+        specifier: workspace:*
+        version: link:../office-model
+      '@use-brian/office-renderer':
+        specifier: workspace:*
+        version: link:../office-renderer
       '@use-brian/shared':
         specifier: workspace:*
         version: link:../shared

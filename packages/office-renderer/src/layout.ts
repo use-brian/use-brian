@@ -40,6 +40,20 @@ export type OfficeLayoutResult = {
   serialization: string
 }
 
+export type OfficeFitBudget = {
+  maxPages?: number
+  maxSlides?: number
+  maxTextCharsByObject?: Record<string, number>
+  minimumFontSizePt?: number
+}
+
+export type OfficeFitResult = {
+  ok: boolean
+  attempts: number
+  result: OfficeLayoutResult
+  issues: OfficeLayoutIssue[]
+}
+
 function textOf(runs: readonly OfficeRichTextRun[]): string {
   return runs.map((run) => run.text).join('')
 }
@@ -147,4 +161,58 @@ function layoutPresentation(snapshot: PresentationSnapshot): OfficeLayoutResult 
 
 export function layoutOfficeArtifact(snapshot: OfficeArtifactSnapshot): OfficeLayoutResult {
   return snapshot.family === 'document' ? layoutDocument(snapshot) : layoutPresentation(snapshot)
+}
+
+/** D16's deterministic fit gate. It validates; it never silently truncates,
+ * shrinks, hides, or invents a layout. Generation may repair the named issues
+ * and call again within its own bounded loop. */
+export function fitOfficeArtifact(snapshot: OfficeArtifactSnapshot, budget: OfficeFitBudget = {}): OfficeFitResult {
+  const result = layoutOfficeArtifact(snapshot)
+  const issues = [...result.issues]
+  const pageLimit = snapshot.family === 'document' ? budget.maxPages : budget.maxSlides
+  if (pageLimit !== undefined && result.pages.length > pageLimit) {
+    issues.push({ code: 'overflow', objectId: snapshot.rootId, message: `${snapshot.family === 'document' ? 'Page' : 'Slide'} count ${result.pages.length} exceeds the admitted limit ${pageLimit}` })
+  }
+  const floor = budget.minimumFontSizePt ?? 8
+  const visitRuns = (value: unknown): void => {
+    if (!value || typeof value !== 'object') return
+    if (!Array.isArray(value)) {
+      const object = value as Record<string, unknown>
+      const style = object.style as Record<string, unknown> | undefined
+      if (style && typeof style.fontSizePt === 'number' && style.fontSizePt < floor) {
+        issues.push({ code: 'readability', objectId: typeof object.id === 'string' ? object.id : snapshot.rootId, message: `Font size ${style.fontSizePt}pt is below the ${floor}pt readability floor` })
+      }
+      const max = typeof object.id === 'string' ? budget.maxTextCharsByObject?.[object.id] : undefined
+      if (max !== undefined && typeof object.text === 'string' && object.text.length > max) {
+        issues.push({ code: 'overflow', objectId: object.id as string, message: `Text length ${object.text.length} exceeds the admitted field budget ${max}` })
+      }
+    }
+    for (const child of Object.values(value)) visitRuns(child)
+  }
+  visitRuns(snapshot)
+  return { ok: issues.length === 0, attempts: 1, result, issues }
+}
+
+function escapeXml(value: string): string {
+  return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;')
+}
+
+/** Browser/server preview input over the exact display-list coordinates used
+ * by export validation. The UI may mount this SVG directly or translate the
+ * same primitives to DOM nodes. */
+export function renderOfficePreviewSvg(page: OfficeDisplayPage): string {
+  const primitives = [...page.primitives].sort((left, right) => left.z - right.z).map((primitive) => {
+    const common = `data-office-object="${escapeXml(primitive.id)}" x="${primitive.xPt}" y="${primitive.yPt}" width="${primitive.widthPt}" height="${primitive.heightPt}"`
+    if (primitive.kind === 'text') return `<foreignObject ${common}><div xmlns="http://www.w3.org/1999/xhtml">${escapeXml(primitive.text ?? '')}</div></foreignObject>`
+    if (primitive.kind === 'line') return `<line data-office-object="${escapeXml(primitive.id)}" x1="${primitive.xPt}" y1="${primitive.yPt}" x2="${primitive.xPt + primitive.widthPt}" y2="${primitive.yPt + primitive.heightPt}"/>`
+    if (primitive.kind === 'rect') return `<rect ${common}/>`
+    const label = primitive.kind === 'image' ? 'Image' : primitive.kind === 'table' ? 'Table' : primitive.kind === 'chart' ? `Chart: ${primitive.text ?? ''}` : 'Video'
+    return `<g data-office-object="${escapeXml(primitive.id)}"><rect x="${primitive.xPt}" y="${primitive.yPt}" width="${primitive.widthPt}" height="${primitive.heightPt}"/><text x="${primitive.xPt + 4}" y="${primitive.yPt + 16}">${escapeXml(label)}</text></g>`
+  }).join('')
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${page.widthPt} ${page.heightPt}" role="img">${primitives}</svg>`
+}
+
+export function officeGoldenSerialization(snapshot: OfficeArtifactSnapshot): string {
+  const layout = layoutOfficeArtifact(snapshot)
+  return JSON.stringify({ family: layout.family, pages: layout.pages, previews: layout.pages.map(renderOfficePreviewSvg), issues: layout.issues })
 }
