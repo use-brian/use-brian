@@ -1,0 +1,150 @@
+import type {
+  DocumentFlowNode,
+  DocumentSnapshot,
+  OfficeArtifactSnapshot,
+  OfficeRichTextRun,
+  PresentationObject,
+  PresentationSnapshot,
+} from '@use-brian/office-model'
+
+export type OfficeDisplayPrimitive = {
+  id: string
+  kind: 'text' | 'image' | 'rect' | 'line' | 'table' | 'chart' | 'video'
+  xPt: number
+  yPt: number
+  widthPt: number
+  heightPt: number
+  text?: string
+  resourceId?: string
+  sourceKind?: string
+  z: number
+}
+
+export type OfficeDisplayPage = {
+  id: string
+  widthPt: number
+  heightPt: number
+  primitives: OfficeDisplayPrimitive[]
+}
+
+export type OfficeLayoutIssue = {
+  code: 'overflow' | 'collision' | 'readability' | 'missing-resource'
+  objectId: string
+  message: string
+}
+
+export type OfficeLayoutResult = {
+  family: 'document' | 'presentation'
+  pages: OfficeDisplayPage[]
+  issues: OfficeLayoutIssue[]
+  serialization: string
+}
+
+function textOf(runs: readonly OfficeRichTextRun[]): string {
+  return runs.map((run) => run.text).join('')
+}
+
+function textHeight(runs: readonly OfficeRichTextRun[], widthPt: number): number {
+  const font = Math.max(8, ...runs.map((run) => run.style.fontSizePt))
+  const charsPerLine = Math.max(1, Math.floor(widthPt / (font * 0.52)))
+  const lines = Math.max(1, Math.ceil(textOf(runs).length / charsPerLine))
+  return lines * font * 1.25
+}
+
+function documentNodeHeight(node: DocumentFlowNode, widthPt: number): number {
+  if (node.kind === 'paragraph' || node.kind === 'heading') return textHeight(node.runs, widthPt) + 8
+  if (node.kind === 'list') return node.items.reduce((height, item) => height + textHeight(item.runs, widthPt - 24), 0) + 8
+  if (node.kind === 'table') return Math.max(36, node.rows.length * 28)
+  if (node.kind === 'image') return node.heightPt
+  if (node.kind === 'chart') return 240
+  if (node.kind === 'video') return 270
+  return 0
+}
+
+function nodePrimitive(node: DocumentFlowNode, xPt: number, yPt: number, widthPt: number, heightPt: number, z: number): OfficeDisplayPrimitive | null {
+  if (node.kind === 'pageBreak' || node.kind === 'sectionBreak') return null
+  if (node.kind === 'paragraph' || node.kind === 'heading') return { id: node.id, kind: 'text', xPt, yPt, widthPt, heightPt, text: textOf(node.runs), sourceKind: node.kind, z }
+  if (node.kind === 'list') return { id: node.id, kind: 'text', xPt, yPt, widthPt, heightPt, text: node.items.map((item, index) => `${node.ordered ? `${index + 1}.` : '•'} ${textOf(item.runs)}`).join('\n'), sourceKind: node.kind, z }
+  if (node.kind === 'image') return { id: node.id, kind: 'image', xPt, yPt, widthPt: Math.min(widthPt, node.widthPt), heightPt, resourceId: node.resourceId, sourceKind: node.kind, z }
+  if (node.kind === 'table') return { id: node.id, kind: 'table', xPt, yPt, widthPt, heightPt, sourceKind: node.kind, z }
+  if (node.kind === 'chart') return { id: node.id, kind: 'chart', xPt, yPt, widthPt, heightPt, text: node.title, sourceKind: node.kind, z }
+  return { id: node.id, kind: 'video', xPt, yPt, widthPt, heightPt, resourceId: node.resourceId, sourceKind: node.kind, z }
+}
+
+function layoutDocument(snapshot: DocumentSnapshot): OfficeLayoutResult {
+  const pages: OfficeDisplayPage[] = []
+  const issues: OfficeLayoutIssue[] = []
+  for (const section of snapshot.sections) {
+    const width = section.page.widthPt
+    const height = section.page.heightPt
+    const bodyWidth = width - section.page.marginLeftPt - section.page.marginRightPt
+    const bottom = height - section.page.marginBottomPt
+    let page: OfficeDisplayPage = { id: `${section.id}:${pages.length}`, widthPt: width, heightPt: height, primitives: [] }
+    pages.push(page)
+    let y = section.page.marginTopPt
+    for (const node of section.nodes) {
+      if (node.kind === 'pageBreak' || (node.kind === 'sectionBreak' && page.primitives.length > 0)) {
+        page = { id: `${section.id}:${pages.length}`, widthPt: width, heightPt: height, primitives: [] }
+        pages.push(page)
+        y = section.page.marginTopPt
+        continue
+      }
+      const nodeHeight = documentNodeHeight(node, bodyWidth)
+      if (y + nodeHeight > bottom && page.primitives.length > 0) {
+        page = { id: `${section.id}:${pages.length}`, widthPt: width, heightPt: height, primitives: [] }
+        pages.push(page)
+        y = section.page.marginTopPt
+      }
+      if (nodeHeight > bottom - section.page.marginTopPt) issues.push({ code: 'overflow', objectId: node.id, message: 'Object is taller than the printable page body' })
+      const primitive = nodePrimitive(node, section.page.marginLeftPt, y, bodyWidth, nodeHeight, page.primitives.length)
+      if (primitive) page.primitives.push(primitive)
+      y += nodeHeight
+    }
+  }
+  const serialization = JSON.stringify(pages)
+  return { family: 'document', pages, issues, serialization }
+}
+
+function slidePrimitive(object: PresentationObject, z: number): OfficeDisplayPrimitive {
+  const geometry = object.geometry
+  const common = { id: object.id, xPt: geometry.xPt, yPt: geometry.yPt, widthPt: geometry.widthPt, heightPt: geometry.heightPt, sourceKind: object.kind, z }
+  if (object.kind === 'text') return { ...common, kind: 'text', text: textOf(object.runs) }
+  if (object.kind === 'image') return { ...common, kind: 'image', resourceId: object.resourceId }
+  if (object.kind === 'shape') return { ...common, kind: object.shape === 'line' ? 'line' : 'rect', text: textOf(object.text) }
+  if (object.kind === 'connector') return { ...common, kind: 'line' }
+  if (object.kind === 'table') return { ...common, kind: 'table' }
+  if (object.kind === 'chart') return { ...common, kind: 'chart', text: object.title }
+  return { ...common, kind: 'video', resourceId: object.resourceId }
+}
+
+function overlaps(left: OfficeDisplayPrimitive, right: OfficeDisplayPrimitive): boolean {
+  return left.xPt < right.xPt + right.widthPt && left.xPt + left.widthPt > right.xPt && left.yPt < right.yPt + right.heightPt && left.yPt + left.heightPt > right.yPt
+}
+
+function layoutPresentation(snapshot: PresentationSnapshot): OfficeLayoutResult {
+  const issues: OfficeLayoutIssue[] = []
+  const pages = snapshot.slides.map((slide) => {
+    const primitives = slide.objects.map(slidePrimitive)
+    for (const primitive of primitives) {
+      if (primitive.xPt < 0 || primitive.yPt < 0 || primitive.xPt + primitive.widthPt > snapshot.slideSize.widthPt || primitive.yPt + primitive.heightPt > snapshot.slideSize.heightPt) {
+        issues.push({ code: 'overflow', objectId: primitive.id, message: 'Object extends outside the slide boundary' })
+      }
+      if (primitive.kind === 'text') {
+        const object = slide.objects.find((candidate) => candidate.id === primitive.id)
+        if (object?.kind === 'text' && textHeight(object.runs, primitive.widthPt) > primitive.heightPt) issues.push({ code: 'overflow', objectId: primitive.id, message: 'Text does not fit its box at the readability floor' })
+      }
+    }
+    for (let left = 0; left < primitives.length; left += 1) {
+      for (let right = left + 1; right < primitives.length; right += 1) {
+        if (primitives[left].kind === 'text' && primitives[right].kind === 'text' && overlaps(primitives[left], primitives[right])) issues.push({ code: 'collision', objectId: primitives[right].id, message: `Text overlaps ${primitives[left].id}` })
+      }
+    }
+    return { id: slide.id, widthPt: snapshot.slideSize.widthPt, heightPt: snapshot.slideSize.heightPt, primitives }
+  })
+  const serialization = JSON.stringify(pages)
+  return { family: 'presentation', pages, issues, serialization }
+}
+
+export function layoutOfficeArtifact(snapshot: OfficeArtifactSnapshot): OfficeLayoutResult {
+  return snapshot.family === 'document' ? layoutDocument(snapshot) : layoutPresentation(snapshot)
+}

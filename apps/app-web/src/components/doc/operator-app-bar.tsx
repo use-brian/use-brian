@@ -58,6 +58,7 @@ import {
   customHomeAppId,
   homeAppPath,
   isBuiltinHomeAppKey,
+  isOperatorAppKey,
   writeOperatorApp,
   type HomeAppEntry,
   type OperatorAppKey,
@@ -122,7 +123,7 @@ export function OperatorAppBar({
     active === null
       ? []
       : homeApps.filter((entry) => {
-          if (isBuiltinHomeAppKey(entry)) return true;
+          if (isBuiltinHomeAppKey(entry)) return isOperatorAppKey(entry);
           const id = customHomeAppId(entry);
           return Boolean(id && byId.get(id)?.renderable);
         });
