@@ -14,7 +14,7 @@ import {
 } from '@use-brian/office-model'
 import { defaultOfficeDbQuery, type OfficeDbQuery } from './office-artifacts.js'
 
-export type OfficeLiveSnapshot = { snapshot: OfficeArtifactSnapshot; seq: number; baseVersion: number }
+export type OfficeLiveSnapshot = { snapshot: OfficeArtifactSnapshot; seq: number; baseVersion: number; canonicalHash: string }
 
 function decode(bytes: Uint8Array): Y.Doc {
   const doc = new Y.Doc()
@@ -24,16 +24,27 @@ function decode(bytes: Uint8Array): Y.Doc {
 
 export function createOfficeLiveStore(db: OfficeDbQuery = defaultOfficeDbQuery) {
   const get = async (userId: string, artifactId: string): Promise<OfficeLiveSnapshot | null> => {
-    const result = await db<{ ydoc: Buffer; seq: number; baseVersion: number }>(userId, `
-      SELECT ydoc, seq::int AS seq, base_version::int AS "baseVersion"
+    const result = await db<{ ydoc: Buffer; seq: number; baseVersion: number; canonicalHash: string }>(userId, `
+      SELECT ydoc, seq::int AS seq, base_version::int AS "baseVersion", canonical_hash AS "canonicalHash"
         FROM office_collab_documents WHERE artifact_id = $1
     `, [artifactId])
     const row = result.rows[0]
     if (!row) return null
-    return { snapshot: yDocToSnapshot(decode(row.ydoc)), seq: row.seq, baseVersion: row.baseVersion }
+    return { snapshot: yDocToSnapshot(decode(row.ydoc)), seq: row.seq, baseVersion: row.baseVersion, canonicalHash: row.canonicalHash }
   }
   return {
     get,
+
+    async getOfflineSource(userId: string, artifactId: string): Promise<{ snapshot: OfficeArtifactSnapshot; update: Uint8Array; stateVector: Uint8Array; seq: number; baseVersion: number } | null> {
+      const result = await db<{ ydoc: Buffer; stateVector: Buffer; seq: number; baseVersion: number }>(userId, `
+        SELECT ydoc, state_vector AS "stateVector", seq::int AS seq,
+               base_version::int AS "baseVersion"
+          FROM office_collab_documents WHERE artifact_id=$1
+      `, [artifactId])
+      const row = result.rows[0]
+      if (!row) return null
+      return { snapshot: yDocToSnapshot(decode(row.ydoc)), update: new Uint8Array(row.ydoc), stateVector: new Uint8Array(row.stateVector), seq: row.seq, baseVersion: row.baseVersion }
+    },
 
     async initialize(params: { userId: string; artifactId: string; snapshot: OfficeArtifactSnapshot }): Promise<void> {
       if (params.snapshot.artifactId !== params.artifactId) throw new Error('Office live snapshot artifact mismatch')
@@ -73,7 +84,7 @@ export function createOfficeLiveStore(db: OfficeDbQuery = defaultOfficeDbQuery) 
          RETURNING seq::int AS seq
       `, [params.artifactId, params.expectedSeq, Buffer.from(update), Buffer.from(officeStateVector(doc)), hash])
       const row = saved.rows[0]
-      return row ? { snapshot, seq: row.seq, baseVersion: current.baseVersion } : 'conflict'
+      return row ? { snapshot, seq: row.seq, baseVersion: current.baseVersion, canonicalHash: hash } : 'conflict'
     },
   }
 }

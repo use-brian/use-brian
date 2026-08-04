@@ -20,6 +20,7 @@ export type OfficeAccessProjection = {
   sensitivity: OfficeClearance
   visibilityUserIds: string[]
   requiredCompartments: string[]
+  sourcesEligible: boolean
   defaultWorkspaceRole: OfficeRole
   lifecycleState: OfficeLifecycleState
   memberRole: WorkspaceRole
@@ -39,6 +40,7 @@ export type ResolvedOfficeAccess = {
   canComment: boolean
   canEdit: boolean
   canRestore: boolean
+  canDeletePermanently: boolean
   canElevate: boolean
 }
 
@@ -54,6 +56,7 @@ export function resolveOfficeAccessProjection(
 ): ResolvedOfficeAccess | null {
   if (projection.lifecycleState === 'purged') return null
   if (CLEARANCE_RANK[projection.memberClearance] < CLEARANCE_RANK[projection.sensitivity]) return null
+  if (!projection.sourcesEligible) return null
   if (projection.visibilityUserIds.length > 0 && !projection.visibilityUserIds.includes(userId)) return null
   if (
     projection.memberCompartments !== null &&
@@ -81,7 +84,8 @@ export function resolveOfficeAccessProjection(
     canView: true,
     canComment: mutable && (role === 'comment' || role === 'edit'),
     canEdit: mutable && role === 'edit',
-    canRestore: (projection.lifecycleState === 'archived' || projection.lifecycleState === 'trash') && role === 'edit',
+    canRestore: (projection.lifecycleState === 'archived' || projection.lifecycleState === 'trash' || projection.lifecycleState === 'retained') && (role === 'edit' || projection.memberRole === 'owner' || projection.memberRole === 'admin'),
+    canDeletePermanently: (projection.ownerUserId === userId || projection.memberRole === 'owner' || projection.memberRole === 'admin') && (projection.lifecycleState === 'trash' || projection.lifecycleState === 'retained'),
     canElevate: mutable && (projection.memberRole === 'owner' || projection.memberRole === 'admin') && role !== 'edit',
   }
 }
@@ -94,6 +98,7 @@ export const OFFICE_ACCESS_SQL = `
          a.sensitivity                AS sensitivity,
          a.visibility_user_ids        AS "visibilityUserIds",
          a.required_compartments      AS "requiredCompartments",
+         COALESCE(src.eligible, TRUE) AS "sourcesEligible",
          a.default_workspace_role     AS "defaultWorkspaceRole",
          a.lifecycle_state            AS "lifecycleState",
          wm.role                      AS "memberRole",
@@ -106,6 +111,16 @@ export const OFFICE_ACCESS_SQL = `
       ON wm.workspace_id = a.workspace_id AND wm.user_id = $2
     LEFT JOIN office_artifact_grants g
       ON g.artifact_id = a.id AND g.user_id = $2
+    LEFT JOIN LATERAL (
+      SELECT bool_and(
+        CASE s.sensitivity WHEN 'public' THEN 0 WHEN 'internal' THEN 1 WHEN 'confidential' THEN 2 ELSE 3 END
+          <= CASE wm.clearance WHEN 'public' THEN 0 WHEN 'internal' THEN 1 ELSE 2 END
+        AND (cardinality(s.visibility_user_ids)=0 OR $2=ANY(s.visibility_user_ids))
+        AND (wm.compartments IS NULL OR s.required_compartments <@ wm.compartments)
+      ) AS eligible
+      FROM office_artifact_sources s
+      WHERE s.artifact_id=a.id AND s.retracted_at IS NULL
+    ) src ON TRUE
    WHERE a.id = $1
    LIMIT 1
 `

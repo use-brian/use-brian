@@ -28,7 +28,7 @@ export type OfficeArtifactRow = {
 
 export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQuery) {
   return {
-    async list(userId: string, workspaceId: string, lifecycleState: 'active' | 'archived' | 'trash'): Promise<OfficeArtifactRow[]> {
+    async list(userId: string, workspaceId: string, lifecycleState: 'active' | 'archived' | 'trash' | 'retained'): Promise<OfficeArtifactRow[]> {
       const result = await db<OfficeArtifactRow>(userId, `
         SELECT id, workspace_id AS "workspaceId", family, mode, title,
                creator_user_id AS "creatorUserId", owner_user_id AS "ownerUserId",
@@ -98,6 +98,15 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
          LIMIT 200
       `, [artifactId])
       return result.rows
+    },
+
+    async getHeadVersion(userId: string, artifactId: string): Promise<{ id: string; version: number; snapshotHash: string } | null> {
+      const result = await db<{ id: string; version: number; snapshotHash: string }>(userId, `
+        SELECT id,version::int AS version,snapshot_hash AS "snapshotHash"
+          FROM office_artifact_versions
+         WHERE artifact_id=$1 AND id=(SELECT head_version_id FROM office_artifacts WHERE id=$1)
+      `, [artifactId])
+      return result.rows[0] ?? null
     },
 
     async commitVersion(params: {
@@ -191,6 +200,55 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
           elevation_reason = EXCLUDED.elevation_reason,
           granted_at = now(), revoked_at = NULL
       `, [params.artifactId, params.workspaceId, params.targetUserId, params.role, params.userId, params.reason ?? null])
+    },
+
+    async addSource(params: { userId: string; artifactId: string; artifactVersionId: string; workspaceId: string; sourceArtifactId: string; sourceVersion: string; sensitivity: 'public' | 'internal' | 'confidential' }): Promise<void> {
+      await db(params.userId, `
+        INSERT INTO office_artifact_sources
+          (artifact_id,artifact_version_id,workspace_id,source_kind,source_id,source_version,sensitivity)
+        VALUES ($1,$2,$3,'artifact',$4,$5,$6)
+        ON CONFLICT (artifact_version_id,source_kind,source_id,source_version) DO NOTHING
+      `, [params.artifactId, params.artifactVersionId, params.workspaceId, params.sourceArtifactId, params.sourceVersion, params.sensitivity])
+    },
+
+    async transitionLifecycle(params: { userId: string; artifactId: string; action: 'archive' | 'unarchive' | 'trash' | 'restore' | 'retain' | 'purge'; reason: string }): Promise<OfficeArtifactRow | null> {
+      const result = await db<OfficeArtifactRow>(params.userId, `
+        WITH candidate AS (
+          SELECT * FROM office_artifacts
+           WHERE id=$1 AND legal_hold=FALSE AND (
+             ($2='archive' AND lifecycle_state='active') OR
+             ($2='unarchive' AND lifecycle_state='archived') OR
+             ($2='trash' AND lifecycle_state IN ('active','archived')) OR
+             ($2='restore' AND lifecycle_state IN ('trash','retained')) OR
+             ($2='retain' AND lifecycle_state='trash' AND retain_at <= now()) OR
+             ($2='purge' AND lifecycle_state IN ('trash','retained'))
+           ) FOR UPDATE
+        ), updated AS (
+          UPDATE office_artifacts a SET
+            lifecycle_state=CASE $2
+              WHEN 'archive' THEN 'archived' WHEN 'unarchive' THEN 'active'
+              WHEN 'trash' THEN 'trash' WHEN 'restore' THEN 'active'
+              WHEN 'retain' THEN 'retained' WHEN 'purge' THEN 'purged' END,
+            archived_at=CASE WHEN $2='archive' THEN now() WHEN $2 IN ('unarchive','restore') THEN NULL ELSE a.archived_at END,
+            trashed_at=CASE WHEN $2='trash' THEN now() WHEN $2='restore' THEN NULL ELSE a.trashed_at END,
+            retain_at=CASE WHEN $2='trash' THEN now()+interval '30 days' WHEN $2='restore' THEN NULL ELSE a.retain_at END,
+            purge_at=CASE WHEN $2='trash' THEN now()+interval '60 days' WHEN $2='restore' THEN NULL ELSE a.purge_at END,
+            updated_at=now()
+          FROM candidate c WHERE a.id=c.id
+          RETURNING a.*, c.lifecycle_state AS prior_state
+        ), audited AS (
+          INSERT INTO office_audit_events(workspace_id,artifact_id,actor_user_id,event_type,artifact_version,reason,metadata)
+          SELECT workspace_id,id,$3,'office.lifecycle.'||$2,head_version,$4,jsonb_build_object('priorState',prior_state,'nextState',lifecycle_state)
+          FROM updated
+        )
+        SELECT id, workspace_id AS "workspaceId", family, mode, title,
+               creator_user_id AS "creatorUserId", owner_user_id AS "ownerUserId",
+               template_version_id AS "templateVersionId", head_version_id AS "headVersionId",
+               head_version::int AS "headVersion", capability_version AS "capabilityVersion",
+               sensitivity,lifecycle_state AS "lifecycleState",updated_at AS "updatedAt"
+          FROM updated
+      `, [params.artifactId, params.action, params.userId, params.reason])
+      return result.rows[0] ?? null
     },
   }
 }

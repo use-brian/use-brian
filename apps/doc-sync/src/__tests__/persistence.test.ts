@@ -3,6 +3,7 @@ import * as Y from 'yjs'
 import {
   loadPageUpdate,
   notifyPageUpdated,
+  notifyOfficeCheckpoint,
   storePageSnapshot,
   type SysQuery,
 } from '../persistence.js'
@@ -135,5 +136,15 @@ describe('[COMP:doc-sync/persistence] notifyPageUpdated', () => {
       config: { apiBaseUrl: 'http://api', syncSecret: 's', doFetch },
     })
     expect(out).toBe('error')
+  })
+})
+
+describe('[COMP:doc-sync/office-collab] Office checkpoint handoff', () => {
+  it('sends only the canonical CAS tuple through the shared-secret route', async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = []
+    const doFetch = (async (url: string, init: RequestInit) => { calls.push({ url, init }); return { status: 201, ok: true } as Response }) as unknown as typeof fetch
+    await expect(notifyOfficeCheckpoint({ artifactId: 'a1', expectedVersion: 4, canonicalHash: 'a'.repeat(64), config: { apiBaseUrl: 'http://api/', syncSecret: 'secret', doFetch } })).resolves.toBe('checkpointed')
+    expect(calls[0].url).toBe('http://api/internal/office-checkpoint')
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({ artifactId: 'a1', expectedVersion: 4, canonicalHash: 'a'.repeat(64) })
   })
 })

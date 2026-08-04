@@ -16,6 +16,7 @@ function projection(overrides: Partial<OfficeAccessProjection> = {}): OfficeAcce
     sensitivity: 'internal',
     visibilityUserIds: [],
     requiredCompartments: [],
+    sourcesEligible: true,
     defaultWorkspaceRole: 'comment',
     lifecycleState: 'active',
     memberRole: 'member',
@@ -39,6 +40,7 @@ describe('[COMP:api/office-access] Office access predicate', () => {
     expect(resolveOfficeAccessProjection(USER, projection({ visibilityUserIds: [OTHER] }))).toBeNull()
     expect(resolveOfficeAccessProjection(USER, projection({ memberCompartments: ['sales'], requiredCompartments: ['legal'] }))).toBeNull()
     expect(resolveOfficeAccessProjection(USER, projection({ explicitRole: 'deny' }))).toBeNull()
+    expect(resolveOfficeAccessProjection(USER, projection({ sourcesEligible: false }))).toBeNull()
   })
 
   it('makes Archive/Trash read-only and Retained owner/admin-only', () => {

@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { officeArtifactRoutes } from '../office-artifacts.js'
 import { officeJobRoutes } from '../office-jobs.js'
 import { officeTemplateRoutes } from '../office-templates.js'
+import { internalOfficeCheckpointRoutes } from '../internal-office-checkpoint.js'
 
 const USER = '20000000-0000-4000-8000-000000000001'
 const WORKSPACE = '20000000-0000-4000-8000-000000000002'
@@ -29,6 +30,7 @@ function app() {
     createDraft: vi.fn(async () => ({ id: 'template-1' })),
     createTemplateShell: vi.fn(async () => ({ id: ARTIFACT })),
     createCompileJob: vi.fn(async () => ({ id: JOB })),
+    transitionLifecycle: vi.fn(async () => ({ id: 'template-1', lifecycleState: 'deprecated' })),
   }
   server.use('/api/office', officeArtifactRoutes(artifacts))
   server.use('/api/office', officeJobRoutes(jobs))
@@ -59,5 +61,31 @@ describe('[COMP:api/office-routes] Office API routes', () => {
     await request(test.server).post('/api/office/artifacts').send({ workspaceId: 'bad' }).expect(400)
     await request(test.server).post(`/api/office/jobs/${JOB}/steering`).send({ instruction: '' }).expect(400)
     expect(test.artifacts.service.create).not.toHaveBeenCalled()
+  })
+})
+
+describe('[COMP:api/office-routes] Office checkpoint route', () => {
+  it('authenticates doc-sync and commits the exact canonical CAS tuple', async () => {
+    const server = express()
+    server.use(express.json())
+    const checkpoint = vi.fn(async () => ({ version: 5 }))
+    server.use(internalOfficeCheckpointRoutes({ sharedSecret: 'sync-secret', checkpoint }))
+
+    await request(server).post('/internal/office-checkpoint').send({ artifactId: ARTIFACT, expectedVersion: 4, canonicalHash: 'a'.repeat(64) }).expect(403)
+    const response = await request(server).post('/internal/office-checkpoint').set('x-doc-sync-secret', 'sync-secret').send({ artifactId: ARTIFACT, expectedVersion: 4, canonicalHash: 'a'.repeat(64) }).expect(201)
+
+    expect(response.body).toEqual({ version: 5 })
+    expect(checkpoint).toHaveBeenCalledOnce()
+    expect(checkpoint).toHaveBeenCalledWith(ARTIFACT, 4, 'a'.repeat(64))
+  })
+
+  it('rejects malformed hashes and exposes CAS conflicts', async () => {
+    const server = express()
+    server.use(express.json())
+    const checkpoint = vi.fn(async () => 'conflict' as const)
+    server.use(internalOfficeCheckpointRoutes({ sharedSecret: 'sync-secret', checkpoint }))
+
+    await request(server).post('/internal/office-checkpoint').set('x-doc-sync-secret', 'sync-secret').send({ artifactId: ARTIFACT, expectedVersion: 4, canonicalHash: 'bad' }).expect(400)
+    await request(server).post('/internal/office-checkpoint').set('x-doc-sync-secret', 'sync-secret').send({ artifactId: ARTIFACT, expectedVersion: 4, canonicalHash: 'b'.repeat(64) }).expect(409, { error: 'version_conflict' })
   })
 })

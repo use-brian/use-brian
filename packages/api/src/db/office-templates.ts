@@ -11,6 +11,15 @@ export function createOfficeTemplateStore(db: OfficeDbQuery = defaultOfficeDbQue
       return result.rows[0] ?? null
     },
 
+    async getResource(userId: string, resourceId: string): Promise<{ id: string; workspaceId: string; fileId: string | null; hash: string; mime: string; sensitivity: 'public' | 'internal' | 'confidential' } | null> {
+      const result = await db<{ id: string; workspaceId: string; fileId: string | null; hash: string; mime: string; sensitivity: 'public' | 'internal' | 'confidential' }>(userId, `
+        SELECT id, workspace_id AS "workspaceId", file_id AS "fileId",
+               content_hash AS hash, mime, sensitivity
+          FROM office_resources WHERE id=$1
+      `, [resourceId])
+      return result.rows[0] ?? null
+    },
+
     async list(userId: string, workspaceId: string, family?: 'document' | 'presentation'): Promise<Array<Record<string, unknown>>> {
       const result = await db<Record<string, unknown>>(userId, `
         SELECT id, family, name, description, lifecycle_state AS "lifecycleState",
@@ -20,9 +29,13 @@ export function createOfficeTemplateStore(db: OfficeDbQuery = defaultOfficeDbQue
          WHERE workspace_id = $1
            AND ($2::text IS NULL OR family = $2::text)
            AND lifecycle_state <> 'purged'
+           AND (lifecycle_state <> 'retained' OR owner_user_id = $3 OR EXISTS (
+             SELECT 1 FROM workspace_members wm WHERE wm.workspace_id=office_templates.workspace_id
+               AND wm.user_id=$3 AND wm.role IN ('owner','admin')
+           ))
          ORDER BY updated_at DESC
          LIMIT 200
-      `, [workspaceId, family ?? null])
+      `, [workspaceId, family ?? null, userId])
       return result.rows
     },
 
@@ -78,6 +91,41 @@ export function createOfficeTemplateStore(db: OfficeDbQuery = defaultOfficeDbQue
       `, [params.workspaceId, params.kind, params.name, params.fileId, params.hash, params.mime, JSON.stringify(params.licence), params.embeddingRights, params.sensitivity, params.userId])
       if (!result.rows[0]) throw new Error('Office resource insert returned no row')
       return result.rows[0]
+    },
+
+    async transitionLifecycle(params: { userId: string; templateId: string; action: 'deprecate' | 'restore' | 'trash' | 'purge'; reason: string }): Promise<Record<string, unknown> | null> {
+      const result = await db<Record<string, unknown>>(params.userId, `
+        WITH candidate AS (
+          SELECT t.* FROM office_templates t
+           WHERE t.id=$1 AND t.legal_hold=FALSE
+             AND (t.owner_user_id=$3 OR EXISTS (
+               SELECT 1 FROM workspace_members wm WHERE wm.workspace_id=t.workspace_id
+                 AND wm.user_id=$3 AND wm.role IN ('owner','admin')
+             ))
+             AND (($2='deprecate' AND t.lifecycle_state='admitted') OR
+                  ($2='restore' AND t.lifecycle_state IN ('deprecated','trash','retained')) OR
+                  ($2='trash' AND t.lifecycle_state IN ('draft','admitted','deprecated')) OR
+                  ($2='purge' AND t.lifecycle_state IN ('trash','retained') AND NOT EXISTS (
+                    SELECT 1 FROM office_artifacts a JOIN office_template_versions v ON v.id=a.template_version_id
+                     WHERE v.template_id=t.id AND a.lifecycle_state <> 'purged'
+                  )))
+           FOR UPDATE
+        )
+        , updated AS (
+          UPDATE office_templates t SET
+            lifecycle_state=CASE $2 WHEN 'deprecate' THEN 'deprecated' WHEN 'restore' THEN CASE WHEN t.current_version_id IS NULL THEN 'draft' ELSE 'admitted' END WHEN 'trash' THEN 'trash' WHEN 'purge' THEN 'purged' END,
+            trashed_at=CASE WHEN $2='trash' THEN now() WHEN $2='restore' THEN NULL ELSE t.trashed_at END,
+            retain_at=CASE WHEN $2='trash' THEN now()+interval '30 days' WHEN $2='restore' THEN NULL ELSE t.retain_at END,
+            purge_at=CASE WHEN $2='trash' THEN now()+interval '60 days' WHEN $2='restore' THEN NULL ELSE t.purge_at END,
+            updated_at=now()
+          FROM candidate c WHERE t.id=c.id RETURNING t.*
+        ), audited AS (
+          INSERT INTO office_audit_events(workspace_id,actor_user_id,event_type,reason,metadata)
+          SELECT workspace_id,$3,'office.template.lifecycle.'||$2,$4,jsonb_build_object('templateId',id) FROM updated
+        )
+        SELECT id,lifecycle_state AS "lifecycleState",updated_at AS "updatedAt" FROM updated
+      `, [params.templateId, params.action, params.userId, params.reason])
+      return result.rows[0] ?? null
     },
   }
 }

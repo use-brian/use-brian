@@ -37,6 +37,7 @@ import {
   loadPageUpdate,
   maybeEnqueueBrainIngest,
   notifyPageUpdated,
+  notifyOfficeCheckpoint,
   storePageSnapshot,
   type SysQuery,
 } from './persistence.js'
@@ -159,6 +160,19 @@ const hocuspocus = new Hocuspocus({
     }
   },
 
+  // Lifecycle/grant/clearance changes must affect an already-open Office tab,
+  // not only its next reconnect. Re-resolve before every inbound message and
+  // flip the connection read-only before MessageReceiver handles an update.
+  // Awareness remains available for read-only Archive/Trash previews.
+  async beforeHandleMessage(data) {
+    const target = parseSyncDocumentName(data.documentName)
+    if (target.kind !== 'office') return
+    const context = data.context as { service?: true; userId?: string } | undefined
+    if (context?.service) return
+    const access = context?.userId ? await resolveOfficeAccess(context.userId, target.id) : null
+    data.connection.readOnly = !access?.canEdit
+  },
+
   async onLoadDocument(data) {
     const target = parseSyncDocumentName(data.documentName)
     if (target.kind === 'office') {
@@ -202,11 +216,12 @@ const hocuspocus = new Hocuspocus({
   async onStoreDocument(data) {
     const target = parseSyncDocumentName(data.documentName)
     if (target.kind === 'office') {
-      await storeOfficeSnapshot({
+      const stored = await storeOfficeSnapshot({
         artifactId: target.id,
         ydoc: data.document as unknown as Y.Doc,
         query: sysQuery,
       })
+      if (API_INTERNAL_URL && DOC_SYNC_SECRET) void notifyOfficeCheckpoint({ artifactId: target.id, expectedVersion: stored.baseVersion, canonicalHash: stored.hash, config: { apiBaseUrl: API_INTERNAL_URL, syncSecret: DOC_SYNC_SECRET } })
       return
     }
     const pageId = target.id

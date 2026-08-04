@@ -11,7 +11,7 @@ export type OfficeArtifact = {
   mode?: "artifact" | "template";
   title: string;
   version: number;
-  lifecycleState: "active" | "archived" | "trash" | "retained";
+  lifecycleState: "active" | "archived" | "trash" | "retained" | "purged";
   role: "view" | "comment" | "edit";
   job?: { id: string; status: string; stage: string };
 };
@@ -43,14 +43,18 @@ export type OfficeCommentThread = {
   messages: Array<{ id: string; authorType: string; body: string; brianRunStatus?: string; createdAt: string }>;
 };
 
+export class OfficeApiError extends Error {
+  constructor(message: string, readonly status: number) { super(message); }
+}
+
 async function json<T>(response: Response, fallback: string): Promise<T> {
-  if (!response.ok) throw new Error(fallback);
+  if (!response.ok) throw new OfficeApiError(fallback, response.status);
   return response.json() as Promise<T>;
 }
 
 export async function listOfficeArtifacts(
   workspaceId: string,
-  view: "active" | "archived" | "trash" = "active",
+  view: "active" | "archived" | "trash" | "retained" = "active",
 ): Promise<OfficeArtifact[]> {
   const query = new URLSearchParams({ workspaceId, view });
   const body = await json<{ artifacts: OfficeArtifact[] }>(
@@ -175,6 +179,11 @@ export async function compileOfficeTemplateDraft(input: { templateId: string; wo
   }), "office_template_compile_failed");
 }
 
+export async function transitionOfficeTemplateLifecycle(templateId: string, action: "deprecate" | "restore" | "trash" | "purge", reason: string): Promise<Record<string, unknown>> {
+  const body = await json<{ template: Record<string, unknown> }>(await authFetch(`${API_URL}/api/office/templates/${encodeURIComponent(templateId)}/lifecycle`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, reason }) }), "office_template_lifecycle_failed");
+  return body.template;
+}
+
 export async function uploadOfficeSource(workspaceId: string, file: File): Promise<{ fileId: string; family: OfficeFamily }> {
   const family: OfficeFamily = file.name.toLowerCase().endsWith(".docx") ? "document" : file.name.toLowerCase().endsWith(".pptx") ? "presentation" : (() => { throw new Error("office_file_type"); })();
   const form = new FormData();
@@ -187,4 +196,42 @@ export async function uploadOfficeSource(workspaceId: string, file: File): Promi
 
 export async function startOfficeImport(input: { workspaceId: string; assistantId: string; family: OfficeFamily; sourceFileId: string; title: string; templateVersionId: string }): Promise<{ artifactId: string; jobId: string }> {
   return json(await authFetch(`${API_URL}/api/office/imports`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...input, sensitivity: "internal", idempotencyKey: crypto.randomUUID() }) }), "office_import_failed");
+}
+
+export type OfficeReleaseReceipt = { status: "blocked" | "needs_ack" | "ready"; version: number; action: string; blocks: Array<{ code: string; message: string; subjectId?: string }>; warnings: Array<{ code: string; message: string; subjectId?: string }>; acknowledgedCodes: string[] };
+export type OfficeReleaseInput = { expectedVersion: number; action: "export" | "share" | "present" | "send" | "publish"; destination: { sensitivity: "public" | "internal" | "confidential"; external: boolean; disclosureSatisfied?: boolean }; acknowledgement?: { version: number; action: "export" | "share" | "present" | "send" | "publish"; codes: string[] } };
+
+export async function reviewOfficeRelease(artifactId: string, input: OfficeReleaseInput): Promise<OfficeReleaseReceipt> {
+  const body = await json<{ receipt: OfficeReleaseReceipt }>(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/releases/preflight`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) }), "office_release_review_failed");
+  return body.receipt;
+}
+
+export async function releaseOfficeArtifact(artifactId: string, input: OfficeReleaseInput): Promise<{ releaseId: string; fileId: string; receipt: OfficeReleaseReceipt }> {
+  return json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/releases`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) }), "office_release_failed");
+}
+
+export async function readOfficeReleasedFile(workspaceId: string, fileId: string): Promise<Blob> {
+  const response = await authFetch(`${API_URL}/api/doc-files/${encodeURIComponent(workspaceId)}/${encodeURIComponent(fileId)}`);
+  if (!response.ok) throw new OfficeApiError("office_release_download_failed", response.status);
+  return response.blob();
+}
+
+export async function createOfficeDerivative(artifactId: string, input: { title: string; sensitivity: "public" | "internal" | "confidential"; selectedObjectIds: string[]; visibilityUserIds?: string[] }): Promise<{ artifactId: string; version: number }> {
+  return json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/derivatives`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...input, visibilityUserIds: input.visibilityUserIds ?? [] }) }), "office_derivative_failed");
+}
+
+export async function transitionOfficeLifecycle(artifactId: string, action: "archive" | "unarchive" | "trash" | "restore" | "purge", reason: string): Promise<OfficeArtifact> {
+  const body = await json<{ artifact: OfficeArtifact }>(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/lifecycle`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, reason }) }), "office_lifecycle_failed");
+  return body.artifact;
+}
+
+export async function createOfficeOfflinePackage(artifactId: string, input: { deviceId: string; pinned: boolean; expectedVersion: number }): Promise<{ manifest: Record<string, unknown>; signature: string; payload: unknown }> {
+  return json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/offline-packages`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) }), "office_offline_package_failed");
+}
+
+export async function syncOfficeOfflineCommands(artifactId: string, expectedSeq: number, commands: OfficeCommand[]): Promise<{ status: string; reason?: string; quarantine?: boolean; seq?: number; snapshot?: OfficeArtifactSnapshot }> {
+  const response = await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/offline-sync`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expectedSeq, commands }) });
+  const body = await response.json() as { status: string; reason?: string; quarantine?: boolean; seq?: number; snapshot?: OfficeArtifactSnapshot };
+  if (!response.ok && response.status !== 409) throw new Error("office_offline_sync_failed");
+  return body;
 }

@@ -42,11 +42,12 @@ describe('[COMP:doc-sync/office-collab] Generic Office collaboration routing', (
     const calls: { sql: string; params: unknown[] }[] = []
     const query: SysQuery = async (sql, params) => {
       calls.push({ sql, params })
-      return [] as never[]
+      return [{ baseVersion: 4 }] as never[]
     }
     const receipt = await storeOfficeSnapshot({ artifactId: snapshot.artifactId, ydoc: doc, query })
     expect(receipt.snapshot).toEqual(snapshot)
     expect(receipt.hash).toMatch(/^[a-f0-9]{64}$/)
+    expect(receipt.baseVersion).toBe(4)
     expect(calls).toHaveLength(1)
     expect(calls[0].sql).toContain('office_collab_documents.seq + 1')
     expect(calls[0].sql).toContain('a.head_version')

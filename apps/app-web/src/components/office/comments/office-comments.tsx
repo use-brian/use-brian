@@ -5,14 +5,26 @@ import { useEffect, useState } from "react";
 import { APP_LEVEL_ASSISTANT_ID } from "@use-brian/shared";
 import { createOfficeComment, listOfficeComments, resolveOfficeComment, type OfficeCommentThread } from "@/lib/office/api";
 import { useT } from "@/lib/i18n/client";
+import { appendOfflineCommand, listOfflineJournal, removeOfflineJournalEntry } from "@/lib/office/offline";
 
-export function OfficeComments({ artifactId, version, targetIds, anchorKind = "object", canComment }: { artifactId: string; version: number; targetIds: string[]; anchorKind?: OfficeCommentThread["anchor"]["kind"]; canComment: boolean }) {
+export function OfficeComments({ artifactId, version, targetIds, anchorKind = "object", canComment, offline = false, initialThreads }: { artifactId: string; version: number; targetIds: string[]; anchorKind?: OfficeCommentThread["anchor"]["kind"]; canComment: boolean; offline?: boolean; initialThreads?: OfficeCommentThread[] }) {
   const t = useT().office;
-  const [threads, setThreads] = useState<OfficeCommentThread[]>([]);
+  const [threads, setThreads] = useState<OfficeCommentThread[]>(initialThreads ?? []);
   const [body, setBody] = useState("");
   const [busy, setBusy] = useState(false);
   const reload = () => listOfficeComments(artifactId).then(setThreads).catch(() => setThreads([]));
-  useEffect(() => { void reload(); }, [artifactId]);
+  useEffect(() => { if (offline) setThreads(initialThreads ?? []); else void reload(); }, [artifactId, offline, initialThreads]);
+  useEffect(() => {
+    if (offline) return;
+    void listOfflineJournal(artifactId).then(async (entries) => {
+      for (const entry of entries) {
+        if (entry.kind !== "comment") continue;
+        await createOfficeComment({ artifactId, anchor: entry.anchor as OfficeCommentThread["anchor"], body: entry.body, invokeBrian: entry.invokeBrian });
+        await removeOfflineJournalEntry(entry);
+      }
+      if (entries.some((entry) => entry.kind === "comment")) await reload();
+    }).catch(() => undefined);
+  }, [artifactId, offline]);
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -20,9 +32,15 @@ export function OfficeComments({ artifactId, version, targetIds, anchorKind = "o
     setBusy(true);
     const invoke = /(^|\s)@Brian\b/i.test(body);
     try {
-      await createOfficeComment({ artifactId, anchor: { kind: anchorKind, targetIds }, body: body.trim(), invokeBrian: invoke ? { assistantId: APP_LEVEL_ASSISTANT_ID, expectedVersion: version, idempotencyKey: crypto.randomUUID() } : undefined });
+      const invokeBrian = invoke ? { assistantId: APP_LEVEL_ASSISTANT_ID, expectedVersion: version, idempotencyKey: crypto.randomUUID() } : undefined;
+      if (offline) {
+        const createdAt = new Date().toISOString();
+        const seq = Date.now() * 1_000 + Math.floor(Math.random() * 1_000);
+        await appendOfflineCommand({ artifactId, seq, kind: "comment", anchor: { kind: anchorKind, targetIds }, body: body.trim(), invokeBrian, createdAt });
+        setThreads((current) => [...current, { id: `offline:${seq}`, artifactVersionId: String(version), anchorKind, anchor: { kind: anchorKind, targetIds }, status: "open", messages: [{ id: `offline-message:${seq}`, authorType: "user", body: body.trim(), createdAt }] }]);
+      } else await createOfficeComment({ artifactId, anchor: { kind: anchorKind, targetIds }, body: body.trim(), invokeBrian });
       setBody("");
-      await reload();
+      if (!offline) await reload();
     } finally { setBusy(false); }
   }
 

@@ -5,6 +5,7 @@ import * as Y from 'yjs'
 import {
   encodeOfficeState,
   officeStateVector,
+  preflightOfficeCandidate,
   snapshotToYDoc,
   yDocToSnapshot,
   type OfficeArtifactSnapshot,
@@ -30,12 +31,14 @@ export async function storeOfficeSnapshot(params: {
   artifactId: string
   ydoc: Y.Doc
   query: SysQuery
-}): Promise<{ snapshot: OfficeArtifactSnapshot; hash: string }> {
+}): Promise<{ snapshot: OfficeArtifactSnapshot; hash: string; baseVersion: number }> {
   const snapshot = yDocToSnapshot(params.ydoc)
   if (snapshot.artifactId !== params.artifactId) throw new Error('Office collaboration document artifact mismatch')
+  const preflight = preflightOfficeCandidate(snapshot)
+  if (!preflight.ok) throw new Error(`Office collaboration snapshot failed preflight: ${preflight.diagnostics.map((item) => `${item.path}: ${item.message}`).join('; ')}`)
   const canonical = JSON.stringify(snapshot)
   const hash = createHash('sha256').update(canonical).digest('hex')
-  await params.query(
+  const rows = await params.query<{ baseVersion: number }>(
     `INSERT INTO office_collab_documents
        (artifact_id, workspace_id, ydoc, state_vector, canonical_hash, base_version, seq, updated_at)
      SELECT $1,$2,$3,$4,$5,a.head_version,1,now()
@@ -46,7 +49,8 @@ export async function storeOfficeSnapshot(params: {
        canonical_hash = EXCLUDED.canonical_hash,
        base_version = EXCLUDED.base_version,
        seq = office_collab_documents.seq + 1,
-       updated_at = now()`,
+       updated_at = now()
+     RETURNING base_version::int AS "baseVersion"`,
     [
       params.artifactId,
       snapshot.workspaceId,
@@ -55,5 +59,5 @@ export async function storeOfficeSnapshot(params: {
       hash,
     ],
   )
-  return { snapshot, hash }
+  return { snapshot, hash, baseVersion: rows[0]?.baseVersion ?? 0 }
 }

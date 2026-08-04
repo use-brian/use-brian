@@ -11,7 +11,7 @@ import { cn } from "@/lib/utils";
 import { listOfficeArtifacts, type OfficeArtifact, type OfficeFamily } from "@/lib/office/api";
 import { OfficeImport } from "./office-import";
 
-type View = "active" | "archived" | "trash";
+type View = "active" | "archived" | "trash" | "retained";
 type Filter = "all" | OfficeFamily;
 
 export function OfficeHome({ workspaceId, initialArtifacts }: { workspaceId: string; initialArtifacts?: OfficeArtifact[] }) {
@@ -58,7 +58,7 @@ export function OfficeHome({ workspaceId, initialArtifacts }: { workspaceId: str
 
         <div className="flex flex-wrap items-center justify-between gap-3 border-b pb-3">
           <div className="flex gap-1" role="tablist">
-            {(["active", "archived", "trash"] as const).map((item) => (
+            {(["active", "archived", "trash", "retained"] as const).map((item) => (
               <button key={item} type="button" role="tab" aria-selected={view === item} onClick={() => { setArtifacts(null); setView(item); }} className={cn("rounded-md px-3 py-1.5 text-sm", view === item ? "bg-muted font-medium" : "text-muted-foreground")}>
                 {t[item]}
               </button>

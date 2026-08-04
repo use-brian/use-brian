@@ -8,6 +8,7 @@ export type OfficeTemplatesRouteDeps = {
   createTemplateShell(params: { userId: string; workspaceId: string; family: 'document' | 'presentation'; title: string; templateVersionId: null; capabilityVersion: number; sensitivity: 'public' | 'internal' | 'confidential'; mode: 'template' }): Promise<{ id: string }>
   createCompileJob(params: { userId: string; workspaceId: string; artifactId: string; assistantId: string | null; jobKind: 'template_compile'; brief: unknown; authorityProjection: unknown; idempotencyKey: string }): Promise<{ id: string }>
   wakeCompile?(userId: string): void
+  transitionLifecycle(params: { userId: string; templateId: string; action: 'deprecate' | 'restore' | 'trash' | 'purge'; reason: string }): Promise<unknown | null>
 }
 
 export function officeTemplateRoutes(deps: OfficeTemplatesRouteDeps): Router {
@@ -44,6 +45,15 @@ export function officeTemplateRoutes(deps: OfficeTemplatesRouteDeps): Router {
     const job = await deps.createCompileJob({ userId, workspaceId: body.data.workspaceId, artifactId: body.data.draftArtifactId, assistantId: body.data.assistantId, jobKind: 'template_compile', brief: { templateId: String(req.params.templateId), source: body.data.source }, authorityProjection: { sensitivity: 'internal' }, idempotencyKey: body.data.idempotencyKey })
     deps.wakeCompile?.(userId)
     res.status(202).json({ jobId: job.id })
+  })
+  router.post('/templates/:templateId/lifecycle', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
+    const body = z.object({ action: z.enum(['deprecate', 'restore', 'trash', 'purge']), reason: z.string().min(1).max(2_000) }).strict().safeParse(req.body)
+    if (!body.success) return void res.status(400).json({ error: 'Invalid template lifecycle request', issues: body.error.issues })
+    const template = await deps.transitionLifecycle({ userId, templateId: String(req.params.templateId), ...body.data })
+    if (!template) return void res.status(409).json({ error: 'template_lifecycle_blocked' })
+    res.json({ template })
   })
   return router
 }

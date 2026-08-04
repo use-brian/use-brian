@@ -6,7 +6,7 @@ import type { OfficeArtifactToolProjection, OfficeToolPort } from '@use-brian/co
 
 export type OfficeArtifactsRouteDeps = {
   service: OfficeToolPort
-  list(userId: string, workspaceId: string, view: 'active' | 'archived' | 'trash'): Promise<OfficeArtifactToolProjection[]>
+  list(userId: string, workspaceId: string, view: 'active' | 'archived' | 'trash' | 'retained'): Promise<OfficeArtifactToolProjection[]>
   restoreVersion(params: { userId: string; artifactId: string; targetVersionId: string; expectedVersion: number; summary: string }): Promise<{ id: string; version: number } | null>
   getArtifact(userId: string, artifactId: string): Promise<OfficeArtifactRow | null>
   listVersions(userId: string, artifactId: string): Promise<Array<Record<string, unknown>>>
@@ -32,7 +32,7 @@ export function officeArtifactRoutes(deps: OfficeArtifactsRouteDeps): Router {
     const userId = (req as { userId?: string }).userId
     if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
     const workspaceId = z.string().uuid().safeParse(req.query.workspaceId)
-    const view = z.enum(['active', 'archived', 'trash']).catch('active').parse(req.query.view)
+    const view = z.enum(['active', 'archived', 'trash', 'retained']).catch('active').parse(req.query.view)
     if (!workspaceId.success) return void res.status(400).json({ error: 'workspaceId must be a UUID' })
     res.json({ artifacts: await deps.list(userId, workspaceId.data, view) })
   })
