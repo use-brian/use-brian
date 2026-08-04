@@ -11,6 +11,7 @@ vi.mock('@/lib/auth-fetch', () => ({ authFetch: vi.fn() }))
 
 import { authFetch } from '@/lib/auth-fetch'
 import {
+  captureProfileSession,
   completeComputerTask,
   createBrowserProfile,
   deleteBrowserProfile,
@@ -129,6 +130,37 @@ describe('[COMP:app-web/sandbox-takeover] Take-Over live view SDK', () => {
     expect(JSON.parse(complete[1]!.body as string)).toEqual({ outcome: 'failed' })
   })
 
+})
+
+// "Save this login from my browser" (browser-session-portability.md D5): a
+// profile-scoped capture, not a task-scoped one - no sessionId, just the
+// profile and the site. Echoes site + capturedAt on success (story 3) and
+// surfaces the server's message verbatim on failure (story 20), so distinct
+// refusals like a wrong tab's site never collapse into one flattened error.
+describe('[COMP:app-web/profile-management] captureProfileSession ("Save this login from my browser")', () => {
+  it('posts to the profile-scoped capture route and echoes site + capturedAt on success', async () => {
+    mockFetch.mockResolvedValueOnce(
+      respond(200, { ok: true, site: 'instagram.com', capturedAt: '2026-08-04T00:00:00.000Z' }),
+    )
+    const result = await captureProfileSession('p1', 'instagram.com')
+    expect(result).toEqual({ ok: true, site: 'instagram.com', capturedAt: '2026-08-04T00:00:00.000Z' })
+    const call = mockFetch.mock.calls.at(-1)!
+    expect(String(call[0])).toContain('/api/computer/profiles/p1/capture')
+    expect(call[1]).toMatchObject({ method: 'POST' })
+    expect(JSON.parse(call[1]!.body as string)).toEqual({ site: 'instagram.com' })
+  })
+
+  it('surfaces the server message verbatim on a non-500 refusal', async () => {
+    mockFetch.mockResolvedValueOnce(
+      respond(409, {
+        error: 'The allowed tab is on a different site than instagram.com.',
+        code: 'site_mismatch',
+      }),
+    )
+    const refused = await captureProfileSession('p1', 'instagram.com')
+    expect(refused.ok).toBe(false)
+    expect(refused.error).toBe('The allowed tab is on a different site than instagram.com.')
+  })
 })
 
 describe('[COMP:app-web/backend-toggle] The live backend toggle (R2-3)', () => {

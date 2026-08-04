@@ -18,8 +18,10 @@ import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { ConnectBrowserPanel } from "./connect-browser-panel";
 import { listAssistants, type StudioAssistantSummary } from "@/lib/api/studio";
 import {
+  captureProfileSession,
   createBrowserProfile,
   deleteBrowserProfile,
+  getBrowserExtensionStatus,
   listBrowserProfiles,
   revokeProfileGrant,
   revokeProfileSession,
@@ -40,6 +42,28 @@ function normalizeLoginUrl(raw: string): string | null {
     return url.hostname.includes(".") ? url.toString() : null;
   } catch {
     return null;
+  }
+}
+
+/** The registrable-ish site a normalised login URL captures against - strips
+ *  a leading "www." the way the profile's vault sessions are keyed. The
+ *  extension re-validates against the actually-allowed tab (`site_mismatch`
+ *  refuses a mismatch), so an approximate strip here is safe. */
+export function siteFromLoginUrl(url: string): string {
+  return new URL(url).hostname.replace(/^www\./i, "");
+}
+
+/** A proxy URL must be an absolute URL with a real host - `new URL` alone is
+ *  not enough, since a bare "host:port" typo (the common one, e.g.
+ *  "proxy.example:8080") parses as a valid OPAQUE url whose "scheme" is the
+ *  host and whose hostname is empty, not as an error. Requiring a hostname
+ *  is what actually catches it (story 12: a typo must not silently produce
+ *  an unproxied browse). */
+export function isValidProxyUrl(raw: string): boolean {
+  try {
+    return new URL(raw).hostname.length > 0;
+  } catch {
+    return false;
   }
 }
 
@@ -83,6 +107,23 @@ export function BrowserProfilesSection() {
   // "Sign in to a site" drafts + in-flight flag, keyed by profile id.
   const [loginDrafts, setLoginDrafts] = useState<Record<string, string>>({});
   const [loginBusyId, setLoginBusyId] = useState<string | null>(null);
+  // "Save this login from my browser" (browser-session-portability.md D5/D7):
+  // drafts + in-flight flag, keyed by profile id, plus the last successful
+  // capture per profile so the box can show which site and when (story 3).
+  const [captureDrafts, setCaptureDrafts] = useState<Record<string, string>>({});
+  const [captureBusyId, setCaptureBusyId] = useState<string | null>(null);
+  const [captureResults, setCaptureResults] = useState<
+    Record<string, { site: string; capturedAt: string | null }>
+  >({});
+  // Whether the caller's own browser is connected (story 8) - the same
+  // status the connect panel above already polls via
+  // `getBrowserExtensionStatus`, reused here rather than a second probe.
+  // Capture is a userId-keyed relay op, not a property of any task, so this
+  // is the only precondition worth checking client-side.
+  const [extensionConnected, setExtensionConnected] = useState(false);
+  // Proxy URL drafts (D7) - undefined until the user edits, so the input
+  // falls back to the saved value.
+  const [proxyDrafts, setProxyDrafts] = useState<Record<string, string>>({});
 
   const reload = useCallback(async () => {
     if (!workspaceId) {
@@ -105,6 +146,19 @@ export function BrowserProfilesSection() {
     if (!workspaceId) return;
     void listAssistants(workspaceId).then(setAssistants).catch(() => setAssistants([]));
   }, [workspaceId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const check = () => void getBrowserExtensionStatus().then((s) => {
+      if (!cancelled) setExtensionConnected(s.connected);
+    });
+    check();
+    const id = setInterval(check, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
 
   const onCreate = useCallback(async () => {
     const name = newName.trim();
@@ -186,6 +240,54 @@ export function BrowserProfilesSection() {
       );
     },
     [loginBusyId, loginDrafts, t, workspaceId],
+  );
+
+  // "Save this login from my browser" (D5): captures the named site straight
+  // out of the caller's already-connected Chrome (no cloud sandbox, no
+  // separate sign-in tab) into this profile's vault, for a later cloud
+  // browse under the same profile to replay. Requires the caller's own
+  // browser to be connected (story 8) - the extension asks for tab consent
+  // on its own when the command arrives, so there is nothing else to check
+  // client-side.
+  const onCapture = useCallback(
+    async (profile: BrowserProfile) => {
+      const url = normalizeLoginUrl(captureDrafts[profile.id] ?? "");
+      if (!url || captureBusyId || !extensionConnected) return;
+      const site = siteFromLoginUrl(url);
+      setActionError(null);
+      setCaptureBusyId(profile.id);
+      const result = await captureProfileSession(profile.id, site).catch(
+        () => ({ ok: false, site: undefined, capturedAt: undefined, error: undefined }),
+      );
+      setCaptureBusyId(null);
+      if (!result.ok) {
+        // The server's message verbatim (story 20): "no extension" and
+        // "wrong tab's site" must stay distinguishable, not one flattened
+        // failure - only translate when the server gave nothing back.
+        setActionError(result.error ?? t.computer.profiles.captureFailed);
+        return;
+      }
+      setCaptureResults((r) => ({
+        ...r,
+        [profile.id]: { site: result.site ?? site, capturedAt: result.capturedAt ?? null },
+      }));
+      void reload();
+    },
+    [captureBusyId, captureDrafts, extensionConnected, reload, t],
+  );
+
+  // Proxy URL (D7): free-text, validated client-side as a URL, saved through
+  // the same `mutate` PATCH path as every other profile field.
+  const onSaveProxy = useCallback(
+    async (profile: BrowserProfile) => {
+      const raw = (proxyDrafts[profile.id] ?? profile.proxyUrl ?? "").trim();
+      if (raw && !isValidProxyUrl(raw)) {
+        setActionError(t.computer.profiles.proxyInvalid);
+        return;
+      }
+      await mutate(profile.id, { proxyUrl: raw || null });
+    },
+    [mutate, proxyDrafts, t],
   );
 
   const onRevokeGrant = useCallback(
@@ -331,6 +433,61 @@ export function BrowserProfilesSection() {
                   </div>
                   ) : null}
 
+                  {/* "Save this login from my browser" (D5): capture a site's
+                      already-signed-in cookies straight from the caller's own
+                      connected Chrome, no separate sign-in tab needed. Same
+                      vault, same later cloud replay as the box above. */}
+                  {profileSurfaces(profile).signIn ? (
+                  <div className="mt-3">
+                    <p className="text-[11px] font-medium text-muted-foreground">
+                      {t.computer.profiles.captureLabel}
+                    </p>
+                    <div className="mt-1 flex items-center gap-2">
+                      <input
+                        type="text"
+                        value={captureDrafts[profile.id] ?? ""}
+                        onChange={(e) =>
+                          setCaptureDrafts((d) => ({ ...d, [profile.id]: e.target.value }))
+                        }
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") void onCapture(profile);
+                        }}
+                        placeholder={t.computer.profiles.capturePlaceholder}
+                        className="h-8 flex-1 rounded-md border border-border bg-background px-2.5 text-sm outline-none focus:ring-1 focus:ring-ring"
+                      />
+                      <button
+                        type="button"
+                        disabled={
+                          captureBusyId !== null ||
+                          !extensionConnected ||
+                          normalizeLoginUrl(captureDrafts[profile.id] ?? "") === null
+                        }
+                        onClick={() => void onCapture(profile)}
+                        className="h-8 shrink-0 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground disabled:opacity-50"
+                      >
+                        {captureBusyId === profile.id
+                          ? t.computer.profiles.captureSaving
+                          : t.computer.profiles.captureAction}
+                      </button>
+                    </div>
+                    <p className="mt-1 text-[11px] text-muted-foreground">
+                      {extensionConnected ? t.computer.profiles.captureHint : t.computer.profiles.captureNoSession}
+                    </p>
+                    {captureResults[profile.id] ? (
+                      <p className="mt-1 text-[11px] text-primary">
+                        {t.computer.profiles.captureSuccess
+                          .replace("{site}", captureResults[profile.id]!.site)
+                          .replace(
+                            "{date}",
+                            captureResults[profile.id]!.capturedAt
+                              ? new Date(captureResults[profile.id]!.capturedAt as string).toLocaleString()
+                              : "",
+                          )}
+                      </p>
+                    ) : null}
+                  </div>
+                  ) : null}
+
                   {/* Clearance rung (top rung = owner-only; lower = shared) */}
                   <div className="mt-3">
                     <p className="text-[11px] font-medium text-muted-foreground">
@@ -378,6 +535,39 @@ export function BrowserProfilesSection() {
                         </button>
                       ))}
                     </div>
+                  </div>
+
+                  {/* Proxy URL (D7): routes the CLOUD browser's traffic
+                      through the user's own proxy, so its egress resembles
+                      where a captured session's cookies were minted. */}
+                  <div className="mt-3">
+                    <p className="text-[11px] font-medium text-muted-foreground">
+                      {t.computer.profiles.proxyLabel}
+                    </p>
+                    <div className="mt-1 flex items-center gap-2">
+                      <input
+                        type="text"
+                        value={proxyDrafts[profile.id] ?? profile.proxyUrl ?? ""}
+                        onChange={(e) =>
+                          setProxyDrafts((d) => ({ ...d, [profile.id]: e.target.value }))
+                        }
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") void onSaveProxy(profile);
+                        }}
+                        placeholder={t.computer.profiles.proxyPlaceholder}
+                        className="h-8 flex-1 rounded-md border border-border bg-background px-2.5 text-sm outline-none focus:ring-1 focus:ring-ring"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => void onSaveProxy(profile)}
+                        className="h-8 shrink-0 rounded-md border border-border px-3 text-xs font-medium hover:bg-accent"
+                      >
+                        {t.computer.profiles.proxySave}
+                      </button>
+                    </div>
+                    <p className="mt-1 text-[11px] text-muted-foreground">
+                      {t.computer.profiles.proxyHint}
+                    </p>
                   </div>
 
                   {/* Enabled assistants (R2-4: explicit enablement) */}

@@ -6674,6 +6674,21 @@ export const en = {
         "Could not open the sign-in browser. Only the profile's owner can sign in, and cloud browsing must be configured on this deployment.",
       loginHint:
         "Opens the site in a cloud browser you control. Sign in there and save the session into this profile; your password goes to the site only, never to us.",
+      captureLabel: "Save this login from my browser",
+      capturePlaceholder: "instagram.com or a full URL",
+      captureAction: "Save this login",
+      captureSaving: "Saving...",
+      captureHint:
+        "Captures the cookies for the site you name from your connected browser and saves them here, so a cloud browse under this profile starts already signed in.",
+      captureNoSession: "Connect My Browser above first, then come back here to save the login.",
+      captureFailed: "Could not save the session from your browser. Please try again.",
+      captureSuccess: "Saved {site} on {date}.",
+      proxyLabel: "Proxy URL",
+      proxyPlaceholder: "http://user:pass@proxy.example:8080",
+      proxyHint:
+        "Routes the cloud browser's traffic through your own proxy, so its network resembles where the login was created. Leave blank to use the default egress.",
+      proxyInvalid: "Enter a valid URL, or leave this blank.",
+      proxySave: "Save",
     },
   },
   deckPage: {

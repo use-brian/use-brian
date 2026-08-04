@@ -195,6 +195,8 @@ async function dispatch(op: string, args: Record<string, unknown>): Promise<unkn
       return { typed: true }
     case 'currentUrl':
       return executor.currentUrl()
+    case 'captureState':
+      return executor.captureState(String(args.site ?? ''))
     case 'captureFrame':
       return executor.captureFrame()
     case 'takeoverInput':

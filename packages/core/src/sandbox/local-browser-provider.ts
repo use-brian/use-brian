@@ -9,6 +9,7 @@
  */
 import {
   BrowserBackendError,
+  BrowserCaptureResultSchema,
   BrowserNavigateResultSchema,
   BrowserSnapshotSchema,
   TakeoverFrameSchema,
@@ -35,6 +36,7 @@ const KNOWN_ERROR_CODES: ReadonlySet<string> = new Set([
   'firefox_restart_required',
   'unsupported_browser',
   'stale_ref',
+  'site_mismatch',
   'backend_error',
 ])
 
@@ -88,6 +90,9 @@ export function createLocalBrowserProvider(deps: {
     },
     async currentUrl(ctx) {
       return BrowserUrlResultSchema.parse(await send(ctx, 'currentUrl'))
+    },
+    async captureState(ctx, site) {
+      return BrowserCaptureResultSchema.parse(await send(ctx, 'captureState', { site }))
     },
     async nextTakeoverFrame(ctx) {
       return TakeoverFrameSchema.parse(await send(ctx, 'captureFrame'))

@@ -128,7 +128,7 @@ describe('[COMP:sandbox/e2b-cloud] E2BCloudProvider', () => {
     expect(commands.every((c) => c.envs?.AGENT_BROWSER_SESSION_NAME === SANDBOX_SESSION_NAME)).toBe(true)
   })
 
-  it('appends the dormant BYOP proxy flag to open only when a proxy is configured (§4.6)', async () => {
+  it('appends the BYOP --proxy flag to open only when a proxy is configured (§4.6)', async () => {
     const { runtime, commands } = fakeRuntime((cmd) =>
       cmd.includes(cli.getUrl())
         ? { stdout: `${PART_SEPARATOR}\nhttps://x.test/`, stderr: '', exitCode: 0 }
@@ -141,7 +141,11 @@ describe('[COMP:sandbox/e2b-cloud] E2BCloudProvider', () => {
       proxyUrl: 'http://proxy.example:8080',
     })
     await provider.browser(sandboxId).navigate('https://x.test/')
-    expect(commands.some((c) => c.cmd.includes("-p 'http://proxy.example:8080'"))).toBe(true)
+    expect(commands.some((c) => c.cmd.includes("--proxy 'http://proxy.example:8080'"))).toBe(true)
+    // `-p` is the CLI's --provider selector, never the proxy. Guarding the
+    // negative is the point of this test: the wrong flag produced a command
+    // that ran fine and proxied nothing.
+    expect(commands.some((c) => c.cmd.includes("-p 'http://proxy.example:8080'"))).toBe(false)
   })
 
   it('take-over input dispatches TRUSTED events through the CDP helper, never DOM synthesis (§4.8)', async () => {

@@ -75,6 +75,7 @@ export type BrowserBackendErrorCode =
   | 'firefox_restart_required' // Firefox was not started with its loopback Remote Agent
   | 'unsupported_browser' // local browser control is unavailable on this platform
   | 'stale_ref'      // ref is not from the latest snapshot
+  | 'site_mismatch'  // the allowed tab is not on the site captureState was asked for
   | 'backend_error'  // anything else the backend reported
 
 export class BrowserBackendError extends Error {
@@ -113,6 +114,16 @@ export interface BrowserProvider {
   click(ctx: BrowserCallContext, ref: string): Promise<void>
   type(ctx: BrowserCallContext, ref: string, text: string): Promise<void>
   currentUrl(ctx: BrowserCallContext): Promise<BrowserUrlResult>
+  /**
+   * Capture the live authenticated session for `site` and return it in the
+   * vault's bundle shape (D1), so a login can move from the browser the user
+   * is actually signed in on into the profile vault, for a later browse
+   * (often on a different backend, e.g. cloud replaying a local capture) to
+   * replay. Optional: a backend that cannot capture a session leaves this
+   * undefined so callers surface a typed refusal instead of crashing on a
+   * missing method.
+   */
+  captureState?(ctx: BrowserCallContext, site: string): Promise<SessionBundle>
   /** Optional watched Take-Over surface. Local uses relay polling; cloud uses SandboxProvider below. */
   nextTakeoverFrame?(ctx: BrowserCallContext): Promise<TakeoverFrame | null>
   sendTakeoverInput?(ctx: BrowserCallContext, event: TakeoverInputEvent): Promise<void>
@@ -157,6 +168,14 @@ export type SessionBundle = {
   localStorage?: Record<string, Record<string, string>>
   capturedAt: string
 }
+
+/** Wire/zod shape of `SessionBundle` — parses the relay's `captureState` result (D2). */
+export const BrowserCaptureResultSchema = z.object({
+  site: z.string(),
+  cookies: z.array(z.unknown()),
+  localStorage: z.record(z.string(), z.record(z.string(), z.string())).optional(),
+  capturedAt: z.string(),
+})
 
 export type VaultSessionInfo = {
   site: string

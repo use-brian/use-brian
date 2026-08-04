@@ -62,6 +62,16 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
           if (op === 'captureFrame') {
             return { ok: true, data: { data: 'local-jpeg', mimeType: 'image/jpeg' } }
           }
+          if (op === 'captureState') {
+            return {
+              ok: true,
+              data: {
+                site: (args?.site as string | undefined) ?? 'example.com',
+                cookies: [{ name: 'sid', value: 'local-cookie' }],
+                capturedAt: '2026-08-04T00:00:00.000Z',
+              },
+            }
+          }
           return { ok: true, data: { url: 'https://example.com/', title: 'Example' } }
         },
       },
@@ -420,6 +430,116 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
     expect(vault.bundles.get(`${profileId}:example.com`)).toBeTruthy()
   })
 
+  describe('[COMP:sandbox/session-capture] "Save this login from my browser" (D5, browser-session-portability.md)', () => {
+    it('captures through the local provider with no task at all, and echoes site + capturedAt', async () => {
+      const res = await request(app)
+        .post(`/api/computer/profiles/${profileId}/capture`)
+        .send({ site: 'skyscanner.com' })
+      expect(res.status).toBe(200)
+      expect(res.body).toEqual({ ok: true, site: 'skyscanner.com', capturedAt: '2026-08-04T00:00:00.000Z' })
+      expect(vault.bundles.get(`${profileId}:skyscanner.com`)).toBeTruthy()
+      // No task of any kind was created for this capture — it went straight
+      // through the local provider, never through the SandboxProvider or
+      // the local task store.
+      expect(localTasks.listActiveByWorkspace('ws-1')).toEqual([])
+      expect(localOps.find((o) => o.op === 'captureState')).toEqual({
+        op: 'captureState',
+        args: { site: 'skyscanner.com' },
+      })
+    })
+
+    it('leaves the existing "I signed in" cloud capture unchanged', async () => {
+      const res = await request(app)
+        .post('/api/computer/tasks/sess-1/captured')
+        .send({ site: 'github.com' })
+      expect(res.status).toBe(200)
+      expect(res.body.ok).toBe(true)
+      expect(vault.bundles.get(`${profileId}:github.com`)).toBeTruthy()
+
+      // A task whose backend is local still refuses on the task-scoped route
+      // (unchanged) — the new profile-scoped route above is the only path
+      // for a My Browser capture.
+      localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local' })
+      const refused = await request(app)
+        .post('/api/computer/tasks/sess-local/captured')
+        .send({ site: 'skyscanner.com' })
+      expect(refused.body.code).toBe('local_session')
+    })
+
+    it('is owner-only, like every other route that writes an identity into a profile', async () => {
+      const stranger = makeApp('intruder')
+      const res = await request(stranger)
+        .post(`/api/computer/profiles/${profileId}/capture`)
+        .send({ site: 'skyscanner.com' })
+      expect(res.status).toBe(404)
+      expect(vault.bundles.size).toBe(0)
+    })
+
+    it('rejects a missing site before touching the provider', async () => {
+      const res = await request(app).post(`/api/computer/profiles/${profileId}/capture`).send({})
+      expect(res.status).toBe(400)
+      expect(localOps).toEqual([])
+    })
+
+    it('answers a typed refusal, not a 500, when the local provider cannot capture', async () => {
+      localProvider = { ...localProvider, captureState: undefined }
+      app = makeApp('user-1')
+
+      const res = await request(app)
+        .post(`/api/computer/profiles/${profileId}/capture`)
+        .send({ site: 'skyscanner.com' })
+      expect(res.status).toBe(501)
+      expect(res.body.code).toBe('capture_unsupported')
+      expect(vault.bundles.size).toBe(0)
+    })
+
+    it('answers a typed refusal when the vault is not configured', async () => {
+      const noVault = createTestApp(
+        '/api/computer',
+        computerRoutes({
+          orchestrator,
+          provider,
+          localProvider,
+          localTasks,
+          vault: null,
+          profileStore,
+          getWorkspaceRole: MEMBER_ROLE,
+        }),
+        { userId: 'user-1' },
+      )
+      const res = await request(noVault)
+        .post(`/api/computer/profiles/${profileId}/capture`)
+        .send({ site: 'skyscanner.com' })
+      expect(res.status).toBe(501)
+      expect(res.body.code).toBe('capture_unsupported')
+    })
+
+    it('maps each BrowserBackendError code to its own status and message, not one flattened failure', async () => {
+      const cases: Array<{ code: ConstructorParameters<typeof BrowserBackendError>[1]; status: number }> = [
+        { code: 'no_extension', status: 409 },
+        { code: 'no_eligible_tab', status: 409 },
+        { code: 'site_mismatch', status: 409 },
+        { code: 'detached', status: 409 },
+        { code: 'not_configured', status: 501 },
+        { code: 'timeout', status: 502 },
+      ]
+      for (const { code, status } of cases) {
+        localProvider = {
+          ...localProvider,
+          captureState: async () => {
+            throw new BrowserBackendError(`refused: ${code}`, code)
+          },
+        }
+        app = makeApp('user-1')
+        const res = await request(app)
+          .post(`/api/computer/profiles/${profileId}/capture`)
+          .send({ site: 'skyscanner.com' })
+        expect(res.status).toBe(status)
+        expect(res.body.error).toBe(`refused: ${code}`)
+      }
+    })
+  })
+
   it('resume + complete drive the task lifecycle (close-to-stop)', async () => {
     await orchestrator.pauseForTakeover('sess-1')
     const resumed = await request(app).post('/api/computer/tasks/sess-1/resume')
@@ -484,6 +604,26 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
         clearance: 'confidential',
         defaultBackend: 'local',
       })
+    })
+
+    it('round-trips proxyUrl on create and on PATCH (D7)', async () => {
+      const created = await request(app)
+        .post('/api/computer/profiles')
+        .send({ workspaceId: 'ws-1', name: 'Proxied', proxyUrl: 'http://proxy.example:8080' })
+      expect(created.status).toBe(200)
+      expect(created.body.profile.proxyUrl).toBe('http://proxy.example:8080')
+
+      const patched = await request(app)
+        .patch(`/api/computer/profiles/${created.body.profile.id}`)
+        .send({ proxyUrl: 'http://other-proxy.example:9090' })
+      expect(patched.status).toBe(200)
+      expect(patched.body.profile.proxyUrl).toBe('http://other-proxy.example:9090')
+
+      const cleared = await request(app)
+        .patch(`/api/computer/profiles/${created.body.profile.id}`)
+        .send({ proxyUrl: null })
+      expect(cleared.status).toBe(200)
+      expect(cleared.body.profile.proxyUrl).toBeNull()
     })
 
     it('updates (clearance downgrade, enablement, backend) and deletes — OWNER only', async () => {
