@@ -16,11 +16,16 @@
       .status.ready .dot { background: #16a34a; }
       .actions { display: flex; gap: 6px; margin-top: 10px; }
       .hint { color: #64748b; font-size: 11px; margin-top: 8px; }
+      .warn { background: #fef3c7; border: 1px solid #fcd34d; color: #78350f; border-radius: 6px; padding: 7px 9px; font-size: 12px; margin-top: 8px; }
+      .build { color: #94a3b8; font-size: 10px; margin-top: 10px; font-variant-numeric: tabular-nums; }
     </style>
   </head>
   <body>
     <h1>Use Brian Browser Agent</h1>
     <div id="status" class="status"><span class="dot"></span><span id="status-text">Checking...</span></div>
+    <!-- Separate from the status line, not folded into it: a stale build still
+         connects and still holds consent, so both statements are true at once. -->
+    <div id="build-warning" class="warn" hidden></div>
     <!-- Shown only while browser control is NOT granted. The click here is the
          user gesture Chrome requires before it will open its own dialog, which
          is why this button lives in the extension and not in the web app. -->
@@ -41,6 +46,9 @@
       <button id="stop" class="danger">Stop task</button>
     </div>
     <p class="hint">The assistant only acts in a tab you allow, one task at a time. Stop ends the current task immediately.</p>
+    <!-- Which build is loaded. Answering this once cost a SHA256 of the folder
+         path Chrome derived the extension id from. -->
+    <p class="build" id="build-line"></p>
     <script type="module" src="popup.js"></script>
   </body>
 </html>

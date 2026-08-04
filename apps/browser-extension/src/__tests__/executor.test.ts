@@ -37,6 +37,79 @@ function installChrome(): void {
 
 beforeEach(installChrome)
 
+/**
+ * The hole this suite had until 2026-08-04: `dbg.attach` was mocked as
+ * always-resolving, so nothing here ever exercised `chrome.debugger.attach`
+ * REJECTING — which is the one Chrome call that sat outside the `cdp()`
+ * translation wrapper. A user's assistant read Chrome's raw
+ * `Cannot access a chrome-extension:// URL` off a tool result and reported it
+ * to them as a system permission error.
+ */
+describe('[COMP:ext/agent] Attach failure translation', () => {
+  it('never lets Chrome’s own wording escape attach', async () => {
+    dbg.attach = vi.fn(async () => {
+      throw new Error('Cannot access a chrome-extension:// URL')
+    })
+    const executor = new TabExecutor()
+    const err = await executor.attach(42).catch((e: unknown) => e)
+
+    expect(err).toBeInstanceOf(ExecutorError)
+    expect((err as ExecutorError).code).toBe('no_eligible_tab')
+    // The assertion that matters: the message the model receives is ours.
+    expect((err as ExecutorError).message).not.toMatch(/chrome-extension:\/\//)
+    expect((err as ExecutorError).message).toMatch(/switch to the website/i)
+    // Chrome's text survives for debugging, off the wire — `background.ts`
+    // sends `err.message`, never `err.cause`.
+    expect(((err as ExecutorError).cause as Error).message).toBe(
+      'Cannot access a chrome-extension:// URL',
+    )
+  })
+
+  it('translates a chrome:// refusal the same way', async () => {
+    dbg.attach = vi.fn(async () => {
+      throw new Error('Cannot access a chrome:// URL')
+    })
+    const executor = new TabExecutor()
+    const err = (await executor.attach(7).catch((e: unknown) => e)) as ExecutorError
+    expect(err.code).toBe('no_eligible_tab')
+    expect(err.message).not.toMatch(/chrome:\/\//)
+  })
+
+  it('falls back to our own sentence for a refusal we cannot name', async () => {
+    dbg.attach = vi.fn(async () => {
+      throw new Error('Some future Chrome wording we have never seen')
+    })
+    const executor = new TabExecutor()
+    const err = (await executor.attach(7).catch((e: unknown) => e)) as ExecutorError
+    // The default must be OURS. An unmatched phrasing leaking through is the
+    // whole failure mode, and Chrome's wording is not a fixed contract.
+    expect(err.code).toBe('backend_error')
+    expect(err.message).not.toMatch(/future Chrome wording/)
+    expect(err.message).toMatch(/refused to hand Use Brian control/i)
+  })
+
+  it('still reports a detach at attach time as detached, not unattachable', async () => {
+    dbg.attach = vi.fn(async () => {
+      throw new Error('Debugger is not attached to the tab with id: 42.')
+    })
+    const executor = new TabExecutor()
+    const err = (await executor.attach(42).catch((e: unknown) => e)) as ExecutorError
+    expect(err.code).toBe('detached')
+  })
+
+  it('leaves no cached attachment behind after a failed attach', async () => {
+    dbg.attach = vi.fn(async () => {
+      throw new Error('Cannot access a chrome-extension:// URL')
+    })
+    const executor = new TabExecutor()
+    await executor.attach(42).catch(() => {})
+    // Recording the tab id on a failed attach would make the next attach
+    // short-circuit and every CDP op fail forever — the half-dead state the
+    // detach path exists to prevent.
+    expect(executor.attachedTab()).toBeNull()
+  })
+})
+
 describe('[COMP:ext/agent] CDP attachment lifecycle', () => {
   it('re-attaches on the next op after Chrome detaches the debugger', async () => {
     const executor = new TabExecutor()

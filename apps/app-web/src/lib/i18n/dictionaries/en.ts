@@ -6590,6 +6590,8 @@ export const en = {
       gatedCta: "See plans",
       statusConnected: "Your browser is connected",
       statusDisconnected: "Your browser is not connected",
+      staleBuildWarning:
+        "The extension in this browser is out of date, so it may be missing fixes. Rebuild it, open your browser's extensions page, and press Reload.",
       connectedHint:
         "Set a profile's browser to \"My Browser\" below, or accept the assistant's offer when a site blocks the cloud browser, and it will act in your Chrome.",
       step1Title: "1. Install the extension",

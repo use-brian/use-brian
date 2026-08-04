@@ -5,7 +5,13 @@
  * here because it ships without zod).
  */
 
-type HelloMessage = { type: 'hello'; pairingToken: string }
+/**
+ * `build` is the source fingerprint from `dist/build-info.json`. Optional on
+ * the wire in both directions on purpose: an extension built before the stamp
+ * existed omits it, and the relay's frames are non-strict `z.object`, so no
+ * coordinated deploy is needed in either order.
+ */
+type HelloMessage = { type: 'hello'; pairingToken: string; build?: string }
 type ResultMessage = {
   type: 'result'
   id: string
@@ -19,7 +25,8 @@ type EventMessage = { type: 'event'; kind: EventKind }
 type PingMessage = { type: 'ping' }
 export type ExtensionToRelay = HelloMessage | ResultMessage | EventMessage | PingMessage
 
-type ReadyMessage = { type: 'ready'; sessionToken?: string }
+/** `staleBuild` is the relay's verdict on the `build` we sent in hello. */
+type ReadyMessage = { type: 'ready'; sessionToken?: string; staleBuild?: boolean }
 type CommandMessage = { type: 'command'; id: string; op: string; args: Record<string, unknown> }
 type PongMessage = { type: 'pong' }
 type ErrorMessage = { type: 'error'; message: string }

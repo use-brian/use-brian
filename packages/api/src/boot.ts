@@ -207,7 +207,6 @@ import { browserExtensionRoutes } from './routes/browser-extension.js'
 import { computerRoutes, createInMemoryLocalComputerTaskStore } from './routes/computer.js'
 import {
   createRelayCommandTransport,
-  relayExtensionConnected,
   relayExtensionStatus,
 } from './sandbox/relay-transport.js'
 import { feedbackRoutes } from './routes/feedback.js'
@@ -4107,10 +4106,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     jwtSecret: env.JWT_SECRET,
     workspaceStore,
     relayWsUrl: browserRelayWsUrl,
-    extensionConnected:
+    extensionStatus:
       browserRelayUrl && env.BROWSER_RELAY_SECRET
         ? (userId) =>
-            relayExtensionConnected({
+            relayExtensionStatus({
               relayUrl: browserRelayUrl as string,
               relaySecret: env.BROWSER_RELAY_SECRET as string,
               userId,

@@ -8,6 +8,7 @@ import {
   verifyBrowserExtPairToken,
   verifyBrowserExtSessionToken,
 } from '@use-brian/api/auth/browser-ext-pair-token.js'
+import { CURRENT_EXTENSION_BUILD } from '@use-brian/api/sandbox/extension-build.js'
 
 const SECRET = 'test-jwt-secret'
 
@@ -40,10 +41,22 @@ function relayWithVerifier(commandTimeoutMs?: number): BrowserRelay {
   })
 }
 
-function pair(relay: BrowserRelay, userId = 'user-1'): FakeSocket {
+/**
+ * Defaults to the CURRENT build, so the rest of the suite describes a healthy
+ * install. Pass `build: null` to describe an extension that predates build
+ * stamping — which the relay treats as stale, on purpose.
+ */
+function pair(
+  relay: BrowserRelay,
+  userId = 'user-1',
+  build: string | null = CURRENT_EXTENSION_BUILD,
+): FakeSocket {
   const socket = fakeSocket()
   const token = signBrowserExtPairToken({ userId, workspaceId: 'ws-1' }, SECRET)
-  relay.handleMessage(socket, JSON.stringify({ type: 'hello', pairingToken: token }))
+  relay.handleMessage(
+    socket,
+    JSON.stringify({ type: 'hello', pairingToken: token, ...(build ? { build } : {}) }),
+  )
   return socket
 }
 
@@ -107,7 +120,13 @@ describe('[COMP:ext/relay] Browser extension relay', () => {
       ok: true,
       data: { stopped: true },
     })
-    expect(relay.connectionStatus('user-1')).toEqual({ connected: false, terminalEvent: 'stopped' })
+    expect(relay.connectionStatus('user-1')).toEqual({
+      connected: false,
+      terminalEvent: 'stopped',
+      // Nothing connected: there is no build to report and nothing to update.
+      build: null,
+      staleBuild: false,
+    })
 
     const first = pair(relay)
     expect(first.sent).toEqual([
@@ -139,22 +158,42 @@ describe('[COMP:ext/relay] Browser extension relay', () => {
     const resultPromise = relay.dispatchCommand({ userId: 'user-1', op: 'type', args: { ref: '@e1', text: 'hi' } })
     relay.handleMessage(socket, JSON.stringify({ type: 'event', kind: 'stopped' }))
     await expect(resultPromise).resolves.toMatchObject({ ok: false, code: 'stopped' })
-    expect(relay.connectionStatus('user-1')).toEqual({ connected: true, terminalEvent: 'stopped' })
+    expect(relay.connectionStatus('user-1')).toEqual({
+      connected: true,
+      terminalEvent: 'stopped',
+      build: CURRENT_EXTENSION_BUILD,
+      staleBuild: false,
+    })
   })
 
   it('remembers tab_closed across reconnect until a successful new command', async () => {
     const relay = relayWithVerifier()
     const socket = pair(relay)
     relay.handleMessage(socket, JSON.stringify({ type: 'event', kind: 'tab_closed' }))
-    expect(relay.connectionStatus('user-1')).toEqual({ connected: true, terminalEvent: 'tab_closed' })
+    expect(relay.connectionStatus('user-1')).toEqual({
+      connected: true,
+      terminalEvent: 'tab_closed',
+      build: CURRENT_EXTENSION_BUILD,
+      staleBuild: false,
+    })
 
     const replacement = pair(relay)
-    expect(relay.connectionStatus('user-1')).toEqual({ connected: true, terminalEvent: 'tab_closed' })
+    expect(relay.connectionStatus('user-1')).toEqual({
+      connected: true,
+      terminalEvent: 'tab_closed',
+      build: CURRENT_EXTENSION_BUILD,
+      staleBuild: false,
+    })
     const resultPromise = relay.dispatchCommand({ userId: 'user-1', op: 'snapshot' })
     const command = replacement.sent.find((message) => message.type === 'command') as { id: string }
     relay.handleMessage(replacement, JSON.stringify({ type: 'result', id: command.id, ok: true, data: {} }))
     await expect(resultPromise).resolves.toMatchObject({ ok: true })
-    expect(relay.connectionStatus('user-1')).toEqual({ connected: true, terminalEvent: null })
+    expect(relay.connectionStatus('user-1')).toEqual({
+      connected: true,
+      terminalEvent: null,
+      build: CURRENT_EXTENSION_BUILD,
+      staleBuild: false,
+    })
   })
 
   it('rejects in-flight commands when the extension emits event{detached}', async () => {
@@ -172,7 +211,12 @@ describe('[COMP:ext/relay] Browser extension relay', () => {
     expect(res.code).toBe('detached')
     expect(res.error).not.toMatch(/closed/i)
     expect(res.error).toMatch(/debugging session/i)
-    expect(relay.connectionStatus('user-1')).toEqual({ connected: true, terminalEvent: null })
+    expect(relay.connectionStatus('user-1')).toEqual({
+      connected: true,
+      terminalEvent: null,
+      build: CURRENT_EXTENSION_BUILD,
+      staleBuild: false,
+    })
   })
 
   it('rejects in-flight commands with no_extension when the socket disconnects', async () => {
@@ -253,9 +297,69 @@ describe('[COMP:ext/relay] Session-token exchange', () => {
     const relay = relayWithMinter()
     const socket = fakeSocket()
     const session = signBrowserExtSessionToken({ userId: 'user-1', workspaceId: 'ws-1' }, SECRET)
-    relay.handleMessage(socket, JSON.stringify({ type: 'hello', pairingToken: session }))
+    relay.handleMessage(
+      socket,
+      JSON.stringify({ type: 'hello', pairingToken: session, build: CURRENT_EXTENSION_BUILD }),
+    )
     expect(socket.sent[0]).toEqual({ type: 'ready' })
     expect(relay.isConnected('user-1')).toBe(true)
+  })
+
+  it('judges the reported build once, at hello, and says so in ready', () => {
+    const relay = relayWithVerifier()
+    const stale = pair(relay, 'user-stale', 'deadbeefcafe')
+    expect(stale.sent[0]).toEqual({ type: 'ready', staleBuild: true })
+    expect(relay.connectionStatus('user-stale')).toMatchObject({
+      build: 'deadbeefcafe',
+      staleBuild: true,
+    })
+  })
+
+  it('treats an extension that reports no build as stale', () => {
+    // No special case, deliberately: an extension with nothing to report was
+    // built before the stamp existed, so it is strictly older than the commit
+    // that introduced it. That is exactly the population the 2026-08-03
+    // incident came from, and exempting it would exempt the only users who
+    // need telling.
+    const relay = relayWithVerifier()
+    const legacy = pair(relay, 'user-legacy', null)
+    expect(legacy.sent[0]).toEqual({ type: 'ready', staleBuild: true })
+    expect(relay.connectionStatus('user-legacy')).toMatchObject({
+      build: null,
+      staleBuild: true,
+    })
+  })
+
+  it('marks a failing command as coming from a stale extension', async () => {
+    const relay = relayWithVerifier()
+    const socket = pair(relay, 'user-1', null)
+    const resultPromise = relay.dispatchCommand({ userId: 'user-1', op: 'snapshot' })
+    const command = socket.sent.find((m) => m.type === 'command') as { id: string }
+    relay.handleMessage(
+      socket,
+      JSON.stringify({ type: 'result', id: command.id, ok: false, error: 'nope', code: 'backend_error' }),
+    )
+    // Context on the failure, never a replacement for it: the api side appends
+    // a remedy to the message so the assistant has something to tell the user
+    // besides what broke.
+    await expect(resultPromise).resolves.toEqual({
+      ok: false,
+      error: 'nope',
+      code: 'backend_error',
+      staleBuild: true,
+    })
+  })
+
+  it('does not mark a SUCCESSFUL command, even from a stale extension', async () => {
+    const relay = relayWithVerifier()
+    const socket = pair(relay, 'user-1', null)
+    const resultPromise = relay.dispatchCommand({ userId: 'user-1', op: 'snapshot' })
+    const command = socket.sent.find((m) => m.type === 'command') as { id: string }
+    relay.handleMessage(socket, JSON.stringify({ type: 'result', id: command.id, ok: true, data: {} }))
+    // A stale build that worked is not a problem to narrate mid-task. The
+    // popup and the connect panel carry that message; a tool result should
+    // only ever explain a failure.
+    await expect(resultPromise).resolves.toEqual({ ok: true, data: {} })
   })
 
   it('keeps the token kinds distinct: a pair token is not a session token and vice versa', () => {

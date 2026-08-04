@@ -4,6 +4,7 @@ import { TaskGate, CONSENT_PROMPT_TIMEOUT_MS, type ConsentOutcome } from './task
 import { activeTabForConsent, eligibilityOf } from './tab-eligibility.js'
 import { credentialsForConfigure, type PairRequest } from './pairing.js'
 import { FirefoxNativeClient, FirefoxNativeError } from './firefox-native-client.js'
+import { readBuildStamp } from './build-info.js'
 
 const ext = (globalThis as unknown as { browser: typeof chrome }).browser
 const native = new FirefoxNativeClient()
@@ -57,6 +58,7 @@ const client = new RelayClient({
   getUrl: () => getStored('relayUrl'),
   connect: (url) => new WebSocket(url) as unknown as import('./relay-client.js').WebSocketLike,
   getToken: async () => (await getStored('sessionToken')) ?? (await getStored('pairingToken')),
+  getBuild: () => readBuildStamp(),
   onSessionToken: async (token) => {
     await ext.storage.local.set({ sessionToken: token })
     await ext.storage.local.remove('pairingToken')
@@ -163,12 +165,14 @@ ext.runtime.onMessage.addListener((message: unknown) => {
     return native.request('openDesktop').then(() => ({ ok: true }))
   }
   if (msg.type === 'status') {
-    return native.status().then((control) => ({
+    return Promise.all([native.status(), readBuildStamp()]).then(([control, build]) => ({
       state: client.getState(),
       controlledTab: gate.currentTab(),
       stopped: gate.isStopped(),
       hasControl: control.ready,
       controlReason: control.reason,
+      build,
+      staleBuild: client.isBuildStale(),
       extensionId: ext.runtime.id,
     }))
   }
