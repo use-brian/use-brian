@@ -23,6 +23,13 @@ export type ExtensionPairResult =
 export type ExtensionMessenger = (extensionId: string, message: unknown) => Promise<unknown>;
 
 /**
+ * Canonical install destination shared by every My Browser entry point.
+ * Replace the pre-publish search with the final listing URL when P2 ships.
+ */
+export const BROWSER_EXTENSION_INSTALL_URL =
+  "https://chromewebstore.google.com/search/Use%20Brian";
+
+/**
  * Module-local on purpose. Every caller reaches it through the `extensionId`
  * option's default, and anything wanting a different build passes one. An
  * export would only invite a second opinion on which extension we talk to.

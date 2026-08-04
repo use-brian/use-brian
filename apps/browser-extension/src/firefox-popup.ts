@@ -1,5 +1,5 @@
 /** Firefox popup with the same layout/actions as the Chromium popup. */
-export {}
+import { buildLine, buildWarning } from './popup-status.js'
 
 const ext = (globalThis as unknown as { browser: typeof chrome }).browser
 
@@ -15,6 +15,8 @@ type Status = {
   stopped?: boolean
   hasControl?: boolean
   controlReason?: string
+  build?: string | null
+  staleBuild?: boolean
 }
 
 const STATE_LABELS: Record<string, string> = {
@@ -30,6 +32,8 @@ const statusText = el<HTMLSpanElement>('status-text')
 const relayUrlInput = el<HTMLInputElement>('relay-url')
 const tokenInput = el<HTMLInputElement>('pairing-token')
 const grantRow = el<HTMLDivElement>('grant-row')
+const buildWarningBox = el<HTMLDivElement>('build-warning')
+const buildLineBox = el<HTMLParagraphElement>('build-line')
 
 function statusLine(status: Status): string {
   if (status.hasControl === false) {
@@ -49,6 +53,12 @@ async function refreshStatus(): Promise<void> {
   statusBox.classList.toggle('ready', status.state === 'ready' && !status.stopped && ready)
   statusText.textContent = statusLine(status)
   grantRow.hidden = ready
+  // Same two facts as the Chromium popup, from the same pure helpers: the
+  // Firefox wording differs for control state, never for build state.
+  const warning = buildWarning(status)
+  buildWarningBox.textContent = warning ?? ''
+  buildWarningBox.hidden = warning === null
+  buildLineBox.textContent = buildLine(status)
 }
 
 async function loadStored(): Promise<void> {

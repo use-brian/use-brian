@@ -10,7 +10,7 @@
  * the site. Spec: docs/architecture/engine/computer-use.md §5.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { TabExecutor, ExecutorError, isDetachedError, retryableAfterReattach } from '../executor.js'
+import { TabExecutor, ExecutorError, isDetachedError, retryableAfterReattach, hostMatchesSite } from '../executor.js'
 
 type Stub = {
   attach: ReturnType<typeof vi.fn>
@@ -19,6 +19,7 @@ type Stub = {
 }
 
 let dbg: Stub
+let tabsGet: ReturnType<typeof vi.fn>
 
 function installChrome(): void {
   dbg = {
@@ -26,16 +27,90 @@ function installChrome(): void {
     detach: vi.fn(async () => {}),
     sendCommand: vi.fn(async () => ({ nodes: [] })),
   }
+  tabsGet = vi.fn(async () => ({ url: 'https://luma.com/x', title: 'Luma', status: 'complete' }))
   ;(globalThis as unknown as { chrome: unknown }).chrome = {
     debugger: dbg,
     tabs: {
-      get: vi.fn(async () => ({ url: 'https://luma.com/x', title: 'Luma', status: 'complete' })),
+      get: tabsGet,
       onUpdated: { addListener: vi.fn(), removeListener: vi.fn() },
     },
   }
 }
 
 beforeEach(installChrome)
+
+/**
+ * The hole this suite had until 2026-08-04: `dbg.attach` was mocked as
+ * always-resolving, so nothing here ever exercised `chrome.debugger.attach`
+ * REJECTING — which is the one Chrome call that sat outside the `cdp()`
+ * translation wrapper. A user's assistant read Chrome's raw
+ * `Cannot access a chrome-extension:// URL` off a tool result and reported it
+ * to them as a system permission error.
+ */
+describe('[COMP:ext/agent] Attach failure translation', () => {
+  it('never lets Chrome’s own wording escape attach', async () => {
+    dbg.attach = vi.fn(async () => {
+      throw new Error('Cannot access a chrome-extension:// URL')
+    })
+    const executor = new TabExecutor()
+    const err = await executor.attach(42).catch((e: unknown) => e)
+
+    expect(err).toBeInstanceOf(ExecutorError)
+    expect((err as ExecutorError).code).toBe('no_eligible_tab')
+    // The assertion that matters: the message the model receives is ours.
+    expect((err as ExecutorError).message).not.toMatch(/chrome-extension:\/\//)
+    expect((err as ExecutorError).message).toMatch(/switch to the website/i)
+    // Chrome's text survives for debugging, off the wire — `background.ts`
+    // sends `err.message`, never `err.cause`.
+    expect(((err as ExecutorError).cause as Error).message).toBe(
+      'Cannot access a chrome-extension:// URL',
+    )
+  })
+
+  it('translates a chrome:// refusal the same way', async () => {
+    dbg.attach = vi.fn(async () => {
+      throw new Error('Cannot access a chrome:// URL')
+    })
+    const executor = new TabExecutor()
+    const err = (await executor.attach(7).catch((e: unknown) => e)) as ExecutorError
+    expect(err.code).toBe('no_eligible_tab')
+    expect(err.message).not.toMatch(/chrome:\/\//)
+  })
+
+  it('falls back to our own sentence for a refusal we cannot name', async () => {
+    dbg.attach = vi.fn(async () => {
+      throw new Error('Some future Chrome wording we have never seen')
+    })
+    const executor = new TabExecutor()
+    const err = (await executor.attach(7).catch((e: unknown) => e)) as ExecutorError
+    // The default must be OURS. An unmatched phrasing leaking through is the
+    // whole failure mode, and Chrome's wording is not a fixed contract.
+    expect(err.code).toBe('backend_error')
+    expect(err.message).not.toMatch(/future Chrome wording/)
+    expect(err.message).toMatch(/refused to hand Use Brian control/i)
+  })
+
+  it('still reports a detach at attach time as detached, not unattachable', async () => {
+    dbg.attach = vi.fn(async () => {
+      throw new Error('Debugger is not attached to the tab with id: 42.')
+    })
+    const executor = new TabExecutor()
+    const err = (await executor.attach(42).catch((e: unknown) => e)) as ExecutorError
+    expect(err.code).toBe('detached')
+  })
+
+  it('leaves no cached attachment behind after a failed attach', async () => {
+    dbg.attach = vi.fn(async () => {
+      throw new Error('Cannot access a chrome-extension:// URL')
+    })
+    const executor = new TabExecutor()
+    await executor.attach(42).catch(() => {})
+    // Recording the tab id on a failed attach would make the next attach
+    // short-circuit and every CDP op fail forever — the half-dead state the
+    // detach path exists to prevent.
+    expect(executor.attachedTab()).toBeNull()
+  })
+})
 
 describe('[COMP:ext/agent] CDP attachment lifecycle', () => {
   it('re-attaches on the next op after Chrome detaches the debugger', async () => {
@@ -206,5 +281,159 @@ describe('[COMP:ext/agent] Local Take-Over', () => {
 
     const mouse = dbg.sendCommand.mock.calls.filter((call) => call[1] === 'Input.dispatchMouseEvent')
     expect(mouse.at(-1)?.[2]).toMatchObject({ type: 'mouseReleased', buttons: 0 })
+  })
+})
+
+describe('[COMP:ext/agent] Site suffix match', () => {
+  it('matches the exact site and its subdomains', () => {
+    expect(hostMatchesSite('example.com', 'example.com')).toBe(true)
+    expect(hostMatchesSite('login.example.com', 'example.com')).toBe(true)
+    expect(hostMatchesSite('www.example.com', 'example.com')).toBe(true)
+  })
+
+  it('rejects a different site, even one that merely contains the name', () => {
+    expect(hostMatchesSite('notexample.com', 'example.com')).toBe(false)
+    expect(hostMatchesSite('example.com.evil.example', 'example.com')).toBe(false)
+    expect(hostMatchesSite('example.net', 'example.com')).toBe(false)
+    expect(hostMatchesSite('', 'example.com')).toBe(false)
+  })
+
+  it('strips a leading dot from either side', () => {
+    expect(hostMatchesSite('.example.com', 'example.com')).toBe(true)
+    expect(hostMatchesSite('example.com', '.example.com')).toBe(true)
+  })
+})
+
+describe('[COMP:sandbox/session-capture] Session capture (D2/D3)', () => {
+  function mockCdp(handlers: Record<string, unknown>): void {
+    dbg.sendCommand.mockImplementation(async (_target, method) => {
+      if (method in handlers) return handlers[method]
+      return {}
+    })
+  }
+
+  it('filters captured cookies to the requested site, dropping every other site’s cookies', async () => {
+    tabsGet.mockResolvedValue({ url: 'https://app.example.com/dashboard', title: 'Example', status: 'complete' })
+    mockCdp({
+      'Network.getAllCookies': {
+        cookies: [
+          { name: 'session', value: 'abc', domain: '.example.com', path: '/', expires: -1, httpOnly: true, secure: true },
+          { name: 'sub', value: 'def', domain: 'login.example.com', path: '/app', expires: 1893456000, httpOnly: false, secure: true },
+          { name: 'other', value: 'xyz', domain: 'unrelated.example.net', path: '/', expires: -1 },
+        ],
+      },
+      'Runtime.evaluate': { result: { value: [] } },
+    })
+    const executor = new TabExecutor()
+    await executor.attach(42)
+
+    const bundle = await executor.captureState('example.com')
+
+    expect(bundle.site).toBe('example.com')
+    expect(bundle.cookies).toEqual([
+      { name: 'session', value: 'abc', domain: '.example.com', path: '/', expires: -1, httpOnly: true, secure: true },
+      { name: 'sub', value: 'def', domain: 'login.example.com', path: '/app', expires: 1893456000, httpOnly: false, secure: true },
+    ])
+  })
+
+  it('emits Playwright storageState cookies, not the raw CDP shape', async () => {
+    // The captured array is written VERBATIM into the file AGENT_BROWSER_STATE
+    // loads at daemon launch, so a CDP-only field riding along breaks replay
+    // inside the sandbox while the capture itself still looks successful.
+    // Asserting the exact key set is what keeps that failure from being latent.
+    tabsGet.mockResolvedValue({ url: 'https://app.example.com/dashboard', title: 'Example', status: 'complete' })
+    mockCdp({
+      'Network.getAllCookies': {
+        cookies: [
+          {
+            name: 'session',
+            value: 'abc',
+            domain: '.example.com',
+            path: '/',
+            expires: -1,
+            httpOnly: true,
+            secure: true,
+            sameSite: 'Lax',
+            // CDP-only fields storageState does not define:
+            session: true,
+            size: 42,
+            priority: 'Medium',
+            sourceScheme: 'Secure',
+            sourcePort: 443,
+          },
+        ],
+      },
+      'Runtime.evaluate': { result: { value: [] } },
+    })
+    const executor = new TabExecutor()
+    await executor.attach(42)
+
+    const [cookie] = (await executor.captureState('example.com')).cookies as Array<Record<string, unknown>>
+
+    expect(Object.keys(cookie).sort()).toEqual(
+      ['domain', 'expires', 'httpOnly', 'name', 'path', 'sameSite', 'secure', 'value'].sort(),
+    )
+    expect(cookie.sameSite).toBe('Lax')
+  })
+
+  it('omits sameSite entirely when CDP reported none', async () => {
+    tabsGet.mockResolvedValue({ url: 'https://app.example.com/dashboard', title: 'Example', status: 'complete' })
+    mockCdp({
+      'Network.getAllCookies': {
+        cookies: [{ name: 'plain', value: 'v', domain: 'example.com', path: '/', expires: -1 }],
+      },
+      'Runtime.evaluate': { result: { value: [] } },
+    })
+    const executor = new TabExecutor()
+    await executor.attach(42)
+
+    const [cookie] = (await executor.captureState('example.com')).cookies as Array<Record<string, unknown>>
+
+    expect('sameSite' in cookie).toBe(false)
+  })
+
+  it('folds the attached page’s localStorage into the origin map', async () => {
+    tabsGet.mockResolvedValue({ url: 'https://app.example.com/dashboard', title: 'Example', status: 'complete' })
+    mockCdp({
+      'Network.getAllCookies': { cookies: [] },
+      'Runtime.evaluate': {
+        result: {
+          value: [
+            ['token', 't1'],
+            ['flag', 'on'],
+          ],
+        },
+      },
+    })
+    const executor = new TabExecutor()
+    await executor.attach(42)
+
+    const bundle = await executor.captureState('example.com')
+
+    expect(bundle.localStorage).toEqual({
+      'https://app.example.com': { token: 't1', flag: 'on' },
+    })
+  })
+
+  it('refuses with site_mismatch when the attached tab is on a different site, before capturing anything', async () => {
+    tabsGet.mockResolvedValue({ url: 'https://other.example.org/page', title: 'Other', status: 'complete' })
+    const executor = new TabExecutor()
+    await executor.attach(42)
+
+    await expect(executor.captureState('example.com')).rejects.toMatchObject({ code: 'site_mismatch' })
+    const cookieCalls = dbg.sendCommand.mock.calls.filter((call) => call[1] === 'Network.getAllCookies')
+    expect(cookieCalls).toHaveLength(0)
+  })
+
+  it('maps a lost debugger session to `detached`, like every other op', async () => {
+    tabsGet.mockResolvedValue({ url: 'https://app.example.com/dashboard', title: 'Example', status: 'complete' })
+    const executor = new TabExecutor()
+    await executor.attach(42)
+    // The session drops on the first CDP call captureState makes (Network.enable).
+    dbg.sendCommand.mockRejectedValueOnce(new Error('Debugger is not attached to the tab with id: 42.'))
+
+    const err = (await executor.captureState('example.com').catch((e: unknown) => e)) as ExecutorError
+    expect(err).toBeInstanceOf(ExecutorError)
+    expect(err.code).toBe('detached')
   })
 })

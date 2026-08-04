@@ -188,7 +188,13 @@ export function buildToolIndex(sources: ToolSource[]): McpToolIndex {
  * Simple term-matching search. Scores each tool by how many query terms
  * appear in its token set. Name matches are weighted 2x over description.
  */
-function searchIndex(index: McpToolIndex, query: string, limit: number = 8): IndexedTool[] {
+function searchIndex(
+  index: McpToolIndex,
+  query: string,
+  limit: number = 8,
+  include: (entry: IndexedTool) => boolean = () => true,
+): IndexedTool[] {
+  const entries = index.entries.filter(include)
   const queryTerms = query
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, '')
@@ -199,17 +205,17 @@ function searchIndex(index: McpToolIndex, query: string, limit: number = 8): Ind
     // Empty query — return a sample from each server
     const seen = new Set<string>()
     const results: IndexedTool[] = []
-    for (const entry of index.entries) {
+    for (const entry of entries) {
       if (!seen.has(entry.server)) {
         seen.add(entry.server)
-        results.push(...index.entries.filter((e) => e.server === entry.server).slice(0, 3))
+        results.push(...entries.filter((e) => e.server === entry.server).slice(0, 3))
       }
       if (results.length >= limit) break
     }
     return results.slice(0, limit)
   }
 
-  const scored = index.entries.map((entry) => {
+  const scored = entries.map((entry) => {
     let score = 0
     const nameStr = entry.toolName.toLowerCase().replace(/_/g, ' ')
     const descStr = entry.description.toLowerCase()
@@ -256,6 +262,37 @@ function summarizeCapabilities(toolNames: string[]): string {
 }
 
 /** Format a tool entry for the search result (includes schema). */
+function compactSchemaType(definition: Record<string, unknown>, depth = 0): string {
+  const enumValues = definition.enum
+  if (Array.isArray(enumValues) && enumValues.length > 0) {
+    return enumValues.map((value) => JSON.stringify(value)).join(' | ')
+  }
+
+  if (definition.type === 'array') {
+    const items = definition.items
+    const itemType = items && typeof items === 'object'
+      ? compactSchemaType(items as Record<string, unknown>, depth + 1)
+      : 'any'
+    return `Array<${itemType}>`
+  }
+
+  if (definition.type === 'object') {
+    const properties = definition.properties
+    if (depth >= 3 || !properties || typeof properties !== 'object') return 'object'
+
+    const required = new Set(Array.isArray(definition.required) ? definition.required : [])
+    const fields = Object.entries(properties as Record<string, unknown>).map(([name, field]) => {
+      const fieldType = field && typeof field === 'object'
+        ? compactSchemaType(field as Record<string, unknown>, depth + 1)
+        : 'any'
+      return `${name}${required.has(name) ? '' : '?'}: ${fieldType}`
+    })
+    return `{ ${fields.join('; ')} }`
+  }
+
+  return typeof definition.type === 'string' ? definition.type : 'any'
+}
+
 function formatToolResult(entry: IndexedTool): string {
   const schema = entry.inputSchema
   const hasParams = schema && typeof schema === 'object' && Object.keys(schema).length > 0
@@ -268,7 +305,7 @@ function formatToolResult(entry: IndexedTool): string {
     if (props) {
       const paramParts = Object.entries(props).map(([name, def]) => {
         const typeDef = def as Record<string, unknown>
-        const type = typeDef.type ?? 'any'
+        const type = compactSchemaType(typeDef)
         const desc = typeDef.description ? ` — ${typeDef.description}` : ''
         const req = required?.includes(name) ? '' : '?'
         return `    ${name}${req}: ${type}${desc}`
@@ -342,18 +379,23 @@ export function createMcpSearchTools(params: {
 
   const searchTool = buildTool({
     name: 'mcp_search',
-    description: `Search across ${totalTools} tools from ${searchScope}. This searches available tool capabilities, not the underlying user data. Returns matching tools with descriptions and parameter schemas. Available sources: ${connectorList}.`,
+    description: `Search across ${totalTools} tools from ${searchScope}. This searches available tool capabilities, not the underlying user data. Returns matching tools with descriptions and parameter schemas. Set limit=1 for one exact capability so unrelated schemas stay out of context. Available sources: ${connectorList}.`,
     inputSchema: z.object({
       query: z.string().describe(queryGuidance),
+      limit: z.number().int().min(1).max(8).optional().describe('Maximum matching tools to return (1-8, default 8). Use 1 for an exact capability.'),
     }),
     isConcurrencySafe: true,
     isReadOnly: true,
     requiresConfirmation: false,
 
     async execute(input) {
-      const { query } = input as { query: string }
-      const results = searchIndex(index, query)
-        .filter((entry) => !blockedTools.has(`${entry.server}:${entry.toolName}`))
+      const { query, limit } = input as { query: string; limit?: number }
+      const results = searchIndex(
+        index,
+        query,
+        limit,
+        (entry) => !blockedTools.has(`${entry.server}:${entry.toolName}`),
+      )
 
       if (results.length === 0) {
         return {

@@ -5,13 +5,15 @@
  * re-snapshot.
  */
 import { buildSnapshot, type BuiltSnapshot, type CdpAXNode } from './snapshot.js'
+import { RESTRICTED_TAB_MESSAGE } from './tab-eligibility.js'
 
 export class ExecutorError extends Error {
   constructor(
     message: string,
     readonly code: string,
+    options?: ErrorOptions,
   ) {
-    super(message)
+    super(message, options)
     this.name = 'ExecutorError'
   }
 }
@@ -23,6 +25,35 @@ const DETACHED_MESSAGE =
   'Chrome ended the debugging session for this tab, so the browser is no longer under control. ' +
   'This happens when the "Use Brian is debugging this browser" banner is dismissed, DevTools opens on the tab, or the page crashes. ' +
   'Retry the step: the user will be asked to allow the tab again. Do not assume the website blocked you.'
+
+/** Chrome refused the attachment for a reason we have no better name for. */
+const ATTACH_FAILED_MESSAGE =
+  'The browser refused to hand Use Brian control of this tab. Ask the user to switch to the website they want it to work on, reload it, and try again.'
+
+/**
+ * Translate a `chrome.debugger.attach` rejection into one of our codes.
+ *
+ * `attach` used to sit outside every wrapper, so Chrome's own wording became
+ * the tool result: on 2026-08-03 a user's assistant read
+ * `ERROR: Cannot access a chrome-extension:// URL` and paraphrased it to them
+ * as a system permission error, which is neither actionable nor true. Chrome
+ * attaches no code to these — the message is the only signal — so matching its
+ * phrasing is unavoidable here. What IS avoidable is letting an unmatched
+ * phrasing through: the default is our own sentence, and Chrome's text is kept
+ * only as `cause`, which never reaches the wire (`background.ts` sends
+ * `err.message`).
+ */
+function attachError(err: unknown): ExecutorError {
+  if (err instanceof ExecutorError) return err
+  if (isDetachedError(err)) return new ExecutorError(DETACHED_MESSAGE, 'detached', { cause: err })
+  const message = err instanceof Error ? err.message : String(err)
+  // "Cannot access a chrome-extension:// URL", "Cannot access a chrome:// URL",
+  // "Cannot attach to this target" — all mean the tab is off limits to CDP.
+  if (/cannot access|cannot attach/i.test(message)) {
+    return new ExecutorError(RESTRICTED_TAB_MESSAGE, 'no_eligible_tab', { cause: err })
+  }
+  return new ExecutorError(ATTACH_FAILED_MESSAGE, 'backend_error', { cause: err })
+}
 
 /**
  * True when Chrome is telling us the CDP session is gone. Chrome reports this
@@ -77,6 +108,59 @@ async function sendCdp<T = unknown>(tabId: number, method: string, params?: Reco
   return (await chrome.debugger.sendCommand({ tabId }, method, params)) as T
 }
 
+/**
+ * Registrable-host suffix match used to filter captured cookies to the site
+ * the caller asked for (D3: filtering happens INSIDE the extension, before
+ * anything crosses the wire — this is a security requirement, not an
+ * optimisation). A host matches when it equals `site` outright or is a
+ * subdomain of it: `login.example.com` matches `example.com`, but
+ * `notexample.com` and `example.com.evil.example` do not. Exported so it can
+ * be unit-tested directly without going through CDP.
+ */
+export function hostMatchesSite(host: string, site: string): boolean {
+  const normalizedHost = host.replace(/^\./, '').toLowerCase()
+  const normalizedSite = site.replace(/^\./, '').toLowerCase()
+  if (!normalizedHost || !normalizedSite) return false
+  return normalizedHost === normalizedSite || normalizedHost.endsWith(`.${normalizedSite}`)
+}
+
+/**
+ * CDP cookie → Playwright `storageState` cookie.
+ *
+ * `Network.getAllCookies` returns fields storageState never defines (`session`,
+ * `size`, `priority`, `sourceScheme`, `sourcePort`, sometimes `partitionKey`),
+ * and the E2B provider writes `{cookies, origins}` VERBATIM into the file
+ * AGENT_BROWSER_STATE loads at daemon launch. Passing the raw CDP shape
+ * through therefore fails at *replay*, inside the sandbox — the one step this
+ * whole path exists to make work — while the capture itself looks green
+ * everywhere it is visible: bundle stored, vault row written, UI happy.
+ *
+ * `expires: -1` is the session-cookie sentinel in both shapes, so it is kept
+ * as-is rather than invented. `sameSite` is omitted when CDP gave none — an
+ * absent value and a defaulted one are not the same cookie.
+ */
+function toStorageStateCookie(c: Record<string, unknown>): Record<string, unknown> {
+  const sameSite = typeof c.sameSite === 'string' ? c.sameSite : undefined
+  return {
+    name: String(c.name ?? ''),
+    value: String(c.value ?? ''),
+    domain: String(c.domain ?? ''),
+    path: String(c.path ?? '/'),
+    expires: typeof c.expires === 'number' ? c.expires : -1,
+    httpOnly: c.httpOnly === true,
+    secure: c.secure === true,
+    ...(sameSite ? { sameSite } : {}),
+  }
+}
+
+function parsedTabUrl(url: string): URL | null {
+  try {
+    return new URL(url)
+  } catch {
+    return null
+  }
+}
+
 export class TabExecutor {
   private attachedTabId: number | null = null
   private lastSnapshot: BuiltSnapshot | null = null
@@ -85,7 +169,15 @@ export class TabExecutor {
   async attach(tabId: number): Promise<void> {
     if (this.attachedTabId === tabId) return
     await this.detach()
-    await chrome.debugger.attach({ tabId }, '1.3')
+    // `chrome.debugger.attach` is the one Chrome call that can reject with
+    // provider-authored text on the happy path, and it sat outside `cdp()`'s
+    // translation for as long as the executor existed. Everything below the
+    // wrapper is safe; this line was the hole.
+    try {
+      await chrome.debugger.attach({ tabId }, '1.3')
+    } catch (err) {
+      throw attachError(err)
+    }
     this.attachedTabId = tabId
     await this.cdp(tabId, 'Accessibility.enable')
   }
@@ -235,6 +327,51 @@ export class TabExecutor {
     const tabId = this.mustTab()
     const tab = await chrome.tabs.get(tabId)
     return { url: tab.url ?? '', title: tab.title ?? '' }
+  }
+
+  /**
+   * Capture the allowed tab's authenticated session for `site` (D2/D3): the
+   * cookies + localStorage for a login the user already has in their own
+   * Chrome, so it can be replayed into the profile vault. User-initiated
+   * only — there is no tool over this, only the Settings "Save this login"
+   * route calls it (D4).
+   */
+  async captureState(site: string): Promise<{
+    site: string
+    cookies: unknown[]
+    localStorage: Record<string, Record<string, string>>
+    capturedAt: string
+  }> {
+    const tabId = this.mustTab()
+    const tab = await chrome.tabs.get(tabId)
+    const parsed = parsedTabUrl(tab.url ?? '')
+    const host = parsed?.hostname ?? ''
+    // Capture is not a navigation: it must refuse rather than silently
+    // succeed against whatever tab happens to be allowed (D3).
+    if (!hostMatchesSite(host, site)) {
+      throw new ExecutorError(
+        `The allowed tab is on ${host || 'a page with no URL'}, not ${site}. Switch the allowed tab to ${site} and retry.`,
+        'site_mismatch',
+      )
+    }
+
+    await this.cdp(tabId, 'Network.enable')
+    const { cookies } = await this.cdp<{ cookies: Array<Record<string, unknown>> }>(tabId, 'Network.getAllCookies')
+    // Drop everything but the requested site's cookies BEFORE building the
+    // result — the relay, the API, and the database must never see cookies
+    // for sites the user did not name.
+    const siteCookies = cookies.filter((c) => hostMatchesSite(String(c.domain ?? ''), site)).map(toStorageStateCookie)
+
+    const evaluated = await this.cdp<{ result?: { value?: Array<[string, string]> } }>(tabId, 'Runtime.evaluate', {
+      expression: 'Object.entries(localStorage)',
+      returnByValue: true,
+    })
+    const origin = parsed?.origin ?? ''
+    const localStorage: Record<string, Record<string, string>> = {
+      [origin]: Object.fromEntries(evaluated.result?.value ?? []),
+    }
+
+    return { site, cookies: siteCookies, localStorage, capturedAt: new Date().toISOString() }
   }
 
   async captureFrame(): Promise<{ data: string; mimeType: string }> {

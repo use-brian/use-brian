@@ -586,6 +586,23 @@ export function createDbWorkflowRunStore(): WorkflowRunStore {
       )
       return result.rows.map(rowToRun)
     },
+    async resolveRunsByIdPrefix(userId, idPrefix, opts) {
+      // Small candidate set — enough to detect + describe ambiguity, never
+      // to page. RLS-scoped (not the system `query` path): this is a read
+      // on behalf of the calling user, same boundary as getRunById.
+      // Anchored, parameterised prefix match — `id::text LIKE $1 || '%'`,
+      // never a substring and never string-concatenated into the SQL.
+      const limit = Math.min(opts?.limit ?? 5, 20)
+      const result = await queryWithRLS<RunRow>(
+        userId,
+        `SELECT ${RUN_SELECT} FROM workflow_runs
+         WHERE id::text LIKE $1 || '%'
+         ORDER BY started_at DESC
+         LIMIT $2`,
+        [idPrefix, limit],
+      )
+      return result.rows.map(rowToRun)
+    },
     async getLatestOutcomeForWorkflowSystem(workflowId, excludeRunId) {
       // System read (no RLS) — the executor calls this on every advance to
       // build the `{{lastRun.*}}` scope. Most recent TERMINAL run's distilled

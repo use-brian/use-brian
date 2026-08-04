@@ -2,7 +2,10 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { saveLocalProviderPreference } from '../local-provider-preference.js'
+import {
+  loadLocalProviderPreference,
+  saveLocalProviderPreference,
+} from '../local-provider-preference.js'
 
 const temporaryDirectories: string[] = []
 
@@ -39,5 +42,17 @@ describe('[COMP:api/codex-provider] local provider preference persistence', () =
       port: 5173,
       credentialMode: 'chatgpt',
     })
+  })
+
+  it('restores the saved preference after an API process restart', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'brian-provider-preference-'))
+    temporaryDirectories.push(directory)
+    const path = join(directory, 'config.json')
+
+    expect(await loadLocalProviderPreference(path)).toBeNull()
+
+    await saveLocalProviderPreference('dashscope-intl', path)
+
+    expect(await loadLocalProviderPreference(path)).toBe('dashscope-intl')
   })
 })

@@ -94,14 +94,21 @@ export async function parseFileContent(
   if (mimeType === XLSX_MIME || fileName.toLowerCase().endsWith('.xlsx')) {
     // Each worksheet → a Markdown table (computed values, not formulas).
     try {
-      const text = await parseXlsxToMarkdown(buffer)
+      const { text, sheets, totalRows } = await parseXlsxToMarkdown(buffer)
       if (!text) {
         return {
           text: `[Spreadsheet: ${fileName}. No extractable cells (the workbook may be empty).]`,
           summary: `Spreadsheet: ${fileName}`,
         }
       }
-      return { text, summary: `Spreadsheet: ${fileName} (${text.length} chars)` }
+      // The row count is load-bearing, not decoration: it is how a reader (and
+      // the model) can tell a complete parse from a short one. See issue #273.
+      const sheetPart =
+        sheets.length > 1 ? `, ${sheets.length} sheets (${sheets.map((s) => `${s.name}: ${s.rows}`).join(', ')})` : ''
+      return {
+        text,
+        summary: `Spreadsheet: ${fileName} (${totalRows} rows${sheetPart}, ${text.length} chars)`,
+      }
     } catch (err) {
       const reason = err instanceof Error ? err.message : 'unknown error'
       return {

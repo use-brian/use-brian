@@ -650,6 +650,9 @@ export const ja: Dictionary = {
       ingestFailed: "失敗",
       ingestRemove: "削除",
       ingestClear: "クリア",
+      linkedinArchiveAlone: "全行を照合するため、LinkedIn ZIP は単独で追加してください。",
+      linkedinImportQueued: "ロスレス取り込みをキューに追加済み",
+      linkedinRowsImported: "行を取り込み済み",
     },
     setupChecklist: {
       ariaLabel: "ワークスペースをセットアップ",
@@ -1887,6 +1890,12 @@ export const ja: Dictionary = {
         models: "モデル",
         domains: "ドメイン",
       },
+      source: {
+        version: "バージョン {hash}",
+        repository: "ソースコード",
+        viewVersion: "GitHub でバージョン {hash} を表示",
+        viewRepository: "GitHub でソースコードを表示",
+      },
       models: {
         title: "モデル",
         blurb: "このワークスペースのモデル設定: 各プランティアで使うモデル、従量課金モデルの保存済み予算、独自の Gemini API キー。",
@@ -2856,6 +2865,8 @@ export const ja: Dictionary = {
       eventMatchCapReached: "上限の {cap} 件に達しました。",
       // ── 実行履歴ドリルダウン ────────────────────────────────────────
       runsOpenRun: "実行を開く",
+      runsCopyId: "実行 ID をコピー",
+      runsIdCopied: "実行 ID をコピーしました",
       // ── ライブ実行アクティビティ（ボード上のバナー）──────────────────
       liveRunning: "実行中",
       livePausedWait: "タイマーの再開を待っています",
@@ -2887,6 +2898,8 @@ export const ja: Dictionary = {
         triggerKindLabel: "トリガー: {kind}",
         statusLabel: "ステータス",
         runIdLabel: "実行 ID",
+        runIdCopy: "実行 ID をコピー",
+        runIdCopied: "実行 ID をコピーしました",
         stepTrailHeading: "ステップトレース",
         stepTrailEmpty: "この実行に記録されたステップはありません。",
         stepDurationLabel: "{value}",
@@ -6359,6 +6372,11 @@ export const ja: Dictionary = {
       selectTitle: "ライブブラウザを見る",
       selectHint:
         "左のセッションを選んで見るか操作を引き継ぐか、アシスタントがブラウザを開くのを待ちます。",
+      connectTitle: "自分のChromeを使う",
+      connectHint:
+        "Use Brian拡張機能をインストールし、「ブラウザプロフィール」で「マイブラウザ」をペアリングします。すると、既存のログイン情報を使って、許可したタブでアシスタントが操作できます。",
+      installAction: "拡張機能をインストール",
+      connectAction: "ブラウザプロフィールでペアリング",
       statusRunning: "実行中",
       statusPaused: "一時停止",
       unnamed: "ブラウザセッション",
@@ -6374,6 +6392,8 @@ export const ja: Dictionary = {
       gatedCta: "プランを見る",
       statusConnected: "ブラウザが接続されています",
       statusDisconnected: "ブラウザが接続されていません",
+      staleBuildWarning:
+        "このブラウザの拡張機能は古いため、修正が反映されていない可能性があります。拡張機能をビルドし直し、ブラウザの拡張機能ページで「再読み込み」を押してください。",
       connectedHint:
         "下のプロファイルのブラウザを「マイブラウザ」に設定するか、サイトがクラウドブラウザをブロックしたときにアシスタントの提案を受け入れると、あなたのChromeで動作します。",
       step1Title: "1. 拡張機能をインストール",
@@ -6461,6 +6481,21 @@ export const ja: Dictionary = {
         "サインイン用ブラウザを開けませんでした。サインインできるのはプロフィールの所有者のみで、このデプロイでクラウドブラウジングが設定されている必要があります。",
       loginHint:
         "あなたが操作するクラウドブラウザでサイトを開きます。そこでサインインして、セッションをこのプロフィールに保存してください。パスワードはサイトにのみ送られ、私たちには届きません。",
+      captureLabel: "自分のブラウザからこのログインを保存",
+      capturePlaceholder: "instagram.com または完全な URL",
+      captureAction: "このログインを保存",
+      captureSaving: "保存中...",
+      captureHint:
+        "指定したサイトのCookieを、接続済みのブラウザから取得してここに保存します。以降このプロフィールでのクラウドブラウズは、最初からサインイン済みの状態で始まります。",
+      captureNoSession: "上のMy Browserをまず接続してください。接続後、ここに戻ってログインを保存できます。",
+      captureFailed: "ブラウザからのセッション保存に失敗しました。もう一度お試しください。",
+      captureSuccess: "{site} を {date} に保存しました。",
+      proxyLabel: "プロキシURL",
+      proxyPlaceholder: "http://user:pass@proxy.example:8080",
+      proxyHint:
+        "クラウドブラウザの通信をあなた自身のプロキシ経由にし、ログインが作成されたネットワークに近づけます。空欄のままだと既定の経路が使われます。",
+      proxyInvalid: "有効なURLを入力するか、空欄のままにしてください。",
+      proxySave: "保存",
     },
   },
   deckPage: {

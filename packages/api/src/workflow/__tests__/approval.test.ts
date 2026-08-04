@@ -121,6 +121,9 @@ function makeStores() {
     async listRunsForWorkflow(_u, workflowId) {
       return [...runs.values()].filter((r) => r.workflowId === workflowId)
     },
+    async resolveRunsByIdPrefix(_u, idPrefix) {
+      return [...runs.values()].filter((r) => r.id.startsWith(idPrefix))
+    },
     listRunsForPage: async () => [],
     async getLatestOutcomeForWorkflowSystem(workflowId, excludeRunId) {
       const terminal = [...runs.values()]

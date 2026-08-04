@@ -15,8 +15,8 @@
  *    only — the exploration LLM key, set per-run on the driver exec (the
  *    agentic loop runs inside the VM and must reach its LLM; documented on
  *    `E2bCloudProviderConfig.browserUse`).
- *  - The BYOP proxy hook (§4.6) is agent-browser's `-p` flag, wired but
- *    dormant (set per-create, never a pool).
+ *  - The BYOP proxy hook (§4.6) is agent-browser's `--proxy` flag, set
+ *    per-create, never a pool.
  */
 import {
   BrowserBackendError,
@@ -155,7 +155,14 @@ export function createE2bCloudProvider(
       // trips, not compute.
       navigate: async (url) => {
         const proxy = meta(sandboxId).proxyUrl
-        const open = proxy ? `${cli.open(url)} -p '${proxy.replace(/'/g, '')}'` : cli.open(url)
+        // `--proxy`, NOT `-p`. In the agent-browser CLI `-p` is
+        // `--provider <name>` — the browser-provider plugin selector — so the
+        // original `-p '<url>'` handed the proxy URL over as a provider name
+        // and every configured proxy was silently inert. Nothing catches that
+        // locally: the string typechecks, the hook had no UI, and no profile
+        // in prod carried a proxy_url, so it stayed dormant-and-wrong until a
+        // hardened site made a non-datacenter egress the whole point.
+        const open = proxy ? `${cli.open(url)} --proxy '${proxy.replace(/'/g, '')}'` : cli.open(url)
         // Viewport rides the same exec (chained = zero extra round trips) on
         // every navigate: the snapshot's pre-warmed daemon and a
         // vault-injected relaunch both come up at the CLI default size, and

@@ -337,6 +337,13 @@ export function DocSidebarDataProvider({
       const detail = (event as CustomEvent<HomeAppsRefreshDetail>).detail;
       // Scope to this workspace; the catch-up dispatch carries no id filter.
       if (detail?.workspaceId && detail.workspaceId !== workspaceId) return;
+      // A same-tab Studio save already has the server-confirmed value. Adopt
+      // it synchronously so the next Home soft-nav cannot render the stale
+      // layout-provider state; stream/catch-up signals omit data and re-fetch.
+      if (detail?.homeApps) {
+        setHomeApps([...detail.homeApps]);
+        return;
+      }
       reloadHomeApps();
     };
     window.addEventListener(HOME_APPS_REFRESH_EVENT, onRefresh);

@@ -148,18 +148,17 @@ describe('[COMP:prompt/token-cost] Per-turn input token cost — realistic user 
 
   it('PR #4 savings — power-legacy baseline still measurable for A/B comparison', () => {
     const m = run('power-legacy')
-    // PRE-PR#4 baseline kept so anyone comparing "before vs after"
-    // can read the saving directly off the snapshot. At lock time
-    // (2026-05-25): power-legacy total = ~11,634 tokens; power total =
-    // ~6,379 tokens; saved per turn = ~5,255 tokens (~45%).
+    // Direct-schema baseline kept so anyone comparing "before vs after"
+    // can read the saving directly off the snapshot. The Calendar P0/P1
+    // expansion intentionally lifted this path to ~16,317 tokens while
+    // the lazy `power` path stayed ~8,363; normal chat does not pay it.
     expect(m.totalTokens).toBeGreaterThan(9_000)
-    // The provenance boundary raises every scenario by ~330 prompt tokens.
-    expect(m.totalTokens).toBeLessThan(15_000)
+    expect(m.totalTokens).toBeLessThan(17_500)
     // Compare against `power` for the documented saving.
     const post = results.find((r) => r.id === 'power')
     if (post) {
       const saved = m.totalTokens - post.totalTokens
-      expect(saved).toBeGreaterThan(3_000) // floor — savings must be real
+      expect(saved).toBeGreaterThan(6_000) // floor — savings must be real
     }
   })
 

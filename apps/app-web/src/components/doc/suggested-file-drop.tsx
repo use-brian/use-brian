@@ -2,9 +2,9 @@
 
 /**
  * Home "Add files to your brain" drop block. Drag files onto it (or pick them),
- * then "Add to brain" runs the deterministic ingest: POST /api/files/ingest
- * stores each file's raw bytes AND decomposes its content into entities /
- * memories / tasks (no chat turn). Per-file status renders inline.
+ * then "Add to brain" runs deterministic ingest. Ordinary files use Pipeline B;
+ * a single LinkedIn ZIP uses the dedicated lossless queue. Per-file status
+ * renders inline.
  *
  * Reuses `useFileDrop` for drag state; the ingest SDK is `lib/api/ingest.ts`.
  * Lives on the Suggested-for-you surface, under the build bar.
@@ -18,7 +18,12 @@ import { AlertCircle, Check, FileUp, Loader2, X } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 import { useFileDrop } from "@/lib/use-file-drop";
-import { ingestFiles, totalAdded, type IngestFileResult } from "@/lib/api/ingest";
+import {
+  ingestFiles,
+  ingestLinkedInArchive,
+  totalAdded,
+  type IngestFileResult,
+} from "@/lib/api/ingest";
 
 /** Match the server's per-request cap (MAX_INGEST_FILES in routes/files.ts). */
 const MAX_FILES = 5;
@@ -79,7 +84,13 @@ export function SuggestedFileDrop({ workspaceId }: { workspaceId: string }) {
       prev.map((i) => (pendingIds.has(i.localId) ? { ...i, status: "ingesting" } : i)),
     );
     try {
-      const results = await ingestFiles(workspaceId, pending.map((p) => p.file));
+      const zipItems = pending.filter((item) => item.file.name.toLowerCase().endsWith(".zip"));
+      if (zipItems.length > 0 && pending.length !== 1) {
+        throw new Error(t.linkedinArchiveAlone);
+      }
+      const results = zipItems.length === 1
+        ? [await ingestLinkedInArchive(workspaceId, zipItems[0].file)]
+        : await ingestFiles(workspaceId, pending.map((p) => p.file));
       setItems((prev) => {
         let idx = 0;
         return prev.map((i) => {
@@ -102,7 +113,7 @@ export function SuggestedFileDrop({ workspaceId }: { workspaceId: string }) {
     } finally {
       setBusy(false);
     }
-  }, [items, busy, workspaceId, t.ingestFailed]);
+  }, [items, busy, workspaceId, t.ingestFailed, t.linkedinArchiveAlone]);
 
   return (
     <section
@@ -219,6 +230,14 @@ function StatusLabel({
   if (item.status === "pending") return <>{t.ingestReady}</>;
   if (item.status === "ingesting") return <>{t.ingestAdding}</>;
   if (item.status === "error") return <span className="text-rose-600 dark:text-rose-400">{item.error ?? t.ingestFailed}</span>;
+  if (item.result?.linkedinImport) {
+    const imported = item.result.linkedinImport;
+    return imported.status === "completed" ? (
+      <span className="text-emerald-600 dark:text-emerald-400">{`${imported.rows} ${t.linkedinRowsImported}`}</span>
+    ) : (
+      <span className="text-emerald-600 dark:text-emerald-400">{t.linkedinImportQueued}</span>
+    );
+  }
   const n = totalAdded(item.result?.counts);
   return n > 0 ? (
     <span className="text-emerald-600 dark:text-emerald-400">{`${n} ${t.ingestAdded}`}</span>

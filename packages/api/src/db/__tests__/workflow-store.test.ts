@@ -267,6 +267,42 @@ describe('[COMP:api/workflow-store] createDbWorkflowRunStore', () => {
     expect(values).toEqual(['wf-1', ['running', 'failed'], 200])
   })
 
+  // use-brian#278 — the prefix lookup backing getWorkflowRun's short-id
+  // resolution. RLS-scoped, anchored, bounded: the three non-negotiable
+  // properties from the issue.
+  it('resolveRunsByIdPrefix reads through queryWithRLS, never the system query path', async () => {
+    mockRls.mockResolvedValueOnce({ rows: [runRow()], rowCount: 1 } as never)
+    await runs.resolveRunsByIdPrefix('u-1', '090aa843')
+    expect(mockRls).toHaveBeenCalledTimes(1)
+    expect(mockQuery).not.toHaveBeenCalled()
+    expect(mockRls.mock.calls[0][0]).toBe('u-1')
+  })
+
+  it('resolveRunsByIdPrefix anchors the match to the start of id, parameterised (not a substring, not string-concatenated)', async () => {
+    mockRls.mockResolvedValueOnce({ rows: [runRow()], rowCount: 1 } as never)
+    await runs.resolveRunsByIdPrefix('u-1', '090aa843')
+    const [, sql, values] = mockRls.mock.calls[0]
+    expect(sql).toContain("id::text LIKE $1 || '%'")
+    expect(sql).not.toContain('090aa843')
+    expect((values as unknown[])[0]).toBe('090aa843')
+  })
+
+  it('resolveRunsByIdPrefix caps the result with a LIMIT', async () => {
+    mockRls.mockResolvedValueOnce({ rows: [runRow()], rowCount: 1 } as never)
+    await runs.resolveRunsByIdPrefix('u-1', '090aa843')
+    const [, sql, values] = mockRls.mock.calls[0]
+    expect(sql).toMatch(/LIMIT \$2/)
+    expect(typeof (values as unknown[])[1]).toBe('number')
+    expect((values as unknown[])[1]).toBeGreaterThan(0)
+  })
+
+  it('resolveRunsByIdPrefix orders most-recent-first', async () => {
+    mockRls.mockResolvedValueOnce({ rows: [runRow()], rowCount: 1 } as never)
+    await runs.resolveRunsByIdPrefix('u-1', '090aa843')
+    const [, sql] = mockRls.mock.calls[0]
+    expect(sql).toContain('ORDER BY started_at DESC')
+  })
+
   it('listRunsForPage joins workflows, clamps the limit, and maps outcome.summary (mig 282)', async () => {
     mockRls.mockResolvedValueOnce({
       rows: [

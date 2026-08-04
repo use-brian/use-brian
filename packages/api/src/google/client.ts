@@ -2,14 +2,23 @@
  * Google API client — thin fetch-based wrappers for Calendar, Gmail, Tasks,
  * Drive, Docs, Sheets, and Slides.
  *
- * No heavy SDK. Each function takes an access token and makes a single
- * API call. Token refresh is handled by the caller.
+ * No heavy SDK. Each function takes an access token and uses direct fetch;
+ * token refresh is handled by the caller. Composite Calendar intents such as
+ * safe attendee merges and "this and following" deliberately make the
+ * provider's required get/split/update sequence inside this adapter.
  *
  * See docs/architecture/integrations/mcp.md → "Built-in connectors".
  */
 
 import { randomUUID } from 'node:crypto'
-import type { GmailOutgoingAttachment } from '@use-brian/core'
+import type {
+  GmailOutgoingAttachment,
+  CalendarEventCreateInput,
+  CalendarEventUpdateInput,
+  CalendarRecurrenceScope,
+  CalendarAttendeeInput,
+  CalendarAttachmentInput,
+} from '@use-brian/core'
 import { renderEmailBody } from '@use-brian/channels'
 
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token'
@@ -54,16 +63,87 @@ export async function refreshGoogleAccessToken(
 
 // ── Calendar ──────────────────────────────────────────────────
 
+type CalendarBoundary = { dateTime?: string; date?: string; timeZone?: string }
+type CalendarAttendee = CalendarAttendeeInput & {
+  responseStatus?: string
+  self?: boolean
+  organizer?: boolean
+}
+type CalendarAttachment = CalendarAttachmentInput & { fileId?: string; iconLink?: string }
+
 export type CalendarEvent = {
   id: string
   summary: string
   description?: string
-  start: { dateTime?: string; date?: string }
-  end: { dateTime?: string; date?: string }
+  start: CalendarBoundary
+  end: CalendarBoundary
+  originalStartTime?: CalendarBoundary
+  recurringEventId?: string
+  recurrence?: string[]
   location?: string
-  attendees?: Array<{ email: string; responseStatus?: string }>
+  attendees?: CalendarAttendee[]
+  attachments?: CalendarAttachment[]
+  reminders?: Record<string, unknown>
+  conferenceData?: Record<string, unknown> | null
+  hangoutLink?: string
+  transparency?: string
+  visibility?: string
+  eventType?: string
+  focusTimeProperties?: Record<string, unknown>
+  outOfOfficeProperties?: Record<string, unknown>
+  workingLocationProperties?: Record<string, unknown>
+  guestsCanInviteOthers?: boolean
+  guestsCanModify?: boolean
+  guestsCanSeeOtherGuests?: boolean
   htmlLink?: string
   status?: string
+  [key: string]: unknown
+}
+
+export type CalendarListEntry = {
+  id: string
+  summary: string
+  summaryOverride?: string
+  timeZone?: string
+  primary?: boolean
+  selected?: boolean
+  accessRole?: 'freeBusyReader' | 'reader' | 'writer' | 'owner'
+  backgroundColor?: string
+  foregroundColor?: string
+}
+
+export type CalendarSendUpdates = 'all' | 'externalOnly' | 'none'
+
+async function calendarJson<T>(res: Response, context = 'Calendar API'): Promise<T> {
+  if (!res.ok) {
+    const err = await res.text()
+    throw new Error(`${context} error (${res.status}): ${err}`)
+  }
+  return await res.json() as T
+}
+
+function calendarHeaders(accessToken: string, json = false): Record<string, string> {
+  return {
+    Authorization: `Bearer ${accessToken}`,
+    ...(json ? { 'Content-Type': 'application/json' } : {}),
+  }
+}
+
+export async function listCalendarList(accessToken: string): Promise<CalendarListEntry[]> {
+  const items: CalendarListEntry[] = []
+  let pageToken: string | undefined
+  do {
+    const qs = new URLSearchParams({ maxResults: '250', showHidden: 'false' })
+    if (pageToken) qs.set('pageToken', pageToken)
+    const data = await calendarJson<{ items?: CalendarListEntry[]; nextPageToken?: string }>(
+      await fetch(`${CALENDAR_API}/users/me/calendarList?${qs}`, {
+        headers: calendarHeaders(accessToken),
+      }),
+    )
+    items.push(...(data.items ?? []))
+    pageToken = data.nextPageToken
+  } while (pageToken)
+  return items
 }
 
 export async function listCalendarEvents(
@@ -88,16 +168,11 @@ export async function listCalendarEvents(
   if (params.query) qs.set('q', params.query)
   if (params.timeZone) qs.set('timeZone', params.timeZone)
 
-  const res = await fetch(`${CALENDAR_API}/calendars/${calendarId}/events?${qs}`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  })
-
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Calendar API error (${res.status}): ${err}`)
-  }
-
-  const data = await res.json() as { items?: CalendarEvent[] }
+  const data = await calendarJson<{ items?: CalendarEvent[] }>(
+    await fetch(`${CALENDAR_API}/calendars/${calendarId}/events?${qs}`, {
+      headers: calendarHeaders(accessToken),
+    }),
+  )
   return data.items ?? []
 }
 
@@ -106,35 +181,19 @@ export async function getCalendarEvent(
   eventId: string,
   calendarId = 'primary',
 ): Promise<CalendarEvent> {
-  const res = await fetch(
+  return calendarJson<CalendarEvent>(await fetch(
     `${CALENDAR_API}/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`,
-    { headers: { Authorization: `Bearer ${accessToken}` } },
-  )
-
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Calendar API error (${res.status}): ${err}`)
-  }
-
-  return await res.json() as CalendarEvent
+    { headers: calendarHeaders(accessToken) },
+  ))
 }
 
 /**
- * Raw Google Calendar `events.list` — returns the unmodified `items`
- * array, each a full Calendar `Event` resource. `listCalendarEvents`
- * narrows to the handful of fields the calendar *tools* read; the ingest
- * poller needs the full resource (`organizer`, `recurrence`,
- * `recurringEventId`, `updated`) for `normalizeCalendarEvent`. Ordered by
- * last-modification time so an `updatedMin`-windowed poll reads the
- * change feed; `singleEvents` expands recurring series into instances.
+ * Raw Google Calendar `events.list` for the ingest poller. Ordered by last
+ * modification and expanded into instances.
  */
 export async function listCalendarEventsRaw(
   accessToken: string,
-  params: {
-    updatedMin?: string
-    calendarId?: string
-    maxResults?: number
-  },
+  params: { updatedMin?: string; calendarId?: string; maxResults?: number },
 ): Promise<Array<Record<string, unknown>>> {
   const calendarId = encodeURIComponent(params.calendarId ?? 'primary')
   const qs = new URLSearchParams({
@@ -143,152 +202,547 @@ export async function listCalendarEventsRaw(
     maxResults: String(params.maxResults ?? 250),
   })
   if (params.updatedMin) qs.set('updatedMin', params.updatedMin)
-
-  const res = await fetch(`${CALENDAR_API}/calendars/${calendarId}/events?${qs}`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  })
-
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Calendar API error (${res.status}): ${err}`)
-  }
-
-  const data = (await res.json()) as { items?: Array<Record<string, unknown>> }
+  const data = await calendarJson<{ items?: Array<Record<string, unknown>> }>(
+    await fetch(`${CALENDAR_API}/calendars/${calendarId}/events?${qs}`, {
+      headers: calendarHeaders(accessToken),
+    }),
+  )
   return data.items ?? []
 }
 
-export type CalendarSendUpdates = 'all' | 'externalOnly' | 'none'
+export async function queryCalendarFreeBusy(
+  accessToken: string,
+  params: {
+    timeMin: string
+    timeMax: string
+    calendarIds: string[]
+    timeZone?: string
+    durationMinutes?: number
+  },
+): Promise<Record<string, unknown>> {
+  const data = await calendarJson<{
+    timeMin?: string
+    timeMax?: string
+    calendars?: Record<string, { busy?: Array<{ start: string; end: string }>; errors?: unknown[] }>
+    groups?: Record<string, unknown>
+  }>(await fetch(`${CALENDAR_API}/freeBusy`, {
+    method: 'POST',
+    headers: calendarHeaders(accessToken, true),
+    body: JSON.stringify({
+      timeMin: params.timeMin,
+      timeMax: params.timeMax,
+      ...(params.timeZone ? { timeZone: params.timeZone } : {}),
+      items: params.calendarIds.map((id) => ({ id })),
+    }),
+  }))
+
+  const windowStart = new Date(params.timeMin).getTime()
+  const windowEnd = new Date(params.timeMax).getTime()
+  if (!Number.isFinite(windowStart) || !Number.isFinite(windowEnd) || windowEnd <= windowStart) {
+    throw new Error('Calendar free/busy window must have valid timeMin < timeMax')
+  }
+
+  const calendarResults = data.calendars ?? {}
+  const failedCalendars = params.calendarIds.filter((calendarId) => {
+    const result = calendarResults[calendarId]
+    return !result || (result.errors?.length ?? 0) > 0
+  })
+  if (failedCalendars.length > 0) {
+    throw new Error(`Calendar free/busy unavailable for: ${failedCalendars.join(', ')}`)
+  }
+
+  const busy = Object.values(calendarResults)
+    .flatMap((calendar) => calendar.busy ?? [])
+    .map((block) => ({
+      start: Math.max(windowStart, new Date(block.start).getTime()),
+      end: Math.min(windowEnd, new Date(block.end).getTime()),
+    }))
+    .filter((block) => Number.isFinite(block.start) && Number.isFinite(block.end) && block.end > block.start)
+    .sort((a, b) => a.start - b.start)
+
+  const merged: Array<{ start: number; end: number }> = []
+  for (const block of busy) {
+    const last = merged[merged.length - 1]
+    if (last && block.start <= last.end) last.end = Math.max(last.end, block.end)
+    else merged.push({ ...block })
+  }
+
+  const minimumMs = (params.durationMinutes ?? 30) * 60_000
+  const available: Array<{ start: string; end: string }> = []
+  let cursor = windowStart
+  for (const block of merged) {
+    if (block.start - cursor >= minimumMs) {
+      available.push({ start: new Date(cursor).toISOString(), end: new Date(block.start).toISOString() })
+    }
+    cursor = Math.max(cursor, block.end)
+  }
+  if (windowEnd - cursor >= minimumMs) {
+    available.push({ start: new Date(cursor).toISOString(), end: new Date(windowEnd).toISOString() })
+  }
+
+  return { ...data, durationMinutes: params.durationMinutes ?? 30, available }
+}
+
+function eventBoundary(value: string, allDay: boolean, timeZone?: string): CalendarBoundary {
+  if (allDay) return { date: value }
+  return { dateTime: value, ...(timeZone ? { timeZone } : {}) }
+}
+
+function normalizeWorkingLocation(input: NonNullable<CalendarEventCreateInput['workingLocationProperties']>): Record<string, unknown> {
+  if (input.type === 'homeOffice') return { type: 'homeOffice', homeOffice: {} }
+  if (input.type === 'customLocation') return { type: 'customLocation', customLocation: { label: input.label } }
+  const { type: _, ...officeLocation } = input
+  return { type: 'officeLocation', officeLocation }
+}
+
+function addGuestPermissions(body: Record<string, unknown>, permissions: CalendarEventCreateInput['guestPermissions']): void {
+  if (!permissions) return
+  if (permissions.canInviteOthers !== undefined) body.guestsCanInviteOthers = permissions.canInviteOthers
+  if (permissions.canModify !== undefined) body.guestsCanModify = permissions.canModify
+  if (permissions.canSeeOtherGuests !== undefined) body.guestsCanSeeOtherGuests = permissions.canSeeOtherGuests
+}
+
+function addStatusProperties(body: Record<string, unknown>, event: CalendarEventCreateInput): void {
+  const eventType = event.eventType ?? 'default'
+  if (eventType !== 'default' && (event.calendarId ?? 'primary') !== 'primary') {
+    throw new Error(`${eventType} events are supported only on the primary calendar`)
+  }
+  if (eventType === 'focusTime') {
+    if (event.allDay) throw new Error('Focus Time cannot be an all-day event')
+    if (!event.focusTimeProperties) throw new Error('focusTimeProperties is required for a Focus Time event')
+    body.eventType = eventType
+    body.focusTimeProperties = event.focusTimeProperties
+    body.transparency = 'opaque'
+  } else if (eventType === 'outOfOffice') {
+    if (event.allDay) throw new Error('Out of Office cannot be an all-day event')
+    if (!event.outOfOfficeProperties) throw new Error('outOfOfficeProperties is required for an Out of Office event')
+    body.eventType = eventType
+    body.outOfOfficeProperties = event.outOfOfficeProperties
+    body.transparency = 'opaque'
+  } else if (eventType === 'workingLocation') {
+    if (!event.workingLocationProperties) throw new Error('workingLocationProperties is required for a Working Location event')
+    if (event.workingLocationProperties.type === 'customLocation' && !event.workingLocationProperties.label) {
+      throw new Error('A custom Working Location requires a label')
+    }
+    if (event.allDay) {
+      const start = Date.parse(`${event.start}T00:00:00Z`)
+      const end = Date.parse(`${event.end}T00:00:00Z`)
+      if (!Number.isFinite(start) || end - start !== 86_400_000) {
+        throw new Error('An all-day Working Location must span exactly one day')
+      }
+    }
+    body.eventType = eventType
+    body.workingLocationProperties = normalizeWorkingLocation(event.workingLocationProperties)
+    body.visibility = 'public'
+    body.transparency = 'transparent'
+  }
+}
+
+function createEventBody(event: CalendarEventCreateInput): Record<string, unknown> {
+  if (event.allDay) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(event.start) || !/^\d{4}-\d{2}-\d{2}$/.test(event.end)) {
+      throw new Error('All-day events require YYYY-MM-DD start and end dates')
+    }
+    if (Date.parse(`${event.end}T00:00:00Z`) <= Date.parse(`${event.start}T00:00:00Z`)) {
+      throw new Error('An all-day event end date must be after its start date')
+    }
+  }
+  const body: Record<string, unknown> = {
+    summary: event.summary,
+    start: eventBoundary(event.start, event.allDay === true, event.timeZone),
+    end: eventBoundary(event.end, event.allDay === true, event.timeZone),
+  }
+  if (event.description !== undefined) body.description = event.description
+  if (event.location !== undefined) body.location = event.location
+  if (event.attendees) body.attendees = event.attendees
+  if (event.recurrence?.length) body.recurrence = event.recurrence
+  if (event.reminders) body.reminders = event.reminders
+  if (event.availability) body.transparency = event.availability === 'free' ? 'transparent' : 'opaque'
+  if (event.visibility) body.visibility = event.visibility
+  if (event.attachments) body.attachments = event.attachments
+  if (event.conference === 'google_meet') {
+    body.conferenceData = {
+      createRequest: {
+        requestId: randomUUID(),
+        conferenceSolutionKey: { type: 'hangoutsMeet' },
+      },
+    }
+  }
+  addGuestPermissions(body, event.guestPermissions)
+  addStatusProperties(body, event)
+  return body
+}
+
+function eventMutationQuery(
+  sendUpdates: CalendarSendUpdates,
+  options: { conference?: boolean; attachments?: boolean } = {},
+): string {
+  const qs = new URLSearchParams({ sendUpdates })
+  if (options.conference) qs.set('conferenceDataVersion', '1')
+  if (options.attachments) qs.set('supportsAttachments', 'true')
+  return qs.toString()
+}
+
+async function insertCalendarEventBody(
+  accessToken: string,
+  calendarId: string,
+  body: Record<string, unknown>,
+  sendUpdates: CalendarSendUpdates,
+): Promise<CalendarEvent> {
+  const query = eventMutationQuery(sendUpdates, {
+    conference: Object.hasOwn(body, 'conferenceData'),
+    attachments: Object.hasOwn(body, 'attachments'),
+  })
+  return calendarJson<CalendarEvent>(await fetch(
+    `${CALENDAR_API}/calendars/${encodeURIComponent(calendarId)}/events?${query}`,
+    {
+      method: 'POST',
+      headers: calendarHeaders(accessToken, true),
+      body: JSON.stringify(body),
+    },
+  ))
+}
 
 export async function createCalendarEvent(
   accessToken: string,
-  event: {
-    summary: string
-    start: string
-    end: string
-    description?: string
-    location?: string
-    attendees?: string[]
-  },
-  calendarId = 'primary',
+  event: CalendarEventCreateInput,
+  calendarId = event.calendarId ?? 'primary',
   sendUpdates: CalendarSendUpdates = 'all',
 ): Promise<CalendarEvent> {
-  const body: Record<string, unknown> = {
-    summary: event.summary,
-    start: { dateTime: event.start },
-    end: { dateTime: event.end },
-  }
-  if (event.description) body.description = event.description
-  if (event.location) body.location = event.location
-  if (event.attendees?.length) {
-    body.attendees = event.attendees.map((email) => ({ email }))
-  }
+  return insertCalendarEventBody(accessToken, calendarId, createEventBody({ ...event, calendarId }), sendUpdates)
+}
 
-  const res = await fetch(
-    `${CALENDAR_API}/calendars/${encodeURIComponent(calendarId)}/events?sendUpdates=${sendUpdates}`,
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
+function mergeAttendees(current: CalendarAttendee[], updates: CalendarEventUpdateInput): CalendarAttendee[] | undefined {
+  let attendees = updates.attendees ? [...updates.attendees] as CalendarAttendee[] : [...current]
+  let changed = updates.attendees !== undefined
+  if (updates.attendeeChanges) {
+    changed = true
+    const remove = new Set((updates.attendeeChanges.remove ?? []).map((email) => email.toLowerCase()))
+    attendees = attendees.filter((attendee) => !remove.has(attendee.email.toLowerCase()))
+    for (const addition of updates.attendeeChanges.add ?? []) {
+      const index = attendees.findIndex((attendee) => attendee.email.toLowerCase() === addition.email.toLowerCase())
+      if (index >= 0) attendees[index] = { ...attendees[index], ...addition }
+      else attendees.push(addition)
+    }
+  }
+  if (updates.responseStatus || updates.responseComment !== undefined) {
+    const selfIndex = attendees.findIndex((attendee) => attendee.self)
+    if (selfIndex < 0) throw new Error('The authenticated user is not an attendee on this event')
+    changed = true
+    attendees[selfIndex] = {
+      ...attendees[selfIndex],
+      ...(updates.responseStatus ? { responseStatus: updates.responseStatus } : {}),
+      ...(updates.responseComment !== undefined ? { comment: updates.responseComment } : {}),
+    }
+  }
+  return changed ? attendees : undefined
+}
+
+function mergeAttachments(current: CalendarAttachment[], changes: CalendarEventUpdateInput['attachmentChanges']): CalendarAttachment[] | undefined {
+  if (!changes) return undefined
+  const remove = new Set((changes.removeFileUrls ?? []).map((url) => url.toLowerCase()))
+  const attachments = current.filter((item) => !remove.has(item.fileUrl.toLowerCase()))
+  for (const addition of changes.add ?? []) {
+    const index = attachments.findIndex((item) => item.fileUrl.toLowerCase() === addition.fileUrl.toLowerCase())
+    if (index >= 0) attachments[index] = { ...attachments[index], ...addition }
+    else attachments.push(addition)
+  }
+  return attachments
+}
+
+function inferAllDay(event: CalendarEvent, explicit?: boolean): boolean {
+  return explicit ?? Boolean(event.start?.date)
+}
+
+function updateEventBody(updates: CalendarEventUpdateInput, current: CalendarEvent): Record<string, unknown> {
+  const body: Record<string, unknown> = {}
+  if (updates.allDay !== undefined && (updates.start === undefined || updates.end === undefined)) {
+    throw new Error('Changing allDay mode requires both start and end boundaries')
+  }
+  const allDay = inferAllDay(current, updates.allDay)
+  if (updates.summary !== undefined) body.summary = updates.summary
+  if (updates.start !== undefined) body.start = eventBoundary(updates.start, allDay, updates.timeZone)
+  if (updates.end !== undefined) body.end = eventBoundary(updates.end, allDay, updates.timeZone)
+  if (updates.description !== undefined) body.description = updates.description
+  if (updates.location !== undefined) body.location = updates.location
+  if (updates.recurrence !== undefined) body.recurrence = updates.recurrence
+  if (updates.reminders !== undefined) body.reminders = updates.reminders
+  if (updates.availability !== undefined) body.transparency = updates.availability === 'free' ? 'transparent' : 'opaque'
+  if (updates.visibility !== undefined) body.visibility = updates.visibility
+  const attendees = mergeAttendees(current.attendees ?? [], updates)
+  if (attendees) body.attendees = attendees
+  const attachments = mergeAttachments(current.attachments ?? [], updates.attachmentChanges)
+  if (attachments) body.attachments = attachments
+  if (updates.conference === 'google_meet') {
+    body.conferenceData = {
+      createRequest: {
+        requestId: randomUUID(),
+        conferenceSolutionKey: { type: 'hangoutsMeet' },
       },
+    }
+  } else if (updates.conference === 'none') {
+    body.conferenceData = null
+  }
+  addGuestPermissions(body, updates.guestPermissions)
+  if (updates.focusTimeProperties !== undefined) {
+    if (current.eventType !== 'focusTime') throw new Error('focusTimeProperties can update only a Focus Time event')
+    body.focusTimeProperties = updates.focusTimeProperties
+    body.transparency = 'opaque'
+  }
+  if (updates.outOfOfficeProperties !== undefined) {
+    if (current.eventType !== 'outOfOffice') throw new Error('outOfOfficeProperties can update only an Out of Office event')
+    body.outOfOfficeProperties = updates.outOfOfficeProperties
+    body.transparency = 'opaque'
+  }
+  if (updates.workingLocationProperties !== undefined) {
+    if (current.eventType !== 'workingLocation') throw new Error('workingLocationProperties can update only a Working Location event')
+    body.workingLocationProperties = normalizeWorkingLocation(updates.workingLocationProperties)
+    body.visibility = 'public'
+    body.transparency = 'transparent'
+  }
+  if (updates.allDay === true && (current.eventType === 'focusTime' || current.eventType === 'outOfOffice')) {
+    throw new Error(`${current.eventType} cannot be an all-day event`)
+  }
+  return body
+}
+
+async function patchCalendarEventBody(
+  accessToken: string,
+  calendarId: string,
+  eventId: string,
+  body: Record<string, unknown>,
+  sendUpdates: CalendarSendUpdates,
+): Promise<CalendarEvent> {
+  const query = eventMutationQuery(sendUpdates, {
+    conference: Object.hasOwn(body, 'conferenceData'),
+    attachments: Object.hasOwn(body, 'attachments'),
+  })
+  return calendarJson<CalendarEvent>(await fetch(
+    `${CALENDAR_API}/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}?${query}`,
+    {
+      method: 'PATCH',
+      headers: calendarHeaders(accessToken, true),
       body: JSON.stringify(body),
     },
-  )
+  ))
+}
 
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Calendar API error (${res.status}): ${err}`)
+async function listInstancesBefore(
+  accessToken: string,
+  calendarId: string,
+  recurringEventId: string,
+  target: CalendarBoundary,
+): Promise<number> {
+  const rawTimeMax = target.dateTime ?? (target.date ? `${target.date}T00:00:00Z` : undefined)
+  if (!rawTimeMax) throw new Error('Recurring instance is missing originalStartTime')
+  let pageToken: string | undefined
+  let count = 0
+  do {
+    const qs = new URLSearchParams({ timeMax: rawTimeMax, maxResults: '2500', showDeleted: 'true' })
+    if (pageToken) qs.set('pageToken', pageToken)
+    const data = await calendarJson<{ items?: CalendarEvent[]; nextPageToken?: string }>(await fetch(
+      `${CALENDAR_API}/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(recurringEventId)}/instances?${qs}`,
+      { headers: calendarHeaders(accessToken) },
+    ))
+    count += data.items?.length ?? 0
+    pageToken = data.nextPageToken
+  } while (pageToken)
+  return count
+}
+
+function untilBefore(boundary: CalendarBoundary): string {
+  if (boundary.date) {
+    const previous = new Date(`${boundary.date}T00:00:00Z`)
+    previous.setUTCDate(previous.getUTCDate() - 1)
+    return previous.toISOString().slice(0, 10).replaceAll('-', '')
   }
+  if (!boundary.dateTime) throw new Error('Recurring instance is missing originalStartTime')
+  const previous = new Date(new Date(boundary.dateTime).getTime() - 1000)
+  if (!Number.isFinite(previous.getTime())) throw new Error('Recurring instance has an invalid originalStartTime')
+  return previous.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z')
+}
 
-  return await res.json() as CalendarEvent
+function splitRule(line: string, prefix: 'RRULE' | 'EXRULE', until: string, elapsed: number): { before: string; following?: string } {
+  const parts = line.slice(`${prefix}:`.length).split(';').filter(Boolean)
+  let originalCount: number | undefined
+  const originalUntil = parts.find((part) => part.toUpperCase().startsWith('UNTIL='))
+  const base = parts.filter((part) => {
+    const upper = part.toUpperCase()
+    if (upper.startsWith('COUNT=')) {
+      originalCount = Number(part.slice('COUNT='.length))
+      return false
+    }
+    return !upper.startsWith('UNTIL=')
+  })
+  const before = `${prefix}:${[...base, `UNTIL=${until}`].join(';')}`
+  if (originalCount !== undefined) {
+    const remaining = originalCount - elapsed
+    return { before, following: remaining > 0 ? `${prefix}:${[...base, `COUNT=${remaining}`].join(';')}` : undefined }
+  }
+  return { before, following: `${prefix}:${[...base, ...(originalUntil ? [originalUntil] : [])].join(';')}` }
+}
+
+function basicDateTime(date: Date, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(date)
+  const get = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value ?? ''
+  return `${get('year')}${get('month')}${get('day')}T${get('hour')}${get('minute')}${get('second')}`
+}
+
+function recurrenceTargetKey(linePrefix: string, value: string, target: CalendarBoundary): string {
+  const dateOnly = /^\d{8}$/.test(value.split('/')[0] ?? '')
+  if (dateOnly) {
+    if (target.date) return target.date.replaceAll('-', '')
+    if (!target.dateTime) throw new Error('Recurring instance is missing originalStartTime')
+    return target.dateTime.slice(0, 10).replaceAll('-', '')
+  }
+  if (!target.dateTime) {
+    if (!target.date) throw new Error('Recurring instance is missing originalStartTime')
+    return `${target.date.replaceAll('-', '')}T000000`
+  }
+  const targetDate = new Date(target.dateTime)
+  if (value.split('/')[0]?.endsWith('Z')) return basicDateTime(targetDate, 'UTC')
+  const tzid = /(?:^|;)TZID=([^;:]+)/i.exec(linePrefix)?.[1]
+  if (tzid) return basicDateTime(targetDate, tzid)
+  return target.dateTime.slice(0, 19).replace(/[-:]/g, '')
+}
+
+function partitionDateLine(line: string, target: CalendarBoundary): { before?: string; following?: string } {
+  const colon = line.indexOf(':')
+  if (colon < 0) return { before: line, following: line }
+  const prefix = line.slice(0, colon + 1)
+  const values = line.slice(colon + 1).split(',').filter(Boolean)
+  const beforeValues: string[] = []
+  const followingValues: string[] = []
+  for (const value of values) {
+    const comparable = (value.split('/')[0] ?? '').replace(/[-:]/g, '').replace(/Z$/, '')
+    const targetKey = recurrenceTargetKey(prefix, value, target)
+    if (comparable < targetKey) beforeValues.push(value)
+    else followingValues.push(value)
+  }
+  return {
+    ...(beforeValues.length ? { before: `${prefix}${beforeValues.join(',')}` } : {}),
+    ...(followingValues.length ? { following: `${prefix}${followingValues.join(',')}` } : {}),
+  }
+}
+
+function splitRecurrence(lines: string[], target: CalendarBoundary, elapsed: number): { before: string[]; following: string[] } {
+  const until = untilBefore(target)
+  const before: string[] = []
+  const following: string[] = []
+  for (const line of lines) {
+    if (line.toUpperCase().startsWith('RRULE:')) {
+      const split = splitRule(line, 'RRULE', until, elapsed)
+      before.push(split.before)
+      if (split.following) following.push(split.following)
+    } else if (line.toUpperCase().startsWith('EXRULE:')) {
+      const split = splitRule(line, 'EXRULE', until, elapsed)
+      before.push(split.before)
+      if (split.following) following.push(split.following)
+    } else {
+      const partitioned = partitionDateLine(line, target)
+      if (partitioned.before) before.push(partitioned.before)
+      if (partitioned.following) following.push(partitioned.following)
+    }
+  }
+  return { before, following }
+}
+
+function cloneSeriesBody(
+  parent: CalendarEvent,
+  target: CalendarEvent,
+  recurrence: string[],
+  updates: CalendarEventUpdateInput,
+): Record<string, unknown> {
+  const copyFields = [
+    'summary', 'description', 'location', 'colorId', 'attendees', 'reminders',
+    'visibility', 'transparency', 'guestsCanInviteOthers', 'guestsCanModify',
+    'guestsCanSeeOtherGuests', 'attachments', 'conferenceData',
+    'extendedProperties', 'source', 'eventType', 'focusTimeProperties',
+    'outOfOfficeProperties', 'workingLocationProperties',
+  ] as const
+  const body: Record<string, unknown> = {}
+  for (const field of copyFields) {
+    if (parent[field] !== undefined) body[field] = parent[field]
+  }
+  body.start = target.start
+  body.end = target.end
+  body.recurrence = recurrence
+  Object.assign(body, updateEventBody({ ...updates, recurrence: undefined }, parent))
+  if (updates.recurrence) body.recurrence = updates.recurrence
+  return body
 }
 
 export async function updateCalendarEvent(
   accessToken: string,
   eventId: string,
-  updates: {
-    summary?: string
-    start?: string
-    end?: string
-    description?: string
-    location?: string
-    attendees?: string[]
-    responseStatus?: 'accepted' | 'declined' | 'tentative'
-  },
-  calendarId = 'primary',
+  updates: CalendarEventUpdateInput,
+  calendarId = updates.calendarId ?? 'primary',
   sendUpdates: CalendarSendUpdates = 'all',
 ): Promise<CalendarEvent> {
-  // RSVP status update — fetch the event first to find the self attendee,
-  // then PATCH with the updated responseStatus on the self entry.
-  if (updates.responseStatus) {
-    const eventRes = await fetch(
-      `${CALENDAR_API}/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`,
-      { headers: { Authorization: `Bearer ${accessToken}` } },
-    )
-    if (!eventRes.ok) {
-      const err = await eventRes.text()
-      throw new Error(`Calendar API error fetching event (${eventRes.status}): ${err}`)
-    }
-    const event = await eventRes.json() as CalendarEvent
-    const updatedAttendees = (event.attendees ?? []).map((a) => ({
-      ...a,
-      responseStatus: a.responseStatus === undefined ? undefined :
-        // Google marks the authenticated user's entry with `self: true`
-        (a as Record<string, unknown>).self ? updates.responseStatus : a.responseStatus,
-    }))
+  const scope = updates.recurringScope ?? 'instance'
+  if (updates.recurrence && scope === 'instance') {
+    throw new Error('Changing recurrence requires recurringScope="series" or "following"')
+  }
+  const target = await getCalendarEvent(accessToken, eventId, calendarId)
+  const cleanUpdates = { ...updates }
+  delete cleanUpdates.calendarId
+  delete cleanUpdates.recurringScope
 
-    const rsvpBody: Record<string, unknown> = { attendees: updatedAttendees }
-    // Include any other updates alongside the RSVP
-    if (updates.summary) rsvpBody.summary = updates.summary
-    if (updates.start) rsvpBody.start = { dateTime: updates.start }
-    if (updates.end) rsvpBody.end = { dateTime: updates.end }
-    if (updates.description !== undefined) rsvpBody.description = updates.description
-    if (updates.location !== undefined) rsvpBody.location = updates.location
-
-    const res = await fetch(
-      `${CALENDAR_API}/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}?sendUpdates=${sendUpdates}`,
-      {
-        method: 'PATCH',
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(rsvpBody),
-      },
-    )
-    if (!res.ok) {
-      const err = await res.text()
-      throw new Error(`Calendar API error (${res.status}): ${err}`)
-    }
-    return await res.json() as CalendarEvent
+  if (scope === 'instance') {
+    return patchCalendarEventBody(accessToken, calendarId, eventId, updateEventBody(cleanUpdates, target), sendUpdates)
   }
 
-  const body: Record<string, unknown> = {}
-  if (updates.summary) body.summary = updates.summary
-  if (updates.start) body.start = { dateTime: updates.start }
-  if (updates.end) body.end = { dateTime: updates.end }
-  if (updates.description !== undefined) body.description = updates.description
-  if (updates.location !== undefined) body.location = updates.location
-  if (updates.attendees) body.attendees = updates.attendees.map((email) => ({ email }))
+  const parentId = target.recurringEventId ?? (target.recurrence?.length ? target.id : undefined)
+  if (!parentId) throw new Error(`recurringScope="${scope}" requires a recurring event or instance`)
+  const parent = parentId === target.id ? target : await getCalendarEvent(accessToken, parentId, calendarId)
 
+  if (scope === 'series') {
+    return patchCalendarEventBody(accessToken, calendarId, parentId, updateEventBody(cleanUpdates, parent), sendUpdates)
+  }
+
+  if (!target.recurringEventId) {
+    throw new Error('recurringScope="following" requires a concrete recurring instance ID')
+  }
+  const originalStart = target.originalStartTime ?? target.start
+  const recurrence = parent.recurrence ?? []
+  if (!recurrence.some((line) => line.toUpperCase().startsWith('RRULE:'))) {
+    throw new Error('The recurring parent has no RRULE to split')
+  }
+  const elapsed = await listInstancesBefore(accessToken, calendarId, parentId, originalStart)
+  const split = splitRecurrence(recurrence, originalStart, elapsed)
+  await patchCalendarEventBody(accessToken, calendarId, parentId, { recurrence: split.before }, sendUpdates)
+  try {
+    const clone = cloneSeriesBody(parent, target, split.following, cleanUpdates)
+    return await insertCalendarEventBody(accessToken, calendarId, clone, sendUpdates)
+  } catch (err) {
+    try {
+      await patchCalendarEventBody(accessToken, calendarId, parentId, { recurrence }, 'none')
+    } catch (rollbackErr) {
+      throw new Error(`Calendar following-update failed and recurrence rollback also failed: ${err instanceof Error ? err.message : String(err)}; rollback: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`)
+    }
+    throw err
+  }
+}
+
+async function deleteCalendarEventById(
+  accessToken: string,
+  eventId: string,
+  calendarId: string,
+  sendUpdates: CalendarSendUpdates,
+): Promise<void> {
   const res = await fetch(
     `${CALENDAR_API}/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}?sendUpdates=${sendUpdates}`,
-    {
-      method: 'PATCH',
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    },
+    { method: 'DELETE', headers: calendarHeaders(accessToken) },
   )
-
   if (!res.ok) {
     const err = await res.text()
     throw new Error(`Calendar API error (${res.status}): ${err}`)
   }
-
-  return await res.json() as CalendarEvent
 }
 
 export async function deleteCalendarEvent(
@@ -296,19 +750,31 @@ export async function deleteCalendarEvent(
   eventId: string,
   calendarId = 'primary',
   sendUpdates: CalendarSendUpdates = 'all',
+  recurringScope: CalendarRecurrenceScope = 'instance',
 ): Promise<void> {
-  const res = await fetch(
-    `${CALENDAR_API}/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}?sendUpdates=${sendUpdates}`,
-    {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${accessToken}` },
-    },
-  )
-
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Calendar API error (${res.status}): ${err}`)
+  if (recurringScope === 'instance') {
+    await deleteCalendarEventById(accessToken, eventId, calendarId, sendUpdates)
+    return
   }
+  const target = await getCalendarEvent(accessToken, eventId, calendarId)
+  const parentId = target.recurringEventId ?? (target.recurrence?.length ? target.id : undefined)
+  if (!parentId) throw new Error(`recurringScope="${recurringScope}" requires a recurring event or instance`)
+  if (recurringScope === 'series') {
+    await deleteCalendarEventById(accessToken, parentId, calendarId, sendUpdates)
+    return
+  }
+  if (!target.recurringEventId) {
+    throw new Error('recurringScope="following" requires a concrete recurring instance ID')
+  }
+  const parent = await getCalendarEvent(accessToken, parentId, calendarId)
+  const recurrence = parent.recurrence ?? []
+  if (!recurrence.some((line) => line.toUpperCase().startsWith('RRULE:'))) {
+    throw new Error('The recurring parent has no RRULE to truncate')
+  }
+  const originalStart = target.originalStartTime ?? target.start
+  const elapsed = await listInstancesBefore(accessToken, calendarId, parentId, originalStart)
+  const split = splitRecurrence(recurrence, originalStart, elapsed)
+  await patchCalendarEventBody(accessToken, calendarId, parentId, { recurrence: split.before }, sendUpdates)
 }
 
 // ── Gmail ─────────────────────────────────────────────────────

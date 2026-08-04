@@ -3,11 +3,13 @@ import dotenv from "dotenv";
 import { realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { resolve, sep } from "node:path";
+import { resolveOssGitCommitSha } from "./build-info.config";
 
 // Load .env from monorepo root
 dotenv.config({ path: resolve(import.meta.dirname, "..", "..", ".env") });
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const OSS_GIT_COMMIT_SHA = resolveOssGitCommitSha();
 const nextPackagePath = realpathSync(
   createRequire(import.meta.url).resolve("next/package.json"),
 );
@@ -23,6 +25,9 @@ const nextConfig: NextConfig = {
     root: workspaceRoot,
   },
   env: {
+    // Public build provenance for Settings. Prefer OSS_GIT_COMMIT_SHA when a
+    // source archive omits .git; ordinary checkout builds resolve HEAD.
+    NEXT_PUBLIC_OSS_GIT_COMMIT_SHA: OSS_GIT_COMMIT_SHA,
     // Public OAuth client metadata used by the connector consent launcher.
     // Interactive account sign-in no longer lives in app-web, but Google
     // connector authorization still builds its provider URL in the browser.

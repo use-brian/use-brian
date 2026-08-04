@@ -291,8 +291,8 @@ export const scenarios: Scenario[] = [
   },
   {
     id: 'light',
-    label: 'light user (Calendar)',
-    note: '~10 memories, Google Calendar connector, custom instructions, no skills.',
+    label: 'light user (Calendar direct)',
+    note: '~10 memories and the full Google Calendar schema injected directly (workflow-style benchmark), plus custom instructions and no skills.',
     build: () => ({
       systemPrompt: buildFullSystemPrompt({
         ...minimalPromptArgs(),
@@ -313,8 +313,8 @@ export const scenarios: Scenario[] = [
   },
   {
     id: 'active',
-    label: 'active user (200 mem, 3 Google)',
-    note: '200 memories (cap kicks in: 60 shown + footer hinting at 125 more), Calendar + Gmail + Tasks, skills.',
+    label: 'active user (200 mem, 3 Google direct)',
+    note: '200 memories (cap kicks in: 60 shown + footer hinting at 125 more), Calendar + Gmail + Tasks directly injected, skills.',
     build: () => ({
       systemPrompt: buildFullSystemPrompt({
         ...minimalPromptArgs(),
@@ -386,7 +386,7 @@ export const scenarios: Scenario[] = [
   {
     id: 'power-legacy',
     label: 'power user (pre-PR#4 baseline)',
-    note: 'PRE-PR#4 baseline kept for historical A/B comparison: same memories + connectors as `power`, but every built-in tool schema inlined into the prompt. Will be retired once PR #4 ships and the savings are documented in the snapshot.',
+    note: 'Historical A/B comparison: same memories + connectors as `power`, but every built-in tool schema is inlined into the prompt. It also models the direct-schema cost paid by workflow execution.',
     build: () => ({
       systemPrompt: buildFullSystemPrompt({
         ...minimalPromptArgs(),
@@ -419,8 +419,8 @@ export const scenarios: Scenario[] = [
   },
   {
     id: 'team',
-    label: 'team user',
-    note: 'Personal + team memories + Calendar. Team identity + team index rendered below personal.',
+    label: 'team user (Calendar direct)',
+    note: 'Personal + team memories with the full Calendar schema directly injected. Team identity + team index rendered below personal.',
     build: () => ({
       systemPrompt: buildFullSystemPrompt({
         ...minimalPromptArgs(),

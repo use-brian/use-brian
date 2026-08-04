@@ -207,6 +207,13 @@ within that provider first, then apply the existing same-class fallback rule.
 This lets an OAuth user choose ChatGPT without changing hosted plan tiers or
 making OpenAI the default for existing installs.
 
+The preference is process-restart durable for every OSS boot path, not only
+the all-in-one launcher. The standalone API entry restores it from
+`~/.usebrian/config.json` before composition; an explicit
+`USEBRIAN_PREFERRED_PROVIDER` environment value wins. The Settings write path
+updates both the live routing gate and that same file, so reopening a remote
+self-host cannot reset the selector to `auto`.
+
 The pinned runtime's reviewed 2026-07-27 public catalog establishes the initial
 OSS auto-routing map: Luna → Standard, Terra → Pro, Sol → Max, and GPT-5.5 →
 Research. GPT-5.2 remains a directly selectable Research alternative. These are

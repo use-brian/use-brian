@@ -3,6 +3,7 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
+import { resolveOssGitCommitSha } from "./build-info.config";
 
 /**
  * Desktop bundle build — "Approach B" of docs/plans/doc-desktop-bundled-offline.md.
@@ -16,8 +17,12 @@ import { resolve } from "node:path";
  * shell is mounted — see the plan's Phase 2).
  */
 const here = fileURLToPath(new URL(".", import.meta.url));
+const ossGitCommitSha = resolveOssGitCommitSha();
 
 export default defineConfig({
+  define: {
+    "process.env.NEXT_PUBLIC_OSS_GIT_COMMIT_SHA": JSON.stringify(ossGitCommitSha),
+  },
   plugins: [
     react(),
     // Tailwind v4 (the Next build uses @tailwindcss/postcss; the Vite build needs

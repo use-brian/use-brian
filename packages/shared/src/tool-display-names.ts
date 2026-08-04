@@ -15,8 +15,10 @@
  */
 export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   // Google Calendar
+  googleCalendarListCalendars: 'List calendars',
   googleCalendarListEvents: 'List calendar events',
   googleCalendarGetEvent: 'View calendar event',
+  googleCalendarQueryFreeBusy: 'Check calendar availability',
   googleCalendarCreateEvent: 'Create calendar event',
   googleCalendarUpdateEvent: 'Update calendar event',
   googleCalendarDeleteEvent: 'Delete calendar event',

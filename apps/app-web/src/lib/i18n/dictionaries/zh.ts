@@ -639,6 +639,9 @@ export const zh: Dictionary = {
       ingestFailed: "失敗",
       ingestRemove: "移除",
       ingestClear: "清除",
+      linkedinArchiveAlone: "請單獨加入 LinkedIn ZIP，以便核對每一列資料。",
+      linkedinImportQueued: "無損匯入已排程",
+      linkedinRowsImported: "列已匯入",
     },
     setupChecklist: {
       ariaLabel: "設定你的工作區",
@@ -1874,6 +1877,12 @@ export const zh: Dictionary = {
         models: "模型",
         domains: "網域",
       },
+      source: {
+        version: "版本 {hash}",
+        repository: "原始碼",
+        viewVersion: "在 GitHub 查看版本 {hash}",
+        viewRepository: "在 GitHub 查看原始碼",
+      },
       models: {
         title: "模型",
         blurb: "此工作區的模型設定: 各方案級別使用的模型、按量計費模型的已儲存預算,以及自備的 Gemini API 金鑰。",
@@ -2827,6 +2836,8 @@ export const zh: Dictionary = {
       eventMatchCapReached: "已達到 {cap} 筆上限。",
       // ── 執行記錄展開 ─────────────────────────────────────────────
       runsOpenRun: "查看執行",
+      runsCopyId: "複製執行 ID",
+      runsIdCopied: "已複製執行 ID",
       // ── 即時執行動態（看板上方橫幅）───────────────────────────────
       liveRunning: "執行中",
       livePausedWait: "正在等待計時器恢復",
@@ -2858,6 +2869,8 @@ export const zh: Dictionary = {
         triggerKindLabel: "觸發：{kind}",
         statusLabel: "狀態",
         runIdLabel: "執行 ID",
+        runIdCopy: "複製執行 ID",
+        runIdCopied: "已複製執行 ID",
         stepTrailHeading: "步驟軌跡",
         stepTrailEmpty: "此執行沒有記錄到任何步驟。",
         stepDurationLabel: "{value}",
@@ -6298,6 +6311,11 @@ export const zh: Dictionary = {
       liveCount: "{count} 個執行中",
       selectTitle: "觀看即時瀏覽器",
       selectHint: "在左側選擇一個工作階段來觀看或接管，或等待助理開啟瀏覽器。",
+      connectTitle: "使用你自己的 Chrome",
+      connectHint:
+        "安裝 Use Brian 擴充功能，然後在「瀏覽器身分」中配對「我的瀏覽器」。之後助理就能在你核准的分頁中，使用現有的登入狀態操作。",
+      installAction: "安裝擴充功能",
+      connectAction: "在瀏覽器身分中配對",
       statusRunning: "執行中",
       statusPaused: "已暫停",
       unnamed: "瀏覽器工作階段",
@@ -6312,6 +6330,8 @@ export const zh: Dictionary = {
       gatedCta: "查看方案",
       statusConnected: "你的瀏覽器已連接",
       statusDisconnected: "你的瀏覽器未連接",
+      staleBuildWarning:
+        "這個瀏覽器上的擴充功能版本過舊，可能缺少已修正的問題。請重新建置擴充功能，開啟瀏覽器的擴充功能頁面並按「重新載入」。",
       connectedHint:
         "在下方將某個設定檔的瀏覽器設為「我的瀏覽器」，或在網站封鎖雲端瀏覽器時接受助理的提議，助理就會在你的Chrome中操作。",
       step1Title: "1. 安裝擴充功能",
@@ -6392,6 +6412,19 @@ export const zh: Dictionary = {
       loginOpening: "開啟中...",
       loginFailed: "無法開啟登入瀏覽器。只有身分的擁有者可以登入，且此部署必須已設定雲端瀏覽。",
       loginHint: "在一個由你操作的雲端瀏覽器開啟該網站。在裡面登入並把工作階段存進這個身分；密碼只會送到該網站，不會經過我們。",
+      captureLabel: "從我的瀏覽器儲存這個登入",
+      capturePlaceholder: "instagram.com 或完整網址",
+      captureAction: "儲存這個登入",
+      captureSaving: "儲存中...",
+      captureHint: "從你已連線的瀏覽器擷取你指定網站的 Cookie 並存到這裡，之後這個身分在雲端瀏覽時就會直接是登入狀態。",
+      captureNoSession: "請先在上方連線 My Browser，連線後再回來這裡儲存登入。",
+      captureFailed: "無法從你的瀏覽器儲存工作階段，請再試一次。",
+      captureSuccess: "已於 {date} 儲存 {site}。",
+      proxyLabel: "代理伺服器網址",
+      proxyPlaceholder: "http://user:pass@proxy.example:8080",
+      proxyHint: "讓雲端瀏覽器的流量透過你自己的代理伺服器，使其網路環境更接近登入建立時的環境。留空則使用預設出口。",
+      proxyInvalid: "請輸入有效的網址，或留空。",
+      proxySave: "儲存",
     },
   },
   deckPage: {

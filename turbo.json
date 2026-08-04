@@ -10,6 +10,7 @@
         "GOOGLE_API_KEY",
         "GOOGLE_PROJECT_NUMBER",
         "NODE_ENV",
+        "OSS_GIT_COMMIT_SHA",
         "NEXT_PUBLIC_*"
       ]
     },

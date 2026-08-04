@@ -3,7 +3,22 @@ export { buildTool } from './types.js'
 export { filterToolsByCapabilities, isAutonomousToolContext, INTERACTIVE_CHANNEL_TYPES } from './capability-gate.js'
 export { createBaseTools, urlReaderTool, webSearchTool, askQuestionTool, createTaskTool, updateTaskTool, getTimeTool, _getSessionTasksSize } from './base/index.js'
 export { createGoogleCalendarTools } from './base/google-calendar.js'
-export type { GoogleCalendarApi } from './base/google-calendar.js'
+export type {
+  GoogleCalendarApi,
+  CalendarRecurrenceScope,
+  CalendarAvailability,
+  CalendarVisibility,
+  CalendarConference,
+  CalendarAttendeeInput,
+  CalendarAttachmentInput,
+  CalendarRemindersInput,
+  CalendarGuestPermissionsInput,
+  CalendarFocusTimeProperties,
+  CalendarOutOfOfficeProperties,
+  CalendarWorkingLocationProperties,
+  CalendarEventCreateInput,
+  CalendarEventUpdateInput,
+} from './base/google-calendar.js'
 export { createGmailTools, MAX_EMAIL_ATTACHMENTS, MAX_EMAIL_ATTACHMENT_TOTAL_BYTES } from './base/google-gmail.js'
 export type { GmailApi, GmailOutgoingAttachment } from './base/google-gmail.js'
 export { createGoogleTasksTools } from './base/google-tasks.js'

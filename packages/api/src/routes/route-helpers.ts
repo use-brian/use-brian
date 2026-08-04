@@ -6,7 +6,7 @@
 
 import { findOrCreateUser, findUserById } from '../db/users.js'
 import { query } from '../db/client.js'
-import { loadBuiltinSkills, formatSkillListing, createUseSkillTool, expandSkillPointers, parseFileContent, shouldInline } from '@use-brian/core'
+import { loadBuiltinSkills, formatSkillListing, createUseSkillTool, expandSkillPointers, parseFileContent, shouldInline, isTabular, profileWorkbook, renderWorkbookProfile } from '@use-brian/core'
 import type { Tool, UsageStore, BudgetStatus, ContentBlock, FileStore, McpSettingsStore, KnowledgeStoreInterface, KnowledgeRepoWriter, GDriveFilesStore, SkillContent, EngineHooks, FilesApi } from '@use-brian/core'
 import type { ActorIdentity } from '../mcp/auth-headers.js'
 // NOTE: the real DB-backed credit gate (`checkCreditBudget`, closed billing/)
@@ -21,6 +21,7 @@ import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
 import type { ConnectorInstanceStore } from '../db/connector-instance-store.js'
 import { injectMcpTools, type ConfirmationEnricher, type McpInjectionResult } from '../mcp/inject.js'
 import { renderArtifactManifest } from '../files/artifact-manifest.js'
+import { truncateForInline } from '../files/inline-truncation.js'
 
 // ── User resolution ────────────────────────────────────────────
 
@@ -857,8 +858,13 @@ export type FileContentBlocksResult = {
  * - Text/JSON/CSV (small) → inlined as <attached_file> text
  * - Large files → durable artifact manifest when `promoteArtifact` is wired
  *   (large-content-artifacts §Phase 2.3); else cached in fileStore (if
- *   provided) with a readFileContent reference; else the 20K truncation
- *   fallback.
+ *   provided) with a readFileContent reference; else the truncation fallback.
+ *
+ * **The manifest path is web-only today.** Every messaging-channel caller
+ * passes `files` alone, so a large channel attachment always lands in the
+ * truncation branch. Wiring `promoteArtifact` into those routes is the open
+ * fix; until then `truncateForInline` at least makes the loss legible to the
+ * model. See `docs/plans/channel-attachment-truncation.md`.
  *
  * @param files - Array of file inputs to process
  * @param fileStore - Optional file store for caching large files
@@ -907,6 +913,50 @@ export async function buildFileContentBlocks(
       const { text } = await parseFileContent(file.buffer, file.mimeType, file.fileName)
       const isSmall = shouldInline(text)
 
+      // ── Tabular lane (issue #273) ──
+      // A large CSV/XLSX contributes a SCHEMA PROFILE, never rows. Any row
+      // subset (truncated or retrieved) lets the model state a total it cannot
+      // support: a 4,159-row CSV delivered at 8% produced a total understated
+      // by 88.7% and a wrong personal record, both stated as fact. The profile
+      // is ~200 tokens at any file size and carries the true row count and
+      // date range, so a wrong range is not expressible. Figures come from
+      // querying the stored file, not from the prompt.
+      if (!isSmall && isTabular(file.mimeType, file.fileName)) {
+        const sheets = profileWorkbook(text, file.mimeType)
+        // Resolve a durable handle so the model can query the rows. Promotion
+        // first (outlives the cache TTL), then the session cache, then none.
+        let handleId: string | undefined = file.id
+        if (promoteArtifact) {
+          const promoted = await promoteArtifact({
+            fileName: file.fileName,
+            mime: file.mimeType,
+            bytes: file.buffer,
+            parsedText: text,
+          }).catch(() => null)
+          if (promoted) handleId = promoted.fileId
+        }
+        if (!handleId && fileStore && sessionId) {
+          const cached = await fileStore
+            .cache({
+              sessionId,
+              fileName: file.fileName,
+              mimeType: file.mimeType,
+              content: text,
+              sizeBytes: file.buffer.length,
+            })
+            .catch(() => null)
+          if (cached) handleId = cached.id
+        }
+        textParts.push(
+          renderWorkbookProfile(sheets, {
+            ...(handleId ? { fileId: handleId } : {}),
+            fileName: file.fileName,
+            mime: file.mimeType,
+          }),
+        )
+        continue
+      }
+
       if (isSmall) {
         textParts.push(
           `<attached_file${file.id ? ` id="${file.id}"` : ''} name="${file.fileName}" type="${file.mimeType}">\n${text}\n</attached_file>`,
@@ -947,7 +997,7 @@ export async function buildFileContentBlocks(
             `<attached_file id="${cached.id}" name="${file.fileName}" type="${file.mimeType}">[Large file. Use readFileContent with fileId="${cached.id}" to retrieve full content.]</attached_file>`,
           )
         } else {
-          const truncated = text.length > 20000 ? text.slice(0, 20000) + '\n... [truncated]' : text
+          const truncated = truncateForInline(text)
           textParts.push(
             `<attached_file${file.id ? ` id="${file.id}"` : ''} name="${file.fileName}" type="${file.mimeType}">\n${truncated}\n</attached_file>`,
           )
@@ -965,8 +1015,9 @@ export async function buildFileContentBlocks(
           `<attached_file id="${cached.id}" name="${file.fileName}" type="${file.mimeType}">[Large file. Use readFileContent with fileId="${cached.id}" to retrieve full content.]</attached_file>`,
         )
       } else {
-        // No fileStore — inline a truncated version
-        const truncated = text.length > 20000 ? text.slice(0, 20000) + '\n... [truncated]' : text
+        // No fileStore — inline a truncated version. This is the branch every
+        // messaging channel takes for a large attachment.
+        const truncated = truncateForInline(text)
         textParts.push(
           `<attached_file${file.id ? ` id="${file.id}"` : ''} name="${file.fileName}" type="${file.mimeType}">\n${truncated}\n</attached_file>`,
         )

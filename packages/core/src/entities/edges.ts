@@ -73,6 +73,7 @@ export const EDGE_TYPES = [
   'target_investor',
   'outreach_strategy_for',
   'mutual_connection',
+  'connected_to',
   'discussed_with',
   'depends_on',
   'mentioned_publicly_at',
@@ -223,6 +224,13 @@ export const EDGE_SPECS: Record<EdgeType, EdgeSpec> = {
     toKinds: ['entity'],
     toEntityKinds: ['person'],
     description: 'Two people share a mutual connection',
+  },
+  connected_to: {
+    fromKinds: ['entity'],
+    fromEntityKinds: ['person'],
+    toKinds: ['entity'],
+    toEntityKinds: ['person'],
+    description: 'One person has a direct source-attested connection to another person',
   },
   discussed_with: {
     fromKinds: ['entity'],

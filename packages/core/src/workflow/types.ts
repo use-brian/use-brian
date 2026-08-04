@@ -870,6 +870,29 @@ export type WorkflowRunStore = {
   ): Promise<WorkflowRunRecord[]>
 
   /**
+   * Resolve an identifier PREFIX to candidate runs, anchored to the start
+   * of `id`, most recent first. Backs `getWorkflowRun`'s short-id lookup
+   * (use-brian#278) — the interface shows only an 8-character prefix, so
+   * the tool layer needs a way to turn that back into a run without a
+   * full UUID. RLS-gated via the workspace_member policy on
+   * `workflow_runs` — same boundary as `getRunById` / `listRunsForWorkflow`,
+   * deliberately NOT the system read path. Bounded by `opts.limit` (small;
+   * callers use the candidate set to DETECT and DESCRIBE ambiguity, never
+   * to page — `listRunsForWorkflow` is the paging path).
+   *
+   * RLS scopes to every workspace the calling user belongs to, which can be
+   * broader than one conversation's workspace — the caller MUST filter the
+   * result to its own `workspaceId` before treating the candidate count as
+   * ambiguity (filter first, then count; see tools.ts `resolveRunId`).
+   * See docs/architecture/features/workflow.md → "Run lookup by prefix".
+   */
+  resolveRunsByIdPrefix(
+    userId: string,
+    idPrefix: string,
+    opts?: { limit?: number },
+  ): Promise<WorkflowRunRecord[]>
+
+  /**
    * The `outcome` of the workflow's most recent TERMINAL run
    * (`completed` / `failed` / `timeout`), excluding `excludeRunId` (the run
    * currently executing). System read (no RLS) — the executor calls it on
