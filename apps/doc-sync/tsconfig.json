@@ -9,6 +9,7 @@
     { "path": "../../packages/shared" },
     { "path": "../../packages/core" },
     { "path": "../../packages/api" },
-    { "path": "../../packages/doc-model" }
+    { "path": "../../packages/doc-model" },
+    { "path": "../../packages/office-model" }
   ]
 }

@@ -361,6 +361,9 @@ importers:
       '@use-brian/doc-model':
         specifier: workspace:*
         version: link:../../packages/doc-model
+      '@use-brian/office-model':
+        specifier: workspace:*
+        version: link:../../packages/office-model
       dotenv:
         specifier: ^16
         version: 16.6.1
@@ -487,6 +490,9 @@ importers:
       '@use-brian/doc-model':
         specifier: workspace:*
         version: link:../doc-model
+      '@use-brian/office-model':
+        specifier: workspace:*
+        version: link:../office-model
       '@use-brian/shared':
         specifier: workspace:*
         version: link:../shared

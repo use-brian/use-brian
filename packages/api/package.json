@@ -30,6 +30,7 @@
     "@use-brian/channels": "workspace:*",
     "@use-brian/core": "workspace:*",
     "@use-brian/doc-model": "workspace:*",
+    "@use-brian/office-model": "workspace:*",
     "@use-brian/shared": "workspace:*",
     "dotenv": "^16",
     "express": "^5",

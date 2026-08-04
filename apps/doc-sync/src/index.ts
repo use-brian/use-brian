@@ -20,6 +20,7 @@ import { WebSocketServer } from 'ws'
 import { Hocuspocus } from '@hocuspocus/server'
 import * as Y from 'yjs'
 import { getPool, query, queryWithRLS } from '@use-brian/api/db/client.js'
+import { resolveOfficeAccess } from '@use-brian/api/office/access.js'
 import {
   applyOpsToYDoc,
   FRAGMENT_FIELD,
@@ -41,6 +42,8 @@ import {
 } from './persistence.js'
 import { bridgeConnection } from './ws-bridge.js'
 import { createRunRegistry, type RunRegistry } from './run-registry.js'
+import { parseSyncDocumentName } from './document-router.js'
+import { loadOfficeUpdate, storeOfficeSnapshot } from './office-collab.js'
 
 // Local dev: load the monorepo-root .env (the service runs from
 // apps/doc-sync, so the default cwd .env isn't where the shared
@@ -110,7 +113,8 @@ const hocuspocus = new Hocuspocus({
   // "working" immediately (covers a run triggered from Telegram/Slack while no
   // browser was open). Idempotent — republish on an idle page broadcasts nothing.
   async connected(data) {
-    runRegistry.republish(data.documentName)
+    const target = parseSyncDocumentName(data.documentName)
+    if (target.kind === 'page') runRegistry.republish(target.id)
   },
 
   async onAuthenticate(data) {
@@ -121,11 +125,23 @@ const hocuspocus = new Hocuspocus({
     })
     if (auth.kind === 'reject') throw new Error(`unauthorized: ${auth.reason}`)
     if (auth.kind === 'service') return { service: true as const }
+    const target = parseSyncDocumentName(data.documentName)
+    if (target.kind === 'office') {
+      const access = await resolveOfficeAccess(auth.userId, target.id)
+      if (!access) throw new Error('unauthorized: office_access_denied')
+      data.connectionConfig.readOnly = !access.canEdit
+      return {
+        userId: auth.userId,
+        workspaceId: access.workspaceId,
+        role: access.role,
+        office: true as const,
+      }
+    }
     // End-user: enforce the page clearance gate + resolve the member's role
     // before joining the doc.
     const access = await assertPageAccess({
       userId: auth.userId,
-      pageId: data.documentName,
+      pageId: target.id,
       query: rlsQuery,
     })
     // Phase 3 write-filter (§13 D2): view/comment members join the live doc
@@ -144,7 +160,13 @@ const hocuspocus = new Hocuspocus({
   },
 
   async onLoadDocument(data) {
-    const loaded = await loadPageUpdate({ pageId: data.documentName, query: sysQuery })
+    const target = parseSyncDocumentName(data.documentName)
+    if (target.kind === 'office') {
+      const update = await loadOfficeUpdate({ artifactId: target.id, query: sysQuery })
+      if (update) Y.applyUpdate(data.document as unknown as Y.Doc, update)
+      return data.document
+    }
+    const loaded = await loadPageUpdate({ pageId: target.id, query: sysQuery })
     const ydoc = data.document as unknown as Y.Doc
     if (loaded) {
       // A `legacy-seed` is a fresh encoding of `saved_views.page`, not this
@@ -164,7 +186,7 @@ const hocuspocus = new Hocuspocus({
         Y.applyUpdate(ydoc, loaded.update)
       } else {
         console.warn(
-          `[doc-sync] skipped legacy seed for ${data.documentName}: document already holds content`,
+          `[doc-sync] skipped legacy seed for ${target.id}: document already holds content`,
         )
       }
     }
@@ -178,7 +200,16 @@ const hocuspocus = new Hocuspocus({
   },
 
   async onStoreDocument(data) {
-    const pageId = data.documentName
+    const target = parseSyncDocumentName(data.documentName)
+    if (target.kind === 'office') {
+      await storeOfficeSnapshot({
+        artifactId: target.id,
+        ydoc: data.document as unknown as Y.Doc,
+        query: sysQuery,
+      })
+      return
+    }
+    const pageId = target.id
     const { page } = await storePageSnapshot({
       pageId,
       ydoc: data.document as unknown as Y.Doc,
