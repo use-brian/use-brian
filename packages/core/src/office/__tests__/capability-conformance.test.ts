@@ -15,7 +15,7 @@ import {
 import { layoutOfficeArtifact, renderOfficePreviewSvg } from '@use-brian/office-renderer'
 import { exportOfficeDocument, importOfficeDocument, reparseOfficeDocument } from '../docx/index.js'
 import { exportOfficePresentation, importOfficePresentation, reparseOfficePresentation } from '../pptx/index.js'
-import { documentSnapshot, id, presentationSnapshot, resolveFixtureResource } from './fixtures.js'
+import { completeDocumentSnapshot, completePresentationSnapshot, id, resolveFixtureResource } from './fixtures.js'
 
 const actorId = id(98)
 const editable = officeCapabilityManifest.capabilities.filter((capability) => capability.disposition === 'editable')
@@ -83,13 +83,13 @@ describe('[COMP:office/capabilities] Matrix-driven Office capability conformance
   it('maps every editable manifest row to a concrete command fixture', () => {
     expect(editable).toHaveLength(24)
     for (const [ordinal, capability] of editable.entries()) {
-      const snapshot = capability.family === 'presentation' ? presentationSnapshot() : documentSnapshot()
+      const snapshot = capability.family === 'presentation' ? completePresentationSnapshot() : completeDocumentSnapshot()
       expect(() => commandFor(capability.id, snapshot, ordinal)).not.toThrow()
     }
   })
 
   it.each(editable)('$id covers model, command, collaboration, render, accessibility, and offline replay', (capability) => {
-    const source = capability.family === 'presentation' ? presentationSnapshot() : documentSnapshot()
+    const source = capability.family === 'presentation' ? completePresentationSnapshot() : completeDocumentSnapshot()
     const snapshot = OfficeArtifactSnapshotSchema.parse(source)
     expect(preflightOfficeCandidate(snapshot).ok).toBe(true)
     if (!capability.implementation) throw new Error(`Editable capability ${capability.id} has no implementation map`)
@@ -113,13 +113,13 @@ describe('[COMP:office/capabilities] Matrix-driven Office capability conformance
   })
 
   it('round-trips the complete Document and Presentation fixtures through export, import, and reparse', async () => {
-    const document = documentSnapshot()
+    const document = completeDocumentSnapshot()
     const docx = await exportOfficeDocument(document, resolveFixtureResource)
     const importedDocument = await importOfficeDocument(docx.bytes, { artifactId: document.artifactId, workspaceId: document.workspaceId, templateVersionId: document.templateVersionId, locale: document.locale, defaultLanguage: document.defaultLanguage, title: document.title })
     expect(importedDocument.snapshot).toEqual(document)
     expect((await reparseOfficeDocument(docx.bytes)).snapshot).toEqual(document)
 
-    const presentation = presentationSnapshot()
+    const presentation = completePresentationSnapshot()
     const pptx = await exportOfficePresentation(presentation, resolveFixtureResource)
     const importedPresentation = await importOfficePresentation(pptx.bytes, { artifactId: presentation.artifactId, workspaceId: presentation.workspaceId, templateVersionId: presentation.templateVersionId, locale: presentation.locale, defaultLanguage: presentation.defaultLanguage, title: presentation.title })
     expect(importedPresentation.snapshot).toEqual(presentation)
@@ -127,9 +127,9 @@ describe('[COMP:office/capabilities] Matrix-driven Office capability conformance
   })
 
   it('lays out 100-page and 100-slide fixtures within a bounded test budget', () => {
-    const document = documentSnapshot()
+    const document = completeDocumentSnapshot()
     document.sections[0].nodes = Array.from({ length: 100 }, (_, index) => ({ id: id(400 + index), kind: 'pageBreak' as const }))
-    const presentation = presentationSnapshot()
+    const presentation = completePresentationSnapshot()
     presentation.slides = Array.from({ length: 100 }, (_, index) => ({ ...presentation.slides[1], id: id(600 + index), title: `Slide ${index + 1}` }))
     const started = performance.now()
     expect(layoutOfficeArtifact(document).pages).toHaveLength(101)
@@ -138,7 +138,7 @@ describe('[COMP:office/capabilities] Matrix-driven Office capability conformance
   })
 
   it('rejects prototype-polluting property commands before mutation', () => {
-    const snapshot = documentSnapshot()
+    const snapshot = completeDocumentSnapshot()
     const command = { ...commandBase(snapshot, 99), kind: 'setObjectProperty' as const, targetId: snapshot.rootId, path: ['constructor'], value: { polluted: true } }
     expect(() => applyOfficeCommand(snapshot, command)).toThrow('Unsafe property path')
     expect(({} as { polluted?: boolean }).polluted).toBeUndefined()

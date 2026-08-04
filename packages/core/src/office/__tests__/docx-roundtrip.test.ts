@@ -1,11 +1,11 @@
 import JSZip from 'jszip'
 import { describe, expect, it } from 'vitest'
 import { exportOfficeDocument, importOfficeDocument, reparseOfficeDocument } from '../docx/index.js'
-import { documentSnapshot, id, resolveFixtureResource } from './fixtures.js'
+import { completeDocumentSnapshot, id, resolveFixtureResource } from './fixtures.js'
 
 describe('[COMP:office/docx-engine] DOCX engine', () => {
   it('exports, safely reparses, and preserves canonical semantics plus layout', async () => {
-    const source = documentSnapshot()
+    const source = completeDocumentSnapshot()
     const exported = await exportOfficeDocument(source, resolveFixtureResource)
     const imported = await importOfficeDocument(exported.bytes, { artifactId: source.artifactId, workspaceId: source.workspaceId, templateVersionId: source.templateVersionId, locale: source.locale, defaultLanguage: source.defaultLanguage, title: source.title })
     const reopened = await reparseOfficeDocument(exported.bytes)

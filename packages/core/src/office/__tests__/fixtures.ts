@@ -18,7 +18,7 @@ const resources = [
   { id: videoId, kind: 'video' as const, hash: 'b'.repeat(64), mime: 'video/mp4', sensitivity: 'internal' as const },
 ]
 
-export function documentSnapshot(): DocumentSnapshot {
+export function completeDocumentSnapshot(): DocumentSnapshot {
   return {
     schemaVersion: 1,
     capabilityVersion: 1,
@@ -56,7 +56,19 @@ export function documentSnapshot(): DocumentSnapshot {
   }
 }
 
-export function presentationSnapshot(): PresentationSnapshot {
+export function documentSnapshot(): DocumentSnapshot {
+  const complete = completeDocumentSnapshot()
+  return {
+    ...complete,
+    resources: [],
+    sections: complete.sections.map((section) => ({
+      ...section,
+      nodes: section.nodes.filter((node) => [id(7), id(9), id(11)].includes(node.id)),
+    })),
+  }
+}
+
+export function completePresentationSnapshot(): PresentationSnapshot {
   const masterId = id(30)
   const layoutId = id(31)
   return {
@@ -91,6 +103,18 @@ export function presentationSnapshot(): PresentationSnapshot {
     }, {
       id: id(52), title: 'Closing', masterId, layoutId, notes: [], objects: [{ id: id(53), kind: 'text', geometry: { xPt: 72, yPt: 72, widthPt: 816, heightPt: 72, rotationDeg: 0 }, locked: false, alignment: 'center', verticalAlignment: 'middle', runs: [{ id: id(54), text: 'Thank you', style: style(32) }] }], readingOrder: [id(53)],
     }],
+  }
+}
+
+export function presentationSnapshot(): PresentationSnapshot {
+  const complete = completePresentationSnapshot()
+  const first = complete.slides[0]
+  const objects = first.objects.filter((object) => [id(34), id(36), id(46)].includes(object.id))
+  return {
+    ...complete,
+    resources: [],
+    layouts: complete.layouts.map((layout) => ({ ...layout, placeholderIds: [] })),
+    slides: [{ ...first, objects, readingOrder: objects.map((object) => object.id) }],
   }
 }
 
