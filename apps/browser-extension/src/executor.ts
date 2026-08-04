@@ -5,13 +5,15 @@
  * re-snapshot.
  */
 import { buildSnapshot, type BuiltSnapshot, type CdpAXNode } from './snapshot.js'
+import { RESTRICTED_TAB_MESSAGE } from './tab-eligibility.js'
 
 export class ExecutorError extends Error {
   constructor(
     message: string,
     readonly code: string,
+    options?: ErrorOptions,
   ) {
-    super(message)
+    super(message, options)
     this.name = 'ExecutorError'
   }
 }
@@ -23,6 +25,35 @@ const DETACHED_MESSAGE =
   'Chrome ended the debugging session for this tab, so the browser is no longer under control. ' +
   'This happens when the "Use Brian is debugging this browser" banner is dismissed, DevTools opens on the tab, or the page crashes. ' +
   'Retry the step: the user will be asked to allow the tab again. Do not assume the website blocked you.'
+
+/** Chrome refused the attachment for a reason we have no better name for. */
+const ATTACH_FAILED_MESSAGE =
+  'The browser refused to hand Use Brian control of this tab. Ask the user to switch to the website they want it to work on, reload it, and try again.'
+
+/**
+ * Translate a `chrome.debugger.attach` rejection into one of our codes.
+ *
+ * `attach` used to sit outside every wrapper, so Chrome's own wording became
+ * the tool result: on 2026-08-03 a user's assistant read
+ * `ERROR: Cannot access a chrome-extension:// URL` and paraphrased it to them
+ * as a system permission error, which is neither actionable nor true. Chrome
+ * attaches no code to these — the message is the only signal — so matching its
+ * phrasing is unavoidable here. What IS avoidable is letting an unmatched
+ * phrasing through: the default is our own sentence, and Chrome's text is kept
+ * only as `cause`, which never reaches the wire (`background.ts` sends
+ * `err.message`).
+ */
+function attachError(err: unknown): ExecutorError {
+  if (err instanceof ExecutorError) return err
+  if (isDetachedError(err)) return new ExecutorError(DETACHED_MESSAGE, 'detached', { cause: err })
+  const message = err instanceof Error ? err.message : String(err)
+  // "Cannot access a chrome-extension:// URL", "Cannot access a chrome:// URL",
+  // "Cannot attach to this target" — all mean the tab is off limits to CDP.
+  if (/cannot access|cannot attach/i.test(message)) {
+    return new ExecutorError(RESTRICTED_TAB_MESSAGE, 'no_eligible_tab', { cause: err })
+  }
+  return new ExecutorError(ATTACH_FAILED_MESSAGE, 'backend_error', { cause: err })
+}
 
 /**
  * True when Chrome is telling us the CDP session is gone. Chrome reports this
@@ -138,7 +169,15 @@ export class TabExecutor {
   async attach(tabId: number): Promise<void> {
     if (this.attachedTabId === tabId) return
     await this.detach()
-    await chrome.debugger.attach({ tabId }, '1.3')
+    // `chrome.debugger.attach` is the one Chrome call that can reject with
+    // provider-authored text on the happy path, and it sat outside `cdp()`'s
+    // translation for as long as the executor existed. Everything below the
+    // wrapper is safe; this line was the hole.
+    try {
+      await chrome.debugger.attach({ tabId }, '1.3')
+    } catch (err) {
+      throw attachError(err)
+    }
     this.attachedTabId = tabId
     await this.cdp(tabId, 'Accessibility.enable')
   }

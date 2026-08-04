@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { activeTabForConsent, eligibilityOf } from '../tab-eligibility.js'
+import { attachabilityOf, activeTabForConsent, eligibilityOf } from '../tab-eligibility.js'
 
 /**
  * Which tabs the extension can actually drive.
@@ -87,5 +87,47 @@ describe('[COMP:ext/agent] Controllable-tab eligibility', () => {
     expect(eligibilityOf('https://example.com/?next=chrome://extensions')).toEqual({
       eligible: true,
     })
+  })
+})
+
+/**
+ * Attachability is asked immediately before `chrome.debugger.attach`, which is
+ * NOT where eligibility is asked. `TaskGate.requireTab` returns a cached tab
+ * for up to ten minutes without re-consulting anyone, and the post-detach
+ * retry re-attaches without prompting, so both reach `attach` having skipped
+ * `promptForConsent` entirely — the only place eligibility was enforced.
+ *
+ * The two lists differ by exactly one entry, and these tests exist to keep
+ * anyone from "tidying" them into one.
+ */
+describe('[COMP:ext/agent] Attachability at attach time', () => {
+  it('permits about:blank, which consent deliberately refuses', () => {
+    // CDP attaches to about:blank happily, and a tab mid-navigation reads as
+    // about:blank — rejecting it here would break navigate in flight. Consent
+    // still declines to raise an Allow window for an empty page.
+    expect(attachabilityOf('about:blank')).toBe(true)
+    expect(eligibilityOf('about:blank')).toEqual({ eligible: false, reason: 'restricted_url' })
+  })
+
+  it('refuses the pages Chrome will not attach to', () => {
+    expect(attachabilityOf('chrome-extension://abcdefghijklmnop/grant.html')).toBe(false)
+    expect(attachabilityOf('chrome://settings')).toBe(false)
+    expect(attachabilityOf('devtools://devtools/bundled/inspector.html')).toBe(false)
+    expect(attachabilityOf('view-source:https://example.com')).toBe(false)
+    expect(attachabilityOf('moz-extension://abc/popup.html')).toBe(false)
+    expect(attachabilityOf('https://chromewebstore.google.com/search/Use%20Brian')).toBe(false)
+  })
+
+  it('permits an ordinary page, including one that mentions a blocked scheme', () => {
+    expect(attachabilityOf('https://example.com/dashboard')).toBe(true)
+    expect(attachabilityOf('https://example.com/?next=chrome://extensions')).toBe(true)
+  })
+
+  it('permits an unknown url rather than refusing on no evidence', () => {
+    // The tab already passed eligibility to be consented to, so a blank read
+    // here means "still loading" far more often than "privileged". Chrome
+    // stays the authority and `TabExecutor.attach` translates its refusal.
+    expect(attachabilityOf(undefined)).toBe(true)
+    expect(attachabilityOf('')).toBe(true)
   })
 })
