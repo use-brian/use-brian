@@ -5,7 +5,7 @@ import type { OfficeArtifact, OfficeCommentThread, OfficeLiveSnapshot } from "..
 
 export type OfficeOfflineStatus = "saved_device" | "offline" | "syncing" | "synced" | "needs_attention" | "sync_failed";
 export type EncryptedOfficePackage = { artifactId: string; version: number; manifestHash: string; iv: string; ciphertext: string; pinned: boolean; savedAt: string };
-export type OfficeOfflinePayload = {
+type OfficeOfflinePayload = {
   artifact: OfficeArtifact;
   snapshot: OfficeLiveSnapshot["snapshot"];
   seq: number;
@@ -16,7 +16,7 @@ export type OfficeOfflinePayload = {
   renderedFallback: string;
   resources: Array<{ id: string; mime: string; hash: string; bytes: string }>;
 };
-export type OfficeOfflinePackage = { manifest: Record<string, unknown>; signature: string; payload: OfficeOfflinePayload };
+type OfficeOfflinePackage = { manifest: Record<string, unknown>; signature: string; payload: OfficeOfflinePayload };
 export type LoadedOfficeOfflinePackage = OfficeOfflinePackage & { savedAt: string };
 export type OfflineJournalEntry =
   | { artifactId: string; seq: number; kind: "command"; expectedSeq: number; command: OfficeCommand; createdAt: string }
@@ -50,7 +50,7 @@ export async function officeManifestHash(manifest: unknown): Promise<string> {
 /** Rechecks every advertised completeness hash before a package is allowed to
  * become a readable local copy. The server signature authenticates the
  * manifest in transit; AES-GCM authenticates the verified package at rest. */
-export async function validateOfficeOfflinePackage(value: OfficeOfflinePackage): Promise<void> {
+async function validateOfficeOfflinePackage(value: OfficeOfflinePackage): Promise<void> {
   const manifest = value.manifest as { artifactId?: unknown; version?: unknown; snapshotHash?: unknown; updateHash?: unknown; fallbackHash?: unknown; resourceHashes?: unknown };
   if (manifest.artifactId !== value.payload.artifact.artifactId || manifest.version !== value.payload.artifact.version) throw new Error("office_offline_manifest_identity_mismatch");
   if (manifest.snapshotHash !== await sha256(canonical(value.payload.snapshot))) throw new Error("office_offline_snapshot_hash_mismatch");
@@ -66,7 +66,7 @@ export async function validateOfficeOfflinePackage(value: OfficeOfflinePackage):
   }
 }
 
-export async function deriveOfficeDeviceKey(deviceSecret: Uint8Array | CryptoKey, artifactId: string): Promise<CryptoKey> {
+async function deriveOfficeDeviceKey(deviceSecret: Uint8Array | CryptoKey, artifactId: string): Promise<CryptoKey> {
   const source = deviceSecret instanceof Uint8Array ? await crypto.subtle.importKey("raw", deviceSecret.slice().buffer as ArrayBuffer, "HKDF", false, ["deriveKey"]) : deviceSecret;
   return crypto.subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt: encoder.encode(artifactId), info: encoder.encode("use-brian-office-offline-v1") }, source, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
 }

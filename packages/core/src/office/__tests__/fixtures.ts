@@ -106,7 +106,7 @@ export function completePresentationSnapshot(): PresentationSnapshot {
   }
 }
 
-export function presentationSnapshot(): PresentationSnapshot {
+function presentationSnapshot(): PresentationSnapshot {
   const complete = completePresentationSnapshot()
   const first = complete.slides[0]
   const objects = first.objects.filter((object) => [id(34), id(36), id(46)].includes(object.id))

@@ -4505,8 +4505,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const docNotificationsStore = createDbDocNotificationsStore()
   app.use('/api', requireAuth(env.JWT_SECRET), commentRoutes({ commentThreadStore }))
   app.use('/api', requireAuth(env.JWT_SECRET), inboxRoutes({ commentThreadStore, docNotificationsStore }))
-  const officeAuth = requireAuth(env.JWT_SECRET)
-  app.use('/api/office', officeAuth, officeArtifactRoutes({
+  app.use('/api/office', requireAuth(env.JWT_SECRET), officeArtifactRoutes({
     service: officeService,
     async list(userId, workspaceId, view) {
       const artifacts = await officeArtifactStore.list(userId, workspaceId, view)
@@ -4520,7 +4519,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       return (await resolveOfficeAccess(userId, artifactId))?.canRestore ?? false
     },
   }))
-  app.use('/api/office', officeAuth, officeJobRoutes({
+  app.use('/api/office', requireAuth(env.JWT_SECRET), officeJobRoutes({
     get: officeGenerationStore.get,
     events: officeGenerationStore.listEvents,
     steer: officeGenerationStore.steer,
@@ -4563,7 +4562,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const wakeTemplateCompile = (userId: string) => {
     if (officeTemplateCompileWorker) void officeTemplateCompileWorker(userId).catch((error) => console.error('[office-template-compile-worker]', error))
   }
-  app.use('/api/office', officeAuth, officeTemplateRoutes({
+  app.use('/api/office', requireAuth(env.JWT_SECRET), officeTemplateRoutes({
     list: officeTemplateStore.list,
     createDraft: officeTemplateStore.createDraft,
     createTemplateShell: officeArtifactStore.createShell,
@@ -4571,7 +4570,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     wakeCompile: wakeTemplateCompile,
     transitionLifecycle: officeTemplateStore.transitionLifecycle,
   }))
-  app.use('/api/office', officeAuth, officeCollaborationRoutes({
+  app.use('/api/office', requireAuth(env.JWT_SECRET), officeCollaborationRoutes({
     getArtifact: officeArtifactStore.get,
     resolveAccess: resolveOfficeAccess,
     getSnapshot: officeLiveStore.get,
@@ -4584,7 +4583,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     decideSuggestion: officeCommentStore.decideSuggestion,
     service: officeService,
   }))
-  app.use('/api/office', officeAuth, officeImportRoutes({
+  app.use('/api/office', requireAuth(env.JWT_SECRET), officeImportRoutes({
     createShell: officeArtifactStore.createShell,
     createJob: officeGenerationStore.create,
     wake: wakeImport,
@@ -4639,7 +4638,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     const [claims, media] = artifact.headVersionId ? await Promise.all([officeReleaseStore.listClaims(userId, artifactId, artifact.headVersionId), officeReleaseStore.listMedia(userId, artifactId, artifact.headVersionId)]) : [[], []]
     return { artifact: { ...artifact, headVersionId: head?.snapshotHash === live.canonicalHash ? artifact.headVersionId : null }, access, snapshot: live.snapshot, claims, media }
   }
-  if (filesApi) app.use('/api/office', officeAuth, officeReleaseRoutes({
+  if (filesApi) app.use('/api/office', requireAuth(env.JWT_SECRET), officeReleaseRoutes({
     load: loadOfficeReleaseContext,
     resolveResource: (userId, workspaceId) => async (resourceId) => readOfficeResource(userId, workspaceId, resourceId),
     async saveReleasedFile({ userId, workspaceId, artifactId, version, action, extension, mime, bytes }) {
@@ -4665,8 +4664,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       return { artifactId: shell.id, version: version.version }
     },
   }))
-  app.use('/api/office', officeAuth, officeLifecycleRoutes({ resolveAccess: resolveOfficeAccess, transition: officeArtifactStore.transitionLifecycle, revokeOffline: officeReleaseStore.revokeOfflinePackages }))
-  if (filesApi) app.use('/api/office', officeAuth, officeOfflineRoutes({
+  app.use('/api/office', requireAuth(env.JWT_SECRET), officeLifecycleRoutes({ resolveAccess: resolveOfficeAccess, transition: officeArtifactStore.transitionLifecycle, revokeOffline: officeReleaseStore.revokeOfflinePackages }))
+  if (filesApi) app.use('/api/office', requireAuth(env.JWT_SECRET), officeOfflineRoutes({
     signingSecret: env.JWT_SECRET,
     async load(userId, artifactId) {
       const [artifact, access, live, comments, history] = await Promise.all([officeArtifactStore.get(userId, artifactId), resolveOfficeAccess(userId, artifactId), officeLiveStore.getOfflineSource(userId, artifactId), officeCommentStore.listThreads(userId, artifactId), officeArtifactStore.listVersions(userId, artifactId)])

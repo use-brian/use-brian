@@ -19,7 +19,3 @@ export function parseSyncDocumentName(name: string): SyncDocumentTarget {
   if (!name) throw new Error('invalid empty document id')
   return { kind: 'page', id: name, legacyBareName: true }
 }
-
-export function officeDocumentName(artifactId: string): string {
-  return `office:${artifactId}`
-}
