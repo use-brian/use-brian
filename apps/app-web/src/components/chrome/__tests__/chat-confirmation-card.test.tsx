@@ -65,6 +65,12 @@ function confirmation(
       body: "Hi Alice,\n\nThe **final** numbers are in.",
     },
     description: TOOL_DESCRIPTION,
+    displayLines: [
+      "• From: sender@company.example",
+      "• To: alice@example.com",
+      "• Subject: Q2 report",
+      "• Body: Hi Alice,\n\nThe **final** numbers are in.",
+    ],
     sessionId: "s-1",
     status: "pending",
     ...overrides,
@@ -73,7 +79,7 @@ function confirmation(
 
 function renderCard(conf: PendingConfirmation, handlers?: {
   onApprove?: (id: string) => void;
-  onDeny?: (id: string) => void;
+  onDeny?: (id: string, comment?: string) => void;
 }) {
   render(
     <ChatConfirmationCard
@@ -92,6 +98,7 @@ describe("[COMP:app-web/chat-confirmation-card] ChatConfirmationCard", () => {
     renderCard(confirmation());
     const text = host!.textContent ?? "";
     expect(text).toContain("alice@example.com");
+    expect(text).toContain("sender@company.example");
     expect(text).toContain("Q2 report");
     expect(text).toContain("The final numbers are in.");
     // Markdown is rendered, not shown as raw markers.
@@ -99,6 +106,8 @@ describe("[COMP:app-web/chat-confirmation-card] ChatConfirmationCard", () => {
     expect(text).not.toContain("**final**");
     // The model-facing tool description is suppressed by the preview.
     expect(text).not.toContain("never guess an alias");
+    expect(text).toContain("Documents attached");
+    expect(text).toContain("No documents attached");
   });
 
   it("suppresses narrating displayLines when the preview renders, but keeps resolved attachment names", () => {
@@ -111,6 +120,7 @@ describe("[COMP:app-web/chat-confirmation-card] ChatConfirmationCard", () => {
           attachments: ["file-abc-123"],
         },
         displayLines: [
+          "• From: sender@company.example",
           "• To: alice@example.com",
           "• Subject: Q2 report",
           "• Body: Attached.",
@@ -270,5 +280,64 @@ describe("[COMP:app-web/chat-confirmation-card] ChatConfirmationCard", () => {
     );
     // Blank note → plain deny with the toolCallId only.
     expect(onDeny).toHaveBeenCalledWith("call-1", undefined);
+  });
+
+  it("submits with Enter and reserves Shift+Enter for a newline", () => {
+    const onDeny = vi.fn();
+    renderCard(confirmation(), { onDeny });
+    act(() =>
+      Array.from(host!.querySelectorAll("button"))
+        .find((b) => b.textContent === "Deny with comment")!
+        .click(),
+    );
+
+    const textarea = host!.querySelector("textarea")!;
+    const setValue = Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      "value",
+    )!.set!;
+    act(() => {
+      setValue.call(textarea, "first line");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    const shiftedEnter = new KeyboardEvent("keydown", {
+      key: "Enter",
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => textarea.dispatchEvent(shiftedEnter));
+    expect(shiftedEnter.defaultPrevented).toBe(false);
+    expect(onDeny).not.toHaveBeenCalled();
+
+    const composingEnter = new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(composingEnter, "isComposing", { value: true });
+    act(() => textarea.dispatchEvent(composingEnter));
+    expect(composingEnter.defaultPrevented).toBe(false);
+    expect(onDeny).not.toHaveBeenCalled();
+
+    // jsdom does not apply textarea keyboard defaults, so mirror the newline
+    // that the unprevented Shift+Enter inserts in a browser.
+    act(() => {
+      setValue.call(textarea, "first line\nsecond line");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const enter = new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => textarea.dispatchEvent(enter));
+
+    expect(enter.defaultPrevented).toBe(true);
+    expect(onDeny).toHaveBeenCalledWith(
+      "call-1",
+      "first line\nsecond line",
+    );
   });
 });

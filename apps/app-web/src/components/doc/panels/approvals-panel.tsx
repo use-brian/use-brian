@@ -86,6 +86,7 @@ import {
 } from "@/lib/approvals-filter";
 import {
   extractAttachmentLines,
+  extractEmailSender,
   parseToolPreview,
   type ToolPreviewData,
 } from "@/lib/approval-previews";
@@ -803,6 +804,9 @@ function ApprovalCard({
                       attachmentLines={extractAttachmentLines(
                         row.approvalPayload.displayLines,
                       )}
+                      senderEmail={extractEmailSender(
+                        row.approvalPayload.displayLines,
+                      )}
                     />
                     <RawInputToggle args={row.arguments} />
                   </div>
@@ -1012,6 +1016,9 @@ function ToolCallBody({
         <ToolPreview
           preview={preview}
           attachmentLines={extractAttachmentLines(
+            row.approvalPayload.displayLines,
+          )}
+          senderEmail={extractEmailSender(
             row.approvalPayload.displayLines,
           )}
         />

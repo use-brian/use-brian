@@ -44,20 +44,24 @@ export async function assertActionAllowed(
   assistantId: string,
   connectorId: string,
   actionKind: string,
+  fallbackConnectorId?: string,
+  displayConnectorId: string = connectorId,
 ): Promise<ActionAllowedResult> {
-  const grant = await store.getForAssistantSystem(assistantId, connectorId)
+  const grant = fallbackConnectorId
+    ? await store.getForAssistantSystem(assistantId, connectorId, fallbackConnectorId)
+    : await store.getForAssistantSystem(assistantId, connectorId)
   if (!grant) {
     return {
       ok: false,
       reason: 'action_not_granted',
-      details: `This assistant has no grant for ${connectorId}. Ask the assistant's owner to enable ${actionKind} in Studio → Assistants → Tools.`,
+      details: `This assistant has no grant for ${displayConnectorId}. Ask the assistant's owner to enable ${actionKind} in Studio → Assistants → Tools.`,
     }
   }
   if (!grant.allowedActions.includes(actionKind)) {
     return {
       ok: false,
       reason: 'action_not_granted',
-      details: `This assistant cannot perform ${actionKind} on ${connectorId}. Ask the assistant's owner to enable it in Studio → Assistants → Tools.`,
+      details: `This assistant cannot perform ${actionKind} on ${displayConnectorId}. Ask the assistant's owner to enable it in Studio → Assistants → Tools.`,
     }
   }
   return { ok: true }
@@ -83,6 +87,8 @@ export function gateToolsOnActionGrants(
   connectorId: string,
   store: AssistantConnectorGrantsStore | undefined,
   assistantId: string,
+  grantConnectorId: string = connectorId,
+  fallbackGrantConnectorId?: string,
 ): Tool[] {
   if (!store) return tools
   const gated = new Set(
@@ -96,7 +102,14 @@ export function gateToolsOnActionGrants(
     return {
       ...tool,
       execute: async (input, context) => {
-        const allowed = await assertActionAllowed(store, assistantId, connectorId, tool.name)
+        const allowed = await assertActionAllowed(
+          store,
+          assistantId,
+          grantConnectorId,
+          tool.name,
+          fallbackGrantConnectorId,
+          connectorId,
+        )
         if (!allowed.ok) throw new Error(allowed.details)
         return tool.execute(input, context)
       },

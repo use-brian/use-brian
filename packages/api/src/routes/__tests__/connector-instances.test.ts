@@ -161,6 +161,36 @@ describe('[COMP:api/connector-instances-route] connector instance routes', () =>
     expect(setPolicy).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: WS, serverName: 'github', toolName: 'issues', updatedBy: 'u1' }))
   })
 
+  it('uses an instance policy key for IMAP and falls back tool-by-tool to the legacy provider row', async () => {
+    const { app, get, listForWorkspace, setPolicy } = makeApp()
+    get.mockResolvedValue(instance({ provider: 'imap' }))
+    listForWorkspace.mockResolvedValue([
+      { serverName: 'imap', toolName: 'imapSearchMessages', policy: 'allow' },
+      { serverName: 'imap', toolName: 'imapSendMessage', policy: 'ask' },
+      { serverName: `imap:${IID}`, toolName: 'imapSendMessage', policy: 'block' },
+      { serverName: 'imap:some-sibling', toolName: 'imapSearchMessages', policy: 'block' },
+    ] as never)
+
+    const listed = await request(app).get(`/api/workspaces/${WS}/connectors/${IID}/tool-policies`)
+    expect(listed.status).toBe(200)
+    expect(listed.body.policies).toEqual(expect.arrayContaining([
+      expect.objectContaining({ serverName: 'imap', toolName: 'imapSearchMessages', policy: 'allow' }),
+      expect.objectContaining({ serverName: `imap:${IID}`, toolName: 'imapSendMessage', policy: 'block' }),
+    ]))
+    expect(listed.body.policies).toHaveLength(2)
+
+    const updated = await request(app)
+      .put(`/api/workspaces/${WS}/connectors/${IID}/tools/imapSendMessage/policy`)
+      .send({ policy: 'allow', classification: 'write' })
+    expect(updated.status).toBe(200)
+    expect(setPolicy).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: WS,
+      serverName: `imap:${IID}`,
+      toolName: 'imapSendMessage',
+      updatedBy: 'u1',
+    }))
+  })
+
   it('validates grant input and requires an authenticated caller', async () => {
     const invalid = await request(makeApp().app)
       .post(`/api/connector-instances/${IID}/grants`)

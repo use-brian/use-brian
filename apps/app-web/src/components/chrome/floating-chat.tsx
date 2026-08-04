@@ -115,7 +115,6 @@ import {
   Check,
   ChevronDown,
   Copy,
-  ExternalLink,
   Eye,
   FilePlus,
   FileText,
@@ -144,6 +143,7 @@ import { ChatCodeBlock } from "@/components/chrome/chat-code-block";
 import { ChatConfirmationCard } from "@/components/chrome/chat-confirmation-card";
 import {
   ChatActivityFeed,
+  ChatCitationList,
   ChatActivitySummary,
   type ResearchPhase,
 } from "@/components/chrome/chat-activity";
@@ -168,6 +168,7 @@ import {
   type NarrationDict,
 } from "@/lib/tool-narration";
 import { requestBrainRefresh } from "@/lib/brain-events";
+import { requestApprovalsRefresh } from "@/lib/approvals-events";
 import {
   SURFACE_CHAT_SEED_EVENT,
   type SurfaceChatSeed,
@@ -2426,6 +2427,11 @@ export function FloatingChat({
             status: action === "approve" ? "approved" : "denied",
             result: data.result,
           });
+          // Same-tab repair for every approval-backed surface (queue + Home
+          // dock). The durable row update also emits the workspace event for
+          // other tabs, but the click's own tab should not wait for that SSE
+          // round trip before removing the handled item.
+          requestApprovalsRefresh(workspaceId);
         } else {
           // Reset to pending so the user can retry (e.g. 404 resolver expired).
           session.updateConfirmation(toolCallId, { status: "pending" });
@@ -2434,7 +2440,7 @@ export function FloatingChat({
         session.updateConfirmation(toolCallId, { status: "pending" });
       }
     },
-    [session],
+    [session, workspaceId],
   );
 
   // ── Doc deep-link ────────────────────────────────────────────────────
@@ -2759,7 +2765,7 @@ export function FloatingChat({
                   </div>
                 ) : null}
                 {citations.length > 0 ? (
-                  <CitationList citations={citations} label={t.citationLabel} />
+                  <ChatCitationList citations={citations} label={t.citationLabel} />
                 ) : null}
               </div>
             </div>
@@ -3525,7 +3531,7 @@ function MessageBubble({
           <ChatFileAttachments attachments={message.fileAttachments} />
         ) : null}
         {message.citations && message.citations.length > 0 ? (
-          <CitationList citations={message.citations} label={citationLabel} />
+          <ChatCitationList citations={message.citations} label={citationLabel} />
         ) : null}
         {message.text ? (
           <div className="flex items-center gap-1 -ml-1 pt-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -3625,52 +3631,6 @@ function ViewBlock({
       <span className="text-muted-foreground">{actionLabel}</span>
       <ArrowRight className="size-3 text-muted-foreground" aria-hidden />
     </button>
-  );
-}
-
-/** Source chips, dedup'd by URL upstream, capped + expandable. */
-function CitationList({
-  citations,
-  label,
-}: {
-  citations: CitationSource[];
-  label: string;
-}) {
-  const VISIBLE = 4;
-  const [expanded, setExpanded] = useState(false);
-  const visible = expanded ? citations : citations.slice(0, VISIBLE);
-  const hidden = citations.length - VISIBLE;
-
-  return (
-    <div className="space-y-1">
-      <div className="text-[10px] uppercase tracking-wide font-medium text-muted-foreground/70">
-        {label}
-      </div>
-      <div className="flex flex-wrap gap-1.5">
-        {visible.map((c) => (
-          <a
-            key={c.url}
-            href={c.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-1 rounded-md bg-muted/60 hover:bg-muted px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground transition-colors truncate max-w-[220px]"
-            title={c.url}
-          >
-            <ExternalLink className="size-2.5 shrink-0" aria-hidden />
-            <span className="truncate">{c.title}</span>
-          </a>
-        ))}
-        {!expanded && hidden > 0 ? (
-          <button
-            type="button"
-            onClick={() => setExpanded(true)}
-            className="inline-flex items-center rounded-md bg-muted/40 hover:bg-muted/70 px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
-          >
-            +{hidden}
-          </button>
-        ) : null}
-      </div>
-    </div>
   );
 }
 

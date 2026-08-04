@@ -63,6 +63,7 @@ import {
   type RecordingTranscriber,
   createIngestStoredFileTool,
   createReprocessRecordingTool,
+  createPresentDocumentTool,
   createWorkflowTools,
   createWorkflowBrainTools,
   createCorrectionTools,
@@ -214,6 +215,7 @@ import { accountRoutes, accountAvatarPublicRoutes } from './routes/account.js'
 import { memoryRoutes } from './routes/memories.js'
 import { createEntityMergeStore } from './db/entity-merge-store.js'
 import { assistantRoutes } from './routes/assistants.js'
+import { assistantConnectorGrantsRoutes } from './routes/assistant-connector-grants.js'
 import { skillRoutes } from './routes/skills.js'
 import { workspaceRoutes } from './routes/workspaces.js'
 import { invitationRoutes } from './routes/invitations.js'
@@ -2616,6 +2618,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   })
   allTools.set('renderView', renderView)
   allTools.set('saveView', saveView)
+  // The chat route removes this presentation-only tool unless the request is
+  // from the full Chat operator app. Registering it here keeps construction in
+  // the composition root while preventing docks/channels from seeing a UI
+  // affordance they cannot render.
+  allTools.set('presentDocument', createPresentDocumentTool())
 
   // ── Primitive tools (Tasks + CRM) ──
   // The admission gate runs on the `assistant` lane here: a workspace deny
@@ -3969,6 +3976,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     capabilityStore,
     assistantConnectorGrantsStore,
   }))
+  app.use(
+    '/api/assistant-connector-grants',
+    requireAuth(env.JWT_SECRET),
+    assistantConnectorGrantsRoutes({ store: assistantConnectorGrantsStore }),
+  )
 
   // Late-bound (origin-aware induction): the validated definition editor is
   // assembled with the workflows route options further down this function;

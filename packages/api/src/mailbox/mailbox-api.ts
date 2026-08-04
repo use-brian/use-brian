@@ -530,6 +530,7 @@ export function createMailboxApi(opts: CreateMailboxApiOptions): MailboxApi {
         ...(params.bcc?.length ? { bcc: params.bcc } : {}),
         subject: params.subject,
         body: params.body,
+        ...(params.attachments?.length ? { attachments: params.attachments } : {}),
         ...(inReplyToHeader ? { inReplyTo: inReplyToHeader } : {}),
         ...(references ? { references } : {}),
       })

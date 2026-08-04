@@ -16,9 +16,10 @@
  *
  * Attachment delivery (Phase 3, D15-D17): `imapGetMessage` lists parts with
  * their BODYSTRUCTURE ids, `imapSaveAttachment` lands one part's bytes in the
- * workspace file primitive, and the existing `sendFile` delivers it. The chain
- * always runs through the file layer — never a direct email-to-channel byte
- * pipe — so the sensitivity / size / quota gates stay in one place.
+ * workspace file primitive, and the existing `sendFile` delivers it. Outbound
+ * `imapSendMessage` attachments also resolve through that file primitive before
+ * crossing the seam as MIME-ready bytes, keeping access/sensitivity gates in
+ * core while the API layer owns SMTP composition.
  *
  * [COMP:tools/mailbox-imap]
  * [COMP:tools/imap-attachments]
@@ -28,7 +29,7 @@ import { z } from 'zod'
 import { buildTool, type Tool } from '../types.js'
 import type { FilesApi } from '../../workspace-files/api.js'
 import { MAX_EXTERNAL_DOCUMENT_BYTES } from '../../workspace-files/attachments.js'
-import { ctxFor, errorMessage, workspaceGate } from '../../workspace-files/tool-helpers.js'
+import { ctxFor, errorMessage, idOrPathShape, workspaceGate } from '../../workspace-files/tool-helpers.js'
 
 /** Default lookback window for searches with no explicit `since` (D12 #4). */
 export const MAILBOX_DEFAULT_WINDOW_DAYS = 90
@@ -44,6 +45,16 @@ export const MAILBOX_SNIPPET_CHARS = 200
  * strands a stored file the user asked to be sent.
  */
 export const MAILBOX_ATTACHMENT_MAX_BYTES = MAX_EXTERNAL_DOCUMENT_BYTES
+/** SMTP attachment caps mirror Gmail's reviewed raw-byte envelope. */
+export const MAX_MAILBOX_OUTGOING_ATTACHMENTS = 10
+export const MAX_MAILBOX_OUTGOING_ATTACHMENT_TOTAL_BYTES = 18 * 1024 * 1024
+
+/** Resolved outbound document crossing the core → SMTP seam. */
+export type MailboxOutgoingAttachment = {
+  filename: string
+  mime: string
+  data: Uint8Array
+}
 
 /** One search hit — already projected to documented fields by the seam impl. */
 export type MailboxSearchHit = {
@@ -154,6 +165,8 @@ export type MailboxApi = {
     subject: string
     /** Markdown source — the API layer renders it to multipart/alternative. */
     body: string
+    /** Resolved workspace files — the API layer composes real MIME parts. */
+    attachments?: MailboxOutgoingAttachment[]
     /** Provider id (`folder:uid`) of the message being replied to — sets In-Reply-To/References. */
     inReplyTo?: string
   }): Promise<{ messageId: string | null }>
@@ -250,19 +263,16 @@ function mailboxError(err: unknown): { data: string; isError: true } {
 
 /** A connected company mailbox, primary (first-connected) first. */
 export type MailboxAccountRef = {
-  /** The mailbox email address — the value the model passes as `account`. */
+  /** The mailbox email address — the router's authoritative identity key. */
   email: string
   /** True for the user's primary (first-connected) mailbox — the default sender. */
   isPrimary: boolean
 }
 
 /**
- * Multi-account router (D11 retired — the AgentMail `fromInbox` precedent):
- * the tools stay ONE set, an optional `account` picks one of the user's
- * connected mailboxes, and an omitted `account` resolves to the primary
- * (first-connected). The injector builds this over one per-instance
- * `MailboxApi` each; `list()` and `get()` are cheap (creds lazy-load on the
- * first real IMAP call).
+ * Mailbox router. It still supports the legacy multi-account `account`
+ * selector for direct factory consumers, while runtime injection now builds a
+ * one-account router per instance and hides that selector from the tool schema.
  */
 export type MailboxAccountRouter = {
   /** Every connected mailbox for this user, primary first. */
@@ -325,7 +335,7 @@ const accountField = z
  * `gmailSendMessage` attachments conditioning.
  */
 export type MailboxAttachmentDeps = {
-  /** Workspace file primitive — the only place email bytes ever land (D17). */
+  /** Workspace file primitive — the authority for inbound saves and outbound sends. */
   filesApi: FilesApi
   /**
    * Make the saved file searchable (the API layer's file-ingest queue).
@@ -342,6 +352,12 @@ export type MailboxAttachmentDeps = {
 
 export type CreateMailboxToolsOptions = {
   attachments?: MailboxAttachmentDeps
+  /**
+   * Bind every generated tool to this mailbox and omit `account` from its
+   * model-facing schema. Runtime injection sets this for every per-instance
+   * canonical/variant tool set.
+   */
+  boundAccountEmail?: string
 }
 
 /** Filesystem-safe leaf name, mirroring the channel-media persist shape. */
@@ -353,11 +369,29 @@ function formatMb(bytes: number): string {
   return `${Math.round((bytes / (1024 * 1024)) * 10) / 10} MB`
 }
 
+function formatSize(bytes: number): string {
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`
+  return formatMb(bytes)
+}
+
 export function createMailboxTools(
   router: MailboxAccountRouter,
   opts?: CreateMailboxToolsOptions,
 ): Tool[] {
   const attachmentDeps = opts?.attachments
+  const boundAccountEmail = opts?.boundAccountEmail
+  const accountInputShape: z.ZodRawShape = boundAccountEmail ? {} : { account: accountField }
+  const resolveForInput = (input: unknown) => {
+    const selected = boundAccountEmail ?? (
+      typeof (input as { account?: unknown } | null)?.account === 'string'
+        ? (input as { account: string }).account
+        : undefined
+    )
+    return resolveMailboxAccount(router, selected)
+  }
+  const accountRoutingDescription = boundAccountEmail
+    ? `This tool is bound to ${boundAccountEmail}; use the separately named tool set for another mailbox.`
+    : 'If more than one company mailbox is connected, pass `account` (the mailbox email) to choose which; omit it for the primary.'
   const searchMessages = buildTool({
     name: 'imapSearchMessages',
     description:
@@ -366,7 +400,7 @@ export function createMailboxTools(
       'Server-side search is substring matching with no ranking — iterate like grep: start with 2-4 `keywords` (they are OR\'d in one round trip, so include synonyms), ' +
       'then refine by sender, subject, or date. Results come back grouped into conversation threads with snippets. ' +
       `Defaults to the last ${MAILBOX_DEFAULT_WINDOW_DAYS} days — pass \`since\` to search older mail. ` +
-      'If more than one company mailbox is connected, pass `account` (the mailbox email) to choose which; omit it for the primary.',
+      accountRoutingDescription,
     inputSchema: z.object({
       keywords: z
         .array(z.string())
@@ -392,14 +426,14 @@ export function createMailboxTools(
         .max(MAILBOX_MAX_LIMIT)
         .optional()
         .describe(`Max messages to return (default ${MAILBOX_DEFAULT_LIMIT}, max ${MAILBOX_MAX_LIMIT}).`),
-      account: accountField,
+      ...accountInputShape,
     }),
     isConcurrencySafe: true,
     isReadOnly: true,
     timeoutMs: 30_000,
 
     async execute(input) {
-      const resolved = resolveMailboxAccount(router, input.account)
+      const resolved = resolveForInput(input)
       if (!resolved.ok) return { data: resolved.error, isError: true }
       const api = resolved.api
       try {
@@ -435,17 +469,18 @@ export function createMailboxTools(
       // tool-awareness rule applied at the description level.
       (attachmentDeps
         ? 'To hand an attachment to the user, save it with imapSaveAttachment using its `partId`, then deliver it with sendFile.'
-        : 'Attachment contents cannot be fetched here.'),
+        : 'Attachment contents cannot be fetched here.') +
+      ` ${accountRoutingDescription}`,
     inputSchema: z.object({
       messageId: z.string().describe('The message id from imapSearchMessages results (`folder:uid`).'),
-      account: accountField,
+      ...accountInputShape,
     }),
     isConcurrencySafe: true,
     isReadOnly: true,
     timeoutMs: 20_000,
 
     async execute(input) {
-      const resolved = resolveMailboxAccount(router, input.account)
+      const resolved = resolveForInput(input)
       if (!resolved.ok) return { data: resolved.error, isError: true }
       try {
         const data = await resolved.api.getMessage(input.messageId)
@@ -464,7 +499,10 @@ export function createMailboxTools(
       'Call this tool directly — the user will see an Approve/Deny prompt. ' +
       'To reply on an existing thread, pass the original message\'s id as `inReplyTo` so the reply threads correctly. ' +
       'Copy additional people with `cc` (visible to every recipient) or `bcc` (hidden from the others); put an internal colleague you are looping in on `cc` unless the user asks to keep them hidden. ' +
-      'If more than one company mailbox is connected, pass `account` (the mailbox email) to choose which address to send AS; omit it for the primary.',
+      'Workspace files can be attached as real email attachments: pass their ids or absolute paths in `attachments`. ' +
+      'Only brain-saved files can be attached; confidential files are refused. Limits: 10 attachments, 18 MB total. ' +
+      'If attachment resolution fails, relay the reason honestly and never claim the document was attached. ' +
+      accountRoutingDescription,
     inputSchema: z.object({
       to: z.array(z.string()).min(1).max(20).describe('Recipient email addresses.'),
       cc: z.array(z.string()).max(20).optional().describe('CC addresses: copied recipients, visible to everyone on the email.'),
@@ -477,19 +515,81 @@ export function createMailboxTools(
           '(headings, bold, lists, links, and tables become proper HTML, with a plain-text version ' +
           'generated automatically). Write it the way an email reads: greeting, short paragraphs, sign-off.',
         ),
+      attachments: z
+        .array(idOrPathShape)
+        .max(MAX_MAILBOX_OUTGOING_ATTACHMENTS)
+        .optional()
+        .describe(
+          'Workspace files to attach — each entry a file id or absolute workspace path. ' +
+          'The recipient receives real MIME parts, not storage links.',
+        ),
       inReplyTo: z
         .string()
         .optional()
         .describe('Message id (`folder:uid`) of the message being replied to — threads the reply via In-Reply-To/References.'),
-      account: accountField,
+      ...accountInputShape,
     }),
     isConcurrencySafe: false,
     isReadOnly: false,
     requiresConfirmation: true,
     timeoutMs: 30_000,
 
+    async describeConfirmation(input, context) {
+      const draft = (input ?? {}) as {
+        account?: unknown
+        to?: unknown
+        cc?: unknown
+        bcc?: unknown
+        subject?: unknown
+        body?: unknown
+        attachments?: unknown
+      }
+      const resolved = resolveForInput(draft)
+      if (!resolved.ok) return null
+      const recipients = (value: unknown): string[] =>
+        Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : []
+      const to = recipients(draft.to)
+      const cc = recipients(draft.cc)
+      const bcc = recipients(draft.bcc)
+      const lines = [
+        `• From: ${resolved.email}`,
+        ...(to.length > 0 ? [`• To: ${to.join(', ')}`] : []),
+      ]
+      if (cc.length > 0) lines.push(`• Cc: ${cc.join(', ')}`)
+      if (bcc.length > 0) lines.push(`• Bcc: ${bcc.join(', ')}`)
+      if (typeof draft.subject === 'string') lines.push(`• Subject: ${draft.subject}`)
+      if (typeof draft.body === 'string') lines.push(`• Body: ${draft.body}`)
+      const refs = Array.isArray(draft.attachments)
+        ? draft.attachments.filter((v): v is string => typeof v === 'string')
+        : []
+      if (refs.length > 0) {
+        if (!attachmentDeps || !context.workspaceId) {
+          for (const ref of refs) lines.push(`• Attachment: ${ref}`)
+          return lines
+        }
+        const seen = new Set<string>()
+        const ctx = ctxFor(context)
+        for (const ref of refs) {
+          const stat = await attachmentDeps.filesApi.stat(ctx, ref)
+          if (!stat.ok) {
+            lines.push(`• Attachment: ${ref} (not found)`)
+            continue
+          }
+          const file = stat.value
+          if (seen.has(file.id)) continue
+          seen.add(file.id)
+          lines.push(
+            file.sensitivity === 'confidential'
+              ? `• Attachment: ${file.name} (confidential: send will be refused)`
+              : `• Attachment: ${file.name} (${formatSize(file.sizeBytes)})`,
+          )
+        }
+      }
+      return lines
+    },
+
     async execute(input, context) {
-      const resolved = resolveMailboxAccount(router, input.account)
+      const resolved = resolveForInput(input)
       if (!resolved.ok) return { data: resolved.error, isError: true }
       try {
         // Egress-safety gate (the gmailSendMessage / agentmail precedent):
@@ -505,15 +605,80 @@ export function createMailboxTools(
             isError: true,
           }
         }
+        let attachments: MailboxOutgoingAttachment[] | undefined
+        if (input.attachments && input.attachments.length > 0) {
+          if (!attachmentDeps) {
+            return {
+              data:
+                'File attachments are not available in this context — workspace file storage is not wired here. ' +
+                'Send the email without attachments, or tell the user to share the file another way.',
+              isError: true,
+            }
+          }
+          const gate = workspaceGate(context.workspaceId)
+          if (gate) return gate
+          const ctx = ctxFor(context)
+
+          // Resolve every metadata row and run all gates before reading bytes.
+          const seen = new Set<string>()
+          const files: Array<{ id: string; path: string; name: string; mime: string; sizeBytes: number }> = []
+          for (const ref of input.attachments) {
+            const stat = await attachmentDeps.filesApi.stat(ctx, ref)
+            if (!stat.ok) return { data: errorMessage(stat.error), isError: true }
+            const file = stat.value
+            if (seen.has(file.id)) continue
+            seen.add(file.id)
+            if (file.sensitivity === 'confidential') {
+              return {
+                data:
+                  `${file.path} is confidential and cannot be emailed — email recipients are outside the workspace. ` +
+                  'Tell the user to share it from the web app instead.',
+                isError: true,
+              }
+            }
+            files.push({
+              id: file.id,
+              path: file.path,
+              name: file.name,
+              mime: file.mime,
+              sizeBytes: file.sizeBytes,
+            })
+          }
+
+          const totalBytes = files.reduce((sum, file) => sum + file.sizeBytes, 0)
+          if (totalBytes > MAX_MAILBOX_OUTGOING_ATTACHMENT_TOTAL_BYTES) {
+            return {
+              data:
+                `Attachments total ${formatMb(totalBytes)} — over the ${formatMb(MAX_MAILBOX_OUTGOING_ATTACHMENT_TOTAL_BYTES)} email limit. ` +
+                'Send fewer or smaller files, or tell the user to share the large ones from the web app.',
+              isError: true,
+            }
+          }
+
+          attachments = []
+          for (const file of files) {
+            const read = await attachmentDeps.filesApi.readBytes(ctx, file.id)
+            if (!read.ok) return { data: errorMessage(read.error), isError: true }
+            attachments.push({ filename: file.name, mime: file.mime, data: read.value.bytes })
+          }
+        }
+
         const data = await resolved.api.sendMessage({
           to: input.to,
           ...(input.cc?.length ? { cc: input.cc } : {}),
           ...(input.bcc?.length ? { bcc: input.bcc } : {}),
           subject: input.subject,
           body: input.body,
+          ...(attachments?.length ? { attachments } : {}),
           ...(input.inReplyTo ? { inReplyTo: input.inReplyTo } : {}),
         })
-        return { data: { messageId: data.messageId, from: resolved.email } }
+        return {
+          data: {
+            messageId: data.messageId,
+            from: resolved.email,
+            ...(attachments?.length ? { attached: attachments.map((file) => file.filename) } : {}),
+          },
+        }
       } catch (err) {
         return mailboxError(err)
       }
@@ -538,7 +703,7 @@ export function createMailboxTools(
           "Save one attachment from an email in the user's company mailbox into the workspace as a real file, then attach it to your reply with sendFile. " +
           'Use this when the user asks for a document that arrived by email (a boarding pass, invoice, statement, contract) — read the message with imapGetMessage first, take the `partId` of the attachment you want from its attachment list, save it here, then pass the returned `fileId` to sendFile. ' +
           `One attachment per call, up to ${formatMb(MAILBOX_ATTACHMENT_MAX_BYTES)}. ` +
-          'If more than one company mailbox is connected, pass `account` (the mailbox email) to choose which; omit it for the primary.',
+          accountRoutingDescription,
         inputSchema: z.object({
           messageId: z.string().describe('The message id from imapSearchMessages or imapGetMessage (`folder:uid`).'),
           partId: z
@@ -550,7 +715,7 @@ export function createMailboxTools(
             .max(256)
             .optional()
             .describe('Display label for the saved file. Defaults to the attachment filename.'),
-          account: accountField,
+          ...accountInputShape,
         }),
         isConcurrencySafe: false,
         isReadOnly: false,
@@ -561,7 +726,7 @@ export function createMailboxTools(
         async execute(input, context) {
           const gate = workspaceGate(context.workspaceId)
           if (gate) return gate
-          const resolved = resolveMailboxAccount(router, input.account)
+          const resolved = resolveForInput(input)
           if (!resolved.ok) return { data: resolved.error, isError: true }
           try {
             // Both size gates (BODYSTRUCTURE pre-check + streamed byte count)

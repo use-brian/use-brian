@@ -9,7 +9,7 @@
  * view-toggle's alternate behind the topbar's List tab.
  *
  * Renders one bounded server projection at a time: overview groups unfold
- * into child groups or real entries through click/semantic zoom, while the
+ * into child groups or real entries through explicit group clicks, while the
  * force simulation never receives the workspace-wide source graph. Real-entry
  * clicks open the shared `BrainDetailDrawer`.
  *
@@ -20,7 +20,7 @@
  *
  * - The module is imported in an effect (NOT `next/dynamic` — dynamic()
  *   drops refs, and this canvas needs the instance for force tuning +
- *   `zoomToFit`; same pattern as `connections-graph.tsx`). The import
+ *   bounded camera framing; same pattern as `connections-graph.tsx`). The import
  *   only runs client-side, so SSR stays safe.
  * - Node sizing: flat log curve clamped to [2.5, 7] graph units
  *   (`nodeRadius`). The old `sqrt(1+min(d,12))*4` curve drew hubs as
@@ -28,8 +28,8 @@
  * - A custom collision force (`makeCollideForce`) keeps discs from ever
  *   overlapping; charge/link-distance are tuned so clusters separate at
  *   80+ nodes instead of hairballing.
- * - `zoomToFit` on the first engine settle frames the whole layout —
- *   the old canvas opened wherever d3's initial transform landed.
+ * - A bounded one-time fit after the hidden warmup frames the layout without
+ *   making sparse brains enormous. Scope changes never re-fit the camera.
  * - Warm start: node positions carry across scope and snapshot refreshes
  *   (`mergePositions`), so a brain-write → refresh nudges the layout
  *   instead of re-scrambling the user's mental map. (This replaced the
@@ -72,7 +72,14 @@
  *   the hovered node runs a `pulsePhase` expanding ring.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { ComponentType } from "react";
 import {
   getBrainGraph,
@@ -91,6 +98,7 @@ import {
   CLUSTER_MIN_SIZE,
   LABEL_FONT_PX,
   LABEL_FONT_PX_EMPHASIZED,
+  boundedViewportFit,
   clusterLabelAlpha,
   communityHalos,
   communityLabels,
@@ -105,6 +113,7 @@ import {
   nodePhase,
   nodeRadius,
   pulsePhase,
+  radialSeedPositions,
   shadeHex,
   stepToward,
   truncateLabel,
@@ -115,11 +124,11 @@ import {
 import { detectCommunities } from "@use-brian/shared";
 import {
   graphScopeCacheKey,
-  semanticZoomDecision,
+  shouldShowGraphLoader,
 } from "@/lib/graph-semantic-zoom";
 import { format, useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
-import { GraphLoadingConstellation } from "@/components/brain/graph-loading";
+import { BrainGraphLoadingSkeleton } from "@/components/brain/graph-loading";
 
 type Props = {
   graph: BrainGraph;
@@ -200,10 +209,29 @@ type ForceGraphInstance = {
       }
     | undefined;
   d3Force(name: string, force: ((alpha: number) => void) | null): unknown;
-  zoomToFit(durationMs?: number, paddingPx?: number): void;
   zoom(): number;
-  graph2ScreenCoords(x: number, y: number): { x: number; y: number };
+  zoom(scale: number, durationMs?: number): void;
+  centerAt(x: number, y: number, durationMs?: number): void;
+  getGraphBbox(): { x: [number, number]; y: [number, number] } | null;
 };
+
+type ForceGraphComponent = ComponentType<Record<string, unknown>>;
+
+// The effect import is browser-safe, but a route revisit should not briefly
+// resurrect the skeleton while the already-loaded module resolves again.
+let forceGraphComponentCache: ForceGraphComponent | null = null;
+let forceGraphComponentPromise: Promise<ForceGraphComponent> | null = null;
+
+function loadForceGraphComponent(): Promise<ForceGraphComponent> {
+  if (forceGraphComponentCache) return Promise.resolve(forceGraphComponentCache);
+  if (!forceGraphComponentPromise) {
+    forceGraphComponentPromise = import("react-force-graph-2d").then((mod) => {
+      forceGraphComponentCache = mod.default as ForceGraphComponent;
+      return forceGraphComponentCache;
+    });
+  }
+  return forceGraphComponentPromise;
+}
 
 /** Node color source — detected community (default, the Obsidian
  *  path-groups look) or kind (entity-type hues + legend). */
@@ -364,23 +392,17 @@ export function BrainGraphView({
   const requestRef = useRef<AbortController | null>(null);
   const requestSequenceRef = useRef(0);
   const transitionOriginRef = useRef<string | null>(null);
-  const pointerScreenRef = useRef<{ x: number; y: number } | null>(null);
-  const semanticZoomSuppressedUntilRef = useRef(0);
   // Imported in an effect instead of `next/dynamic` — dynamic() does not
-  // forward refs, and this canvas needs the instance for zoomToFit + force
-  // tuning. The import only runs client-side, so SSR stays safe.
-  const [ForceGraph2D, setForceGraph2D] = useState<ComponentType<
-    Record<string, unknown>
-  > | null>(null);
+  // forward refs, and this canvas needs the instance for force + camera tuning.
+  // The import only runs client-side, so SSR stays safe.
+  const [ForceGraph2D, setForceGraph2D] = useState<ForceGraphComponent | null>(
+    () => forceGraphComponentCache,
+  );
 
   useEffect(() => {
     let cancelled = false;
-    import("react-force-graph-2d").then((mod) => {
-      if (!cancelled) {
-        setForceGraph2D(
-          () => mod.default as ComponentType<Record<string, unknown>>,
-        );
-      }
+    void loadForceGraphComponent().then((component) => {
+      if (!cancelled) setForceGraph2D(() => component);
     });
     return () => {
       cancelled = true;
@@ -429,13 +451,21 @@ export function BrainGraphView({
   // Observe container size — ForceGraph2D wants explicit width/height
   // numbers. ResizeObserver matches the parent flex layout without
   // needing the parent to plumb dimensions through.
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = containerRef.current;
     if (!el) return;
+    const commitSize = (width: number, height: number) => {
+      const next = { w: Math.max(200, width), h: Math.max(200, height) };
+      setDims((current) =>
+        current?.w === next.w && current.h === next.h ? current : next,
+      );
+    };
+    const initial = el.getBoundingClientRect();
+    commitSize(initial.width, initial.height);
     const ro = new ResizeObserver((entries) => {
       const r = entries[0]?.contentRect;
       if (!r) return;
-      setDims({ w: Math.max(200, r.width), h: Math.max(200, r.height) });
+      commitSize(r.width, r.height);
     });
     ro.observe(el);
     return () => ro.disconnect();
@@ -475,7 +505,7 @@ export function BrainGraphView({
         return next;
       } catch (error) {
         if (controller.signal.aborted) return null;
-        console.error("[brain-graph] semantic zoom fetch failed", error);
+        console.error("[brain-graph] scope projection fetch failed", error);
         return null;
       } finally {
         if (sequence === requestSequenceRef.current) setScopeLoading(false);
@@ -514,10 +544,12 @@ export function BrainGraphView({
       if (!group || scopeLoading) return;
       transitionOriginRef.current = group.id;
       const next = await loadProjection({ scopeId: group.groupId });
-      if (!next) return;
+      if (!next) {
+        transitionOriginRef.current = null;
+        return;
+      }
       setScopeHistory((current) => [...current, activeProjection]);
       setScopedGraph(next);
-      semanticZoomSuppressedUntilRef.current = performance.now() + 900;
     },
     [graph.nodes, scopeLoading, loadProjection, activeProjection],
   );
@@ -529,7 +561,6 @@ export function BrainGraphView({
     transitionOriginRef.current = null;
     setScopedGraph(previous.scopeId ? previous : null);
     setScopeHistory((current) => current.slice(0, -1));
-    semanticZoomSuppressedUntilRef.current = performance.now() + 700;
   }, [scopeHistory]);
 
   // Search reveal is server-side and debounced. Clearing it restores the
@@ -548,7 +579,6 @@ export function BrainGraphView({
         transitionOriginRef.current = next.scopeId ?? null;
         setScopeHistory([sourceGraph]);
         setScopedGraph(next);
-        semanticZoomSuppressedUntilRef.current = performance.now() + 700;
       });
     }, 280);
     return () => window.clearTimeout(timer);
@@ -794,6 +824,20 @@ export function BrainGraphView({
   // start: a refresh keeps every surviving node where the user left it.
   const lastNodesRef = useRef<Map<string, GraphNodeWithPos>>(new Map());
 
+  // Per-node/edge current paint values. Declared before graphData so a scoped
+  // projection can seed newly revealed objects at alpha 0 and let the
+  // continuous canvas ease them in from their former parent's position.
+  const nodeAlphaRef = useRef<Map<string, number>>(new Map());
+  const edgeAlphaRef = useRef<Map<string, number>>(new Map());
+  const edgeWidthRef = useRef<Map<string, number>>(new Map());
+
+  useEffect(() => {
+    lastNodesRef.current.clear();
+    nodeAlphaRef.current.clear();
+    edgeAlphaRef.current.clear();
+    edgeWidthRef.current.clear();
+  }, [workspaceId, viewpointAssistantId, showMemory]);
+
   // Live community halos from the most recent frame's `paintHalos` pass
   // (centroid + bounding radius over the sim-mutated positions). Stashed
   // so the cluster-heading pass in `onRenderFramePost` reuses them instead
@@ -821,9 +865,19 @@ export function BrainGraphView({
     const originId = transitionOriginRef.current;
     const origin = originId ? lastNodesRef.current.get(originId) : null;
     if (origin?.x != null && origin.y != null) {
-      for (const node of nodes) {
-        if (prev.has(node.id)) continue;
-        prev.set(node.id, { x: origin.x, y: origin.y, vx: 0, vy: 0 });
+      const revealed = nodes.filter((node) => !prev.has(node.id));
+      const seeded = radialSeedPositions(revealed, {
+        x: origin.x,
+        y: origin.y,
+      });
+      for (const [id, position] of seeded) {
+        prev.set(id, position);
+        nodeAlphaRef.current.set(id, 0);
+      }
+      for (const edge of graph.edges) {
+        if (edgeAlphaRef.current.has(edge.id)) continue;
+        edgeAlphaRef.current.set(edge.id, 0);
+        edgeWidthRef.current.set(edge.id, 0);
       }
     }
     mergePositions(nodes, graph.edges, prev);
@@ -857,10 +911,6 @@ export function BrainGraphView({
   // frame. (A React-state "repaint pump" was tried first and does NOT
   // work: prop updates don't mark the lib's halted canvas dirty, so the
   // stale frame stays frozen on screen.)
-  const nodeAlphaRef = useRef<Map<string, number>>(new Map());
-  const edgeAlphaRef = useRef<Map<string, number>>(new Map());
-  const edgeWidthRef = useRef<Map<string, number>>(new Map());
-
   // ── Visual-treatment caches ──────────────────────────────────────────
   // Orb gradients per (fill, radius-bucket) and the backdrop dot tile.
   // Both are theme-derived, so a palette change invalidates them below.
@@ -1109,67 +1159,50 @@ export function BrainGraphView({
     ctx.restore();
   };
 
-  // Frame the whole layout once the first simulation settles. Subsequent
-  // settles (snapshot refreshes reheat the sim) deliberately do NOT re-fit:
-  // the warm start means the layout barely moved, and yanking the camera
-  // away from where the user zoomed would destroy the mental map the warm
-  // start just preserved.
+  // Frame the first non-empty projection once, immediately after the hidden
+  // warmup. Scope changes and refreshes preserve the camera: wheel/pinch is a
+  // continuous camera gesture, never an implicit request to replace a layer.
   const didFitRef = useRef(false);
-  // The scale zoomToFit chose — the label tiers are FIT-RELATIVE (see
-  // graph-canvas.ts ramps), so the renderer divides the live globalScale
-  // by this. 1 until the first fit completes (hub labels still render
-  // during the settle because the hub ramp passes at zoomRel ≥ ~1).
+  const hasUserCameraIntentRef = useRef(false);
+  // The bounded initial fit scale anchors the fit-relative label tiers.
   const fitScaleRef = useRef(1);
 
   useEffect(() => {
     didFitRef.current = false;
+    hasUserCameraIntentRef.current = false;
     fitScaleRef.current = 1;
-    semanticZoomSuppressedUntilRef.current = performance.now() + 700;
-  }, [activeProjection.scopeId, activeProjection.scopeLabel]);
+  }, [workspaceId, viewpointAssistantId, showMemory]);
 
-  const handleSemanticZoomEnd = useCallback(
-    (transform: { k: number }) => {
-      if (
-        scopeLoading ||
-        performance.now() < semanticZoomSuppressedUntilRef.current
-      ) {
-        return;
-      }
-      const instance = fgRef.current;
-      if (!instance || !dims) return;
-      const groups = graphData.nodes
-        .filter(
-          (node): node is GraphNodeWithPos & BrainGraphGroupNode =>
-            isBrainGraphGroupNode(node) && node.x != null && node.y != null,
-        )
-        .map((node) => {
-          const point = instance.graph2ScreenCoords(node.x!, node.y!);
-          return { id: node.groupId, x: point.x, y: point.y };
-        });
-      const decision = semanticZoomDecision({
-        relativeZoom: transform.k / (fitScaleRef.current || 1),
-        hasParentScope: scopeHistory.length > 0,
-        targetPoint: pointerScreenRef.current ?? {
-          x: dims.w / 2,
-          y: dims.h / 2,
-        },
-        groups,
-      });
-      if (decision.type === "expand") {
-        void openGroup(decision.groupId);
-      } else if (decision.type === "collapse") {
-        returnToPreviousScope();
-      }
-    },
-    [
-      scopeLoading,
-      dims,
-      graphData.nodes,
-      scopeHistory.length,
-      openGroup,
-      returnToPreviousScope,
-    ],
-  );
+  const fitInitialCamera = useCallback(() => {
+    const instance = fgRef.current;
+    if (didFitRef.current || !instance || !dims || graphData.nodes.length === 0) {
+      return;
+    }
+    // A person who already started panning/zooming owns the camera. Never let
+    // a late engine callback yank it back to an automated frame.
+    if (hasUserCameraIntentRef.current) {
+      didFitRef.current = true;
+      const currentScale = instance.zoom();
+      if (currentScale > 0) fitScaleRef.current = currentScale;
+      return;
+    }
+
+    const bounds = instance.getGraphBbox();
+    if (!bounds) return;
+    didFitRef.current = true;
+    const fit = boundedViewportFit({
+      width: dims.w,
+      height: dims.h,
+      bounds,
+      maxNodeRadius: graphData.nodes.reduce(
+        (max, node) => Math.max(max, displayRadius(node)),
+        0,
+      ),
+    });
+    fitScaleRef.current = fit.scale;
+    instance.centerAt(fit.center.x, fit.center.y, 360);
+    instance.zoom(fit.scale, 360);
+  }, [dims, graphData.nodes]);
 
   /** Ref callback — fires when the instance exists, i.e. when the d3
    *  forces are live. Tunes charge/link and installs the collision
@@ -1199,7 +1232,7 @@ export function BrainGraphView({
       makeCollideForce((n) => displayRadius(n as GraphNodeWithPos)),
     );
     // Weak pull-to-origin so isolated nodes / disconnected fragments stop
-    // drifting off and ballooning the zoomToFit bounding box.
+    // drifting off and ballooning the initial-fit bounding box.
     instance.d3Force("anchor", makeAnchorForce());
     // Community gravity — members pull toward their cluster's centroid.
     instance.d3Force(
@@ -1221,7 +1254,12 @@ export function BrainGraphView({
     );
   }
 
-  const showGraphLoader = loading || scopeLoading || !dims || !ForceGraph2D;
+  const showGraphLoader = shouldShowGraphLoader({
+    initialLoading: Boolean(loading),
+    scopeLoading,
+    hasDimensions: dims !== null,
+    hasRenderer: ForceGraph2D !== null,
+  });
   const visibleGroupCount = graph.nodes.filter(isBrainGraphGroupNode).length;
   const totalNodeCount = activeProjection.totalNodes ?? graph.nodes.length;
 
@@ -1229,20 +1267,17 @@ export function BrainGraphView({
     <div
       ref={containerRef}
       className="relative flex-1 min-h-0 overflow-hidden bg-[var(--graph-bg)]"
-      onPointerMove={(event) => {
-        const rect = event.currentTarget.getBoundingClientRect();
-        pointerScreenRef.current = {
-          x: event.clientX - rect.left,
-          y: event.clientY - rect.top,
-        };
+      aria-busy={Boolean(loading) || scopeLoading}
+      onPointerDownCapture={() => {
+        hasUserCameraIntentRef.current = true;
       }}
-      onPointerLeave={() => {
-        pointerScreenRef.current = null;
+      onWheelCapture={() => {
+        hasUserCameraIntentRef.current = true;
       }}
     >
       {showGraphLoader && (
         <div className="absolute inset-0 z-20">
-          <GraphLoadingConstellation />
+          <BrainGraphLoadingSkeleton />
         </div>
       )}
       {!showGraphLoader &&
@@ -1341,28 +1376,13 @@ export function BrainGraphView({
           // changes, which the lib's auto-pause would freeze (see the
           // eased-transitions note above).
           autoPauseRedraw={false}
-          // Warm-started reheats settle fast; the synchronous warmup hides
-          // most of the initial churn on a cold layout.
-          warmupTicks={60}
-          cooldownTicks={200}
+          // Hide the high-energy part of the simulation. Only the final forty
+          // ticks remain visible, so the graph feels alive without reshaping
+          // itself while the person is trying to read it.
+          warmupTicks={100}
+          cooldownTicks={140}
           d3VelocityDecay={0.32}
-          onEngineStop={() => {
-            // Guard on node count: the brain page mounts this canvas with an
-            // EMPTY graph while the snapshot loads, and the engine "settles"
-            // instantly on 0 nodes — consuming the one-shot fit before any
-            // data exists would leave the real layout unframed.
-            if (!didFitRef.current && graph.nodes.length > 0) {
-              didFitRef.current = true;
-              fgRef.current?.zoomToFit(400, 60);
-              // Capture the fit scale once the 400ms zoom animation lands —
-              // it anchors the fit-relative label tiers.
-              window.setTimeout(() => {
-                const z = fgRef.current?.zoom();
-                if (typeof z === "number" && z > 0) fitScaleRef.current = z;
-              }, 450);
-            }
-          }}
-          onZoomEnd={handleSemanticZoomEnd}
+          onEngineTick={fitInitialCamera}
           // Backdrop layers under the graph: screen-space dot grid +
           // vignette, then the graph-space community washes.
           onRenderFramePre={(

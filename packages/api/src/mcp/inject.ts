@@ -109,6 +109,7 @@ import {
   type MsGraphTokens,
 } from '../msgraph/token.js'
 import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTORS } from '@use-brian/shared'
+import { connectorInstanceGovernanceId } from '../db/connector-instance-store.js'
 // Built-in connector OAuth app creds come through getConnectorConfig (OPEN, file
 // or env), NOT getEnv (closed env schema) — so this open injector imports no
 // closed code. See connector-config.ts + oss-local-brain-wedge.md §12.2.
@@ -306,6 +307,7 @@ export const INJECTED_BUILTIN_TOOLS_BY_CONNECTOR: Record<string, readonly string
     'imapSendMessage',
     'imapSaveAttachment',
     'searchEmailArchive',
+    'syncMailboxNow',
   ],
 }
 
@@ -854,7 +856,11 @@ export async function injectMcpTools(params: {
         .filter((c) => c.connectorId === provider && c.connected)
         .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
       if (insts.length > 1) {
-        extrasByProvider.set(provider, insts.slice(1).map((c) => ({ id: c.id, label: c.name })))
+        extrasByProvider.set(provider, insts.slice(1).map((c) => ({
+          id: c.id,
+          label: c.name,
+          connectedEmail: c.connectedEmail,
+        })))
       }
     }
   }
@@ -1043,7 +1049,18 @@ export async function injectMcpTools(params: {
           // injects every connected Google provider it sees in `connectors`, so
           // passing the grantor's full list would let an ungranted sibling
           // service (e.g. a personal Calendar) ride along on a granted Gmail.
-          await injectGoogleTools([{ connectorId: p, connected: true }], connectorStore, settingsStore, g.grantedByUserId, assistantId, assistantConnectorStore, tools, userTimezone, undefined, gdriveFilesStore, { [p]: boundGrantCreds }, connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain, filesApi)
+          await injectGoogleTools(
+            [{
+              connectorId: p,
+              connected: true,
+              name: g.instance.label,
+              connectedEmail: g.instance.connectedEmail,
+            }],
+            connectorStore, settingsStore, g.grantedByUserId, assistantId,
+            assistantConnectorStore, tools, userTimezone, undefined,
+            gdriveFilesStore, { [p]: boundGrantCreds }, connectorActionAudit,
+            assistantConnectorGrantsStore, workspaceDomain, filesApi,
+          )
         } else if (g.instance.custom && g.instance.url) {
           // Custom remote MCP shared via a grant. Respect Layer-2 enablement
           // (keyed on the provider UUID, like the team-native custom path),
@@ -1083,18 +1100,24 @@ export async function injectMcpTools(params: {
       // one, so the per-provider injectors' enable checks and discovery
       // logic don't need to change. `credsOverride` / `credsOverridePerConnector`
       // reroute the actual credential reads.
-      const syntheticConnectors: Array<{ connectorId: string; connected: boolean; url?: string | null }> = []
+      const syntheticConnectors: Array<{
+        connectorId: string
+        connected: boolean
+        name?: string
+        connectedEmail?: string | null
+        url?: string | null
+      }> = []
 
       for (const inst of teamNative) {
         if (!inst.connected) continue
         const p = inst.provider
-        // Assistant Email instances are one-per-inbox (decision D1) and inject
-        // as ONE tool set over ALL inboxes below — not first-instance-wins.
+        // Assistant Email instances are one-per-inbox (decision D1). Their
+        // injector owns its provider-specific multi-instance naming below.
         if (p === 'agentmail') continue
 
-        // Company Email has the same one-tool-set/many-accounts shape. Build
-        // the router once from every workspace-owned IMAP instance; provider-
-        // level workspace policy still governs the resulting tool set.
+        // Company Email builds one independently governed tool set per
+        // workspace-owned IMAP instance, so collect the full account list in
+        // one injection pass while retaining each instance id.
         if (p === 'imap') {
           if (overlaidByTeam.has(p)) continue
           overlaidByTeam.add(p)
@@ -1133,6 +1156,7 @@ export async function injectMcpTools(params: {
               assistantConnectorGrantsStore,
               healthProbe: { report: reportHealth },
               filesApi,
+              workspacePolicyScoped: true,
             })
           }
           continue
@@ -1149,7 +1173,13 @@ export async function injectMcpTools(params: {
           unavailable.push(connectorReconnectNotice(p, inst.label))
           continue
         }
-        syntheticConnectors.push({ connectorId: p, connected: true, url: inst.url ?? null })
+        syntheticConnectors.push({
+          connectorId: p,
+          connected: true,
+          name: inst.label,
+          connectedEmail: inst.connectedEmail,
+          url: inst.url ?? null,
+        })
 
         if (p === 'github') {
           await injectGitHubTools(
@@ -1539,15 +1569,22 @@ async function resolveEffectivePolicy(
   serverName: string,
   toolName: string,
   fallback: string,
+  appServerName: string = serverName,
+  assistantFallbackServerName?: string,
 ): Promise<'allow' | 'ask' | 'block'> {
   const l1 = await settingsStore.getPolicy({
-    assistantId: APP_LEVEL_ASSISTANT_ID, userId, serverName, toolName,
+    assistantId: APP_LEVEL_ASSISTANT_ID, userId, serverName: appServerName, toolName,
   })
   const appPolicy = l1?.policy ?? fallback
 
-  const l2 = await settingsStore.getPolicy({
+  let l2 = await settingsStore.getPolicy({
     assistantId, userId, serverName, toolName,
   })
+  if (!l2 && assistantFallbackServerName && assistantFallbackServerName !== serverName) {
+    l2 = await settingsStore.getPolicy({
+      assistantId, userId, serverName: assistantFallbackServerName, toolName,
+    })
+  }
   const assistantPolicy = l2?.policy ?? fallback
 
   return strictestPolicy(appPolicy, assistantPolicy)
@@ -1562,15 +1599,21 @@ async function applyPolicyOrSkip(
   unavailable?: string[],
   /**
    * Tool name to resolve policy against. Defaults to `tool.name`. Multi-instance
-   * variants pass the CANONICAL base name here so every instance of a provider
-   * shares the provider's single tool policy (no per-instance policy rows).
+   * variants pass the CANONICAL base name while `serverName` selects either the
+   * provider or one concrete instance-governance record.
    */
   policyToolName?: string,
+  /** Canonical provider key for app-level policy; defaults to `serverName`. */
+  appPolicyServerName?: string,
+  /** Legacy provider-level L2 key used only when the exact instance has no row. */
+  assistantFallbackServerName?: string,
 ): Promise<'skip' | 'include'> {
   const policyName = policyToolName ?? tool.name
   const fallback = tool.requiresConfirmation ? 'ask' : 'allow'
   const effective = await resolveEffectivePolicy(
     settingsStore, userId, assistantId, serverName, policyName, fallback,
+    appPolicyServerName ?? serverName,
+    assistantFallbackServerName,
   )
 
   if (effective === 'block') {
@@ -1583,6 +1626,8 @@ async function applyPolicyOrSkip(
   tool.resolveConfirmation = async () => {
     const current = await resolveEffectivePolicy(
       settingsStore, userId, assistantId, serverName, policyName, fallback,
+      appPolicyServerName ?? serverName,
+      assistantFallbackServerName,
     )
     return current === 'ask'
   }
@@ -1617,7 +1662,11 @@ function baseToolName(name: string): string {
   return i === -1 ? name : name.slice(0, i)
 }
 
-export type ConnectorInstanceRef = { id: string; label: string }
+export type ConnectorInstanceRef = {
+  id: string
+  label: string
+  connectedEmail?: string | null
+}
 
 /**
  * Inject label-qualified tool variants for each additional connector instance.
@@ -1773,7 +1822,13 @@ function expiredCredentialsNotice(displayName: string): string {
 }
 
 async function injectGoogleTools(
-  connectors: Array<{ connectorId: string; connected: boolean; url?: string | null }>,
+  connectors: Array<{
+    connectorId: string
+    connected: boolean
+    name?: string
+    connectedEmail?: string | null
+    url?: string | null
+  }>,
   connectorStore: ConnectorStore,
   settingsStore: McpSettingsStore,
   userId: string,
@@ -2159,7 +2214,10 @@ async function injectGoogleTools(
       // variants, same shape as the gcal builder above). The grants gate,
       // audit wrap, and classifier preflight are provider-level — shared
       // across accounts by design.
-      const buildGmailToolSet = (getToken: () => Promise<string>) => gateToolsOnActionGrants(createGmailTools({
+      const buildGmailToolSet = (
+        getToken: () => Promise<string>,
+        senderEmail?: string | null,
+      ) => gateToolsOnActionGrants(createGmailTools({
         listMessages: async (params) => {
           const token = await getToken()
           return listGmailMessages(token, params)
@@ -2286,8 +2344,11 @@ async function injectGoogleTools(
             throw err
           }
         },
-      }, { filesApi }), 'gmail', assistantConnectorGrantsStore, assistantId)
-      const gmailTools = buildGmailToolSet(() => getAccessToken('gmail'))
+      }, { filesApi, senderEmail: senderEmail ?? undefined }), 'gmail', assistantConnectorGrantsStore, assistantId)
+      const gmailTools = buildGmailToolSet(
+        () => getAccessToken('gmail'),
+        gmail.connectedEmail,
+      )
       for (const tool of gmailTools) {
         if (await applyPolicyOrSkip(tool, 'gmail', settingsStore, assistantId, userId, unavailable) === 'include') {
           tools.set(tool.name, tool)
@@ -2305,7 +2366,10 @@ async function injectGoogleTools(
           buildToolsForInstance: (inst) => {
             const getToken = () => getAccessTokenForInstance(inst.id)
             instanceTokenBySuffix.set(instanceToolSuffix(inst.id, inst.label), getToken)
-            return probeVariant(buildGmailToolSet(getToken), inst.id)
+            return probeVariant(
+              buildGmailToolSet(getToken, inst.connectedEmail),
+              inst.id,
+            )
           },
         })
       }
@@ -3306,10 +3370,11 @@ async function injectMsGraphTools(
 //
 // The USER'S own corporate mailbox (mailbox-imap.md) — the third identity
 // lane beside gmail (the user's Google account) and agentmail (the
-// assistant's own address). Single account per user (D11, `single_instance`
-// in the registry). Credentials are the typed `type:'imap'` blob on the
-// user-scoped connector_instance; `imapSendMessage` reuses the Gmail
-// governance chain verbatim: `ask` classification + write-grant gate
+// assistant's own address). Multiple mailboxes inject as instance-bound tool
+// sets: primary canonical names plus stable suffixed variants. Credentials are
+// the typed `type:'imap'` blob on each connector_instance;
+// `imapSendMessage` reuses the Gmail governance chain verbatim: `ask`
+// classification + write-grant gate
 // (registry-derived), the connector_actions `send_email` audit with the
 // payload-classifier preflight before the network call, and the
 // confidential-turn egress refusal inside the core tool.
@@ -3334,16 +3399,17 @@ async function injectMailboxTools(params: {
    * that always errors.
    */
   filesApi?: FilesApi
+  /** Team-owned rows resolve both policy layers from workspace_tool_policy. */
+  workspacePolicyScoped?: boolean
 }): Promise<void> {
   const {
     connectors, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable,
     connectorInstanceStore, connectorActionAudit, assistantConnectorGrantsStore, instanceIdOverride, healthProbe,
-    filesApi,
+    filesApi, workspacePolicyScoped = false,
   } = params
 
   const imapConnectors = connectors.filter((c) => c.connectorId === 'imap' && c.connected)
-  const imapEnabled = imapConnectors.length > 0 && (!assistantConnectorStore || await assistantConnectorStore.isEnabled(assistantId, 'imap'))
-  if (!imapEnabled) {
+  if (imapConnectors.length === 0) {
     unavailable?.push(notConnectedNotice('Company email (IMAP)', "searching, reading, and sending from the user's own corporate mailbox"))
     return
   }
@@ -3353,11 +3419,26 @@ async function injectMailboxTools(params: {
   // Which instances to bind. Normal personal injection and both workspace
   // overlays pass EVERY authorized connected mailbox; the optional override is
   // retained for legacy/single-instance callers. Primary = first-connected
-  // (createdAt asc): the default when the model omits `account`.
-  const rows = (instanceIdOverride
+  // (createdAt asc), which keeps the canonical unsuffixed tool names.
+  const candidateRows = (instanceIdOverride
     ? imapConnectors.filter((c) => c.id === instanceIdOverride)
     : [...imapConnectors])
     .sort((a, b) => (a.createdAt?.getTime() ?? 0) - (b.createdAt?.getTime() ?? 0))
+  const rows: typeof candidateRows = []
+  for (const row of candidateRows) {
+    const instanceId = row.id ?? instanceIdOverride ?? null
+    if (!instanceId) continue
+    const governanceId = connectorInstanceGovernanceId('imap', instanceId)
+    if (
+      assistantConnectorStore
+      && !(await assistantConnectorStore.isEnabled(assistantId, governanceId, 'imap'))
+    ) continue
+    rows.push(row)
+  }
+  if (rows.length === 0) {
+    unavailable?.push(notConnectedNotice('Company email (IMAP)', "searching, reading, and sending from the user's own corporate mailbox"))
+    return
+  }
 
   // Health rides at the API level, per instance, so a mailbox whose auth died
   // flips ITS OWN row — never a sibling's — and the read-only archive tool
@@ -3406,6 +3487,12 @@ async function injectMailboxTools(params: {
         body_length: p.body?.length ?? 0,
         body: p.body ?? '',
         in_reply_to: p.inReplyTo ?? null,
+        attachment_count: p.attachments?.length ?? 0,
+        attachments: (p.attachments ?? []).map((attachment) => ({
+          name: attachment.filename,
+          mime: attachment.mime,
+          size_bytes: attachment.data.byteLength,
+        })),
       }
       let preflight: ConnectorActionPreflight | undefined
       if (connectorActionAudit) {
@@ -3459,8 +3546,8 @@ async function injectMailboxTools(params: {
 
   try {
     // Build a bound MailboxApi per connected mailbox + resolve its
-    // authoritative email (the value the model passes as `account`; the label
-    // can be renamed so it is NOT the identity). A creds-missing instance is
+    // authoritative email (the model-visible binding label; the instance label
+    // can be renamed, so it is NOT the identity). A creds-missing instance is
     // skipped rather than surfaced as a dead tool.
     const bound: Array<{ instanceId: string; email: string; api: MailboxApi }> = []
     for (const row of rows) {
@@ -3489,74 +3576,100 @@ async function injectMailboxTools(params: {
       return
     }
 
-    // One tool set over an account router — primary (first-connected) is the
-    // default sender; `account` selects a sibling by email.
-    const router: MailboxAccountRouter = {
-      list: () => bound.map((b, i) => ({ email: b.email, isPrimary: i === 0 })),
-      get: (email) => bound.find((b) => b.email.trim().toLowerCase() === email.trim().toLowerCase())?.api,
-    }
-    // Attachment saves (Phase 3) land bytes in the workspace file primitive
-    // and then ride the existing file-ingest queue so the saved document is
-    // searchable — the `channel-media-deps` persist shape, on request only (D15).
-    const built = gateToolsOnActionGrants(
-      createMailboxTools(router, {
-        ...(filesApi
-          ? {
-              attachments: {
-                filesApi,
-                enqueueIngest: async ({ fileId, workspaceId, actingUserId, assistantId: forAssistant }) => {
-                  await enqueueFileIngestJob({
-                    fileId,
-                    workspaceId,
-                    actingUserId,
-                    assistantId: forAssistant,
-                    sourceLabel: 'email-attachment',
-                  })
-                },
-              },
-            }
-          : {}),
-      }),
-      'imap',
-      assistantConnectorGrantsStore,
-      assistantId,
-    )
-
-    // Archive search (Phase 2) — injected only when boot wired the archive
-    // seam (DB + embedder). Read-only; a DB search must not flip connector
-    // health, so it rides OUTSIDE the per-instance api health wrap. Owner + the
-    // instance set are bound here, never model inputs.
+    // Build one complete tool set per mailbox. The first/oldest keeps canonical
+    // names for single-account compatibility; every later set uses the same
+    // stable instance suffix convention as Google/GitHub/etc. Every schema is
+    // bound to one identity (no model-selectable `account` field), while policy
+    // and write grants resolve through that mailbox's governance id.
     const archiveDeps = getGlobalMailboxArchiveDeps()
-    const withArchive = archiveDeps
-      ? [
-          ...built,
-          createSearchEmailArchiveTool({
-            ownerUserId: userId,
-            accounts: bound.map((b, i) => ({ instanceId: b.instanceId, email: b.email, isPrimary: i === 0 })),
-            deps: archiveDeps,
-          }),
-        ]
-      : built
-
-    // On-demand sync (sync-on-connect's twin) — injected only when boot wired
-    // the sync seam. Same bound account set as the archive tool; the instance
-    // is bound here, never a model input.
     const syncDeps = getGlobalMailboxSyncDeps()
-    const withSync = syncDeps
-      ? [
-          ...withArchive,
-          createSyncMailboxNowTool({
-            accounts: bound.map((b, i) => ({ instanceId: b.instanceId, email: b.email, isPrimary: i === 0 })),
-            deps: syncDeps,
-          }),
-        ]
-      : withArchive
-    for (const tool of withSync) {
-      if (await applyPolicyOrSkip(tool, 'imap', settingsStore, assistantId, userId, unavailable) === 'include') {
-        tools.set(tool.name, tool)
+    for (const [index, mailbox] of bound.entries()) {
+      const governanceId = connectorInstanceGovernanceId('imap', mailbox.instanceId)
+      const accountRef = {
+        instanceId: mailbox.instanceId,
+        email: mailbox.email,
+        isPrimary: true,
+      }
+      const router: MailboxAccountRouter = {
+        list: () => [{ email: mailbox.email, isPrimary: true }],
+        get: (email) => email.trim().toLowerCase() === mailbox.email.trim().toLowerCase()
+          ? mailbox.api
+          : undefined,
+      }
+      // Attachment saves (Phase 3) land bytes in the workspace file primitive
+      // and then ride the existing file-ingest queue so the saved document is
+      // searchable — the `channel-media-deps` persist shape, on request only.
+      const accountTools: Tool[] = gateToolsOnActionGrants(
+        createMailboxTools(router, {
+          boundAccountEmail: mailbox.email,
+          ...(filesApi
+            ? {
+                attachments: {
+                  filesApi,
+                  enqueueIngest: async ({ fileId, workspaceId, actingUserId, assistantId: forAssistant }) => {
+                    await enqueueFileIngestJob({
+                      fileId,
+                      workspaceId,
+                      actingUserId,
+                      assistantId: forAssistant,
+                      sourceLabel: 'email-attachment',
+                    })
+                  },
+                },
+              }
+            : {}),
+        }),
+        'imap',
+        assistantConnectorGrantsStore,
+        assistantId,
+        governanceId,
+        'imap',
+      )
+
+      // Archive search + on-demand sync stay outside the live API health wrap,
+      // but each is bound to the SAME concrete instance as this variant set.
+      if (archiveDeps) {
+        accountTools.push(createSearchEmailArchiveTool({
+          ownerUserId: userId,
+          accounts: [accountRef],
+          boundAccount: accountRef,
+          deps: archiveDeps,
+        }))
+      }
+      if (syncDeps) {
+        accountTools.push(createSyncMailboxNowTool({
+          accounts: [accountRef],
+          boundAccount: accountRef,
+          deps: syncDeps,
+        }))
+      }
+
+      const suffix = index === 0 ? '' : instanceToolSuffix(mailbox.instanceId, mailbox.email)
+      for (const rawTool of accountTools) {
+        const canonicalName = rawTool.name
+        const tool: Tool = {
+          ...rawTool,
+          name: `${canonicalName}${suffix}`,
+          description: `[${mailbox.email}] ${rawTool.description}`,
+        }
+        if (
+          await applyPolicyOrSkip(
+            tool,
+            governanceId,
+            settingsStore,
+            assistantId,
+            userId,
+            unavailable,
+            canonicalName,
+            workspacePolicyScoped ? governanceId : 'imap',
+            'imap',
+          ) === 'include'
+        ) {
+          tools.set(tool.name, tool)
+        }
       }
     }
-    console.debug(`[mcp-inject] Company mailbox (imap): injected tools for ${bound.length} mailbox(es)`)
+    console.debug(`[mcp-inject] Company mailbox (imap): injected ${bound.length} account-bound tool set(s)`)
   } catch (err) {
     console.error('[mcp-inject] Company mailbox (imap) injection failed:', err)
   }

@@ -11,10 +11,71 @@
 import { describe, expect, it } from "vitest";
 import {
   extractMessageText,
+  extractPresentedDocuments,
   stripAttachmentMarkup,
   stripCommentThreadReplyTag,
   parseMessageAttachments,
 } from "../api/sessions";
+
+describe("[COMP:app-web/chat-document-viewer] persisted document payloads", () => {
+  it("restores a validated presentDocument tool input verbatim", () => {
+    expect(
+      extractPresentedDocuments([
+        {
+          type: "tool_use",
+          id: "tool-doc-1",
+          name: "presentDocument",
+          input: {
+            title: "Design objective.docx",
+            sourceName: "Email attachment",
+            content: "First line\n\n**literal source**",
+            format: "text",
+          },
+        },
+      ]),
+    ).toEqual([
+      {
+        id: "tool-doc-1",
+        title: "Design objective.docx",
+        sourceName: "Email attachment",
+        content: "First line\n\n**literal source**",
+        format: "text",
+      },
+    ]);
+  });
+
+  it("defaults legacy missing format to text and drops malformed inputs", () => {
+    expect(
+      extractPresentedDocuments([
+        {
+          type: "tool_use",
+          id: "valid",
+          name: "presentDocument",
+          input: { title: "Notes", content: "verbatim" },
+        },
+        {
+          type: "tool_use",
+          id: "missing-body",
+          name: "presentDocument",
+          input: { title: "No body" },
+        },
+        {
+          type: "tool_use",
+          id: "wrong-tool",
+          name: "fileRead",
+          input: { title: "Ignore", content: "Ignore" },
+        },
+      ]),
+    ).toEqual([
+      {
+        id: "valid",
+        title: "Notes",
+        content: "verbatim",
+        format: "text",
+      },
+    ]);
+  });
+});
 
 describe("[COMP:app-web/sessions-sdk] extractMessageText", () => {
   it("returns a plain string as-is", () => {

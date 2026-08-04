@@ -10,8 +10,12 @@
 import { query } from './client.js'
 
 export type AssistantConnectorStore = {
-  /** Returns true if the connector is enabled for this assistant. No row = enabled (default). */
-  isEnabled(assistantId: string, connectorId: string): Promise<boolean>
+  /**
+   * Returns true if the connector is enabled for this assistant. No row =
+   * enabled (default). Account-bound connectors may supply a legacy provider
+   * fallback; an exact instance row always wins.
+   */
+  isEnabled(assistantId: string, connectorId: string, fallbackConnectorId?: string): Promise<boolean>
   /** Upsert the enabled state for a connector on an assistant. */
   setEnabled(assistantId: string, connectorId: string, enabled: boolean): Promise<void>
   /** List all connector settings for an assistant. Only returns rows that exist (explicitly set). */
@@ -20,11 +24,13 @@ export type AssistantConnectorStore = {
 
 export function createDbAssistantConnectorStore(): AssistantConnectorStore {
   return {
-    async isEnabled(assistantId, connectorId) {
+    async isEnabled(assistantId, connectorId, fallbackConnectorId) {
       const result = await query<{ enabled: boolean }>(
         `SELECT enabled FROM assistant_connector_settings
-         WHERE assistant_id = $1 AND connector_id = $2`,
-        [assistantId, connectorId],
+         WHERE assistant_id = $1 AND connector_id IN ($2, $3)
+         ORDER BY CASE WHEN connector_id = $2 THEN 0 ELSE 1 END
+         LIMIT 1`,
+        [assistantId, connectorId, fallbackConnectorId ?? connectorId],
       )
       // No row = default enabled
       return result.rows[0]?.enabled ?? true

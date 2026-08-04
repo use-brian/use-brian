@@ -38,8 +38,10 @@ export {
   MAILBOX_DEFAULT_LIMIT,
   MAILBOX_MAX_LIMIT,
   MAILBOX_ATTACHMENT_MAX_BYTES,
+  MAX_MAILBOX_OUTGOING_ATTACHMENTS,
+  MAX_MAILBOX_OUTGOING_ATTACHMENT_TOTAL_BYTES,
 } from './base/mailbox.js'
-export type { MailboxApi, MailboxAccountRouter, MailboxAccountRef, MailboxSearchParams, MailboxSearchHit, MailboxMessage, MailboxThread, MailboxAttachment, MailboxAttachmentBytes, MailboxAttachmentDeps, CreateMailboxToolsOptions } from './base/mailbox.js'
+export type { MailboxApi, MailboxAccountRouter, MailboxAccountRef, MailboxSearchParams, MailboxSearchHit, MailboxMessage, MailboxThread, MailboxAttachment, MailboxAttachmentBytes, MailboxOutgoingAttachment, MailboxAttachmentDeps, CreateMailboxToolsOptions } from './base/mailbox.js'
 export { createKnowledgeTools } from './base/knowledge.js'
 export { createInterAssistantTools } from './base/ask-assistant.js'
 export type { InterAssistantDeps } from './base/ask-assistant.js'
@@ -51,3 +53,10 @@ export { createIngestStoredFileTool } from './base/ingest-stored-file.js'
 export type { IngestStoredFileDeps } from './base/ingest-stored-file.js'
 export { createReprocessRecordingTool } from './base/reprocess-recording.js'
 export type { ReprocessRecordingDeps } from './base/reprocess-recording.js'
+export {
+  createPresentDocumentTool,
+  MAX_PRESENTED_DOCUMENT_CHARS,
+  parsePresentedDocumentInput,
+  presentedDocumentInputSchema,
+} from './base/present-document.js'
+export type { PresentedDocumentInput } from './base/present-document.js'

@@ -19,6 +19,7 @@ import type { BuildEvent } from "@/lib/build-events";
 import {
   ChatActivityFeed,
   ChatActivitySummary,
+  ChatCitationList,
   formatDuration,
 } from "../chat-activity";
 
@@ -215,5 +216,30 @@ describe("[COMP:app-web/chat-activity] Post-turn receipt", () => {
   it("renders nothing without steps", () => {
     const html = wrap(<ChatActivitySummary tools={[]} durationMs={5000} />);
     expect(html).toBe("");
+  });
+});
+
+describe("[COMP:app-web/chat-activity] Citation list", () => {
+  it("renders safe source links and caps the collapsed list", () => {
+    const html = wrap(
+      <ChatCitationList
+        label="Sources"
+        citations={[
+          { url: "https://one.example/report", title: "One" },
+          { url: "https://two.example/report", title: "Two" },
+          { url: "https://three.example/report", title: "Three" },
+          { url: "https://four.example/report", title: "Four" },
+          { url: "https://five.example/report", title: "Five" },
+        ]}
+      />,
+    );
+
+    expect(html).toContain("Sources");
+    expect(html).toContain('target="_blank"');
+    expect(html).toContain('rel="noopener noreferrer"');
+    expect(html).toContain("One");
+    expect(html).toContain("Four");
+    expect(html).not.toContain("Five");
+    expect(html).toMatch(/\+[\s\S]*1/);
   });
 });

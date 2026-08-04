@@ -1322,6 +1322,8 @@ const MODEL_COLORS: Record<string, string> = {
 
 type UserConnector = {
   id: string;
+  /** Canonical registry id when `id` is an instance governance key. */
+  providerId?: string;
   name: string;
   connected: boolean;  // Layer 1: user has authenticated/connected
   enabled: boolean;    // Layer 2: enabled for this assistant
@@ -1336,19 +1338,10 @@ type UserConnector = {
   // credential, synthesized by the route so its per-assistant tool
   // policy is governable here.
   scope?: "personal" | "team-native" | "team-grant" | "builtin";
-  // Backing connector_instance id — team-native rows only. Keys the
-  // clearance-gated workspace tool-policy routes the governance table's
-  // Allow/Ask/Block edits for team-owned connectors.
+  // Backing connector_instance id. IMAP uses it for one independently governed
+  // top-level card per mailbox; team-native rows also use it for workspace
+  // policy routes.
   instanceId?: string;
-  // Provider-level multi-account projection (currently Company Email). The
-  // connector toggle/policies remain shared; this list shows which concrete
-  // accounts the single routed tool set can address.
-  accounts?: Array<{
-    instanceId: string;
-    label: string;
-    connected: boolean;
-    isPrimary: boolean;
-  }>;
 };
 
 type ToolPerm = {
@@ -1460,7 +1453,7 @@ function ConnectorsTab({ assistantId, workspaceId }: { assistantId: string; work
     );
     try {
       await authFetch(
-        `${API_URL}/api/assistants/${assistantId}/connectors/${id}/${enable ? "enable" : "disable"}`,
+        `${API_URL}/api/assistants/${assistantId}/connectors/${encodeURIComponent(id)}/${enable ? "enable" : "disable"}`,
         { method: "POST" }
       );
     } catch {
@@ -1477,7 +1470,7 @@ function ConnectorsTab({ assistantId, workspaceId }: { assistantId: string; work
     setToolsMap((prev) => ({ ...prev, [connectorId]: { tools: [], serverName: "", loading: true } }));
     try {
       // Use assistant-scoped endpoint — returns L1 + L2 + effective policy
-      const res = await authFetch(`${API_URL}/api/assistants/${assistantId}/connectors/${connectorId}/tools`);
+      const res = await authFetch(`${API_URL}/api/assistants/${assistantId}/connectors/${encodeURIComponent(connectorId)}/tools`);
       if (res.ok) {
         const data = await res.json();
         setToolsMap((prev) => ({ ...prev, [connectorId]: { tools: data.tools ?? [], serverName: data.serverName ?? "", loading: false } }));
@@ -1513,7 +1506,7 @@ function ConnectorsTab({ assistantId, workspaceId }: { assistantId: string; work
     });
     try {
       // Save to assistant-scoped endpoint (L2)
-      await authFetch(`${API_URL}/api/assistants/${assistantId}/connectors/${connectorId}/tools/policy`, {
+      await authFetch(`${API_URL}/api/assistants/${assistantId}/connectors/${encodeURIComponent(connectorId)}/tools/policy`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ serverName, toolName, policy }),
@@ -1645,6 +1638,7 @@ function ConnectorsTab({ assistantId, workspaceId }: { assistantId: string; work
       <div className="space-y-2">
         {allConnectors.map((c) => {
           const isExpanded = expandedTools === c.id;
+          const providerId = c.providerId ?? c.id;
 
           return (
             <div key={c.id} className={`border rounded-xl overflow-hidden transition-colors duration-150 ${isExpanded ? "border-primary/30 bg-muted/20" : "border-border"}`}>
@@ -1652,7 +1646,7 @@ function ConnectorsTab({ assistantId, workspaceId }: { assistantId: string; work
               <div className="flex items-center justify-between gap-4 px-5 py-3">
                 <button onClick={() => c.connected ? toggleExpand(c) : undefined} className="flex items-center gap-3 min-w-0 flex-1 text-left">
                   <div className="w-8 h-8 rounded-lg bg-muted flex items-center justify-center shrink-0">
-                    <ConnectorIcon connectorId={c.id} iconUrl={c.icon_url} />
+                    <ConnectorIcon connectorId={providerId} iconUrl={c.icon_url} />
                   </div>
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
@@ -1672,14 +1666,6 @@ function ConnectorsTab({ assistantId, workspaceId }: { assistantId: string; work
                     </div>
                     {c.custom && c.url && (
                       <div className="text-[11px] text-muted-foreground truncate">{c.url}</div>
-                    )}
-                    {c.accounts && c.accounts.length > 0 && (
-                      <div
-                        className="text-[11px] text-muted-foreground truncate"
-                        title={c.accounts.map((account) => account.label).join(" · ")}
-                      >
-                        {c.accounts.map((account) => account.label).join(" · ")}
-                      </div>
                     )}
                   </div>
                 </button>
@@ -1738,7 +1724,8 @@ function ConnectorsTab({ assistantId, workspaceId }: { assistantId: string; work
                         custom MCPs render policy-only inside the component. */}
                     <ConnectorToolGovernance
                       assistantId={assistantId}
-                      connectorId={c.id}
+                      connectorId={providerId}
+                      governanceId={c.id}
                       scope={c.scope}
                       loading={toolsMap[c.id]?.loading}
                       tools={(toolsMap[c.id]?.tools ?? []).map((tool) => ({

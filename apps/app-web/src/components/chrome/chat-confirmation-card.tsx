@@ -24,6 +24,7 @@ import { cn } from "@/lib/utils";
 import { ToolPreview } from "@/components/doc/panels/approval-tool-previews";
 import {
   extractAttachmentLines,
+  extractEmailSender,
   parseToolPreview,
 } from "@/lib/approval-previews";
 
@@ -53,6 +54,10 @@ export function ChatConfirmationCard({
   const title = confirmation.displayName ?? confirmation.toolName;
   const isInFlight = confirmation.status === "approving";
   const preview = parseToolPreview(confirmation.toolName, confirmation.input);
+  const submitDenial = () => {
+    if (isInFlight) return;
+    onDeny(confirmation.toolCallId, comment.trim() || undefined);
+  };
   return (
     <div className="flex gap-2.5">
       <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-amber-500/15 text-amber-600 dark:text-amber-400 ring-1 ring-amber-500/25">
@@ -64,6 +69,7 @@ export function ChatConfirmationCard({
           <ToolPreview
             preview={preview}
             attachmentLines={extractAttachmentLines(confirmation.displayLines)}
+            senderEmail={extractEmailSender(confirmation.displayLines)}
           />
         ) : (
           <>
@@ -91,6 +97,17 @@ export function ChatConfirmationCard({
               rows={2}
               value={comment}
               onChange={(e) => setComment(e.target.value)}
+              onKeyDown={(event) => {
+                if (
+                  event.key !== "Enter" ||
+                  event.shiftKey ||
+                  event.nativeEvent.isComposing
+                ) {
+                  return;
+                }
+                event.preventDefault();
+                submitDenial();
+              }}
               disabled={isInFlight}
               placeholder={t.confirmationCommentPlaceholder}
               maxLength={1000}
@@ -102,9 +119,7 @@ export function ChatConfirmationCard({
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={() =>
-                  onDeny(confirmation.toolCallId, comment.trim() || undefined)
-                }
+                onClick={submitDenial}
                 disabled={isInFlight}
                 className={cn(
                   "rounded-md border border-border bg-background px-3 py-1 text-[12px] font-medium text-muted-foreground",

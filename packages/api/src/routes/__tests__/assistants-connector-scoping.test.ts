@@ -26,6 +26,7 @@ const connectorStore = { list: vi.fn() }
 const assistantConnectorStore = { listForAssistant: vi.fn() }
 const connectorInstanceStore = { listByWorkspaceSystem: vi.fn() }
 const connectorGrantStore = { listForTargetSystem: vi.fn() }
+const mcpSettingsStore = { getPolicy: vi.fn(), setPolicy: vi.fn() }
 
 beforeEach(() => {
   mockQueryWithRLS.mockReset()
@@ -33,6 +34,8 @@ beforeEach(() => {
   assistantConnectorStore.listForAssistant.mockReset().mockResolvedValue([])
   connectorInstanceStore.listByWorkspaceSystem.mockReset().mockResolvedValue([])
   connectorGrantStore.listForTargetSystem.mockReset().mockResolvedValue([])
+  mcpSettingsStore.getPolicy.mockReset().mockResolvedValue(null)
+  mcpSettingsStore.setPolicy.mockReset().mockResolvedValue(undefined)
 })
 
 function makeApp(userId: string) {
@@ -49,6 +52,7 @@ function makeApp(userId: string) {
       assistantConnectorStore: assistantConnectorStore as never,
       connectorInstanceStore: connectorInstanceStore as never,
       connectorGrantStore: connectorGrantStore as never,
+      mcpSettingsStore: mcpSettingsStore as never,
       capabilityStore: {} as never,
     }),
   )
@@ -140,7 +144,7 @@ describe('[COMP:routes/assistants-connector-scoping] GET /:assistantId/connector
     expect(gmail?.scope).toBe('team-grant')
   })
 
-  it('lists every exposed IMAP mailbox from the winning grantor on one provider-policy card', async () => {
+  it('projects every winning-grantor IMAP mailbox as a separately governed top-level connector', async () => {
     queueMembershipAndTeam('owner', 'ws-personal')
     connectorGrantStore.listForTargetSystem.mockResolvedValueOnce([
       {
@@ -176,14 +180,20 @@ describe('[COMP:routes/assistants-connector-scoping] GET /:assistantId/connector
     expect(res.status).toBe(200)
     const imap = (res.body.connectors as Array<{
       id: string
+      providerId?: string
       name: string
       scope: string
-      accounts?: Array<{ instanceId: string; label: string; isPrimary: boolean }>
-    }>).find((connector) => connector.id === 'imap')
-    expect(imap).toMatchObject({ name: 'Company Email (IMAP)', scope: 'team-grant' })
-    expect(imap?.accounts).toEqual([
-      { instanceId: 'imap-primary', label: 'primary@example.com', connected: true, isPrimary: true },
-      { instanceId: 'imap-newer', label: 'newer@example.com', connected: true, isPrimary: false },
+      instanceId?: string
+    }>).filter((connector) => connector.providerId === 'imap')
+    expect(imap).toEqual([
+      expect.objectContaining({
+        id: 'imap:imap-primary', providerId: 'imap', instanceId: 'imap-primary',
+        name: 'primary@example.com', scope: 'team-grant',
+      }),
+      expect.objectContaining({
+        id: 'imap:imap-newer', providerId: 'imap', instanceId: 'imap-newer',
+        name: 'newer@example.com', scope: 'team-grant',
+      }),
     ])
   })
 
@@ -211,7 +221,7 @@ describe('[COMP:routes/assistants-connector-scoping] GET /:assistantId/connector
     const res = await request(makeApp('u-owner')).get('/api/assistants/a-1/connectors')
 
     expect(res.status).toBe(200)
-    expect((res.body.connectors as Array<{ id: string }>).some((connector) => connector.id === 'imap')).toBe(false)
+    expect((res.body.connectors as Array<{ providerId?: string }>).some((connector) => connector.providerId === 'imap')).toBe(false)
   })
 
   it('synthesizes an always-on built-in row (Workspace Files) with no backing connector row', async () => {
@@ -258,5 +268,50 @@ describe('[COMP:routes/assistants-connector-scoping] GET /:assistantId/connector
     expect(connectorStore.list).toHaveBeenCalledWith('u-owner')
     const ids = (res.body.connectors as Array<{ id: string }>).map((c) => c.id)
     expect(ids).toContain('notion')
+  })
+})
+
+describe('[COMP:routes/assistants-connector-scoping] account-bound IMAP governance routes', () => {
+  it('reads and writes L2 policy under the instance id while L1 stays canonical', async () => {
+    mockAccess.mockResolvedValue({
+      assistant: { id: 'a-1', name: 'A', workspaceId: 'ws-1' },
+      role: 'owner',
+    } as never)
+    mcpSettingsStore.getPolicy.mockImplementation(async (params: {
+      assistantId: string; serverName: string; toolName: string
+    }) => (
+      params.assistantId === 'a-1'
+      && params.serverName === 'imap:mailbox-1'
+      && params.toolName === 'imapSendMessage'
+        ? { policy: 'block' }
+        : null
+    ))
+
+    const listed = await request(makeApp('u-owner'))
+      .get('/api/assistants/a-1/connectors/imap%3Amailbox-1/tools')
+    expect(listed.status).toBe(200)
+    expect(listed.body).toMatchObject({ serverName: 'imap:mailbox-1', providerId: 'imap' })
+    expect(listed.body.tools).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'imapSendMessage', assistantPolicy: 'block', effectivePolicy: 'block' }),
+    ]))
+    expect(mcpSettingsStore.getPolicy).toHaveBeenCalledWith(expect.objectContaining({
+      assistantId: '00000000-0000-0000-0000-000000000000',
+      serverName: 'imap',
+      toolName: 'imapSendMessage',
+    }))
+    expect(mcpSettingsStore.getPolicy).toHaveBeenCalledWith(expect.objectContaining({
+      assistantId: 'a-1', serverName: 'imap:mailbox-1', toolName: 'imapSendMessage',
+    }))
+
+    const updated = await request(makeApp('u-owner'))
+      .post('/api/assistants/a-1/connectors/imap%3Amailbox-1/tools/policy')
+      .send({ serverName: 'imap', toolName: 'imapSendMessage', policy: 'allow' })
+    expect(updated.status).toBe(200)
+    expect(mcpSettingsStore.setPolicy).toHaveBeenCalledWith(expect.objectContaining({
+      assistantId: 'a-1',
+      serverName: 'imap:mailbox-1',
+      toolName: 'imapSendMessage',
+      policy: 'allow',
+    }))
   })
 })

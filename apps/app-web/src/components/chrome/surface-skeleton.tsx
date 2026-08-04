@@ -28,7 +28,7 @@
  */
 
 import { Skeleton } from "@/components/skeleton";
-import { GraphLoadingConstellation } from "@/components/brain/graph-loading";
+import { BrainGraphLoadingSkeleton } from "@/components/brain/graph-loading";
 import type { WorkspaceSurface } from "@/lib/doc-page-url";
 import { cn } from "@/lib/utils";
 
@@ -302,10 +302,9 @@ export function RailSurfaceSkeleton({
 }
 
 /**
- * Brain - chrome row, the compact filter strip, then the graph-native loading
- * constellation shared with the live canvas. The old loose scatter of large
- * skeleton circles looked like unrelated final data and did not communicate
- * that relationships/communities were being mapped.
+ * Brain - chrome row, the compact filter strip, then the skeleton-color-only
+ * force-graph facsimile shared with the live canvas. Circular nodes, label
+ * bars, and fine edges match the finished graph's visual grammar.
  */
 export function BrainSurfaceSkeleton() {
   return (
@@ -317,7 +316,7 @@ export function BrainSurfaceSkeleton() {
         <Skeleton className="ml-auto h-7 w-24 rounded-md" />
       </div>
       <div className="relative flex-1 overflow-hidden">
-        <GraphLoadingConstellation />
+        <BrainGraphLoadingSkeleton />
       </div>
     </div>
   );

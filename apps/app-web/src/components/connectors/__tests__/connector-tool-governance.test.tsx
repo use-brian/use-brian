@@ -108,6 +108,27 @@ describe("[COMP:app-web/connector-tool-list] granted toggle + policy segments", 
     expect(html).not.toContain("data-grant-toggle");
     expect(html).toContain('aria-pressed');
   });
+
+  it("renders one tool table for one independently governed mailbox card", () => {
+    const imapTools: ConnectorToolListItem[] = [
+      { name: "imapSearchMessages", description: "Search mailbox", classification: "read", currentPolicy: "allow" },
+      { name: "imapSendMessage", description: "Send email", classification: "write", currentPolicy: "ask" },
+    ];
+    const html = wrap(
+      <ConnectorToolGovernance
+        assistantId="a-1"
+        connectorId="imap"
+        governanceId="imap:imap-primary"
+        scope="team-grant"
+        tools={imapTools}
+        onPolicyChange={() => {}}
+      />,
+    );
+
+    expect(html.match(/data-tool-row="imapSearchMessages"/g)).toHaveLength(1);
+    expect(html.match(/data-grant-toggle="imap:imapSendMessage"/g)).toHaveLength(1);
+    expect(html).not.toContain("data-mailbox-tool-group");
+  });
 });
 
 describe("[COMP:app-web/connector-tool-governance] governance wrapper", () => {

@@ -66,6 +66,7 @@ const WORKSPACE_POLICY_DEFAULT: ToolPolicy = "ask";
 export function ConnectorToolGovernance({
   assistantId,
   connectorId,
+  governanceId = connectorId,
   scope,
   tools,
   loading,
@@ -75,6 +76,8 @@ export function ConnectorToolGovernance({
 }: {
   assistantId: string;
   connectorId: string;
+  /** Persisted governance key. Account-bound IMAP uses `imap:<instanceId>`. */
+  governanceId?: string;
   /** Connector scope from GET /api/assistants/:id/connectors. */
   scope?: string;
   tools: ConnectorToolListItem[];
@@ -108,12 +111,13 @@ export function ConnectorToolGovernance({
     authFetch(`${API_URL}/api/assistant-connector-grants/${assistantId}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((data: { grants?: Grant[] } | null) => {
-        const grant = data?.grants?.find((g) => g.connectorId === connectorId);
+        const grant = data?.grants?.find((g) => g.connectorId === governanceId)
+          ?? data?.grants?.find((g) => g.connectorId === connectorId);
         setAllowed(new Set(grant?.allowedActions ?? []));
       })
       .catch(() => setAllowed(new Set()))
       .finally(() => setGrantsLoading(false));
-  }, [assistantId, connectorId, grantsApply]);
+  }, [assistantId, connectorId, governanceId, grantsApply]);
 
   useEffect(() => {
     fetchGrant();
@@ -170,7 +174,7 @@ export function ConnectorToolGovernance({
     setSaving(true);
     try {
       const res = await authFetch(
-        `${API_URL}/api/assistant-connector-grants/${assistantId}/${connectorId}`,
+        `${API_URL}/api/assistant-connector-grants/${assistantId}/${encodeURIComponent(governanceId)}`,
         {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },

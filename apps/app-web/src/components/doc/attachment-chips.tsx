@@ -15,6 +15,7 @@ import * as React from "react";
 import { AlertCircle, FileText, Loader2, Paperclip, X } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import type { Attachment } from "@/lib/use-file-attachments";
+import { cn } from "@/lib/utils";
 
 /**
  * Drop-target overlay shown while a file is dragged over a chat surface. The
@@ -38,15 +39,18 @@ export function FileDropOverlay({ active }: { active: boolean }) {
 export function AttachmentChips({
   attachments,
   onRemove,
+  className,
 }: {
   attachments: Attachment[];
   onRemove: (localId: string) => void;
+  /** Surface-specific tray spacing; compact comment composers need none. */
+  className?: string;
 }) {
   const t = useT().attachments;
   if (attachments.length === 0) return null;
 
   return (
-    <div className="flex flex-wrap gap-1.5">
+    <div className={cn("flex flex-wrap gap-1.5", className)}>
       {attachments.map((a) => {
         const isError = a.status === "error";
         return (

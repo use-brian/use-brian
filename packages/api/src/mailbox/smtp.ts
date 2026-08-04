@@ -48,6 +48,8 @@ export async function composeMailboxMessage(params: {
   subject: string
   /** Markdown source. */
   body: string
+  /** Resolved workspace-file bytes, composed as real MIME parts. */
+  attachments?: Array<{ filename: string; mime: string; data: Uint8Array }>
   inReplyTo?: string
   references?: string[]
 }): Promise<ComposedMailboxMessage> {
@@ -68,6 +70,15 @@ export async function composeMailboxMessage(params: {
     subject,
     text: rendered.text,
     html: rendered.html,
+    ...(params.attachments?.length
+      ? {
+          attachments: params.attachments.map((attachment) => ({
+            filename: attachment.filename,
+            contentType: attachment.mime,
+            content: Buffer.from(attachment.data),
+          })),
+        }
+      : {}),
     ...(params.inReplyTo ? { inReplyTo: sanitizeHeaderValue(params.inReplyTo) } : {}),
     ...(params.references?.length
       ? { references: params.references.map((r) => sanitizeHeaderValue(r)) }

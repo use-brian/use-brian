@@ -158,7 +158,7 @@ function ToolRow({
     : t.connectorToolList.classUnknown;
 
   return (
-    <div className="flex items-center justify-between gap-3 px-4 py-2.5">
+    <div data-tool-row={tool.name} className="flex items-center justify-between gap-3 px-4 py-2.5">
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className="text-[13px] font-medium truncate">{tool.name}</span>
