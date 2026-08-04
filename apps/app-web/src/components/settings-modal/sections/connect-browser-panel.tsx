@@ -26,14 +26,11 @@ import {
   type BrowserExtensionStatus,
 } from "@/lib/api/computer";
 import {
+  BROWSER_EXTENSION_INSTALL_URL,
   chromeMessenger,
   detectExtension,
   pairViaExtension,
 } from "@/lib/browser-extension-bridge";
-
-// Set to the published listing at P2 (Chrome Web Store publish). A search link
-// keeps the CTA honest pre-publish rather than pointing at a dead extension id.
-const EXTENSION_STORE_URL = "https://chromewebstore.google.com/search/Use%20Brian";
 
 const STATUS_POLL_MS = 5000;
 
@@ -244,7 +241,7 @@ export function ConnectBrowserPanel() {
             <p className="text-[11px] font-medium">{c.step1Title}</p>
             <p className="mt-0.5 text-[11px] text-muted-foreground">{c.step1Body}</p>
             <a
-              href={EXTENSION_STORE_URL}
+              href={BROWSER_EXTENSION_INSTALL_URL}
               target="_blank"
               rel="noopener noreferrer"
               className="mt-1 inline-flex h-8 items-center rounded-md border border-border px-3 text-xs font-medium hover:bg-accent"

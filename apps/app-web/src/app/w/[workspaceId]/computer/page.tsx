@@ -12,6 +12,8 @@
 import { use as usePromise, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { MonitorPlay } from "lucide-react";
+import { openWorkspaceSettings } from "@/components/settings-modal/settings-modal";
+import { BROWSER_EXTENSION_INSTALL_URL } from "@/lib/browser-extension-bridge";
 import { useT } from "@/lib/i18n/client";
 import {
   listActiveComputerTasks,
@@ -20,12 +22,49 @@ import {
 
 const POLL_MS = 2_000;
 
+/** Persistent getting-started copy for the no-live-session state. */
+export function BrowsersEmptyState() {
+  const t = useT().computer.sessions;
+
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-5 p-8 text-center">
+      <MonitorPlay className="size-8 text-muted-foreground/50" aria-hidden />
+      <div className="max-w-sm space-y-1">
+        <p className="text-sm font-medium text-foreground">{t.selectTitle}</p>
+        <p className="text-xs text-muted-foreground">{t.selectHint}</p>
+      </div>
+      <div className="w-full max-w-sm rounded-lg border border-border bg-muted/30 px-4 py-3">
+        <p className="text-xs font-medium text-foreground">{t.connectTitle}</p>
+        <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+          {t.connectHint}
+        </p>
+        <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
+          <a
+            href={BROWSER_EXTENSION_INSTALL_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex h-8 items-center justify-center rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+          >
+            {t.installAction}
+          </a>
+          <button
+            type="button"
+            onClick={() => openWorkspaceSettings("ws-browser-profiles")}
+            className="inline-flex h-8 items-center justify-center rounded-md border border-border bg-background px-3 text-xs font-medium text-foreground transition-colors hover:bg-accent"
+          >
+            {t.connectAction}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function BrowsersIndexPage(props: {
   params: Promise<{ workspaceId: string }>;
 }) {
   const { workspaceId } = usePromise(props.params);
   const router = useRouter();
-  const t = useT().computer.sessions;
 
   useEffect(() => {
     let cancelled = false;
@@ -48,13 +87,5 @@ export default function BrowsersIndexPage(props: {
     };
   }, [router, workspaceId]);
 
-  return (
-    <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
-      <MonitorPlay className="size-8 text-muted-foreground/50" aria-hidden />
-      <div className="max-w-sm space-y-1">
-        <p className="text-sm font-medium text-foreground">{t.selectTitle}</p>
-        <p className="text-xs text-muted-foreground">{t.selectHint}</p>
-      </div>
-    </div>
-  );
+  return <BrowsersEmptyState />;
 }

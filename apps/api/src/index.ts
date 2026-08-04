@@ -20,6 +20,7 @@ import dotenv from 'dotenv'
 import { bootOpenApi, type OpenApiEnv } from '@use-brian/api/boot.js'
 import { buildEpisodeIngestors } from '@use-brian/api/build-episode-ingestors.js'
 import { buildOpenChannelHosts } from '@use-brian/api/channel-hosts.js'
+import { loadLocalProviderPreference } from '@use-brian/api/local-provider-preference.js'
 
 dotenv.config()
 
@@ -30,6 +31,8 @@ dotenv.config()
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY
 const VERTEX_PROJECT_ID = process.env.VERTEX_PROJECT_ID
 const DASHSCOPE_API_KEY = process.env.DASHSCOPE_API_KEY
+const USEBRIAN_PREFERRED_PROVIDER =
+  process.env.USEBRIAN_PREFERRED_PROVIDER || (await loadLocalProviderPreference()) || undefined
 
 // JWT_SECRET is auto-generated + persisted by the launcher; for a bare boot we
 // fall back to a process-local random one (sessions don't survive a restart,
@@ -62,6 +65,7 @@ const env: OpenApiEnv = {
   FALLBACK_PROVIDER_ENABLED: process.env.FALLBACK_PROVIDER_ENABLED === 'true',
   ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
   DASHSCOPE_API_KEY: process.env.DASHSCOPE_API_KEY,
+  USEBRIAN_PREFERRED_PROVIDER,
   DASHSCOPE_BASE_URL: process.env.DASHSCOPE_BASE_URL,
   DASHSCOPE_VISION_MODEL: process.env.DASHSCOPE_VISION_MODEL,
   DASHSCOPE_ASR_MODEL: process.env.DASHSCOPE_ASR_MODEL,

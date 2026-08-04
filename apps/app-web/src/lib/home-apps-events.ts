@@ -5,7 +5,10 @@
  * stream (`workspace-events.ts`) dispatches this for `workspace_config` change
  * signals from any lane — the Studio "Mini apps" tab in this tab, an admin on
  * another device, a custom app that just dropped to `needs_consent`. Payloads
- * are signals, not data: subscribers re-fetch.
+ * from the workspace stream are signals, so subscribers re-fetch. A successful
+ * same-tab Studio save includes the server-confirmed `homeApps` order, letting
+ * persistent chrome adopt it synchronously before the user soft-navigates back
+ * to Home; the later server signal remains a repair/cross-client path.
  *
  * WHY THIS EXISTS AT ALL. The app-bar renders inside `WorkspaceChrome`, which
  * is mounted by the `/w/[workspaceId]` layout and therefore **never unmounts**
@@ -21,9 +24,29 @@
  * reading whenever a teammate reorders the strip.
  */
 
+import type { HomeAppEntry } from "@use-brian/shared/home-apps";
+
 export const HOME_APPS_REFRESH_EVENT = "sidan:home-apps-refresh";
 
 export type HomeAppsRefreshDetail = {
   /** Scopes the refresh; surfaces ignore other workspaces. */
   workspaceId: string | null;
+  /**
+   * Confirmed same-tab value. Omitted by server-stream and catch-up signals,
+   * whose subscribers re-fetch because the event carries no row data.
+   */
+  homeApps?: readonly HomeAppEntry[];
 };
+
+/** Publish a confirmed local save to persistent workspace chrome. */
+export function requestHomeAppsRefresh(
+  workspaceId: string | null,
+  homeApps?: readonly HomeAppEntry[],
+): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(
+    new CustomEvent<HomeAppsRefreshDetail>(HOME_APPS_REFRESH_EVENT, {
+      detail: { workspaceId, homeApps },
+    }),
+  );
+}

@@ -732,6 +732,9 @@ export const en = {
       ingestFailed: "Failed",
       ingestRemove: "Remove",
       ingestClear: "Clear",
+      linkedinArchiveAlone: "Add a LinkedIn ZIP by itself so every row can be reconciled.",
+      linkedinImportQueued: "Lossless import queued",
+      linkedinRowsImported: "rows imported",
     },
     // Cold-start setup checklist on the home landing (the home half of the
     // lifecycle-aware Studio prominence). Shown only while the workspace has no
@@ -1009,7 +1012,7 @@ export const en = {
       // Fallback — rendered when an unknown block kind reaches the renderer.
       unsupportedKind: "Unsupported block: {kind}",
     },
-    // Simple-table block — Notion-style edge controls and menus.
+    // Simple-table block: Notion-style edge controls and menus.
     table: {
       addRow: "Add row",
       addColumn: "Add column",
@@ -2065,6 +2068,12 @@ export const en = {
         browserProfiles: "Browser profiles",
         models: "Models",
         domains: "Domains",
+      },
+      source: {
+        version: "Version {hash}",
+        repository: "Source code",
+        viewVersion: "View version {hash} on GitHub",
+        viewRepository: "View source code on GitHub",
       },
       models: {
         title: "Models",
@@ -6571,6 +6580,11 @@ export const en = {
       selectTitle: "Watch a live browser",
       selectHint:
         "Pick a session on the left to watch or take over, or wait for an assistant to open one.",
+      connectTitle: "Use your own Chrome",
+      connectHint:
+        "Install the Use Brian extension, then pair My Browser in Browser profiles. Your assistant can then work in a tab you approve, using your existing sign-ins.",
+      installAction: "Install extension",
+      connectAction: "Pair in Browser profiles",
       statusRunning: "Running",
       statusPaused: "Paused",
       unnamed: "Browser session",

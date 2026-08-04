@@ -16,8 +16,8 @@ import {
 
 describe('[COMP:brain/edge-vocabulary] Edge vocabulary', () => {
   describe('constant tables', () => {
-    it('declares all 20 locked edge types', () => {
-      expect(EDGE_TYPES).toHaveLength(20)
+    it('declares all 21 locked edge types', () => {
+      expect(EDGE_TYPES).toHaveLength(21)
     })
 
     it('contains each named edge from data-model.md §Entity Links', () => {
@@ -34,6 +34,7 @@ describe('[COMP:brain/edge-vocabulary] Edge vocabulary', () => {
         'target_investor',
         'outreach_strategy_for',
         'mutual_connection',
+        'connected_to',
         'discussed_with',
         'depends_on',
         'mentioned_publicly_at',
@@ -110,6 +111,19 @@ describe('[COMP:brain/edge-vocabulary] Edge vocabulary', () => {
         target_entity_kind: 'company',
       })
       expect(result.ok).toBe(true)
+    })
+
+    it('distinguishes a direct person connection from a mutual connection', () => {
+      expect(
+        validateEdge({
+          edge_type: 'connected_to',
+          source_kind: 'entity',
+          source_entity_kind: 'person',
+          target_kind: 'entity',
+          target_entity_kind: 'person',
+        }).ok,
+      ).toBe(true)
+      expect(getEdgeSpec('connected_to').description).toMatch(/direct/)
     })
 
     it('accepts mentioned with any source endpoint kind targeting an entity', () => {

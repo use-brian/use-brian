@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { z } from 'zod'
 import { buildToolIndex, createMcpSearchTools } from '../tool-search.js'
 import type { McpSettingsStore, McpServerConfig, McpToolSetting } from '../types.js'
+import { buildTool } from '../../tools/types.js'
 
 function makeFakeSettingsStore(overrides: Map<string, McpToolSetting> = new Map()): McpSettingsStore {
   return {
@@ -171,6 +172,56 @@ describe('[COMP:mcp/tool-search] createMcpSearchTools', () => {
     const text = String(result.data)
     expect(text).toContain('drep_id')
     expect(text).toContain('limit')
+  })
+
+  it('limits an exact lookup to one compact tool shape while retaining nested fields and enums', async () => {
+    const createEvent = buildTool({
+      name: 'googleCalendarCreateEvent',
+      description: 'Create a Google Calendar event.',
+      inputSchema: z.object({
+        summary: z.string(),
+        reminders: z.object({
+          useDefault: z.boolean(),
+          overrides: z.array(z.object({
+            method: z.enum(['email', 'popup']),
+            minutes: z.number(),
+          })).optional(),
+        }).optional(),
+      }),
+      execute: async () => ({ data: {} }),
+    })
+    const updateEvent = buildTool({
+      name: 'googleCalendarUpdateEvent',
+      description: 'Update a Google Calendar event.',
+      inputSchema: z.object({ eventId: z.string() }),
+      execute: async () => ({ data: {} }),
+    })
+    const index = buildToolIndex([
+      { kind: 'local', serverName: 'gcal', tools: [createEvent, updateEvent] },
+    ])
+    const [searchTool] = createMcpSearchTools({
+      index,
+      settingsStore: makeFakeSettingsStore(),
+      assistantId: 'a1',
+      userId: 'u1',
+      callMcpTool: vi.fn(async () => ({})),
+    })
+
+    const result = await searchTool.execute({ query: 'create calendar event', limit: 1 }, ctx)
+    const text = String(result.data)
+
+    expect(text).toContain('Found 1 matching tools')
+    expect(text).toContain('googleCalendarCreateEvent')
+    expect(text).not.toContain('googleCalendarUpdateEvent')
+    expect(text).toContain('reminders?: { useDefault: boolean; overrides?: Array<{ method: "email" | "popup"; minutes: number }> }')
+  })
+
+  it('bounds mcp_search result limits to 1-8', () => {
+    const [searchTool] = makeSearchTools().tools
+    expect(searchTool.inputSchema.safeParse({ query: 'calendar', limit: 1 }).success).toBe(true)
+    expect(searchTool.inputSchema.safeParse({ query: 'calendar', limit: 8 }).success).toBe(true)
+    expect(searchTool.inputSchema.safeParse({ query: 'calendar', limit: 0 }).success).toBe(false)
+    expect(searchTool.inputSchema.safeParse({ query: 'calendar', limit: 9 }).success).toBe(false)
   })
 
   it('mcp_search ranks name matches higher than description matches', async () => {
@@ -375,8 +426,11 @@ describe('[COMP:mcp/tool-search] createMcpSearchTools', () => {
     await tools[1].execute({ server: 'Notion', tool: 'create_page', args: { title: 'test' } }, ctx)
 
     // Then: search should NOT return the blocked tool
-    const searchResult = await tools[0].execute({ query: 'create page' }, ctx)
-    expect(String(searchResult.data)).not.toContain('create_page')
+    const searchResult = await tools[0].execute({ query: 'create page', limit: 1 }, ctx)
+    const searchText = String(searchResult.data)
+    expect(searchText).not.toContain('create_page')
+    expect(searchText).toContain('search_pages')
+    expect(searchText).not.toContain('No tools found')
   })
 
   it('re-calling a blocked tool gets immediate rejection without policy lookup', async () => {

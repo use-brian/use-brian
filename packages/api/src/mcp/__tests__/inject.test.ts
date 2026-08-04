@@ -30,12 +30,17 @@ const refreshGoogleAccessToken = vi.fn(
 const getGoogleTask = vi.fn(
   async (_token: string, _taskListId: string, _taskId: string) => ({ title: 'Standup prep' }),
 )
+const getCalendarEvent = vi.fn(
+  async (_token: string, eventId: string, _calendarId: string) => ({ id: eventId, summary: 'Planning' }),
+)
 vi.mock('../../google/client.js', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   refreshGoogleAccessToken: (refreshToken: string, clientId: string, clientSecret: string) =>
     refreshGoogleAccessToken(refreshToken, clientId, clientSecret),
   getGoogleTask: (token: string, taskListId: string, taskId: string) =>
     getGoogleTask(token, taskListId, taskId),
+  getCalendarEvent: (token: string, eventId: string, calendarId: string) =>
+    getCalendarEvent(token, eventId, calendarId),
 }))
 
 // Custom remote MCP discovery / calls — stubbed so the tests never hit the
@@ -737,6 +742,7 @@ describe('[COMP:api/mcp-inject] multi-account Google built-ins', () => {
     )
     refreshGoogleAccessToken.mockClear()
     getGoogleTask.mockClear()
+    getCalendarEvent.mockClear()
   })
   afterEach(() => {
     getConnectorConfig.mockReset()
@@ -830,6 +836,25 @@ describe('[COMP:api/mcp-inject] multi-account Google built-ins', () => {
     // and the task fetched with the VARIANT account's access token.
     expect(getGoogleTask).toHaveBeenCalledWith('access-refresh-ci-gc2', '@default', 'task-1')
     expect(enriched).toMatchObject({ task: 'Standup prep' })
+  })
+
+  it('enriches an event mutation from the calendar it will modify', async () => {
+    const tools = new Map()
+    const { connectorStore, connectorInstanceStore } = googleStores()
+    const result = await injectMcpTools({
+      userId: 'u-1', assistantId: 'a-1', tools,
+      connectorStore: connectorStore as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorInstanceStore: connectorInstanceStore as never,
+      keepBuiltinsDirect: true,
+    })
+
+    await result.enrichConfirmation('googleCalendarDeleteEvent', {
+      eventId: 'event-1', calendarId: 'team@example.com',
+    })
+    expect(getCalendarEvent).toHaveBeenCalledWith(
+      'access-refresh-primary', 'event-1', 'team@example.com',
+    )
   })
 
   it('single account per Google provider: canonical tools only, no variants', async () => {

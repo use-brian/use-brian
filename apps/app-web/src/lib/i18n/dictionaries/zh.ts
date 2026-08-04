@@ -639,6 +639,9 @@ export const zh: Dictionary = {
       ingestFailed: "失敗",
       ingestRemove: "移除",
       ingestClear: "清除",
+      linkedinArchiveAlone: "請單獨加入 LinkedIn ZIP，以便核對每一列資料。",
+      linkedinImportQueued: "無損匯入已排程",
+      linkedinRowsImported: "列已匯入",
     },
     setupChecklist: {
       ariaLabel: "設定你的工作區",
@@ -1873,6 +1876,12 @@ export const zh: Dictionary = {
         browserProfiles: "瀏覽器身分",
         models: "模型",
         domains: "網域",
+      },
+      source: {
+        version: "版本 {hash}",
+        repository: "原始碼",
+        viewVersion: "在 GitHub 查看版本 {hash}",
+        viewRepository: "在 GitHub 查看原始碼",
       },
       models: {
         title: "模型",
@@ -6298,6 +6307,11 @@ export const zh: Dictionary = {
       liveCount: "{count} 個執行中",
       selectTitle: "觀看即時瀏覽器",
       selectHint: "在左側選擇一個工作階段來觀看或接管，或等待助理開啟瀏覽器。",
+      connectTitle: "使用你自己的 Chrome",
+      connectHint:
+        "安裝 Use Brian 擴充功能，然後在「瀏覽器身分」中配對「我的瀏覽器」。之後助理就能在你核准的分頁中，使用現有的登入狀態操作。",
+      installAction: "安裝擴充功能",
+      connectAction: "在瀏覽器身分中配對",
       statusRunning: "執行中",
       statusPaused: "已暫停",
       unnamed: "瀏覽器工作階段",

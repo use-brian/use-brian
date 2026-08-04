@@ -80,6 +80,7 @@ import {
   type OperatorAppKey,
 } from "@/lib/operator-apps";
 import { surfaceFromPathname } from "@/lib/doc-page-url";
+import { requestHomeAppsRefresh } from "@/lib/home-apps-events";
 import {
   getWorkspaceHomeApps,
   getWorkspaceRole,
@@ -166,7 +167,13 @@ export default function StudioMiniAppsPage() {
       setError(null);
       setHomeApps(next); // optimistic — a preference should feel instant
       try {
-        setHomeApps(await setWorkspaceHomeApps(workspaceId, next));
+        const confirmed = await setWorkspaceHomeApps(workspaceId, next);
+        setHomeApps(confirmed);
+        // The Home/sidebar state lives in a persistent parent layout, so this
+        // page's local optimistic state cannot update it. Hand the confirmed
+        // order to that provider before the user soft-navigates back Home;
+        // workspace_config SSE remains the cross-tab/device repair path.
+        requestHomeAppsRefresh(workspaceId, confirmed);
       } catch {
         setHomeApps(previous); // the strip must never claim a state the server refused
         setError(copy.saveFailed);

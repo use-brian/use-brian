@@ -17,8 +17,10 @@ const ctx = {
 
 function mockApi(overrides?: Partial<GoogleCalendarApi>): GoogleCalendarApi {
   return {
+    listCalendars: vi.fn().mockResolvedValue([]),
     listEvents: vi.fn().mockResolvedValue([]),
     getEvent: vi.fn().mockResolvedValue({ id: 'evt1', summary: 'Test Event' }),
+    queryFreeBusy: vi.fn().mockResolvedValue({ calendars: {}, available: [] }),
     createEvent: vi.fn().mockResolvedValue({ id: 'evt-new' }),
     updateEvent: vi.fn().mockResolvedValue({ id: 'evt1', summary: 'Updated' }),
     deleteEvent: vi.fn().mockResolvedValue(undefined),
@@ -70,6 +72,11 @@ function zodFieldToJsonSchema(field: { _def: Record<string, unknown> }): Record<
       if (def.description && !inner.description) inner.description = def.description as string
       return inner
     }
+    case 'ZodEffects': {
+      const inner = zodFieldToJsonSchema({ _def: (def.schema as { _def: Record<string, unknown> })._def })
+      if (def.description && !inner.description) inner.description = def.description as string
+      return inner
+    }
     case 'ZodEnum':
       return { type: 'string', enum: def.values as string[], ...(def.description ? { description: def.description as string } : {}) }
     case 'ZodArray':
@@ -86,14 +93,16 @@ function zodFieldToJsonSchema(field: { _def: Record<string, unknown> }): Record<
 // ── Tests ────────────────────────────────────────────────────
 
 describe('[COMP:tools/google-calendar] Google Calendar tools', () => {
-  it('creates all 5 calendar tools', () => {
+  it('creates all 7 calendar tools', () => {
     const tools = createGoogleCalendarTools(mockApi())
-    expect(tools).toHaveLength(5)
+    expect(tools).toHaveLength(7)
     expect(tools.map((t) => t.name).sort()).toEqual([
       'googleCalendarCreateEvent',
       'googleCalendarDeleteEvent',
       'googleCalendarGetEvent',
+      'googleCalendarListCalendars',
       'googleCalendarListEvents',
+      'googleCalendarQueryFreeBusy',
       'googleCalendarUpdateEvent',
     ])
   })
@@ -194,6 +203,249 @@ describe('[COMP:tools/google-calendar] Google Calendar tools', () => {
 
     expect(api.updateEvent).toHaveBeenCalledWith('evt-789', {
       responseStatus: 'declined',
+    })
+  })
+
+  // ── Recurring-series creation ───────────────────────────────
+
+  it('advertises optional recurrence lines in the create schema seen by the model', () => {
+    const tools = createGoogleCalendarTools(mockApi())
+    const createTool = tools.find((t) => t.name === 'googleCalendarCreateEvent')!
+    const jsonSchema = jsonSchemaFromZod(createTool.inputSchema)
+
+    expect(jsonSchema.properties.recurrence).toMatchObject({ type: 'array' })
+    expect(jsonSchema.properties.recurrence.description).toMatch(/RRULE/)
+    expect(jsonSchema.required ?? []).not.toContain('recurrence')
+    expect(createTool.description).toMatch(/recurring series/i)
+    expect(createTool.description).toContain('RRULE:FREQ=WEEKLY;BYDAY=TU')
+  })
+
+  it('passes recurrence and the user timezone through for one recurring series', async () => {
+    const api = mockApi()
+    const tools = createGoogleCalendarTools(api, 'Asia/Hong_Kong')
+    const createTool = tools.find((t) => t.name === 'googleCalendarCreateEvent')!
+
+    await createTool.execute({
+      summary: 'Running',
+      start: '2026-08-11T18:30:00+08:00',
+      end: '2026-08-11T22:00:00+08:00',
+      recurrence: ['RRULE:FREQ=WEEKLY;BYDAY=TU'],
+    }, ctx)
+
+    expect(api.createEvent).toHaveBeenCalledTimes(1)
+    expect(api.createEvent).toHaveBeenCalledWith({
+      summary: 'Running',
+      start: '2026-08-11T18:30:00+08:00',
+      end: '2026-08-11T22:00:00+08:00',
+      description: undefined,
+      location: undefined,
+      attendees: undefined,
+      recurrence: ['RRULE:FREQ=WEEKLY;BYDAY=TU'],
+      timeZone: 'Asia/Hong_Kong',
+    })
+  })
+
+  it('normalizes a single recurrence string and falls back to UTC without a user timezone', async () => {
+    const api = mockApi()
+    const tools = createGoogleCalendarTools(api)
+    const createTool = tools.find((t) => t.name === 'googleCalendarCreateEvent')!
+
+    const parsed = createTool.inputSchema.parse({
+      summary: 'Daily stand-up',
+      start: '2026-08-05T09:00:00Z',
+      end: '2026-08-05T09:15:00Z',
+      recurrence: 'RRULE:FREQ=DAILY;COUNT=5',
+    })
+    await createTool.execute(parsed, ctx)
+
+    expect(api.createEvent).toHaveBeenCalledWith(expect.objectContaining({
+      recurrence: ['RRULE:FREQ=DAILY;COUNT=5'],
+      timeZone: 'UTC',
+    }))
+  })
+
+  it('accepts JSON-stringified recurrence arrays but rejects DTSTART lines', async () => {
+    const api = mockApi()
+    const tools = createGoogleCalendarTools(api, 'Asia/Hong_Kong')
+    const createTool = tools.find((t) => t.name === 'googleCalendarCreateEvent')!
+
+    const parsed = createTool.inputSchema.parse({
+      summary: 'Weekdays',
+      start: '2026-08-05T09:00:00+08:00',
+      end: '2026-08-05T09:30:00+08:00',
+      recurrence: '["RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR"]',
+    })
+    await createTool.execute(parsed, ctx)
+    expect(api.createEvent).toHaveBeenCalledWith(expect.objectContaining({
+      recurrence: ['RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR'],
+    }))
+
+    expect(() => createTool.inputSchema.parse({
+      summary: 'Invalid series',
+      start: '2026-08-05T09:00:00+08:00',
+      end: '2026-08-05T09:30:00+08:00',
+      recurrence: ['DTSTART:20260805T090000'],
+    })).toThrow(/RRULE, EXRULE, RDATE, or EXDATE/)
+  })
+
+  it('keeps single-event creation unchanged without recurrence or timezone metadata', async () => {
+    const api = mockApi()
+    const tools = createGoogleCalendarTools(api, 'Asia/Hong_Kong')
+    const createTool = tools.find((t) => t.name === 'googleCalendarCreateEvent')!
+
+    await createTool.execute({
+      summary: 'One-off',
+      start: '2026-08-05T09:00:00+08:00',
+      end: '2026-08-05T09:30:00+08:00',
+    }, ctx)
+
+    expect(api.createEvent).toHaveBeenCalledWith({
+      summary: 'One-off',
+      start: '2026-08-05T09:00:00+08:00',
+      end: '2026-08-05T09:30:00+08:00',
+    })
+  })
+
+  it('passes all-day, secondary-calendar, Meet, reminder, guest, attachment, and privacy intent', async () => {
+    const api = mockApi()
+    const tools = createGoogleCalendarTools(api, 'Asia/Hong_Kong')
+    const createTool = tools.find((t) => t.name === 'googleCalendarCreateEvent')!
+    const parsed = createTool.inputSchema.parse({
+      summary: 'Company retreat',
+      start: '2026-09-18',
+      end: '2026-09-20',
+      allDay: true,
+      calendarId: 'work@example.com',
+      attendees: ['alice@example.com', { email: 'room@example.com', resource: true }],
+      conference: 'google_meet',
+      reminders: { useDefault: false, overrides: [{ method: 'popup', minutes: 30 }] },
+      availability: 'free',
+      visibility: 'private',
+      guestPermissions: { canInviteOthers: false, canModify: true },
+      attachments: [{ fileUrl: 'https://drive.google.com/file/d/brief', title: 'Brief' }],
+    })
+
+    await createTool.execute(parsed, ctx)
+
+    expect(api.createEvent).toHaveBeenCalledWith(expect.objectContaining({
+      allDay: true,
+      calendarId: 'work@example.com',
+      attendees: [
+        { email: 'alice@example.com' },
+        { email: 'room@example.com', resource: true },
+      ],
+      conference: 'google_meet',
+      reminders: { useDefault: false, overrides: [{ method: 'popup', minutes: 30 }] },
+      availability: 'free',
+      visibility: 'private',
+      guestPermissions: { canInviteOthers: false, canModify: true },
+      attachments: [{ fileUrl: 'https://drive.google.com/file/d/brief', title: 'Brief' }],
+    }))
+    expect(api.createEvent).toHaveBeenCalledWith(expect.not.objectContaining({ timeZone: expect.anything() }))
+  })
+
+  it('passes Calendar status-event intent without provider-specific expansion', async () => {
+    const api = mockApi()
+    const tools = createGoogleCalendarTools(api)
+    const createTool = tools.find((t) => t.name === 'googleCalendarCreateEvent')!
+
+    await createTool.execute({
+      summary: 'Heads down',
+      start: '2026-08-05T09:00:00Z',
+      end: '2026-08-05T11:00:00Z',
+      eventType: 'focusTime',
+      focusTimeProperties: {
+        autoDeclineMode: 'declineOnlyNewConflictingInvitations',
+        declineMessage: 'In focus time',
+        chatStatus: 'doNotDisturb',
+      },
+    }, ctx)
+
+    expect(api.createEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventType: 'focusTime',
+      focusTimeProperties: {
+        autoDeclineMode: 'declineOnlyNewConflictingInvitations',
+        declineMessage: 'In focus time',
+        chatStatus: 'doNotDisturb',
+      },
+    }))
+  })
+
+  it('passes safe attendee/attachment changes and recurring scope on update', async () => {
+    const api = mockApi()
+    const tools = createGoogleCalendarTools(api, 'Asia/Hong_Kong')
+    const updateTool = tools.find((t) => t.name === 'googleCalendarUpdateEvent')!
+    const parsed = updateTool.inputSchema.parse({
+      eventId: 'instance-2',
+      calendarId: 'work@example.com',
+      recurringScope: 'following',
+      attendeeChanges: {
+        add: ['new@example.com'],
+        remove: ['old@example.com'],
+      },
+      attachmentChanges: {
+        add: [{ fileUrl: 'https://drive.google.com/file/d/new' }],
+        removeFileUrls: ['https://drive.google.com/file/d/old'],
+      },
+      conference: 'google_meet',
+      availability: 'busy',
+    })
+
+    await updateTool.execute(parsed, ctx)
+
+    expect(api.updateEvent).toHaveBeenCalledWith('instance-2', expect.objectContaining({
+      calendarId: 'work@example.com',
+      recurringScope: 'following',
+      attendeeChanges: {
+        add: [{ email: 'new@example.com' }],
+        remove: ['old@example.com'],
+      },
+      attachmentChanges: {
+        add: [{ fileUrl: 'https://drive.google.com/file/d/new' }],
+        removeFileUrls: ['https://drive.google.com/file/d/old'],
+      },
+      conference: 'google_meet',
+      availability: 'busy',
+      timeZone: 'Asia/Hong_Kong',
+    }))
+  })
+
+  it('passes calendar and recurring scope to delete', async () => {
+    const api = mockApi()
+    const tools = createGoogleCalendarTools(api)
+    const deleteTool = tools.find((t) => t.name === 'googleCalendarDeleteEvent')!
+
+    await deleteTool.execute({
+      eventId: 'instance-2',
+      calendarId: 'work@example.com',
+      recurringScope: 'series',
+    }, ctx)
+
+    expect(api.deleteEvent).toHaveBeenCalledWith('instance-2', 'work@example.com', 'series')
+  })
+
+  it('lists calendars and queries common free/busy through dedicated read tools', async () => {
+    const api = mockApi({
+      listCalendars: vi.fn().mockResolvedValue([{ id: 'primary', primary: true }]),
+      queryFreeBusy: vi.fn().mockResolvedValue({ available: [] }),
+    })
+    const tools = createGoogleCalendarTools(api, 'Asia/Hong_Kong')
+
+    const calendars = await tools.find((t) => t.name === 'googleCalendarListCalendars')!.execute({}, ctx)
+    expect(calendars.data).toEqual([{ id: 'primary', primary: true }])
+
+    await tools.find((t) => t.name === 'googleCalendarQueryFreeBusy')!.execute({
+      timeMin: '2026-08-05T09:00:00+08:00',
+      timeMax: '2026-08-05T18:00:00+08:00',
+      calendarIds: ['primary', 'alice@example.com'],
+      durationMinutes: 60,
+    }, ctx)
+    expect(api.queryFreeBusy).toHaveBeenCalledWith({
+      timeMin: '2026-08-05T09:00:00+08:00',
+      timeMax: '2026-08-05T18:00:00+08:00',
+      calendarIds: ['primary', 'alice@example.com'],
+      durationMinutes: 60,
+      timeZone: 'Asia/Hong_Kong',
     })
   })
 
@@ -310,6 +562,27 @@ describe('[COMP:tools/google-calendar] Google Calendar tools', () => {
     // 08:15 UTC = 16:15 HKT
     expect(events[0].localStart).toMatch(/4:15\s*PM/)
     expect(events[0].localEnd).toMatch(/5:15\s*PM/)
+  })
+
+  it('keeps recurring parent identity and original occurrence time in list results', async () => {
+    const api = mockApi({
+      listEvents: vi.fn().mockResolvedValue([{
+        id: 'instance-2',
+        summary: 'Weekly run',
+        recurringEventId: 'series-1',
+        originalStartTime: { dateTime: '2026-08-11T10:30:00Z' },
+        start: { dateTime: '2026-08-11T11:00:00Z' },
+        end: { dateTime: '2026-08-11T12:00:00Z' },
+      }]),
+    })
+    const tools = createGoogleCalendarTools(api, 'Asia/Hong_Kong')
+    const result = await tools.find((t) => t.name === 'googleCalendarListEvents')!.execute({}, ctx)
+
+    expect((result.data as Array<Record<string, unknown>>)[0]).toMatchObject({
+      recurringEventId: 'series-1',
+      originalStartTime: { dateTime: '2026-08-11T10:30:00Z' },
+      localOriginalStart: expect.stringMatching(/6:30\s*PM/),
+    })
   })
 
   it('enriches getEvent result with localStart/localEnd in user timezone', async () => {

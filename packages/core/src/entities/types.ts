@@ -53,6 +53,7 @@ export const EDGE_TYPES = [
   'target_investor',
   'outreach_strategy_for',
   'mutual_connection',
+  'connected_to',
   'discussed_with',
   'depends_on',
   'mentioned_publicly_at',

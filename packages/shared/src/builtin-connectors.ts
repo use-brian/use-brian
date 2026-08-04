@@ -62,8 +62,10 @@ export type BuiltinConnectorTool = {
  */
 export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = {
   gcal: [
+    { name: 'googleCalendarListCalendars', description: 'List available calendars and access roles', classification: 'read', defaultPolicy: 'allow' },
     { name: 'googleCalendarListEvents', description: 'List upcoming calendar events', classification: 'read', defaultPolicy: 'allow' },
     { name: 'googleCalendarGetEvent', description: 'Get a specific calendar event', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'googleCalendarQueryFreeBusy', description: 'Find common availability across calendars or attendees', classification: 'read', defaultPolicy: 'allow' },
     { name: 'googleCalendarCreateEvent', description: 'Create a new calendar event', classification: 'write', defaultPolicy: 'ask' },
     { name: 'googleCalendarUpdateEvent', description: 'Update an existing calendar event or RSVP', classification: 'write', defaultPolicy: 'ask' },
     { name: 'googleCalendarDeleteEvent', description: 'Delete a calendar event', classification: 'write', defaultPolicy: 'ask' },

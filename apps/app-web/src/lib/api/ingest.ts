@@ -1,12 +1,14 @@
 /**
- * File-ingest SDK (app-web) — POST /api/files/ingest.
+ * File-ingest SDK (app-web) — ordinary files use POST /api/files/ingest;
+ * LinkedIn ZIP archives use the dedicated lossless /api/imports/linkedin queue.
  *
  * One multipart request stores each file's raw bytes in the workspace brain
  * AND decomposes its content into entities / memories / tasks (Pipeline B),
  * server-side and deterministically (no chat turn). Returns a per-file result.
  * Backs the Home "Add files to your brain" drop block.
  *
- * Spec: docs/architecture/features/files.md -> "Direct ingest".
+ * Specs: docs/architecture/features/files.md -> "Direct ingest" and
+ * docs/architecture/brain/linkedin-import.md.
  */
 
 import { authFetch } from "@/lib/auth-fetch";
@@ -31,6 +33,12 @@ export type IngestFileResult = {
   /** Content was decomposed through Pipeline B (false = stored only). */
   decomposed?: boolean;
   counts?: IngestCounts;
+  /** Dedicated, lossless LinkedIn archive queue result (ZIPs bypass Pipeline B). */
+  linkedinImport?: {
+    runId: string;
+    status: "pending" | "processing" | "completed" | "failed";
+    rows: number;
+  };
   error?: string;
 };
 
@@ -64,6 +72,81 @@ export async function ingestFiles(
   }
   const data = (await res.json()) as { files: IngestFileResult[] };
   return data.files;
+}
+
+type LinkedInImportResponse = {
+  run: {
+    id: string;
+    status: "pending" | "processing" | "completed" | "failed";
+    counts: { rows: number };
+    error?: string | null;
+  };
+};
+
+type LinkedInImportPollOptions = {
+  pollIntervalMs?: number;
+  timeoutMs?: number;
+};
+
+const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+function linkedInResult(file: File, data: LinkedInImportResponse): IngestFileResult {
+  return {
+    fileName: file.name,
+    ok: data.run.status === "completed",
+    linkedinImport: {
+      runId: data.run.id,
+      status: data.run.status,
+      rows: data.run.counts.rows,
+    },
+    ...(data.run.status === "failed" ? { error: data.run.error ?? "LinkedIn import failed" } : {}),
+  };
+}
+
+/**
+ * Store + enqueue a complete LinkedIn data-export ZIP. The backend preserves
+ * every member/row and builds the identity/referral graph asynchronously.
+ */
+export async function ingestLinkedInArchive(
+  workspaceId: string,
+  file: File,
+  options: LinkedInImportPollOptions = {},
+): Promise<IngestFileResult> {
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("workspaceId", workspaceId);
+  const res = await authFetch(`${API_URL}/api/imports/linkedin`, {
+    method: "POST",
+    body: formData,
+  });
+  const data = (await res.json().catch(() => null)) as
+    | (LinkedInImportResponse & { error?: string })
+    | null;
+  if (!res.ok || !data?.run) {
+    throw new Error(data?.error ?? `LinkedIn import failed (HTTP ${res.status})`);
+  }
+  if (data.run.status === "completed" || data.run.status === "failed") {
+    return linkedInResult(file, data);
+  }
+
+  const pollIntervalMs = options.pollIntervalMs ?? 2_000;
+  const deadline = Date.now() + (options.timeoutMs ?? 30 * 60_000);
+  while (Date.now() <= deadline) {
+    await wait(pollIntervalMs);
+    const statusRes = await authFetch(
+      `${API_URL}/api/imports/linkedin/${encodeURIComponent(data.run.id)}`,
+    );
+    const statusData = (await statusRes.json().catch(() => null)) as
+      | (LinkedInImportResponse & { error?: string })
+      | null;
+    if (!statusRes.ok || !statusData?.run) {
+      throw new Error(statusData?.error ?? `LinkedIn import status failed (HTTP ${statusRes.status})`);
+    }
+    if (statusData.run.status === "completed" || statusData.run.status === "failed") {
+      return linkedInResult(file, statusData);
+    }
+  }
+  throw new Error(`LinkedIn import ${data.run.id} is still processing`);
 }
 
 /** Outcome of a stored-file (re-)ingest request. */

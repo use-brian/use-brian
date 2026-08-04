@@ -650,6 +650,9 @@ export const ja: Dictionary = {
       ingestFailed: "失敗",
       ingestRemove: "削除",
       ingestClear: "クリア",
+      linkedinArchiveAlone: "全行を照合するため、LinkedIn ZIP は単独で追加してください。",
+      linkedinImportQueued: "ロスレス取り込みをキューに追加済み",
+      linkedinRowsImported: "行を取り込み済み",
     },
     setupChecklist: {
       ariaLabel: "ワークスペースをセットアップ",
@@ -1886,6 +1889,12 @@ export const ja: Dictionary = {
         browserProfiles: "ブラウザプロフィール",
         models: "モデル",
         domains: "ドメイン",
+      },
+      source: {
+        version: "バージョン {hash}",
+        repository: "ソースコード",
+        viewVersion: "GitHub でバージョン {hash} を表示",
+        viewRepository: "GitHub でソースコードを表示",
       },
       models: {
         title: "モデル",
@@ -6359,6 +6368,11 @@ export const ja: Dictionary = {
       selectTitle: "ライブブラウザを見る",
       selectHint:
         "左のセッションを選んで見るか操作を引き継ぐか、アシスタントがブラウザを開くのを待ちます。",
+      connectTitle: "自分のChromeを使う",
+      connectHint:
+        "Use Brian拡張機能をインストールし、「ブラウザプロフィール」で「マイブラウザ」をペアリングします。すると、既存のログイン情報を使って、許可したタブでアシスタントが操作できます。",
+      installAction: "拡張機能をインストール",
+      connectAction: "ブラウザプロフィールでペアリング",
       statusRunning: "実行中",
       statusPaused: "一時停止",
       unnamed: "ブラウザセッション",

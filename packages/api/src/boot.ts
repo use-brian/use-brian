@@ -195,6 +195,7 @@ import { createRoomIngestor } from './ingest/room-ingest.js'
 import { sessionQuestionRoutes } from './routes/sessions-questions.js'
 import { analyticsRoutes } from './routes/analytics.js'
 import { fileRoutes } from './routes/files.js'
+import { linkedinImportRoutes } from './routes/linkedin-imports.js'
 import { docFilesRoutes } from './routes/doc-files.js'
 import { bundleStoragePath, deleteBundle, homeAppRoutes } from './routes/home-apps.js'
 import {
@@ -342,6 +343,7 @@ import {
 import { createArtifactPromoter } from './files/artifact-promote.js'
 import { createFileIngestor } from './files/ingest-file.js'
 import { createFileIngestWorker } from './files/file-ingest-worker.js'
+import { createLinkedInImportWorker } from './linkedin-import/worker.js'
 import { enqueueFileIngestJob, claimNextFileIngestJob, markFileIngestJobDone, markFileIngestJobFailed } from './db/file-ingest-jobs-store.js'
 import { createCachedByoFilesResolver, type WorkspaceStorageBinding } from './files/byo-files-resolver.js'
 import { sweepStaleByoBindings } from './files/byo-staleness.js'
@@ -542,6 +544,9 @@ export interface OpenApiEnv {
   // routing and every menu (model-registry plan L12); the base URL is a
   // constant in the provider module, never an env var.
   DASHSCOPE_API_KEY?: string
+  // OSS provider preference restored by the standalone entry from
+  // ~/.usebrian/config.json. An explicit process environment value wins there.
+  USEBRIAN_PREFERRED_PROVIDER?: string
   // Optional DashScope base-URL override. Unset = the international (Singapore)
   // endpoint. Set to the Beijing host (https://dashscope.aliyuncs.com/compatible-mode/v1)
   // for a mainland-China deployment. Applies to Qwen chat, embeddings, and media.
@@ -1334,7 +1339,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const providerInstances: Record<string, LLMProvider> = {}
   const configuredProviders = new MutableProviderAvailability()
   configuredProviders.setPreferredProvider(
-    normalizeOssPreferredProvider(process.env.USEBRIAN_PREFERRED_PROVIDER),
+    normalizeOssPreferredProvider(env.USEBRIAN_PREFERRED_PROVIDER),
   )
   let codexProviderManager: CodexProviderManager | undefined
   if (env.GEMINI_API_KEY || env.VERTEX_PROJECT_ID) {
@@ -3743,6 +3748,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api/feedback', optionalAuth(env.JWT_SECRET), feedbackRoutes())
 
   app.use('/api/files', optionalAuth(env.JWT_SECRET), fileRoutes(fileStore, fileIngestor as never, artifactPromoter))
+  if (filesApi) {
+    app.use(
+      '/api/imports/linkedin',
+      requireAuth(env.JWT_SECRET),
+      linkedinImportRoutes({ filesApi }),
+    )
+  }
   if (filesApi && filesBlobClient) {
     app.use('/api/doc-files', requireAuth(env.JWT_SECRET), docFilesRoutes({
       filesApi,
@@ -5103,6 +5115,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     : null
   if (runWorkers && fileIngestWorker) fileIngestWorker.start()
 
+  // ── Lossless LinkedIn archive worker ──
+  // Own deterministic queue: exact ZIP/member/row ledger first, conservative
+  // identity + referral graph projection second. No Pipeline-B/model caps.
+  const linkedinImportWorker = filesApi
+    ? createLinkedInImportWorker({ filesApi })
+    : null
+  if (runWorkers && linkedinImportWorker) linkedinImportWorker.start()
+
   // ── Recording worker ──
   // Structural synthesis uses the already-resolved extraction model rather than
   // assuming Gemini. This keeps the hosted callback reusable in OSS and allows
@@ -5722,6 +5742,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     externalSinkRelay.stop()
     stuckSessionSweeper.stop()
     fileIngestWorker?.stop()
+    linkedinImportWorker?.stop()
     recordingProcessWorker?.stop()
     await codexProviderManager?.close()
     if (fileCacheReaper) stopJitteredInterval(fileCacheReaper)

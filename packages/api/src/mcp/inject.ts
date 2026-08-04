@@ -38,7 +38,8 @@ import { createHealthReporter, wrapToolsWithHealthProbe, connectorReconnectNotic
 import { buildConnectorAuthHeaders, mergeValidatedHeaders, preflightHeadersToRecord, actorIdentityHeaders, type ActorIdentity } from './auth-headers.js'
 import {
   refreshGoogleAccessToken,
-  listCalendarEvents, getCalendarEvent, createCalendarEvent, updateCalendarEvent, deleteCalendarEvent,
+  listCalendarList, listCalendarEvents, getCalendarEvent, queryCalendarFreeBusy,
+  createCalendarEvent, updateCalendarEvent, deleteCalendarEvent,
   listGmailMessages, getGmailMessage, sendGmailMessage,
   listTaskLists, listGoogleTasks, getGoogleTask, createGoogleTask, updateGoogleTask, deleteGoogleTask,
   listDriveFiles, getDriveFile, getDriveFileContent, createDriveFile, updateDriveFileContent,
@@ -180,8 +181,10 @@ export function _getMcpDiscoveryCacheSize(): number {
  */
 export const INJECTED_BUILTIN_TOOLS_BY_CONNECTOR: Record<string, readonly string[]> = {
   gcal: [
+    'googleCalendarListCalendars',
     'googleCalendarListEvents',
     'googleCalendarGetEvent',
+    'googleCalendarQueryFreeBusy',
     'googleCalendarCreateEvent',
     'googleCalendarUpdateEvent',
     'googleCalendarDeleteEvent',
@@ -2041,6 +2044,18 @@ async function injectGoogleTools(
         description?: string | null
         location?: string | null
         attendees?: Array<{ email?: string }>
+        recurrence?: string[]
+        recurringEventId?: string
+        originalStartTime?: { dateTime?: string; date?: string }
+        reminders?: unknown
+        attachments?: unknown[]
+        conferenceData?: unknown
+        transparency?: string
+        visibility?: string
+        eventType?: string
+        focusTimeProperties?: unknown
+        outOfOfficeProperties?: unknown
+        workingLocationProperties?: unknown
         start?: { dateTime?: string; date?: string }
         end?: { dateTime?: string; date?: string }
       }
@@ -2078,6 +2093,10 @@ async function injectGoogleTools(
       // variants). The audit emitters, action gates, and sendUpdates config
       // are provider-level and intentionally shared across accounts.
       const buildCalTools = (getToken: () => Promise<string>) => gateToolsOnActionGrants(createGoogleCalendarTools({
+        listCalendars: async () => {
+          const token = await getToken()
+          return listCalendarList(token)
+        },
         listEvents: async (params) => {
           const token = await getToken()
           return listCalendarEvents(token, params)
@@ -2086,19 +2105,21 @@ async function injectGoogleTools(
           const token = await getToken()
           return getCalendarEvent(token, eventId, calendarId)
         },
+        queryFreeBusy: async (params) => {
+          const token = await getToken()
+          return queryCalendarFreeBusy(token, params)
+        },
         createEvent: async (event) => {
           const token = await getToken()
-          const audience = deriveAudienceFromAttendees(event.attendees)
+          const audience = deriveAudienceFromAttendees(event.attendees?.map((attendee) => attendee.email))
           const auditPayload: Record<string, unknown> = {
-            summary: event.summary,
-            start: event.start,
-            end: event.end,
-            description: event.description,
-            location: event.location,
+            calendar_id: event.calendarId ?? 'primary',
+            ...event,
             attendees: event.attendees ?? [],
+            recurrence: event.recurrence ?? [],
           }
           try {
-            const result = (await createCalendarEvent(token, event, 'primary', sendUpdates)) as GCalEventLike | null
+            const result = (await createCalendarEvent(token, event, event.calendarId ?? 'primary', sendUpdates)) as GCalEventLike | null
             const eventId = result?.id ?? null
             await emitGcalAudit('create_event', audience, auditPayload, 'executed', eventId)
             return result
@@ -2112,15 +2133,20 @@ async function injectGoogleTools(
         },
         updateEvent: async (eventId, updates) => {
           const token = await getToken()
-          const attendeeEmails = updates.attendees
+          const attendeeEmails = [
+            ...(updates.attendees?.map((attendee) => attendee.email) ?? []),
+            ...(updates.attendeeChanges?.add?.map((attendee) => attendee.email) ?? []),
+          ]
           const audience = deriveAudienceFromAttendees(attendeeEmails)
           const auditPayload: Record<string, unknown> = {
             event_id: eventId,
+            calendar_id: updates.calendarId ?? 'primary',
+            recurring_scope: updates.recurringScope ?? 'instance',
             updates: { ...updates },
           }
           try {
-            const result = await updateCalendarEvent(token, eventId, updates, 'primary', sendUpdates)
-            await emitGcalAudit('update_event', audience, auditPayload, 'executed', eventId)
+            const result = await updateCalendarEvent(token, eventId, updates, updates.calendarId ?? 'primary', sendUpdates)
+            await emitGcalAudit('update_event', audience, auditPayload, 'executed', result.id ?? eventId)
             return result
           } catch (err) {
             await emitGcalAudit('update_event', audience, {
@@ -2130,7 +2156,7 @@ async function injectGoogleTools(
             throw err
           }
         },
-        deleteEvent: async (eventId, calendarId) => {
+        deleteEvent: async (eventId, calendarId, recurringScope) => {
           const token = await getToken()
           // Snapshot the event BEFORE delete so the audit captures
           // what was removed (delete is the first DESTRUCTIVE
@@ -2139,7 +2165,7 @@ async function injectGoogleTools(
           // with the delete, just without rich payload data.
           let snapshot: GCalEventLike | null = null
           try {
-            snapshot = (await getCalendarEvent(token, eventId, calendarId)) as GCalEventLike
+            snapshot = (await getCalendarEvent(token, eventId, calendarId ?? 'primary')) as GCalEventLike
           } catch (snapErr) {
             console.warn('[mcp-inject] gcal delete: snapshot fetch failed:', snapErr instanceof Error ? snapErr.message : String(snapErr))
           }
@@ -2148,6 +2174,8 @@ async function injectGoogleTools(
           )
           const auditPayload: Record<string, unknown> = {
             event_id: eventId,
+            calendar_id: calendarId ?? 'primary',
+            recurring_scope: recurringScope ?? 'instance',
             prior_snapshot: snapshot
               ? {
                   summary: snapshot.summary,
@@ -2156,11 +2184,29 @@ async function injectGoogleTools(
                   description: snapshot.description,
                   location: snapshot.location,
                   attendees: snapshot.attendees ?? [],
+                  recurrence: snapshot.recurrence ?? [],
+                  recurring_event_id: snapshot.recurringEventId,
+                  original_start_time: snapshot.originalStartTime,
+                  reminders: snapshot.reminders,
+                  attachments: snapshot.attachments ?? [],
+                  conference_data: snapshot.conferenceData,
+                  availability: snapshot.transparency,
+                  visibility: snapshot.visibility,
+                  event_type: snapshot.eventType,
+                  focus_time_properties: snapshot.focusTimeProperties,
+                  out_of_office_properties: snapshot.outOfOfficeProperties,
+                  working_location_properties: snapshot.workingLocationProperties,
                 }
               : null,
           }
           try {
-            await deleteCalendarEvent(token, eventId, calendarId, sendUpdates)
+            await deleteCalendarEvent(
+              token,
+              eventId,
+              calendarId ?? 'primary',
+              sendUpdates,
+              recurringScope ?? 'instance',
+            )
             await emitGcalAudit('delete_event', audience, auditPayload, 'executed', eventId)
           } catch (err) {
             await emitGcalAudit('delete_event', audience, {
@@ -2746,7 +2792,8 @@ async function injectGoogleTools(
 
     try {
       const token = await getEnrichToken()
-      const event = await getCalendarEvent(token, eventId)
+      const calendarId = (input.calendarId as string | undefined) ?? 'primary'
+      const event = await getCalendarEvent(token, eventId, calendarId)
       const summary = (event as Record<string, unknown>).summary as string | undefined
       const start = (event as Record<string, unknown>).start as { dateTime?: string; date?: string } | undefined
       const end = (event as Record<string, unknown>).end as { dateTime?: string; date?: string } | undefined

@@ -24,7 +24,7 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { ArrowLeft } from "lucide-react";
-import { useT } from "@/lib/i18n/client";
+import { format, useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 import { isOssEdition, HOSTED_UPGRADE_URL } from "@/lib/edition";
 import { AccountSection } from "./sections/account-section";
@@ -122,6 +122,9 @@ const OSS_WORKSPACE_SECTIONS: SettingsSection[] = [
   "ws-browser-profiles",
 ];
 
+const OSS_SOURCE_URL = "https://github.com/use-brian/use-brian";
+const OSS_GIT_COMMIT_SHA = process.env.NEXT_PUBLIC_OSS_GIT_COMMIT_SHA?.trim() ?? "";
+
 export function workspaceSettingsSections(oss: boolean): SettingsSection[] {
   return oss ? OSS_WORKSPACE_SECTIONS : WORKSPACE_SECTIONS;
 }
@@ -200,42 +203,45 @@ export function SettingsModal({ open, initialSection = "profile", onClose }: Pro
           <nav
             aria-label="Settings sections"
             className={cn(
-              "w-full sm:w-56 shrink-0 sm:border-r border-border p-3 overflow-y-auto",
-              mobilePane === "body" && "hidden sm:block",
+              "w-full sm:w-56 shrink-0 sm:border-r border-border p-3 flex flex-col overflow-hidden",
+              mobilePane === "body" && "hidden sm:flex",
             )}
           >
-            <SectionGroup
-              label={t.chrome.settingsModal.workspace.section}
-              sections={workspaceSections}
-              active={section}
-              onSelect={selectSection}
-              labels={{
-                "ws-general": t.chrome.settingsModal.workspace.general,
-                "ws-members": oss
-                  ? t.chrome.settingsModal.upgrade.teammatesNav
-                  : t.chrome.settingsModal.workspace.members,
-                "ws-llm-key": t.chrome.settingsModal.workspace.llmKey,
-                "ws-domains": t.chrome.settingsModal.workspace.domains,
-                "ws-plan": t.chrome.settingsModal.workspace.plan,
-                "ws-usage": t.chrome.settingsModal.workspace.usage,
-                "ws-models": t.chrome.settingsModal.workspace.models,
-                "ws-browser-profiles": t.chrome.settingsModal.workspace.browserProfiles,
-              }}
-            />
-            <div className="mt-4">
+            <div className="min-h-0 flex-1 overflow-y-auto">
               <SectionGroup
-                label={t.chrome.settingsModal.account.section}
-                sections={ACCOUNT_SECTIONS}
+                label={t.chrome.settingsModal.workspace.section}
+                sections={workspaceSections}
                 active={section}
                 onSelect={selectSection}
                 labels={{
-                  profile: t.chrome.settingsModal.account.profile,
-                  preferences: t.chrome.settingsModal.account.preferences,
-                  privacy: t.chrome.settingsModal.account.privacy,
-                  notifications: t.chrome.settingsModal.account.notifications,
+                  "ws-general": t.chrome.settingsModal.workspace.general,
+                  "ws-members": oss
+                    ? t.chrome.settingsModal.upgrade.teammatesNav
+                    : t.chrome.settingsModal.workspace.members,
+                  "ws-llm-key": t.chrome.settingsModal.workspace.llmKey,
+                  "ws-domains": t.chrome.settingsModal.workspace.domains,
+                  "ws-plan": t.chrome.settingsModal.workspace.plan,
+                  "ws-usage": t.chrome.settingsModal.workspace.usage,
+                  "ws-models": t.chrome.settingsModal.workspace.models,
+                  "ws-browser-profiles": t.chrome.settingsModal.workspace.browserProfiles,
                 }}
               />
+              <div className="mt-4">
+                <SectionGroup
+                  label={t.chrome.settingsModal.account.section}
+                  sections={ACCOUNT_SECTIONS}
+                  active={section}
+                  onSelect={selectSection}
+                  labels={{
+                    profile: t.chrome.settingsModal.account.profile,
+                    preferences: t.chrome.settingsModal.account.preferences,
+                    privacy: t.chrome.settingsModal.account.privacy,
+                    notifications: t.chrome.settingsModal.account.notifications,
+                  }}
+                />
+              </div>
             </div>
+            {oss && <OssVersionFooter />}
           </nav>
 
           {/* Right pane — swaps in for the rail on phones */}
@@ -279,6 +285,34 @@ export function SettingsModal({ open, initialSection = "profile", onClose }: Pro
       </div>
     </div>,
     document.body,
+  );
+}
+
+export function OssVersionFooter({ commitSha = OSS_GIT_COMMIT_SHA }: { commitSha?: string }) {
+  const t = useT();
+  const normalizedSha = /^[0-9a-f]{7,40}$/i.test(commitSha) ? commitSha.toLowerCase() : "";
+  const shortSha = normalizedSha.slice(0, 7);
+  const href = normalizedSha ? `${OSS_SOURCE_URL}/commit/${normalizedSha}` : OSS_SOURCE_URL;
+  const label = shortSha
+    ? format(t.chrome.settingsModal.source.version, { hash: shortSha })
+    : t.chrome.settingsModal.source.repository;
+  const linkLabel = shortSha
+    ? format(t.chrome.settingsModal.source.viewVersion, { hash: shortSha })
+    : t.chrome.settingsModal.source.viewRepository;
+
+  return (
+    <div className="shrink-0 px-2 pb-1 pt-6 text-[11px] text-muted-foreground">
+      <a
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-label={linkLabel}
+        title={normalizedSha || linkLabel}
+        className="transition-colors hover:text-foreground hover:underline underline-offset-2"
+      >
+        {label}
+      </a>
+    </div>
   );
 }
 
