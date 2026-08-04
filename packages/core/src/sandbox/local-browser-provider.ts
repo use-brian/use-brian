@@ -11,6 +11,7 @@ import { STALE_EXTENSION_REMEDY } from '@use-brian/shared'
 import {
   BrowserBackendError,
   BROWSER_BACKEND_ERROR_CODES,
+  BrowserCaptureResultSchema,
   BrowserNavigateResultSchema,
   BrowserSnapshotSchema,
   TakeoverFrameSchema,
@@ -87,6 +88,9 @@ export function createLocalBrowserProvider(deps: {
     },
     async currentUrl(ctx) {
       return BrowserUrlResultSchema.parse(await send(ctx, 'currentUrl'))
+    },
+    async captureState(ctx, site) {
+      return BrowserCaptureResultSchema.parse(await send(ctx, 'captureState', { site }))
     },
     async nextTakeoverFrame(ctx) {
       return TakeoverFrameSchema.parse(await send(ctx, 'captureFrame'))

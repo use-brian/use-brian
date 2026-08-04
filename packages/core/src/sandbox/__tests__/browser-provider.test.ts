@@ -229,6 +229,53 @@ describe('[COMP:sandbox/local-browser] LocalBrowserProvider', () => {
     const provider = createLocalBrowserProvider({ transport })
     await expect(provider.snapshot(CTX)).rejects.toThrow()
   })
+
+  it('sends captureState with the site arg and returns the parsed bundle (D2)', async () => {
+    const { transport, sent } = transportRecording((op) => {
+      if (op === 'captureState') {
+        return {
+          ok: true,
+          data: {
+            site: 'example.com',
+            cookies: [{ name: 'session', value: 'abc', domain: '.example.com' }],
+            localStorage: { 'https://app.example.com': { token: 't1' } },
+            capturedAt: '2026-08-04T00:00:00.000Z',
+          },
+        }
+      }
+      return { ok: true }
+    })
+    const provider = createLocalBrowserProvider({ transport })
+
+    const bundle = await provider.captureState?.(CTX, 'example.com')
+
+    expect(sent[0]).toEqual({ userId: 'user-1', op: 'captureState', args: { site: 'example.com' } })
+    expect(bundle).toEqual({
+      site: 'example.com',
+      cookies: [{ name: 'session', value: 'abc', domain: '.example.com' }],
+      localStorage: { 'https://app.example.com': { token: 't1' } },
+      capturedAt: '2026-08-04T00:00:00.000Z',
+    })
+  })
+
+  it('maps no_extension and site_mismatch refusals from captureState to typed errors', async () => {
+    const noExtension = transportRecording(() => ({ ok: false, error: '', code: 'no_extension' }))
+    const noExtensionErr = await createLocalBrowserProvider({ transport: noExtension.transport })
+      .captureState?.(CTX, 'example.com')
+      .catch((e: unknown) => e)
+    expect((noExtensionErr as BrowserBackendError).code).toBe('no_extension')
+
+    const mismatch = transportRecording(() => ({
+      ok: false,
+      error: 'The allowed tab is on other.example.org, not example.com.',
+      code: 'site_mismatch',
+    }))
+    const mismatchErr = await createLocalBrowserProvider({ transport: mismatch.transport })
+      .captureState?.(CTX, 'example.com')
+      .catch((e: unknown) => e)
+    expect((mismatchErr as BrowserBackendError).code).toBe('site_mismatch')
+    expect((mismatchErr as BrowserBackendError).message).toContain('example.com')
+  })
 })
 
 // ── CloudBrowserProvider: stateless connect-by-id per op ───────
@@ -280,5 +327,20 @@ describe('[COMP:sandbox/browser-provider] CloudBrowserProvider', () => {
     const snap = await provider.snapshot(CTX)
     expect(snap.url).toBe('https://example.org/')
     expect(snap.nodes[0]?.name).toBe('Front page')
+  })
+
+  it('delegates captureState to the sandbox browser’s captureStorageState (D1: no cloud behaviour change)', async () => {
+    const stub = new StubSandboxProvider()
+    const { sandboxId } = await stub.create({ workspaceId: 'ws-1', taskId: 'task-1' })
+    const provider = createCloudBrowserProvider({
+      provider: stub,
+      binding: { resolve: async () => ({ sandboxId }) },
+    })
+
+    const bundle = await provider.captureState?.(CTX, 'example.com')
+
+    const actions = stub.sandboxes.get(sandboxId)?.actions.map((a) => a.op)
+    expect(actions).toContain('captureStorageState')
+    expect(bundle?.site).toBe('example.com')
   })
 })

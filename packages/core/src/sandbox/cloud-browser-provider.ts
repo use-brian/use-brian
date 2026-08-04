@@ -59,6 +59,9 @@ export function createCloudBrowserProvider(deps: {
     async currentUrl(ctx) {
       return (await browserFor(ctx)).currentUrl()
     },
+    async captureState(ctx, site) {
+      return (await browserFor(ctx)).captureStorageState(site)
+    },
     async stop() {
       // Task teardown (pause/kill) is the lifecycle module's job, not the
       // per-op adapter's — see sandbox/lifecycle. Nothing to release here.
