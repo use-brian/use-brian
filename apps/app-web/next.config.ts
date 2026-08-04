@@ -69,16 +69,13 @@ const nextConfig: NextConfig = {
       process.env.NEXT_PUBLIC_API_URL ??
       (process.env.NODE_ENV === "development" ? "" : API_URL),
     NEXT_PUBLIC_CORE_WEB_URL: process.env.NEXT_PUBLIC_CORE_WEB_URL ?? "https://usebrian.ai",
-    // Microsoft Graph (Teams) connect button. An OAuth client id is public by
-    // design, so falling back to the unprefixed server-side var means an
-    // operator only has to set MSGRAPH_CLIENT_ID once. The SECRET is never
-    // exposed here - it stays server-only in the callback route.
-    NEXT_PUBLIC_MSGRAPH_CLIENT_ID:
-      process.env.NEXT_PUBLIC_MSGRAPH_CLIENT_ID ?? process.env.MSGRAPH_CLIENT_ID ?? "",
-    // Tenant segment of the Entra endpoints; blank -> "organizations"
-    // (work/school accounts only - Teams data is unreachable from a personal
-    // Microsoft account). Set it to pin a single tenant id or domain.
-    NEXT_PUBLIC_MSGRAPH_TENANT: process.env.NEXT_PUBLIC_MSGRAPH_TENANT ?? "",
+    // NOTE: no NEXT_PUBLIC_MSGRAPH_* here. The Entra app for Microsoft Teams is
+    // resolved per WORKSPACE in the API (its own registration first, then
+    // MSGRAPH_CLIENT_ID / MSGRAPH_CLIENT_SECRET from this deployment), and a
+    // build-time env var cannot express "this workspace uses its own app". The
+    // browser asks GET /api/connectors/msgraph/app-credentials for the client
+    // id and tenant, which are public and ride in the authorize URL.
+    // See docs/architecture/integrations/msgraph.md -> "Auth".
   },
   async rewrites() {
     if (process.env.NODE_ENV !== "development") return [];

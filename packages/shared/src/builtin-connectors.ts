@@ -289,6 +289,57 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
 }
 
 /**
+ * Connectors whose OAuth *app* credentials a workspace may supply itself,
+ * through Studio -> Connectors instead of deployment config.
+ *
+ * This is deliberately NARROW and hand-maintained, in the sanctioned sense of
+ * the "all built-ins" drift rule: it is not "every official connector", it is
+ * the set whose provider model actually supports a customer registering their
+ * own app. For `msgraph` that model is the point rather than a fallback - an
+ * Entra app registered by the customer's own admin sidesteps both Microsoft
+ * publisher verification and the cross-tenant admin consent that
+ * `ChannelMessage.Read.All` demands unconditionally.
+ *
+ * Adding a connector here requires three things to already be true: the
+ * provider must let an end customer register an app, the authorize URL must be
+ * derivable from that app alone, and the exchange must run server-side (see
+ * `packages/api/src/connectors/app-credentials.ts`). Adding an id with no
+ * route support ships a form that saves credentials nothing reads.
+ *
+ * See docs/architecture/integrations/msgraph.md -> "Auth".
+ */
+export const CONFIGURABLE_APP_CREDENTIAL_CONNECTORS: ReadonlySet<string> = new Set(['msgraph'])
+
+/**
+ * OIDC baseline scopes for the Microsoft Graph connector, requested alongside
+ * whatever Graph permissions `OFFICIAL_OAUTH_SCOPES.msgraph` declares.
+ *
+ * They are deliberately NOT in that table: it is the inventory of Graph
+ * *resource* permissions an admin reads on the consent screen, and Entra
+ * collapses openid/profile/email into a single "Sign you in and read your
+ * profile" line. `openid` is also what produces the `id_token` the connect
+ * flow reads the tenant id and account address from.
+ *
+ * Lives in shared because the authorize URL (app-web, browser) and the code
+ * exchange (packages/api, server) must send the SAME scope string, and they
+ * are in different packages. A second hand-written list is exactly how an
+ * authorize/exchange pair drifts.
+ */
+export const MSGRAPH_BASE_SCOPES: readonly string[] = ['openid', 'profile', 'email']
+
+/** The full msgraph scope set: OIDC baseline + the declared Graph permissions. */
+export function msGraphScopes(): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const scope of [...MSGRAPH_BASE_SCOPES, ...(OFFICIAL_OAUTH_SCOPES.msgraph ?? [])]) {
+    if (seen.has(scope)) continue
+    seen.add(scope)
+    out.push(scope)
+  }
+  return out
+}
+
+/**
  * OAuth scopes requested when a user connects a built-in connector.
  * Shared between the backend (mints the authorize URL in `POST /connectors/:id/connect`)
  * and the frontend (falls back to building the URL client-side when the API

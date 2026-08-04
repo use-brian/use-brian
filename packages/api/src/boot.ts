@@ -248,6 +248,7 @@ import { publishSessionEvent, startSessionEventBus, subscribeSessionEvents } fro
 import { createDbMcpSettingsStore } from './db/mcp-settings-store.js'
 import { createDbConnectorStore } from './db/connector-store.js'
 import { createConnectorInstanceStore } from './db/connector-instance-store.js'
+import { createConnectorAppCredentialStore } from './db/connector-app-credential-store.js'
 import { createIngestSinkStore } from './db/ingest-sink-store.js'
 import { createIngestOutboxStore } from './db/ingest-outbox-store.js'
 import { createExternalSinkRelay } from './ingest/external-sink-relay.js'
@@ -1497,6 +1498,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const mcpSettingsStore = createDbMcpSettingsStore()
   const credKey = env.CHANNEL_CREDENTIAL_KEY ? loadChannelCredentialKey(env.CHANNEL_CREDENTIAL_KEY) : null
   const connectorInstanceStore = createConnectorInstanceStore(credKey)
+  // Workspace-owned OAuth app credentials (migration 394) — a customer's own
+  // Entra registration, resolved ahead of deployment config. See
+  // docs/architecture/integrations/msgraph.md → "Auth".
+  const connectorAppCredentialStore = createConnectorAppCredentialStore(credKey)
   // Shared workspace tool policy (migration 312) — governs allow/ask/block for
   // team-owned connector tools. See workspace-owned-connector-transfer.md §2C.
   const workspaceToolPolicyStore = createWorkspaceToolPolicyStore()
@@ -3872,6 +3877,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           return m?.role === 'owner' || m?.role === 'admin'
         },
       },
+      connectorAppCredentialStore,
     }))
   }
 

@@ -22,10 +22,14 @@
  *     (../mcp/connector-health.ts) agrees once the error has been flattened to
  *     a string, matching how the Google injector detects revocation.
  *
- * Auth model: standard env-var OAuth (one Use Brian-owned Entra app,
- * `MSGRAPH_CLIENT_ID` / `MSGRAPH_CLIENT_SECRET` via `getConnectorConfig`), with
- * a per-user authorization-code grant. See
- * docs/architecture/integrations/msgraph.md and
+ * Auth model: a per-user authorization-code grant against an Entra app that
+ * may come from either of two places — the workspace's own registration
+ * (`connector_app_credentials`, pasted in Studio → Connectors) or deployment
+ * config (`MSGRAPH_CLIENT_ID` / `MSGRAPH_CLIENT_SECRET` via
+ * `getConnectorConfig`). `connectors/app-credentials.ts` owns that resolution;
+ * this module only needs to know that the app which minted a refresh token is
+ * the one that must rotate it, which is why the pair rides in the envelope.
+ * See docs/architecture/integrations/msgraph.md and
  * docs/plans/msteams-connector.md.
  */
 
@@ -72,6 +76,59 @@ export type MsGraphTokens = {
    * not grant `openid`.
    */
   tenantId?: string
+  /**
+   * The Entra app this grant was issued against, when the workspace supplied
+   * its own registration (`connector_app_credentials`, migration 394) rather
+   * than using deployment config.
+   *
+   * It rides in the envelope for one reason: **only the app that minted a
+   * refresh token can rotate it**, and the runtime refresh path
+   * (`mcp/inject.ts`) holds a userId and an instance id, not a workspace id.
+   * Without the pair here, a workspace-owned connection would refresh against
+   * whatever `getConnectorConfig` returns - the deployment's app, or nothing -
+   * and die with `invalid_grant` an hour after connecting.
+   *
+   * Storing it also makes an app change safe rather than destructive: editing
+   * the workspace registration re-aims future consents while existing
+   * connections keep rotating against the app that issued them, until their
+   * owner reconnects.
+   *
+   * Same rotation invariant as `tenantId`: written by the OAuth exchange, so
+   * `packMsGraphTokens` must carry it through every refresh.
+   */
+  appClientId?: string
+  appClientSecret?: string
+  /**
+   * TRANSIENT. The raw `id_token` from THIS grant, when `openid` was consented.
+   *
+   * Deliberately absent from `packMsGraphTokens`: it is exchange output the
+   * connect route reads once (tenant id + account address, via
+   * `decodeMsGraphIdToken`) and must never be persisted — it is a bearer
+   * assertion with its own expiry, and storing it would put a second identity
+   * credential in an envelope whose whole purpose is the refresh tuple.
+   */
+  idToken?: string
+}
+
+/** The app half of the envelope, read back for a refresh. */
+export type MsGraphAppCredentials = { clientId: string; clientSecret: string }
+
+/**
+ * Read the app pair a stored grant was issued against, if it carries one.
+ *
+ * Lenient by design and separate from `unpackMsGraphTokens`: it answers "which
+ * app must rotate this token", which is a different question from "is there a
+ * usable token" and is legitimately answerable when the latter is false.
+ */
+export function unpackMsGraphAppCredentials(blob: string): MsGraphAppCredentials | null {
+  try {
+    const parsed = JSON.parse(blob) as { appClientId?: unknown; appClientSecret?: unknown }
+    if (typeof parsed.appClientId !== 'string' || typeof parsed.appClientSecret !== 'string') return null
+    if (!parsed.appClientId || !parsed.appClientSecret) return null
+    return { clientId: parsed.appClientId, clientSecret: parsed.appClientSecret }
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -82,6 +139,8 @@ export type MsGraphTokens = {
 type MsGraphTokenResponse = {
   access_token?: string
   refresh_token?: string
+  /** Present only when `openid` was consented. Read once, never stored. */
+  id_token?: string
   expires_in?: number // seconds
   token_type?: string
   scope?: string
@@ -180,6 +239,7 @@ async function tokenEndpointCall(
     // lifetime is tenant-configurable (10-60 minutes by policy).
     expiresAt: new Date(now() + Math.max(0, (data.expires_in ?? 3600) * 1000)).toISOString(),
     refreshToken,
+    ...(data.id_token ? { idToken: data.id_token } : {}),
   }
 }
 
@@ -265,22 +325,44 @@ export function createMsGraphTokenManager(params: {
   let inFlight: Promise<string> | null = null
 
   async function refreshAndPersist(current: MsGraphTokens): Promise<string> {
+    // The app that MINTED this refresh token is the only one that can rotate
+    // it. When the grant was issued against a workspace-owned registration the
+    // pair rides in the envelope, and it outranks whatever the caller passed:
+    // the caller resolves deployment config, which is a different Entra app
+    // and would come back `invalid_grant`. `params` is the fallback for every
+    // grant issued before a workspace registered its own app.
+    const app =
+      current.appClientId && current.appClientSecret
+        ? { clientId: current.appClientId, clientSecret: current.appClientSecret }
+        : { clientId: params.clientId, clientSecret: params.clientSecret }
+
     const next = await refreshMsGraphTokens({
       refreshToken: current.refreshToken,
-      clientId: params.clientId,
-      clientSecret: params.clientSecret,
+      clientId: app.clientId,
+      clientSecret: app.clientSecret,
       scope: params.scope,
-      tenantId: params.tenantId,
+      // A workspace-owned app may be registered single-tenant, in which case
+      // `organizations` will not issue for it and its own directory id is the
+      // only authority that will. Deliberately scoped to the workspace-owned
+      // case: for a deployment app this line would change the authority of
+      // every EXISTING grant, which is a separate decision from this one (see
+      // `MsGraphTokens.tenantId` — refreshing at `/{tid}` is a plausible next
+      // step, not a step this change is taking).
+      tenantId: app.clientId === current.appClientId ? (current.tenantId ?? params.tenantId) : params.tenantId,
       fetchImpl: params.fetchImpl,
       now,
     })
     // Persist BEFORE returning: the next call must find the rotated token.
-    // `tenantId` is carried across explicitly — the refresh response never
-    // echoes it, so writing `next` alone would erase what the connect flow
-    // stored in this envelope.
-    await params.store.persistTokens(
-      current.tenantId ? { ...next, tenantId: current.tenantId } : next,
-    )
+    // `tenantId` and the app pair are carried across explicitly — the refresh
+    // response never echoes either, so writing `next` alone would erase what
+    // the connect flow stored in this envelope and brick the NEXT refresh.
+    await params.store.persistTokens({
+      ...next,
+      ...(current.tenantId ? { tenantId: current.tenantId } : {}),
+      ...(current.appClientId && current.appClientSecret
+        ? { appClientId: current.appClientId, appClientSecret: current.appClientSecret }
+        : {}),
+    })
     return next.accessToken
   }
 
@@ -323,6 +405,12 @@ export function packMsGraphTokens(tokens: MsGraphTokens): string {
     refreshToken: tokens.refreshToken,
     expiresAt: tokens.expiresAt,
     ...(tokens.tenantId ? { tenantId: tokens.tenantId } : {}),
+    // The app pair must survive every rotation for the same reason it is
+    // stored at all: the refresh path cannot re-derive it. Dropping it here
+    // would brick a workspace-owned connection at its first refresh.
+    ...(tokens.appClientId && tokens.appClientSecret
+      ? { appClientId: tokens.appClientId, appClientSecret: tokens.appClientSecret }
+      : {}),
   })
 }
 
@@ -334,11 +422,13 @@ export function unpackMsGraphTokens(blob: string): MsGraphTokens | null {
       typeof parsed.refreshToken === 'string' &&
       typeof parsed.expiresAt === 'string'
     ) {
+      const app = unpackMsGraphAppCredentials(blob)
       return {
         accessToken: parsed.accessToken,
         refreshToken: parsed.refreshToken,
         expiresAt: parsed.expiresAt,
         ...(typeof parsed.tenantId === 'string' ? { tenantId: parsed.tenantId } : {}),
+        ...(app ? { appClientId: app.clientId, appClientSecret: app.clientSecret } : {}),
       }
     }
   } catch {

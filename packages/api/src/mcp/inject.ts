@@ -106,7 +106,7 @@ import {
 import { createMsGraphClient } from '../msgraph/client.js'
 import {
   createMsGraphTokenManager,
-  packMsGraphTokens, unpackMsGraphTokens,
+  packMsGraphTokens, unpackMsGraphTokens, unpackMsGraphAppCredentials,
   type MsGraphTokens,
 } from '../msgraph/token.js'
 import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTORS } from '@use-brian/shared'
@@ -3344,29 +3344,55 @@ async function injectMsGraphTools(
   persistOverride?: (encoded: string) => Promise<void>,
 ): Promise<void> {
   const msgraphCfg = getConnectorConfig('msgraph')
-  if (!msgraphCfg) return
-  // Captured as primitives so the nested closures keep the narrowing (TS
-  // widens the captured object back to possibly-undefined) — same reason as
-  // the Fathom injector above.
-  const clientId = msgraphCfg.clientId
-  const clientSecret = msgraphCfg.clientSecret
-
   const msgraph = connectors.find((c) => c.connectorId === 'msgraph' && c.connected)
   const msgraphEnabled = msgraph && (!assistantConnectorStore || await assistantConnectorStore.isEnabled(assistantId, 'msgraph'))
 
   if (!msgraph || !msgraphEnabled) {
+    // Connector-less boot (the open single-player default): no deployment app
+    // and nothing connected. Stay silent rather than spending context telling
+    // the model about a connector nobody on this install could have connected.
+    // A workspace-owned app is invisible from here — this path has no
+    // workspace id — but it is only reachable through a connected instance
+    // anyway, which is the branch below.
+    if (!msgraphCfg) return
     unavailable?.push(notConnectedNotice('Microsoft Teams', 'reading and searching Teams channels, chats, and members'))
     return
   }
+
+  async function readCredentialBlob(): Promise<string | null> {
+    return credsOverride
+      ? await credsOverride()
+      : (await connectorStore.getCredentials(userId, 'msgraph'))?.client_secret ?? null
+  }
+
+  // Which Entra app rotates this grant. Deployment config is the FALLBACK
+  // here, not the gate: a workspace that registered its own app
+  // (connector_app_credentials, migration 394) is connected through an app
+  // this process has no env var for, and gating on `getConnectorConfig` would
+  // make every such connection inject zero tools while Studio kept showing it
+  // connected. The pair rides in the grant envelope precisely so this path can
+  // find it without a workspace id, which it does not have.
+  const envelopeApp = unpackMsGraphAppCredentials((await readCredentialBlob()) ?? '')
+  const app = envelopeApp ?? msgraphCfg
+  if (!app) {
+    // Connected, but no app can rotate the token — a self-host that removed
+    // its env config after users connected. Say so rather than injecting tools
+    // that would all fail at the first refresh.
+    unavailable?.push(notConnectedNotice('Microsoft Teams', 'reading and searching Teams channels, chats, and members'))
+    return
+  }
+  // Captured as primitives so the nested closures keep the narrowing (TS
+  // widens the captured object back to possibly-undefined) — same reason as
+  // the Fathom injector above.
+  const clientId = app.clientId
+  const clientSecret = app.clientSecret
 
   const tokenManager = createMsGraphTokenManager({
     clientId,
     clientSecret,
     store: {
       async getTokens(): Promise<MsGraphTokens | null> {
-        const blob = credsOverride
-          ? await credsOverride()
-          : (await connectorStore.getCredentials(userId, 'msgraph'))?.client_secret ?? null
+        const blob = await readCredentialBlob()
         return blob ? unpackMsGraphTokens(blob) : null
       },
       async persistTokens(next) {
