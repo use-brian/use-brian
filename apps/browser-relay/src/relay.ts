@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { WebSocket } from 'ws'
+import { isExtensionBuildStale } from '@use-brian/api/sandbox/extension-build.js'
 import {
   ExtensionMessageSchema,
   type InternalCommandResponse,
@@ -38,6 +39,9 @@ type Connection = {
   pending: Map<string, Pending>
   lastSeenAt: number
   terminalEvent: 'stopped' | 'tab_closed' | null
+  /** Source fingerprint the extension reported in hello; null from builds that predate the stamp. */
+  build: string | null
+  staleBuild: boolean
 }
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 30_000
@@ -122,11 +126,16 @@ export class BrowserRelay {
   connectionStatus(userId: string): {
     connected: boolean
     terminalEvent: 'stopped' | 'tab_closed' | null
+    build: string | null
+    staleBuild: boolean
   } {
     const connection = this.byUser.get(userId)
     return {
       connected: !!connection,
       terminalEvent: connection?.terminalEvent ?? this.terminalByUser.get(userId) ?? null,
+      build: connection?.build ?? null,
+      // No connection means nothing to update; only a live extension can be stale.
+      staleBuild: connection?.staleBuild ?? false,
     }
   }
 
@@ -174,6 +183,11 @@ export class BrowserRelay {
           /* already gone */
         }
       }
+      // Judged once, at hello, and remembered on the connection: every later
+      // read (ready, status, a failing command) must give the same answer, and
+      // re-deriving it per call would let them disagree.
+      const build = msg.data.build ?? null
+      const staleBuild = isExtensionBuildStale(build)
       const fresh: Connection = {
         socket,
         userId: identity.userId,
@@ -181,6 +195,8 @@ export class BrowserRelay {
         pending: conn?.pending ?? new Map(),
         lastSeenAt: Date.now(),
         terminalEvent: this.terminalByUser.get(identity.userId) ?? null,
+        build,
+        staleBuild,
       }
       this.byUser.set(identity.userId, fresh)
       this.bySocket.set(socket, fresh)
@@ -190,7 +206,11 @@ export class BrowserRelay {
         identity.kind !== 'browser-ext-session' && this.mintSessionToken
           ? this.mintSessionToken({ userId: identity.userId, workspaceId: identity.workspaceId })
           : undefined
-      this.sendTo(socket, sessionToken ? { type: 'ready', sessionToken } : { type: 'ready' })
+      this.sendTo(socket, {
+        type: 'ready',
+        ...(sessionToken ? { sessionToken } : {}),
+        ...(staleBuild ? { staleBuild: true } : {}),
+      })
       if (this.pendingStops.has(identity.userId)) {
         fresh.terminalEvent = 'stopped'
         this.terminalByUser.set(identity.userId, 'stopped')
@@ -226,6 +246,7 @@ export class BrowserRelay {
           ok: false,
           error: msg.data.error ?? 'extension error',
           code: msg.data.code,
+          ...(conn.staleBuild ? { staleBuild: true } : {}),
         })
       }
       return
@@ -296,6 +317,7 @@ export class BrowserRelay {
           ok: false,
           error: `The extension did not answer within ${Math.round(timeoutMs / 1000)}s.`,
           code: 'timeout',
+          ...(conn.staleBuild ? { staleBuild: true } : {}),
         })
       }, timeoutMs)
       conn.pending.set(id, { resolve, timer })

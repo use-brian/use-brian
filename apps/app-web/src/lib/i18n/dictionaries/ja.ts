@@ -6374,6 +6374,8 @@ export const ja: Dictionary = {
       gatedCta: "プランを見る",
       statusConnected: "ブラウザが接続されています",
       statusDisconnected: "ブラウザが接続されていません",
+      staleBuildWarning:
+        "このブラウザの拡張機能は古いため、修正が反映されていない可能性があります。拡張機能をビルドし直し、ブラウザの拡張機能ページで「再読み込み」を押してください。",
       connectedHint:
         "下のプロファイルのブラウザを「マイブラウザ」に設定するか、サイトがクラウドブラウザをブロックしたときにアシスタントの提案を受け入れると、あなたのChromeで動作します。",
       step1Title: "1. 拡張機能をインストール",

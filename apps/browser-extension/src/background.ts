@@ -7,9 +7,15 @@
 import { RelayClient } from './relay-client.js'
 import { TabExecutor, ExecutorError, isDetachedError, retryableAfterReattach } from './executor.js'
 import { TaskGate, CONSENT_PROMPT_TIMEOUT_MS, type ConsentOutcome } from './task-gate.js'
-import { activeTabForConsent, eligibilityOf } from './tab-eligibility.js'
+import {
+  activeTabForConsent,
+  attachabilityOf,
+  eligibilityOf,
+  RESTRICTED_TAB_MESSAGE,
+} from './tab-eligibility.js'
 import { credentialsForConfigure, isTrustedPairingOrigin, type PairRequest } from './pairing.js'
 import { hasBrowserControl } from './browser-control-permission.js'
+import { readBuildStamp } from './build-info.js'
 
 const executor = new TabExecutor()
 
@@ -87,6 +93,7 @@ const client = new RelayClient({
   getUrl: () => getStored('relayUrl'),
   connect: (url) => new WebSocket(url) as unknown as import('./relay-client.js').WebSocketLike,
   getToken: async () => (await getStored('sessionToken')) ?? (await getStored('pairingToken')),
+  getBuild: () => readBuildStamp(),
   onSessionToken: async (token) => {
     await chrome.storage.local.set({ sessionToken: token })
     await chrome.storage.local.remove('pairingToken')
@@ -167,6 +174,36 @@ async function executeOp(op: string, args: Record<string, unknown>): Promise<unk
   }
 }
 
+/**
+ * Attach to the consented tab, refusing first if the tab is no longer one CDP
+ * will take.
+ *
+ * `requireTab()` only consults the user when there is no live consent; inside
+ * the 10-minute idle window it returns the cached tab id having re-checked
+ * nothing, and the post-detach retry in `executeOp` re-attaches without asking
+ * either. Both paths therefore skip `promptForConsent`, which is where
+ * eligibility was being enforced — so the tab the user allowed on a website
+ * could be a settings or extension page by the time we attach to it.
+ *
+ * Consent is dropped rather than kept, so the next command prompts against
+ * whatever the user is actually looking at; keeping it would make the same
+ * command fail for the rest of the idle window even after they switched back.
+ * `stop()` would be disproportionate — it has no resume path.
+ */
+async function attachToEligibleTab(tabId: number): Promise<void> {
+  let url: string | undefined
+  try {
+    url = (await chrome.tabs.get(tabId)).url
+  } catch {
+    // Tab is gone. Let `attach` produce the authoritative failure.
+  }
+  if (!attachabilityOf(url)) {
+    gate.revokeConsent()
+    throw new ExecutorError(RESTRICTED_TAB_MESSAGE, 'no_eligible_tab')
+  }
+  await executor.attach(tabId)
+}
+
 async function dispatch(op: string, args: Record<string, unknown>): Promise<unknown> {
   // Browser control is an OPTIONAL permission now, so it can genuinely be
   // absent here. Say so in the one word the assistant can act on; without this
@@ -181,7 +218,7 @@ async function dispatch(op: string, args: Record<string, unknown>): Promise<unkn
     )
   }
   const tabId = await gate.requireTab()
-  await executor.attach(tabId)
+  await attachToEligibleTab(tabId)
   switch (op) {
     case 'navigate':
       return executor.navigate(String(args.url ?? ''))
@@ -261,6 +298,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         // Allow button off this, so a paired-but-not-allowed install stops
         // claiming it is ready to work.
         hasControl: await hasBrowserControl(),
+        // Which build is loaded, and whether the relay thinks it is behind.
+        // Answering this used to require deriving the extension id from a
+        // SHA256 of the folder path it was loaded from.
+        build: await readBuildStamp(),
+        staleBuild: client.isBuildStale(),
         // Shown in the popup so a self-hoster can point their own deployment at
         // this install without digging through chrome://extensions.
         extensionId: chrome.runtime.id,
@@ -305,6 +347,8 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
         state: client.getState(),
         stopped: gate.isStopped(),
         hasControl: await hasBrowserControl(),
+        build: await readBuildStamp(),
+        staleBuild: client.isBuildStale(),
       })
     })()
     return true // async sendResponse

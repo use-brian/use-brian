@@ -1,5 +1,5 @@
 /** Popup UI: connect/disconnect the relay pairing + the persistent Stop (P1.7). */
-import { statusLine, type PopupStatus } from './popup-status.js'
+import { buildLine, buildWarning, statusLine, type PopupStatus } from './popup-status.js'
 import { requestBrowserControl } from './browser-control-permission.js'
 
 function el<T extends HTMLElement>(id: string): T {
@@ -13,6 +13,8 @@ const statusText = el<HTMLSpanElement>('status-text')
 const relayUrlInput = el<HTMLInputElement>('relay-url')
 const tokenInput = el<HTMLInputElement>('pairing-token')
 const grantRow = el<HTMLDivElement>('grant-row')
+const buildWarningBox = el<HTMLDivElement>('build-warning')
+const buildLineBox = el<HTMLParagraphElement>('build-line')
 
 async function refreshStatus(): Promise<void> {
   const status = ((await chrome.runtime.sendMessage({ type: 'status' })) ?? {}) as PopupStatus
@@ -23,6 +25,12 @@ async function refreshStatus(): Promise<void> {
   statusBox.classList.toggle('ready', status.state === 'ready' && !status.stopped && granted)
   statusText.textContent = statusLine(status)
   grantRow.hidden = granted
+  // Staleness does NOT clear the green dot: the socket really is up. It is a
+  // second fact about the install, shown beside the first rather than instead.
+  const warning = buildWarning(status)
+  buildWarningBox.textContent = warning ?? ''
+  buildWarningBox.hidden = warning === null
+  buildLineBox.textContent = buildLine(status)
 }
 
 async function loadStored(): Promise<void> {

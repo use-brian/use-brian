@@ -336,16 +336,25 @@ export type BrowserExtensionStatus = {
   configured: boolean;
   /** The caller's extension is currently connected to the relay. */
   connected: boolean;
+  /** Source fingerprint the connected extension reported; null when it reported none. */
+  build?: string | null;
+  /** The connected extension is behind the build this deployment expects. */
+  staleBuild?: boolean;
+};
+
+const STATUS_UNAVAILABLE: BrowserExtensionStatus = {
+  configured: false,
+  connected: false,
+  build: null,
+  staleBuild: false,
 };
 
 /** Poll target for the connect surface. Never throws — a status probe must
  *  never take the Settings panel down. */
 export async function getBrowserExtensionStatus(): Promise<BrowserExtensionStatus> {
   const res = await authFetch(`${API_URL}/api/browser-extension/status`).catch(() => null);
-  if (!res?.ok) return { configured: false, connected: false };
-  return (await res
-    .json()
-    .catch(() => ({ configured: false, connected: false }))) as BrowserExtensionStatus;
+  if (!res?.ok) return STATUS_UNAVAILABLE;
+  return (await res.json().catch(() => STATUS_UNAVAILABLE)) as BrowserExtensionStatus;
 }
 
 export type BrowserExtensionPairing = {

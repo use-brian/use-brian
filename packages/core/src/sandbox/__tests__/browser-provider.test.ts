@@ -2,8 +2,10 @@ import { describe, it, expect } from 'vitest'
 import { createLocalBrowserProvider } from '../local-browser-provider.js'
 import { createCloudBrowserProvider } from '../cloud-browser-provider.js'
 import { StubSandboxProvider } from '../providers/stub.js'
+import { STALE_EXTENSION_REMEDY } from '@use-brian/shared'
 import {
   BrowserBackendError,
+  BROWSER_BACKEND_ERROR_CODES,
   NO_EXTENSION_MESSAGE,
   NO_EXTENSION_REMEDY,
   type BrowserCallContext,
@@ -124,6 +126,62 @@ describe('[COMP:sandbox/local-browser] LocalBrowserProvider', () => {
     const err = await provider.snapshot(CTX).catch((e: unknown) => e)
     expect((err as BrowserBackendError).code).toBe('no_eligible_tab')
     expect((err as BrowserBackendError).message).toContain('browser settings page')
+  })
+
+  it('passes no_browser_permission through rather than flattening it to backend_error', async () => {
+    // The extension throws this for "the user has not granted browser control
+    // yet" — the one browser failure with an obvious remedy. The accept-set
+    // was a second, hand-written copy of the code union and had never heard of
+    // it, so it arrived at the model indistinguishable from an unknown
+    // failure. The set is now derived from BROWSER_BACKEND_ERROR_CODES.
+    const { transport } = transportRecording(() => ({
+      ok: false,
+      error: 'Use Brian is not allowed to manage this browser yet.',
+      code: 'no_browser_permission',
+    }))
+    const provider = createLocalBrowserProvider({ transport })
+    const err = await provider.snapshot(CTX).catch((e: unknown) => e)
+    expect((err as BrowserBackendError).code).toBe('no_browser_permission')
+  })
+
+  it('accepts every code the union declares, with no second list to drift', async () => {
+    // The guard on the drift itself: if a code is added to the union and the
+    // accept-set is somehow reintroduced by hand, this fails.
+    for (const code of BROWSER_BACKEND_ERROR_CODES) {
+      const { transport } = transportRecording(() => ({ ok: false, error: 'x', code }))
+      const provider = createLocalBrowserProvider({ transport })
+      const err = await provider.snapshot(CTX).catch((e: unknown) => e)
+      expect((err as BrowserBackendError).code).toBe(code)
+    }
+  })
+
+  it('appends the stale-extension remedy to a failure, without losing the failure', async () => {
+    // Ordering is the point: the model still reports what actually broke, and
+    // the thing the user can act on rides along. A stale extension is why the
+    // 2026-08-03 report was unactionable — nothing anywhere said the build was
+    // eleven days old.
+    const { transport } = transportRecording(() => ({
+      ok: false,
+      error: 'Something specific went wrong.',
+      code: 'backend_error',
+      staleBuild: true,
+    }))
+    const provider = createLocalBrowserProvider({ transport })
+    const err = await provider.snapshot(CTX).catch((e: unknown) => e)
+    const message = (err as BrowserBackendError).message
+    expect(message).toContain('Something specific went wrong.')
+    expect(message).toContain(STALE_EXTENSION_REMEDY)
+  })
+
+  it('says nothing about staleness when the relay did not flag it', async () => {
+    const { transport } = transportRecording(() => ({
+      ok: false,
+      error: 'Something specific went wrong.',
+      code: 'backend_error',
+    }))
+    const provider = createLocalBrowserProvider({ transport })
+    const err = await provider.snapshot(CTX).catch((e: unknown) => e)
+    expect((err as BrowserBackendError).message).toBe('Something specific went wrong.')
   })
 
   it('reports not_configured when no relay transport is wired (open-core boot)', async () => {

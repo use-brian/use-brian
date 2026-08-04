@@ -110,6 +110,78 @@ describe('[COMP:ext/agent] Relay client (P1.2 connection lifecycle)', () => {
     expect(stored).toEqual(['sess-1'])
   })
 
+  it('reports its build in hello and remembers the relay’s staleness verdict', async () => {
+    const { sockets, connect } = fakeWsFactory()
+    const client = new RelayClient({
+      getUrl: async () => 'wss://relay.test/ext',
+      connect,
+      getToken: async () => 'tok',
+      getBuild: async () => 'f0c49f289acc',
+      onSessionToken: async () => {},
+      onCommand: () => {},
+    })
+    client.start()
+    await flush()
+
+    const ws = sockets[0]
+    ws.readyState = 1
+    ws.onopen?.()
+    // The build must ride the FIRST frame: hello is what the relay judges, and
+    // `onopen` cannot await, so the stamp is resolved before the socket opens.
+    expect(JSON.parse(ws.sentFrames[0])).toEqual({
+      type: 'hello',
+      pairingToken: 'tok',
+      build: 'f0c49f289acc',
+    })
+
+    expect(client.isBuildStale()).toBe(false)
+    ws.onmessage?.({ data: JSON.stringify({ type: 'ready', staleBuild: true }) })
+    await flush()
+    expect(client.getState()).toBe('ready')
+    expect(client.isBuildStale()).toBe(true)
+  })
+
+  it('omits build entirely when this build predates the stamp', async () => {
+    const { sockets, connect } = fakeWsFactory()
+    const client = new RelayClient({
+      getUrl: async () => 'wss://relay.test/ext',
+      connect,
+      getToken: async () => 'tok',
+      getBuild: async () => null,
+      onSessionToken: async () => {},
+      onCommand: () => {},
+    })
+    client.start()
+    await flush()
+    const ws = sockets[0]
+    ws.readyState = 1
+    ws.onopen?.()
+    // Absent, not empty-string: the relay reads absence as "predates the
+    // stamp", and an empty value would be a third state nobody handles.
+    expect(JSON.parse(ws.sentFrames[0])).toEqual({ type: 'hello', pairingToken: 'tok' })
+  })
+
+  it('does not claim staleness when the relay says nothing about it', async () => {
+    const { sockets, connect } = fakeWsFactory()
+    const client = new RelayClient({
+      getUrl: async () => 'wss://relay.test/ext',
+      connect,
+      getToken: async () => 'tok',
+      onSessionToken: async () => {},
+      onCommand: () => {},
+    })
+    client.start()
+    await flush()
+    const ws = sockets[0]
+    ws.readyState = 1
+    ws.onopen?.()
+    ws.onmessage?.({ data: JSON.stringify({ type: 'ready' }) })
+    await flush()
+    // An older relay omits the field. Treating that as stale would nag every
+    // user of a deployment that simply has not shipped the check yet.
+    expect(client.isBuildStale()).toBe(false)
+  })
+
   it('dispatches command frames to onCommand and answers via sendResult', async () => {
     const { sockets, connect } = fakeWsFactory()
     const commands: Array<{ id: string; op: string }> = []
