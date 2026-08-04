@@ -52,22 +52,23 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
       templateVersionId: string | null
       capabilityVersion: number
       sensitivity: 'public' | 'internal' | 'confidential'
+      mode?: 'artifact' | 'template'
       visibilityUserIds?: string[]
       requiredCompartments?: string[]
     }): Promise<OfficeArtifactRow> {
       const result = await db<OfficeArtifactRow>(params.userId, `
         INSERT INTO office_artifacts
-          (workspace_id, family, title, creator_user_id, owner_user_id,
+          (workspace_id, family, mode, title, creator_user_id, owner_user_id,
            template_version_id, capability_version, sensitivity,
            visibility_user_ids, required_compartments)
-        VALUES ($1,$2,$3,$4,$4,$5,$6,$7,$8::uuid[],$9::text[])
+        VALUES ($1,$2,$10,$3,$4,$4,$5,$6,$7,$8::uuid[],$9::text[])
         RETURNING id, workspace_id AS "workspaceId", family, mode, title,
                   creator_user_id AS "creatorUserId", owner_user_id AS "ownerUserId",
                   template_version_id AS "templateVersionId",
                   head_version_id AS "headVersionId", head_version AS "headVersion",
                   capability_version AS "capabilityVersion", sensitivity,
                   lifecycle_state AS "lifecycleState", updated_at AS "updatedAt"
-      `, [params.workspaceId, params.family, params.title, params.userId, params.templateVersionId, params.capabilityVersion, params.sensitivity, params.visibilityUserIds ?? [], params.requiredCompartments ?? []])
+      `, [params.workspaceId, params.family, params.title, params.userId, params.templateVersionId, params.capabilityVersion, params.sensitivity, params.visibilityUserIds ?? [], params.requiredCompartments ?? [], params.mode ?? 'artifact'])
       const row = result.rows[0]
       if (!row) throw new Error('Office artifact shell insert returned no row')
       return row

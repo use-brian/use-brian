@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { runOfficeGenerationPipeline, type OfficeGenerationPipelineDeps } from '../generation/pipeline.js'
+import { runOfficeEdit } from '../generation/edit-runner.js'
 import { documentSnapshot, id, templateBundle } from './fixtures.js'
 
 function brief(overrides: Record<string, unknown> = {}) {
@@ -43,5 +44,16 @@ describe('[COMP:office/generation] Office generation pipeline', () => {
     expect(result).toMatchObject({ status: 'needs_input', code: 'website_required' })
     expect(test.value.retrieveBrain).not.toHaveBeenCalled()
     expect(test.value.construct).not.toHaveBeenCalled()
+  })
+})
+
+describe('[COMP:office/generation] Explicit Office revision lane', () => {
+  it('turns comment access and overlapping targets into proposals', async () => {
+    const snapshot = documentSnapshot()
+    const targetId = snapshot.sections[0].nodes[0].id
+    const command = { commandId: id(90), artifactId: snapshot.artifactId, baseVersion: 1, actor: { type: 'assistant' as const, id: id(91) }, origin: 'ai' as const, kind: 'deleteObject' as const, targetId }
+    const base = { artifactId: snapshot.artifactId, baseVersion: 1, currentVersion: 2, instruction: 'Remove it', targetIds: [targetId], threadExcerpt: [], templateConstraints: [], evidencePacket: [], snapshot }
+    await expect(runOfficeEdit({ ...base, role: 'comment', changedObjectIdsSinceBase: [] }, async () => [command])).resolves.toMatchObject({ mode: 'proposal', reason: 'comment_role' })
+    await expect(runOfficeEdit({ ...base, role: 'edit', changedObjectIdsSinceBase: [targetId] }, async () => [command])).resolves.toMatchObject({ mode: 'proposal', reason: 'overlap_conflict' })
   })
 })

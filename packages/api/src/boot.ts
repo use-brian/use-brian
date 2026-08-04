@@ -388,11 +388,17 @@ import { createDeckStore } from './db/deck-store.js'
 import { createOfficeArtifactStore } from './db/office-artifacts.js'
 import { createOfficeTemplateStore } from './db/office-templates.js'
 import { createOfficeGenerationStore } from './db/office-generation.js'
+import { createOfficeCommentStore } from './db/office-comments.js'
+import { createOfficeLiveStore } from './db/office-live.js'
 import { createOfficeService } from './office/service.js'
 import { resolveOfficeAccess } from './office/access.js'
 import { officeArtifactRoutes } from './routes/office-artifacts.js'
 import { officeJobRoutes } from './routes/office-jobs.js'
 import { officeTemplateRoutes } from './routes/office-templates.js'
+import { officeCollaborationRoutes } from './routes/office-collaboration.js'
+import { officeImportRoutes } from './routes/office-imports.js'
+import { createOfficeImportWorker } from './office/import-worker.js'
+import { createOfficeTemplateCompileWorker } from './office/template-compile-worker.js'
 import { publicShareRoutes } from './routes/public-share.js'
 import { publicSiteRoutes } from './routes/public-sites.js'
 import { createDomainProvisioner } from './domains/provisioner.js'
@@ -1885,6 +1891,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const officeArtifactStore = createOfficeArtifactStore()
   const officeTemplateStore = createOfficeTemplateStore()
   const officeGenerationStore = createOfficeGenerationStore()
+  const officeCommentStore = createOfficeCommentStore()
+  const officeLiveStore = createOfficeLiveStore()
   const officeService = createOfficeService({
     createShell: officeArtifactStore.createShell,
     getArtifact: officeArtifactStore.get,
@@ -4493,9 +4501,67 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     steer: officeGenerationStore.steer,
     cancel: officeGenerationStore.cancel,
   }))
+  const officeImportWorker = filesApi ? createOfficeImportWorker({
+    store: officeGenerationStore,
+    async readSource({ userId, workspaceId, assistantId, fileId }) {
+      const result = await filesApi!.readBytes({ workspaceId, userId, assistantId, assistantKind: 'standard', clearance: 'confidential' }, fileId)
+      if (!result.ok) throw new Error(`Office import source unavailable: ${result.error.kind}`)
+      return result.value.bytes
+    },
+    initialize: officeLiveStore.initialize,
+    async context({ userId, artifactId, templateVersionId }) {
+      const artifact = await officeArtifactStore.get(userId, artifactId)
+      if (!artifact) throw new Error('Office import artifact not found')
+      return { artifactId, workspaceId: artifact.workspaceId, templateVersionId, locale: 'en', defaultLanguage: 'en', title: artifact.title }
+    },
+  }) : null
+  const officeTemplateCompileWorker = filesApi ? createOfficeTemplateCompileWorker({
+    claim: officeGenerationStore.claim,
+    getSnapshot: officeLiveStore.get,
+    getTemplate: officeTemplateStore.get,
+    async saveBundle({ userId, workspaceId, templateId, hash, bytes }) {
+      const path = `/office/templates/${templateId}/${hash}.json`
+      const ctx = { workspaceId, userId, assistantKind: 'standard' as const, clearance: 'confidential' as const }
+      const existing = await filesApi!.stat(ctx, path)
+      if (existing.ok) return existing.value.id
+      const saved = await filesApi!.writeBytes(ctx, { path, bytes, mime: 'application/json', sensitivity: 'confidential' })
+      if (!saved.ok) throw new Error(`Office template bundle save failed: ${saved.error.kind}`)
+      return saved.value.id
+    },
+    addVersion: officeTemplateStore.addVersion,
+    appendEvent: officeGenerationStore.appendEvent,
+    finish: officeGenerationStore.finish,
+  }) : null
+  const wakeImport = (userId: string) => {
+    if (officeImportWorker) void officeImportWorker(userId).catch((error) => console.error('[office-import-worker]', error))
+  }
+  const wakeTemplateCompile = (userId: string) => {
+    if (officeTemplateCompileWorker) void officeTemplateCompileWorker(userId).catch((error) => console.error('[office-template-compile-worker]', error))
+  }
   app.use('/api/office', officeAuth, officeTemplateRoutes({
     list: officeTemplateStore.list,
     createDraft: officeTemplateStore.createDraft,
+    createTemplateShell: officeArtifactStore.createShell,
+    createCompileJob: officeGenerationStore.create,
+    wakeCompile: wakeTemplateCompile,
+  }))
+  app.use('/api/office', officeAuth, officeCollaborationRoutes({
+    getArtifact: officeArtifactStore.get,
+    resolveAccess: resolveOfficeAccess,
+    getSnapshot: officeLiveStore.get,
+    appendCommand: officeLiveStore.appendCommand,
+    listThreads: officeCommentStore.listThreads,
+    createThread: officeCommentStore.createThread,
+    reply: officeCommentStore.reply,
+    resolve: officeCommentStore.resolve,
+    createSuggestion: officeCommentStore.createSuggestion,
+    decideSuggestion: officeCommentStore.decideSuggestion,
+    service: officeService,
+  }))
+  app.use('/api/office', officeAuth, officeImportRoutes({
+    createShell: officeArtifactStore.createShell,
+    createJob: officeGenerationStore.create,
+    wake: wakeImport,
   }))
   // Deck live-preview read + export surface (tools registered in the files
   // block above; absent files backend = no decks, so the mount is guarded).

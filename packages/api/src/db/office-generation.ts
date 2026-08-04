@@ -72,11 +72,11 @@ export function createOfficeGenerationStore(db: OfficeDbQuery = defaultOfficeDbQ
       return result.rows[0] ?? null
     },
 
-    async claim(params: { userId: string; leaseToken: string; leaseMs: number }): Promise<OfficeGenerationJobRow | null> {
+    async claim(params: { userId: string; leaseToken: string; leaseMs: number; jobKinds?: OfficeGenerationJobRow['jobKind'][] }): Promise<OfficeGenerationJobRow | null> {
       const result = await db<OfficeGenerationJobRow>(params.userId, `
         WITH candidate AS (
           SELECT id FROM office_generation_jobs
-           WHERE job_kind = 'create' AND status IN ('queued','running') AND cancel_requested_at IS NULL
+           WHERE job_kind = ANY($3::text[]) AND status IN ('queued','running') AND cancel_requested_at IS NULL
              AND next_attempt_at <= now()
              AND (lease_expires_at IS NULL OR lease_expires_at < now())
            ORDER BY next_attempt_at, created_at
@@ -89,7 +89,7 @@ export function createOfficeGenerationStore(db: OfficeDbQuery = defaultOfficeDbQ
                updated_at = now()
           FROM candidate c WHERE j.id = c.id
         RETURNING ${JOB_COLUMNS}
-      `, [params.leaseToken, params.leaseMs])
+      `, [params.leaseToken, params.leaseMs, params.jobKinds ?? ['create']])
       return result.rows[0] ?? null
     },
 

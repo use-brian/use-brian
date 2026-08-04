@@ -148,6 +148,9 @@ importers:
       '@use-brian/doc-model':
         specifier: workspace:*
         version: link:../../packages/doc-model
+      '@use-brian/office-model':
+        specifier: workspace:*
+        version: link:../../packages/office-model
       '@use-brian/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -520,6 +523,9 @@ importers:
       pg:
         specifier: ^8
         version: 8.21.0
+      yjs:
+        specifier: 13.6.31
+        version: 13.6.31
       zod:
         specifier: ^3.24
         version: 3.25.76

@@ -6,6 +6,7 @@ import { buildTool, type Tool } from '../tools/types.js'
 export type OfficeArtifactToolProjection = {
   artifactId: string
   family: 'document' | 'presentation'
+  mode?: 'artifact' | 'template'
   title: string
   version: number
   lifecycleState: 'active' | 'archived' | 'trash' | 'retained'

@@ -10,6 +10,28 @@ export type OfficeCommentAnchor = {
 
 export function createOfficeCommentStore(db: OfficeDbQuery = defaultOfficeDbQuery) {
   return {
+    async listThreads(userId: string, artifactId: string): Promise<Array<Record<string, unknown>>> {
+      const result = await db<Record<string, unknown>>(userId, `
+        SELECT t.id, t.artifact_version_id AS "artifactVersionId",
+               t.anchor_kind AS "anchorKind", t.anchor, t.geometry, t.status,
+               t.assigned_user_id AS "assignedUserId", t.assigned_to_brian AS "assignedToBrian",
+               t.due_at AS "dueAt", t.created_by AS "createdBy", t.created_at AS "createdAt",
+               COALESCE(jsonb_agg(jsonb_build_object(
+                 'id', m.id, 'authorType', m.author_type, 'authorUserId', m.author_user_id,
+                 'authorAssistantId', m.author_assistant_id, 'body', m.body,
+                 'mentions', m.mentions, 'brianRunStatus', m.brian_run_status,
+                 'createdAt', m.created_at
+               ) ORDER BY m.created_at) FILTER (WHERE m.id IS NOT NULL), '[]'::jsonb) AS messages
+          FROM office_comment_threads t
+          LEFT JOIN office_comment_messages m ON m.thread_id = t.id
+         WHERE t.artifact_id = $1
+         GROUP BY t.id
+         ORDER BY t.created_at DESC
+         LIMIT 500
+      `, [artifactId])
+      return result.rows
+    },
+
     async createThread(params: { userId: string; workspaceId: string; artifactId: string; artifactVersionId: string; anchor: OfficeCommentAnchor; snapshotFileId?: string; body: string; mentions?: string[]; brianTriggerKey?: string }): Promise<{ threadId: string; messageId: string }> {
       const result = await db<{ threadId: string; messageId: string }>(params.userId, `
         WITH thread AS (
@@ -72,6 +94,27 @@ export function createOfficeCommentStore(db: OfficeDbQuery = defaultOfficeDbQuer
         RETURNING id
       `, [params.artifactId, params.validTargetIds])
       return result.rows.length
+    },
+
+    async createSuggestion(params: { userId: string; workspaceId: string; artifactId: string; threadId?: string; baseVersionId: string; proposedByType: 'user' | 'assistant'; proposedByAssistantId?: string; commandBatch: unknown; affectedObjectIds: string[] }): Promise<{ id: string }> {
+      const result = await db<{ id: string }>(params.userId, `
+        INSERT INTO office_suggestions
+          (artifact_id, workspace_id, thread_id, base_version_id,
+           proposed_by_type, proposed_by_user_id, proposed_by_assistant_id,
+           command_batch, affected_object_ids)
+        VALUES ($1,$2,$3,$4,$5,CASE WHEN $5='user' THEN $6::uuid END,$7,$8::jsonb,$9::uuid[])
+        RETURNING id
+      `, [params.artifactId, params.workspaceId, params.threadId ?? null, params.baseVersionId, params.proposedByType, params.userId, params.proposedByAssistantId ?? null, JSON.stringify(params.commandBatch), params.affectedObjectIds])
+      if (!result.rows[0]) throw new Error('Office suggestion insert returned no row')
+      return result.rows[0]
+    },
+
+    async decideSuggestion(params: { userId: string; suggestionId: string; decision: 'accepted' | 'rejected'; expectedStatus?: 'open' | 'conflicted' }): Promise<boolean> {
+      const result = await db<{ id: string }>(params.userId, `
+        UPDATE office_suggestions SET status=$2,decided_by=$3,decided_at=now()
+         WHERE id=$1 AND status=$4 RETURNING id
+      `, [params.suggestionId, params.decision, params.userId, params.expectedStatus ?? 'open'])
+      return result.rows.length === 1
     },
   }
 }

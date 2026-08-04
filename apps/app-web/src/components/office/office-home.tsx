@@ -9,6 +9,7 @@ import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 import { cn } from "@/lib/utils";
 import { listOfficeArtifacts, type OfficeArtifact, type OfficeFamily } from "@/lib/office/api";
+import { OfficeImport } from "./office-import";
 
 type View = "active" | "archived" | "trash";
 type Filter = "all" | OfficeFamily;
@@ -45,6 +46,7 @@ export function OfficeHome({ workspaceId, initialArtifacts }: { workspaceId: str
             <p className="mt-1 text-sm text-muted-foreground">{t.homeDescription}</p>
           </div>
           <div className="flex gap-2">
+            <OfficeImport workspaceId={workspaceId} />
             <Link className="inline-flex h-9 items-center gap-2 rounded-md border px-3 text-sm font-medium" href={`/w/${workspaceId}/office/templates`}>
               <Shapes className="size-4" aria-hidden />{t.templates}
             </Link>

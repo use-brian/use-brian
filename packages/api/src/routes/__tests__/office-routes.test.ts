@@ -24,7 +24,12 @@ function app() {
   const job = { id: JOB, workspaceId: WORKSPACE, artifactId: ARTIFACT, initiatedByUserId: USER, assistantId: ASSISTANT, jobKind: 'create' as const, status: 'running' as const, stage: 'grounding', brief: {}, authorityProjection: {}, templateVersionId: null, baseArtifactVersion: 0, checkpoint: {}, checkpointVersion: 2, leaseToken: null, leaseExpiresAt: null, cancelRequestedAt: null, errorCode: null, createdAt: new Date(), updatedAt: new Date() }
   const artifacts = { service, list: vi.fn(async () => [projection]), restoreVersion: vi.fn(async () => ({ id: 'v2', version: 2 })), getArtifact: vi.fn(async () => ({ id: ARTIFACT } as never)), listVersions: vi.fn(async () => []), canRestore: vi.fn(async () => true) }
   const jobs = { get: vi.fn(async () => job), events: vi.fn(async () => [{ seq: 1, code: 'office.job.queued' } as never]), steer: vi.fn(async () => ({ id: 'steer-1' })), cancel: vi.fn(async () => true) }
-  const templates = { list: vi.fn(async () => []), createDraft: vi.fn(async () => ({ id: 'template-1' })) }
+  const templates = {
+    list: vi.fn(async () => []),
+    createDraft: vi.fn(async () => ({ id: 'template-1' })),
+    createTemplateShell: vi.fn(async () => ({ id: ARTIFACT })),
+    createCompileJob: vi.fn(async () => ({ id: JOB })),
+  }
   server.use('/api/office', officeArtifactRoutes(artifacts))
   server.use('/api/office', officeJobRoutes(jobs))
   server.use('/api/office', officeTemplateRoutes(templates))

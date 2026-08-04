@@ -40,6 +40,7 @@
     "multer": "^2.1.1",
     "nodemailer": "^8.0.9",
     "pg": "^8",
+    "yjs": "13.6.31",
     "zod": "^3.24"
   },
   "devDependencies": {

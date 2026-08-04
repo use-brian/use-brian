@@ -18,6 +18,7 @@
 
 import { useEffect, useState } from "react";
 import type { HocuspocusProvider } from "@hocuspocus/provider";
+import { colorForUserId } from "./cursor-color";
 
 export type PresenceUser = {
   /** Stable per-person id (falls back to the awareness clientID). */
@@ -115,6 +116,25 @@ export function usePresence(
   }, [provider]);
 
   return users;
+}
+
+/** Publish identity for collaboration surfaces that do not mount the Page
+ * editor's CollaborationCursor extension (Office uses the same awareness
+ * transport but renders its own canonical editors). */
+export function usePublishPresenceIdentity(
+  provider: HocuspocusProvider | null,
+  user: { id?: string; name: string } | null,
+): void {
+  useEffect(() => {
+    const awareness = provider?.awareness;
+    if (!awareness || !user) return;
+    const id = user.id ?? user.name;
+    awareness.setLocalStateField("user", {
+      id,
+      name: user.name,
+      color: colorForUserId(id),
+    });
+  }, [provider, user?.id, user?.name]);
 }
 
 /**

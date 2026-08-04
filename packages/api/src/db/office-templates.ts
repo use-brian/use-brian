@@ -3,6 +3,14 @@ import { defaultOfficeDbQuery, type OfficeDbQuery } from './office-artifacts.js'
 
 export function createOfficeTemplateStore(db: OfficeDbQuery = defaultOfficeDbQuery) {
   return {
+    async get(userId: string, templateId: string): Promise<{ id: string; workspaceId: string; name: string; description: string; sensitivity: 'public' | 'internal' | 'confidential' } | null> {
+      const result = await db<{ id: string; workspaceId: string; name: string; description: string; sensitivity: 'public' | 'internal' | 'confidential' }>(userId, `
+        SELECT id, workspace_id AS "workspaceId", name, description, sensitivity
+          FROM office_templates WHERE id = $1 AND lifecycle_state <> 'purged'
+      `, [templateId])
+      return result.rows[0] ?? null
+    },
+
     async list(userId: string, workspaceId: string, family?: 'document' | 'presentation'): Promise<Array<Record<string, unknown>>> {
       const result = await db<Record<string, unknown>>(userId, `
         SELECT id, family, name, description, lifecycle_state AS "lifecycleState",
