@@ -248,6 +248,11 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'updatePowerpoint',   description: 'Edit a deck by slide operations and rebuild its .pptx in place',                     classification: 'write', defaultPolicy: 'allow' },
     { name: 'getPowerpoint',      description: 'Read a deck\'s current slides and version',                                          classification: 'read',  defaultPolicy: 'allow' },
   ],
+  office: [
+    { name: 'createOfficeArtifact', description: 'Start a durable Brian-native Document or Presentation job', classification: 'write', defaultPolicy: 'allow' },
+    { name: 'getOfficeArtifact', description: 'Read an Office artifact and its current generation state', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'reviseOfficeArtifact', description: 'Start an undoable Office revision or proposal job', classification: 'write', defaultPolicy: 'allow' },
+  ],
   // Google Cloud Storage (bring-your-own storage) — a credentialed connector
   // with NO assistant tools. It only rebinds where the Workspace Files bytes
   // layer writes (see docs/plans/byo-google-storage.md). Present here so it
@@ -432,6 +437,11 @@ export const BOOT_INJECTED_BUILTIN_TOOLS: Record<string, readonly string[]> = {
     'generatePowerpoint',
     'updatePowerpoint',
     'getPowerpoint',
+  ],
+  office: [
+    'createOfficeArtifact',
+    'getOfficeArtifact',
+    'reviseOfficeArtifact',
   ],
   // Computer use (docs/architecture/engine/computer-use.md): wired at boot
   // from packages/core/src/sandbox/tools.ts, always present (a missing

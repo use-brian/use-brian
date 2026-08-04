@@ -28,6 +28,22 @@ export type OfficeArtifactRow = {
 
 export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQuery) {
   return {
+    async list(userId: string, workspaceId: string, lifecycleState: 'active' | 'archived' | 'trash'): Promise<OfficeArtifactRow[]> {
+      const result = await db<OfficeArtifactRow>(userId, `
+        SELECT id, workspace_id AS "workspaceId", family, mode, title,
+               creator_user_id AS "creatorUserId", owner_user_id AS "ownerUserId",
+               template_version_id AS "templateVersionId",
+               head_version_id AS "headVersionId", head_version AS "headVersion",
+               capability_version AS "capabilityVersion", sensitivity,
+               lifecycle_state AS "lifecycleState", updated_at AS "updatedAt"
+          FROM office_artifacts
+         WHERE workspace_id = $1 AND lifecycle_state = $2
+         ORDER BY updated_at DESC
+         LIMIT 200
+      `, [workspaceId, lifecycleState])
+      return result.rows
+    },
+
     async createShell(params: {
       userId: string
       workspaceId: string
@@ -68,6 +84,19 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
           FROM office_artifacts WHERE id = $1
       `, [artifactId])
       return result.rows[0] ?? null
+    },
+
+    async listVersions(userId: string, artifactId: string): Promise<Array<Record<string, unknown>>> {
+      const result = await db<Record<string, unknown>>(userId, `
+        SELECT id, version::int AS version, parent_version_id AS "parentVersionId",
+               snapshot_hash AS "snapshotHash", origin, author_type AS "authorType",
+               summary, checkpoint_kind AS "checkpointKind", created_at AS "createdAt"
+          FROM office_artifact_versions
+         WHERE artifact_id = $1
+         ORDER BY version DESC
+         LIMIT 200
+      `, [artifactId])
+      return result.rows
     },
 
     async commitVersion(params: {

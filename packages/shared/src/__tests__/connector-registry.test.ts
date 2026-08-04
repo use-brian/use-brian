@@ -21,6 +21,18 @@ const MSGRAPH_TOOLS = [
 ]
 
 describe('[COMP:shared/connector-registry] Official connector registry', () => {
+  it('registers Office as a first-party governed primitive', () => {
+    expect(OFFICIAL_CONNECTORS.find((connector) => connector.id === 'office')).toMatchObject({
+      auth_type: 'none',
+      oauth_required: false,
+    })
+    expect(OFFICIAL_CONNECTOR_TOOLS.office?.map((tool) => tool.name)).toEqual([
+      'createOfficeArtifact',
+      'getOfficeArtifact',
+      'reviseOfficeArtifact',
+    ])
+  })
+
   describe('Microsoft Teams (msgraph)', () => {
     const msgraph = OFFICIAL_CONNECTORS.find((c) => c.id === 'msgraph')
 

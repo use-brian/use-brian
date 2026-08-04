@@ -171,6 +171,9 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   generatePowerpoint: 'Create a PowerPoint deck',
   updatePowerpoint: 'Edit a PowerPoint deck',
   getPowerpoint: 'Read a PowerPoint deck',
+  createOfficeArtifact: 'Create an Office artifact',
+  getOfficeArtifact: 'Read an Office artifact',
+  reviseOfficeArtifact: 'Revise an Office artifact',
 
   // Computer use (docs/architecture/engine/computer-use.md)
   browserNavigate: 'Open a page in the browser',

@@ -55,11 +55,9 @@ export {
  *  the order a workspace starts at and the order the Studio tab lists the
  *  hidden apps in — the order the strip actually renders is whatever
  *  `home_apps` stores, which an admin can drag (`reorderHomeApps`). */
-// Office is registered in the shared Home-app vocabulary in Phase 0 so the
-// reserved migration can land, but it stays out of the navigable registry
-// until the Phase 3 admission barrier enables the product route.
 export const OPERATOR_APP_KEYS = [
   "page",
+  "office",
   "tasks",
   "crm",
   "feed",
@@ -81,6 +79,7 @@ export const DEFAULT_OPERATOR_APP: OperatorAppKey = "page";
  *  session-rail index). */
 const APP_SEGMENT: Record<OperatorAppKey, string> = {
   page: "p",
+  office: "office",
   tasks: "tasks",
   feed: "feed",
   crm: "crm",
@@ -91,6 +90,7 @@ const APP_SEGMENT: Record<OperatorAppKey, string> = {
 /** Surfaces that belong to an operator app (the bar shows on these). */
 const SURFACE_TO_APP: Partial<Record<WorkspaceSurface, OperatorAppKey>> = {
   p: "page",
+  office: "office",
   tasks: "tasks",
   feed: "feed",
   crm: "crm",

@@ -1,0 +1,58 @@
+import express from 'express'
+import request from 'supertest'
+import { describe, expect, it, vi } from 'vitest'
+import { officeArtifactRoutes } from '../office-artifacts.js'
+import { officeJobRoutes } from '../office-jobs.js'
+import { officeTemplateRoutes } from '../office-templates.js'
+
+const USER = '20000000-0000-4000-8000-000000000001'
+const WORKSPACE = '20000000-0000-4000-8000-000000000002'
+const ASSISTANT = '20000000-0000-4000-8000-000000000003'
+const ARTIFACT = '20000000-0000-4000-8000-000000000004'
+const JOB = '20000000-0000-4000-8000-000000000005'
+
+function app() {
+  const server = express()
+  server.use(express.json())
+  server.use((req, _res, next) => { (req as { userId?: string }).userId = USER; next() })
+  const projection = { artifactId: ARTIFACT, family: 'document' as const, title: 'Report', version: 0, lifecycleState: 'active' as const, role: 'edit' as const, job: { id: JOB, status: 'queued', stage: 'queued' } }
+  const service = {
+    create: vi.fn(async () => ({ artifactId: ARTIFACT, jobId: JOB })),
+    get: vi.fn(async () => projection),
+    revise: vi.fn(async () => ({ jobId: JOB, mode: 'direct' as const })),
+  }
+  const job = { id: JOB, workspaceId: WORKSPACE, artifactId: ARTIFACT, initiatedByUserId: USER, assistantId: ASSISTANT, jobKind: 'create' as const, status: 'running' as const, stage: 'grounding', brief: {}, authorityProjection: {}, templateVersionId: null, baseArtifactVersion: 0, checkpoint: {}, checkpointVersion: 2, leaseToken: null, leaseExpiresAt: null, cancelRequestedAt: null, errorCode: null, createdAt: new Date(), updatedAt: new Date() }
+  const artifacts = { service, list: vi.fn(async () => [projection]), restoreVersion: vi.fn(async () => ({ id: 'v2', version: 2 })), getArtifact: vi.fn(async () => ({ id: ARTIFACT } as never)), listVersions: vi.fn(async () => []), canRestore: vi.fn(async () => true) }
+  const jobs = { get: vi.fn(async () => job), events: vi.fn(async () => [{ seq: 1, code: 'office.job.queued' } as never]), steer: vi.fn(async () => ({ id: 'steer-1' })), cancel: vi.fn(async () => true) }
+  const templates = { list: vi.fn(async () => []), createDraft: vi.fn(async () => ({ id: 'template-1' })) }
+  server.use('/api/office', officeArtifactRoutes(artifacts))
+  server.use('/api/office', officeJobRoutes(jobs))
+  server.use('/api/office', officeTemplateRoutes(templates))
+  return { server, artifacts, jobs, templates }
+}
+
+describe('[COMP:api/office-routes] Office API routes', () => {
+  it('creates a shell/job and exposes permission-filtered artifact state', async () => {
+    const test = app()
+    await request(test.server).post('/api/office/artifacts').send({ workspaceId: WORKSPACE, assistantId: ASSISTANT, family: 'document', outcome: 'Create a board report', audience: 'Board', sourceHandles: [], canonicalWebsite: 'https://example.com', companyHasNoWebsite: false, idempotencyKey: 'request-12345678' }).expect(202, { artifactId: ARTIFACT, jobId: JOB })
+    const read = await request(test.server).get(`/api/office/artifacts/${ARTIFACT}`).expect(200)
+    expect(read.body.artifact).toMatchObject({ artifactId: ARTIFACT, role: 'edit', job: { id: JOB, stage: 'queued' } })
+  })
+
+  it('supports late-join events, attributed steering, cancellation, and template drafts', async () => {
+    const test = app()
+    const events = await request(test.server).get(`/api/office/jobs/${JOB}/events?afterSeq=0`).expect(200)
+    expect(events.body.events[0]).toMatchObject({ code: 'office.job.queued' })
+    await request(test.server).post(`/api/office/jobs/${JOB}/steering`).send({ instruction: 'Emphasize retention' }).expect(202)
+    expect(test.jobs.steer).toHaveBeenCalledWith({ userId: USER, workspaceId: WORKSPACE, jobId: JOB, instruction: 'Emphasize retention' })
+    await request(test.server).post(`/api/office/jobs/${JOB}/cancel`).send({}).expect(202)
+    await request(test.server).post('/api/office/templates').send({ workspaceId: WORKSPACE, family: 'presentation', name: 'Pitch', description: 'Company pitch', sensitivity: 'internal' }).expect(201)
+  })
+
+  it('rejects invalid boundaries before touching stores', async () => {
+    const test = app()
+    await request(test.server).post('/api/office/artifacts').send({ workspaceId: 'bad' }).expect(400)
+    await request(test.server).post(`/api/office/jobs/${JOB}/steering`).send({ instruction: '' }).expect(400)
+    expect(test.artifacts.service.create).not.toHaveBeenCalled()
+  })
+})

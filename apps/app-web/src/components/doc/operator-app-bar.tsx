@@ -44,6 +44,7 @@ import { useIntentPrefetch } from "@/lib/surface-prefetch";
 import {
   CheckSquare,
   FileText,
+  Files,
   Users,
   Megaphone,
   MessageSquare,
@@ -70,6 +71,7 @@ import type { CustomHomeApp } from "@/lib/api/home-apps";
  *  chip can never drift. */
 export const APP_ICON: Record<OperatorAppKey, LucideIcon> = {
   page: FileText,
+  office: Files,
   tasks: CheckSquare,
   feed: Megaphone,
   crm: Users,
@@ -106,6 +108,7 @@ export function OperatorAppBar({
   const intentPrefetch = useIntentPrefetch();
   const labels: Record<OperatorAppKey, string> = {
     page: t.page,
+    office: t.office,
     tasks: t.tasks,
     feed: t.feed,
     crm: t.crm,

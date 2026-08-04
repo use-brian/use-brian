@@ -88,6 +88,7 @@ import {
   createViewTools,
   createFileTools,
   createDeckTools,
+  createOfficeTools,
   type FileToolPolicy,
   createFindPageTool,
   createIngestRuleTools,
@@ -384,6 +385,14 @@ import { teamspacesRoutes } from './routes/teamspaces.js'
 import { createTeamspaceStore } from './db/teamspace-store.js'
 import { decksRoutes } from './routes/decks.js'
 import { createDeckStore } from './db/deck-store.js'
+import { createOfficeArtifactStore } from './db/office-artifacts.js'
+import { createOfficeTemplateStore } from './db/office-templates.js'
+import { createOfficeGenerationStore } from './db/office-generation.js'
+import { createOfficeService } from './office/service.js'
+import { resolveOfficeAccess } from './office/access.js'
+import { officeArtifactRoutes } from './routes/office-artifacts.js'
+import { officeJobRoutes } from './routes/office-jobs.js'
+import { officeTemplateRoutes } from './routes/office-templates.js'
 import { publicShareRoutes } from './routes/public-share.js'
 import { publicSiteRoutes } from './routes/public-sites.js'
 import { createDomainProvisioner } from './domains/provisioner.js'
@@ -1873,6 +1882,22 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }
 
   const allTools = buildAllTools()
+  const officeArtifactStore = createOfficeArtifactStore()
+  const officeTemplateStore = createOfficeTemplateStore()
+  const officeGenerationStore = createOfficeGenerationStore()
+  const officeService = createOfficeService({
+    createShell: officeArtifactStore.createShell,
+    getArtifact: officeArtifactStore.get,
+    resolveAccess: resolveOfficeAccess,
+    createJob: officeGenerationStore.create,
+    latestJob: officeGenerationStore.latestForArtifact,
+  })
+  for (const tool of createOfficeTools({
+    port: officeService,
+    appOrigin: env.AUTHED_APP_URL ?? env.APP_URL,
+  })) {
+    allTools.set(tool.name, tool)
+  }
 
   // ── Episode ingestors — built by the platform factory over boot's stores
   //    (open default: no-op chat ingest, undefined brain ingest). ──
@@ -4447,6 +4472,31 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const docNotificationsStore = createDbDocNotificationsStore()
   app.use('/api', requireAuth(env.JWT_SECRET), commentRoutes({ commentThreadStore }))
   app.use('/api', requireAuth(env.JWT_SECRET), inboxRoutes({ commentThreadStore, docNotificationsStore }))
+  const officeAuth = requireAuth(env.JWT_SECRET)
+  app.use('/api/office', officeAuth, officeArtifactRoutes({
+    service: officeService,
+    async list(userId, workspaceId, view) {
+      const artifacts = await officeArtifactStore.list(userId, workspaceId, view)
+      const visible = await Promise.all(artifacts.map((artifact) => officeService.get({ userId, artifactId: artifact.id })))
+      return visible.filter((artifact): artifact is NonNullable<typeof artifact> => artifact !== null)
+    },
+    restoreVersion: officeArtifactStore.restoreVersion,
+    getArtifact: officeArtifactStore.get,
+    listVersions: officeArtifactStore.listVersions,
+    async canRestore(userId, artifactId) {
+      return (await resolveOfficeAccess(userId, artifactId))?.canRestore ?? false
+    },
+  }))
+  app.use('/api/office', officeAuth, officeJobRoutes({
+    get: officeGenerationStore.get,
+    events: officeGenerationStore.listEvents,
+    steer: officeGenerationStore.steer,
+    cancel: officeGenerationStore.cancel,
+  }))
+  app.use('/api/office', officeAuth, officeTemplateRoutes({
+    list: officeTemplateStore.list,
+    createDraft: officeTemplateStore.createDraft,
+  }))
   // Deck live-preview read + export surface (tools registered in the files
   // block above; absent files backend = no decks, so the mount is guarded).
   if (deckStore && filesApi) {

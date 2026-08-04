@@ -3,6 +3,21 @@ import { defaultOfficeDbQuery, type OfficeDbQuery } from './office-artifacts.js'
 
 export function createOfficeTemplateStore(db: OfficeDbQuery = defaultOfficeDbQuery) {
   return {
+    async list(userId: string, workspaceId: string, family?: 'document' | 'presentation'): Promise<Array<Record<string, unknown>>> {
+      const result = await db<Record<string, unknown>>(userId, `
+        SELECT id, family, name, description, lifecycle_state AS "lifecycleState",
+               current_version_id AS "currentVersionId", sensitivity,
+               updated_at AS "updatedAt"
+          FROM office_templates
+         WHERE workspace_id = $1
+           AND ($2::text IS NULL OR family = $2::text)
+           AND lifecycle_state <> 'purged'
+         ORDER BY updated_at DESC
+         LIMIT 200
+      `, [workspaceId, family ?? null])
+      return result.rows
+    },
+
     async createDraft(params: { userId: string; workspaceId: string; family: 'document' | 'presentation'; name: string; description: string; sensitivity: 'public' | 'internal' | 'confidential' }): Promise<{ id: string }> {
       const result = await db<{ id: string }>(params.userId, `
         INSERT INTO office_templates

@@ -55,6 +55,7 @@ export function surfaceSkeletonKind(
       return "rail";
     case "workflow":
     case "feed":
+    case "office":
     case "computer":
     case "recordings":
       return "grid";

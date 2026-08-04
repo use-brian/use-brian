@@ -132,6 +132,7 @@ export function pageIdFromInAppHref(
  */
 export type WorkspaceSurface =
   | "p"
+  | "office"
   | "brain"
   | "studio"
   | "workflow"
@@ -151,6 +152,7 @@ const SURFACE_PATH_RE = /^\/w\/[^/]+\/([^/?#]+)/;
 
 const KNOWN_SURFACES: ReadonlySet<string> = new Set([
   "p",
+  "office",
   "brain",
   "studio",
   "workflow",
