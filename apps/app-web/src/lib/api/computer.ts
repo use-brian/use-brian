@@ -193,12 +193,25 @@ export async function sendStreamInput(inputUrl: string, event: TakeoverInput): P
  * Vault the signed-in session into the task's browser profile. A task that
  * started identity-less answers 409 `profile_required` unless `profileId`
  * names the profile to bind.
+ *
+ * Backend-aware (browser-session-portability.md D5): works the same whether
+ * the session's active backend is cloud (Take-Over "I signed in") or local
+ * ("Save this login from my browser") - the caller does not need to know
+ * which. On failure `error` carries the server's message verbatim, since a
+ * missing extension, a wrong tab, and a dead CDP session all need their own
+ * wording rather than one flattened failure.
  */
 export async function markComputerSessionCaptured(
   sessionId: string,
   site: string,
   profileId?: string,
-): Promise<{ ok: boolean; profileRequired: boolean }> {
+): Promise<{
+  ok: boolean;
+  profileRequired: boolean;
+  site?: string;
+  capturedAt?: string | null;
+  error?: string;
+}> {
   const res = await authFetch(
     `${API_URL}/api/computer/tasks/${encodeURIComponent(sessionId)}/captured`,
     {
@@ -207,7 +220,16 @@ export async function markComputerSessionCaptured(
       body: JSON.stringify(profileId ? { site, profileId } : { site }),
     },
   );
-  return { ok: res.ok, profileRequired: res.status === 409 };
+  const body = (await res.json().catch(() => null)) as
+    | { site?: string; capturedAt?: string | null; error?: string; code?: string }
+    | null;
+  return {
+    ok: res.ok,
+    profileRequired: res.status === 409 && body?.code === "profile_required",
+    site: body?.site,
+    capturedAt: body?.capturedAt,
+    error: body?.error,
+  };
 }
 
 export async function completeComputerTask(
@@ -288,6 +310,32 @@ export async function startProfileLogin(
   return (await res.json()) as { sessionId: string; site: string | null };
 }
 
+/**
+ * "Save this login from my browser" (owner only, browser-session-portability.md
+ * D5): captures the named site straight out of the caller's own connected
+ * Chrome into this profile's vault - no cloud task, no separate sign-in tab.
+ * On failure `error` carries the server's message verbatim (a missing
+ * extension, a wrong tab's site, and a dead CDP session each need their own
+ * wording rather than one flattened failure).
+ */
+export async function captureProfileSession(
+  profileId: string,
+  site: string,
+): Promise<{ ok: boolean; site?: string; capturedAt?: string | null; error?: string }> {
+  const res = await authFetch(
+    `${API_URL}/api/computer/profiles/${encodeURIComponent(profileId)}/capture`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ site }),
+    },
+  );
+  const body = (await res.json().catch(() => null)) as
+    | { site?: string; capturedAt?: string | null; error?: string; code?: string }
+    | null;
+  return { ok: res.ok, site: body?.site, capturedAt: body?.capturedAt, error: body?.error };
+}
+
 export async function updateBrowserProfile(
   profileId: string,
   patch: Partial<
@@ -336,16 +384,25 @@ export type BrowserExtensionStatus = {
   configured: boolean;
   /** The caller's extension is currently connected to the relay. */
   connected: boolean;
+  /** Source fingerprint the connected extension reported; null when it reported none. */
+  build?: string | null;
+  /** The connected extension is behind the build this deployment expects. */
+  staleBuild?: boolean;
+};
+
+const STATUS_UNAVAILABLE: BrowserExtensionStatus = {
+  configured: false,
+  connected: false,
+  build: null,
+  staleBuild: false,
 };
 
 /** Poll target for the connect surface. Never throws — a status probe must
  *  never take the Settings panel down. */
 export async function getBrowserExtensionStatus(): Promise<BrowserExtensionStatus> {
   const res = await authFetch(`${API_URL}/api/browser-extension/status`).catch(() => null);
-  if (!res?.ok) return { configured: false, connected: false };
-  return (await res
-    .json()
-    .catch(() => ({ configured: false, connected: false }))) as BrowserExtensionStatus;
+  if (!res?.ok) return STATUS_UNAVAILABLE;
+  return (await res.json().catch(() => STATUS_UNAVAILABLE)) as BrowserExtensionStatus;
 }
 
 export type BrowserExtensionPairing = {

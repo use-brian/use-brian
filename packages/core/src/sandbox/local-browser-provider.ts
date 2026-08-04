@@ -7,8 +7,11 @@
  * The extension is a governed backend, not an agent: each method here maps
  * 1:1 to one `command{op,args}` envelope the extension executes discretely.
  */
+import { STALE_EXTENSION_REMEDY } from '@use-brian/shared'
 import {
   BrowserBackendError,
+  BROWSER_BACKEND_ERROR_CODES,
+  BrowserCaptureResultSchema,
   BrowserNavigateResultSchema,
   BrowserSnapshotSchema,
   TakeoverFrameSchema,
@@ -22,24 +25,21 @@ import {
   type TakeoverInputEvent,
 } from './types.js'
 
-const KNOWN_ERROR_CODES: ReadonlySet<string> = new Set([
-  'no_extension',
-  'not_configured',
-  'timeout',
-  'stopped',
-  'tab_closed',
-  'detached',
-  'consent_denied',
-  'no_eligible_tab',
-  'firefox_companion_missing',
-  'firefox_restart_required',
-  'unsupported_browser',
-  'stale_ref',
-  'backend_error',
-])
+/**
+ * Derived, never re-typed. A second hand-written copy of this list is how
+ * `no_browser_permission` got flattened to `backend_error` — see
+ * `BROWSER_BACKEND_ERROR_CODES`.
+ */
+const KNOWN_ERROR_CODES: ReadonlySet<string> = new Set(BROWSER_BACKEND_ERROR_CODES)
 
-function toBackendError(error: string, code?: string): BrowserBackendError {
+function toBackendError(error: string, code?: string, staleBuild?: boolean): BrowserBackendError {
   const known = code && KNOWN_ERROR_CODES.has(code) ? (code as BrowserBackendErrorCode) : 'backend_error'
+  // Appended, never substituted, and only on a failure that actually happened.
+  // The model still reports what broke; this adds the one thing the user can
+  // do about it. Same shape as the `no_extension` remedy below, for the same
+  // reason: replacing the cause with the remedy loses the cause.
+  const withRemedy = (message: string): string =>
+    staleBuild ? `${message.trim()} ${STALE_EXTENSION_REMEDY}`.trim() : message
   if (known === 'no_extension') {
     // Keep the relay's cause and APPEND the remedy, rather than substituting
     // one for the other. The relay reports three different situations under
@@ -53,7 +53,7 @@ function toBackendError(error: string, code?: string): BrowserBackendError {
       'no_extension',
     )
   }
-  return new BrowserBackendError(error, known)
+  return new BrowserBackendError(withRemedy(error), known)
 }
 
 export function createLocalBrowserProvider(deps: {
@@ -68,7 +68,7 @@ export function createLocalBrowserProvider(deps: {
       )
     }
     const res = await deps.transport.send({ userId: ctx.userId, op, args })
-    if (!res.ok) throw toBackendError(res.error, res.code)
+    if (!res.ok) throw toBackendError(res.error, res.code, res.staleBuild)
     return res.data
   }
 
@@ -88,6 +88,9 @@ export function createLocalBrowserProvider(deps: {
     },
     async currentUrl(ctx) {
       return BrowserUrlResultSchema.parse(await send(ctx, 'currentUrl'))
+    },
+    async captureState(ctx, site) {
+      return BrowserCaptureResultSchema.parse(await send(ctx, 'captureState', { site }))
     },
     async nextTakeoverFrame(ctx) {
       return TakeoverFrameSchema.parse(await send(ctx, 'captureFrame'))

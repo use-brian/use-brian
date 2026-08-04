@@ -15,12 +15,15 @@
       .status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 4px; margin-right: 6px; background: #94a3b8; }
       .status.ready .dot { background: #16a34a; }
       .actions { display: flex; gap: 6px; margin-top: 10px; }
+      .warn { background: #fef3c7; border: 1px solid #fcd34d; color: #78350f; border-radius: 6px; padding: 7px 9px; font-size: 12px; margin-top: 8px; }
+      .build { color: #94a3b8; font-size: 10px; margin-top: 10px; font-variant-numeric: tabular-nums; }
       .hint { color: #64748b; font-size: 11px; margin-top: 8px; }
     </style>
   </head>
   <body>
     <h1>Use Brian Browser Agent</h1>
     <div id="status" class="status"><span class="dot"></span><span id="status-text">Checking...</span></div>
+    <div id="build-warning" class="warn" hidden></div>
     <div class="row" id="grant-row" hidden>
       <button id="grant" class="primary" style="width: 100%">Open Use Brian desktop setup</button>
     </div>
@@ -38,6 +41,7 @@
       <button id="stop" class="danger">Stop task</button>
     </div>
     <p class="hint">The assistant only acts in a tab you allow, one task at a time. Stop ends the current task immediately.</p>
+    <p class="build" id="build-line"></p>
     <script type="module" src="firefox-popup.js"></script>
   </body>
 </html>

@@ -13,7 +13,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { BrowserProfile } from "@/lib/api/computer";
-import { profileSurfaces } from "../browser-profiles-section";
+import { isValidProxyUrl, profileSurfaces, siteFromLoginUrl } from "../browser-profiles-section";
 
 function profile(overrides: Partial<BrowserProfile> = {}): BrowserProfile {
   return {
@@ -48,5 +48,47 @@ describe("[COMP:app-web/profile-management] Profile surfaces by backend", () => 
       vaultSessions: false,
       ownBrowserNote: true,
     });
+  });
+
+  it("keeps a proxyUrl the profile carries whichever backend it defaults to", () => {
+    expect(profile({ proxyUrl: "http://proxy.example:8080" }).proxyUrl).toBe(
+      "http://proxy.example:8080",
+    );
+    expect(profile({ defaultBackend: "local", proxyUrl: null }).proxyUrl).toBeNull();
+  });
+});
+
+/**
+ * "Save this login from my browser" (browser-session-portability.md D5): the
+ * site the capture route is asked to save comes from the same normalised URL
+ * the sign-in box already validates, reduced to the registrable-ish domain
+ * the vault keys sessions by.
+ */
+describe("[COMP:app-web/profile-management] siteFromLoginUrl", () => {
+  it("takes the hostname, stripping a leading www.", () => {
+    expect(siteFromLoginUrl("https://www.instagram.com/")).toBe("instagram.com");
+    expect(siteFromLoginUrl("https://instagram.com/accounts/login")).toBe("instagram.com");
+  });
+
+  it("leaves a non-www subdomain alone", () => {
+    expect(siteFromLoginUrl("https://app.example.com/")).toBe("app.example.com");
+  });
+});
+
+/**
+ * Proxy URL (D7): the form must refuse a malformed value client-side rather
+ * than silently saving something that proxies nothing (story 12).
+ */
+describe("[COMP:app-web/profile-management] isValidProxyUrl", () => {
+  it("accepts an absolute URL with a scheme", () => {
+    expect(isValidProxyUrl("http://proxy.example:8080")).toBe(true);
+    expect(isValidProxyUrl("http://user:pass@proxy.example:8080")).toBe(true);
+    expect(isValidProxyUrl("socks5://proxy.example:1080")).toBe(true);
+  });
+
+  it("rejects a bare host or an otherwise malformed value", () => {
+    expect(isValidProxyUrl("proxy.example:8080")).toBe(false);
+    expect(isValidProxyUrl("not a url")).toBe(false);
+    expect(isValidProxyUrl("")).toBe(false);
   });
 });

@@ -38,6 +38,7 @@ import {
   type WorkflowRefreshDetail,
 } from "@/lib/workflow-events";
 import { cn } from "@/lib/utils";
+import { RunIdCopyButton } from "@/components/workflow/run-id-copy-button";
 
 export default function WorkflowRunDetailPage({
   params,
@@ -141,9 +142,18 @@ export default function WorkflowRunDetailPage({
       <header className="flex flex-col gap-3">
         <div className="flex items-start justify-between gap-3 flex-wrap">
           <div className="flex flex-col gap-1 min-w-0">
-            <div className="text-xs uppercase tracking-wide text-muted-foreground">
-              {t.workflowPage.builder.runDetail.headingRun} ·{" "}
-              <code className="font-mono">{run.id.slice(0, 8)}</code>
+            <div className="flex items-center gap-1 text-xs uppercase tracking-wide text-muted-foreground">
+              <span>
+                {t.workflowPage.builder.runDetail.headingRun} ·{" "}
+                <code className="font-mono" title={run.id}>
+                  {run.id.slice(0, 8)}
+                </code>
+              </span>
+              <RunIdCopyButton
+                id={run.id}
+                copyLabel={t.workflowPage.builder.runDetail.runIdCopy}
+                copiedLabel={t.workflowPage.builder.runDetail.runIdCopied}
+              />
             </div>
             <h1 className="text-xl font-semibold">{workflow.name}</h1>
             {workflow.description && (

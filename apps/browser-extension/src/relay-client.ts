@@ -22,6 +22,8 @@ export type RelayClientDeps = {
   connect: (url: string) => WebSocketLike
   /** Session token preferred; falls back to the one-shot pairing token. */
   getToken: () => Promise<string | null>
+  /** Source fingerprint to report in hello; null when this build predates the stamp. */
+  getBuild?: () => Promise<string | null>
   /** Persist the session token the relay hands back in ready. */
   onSessionToken: (token: string) => Promise<void>
   onCommand: (cmd: { id: string; op: string; args: Record<string, unknown> }) => void
@@ -78,6 +80,12 @@ export class RelayClient {
   private enabled = false
   /** When the live socket reached `ready`; null while not ready. */
   private readyAt: number | null = null
+  /**
+   * The relay's verdict on the build we reported, from the last `ready`.
+   * Starts false so a never-connected extension is not accused of being out of
+   * date on evidence we do not have.
+   */
+  private staleBuild = false
 
   constructor(deps: RelayClientDeps) {
     this.deps = deps
@@ -85,6 +93,11 @@ export class RelayClient {
 
   getState(): RelayClientState {
     return this.state
+  }
+
+  /** Whether the relay said this build is behind the one the server expects. */
+  isBuildStale(): boolean {
+    return this.staleBuild
   }
 
   private setState(next: RelayClientState): void {
@@ -144,12 +157,15 @@ export class RelayClient {
       this.setState('unpaired')
       return
     }
+    // Resolved before the socket opens: `onopen` cannot await, and hello must
+    // be the first frame on the wire.
+    const build = (await this.deps.getBuild?.()) ?? null
     this.setState('connecting')
     const ws = this.deps.connect(url)
     this.ws = ws
 
     ws.onopen = () => {
-      ws.send(JSON.stringify({ type: 'hello', pairingToken: token }))
+      ws.send(JSON.stringify({ type: 'hello', pairingToken: token, ...(build ? { build } : {}) }))
     }
     ws.onmessage = (ev) => {
       const msg = parseRelayMessage(ev.data)
@@ -158,6 +174,7 @@ export class RelayClient {
         // NOT `attempts = 0` — see STABLE_CONNECTION_MS. Only a connection
         // that lasts earns the reset, and that is only knowable at close.
         this.readyAt = this.now()
+        this.staleBuild = msg.staleBuild === true
         this.setState('ready')
         if (msg.sessionToken) void this.deps.onSessionToken(msg.sessionToken)
         this.schedulePing()

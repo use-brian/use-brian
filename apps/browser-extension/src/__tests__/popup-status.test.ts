@@ -4,7 +4,7 @@
  * the node environment).
  */
 import { describe, it, expect } from 'vitest'
-import { statusLine } from '../popup-status.js'
+import { buildLine, buildWarning, statusLine } from '../popup-status.js'
 
 describe('[COMP:ext/agent] Popup status line', () => {
   it('reports a stopped task even while the socket is healthy', () => {
@@ -56,5 +56,44 @@ describe('[COMP:ext/agent] Popup status line', () => {
   it('falls back to the raw state rather than rendering nothing', () => {
     expect(statusLine({ state: 'some-future-state' })).toContain('some-future-state')
     expect(statusLine({})).toContain('Not paired')
+  })
+})
+
+/**
+ * Which build is loaded, shown before anyone has to ask.
+ *
+ * Establishing this during the 2026-08-03 incident required taking a SHA256 of
+ * the folder path Chrome derives unpacked extension ids from. The install was
+ * eleven days stale, from a folder orphaned by the open-core cutover, and
+ * nothing on any surface said so.
+ */
+describe('[COMP:ext/build-stamp] Popup build status', () => {
+  it('warns only when the relay actually said the build is stale', () => {
+    expect(buildWarning({ staleBuild: true })).toMatch(/out of date/i)
+    expect(buildWarning({ staleBuild: false })).toBeNull()
+    // Undefined is an older background, not a verdict. Accusing an install of
+    // being stale on no evidence is the mirror of the bug being fixed.
+    expect(buildWarning({})).toBeNull()
+  })
+
+  it('keeps staleness beside the status line, never instead of it', () => {
+    // A stale extension is genuinely connected: both statements are true, and
+    // collapsing them would force a choice between two facts the user needs.
+    const status = { state: 'ready', staleBuild: true }
+    expect(statusLine(status)).toContain('Connected.')
+    expect(buildWarning(status)).not.toBeNull()
+  })
+
+  it('ranks a missing grant above staleness', () => {
+    // Staleness only might block work; a missing grant blocks it outright.
+    expect(statusLine({ state: 'ready', hasControl: false, staleBuild: true })).toMatch(
+      /Not allowed to manage/,
+    )
+  })
+
+  it('names the build, and says so plainly when there is none', () => {
+    expect(buildLine({ build: 'f0c49f289acc' })).toBe('Build f0c49f289acc')
+    expect(buildLine({ build: null })).toMatch(/predates build stamping/i)
+    expect(buildLine({})).toMatch(/predates build stamping/i)
   })
 })

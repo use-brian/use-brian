@@ -2,8 +2,10 @@ import { describe, it, expect } from 'vitest'
 import { createLocalBrowserProvider } from '../local-browser-provider.js'
 import { createCloudBrowserProvider } from '../cloud-browser-provider.js'
 import { StubSandboxProvider } from '../providers/stub.js'
+import { STALE_EXTENSION_REMEDY } from '@use-brian/shared'
 import {
   BrowserBackendError,
+  BROWSER_BACKEND_ERROR_CODES,
   NO_EXTENSION_MESSAGE,
   NO_EXTENSION_REMEDY,
   type BrowserCallContext,
@@ -126,6 +128,62 @@ describe('[COMP:sandbox/local-browser] LocalBrowserProvider', () => {
     expect((err as BrowserBackendError).message).toContain('browser settings page')
   })
 
+  it('passes no_browser_permission through rather than flattening it to backend_error', async () => {
+    // The extension throws this for "the user has not granted browser control
+    // yet" — the one browser failure with an obvious remedy. The accept-set
+    // was a second, hand-written copy of the code union and had never heard of
+    // it, so it arrived at the model indistinguishable from an unknown
+    // failure. The set is now derived from BROWSER_BACKEND_ERROR_CODES.
+    const { transport } = transportRecording(() => ({
+      ok: false,
+      error: 'Use Brian is not allowed to manage this browser yet.',
+      code: 'no_browser_permission',
+    }))
+    const provider = createLocalBrowserProvider({ transport })
+    const err = await provider.snapshot(CTX).catch((e: unknown) => e)
+    expect((err as BrowserBackendError).code).toBe('no_browser_permission')
+  })
+
+  it('accepts every code the union declares, with no second list to drift', async () => {
+    // The guard on the drift itself: if a code is added to the union and the
+    // accept-set is somehow reintroduced by hand, this fails.
+    for (const code of BROWSER_BACKEND_ERROR_CODES) {
+      const { transport } = transportRecording(() => ({ ok: false, error: 'x', code }))
+      const provider = createLocalBrowserProvider({ transport })
+      const err = await provider.snapshot(CTX).catch((e: unknown) => e)
+      expect((err as BrowserBackendError).code).toBe(code)
+    }
+  })
+
+  it('appends the stale-extension remedy to a failure, without losing the failure', async () => {
+    // Ordering is the point: the model still reports what actually broke, and
+    // the thing the user can act on rides along. A stale extension is why the
+    // 2026-08-03 report was unactionable — nothing anywhere said the build was
+    // eleven days old.
+    const { transport } = transportRecording(() => ({
+      ok: false,
+      error: 'Something specific went wrong.',
+      code: 'backend_error',
+      staleBuild: true,
+    }))
+    const provider = createLocalBrowserProvider({ transport })
+    const err = await provider.snapshot(CTX).catch((e: unknown) => e)
+    const message = (err as BrowserBackendError).message
+    expect(message).toContain('Something specific went wrong.')
+    expect(message).toContain(STALE_EXTENSION_REMEDY)
+  })
+
+  it('says nothing about staleness when the relay did not flag it', async () => {
+    const { transport } = transportRecording(() => ({
+      ok: false,
+      error: 'Something specific went wrong.',
+      code: 'backend_error',
+    }))
+    const provider = createLocalBrowserProvider({ transport })
+    const err = await provider.snapshot(CTX).catch((e: unknown) => e)
+    expect((err as BrowserBackendError).message).toBe('Something specific went wrong.')
+  })
+
   it('reports not_configured when no relay transport is wired (open-core boot)', async () => {
     const provider = createLocalBrowserProvider({ transport: null })
     const err = await provider.navigate(CTX, 'https://example.com/').catch((e: unknown) => e)
@@ -170,6 +228,53 @@ describe('[COMP:sandbox/local-browser] LocalBrowserProvider', () => {
     const { transport } = transportRecording(() => ({ ok: true, data: { nodes: 'nope' } }))
     const provider = createLocalBrowserProvider({ transport })
     await expect(provider.snapshot(CTX)).rejects.toThrow()
+  })
+
+  it('sends captureState with the site arg and returns the parsed bundle (D2)', async () => {
+    const { transport, sent } = transportRecording((op) => {
+      if (op === 'captureState') {
+        return {
+          ok: true,
+          data: {
+            site: 'example.com',
+            cookies: [{ name: 'session', value: 'abc', domain: '.example.com' }],
+            localStorage: { 'https://app.example.com': { token: 't1' } },
+            capturedAt: '2026-08-04T00:00:00.000Z',
+          },
+        }
+      }
+      return { ok: true }
+    })
+    const provider = createLocalBrowserProvider({ transport })
+
+    const bundle = await provider.captureState?.(CTX, 'example.com')
+
+    expect(sent[0]).toEqual({ userId: 'user-1', op: 'captureState', args: { site: 'example.com' } })
+    expect(bundle).toEqual({
+      site: 'example.com',
+      cookies: [{ name: 'session', value: 'abc', domain: '.example.com' }],
+      localStorage: { 'https://app.example.com': { token: 't1' } },
+      capturedAt: '2026-08-04T00:00:00.000Z',
+    })
+  })
+
+  it('maps no_extension and site_mismatch refusals from captureState to typed errors', async () => {
+    const noExtension = transportRecording(() => ({ ok: false, error: '', code: 'no_extension' }))
+    const noExtensionErr = await createLocalBrowserProvider({ transport: noExtension.transport })
+      .captureState?.(CTX, 'example.com')
+      .catch((e: unknown) => e)
+    expect((noExtensionErr as BrowserBackendError).code).toBe('no_extension')
+
+    const mismatch = transportRecording(() => ({
+      ok: false,
+      error: 'The allowed tab is on other.example.org, not example.com.',
+      code: 'site_mismatch',
+    }))
+    const mismatchErr = await createLocalBrowserProvider({ transport: mismatch.transport })
+      .captureState?.(CTX, 'example.com')
+      .catch((e: unknown) => e)
+    expect((mismatchErr as BrowserBackendError).code).toBe('site_mismatch')
+    expect((mismatchErr as BrowserBackendError).message).toContain('example.com')
   })
 })
 
@@ -222,5 +327,20 @@ describe('[COMP:sandbox/browser-provider] CloudBrowserProvider', () => {
     const snap = await provider.snapshot(CTX)
     expect(snap.url).toBe('https://example.org/')
     expect(snap.nodes[0]?.name).toBe('Front page')
+  })
+
+  it('delegates captureState to the sandbox browser’s captureStorageState (D1: no cloud behaviour change)', async () => {
+    const stub = new StubSandboxProvider()
+    const { sandboxId } = await stub.create({ workspaceId: 'ws-1', taskId: 'task-1' })
+    const provider = createCloudBrowserProvider({
+      provider: stub,
+      binding: { resolve: async () => ({ sandboxId }) },
+    })
+
+    const bundle = await provider.captureState?.(CTX, 'example.com')
+
+    const actions = stub.sandboxes.get(sandboxId)?.actions.map((a) => a.op)
+    expect(actions).toContain('captureStorageState')
+    expect(bundle?.site).toBe('example.com')
   })
 })

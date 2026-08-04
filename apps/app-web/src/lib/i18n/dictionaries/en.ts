@@ -3059,6 +3059,8 @@ export const en = {
       eventMatchCapReached: "Reached the {cap}-item cap.",
       // ── Run history drill-down (clickable rows) ──────────────────────
       runsOpenRun: "Open run",
+      runsCopyId: "Copy run ID",
+      runsIdCopied: "Run ID copied",
       // ── Live run activity (banner over the board) ────────────────────
       liveRunning: "Running",
       livePausedWait: "Waiting for a timer to resume",
@@ -3090,6 +3092,8 @@ export const en = {
         triggerKindLabel: "Trigger: {kind}",
         statusLabel: "Status",
         runIdLabel: "Run ID",
+        runIdCopy: "Copy run ID",
+        runIdCopied: "Run ID copied",
         stepTrailHeading: "Step trail",
         stepTrailEmpty: "No steps recorded for this run.",
         stepDurationLabel: "{value}",
@@ -6600,6 +6604,8 @@ export const en = {
       gatedCta: "See plans",
       statusConnected: "Your browser is connected",
       statusDisconnected: "Your browser is not connected",
+      staleBuildWarning:
+        "The extension in this browser is out of date, so it may be missing fixes. Rebuild it, open your browser's extensions page, and press Reload.",
       connectedHint:
         "Set a profile's browser to \"My Browser\" below, or accept the assistant's offer when a site blocks the cloud browser, and it will act in your Chrome.",
       step1Title: "1. Install the extension",
@@ -6688,6 +6694,21 @@ export const en = {
         "Could not open the sign-in browser. Only the profile's owner can sign in, and cloud browsing must be configured on this deployment.",
       loginHint:
         "Opens the site in a cloud browser you control. Sign in there and save the session into this profile; your password goes to the site only, never to us.",
+      captureLabel: "Save this login from my browser",
+      capturePlaceholder: "instagram.com or a full URL",
+      captureAction: "Save this login",
+      captureSaving: "Saving...",
+      captureHint:
+        "Captures the cookies for the site you name from your connected browser and saves them here, so a cloud browse under this profile starts already signed in.",
+      captureNoSession: "Connect My Browser above first, then come back here to save the login.",
+      captureFailed: "Could not save the session from your browser. Please try again.",
+      captureSuccess: "Saved {site} on {date}.",
+      proxyLabel: "Proxy URL",
+      proxyPlaceholder: "http://user:pass@proxy.example:8080",
+      proxyHint:
+        "Routes the cloud browser's traffic through your own proxy, so its network resembles where the login was created. Leave blank to use the default egress.",
+      proxyInvalid: "Enter a valid URL, or leave this blank.",
+      proxySave: "Save",
     },
   },
   deckPage: {

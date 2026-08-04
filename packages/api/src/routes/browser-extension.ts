@@ -18,8 +18,17 @@ export function browserExtensionRoutes(deps: {
   workspaceStore: WorkspaceMembershipCheck
   /** Relay websocket URL the extension should connect to (shown in the UI). */
   relayWsUrl: string | null
-  /** Live "is this user's extension connected" probe; null when no relay is configured. */
-  extensionConnected: ((userId: string) => Promise<boolean>) | null
+  /**
+   * Live probe of this user's extension connection; null when no relay is
+   * configured. Returns the whole status rather than a bare boolean so the
+   * connect surface can report a stale build — an extension that is connected
+   * and out of date looks identical to a healthy one through a boolean.
+   * Null result means the relay itself was unreachable; never infer a
+   * disconnect from that.
+   */
+  extensionStatus:
+    | ((userId: string) => Promise<{ connected: boolean; build: string | null; staleBuild: boolean } | null>)
+    | null
 }): Router {
   const router = Router()
 
@@ -52,11 +61,17 @@ export function browserExtensionRoutes(deps: {
 
   router.get('/status', async (req, res) => {
     const userId = req.userId as string
-    if (!deps.extensionConnected) {
-      res.json({ configured: false, connected: false })
+    if (!deps.extensionStatus) {
+      res.json({ configured: false, connected: false, build: null, staleBuild: false })
       return
     }
-    res.json({ configured: true, connected: await deps.extensionConnected(userId) })
+    const status = await deps.extensionStatus(userId)
+    res.json({
+      configured: true,
+      connected: status?.connected === true,
+      build: status?.build ?? null,
+      staleBuild: status?.staleBuild === true,
+    })
   })
 
   return router

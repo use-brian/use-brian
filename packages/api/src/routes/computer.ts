@@ -3,6 +3,7 @@ import { Router } from 'express'
 import { z } from 'zod'
 import { BrowserBackendError, createCloudBrowserProvider, registrableSiteOf } from '@use-brian/core'
 import type {
+  BrowserBackendErrorCode,
   BrowserProfileStore,
   BrowserProvider,
   BrowserSkillGrantStore,
@@ -76,6 +77,28 @@ function isTerminalLocalTaskError(error: unknown): boolean {
 
 function isAlreadyStoppedLocalTaskError(error: unknown): boolean {
   return error instanceof BrowserBackendError && ALREADY_STOPPED_LOCAL_ERROR_CODES.has(error.code)
+}
+
+// Local session capture (D5, browser-session-portability.md): each refusal
+// the extension/relay can report reaches the caller as ITS OWN status and
+// message — "no extension" and "wrong tab's site" must stay distinguishable,
+// never flattened into one generic capture failure. Anything not listed here
+// (timeout, stopped, tab_closed, consent_denied, the Firefox codes,
+// backend_error) is a transient backend fault, same as every other relay op
+// in this file.
+const CAPTURE_ERROR_STATUS: Partial<Record<BrowserBackendErrorCode, number>> = {
+  not_configured: 501,
+  no_extension: 409,
+  no_eligible_tab: 409,
+  site_mismatch: 409,
+  detached: 409,
+}
+
+function captureErrorResponse(err: unknown): { status: number; error: string; code?: string } {
+  if (err instanceof BrowserBackendError) {
+    return { status: CAPTURE_ERROR_STATUS[err.code] ?? 502, error: err.message, code: err.code }
+  }
+  return { status: 502, error: err instanceof Error ? err.message : 'session capture failed' }
 }
 
 export type LocalComputerTaskRecord = {
@@ -456,7 +479,7 @@ export function computerRoutes(deps: {
     }
     try {
       await deps.orchestrator.captureSession(req.params.sessionId, body.data.site, body.data.profileId)
-      res.json({ ok: true })
+      res.json({ ok: true, site: body.data.site })
     } catch (err) {
       res.status(502).json({ error: err instanceof Error ? err.message : 'session capture failed' })
     }
@@ -715,6 +738,60 @@ export function computerRoutes(deps: {
       return
     }
     res.json({ sessionId, site: registrableSiteOf(body.data.url) })
+  })
+
+  // "Save this login from my browser" (browser-session-portability.md D5):
+  // capture a site's already-signed-in cookies straight out of the caller's
+  // own connected Chrome, into THIS profile's vault, for a later CLOUD
+  // browse under the same profile to replay. Unlike "Sign in to a site"
+  // above, capture is not a property of a live task — the relay keys the
+  // extension by userId and asks for tab consent on its own, so there is
+  // nothing to resolve except the profile itself. No sandbox task is
+  // created or required. Owner-only, same as every other route that writes
+  // an identity into a profile.
+  router.post('/profiles/:id/capture', async (req, res) => {
+    const profile = await ownedProfile(req.params.id, req.userId as string)
+    if (!profile) {
+      res.status(404).json({ error: 'No such profile (or not yours to save a login into)' })
+      return
+    }
+    // A provider with no `captureState` (or no vault to write into) is a
+    // typed refusal, never a crash.
+    if (!deps.localProvider?.captureState) {
+      res.status(501).json({
+        error: 'Session capture is not supported for the local browser on this deployment',
+        code: 'capture_unsupported',
+      })
+      return
+    }
+    if (!deps.vault) {
+      res.status(501).json({
+        error: 'Browser session storage is not configured on this deployment',
+        code: 'capture_unsupported',
+      })
+      return
+    }
+    const body = z.object({ site: z.string().min(1).max(253) }).safeParse(req.body)
+    if (!body.success) {
+      res.status(400).json({ error: 'site is required' })
+      return
+    }
+    // A BARE uuid for the same reason `/profiles/:id/login` mints one above:
+    // this id only ever needs to be a stable identity handle for the local
+    // provider's call context, and it plainly documents that no request
+    // reuses one task/session across calls here.
+    const sessionId = randomUUID()
+    try {
+      const bundle = await deps.localProvider.captureState(
+        { userId: req.userId as string, workspaceId: profile.workspaceId, sessionId, profileId: profile.id },
+        body.data.site,
+      )
+      await deps.vault.put({ profileId: profile.id, site: body.data.site, bundle })
+      res.json({ ok: true, site: body.data.site, capturedAt: bundle.capturedAt })
+    } catch (err) {
+      const mapped = captureErrorResponse(err)
+      res.status(mapped.status).json({ error: mapped.error, ...(mapped.code ? { code: mapped.code } : {}) })
+    }
   })
 
   // Revoke one site's session inside a profile (the cookie jar keeps the rest).

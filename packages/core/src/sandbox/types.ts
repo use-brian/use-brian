@@ -62,20 +62,36 @@ export type BrowserCallContext = {
 
 // ── Errors ─────────────────────────────────────────────────────
 
-export type BrowserBackendErrorCode =
-  | 'no_extension'   // no paired extension connection at the relay
-  | 'not_configured' // backend has no transport/provider wired (open-core boot without relay/E2B)
-  | 'timeout'        // the extension/sandbox did not answer in time
-  | 'stopped'        // the user hit Stop in the extension
-  | 'tab_closed'     // the controlled tab went away
-  | 'detached'       // Chrome ended the CDP session (banner cancelled, DevTools, crash)
-  | 'consent_denied' // the user declined the extension's per-tab Allow prompt
-  | 'no_eligible_tab' // the active tab is one Chrome will not attach the debugger to
-  | 'firefox_companion_missing' // Firefox extension cannot reach the installed desktop host
-  | 'firefox_restart_required' // Firefox was not started with its loopback Remote Agent
-  | 'unsupported_browser' // local browser control is unavailable on this platform
-  | 'stale_ref'      // ref is not from the latest snapshot
-  | 'backend_error'  // anything else the backend reported
+/**
+ * Every code a browser backend may report, as one list.
+ *
+ * The union used to be written here and the accept-set written again by hand in
+ * `local-browser-provider.ts`. They drifted: the extension threw
+ * `no_browser_permission` for "the user has not allowed browser control yet",
+ * the second list had never heard of it, and it was flattened to
+ * `backend_error` — so the one state with an obvious remedy arrived at the
+ * model indistinguishable from an unknown failure. Deriving the type from the
+ * list means adding a code here is the only step there is.
+ */
+export const BROWSER_BACKEND_ERROR_CODES = [
+  'no_extension',   // no paired extension connection at the relay
+  'not_configured', // backend has no transport/provider wired (open-core boot without relay/E2B)
+  'timeout',        // the extension/sandbox did not answer in time
+  'stopped',        // the user hit Stop in the extension
+  'tab_closed',     // the controlled tab went away
+  'detached',       // Chrome ended the CDP session (banner cancelled, DevTools, crash)
+  'consent_denied', // the user declined the extension's per-tab Allow prompt
+  'no_eligible_tab', // the active tab is one Chrome will not attach the debugger to
+  'site_mismatch',  // the allowed tab is not on the site captureState was asked for
+  'no_browser_permission', // the optional `debugger` permission has not been granted yet
+  'firefox_companion_missing', // Firefox extension cannot reach the installed desktop host
+  'firefox_restart_required', // Firefox was not started with its loopback Remote Agent
+  'unsupported_browser', // local browser control is unavailable on this platform
+  'stale_ref',      // ref is not from the latest snapshot
+  'backend_error',  // anything else the backend reported
+] as const
+
+export type BrowserBackendErrorCode = (typeof BROWSER_BACKEND_ERROR_CODES)[number]
 
 export class BrowserBackendError extends Error {
   constructor(
@@ -113,6 +129,16 @@ export interface BrowserProvider {
   click(ctx: BrowserCallContext, ref: string): Promise<void>
   type(ctx: BrowserCallContext, ref: string, text: string): Promise<void>
   currentUrl(ctx: BrowserCallContext): Promise<BrowserUrlResult>
+  /**
+   * Capture the live authenticated session for `site` and return it in the
+   * vault's bundle shape (D1), so a login can move from the browser the user
+   * is actually signed in on into the profile vault, for a later browse
+   * (often on a different backend, e.g. cloud replaying a local capture) to
+   * replay. Optional: a backend that cannot capture a session leaves this
+   * undefined so callers surface a typed refusal instead of crashing on a
+   * missing method.
+   */
+  captureState?(ctx: BrowserCallContext, site: string): Promise<SessionBundle>
   /** Optional watched Take-Over surface. Local uses relay polling; cloud uses SandboxProvider below. */
   nextTakeoverFrame?(ctx: BrowserCallContext): Promise<TakeoverFrame | null>
   sendTakeoverInput?(ctx: BrowserCallContext, event: TakeoverInputEvent): Promise<void>
@@ -130,7 +156,8 @@ export interface BrowserProvider {
  */
 export type RelayCommandResult =
   | { ok: true; data?: unknown }
-  | { ok: false; error: string; code?: string }
+  /** `staleBuild`: the extension that produced this failure is out of date (see `STALE_EXTENSION_REMEDY`). */
+  | { ok: false; error: string; code?: string; staleBuild?: boolean }
 
 export type RelayCommandTransport = {
   send(params: {
@@ -157,6 +184,14 @@ export type SessionBundle = {
   localStorage?: Record<string, Record<string, string>>
   capturedAt: string
 }
+
+/** Wire/zod shape of `SessionBundle` — parses the relay's `captureState` result (D2). */
+export const BrowserCaptureResultSchema = z.object({
+  site: z.string(),
+  cookies: z.array(z.unknown()),
+  localStorage: z.record(z.string(), z.record(z.string(), z.string())).optional(),
+  capturedAt: z.string(),
+})
 
 export type VaultSessionInfo = {
   site: string
