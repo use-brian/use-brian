@@ -635,7 +635,7 @@ export function EntryThread({
               className={cn(
                 "mb-0.5 inline-flex size-6 shrink-0 items-center justify-center rounded-full transition-colors",
                 canSend
-                  ? "bg-primary text-primary-foreground hover:bg-primary/90"
+                  ? "bg-action text-action-foreground hover:bg-action/90"
                   : "bg-muted text-muted-foreground",
               )}
             >

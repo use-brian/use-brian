@@ -83,6 +83,7 @@ import {
 import { TaskRecordDetail } from "@/components/tasks/task-record-detail";
 import {
   adjustBrainRow,
+  deleteBrainRow,
   type AdjustMemoryChanges,
 } from "@/lib/api/brain-inbox";
 import { fetchWorkspaceTasks, type TaskRow } from "@/lib/api/tasks";
@@ -413,6 +414,24 @@ export function BlockData({
       return { ok: true };
     },
     [workspace.workspaceId, onDataMutated],
+  );
+  const deletePeekTask = useCallback(
+    async (reason: string): Promise<{ ok: boolean; error?: string }> => {
+      if (!peekTaskId) return { ok: false };
+      const result = await deleteBrainRow(
+        workspace.workspaceId,
+        "task",
+        peekTaskId,
+        { reason, createRule: true },
+      );
+      if (!result.ok) return result;
+      setPeekTasks((prev) =>
+        prev ? prev.filter((row) => row.id !== peekTaskId) : prev,
+      );
+      onDataMutated?.();
+      return { ok: true };
+    },
+    [workspace.workspaceId, peekTaskId, onDataMutated],
   );
 
   // Apply optimistic overrides + deletions BEFORE rendering so editors
@@ -866,6 +885,7 @@ export function BlockData({
                 roster={peekRoster}
                 projects={projectOptions(peekTasks ?? [])}
                 commitField={commitPeekField}
+                onDelete={deletePeekTask}
                 onClose={() => setPeekTaskId(null)}
               />
             </div>,

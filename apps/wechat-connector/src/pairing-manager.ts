@@ -130,6 +130,7 @@ export function createPairingManager(): PairingManager {
       }
       if (signal.aborted) return
 
+      const previousStatus = session.snapshot.status
       switch (status.status) {
         case 'wait':
           break
@@ -151,20 +152,26 @@ export function createPairingManager(): PairingManager {
           session.pendingVerifyCode = undefined
           session.snapshot.status = 'error'
           session.snapshot.error = 'verify_code_blocked'
+          console.warn(`[wechat-pairing] ${session.snapshot.pairingId}: verify code blocked`)
           return
         case 'scaned_but_redirect':
           if (status.redirect_host) {
             session.pollBaseUrl = `https://${status.redirect_host}`
+            console.info(
+              `[wechat-pairing] ${session.snapshot.pairingId}: redirected after scan to ${status.redirect_host}`,
+            )
           }
           break
         case 'binded_redirect':
           // Already bound to this deployment — nothing new is issued.
           session.snapshot.status = 'already_bound'
+          console.info(`[wechat-pairing] ${session.snapshot.pairingId}: bot is already bound`)
           return
         case 'expired': {
           session.qrRefreshes += 1
           if (session.qrRefreshes > MAX_QR_REFRESHES) {
             session.snapshot.status = 'expired'
+            console.info(`[wechat-pairing] ${session.snapshot.pairingId}: QR session expired`)
             return
           }
           try {
@@ -176,6 +183,7 @@ export function createPairingManager(): PairingManager {
           } catch (err) {
             session.snapshot.status = 'error'
             session.snapshot.error = `QR refresh failed: ${String(err)}`
+            console.warn(`[wechat-pairing] ${session.snapshot.pairingId}: QR refresh failed:`, err)
             return
           }
           break
@@ -184,6 +192,7 @@ export function createPairingManager(): PairingManager {
           if (!status.bot_token || !status.ilink_bot_id) {
             session.snapshot.status = 'error'
             session.snapshot.error = 'iLink confirmed the login but returned no credentials'
+            console.warn(`[wechat-pairing] ${session.snapshot.pairingId}: confirmed without credentials`)
             return
           }
           session.snapshot.status = 'confirmed'
@@ -194,8 +203,15 @@ export function createPairingManager(): PairingManager {
             ilinkBotId: status.ilink_bot_id,
             boundUserId: status.ilink_user_id,
           }
+          console.info(`[wechat-pairing] ${session.snapshot.pairingId}: pairing confirmed`)
           return
         }
+      }
+
+      if (session.snapshot.status !== previousStatus) {
+        console.info(
+          `[wechat-pairing] ${session.snapshot.pairingId}: ${previousStatus} -> ${session.snapshot.status}`,
+        )
       }
 
       await sleep(POLL_GAP_MS, signal)
@@ -220,6 +236,7 @@ export function createPairingManager(): PairingManager {
         abort: new AbortController(),
       }
       sessions.set(pairingId, session)
+      console.info(`[wechat-pairing] ${pairingId}: QR session started`)
       void runStatusLoop(session).catch((err) => {
         console.error(`[wechat-pairing] ${pairingId}: status loop crashed:`, err)
         session.snapshot.status = 'error'

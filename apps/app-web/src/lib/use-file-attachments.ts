@@ -39,7 +39,7 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
  * platform 32 MiB request cap) or a generic 500 from the multer limit. Video is
  * rejected regardless of size (the route's mime allowlist excludes `video/`);
  * a host that supplies `onRouteMedia` diverts video to the recordings pipeline
- * (direct-to-GCS + transcription) instead. See docs/architecture/features/files.md
+ * (direct-to-GCS staging; processing is a later explicit action) instead. See docs/architecture/features/files.md
  * -> "Client-side upload guard" and docs/architecture/media/transcription.md.
  */
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
@@ -339,12 +339,14 @@ export function imageFilesFromClipboard(
  *   413 / multer 500.
  * @param opts.onRouteMedia When set, `video/*` and recording-sized `audio/*`
  *   files are diverted here (the recordings pipeline) instead of the cache
- *   upload, and no chip is staged for them. When absent, video is rejected as
- *   unsupported-here and audio always takes the inline path.
+ *   upload, and no ordinary-file chip is staged for them. The callback may be
+ *   async; `upload()` waits until the host has staged its recording chips.
+ *   When absent, video is rejected as unsupported-here and audio always takes
+ *   the inline path.
  */
 export function useFileAttachments(
   getSessionId?: () => string | undefined,
-  opts?: { maxBytes?: number; onRouteMedia?: (files: File[]) => void },
+  opts?: { maxBytes?: number; onRouteMedia?: (files: File[]) => void | Promise<void> },
 ): FileAttachmentsApi {
   const t = useT();
   const [attachments, setAttachments] = React.useState<Attachment[]>([]);
@@ -366,9 +368,10 @@ export function useFileAttachments(
       canRouteMedia: !!optsRef.current?.onRouteMedia,
     });
 
-    // Divert video to the host's media pipeline (recordings). No chip staged —
-    // that flow owns its own cost-confirm + status UI.
-    if (media.length > 0) optsRef.current?.onRouteMedia?.(media);
+    // Divert recording-sized media to the host. The host owns the staged
+    // recording chips; wait for it so Send cannot race ahead of the returned
+    // recording ids.
+    if (media.length > 0) await optsRef.current?.onRouteMedia?.(media);
 
     // Guard: rejected files never POST; they surface as clear error chips so the
     // user gets a message instead of an opaque 413 / silent failure.

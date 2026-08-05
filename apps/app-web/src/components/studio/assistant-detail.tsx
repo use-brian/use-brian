@@ -1030,7 +1030,7 @@ function MemoryTab({ assistantId, workspaceId }: { assistantId: string; workspac
                                 <button
                                   onClick={(e) => { e.stopPropagation(); handleSave(); }}
                                   disabled={saving}
-                                  className="text-[12px] font-medium px-4 py-1.5 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
+                                  className="text-[12px] font-medium px-4 py-1.5 rounded-lg bg-action text-action-foreground hover:bg-action/90 transition-colors disabled:opacity-50"
                                 >
                                   {saving ? t.assistant.brainTab.saving : t.assistant.brainTab.save}
                                 </button>
@@ -1338,9 +1338,9 @@ type UserConnector = {
   // credential, synthesized by the route so its per-assistant tool
   // policy is governable here.
   scope?: "personal" | "team-native" | "team-grant" | "builtin";
-  // Backing connector_instance id. IMAP uses it for one independently governed
-  // top-level card per mailbox; team-native rows also use it for workspace
-  // policy routes.
+  // Backing connector_instance id. Multi-account providers use it for one
+  // independently governed top-level card per connection; team-native rows
+  // also use it for workspace policy routes.
   instanceId?: string;
 };
 
@@ -2238,7 +2238,7 @@ function SettingsTab({
                 <button
                   onClick={saveName}
                   disabled={saving === "name" || !name.trim() || name.trim() === assistantName}
-                  className="px-3 py-2 text-[13px] font-medium rounded-lg bg-primary text-primary-foreground hover:bg-primary/80 disabled:opacity-50 disabled:pointer-events-none transition-colors"
+                  className="px-3 py-2 text-[13px] font-medium rounded-lg bg-action text-action-foreground hover:bg-action/80 disabled:opacity-50 disabled:pointer-events-none transition-colors"
                 >
                   {saving === "name" ? t.assistant.settings.saving : t.assistant.settings.save}
                 </button>
@@ -2261,7 +2261,7 @@ function SettingsTab({
               <button
                 onClick={saveBio}
                 disabled={saving === "bio" || bio.trim() === savedBio.trim()}
-                className="px-3 py-2 text-[13px] font-medium rounded-lg bg-primary text-primary-foreground hover:bg-primary/80 disabled:opacity-50 disabled:pointer-events-none transition-colors"
+                className="px-3 py-2 text-[13px] font-medium rounded-lg bg-action text-action-foreground hover:bg-action/80 disabled:opacity-50 disabled:pointer-events-none transition-colors"
               >
                 {saving === "bio" ? t.assistant.settings.saving : t.assistant.settings.save}
               </button>
@@ -2296,7 +2296,7 @@ function SettingsTab({
                 <button
                   onClick={savePrompt}
                   disabled={saving === "prompt"}
-                  className="px-3 py-2 text-[13px] font-medium rounded-lg bg-primary text-primary-foreground hover:bg-primary/80 disabled:opacity-50 disabled:pointer-events-none transition-colors"
+                  className="px-3 py-2 text-[13px] font-medium rounded-lg bg-action text-action-foreground hover:bg-action/80 disabled:opacity-50 disabled:pointer-events-none transition-colors"
                 >
                   {saving === "prompt" ? t.assistant.settings.saving : t.assistant.settings.save}
                 </button>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { TaskRow } from "../api/tasks";
+import { taskIcon, type TaskRow } from "../api/tasks";
 import {
   applyFilters,
   DEFAULT_VIEW_STATE,
@@ -62,6 +62,15 @@ describe("[COMP:app-web/tasks-view] project tag facet", () => {
       task(),
     ];
     expect(projectOptions(rows)).toEqual(["alpha", "beta"]);
+  });
+});
+
+describe("[COMP:app-web/tasks-surface] task icon", () => {
+  it("reads a valid optional icon and hides absent or malformed values", () => {
+    expect(taskIcon(task({ attributes: { icon: "🚀" } }))).toBe("🚀");
+    expect(taskIcon(task({ attributes: {} }))).toBeNull();
+    expect(taskIcon(task({ attributes: { icon: "" } }))).toBeNull();
+    expect(taskIcon(task({ attributes: { icon: "x".repeat(17) } }))).toBeNull();
   });
 });
 

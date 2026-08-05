@@ -140,8 +140,15 @@ function encodeClientVersion(version: string): number {
   return ((major & 0xff) << 16) | ((minor & 0xff) << 8) | (patch & 0xff)
 }
 
-const CLIENT_VERSION = '1.0.0'
-const BOT_AGENT = `UseBrian/${CLIENT_VERSION}`
+/**
+ * iLink wire/client version. Keep this aligned with the current Tencent
+ * `@tencent-weixin/openclaw-weixin` protocol release: the value is sent both
+ * as the encoded `iLink-App-ClientVersion` header and as
+ * `base_info.channel_version`. A stale value can fetch a QR but fail the
+ * post-scan client claim, which WeChat surfaces as unable to connect.
+ */
+export const ILINK_CHANNEL_VERSION = '2.4.6'
+const BOT_AGENT = `UseBrian/${ILINK_CHANNEL_VERSION}`
 
 /** X-WECHAT-UIN: random uint32 → decimal string → base64. */
 function randomWechatUin(): string {
@@ -153,7 +160,7 @@ function buildHeaders(token?: string): Record<string, string> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'iLink-App-Id': 'bot',
-    'iLink-App-ClientVersion': String(encodeClientVersion(CLIENT_VERSION)),
+    'iLink-App-ClientVersion': String(encodeClientVersion(ILINK_CHANNEL_VERSION)),
     AuthorizationType: 'ilink_bot_token',
     'X-WECHAT-UIN': randomWechatUin(),
   }
@@ -181,7 +188,10 @@ async function postJson<T>(params: {
     const res = await fetch(joinUrl(params.baseUrl, params.endpoint), {
       method: 'POST',
       headers: buildHeaders(params.token),
-      body: JSON.stringify({ ...(params.body as object), base_info: { channel_version: CLIENT_VERSION, bot_agent: BOT_AGENT } }),
+      body: JSON.stringify({
+        ...(params.body as object),
+        base_info: { channel_version: ILINK_CHANNEL_VERSION, bot_agent: BOT_AGENT },
+      }),
       signal: controller.signal,
     })
     const text = await res.text()
@@ -232,7 +242,7 @@ export async function pollQrcodeStatus(params: {
       method: 'GET',
       headers: {
         'iLink-App-Id': 'bot',
-        'iLink-App-ClientVersion': String(encodeClientVersion(CLIENT_VERSION)),
+        'iLink-App-ClientVersion': String(encodeClientVersion(ILINK_CHANNEL_VERSION)),
       },
       signal: controller.signal,
     })
@@ -270,8 +280,8 @@ export type IlinkClient = {
   /** Typing indicator. `status` 1 = typing, 2 = cancel. */
   sendTyping(params: { ilinkUserId: string; typingTicket: string; status: 1 | 2 }): Promise<void>
   /** Presence handshake around the long-poll loop lifecycle. Best-effort. */
-  notifyStart(): Promise<void>
-  notifyStop(): Promise<void>
+  notifyStart(): Promise<{ ret?: number; errmsg?: string }>
+  notifyStop(): Promise<{ ret?: number; errmsg?: string }>
 }
 
 export function createIlinkClient(options: { baseUrl: string; token: string }): IlinkClient {
@@ -330,11 +340,11 @@ export function createIlinkClient(options: { baseUrl: string; token: string }): 
     },
 
     async notifyStart() {
-      await postJson({ baseUrl, endpoint: 'ilink/bot/msg/notifystart', body: {}, token, timeoutMs: CONFIG_TIMEOUT_MS })
+      return postJson({ baseUrl, endpoint: 'ilink/bot/msg/notifystart', body: {}, token, timeoutMs: CONFIG_TIMEOUT_MS })
     },
 
     async notifyStop() {
-      await postJson({ baseUrl, endpoint: 'ilink/bot/msg/notifystop', body: {}, token, timeoutMs: CONFIG_TIMEOUT_MS })
+      return postJson({ baseUrl, endpoint: 'ilink/bot/msg/notifystop', body: {}, token, timeoutMs: CONFIG_TIMEOUT_MS })
     },
   }
 }

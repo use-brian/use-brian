@@ -343,7 +343,7 @@ export function BrowseDirectory({ open, onClose, onConnectorAdded, onOauthConnec
                   <div className="flex justify-end">
                     <button
                       onClick={() => { setSkillForm({ name: "", description: "", whenToUse: "", content: "", category: "custom", requiresConnectors: "" }); setSkillError(""); setShowSkillEditor(true); }}
-                      className="text-sm font-medium px-4 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
+                      className="text-sm font-medium px-4 py-2 rounded-lg bg-action text-action-foreground hover:bg-action/90 transition-colors"
                     >
                       {t.browseDirectory.createSkill}
                     </button>
@@ -396,7 +396,7 @@ export function BrowseDirectory({ open, onClose, onConnectorAdded, onOauthConnec
                       {skillError && <p className="text-xs text-destructive">{skillError}</p>}
                       <div className="flex gap-2 justify-end">
                         <button onClick={() => setShowSkillEditor(false)} className="text-sm px-3 py-1.5 rounded-lg border border-border text-muted-foreground hover:bg-muted transition-colors">{t.browseDirectory.cancel}</button>
-                        <button onClick={handleSaveSkill} disabled={savingSkill} className="text-sm px-3 py-1.5 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors">{savingSkill ? t.browseDirectory.saving : t.browseDirectory.create}</button>
+                        <button onClick={handleSaveSkill} disabled={savingSkill} className="text-sm px-3 py-1.5 rounded-lg bg-action text-action-foreground hover:bg-action/90 disabled:opacity-50 transition-colors">{savingSkill ? t.browseDirectory.saving : t.browseDirectory.create}</button>
                       </div>
                     </div>
                   )}
@@ -530,7 +530,7 @@ function DirectoryCard({
         <button
           onClick={(e) => { e.stopPropagation(); onConnect(); }}
           disabled={adding}
-          className="text-[11px] font-medium bg-primary text-primary-foreground px-2.5 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
+          className="text-[11px] font-medium bg-action text-action-foreground px-2.5 py-1 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
         >
           {adding ? "..." : t.browseDirectory.connect}
         </button>

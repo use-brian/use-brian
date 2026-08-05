@@ -42,6 +42,7 @@ function makeRow(over: Record<string, unknown> = {}): Record<string, unknown> {
     authKind: 'hmac',
     mode: 'all',
     enabled: true,
+    managedBy: null,
     hasSecret: true,
     lastAckCursor: null,
     lastDeliveredAt: null,
@@ -123,6 +124,18 @@ describe('[COMP:api/ingest-sink-store] listEnabledByInstance', () => {
     expect(poolQueries[0].text).toContain('enabled = true')
     expect(poolQueries[0].values).toEqual(['ci-1'])
   })
+
+  it('reuses a caller transaction instead of checking out another pool client', async () => {
+    const transactionClient = {
+      query: vi.fn(async () => ({ rows: [makeRow()], rowCount: 1 })),
+    }
+
+    const sinks = await store.listEnabledByInstance('ci-1', transactionClient as never)
+
+    expect(sinks).toHaveLength(1)
+    expect(transactionClient.query).toHaveBeenCalledOnce()
+    expect(fakePool.query).not.toHaveBeenCalled()
+  })
 })
 
 describe('[COMP:api/ingest-sink-store] recordAck', () => {
@@ -145,5 +158,27 @@ describe('[COMP:api/ingest-sink-store] update', () => {
     expect(sql).not.toContain('endpoint_url =')
     const blob = poolQueries[0].values!.find((v) => Buffer.isBuffer(v)) as Buffer
     expect(decryptCredentials<{ secret: string }>(blob, KEY).secret).toBe('rotated-secret-value')
+  })
+})
+
+describe('[COMP:api/ingest-sink-store] managed local archive', () => {
+  it('upserts one encrypted HMAC mode-all sink per instance', async () => {
+    poolResults = [makeRow({ managedBy: 'local_chat_archive' })]
+    await store.ensureManagedLocalChatArchive({
+      connectorInstanceId: 'ci-1',
+      workspaceId: 'ws-1',
+      endpointUrl: 'http://127.0.0.1:8092/append',
+      secret: 'managed-secret',
+    })
+    expect(poolQueries[0].text).toContain("managed_by")
+    expect(poolQueries[0].text).toContain("mode = 'all'")
+    const blob = poolQueries[0].values![3] as Buffer
+    expect(decryptCredentials<{ secret: string }>(blob, KEY).secret).toBe('managed-secret')
+  })
+
+  it('disables only managed sinks when local config is absent', async () => {
+    poolRowCount = 2
+    await expect(store.disableManagedLocalChatArchive()).resolves.toBe(2)
+    expect(poolQueries[0].text).toContain("managed_by = 'local_chat_archive'")
   })
 })

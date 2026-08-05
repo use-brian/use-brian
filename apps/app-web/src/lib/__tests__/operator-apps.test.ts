@@ -21,9 +21,10 @@ describe("[COMP:app-web/operator-app-bar] operator app registry", () => {
     window.localStorage.clear();
   });
 
-  it("keeps the app-bar order with Feed 4th, Browsers 5th, Chat 6th", () => {
+  it("keeps Office next to Page and preserves the configured app-bar order", () => {
     expect(OPERATOR_APP_KEYS).toEqual([
       "page",
+      "office",
       "tasks",
       "crm",
       "feed",

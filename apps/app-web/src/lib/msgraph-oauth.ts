@@ -1,77 +1,50 @@
 /**
- * Microsoft Graph (Teams) OAuth - endpoints, scope resolution, authorize-URL
- * builder, id_token claim reader.
+ * Microsoft Graph (Teams) OAuth - the browser half: authority resolution and
+ * the authorize-URL builder.
  *
- * Shared by the two halves of the round trip so they can never disagree: the
- * Studio connect handler (client) builds the authorize URL, and
- * `/api/auth/callback/msgraph` (server) exchanges the code with the SAME scope
- * string. A second hardcoded scope list in the callback is exactly how an
- * authorize/exchange pair drifts.
+ * The **exchange half deliberately does not live here**. It runs in the API
+ * (`POST /api/connectors/msgraph/oauth-callback`), for the same reason the
+ * Shopify BYO flow put it there: the client secret may belong to a customer's
+ * own Entra app, stored encrypted in their workspace, and it must never be
+ * handed to a Next.js route to post from. app-web keeps only the job that
+ * needs its cookie - the state-nonce CSRF gate - and forwards the code.
  *
- * Auth model: standard env-var OAuth, like `notion` and `fathom`. One Use
- * Brian-owned Entra app; `NEXT_PUBLIC_MSGRAPH_CLIENT_ID` in the browser,
- * `MSGRAPH_CLIENT_SECRET` server-side only. Delegated authorization-code grant
- * with `offline_access`, so the credential is per-user and rotating.
+ * Auth model: the app pair is resolved server-side per workspace
+ * (`connector_app_credentials`, then the config file, then env). The browser
+ * receives only the **client id and tenant**, from
+ * `GET /api/connectors/msgraph/app-credentials` - both are public, they ride
+ * in the authorize URL. `NEXT_PUBLIC_MSGRAPH_CLIENT_ID` is gone: a build-time
+ * env var cannot express "this workspace uses its own registration".
  *
- * See docs/architecture/integrations/msgraph.md.
+ * See docs/architecture/integrations/msgraph.md → "Auth".
  */
 
-import { OFFICIAL_OAUTH_SCOPES } from "@use-brian/shared/builtin-connectors";
+import { msGraphScopes } from "@use-brian/shared/builtin-connectors";
+
+export { msGraphScopes };
 
 /**
- * Tenant segment of the Entra endpoints. `organizations` restricts the account
- * picker to work/school accounts, the only population this connector can serve:
- * every Teams delegated permission publishes "Delegated (personal Microsoft
- * account): Not supported", so under `common` a user could pick a personal MSA,
- * complete consent *successfully*, and then have all nine tools fail at runtime
- * with nothing actionable to tell them. Microsoft is explicit about the consent
- * half too - "Do not use 'common', as personal accounts cannot provide admin
- * consent except in the context of a tenant" - and `ChannelMessage.Read.All`
- * requires admin consent unconditionally. Research note §2.2 + the multitenant
- * decision table; the app registers as `signInAudience: AzureADMultipleOrgs`.
+ * Default tenant segment of the Entra endpoints. `organizations` restricts the
+ * account picker to work/school accounts, the only population this connector
+ * can serve: every Teams delegated permission publishes "Delegated (personal
+ * Microsoft account): Not supported", so under `common` a user could pick a
+ * personal MSA, complete consent *successfully*, and then have all nine tools
+ * fail at runtime with nothing actionable to tell them. Microsoft is explicit
+ * about the consent half too - "Do not use 'common', as personal accounts
+ * cannot provide admin consent except in the context of a tenant" - and
+ * `ChannelMessage.Read.All` requires admin consent unconditionally.
  *
- * The env override exists to pin a single tenant id or domain, which is
- * strictly narrower than `organizations`. Authorize and token must use the SAME
- * segment, which is why both derive from this one const - and it must stay in
- * step with `DEFAULT_TENANT` in `packages/api/src/msgraph/token.ts`, which owns
- * the refresh half of the same round trip.
+ * A workspace that registered a SINGLE-tenant app overrides this with its own
+ * directory id, which is strictly narrower. The override travels with the
+ * credentials from the API, so the authorize call and the token call cannot
+ * disagree about the authority - the token call reads the same stored row.
+ * Must stay in step with `DEFAULT_TENANT` in `packages/api/src/msgraph/token.ts`.
  */
-const MSGRAPH_TENANT = process.env.NEXT_PUBLIC_MSGRAPH_TENANT?.trim() || "organizations";
+export const MSGRAPH_DEFAULT_TENANT = "organizations";
 
-export const MSGRAPH_AUTHORIZE_URL = `https://login.microsoftonline.com/${MSGRAPH_TENANT}/oauth2/v2.0/authorize`;
-export const MSGRAPH_TOKEN_URL = `https://login.microsoftonline.com/${MSGRAPH_TENANT}/oauth2/v2.0/token`;
-
-/**
- * OIDC baseline scopes, requested alongside whatever Graph permissions the
- * registry declares.
- *
- * They deliberately do NOT live in `OFFICIAL_OAUTH_SCOPES.msgraph`: that table
- * is the inventory of *Graph resource permissions* an admin reads on the
- * consent screen, and Entra collapses openid/profile/email into a single "Sign
- * you in and read your profile" line. `offline_access` is what makes a refresh
- * token appear at all - without it the connection dies about an hour after
- * connecting.
- *
- * `openid` is also what produces the `id_token` we read the tenant id and the
- * connected account's address from, so the connect flow needs no extra Graph
- * call to label the instance.
- */
-const MSGRAPH_BASE_SCOPES = ["offline_access", "openid", "profile", "email"];
-
-/**
- * The full scope set for the authorize request and the code exchange.
- * The Graph half is derived from the registry, never restated here.
- */
-export function msGraphScopes(): string[] {
-  const graphScopes = OFFICIAL_OAUTH_SCOPES.msgraph ?? [];
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const scope of [...MSGRAPH_BASE_SCOPES, ...graphScopes]) {
-    if (seen.has(scope)) continue;
-    seen.add(scope);
-    out.push(scope);
-  }
-  return out;
+export function msGraphAuthorizeUrl(tenant?: string | null): string {
+  const segment = tenant?.trim() || MSGRAPH_DEFAULT_TENANT;
+  return `https://login.microsoftonline.com/${encodeURIComponent(segment)}/oauth2/v2.0/authorize`;
 }
 
 /**
@@ -83,6 +56,8 @@ export function buildMsGraphAuthorizeUrl(input: {
   redirectUri: string;
   /** Built by `buildConnectorState` - carries the connector, workspace, and CSRF nonce. */
   state: string;
+  /** The workspace's directory id when it registered a single-tenant app. */
+  tenant?: string | null;
   /** Defaults to `msGraphScopes()`; injectable for tests. */
   scopes?: string[];
 }): string {
@@ -94,54 +69,5 @@ export function buildMsGraphAuthorizeUrl(input: {
     scope: (input.scopes ?? msGraphScopes()).join(" "),
     state: input.state,
   });
-  return `${MSGRAPH_AUTHORIZE_URL}?${sp}`;
-}
-
-export type MsGraphIdTokenClaims = {
-  /** Entra tenant id (`tid`) the user signed in from. */
-  tenantId?: string;
-  /** Connected account address, for the "Connected: <email>" UI and the instance label. */
-  email?: string;
-};
-
-/**
- * Read `tid` and the account address out of an `id_token`.
- *
- * The signature is intentionally NOT verified: this token arrived over TLS in a
- * direct server-to-server response from the token endpoint, which OIDC Core
- * §3.1.3.7 names as the case where a client may skip signature validation. The
- * claims are used for display metadata only - never for authorization, which is
- * carried entirely by the session cookie and the access token.
- *
- * Returns an empty object for anything unparseable; a missing id_token is an
- * expected outcome (no `openid` scope granted), not an error.
- */
-export function decodeMsGraphIdToken(idToken: string | undefined): MsGraphIdTokenClaims {
-  if (!idToken) return {};
-  const payload = idToken.split(".")[1];
-  if (!payload) return {};
-  try {
-    const claims = JSON.parse(base64UrlDecode(payload)) as {
-      tid?: unknown;
-      email?: unknown;
-      preferred_username?: unknown;
-      upn?: unknown;
-    };
-    const tenantId = typeof claims.tid === "string" ? claims.tid : undefined;
-    const email = [claims.email, claims.preferred_username, claims.upn].find(
-      (value): value is string => typeof value === "string" && value.includes("@"),
-    );
-    return { ...(tenantId ? { tenantId } : {}), ...(email ? { email } : {}) };
-  } catch {
-    return {};
-  }
-}
-
-/** base64url -> UTF-8. `atob` + `TextDecoder` so this works in the browser bundle too. */
-function base64UrlDecode(segment: string): string {
-  const base64 = segment.replace(/-/g, "+").replace(/_/g, "/");
-  const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
-  const binary = atob(padded);
-  const bytes = Uint8Array.from(binary, (ch) => ch.charCodeAt(0));
-  return new TextDecoder().decode(bytes);
+  return `${msGraphAuthorizeUrl(input.tenant)}?${sp}`;
 }

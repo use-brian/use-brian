@@ -12,9 +12,10 @@ import {
 } from '../home-apps.js'
 
 describe('[COMP:shared/home-apps] home-apps config vocabulary', () => {
-  it('holds the six built-in apps in registry order, Chat 6th', () => {
+  it('holds the seven built-in apps in registry order', () => {
     expect(BUILTIN_HOME_APP_KEYS).toEqual([
       'page',
+      'office',
       'tasks',
       'crm',
       'feed',
@@ -24,11 +25,11 @@ describe('[COMP:shared/home-apps] home-apps config vocabulary', () => {
     expect(HOME_APPS_MAX).toBe(BUILTIN_HOME_APP_KEYS.length)
   })
 
-  it('defaults a never-configured workspace to Page + Chat (D2)', () => {
-    expect(DEFAULT_HOME_APPS).toEqual(['page', 'chat'])
-    expect(normalizeHomeApps([])).toEqual(['page', 'chat'])
-    expect(normalizeHomeApps(null)).toEqual(['page', 'chat'])
-    expect(normalizeHomeApps('page,chat')).toEqual(['page', 'chat'])
+  it('defaults a never-configured workspace to Page + Office + Chat', () => {
+    expect(DEFAULT_HOME_APPS).toEqual(['page', 'office', 'chat'])
+    expect(normalizeHomeApps([])).toEqual(['page', 'office', 'chat'])
+    expect(normalizeHomeApps(null)).toEqual(['page', 'office', 'chat'])
+    expect(normalizeHomeApps('page,chat')).toEqual(['page', 'office', 'chat'])
   })
 
   it('recognises built-in vs custom entries', () => {
@@ -45,10 +46,10 @@ describe('[COMP:shared/home-apps] home-apps config vocabulary', () => {
   it('filters unknown keys on read instead of failing (additive contract)', () => {
     expect(normalizeHomeApps(['page', 'holodeck', 'chat'])).toEqual(['page', 'chat'])
     // Everything dropped still yields a usable strip, never an empty one.
-    expect(normalizeHomeApps(['holodeck'])).toEqual(['page', 'chat'])
+    expect(normalizeHomeApps(['holodeck'])).toEqual(['page', 'office', 'chat'])
   })
 
-  it('dedupes, preserves the stored order, and caps at six', () => {
+  it('dedupes, preserves the stored order, and caps at seven', () => {
     expect(normalizeHomeApps(['chat', 'page', 'chat'])).toEqual(['chat', 'page'])
     expect(
       normalizeHomeApps([
@@ -59,6 +60,7 @@ describe('[COMP:shared/home-apps] home-apps config vocabulary', () => {
         'browsers',
         'chat',
         'custom:extra',
+        'custom:overflow',
       ]),
     ).toHaveLength(HOME_APPS_MAX)
   })
@@ -102,6 +104,7 @@ describe('[COMP:shared/home-apps] home-apps config vocabulary', () => {
         'browsers',
         'chat',
         'custom:extra',
+        'custom:overflow',
       ]),
     ).toEqual({ ok: false, reason: 'too-many' })
   })

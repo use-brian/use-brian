@@ -1374,15 +1374,15 @@ export function brainInboxRoutes({
 
     if (primitiveParam === 'task') {
       // Task adjust — the editable fields surfaced in the Brain detail
-      // panel: title, status, due date, tags, assignee, priority, and
-      // description. `assignee_id` must be a workspace_members row id in
-      // THIS workspace (null clears). `priority` and `description` are
-      // conventional `attributes.*` keys (the frozen-v1 schema has no typed
-      // columns — tasks.md decision #1), merged into the row's attributes
-      // (null removes the key) so sibling keys survive. Each edit
+      // panel: title, status, due date, tags, assignee, priority,
+      // description, and icon. `assignee_id` must be a workspace_members row
+      // id in THIS workspace (null clears). `priority`, `description`, and
+      // `icon` are conventional `attributes.*` keys (the frozen-v1 schema has
+      // no typed columns — tasks.md decision #1), merged into the row's
+      // attributes (null removes the key) so sibling keys survive. Each edit
       // supersedes the row (a new bi-temporal id), so the preserved old
       // row IS the audit trail — no brain_verification stamp here.
-      const { title, status, due_at, tags, assignee_id, priority, description } = req.body as {
+      const { title, status, due_at, tags, assignee_id, priority, description, icon } = req.body as {
         title?: unknown
         status?: unknown
         due_at?: unknown
@@ -1390,6 +1390,7 @@ export function brainInboxRoutes({
         assignee_id?: unknown
         priority?: unknown
         description?: unknown
+        icon?: unknown
       }
 
       const fields: TaskUpdateFields = {}
@@ -1480,9 +1481,34 @@ export function brainInboxRoutes({
         }
       }
 
-      if (Object.keys(fields).length === 0 && priorityChange === undefined && descriptionChange === undefined) {
+      // Optional task emoji — the same compact convention as page emoji
+      // icons. The operator picker only emits one grapheme; the API keeps a
+      // tolerant 16-code-point ceiling for joined/skin-tone emoji sequences.
+      let iconChange: string | null | undefined
+      if (icon !== undefined) {
+        if (icon === null) iconChange = null
+        else if (
+          typeof icon === 'string'
+          && icon.trim().length > 0
+          && Array.from(icon).length <= 16
+        ) {
+          iconChange = icon
+        } else {
+          res.status(400).json({
+            error: 'icon must be a non-empty emoji of 16 Unicode code points or less, or null to clear',
+          })
+          return
+        }
+      }
+
+      if (
+        Object.keys(fields).length === 0
+        && priorityChange === undefined
+        && descriptionChange === undefined
+        && iconChange === undefined
+      ) {
         res.status(400).json({
-          error: 'At least one field (title, status, due_at, tags, assignee_id, priority, description) is required',
+          error: 'At least one field (title, status, due_at, tags, assignee_id, priority, description, icon) is required',
         })
         return
       }
@@ -1517,7 +1543,11 @@ export function brainInboxRoutes({
           }
         }
 
-        if (priorityChange !== undefined || descriptionChange !== undefined) {
+        if (
+          priorityChange !== undefined
+          || descriptionChange !== undefined
+          || iconChange !== undefined
+        ) {
           const raw = before.rows[0].attributes
           const attrs: Record<string, unknown> =
             raw && typeof raw === 'object' && !Array.isArray(raw)
@@ -1530,6 +1560,10 @@ export function brainInboxRoutes({
           if (descriptionChange !== undefined) {
             if (descriptionChange === null) delete attrs.description
             else attrs.description = descriptionChange
+          }
+          if (iconChange !== undefined) {
+            if (iconChange === null) delete attrs.icon
+            else attrs.icon = iconChange
           }
           fields.attributes = attrs
         }
@@ -1918,12 +1952,15 @@ export function brainInboxRoutes({
   // LARGE selections (the surface client-loops small ones for per-row
   // retry UX — tasks-operator-surface §1.6/§6 Phase 4). Body:
   //   { action: 'update', ids: string[], set: { status?, assignee_id?,
-  //     priority?, due_at? } }  |  { action: 'delete', ids: string[] }
+  //     priority?, due_at? } }  |  { action: 'delete', ids: string[],
+  //     reason?, create_rule? }
   // Server-side it loops the SAME per-row primitives the single-row
   // endpoints use: `updateTask` supersession for updates (priority merged
-  // into each row's live attributes), soft-delete + brain_verifications
-  // audit for deletes. Per-id outcomes come back so the client can keep
-  // failed rows selected. Capped at 200 ids per call.
+  // into each row's live attributes). Reasoned deletes use the same atomic
+  // rejection primitive as single-row Delete (tombstone + optional active
+  // narrow rule); reasonless calls retain the legacy soft-delete path.
+  // Per-id outcomes come back so the client can keep failed rows selected.
+  // Capped at 200 ids per call.
   //
   // [COMP:api/tasks-bulk-route]
   router.post('/:workspaceId/tasks/bulk', async (req, res) => {
@@ -1932,10 +1969,12 @@ export function brainInboxRoutes({
     const { workspaceId } = req.params as { workspaceId: string }
     const userId = (req as any).userId as string
 
-    const { action, ids, set } = req.body as {
+    const { action, ids, set, reason, create_rule: createRuleInput } = req.body as {
       action?: unknown
       ids?: unknown
       set?: unknown
+      reason?: unknown
+      create_rule?: unknown
     }
     if (action !== 'update' && action !== 'delete') {
       res.status(400).json({ error: "action must be 'update' or 'delete'" })
@@ -1948,6 +1987,21 @@ export function brainInboxRoutes({
       ids.some((id) => typeof id !== 'string' || id.length === 0)
     ) {
       res.status(400).json({ error: 'ids must be 1-200 task ids' })
+      return
+    }
+    const rejectReason =
+      action === 'delete' && typeof reason === 'string' ? reason.trim() : ''
+    const createRule = action === 'delete' && createRuleInput === true
+    if (
+      action === 'delete' &&
+      reason !== undefined &&
+      (typeof reason !== 'string' || rejectReason.length < 3)
+    ) {
+      res.status(400).json({ error: 'reason must be at least 3 characters when provided' })
+      return
+    }
+    if (createRule && rejectReason.length < 3) {
+      res.status(400).json({ error: 'A reason of at least 3 characters is required' })
       return
     }
 
@@ -2015,7 +2069,13 @@ export function brainInboxRoutes({
       }
     }
 
-    const results: { id: string; ok: boolean; newId?: string }[] = []
+    const results: {
+      id: string
+      ok: boolean
+      newId?: string
+      tombstoned?: boolean
+      activeRuleId?: string | null
+    }[] = []
     for (const id of ids as string[]) {
       try {
         // Per-row ownership pre-check (same contract as the single-row
@@ -2030,6 +2090,33 @@ export function brainInboxRoutes({
           continue
         }
         if (action === 'delete') {
+          if (rejectReason) {
+            const rejected = await rejectTaskWithReason({
+              workspaceId,
+              userId,
+              taskId: id,
+              reason: rejectReason,
+              createRule,
+            })
+            if (!rejected) {
+              results.push({ id, ok: false })
+              continue
+            }
+            await appendBrainVerification({
+              targetKind: 'task',
+              targetId: id,
+              workspaceId,
+              verifiedByUserId: userId,
+              action: 'delete',
+            })
+            results.push({
+              id,
+              ok: true,
+              tombstoned: true,
+              activeRuleId: rejected.activeRuleId,
+            })
+            continue
+          }
           await query(
             `UPDATE tasks SET valid_to = now(), updated_at = now() WHERE id = $1 AND valid_to IS NULL`,
             [id],
@@ -2123,12 +2210,19 @@ export function brainInboxRoutes({
         primitiveParam === 'task' && typeof (req.body as any)?.reason === 'string'
           ? ((req.body as any).reason as string).trim()
           : ''
+      const createRule =
+        primitiveParam === 'task' && (req.body as any)?.create_rule === true
+      if (createRule && rejectReason.length < 3) {
+        res.status(400).json({ error: 'A reason of at least 3 characters is required' })
+        return
+      }
       if (rejectReason.length >= 3) {
         const rejected = await rejectTaskWithReason({
           workspaceId,
           userId,
           taskId: rowId,
           reason: rejectReason,
+          createRule,
         })
         if (!rejected) {
           res.status(404).json({ error: 'Row not found' })
@@ -2145,6 +2239,7 @@ export function brainInboxRoutes({
         res.json({
           ok: true,
           tombstoned: true,
+          activeRuleId: rejected.activeRuleId,
           proposedRuleId: rejected.proposedRuleId,
         })
         return
@@ -2248,7 +2343,7 @@ export function brainInboxRoutes({
           : 'source_session_id'
       // Workflow tagging (`workflow:<id>`) exists on memories only.
       const tagsCol = primitiveParam === 'memory' ? 'tags' : 'NULL::text[]'
-      const meta = await query<{
+      type ExplainMetaRow = {
         workspace_id: string
         created_at: Date
         created_by_assistant_id: string | null
@@ -2257,14 +2352,50 @@ export function brainInboxRoutes({
         source_session_id: string | null
         source: string | null
         tags: string[] | null
-      }>(
-        `SELECT workspace_id, created_at, created_by_assistant_id, created_by_user_id,
-                source_episode_id, ${sourceSessionCol} AS source_session_id,
-                source, ${tagsCol} AS tags
-         FROM ${targetTable}
-         WHERE id = $1`,
-        [rowId],
-      )
+      }
+      // A task edit creates a new row and re-stamps `created_by_user_id` with
+      // the editor. Creation audit must describe the LOGICAL task, so walk
+      // old → new links in reverse and take the root's date/user while the
+      // current row supplies the carried source/session/episode/assistant.
+      // Other primitives keep their existing single-row read.
+      const metaSql = primitiveParam === 'task'
+        ? `WITH RECURSIVE task_versions AS (
+             SELECT id, superseded_by, created_at, created_by_user_id,
+                    ARRAY[id]::uuid[] AS path, 0 AS depth
+             FROM tasks
+             WHERE id = $1
+             UNION ALL
+             SELECT prior.id, prior.superseded_by, prior.created_at,
+                    prior.created_by_user_id,
+                    versions.path || prior.id,
+                    versions.depth + 1
+             FROM tasks prior
+             JOIN task_versions versions ON prior.superseded_by = versions.id
+             WHERE NOT prior.id = ANY(versions.path)
+           ),
+           task_origin AS (
+             SELECT created_at, created_by_user_id
+             FROM task_versions
+             ORDER BY depth DESC
+             LIMIT 1
+           )
+           SELECT current.workspace_id,
+                  origin.created_at,
+                  current.created_by_assistant_id,
+                  origin.created_by_user_id,
+                  current.source_episode_id,
+                  current.source_session_id,
+                  current.source,
+                  NULL::text[] AS tags
+           FROM tasks current
+           CROSS JOIN task_origin origin
+           WHERE current.id = $1`
+        : `SELECT workspace_id, created_at, created_by_assistant_id, created_by_user_id,
+                  source_episode_id, ${sourceSessionCol} AS source_session_id,
+                  source, ${tagsCol} AS tags
+           FROM ${targetTable}
+           WHERE id = $1`
+      const meta = await query<ExplainMetaRow>(metaSql, [rowId])
       if (meta.rows.length === 0) {
         res.status(404).json({ error: 'Row not found' })
         return

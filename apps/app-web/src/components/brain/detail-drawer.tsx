@@ -831,7 +831,7 @@ export function BrainDetailDrawer({
                 type="button"
                 disabled={actionBusy}
                 onClick={() => void handleConfirm()}
-                className="text-xs px-3 py-1.5 rounded-md bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50"
+                className="text-xs px-3 py-1.5 rounded-md bg-action text-action-foreground hover:opacity-90 disabled:opacity-50"
               >
                 {t.memoriesReview.confirm}
               </button>
@@ -1345,7 +1345,7 @@ function ChangeTypePanel({
           type="button"
           disabled={busy}
           onClick={submit}
-          className="text-xs px-3 py-1.5 rounded-md bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50"
+          className="text-xs px-3 py-1.5 rounded-md bg-action text-action-foreground hover:opacity-90 disabled:opacity-50"
         >
           {busy
             ? isCrmKind
@@ -2454,7 +2454,7 @@ function PrimitiveSection({
               type="button"
               disabled={goalBusy}
               onClick={handleConfirmGoal}
-              className="self-start text-xs px-3 py-1.5 rounded-md bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50"
+              className="self-start text-xs px-3 py-1.5 rounded-md bg-action text-action-foreground hover:opacity-90 disabled:opacity-50"
             >
               {labels.goalConfirm}
             </button>
@@ -2467,7 +2467,7 @@ function PrimitiveSection({
               type="button"
               disabled={goalBusy}
               onClick={handleWorkGoal}
-              className="self-start text-xs px-3 py-1.5 rounded-md bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50"
+              className="self-start text-xs px-3 py-1.5 rounded-md bg-action text-action-foreground hover:opacity-90 disabled:opacity-50"
             >
               {labels.goalWork}
             </button>
@@ -2989,7 +2989,7 @@ function FormActions({
         type="button"
         disabled={busy}
         onClick={onSubmit}
-        className="text-xs px-3 py-1.5 rounded-md bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50"
+        className="text-xs px-3 py-1.5 rounded-md bg-action text-action-foreground hover:opacity-90 disabled:opacity-50"
       >
         {busy ? t.memoriesReview.saving : submitLabel}
       </button>
@@ -3252,7 +3252,7 @@ function SkillSection({
               type="button"
               disabled={busy}
               onClick={handleConfirm}
-              className="text-xs px-3 py-1.5 rounded-md bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50"
+              className="text-xs px-3 py-1.5 rounded-md bg-action text-action-foreground hover:opacity-90 disabled:opacity-50"
             >
               {skillsCopy.confirm}
             </button>

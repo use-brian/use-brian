@@ -2,27 +2,32 @@ import type { PGlite } from '@electric-sql/pglite'
 import { createHash } from 'node:crypto'
 import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { toPgliteMigrationSql } from '@use-brian/api/migrations/pglite-sql.js'
 
 const migrationRuns = new WeakMap<PGlite, Promise<void>>()
 const OSS_CHANNELS_330 = '330_oss_channels.sql'
 const OSS_CHANNELS_330_SHA256 = '64aeddde4c05bd186b638be0b0c02f477dd16afb20358c00446b2e9d0d739c1e'
 
-function withoutOuterTransaction(sql: string, file: string): string {
-  const begins = sql.match(/^BEGIN;\s*$/gm)?.length ?? 0
-  const commits = sql.match(/^COMMIT;\s*$/gm)?.length ?? 0
-  if (begins === 0 && commits === 0) return sql
-  if (begins !== 1 || commits !== 1) {
-    throw new Error(`${file}: expected one outer BEGIN/COMMIT pair`)
-  }
-  return sql.replace(/^BEGIN;\s*$/m, '').replace(/^COMMIT;\s*$/m, '')
+function concurrentIndexStatements(sql: string): string[] | null {
+  if (!/concurrently/i.test(sql) || /^\s*BEGIN/im.test(sql)) return null
+  return sql
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/--[^\n]*/g, '')
+    .split(';')
+    .map((statement) => statement.trim())
+    .filter(Boolean)
 }
 
 /**
  * Apply the open migration baseline (+ any post-squash open migrations) to an
  * embedded PGLite brain. Local boot is OPEN-ONLY — no closed overlay.
  *
- * Each file and its `_migrations` row commit atomically in one runner-owned
- * transaction. Outer BEGIN/COMMIT wrappers are removed before execution. The
+ * Each ordinary file and its `_migrations` row commit atomically in one
+ * runner-owned transaction. Outer BEGIN/COMMIT wrappers are removed before
+ * execution. `CREATE INDEX CONCURRENTLY` files are the deliberate exception:
+ * PostgreSQL and PGLite reject those statements inside a transaction, so the
+ * runner applies their idempotent statements one at a time and records the
+ * file afterwards. The
  * squash separates schema from seed rows with a `-- Seed data` marker (see
  * `000_open_schema_v1.sql`); its DDL runs in one exec and each seed INSERT in a
  * separate exec inside that same transaction. Calls sharing a PGlite instance
@@ -88,12 +93,32 @@ async function migratePgliteExclusive(db: PGlite, migrationsDir: string): Promis
       continue
     }
 
+    // Match the node-postgres migration runner: concurrent indexes must be
+    // separate, top-level statements. The repository's concurrent-index
+    // migrations use IF NOT EXISTS, so a process crash between statements is
+    // safe to resume before the ledger row is written.
+    const concurrentStatements = concurrentIndexStatements(sql)
+    if (concurrentStatements) {
+      const existing = await db.query<{ name: string }>(
+        'SELECT name FROM public._migrations WHERE name = $1',
+        [file],
+      )
+      if (existing.rows.length > 0) continue
+
+      for (const statement of concurrentStatements) {
+        await db.exec(statement)
+      }
+      await db.query('INSERT INTO public._migrations (name) VALUES ($1)', [file])
+      count++
+      continue
+    }
+
     const [ddl, seedRaw = ''] = sql.split('-- Seed data')
     const applied = await db.transaction(async (tx) => {
       const existing = await tx.query<{ name: string }>('SELECT name FROM public._migrations WHERE name = $1', [file])
       if (existing.rows.length > 0) return false
 
-      await tx.exec(withoutOuterTransaction(ddl, file))
+      await tx.exec(toPgliteMigrationSql(ddl, file))
       for (const insert of seedRaw.split('\n').filter((l) => l.trimStart().startsWith('INSERT'))) {
         await tx.exec(insert)
       }

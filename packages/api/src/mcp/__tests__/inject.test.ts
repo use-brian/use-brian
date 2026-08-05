@@ -79,6 +79,7 @@ import {
   _getMcpDiscoveryCacheSize,
 } from '../inject.js'
 import { buildUnavailableCapabilitiesPrompt } from '../../routes/route-helpers.js'
+import { packMsGraphTokens } from '../../msgraph/token.js'
 
 function settingsStoreStub() {
   // Generous stub — the no-connector path touches few of these, but
@@ -365,6 +366,44 @@ describe('[COMP:api/mcp-inject] granted CLI MCP overlay', () => {
     expect(discoverCliServer).toHaveBeenCalledWith(expect.anything(), 'Project Filesystem')
     expect(tools.has('mcp_search')).toBe(true)
     expect(tools.has('mcp_call')).toBe(true)
+  })
+
+  it('skips only the CLI instance disabled for this assistant', async () => {
+    discoverCliServer.mockImplementation(async (_params, name) => ({
+      name,
+      url: `stdio://${name}`,
+      tools: [{ name: `read${name}`, description: 'Read data', inputSchema: { type: 'object' } }],
+    }))
+    const instances = [
+      { id: 'cli-disabled-1', provider: 'cli', label: 'One', connected: true, config: {}, updatedAt: new Date(0) },
+      { id: 'cli-enabled-2', provider: 'cli', label: 'Two', connected: true, config: {}, updatedAt: new Date(0) },
+    ]
+    const isEnabled = vi.fn(async (_assistantId: string, governanceId: string) => governanceId !== 'cli:cli-disabled-1')
+    const tools = new Map()
+
+    await injectMcpTools({
+      userId: 'owner-1', assistantId: 'a-1', tools,
+      connectorStore: { list: vi.fn().mockResolvedValue([]) } as never,
+      settingsStore: settingsStoreStub() as never,
+      assistantConnectorStore: { isEnabled } as never,
+      connectorGrantStore: {
+        listForTargetSystem: vi.fn().mockResolvedValue(instances.map((instance) => ({
+          grantedByUserId: 'grantor-1', instance,
+        }))),
+      } as never,
+      connectorInstanceStore: {
+        listByWorkspaceSystem: vi.fn().mockResolvedValue([]),
+        getAuthCredentialsSystem: vi.fn().mockResolvedValue({
+          type: 'cli', binaryPath: '/usr/bin/node', args: ['/tmp/server.js'],
+        }),
+      } as never,
+      assistantTeamId: 'ws-shared',
+    })
+
+    expect(isEnabled).toHaveBeenCalledWith('a-1', 'cli:cli-disabled-1', 'cli')
+    expect(isEnabled).toHaveBeenCalledWith('a-1', 'cli:cli-enabled-2', 'cli')
+    expect(discoverCliServer).toHaveBeenCalledTimes(1)
+    expect(discoverCliServer).toHaveBeenCalledWith(expect.anything(), 'Two')
   })
 })
 
@@ -1053,6 +1092,121 @@ describe('[COMP:api/mcp-inject] grant overlay instance binding', () => {
     expect(names.some((n) => n.startsWith('googleCalendar'))).toBe(false)
     expect(names.some((n) => n.startsWith('googleTasks'))).toBe(false)
   })
+
+  it('injects every exposed Gmail account and honors an exact extra-account enable switch', async () => {
+    const { connectorStore, connectorInstanceStore, connectorGrantStore } = stores()
+    connectorGrantStore.listForTargetSystem.mockResolvedValue([
+      {
+        grantedByUserId: 'grantor-1',
+        instance: {
+          id: 'ci-gm-exposed', provider: 'gmail', label: 'Personal Gmail',
+          connectedEmail: 'personal@example.com', connected: true, healthStatus: 'ok',
+          custom: false, url: null, createdAt: new Date('2026-07-01T00:00:00Z'),
+        },
+      },
+      {
+        grantedByUserId: 'grantor-1',
+        instance: {
+          id: 'ci-gm-work', provider: 'gmail', label: 'Work Gmail',
+          connectedEmail: 'work@example.com', connected: true, healthStatus: 'ok',
+          custom: false, url: null, createdAt: new Date('2026-07-02T00:00:00Z'),
+        },
+      },
+    ])
+    const assistantConnectorStore = {
+      isEnabled: vi.fn().mockResolvedValue(true),
+    }
+    const tools = new Map()
+
+    await injectMcpTools({
+      userId: 'owner-1', assistantId: 'a-1', tools,
+      connectorStore: connectorStore as never,
+      settingsStore: settingsStoreStub() as never,
+      assistantConnectorStore: assistantConnectorStore as never,
+      connectorInstanceStore: connectorInstanceStore as never,
+      connectorGrantStore: connectorGrantStore as never,
+      assistantTeamId: 'ws-fls', keepBuiltinsDirect: true,
+    })
+
+    const names = [...tools.keys()] as string[]
+    expect(names).toContain('gmailSendMessage')
+    const variant = names.find((name) => name.startsWith('gmailSendMessage__'))
+    expect(variant).toBeTruthy()
+    expect((tools.get(variant!) as { description: string }).description).toMatch(/^\[Work Gmail\]/)
+    expect(assistantConnectorStore.isEnabled).toHaveBeenCalledWith(
+      'a-1', 'gmail:ci-gm-work', 'gmail',
+    )
+
+    assistantConnectorStore.isEnabled.mockImplementation(async (
+      _assistantId: string,
+      connectorId: string,
+    ) => connectorId !== 'gmail:ci-gm-work')
+    const disabledTools = new Map()
+    await injectMcpTools({
+      userId: 'owner-1', assistantId: 'a-1', tools: disabledTools,
+      connectorStore: connectorStore as never,
+      settingsStore: settingsStoreStub() as never,
+      assistantConnectorStore: assistantConnectorStore as never,
+      connectorInstanceStore: connectorInstanceStore as never,
+      connectorGrantStore: connectorGrantStore as never,
+      assistantTeamId: 'ws-fls', keepBuiltinsDirect: true,
+    })
+    expect([...disabledTools.keys()].some((name) => String(name).startsWith('gmailSendMessage__'))).toBe(false)
+
+    // Exact account switches are independent in both directions: disabling
+    // the canonical account must not hide a secondary account that has an
+    // explicit enabled row.
+    assistantConnectorStore.isEnabled.mockImplementation(async (
+      _assistantId: string,
+      connectorId: string,
+    ) => connectorId !== 'gmail')
+    const extraOnlyTools = new Map()
+    await injectMcpTools({
+      userId: 'owner-1', assistantId: 'a-1', tools: extraOnlyTools,
+      connectorStore: connectorStore as never,
+      settingsStore: settingsStoreStub() as never,
+      assistantConnectorStore: assistantConnectorStore as never,
+      connectorInstanceStore: connectorInstanceStore as never,
+      connectorGrantStore: connectorGrantStore as never,
+      assistantTeamId: 'ws-fls', keepBuiltinsDirect: true,
+    })
+    expect(extraOnlyTools.has('gmailSendMessage')).toBe(false)
+    expect([...extraOnlyTools.keys()].some((name) => String(name).startsWith('gmailSendMessage__'))).toBe(true)
+  })
+
+  it('injects every exposed GitHub account as an exact-credential variant', async () => {
+    const connectorStore = {
+      list: vi.fn().mockResolvedValue([
+        { id: 'ci-gh-primary', connectorId: 'github', name: 'GitHub - hinson', connected: true, createdAt: new Date('2026-07-01T00:00:00Z') },
+        { id: 'ci-gh-work', connectorId: 'github', name: 'GitHub - brian', connected: true, createdAt: new Date('2026-07-02T00:00:00Z') },
+      ]),
+    }
+    const connectorInstanceStore = {
+      getCredentialsSystem: vi.fn(async (id: string) => ({ client_id: 'github_pat', client_secret: `pat-${id}` })),
+      updateCredentialsSystem: vi.fn(), markHealth: vi.fn(),
+      listByWorkspaceSystem: vi.fn().mockResolvedValue([]),
+    }
+    const connectorGrantStore = {
+      listForTargetSystem: vi.fn().mockResolvedValue([
+        { grantedByUserId: 'grantor-1', instance: { id: 'ci-gh-primary', provider: 'github', label: 'GitHub - hinson', connected: true, healthStatus: 'ok', custom: false, url: null, createdAt: new Date('2026-07-01T00:00:00Z') } },
+        { grantedByUserId: 'grantor-1', instance: { id: 'ci-gh-work', provider: 'github', label: 'GitHub - brian', connected: true, healthStatus: 'ok', custom: false, url: null, createdAt: new Date('2026-07-02T00:00:00Z') } },
+      ]),
+    }
+    const tools = new Map()
+
+    await injectMcpTools({
+      userId: 'owner-1', assistantId: 'a-1', tools,
+      connectorStore: connectorStore as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorInstanceStore: connectorInstanceStore as never,
+      connectorGrantStore: connectorGrantStore as never,
+      assistantTeamId: 'ws-fls', keepBuiltinsDirect: true,
+    })
+
+    const names = [...tools.keys()] as string[]
+    expect(names).toContain('githubListIssues')
+    expect(names.some((name) => name.startsWith('githubListIssues__'))).toBe(true)
+  })
 })
 
 describe('[COMP:integrations/connector-health] team-native connector health gate', () => {
@@ -1178,14 +1332,14 @@ describe('[COMP:api/mcp-inject] Microsoft Graph (msgraph) built-in', () => {
     'msTeamsFindPerson',
   ]
 
-  function msgraphStore(connected: boolean) {
+  function msgraphStore(connected: boolean, credentials?: string) {
     return {
       list: vi.fn().mockResolvedValue([
         { id: 'ci-ms', connectorId: 'msgraph', name: 'Microsoft Teams', connected, url: null, custom: false, createdAt: new Date('2026-01-01T00:00:00Z') },
       ]),
       getCredentials: vi.fn().mockResolvedValue({
         client_id: 'msgraph_oauth',
-        client_secret: JSON.stringify({
+        client_secret: credentials ?? JSON.stringify({
           accessToken: 'access-1',
           refreshToken: 'refresh-1',
           expiresAt: new Date(Date.now() + 3600_000).toISOString(),
@@ -1198,13 +1352,15 @@ describe('[COMP:api/mcp-inject] Microsoft Graph (msgraph) built-in', () => {
   async function inject(opts: {
     connected?: boolean
     settingsStore?: unknown
+    /** Override the stored envelope (e.g. one carrying a workspace app pair). */
+    credentials?: string
   } = {}): Promise<{ tools: Map<string, unknown>; unavailable: string[] }> {
     const tools = new Map()
     const result = await injectMcpTools({
       userId: 'u-1',
       assistantId: 'a-1',
       tools,
-      connectorStore: msgraphStore(opts.connected ?? true) as never,
+      connectorStore: msgraphStore(opts.connected ?? true, opts.credentials) as never,
       settingsStore: (opts.settingsStore ?? settingsStoreStub()) as never,
       keepBuiltinsDirect: true,
     })
@@ -1232,13 +1388,45 @@ describe('[COMP:api/mcp-inject] Microsoft Graph (msgraph) built-in', () => {
     expect(unavailable.join('\n')).toMatch(/Microsoft Teams: not connected/)
   })
 
-  it('no-ops entirely when no Entra app credentials are configured', async () => {
-    // Connector-less boot (open single-player): no MSGRAPH_CLIENT_ID/SECRET.
+  it('no-ops entirely on a connector-less boot', async () => {
+    // Open single-player: no MSGRAPH_CLIENT_ID/SECRET and nothing connected.
     // Silent — not even a not-connected notice, since nothing could connect.
+    getConnectorConfig.mockReturnValue(undefined)
+    const { tools, unavailable } = await inject({ connected: false })
+    for (const name of MSGRAPH_TOOLS) expect(tools.has(name)).toBe(false)
+    expect(unavailable.join('\n')).not.toMatch(/Microsoft Teams/)
+  })
+
+  /**
+   * Deployment config is no longer the GATE, only a fallback: a workspace that
+   * registered its own Entra app (migration 394) connects through an app this
+   * process has no env var for, and the pair rides in the grant envelope so
+   * the refresh path can find it without a workspace id.
+   */
+  it('injects a workspace-owned connection with no deployment config at all', async () => {
+    getConnectorConfig.mockReturnValue(undefined)
+    const { tools } = await inject({
+      credentials: packMsGraphTokens({
+        accessToken: 'at',
+        refreshToken: 'rt',
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        appClientId: 'ws-client',
+        appClientSecret: 'ws-secret',
+      }),
+    })
+    for (const name of MSGRAPH_TOOLS) expect([...tools.keys()], name).toContain(name)
+  })
+
+  /**
+   * Connected, but nothing can rotate the token — a self-host that removed its
+   * env config after users connected. Injecting tools that would all fail at
+   * the first refresh is worse than saying the connector is unavailable.
+   */
+  it('announces the gap when a connected grant has no app to refresh it', async () => {
     getConnectorConfig.mockReturnValue(undefined)
     const { tools, unavailable } = await inject()
     for (const name of MSGRAPH_TOOLS) expect(tools.has(name)).toBe(false)
-    expect(unavailable.join('\n')).not.toMatch(/Microsoft Teams/)
+    expect(unavailable.join('\n')).toMatch(/Microsoft Teams: not connected/)
   })
 
   it('lands blocked tools in unavailable[] instead of the tool map', async () => {

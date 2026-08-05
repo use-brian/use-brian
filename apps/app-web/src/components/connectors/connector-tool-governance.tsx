@@ -76,7 +76,7 @@ export function ConnectorToolGovernance({
 }: {
   assistantId: string;
   connectorId: string;
-  /** Persisted governance key. Account-bound IMAP uses `imap:<instanceId>`. */
+  /** Persisted governance key. Additional accounts use `<provider>:<instanceId>`. */
   governanceId?: string;
   /** Connector scope from GET /api/assistants/:id/connectors. */
   scope?: string;

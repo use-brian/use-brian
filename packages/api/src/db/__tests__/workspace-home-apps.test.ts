@@ -48,7 +48,7 @@ describe('[COMP:api/workspace-home-apps] getWorkspaceHomeApps', () => {
 
   it("treats '[]' as unset and resolves the built-in default", async () => {
     mockQuery.mockResolvedValueOnce({ rows: [{ home_apps: [] }], rowCount: 1 } as never)
-    expect(await getWorkspaceHomeApps('ws-1')).toEqual(['page', 'chat'])
+    expect(await getWorkspaceHomeApps('ws-1')).toEqual(['page', 'office', 'chat'])
   })
 
   it('filters an entry this build does not know (additive contract)', async () => {
@@ -73,13 +73,13 @@ describe('[COMP:api/workspace-home-apps] getWorkspaceHomeApps', () => {
     // The app-bar is navigation on every authenticated surface — a config
     // lookup failure must never take the shell down.
     mockQuery.mockRejectedValueOnce(new Error('DB down'))
-    expect(await getWorkspaceHomeApps('ws-1')).toEqual(['page', 'chat'])
+    expect(await getWorkspaceHomeApps('ws-1')).toEqual(['page', 'office', 'chat'])
   })
 
   it('handles a missing workspace and a missing id', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
-    expect(await getWorkspaceHomeApps('ws-gone')).toEqual(['page', 'chat'])
-    expect(await getWorkspaceHomeApps(null)).toEqual(['page', 'chat'])
+    expect(await getWorkspaceHomeApps('ws-gone')).toEqual(['page', 'office', 'chat'])
+    expect(await getWorkspaceHomeApps(null)).toEqual(['page', 'office', 'chat'])
   })
 })
 
@@ -128,11 +128,11 @@ describe('[COMP:api/workspace-home-apps] setWorkspaceHomeApps', () => {
     expect(mockQuery).toHaveBeenCalledTimes(1)
   })
 
-  it('rejects an empty strip, a duplicate, and more than six', async () => {
+  it('rejects an empty strip, a duplicate, and more than seven', async () => {
     for (const bad of [
       [],
       ['page', 'page'],
-      ['page', 'tasks', 'crm', 'feed', 'browsers', 'chat', 'custom:x'],
+      ['page', 'office', 'tasks', 'crm', 'feed', 'browsers', 'chat', 'custom:x'],
     ]) {
       mockQuery.mockReset()
       asRole('admin')

@@ -232,7 +232,7 @@ export function NewCommentPopover({
               onClick={submit}
               disabled={!canSend}
               aria-label={t.send}
-              className="inline-flex size-7 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground transition-colors hover:bg-primary/90 disabled:bg-foreground/10 disabled:text-muted-foreground"
+              className="inline-flex size-7 shrink-0 items-center justify-center rounded-full bg-action text-action-foreground transition-colors hover:bg-action/90 disabled:bg-foreground/10 disabled:text-muted-foreground"
             >
               <ArrowUp className="size-4" />
             </button>

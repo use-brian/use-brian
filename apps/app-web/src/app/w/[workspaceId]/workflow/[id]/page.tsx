@@ -678,7 +678,7 @@ export default function WorkflowDetailPage({
               type="button"
               onClick={onRunNow}
               disabled={running || !workflow.enabled}
-              className="px-3 py-1.5 rounded-md bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 disabled:opacity-50"
+              className="px-3 py-1.5 rounded-md bg-action text-action-foreground text-sm font-medium hover:opacity-90 disabled:opacity-50"
             >
               {running ? t.workflowPage.builder.running : t.workflowPage.builder.runNowBtn}
             </button>
@@ -686,7 +686,7 @@ export default function WorkflowDetailPage({
               type="button"
               onClick={onSave}
               disabled={saving || !dirty}
-              className="px-3 py-1.5 rounded-md bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 disabled:opacity-50"
+              className="px-3 py-1.5 rounded-md bg-action text-action-foreground text-sm font-medium hover:opacity-90 disabled:opacity-50"
             >
               {saving ? t.workflowPage.builder.saving : t.workflowPage.builder.saveChanges}
             </button>

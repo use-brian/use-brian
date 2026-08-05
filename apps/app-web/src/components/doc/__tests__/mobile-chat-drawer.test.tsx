@@ -82,8 +82,8 @@ describe("[COMP:app-web/mobile-chat-drawer] FAB + drawer mount", () => {
       />,
     );
     // `<FloatingChat>`'s collapsed pill carries the i18n placeholder
-    // string — if it were mounted we'd see "Ask for a view…".
-    expect(html).not.toMatch(/Ask for a view/);
+    // string — if it were mounted we'd see the generic "Ask anything…" nudge.
+    expect(html).not.toMatch(/Ask anything/);
   });
 
   it("respects the `className` prop on the outer wrapper (lg:hidden)", () => {

@@ -163,6 +163,17 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'shopifySalesReport', description: 'Aggregate sales over a date range (count, revenue, top items)', classification: 'read', defaultPolicy: 'allow' },
     { name: 'shopifyUpdateProduct', description: 'Update product title, description, tags, status, or SEO', classification: 'write', defaultPolicy: 'ask' },
     { name: 'shopifyCreateProduct', description: 'Create a new product', classification: 'write', defaultPolicy: 'ask' },
+    { name: 'shopifyAddProductImage', description: 'Upload a workspace file to a product as a product image', classification: 'write', defaultPolicy: 'ask' },
+    { name: 'shopifySetProductPrice', description: 'Set a product variant price, compare-at price, and SKU', classification: 'write', defaultPolicy: 'ask' },
+    { name: 'shopifyPublishProduct', description: 'Publish a product to the Online Store so customers can see it', classification: 'write', defaultPolicy: 'ask' },
+    { name: 'shopifySetProductMetafields', description: 'Set structured metafields on a product (theme must read them to display)', classification: 'write', defaultPolicy: 'ask' },
+    { name: 'shopifySetProductOptions', description: 'Rename a product option and its values (the storefront variant picker labels)', classification: 'write', defaultPolicy: 'ask' },
+    { name: 'shopifyListThemes', description: 'List online store themes and which one is live', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'shopifyReadProductTemplate', description: 'Read a product page template from the theme', classification: 'read', defaultPolicy: 'allow' },
+    // Destructive, not write: this lands a file in the theme customers are
+    // served from, and a broken page is invisible in the Shopify admin.
+    { name: 'shopifyCreateProductTemplate', description: 'Create a new product page template in the theme', classification: 'destructive', defaultPolicy: 'ask' },
+    { name: 'shopifySetProductTemplate', description: 'Change which page template a product uses', classification: 'write', defaultPolicy: 'ask' },
     { name: 'shopifyCreateDraftOrder', description: 'Create a draft order (quote or invoice, never a charge)', classification: 'write', defaultPolicy: 'ask' },
     { name: 'shopifySendDraftOrderInvoice', description: 'Email the invoice for a draft order', classification: 'write', defaultPolicy: 'ask' },
     { name: 'shopifyAddTags', description: 'Add tags to an order, customer, or product', classification: 'write', defaultPolicy: 'ask' },
@@ -240,13 +251,11 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'saveFileBytes', description: 'Save a file from raw bytes (base64) to the workspace, preserving the original', classification: 'write', defaultPolicy: 'ask' },
     { name: 'sendFile',    description: 'Attach a workspace file to the reply as a downloadable document', classification: 'read',       defaultPolicy: 'allow' },
     { name: 'fileDelete',  description: 'Permanently delete a workspace file',                           classification: 'destructive', defaultPolicy: 'ask' },
-    // Deck tools (docs/architecture/features/deck-generation.md): 'allow' by
-    // default because they only write the deck artifact inside the workspace
-    // (row + decks/<id>.pptx file); outbound delivery stays gated by
-    // sendFile / gmail confirmations.
-    { name: 'generatePowerpoint', description: 'Create a PowerPoint deck as a workspace artifact (spec + .pptx file, live preview)', classification: 'write', defaultPolicy: 'allow' },
-    { name: 'updatePowerpoint',   description: 'Edit a deck by slide operations and rebuild its .pptx in place',                     classification: 'write', defaultPolicy: 'allow' },
-    { name: 'getPowerpoint',      description: 'Read a deck\'s current slides and version',                                          classification: 'read',  defaultPolicy: 'allow' },
+  ],
+  office: [
+    { name: 'createOfficeArtifact', description: 'Start a durable Brian-native Document or Presentation job', classification: 'write', defaultPolicy: 'allow' },
+    { name: 'getOfficeArtifact', description: 'Read an Office artifact and its current generation state', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'reviseOfficeArtifact', description: 'Start an undoable Office revision or proposal job', classification: 'write', defaultPolicy: 'allow' },
   ],
   // Google Cloud Storage (bring-your-own storage) — a credentialed connector
   // with NO assistant tools. It only rebinds where the Workspace Files bytes
@@ -286,6 +295,57 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'loadFromWorkspace', description: 'Copy a workspace file into the sandbox scratch', classification: 'read', defaultPolicy: 'allow' },
     { name: 'saveToWorkspace', description: 'Save a sandbox scratch file into workspace files', classification: 'write', defaultPolicy: 'ask' },
   ],
+}
+
+/**
+ * Connectors whose OAuth *app* credentials a workspace may supply itself,
+ * through Studio -> Connectors instead of deployment config.
+ *
+ * This is deliberately NARROW and hand-maintained, in the sanctioned sense of
+ * the "all built-ins" drift rule: it is not "every official connector", it is
+ * the set whose provider model actually supports a customer registering their
+ * own app. For `msgraph` that model is the point rather than a fallback - an
+ * Entra app registered by the customer's own admin sidesteps both Microsoft
+ * publisher verification and the cross-tenant admin consent that
+ * `ChannelMessage.Read.All` demands unconditionally.
+ *
+ * Adding a connector here requires three things to already be true: the
+ * provider must let an end customer register an app, the authorize URL must be
+ * derivable from that app alone, and the exchange must run server-side (see
+ * `packages/api/src/connectors/app-credentials.ts`). Adding an id with no
+ * route support ships a form that saves credentials nothing reads.
+ *
+ * See docs/architecture/integrations/msgraph.md -> "Auth".
+ */
+export const CONFIGURABLE_APP_CREDENTIAL_CONNECTORS: ReadonlySet<string> = new Set(['msgraph'])
+
+/**
+ * OIDC baseline scopes for the Microsoft Graph connector, requested alongside
+ * whatever Graph permissions `OFFICIAL_OAUTH_SCOPES.msgraph` declares.
+ *
+ * They are deliberately NOT in that table: it is the inventory of Graph
+ * *resource* permissions an admin reads on the consent screen, and Entra
+ * collapses openid/profile/email into a single "Sign you in and read your
+ * profile" line. `openid` is also what produces the `id_token` the connect
+ * flow reads the tenant id and account address from.
+ *
+ * Lives in shared because the authorize URL (app-web, browser) and the code
+ * exchange (packages/api, server) must send the SAME scope string, and they
+ * are in different packages. A second hand-written list is exactly how an
+ * authorize/exchange pair drifts.
+ */
+export const MSGRAPH_BASE_SCOPES: readonly string[] = ['openid', 'profile', 'email']
+
+/** The full msgraph scope set: OIDC baseline + the declared Graph permissions. */
+export function msGraphScopes(): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const scope of [...MSGRAPH_BASE_SCOPES, ...(OFFICIAL_OAUTH_SCOPES.msgraph ?? [])]) {
+    if (seen.has(scope)) continue
+    seen.add(scope)
+    out.push(scope)
+  }
+  return out
 }
 
 /**
@@ -400,6 +460,24 @@ export const OFFICIAL_OAUTH_SCOPES: Record<string, string[]> = {
     'read_shopify_payments_accounts',
     'read_shopify_payments_payouts',
     'read_shopify_payments_disputes',
+    // shopifyPublishProduct only. `productCreate` leaves a product UNPUBLISHED
+    // no matter what `status` says, so without this pair a product created
+    // through the connector can never reach the storefront.
+    'read_publications',
+    'write_publications',
+    // NOT listed, on purpose: `read_themes` / `write_themes`.
+    //
+    // The four theme-template tools need them, but theme access is the most
+    // dangerous grant this connector could ask for — a bad write breaks the
+    // storefront for every visitor, and unlike a bad product it is invisible
+    // in the Shopify admin. Requesting it from every merchant to serve the
+    // minority who author product pages is a trust cost that buys nothing for
+    // the rest, so it is OPT-IN: a merchant who wants page authoring adds the
+    // pair to their own app, and until they do the tools fail with Shopify's
+    // own honest "Required access: read_themes access scope" error rather than
+    // silently doing nothing. Moving them into this list would flip that
+    // default for every install — do it deliberately or not at all.
+    // See docs/architecture/integrations/shopify.md → "Theme product templates".
   ],
 }
 
@@ -429,9 +507,11 @@ export const BOOT_INJECTED_BUILTIN_TOOLS: Record<string, readonly string[]> = {
     'saveFileToBrain',
     'sendFile',
     'fileDelete',
-    'generatePowerpoint',
-    'updatePowerpoint',
-    'getPowerpoint',
+  ],
+  office: [
+    'createOfficeArtifact',
+    'getOfficeArtifact',
+    'reviseOfficeArtifact',
   ],
   // Computer use (docs/architecture/engine/computer-use.md): wired at boot
   // from packages/core/src/sandbox/tools.ts, always present (a missing

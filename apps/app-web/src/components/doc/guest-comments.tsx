@@ -108,7 +108,7 @@ export function GuestComments({ token, pageId }: { token: string; pageId?: strin
             type="button"
             onClick={() => void post()}
             disabled={posting || !canPost}
-            className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+            className="rounded-md bg-action px-3 py-1.5 text-sm font-medium text-action-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
           >
             {posting ? t.posting : t.post}
           </button>

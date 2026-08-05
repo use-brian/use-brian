@@ -188,7 +188,7 @@ export function ConnectBrowserPanel() {
         <button
           type="button"
           onClick={() => openWorkspaceSettings("ws-plan")}
-          className="mt-2 h-8 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground"
+          className="mt-2 h-8 rounded-md bg-action px-3 text-xs font-medium text-action-foreground"
         >
           {c.gatedCta}
         </button>
@@ -237,7 +237,7 @@ export function ConnectBrowserPanel() {
             type="button"
             disabled={busy}
             onClick={() => void onOneClickConnect()}
-            className="mt-2 h-8 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground disabled:opacity-50"
+            className="mt-2 h-8 rounded-md bg-action px-3 text-xs font-medium text-action-foreground disabled:opacity-50"
           >
             {busy ? c.oneClickConnecting : c.oneClickCta}
           </button>
@@ -291,7 +291,7 @@ export function ConnectBrowserPanel() {
                 type="button"
                 disabled={busy}
                 onClick={() => void onGenerate()}
-                className="mt-1 h-8 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground disabled:opacity-50"
+                className="mt-1 h-8 rounded-md bg-action px-3 text-xs font-medium text-action-foreground disabled:opacity-50"
               >
                 {busy ? c.generating : c.generate}
               </button>

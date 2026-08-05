@@ -20,7 +20,15 @@ export type TaskRulePredicate = {
   lanes?: TaskLane[];
   title_matches?: string[];
   channel_refs?: string[];
-  require?: ("assignee" | "due")[];
+  require?: (
+    | "assignee"
+    | "due"
+    | "description"
+    | "resolved_target"
+    | "explicit_commitment"
+    | "completion_signal"
+    | "agent_ready"
+  )[];
 };
 
 export type TaskRule = {
@@ -41,7 +49,33 @@ type TaskCandidateReason =
   | "rule"
   | "rule_requires"
   | "duplicate"
-  | "near_duplicate";
+  | "near_duplicate"
+  | "not_a_task"
+  | "needs_spec"
+  | "quality_unverified";
+
+type TaskReadinessAssessment = {
+  classification: "ready" | "needs_spec" | "not_a_task";
+  evidenceQuote: string | null;
+  evidenceVerified: boolean;
+  commitment: "explicit" | "implicit" | "hedged" | "none";
+  objective: string | null;
+  target: string | null;
+  description: string | null;
+  startingPointKind: "explicit" | "discoverable" | "missing";
+  startingPoint: string | null;
+  completionSignal: string | null;
+  missing: (
+    | "evidence"
+    | "commitment"
+    | "objective"
+    | "target"
+    | "description"
+    | "starting_point"
+    | "completion_signal"
+  )[];
+  explanation: string;
+};
 
 export type TaskCandidate = {
   id: string;
@@ -55,6 +89,7 @@ export type TaskCandidate = {
   matchedTaskId: string | null;
   matchedTaskTitle: string | null;
   similarity: number | null;
+  quality: TaskReadinessAssessment | null;
   createdAt: string;
   expiresAt: string;
 };

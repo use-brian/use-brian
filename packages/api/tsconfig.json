@@ -9,6 +9,7 @@
   "references": [
     { "path": "../shared" },
     { "path": "../core" },
-    { "path": "../channels" }
+    { "path": "../channels" },
+    { "path": "../office-model" }
   ]
 }

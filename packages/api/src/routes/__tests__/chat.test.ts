@@ -1,7 +1,59 @@
 import { describe, it, expect, vi } from 'vitest'
-import { appAssistantForbidsResearch, appAssistantForbidsCoordinator, isAdaptiveResearchEligible, isUserBlocked, sanitizeTitle, buildActivePageInstruction, buildViewingSkillBlock, buildViewingDeckBlock, resolveStickyChannelId, isDocSurface, isAppSurface, attachUserVisibleContext, settleInlineToolApproval } from '../chat.js'
+import { appAssistantForbidsResearch, appAssistantForbidsCoordinator, isAdaptiveResearchEligible, isUserBlocked, sanitizeTitle, buildActivePageInstruction, buildViewingSkillBlock, resolveStickyChannelId, isDocSurface, isAppSurface, attachUserVisibleContext, settleInlineToolApproval, buildAttachedRecordingContext, buildUnscopedFileAttachmentInstruction } from '../chat.js'
 import type { ConfirmationResolver, Message } from '@use-brian/core'
 import type { PendingApproval, PendingApprovalsStore } from '../../db/pending-approvals-store.js'
+
+describe('[COMP:api/chat-route] staged recording context', () => {
+  it('treats upload as storage only and asks for purpose before processing', () => {
+    const context = buildAttachedRecordingContext([
+      {
+        id: 'rec-1',
+        workspaceId: 'ws-1',
+        title: 'customer-call.mp4',
+        fileName: 'customer-call.mp4',
+        status: 'awaiting_upload',
+        durationMs: 20 * 60 * 1000,
+      },
+    ], () => 2)
+
+    expect(context).toContain('uploaded and staged; processing has NOT started')
+    expect(context).toContain('Uploading is NOT consent')
+    expect(context).toContain('Ask what outcome the user wants')
+    expect(context).toContain('estimated processing cost 2 credits')
+    expect(context).not.toContain('transcribing in the background')
+  })
+
+  it('describes an already queued recording without asking to stage it again', () => {
+    const context = buildAttachedRecordingContext([
+      {
+        id: 'rec-2',
+        workspaceId: 'ws-1',
+        title: null,
+        fileName: 'meeting.m4a',
+        status: 'queued',
+        durationMs: 60_000,
+      },
+    ])
+
+    expect(context).toContain('transcription is in progress')
+    expect(context).not.toContain('Uploading is NOT consent')
+  })
+})
+
+describe('[COMP:api/chat-route] unscoped file attachment intent', () => {
+  it('asks for the purpose of a file-only turn without treating upload as consent', () => {
+    const instruction = buildUnscopedFileAttachmentInstruction(true, '')
+
+    expect(instruction).toContain('context only, not as consent')
+    expect(instruction).toContain('Ask what outcome the user wants')
+    expect(instruction).toContain('create tasks')
+  })
+
+  it('does not override an instruction supplied with the file', () => {
+    expect(buildUnscopedFileAttachmentInstruction(true, 'Summarize this contract')).toBe('')
+    expect(buildUnscopedFileAttachmentInstruction(false, '')).toBe('')
+  })
+})
 
 describe('[COMP:api/chat-route] inline approval durability', () => {
   function resolver(resolve: ConfirmationResolver['resolve']): ConfirmationResolver {
@@ -384,37 +436,6 @@ describe('[COMP:api/chat-route] buildViewingSkillBlock', () => {
     const long = buildViewingSkillBlock({ ...base, content: 'x'.repeat(7000) })
     expect(long).toContain('…(truncated)')
     expect(long.length).toBeLessThan(7000)
-  })
-})
-
-describe('[COMP:api/chat-viewing-deck] buildViewingDeckBlock', () => {
-  const deck = {
-    id: 'deck-1',
-    title: 'Seed Round Deck',
-    version: 3,
-    slides: [
-      { title: 'The problem', layout: 'statement' },
-      { title: 'Agenda' },
-      { title: 'Traction', layout: 'stats' },
-    ],
-  }
-
-  it('carries the identity, the 0-based slide outline, and the "this deck" resolution line', () => {
-    const out = buildViewingDeckBlock(deck)
-    expect(out).toContain('# Currently viewing — deck')
-    expect(out).toContain('"Seed Round Deck"')
-    expect(out).toContain('deckId: deck-1')
-    expect(out).toContain('version: 3')
-    expect(out).toContain('0: "The problem" (statement)')
-    expect(out).toContain('1: "Agenda"')
-    expect(out).not.toContain('1: "Agenda" (content)') // default layout unannotated
-    expect(out).toContain('this deck')
-    expect(out).toContain('title slide excluded')
-  })
-
-  it('is tool-agnostic (tool-awareness rule)', () => {
-    const out = buildViewingDeckBlock(deck)
-    expect(out).not.toMatch(/updatePowerpoint|generatePowerpoint|getPowerpoint|sendFile/)
   })
 })
 

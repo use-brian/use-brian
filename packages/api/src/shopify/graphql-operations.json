@@ -11,6 +11,17 @@
       "deprecations": []
     },
     {
+      "name": "AttachProductMedia",
+      "kind": "mutation",
+      "hash": "c6afefb79e035695",
+      "valid": true,
+      "scopes": [
+        "write_products",
+        "read_products"
+      ],
+      "deprecations": []
+    },
+    {
       "name": "CancelOrder",
       "kind": "mutation",
       "hash": "94bdd5739e3e9ee2",
@@ -116,6 +127,14 @@
         "write_products",
         "read_products"
       ],
+      "deprecations": []
+    },
+    {
+      "name": "CreateProductTemplate",
+      "kind": "mutation",
+      "hash": "85a671e100fd856c",
+      "valid": true,
+      "scopes": [],
       "deprecations": []
     },
     {
@@ -308,6 +327,16 @@
       "deprecations": []
     },
     {
+      "name": "ListThemes",
+      "kind": "query",
+      "hash": "dfc7c3a40c91e59c",
+      "valid": true,
+      "scopes": [
+        "read_themes"
+      ],
+      "deprecations": []
+    },
+    {
       "name": "OpenFulfillmentOrders",
       "kind": "query",
       "hash": "f70e4b122f53eb92",
@@ -332,6 +361,60 @@
         "read_shopify_payments",
         "read_shopify_payments_accounts",
         "read_shopify_payments_payouts"
+      ],
+      "deprecations": []
+    },
+    {
+      "name": "ProductOptionsForRename",
+      "kind": "query",
+      "hash": "2144afc30ac1f462",
+      "valid": true,
+      "scopes": [
+        "read_products"
+      ],
+      "deprecations": []
+    },
+    {
+      "name": "ProductVariantsForPricing",
+      "kind": "query",
+      "hash": "0169db322ea69b9f",
+      "valid": true,
+      "scopes": [
+        "read_products"
+      ],
+      "deprecations": []
+    },
+    {
+      "name": "PublishProduct",
+      "kind": "mutation",
+      "hash": "a3cdb625823e5fe1",
+      "valid": true,
+      "scopes": [
+        "write_publications",
+        "read_publications"
+      ],
+      "deprecations": []
+    },
+    {
+      "name": "PublishTargets",
+      "kind": "query",
+      "hash": "930ba954491521ea",
+      "valid": true,
+      "scopes": [
+        "read_products",
+        "read_publications"
+      ],
+      "deprecations": [
+        "The field Publication.name is deprecated. Use [Catalog.title](https://shopify.dev/api/admin-graphql/unstable/interfaces/Catalog#field-catalog-title) instead."
+      ]
+    },
+    {
+      "name": "ReadThemeFiles",
+      "kind": "query",
+      "hash": "05c70b0df0e0e864",
+      "valid": true,
+      "scopes": [
+        "read_themes"
       ],
       "deprecations": []
     },
@@ -392,6 +475,47 @@
       "deprecations": []
     },
     {
+      "name": "SetProductMetafields",
+      "kind": "mutation",
+      "hash": "dbc5d16970783722",
+      "valid": true,
+      "scopes": [],
+      "deprecations": []
+    },
+    {
+      "name": "SetProductOptions",
+      "kind": "mutation",
+      "hash": "628418776435c52a",
+      "valid": true,
+      "scopes": [
+        "write_products",
+        "read_products"
+      ],
+      "deprecations": []
+    },
+    {
+      "name": "SetProductTemplate",
+      "kind": "mutation",
+      "hash": "a4b63dae65d070b8",
+      "valid": true,
+      "scopes": [
+        "write_products",
+        "read_products"
+      ],
+      "deprecations": []
+    },
+    {
+      "name": "SetVariantPrice",
+      "kind": "mutation",
+      "hash": "cb009f61730720c7",
+      "valid": true,
+      "scopes": [
+        "write_products",
+        "read_products"
+      ],
+      "deprecations": []
+    },
+    {
       "name": "ShopInfo",
       "kind": "query",
       "hash": "befacdb7b3f4f447",
@@ -400,6 +524,14 @@
       "deprecations": [
         "The field ShopPlan.displayName is deprecated. Use `publicDisplayName` instead."
       ]
+    },
+    {
+      "name": "StageProductImageUpload",
+      "kind": "mutation",
+      "hash": "67cfd0a825109c77",
+      "valid": true,
+      "scopes": [],
+      "deprecations": []
     },
     {
       "name": "SubscribeTopic",
@@ -418,6 +550,16 @@
         "read_orders",
         "read_marketplace_orders",
         "read_quick_sale"
+      ],
+      "deprecations": []
+    },
+    {
+      "name": "ThemeSectionTypes",
+      "kind": "query",
+      "hash": "69b688390a2aaeda",
+      "valid": true,
+      "scopes": [
+        "read_themes"
       ],
       "deprecations": []
     },

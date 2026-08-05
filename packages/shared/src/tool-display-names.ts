@@ -120,6 +120,15 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   shopifySalesReport: 'Run sales report',
   shopifyUpdateProduct: 'Update product',
   shopifyCreateProduct: 'Create product',
+  shopifyAddProductImage: 'Add product image',
+  shopifySetProductPrice: 'Set product price',
+  shopifyPublishProduct: 'Publish product',
+  shopifySetProductMetafields: 'Set product metafields',
+  shopifySetProductOptions: 'Rename product options',
+  shopifyListThemes: 'List themes',
+  shopifyReadProductTemplate: 'Read page template',
+  shopifyCreateProductTemplate: 'Create page template',
+  shopifySetProductTemplate: 'Set page template',
   shopifyCreateDraftOrder: 'Create draft order',
   shopifySendDraftOrderInvoice: 'Send draft order invoice',
   shopifyAddTags: 'Add Shopify tags',
@@ -167,10 +176,9 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   saveFileBytes: 'Save file bytes to brain',
   sendFile: 'Send a file to the chat',
 
-  // Decks (docs/architecture/features/deck-generation.md)
-  generatePowerpoint: 'Create a PowerPoint deck',
-  updatePowerpoint: 'Edit a PowerPoint deck',
-  getPowerpoint: 'Read a PowerPoint deck',
+  createOfficeArtifact: 'Create an Office artifact',
+  getOfficeArtifact: 'Read an Office artifact',
+  reviseOfficeArtifact: 'Revise an Office artifact',
 
   // Computer use (docs/architecture/engine/computer-use.md)
   browserNavigate: 'Open a page in the browser',

@@ -30,12 +30,14 @@ vi.mock('../../db/memories.js', () => ({
   markVerifiedDirect: vi.fn(),
 }))
 vi.mock('../../db/memory-verifications-store.js', () => ({ recordVerification: vi.fn() }))
+vi.mock('../../db/task-admission-store.js', () => ({ rejectTask: vi.fn() }))
 
 import { brainInboxRoutes } from '../brain-inbox.js'
 import { query } from '../../db/client.js'
 import { updateTask } from '../../db/tasks.js'
 import { updateMemory, getMemoryByIdSystem, markVerifiedDirect } from '../../db/memories.js'
 import { recordVerification } from '../../db/memory-verifications-store.js'
+import { rejectTask } from '../../db/task-admission-store.js'
 
 const mockQuery = vi.mocked(query)
 const mockUpdateTask = vi.mocked(updateTask)
@@ -43,6 +45,7 @@ const mockUpdateMemory = vi.mocked(updateMemory)
 const mockGetMemoryByIdSystem = vi.mocked(getMemoryByIdSystem)
 const mockMarkVerifiedDirect = vi.mocked(markVerifiedDirect)
 const mockRecordVerification = vi.mocked(recordVerification)
+const mockRejectTask = vi.mocked(rejectTask)
 
 const WS = 'e1799b0e-9f64-46d5-8ed8-132a2194943d'
 const ROW = 'f4b30b32-1771-4c90-b5af-b1b42311f543'
@@ -276,6 +279,44 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
     expect(mockUpdateTask).not.toHaveBeenCalled()
   })
 
+  it('task adjust merges and clears the optional icon without clobbering sibling attributes', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ workspaceId: WS, attributes: { priority: 'high', description: 'Context' } }],
+    } as never)
+    mockUpdateTask.mockResolvedValueOnce({ id: 'new-task-id' } as never)
+
+    let res = await request(makeApp())
+      .post(`/api/brain-inbox/${WS}/task/${ROW}/adjust`)
+      .send({ icon: '🚀' })
+
+    expect(res.status).toBe(200)
+    expect(mockUpdateTask).toHaveBeenCalledWith('u_caller', ROW, {
+      attributes: { priority: 'high', description: 'Context', icon: '🚀' },
+    })
+
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ workspaceId: WS, attributes: { priority: 'high', icon: '🚀' } }],
+    } as never)
+    mockUpdateTask.mockResolvedValueOnce({ id: 'newer-task-id' } as never)
+
+    res = await request(makeApp())
+      .post(`/api/brain-inbox/${WS}/task/${ROW}/adjust`)
+      .send({ icon: null })
+
+    expect(res.status).toBe(200)
+    expect(mockUpdateTask).toHaveBeenLastCalledWith('u_caller', ROW, {
+      attributes: { priority: 'high' },
+    })
+  })
+
+  it('task adjust rejects an invalid icon', async () => {
+    const res = await request(makeApp())
+      .post(`/api/brain-inbox/${WS}/task/${ROW}/adjust`)
+      .send({ icon: 'x'.repeat(17) })
+    expect(res.status).toBe(400)
+    expect(mockUpdateTask).not.toHaveBeenCalled()
+  })
+
   it('task adjust returns 404 when the task is absent', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [] } as never)
     const res = await request(makeApp())
@@ -463,6 +504,36 @@ describe('[COMP:api/brain-inbox-explain] Source descriptor', () => {
 
   const SAVED_AT = new Date('2026-07-09T10:00:00Z')
 
+  it('reports the original task creator and timestamp across supersession', async () => {
+    const ORIGINAL_AT = new Date('2026-06-01T08:00:00Z')
+    mockQuery.mockResolvedValueOnce({
+      rows: [{
+        workspace_id: WS,
+        created_at: ORIGINAL_AT,
+        created_by_assistant_id: null,
+        created_by_user_id: 'u_original',
+        source_episode_id: null,
+        source_session_id: null,
+        source: 'user',
+        tags: null,
+      }],
+    } as never)
+    mockQuery.mockResolvedValueOnce({ rows: [{ name: 'Original creator' }] } as never)
+
+    const res = await request(makeApp()).get(`/api/brain-inbox/${WS}/task/${ROW}/explain`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.savedAt).toBe(ORIGINAL_AT.toISOString())
+    expect(res.body.origin).toMatchObject({
+      createdByUserId: 'u_original',
+      createdByUserName: 'Original creator',
+    })
+    const sql = String(mockQuery.mock.calls[0][0])
+    expect(sql).toMatch(/WITH RECURSIVE task_versions/)
+    expect(sql).toMatch(/prior\.superseded_by = versions\.id/)
+    expect(sql).toMatch(/ORDER BY depth DESC/)
+  })
+
   it('resolves a chat origin from the row source_session_id (mig 316) with channel + messages', async () => {
     // 1. meta
     mockQuery.mockResolvedValueOnce({
@@ -584,6 +655,51 @@ describe('[COMP:api/brain-inbox-explain] Source descriptor', () => {
     expect(cascadeSql).toMatch(/host_type = 'task'/)
     // Never a `running` goal — the acting loop owns a claimed goal.
     expect(mockQuery.mock.calls[2][1]).toEqual([ROW, 'host_task_deleted', ['done', 'abandoned', 'running']])
+  })
+
+  it('reasoned task DELETE creates a tombstone and explicitly activates a narrow rule', async () => {
+    mockRejectTask.mockClear()
+    mockQuery.mockResolvedValueOnce({ rows: [{ workspace_id: WS }] } as never) // ownership
+    mockRejectTask.mockResolvedValueOnce({
+      title: 'Integrate Teams',
+      tombstoneId: 'tomb-1',
+      activeRuleId: 'rule-1',
+      proposedRuleId: null,
+      proposedRuleClause: null,
+    })
+    mockQuery.mockResolvedValueOnce({ rows: [] } as never) // brain_verifications audit
+
+    const res = await request(makeApp())
+      .delete(`/api/brain-inbox/${WS}/task/${ROW}`)
+      .send({
+        reason: 'Discussion about an active task is context, not a new commitment',
+        create_rule: true,
+      })
+
+    expect(res.status).toBe(200)
+    expect(mockRejectTask).toHaveBeenCalledWith({
+      workspaceId: WS,
+      userId: 'u_caller',
+      taskId: ROW,
+      reason: 'Discussion about an active task is context, not a new commitment',
+      createRule: true,
+    })
+    expect(res.body).toMatchObject({
+      ok: true,
+      tombstoned: true,
+      activeRuleId: 'rule-1',
+    })
+  })
+
+  it('rejects active-rule deletion without a usable reason', async () => {
+    mockRejectTask.mockClear()
+    mockQuery.mockResolvedValueOnce({ rows: [{ workspace_id: WS }] } as never) // ownership
+    const res = await request(makeApp())
+      .delete(`/api/brain-inbox/${WS}/task/${ROW}`)
+      .send({ reason: 'x', create_rule: true })
+
+    expect(res.status).toBe(400)
+    expect(mockRejectTask).not.toHaveBeenCalled()
   })
 
   it('DELETE of a non-task primitive runs no goal cascade', async () => {

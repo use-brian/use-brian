@@ -157,7 +157,7 @@ export function ScheduleTriggerFields({ trigger, onChange, disabled }: Props) {
                     className={cn(
                       "text-xs px-2 py-1 rounded border capitalize",
                       on
-                        ? "bg-primary text-primary-foreground border-primary"
+                        ? "bg-action text-action-foreground border-primary"
                         : "border-border hover:bg-muted",
                     )}
                   >

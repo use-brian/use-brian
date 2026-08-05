@@ -70,7 +70,7 @@ function EmptyCard({ icon, title, description, cta, className }: CardProps) {
         <button
           type="button"
           onClick={cta.onClick}
-          className="mt-1 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+          className="mt-1 rounded-md bg-action px-3 py-1.5 text-xs font-medium text-action-foreground transition-colors hover:bg-action/90"
         >
           {cta.label}
         </button>

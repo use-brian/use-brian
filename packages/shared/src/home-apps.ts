@@ -42,6 +42,7 @@
  */
 export const BUILTIN_HOME_APP_KEYS = [
   'page',
+  'office',
   'tasks',
   'crm',
   'feed',
@@ -59,13 +60,13 @@ export type HomeAppEntry = HomeAppKey | `${typeof CUSTOM_HOME_APP_PREFIX}${strin
 
 /**
  * Config default for a workspace that has never been configured (`[]`).
- * D2 grandfathers EXISTING workspaces onto all six via migration; only new
- * rows land here.
+ * Migration 385 grandfathered the original six apps; Office migration 394
+ * appends its reserved key. New rows resolve to the minimal three-app set.
  */
-export const DEFAULT_HOME_APPS: readonly HomeAppEntry[] = ['page', 'chat']
+export const DEFAULT_HOME_APPS: readonly HomeAppEntry[] = ['page', 'office', 'chat']
 
 /** Upper bound on the strip. Custom apps count against it (T12). */
-export const HOME_APPS_MAX = 6
+export const HOME_APPS_MAX = 7
 
 const BUILTIN_SET: ReadonlySet<string> = new Set(BUILTIN_HOME_APP_KEYS)
 

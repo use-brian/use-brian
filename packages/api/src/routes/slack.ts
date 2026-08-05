@@ -638,6 +638,7 @@ export function slackRoutes(options: SlackRouteOptions): Router {
           channelUserId,
           ownerId,
           isIdentified,
+          archiveConnectorInstanceId: integration.connectorInstanceId,
           threadTs,
           botToken: slackCreds.bot_token,
           ...options,
@@ -985,6 +986,7 @@ type ProcessMessageParams = {
   channelUserId: string
   ownerId: string
   isIdentified: boolean
+  archiveConnectorInstanceId?: string | null
   threadTs?: string
   botToken: string
   ingestChannelMediaRef?: SlackRouteOptions['ingestChannelMediaRef']
@@ -1211,6 +1213,8 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     isGroupChat: incoming.isGroupChat,
     replyToMessageId: incoming.replyToMessageId ?? null,
     incomingChannelMessageId: incoming.messageId ?? null,
+    archiveIncoming: incoming,
+    archiveConnectorInstanceId: params.archiveConnectorInstanceId,
     modelAlias: assistant.slackModelAlias,
     adaptiveResearchEnabled: true,
     abortController,

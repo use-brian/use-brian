@@ -113,7 +113,7 @@ export function RedeemForm({
             />
             <button
               type="submit"
-              className="w-full h-12 rounded-xl text-sm font-medium bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+              className="w-full h-12 rounded-lg text-sm font-medium bg-action text-action-foreground hover:bg-action/90 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
               disabled={
                 result.kind === "submitting" || !code.trim() || !targetWorkspaceId
               }

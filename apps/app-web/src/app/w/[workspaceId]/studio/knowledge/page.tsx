@@ -33,6 +33,7 @@ import { authFetch } from "@/lib/auth-fetch";
 import { useWorkspaces } from "@/contexts/workspace-context";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
+import { StudioTopbarActions } from "@/components/studio/studio-topbar";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n";
 
@@ -296,6 +297,17 @@ export default function StudioKnowledgePage() {
 
   return (
     <div className="flex flex-col gap-6">
+      <StudioTopbarActions>
+        {!showPicker && (
+          <button
+            onClick={openPicker}
+            className="text-xs font-medium bg-action text-action-foreground px-3 py-1.5 rounded-lg hover:bg-action/90 transition-colors"
+          >
+            {copy.addRepo}
+          </button>
+        )}
+      </StudioTopbarActions>
+
       {connectWarning && (
         <div className="text-[13px] text-amber-600 dark:text-amber-400 bg-amber-500/10 border border-amber-500/30 rounded-lg px-4 py-3">
           {format(copy.validationWarning, { message: connectWarning })}
@@ -303,18 +315,10 @@ export default function StudioKnowledgePage() {
       )}
 
       <section className="flex flex-col gap-3">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center">
           <h2 className="text-[13px] font-semibold tracking-tight uppercase text-muted-foreground">
             {copy.sources}
           </h2>
-          {!showPicker && (
-            <button
-              onClick={openPicker}
-              className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1.5 rounded-lg hover:bg-primary/90 transition-colors"
-            >
-              {copy.addRepo}
-            </button>
-          )}
         </div>
 
         {showPicker && (
@@ -322,13 +326,13 @@ export default function StudioKnowledgePage() {
             <div className="flex gap-1 rounded-lg border border-border p-0.5">
               <button
                 onClick={() => setSourceType("github")}
-                className={`flex-1 text-xs font-medium px-3 py-1.5 rounded-md transition-colors ${sourceType === "github" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted"}`}
+                className={`flex-1 text-xs font-medium px-3 py-1.5 rounded-md transition-colors ${sourceType === "github" ? "bg-action text-action-foreground" : "text-muted-foreground hover:bg-muted"}`}
               >
                 {copy.sourceTypeGithub}
               </button>
               <button
                 onClick={() => setSourceType("local")}
-                className={`flex-1 text-xs font-medium px-3 py-1.5 rounded-md transition-colors ${sourceType === "local" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted"}`}
+                className={`flex-1 text-xs font-medium px-3 py-1.5 rounded-md transition-colors ${sourceType === "local" ? "bg-action text-action-foreground" : "text-muted-foreground hover:bg-muted"}`}
               >
                 {copy.sourceTypeLocal}
               </button>
@@ -436,7 +440,7 @@ export default function StudioKnowledgePage() {
               <button
                 onClick={handleConnect}
                 disabled={connecting || (sourceType === "github" ? !selectedInstance || !selectedRepo || !selectedBranch : !localPath.trim())}
-                className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1.5 rounded-lg hover:bg-primary/90 transition-colors disabled:opacity-50"
+                className="text-xs font-medium bg-action text-action-foreground px-3 py-1.5 rounded-lg hover:bg-action/90 transition-colors disabled:opacity-50"
               >
                 {connecting ? copy.addRepoSubmitting : copy.addRepoSubmit}
               </button>

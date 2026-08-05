@@ -462,7 +462,7 @@ function FilterPopover({
             type="button"
             data-action="apply"
             onClick={handleApply}
-            className="h-7 rounded-md bg-primary px-2 text-xs text-primary-foreground hover:bg-primary/90"
+            className="h-7 rounded-md bg-action px-2 text-xs text-action-foreground hover:bg-action/90"
           >
             {t.apply}
           </button>

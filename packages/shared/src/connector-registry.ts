@@ -20,12 +20,21 @@ export const ConnectorEntrySchema = z.object({
   /**
    * One instance per user, ever — suppresses the "Add another" affordance and
    * excludes the connector from the multi-account runtime
-   * (`MULTI_INSTANCE_RUNTIME_PROVIDERS` in `packages/api/src/mcp/inject.ts`).
+   * (`MULTI_INSTANCE_CONNECTOR_IDS`, derived below).
    * Set on connectors that bind a resource rather than an account (gcs — a
    * per-workspace storage binding). Credentialed connectors WITHOUT this flag
    * must consume their multi-account extras in their injector.
    */
   single_instance: z.boolean().optional(),
+  /**
+   * Multi-instance connectors normally keep the provider id for their oldest
+   * instance and use `<provider>:<instanceId>` for extras. Set this only when
+   * every instance, including the oldest, must use an exact governance key
+   * (for example, account-routed email tools or CLI servers with independent
+   * catalogs). Consumers derive behavior from the registry — they must not
+   * hardcode provider ids.
+   */
+  all_instances_exact_governance: z.boolean().optional(),
 })
 
 export type ConnectorEntry = z.infer<typeof ConnectorEntrySchema>
@@ -157,8 +166,8 @@ export const OFFICIAL_CONNECTORS: ConnectorEntry[] = [
     // a second work account remains possible in principle. This is the imap
     // D11 call (one mailbox per user), made for the same reason — "read the
     // company's Teams" is one work identity in practice.
-    // It is also what keeps msgraph out of MULTI_INSTANCE_RUNTIME_PROVIDERS
-    // (inject.ts), so the injector needs no `extrasByProvider` plumbing;
+    // It is also what keeps msgraph out of MULTI_INSTANCE_CONNECTOR_IDS, so
+    // the injector needs no `extrasByProvider` plumbing;
     // without the flag Studio offers "Add another" and a no-extras injector
     // silently never uses the second account. Multi-account is a later,
     // deliberate change: drop this flag AND consume the extras in
@@ -184,6 +193,7 @@ export const OFFICIAL_CONNECTORS: ConnectorEntry[] = [
     // are ONE set with an optional `account` (the AgentMail router pattern in
     // injectMailboxTools). D11 (one mailbox per user) is retired. NOT
     // single_instance — "Add another" is meaningful here.
+    all_instances_exact_governance: true,
   },
   {
     id: 'agentmail',
@@ -210,6 +220,16 @@ export const OFFICIAL_CONNECTORS: ConnectorEntry[] = [
     oauth_required: false,
     enabled: true,
     tags: ['workspace', 'productivity'],
+  },
+  {
+    id: 'office',
+    name: 'Office',
+    description: 'Create, read, and revise Brian-native Documents and Presentations in your workspace.',
+    category: 'official',
+    auth_type: 'none',
+    oauth_required: false,
+    enabled: true,
+    tags: ['workspace', 'productivity', 'documents', 'presentations'],
   },
   {
     id: 'computer',
@@ -272,6 +292,9 @@ export const OFFICIAL_CONNECTORS: ConnectorEntry[] = [
     oauth_required: false,
     enabled: true,
     tags: ['developer', 'local', 'oss'],
+    // Each CLI server discovers an independent tool catalog, so no instance
+    // can inherit the provider-level governance key from another server.
+    all_instances_exact_governance: true,
   },
 ]
 
@@ -301,4 +324,29 @@ export const BUILTIN_PRIMITIVE_CONNECTOR_IDS: ReadonlySet<string> = new Set(
 
 export const SINGLE_INSTANCE_CONNECTOR_IDS: ReadonlySet<string> = new Set(
   OFFICIAL_CONNECTORS.filter((c) => c.single_instance).map((c) => c.id),
+)
+
+// ── Multi-instance connector semantics ────────────────────────
+//
+// This is the root switch for every official connector surface: Add another,
+// Assistant Tools projection, workspace policy addressing, and runtime extra
+// discovery. A credentialed official connector is multi-instance by default;
+// resource bindings opt out with `single_instance`. Consumers import this set
+// instead of rebuilding or hardcoding provider lists.
+
+export function connectorSupportsMultipleInstances(
+  connector: Pick<ConnectorEntry, 'auth_type' | 'single_instance'>,
+): boolean {
+  return connector.auth_type !== 'none' && !connector.single_instance
+}
+
+export const MULTI_INSTANCE_CONNECTOR_IDS: ReadonlySet<string> = new Set(
+  OFFICIAL_CONNECTORS.filter(connectorSupportsMultipleInstances).map((c) => c.id),
+)
+
+/** Multi-instance providers whose primary also uses an exact governance id. */
+export const ALL_EXACT_INSTANCE_GOVERNANCE_CONNECTOR_IDS: ReadonlySet<string> = new Set(
+  OFFICIAL_CONNECTORS
+    .filter((c) => c.all_instances_exact_governance)
+    .map((c) => c.id),
 )

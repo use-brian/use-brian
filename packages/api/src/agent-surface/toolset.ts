@@ -50,6 +50,8 @@ const BRIDGE_READ_NAMES = [
   'recentEpisodes',
   'provenance',
   'getRowHistory',
+  // Person-compartmented local chat archive
+  'searchChatHistory',
   // Scheduling + ingest reads
   'searchScheduledJobs',
   'listIngestRules',

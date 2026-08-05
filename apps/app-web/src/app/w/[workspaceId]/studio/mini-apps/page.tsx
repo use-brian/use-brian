@@ -73,6 +73,7 @@ import { CustomAppsSection } from "@/components/studio/custom-apps-section";
 import {
   HOME_APPS_MAX,
   isBuiltinHomeAppKey,
+  isOperatorAppKey,
   OPERATOR_APP_KEYS,
   homeAppFromPathname,
   reorderHomeApps,
@@ -129,7 +130,7 @@ export default function StudioMiniAppsPage() {
 
   /** The shown built-ins, in strip order — this is what the list sorts. */
   const shown = useMemo(
-    () => (homeApps ?? []).filter(isBuiltinHomeAppKey),
+    () => (homeApps ?? []).filter(isOperatorAppKey),
     [homeApps],
   );
   /**
@@ -139,7 +140,7 @@ export default function StudioMiniAppsPage() {
    * from this tab can never drop one.
    */
   const extras = useMemo(
-    () => (homeApps ?? []).filter((entry) => !isBuiltinHomeAppKey(entry)),
+    () => (homeApps ?? []).filter((entry) => !isOperatorAppKey(entry)),
     [homeApps],
   );
   const enabled = useMemo(() => new Set(shown), [shown]);

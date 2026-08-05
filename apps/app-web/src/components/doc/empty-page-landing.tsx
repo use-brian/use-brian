@@ -30,7 +30,7 @@
  * persistent saturated-brand icon reads off-brand on the Notion surface. The
  * attach + send buttons match the page-comment composers' style (a muted
  * paperclip and a circular `--primary` send with an up-arrow, no
- * `doc-btn-glow`) so every doc composer reads the same. Motion via
+ * neutral action tokens) so every doc composer reads the same. Motion via
  * `.animate-*`.
  *
  * Spec: docs/architecture/features/doc.md → "Default-viewer landing".
@@ -47,6 +47,7 @@ import {
   Paperclip,
   PencilLine,
   Sparkles,
+  X,
 } from "lucide-react";
 import { ChatComposer } from "@use-brian/chat-ui";
 import { derivePageIcon, type ViewListRow } from "@/lib/api/views";
@@ -59,7 +60,10 @@ import {
 } from "@/components/doc/attachment-chips";
 import { useFileAttachments } from "@/lib/use-file-attachments";
 import { useFileDrop } from "@/lib/use-file-drop";
-import { useRecordingUpload } from "@/lib/recordings/use-recording-upload";
+import {
+  useRecordingUpload,
+  type StagedRecording,
+} from "@/lib/recordings/use-recording-upload";
 import { useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 import { SetupChecklist } from "./setup-checklist";
@@ -69,6 +73,8 @@ type BuildOptions = {
   researchMode: boolean;
   /** Ready (`done`) attachment ids to feed the build turn, in chip order. */
   fileIds: string[];
+  /** Uploaded recordings staged without processing, in chip order. */
+  attachedRecordingIds: string[];
 };
 
 type Props = {
@@ -135,14 +141,15 @@ export function EmptyPageLanding({
   // composer. Quota / exhaustion surface on the build turn's own SSE (in the
   // chat dock), so the landing only holds the armed flag.
   const [researchMode, setResearchMode] = useState(false);
-  // Attached video routes to the recordings pipeline (direct-to-GCS upload →
-  // pre-flight confirm → transcribe + file to the brain) exactly like the chat
-  // dock — a video can't ride the cache upload (20 MB cap, no video/ mime) and
-  // the model can't consume it inline anyway. `run` shows the full pre-flight
-  // confirm: cost AND the blueprint picker (seeded from the workspace default;
-  // no selection is passed here). See
+  // Attached video routes to durable recording staging (direct-to-GCS upload +
+  // duration estimate only) exactly like the chat dock. It does not open the
+  // blueprint dialog or start processing merely because bytes were selected.
+  // A later build prompt carries the staged recording id into the chat turn so
+  // Brian can use the user's stated purpose and confirm any processing there.
+  // See
   // docs/architecture/media/transcription.md → "Chat-attached video".
   const rec = useRecordingUpload(workspaceId, assistantId ?? "");
+  const [pendingRecordings, setPendingRecordings] = useState<StagedRecording[]>([]);
   // File attachments staged on the landing. `fileId`s are session-agnostic on
   // the read path (see `useFileAttachments`), so we upload here — before any
   // draft / session exists — and hand the ready ids to the build turn via the
@@ -150,10 +157,11 @@ export function EmptyPageLanding({
   const att = useFileAttachments(undefined, {
     onRouteMedia:
       workspaceId && assistantId
-        ? (videos) => {
-            void (async () => {
-              for (const file of videos) await rec.run(file);
-            })();
+        ? async (videos) => {
+            for (const file of videos) {
+              const staged = await rec.stage(file);
+              if (staged) setPendingRecordings((current) => [...current, staged]);
+            }
           }
         : undefined,
   });
@@ -162,15 +170,22 @@ export function EmptyPageLanding({
 
   function submit(text: string) {
     const trimmed = text.trim();
-    // A files-only build is allowed once the uploads are ready.
-    if (!trimmed && !att.hasReady) return;
-    if (att.uploading) return;
-    onSubmitPrompt(trimmed, { model, researchMode, fileIds: att.fileIds() });
+    // An attachment-only turn is valid once its upload is ready. The chat
+    // route asks the user what outcome they want before semantic processing.
+    if (!trimmed && !att.hasReady && pendingRecordings.length === 0) return;
+    if (att.uploading || rec.status === "uploading") return;
+    onSubmitPrompt(trimmed, {
+      model,
+      researchMode,
+      fileIds: att.fileIds(),
+      attachedRecordingIds: pendingRecordings.map((recording) => recording.recordingId),
+    });
     att.clear();
+    setPendingRecordings([]);
   }
 
   function submitComposer() {
-    if (att.uploading) return;
+    if (att.uploading || rec.status === "uploading") return;
     submit(prompt);
     setPrompt("");
   }
@@ -232,15 +247,39 @@ export function EmptyPageLanding({
             onChange={setPrompt}
             onSend={submitComposer}
             placeholder={t.landing.placeholder}
-            allowEmptySend={att.hasReady}
+            allowEmptySend={att.hasReady || pendingRecordings.length > 0}
+            disabled={att.uploading || rec.status === "uploading"}
             slotAttachments={
-              att.attachments.length > 0 || rec.status !== "idle" ? (
+              att.attachments.length > 0 || pendingRecordings.length > 0 || rec.status !== "idle" ? (
                 <div className="px-1 pb-2">
                   {att.attachments.length > 0 ? (
                     <AttachmentChips
                       attachments={att.attachments}
                       onRemove={att.remove}
                     />
+                  ) : null}
+                  {pendingRecordings.length > 0 ? (
+                    <div className="flex flex-wrap gap-1.5 py-0.5">
+                      {pendingRecordings.map((recording) => (
+                        <span
+                          key={recording.recordingId}
+                          className="inline-flex items-center gap-1 rounded border border-border bg-muted/40 px-2 py-0.5 text-xs text-muted-foreground"
+                        >
+                          <span aria-hidden>◉</span>
+                          {tRec.chatStagedChip.replace("{name}", recording.title)}
+                          <button
+                            type="button"
+                            onClick={() => setPendingRecordings((current) =>
+                              current.filter((item) => item.recordingId !== recording.recordingId)
+                            )}
+                            aria-label={`${tAttach.remove} ${recording.title}`}
+                            className="rounded p-0.5 hover:bg-muted"
+                          >
+                            <X className="size-3" aria-hidden />
+                          </button>
+                        </span>
+                      ))}
+                    </div>
                   ) : null}
                   {rec.status !== "idle" ? (
                     <p
@@ -322,10 +361,14 @@ export function EmptyPageLanding({
             <button
               type="button"
               onClick={submitComposer}
-              disabled={att.uploading || (!prompt.trim() && !att.hasReady)}
+              disabled={
+                att.uploading ||
+                rec.status === "uploading" ||
+                (!prompt.trim() && !att.hasReady && pendingRecordings.length === 0)
+              }
               aria-label={t.landing.send}
               title={t.landing.send}
-              className="inline-flex size-7 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground transition-colors hover:bg-primary/90 disabled:bg-foreground/10 disabled:text-muted-foreground"
+              className="inline-flex size-7 shrink-0 items-center justify-center rounded-full bg-action text-action-foreground transition-colors hover:bg-action/90 disabled:bg-foreground/10 disabled:text-muted-foreground"
             >
               <ArrowUp className="size-4" aria-hidden />
             </button>

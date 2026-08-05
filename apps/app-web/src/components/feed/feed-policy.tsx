@@ -250,7 +250,7 @@ export function FeedPolicy() {
             type="button"
             onClick={save}
             disabled={saving}
-            className="rounded-lg bg-primary text-primary-foreground px-3 h-8 text-[12.5px] font-medium hover:bg-primary/90 active:bg-primary/85 disabled:opacity-50 transition-colors press"
+            className="rounded-lg bg-action text-action-foreground px-3 h-8 text-[12.5px] font-medium hover:bg-action/90 active:bg-action/85 disabled:opacity-50 transition-colors press"
           >
             {saving ? t.policy.saving : t.policy.saveCta}
           </button>
@@ -306,7 +306,7 @@ function EmptyState(props: {
       </p>
       <Link
         href={feedPath(props.workspaceId)}
-        className="inline-flex items-center justify-center rounded-lg bg-primary px-3 h-8 text-[12.5px] font-medium text-primary-foreground hover:bg-primary/90"
+        className="inline-flex items-center justify-center rounded-lg bg-action px-3 h-8 text-[12.5px] font-medium text-action-foreground hover:bg-action/90"
       >
         {props.t.startSetup}
       </Link>

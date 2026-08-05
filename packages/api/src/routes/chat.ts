@@ -7,7 +7,7 @@ import { findOrCreateSession, findSessionByChannel, findSessionById, addSessionM
 import { query } from '../db/client.js'
 import { buildPinnedContextBlock } from '../resolve-session-pins.js'
 import { getSelfEntityId } from '../db/memories.js'
-import { getRecording } from '../db/recordings-store.js'
+import { getRecording, type Recording } from '../db/recordings-store.js'
 import { queryLoop, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, decodeExternalCostMeta, buildWorkspaceFilesContext, SensitivityAccumulator, CompartmentAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSupervisorSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, parsePresentedDocumentInput, type PresentedDocumentInput, type MediaBackend } from '@use-brian/core'
 import { insertClaimProvenance, getClaimsForLatestAssistantMessage } from '../db/claim-provenance-store.js'
 import type { ToolResultMeta, SessionStateStore, SessionStateRecord, PlanStore, AmbientSurface } from '@use-brian/core'
@@ -259,6 +259,8 @@ type WebChatOptions = {
    */
   artifactPromoter?: ArtifactPromoter | null
   usageStore?: UsageStore
+  /** Hosted recording surcharge quote. Open/self-hosted omits it (0 credits). */
+  recordingSurchargeCredits?: (durationSeconds: number) => number
   /**
    * Doc-page → brain distillation runner (the "Sync to brain" pipeline). When
    * set, the `ingestPage` chat tool is injected on doc turns so the assistant
@@ -747,6 +749,74 @@ export function appAssistantForbidsResearch(
   return assistantKind === 'app'
 }
 
+type AttachedRecording = Pick<
+  Recording,
+  'id' | 'workspaceId' | 'title' | 'fileName' | 'status' | 'durationMs'
+>
+
+/**
+ * User-visible context for recording ids attached to a chat turn. A freshly
+ * staged upload is deliberately a clarification turn, not an implicit request
+ * to transcribe or extract. Exported for the chat-route regression test.
+ */
+export function buildAttachedRecordingContext(
+  recordings: AttachedRecording[],
+  surchargeCredits?: (durationSeconds: number) => number,
+): string {
+  if (recordings.length === 0) return ''
+
+  let hasStaged = false
+  const lines = recordings.map((recording) => {
+    const title = (recording.title ?? recording.fileName ?? 'recording').replace(/[\r\n]+/g, ' ')
+    const url = `/w/${recording.workspaceId}/recordings/${recording.id}`
+    const durationSeconds = recording.durationMs == null
+      ? null
+      : Math.max(0, Math.round(recording.durationMs / 1000))
+    const duration = durationSeconds == null
+      ? ''
+      : `; about ${Math.max(1, Math.round(durationSeconds / 60))} min`
+    const credits = durationSeconds == null || !surchargeCredits
+      ? ''
+      : `; estimated processing cost ${surchargeCredits(durationSeconds)} credits`
+
+    if (recording.status === 'awaiting_upload') {
+      hasStaged = true
+      return `- "${title}" → ${url} — uploaded and staged; processing has NOT started${duration}${credits}`
+    }
+    if (recording.status === 'queued' || recording.status === 'processing') {
+      return `- "${title}" → ${url} — transcription is in progress${duration}`
+    }
+    if (recording.status === 'processed') {
+      return `- "${title}" → ${url} — processed and ready`
+    }
+    return `- "${title}" → ${url} — processing failed; ask before trying again`
+  })
+
+  const stagedInstruction = hasStaged
+    ? ' A staged recording contains stored bytes only. Uploading is NOT consent to transcribe, index, extract tasks, or choose a blueprint. Do not infer purpose from its filename and do not start processing merely because it was attached. Ask what outcome the user wants; help them choose or refine a blueprint, ingest-only, or a one-off use. Start processing only if the user explicitly asks to proceed (their current message may supply that explicit instruction).'
+    : ''
+  return (
+    `[The user attached ${recordings.length === 1 ? 'a recording' : `${recordings.length} recordings`} to this message.${stagedInstruction} ` +
+    `Describe each status truthfully and use the page link when useful. Never claim content from a transcript that is not ready. Recordings:\n${lines.join('\n')}]\n\n`
+  )
+}
+
+/**
+ * A bare file attachment is context, not an instruction to mutate the brain.
+ * Keep this separate from the file contents so every attachment format gets
+ * the same intent guard. Exported for the chat-route regression test.
+ */
+export function buildUnscopedFileAttachmentInstruction(
+  hasReadableAttachments: boolean,
+  message: string | null | undefined,
+): string {
+  if (!hasReadableAttachments || message?.trim()) return ''
+
+  return (
+    '[The user attached one or more files without instructions. Treat the files as context only, not as consent to create tasks, save memories, durably ingest them, or take other downstream actions. Do not infer the purpose from the file contents or filename. Ask what outcome the user wants before taking action.]\n\n'
+  )
+}
+
 /**
  * Is this turn happening on the Doc surface? True for a session that
  * originated in `apps/app-web` (`appOrigin='doc'`) or a doc comment
@@ -886,34 +956,6 @@ export function buildViewingSkillBlock(skill: {
     `This is the last SAVED version — edits the user has typed in the editor but not saved ` +
     `are not visible to you, and you cannot type into their editor. When they ask for ` +
     `changes, propose the exact revised text in chat so they can apply and save it themselves.`
-  )
-}
-
-/**
- * The `# Currently viewing — deck` turn-context block for a turn whose
- * request carried `viewingDeckId` (the app-web floating dock on the deck
- * preview route sends it, path-derived). Lets "this deck" / "slide 3"
- * resolve to what the user is watching; the preview refreshes live after
- * every deck edit. Tool-agnostic on purpose (tool-awareness rule) — the
- * deck id is the handle, not a capability promise. Kept pure + exported
- * for chat.test.ts. Spec: docs/architecture/features/deck-generation.md.
- */
-export function buildViewingDeckBlock(deck: {
-  id: string
-  title: string
-  version: number
-  slides: { title: string; layout?: string }[]
-}): string {
-  const outline = deck.slides
-    .map((s, i) => `${i}: ${JSON.stringify(s.title)}${s.layout && s.layout !== 'content' ? ` (${s.layout})` : ''}`)
-    .join('\n')
-  return (
-    `# Currently viewing — deck\n` +
-    `The user has this presentation deck open in the live preview right now. ` +
-    `When they say "this deck", "the presentation", or reference a slide by number or name, they mean this one. ` +
-    `The preview updates automatically whenever the deck changes.\n\n` +
-    `Deck: ${JSON.stringify(deck.title)} (deckId: ${deck.id}, version: ${deck.version})\n` +
-    `Slides (0-based index, title slide excluded):\n${outline}`
   )
 }
 
@@ -1486,7 +1528,7 @@ export function chatRoutes(options: WebChatOptions): Router {
   const router = Router()
 
   router.post('/', async (req, res) => {
-    const { message: rawMessage, sessionId: requestedSessionId, model: requestedModel, fileIds, attachedRecordingIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, appOrigin: requestedAppOrigin, followupChips: requestedFollowupChips, viewingSkillRowId: requestedViewingSkillRowId, viewingDeckId: requestedViewingDeckId, meteredProfileId, meteredToolRounds, meteredAccepted, ask: requestedAsk, roomResponseGroup: rawRoomResponseGroup } = req.body as {
+    const { message: rawMessage, sessionId: requestedSessionId, model: requestedModel, fileIds, attachedRecordingIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, appOrigin: requestedAppOrigin, followupChips: requestedFollowupChips, viewingSkillRowId: requestedViewingSkillRowId, meteredProfileId, meteredToolRounds, meteredAccepted, ask: requestedAsk, roomResponseGroup: rawRoomResponseGroup } = req.body as {
       message?: string
       sessionId?: string
       model?: string
@@ -1572,13 +1614,6 @@ export function chatRoutes(options: WebChatOptions): Router {
        */
       viewingSkillRowId?: string
       /**
-       * Deck id the app-web floating dock sends while the user is on the
-       * deck preview route (path-derived). Injected as turn context so
-       * "this deck" / "slide 3" resolve to what they are watching.
-       * Workspace-checked against the requesting assistant's workspace.
-       */
-      viewingDeckId?: string
-      /**
        * Optional caller-supplied channel id. Used by per-surface chats
        * (feed-web tuning chat, draft iteration) that want a sticky
        * (assistant_id, user_id, channel_type='web', channel_id) tuple
@@ -1626,10 +1661,12 @@ export function chatRoutes(options: WebChatOptions): Router {
     //                    and let it decide. Same downstream effect as 'research'.
     let researchMode = requestedMode === 'research'
 
-    // Either text or files must be present
+    // Text, ordinary files, or staged recordings may independently start a
+    // turn. A recording-only send is the clarification UX after upload.
     const hasFiles = Array.isArray(fileIds) && fileIds.length > 0
-    if (!message?.trim() && !hasFiles) {
-      res.status(400).json({ error: 'Missing message or files' })
+    const hasRecordings = Array.isArray(attachedRecordingIds) && attachedRecordingIds.length > 0
+    if (!message?.trim() && !hasFiles && !hasRecordings) {
+      res.status(400).json({ error: 'Missing message or attachments' })
       return
     }
 
@@ -2605,35 +2642,26 @@ export function chatRoutes(options: WebChatOptions): Router {
         }
       }
 
-      // Recordings attached in THIS turn (recording-to-brain, chat entry). Unlike
-      // a fileId, a recording is NOT content the turn can read — it transcribes
-      // async on the worker, and its notes land on its own brief page. So the
-      // turn is handed an ACKNOWLEDGE + LINK instruction, never the audio: the
-      // model confirms and shares the link rather than pretending to summarize a
-      // transcript that does not exist yet. Fetched under the user's RLS, so a
-      // recording they cannot see is silently skipped.
+      // Recordings attached in THIS turn. A staged recording is stored bytes,
+      // not an instruction to process; its first turn clarifies purpose. Later
+      // lifecycle states get truthful acknowledge/readiness context. Fetched
+      // under the user's RLS, so an unseen id is silently skipped.
       let recordingContext = ''
       if (Array.isArray(attachedRecordingIds) && attachedRecordingIds.length > 0) {
         const recs = await Promise.all(
           attachedRecordingIds.map((id) => getRecording(user.id, id).catch(() => null)),
         )
-        const lines = recs
-          .filter((r): r is NonNullable<typeof r> => r !== null)
-          .map((r) => {
-            const title = r.title ?? r.fileName ?? 'recording'
-            const url = `/w/${r.workspaceId}/recordings/${r.id}`
-            return `- "${title}" → ${url}`
-          })
-        if (lines.length > 0) {
-          recordingContext =
-            `[The user attached ${lines.length === 1 ? 'a recording' : `${lines.length} recordings`} to this message. ` +
-            `Each is transcribing in the background; its notes and action items will appear on its own page. ` +
-            `Acknowledge briefly and share the link(s) as markdown. Do NOT attempt to summarize the content — ` +
-            `the transcript is not ready yet. Recordings:\n${lines.join('\n')}]\n\n`
-        }
+        recordingContext = buildAttachedRecordingContext(
+          recs.filter((r): r is NonNullable<typeof r> => r !== null),
+          options.recordingSurchargeCredits,
+        )
       }
 
-      const userMessageText = recordingContext + attachmentContext + (message ?? '')
+      const fileIntentContext = buildUnscopedFileAttachmentInstruction(
+        attachmentContext.length > 0,
+        message,
+      )
+      const userMessageText = recordingContext + fileIntentContext + attachmentContext + (message ?? '')
 
       // Add text block after image blocks so images are seen in context
       if (userMessageText) {
@@ -3701,33 +3729,6 @@ export function chatRoutes(options: WebChatOptions): Router {
           if (viewedSkill) userVisibleContextParts.push(buildViewingSkillBlock(viewedSkill))
         } catch (err) {
           console.error('[chat] viewing-skill context injection failed:', err)
-        }
-      }
-
-      // ── Viewing-deck context (deck live preview) ────────────────
-      // The app-web floating dock sends `viewingDeckId` while the user is
-      // on the deck preview route. Workspace-checked against the assistant's
-      // workspace so a foreign deck id injects nothing.
-      if (
-        typeof requestedViewingDeckId === 'string' &&
-        requestedViewingDeckId &&
-        assistant.workspaceId
-      ) {
-        try {
-          const { createDeckStore } = await import('../db/deck-store.js')
-          const viewedDeck = await createDeckStore().getSystem(requestedViewingDeckId)
-          if (viewedDeck && viewedDeck.workspaceId === assistant.workspaceId) {
-            userVisibleContextParts.push(
-              buildViewingDeckBlock({
-                id: viewedDeck.id,
-                title: viewedDeck.title,
-                version: viewedDeck.version,
-                slides: viewedDeck.spec.slides,
-              }),
-            )
-          }
-        } catch (err) {
-          console.error('[chat] viewing-deck context injection failed:', err)
         }
       }
 

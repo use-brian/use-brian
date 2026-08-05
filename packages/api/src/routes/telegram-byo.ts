@@ -954,6 +954,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
           channelUserId,
           ownerId: routedOwnerId,
           isIdentified,
+          archiveConnectorInstanceId: boundIntegration.connectorInstanceId,
           ...options,
           pendingConfResolvers,
         }),
@@ -1049,6 +1050,7 @@ type ProcessMessageParams = {
   channelUserId: string
   ownerId: string
   isIdentified: boolean
+  archiveConnectorInstanceId?: string | null
   provider: LLMProvider
   systemPrompt: string
   tools: Map<string, Tool>
@@ -1414,6 +1416,8 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     replyToMessageId: incoming.replyToMessageId ?? null,
     replyRaw: incoming.raw,
     incomingChannelMessageId: incoming.messageId ?? null,
+    archiveIncoming: incoming,
+    archiveConnectorInstanceId: params.archiveConnectorInstanceId,
     modelAlias: assistant.telegramModelAlias,
     adaptiveResearchEnabled: true,
     abortController: new AbortController(),

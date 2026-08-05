@@ -193,7 +193,7 @@ export function SuggestedFileDrop({ workspaceId }: { workspaceId: string }) {
             type="button"
             onClick={addToBrain}
             disabled={pendingCount === 0 || busy}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-[12.5px] font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:bg-foreground/10 disabled:text-muted-foreground"
+            className="inline-flex items-center gap-1.5 rounded-lg bg-action px-3 py-1.5 text-[12.5px] font-medium text-action-foreground transition-colors hover:bg-action/90 disabled:bg-foreground/10 disabled:text-muted-foreground"
           >
             {busy && <Loader2 className="size-3.5 animate-spin" aria-hidden />}
             {busy ? t.ingestAdding : t.ingestAdd}

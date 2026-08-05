@@ -5,49 +5,32 @@ import {
   parseConnectorState,
   verifyConnectorState,
 } from "@/lib/connector-oauth-state";
-import {
-  MSGRAPH_TOKEN_URL,
-  decodeMsGraphIdToken,
-  msGraphScopes,
-} from "@/lib/msgraph-oauth";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
-// Server side, so prefer the canonical unprefixed name the API's
-// `getConnectorConfig('msgraph')` reads; the NEXT_PUBLIC_ mirror is the
-// fallback for a deploy that only set the browser-side var.
-const MSGRAPH_CLIENT_ID =
-  process.env.MSGRAPH_CLIENT_ID || process.env.NEXT_PUBLIC_MSGRAPH_CLIENT_ID || "";
-const MSGRAPH_CLIENT_SECRET = process.env.MSGRAPH_CLIENT_SECRET ?? "";
 
 /**
  * Microsoft Graph OAuth callback for the `msgraph` (Microsoft Teams) connector.
  *
- * Cloned from `callback/notion/route.ts` - same skeleton: intent guard, the
- * double-submit `conn_oauth_state` nonce CSRF gate BEFORE any token exchange,
- * code exchange, POST to `/api/connectors/msgraph/store-credentials`, redirect
- * back into the workspace-scoped Studio route.
+ * This route does **two** things and deliberately no more: it verifies the
+ * double-submit `conn_oauth_state` nonce (the only job that needs this app's
+ * cookie), and it forwards the raw code to
+ * `POST /api/connectors/msgraph/oauth-callback`.
  *
- * Microsoft deltas:
- *  - Form-encoded exchange (Notion uses HTTP Basic + JSON); Google and Fathom
- *    are form-encoded, this follows those.
- *  - The refresh token is REQUIRED, not optional. Graph rotates it on every
- *    refresh, so a connection stored without one dies at the first refresh with
- *    no way back except reconnecting.
- *  - Tenant id and the connected address are read from the `id_token` claims
- *    rather than from a `/me` round trip.
+ * The exchange used to happen here, against `MSGRAPH_CLIENT_ID` /
+ * `MSGRAPH_CLIENT_SECRET` from this app's environment. It moved to the API for
+ * the reason `/shopify/oauth-callback` states: the client secret may be a
+ * CUSTOMER's - their own Entra registration, stored encrypted against their
+ * workspace (`connector_app_credentials`, migration 394) - and app-web has no
+ * database to read it from. On the hosted product it is not merely unwise but
+ * impossible: nobody can put a per-workspace secret in a build-time env var.
  *
- * The exchange is written out inline rather than calling
- * `exchangeMsGraphAuthorizationCode` from `packages/api/src/msgraph/token.ts`:
- * app-web cannot import the Express package (same split as
- * `verifyShopifyOAuthQueryHmac`). The two must stay in sync - both post
- * form-encoded to `/{tenant}/oauth2/v2.0/token` and both treat the tuple as
- * rotating. The stored envelope is exactly what `unpackMsGraphTokens` reads.
+ * That move also fixed a hosted-only break. The old shape POSTed the exchanged
+ * tuple to `/api/connectors/msgraph/store-credentials`, and the closed router
+ * has no `msgraph` branch there - it fell through to the Google `else`, looked
+ * for a `refreshToken` field this callback never sent, and answered 400 "Token
+ * is required". Microsoft Teams could not connect on app.usebrian.ai at all.
  *
- * INFRA: requires `NEXT_PUBLIC_MSGRAPH_CLIENT_ID` / `MSGRAPH_CLIENT_SECRET` and
- * an `app.usebrian.ai/api/auth/callback/msgraph` redirect URI registered on the
- * Entra app (platform type "Web", so the client secret is accepted).
- *
- * See docs/architecture/integrations/msgraph.md.
+ * See docs/architecture/integrations/msgraph.md → "Auth".
  */
 export async function GET(request: Request) {
   const url = new URL(request.url);
@@ -65,8 +48,8 @@ export async function GET(request: Request) {
   }
 
   // CSRF gate (WS3 #5): the `state` nonce must match the companion cookie set
-  // before the provider redirect; reject a forged callback before token
-  // exchange so an attacker's token can't be bound to the victim.
+  // before the provider redirect; reject a forged callback before the exchange
+  // so an attacker's token can't be bound to the victim.
   const cookieStore = await cookies();
   const cookieNonce = cookieStore.get(CONNECTOR_OAUTH_STATE_COOKIE)?.value;
   if (!verifyConnectorState({ stateNonce: nonce, cookieNonce })) {
@@ -75,105 +58,52 @@ export async function GET(request: Request) {
     );
   }
 
-  try {
-    const origin = new URL(request.url).origin;
-    const redirectUri = `${origin}/api/auth/callback/msgraph`;
+  const accessToken = cookieStore.get("access_token")?.value;
+  if (!accessToken) {
+    return NextResponse.redirect(new URL("/login", request.url));
+  }
 
-    const tokenRes = await fetch(MSGRAPH_TOKEN_URL, {
+  try {
+    // Must be byte-identical to the `redirect_uri` the authorize call sent -
+    // Entra compares them, and a mismatch surfaces as AADSTS50011 rather than
+    // as anything about the code.
+    const redirectUri = `${new URL(request.url).origin}/api/auth/callback/msgraph`;
+
+    const exchangeRes = await fetch(`${API_URL}/api/connectors/msgraph/oauth-callback`, {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "authorization_code",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify({
         code,
-        client_id: MSGRAPH_CLIENT_ID,
-        client_secret: MSGRAPH_CLIENT_SECRET,
-        redirect_uri: redirectUri,
-        // Same set the authorize URL asked for - the two are built from one
-        // helper so an added Graph permission can't land on only one side.
-        scope: msGraphScopes().join(" "),
+        redirectUri,
+        // The workspace decides WHICH Entra app the exchange resolves against,
+        // so a workspace-owned registration is only findable when this is sent.
+        ...(workspaceId ? { workspaceId } : {}),
+        // Reconnect re-points the existing row; otherwise connect / add-another.
+        ...(instanceId ? { instanceId } : { createNew }),
       }),
     });
 
-    if (!tokenRes.ok) {
-      console.error("[msgraph] token exchange failed:", await tokenRes.text());
+    if (!exchangeRes.ok) {
+      const detail = await exchangeRes.text();
+      console.error("[msgraph] exchange failed:", detail);
+      // `app_credentials_missing` is the one failure the user can act on: no
+      // app is registered for this workspace and none is configured on the
+      // server. Everything else is opaque and reads as a generic failure.
+      const reason = detail.includes("app_credentials_missing")
+        ? "app_credentials_missing"
+        : "token_exchange_failed";
       return NextResponse.redirect(
-        new URL(connectorsPath(workspaceId, { error: "token_exchange_failed" }), request.url),
-      );
-    }
-
-    const tokens = (await tokenRes.json()) as {
-      access_token?: string;
-      refresh_token?: string;
-      id_token?: string;
-      expires_in?: number;
-      token_type?: string;
-      scope?: string;
-    };
-
-    // Both halves are required. Graph rotates the refresh token on every use,
-    // so storing an access token alone yields a connector that works for one
-    // hour and then fails permanently.
-    if (!tokens.access_token || !tokens.refresh_token) {
-      console.error("[msgraph] incomplete token response (access_token + refresh_token required)");
-      return NextResponse.redirect(
-        new URL(connectorsPath(workspaceId, { error: "no_access_token" }), request.url),
-      );
-    }
-
-    const expiresInMs = Math.max(0, (tokens.expires_in ?? 3600) * 1000);
-    const expiresAt = new Date(Date.now() + expiresInMs).toISOString();
-
-    // Tenant id + connected address come from the id_token claims. Absent when
-    // the tenant did not grant `openid`; both are display/routing metadata, so
-    // the connect succeeds without them rather than guessing a value.
-    const { tenantId, email: connectedEmail } = decodeMsGraphIdToken(tokens.id_token);
-
-    // Get JWT from cookie to authenticate with Express backend
-    const accessToken = cookieStore.get("access_token")?.value;
-    if (!accessToken) {
-      return NextResponse.redirect(new URL("/login", request.url));
-    }
-
-    const storeRes = await fetch(
-      `${API_URL}/api/connectors/msgraph/store-credentials`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${accessToken}`,
-        },
-        body: JSON.stringify({
-          // Anything added to this tuple must also be handled by
-          // `packMsGraphTokens` (packages/api/src/msgraph/token.ts): the
-          // refresh rewrites the whole envelope, so an unhandled field is
-          // erased at the first rotation rather than merely ignored.
-          msgraphTokens: {
-            accessToken: tokens.access_token,
-            refreshToken: tokens.refresh_token,
-            expiresAt,
-            ...(tenantId ? { tenantId } : {}),
-          },
-          email: connectedEmail,
-          // Reconnect a workspace-owned instance re-points the existing row;
-          // otherwise connect / add-another. Mutually exclusive.
-          ...(instanceId
-            ? { instanceId }
-            : { createNew, label: createNew ? connectedEmail : undefined }),
-        }),
-      },
-    );
-
-    if (!storeRes.ok) {
-      console.error("[msgraph] store credentials failed:", await storeRes.text());
-      return NextResponse.redirect(
-        new URL(connectorsPath(workspaceId, { error: "store_failed" }), request.url),
+        new URL(connectorsPath(workspaceId, { error: reason }), request.url),
       );
     }
 
     // Thread the minted/reconnected instance UUID back to the connectors
     // page - the auto-expose must act on THIS instance, and a bare slug is
     // ambiguous once the provider has a second account.
-    const stored = (await storeRes.json().catch(() => ({}))) as {
+    const stored = (await exchangeRes.json().catch(() => ({}))) as {
       connectorInstanceId?: string;
     };
 

@@ -17,21 +17,29 @@
  */
 
 import Link from "next/link";
+import { useEffect, useState } from "react";
 import {
   Calendar,
   CircleDashed,
+  Clock3,
   ExternalLink,
   Flag,
   Folder,
   SquareCheckBig,
+  Trash2,
   UserRound,
   X,
 } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { brainRowUrl } from "@/lib/brain-deep-link";
-import { type AdjustMemoryChanges } from "@/lib/api/brain-inbox";
+import {
+  explainBrainRow,
+  type AdjustMemoryChanges,
+  type ExplainContext,
+} from "@/lib/api/brain-inbox";
 import {
   taskDescription,
+  taskIcon,
   taskPriority,
   type TaskRow,
   type TaskStatus,
@@ -50,10 +58,14 @@ import {
   PageTitle,
   PersonProperty,
   SelectProperty,
+  StaticProperty,
   type PersonPropertyOption,
   type SelectPropertyOption,
 } from "@/components/brain/property-field";
+import { originClue } from "@/components/brain/source-origin";
 import { ResizablePeek } from "@/components/operator/resizable-peek";
+import { EmojiPicker } from "@/components/ui/emoji-picker";
+import { promptDialog } from "@/components/ui/prompt-dialog";
 
 export function TaskRecordDetail({
   workspaceId,
@@ -61,6 +73,7 @@ export function TaskRecordDetail({
   roster,
   projects,
   commitField,
+  onDelete,
   onClose,
 }: {
   workspaceId: string;
@@ -73,10 +86,12 @@ export function TaskRecordDetail({
     changes: AdjustMemoryChanges,
     patch: Partial<TaskRow>,
   ) => Promise<{ ok: boolean; error?: string }>;
+  onDelete: (reason: string) => Promise<{ ok: boolean; error?: string }>;
   onClose: () => void;
 }) {
   const t = useT();
   const tp = t.tasksPage;
+  const review = t.memoriesReview;
   const statusLabels = t.brainPage.taskStatus as Record<string, string>;
   const priorityLabels = t.brainPage.taskPriority as Record<string, string>;
   const memberRoleLabels = t.brainPage.detailDrawer.memberRole as Record<
@@ -122,11 +137,86 @@ export function TaskRecordDetail({
 
   const priority = taskPriority(row) ?? "none";
   const project = taskProject(row);
+  const icon = taskIcon(row);
+  const [creationContext, setCreationContext] = useState<
+    ExplainContext | null | undefined
+  >(undefined);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  async function deleteWithReason() {
+    const answer = await promptDialog({
+      title: tp.deleteTaskTitle,
+      description: tp.deleteTaskDescription,
+      placeholder: tp.deleteReasonPlaceholder,
+      confirmLabel: tp.deleteAndAddRule,
+      cancelLabel: t.common.cancel,
+    });
+    if (answer === null) return;
+    const reason = answer.trim();
+    if (reason.length < 3) {
+      setDeleteError(tp.deleteReasonTooShort);
+      return;
+    }
+    setDeleteError(null);
+    setDeleting(true);
+    const result = await onDelete(reason).catch(() => ({
+      ok: false,
+      error: tp.deleteFailed,
+    }));
+    setDeleting(false);
+    if (!result.ok) {
+      setDeleteError(result.error ?? tp.deleteFailed);
+      return;
+    }
+    onClose();
+  }
+
+  useEffect(() => {
+    let alive = true;
+    setCreationContext(undefined);
+    void explainBrainRow(workspaceId, "task", row.id)
+      .then((context) => {
+        if (alive) setCreationContext(context);
+      })
+      .catch(() => {
+        if (alive) setCreationContext(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [row.id, workspaceId]);
+
+  const createdBy = creationContext
+    ? originClue(
+        creationContext.origin,
+        review,
+        creationContext.savedAt,
+        creationContext.savedByAssistantName,
+      ) ?? review.whyNoMessages
+    : creationContext === undefined
+      ? review.loading
+      : review.whyUnavailable;
+  const createdAt = creationContext
+    ? new Date(creationContext.savedAt).toLocaleString()
+    : creationContext === undefined
+      ? review.loading
+      : review.whyUnavailable;
 
   return (
     <ResizablePeek storageKey="operator:peek-width" ariaLabel={row.title} onDismiss={onClose}>
       {/* Slim action toolbar — the Brain entry page's top-row shape. */}
       <div className="flex items-center justify-end gap-1 border-b border-border/60 px-3 py-2">
+        <button
+          type="button"
+          aria-label={tp.deleteTaskAria}
+          title={tp.deleteTaskAria}
+          disabled={deleting}
+          onClick={() => void deleteWithReason()}
+          className="rounded-md p-1.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive disabled:pointer-events-none disabled:opacity-50"
+        >
+          <Trash2 className="size-4" aria-hidden />
+        </button>
         <Link
           href={brainRowUrl("", workspaceId, row.id, "task")}
           title={tp.openInBrain}
@@ -144,14 +234,52 @@ export function TaskRecordDetail({
         </button>
       </div>
 
+      {deleteError ? (
+        <div
+          role="alert"
+          className="border-b border-destructive/20 bg-destructive/10 px-4 py-2 text-xs text-destructive"
+        >
+          {deleteError}
+        </div>
+      ) : null}
+
       <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
-        {/* Big muted kind icon leading the editable page title. */}
-        <PageTitle
-          value={row.title}
-          editable
-          onCommit={(title) => commitField(row, { title }, { title })}
-          icon={<SquareCheckBig />}
-        />
+        {/* The leading glyph is the icon editor. Outside the peek, only an
+            assigned emoji renders beside the title. */}
+        <div className="flex items-start gap-3">
+          <EmojiPicker
+            side="bottom"
+            align="start"
+            onPick={(next) => {
+              const attributes = { ...row.attributes };
+              if (next === null) delete attributes.icon;
+              else attributes.icon = next;
+              void commitField(row, { icon: next }, { attributes });
+            }}
+            trigger={
+              <button
+                type="button"
+                aria-label={tp.iconButtonAria}
+                className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground/40 transition-colors hover:bg-muted hover:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+              >
+                {icon ? (
+                  <span className="text-2xl leading-none" aria-hidden>
+                    {icon}
+                  </span>
+                ) : (
+                  <SquareCheckBig className="size-8 stroke-[1.5]" aria-hidden />
+                )}
+              </button>
+            }
+          />
+          <div className="min-w-0 flex-1">
+            <PageTitle
+              value={row.title}
+              editable
+              onCommit={(title) => commitField(row, { title }, { title })}
+            />
+          </div>
+        </div>
 
         {/* Property list — the entry page's field block. */}
         <div className="mt-3 flex flex-col">
@@ -244,6 +372,16 @@ export function TaskRecordDetail({
               );
               return commitField(row, { tags }, { tags });
             }}
+          />
+          <StaticProperty
+            icon={<Clock3 />}
+            label={tp.createdAtLabel}
+            value={createdAt}
+          />
+          <StaticProperty
+            icon={<UserRound />}
+            label={tp.createdByLabel}
+            value={createdBy}
           />
         </div>
 

@@ -103,6 +103,186 @@ describe('[COMP:api/files-route] File routes', () => {
     expect(res.body.error).toMatch(/No files/)
   })
 
+  it('keeps transient cache uploads at 20 MiB', async () => {
+    const app = createTestApp('/api/files', fileRoutes(fileStore as never))
+    const res = await request(app)
+      .post('/api/files/upload')
+      .attach('files', Buffer.alloc(20 * 1024 * 1024 + 1), {
+        filename: 'oversized.pdf',
+        contentType: 'application/pdf',
+      })
+
+    expect(res.status).toBe(413)
+    expect(res.body).toEqual({
+      error: 'file_too_large',
+      detail: 'Each file must be 20 MB or smaller.',
+    })
+  })
+
+  it('accepts a durable ingest file above 20 MiB', async () => {
+    const ingestor = vi.fn().mockResolvedValue({
+      fileName: 'large.pdf',
+      fileId: 'wf-large',
+      path: '/uploads/large.pdf',
+      sizeBytes: 20 * 1024 * 1024 + 1,
+      distilled: true,
+      decomposed: true,
+      counts: { entities: 1, edges: 0, memories: 1, tasks: 0 },
+    })
+    vi.mocked(getWorkspacePrimaryAssistant).mockResolvedValueOnce({
+      id: 'a-1',
+      kind: 'primary',
+      workspaceId: 'ws-1',
+      clearance: 'internal',
+      compartments: [],
+    } as never)
+    const app = createTestApp(
+      '/api/files',
+      fileRoutes(fileStore as never, ingestor),
+      { userId: 'u-1' },
+    )
+    const bytes = Buffer.alloc(20 * 1024 * 1024 + 1)
+    const res = await request(app)
+      .post('/api/files/ingest')
+      .field('workspaceId', 'ws-1')
+      .attach('files', bytes, { filename: 'large.pdf', contentType: 'application/pdf' })
+
+    expect(res.status).toBe(200)
+    expect(res.body.files[0]).toMatchObject({ ok: true, fileId: 'wf-large' })
+    expect(ingestor).toHaveBeenCalledWith(
+      expect.objectContaining({ fileName: 'large.pdf', mime: 'application/pdf' }),
+      expect.objectContaining({ workspaceId: 'ws-1', userId: 'u-1' }),
+    )
+    expect(ingestor.mock.calls[0][0].bytes).toHaveLength(bytes.length)
+  })
+
+  it('stores a durable Pins file without semantic processing', async () => {
+    const ingestor = vi.fn().mockResolvedValue({
+      fileName: 'extension-request.pdf',
+      fileId: 'wf-staged',
+      path: '/uploads/extension-request.pdf',
+      sizeBytes: 4,
+      distilled: false,
+      decomposed: false,
+      counts: { entities: 0, edges: 0, memories: 0, tasks: 0 },
+    })
+    vi.mocked(getWorkspacePrimaryAssistant).mockResolvedValueOnce({
+      id: 'a-1',
+      kind: 'primary',
+      workspaceId: 'ws-1',
+      clearance: 'internal',
+      compartments: [],
+    } as never)
+
+    const res = await request(createTestApp(
+      '/api/files',
+      fileRoutes(fileStore as never, ingestor),
+      { userId: 'u-1' },
+    ))
+      .post('/api/files/store')
+      .field('workspaceId', 'ws-1')
+      .attach('files', Buffer.from('%PDF'), {
+        filename: 'extension-request.pdf',
+        contentType: 'application/pdf',
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body.files[0]).toMatchObject({
+      ok: true,
+      fileId: 'wf-staged',
+      distilled: false,
+      decomposed: false,
+      counts: { entities: 0, edges: 0, memories: 0, tasks: 0 },
+    })
+    expect(ingestor).toHaveBeenCalledWith(
+      expect.objectContaining({
+        fileName: 'extension-request.pdf',
+        mime: 'application/pdf',
+        process: false,
+      }),
+      expect.objectContaining({ workspaceId: 'ws-1', userId: 'u-1' }),
+    )
+  })
+
+  it('starts and completes a direct-to-storage chunked upload', async () => {
+    const chunkedUploads = {
+      start: vi.fn().mockResolvedValue({
+        uploadId: 'upload-1',
+        fileId: 'file-large',
+        chunkSizeBytes: 8 * 1024 * 1024,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        parts: [{ index: 0, offset: 0, sizeBytes: 4, url: 'https://storage.example/part-0' }],
+      }),
+      complete: vi.fn().mockResolvedValue({
+        id: 'file-large',
+        name: 'catalog.pdf',
+        path: '/uploads/catalog.pdf',
+        sizeBytes: 31 * 1024 * 1024,
+        mime: 'application/pdf',
+      }),
+      abort: vi.fn(),
+      sweepExpired: vi.fn(),
+    }
+    vi.mocked(getWorkspacePrimaryAssistant).mockResolvedValue({
+      id: 'a-1',
+      kind: 'primary',
+      workspaceId: 'ws-1',
+      clearance: 'internal',
+      compartments: [],
+    } as never)
+    const app = createTestApp(
+      '/api/files',
+      fileRoutes(fileStore as never, null, null, null, chunkedUploads as never),
+      { userId: 'u-1' },
+    )
+
+    const started = await request(app).post('/api/files/uploads/start').send({
+      workspaceId: 'ws-1',
+      fileName: 'catalog.pdf',
+      mime: 'application/pdf',
+      sizeBytes: 31 * 1024 * 1024,
+    })
+    expect(started.status).toBe(201)
+    expect(started.body.uploadId).toBe('upload-1')
+    expect(chunkedUploads.start).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceId: 'ws-1', userId: 'u-1' }),
+      expect.objectContaining({ fileName: 'catalog.pdf', sizeBytes: 31 * 1024 * 1024 }),
+    )
+
+    const completed = await request(app)
+      .post('/api/files/uploads/upload-1/complete')
+      .send({ workspaceId: 'ws-1' })
+    expect(completed.status).toBe(200)
+    expect(completed.body).toMatchObject({
+      ok: true,
+      fileId: 'file-large',
+      decomposed: false,
+    })
+    expect(chunkedUploads.complete).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceId: 'ws-1', userId: 'u-1' }),
+      'upload-1',
+    )
+  })
+
+  it('rejects a durable ingest file above 30 MiB with the route-specific limit', async () => {
+    const app = createTestApp('/api/files', fileRoutes(fileStore as never, vi.fn()), {
+      userId: 'u-1',
+    })
+    const res = await request(app)
+      .post('/api/files/ingest')
+      .field('workspaceId', 'ws-1')
+      .attach('files', Buffer.alloc(30 * 1024 * 1024 + 1), {
+        filename: 'too-large.pdf',
+        contentType: 'application/pdf',
+      })
+
+    expect(res.status).toBe(413)
+    expect(res.body).toEqual({
+      error: 'file_too_large',
+      detail: 'Each file must be 30 MB or smaller.',
+    })
+  })
+
   it('uses existing session when sessionId provided', async () => {
     const app = createTestApp('/api/files', fileRoutes(fileStore as never), { userId: 'u_1' })
     mockFindUserById.mockResolvedValueOnce({ id: 'u_1' } as never)

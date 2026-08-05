@@ -22,12 +22,14 @@ import {
   significantTokens,
   unsatisfiedRequirement,
   validateRulePredicate,
+  verifyTaskEvidenceQuote,
   type ScoredTask,
   type ScoredTombstone,
   type TaskAdmissionCandidate,
   type RecordCandidateInput,
   type TaskAdmissionPort,
   type TaskRuleRecord,
+  type TaskReadinessAssessment,
   type TaskTombstoneRecord,
 } from '../admission.js'
 
@@ -66,6 +68,24 @@ function tombstone(over: Partial<TaskTombstoneRecord> = {}): TaskTombstoneRecord
     sourceKind: 'slack_thread',
     lane: 'extracted',
     createdAt: new Date('2026-07-27T09:00:00Z'),
+    ...over,
+  }
+}
+
+function quality(over: Partial<TaskReadinessAssessment> = {}): TaskReadinessAssessment {
+  return {
+    classification: 'ready',
+    evidenceQuote: 'Ship the pricing page update by Friday',
+    evidenceVerified: true,
+    commitment: 'explicit',
+    objective: 'Ship the pricing page update',
+    target: 'Pricing page',
+    description: 'Update the pricing page and ship it by Friday. Done when the updated page is live.',
+    startingPointKind: 'discoverable',
+    startingPoint: 'Open the pricing page project and locate the current page implementation.',
+    completionSignal: 'The updated pricing page is live.',
+    missing: [],
+    explanation: 'Explicit assignment with a resolvable target and completion signal.',
     ...over,
   }
 }
@@ -147,6 +167,7 @@ describe('[COMP:tasks/admission] validateRulePredicate', () => {
   it('accepts well-formed rules', () => {
     expect(validateRulePredicate('deny', { title_matches: ['standup'] })).toBeNull()
     expect(validateRulePredicate('require', { require: ['assignee'] })).toBeNull()
+    expect(validateRulePredicate('require', { require: ['agent_ready'] })).toBeNull()
   })
 })
 
@@ -163,6 +184,30 @@ describe('[COMP:tasks/admission] unsatisfiedRequirement', () => {
         candidate({ assigneeId: 'm-1', due: new Date() }),
       ),
     ).toBeNull()
+    expect(
+      unsatisfiedRequirement(
+        { require: ['description', 'resolved_target', 'explicit_commitment', 'completion_signal', 'agent_ready'] },
+        candidate({ quality: quality() }),
+      ),
+    ).toBeNull()
+  })
+
+  it('enforces workspace readiness requirements deterministically', () => {
+    expect(
+      unsatisfiedRequirement(
+        { require: ['agent_ready'] },
+        candidate({ quality: quality({ completionSignal: null }) }),
+      ),
+    ).toBe('agent_ready')
+  })
+})
+
+describe('[COMP:tasks/admission] grounded evidence', () => {
+  it('accepts only a quote present in the source after whitespace canonicalisation', () => {
+    expect(
+      verifyTaskEvidenceQuote('Ashley: Ship the pricing page\nupdate by Friday', 'Ship the pricing page update by Friday'),
+    ).toBe(true)
+    expect(verifyTaskEvidenceQuote('Ashley: maybe later', 'Ship the pricing page')).toBe(false)
   })
 })
 
@@ -171,6 +216,74 @@ describe('[COMP:tasks/admission] evaluateTaskAdmission — decision table', () =
     expect(evaluateTaskAdmission({ candidate: candidate(), rules: [], ...NO_MATCHES })).toEqual({
       outcome: 'allow',
     })
+  })
+
+  it('drops the production slop shape "pull a group" when the grounded commitment is hedged', () => {
+    const decision = evaluateTaskAdmission({
+      candidate: candidate({
+        title: 'Pull a group',
+        quality: quality({
+          classification: 'not_a_task',
+          evidenceQuote: 'i pull a group maybe',
+          commitment: 'hedged',
+          objective: null,
+          target: null,
+          description: null,
+          startingPointKind: 'missing',
+          startingPoint: null,
+          completionSignal: null,
+          missing: ['commitment', 'objective', 'target', 'description', 'starting_point', 'completion_signal'],
+          explanation: 'The speaker hedged with "maybe" and did not identify the group or purpose.',
+        }),
+      }),
+      rules: [],
+      ...NO_MATCHES,
+    })
+    expect(decision.outcome).toBe('drop')
+    if (decision.outcome === 'drop') expect(decision.reasonCode).toBe('not_a_task')
+  })
+
+  it('holds a real but underspecified commitment instead of creating slop', () => {
+    const decision = evaluateTaskAdmission({
+      candidate: candidate({
+        title: 'Pull a group',
+        quality: quality({
+          classification: 'needs_spec',
+          objective: 'Pull a group',
+          target: null,
+          description: null,
+          startingPointKind: 'missing',
+          startingPoint: null,
+          completionSignal: null,
+          missing: ['target', 'description', 'starting_point', 'completion_signal'],
+          explanation: 'The commitment is explicit but the intended group and success condition are missing.',
+        }),
+      }),
+      rules: [],
+      ...NO_MATCHES,
+    })
+    expect(decision.outcome).toBe('hold')
+    if (decision.outcome === 'hold') expect(decision.reasonCode).toBe('needs_spec')
+  })
+
+  it('fails closed when the judge evidence cannot be verified', () => {
+    const decision = evaluateTaskAdmission({
+      candidate: candidate({ quality: quality({ evidenceVerified: false, missing: ['evidence'] }) }),
+      rules: [],
+      ...NO_MATCHES,
+    })
+    expect(decision.outcome).toBe('hold')
+    if (decision.outcome === 'hold') expect(decision.reasonCode).toBe('quality_unverified')
+  })
+
+  it('allows a grounded agent-ready automatic task', () => {
+    expect(
+      evaluateTaskAdmission({
+        candidate: candidate({ quality: quality() }),
+        rules: [],
+        ...NO_MATCHES,
+      }),
+    ).toEqual({ outcome: 'allow' })
   })
 
   it('drops a tombstoned title and quotes the user\'s own reason back', () => {
@@ -467,6 +580,29 @@ describe('[COMP:tasks/admission] buildTaskPolicyPromptBlock', () => {
     expect(block).toContain('not a work item')
   })
 
+  it('renders a shared bulk-delete reason only once', () => {
+    const shared = 'Slack discussion about existing work is not a new task'
+    const block = buildTaskPolicyPromptBlock(
+      [
+        rule({ id: 'r1', nlClause: shared }),
+        rule({ id: 'r2', nlClause: shared }),
+        rule({ id: 'r3', nlClause: 'Do not turn acknowledgements into tasks' }),
+      ],
+      [],
+    )
+    expect(block.match(new RegExp(shared, 'g'))).toHaveLength(1)
+    expect(block).toContain('Do not turn acknowledgements into tasks')
+  })
+
+  it('shows relevant open tasks as already tracked work', () => {
+    const block = buildTaskPolicyPromptBlock([], [], [
+      { id: 'task-1', title: 'Integrate Teams', similarity: 0.875 },
+    ])
+    expect(block).toContain('Already-tracked open tasks relevant to this source')
+    expect(block).toContain('Already tracked: "Integrate Teams"')
+    expect(block).toContain('is not a new task')
+  })
+
   it('skips rules that are not active or have no sentence', () => {
     expect(
       buildTaskPolicyPromptBlock(
@@ -485,6 +621,14 @@ describe('[COMP:tasks/admission] buildTaskPolicyPromptBlock', () => {
     )
     const block = buildTaskPolicyPromptBlock([], many)
     expect(block.match(/Rejected:/g)).toHaveLength(8)
+
+    const openTasks = Array.from({ length: 30 }, (_, i) => ({
+      id: `task-${i}`,
+      title: `Task ${i}`,
+      similarity: 0.8,
+    }))
+    const trackedBlock = buildTaskPolicyPromptBlock([], [], openTasks)
+    expect(trackedBlock.match(/Already tracked:/g)).toHaveLength(8)
   })
 })
 

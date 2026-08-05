@@ -60,7 +60,10 @@ import type { TaskStore } from '../tasks/types.js'
 import {
   admitTask,
   buildTaskPolicyPromptBlock,
+  verifyTaskEvidenceQuote,
   type TaskAdmissionPort,
+  type TaskReadinessAssessment,
+  type TaskReadinessMissingFact,
 } from '../tasks/admission.js'
 import { collectStream } from '../providers/accumulator.js'
 import type { LLMProvider, Message, TokenUsage } from '../providers/types.js'
@@ -96,6 +99,8 @@ export type PipelineBEpisode = {
   assistantId: string | null
   createdByUserId: string
   createdByAssistantId: string | null
+  /** Connector channel id carried into task-rule predicate evaluation. */
+  channelRef?: string | null
   /** Tags pre-stamped by the ingest engine from rule metadata (e.g.
    *  `channel_match { #engineering }` → `'domain:engineering'`). Merged
    *  alongside model-emitted tags. */
@@ -353,6 +358,79 @@ const extractedTaskSchema = z.object({
   assignee_ref: z.string().nullish().transform(emptyToUndef),
 })
 
+const TASK_READINESS_CLASSIFICATIONS = ['ready', 'needs_spec', 'not_a_task'] as const
+const TASK_COMMITMENT_KINDS = ['explicit', 'implicit', 'hedged', 'none'] as const
+const TASK_STARTING_POINT_KINDS = ['explicit', 'discoverable', 'missing'] as const
+const TASK_READINESS_MISSING_FACTS = [
+  'evidence',
+  'commitment',
+  'objective',
+  'target',
+  'description',
+  'starting_point',
+  'completion_signal',
+] as const satisfies readonly TaskReadinessMissingFact[]
+
+const judgedTaskReadinessSchema = z.object({
+  index: z.number().int().min(0).max(29),
+  classification: z.enum(TASK_READINESS_CLASSIFICATIONS),
+  evidence_quote: z.string().min(1).max(500).nullable(),
+  commitment: z.enum(TASK_COMMITMENT_KINDS),
+  objective: z.string().min(1).max(500).nullable(),
+  target: z.string().min(1).max(500).nullable(),
+  description: z.string().min(1).max(2_000).nullable(),
+  starting_point_kind: z.enum(TASK_STARTING_POINT_KINDS),
+  starting_point: z.string().min(1).max(500).nullable(),
+  completion_signal: z.string().min(1).max(500).nullable(),
+  missing: z.array(z.enum(TASK_READINESS_MISSING_FACTS)).max(TASK_READINESS_MISSING_FACTS.length),
+  explanation: z.string().min(1).max(500),
+})
+
+const taskReadinessOutputSchema = z.object({
+  assessments: z.array(judgedTaskReadinessSchema).max(30),
+})
+
+const TASK_READINESS_RESPONSE_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    assessments: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          index: { type: 'integer' },
+          classification: { type: 'string', enum: [...TASK_READINESS_CLASSIFICATIONS] },
+          evidence_quote: { type: 'string', nullable: true },
+          commitment: { type: 'string', enum: [...TASK_COMMITMENT_KINDS] },
+          objective: { type: 'string', nullable: true },
+          target: { type: 'string', nullable: true },
+          description: { type: 'string', nullable: true },
+          starting_point_kind: { type: 'string', enum: [...TASK_STARTING_POINT_KINDS] },
+          starting_point: { type: 'string', nullable: true },
+          completion_signal: { type: 'string', nullable: true },
+          missing: { type: 'array', items: { type: 'string', enum: [...TASK_READINESS_MISSING_FACTS] } },
+          explanation: { type: 'string' },
+        },
+        required: [
+          'index',
+          'classification',
+          'evidence_quote',
+          'commitment',
+          'objective',
+          'target',
+          'description',
+          'starting_point_kind',
+          'starting_point',
+          'completion_signal',
+          'missing',
+          'explanation',
+        ],
+      },
+    },
+  },
+  required: ['assessments'],
+}
+
 // ── Task-creation lane policy ─────────────────────────────────────────
 //
 // Some source kinds are RETROSPECTIVE records of work already completed
@@ -608,7 +686,7 @@ export function mergeExtractionOutputs(payloads: ExtractionOutput[]): Extraction
   const seenEntities = new Set<string>()
   for (const p of payloads) {
     for (const e of p.entities) {
-      const key = `${e.kind} ${e.display_name}`
+      const key = `${e.kind}\u0000${e.display_name}`
       if (seenEntities.has(key)) continue
       seenEntities.add(key)
       entities.push(e)
@@ -618,7 +696,7 @@ export function mergeExtractionOutputs(payloads: ExtractionOutput[]): Extraction
   const seenEdges = new Set<string>()
   for (const p of payloads) {
     for (const e of p.edges) {
-      const key = `${e.source_ref} ${e.edge_type} ${e.target_ref}`
+      const key = `${e.source_ref}\u0000${e.edge_type}\u0000${e.target_ref}`
       if (seenEdges.has(key)) continue
       seenEdges.add(key)
       edges.push(e)
@@ -674,10 +752,15 @@ ${spotlightContent(truncate(content, CONTENT_CHAR_LIMIT))}
 You are extracting structured knowledge from this content. Memory is the LAST resort, not the default. Run every observation through the precedence ladder below and emit it at the FIRST tier that fits.
 
 Precedence ladder (first-fit wins):
-  1. Task — anything the user (or someone in their workspace) must DO. Examples: "Schedule X", "Reply to Y", "Follow up on Z by Friday". Emit into "tasks".
+  1. Task — an explicit, distinct NEW commitment that the user (or someone in their workspace) must DO. Examples: "Schedule X", "Reply to Y", "Follow up on Z by Friday". Emit into "tasks".
   2. Entity — a person, company, project, or product mentioned. Names a thing that may recur. Emit into "entities". If a relationship between two entities is asserted (e.g. "Alice works at Notion"), also emit into "edges".
   3. Memory — a durable fact about the user or their world that doesn't fit as an entity attribute or a task. Examples: "User prefers async over meetings", "Team uses Linear for tracking". Emit into "memories" WITH justification fields (see below).
   4. Ephemeral — content that has no durable value: status updates, relative-time markers, per-cycle counters, ack-only replies, duplicates of existing content. Emit into "ephemeral" with a reason. These are NOT persisted as memories.
+
+Task boundaries — do NOT mint a task merely because action words appear:
+  - Discussion, progress/status updates, requests to list or review an existing task, and references to active work are context, not new tasks.
+  - A request aimed at the assistant (for example "list our tasks") is conversation context unless the user explicitly asks to track a new durable task.
+  - If the content discusses already-tracked work, emit a task only when it contains a separate explicit new commitment or assignment.
 
 Output JSON only, matching this exact shape:
 {
@@ -730,6 +813,175 @@ Rules:
 - Tasks may reference an entity by display_name in assignee_ref; the writer will resolve it to a workspace member.
 - Every memory MUST include both why_not_entity and why_not_task. If you cannot articulate why the content isn't an entity or a task, do not emit it as a memory — re-classify it.
 - Empty result IS acceptable when there is nothing useful: {"summary":"","entities":[],"edges":[],"tasks":[],"memories":[],"ephemeral":[],"tags":[]}.`
+}
+
+const TASK_READINESS_SYSTEM_PROMPT =
+  'You are an independent quality gate for automatically generated tasks. ' +
+  'Judge the proposed candidates against the source; do not trust the extractor and do not invent missing facts. ' +
+  'Output ONE JSON object and nothing else. No markdown fences. No commentary. ' +
+  SPOTLIGHT_RULE
+
+function unverifiedTaskReadiness(explanation: string): TaskReadinessAssessment {
+  return {
+    classification: 'needs_spec',
+    evidenceQuote: null,
+    evidenceVerified: false,
+    commitment: 'implicit',
+    objective: null,
+    target: null,
+    description: null,
+    startingPointKind: 'missing',
+    startingPoint: null,
+    completionSignal: null,
+    missing: [
+      'evidence',
+      'commitment',
+      'objective',
+      'target',
+      'description',
+      'starting_point',
+      'completion_signal',
+    ],
+    explanation,
+  }
+}
+
+function buildTaskReadinessPrompt(
+  content: string,
+  tasks: readonly ExtractedTask[],
+  taskPolicy: string,
+): string {
+  const candidateLines = tasks.map((task, index) => `${index}. ${task.text}`).join('\n')
+  return `Source content:
+${spotlightContent(truncate(content, CONTENT_CHAR_LIMIT))}
+
+Proposed task candidates (index is identity):
+${spotlightContent(candidateLines)}
+
+Classify every candidate independently:
+- ready: the source contains an explicit commitment and a reasonable agent can identify the objective, target/context, a concrete or discoverable starting path, and an observable completion signal.
+- needs_spec: likely real work, but one or more of those facts is missing. Do not repair it by guessing.
+- not_a_task: discussion, status, acknowledgement, instruction to the assistant, withdrawn/hedged speech, or no actual commitment.
+
+The evidence_quote must be a verbatim quote from Source content that proves the commitment or its absence. Keep it short. Words such as "maybe", "might", and "could", plus jokes and exploratory suggestions, are hedged unless another source line explicitly commits. A phrase such as "pull a group" has no usable target or purpose by itself.
+
+For ready candidates, description must be self-contained and grounded in the source: state the objective/context, where or how to start (an explicit place/tool when named, otherwise a genuinely discoverable path), and what observable result means done. Do not prescribe a tool the source does not support. If any required fact would have to be invented, return needs_spec and list it in missing.
+
+Output exactly:
+{
+  "assessments": [{
+    "index": 0,
+    "classification": "ready" | "needs_spec" | "not_a_task",
+    "evidence_quote": "verbatim source quote" | null,
+    "commitment": "explicit" | "implicit" | "hedged" | "none",
+    "objective": "..." | null,
+    "target": "..." | null,
+    "description": "..." | null,
+    "starting_point_kind": "explicit" | "discoverable" | "missing",
+    "starting_point": "..." | null,
+    "completion_signal": "..." | null,
+    "missing": ["evidence" | "commitment" | "objective" | "target" | "description" | "starting_point" | "completion_signal"],
+    "explanation": "short reason"
+  }]
+}
+${taskPolicy}`
+}
+
+/**
+ * One independent, batched readiness judgment for automatic task candidates.
+ * The extractor never grades its own output. Any failure is converted into one
+ * unverified assessment per candidate so admission fails closed to Suggestions
+ * while entity/memory ingestion continues.
+ *
+ * [COMP:tasks/task-readiness]
+ */
+export async function judgeTaskReadinessBatch(
+  episode: PipelineBEpisode,
+  content: string,
+  tasks: readonly ExtractedTask[],
+  deps: PipelineBDeps,
+  taskPolicy = '',
+): Promise<TaskReadinessAssessment[]> {
+  if (tasks.length === 0) return []
+  const fallback = () =>
+    tasks.map(() =>
+      unverifiedTaskReadiness('Brian could not independently verify this candidate.'),
+    )
+
+  try {
+    const response = await collectStream(
+      deps.provider.stream({
+        model: deps.model,
+        systemPrompt: TASK_READINESS_SYSTEM_PROMPT,
+        messages: [{ role: 'user', content: buildTaskReadinessPrompt(content, tasks, taskPolicy) }],
+        maxTokens: 4_096,
+        temperature: 0,
+        responseFormat: 'json',
+        responseSchema: TASK_READINESS_RESPONSE_SCHEMA,
+        thinkingLevel: 'low',
+      }),
+    )
+    await recordExtractionUsage(deps, episode, response.usage, {
+      source: 'overhead:classifier',
+      triggerKey: 'pipeline_b_task_readiness',
+    })
+
+    if (response.stopReason === 'max_tokens' || response.stopReason === 'incomplete') {
+      console.warn(`[pipeline-b] task readiness judgment truncated for episode ${episode.id}`)
+      return fallback()
+    }
+
+    const rawText = response.content
+      .filter((block) => block.type === 'text')
+      .map((block) => (block.type === 'text' ? block.text : ''))
+      .join('')
+    const parsed = taskReadinessOutputSchema.safeParse(JSON.parse(rawText))
+    if (!parsed.success) {
+      console.warn(
+        `[pipeline-b] task readiness judgment invalid for episode ${episode.id}: ${parsed.error.issues[0]?.message ?? 'schema mismatch'}`,
+      )
+      return fallback()
+    }
+
+    const byIndex = new Map<number, z.infer<typeof judgedTaskReadinessSchema>>()
+    for (const assessment of parsed.data.assessments) {
+      if (assessment.index >= tasks.length || byIndex.has(assessment.index)) continue
+      byIndex.set(assessment.index, assessment)
+    }
+
+    return tasks.map((_task, index) => {
+      const judged = byIndex.get(index)
+      if (!judged) {
+        return unverifiedTaskReadiness(
+          'The independent judge did not return an assessment for this candidate.',
+        )
+      }
+      const evidenceVerified = verifyTaskEvidenceQuote(content, judged.evidence_quote)
+      const missing = new Set<TaskReadinessMissingFact>(judged.missing)
+      if (!evidenceVerified) missing.add('evidence')
+      return {
+        classification: judged.classification,
+        evidenceQuote: judged.evidence_quote,
+        evidenceVerified,
+        commitment: judged.commitment,
+        objective: judged.objective,
+        target: judged.target,
+        description: judged.description,
+        startingPointKind: judged.starting_point_kind,
+        startingPoint: judged.starting_point,
+        completionSignal: judged.completion_signal,
+        missing: [...missing],
+        explanation: judged.explanation,
+      }
+    })
+  } catch (err) {
+    console.warn(
+      `[pipeline-b] task readiness judgment failed for episode ${episode.id}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    )
+    return fallback()
+  }
 }
 
 // ── Parser ───────────────────────────────────────────────────────────
@@ -1116,8 +1368,15 @@ export async function processEpisode(
   let taskPolicyBlock = ''
   if (deps.taskAdmission?.loadPolicyForPrompt) {
     try {
-      const policy = await deps.taskAdmission.loadPolicyForPrompt(episode.workspaceId)
-      taskPolicyBlock = buildTaskPolicyPromptBlock(policy.rules, policy.tombstones)
+      const policy = await deps.taskAdmission.loadPolicyForPrompt(
+        episode.workspaceId,
+        extractableContent.slice(0, 16_000),
+      )
+      taskPolicyBlock = buildTaskPolicyPromptBlock(
+        policy.rules,
+        policy.tombstones,
+        policy.openTasks,
+      )
     } catch (err) {
       console.warn(
         `[pipeline-b] task policy load failed for episode ${episode.id}: ${
@@ -1233,6 +1492,22 @@ export async function processEpisode(
   }
   const payload = mergeExtractionOutputs(windowPayloads)
 
+  // Automatic task generation has a separate judge: the extractor may
+  // propose candidates but cannot grade its own work. Only run this when the
+  // admission port is wired; unwired OSS callers keep the legacy single-call
+  // path and make no readiness guarantee.
+  const createsTasks = sourceKindCreatesTasks(episode.sourceKind)
+  const taskReadiness =
+    deps.tasks && createsTasks && deps.taskAdmission && payload.tasks.length > 0
+      ? await judgeTaskReadinessBatch(
+          episode,
+          extractableContent,
+          payload.tasks,
+          deps,
+          taskPolicyBlock,
+        )
+      : []
+
   // 3. Merge tags.
   const tags = dedupTags(episode.preStampedTags, payload.tags)
 
@@ -1329,14 +1604,14 @@ export async function processEpisode(
   // Retrospective sources (code history) extract knowledge but never mint
   // tasks — see RETROSPECTIVE_SOURCE_KINDS. This is the enforcement point
   // graded by `invariants/no-task-extraction-from-code-history`.
-  const createsTasks = sourceKindCreatesTasks(episode.sourceKind)
   // Per-item admission outcomes, folded into the log line below so a workspace
   // can see the guardrail working without opening the candidates table.
   let tasksHeld = 0
   let tasksBlocked = 0
   if (deps.tasks && createsTasks) {
-    for (const ex of payload.tasks) {
+    for (const [taskIndex, ex] of payload.tasks.entries()) {
       try {
+        const quality = taskReadiness[taskIndex] ?? null
         let due: Date | null = null
         if (ex.due_iso) {
           const parsed = new Date(ex.due_iso)
@@ -1354,8 +1629,10 @@ export async function processEpisode(
             due,
             lane: 'extracted',
             sourceKind: episode.sourceKind,
+            channelRef: episode.channelRef ?? null,
             sourceEpisodeId: episode.id,
             createdByAssistantId: episode.createdByAssistantId,
+            quality,
           })
           if (!verdict.admitted) {
             if (verdict.outcome === 'hold') tasksHeld++
@@ -1375,6 +1652,9 @@ export async function processEpisode(
           source: 'extracted',
           sourceEpisodeId: episode.id,
           createdByAssistantId: episode.createdByAssistantId,
+          attributes: quality?.description
+            ? { description: quality.description }
+            : undefined,
         })
         tasksWritten.push({ id: task.id })
       } catch (err) {

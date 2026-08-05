@@ -60,6 +60,7 @@ import { ConnectorToolList, type ToolPolicy } from "@/components/connectors/conn
 import { ConnectorIcon } from "@/components/connectors/connector-icon";
 import { SensitivityBadge } from "@/components/sensitivity-badge";
 import { AddConnectorMenu } from "@/components/connectors/add-connector-menu";
+import { StudioTopbarActions } from "@/components/studio/studio-topbar";
 import { PreflightHeadersSection } from "@/components/connectors/preflight-headers-section";
 import { readPreflightHeaders } from "@/lib/connector-preflight-headers";
 import { ActorIdentityToggle } from "@/components/connectors/actor-identity-toggle";
@@ -97,10 +98,12 @@ const FATHOM_CLIENT_ID = process.env.NEXT_PUBLIC_FATHOM_CLIENT_ID ?? "";
 const FATHOM_AUTHORIZE_URL =
   process.env.NEXT_PUBLIC_FATHOM_AUTHORIZE_URL ??
   "https://fathom.video/oauth2/authorize";
-// Use Brian-owned Entra app (docs/architecture/integrations/msgraph.md).
-// Absent -> the Microsoft Teams connect button builds an authorize URL with an
-// empty client_id and Entra rejects it; nothing else in the page changes.
-const MSGRAPH_CLIENT_ID = process.env.NEXT_PUBLIC_MSGRAPH_CLIENT_ID ?? "";
+// NOTE: there is deliberately no MSGRAPH_CLIENT_ID here either. The Entra app
+// for Microsoft Teams is resolved SERVER-side per workspace (the workspace's
+// own registration first, then deployment config), because a build-time env
+// var cannot express "this workspace uses its own app". The connect handler
+// asks GET /api/connectors/msgraph/app-credentials and uses what it returns.
+// See docs/architecture/integrations/msgraph.md -> "Auth".
 // NOTE: there is deliberately no SHOPIFY_CLIENT_ID here. Shopify connects by
 // pasted Admin API token only; the OAuth flow is built but not offered (see
 // docs/architecture/integrations/shopify.md → "Auth model"). Re-enabling means
@@ -145,6 +148,25 @@ const CONFIGURABLE_CONNECTORS = new Set(["gcal", "gdrive", "cli"]);
 const STORAGE_CONNECTOR_IDS = new Set(
   OFFICIAL_CONNECTORS.filter((connector) => connector.tags.includes("storage")).map((connector) => connector.id),
 );
+
+/**
+ * Which Entra app a Microsoft Teams connect will actually use, as answered by
+ * `GET /api/connectors/msgraph/app-credentials`.
+ *
+ * `configured` is deliberately a SERVER answer: it depends on deployment
+ * config the browser cannot see, so the page must ask rather than infer it
+ * from an env var. Never carries the client secret - only the client id, which
+ * is public and rides in the authorize URL.
+ */
+type MsGraphAppStatus = {
+  configured: boolean;
+  source: "workspace" | "deployment" | null;
+  clientId: string | null;
+  tenantId: string | null;
+  /** True when this workspace owns the registration, i.e. it can be replaced or removed. */
+  workspaceOwned: boolean;
+  updatedAt: string | null;
+};
 
 type Connector = {
   id: string;
@@ -393,7 +415,7 @@ function GDriveAuthorizedFiles() {
               onClick={open}
               disabled={isOpening || disabled}
               title={disabledReason}
-              className="text-[11px] font-medium px-3 py-1 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-40 transition-colors shrink-0"
+              className="text-[11px] font-medium px-3 py-1 rounded-lg bg-action text-action-foreground hover:bg-action/90 disabled:opacity-40 transition-colors shrink-0"
             >
               {isOpening ? gd.opening : gd.addFromDrive}
             </button>
@@ -760,6 +782,20 @@ function ConnectorsList() {
   const [shopifyResolved, setShopifyResolved] = useState<string | null>(null);
   const [shopifyResolving, setShopifyResolving] = useState(false);
   const [shopifyResolveFailed, setShopifyResolveFailed] = useState(false);
+
+  // Microsoft Teams (msgraph) — the workspace's own Entra app registration.
+  // Same two-hop shape as Shopify BYO: store the app pair server-side FIRST,
+  // then redirect to consent against it. The secret is write-only by design;
+  // the panel shows the client id it holds and re-collects the secret to
+  // change it. See docs/architecture/integrations/msgraph.md -> "Auth".
+  const [showMsGraphForm, setShowMsGraphForm] = useState<string | null>(null);
+  const [msgraphAppId, setMsGraphAppId] = useState("");
+  const [msgraphAppSecret, setMsGraphAppSecret] = useState("");
+  const [msgraphTenantId, setMsGraphTenantId] = useState("");
+  const [msgraphError, setMsGraphError] = useState<string | null>(null);
+  const [msgraphShowHelp, setMsGraphShowHelp] = useState(false);
+  const [msgraphConnectOpts, setMsGraphConnectOpts] = useState<{ addAnother?: boolean; instanceId?: string } | null>(null);
+  const [msgraphStatus, setMsGraphStatus] = useState<MsGraphAppStatus | null>(null);
 
   // "Add another account" state — provider slug whose add-another form is open,
   // plus the nickname + secret for the new instance.
@@ -1204,25 +1240,25 @@ function ConnectorsList() {
     // OFFICIAL_OAUTH_SCOPES carries an `msgraph` entry, so falling through
     // would send the user to the GOOGLE authorize URL with a Google client id.
     if (id === "msgraph") {
-      // Without a client id the authorize URL is still well-formed, so the
-      // browser navigates away and Entra answers AADSTS900144 ("the request
-      // body must contain 'client_id'") on its own error page - a dead end
-      // that names Microsoft rather than the missing local config. Fail here
-      // instead, where we can say what is actually wrong.
-      if (!MSGRAPH_CLIENT_ID) {
-        void confirmDialog({
-          title: t.settings.connectors.title,
-          description: t.settings.connectors.notConfigured,
-        });
+      // Which Entra app to consent against is a SERVER question: the workspace
+      // may have registered its own (the hosted answer, since a customer admin
+      // cannot reach the environment), or the deployment may configure one.
+      // Asking first is also what makes the empty case actionable - an
+      // authorize URL with no client_id navigates away and dead-ends on
+      // Entra's own AADSTS900144 page, which names Microsoft rather than the
+      // thing the user can actually fix.
+      setConnecting(rid);
+      const status = await fetchMsGraphAppStatus();
+      setConnecting(null);
+      if (!status?.configured || !status.clientId) {
+        // No app anywhere: open the form so they can register one, instead of
+        // telling them to go edit an environment they do not have.
+        setMsGraphConnectOpts(opts ?? null);
+        setMsGraphError(null);
+        setShowMsGraphForm(rid);
         return;
       }
-      const nonce = armConnectorOauthState();
-      const redirectUri = `${window.location.origin}/api/auth/callback/msgraph`;
-      window.location.href = buildMsGraphAuthorizeUrl({
-        clientId: MSGRAPH_CLIENT_ID,
-        redirectUri,
-        state: buildConnectorState({ connector: "msgraph", workspaceId, createNew: !!opts?.addAnother, instanceId: opts?.instanceId, nonce }),
-      });
+      startMsGraphAuthorize({ clientId: status.clientId, tenant: status.tenantId, opts });
       return;
     }
 
@@ -1470,6 +1506,121 @@ function ConnectorsList() {
   // redirect to THEIR app's authorize URL. The code exchange happens in the API,
   // never here — app-web must not receive a client secret.
   // docs/architecture/integrations/shopify.md → "Per-merchant app credentials".
+  // ── Microsoft Teams (msgraph) — workspace-owned Entra app ──────
+  //
+  // Two hops, the Shopify BYO shape: PUT the app pair (server-side, encrypted,
+  // owner/admin only), then redirect to consent against it. The code exchange
+  // runs in the API, never here - app-web must not hold a customer's client
+  // secret. docs/architecture/integrations/msgraph.md -> "Auth".
+
+  async function fetchMsGraphAppStatus(): Promise<MsGraphAppStatus | null> {
+    try {
+      const res = await authFetch(
+        `${API_URL}/api/connectors/msgraph/app-credentials?workspaceId=${encodeURIComponent(workspaceId)}`,
+      );
+      if (!res.ok) return null;
+      const status = (await res.json()) as MsGraphAppStatus;
+      setMsGraphStatus(status);
+      return status;
+    } catch {
+      return null;
+    }
+  }
+
+  function startMsGraphAuthorize(input: {
+    clientId: string;
+    tenant?: string | null;
+    opts?: { addAnother?: boolean; instanceId?: string } | null;
+  }) {
+    const nonce = armConnectorOauthState();
+    window.location.href = buildMsGraphAuthorizeUrl({
+      clientId: input.clientId,
+      tenant: input.tenant,
+      redirectUri: `${window.location.origin}/api/auth/callback/msgraph`,
+      state: buildConnectorState({
+        connector: "msgraph",
+        workspaceId,
+        createNew: !!input.opts?.addAnother,
+        instanceId: input.opts?.instanceId,
+        nonce,
+      }),
+    });
+  }
+
+  /** Save the workspace's registration, then continue straight into consent. */
+  async function saveMsGraphApp(c: Connector) {
+    const clientId = msgraphAppId.trim();
+    const clientSecret = msgraphAppSecret.trim();
+    if (!clientId || !clientSecret) return;
+    const rid = rowId(c);
+    setConnecting(rid);
+    setMsGraphError(null);
+    try {
+      const res = await authFetch(`${API_URL}/api/connectors/msgraph/app-credentials`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId,
+          clientId,
+          clientSecret,
+          tenantId: msgraphTenantId.trim() || null,
+        }),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        // 403 is the one failure with a specific remedy (ask an owner), so it
+        // gets its own sentence rather than the generic save error.
+        setMsGraphError(
+          body.error === "not_admin" || body.error === "not_member"
+            ? tc.msgraph.errNotAdmin
+            : tc.msgraph.errSave,
+        );
+        setConnecting(null);
+        return;
+      }
+      const saved = (await res.json()) as { clientId?: string; tenantId?: string | null };
+      startMsGraphAuthorize({
+        clientId: saved.clientId ?? clientId,
+        tenant: saved.tenantId ?? (msgraphTenantId.trim() || null),
+        opts: msgraphConnectOpts,
+      });
+    } catch {
+      setMsGraphError(tc.msgraph.errSave);
+      setConnecting(null);
+    }
+  }
+
+  /** Drop the workspace registration. Live connections keep working - their
+   *  app pair travels in the grant envelope, not in this row. */
+  async function removeMsGraphApp() {
+    const ok = await confirmDialog({
+      title: tc.msgraph.removeTitle,
+      description: tc.msgraph.removeBody,
+      confirmLabel: tc.msgraph.removeConfirm,
+      variant: "destructive",
+    });
+    if (!ok) return;
+    try {
+      await authFetch(
+        `${API_URL}/api/connectors/msgraph/app-credentials?workspaceId=${encodeURIComponent(workspaceId)}`,
+        { method: "DELETE" },
+      );
+      await fetchMsGraphAppStatus();
+    } catch {
+      setMsGraphError(tc.msgraph.errSave);
+    }
+  }
+
+  function closeMsGraphForm() {
+    setShowMsGraphForm(null);
+    setMsGraphAppId("");
+    setMsGraphAppSecret("");
+    setMsGraphTenantId("");
+    setMsGraphError(null);
+    setMsGraphShowHelp(false);
+    setMsGraphConnectOpts(null);
+  }
+
   async function startShopifyByoConnect(c: Connector) {
     const shopDomain = await resolveEffectiveShopDomain();
     if (!shopDomain) {
@@ -1870,10 +2021,11 @@ function ConnectorsList() {
       return { ...prev, [connectorId]: { ...entry, tools: entry.tools.map((tool) => (tool.name === toolName ? { ...tool, policy } : tool)) } };
     });
     try {
-      await authFetch(`${API_URL}/api/connectors/${connectorId}/tools/policy`, {
+      const res = await authFetch(`${API_URL}/api/connectors/${connectorId}/tools/policy`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ serverName, toolName, policy }),
       });
+      if (!res.ok) throw new Error("Failed to update tool policy");
     } catch { loadTools(connectorId); }
   }
 
@@ -2343,9 +2495,7 @@ function ConnectorsList() {
 
   return (
     <div className="space-y-5">
-      {/* Intro row — the page's one primary action, the Add menu (the topbar
-          breadcrumb names the section; no description paragraph). */}
-      <div className="flex justify-end">
+      <StudioTopbarActions>
         <AddConnectorMenu
           label={tc.addConnector}
           browseLabel={tc.browseDirectory}
@@ -2353,7 +2503,7 @@ function ConnectorsList() {
           onBrowseDirectory={() => setShowBrowse(true)}
           onAddCustom={() => setShowAddForm(true)}
         />
-      </div>
+      </StudioTopbarActions>
 
       {/* Custom MCP server form — opened from the Add menu. */}
       {showAddForm && (
@@ -2400,7 +2550,7 @@ function ConnectorsList() {
               {tc.cancel}
             </button>
             <button onClick={handleAddCustom} disabled={!newName.trim() || !newUrl.trim()}
-              className="text-xs font-medium bg-primary text-primary-foreground px-4 py-1.5 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors">
+              className="text-xs font-medium bg-action text-action-foreground px-4 py-1.5 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors">
               {tc.add}
             </button>
           </div>
@@ -2636,7 +2786,7 @@ function ConnectorsList() {
                         <button
                           onClick={() => handleWsReconnect(sel)}
                           disabled={!wsReconnectSecret.trim() || connecting === rid}
-                          className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                          className="text-xs font-medium bg-action text-action-foreground px-3 py-1 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
                         >
                           {connecting === rid ? tc.savingBtn : tc.saveBtn}
                         </button>
@@ -2681,7 +2831,7 @@ function ConnectorsList() {
                         </button>
                         <button
                           onClick={() => handleWsSaveDetails(sel)}
-                          className="text-xs font-medium bg-primary text-primary-foreground px-4 py-1.5 rounded-lg hover:bg-primary/90 transition-colors"
+                          className="text-xs font-medium bg-action text-action-foreground px-4 py-1.5 rounded-lg hover:bg-action/90 transition-colors"
                         >
                           {tc.saveBtn}
                         </button>
@@ -2955,7 +3105,7 @@ function ConnectorsList() {
                     <button
                       onClick={() => handleConnect(sel)}
                       disabled={connecting === rid}
-                      className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 transition-colors disabled:opacity-50"
+                      className="text-xs font-medium bg-action text-action-foreground px-3 py-1 rounded-lg hover:bg-action/90 transition-colors disabled:opacity-50"
                     >
                       {connecting === rid ? tc.connectingBtn : tc.connectBtn}
                     </button>
@@ -3053,7 +3203,7 @@ function ConnectorsList() {
                       <button
                         onClick={() => handleSavePat(sel)}
                         disabled={!patInput.trim() || connecting === rid}
-                        className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                        className="text-xs font-medium bg-action text-action-foreground px-3 py-1 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
                       >
                         {connecting === rid ? tc.savingBtn : tc.saveBtn}
                       </button>
@@ -3066,6 +3216,88 @@ function ConnectorsList() {
                     which the server verifies against the store before saving.
                     There is deliberately no OAuth button: see
                     docs/architecture/integrations/shopify.md → "Auth model". */}
+                {showMsGraphForm === rid && (
+                  <div className="space-y-2">
+                    <p className="text-xs text-muted-foreground">{tc.msgraph.formHelp}</p>
+                    <input
+                      type="text"
+                      placeholder={tc.msgraph.appIdPlaceholder}
+                      value={msgraphAppId}
+                      onChange={(e) => setMsGraphAppId(e.target.value)}
+                      autoComplete="off"
+                      autoFocus
+                      className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                    />
+                    <input
+                      type="password"
+                      placeholder={tc.msgraph.appSecretPlaceholder}
+                      value={msgraphAppSecret}
+                      onChange={(e) => setMsGraphAppSecret(e.target.value)}
+                      autoComplete="off"
+                      className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                    />
+                    <input
+                      type="text"
+                      placeholder={tc.msgraph.tenantPlaceholder}
+                      value={msgraphTenantId}
+                      onChange={(e) => setMsGraphTenantId(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") saveMsGraphApp(sel); }}
+                      autoComplete="off"
+                      className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                    />
+                    <p className="text-[11px] text-muted-foreground">{tc.msgraph.tenantHelp}</p>
+                    {/* Where the values come from. The admin has to register the
+                        app and allow our redirect URI before any of this works,
+                        so the redirect URI is shown verbatim to copy. */}
+                    <button
+                      onClick={() => setMsGraphShowHelp((v) => !v)}
+                      className="text-[11px] text-muted-foreground underline underline-offset-2 hover:text-foreground transition-colors"
+                    >
+                      {tc.msgraph.helpTitle}
+                    </button>
+                    {msgraphShowHelp && (
+                      <div className="space-y-1">
+                        <p className="text-[11px] text-muted-foreground">{tc.msgraph.helpBody}</p>
+                        <p className="text-[11px] text-muted-foreground">
+                          {tc.msgraph.helpRedirect}
+                          <span className="font-medium text-foreground break-all">
+                            {typeof window === "undefined" ? "" : `${window.location.origin}/api/auth/callback/msgraph`}
+                          </span>
+                        </p>
+                        <p className="text-[11px] text-muted-foreground">{tc.msgraph.helpScopes}</p>
+                        <p className="text-[11px] text-muted-foreground">{tc.msgraph.helpConsent}</p>
+                      </div>
+                    )}
+                    {msgraphError && <p className="text-xs text-destructive">{msgraphError}</p>}
+                    <div className="flex gap-2">
+                      <button
+                        onClick={closeMsGraphForm}
+                        className="text-xs font-medium border border-border px-3 py-1 rounded-lg text-muted-foreground hover:bg-muted transition-colors"
+                      >
+                        {tc.cancel}
+                      </button>
+                      <button
+                        onClick={() => saveMsGraphApp(sel)}
+                        disabled={!msgraphAppId.trim() || !msgraphAppSecret.trim() || connecting === rid}
+                        className="text-xs font-medium bg-action text-action-foreground px-3 py-1 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
+                      >
+                        {connecting === rid ? tc.msgraph.connectingBtn : tc.msgraph.connectBtn}
+                      </button>
+                    </div>
+                    {/* Only offered once a workspace row exists: removing falls
+                        the workspace back to deployment config, and live
+                        connections are unaffected (their app pair rides in the
+                        grant envelope, not in this row). */}
+                    {msgraphStatus?.workspaceOwned && (
+                      <button
+                        onClick={removeMsGraphApp}
+                        className="text-[11px] text-muted-foreground underline underline-offset-2 hover:text-foreground transition-colors"
+                      >
+                        {tc.msgraph.removeLink}
+                      </button>
+                    )}
+                  </div>
+                )}
                 {showShopifyForm === rid && (
                   <div className="space-y-2">
                     <p className="text-xs text-muted-foreground">{tc.shopify.formHelp}</p>
@@ -3147,7 +3379,7 @@ function ConnectorsList() {
                       <button
                         onClick={() => startShopifyByoConnect(sel)}
                         disabled={!shopifyDomain.trim() || !shopifyAppId.trim() || !shopifyAppSecret.trim() || connecting === rid || shopifyResolving}
-                        className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                        className="text-xs font-medium bg-action text-action-foreground px-3 py-1 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
                       >
                         {connecting === rid ? tc.shopify.connectingBtn : tc.shopify.appConnectBtn}
                       </button>
@@ -3226,7 +3458,7 @@ function ConnectorsList() {
                       <button
                         onClick={() => handleSaveGcs(sel)}
                         disabled={!gcsKey.trim() || !gcsBucket.trim() || connecting === rid}
-                        className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                        className="text-xs font-medium bg-action text-action-foreground px-3 py-1 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
                       >
                         {connecting === rid ? tc.gcs.validatingBtn : tc.gcs.connectBtn}
                       </button>
@@ -3291,7 +3523,7 @@ function ConnectorsList() {
                       <button
                         onClick={() => handleSaveS3(sel)}
                         disabled={!s3Bucket.trim() || !s3AccessKeyId.trim() || !s3SecretKey.trim() || connecting === rid}
-                        className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                        className="text-xs font-medium bg-action text-action-foreground px-3 py-1 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
                       >
                         {connecting === rid ? tc.s3.validatingBtn : tc.s3.connectBtn}
                       </button>
@@ -3322,7 +3554,7 @@ function ConnectorsList() {
                       <button
                         onClick={() => handleSaveLocal(sel)}
                         disabled={!localDirPath.trim() || connecting === rid}
-                        className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                        className="text-xs font-medium bg-action text-action-foreground px-3 py-1 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
                       >
                         {connecting === rid ? tc.local.connectingBtn : tc.local.connectBtn}
                       </button>
@@ -3374,7 +3606,7 @@ function ConnectorsList() {
                       <button
                         onClick={() => handleSaveCli(sel)}
                         disabled={!newCliLabel.trim() || !newCliBinaryPath.trim() || connecting === rid}
-                        className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                        className="text-xs font-medium bg-action text-action-foreground px-3 py-1 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
                       >
                         {connecting === rid ? tc.cli.connectingBtn : tc.cli.connectBtn}
                       </button>
@@ -3498,7 +3730,7 @@ function ConnectorsList() {
                       <button
                         onClick={() => handleSaveImap(sel)}
                         disabled={!imapEmail.trim().includes("@") || !imapPassword || connecting === rid}
-                        className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                        className="text-xs font-medium bg-action text-action-foreground px-3 py-1 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
                       >
                         {connecting === rid ? tc.imap.verifyingBtn : tc.imap.connectBtn}
                       </button>
@@ -3537,7 +3769,7 @@ function ConnectorsList() {
                       <button
                         onClick={() => handleSaveAddAnother(sel.id)}
                         disabled={!addPat.trim() || connecting === `add:${sel.id}`}
-                        className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                        className="text-xs font-medium bg-action text-action-foreground px-3 py-1 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
                       >
                         {connecting === `add:${sel.id}` ? tc.savingBtn : tc.addAccountBtn}
                       </button>
@@ -3687,7 +3919,7 @@ function ConnectorsList() {
                             currentPolicy: tool.policy as ToolPolicy,
                           }))}
                           onPolicyChange={(toolName, policy) =>
-                            handlePolicyChange(sel.id, entry?.serverName ?? sel.id, toolName, policy)
+                            handlePolicyChange(toolKey ?? sel.id, entry?.serverName ?? sel.id, toolName, policy)
                           }
                         />
                       );
@@ -3747,7 +3979,7 @@ function ConnectorsList() {
                           <button
                             onClick={() => handleSaveCustom(sel.id)}
                             disabled={!editName.trim() || !editUrl.trim()}
-                            className="text-xs font-medium bg-primary text-primary-foreground px-4 py-1.5 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                            className="text-xs font-medium bg-action text-action-foreground px-4 py-1.5 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
                           >
                             {tc.saveBtn}
                           </button>
@@ -3787,7 +4019,7 @@ function ConnectorsList() {
                         {cliEnvKeys.length > 0 && <p className="text-[11px] text-muted-foreground">{tc.cli.envKeys.replace("{keys}", cliEnvKeys.join(", "))}</p>}
                         <p className="text-[11px] text-muted-foreground">{tc.cli.updateNote}</p>
                         {cliError && <p className="text-xs text-destructive">{cliError}</p>}
-                        <button onClick={() => handleUpdateCli(sel)} disabled={!cliLabel.trim() || !cliBinaryPath.trim() || connecting === rid} className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1.5 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors">
+                        <button onClick={() => handleUpdateCli(sel)} disabled={!cliLabel.trim() || !cliBinaryPath.trim() || connecting === rid} className="text-xs font-medium bg-action text-action-foreground px-3 py-1.5 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors">
                           {connecting === rid ? tc.cli.connectingBtn : tc.cli.updateBtn}
                         </button>
                       </div>

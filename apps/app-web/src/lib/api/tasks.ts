@@ -71,6 +71,16 @@ export function taskDescription(row: Pick<TaskRow, "attributes">): string | null
   return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
 
+/** The conventional `attributes.icon` emoji, or null for absent/junk data. */
+export function taskIcon(row: Pick<TaskRow, "attributes">): string | null {
+  const value = row.attributes?.icon;
+  return typeof value === "string" &&
+    value.trim().length > 0 &&
+    Array.from(value).length <= 16
+    ? value
+    : null;
+}
+
 export async function fetchWorkspaceTasks(
   workspaceId: string,
 ): Promise<TaskRow[]> {
@@ -97,7 +107,13 @@ export type BulkTaskSet = {
 export type BulkTasksResult = {
   ok: boolean;
   /** Per-id outcome; `newId` is the supersession id on updates. */
-  results: { id: string; ok: boolean; newId?: string }[];
+  results: {
+    id: string;
+    ok: boolean;
+    newId?: string;
+    tombstoned?: boolean;
+    activeRuleId?: string | null;
+  }[];
 };
 
 /**
@@ -109,7 +125,12 @@ export async function bulkTasks(
   workspaceId: string,
   body:
     | { action: "update"; ids: string[]; set: BulkTaskSet }
-    | { action: "delete"; ids: string[] },
+    | {
+        action: "delete";
+        ids: string[];
+        reason?: string;
+        create_rule?: boolean;
+      },
 ): Promise<BulkTasksResult | { ok: false; error: string }> {
   const res = await authFetch(
     `${API_URL}/api/brain-inbox/${encodeURIComponent(workspaceId)}/tasks/bulk`,
