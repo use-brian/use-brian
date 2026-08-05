@@ -265,7 +265,7 @@ export function CustomAppsSection({
                       type="button"
                       disabled={busy === app.id}
                       onClick={() => void onGrant(app)}
-                      className="rounded-md bg-primary px-2 py-1 text-[11px] font-medium text-primary-foreground disabled:opacity-50"
+                      className="rounded-md bg-action px-2 py-1 text-[11px] font-medium text-action-foreground disabled:opacity-50"
                     >
                       {needsReconsent ? t.reconsentAction : t.grantAction}
                     </button>
@@ -586,7 +586,7 @@ function AddFromGithub({
           type="button"
           disabled={busy || !repo}
           onClick={() => void submit()}
-          className="rounded-md bg-primary px-2 py-1 text-[11px] font-medium text-primary-foreground disabled:opacity-50"
+          className="rounded-md bg-action px-2 py-1 text-[11px] font-medium text-action-foreground disabled:opacity-50"
         >
           {busy ? t.addBusy : t.addConfirm}
         </button>

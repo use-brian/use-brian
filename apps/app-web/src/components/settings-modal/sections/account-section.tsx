@@ -231,7 +231,7 @@ export function AccountSection() {
                   type="button"
                   onClick={onSaveName}
                   disabled={!nameDirty || savingName}
-                  className="text-sm font-medium px-4 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+                  className="text-sm font-medium px-4 py-2 rounded-lg bg-action text-action-foreground hover:bg-action/90 disabled:opacity-50"
                 >
                   {savingName ? "…" : t.settings.account.saveName}
                 </button>
@@ -411,7 +411,7 @@ function ConnectedAccountsSection() {
             type="button"
             onClick={() => void onConnect()}
             disabled={busy}
-            className="text-sm font-medium px-4 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+            className="text-sm font-medium px-4 py-2 rounded-lg bg-action text-action-foreground hover:bg-action/90 disabled:opacity-50"
           >
             {busy ? "…" : t.settings.account.connect}
           </button>
@@ -442,7 +442,7 @@ function ConnectedAccountsSection() {
                 href={deepLink}
                 target="_blank"
                 rel="noreferrer"
-                className="text-sm font-medium px-4 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90"
+                className="text-sm font-medium px-4 py-2 rounded-lg bg-action text-action-foreground hover:bg-action/90"
               >
                 {t.settings.account.openTelegram}
               </a>
@@ -452,7 +452,7 @@ function ConnectedAccountsSection() {
                 type="button"
                 onClick={() => void onConnect()}
                 disabled={busy}
-                className="text-sm font-medium px-4 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+                className="text-sm font-medium px-4 py-2 rounded-lg bg-action text-action-foreground hover:bg-action/90 disabled:opacity-50"
               >
                 {busy ? "…" : t.settings.account.generateNewCode}
               </button>
@@ -632,7 +632,7 @@ function WhatsappLinkRow() {
             type="button"
             onClick={() => void onConnect()}
             disabled={busy}
-            className="text-sm font-medium px-4 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+            className="text-sm font-medium px-4 py-2 rounded-lg bg-action text-action-foreground hover:bg-action/90 disabled:opacity-50"
           >
             {busy ? "…" : t.settings.account.connect}
           </button>
@@ -665,7 +665,7 @@ function WhatsappLinkRow() {
                 href={deepLink}
                 target="_blank"
                 rel="noreferrer"
-                className="text-sm font-medium px-4 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90"
+                className="text-sm font-medium px-4 py-2 rounded-lg bg-action text-action-foreground hover:bg-action/90"
               >
                 {t.settings.account.openWhatsapp}
               </a>
@@ -675,7 +675,7 @@ function WhatsappLinkRow() {
                 type="button"
                 onClick={() => void onConnect()}
                 disabled={busy}
-                className="text-sm font-medium px-4 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+                className="text-sm font-medium px-4 py-2 rounded-lg bg-action text-action-foreground hover:bg-action/90 disabled:opacity-50"
               >
                 {busy ? "…" : t.settings.account.generateNewCode}
               </button>
@@ -785,7 +785,7 @@ function HandleSection() {
             <button
               onClick={saveHandle}
               disabled={saving}
-              className="text-sm font-medium px-4 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+              className="text-sm font-medium px-4 py-2 rounded-lg bg-action text-action-foreground hover:bg-action/90 disabled:opacity-50"
             >
               {saving ? "..." : t.settings.common.save}
             </button>

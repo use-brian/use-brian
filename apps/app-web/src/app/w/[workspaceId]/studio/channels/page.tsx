@@ -113,6 +113,7 @@ import {
   SearchableSelect,
   type SearchableSelectItem,
 } from "@/components/ui/searchable-select";
+import { StudioTopbarActions } from "@/components/studio/studio-topbar";
 import { DISPLAY_API_URL } from "@/lib/display-api-url";
 
 // Slack manifest's `request_url` must be a syntactically valid URL — Slack
@@ -434,19 +435,17 @@ export default function StudioChannelsPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      {/* Intro row — the one primary action; the topbar breadcrumb names the
-          section (docs/architecture/features/studio.md → "Page headers"). */}
-      <header className="flex justify-end">
+      <StudioTopbarActions>
         {activeId && (
           <button
             type="button"
             onClick={() => setAddOpen((v) => !v)}
-            className="shrink-0 text-sm font-medium rounded-md bg-primary text-primary-foreground px-3 py-1.5"
+            className="shrink-0 text-sm font-medium rounded-md bg-action text-action-foreground px-3 py-1.5"
           >
             {addOpen ? tr.add.close : tr.add.cta}
           </button>
         )}
-      </header>
+      </StudioTopbarActions>
 
       {addOpen && activeId && (
         <AddChannelForm
@@ -896,7 +895,7 @@ function ChannelDetail({
             type="button"
             onClick={() => void onAttach()}
             disabled={!attachAssistantId || attaching}
-            className="text-sm font-medium rounded-md bg-primary text-primary-foreground px-3 py-1 disabled:opacity-50"
+            className="text-sm font-medium rounded-md bg-action text-action-foreground px-3 py-1 disabled:opacity-50"
           >
             {attaching
               ? t.studioPage.channels.attaching
@@ -2096,7 +2095,7 @@ function AddChannelForm({
             type="button"
             onClick={() => void submit()}
             disabled={!canSubmit}
-            className="text-sm font-medium rounded-md bg-primary text-primary-foreground px-3 py-1.5 disabled:opacity-50"
+            className="text-sm font-medium rounded-md bg-action text-action-foreground px-3 py-1.5 disabled:opacity-50"
           >
             {submitting ? add.connecting : add.connect}
           </button>
@@ -2201,7 +2200,7 @@ function AddChannelForm({
                 href={`https://t.me/${encodeURIComponent(success.botUsername)}?start=${encodeURIComponent(success.pairingCode)}`}
                 target="_blank"
                 rel="noreferrer"
-                className="text-xs font-medium rounded-md bg-primary text-primary-foreground px-2 py-1"
+                className="text-xs font-medium rounded-md bg-action text-action-foreground px-2 py-1"
               >
                 {add.telegramPairingOpen}
               </a>
@@ -2235,7 +2234,7 @@ function AddChannelForm({
               href={success.inviteUrl}
               target="_blank"
               rel="noreferrer"
-              className="text-xs font-medium rounded-md bg-primary text-primary-foreground px-2 py-1"
+              className="text-xs font-medium rounded-md bg-action text-action-foreground px-2 py-1"
             >
               {add.discordInviteOpen}
             </a>
@@ -2343,7 +2342,7 @@ function WhatsappConnectTab({
           <button
             type="button"
             onClick={start}
-            className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground"
+            className="rounded-md bg-action px-3 py-1.5 text-sm font-medium text-action-foreground"
           >
             {wa.dialogRetry}
           </button>
@@ -2352,7 +2351,7 @@ function WhatsappConnectTab({
         <button
           type="button"
           onClick={start}
-          className="self-start rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground"
+          className="self-start rounded-md bg-action px-3 py-1.5 text-sm font-medium text-action-foreground"
         >
           {wa.connectAction}
         </button>
@@ -2515,7 +2514,7 @@ function WechatConnectTab({
               type="button"
               onClick={submitCode}
               disabled={!verifyCode.trim()}
-              className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground disabled:opacity-50"
+              className="rounded-md bg-action px-3 py-1.5 text-sm font-medium text-action-foreground disabled:opacity-50"
             >
               {wc.verifySubmit}
             </button>
@@ -2542,7 +2541,7 @@ function WechatConnectTab({
           <button
             type="button"
             onClick={start}
-            className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground"
+            className="rounded-md bg-action px-3 py-1.5 text-sm font-medium text-action-foreground"
           >
             {wc.retry}
           </button>
@@ -2551,7 +2550,7 @@ function WechatConnectTab({
         <button
           type="button"
           onClick={start}
-          className="self-start rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground"
+          className="self-start rounded-md bg-action px-3 py-1.5 text-sm font-medium text-action-foreground"
         >
           {wc.startAction}
         </button>
@@ -3018,7 +3017,7 @@ function WhatsappRepliesSection({ workspaceId }: { workspaceId: string }) {
                     ),
                   )
                 }
-                className="rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground disabled:opacity-50"
+                className="rounded-md bg-action px-2.5 py-1 text-xs font-medium text-action-foreground disabled:opacity-50"
               >
                 {bot.add}
               </button>

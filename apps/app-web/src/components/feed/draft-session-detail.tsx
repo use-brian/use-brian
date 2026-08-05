@@ -1903,7 +1903,7 @@ export function DraftSessionDetail() {
         <p className="text-sm text-muted-foreground">{td.noBrandBody}</p>
         <Link
           href={feedPath(params.workspaceId)}
-          className="inline-flex items-center justify-center rounded-lg bg-primary px-3 h-8 text-[12.5px] font-medium text-primary-foreground hover:bg-primary/90"
+          className="inline-flex items-center justify-center rounded-lg bg-action px-3 h-8 text-[12.5px] font-medium text-action-foreground hover:bg-action/90"
         >
           {td.noBrandCta}
         </Link>
@@ -2074,7 +2074,7 @@ export function DraftSessionDetail() {
                               type="button"
                               onClick={() => handleSaveEdit(msg.id)}
                               disabled={!editingMessageText.trim()}
-                              className="text-sm font-medium px-4 py-1.5 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                              className="text-sm font-medium px-4 py-1.5 rounded-lg bg-action text-action-foreground hover:bg-action/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                             >
                               {td.save}
                             </button>
@@ -2082,7 +2082,7 @@ export function DraftSessionDetail() {
                         </div>
                       ) : (
                         <div key="view" className="space-y-2 animate-fade-in">
-                          <div className="inline-block max-w-full bg-primary text-primary-foreground rounded-2xl rounded-br-md px-4 py-2.5 text-[15px] leading-[1.55] shadow-sm">
+                          <div className="inline-block max-w-full bg-secondary text-secondary-foreground rounded-2xl rounded-br-md px-4 py-2.5 text-[15px] leading-[1.55] shadow-sm">
                             <p className="whitespace-pre-wrap break-words overflow-hidden">
                               {msg.text}
                             </p>
@@ -2306,7 +2306,7 @@ export function DraftSessionDetail() {
                   type="button"
                   onClick={() => void onSend()}
                   disabled={!input.trim() || Boolean(activeOtherTurnUser)}
-                  className="rounded-lg bg-primary text-primary-foreground px-3 h-8 text-[12.5px] font-medium hover:bg-primary/90 disabled:opacity-40 transition-colors"
+                  className="rounded-lg bg-action text-action-foreground px-3 h-8 text-[12.5px] font-medium hover:bg-action/90 disabled:opacity-40 transition-colors"
                 >
                   {t.tuningChat.send}
                 </button>
@@ -2786,7 +2786,7 @@ function DraftOptionCard({
             className={`rounded-md px-3 h-7 text-[11px] font-medium transition-all duration-200 ${
               saved
                 ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/40 cursor-default"
-                : "bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-40"
+                : "bg-action text-action-foreground hover:bg-action/90 disabled:opacity-40"
             }`}
           >
             <span key={saved ? "saved" : saving ? "saving" : "idle"} className="inline-block animate-fade-in">
@@ -3029,7 +3029,7 @@ function SavedDraftsPanel(props: {
                       type="button"
                       onClick={() => props.onApprove(d)}
                       disabled={isActing || (isEditing && !props.editingDraftText.trim())}
-                      className="rounded-lg bg-primary text-primary-foreground px-3 h-8 text-xs font-medium hover:bg-primary/90 disabled:opacity-40 transition-colors"
+                      className="rounded-lg bg-action text-action-foreground px-3 h-8 text-xs font-medium hover:bg-action/90 disabled:opacity-40 transition-colors"
                     >
                       {isActing
                         ? props.sessionIntent === "post"
@@ -3328,7 +3328,7 @@ function ReferencesPanel(props: {
                   onClick={() => props.onPick(i)}
                   className={`rounded-full px-2.5 h-6 text-[11px] leading-none border transition-colors ${
                     isActive
-                      ? "bg-primary text-primary-foreground border-primary"
+                      ? "bg-action text-action-foreground border-primary"
                       : "bg-card text-muted-foreground border-border hover:text-foreground hover:border-primary/40"
                   }`}
                   title={r.permalink}

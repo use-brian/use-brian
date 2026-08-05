@@ -132,6 +132,7 @@ import { TasksSidebarPanel } from "./sidebar-panels/tasks-sidebar-panel";
 import { CrmSidebarPanel } from "./sidebar-panels/crm-sidebar-panel";
 import { BrowsersSidebarPanel } from "./sidebar-panels/browsers-sidebar-panel";
 import { ChatSidebarPanel } from "./sidebar-panels/chat-sidebar-panel";
+import { OfficeSidebarPanel } from "./sidebar-panels/office-sidebar-panel";
 
 export type SidebarMove = {
   viewId: string;
@@ -747,20 +748,19 @@ export function DocSidebar(props: Props) {
       )}
 
       <div className="flex-1 min-h-0 overflow-y-auto px-2 pb-4">
-        {/* Suggested for you is the one persistent row shared by the whole
-            operator mini-app family. Keep it before each app's own sidebar
-            panel (and before Page's sections) so Tasks / CRM / Feed /
-            Browsers / Chat / custom apps never strand the needs-you badge in
-            Page alone. It remains absent on Brain / Studio / Workflow. */}
+        {/* The shared quiet Suggested-for-you row always leads the scrollable
+            body, including Office, before the active app's local navigation. */}
         {activeOperatorApp !== null ? (
           <HomeDock workspaceId={workspaceId} />
         ) : null}
 
         {/* Surface-aware body. The page tree (Favorites / Drafts / search) shows
-            ONLY on Home (`'p'`); Brain / Studio / Workflow / Tasks / CRM /
-            Browsers / Chat each swap in their own panel; every other surface
-            (approvals, knowledge-base, root) renders nothing here. */}
-        {props.activeSurface === "brain" ? (
+            ONLY on Home (`'p'`); Office / Brain / Studio / Workflow / Tasks /
+            CRM / Browsers / Chat each swap in their own panel; every other
+            surface (approvals, knowledge-base, root) renders nothing here. */}
+        {props.activeSurface === "office" ? (
+          <OfficeSidebarPanel workspaceId={workspaceId} />
+        ) : props.activeSurface === "brain" ? (
           <BrainSidebarPanel workspaceId={workspaceId} />
         ) : props.activeSurface === "studio" ? (
           <StudioSidebarPanel workspaceId={workspaceId} />

@@ -354,7 +354,7 @@ function GithubRepoPicker({
               <button
                 onClick={save}
                 disabled={saving}
-                className="relative text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-60 transition-colors"
+                className="relative text-xs font-medium bg-action text-action-foreground px-3 py-1 rounded-lg hover:bg-action/90 disabled:opacity-60 transition-colors"
               >
                 <span className={saving ? "invisible" : undefined}>
                   {copy.save}
@@ -664,7 +664,7 @@ export default function StudioIngestRulesPage() {
                 "text-xs font-medium px-3 py-1 rounded-lg shrink-0 transition-colors disabled:opacity-40",
                 s.ingestionEnabled
                   ? "border border-border text-muted-foreground hover:text-destructive hover:border-destructive/30"
-                  : "bg-primary text-primary-foreground hover:bg-primary/90",
+                  : "bg-action text-action-foreground hover:bg-action/90",
               )}
             >
               {busy
@@ -802,7 +802,7 @@ export default function StudioIngestRulesPage() {
           </p>
           <Link
             href={connectorsHref}
-            className="mt-2 inline-block rounded-lg bg-primary px-3 py-1 text-xs font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
+            className="mt-2 inline-block rounded-lg bg-action px-3 py-1 text-xs font-medium text-action-foreground hover:bg-action/90 transition-colors"
           >
             {copy.connectAction}
           </Link>
@@ -913,7 +913,7 @@ export default function StudioIngestRulesPage() {
           </p>
           <Link
             href={connectorsHref}
-            className="mt-2 text-sm font-medium bg-primary text-primary-foreground px-4 py-2 rounded-lg hover:bg-primary/90 transition-colors"
+            className="mt-2 text-sm font-medium bg-action text-action-foreground px-4 py-2 rounded-lg hover:bg-action/90 transition-colors"
           >
             {copy.emptyCta}
           </Link>

@@ -263,6 +263,10 @@ export function openRecordingsRoutes(deps: RouteDeps): Router {
       if (durationMs > MAX_RECORDING_DURATION_MS) {
         return void res.status(413).json({ error: 'too_long', ceilingMinutes: 180 })
       }
+      // Estimate is also the chat staging boundary. Persist the proven
+      // duration now so a recording can remain uploaded-but-unprocessed while
+      // the conversation clarifies its purpose.
+      await (deps.updateRecording ?? updateRecording)(episode.id, { durationMs })
       res.json({
         recordingId: episode.id,
         durationMs,

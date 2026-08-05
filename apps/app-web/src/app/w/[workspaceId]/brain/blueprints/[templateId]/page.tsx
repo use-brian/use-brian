@@ -1136,7 +1136,7 @@ function PageActionsSection({
               type="button"
               disabled={saving || !label.trim() || (kind === "workflow" && !workflowId)}
               onClick={() => void handleAdd()}
-              className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+              className="rounded-md bg-action px-3 py-1.5 text-sm font-medium text-action-foreground transition-colors hover:bg-action/90 disabled:opacity-50"
             >
               {copy.save}
             </button>

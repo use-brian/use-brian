@@ -32,12 +32,10 @@
  */
 
 import {
-  BUILTIN_HOME_APP_KEYS,
   DEFAULT_HOME_APPS,
   customHomeAppId,
   isBuiltinHomeAppKey,
   type HomeAppEntry,
-  type HomeAppKey,
 } from "@use-brian/shared/home-apps";
 import type { WorkspaceSurface } from "@/lib/doc-page-url";
 
@@ -57,8 +55,21 @@ export {
  *  the order a workspace starts at and the order the Studio tab lists the
  *  hidden apps in — the order the strip actually renders is whatever
  *  `home_apps` stores, which an admin can drag (`reorderHomeApps`). */
-export const OPERATOR_APP_KEYS = BUILTIN_HOME_APP_KEYS;
-export type OperatorAppKey = HomeAppKey;
+export const OPERATOR_APP_KEYS = [
+  "page",
+  "office",
+  "tasks",
+  "crm",
+  "feed",
+  "browsers",
+  "chat",
+] as const;
+export type OperatorAppKey = (typeof OPERATOR_APP_KEYS)[number];
+const OPERATOR_APP_SET: ReadonlySet<string> = new Set(OPERATOR_APP_KEYS);
+
+export function isOperatorAppKey(value: unknown): value is OperatorAppKey {
+  return typeof value === "string" && OPERATOR_APP_SET.has(value);
+}
 
 /** Fallback when config resolution has nothing to say (SSR, empty list). */
 export const DEFAULT_OPERATOR_APP: OperatorAppKey = "page";
@@ -68,6 +79,7 @@ export const DEFAULT_OPERATOR_APP: OperatorAppKey = "page";
  *  session-rail index). */
 const APP_SEGMENT: Record<OperatorAppKey, string> = {
   page: "p",
+  office: "office",
   tasks: "tasks",
   feed: "feed",
   crm: "crm",
@@ -78,6 +90,7 @@ const APP_SEGMENT: Record<OperatorAppKey, string> = {
 /** Surfaces that belong to an operator app (the bar shows on these). */
 const SURFACE_TO_APP: Partial<Record<WorkspaceSurface, OperatorAppKey>> = {
   p: "page",
+  office: "office",
   tasks: "tasks",
   feed: "feed",
   crm: "crm",
@@ -112,7 +125,9 @@ export function customAppPath(workspaceId: string, appId: string): string {
 export function homeAppPath(workspaceId: string, entry: HomeAppEntry): string {
   const customId = customHomeAppId(entry);
   if (customId) return customAppPath(workspaceId, customId);
-  return operatorAppPath(workspaceId, entry as OperatorAppKey);
+  if (isOperatorAppKey(entry)) return operatorAppPath(workspaceId, entry);
+  // A reserved-but-not-enabled built-in must never produce a dead route.
+  return operatorAppPath(workspaceId, DEFAULT_OPERATOR_APP);
 }
 
 /** Matches the custom-app route, capturing the `workspace_home_apps` row id. */
@@ -176,7 +191,7 @@ export function operatorAppStorageKey(workspaceId: string): string {
  *  T12: Home resolves to the FIRST enabled entry — Page may be deselected, so
  *  a hard-coded `page` would send those workspaces to a hidden app. */
 function firstEnabled(enabled: readonly HomeAppEntry[]): HomeAppEntry {
-  return enabled[0] ?? DEFAULT_OPERATOR_APP;
+  return enabled.find((entry) => isOperatorAppKey(entry) || Boolean(customHomeAppId(entry))) ?? DEFAULT_OPERATOR_APP;
 }
 
 /**
@@ -195,7 +210,7 @@ export function readOperatorApp(
     const raw = window.localStorage.getItem(operatorAppStorageKey(workspaceId));
     if (
       raw &&
-      (isBuiltinHomeAppKey(raw) || raw.startsWith("custom:")) &&
+      (isOperatorAppKey(raw) || raw.startsWith("custom:")) &&
       (enabled as readonly string[]).includes(raw)
     ) {
       return raw as HomeAppEntry;

@@ -1,0 +1,7 @@
+export * from './package.js'
+export * from './docx/index.js'
+export * from './pptx/index.js'
+export * from './templates/compiler.js'
+export * from './generation/index.js'
+export * from './tools.js'
+export { officeGoldenSerialization } from '@use-brian/office-renderer'

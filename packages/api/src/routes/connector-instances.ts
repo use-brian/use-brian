@@ -6,7 +6,12 @@
 import { Router, type Response } from 'express'
 import { z } from 'zod'
 import {
+  ALL_EXACT_INSTANCE_GOVERNANCE_CONNECTOR_IDS,
+  MULTI_INSTANCE_CONNECTOR_IDS,
+} from '@use-brian/shared'
+import {
   connectorInstanceGovernanceId,
+  type ConnectorInstance,
   type ConnectorInstanceStore,
   type SensitivityTier,
 } from '../db/connector-instance-store.js'
@@ -94,6 +99,24 @@ export function workspaceConnectorInstanceRoutes(opts: ConnectorInstanceRouteOpt
       return null
     }
     return { userId, instance, ceiling }
+  }
+
+  async function governanceIdForInstance(
+    userId: string,
+    workspaceId: string,
+    instance: ConnectorInstance,
+  ): Promise<string> {
+    if (ALL_EXACT_INSTANCE_GOVERNANCE_CONNECTOR_IDS.has(instance.provider)) {
+      return connectorInstanceGovernanceId(instance.provider, instance.id)
+    }
+    if (!MULTI_INSTANCE_CONNECTOR_IDS.has(instance.provider)) return instance.provider
+
+    const primary = (await opts.connectorInstanceStore.listByWorkspace(userId, workspaceId))
+      .filter((candidate) => candidate.provider === instance.provider)
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || a.id.localeCompare(b.id))[0]
+    return primary?.id === instance.id
+      ? instance.provider
+      : connectorInstanceGovernanceId(instance.provider, instance.id)
   }
 
   router.get('/', async (req, res) => {
@@ -189,9 +212,7 @@ export function workspaceConnectorInstanceRoutes(opts: ConnectorInstanceRouteOpt
     if (!gate) return
     const workspaceId = (req.params as Record<string, string>).workspaceId
     const policies = await opts.workspaceToolPolicyStore.listForWorkspace(workspaceId)
-    const governanceId = gate.instance.provider === 'imap'
-      ? connectorInstanceGovernanceId('imap', gate.instance.id)
-      : gate.instance.provider
+    const governanceId = await governanceIdForInstance(gate.userId, workspaceId, gate.instance)
     // Legacy provider rows seed an account until that concrete instance has an
     // explicit row. Exact rows overwrite by tool, so sibling edits stay split.
     const byTool = new Map<string, (typeof policies)[number]>()
@@ -213,9 +234,7 @@ export function workspaceConnectorInstanceRoutes(opts: ConnectorInstanceRouteOpt
       return
     }
     const workspaceId = (req.params as Record<string, string>).workspaceId
-    const governanceId = gate.instance.provider === 'imap'
-      ? connectorInstanceGovernanceId('imap', gate.instance.id)
-      : gate.instance.provider
+    const governanceId = await governanceIdForInstance(gate.userId, workspaceId, gate.instance)
     const policy = await opts.workspaceToolPolicyStore.setPolicy({
       workspaceId,
       serverName: governanceId,

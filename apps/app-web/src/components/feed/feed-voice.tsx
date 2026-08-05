@@ -453,7 +453,7 @@ export function FeedVoice({ scope }: { scope: VoiceScope }) {
         </p>
         <Link
           href={feedPath(team.workspaceId)}
-          className="inline-flex items-center justify-center rounded-lg bg-primary px-3 h-8 text-[12.5px] font-medium text-primary-foreground hover:bg-primary/90"
+          className="inline-flex items-center justify-center rounded-lg bg-action px-3 h-8 text-[12.5px] font-medium text-action-foreground hover:bg-action/90"
         >
           {t.noVoiceCta}
         </Link>
@@ -807,7 +807,7 @@ function VoiceForm({
           type="button"
           onClick={onSubmit}
           disabled={busy || !form.summary.trim()}
-          className="rounded-xl bg-primary text-primary-foreground px-4 h-9 text-sm font-medium hover:bg-primary/90 disabled:opacity-50"
+          className="rounded-lg bg-action text-action-foreground px-4 h-9 text-sm font-medium hover:bg-action/90 disabled:opacity-50"
         >
           {busy ? t.saving : submitLabel}
         </button>

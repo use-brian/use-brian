@@ -118,7 +118,11 @@ import {
   packMsGraphTokens, unpackMsGraphTokens, unpackMsGraphAppCredentials,
   type MsGraphTokens,
 } from '../msgraph/token.js'
-import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTORS } from '@use-brian/shared'
+import {
+  APP_LEVEL_ASSISTANT_ID,
+  MULTI_INSTANCE_CONNECTOR_IDS,
+  OFFICIAL_CONNECTOR_TOOLS,
+} from '@use-brian/shared'
 import { connectorInstanceGovernanceId } from '../db/connector-instance-store.js'
 // Built-in connector OAuth app creds come through getConnectorConfig (OPEN, file
 // or env), NOT getEnv (closed env schema) — so this open injector imports no
@@ -867,12 +871,9 @@ export async function injectMcpTools(params: {
   // entry `single_instance` — a provider in this list whose injector ignores
   // extras ships a silently-dead second account. Checklist:
   // docs/architecture/integrations/mcp.md → "Adding a new built-in connector tool".
-  const MULTI_INSTANCE_RUNTIME_PROVIDERS = OFFICIAL_CONNECTORS
-    .filter((c) => c.auth_type !== 'none' && !c.single_instance)
-    .map((c) => c.id)
   const extrasByProvider = new Map<string, ConnectorInstanceRef[]>()
   if (connectorInstanceStore) {
-    for (const provider of MULTI_INSTANCE_RUNTIME_PROVIDERS) {
+    for (const provider of MULTI_INSTANCE_CONNECTOR_IDS) {
       const insts = connectors
         .filter((c) => c.connectorId === provider && c.connected)
         .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
@@ -900,7 +901,7 @@ export async function injectMcpTools(params: {
   await injectShopifyTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, undefined, extrasByProvider.get('shopify'), resolveInstanceCreds, persistInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore, filesApi)
   // No extras argument: `msgraph` is `single_instance` in OFFICIAL_CONNECTORS
   // (one Microsoft identity per user), so it is never in
-  // MULTI_INSTANCE_RUNTIME_PROVIDERS and `extrasByProvider` never holds it.
+  // MULTI_INSTANCE_CONNECTOR_IDS and `extrasByProvider` never holds it.
   await injectMsGraphTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, { report: reportHealth })
   await injectMailboxTools({
     connectors, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable,
@@ -938,11 +939,19 @@ export async function injectMcpTools(params: {
   // legacy call sites (pre-promotion, tests) stay unchanged.
   if (assistantTeamId && connectorGrantStore) {
     try {
-      const grants = await connectorGrantStore.listForTargetSystem('workspace', assistantTeamId)
+      const grants = (await connectorGrantStore.listForTargetSystem('workspace', assistantTeamId))
+        .sort((a, b) => (a.instance.createdAt?.getTime() ?? 0) - (b.instance.createdAt?.getTime() ?? 0)
+          || String(a.instance.id).localeCompare(String(b.instance.id)))
       const overlaidByGrant = new Set<string>()
+      const winningGrantorByProvider = new Map<string, string>()
+      for (const grant of grants) {
+        if (!grant.instance.connected || winningGrantorByProvider.has(grant.instance.provider)) continue
+        winningGrantorByProvider.set(grant.instance.provider, grant.grantedByUserId)
+      }
       for (const g of grants) {
         if (!g.instance.connected) continue
         const p = g.instance.provider
+        if (winningGrantorByProvider.get(p) !== g.grantedByUserId) continue
 
         // IMAP is one provider-level tool set with an `account` router, so the
         // usual first-instance-per-provider overlay would discard the user's
@@ -997,8 +1006,6 @@ export async function injectMcpTools(params: {
           continue
         }
 
-        if (overlaidByGrant.has(p)) continue    // first grant per provider wins
-        overlaidByGrant.add(p)
         // Health gate (migration 294): a granted connector whose credentials
         // died is announced as needing reconnect rather than injected, so the
         // model doesn't burn its tool budget on a dead connector.
@@ -1006,6 +1013,26 @@ export async function injectMcpTools(params: {
           unavailable.push(connectorReconnectNotice(p, g.instance.label))
           continue
         }
+        if (overlaidByGrant.has(p)) continue
+        overlaidByGrant.add(p)
+        const siblingInstances = grants.filter((candidate) =>
+          candidate !== g
+          && candidate.instance.provider === p
+          && candidate.grantedByUserId === g.grantedByUserId
+          && candidate.instance.connected,
+        )
+        for (const sibling of siblingInstances) {
+          if (sibling.instance.healthStatus === 'auth_failed') {
+            unavailable.push(connectorReconnectNotice(p, sibling.instance.label))
+          }
+        }
+        const extraInstances = siblingInstances
+          .filter((sibling) => sibling.instance.healthStatus !== 'auth_failed')
+          .map((sibling) => ({
+            id: sibling.instance.id,
+            label: sibling.instance.label,
+            connectedEmail: sibling.instance.connectedEmail,
+          }))
         const grantorConnectors = await connectorStore.list(g.grantedByUserId).catch(() => [])
         // Bind the granted built-in connector to the EXACT exposed instance
         // (`g.instance.id`), NOT `connectorStore.getCredentials(grantor, provider)`.
@@ -1026,12 +1053,34 @@ export async function injectMcpTools(params: {
           const creds = await connectorInstanceStore.getCredentialsSystem(g.instance.id)
           return creds?.client_secret ?? null
         }
+        const resolveGrantedInstanceCreds = async (instanceId: string): Promise<string | null> => {
+          if (!connectorInstanceStore) return null
+          const creds = await connectorInstanceStore.getCredentialsSystem(instanceId)
+          return creds?.client_secret ?? null
+        }
+        const persistGrantedInstanceCreds = async (
+          instanceId: string,
+          clientId: string,
+          secret: string,
+        ): Promise<void> => {
+          if (!connectorInstanceStore) throw new Error(`${p} token rotation needs the instance store`)
+          await connectorInstanceStore.updateCredentialsSystem(instanceId, {
+            client_id: clientId,
+            client_secret: secret,
+          })
+        }
         if (p === 'github') {
-          await injectGitHubTools(grantorConnectors, connectorStore, settingsStore, g.grantedByUserId, assistantId, assistantConnectorStore, tools, undefined, boundGrantCreds, undefined, undefined, { report: reportHealth, instanceId: g.instance.id }, assistantConnectorGrantsStore)
+          await injectGitHubTools(grantorConnectors, connectorStore, settingsStore, g.grantedByUserId, assistantId, assistantConnectorStore, tools, undefined, boundGrantCreds, extraInstances, resolveGrantedInstanceCreds, { report: reportHealth, instanceId: g.instance.id }, assistantConnectorGrantsStore)
         } else if (p === 'notion') {
-          await injectNotionTools(grantorConnectors, connectorStore, settingsStore, g.grantedByUserId, assistantId, assistantConnectorStore, tools, undefined, boundGrantCreds, undefined, undefined, { report: reportHealth, instanceId: g.instance.id }, assistantConnectorGrantsStore)
+          await injectNotionTools(grantorConnectors, connectorStore, settingsStore, g.grantedByUserId, assistantId, assistantConnectorStore, tools, undefined, boundGrantCreds, extraInstances, resolveGrantedInstanceCreds, { report: reportHealth, instanceId: g.instance.id }, assistantConnectorGrantsStore)
         } else if (p === 'fathom') {
-          await injectFathomTools(grantorConnectors, connectorStore, settingsStore, g.grantedByUserId, assistantId, assistantConnectorStore, tools, undefined)
+          await injectFathomTools(
+            grantorConnectors, connectorStore, settingsStore, g.grantedByUserId,
+            assistantId, assistantConnectorStore, tools, undefined,
+            boundGrantCreds,
+            async (encoded) => persistGrantedInstanceCreds(g.instance.id, 'fathom_oauth', encoded),
+            extraInstances, resolveGrantedInstanceCreds, persistGrantedInstanceCreds,
+          )
         } else if (p === 'shopify') {
           // Rotated tuples persist back into the EXPOSED instance row (the
           // Fathom team-path deferral doesn't apply: updateCredentialsSystem
@@ -1043,7 +1092,7 @@ export async function injectMcpTools(params: {
               if (!connectorInstanceStore) throw new Error('Shopify token rotation needs the instance store')
               await connectorInstanceStore.updateCredentialsSystem(g.instance.id, { client_id: 'shopify_oauth', client_secret: encoded })
             },
-            undefined, undefined, undefined,
+            extraInstances, resolveGrantedInstanceCreds, persistGrantedInstanceCreds,
             { report: reportHealth, instanceId: g.instance.id },
             assistantConnectorGrantsStore,
             filesApi,
@@ -1082,6 +1131,7 @@ export async function injectMcpTools(params: {
             assistantConnectorStore, tools, userTimezone, undefined,
             gdriveFilesStore, { [p]: boundGrantCreds }, connectorActionAudit,
             assistantConnectorGrantsStore, workspaceDomain, filesApi,
+            new Map([[p, extraInstances]]), resolveGrantedInstanceCreds, reportHealth,
           )
         } else if (g.instance.custom && g.instance.url) {
           // Custom remote MCP shared via a grant. Respect Layer-2 enablement
@@ -1105,9 +1155,26 @@ export async function injectMcpTools(params: {
 
   if (assistantTeamId && connectorInstanceStore) {
     try {
-      const teamNative = await connectorInstanceStore.listByWorkspaceSystem(assistantTeamId)
+      const teamNative = (await connectorInstanceStore.listByWorkspaceSystem(assistantTeamId))
+        .sort((a, b) => (a.createdAt?.getTime() ?? 0) - (b.createdAt?.getTime() ?? 0)
+          || String(a.id).localeCompare(String(b.id)))
       const overlaidByTeam = new Set<string>()
       const googleOverrides: Partial<Record<string, () => Promise<string | null>>> = {}
+      const teamExtrasByProvider = new Map<string, ConnectorInstanceRef[]>()
+      const resolveTeamInstanceCreds = async (instanceId: string): Promise<string | null> => {
+        const creds = await connectorInstanceStore.getCredentialsSystem(instanceId)
+        return creds?.client_secret ?? null
+      }
+      const persistTeamInstanceCreds = async (
+        instanceId: string,
+        clientId: string,
+        secret: string,
+      ): Promise<void> => {
+        await connectorInstanceStore.updateCredentialsSystem(instanceId, {
+          client_id: clientId,
+          client_secret: secret,
+        })
+      }
 
       // Team-owned connectors are governed by the SHARED workspace policy, not
       // any single user's mcp_tool_settings. Swap the settings store for a
@@ -1143,6 +1210,10 @@ export async function injectMcpTools(params: {
         if (p === 'imap') {
           if (overlaidByTeam.has(p)) continue
           overlaidByTeam.add(p)
+          const imapToolNames = new Set((OFFICIAL_CONNECTOR_TOOLS.imap ?? []).map((tool) => tool.name))
+          for (const toolName of tools.keys()) {
+            if (imapToolNames.has(baseToolName(toolName))) tools.delete(toolName)
+          }
           const usableMailboxes: Array<{
             connectorId: string
             connected: boolean
@@ -1184,8 +1255,15 @@ export async function injectMcpTools(params: {
           continue
         }
 
-        if (overlaidByTeam.has(p)) continue    // first team-native per provider wins
-        overlaidByTeam.add(p)
+        if (overlaidByTeam.has(p)) continue
+        // Team-native precedence covers the whole provider, including any
+        // account variants injected by the lower-priority grant overlay.
+        // Remove that provider family before adding the workspace-owned
+        // primary + variants, otherwise hidden grant cards remain callable.
+        const providerToolNames = new Set((OFFICIAL_CONNECTOR_TOOLS[p] ?? []).map((tool) => tool.name))
+        for (const toolName of tools.keys()) {
+          if (providerToolNames.has(baseToolName(toolName))) tools.delete(toolName)
+        }
         // Health gate (migration 294): a team-native connector whose credentials
         // died (401 at call time) is announced as needing reconnect and NOT
         // re-injected — the exact fix for the dead-GitHub-token incident, where
@@ -1195,6 +1273,22 @@ export async function injectMcpTools(params: {
           unavailable.push(connectorReconnectNotice(p, inst.label))
           continue
         }
+        overlaidByTeam.add(p)
+        const siblingInstances = teamNative.filter((candidate) =>
+          candidate !== inst && candidate.provider === p && candidate.connected,
+        )
+        for (const sibling of siblingInstances) {
+          if (sibling.healthStatus === 'auth_failed') {
+            unavailable.push(connectorReconnectNotice(p, sibling.label))
+          }
+        }
+        const extraInstances = siblingInstances
+          .filter((sibling) => sibling.healthStatus !== 'auth_failed')
+          .map((sibling) => ({
+            id: sibling.id,
+            label: sibling.label,
+            connectedEmail: sibling.connectedEmail,
+          }))
         syntheticConnectors.push({
           connectorId: p,
           connected: true,
@@ -1217,8 +1311,8 @@ export async function injectMcpTools(params: {
               const creds = await connectorInstanceStore.getCredentialsSystem(inst.id)
               return creds?.client_secret ?? null
             },
-            undefined,
-            undefined,
+            extraInstances,
+            resolveTeamInstanceCreds,
             { report: reportHealth, instanceId: inst.id },
             assistantConnectorGrantsStore,
           )
@@ -1236,20 +1330,19 @@ export async function injectMcpTools(params: {
               const creds = await connectorInstanceStore.getCredentialsSystem(inst.id)
               return creds?.client_secret ?? null
             },
-            undefined,
-            undefined,
+            extraInstances,
+            resolveTeamInstanceCreds,
             { report: reportHealth, instanceId: inst.id },
             assistantConnectorGrantsStore,
           )
         } else if (p === 'fathom') {
-          // Fathom team-native is intentionally deferred: refresh tokens are
-          // one-time-use, so this path needs a system-level writer on
-          // connectorInstanceStore to persist rotated tokens back into the
-          // team-scoped row. Without it, the first refresh would land in
-          // the user-scoped store and brick the next call. Skip until that
-          // writer lands. User-scoped Fathom continues to work via the main
-          // built-in path above.
-          continue
+          await injectFathomTools(
+            syntheticConnectors, connectorStore, teamPolicyStore, userId,
+            assistantId, assistantConnectorStore, tools, undefined,
+            () => resolveTeamInstanceCreds(inst.id),
+            (encoded) => persistTeamInstanceCreds(inst.id, 'fathom_oauth', encoded),
+            extraInstances, resolveTeamInstanceCreds, persistTeamInstanceCreds,
+          )
         } else if (p === 'shopify') {
           await injectShopifyTools(
             syntheticConnectors,
@@ -1269,7 +1362,7 @@ export async function injectMcpTools(params: {
             async (encoded) => {
               await connectorInstanceStore.updateCredentialsSystem(inst.id, { client_id: 'shopify_oauth', client_secret: encoded })
             },
-            undefined, undefined, undefined,
+            extraInstances, resolveTeamInstanceCreds, persistTeamInstanceCreds,
             { report: reportHealth, instanceId: inst.id },
             assistantConnectorGrantsStore,
             filesApi,
@@ -1301,6 +1394,7 @@ export async function injectMcpTools(params: {
             const creds = await connectorInstanceStore.getCredentialsSystem(inst.id)
             return creds?.client_secret ?? null
           }
+          if (extraInstances.length > 0) teamExtrasByProvider.set(p, extraInstances)
         }
         // Custom remote MCP team-native instances are handled in the
         // unified MCP discovery loop near the top of this function — they
@@ -1328,6 +1422,9 @@ export async function injectMcpTools(params: {
           assistantConnectorGrantsStore,
           workspaceDomain,
           filesApi,
+          teamExtrasByProvider,
+          resolveTeamInstanceCreds,
+          reportHealth,
         )
       }
 
@@ -1695,7 +1792,7 @@ export type ConnectorInstanceRef = {
  * Inject label-qualified tool variants for each additional connector instance.
  * `buildToolsForInstance` returns the provider's canonical tool set already
  * bound to the given instance's credentials; this helper renames + tags them
- * and applies the provider's (shared) policy.
+ * and applies exact-instance enablement and policy with provider fallback.
  */
 async function injectInstanceVariants(opts: {
   provider: string
@@ -1703,13 +1800,18 @@ async function injectInstanceVariants(opts: {
   settingsStore: McpSettingsStore
   assistantId: string
   userId: string
+  assistantConnectorStore?: AssistantConnectorStore
   tools: Map<string, Tool>
-  buildToolsForInstance: (instance: ConnectorInstanceRef) => Tool[]
+  buildToolsForInstance: (instance: ConnectorInstanceRef, governanceId: string) => Tool[]
 }): Promise<void> {
   for (const extra of opts.extras) {
+    const governanceId = connectorInstanceGovernanceId(opts.provider, extra.id)
+    const enabled = !opts.assistantConnectorStore
+      || await opts.assistantConnectorStore.isEnabled(opts.assistantId, governanceId, opts.provider)
+    if (!enabled) continue
     let variantTools: Tool[]
     try {
-      variantTools = opts.buildToolsForInstance(extra)
+      variantTools = opts.buildToolsForInstance(extra, governanceId)
     } catch (err) {
       console.error(`[mcp-inject] ${opts.provider} instance ${extra.id} build failed:`, err)
       continue
@@ -1723,7 +1825,17 @@ async function injectInstanceVariants(opts: {
         description: `[${extra.label}] ${tool.description}`,
       }
       if (
-        (await applyPolicyOrSkip(variant, opts.provider, opts.settingsStore, opts.assistantId, opts.userId, undefined, canonical)) === 'include'
+        (await applyPolicyOrSkip(
+          variant,
+          governanceId,
+          opts.settingsStore,
+          opts.assistantId,
+          opts.userId,
+          undefined,
+          canonical,
+          opts.provider,
+          opts.provider,
+        )) === 'include'
       ) {
         opts.tools.set(variant.name, variant)
       }
@@ -1906,12 +2018,12 @@ async function injectGoogleTools(
    */
   filesApi?: FilesApi,
   /**
-   * Multi-account extras (personal base load only). Additional connected
+   * Multi-account extras. Additional connected
    * instances per Google provider beyond the primary — each is injected as a
    * label-qualified variant tool set bound to its own refresh token via
    * `resolveInstanceCreds`, mirroring the GitHub/Notion/Fathom pattern. The
-   * team-native / grant overlay paths never pass these (overlays stay
-   * provider-level, first instance wins).
+   * workspace overlay paths pass the same shape so exposed/team-owned sibling
+   * accounts receive the same exact-instance variants as personal assistants.
    */
   extrasByProvider?: Map<string, ConnectorInstanceRef[]>,
   resolveInstanceCreds?: (instanceId: string) => Promise<string | null>,
@@ -2008,10 +2120,27 @@ async function injectGoogleTools(
   // account's token for a suffixed tool name (`googleCalendarUpdateEvent__work_1a2b3c4d`).
   const instanceTokenBySuffix = new Map<string, () => Promise<string>>()
 
-  /** Extras for one Google provider — only on the personal base load. */
+  /** Extras for one Google provider, regardless of credential source. */
   function googleExtras(provider: 'gcal' | 'gmail' | 'gdrive'): ConnectorInstanceRef[] {
-    if (credsOverridePerConnector || !resolveInstanceCreds) return []
+    if (!resolveInstanceCreds) return []
     return extrasByProvider?.get(provider) ?? []
+  }
+
+  /** Whether at least one additional account survives its exact enable gate. */
+  async function hasEnabledGoogleExtra(
+    provider: 'gcal' | 'gmail' | 'gdrive',
+    extras: ConnectorInstanceRef[],
+  ): Promise<boolean> {
+    if (extras.length === 0) return false
+    if (!assistantConnectorStore) return true
+    for (const extra of extras) {
+      if (await assistantConnectorStore.isEnabled(
+        assistantId,
+        connectorInstanceGovernanceId(provider, extra.id),
+        provider,
+      )) return true
+    }
+    return false
   }
 
   /** Wrap a variant tool set with the per-instance health probe (when wired). */
@@ -2033,12 +2162,14 @@ async function injectGoogleTools(
   // Google Calendar — Layer 1 (connected + not revoked) + Layer 2 (enabled for this assistant)
   const gcal = gcalRaw && !revokedConnectors.has('gcal') ? gcalRaw : undefined
   const gcalEnabled = gcal && (!assistantConnectorStore || await assistantConnectorStore.isEnabled(assistantId, 'gcal'))
+  const gcalExtras = googleExtras('gcal')
+  const gcalExtraEnabled = await hasEnabledGoogleExtra('gcal', gcalExtras)
   if (revokedConnectors.has('gcal')) {
     unavailable?.push(expiredCredentialsNotice('Google Calendar'))
-  } else if (!gcal || !gcalEnabled) {
+  } else if ((!gcal || !gcalEnabled) && !gcalExtraEnabled) {
     unavailable?.push(notConnectedNotice('Google Calendar and Google Tasks', 'calendar events, tasks, and reminders'))
   }
-  if (gcal && gcalEnabled) {
+  if (gcalRaw && (gcalEnabled || gcalExtraEnabled)) {
     try {
       // Read per-user gcal config (e.g. sendUpdates preference)
       const gcalConfig = await connectorStore.getConfig(userId, 'gcal')
@@ -2110,9 +2241,12 @@ async function injectGoogleTools(
 
       // Tool set bound to one account's token source — built once for the
       // primary (canonical names) and once per extra account (suffixed
-      // variants). The audit emitters, action gates, and sendUpdates config
-      // are provider-level and intentionally shared across accounts.
-      const buildCalTools = (getToken: () => Promise<string>) => gateToolsOnActionGrants(createGoogleCalendarTools({
+      // variants). Audit metadata + sendUpdates remain provider-level; action
+      // grants use each account's exact governance id.
+      const buildCalTools = (
+        getToken: () => Promise<string>,
+        governanceId: string = 'gcal',
+      ) => gateToolsOnActionGrants(createGoogleCalendarTools({
         listCalendars: async () => {
           const token = await getToken()
           return listCalendarList(token)
@@ -2236,27 +2370,29 @@ async function injectGoogleTools(
             throw err
           }
         },
-      }, userTimezone), 'gcal', assistantConnectorGrantsStore, assistantId)
-      const calTools = buildCalTools(() => getAccessToken('gcal'))
-      for (const tool of calTools) {
-        if (await applyPolicyOrSkip(tool, 'gcal', settingsStore, assistantId, userId, unavailable) === 'include') {
-          tools.set(tool.name, tool)
+      }, userTimezone), 'gcal', assistantConnectorGrantsStore, assistantId, governanceId,
+      governanceId === 'gcal' ? undefined : 'gcal')
+      if (gcalEnabled) {
+        const calTools = buildCalTools(() => getAccessToken('gcal'))
+        for (const tool of calTools) {
+          if (await applyPolicyOrSkip(tool, 'gcal', settingsStore, assistantId, userId, unavailable) === 'include') {
+            tools.set(tool.name, tool)
+          }
         }
       }
 
       // Extra Google Calendar accounts → label-qualified variant sets bound
       // to their own tokens (the Tasks variants ride the same suffix in the
       // Tasks section below).
-      const gcalExtras = googleExtras('gcal')
       if (gcalExtras.length) {
         await injectInstanceVariants({
           provider: 'gcal',
           extras: gcalExtras,
-          settingsStore, assistantId, userId, tools,
-          buildToolsForInstance: (inst) => {
+          settingsStore, assistantId, userId, assistantConnectorStore, tools,
+          buildToolsForInstance: (inst, governanceId) => {
             const getToken = () => getAccessTokenForInstance(inst.id)
             instanceTokenBySuffix.set(instanceToolSuffix(inst.id, inst.label), getToken)
-            return probeVariant(buildCalTools(getToken), inst.id)
+            return probeVariant(buildCalTools(getToken, governanceId), inst.id)
           },
         })
       }
@@ -2269,20 +2405,22 @@ async function injectGoogleTools(
   // Gmail — Layer 1 (connected + not revoked) + Layer 2 (enabled for this assistant)
   const gmail = gmailRaw && !revokedConnectors.has('gmail') ? gmailRaw : undefined
   const gmailEnabled = gmail && (!assistantConnectorStore || await assistantConnectorStore.isEnabled(assistantId, 'gmail'))
+  const gmailExtras = googleExtras('gmail')
+  const gmailExtraEnabled = await hasEnabledGoogleExtra('gmail', gmailExtras)
   if (revokedConnectors.has('gmail')) {
     unavailable?.push(expiredCredentialsNotice('Gmail'))
-  } else if (!gmail || !gmailEnabled) {
+  } else if ((!gmail || !gmailEnabled) && !gmailExtraEnabled) {
     unavailable?.push(notConnectedNotice('Gmail', 'sending and reading email'))
   }
-  if (gmail && gmailEnabled) {
+  if (gmailRaw && (gmailEnabled || gmailExtraEnabled)) {
     try {
       // Tool set bound to one account's token source (primary + per-extra
-      // variants, same shape as the gcal builder above). The grants gate,
-      // audit wrap, and classifier preflight are provider-level — shared
-      // across accounts by design.
+      // variants, same shape as the gcal builder above). Audit + classifier
+      // behavior stays provider-level; grants use each account's exact key.
       const buildGmailToolSet = (
         getToken: () => Promise<string>,
         senderEmail?: string | null,
+        governanceId: string = 'gmail',
       ) => gateToolsOnActionGrants(createGmailTools({
         listMessages: async (params) => {
           const token = await getToken()
@@ -2410,30 +2548,32 @@ async function injectGoogleTools(
             throw err
           }
         },
-      }, { filesApi, senderEmail: senderEmail ?? undefined }), 'gmail', assistantConnectorGrantsStore, assistantId)
-      const gmailTools = buildGmailToolSet(
-        () => getAccessToken('gmail'),
-        gmail.connectedEmail,
-      )
-      for (const tool of gmailTools) {
-        if (await applyPolicyOrSkip(tool, 'gmail', settingsStore, assistantId, userId, unavailable) === 'include') {
-          tools.set(tool.name, tool)
+      }, { filesApi, senderEmail: senderEmail ?? undefined }), 'gmail', assistantConnectorGrantsStore,
+      assistantId, governanceId, governanceId === 'gmail' ? undefined : 'gmail')
+      if (gmailEnabled) {
+        const gmailTools = buildGmailToolSet(
+          () => getAccessToken('gmail'),
+          gmail.connectedEmail,
+        )
+        for (const tool of gmailTools) {
+          if (await applyPolicyOrSkip(tool, 'gmail', settingsStore, assistantId, userId, unavailable) === 'include') {
+            tools.set(tool.name, tool)
+          }
         }
       }
 
       // Extra Gmail accounts → label-qualified variant sets bound to their
       // own tokens.
-      const gmailExtras = googleExtras('gmail')
       if (gmailExtras.length) {
         await injectInstanceVariants({
           provider: 'gmail',
           extras: gmailExtras,
-          settingsStore, assistantId, userId, tools,
-          buildToolsForInstance: (inst) => {
+          settingsStore, assistantId, userId, assistantConnectorStore, tools,
+          buildToolsForInstance: (inst, governanceId) => {
             const getToken = () => getAccessTokenForInstance(inst.id)
             instanceTokenBySuffix.set(instanceToolSuffix(inst.id, inst.label), getToken)
             return probeVariant(
-              buildGmailToolSet(getToken, inst.connectedEmail),
+              buildGmailToolSet(getToken, inst.connectedEmail, governanceId),
               inst.id,
             )
           },
@@ -2448,12 +2588,14 @@ async function injectGoogleTools(
   // Google Drive (+ Docs, Sheets, Slides) — Layer 1 (connected + not revoked) + Layer 2 (enabled)
   const gdrive = gdriveRaw && !revokedConnectors.has('gdrive') ? gdriveRaw : undefined
   const gdriveEnabled = gdrive && (!assistantConnectorStore || await assistantConnectorStore.isEnabled(assistantId, 'gdrive'))
+  const gdriveExtras = googleExtras('gdrive')
+  const gdriveExtraEnabled = await hasEnabledGoogleExtra('gdrive', gdriveExtras)
   if (revokedConnectors.has('gdrive')) {
     unavailable?.push(expiredCredentialsNotice('Google Drive, Docs, Sheets and Slides'))
-  } else if (!gdrive || !gdriveEnabled) {
+  } else if ((!gdrive || !gdriveEnabled) && !gdriveExtraEnabled) {
     unavailable?.push(notConnectedNotice('Google Drive, Docs, Sheets and Slides', 'creating or opening docs, slides, spreadsheets, and Excel files'))
   }
-  if (gdrive && gdriveEnabled) {
+  if (gdriveRaw && (gdriveEnabled || gdriveExtraEnabled)) {
     try {
       // Load per-user gdrive config — the authorized-files list is the set of
       // Google Docs/Sheets/Slides the user has explicitly picked via the
@@ -2511,7 +2653,10 @@ async function injectGoogleTools(
       // families. `gdriveAuthorizedFiles`, `recordCreated`, and `syncOnRead`
       // are per-USER state (Picker consent + created-file index),
       // intentionally shared across accounts.
-      const buildDriveTools = (getToken: () => Promise<string>) => gateToolsOnActionGrants(createGoogleDriveTools({
+      const buildDriveTools = (
+        getToken: () => Promise<string>,
+        governanceId: string = 'gdrive',
+      ) => gateToolsOnActionGrants(createGoogleDriveTools({
         listFiles: async (params) => {
           const token = await getToken()
           return listDriveFiles(token, params)
@@ -2532,16 +2677,22 @@ async function injectGoogleTools(
           const token = await getToken()
           return updateDriveFileContent(token, fileId, params)
         },
-      }, gdriveAuthorizedFiles), 'gdrive', assistantConnectorGrantsStore, assistantId)
-      const driveTools = buildDriveTools(() => getAccessToken('gdrive'))
-      for (const tool of driveTools) {
-        if (await applyPolicyOrSkip(tool, 'gdrive', settingsStore, assistantId, userId, unavailable) === 'include') {
-          tools.set(tool.name, tool)
+      }, gdriveAuthorizedFiles), 'gdrive', assistantConnectorGrantsStore, assistantId, governanceId,
+      governanceId === 'gdrive' ? undefined : 'gdrive')
+      if (gdriveEnabled) {
+        const driveTools = buildDriveTools(() => getAccessToken('gdrive'))
+        for (const tool of driveTools) {
+          if (await applyPolicyOrSkip(tool, 'gdrive', settingsStore, assistantId, userId, unavailable) === 'include') {
+            tools.set(tool.name, tool)
+          }
         }
       }
 
       // Docs tools
-      const buildDocsTools = (getToken: () => Promise<string>) => gateToolsOnActionGrants(createGoogleDocsTools({
+      const buildDocsTools = (
+        getToken: () => Promise<string>,
+        governanceId: string = 'gdrive',
+      ) => gateToolsOnActionGrants(createGoogleDocsTools({
         getContent: async (documentId) => {
           const token = await getToken()
           const doc = await getDocContent(token, documentId)
@@ -2562,16 +2713,22 @@ async function injectGoogleTools(
           recordCreated('doc', doc.documentId, doc.title, doc.url, 'application/vnd.google-apps.document')
           return doc
         },
-      }, gdriveAuthorizedFiles), 'gdrive', assistantConnectorGrantsStore, assistantId)
-      const docsTools = buildDocsTools(() => getAccessToken('gdrive'))
-      for (const tool of docsTools) {
-        if (await applyPolicyOrSkip(tool, 'gdrive', settingsStore, assistantId, userId, unavailable) === 'include') {
-          tools.set(tool.name, tool)
+      }, gdriveAuthorizedFiles), 'gdrive', assistantConnectorGrantsStore, assistantId, governanceId,
+      governanceId === 'gdrive' ? undefined : 'gdrive')
+      if (gdriveEnabled) {
+        const docsTools = buildDocsTools(() => getAccessToken('gdrive'))
+        for (const tool of docsTools) {
+          if (await applyPolicyOrSkip(tool, 'gdrive', settingsStore, assistantId, userId, unavailable) === 'include') {
+            tools.set(tool.name, tool)
+          }
         }
       }
 
       // Sheets tools
-      const buildSheetsTools = (getToken: () => Promise<string>) => gateToolsOnActionGrants(createGoogleSheetsTools({
+      const buildSheetsTools = (
+        getToken: () => Promise<string>,
+        governanceId: string = 'gdrive',
+      ) => gateToolsOnActionGrants(createGoogleSheetsTools({
         getSpreadsheetInfo: async (spreadsheetId) => {
           const token = await getToken()
           const info = await getSpreadsheetInfo(token, spreadsheetId)
@@ -2604,17 +2761,23 @@ async function injectGoogleTools(
           const token = await getToken()
           return batchUpdateSpreadsheet(token, spreadsheetId, requests)
         },
-      }, gdriveAuthorizedFiles), 'gdrive', assistantConnectorGrantsStore, assistantId)
-      const sheetsTools = buildSheetsTools(() => getAccessToken('gdrive'))
-      for (const tool of sheetsTools) {
-        if (await applyPolicyOrSkip(tool, 'gdrive', settingsStore, assistantId, userId, unavailable) === 'include') {
-          tools.set(tool.name, tool)
+      }, gdriveAuthorizedFiles), 'gdrive', assistantConnectorGrantsStore, assistantId, governanceId,
+      governanceId === 'gdrive' ? undefined : 'gdrive')
+      if (gdriveEnabled) {
+        const sheetsTools = buildSheetsTools(() => getAccessToken('gdrive'))
+        for (const tool of sheetsTools) {
+          if (await applyPolicyOrSkip(tool, 'gdrive', settingsStore, assistantId, userId, unavailable) === 'include') {
+            tools.set(tool.name, tool)
+          }
         }
       }
 
       // Slides tools — structured read + placeholder-targeted, atomic write.
       // See docs/architecture/integrations/google-slides.md.
-      const buildSlidesTools = (getToken: () => Promise<string>) => gateToolsOnActionGrants(createGoogleSlidesTools({
+      const buildSlidesTools = (
+        getToken: () => Promise<string>,
+        governanceId: string = 'gdrive',
+      ) => gateToolsOnActionGrants(createGoogleSlidesTools({
         getPresentationInfo: async (presentationId) => {
           const token = await getToken()
           const info = await getPresentationInfo(token, presentationId)
@@ -2663,11 +2826,14 @@ async function injectGoogleTools(
           recordCreated('slide', pres.presentationId, pres.title, pres.url, 'application/vnd.google-apps.presentation')
           return pres
         },
-      }, gdriveAuthorizedFiles), 'gdrive', assistantConnectorGrantsStore, assistantId)
-      const slidesTools = buildSlidesTools(() => getAccessToken('gdrive'))
-      for (const tool of slidesTools) {
-        if (await applyPolicyOrSkip(tool, 'gdrive', settingsStore, assistantId, userId, unavailable) === 'include') {
-          tools.set(tool.name, tool)
+      }, gdriveAuthorizedFiles), 'gdrive', assistantConnectorGrantsStore, assistantId, governanceId,
+      governanceId === 'gdrive' ? undefined : 'gdrive')
+      if (gdriveEnabled) {
+        const slidesTools = buildSlidesTools(() => getAccessToken('gdrive'))
+        for (const tool of slidesTools) {
+          if (await applyPolicyOrSkip(tool, 'gdrive', settingsStore, assistantId, userId, unavailable) === 'include') {
+            tools.set(tool.name, tool)
+          }
         }
       }
 
@@ -2675,20 +2841,19 @@ async function injectGoogleTools(
       // each bound to its own token. `findGDriveFiles` is deliberately NOT
       // variant-injected: it reads the per-user created-file index, not the
       // Drive API — one copy serves every account.
-      const gdriveExtras = googleExtras('gdrive')
       if (gdriveExtras.length) {
         await injectInstanceVariants({
           provider: 'gdrive',
           extras: gdriveExtras,
-          settingsStore, assistantId, userId, tools,
-          buildToolsForInstance: (inst) => {
+          settingsStore, assistantId, userId, assistantConnectorStore, tools,
+          buildToolsForInstance: (inst, governanceId) => {
             const getToken = () => getAccessTokenForInstance(inst.id)
             instanceTokenBySuffix.set(instanceToolSuffix(inst.id, inst.label), getToken)
             return probeVariant([
-              ...buildDriveTools(getToken),
-              ...buildDocsTools(getToken),
-              ...buildSheetsTools(getToken),
-              ...buildSlidesTools(getToken),
+              ...buildDriveTools(getToken, governanceId),
+              ...buildDocsTools(getToken, governanceId),
+              ...buildSheetsTools(getToken, governanceId),
+              ...buildSlidesTools(getToken, governanceId),
             ], inst.id)
           },
         })
@@ -2715,9 +2880,12 @@ async function injectGoogleTools(
   if (revokedConnectors.has('gcal')) {
     unavailable?.push(expiredCredentialsNotice('Google Tasks'))
   }
-  if (gcal && gcalEnabled) {
+  if (gcalRaw && (gcalEnabled || gcalExtraEnabled)) {
     try {
-      const buildTasksTools = (getToken: () => Promise<string>) => gateToolsOnActionGrants(createGoogleTasksTools({
+      const buildTasksTools = (
+        getToken: () => Promise<string>,
+        governanceId: string = 'gcal',
+      ) => gateToolsOnActionGrants(createGoogleTasksTools({
         listTaskLists: async (params) => {
           const token = await getToken()
           return listTaskLists(token, params)
@@ -2742,24 +2910,27 @@ async function injectGoogleTools(
           const token = await getToken()
           return deleteGoogleTask(token, taskListId, taskId)
         },
-      }), 'gcal', assistantConnectorGrantsStore, assistantId)
-      const tasksTools = buildTasksTools(() => getAccessToken('gcal'))
-      for (const tool of tasksTools) {
-        if (await applyPolicyOrSkip(tool, 'gcal', settingsStore, assistantId, userId, unavailable) === 'include') {
-          tools.set(tool.name, tool)
+      }), 'gcal', assistantConnectorGrantsStore, assistantId, governanceId,
+      governanceId === 'gcal' ? undefined : 'gcal')
+      if (gcalEnabled) {
+        const tasksTools = buildTasksTools(() => getAccessToken('gcal'))
+        for (const tool of tasksTools) {
+          if (await applyPolicyOrSkip(tool, 'gcal', settingsStore, assistantId, userId, unavailable) === 'include') {
+            tools.set(tool.name, tool)
+          }
         }
       }
 
       // Tasks ride the gcal credential, so each extra Calendar account also
       // gets its Tasks variants (same suffix as its Calendar set above).
-      const tasksExtras = googleExtras('gcal')
+      const tasksExtras = gcalExtras
       if (tasksExtras.length) {
         await injectInstanceVariants({
           provider: 'gcal',
           extras: tasksExtras,
-          settingsStore, assistantId, userId, tools,
-          buildToolsForInstance: (inst) =>
-            probeVariant(buildTasksTools(() => getAccessTokenForInstance(inst.id)), inst.id),
+          settingsStore, assistantId, userId, assistantConnectorStore, tools,
+          buildToolsForInstance: (inst, governanceId) =>
+            probeVariant(buildTasksTools(() => getAccessTokenForInstance(inst.id), governanceId), inst.id),
         })
       }
       console.debug('[mcp-inject] Google Tasks: injected tools (via gcal)')
@@ -2887,14 +3058,14 @@ async function injectGitHubTools(
   const github = connectors.find((c) => c.connectorId === 'github' && c.connected)
   const githubEnabled = github && (!assistantConnectorStore || await assistantConnectorStore.isEnabled(assistantId, 'github'))
 
-  if (!github || !githubEnabled) {
+  if (!github) {
     unavailable?.push(notConnectedNotice('GitHub', 'repositories, issues, and pull requests'))
     return
   }
 
   // Build the GitHub tool set bound to a given PAT source. Reused for the
   // primary instance and (renamed) for each extra account.
-  function buildTools(getPat: () => Promise<string>): Tool[] {
+  function buildTools(getPat: () => Promise<string>, governanceId: string = 'github'): Tool[] {
     return gateToolsOnActionGrants(createGitHubTools({
       searchRepositories: async (params) => searchRepositories(await getPat(), params),
       getRepository: async (owner, repo) => getRepository(await getPat(), owner, repo),
@@ -2906,7 +3077,8 @@ async function injectGitHubTools(
       createIssueComment: async (owner, repo, issueNumber, body) => createIssueComment(await getPat(), owner, repo, issueNumber, body),
       getFileContents: async (owner, repo, path, ref) => getFileContents(await getPat(), owner, repo, path, ref),
       createOrUpdateFile: async (owner, repo, params) => createOrUpdateFile(await getPat(), owner, repo, params),
-    }), 'github', assistantConnectorGrantsStore, assistantId)
+    }), 'github', assistantConnectorGrantsStore, assistantId, governanceId,
+    governanceId === 'github' ? undefined : 'github')
   }
 
   async function getPat(): Promise<string> {
@@ -2922,29 +3094,31 @@ async function injectGitHubTools(
 
   const primaryInstanceId = healthProbe?.instanceId ?? (github as { id?: string }).id ?? null
   try {
-    const built = buildTools(getPat)
-    const ghTools = healthProbe && primaryInstanceId
-      ? wrapToolsWithHealthProbe(built, primaryInstanceId, healthProbe.report)
-      : built
+    if (githubEnabled) {
+      const built = buildTools(getPat)
+      const ghTools = healthProbe && primaryInstanceId
+        ? wrapToolsWithHealthProbe(built, primaryInstanceId, healthProbe.report)
+        : built
 
-    for (const tool of ghTools) {
-      if (await applyPolicyOrSkip(tool, 'github', settingsStore, assistantId, userId, unavailable) === 'include') {
-        tools.set(tool.name, tool)
+      for (const tool of ghTools) {
+        if (await applyPolicyOrSkip(tool, 'github', settingsStore, assistantId, userId, unavailable) === 'include') {
+          tools.set(tool.name, tool)
+        }
       }
     }
 
     // Extra GitHub accounts → label-qualified variant tool sets.
-    if (!credsOverride && extraInstances?.length && resolveInstanceCreds) {
+    if (extraInstances?.length && resolveInstanceCreds) {
       await injectInstanceVariants({
         provider: 'github',
         extras: extraInstances,
-        settingsStore, assistantId, userId, tools,
-        buildToolsForInstance: (inst) => {
+        settingsStore, assistantId, userId, assistantConnectorStore, tools,
+        buildToolsForInstance: (inst, governanceId) => {
           const variant = buildTools(async () => {
             const pat = await resolveInstanceCreds(inst.id)
             if (!pat) throw new Error(`GitHub instance ${inst.id} has no credentials`)
             return pat
-          })
+          }, governanceId)
           return healthProbe ? wrapToolsWithHealthProbe(variant, inst.id, healthProbe.report) : variant
         },
       })
@@ -2982,14 +3156,14 @@ async function injectNotionTools(
   const notion = connectors.find((c) => c.connectorId === 'notion' && c.connected)
   const notionEnabled = notion && (!assistantConnectorStore || await assistantConnectorStore.isEnabled(assistantId, 'notion'))
 
-  if (!notion || !notionEnabled) {
+  if (!notion) {
     unavailable?.push(notConnectedNotice('Notion', 'searching and updating Notion pages and databases'))
     return
   }
 
   // Notion uses a long-lived access token stored in client_secret. Build the
   // tool set bound to a given token source — reused per account.
-  function buildTools(getAccessToken: () => Promise<string>): Tool[] {
+  function buildTools(getAccessToken: () => Promise<string>, governanceId: string = 'notion'): Tool[] {
     return gateToolsOnActionGrants(createNotionTools({
       search: async (params) => searchNotion(await getAccessToken(), params),
       getPage: async (pageId) => getNotionPage(await getAccessToken(), pageId),
@@ -2998,7 +3172,8 @@ async function injectNotionTools(
       createPage: async (params) => createNotionPage(await getAccessToken(), params),
       updatePage: async (pageId, params) => updateNotionPage(await getAccessToken(), pageId, params),
       appendBlocks: async (pageId, content) => appendNotionBlocks(await getAccessToken(), pageId, content),
-    }), 'notion', assistantConnectorGrantsStore, assistantId)
+    }), 'notion', assistantConnectorGrantsStore, assistantId, governanceId,
+    governanceId === 'notion' ? undefined : 'notion')
   }
 
   async function getAccessToken(): Promise<string> {
@@ -3014,28 +3189,30 @@ async function injectNotionTools(
 
   const primaryInstanceId = healthProbe?.instanceId ?? (notion as { id?: string }).id ?? null
   try {
-    const builtNotion = buildTools(getAccessToken)
-    const notionTools = healthProbe && primaryInstanceId
-      ? wrapToolsWithHealthProbe(builtNotion, primaryInstanceId, healthProbe.report)
-      : builtNotion
+    if (notionEnabled) {
+      const builtNotion = buildTools(getAccessToken)
+      const notionTools = healthProbe && primaryInstanceId
+        ? wrapToolsWithHealthProbe(builtNotion, primaryInstanceId, healthProbe.report)
+        : builtNotion
 
-    for (const tool of notionTools) {
-      if (await applyPolicyOrSkip(tool, 'notion', settingsStore, assistantId, userId, unavailable) === 'include') {
-        tools.set(tool.name, tool)
+      for (const tool of notionTools) {
+        if (await applyPolicyOrSkip(tool, 'notion', settingsStore, assistantId, userId, unavailable) === 'include') {
+          tools.set(tool.name, tool)
+        }
       }
     }
 
-    if (!credsOverride && extraInstances?.length && resolveInstanceCreds) {
+    if (extraInstances?.length && resolveInstanceCreds) {
       await injectInstanceVariants({
         provider: 'notion',
         extras: extraInstances,
-        settingsStore, assistantId, userId, tools,
-        buildToolsForInstance: (inst) => {
+        settingsStore, assistantId, userId, assistantConnectorStore, tools,
+        buildToolsForInstance: (inst, governanceId) => {
           const variant = buildTools(async () => {
             const token = await resolveInstanceCreds(inst.id)
             if (!token) throw new Error(`Notion instance ${inst.id} has no credentials`)
             return token
-          })
+          }, governanceId)
           return healthProbe ? wrapToolsWithHealthProbe(variant, inst.id, healthProbe.report) : variant
         },
       })
@@ -3083,7 +3260,7 @@ async function injectFathomTools(
   const fathom = connectors.find((c) => c.connectorId === 'fathom' && c.connected)
   const fathomEnabled = fathom && (!assistantConnectorStore || await assistantConnectorStore.isEnabled(assistantId, 'fathom'))
 
-  if (!fathom || !fathomEnabled) {
+  if (!fathom) {
     unavailable?.push(notConnectedNotice('Fathom', 'meeting transcripts, summaries, and action items'))
     return
   }
@@ -3138,19 +3315,21 @@ async function injectFathomTools(
   }
 
   try {
-    const fathomTools = buildTools(makeTokenManager(loadEncodedTokens, persistEncoded))
+    if (fathomEnabled) {
+      const fathomTools = buildTools(makeTokenManager(loadEncodedTokens, persistEncoded))
 
-    for (const tool of fathomTools) {
-      if (await applyPolicyOrSkip(tool, 'fathom', settingsStore, assistantId, userId, unavailable) === 'include') {
-        tools.set(tool.name, tool)
+      for (const tool of fathomTools) {
+        if (await applyPolicyOrSkip(tool, 'fathom', settingsStore, assistantId, userId, unavailable) === 'include') {
+          tools.set(tool.name, tool)
+        }
       }
     }
 
-    if (!credsOverride && extraInstances?.length && resolveInstanceCreds && persistInstanceCreds) {
+    if (extraInstances?.length && resolveInstanceCreds && persistInstanceCreds) {
       await injectInstanceVariants({
         provider: 'fathom',
         extras: extraInstances,
-        settingsStore, assistantId, userId, tools,
+        settingsStore, assistantId, userId, assistantConnectorStore, tools,
         buildToolsForInstance: (inst) =>
           buildTools(makeTokenManager(
             () => resolveInstanceCreds(inst.id),
@@ -3201,7 +3380,7 @@ async function injectShopifyTools(
   const shopify = connectors.find((c) => c.connectorId === 'shopify' && c.connected)
   const shopifyEnabled = shopify && (!assistantConnectorStore || await assistantConnectorStore.isEnabled(assistantId, 'shopify'))
 
-  if (!shopify || !shopifyEnabled) {
+  if (!shopify) {
     unavailable?.push(notConnectedNotice('Shopify', 'store products, orders, customers, and inventory'))
     return
   }
@@ -3246,7 +3425,10 @@ async function injectShopifyTools(
     })
   }
 
-  function buildTools(tm: ReturnType<typeof makeTokenManager>): Tool[] {
+  function buildTools(
+    tm: ReturnType<typeof makeTokenManager>,
+    governanceId: string = 'shopify',
+  ): Tool[] {
     return gateToolsOnActionGrants(createShopifyTools({
       getShop: async () => getShopifyShop(await tm.getAuth()),
       listProducts: async (params) => listShopifyProducts(await tm.getAuth(), params),
@@ -3300,34 +3482,37 @@ async function injectShopifyTools(
             }
           }
         : undefined,
-    }), 'shopify', assistantConnectorGrantsStore, assistantId)
+    }), 'shopify', assistantConnectorGrantsStore, assistantId, governanceId,
+    governanceId === 'shopify' ? undefined : 'shopify')
   }
 
   const primaryInstanceId = healthProbe?.instanceId ?? (shopify as { id?: string }).id ?? null
   try {
-    const built = buildTools(makeTokenManager(loadEncodedTokens, persistEncoded))
-    const shopifyTools = healthProbe && primaryInstanceId
-      ? wrapToolsWithHealthProbe(built, primaryInstanceId, healthProbe.report)
-      : built
+    if (shopifyEnabled) {
+      const built = buildTools(makeTokenManager(loadEncodedTokens, persistEncoded))
+      const shopifyTools = healthProbe && primaryInstanceId
+        ? wrapToolsWithHealthProbe(built, primaryInstanceId, healthProbe.report)
+        : built
 
-    for (const tool of shopifyTools) {
-      if (await applyPolicyOrSkip(tool, 'shopify', settingsStore, assistantId, userId, unavailable) === 'include') {
-        tools.set(tool.name, tool)
+      for (const tool of shopifyTools) {
+        if (await applyPolicyOrSkip(tool, 'shopify', settingsStore, assistantId, userId, unavailable) === 'include') {
+          tools.set(tool.name, tool)
+        }
       }
     }
 
     // Extra stores → label-qualified variant tool sets, each with its own
     // token manager bound to its own instance row.
-    if (!credsOverride && extraInstances?.length && resolveInstanceCreds && persistInstanceCreds) {
+    if (extraInstances?.length && resolveInstanceCreds && persistInstanceCreds) {
       await injectInstanceVariants({
         provider: 'shopify',
         extras: extraInstances,
-        settingsStore, assistantId, userId, tools,
-        buildToolsForInstance: (inst) => {
+        settingsStore, assistantId, userId, assistantConnectorStore, tools,
+        buildToolsForInstance: (inst, governanceId) => {
           const variant = buildTools(makeTokenManager(
             () => resolveInstanceCreds(inst.id),
             (encoded) => persistInstanceCreds(inst.id, 'shopify_oauth', encoded),
-          ))
+          ), governanceId)
           return healthProbe ? wrapToolsWithHealthProbe(variant, inst.id, healthProbe.report) : variant
         },
       })
@@ -3349,7 +3534,7 @@ async function injectShopifyTools(
 //     into the credentials envelope before returning. See msgraph/token.ts.
 //   - Unlike GitHub/Notion/Fathom/Shopify there is no extras path: `msgraph`
 //     is `single_instance` in OFFICIAL_CONNECTORS (one Microsoft identity per
-//     user), which keeps it out of MULTI_INSTANCE_RUNTIME_PROVIDERS entirely.
+//     user), which keeps it out of MULTI_INSTANCE_CONNECTOR_IDS entirely.
 //     Dropping that flag means wiring `extrasByProvider.get('msgraph')`
 //     through here in the same change, or a second account is silently dead.
 //

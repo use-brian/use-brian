@@ -174,7 +174,7 @@ export function TaskSuggestions({ workspaceId, onAccepted }: Props) {
               type="button"
               disabled={reason.trim().length < 3}
               onClick={() => void dismiss(dismissing, reason.trim())}
-              className="rounded bg-primary px-2.5 py-1 text-xs text-primary-foreground disabled:opacity-50"
+              className="rounded bg-action px-2.5 py-1 text-xs text-action-foreground disabled:opacity-50"
             >
               {t.dismissConfirm}
             </button>
@@ -218,6 +218,18 @@ function reasonLabel(
       return t.reasonRule;
     case "rule_requires":
       return t.reasonRuleRequires;
+    case "not_a_task":
+      return t.reasonNotTask;
+    case "quality_unverified":
+      return t.reasonQualityUnverified;
+    case "needs_spec": {
+      const missing = candidate.quality?.missing
+        .map((fact) => t.missingFacts[fact])
+        .join(", ");
+      return missing
+        ? t.reasonNeedsSpec.replace("{missing}", missing)
+        : t.reasonNeedsSpecGeneric;
+    }
     default:
       return "";
   }

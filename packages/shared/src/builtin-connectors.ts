@@ -251,13 +251,11 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'saveFileBytes', description: 'Save a file from raw bytes (base64) to the workspace, preserving the original', classification: 'write', defaultPolicy: 'ask' },
     { name: 'sendFile',    description: 'Attach a workspace file to the reply as a downloadable document', classification: 'read',       defaultPolicy: 'allow' },
     { name: 'fileDelete',  description: 'Permanently delete a workspace file',                           classification: 'destructive', defaultPolicy: 'ask' },
-    // Deck tools (docs/architecture/features/deck-generation.md): 'allow' by
-    // default because they only write the deck artifact inside the workspace
-    // (row + decks/<id>.pptx file); outbound delivery stays gated by
-    // sendFile / gmail confirmations.
-    { name: 'generatePowerpoint', description: 'Create a PowerPoint deck as a workspace artifact (spec + .pptx file, live preview)', classification: 'write', defaultPolicy: 'allow' },
-    { name: 'updatePowerpoint',   description: 'Edit a deck by slide operations and rebuild its .pptx in place',                     classification: 'write', defaultPolicy: 'allow' },
-    { name: 'getPowerpoint',      description: 'Read a deck\'s current slides and version',                                          classification: 'read',  defaultPolicy: 'allow' },
+  ],
+  office: [
+    { name: 'createOfficeArtifact', description: 'Start a durable Brian-native Document or Presentation job', classification: 'write', defaultPolicy: 'allow' },
+    { name: 'getOfficeArtifact', description: 'Read an Office artifact and its current generation state', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'reviseOfficeArtifact', description: 'Start an undoable Office revision or proposal job', classification: 'write', defaultPolicy: 'allow' },
   ],
   // Google Cloud Storage (bring-your-own storage) — a credentialed connector
   // with NO assistant tools. It only rebinds where the Workspace Files bytes
@@ -509,9 +507,11 @@ export const BOOT_INJECTED_BUILTIN_TOOLS: Record<string, readonly string[]> = {
     'saveFileToBrain',
     'sendFile',
     'fileDelete',
-    'generatePowerpoint',
-    'updatePowerpoint',
-    'getPowerpoint',
+  ],
+  office: [
+    'createOfficeArtifact',
+    'getOfficeArtifact',
+    'reviseOfficeArtifact',
   ],
   // Computer use (docs/architecture/engine/computer-use.md): wired at boot
   // from packages/core/src/sandbox/tools.ts, always present (a missing

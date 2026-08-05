@@ -642,7 +642,7 @@ export function DraftSessionsList(props: { platform?: FeedPlatform } = {}) {
         </p>
         <Link
           href={feedPath(params.workspaceId)}
-          className="inline-flex items-center justify-center rounded-lg bg-primary px-3 h-8 text-[12.5px] font-medium text-primary-foreground hover:bg-primary/90"
+          className="inline-flex items-center justify-center rounded-lg bg-action px-3 h-8 text-[12.5px] font-medium text-action-foreground hover:bg-action/90"
         >
           {td.noBrandCta}
         </Link>
@@ -728,7 +728,7 @@ export function DraftSessionsList(props: { platform?: FeedPlatform } = {}) {
                 className={
                   "inline-flex items-center gap-1.5 rounded-full px-3 h-7 text-xs font-medium transition-colors " +
                   (active
-                    ? "bg-primary text-primary-foreground"
+                    ? "bg-action text-action-foreground"
                     : "bg-card border border-border text-muted-foreground hover:text-foreground hover:bg-accent")
                 }
               >
@@ -1135,7 +1135,7 @@ function ReplyAndPostStack(props: {
         type="button"
         onClick={onNewPost}
         disabled={disabled}
-        className="inline-flex items-center justify-center h-9 rounded-lg bg-primary text-primary-foreground text-[13px] font-medium hover:bg-primary/90 active:bg-primary/85 disabled:opacity-50 transition-all duration-150 ease-out"
+        className="inline-flex items-center justify-center h-9 rounded-lg bg-action text-action-foreground text-[13px] font-medium hover:bg-action/90 active:bg-action/85 disabled:opacity-50 transition-all duration-150 ease-out"
       >
         {composing === "post" ? td.creating : td.newPost}
       </button>

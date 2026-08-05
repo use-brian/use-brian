@@ -95,7 +95,7 @@ export type Workspace = {
    */
   transcriptionPrefs: WorkspaceTranscriptionPrefs
   /**
-   * Home app-bar configuration (migration 385) — an ordered array of 1-6
+   * Home app-bar configuration (migrations 385 and 394) — an ordered array of 1-7
    * operator-app entries. `[]` means UNSET and resolves to the built-in
    * default; callers should read it through `getWorkspaceHomeApps` (or
    * `normalizeHomeApps`) rather than trusting the raw column, which may hold
@@ -841,7 +841,7 @@ export async function setWorkspaceHomeApps(
         validated.reason === 'empty'
           ? 'Pick at least one app to show on Home.'
           : validated.reason === 'too-many'
-            ? 'Home shows at most 6 apps.'
+            ? 'Home shows at most 7 apps.'
             : validated.reason === 'duplicate'
               ? 'An app can only appear once.'
               : 'That is not an app this workspace can show.',

@@ -3,11 +3,128 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@/lib/auth-fetch", () => ({ authFetch: vi.fn() }));
 
 import { authFetch } from "@/lib/auth-fetch";
-import { ingestLinkedInArchive } from "../ingest";
+import {
+  MAX_INGEST_FILE_BYTES,
+  ingestFiles,
+  ingestLinkedInArchive,
+  storeFiles,
+} from "../ingest";
 
 const mockAuthFetch = vi.mocked(authFetch);
 
 beforeEach(() => vi.resetAllMocks());
+
+describe("[COMP:app-web/chat-context-pins] ordinary file ingest transport", () => {
+  it("stages Pins files through the storage-only endpoint", async () => {
+    const file = new File(["brief"], "brief.pdf", { type: "application/pdf" });
+    mockAuthFetch.mockResolvedValueOnce(new Response(JSON.stringify({
+      files: [{
+        fileName: "brief.pdf",
+        ok: true,
+        fileId: "file-staged",
+        distilled: false,
+        decomposed: false,
+      }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+    await expect(storeFiles("ws-1", [file])).resolves.toMatchObject([
+      { fileId: "file-staged", distilled: false, decomposed: false },
+    ]);
+    expect(mockAuthFetch.mock.calls[0][0]).toMatch(/\/api\/files\/store$/);
+  });
+
+  it("sends a selected batch as one multipart request per file", async () => {
+    const first = new File(["alpha"], "alpha.txt", { type: "text/plain" });
+    const second = new File(["beta"], "beta.txt", { type: "text/plain" });
+    mockAuthFetch
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        files: [{ fileName: "alpha.txt", ok: true, fileId: "file-a" }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        files: [{ fileName: "beta.txt", ok: true, fileId: "file-b" }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+    await expect(ingestFiles("ws-1", [first, second])).resolves.toEqual([
+      { fileName: "alpha.txt", ok: true, fileId: "file-a" },
+      { fileName: "beta.txt", ok: true, fileId: "file-b" },
+    ]);
+
+    expect(mockAuthFetch).toHaveBeenCalledTimes(2);
+    const firstForm = mockAuthFetch.mock.calls[0][1]?.body as FormData;
+    const secondForm = mockAuthFetch.mock.calls[1][1]?.body as FormData;
+    expect(firstForm.getAll("files")).toEqual([first]);
+    expect(secondForm.getAll("files")).toEqual([second]);
+    expect(firstForm.get("workspaceId")).toBe("ws-1");
+    expect(secondForm.get("workspaceId")).toBe("ws-1");
+  });
+
+  it("uploads a large stored file as signed parts and completes it", async () => {
+    const bytes = new Uint8Array(MAX_INGEST_FILE_BYTES + 1);
+    const file = new File([bytes], "catalog.pdf", { type: "application/pdf" });
+    const partBytes = 8 * 1024 * 1024;
+    const parts = Array.from({ length: Math.ceil(file.size / partBytes) }, (_, index) => ({
+      index,
+      offset: index * partBytes,
+      sizeBytes: Math.min(partBytes, file.size - index * partBytes),
+      url: `https://storage.example/part-${index}`,
+    }));
+    mockAuthFetch
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        uploadId: "upload-1",
+        fileId: "file-large",
+        chunkSizeBytes: partBytes,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        parts,
+      }), { status: 201, headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        fileName: "catalog.pdf",
+        ok: true,
+        fileId: "file-large",
+        sizeBytes: file.size,
+        decomposed: false,
+      }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    const directFetch = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
+    vi.stubGlobal("fetch", directFetch);
+    const progress = vi.fn();
+
+    await expect(storeFiles("ws-1", [file], { onProgress: progress })).resolves.toMatchObject([
+      { ok: true, fileId: "file-large", decomposed: false },
+    ]);
+
+    expect(mockAuthFetch).toHaveBeenCalledTimes(2);
+    expect(mockAuthFetch.mock.calls[0][0]).toMatch(/\/api\/files\/uploads\/start$/);
+    expect(mockAuthFetch.mock.calls[1][0]).toMatch(/\/api\/files\/uploads\/upload-1\/complete$/);
+    expect(directFetch).toHaveBeenCalledTimes(parts.length);
+    for (const [index, call] of directFetch.mock.calls.entries()) {
+      expect(call[0]).toBe(`https://storage.example/part-${index}`);
+      expect((call[1]?.body as Blob).size).toBe(parts[index].sizeBytes);
+    }
+    expect(progress).toHaveBeenLastCalledWith(file, file.size, file.size);
+  });
+
+  it("keeps a request-level failure on its file and continues the batch", async () => {
+    const tooLarge = new File(["large"], "large.pdf", { type: "application/pdf" });
+    const valid = new File(["ok"], "valid.txt", { type: "text/plain" });
+    mockAuthFetch
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: "file_too_large",
+        detail: "Each file must be 30 MB or smaller.",
+      }), { status: 413, headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        files: [{ fileName: "valid.txt", ok: true, fileId: "file-ok" }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+    await expect(ingestFiles("ws-1", [tooLarge, valid])).resolves.toEqual([
+      {
+        fileName: "large.pdf",
+        ok: false,
+        error: "Each file must be 30 MB or smaller.",
+      },
+      { fileName: "valid.txt", ok: true, fileId: "file-ok" },
+    ]);
+    expect(mockAuthFetch).toHaveBeenCalledTimes(2);
+  });
+});
 
 describe("[COMP:api/linkedin-import-http] app-web LinkedIn import SDK", () => {
   it("posts the ZIP and workspace to the dedicated lossless endpoint", async () => {

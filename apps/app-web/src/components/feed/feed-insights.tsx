@@ -1180,7 +1180,7 @@ function KindFilterPicker({
             className={
               "px-3 h-8 text-xs font-medium rounded-lg transition-colors inline-flex items-center gap-1.5 " +
               (isActive
-                ? "bg-primary text-primary-foreground shadow-sm"
+                ? "bg-action text-action-foreground shadow-sm"
                 : "text-muted-foreground hover:text-foreground hover:bg-accent")
             }
             aria-pressed={isActive}
@@ -1189,7 +1189,7 @@ function KindFilterPicker({
             <span
               className={
                 "tabular-nums text-[10px] " +
-                (isActive ? "text-primary-foreground/85" : "text-muted-foreground/70")
+                (isActive ? "text-action-foreground/85" : "text-muted-foreground/70")
               }
             >
               {count}
@@ -1235,7 +1235,7 @@ function NotConnectedState({
       </p>
       <Link
         href={feedPath(workspaceId)}
-        className="inline-flex items-center justify-center rounded-lg bg-primary px-3 h-8 text-[12.5px] font-medium text-primary-foreground hover:bg-primary/90"
+        className="inline-flex items-center justify-center rounded-lg bg-action px-3 h-8 text-[12.5px] font-medium text-action-foreground hover:bg-action/90"
       >
         {format(t.draftSessions.connectCta, { platform: label })}
       </Link>
@@ -1266,7 +1266,7 @@ function RangePicker({
             className={
               "px-3 h-8 text-xs font-medium rounded-lg transition-colors " +
               (isActive
-                ? "bg-primary text-primary-foreground shadow-sm"
+                ? "bg-action text-action-foreground shadow-sm"
                 : "text-muted-foreground hover:text-foreground hover:bg-accent")
             }
             aria-pressed={isActive}

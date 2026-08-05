@@ -420,7 +420,7 @@ export function BrowserProfilesSection() {
                           normalizeLoginUrl(loginDrafts[profile.id] ?? "") === null
                         }
                         onClick={() => void onLogin(profile)}
-                        className="h-8 shrink-0 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground disabled:opacity-50"
+                        className="h-8 shrink-0 rounded-md bg-action px-3 text-xs font-medium text-action-foreground disabled:opacity-50"
                       >
                         {loginBusyId === profile.id
                           ? t.computer.profiles.loginOpening
@@ -463,7 +463,7 @@ export function BrowserProfilesSection() {
                           normalizeLoginUrl(captureDrafts[profile.id] ?? "") === null
                         }
                         onClick={() => void onCapture(profile)}
-                        className="h-8 shrink-0 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground disabled:opacity-50"
+                        className="h-8 shrink-0 rounded-md bg-action px-3 text-xs font-medium text-action-foreground disabled:opacity-50"
                       >
                         {captureBusyId === profile.id
                           ? t.computer.profiles.captureSaving

@@ -328,7 +328,7 @@ function TriageDetailPane({
           type="button"
           disabled={busy !== null}
           onClick={handleConfirm}
-          className="text-xs px-3 py-1.5 rounded-md bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50"
+          className="text-xs px-3 py-1.5 rounded-md bg-action text-action-foreground hover:opacity-90 disabled:opacity-50"
         >
           {busy === "confirm" ? labels.confirming : labels.confirmArm}
         </button>

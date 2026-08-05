@@ -73,7 +73,47 @@ export type TaskLane = 'extracted' | 'assistant'
 
 export type TaskRuleEffect = 'deny' | 'require'
 export type TaskRuleStatus = 'active' | 'proposed' | 'disabled'
-export type TaskRuleRequirement = 'assignee' | 'due'
+export type TaskRuleRequirement =
+  | 'assignee'
+  | 'due'
+  | 'description'
+  | 'resolved_target'
+  | 'explicit_commitment'
+  | 'completion_signal'
+  | 'agent_ready'
+
+export type TaskReadinessClassification = 'ready' | 'needs_spec' | 'not_a_task'
+export type TaskCommitmentKind = 'explicit' | 'implicit' | 'hedged' | 'none'
+export type TaskStartingPointKind = 'explicit' | 'discoverable' | 'missing'
+export type TaskReadinessMissingFact =
+  | 'evidence'
+  | 'commitment'
+  | 'objective'
+  | 'target'
+  | 'description'
+  | 'starting_point'
+  | 'completion_signal'
+
+/**
+ * Structured result of the independent automatic-ingestion readiness judge.
+ * Every nullable prose field is nullable on purpose: inventing a value to make
+ * the row look complete would defeat the gate. `evidenceVerified` is computed
+ * by code after the judge returns, never trusted from the model.
+ */
+export type TaskReadinessAssessment = {
+  classification: TaskReadinessClassification
+  evidenceQuote: string | null
+  evidenceVerified: boolean
+  commitment: TaskCommitmentKind
+  objective: string | null
+  target: string | null
+  description: string | null
+  startingPointKind: TaskStartingPointKind
+  startingPoint: string | null
+  completionSignal: string | null
+  missing: TaskReadinessMissingFact[]
+  explanation: string
+}
 
 /**
  * What a rule can test. Conditions AND together; a list within one condition
@@ -136,6 +176,8 @@ export type TaskAdmissionCandidate = {
   channelRef?: string | null
   sourceEpisodeId?: string | null
   createdByAssistantId?: string | null
+  /** Present on automatic extraction after the separate readiness judge. */
+  quality?: TaskReadinessAssessment | null
 }
 
 export type TaskAdmissionReasonCode =
@@ -144,6 +186,9 @@ export type TaskAdmissionReasonCode =
   | 'rule_requires'
   | 'duplicate'
   | 'near_duplicate'
+  | 'not_a_task'
+  | 'needs_spec'
+  | 'quality_unverified'
 
 export type TaskAdmissionDecision =
   | { outcome: 'allow'; warning?: TaskAdmissionWarning }
@@ -199,7 +244,12 @@ export type TaskAdmissionPort = {
    */
   loadPolicyForPrompt?(
     workspaceId: string,
-  ): Promise<{ rules: TaskRuleRecord[]; tombstones: TaskTombstoneRecord[] }>
+    content?: string,
+  ): Promise<{
+    rules: TaskRuleRecord[]
+    tombstones: TaskTombstoneRecord[]
+    openTasks?: ScoredTask[]
+  }>
 }
 
 export type RecordCandidateInput = {
@@ -216,6 +266,7 @@ export type RecordCandidateInput = {
   matchedRuleId?: string | null
   matchedTombstoneId?: string | null
   similarity?: number | null
+  quality?: TaskReadinessAssessment | null
   expiresAt: Date
 }
 
@@ -300,6 +351,44 @@ export function matchesPredicate(
 }
 
 /** First `require` entry the candidate fails, or null when it satisfies them all. */
+/** Facts that still keep an automatic candidate below the agent-ready floor. */
+export function missingAgentReadyFacts(
+  quality: TaskReadinessAssessment | null | undefined,
+): TaskReadinessMissingFact[] {
+  if (!quality) return ['evidence']
+  const missing = new Set<TaskReadinessMissingFact>(quality.missing)
+  if (!quality.evidenceVerified) missing.add('evidence')
+  if (quality.commitment !== 'explicit') missing.add('commitment')
+  if (!quality.objective?.trim()) missing.add('objective')
+  if (!quality.target?.trim()) missing.add('target')
+  if (!quality.description?.trim()) missing.add('description')
+  if (quality.startingPointKind === 'missing' || !quality.startingPoint?.trim()) {
+    missing.add('starting_point')
+  }
+  if (!quality.completionSignal?.trim()) missing.add('completion_signal')
+  return [...missing]
+}
+
+export function isTaskAgentReady(
+  quality: TaskReadinessAssessment | null | undefined,
+): boolean {
+  return (
+    quality?.classification === 'ready' &&
+    missingAgentReadyFacts(quality).length === 0
+  )
+}
+
+/**
+ * Verify a judge-returned quote against the exact Episode text after only
+ * Unicode/whitespace canonicalisation. No semantic/fuzzy matching: evidence is
+ * either present in the source or it is not.
+ */
+export function verifyTaskEvidenceQuote(content: string, quote: string | null): boolean {
+  if (!quote?.trim()) return false
+  const canonical = (value: string) => value.normalize('NFKC').replace(/\s+/g, ' ').trim()
+  return canonical(content).includes(canonical(quote))
+}
+
 export function unsatisfiedRequirement(
   predicate: TaskRulePredicate,
   candidate: TaskAdmissionCandidate,
@@ -307,6 +396,15 @@ export function unsatisfiedRequirement(
   for (const req of predicate.require ?? []) {
     if (req === 'assignee' && !candidate.assigneeId) return 'assignee'
     if (req === 'due' && !candidate.due) return 'due'
+    if (req === 'description' && !candidate.quality?.description?.trim()) return 'description'
+    if (req === 'resolved_target' && !candidate.quality?.target?.trim()) return 'resolved_target'
+    if (req === 'explicit_commitment' && candidate.quality?.commitment !== 'explicit') {
+      return 'explicit_commitment'
+    }
+    if (req === 'completion_signal' && !candidate.quality?.completionSignal?.trim()) {
+      return 'completion_signal'
+    }
+    if (req === 'agent_ready' && !isTaskAgentReady(candidate.quality)) return 'agent_ready'
   }
   return null
 }
@@ -330,7 +428,7 @@ export function validateRulePredicate(
     return 'A deny rule needs at least one condition (source_kinds, lanes, title_matches, or channel_refs) — an empty predicate would block every task in the workspace.'
   }
   if (effect === 'require' && !predicate.require?.length) {
-    return 'A require rule needs at least one requirement (assignee or due).'
+    return 'A require rule needs at least one requirement (assignee, due, description, resolved_target, explicit_commitment, completion_signal, or agent_ready).'
   }
   return null
 }
@@ -350,23 +448,41 @@ export type EvaluateTaskAdmissionInput = {
  * certainty-descending, so the user's own explicit past decisions outrank
  * anything inferred.
  *
- *   1. tombstone match          -> drop   (they already rejected this)
- *   2. active deny rule         -> drop   (their stated policy)
- *   3. unsatisfied require rule -> hold
+ *   1. verified not-a-task      -> drop   (no/hedged commitment)
+ *   2. tombstone match          -> drop   (they already rejected this)
+ *   3. active deny rule         -> drop   (their stated policy)
  *   4. duplicate  >= 0.88       -> drop   (restatement of tracked work)
- *   5. near-dup   >= 0.65       -> hold
- *   6. otherwise                -> allow
+ *   5. unverified/underspecified quality -> hold
+ *   6. unsatisfied require rule -> hold
+ *   7. near-dup   >= 0.65       -> hold
+ *   8. otherwise                -> allow
  *
- * A silent drop is only ever justified when the user has already ruled on it.
- * Everything else holds, because a guardrail that silently eats real work is
- * worse than the slop it replaces.
+ * `not_a_task` is the only inferred silent drop: it requires a separately
+ * judged, source-verified absence of commitment (or explicit hedging). A real
+ * but incomplete commitment holds, because a guardrail that silently eats real
+ * work is worse than the slop it replaces.
  */
 export function evaluateTaskAdmission(
   input: EvaluateTaskAdmissionInput,
 ): TaskAdmissionDecision {
   const { candidate, rules, tombstoneMatches, taskMatches } = input
 
-  // 1. Tombstone — the user rejected this exact class, with a reason.
+  // 1. The independent judge found grounded non-commitment. Never trust this
+  //    branch without code-verified source evidence.
+  if (
+    candidate.quality?.evidenceVerified &&
+    (candidate.quality.classification === 'not_a_task' ||
+      candidate.quality.commitment === 'hedged' ||
+      candidate.quality.commitment === 'none')
+  ) {
+    return {
+      outcome: 'drop',
+      reasonCode: 'not_a_task',
+      explanation: `Not created — ${candidate.quality.explanation}`,
+    }
+  }
+
+  // 2. Tombstone — the user rejected this exact class, with a reason.
   const tombstone = bestAbove(tombstoneMatches, TASK_ADMISSION_THRESHOLDS.TOMBSTONE_MATCH)
   if (tombstone) {
     return {
@@ -378,7 +494,7 @@ export function evaluateTaskAdmission(
     }
   }
 
-  // 2. Deny rules.
+  // 3. Deny rules.
   for (const rule of rules) {
     if (rule.effect !== 'deny') continue
     if (!matchesPredicate(rule.predicate, candidate)) continue
@@ -392,8 +508,44 @@ export function evaluateTaskAdmission(
     }
   }
 
-  // 3. Require rules — the task may be real but is not yet well-formed, so it
-  //    waits for a human rather than landing half-specified.
+  // 4. Strong duplicate of a live OPEN task. Run this before readiness holds
+  //    so a rewritten duplicate does not clutter Suggestions as "needs spec".
+  const dup = bestAbove(taskMatches, TASK_ADMISSION_THRESHOLDS.NEAR_DUPLICATE_HOLD)
+  if (dup && dup.similarity >= TASK_ADMISSION_THRESHOLDS.DUPLICATE_DROP) {
+    return {
+      outcome: 'drop',
+      reasonCode: 'duplicate',
+      explanation: `Not created — this duplicates the open task "${dup.title}" [${dup.id}]. Update that one instead.`,
+      matchedTaskId: dup.id,
+      similarity: dup.similarity,
+    }
+  }
+
+  // 5/6. Automatic readiness. The quality field is optional because manual
+  //      and direct-assistant creation deliberately do not run this judge.
+  if (candidate.quality) {
+    if (!candidate.quality.evidenceVerified) {
+      return {
+        outcome: 'hold',
+        reasonCode: 'quality_unverified',
+        explanation: 'Held for review — Brian could not verify the proposed task against an exact source quote.',
+      }
+    }
+
+    if (!isTaskAgentReady(candidate.quality)) {
+      const missing = missingAgentReadyFacts(candidate.quality)
+      return {
+        outcome: 'hold',
+        reasonCode: 'needs_spec',
+        explanation: `Held for review — ${candidate.quality.explanation}${
+          missing.length > 0 ? ` Missing: ${missing.join(', ')}.` : ''
+        }`,
+      }
+    }
+  }
+
+  // 6. Require rules — workspace-specific policy above the core readiness
+  //    floor. The task may be real but waits rather than landing incomplete.
   for (const rule of rules) {
     if (rule.effect !== 'require') continue
     if (!matchesPredicate(rule.predicate, candidate)) continue
@@ -402,25 +554,15 @@ export function evaluateTaskAdmission(
     return {
       outcome: 'hold',
       reasonCode: 'rule_requires',
-      explanation: `Held for review — the workspace requires every task to have ${
-        missing === 'assignee' ? 'an assignee' : 'a due date'
-      }${rule.nlClause ? ` ("${rule.nlClause}")` : ''}.`,
+      explanation: `Held for review — the workspace requires ${requirementLabel(missing)}${
+        rule.nlClause ? ` ("${rule.nlClause}")` : ''
+      }.`,
       matchedRuleId: rule.id,
     }
   }
 
-  // 4/5. Duplicate of a live OPEN task.
-  const dup = bestAbove(taskMatches, TASK_ADMISSION_THRESHOLDS.NEAR_DUPLICATE_HOLD)
+  // 7. Ambiguous duplicate band.
   if (dup) {
-    if (dup.similarity >= TASK_ADMISSION_THRESHOLDS.DUPLICATE_DROP) {
-      return {
-        outcome: 'drop',
-        reasonCode: 'duplicate',
-        explanation: `Not created — this duplicates the open task "${dup.title}" [${dup.id}]. Update that one instead.`,
-        matchedTaskId: dup.id,
-        similarity: dup.similarity,
-      }
-    }
     return {
       outcome: 'hold',
       reasonCode: 'near_duplicate',
@@ -431,6 +573,25 @@ export function evaluateTaskAdmission(
   }
 
   return { outcome: 'allow' }
+}
+
+function requirementLabel(requirement: TaskRuleRequirement): string {
+  switch (requirement) {
+    case 'assignee':
+      return 'an assignee'
+    case 'due':
+      return 'a due date'
+    case 'description':
+      return 'a self-contained description'
+    case 'resolved_target':
+      return 'a resolved target or context'
+    case 'explicit_commitment':
+      return 'an explicit commitment'
+    case 'completion_signal':
+      return 'a completion signal'
+    case 'agent_ready':
+      return 'an agent-ready specification'
+  }
 }
 
 function bestAbove<T extends { similarity: number }>(
@@ -529,6 +690,7 @@ export async function admitTask(
       matchedRuleId: decision.matchedRuleId ?? null,
       matchedTombstoneId: decision.matchedTombstoneId ?? null,
       similarity: decision.similarity ?? null,
+      quality: candidate.quality ?? null,
       expiresAt: new Date(now.getTime() + ttlDays * 24 * 60 * 60 * 1000),
     })
   } catch (err) {
@@ -547,6 +709,7 @@ export async function admitTask(
 /** Caps — the policy block is guidance, not a second system prompt. */
 const MAX_PROMPT_RULES = 8
 const MAX_PROMPT_TOMBSTONES = 8
+const MAX_PROMPT_OPEN_TASKS = 8
 
 /**
  * Render the workspace's task policy for injection into the Pipeline B
@@ -563,23 +726,44 @@ const MAX_PROMPT_TOMBSTONES = 8
 export function buildTaskPolicyPromptBlock(
   rules: readonly TaskRuleRecord[],
   tombstones: readonly TaskTombstoneRecord[],
+  openTasks: readonly ScoredTask[] = [],
 ): string {
-  const clauses = rules
-    .filter((r) => r.status === 'active' && r.nlClause?.trim())
+  // A reasoned bulk delete intentionally creates one narrow deterministic rule
+  // per task. The shared human sentence must still occupy ONE prompt slot,
+  // otherwise a large cleanup could crowd every other workspace policy out of
+  // this bounded block with eight identical lines.
+  const clauses = [
+    ...new Set(
+      rules
+        .filter((r) => r.status === 'active' && r.nlClause?.trim())
+        .map((r) => r.nlClause!.trim()),
+    ),
+  ]
     .slice(0, MAX_PROMPT_RULES)
-    .map((r) => `- ${r.nlClause!.trim()}`)
+    .map((clause) => `- ${clause}`)
 
   const rejections = tombstones
     .slice(0, MAX_PROMPT_TOMBSTONES)
     .map((t) => `- Rejected: "${t.title}" — ${t.reason}`)
 
-  if (clauses.length === 0 && rejections.length === 0) return ''
+  const tracked = openTasks
+    .slice(0, MAX_PROMPT_OPEN_TASKS)
+    .map((task) => `- Already tracked: "${task.title}"`)
+
+  if (clauses.length === 0 && rejections.length === 0 && tracked.length === 0) return ''
 
   return [
     '',
     'Workspace task policy — this team has rejected tasks like these. Do NOT emit them into "tasks":',
     ...clauses,
     ...rejections,
+    ...(tracked.length > 0
+      ? [
+          'Already-tracked open tasks relevant to this source:',
+          ...tracked,
+          'Discussion, progress updates, or status chatter about these is not a new task. Emit a task only for an explicit, distinct new commitment.',
+        ]
+      : []),
   ].join('\n')
 }
 

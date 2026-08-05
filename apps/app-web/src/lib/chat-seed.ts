@@ -22,7 +22,7 @@
 import type { ModelTier } from "@/lib/chat-model";
 
 export type ChatSeed = {
-  /** Composer prefill text. Required — empty seeds are dropped. */
+  /** Composer prefill text. May be empty when a file or recording is attached. */
   prefill: string;
   /**
    * Send the prompt immediately instead of only prefilling the composer.
@@ -40,6 +40,8 @@ export type ChatSeed = {
    * on the read path, so they can be uploaded before the draft exists.
    */
   fileIds?: string[];
+  /** Recording ids staged without processing on the seeding surface. */
+  attachedRecordingIds?: string[];
   /**
    * Anchor the turn to a specific doc page (sent as `docViewId`), so
    * the model edits THAT page via `patchPage` and the construction streams
@@ -63,11 +65,16 @@ export const CHAT_SEED_EVENT = "doc:chat-seed";
 /**
  * Ask the doc chat to apply the given seed. No-op on SSR. Returns
  * immediately — the shell handles routing + delivery on the next tick. An
- * empty `prefill` is dropped (every seed now carries prompt text, including
- * the inline Space-for-AI box, which seeds an `autoSend` turn on submit).
+ * seed without text or attachments is dropped. Attachment-only seeds are
+ * valid: the chat route uses that first turn to ask what outcome the user
+ * wants before any durable processing or extraction starts.
  */
 export function requestChatSeed(seed: ChatSeed): void {
   if (typeof window === "undefined") return;
-  if (!seed.prefill.trim()) return;
+  if (
+    !seed.prefill.trim() &&
+    !seed.fileIds?.length &&
+    !seed.attachedRecordingIds?.length
+  ) return;
   window.dispatchEvent(new CustomEvent<ChatSeed>(CHAT_SEED_EVENT, { detail: seed }));
 }

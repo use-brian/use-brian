@@ -536,7 +536,7 @@ function WebhookCredentials({
             type="button"
             onClick={sendTestRequest}
             disabled={disabled || test.status === "sending"}
-            className="text-xs px-3 py-1.5 rounded bg-primary text-primary-foreground font-medium hover:opacity-90 disabled:opacity-50"
+            className="text-xs px-3 py-1.5 rounded bg-action text-action-foreground font-medium hover:opacity-90 disabled:opacity-50"
           >
             {test.status === "sending"
               ? t.workflowPage.builder.webhookTestSending

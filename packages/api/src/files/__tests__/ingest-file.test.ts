@@ -40,6 +40,40 @@ const ctx: FileIngestContext = {
 }
 
 describe('[COMP:files/ingest] createFileIngestor', () => {
+  it('stores staged bytes without parsing, distilling, indexing, or decomposing', async () => {
+    const fw = fakeWriteBytes()
+    const ing = fakeIngest({ entities: 0, edges: 0, memories: 0, tasks: 0 })
+    const distill = vi.fn(async () => 'SHOULD NOT BE CALLED')
+    const parse = vi.fn(async () => ({ text: 'SHOULD NOT BE CALLED', summary: '' }))
+    const ingestFile = createFileIngestor({
+      filesApi: { writeBytes: fw.writeBytes } as unknown as FilesApi,
+      ingest: ing.ingest as never,
+      distill,
+      parse: parse as never,
+    })
+
+    const result = await ingestFile(
+      {
+        fileName: 'extension-request.pdf',
+        mime: 'application/pdf',
+        bytes: Buffer.from('%PDF'),
+        process: false,
+      },
+      ctx,
+    )
+
+    expect(fw.calls).toHaveLength(1)
+    expect(parse).not.toHaveBeenCalled()
+    expect(distill).not.toHaveBeenCalled()
+    expect(ing.ingest).not.toHaveBeenCalled()
+    expect(result).toMatchObject({
+      fileId: 'file_1',
+      distilled: false,
+      decomposed: false,
+      counts: { entities: 0, edges: 0, memories: 0, tasks: 0 },
+    })
+  })
+
   it('stores raw bytes and decomposes text through the open brain ingestor', async () => {
     const fw = fakeWriteBytes()
     const ing = fakeIngest({ entities: 2, edges: 1, memories: 3, tasks: 0 })

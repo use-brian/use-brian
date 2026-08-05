@@ -1128,7 +1128,7 @@ export function WorkspaceMembersSection() {
           <button
             onClick={sendInvites}
             disabled={sending || !emails.trim()}
-            className="w-full text-sm font-medium bg-primary text-primary-foreground px-3 py-2 rounded-lg hover:bg-primary/90 transition-colors disabled:opacity-50"
+            className="w-full text-sm font-medium bg-action text-action-foreground px-3 py-2 rounded-lg hover:bg-action/90 transition-colors disabled:opacity-50"
           >
             {sending ? t.workspaceDetailInline.sending : t.workspaceDetailInline.sendInvite}
           </button>

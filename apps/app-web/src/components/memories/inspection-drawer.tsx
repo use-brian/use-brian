@@ -294,7 +294,7 @@ export function InspectionDrawer({
                 key={i}
                 className={
                   turn.role === "user"
-                    ? "self-end max-w-[85%] text-xs bg-primary text-primary-foreground rounded-md px-3 py-2 whitespace-pre-wrap"
+                    ? "self-end max-w-[85%] text-xs bg-secondary text-secondary-foreground rounded-md px-3 py-2 whitespace-pre-wrap"
                     : "self-start max-w-[95%] text-xs bg-muted text-foreground rounded-md px-3 py-2 whitespace-pre-wrap"
                 }
               >
@@ -342,7 +342,7 @@ export function InspectionDrawer({
               type="button"
               onClick={() => void send()}
               disabled={!session || busy || draft.trim().length === 0}
-              className="text-xs px-3 py-1.5 rounded-md bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50"
+              className="text-xs px-3 py-1.5 rounded-md bg-action text-action-foreground hover:opacity-90 disabled:opacity-50"
             >
               {busy ? t.memoriesReview.sending : t.memoriesReview.send}
             </button>

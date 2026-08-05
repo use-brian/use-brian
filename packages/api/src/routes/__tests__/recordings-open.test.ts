@@ -220,7 +220,7 @@ describe('[COMP:recordings/open-routes] OSS recordings routes', () => {
   })
 
   it('estimates without a hosted credit surcharge', async () => {
-    const { app } = makeApp()
+    const { app, deps } = makeApp()
     const response = await request(app).post('/api/recordings/rec-1/estimate')
 
     expect(response.status).toBe(200)
@@ -230,6 +230,7 @@ describe('[COMP:recordings/open-routes] OSS recordings routes', () => {
       durationSeconds: 65,
       surchargeCredits: 0,
     })
+    expect(deps.updateRecording).toHaveBeenCalledWith('rec-1', { durationMs: 65_000 })
   })
 
   it('returns the actionable ffprobe prerequisite error', async () => {

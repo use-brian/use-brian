@@ -395,7 +395,7 @@ export function SkillIterationChat({
             className={cn(
               "inline-flex size-7 shrink-0 items-center justify-center rounded-lg transition-colors",
               input.trim() && !busy && !attachments.uploading
-                ? "bg-primary text-primary-foreground hover:bg-primary/90"
+                ? "bg-action text-action-foreground hover:bg-action/90"
                 : "bg-muted text-muted-foreground",
             )}
           >

@@ -144,7 +144,7 @@ function StudioAssistants() {
           <button
             type="button"
             onClick={() => setShowCreate(true)}
-            className="inline-flex items-center gap-1.5 text-sm font-medium px-3 py-1.5 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
+            className="inline-flex items-center gap-1.5 text-sm font-medium px-3 py-1.5 rounded-md bg-action text-action-foreground hover:bg-action/90 transition-colors"
           >
             <span aria-hidden>+</span>
             {t.studioPage.assistants.newCta}
@@ -288,7 +288,7 @@ function CreateAssistantModal({
               type="button"
               onClick={() => void submit()}
               disabled={!name.trim() || creating}
-              className="text-sm font-medium px-4 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors"
+              className="text-sm font-medium px-4 py-2 rounded-lg bg-action text-action-foreground hover:bg-action/90 disabled:opacity-50 transition-colors"
             >
               {creating
                 ? t.studioPage.assistants.createSubmitting
