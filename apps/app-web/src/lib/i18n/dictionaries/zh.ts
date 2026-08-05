@@ -4192,6 +4192,7 @@ export const zh: Dictionary = {
       browseFiles: "瀏覽",
       dropToPin: "放開以釘選",
       fileLimit: "最多選擇 5 個檔案。",
+      fileTooLarge: "此檔案太大，無法釘選（上限 30 MB）。",
       filePinFailed: "無法釘選此檔案。",
       dismissFileError: "關閉檔案錯誤",
       pinAction: "釘選",

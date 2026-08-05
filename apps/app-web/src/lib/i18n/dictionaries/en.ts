@@ -4434,6 +4434,7 @@ export const en = {
       browseFiles: "Browse",
       dropToPin: "Drop to pin",
       fileLimit: "Choose up to 5 files.",
+      fileTooLarge: "That file is too large to pin (max 30 MB).",
       filePinFailed: "Could not pin this file.",
       dismissFileError: "Dismiss file error",
       pinAction: "Pin",

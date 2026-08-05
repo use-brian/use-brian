@@ -4234,6 +4234,7 @@ export const ja: Dictionary = {
       browseFiles: "選択",
       dropToPin: "ドロップしてピン留め",
       fileLimit: "ファイルは5件まで選択できます。",
+      fileTooLarge: "このファイルは大きすぎてピン留めできません（最大30 MB）。",
       filePinFailed: "このファイルをピン留めできませんでした。",
       dismissFileError: "ファイルエラーを閉じる",
       pinAction: "ピン留め",

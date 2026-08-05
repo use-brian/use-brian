@@ -64,8 +64,9 @@ import {
 import { listViews } from "@/lib/api/views";
 import { fetchWorkspaceTasks } from "@/lib/api/tasks";
 import { fetchWorkspaceCrm } from "@/lib/api/crm";
-import { ingestFiles } from "@/lib/api/ingest";
+import { ingestFiles, MAX_INGEST_FILE_BYTES } from "@/lib/api/ingest";
 import { useFileDrop } from "@/lib/use-file-drop";
+import { partitionUpload } from "@/lib/use-file-attachments";
 import {
   EMPTY_WORKER_RUN_SUMMARY,
   fetchWorkerRunSummary,
@@ -154,7 +155,8 @@ export function ChatContextPins({
   expanded: boolean;
   onExpandedChange: (expanded: boolean) => void;
 }) {
-  const chatT = useT().chatApp;
+  const dictionary = useT();
+  const chatT = dictionary.chatApp;
   const t = chatT.pins;
   const [pins, setPins] = useState<SessionPinRow[]>([]);
   const [addOpen, setAddOpen] = useState(false);
@@ -316,11 +318,7 @@ export function ChatContextPins({
         return;
       }
 
-      const uploads = files.map((file, index) => ({
-        id: `${file.name}-${file.lastModified}-${index}-${Date.now()}`,
-        fileName: file.name,
-        status: "uploading" as const,
-      }));
+      let uploads: FileUpload[] = [];
       const updateUpload = (
         id: string,
         update: { status: "error"; error: string } | null,
@@ -333,17 +331,41 @@ export function ChatContextPins({
         );
       };
 
-      setFileUploads((current) => [
-        ...current.filter((item) => item.status === "error"),
-        ...uploads,
-      ]);
       setFileBusy(true);
       setError(null);
-      let anyPinned = false;
-      let anyFailed = false;
 
       try {
-        const results = await ingestFiles(workspaceId, files);
+        const { attach, rejected } = await partitionUpload(files, {
+          maxBytes: MAX_INGEST_FILE_BYTES,
+          canRouteMedia: false,
+        });
+        const uploadStartedAt = Date.now();
+        uploads = attach.map((file, index) => ({
+          id: `${file.name}-${file.lastModified}-${index}-${uploadStartedAt}`,
+          fileName: file.name,
+          status: "uploading" as const,
+        }));
+        const rejectedUploads: FileUpload[] = rejected.map(
+          ({ file, reason }, index) => ({
+            id: `${file.name}-${file.lastModified}-rejected-${index}-${uploadStartedAt}`,
+            fileName: file.name,
+            status: "error",
+            error:
+              reason === "too_large"
+                ? t.fileTooLarge
+                : dictionary.attachments.videoUnsupported,
+          }),
+        );
+        setFileUploads((current) => [
+          ...current.filter((item) => item.status === "error"),
+          ...rejectedUploads,
+          ...uploads,
+        ]);
+        if (attach.length === 0) return;
+
+        let anyPinned = false;
+        let anyFailed = rejected.length > 0;
+        const results = await ingestFiles(workspaceId, attach);
         for (let index = 0; index < uploads.length; index += 1) {
           const upload = uploads[index];
           const result = results[index];
@@ -383,7 +405,7 @@ export function ChatContextPins({
         setFileBusy(false);
       }
     },
-    [fileBusy, refresh, sessionId, t, workspaceId],
+    [dictionary.attachments, fileBusy, refresh, sessionId, t, workspaceId],
   );
 
   const { isDragging, dropProps } = useFileDrop(

@@ -3,11 +3,61 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@/lib/auth-fetch", () => ({ authFetch: vi.fn() }));
 
 import { authFetch } from "@/lib/auth-fetch";
-import { ingestLinkedInArchive } from "../ingest";
+import { ingestFiles, ingestLinkedInArchive } from "../ingest";
 
 const mockAuthFetch = vi.mocked(authFetch);
 
 beforeEach(() => vi.resetAllMocks());
+
+describe("[COMP:app-web/chat-context-pins] ordinary file ingest transport", () => {
+  it("sends a selected batch as one multipart request per file", async () => {
+    const first = new File(["alpha"], "alpha.txt", { type: "text/plain" });
+    const second = new File(["beta"], "beta.txt", { type: "text/plain" });
+    mockAuthFetch
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        files: [{ fileName: "alpha.txt", ok: true, fileId: "file-a" }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        files: [{ fileName: "beta.txt", ok: true, fileId: "file-b" }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+    await expect(ingestFiles("ws-1", [first, second])).resolves.toEqual([
+      { fileName: "alpha.txt", ok: true, fileId: "file-a" },
+      { fileName: "beta.txt", ok: true, fileId: "file-b" },
+    ]);
+
+    expect(mockAuthFetch).toHaveBeenCalledTimes(2);
+    const firstForm = mockAuthFetch.mock.calls[0][1]?.body as FormData;
+    const secondForm = mockAuthFetch.mock.calls[1][1]?.body as FormData;
+    expect(firstForm.getAll("files")).toEqual([first]);
+    expect(secondForm.getAll("files")).toEqual([second]);
+    expect(firstForm.get("workspaceId")).toBe("ws-1");
+    expect(secondForm.get("workspaceId")).toBe("ws-1");
+  });
+
+  it("keeps a request-level failure on its file and continues the batch", async () => {
+    const tooLarge = new File(["large"], "large.pdf", { type: "application/pdf" });
+    const valid = new File(["ok"], "valid.txt", { type: "text/plain" });
+    mockAuthFetch
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: "file_too_large",
+        detail: "Each file must be 30 MB or smaller.",
+      }), { status: 413, headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        files: [{ fileName: "valid.txt", ok: true, fileId: "file-ok" }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+    await expect(ingestFiles("ws-1", [tooLarge, valid])).resolves.toEqual([
+      {
+        fileName: "large.pdf",
+        ok: false,
+        error: "Each file must be 30 MB or smaller.",
+      },
+      { fileName: "valid.txt", ok: true, fileId: "file-ok" },
+    ]);
+    expect(mockAuthFetch).toHaveBeenCalledTimes(2);
+  });
+});
 
 describe("[COMP:api/linkedin-import-http] app-web LinkedIn import SDK", () => {
   it("posts the ZIP and workspace to the dedicated lossless endpoint", async () => {

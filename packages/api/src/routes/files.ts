@@ -15,7 +15,8 @@ import { mintFilePreviewToken, verifyFilePreviewToken } from './file-preview-tok
 /** Silent-path PDFs promote store-only above this (native inlineData stays the read path below). */
 const PDF_STORE_ONLY_MIN_BYTES = 2 * 1024 * 1024
 
-const MAX_FILE_SIZE = 20 * 1024 * 1024 // 20 MB
+const MAX_CACHE_FILE_SIZE = 20 * 1024 * 1024 // 20 MiB — transient chat cache
+const MAX_INGEST_FILE_SIZE = 30 * 1024 * 1024 // 30 MiB — 2 MiB below Cloud Run HTTP/1
 const MAX_FILES_PER_REQUEST = 10
 // Preview capability-URL TTL. The browser fetches the signed `<img src>` /
 // download URL promptly after the mint round-trip, so a few minutes is ample
@@ -26,13 +27,18 @@ const PREVIEW_URL_TTL_MS = 5 * 60_000
 // background job queue is the documented scale follow-up (files.md).
 const MAX_INGEST_FILES = 5
 
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: {
-    fileSize: MAX_FILE_SIZE,
-    files: MAX_FILES_PER_REQUEST,
-  },
-})
+function memoryUpload(maxFileSize: number) {
+  return multer({
+    storage: multer.memoryStorage(),
+    limits: {
+      fileSize: maxFileSize,
+      files: MAX_FILES_PER_REQUEST,
+    },
+  })
+}
+
+const cacheUpload = memoryUpload(MAX_CACHE_FILE_SIZE)
+const ingestUpload = memoryUpload(MAX_INGEST_FILE_SIZE)
 
 /**
  * Multipart upload allowlist — shared between the transient chat-attachment
@@ -98,7 +104,7 @@ export function fileRoutes(
 ): Router {
   const router = Router()
 
-  router.post('/upload', upload.array('files', MAX_FILES_PER_REQUEST), async (req, res) => {
+  router.post('/upload', cacheUpload.array('files', MAX_FILES_PER_REQUEST), async (req, res) => {
     const files = (req.files as Express.Multer.File[] | undefined) ?? []
 
     if (files.length === 0) {
@@ -274,7 +280,7 @@ export function fileRoutes(
    * (no chat turn): each file's bytes land in workspace_files AND its content is
    * distilled/parsed to text and run through Pipeline B. Per-file results.
    */
-  router.post('/ingest', upload.array('files', MAX_FILES_PER_REQUEST), async (req, res) => {
+  router.post('/ingest', ingestUpload.array('files', MAX_FILES_PER_REQUEST), async (req, res) => {
     if (!ingestor) {
       res.status(503).json({ error: 'File ingest is not available on this deployment.' })
       return
@@ -580,15 +586,17 @@ export function fileRoutes(
   // Map multer limit rejections to a clear 413 instead of the generic 500 a
   // thrown MulterError would otherwise surface. The web client guards before
   // POST (`use-file-attachments.ts` → `partitionUpload`), so this is
-  // defense-in-depth for direct API callers and any file between the 20 MB
-  // multer cap and Cloud Run's 32 MiB edge cap. See
+  // defense-in-depth for direct API callers. Cache uploads remain at 20 MiB;
+  // durable ingest has 30 MiB of usable room below Cloud Run's 32 MiB edge
+  // cap. See
   // docs/architecture/features/files.md → "Upload limits".
-  router.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
+  router.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
     if (err instanceof MulterError) {
       if (err.code === 'LIMIT_FILE_SIZE') {
+        const maxFileSize = req.path === '/ingest' ? MAX_INGEST_FILE_SIZE : MAX_CACHE_FILE_SIZE
         res.status(413).json({
           error: 'file_too_large',
-          detail: `Each file must be ${MAX_FILE_SIZE / (1024 * 1024)} MB or smaller.`,
+          detail: `Each file must be ${maxFileSize / (1024 * 1024)} MB or smaller.`,
         })
         return
       }

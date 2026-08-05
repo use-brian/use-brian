@@ -15,6 +15,9 @@ import { authFetch } from "@/lib/auth-fetch";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
+/** Keep one multipart body below Cloud Run's 32 MiB HTTP/1 request ceiling. */
+export const MAX_INGEST_FILE_BYTES = 30 * 1024 * 1024;
+
 export type IngestCounts = {
   entities: number;
   edges: number;
@@ -49,29 +52,54 @@ export function totalAdded(counts: IngestCounts | undefined): number {
 }
 
 /**
- * Upload + ingest up to a few files in one request. Throws on a whole-request
- * failure (auth, 4xx, network); per-file failures come back as `ok: false`
- * entries in the result array.
+ * Upload + ingest a UI batch. Each file travels in its own request so the
+ * selected files' combined bytes cannot exceed Cloud Run's request ceiling.
+ * Request failures become that file's `ok: false` result, preserving successful
+ * siblings and the caller's positional reconciliation.
  */
 export async function ingestFiles(
   workspaceId: string,
   files: File[],
 ): Promise<IngestFileResult[]> {
-  const formData = new FormData();
-  for (const f of files) formData.append("files", f);
-  formData.append("workspaceId", workspaceId);
+  const results: IngestFileResult[] = [];
+  for (const file of files) {
+    const formData = new FormData();
+    formData.append("files", file);
+    formData.append("workspaceId", workspaceId);
 
-  // Don't set Content-Type — the browser adds the multipart boundary.
-  const res = await authFetch(`${API_URL}/api/files/ingest`, {
-    method: "POST",
-    body: formData,
-  });
-  if (!res.ok) {
-    const detail = (await res.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(detail?.error ?? `Ingest failed (HTTP ${res.status})`);
+    try {
+      // Don't set Content-Type — the browser adds the multipart boundary.
+      const res = await authFetch(`${API_URL}/api/files/ingest`, {
+        method: "POST",
+        body: formData,
+      });
+      const data = (await res.json().catch(() => null)) as
+        | { files?: IngestFileResult[]; error?: string; detail?: string }
+        | null;
+      if (!res.ok) {
+        results.push({
+          fileName: file.name,
+          ok: false,
+          error: data?.detail ?? data?.error ?? `Ingest failed (HTTP ${res.status})`,
+        });
+        continue;
+      }
+      results.push(
+        data?.files?.[0] ?? {
+          fileName: file.name,
+          ok: false,
+          error: `Ingest failed (HTTP ${res.status})`,
+        },
+      );
+    } catch (err) {
+      results.push({
+        fileName: file.name,
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
-  const data = (await res.json()) as { files: IngestFileResult[] };
-  return data.files;
+  return results;
 }
 
 type LinkedInImportResponse = {

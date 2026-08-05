@@ -36,6 +36,7 @@ vi.mock("@/lib/api/session-pins", () => ({
   removeSessionPin: vi.fn(),
 }));
 vi.mock("@/lib/api/ingest", () => ({
+  MAX_INGEST_FILE_BYTES: 30 * 1024 * 1024,
   ingestFiles: (...args: unknown[]) => ingestFiles(...args),
 }));
 vi.mock("@/lib/api/views", () => ({
@@ -371,6 +372,55 @@ describe("[COMP:app-web/chat-context-pins] Work Bench section", () => {
       refId: "file-durable-1",
     });
     expect(listSessionPins).toHaveBeenCalledTimes(2);
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it("rejects an oversized dropped file before durable ingest and explains the 30 MB limit", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <I18nProvider locale="en" dict={dict}>
+          <ChatContextPins
+            sessionId="session-1"
+            workspaceId="workspace-1"
+            refreshKey={0}
+            startedByName="Ada"
+            expanded
+            onExpandedChange={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const file = new File(["pdf"], "price-list.pdf", {
+      type: "application/pdf",
+      lastModified: 2,
+    });
+    Object.defineProperty(file, "size", { value: 30 * 1024 * 1024 + 1 });
+    const pinsSection = container.querySelector<HTMLElement>(
+      'section[aria-label="Pinned context"]',
+    );
+    const drop = new Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, "dataTransfer", {
+      value: { files: [file], types: ["Files"] },
+    });
+
+    await act(async () => {
+      pinsSection!.dispatchEvent(drop);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(ingestFiles).not.toHaveBeenCalled();
+    expect(addSessionPin).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("price-list.pdf");
+    expect(container.textContent).toContain(
+      "That file is too large to pin (max 30 MB).",
+    );
 
     act(() => root.unmount());
     container.remove();
