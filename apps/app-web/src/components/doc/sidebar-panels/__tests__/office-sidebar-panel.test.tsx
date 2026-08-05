@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
@@ -18,6 +19,15 @@ function render(pathname: string, search = "") {
 }
 
 describe("[COMP:app-web/office-navigation] Office sidebar navigation", () => {
+  it("keeps Suggested for you above the Office-local navigation", () => {
+    const source = readFileSync(new URL("../../doc-sidebar.tsx", import.meta.url), "utf8");
+    const suggested = source.indexOf("<HomeDock workspaceId={workspaceId} />");
+    const office = source.indexOf("<OfficeSidebarPanel workspaceId={workspaceId} />");
+    expect(suggested).toBeGreaterThan(-1);
+    expect(office).toBeGreaterThan(-1);
+    expect(suggested).toBeLessThan(office);
+  });
+
   it("keeps all Office destinations reachable from every Office route", () => {
     const html = render("/w/workspace-1/office/new");
     expect(html).toContain('aria-label="Office navigation"');
