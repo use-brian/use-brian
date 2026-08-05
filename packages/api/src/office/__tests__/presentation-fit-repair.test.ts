@@ -165,4 +165,56 @@ describe('[COMP:api/office-generation] presentation fit repair', () => {
     expect(fitOfficeArtifact(revised).issues).toEqual([])
     expect(revised.slides[0]?.objects[0]?.kind === 'text' ? revised.slides[0].objects[0].runs.map((run) => run.text).join('') : null).toBe('Act\nnow')
   })
+
+  it('treats a selected slide as a bounded scope over its unlocked text objects', async () => {
+    const scoped = structuredClone(snapshot)
+    const secondaryTargetId = uid(23)
+    const lockedTargetId = uid(25)
+    scoped.slides[0]!.objects.push({
+      id: secondaryTargetId,
+      kind: 'text',
+      geometry: { xPt: 300, yPt: 72, widthPt: 300, heightPt: 60, rotationDeg: 0 },
+      locked: false,
+      runs: [{ id: uid(24), text: 'Supporting copy', style: secondaryStyle }],
+      alignment: 'start',
+      verticalAlignment: 'top',
+    }, {
+      id: lockedTargetId,
+      kind: 'text',
+      geometry: { xPt: 300, yPt: 300, widthPt: 300, heightPt: 60, rotationDeg: 0 },
+      locked: true,
+      runs: [{ id: uid(26), text: 'Locked brand copy', style: secondaryStyle }],
+      alignment: 'start',
+      verticalAlignment: 'top',
+    })
+    scoped.slides[0]!.readingOrder.push(secondaryTargetId, lockedTargetId)
+    const requests: Array<{ messages?: Message[] }> = []
+    const provider = {
+      async *stream(request: { messages?: Message[] }) {
+        requests.push(request)
+        yield { type: 'message_start' as const, model: 'test' }
+        yield { type: 'text_delta' as const, text: JSON.stringify({ replacements: [{ targetId, text: 'Go' }] }) }
+        yield { type: 'message_end' as const, stopReason: 'end_turn' as const, usage: { inputTokens: 1, outputTokens: 1 } }
+      },
+    }
+
+    const revised = await revisePresentationTargets({
+      provider: provider as never,
+      model: 'test',
+      snapshot: scoped,
+      targetIds: [scoped.slides[0]!.id],
+      instruction: '@Brian change only the headline',
+    })
+
+    const requestContent = requests[0]?.messages?.[0]?.content
+    const request = typeof requestContent === 'string' ? requestContent : JSON.stringify(requestContent ?? '')
+    const selectedText = request.split('\n\nComplete presentation context')[0] ?? ''
+    expect(selectedText).toContain(targetId)
+    expect(selectedText).toContain(secondaryTargetId)
+    expect(selectedText).not.toContain(lockedTargetId)
+    expect(selectedText).toContain('"required":false')
+    expect(revised.slides[0]?.objects[0]?.kind === 'text' ? revised.slides[0].objects[0].runs.map((run) => run.text).join('') : null).toBe('Go')
+    expect(revised.slides[0]?.objects[1]?.kind === 'text' ? revised.slides[0].objects[1].runs.map((run) => run.text).join('') : null).toBe('Supporting copy')
+    expect(revised.slides[0]?.objects[2]?.kind === 'text' ? revised.slides[0].objects[2].runs.map((run) => run.text).join('') : null).toBe('Locked brand copy')
+  })
 })

@@ -46,7 +46,7 @@ const RevisionSchema = z.object({
 
 const PRESENTATION_SYSTEM_PROMPT = `You plan a concise presentation from an admitted slide-template catalogue. Return one JSON object and nothing else. Use only the supplied recipeId and fieldId values. Never invent a customer, metric, date, quote, award, integration, price, or commitment. Facts may come only from the user's request or supplied evidence. Prefer a coherent progression: opening, explanation, proof or detail, and closing. Respect every recipe's use guidance and repetition limit. Fill every required textual field. Omit optional fields that do not need to change so admitted brand copy and media remain intact. Use this exact shape: {"title":"...","slides":[{"recipeId":"uuid","title":"...","fields":[{"fieldId":"uuid","text":"..."}]}]}`
 
-const REVISION_SYSTEM_PROMPT = `You revise only the selected text in a presentation. The complete presentation context is read-only and exists only so you can preserve meaning, narrative flow, and facts. Preserve every fact and the intended slide role unless the instruction explicitly changes it. Do not copy surrounding text into the replacement. Return one JSON object and nothing else with this exact shape: {"replacements":[{"targetId":"uuid","text":"replacement"}]}. Include every supplied target exactly once and no other target.`
+const REVISION_SYSTEM_PROMPT = `You revise only the selected text in a presentation. The complete presentation context is read-only and exists only so you can preserve meaning, narrative flow, and facts. Preserve every fact and the intended slide role unless the instruction explicitly changes it. Do not copy surrounding text into the replacement. Return one JSON object and nothing else with this exact shape: {"replacements":[{"targetId":"uuid","text":"replacement"}]}. Every selected entry marked required must appear exactly once. A slide-scoped entry not marked required is allowed but should appear only when the instruction requires changing it. Never return a target outside the selected entries.`
 
 type PresentationPlan = z.infer<typeof PresentationPlanSchema>
 type RevisionPlan = z.infer<typeof RevisionSchema>
@@ -387,21 +387,31 @@ export async function revisePresentationTargets(params: {
   targetIds: string[]
   instruction: string
 }): Promise<PresentationSnapshot> {
-  const targetSet = new Set(params.targetIds)
-  const selected: Array<{ targetId: string; text: string }> = []
+  const requestedTargetSet = new Set(params.targetIds)
+  const resolvedRequestedTargets = new Set<string>()
+  const selected: Array<{ targetId: string; text: string; required: boolean }> = []
   for (const slide of params.snapshot.slides) {
+    const slideSelected = requestedTargetSet.has(slide.id)
+    let slideHasEditableText = false
     for (const object of slide.objects) {
-      const text = targetSet.has(object.id) ? textOfObject(object) : null
-      if (text !== null) selected.push({ targetId: object.id, text })
+      const objectSelected = requestedTargetSet.has(object.id)
+      const text = textOfObject(object)
+      if (text === null || object.locked || !slideSelected && !objectSelected) continue
+      selected.push({ targetId: object.id, text, required: objectSelected })
+      if (slideSelected) slideHasEditableText = true
+      if (objectSelected) resolvedRequestedTargets.add(object.id)
     }
+    if (slideSelected && slideHasEditableText) resolvedRequestedTargets.add(slide.id)
   }
-  if (selected.length !== targetSet.size) throw new Error('One or more presentation revision targets are missing or non-textual')
+  if (resolvedRequestedTargets.size !== requestedTargetSet.size || selected.length === 0) throw new Error('One or more presentation revision targets are missing, locked, or non-textual')
+  const allowedTargetSet = new Set(selected.map((entry) => entry.targetId))
+  const requiredTargetSet = new Set(selected.filter((entry) => entry.required).map((entry) => entry.targetId))
   const context = params.snapshot.slides.map((slide, slideIndex) => ({
     slide: slideIndex + 1,
     title: slide.title,
     objects: slide.objects.flatMap((object) => {
       const text = textOfObject(object)
-      return text === null ? [] : [{ targetId: object.id, selected: targetSet.has(object.id), text }]
+      return text === null ? [] : [{ targetId: object.id, selected: allowedTargetSet.has(object.id), text }]
     }),
   }))
   const requestContext = `Instruction:\n${params.instruction.replace(/(^|\s)@Brian\b/gi, '$1').trim()}\n\nSelected text:\n${JSON.stringify(selected)}\n\nComplete presentation context (read-only):\n${JSON.stringify(context)}`
@@ -421,7 +431,10 @@ export async function revisePresentationTargets(params: {
     }))
     const revision = RevisionSchema.parse(parseJsonObject(responseText(response)))
     const replacements = new Map(revision.replacements.map((item) => [item.targetId, item.text]))
-    if (replacements.size !== targetSet.size || [...targetSet].some((id) => !replacements.has(id))) throw new Error('Presentation revision did not return every selected target')
+    const hasDuplicateTargets = replacements.size !== revision.replacements.length
+    const hasOutOfScopeTargets = [...replacements.keys()].some((id) => !allowedTargetSet.has(id))
+    const missesRequiredTarget = [...requiredTargetSet].some((id) => !replacements.has(id))
+    if (hasDuplicateTargets || hasOutOfScopeTargets || missesRequiredTarget) throw new Error('Presentation revision escaped its selected target boundary')
     const next = structuredClone(params.snapshot)
     next.slides = next.slides.map((slide) => ({
       ...slide,
