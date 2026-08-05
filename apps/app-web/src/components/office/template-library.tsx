@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Dialog } from "@base-ui/react/dialog";
 import { Plus, X } from "lucide-react";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
@@ -10,19 +10,38 @@ import { useT } from "@/lib/i18n/client";
 import { createOfficeTemplate, listOfficeTemplates, transitionOfficeTemplateLifecycle, type OfficeFamily } from "@/lib/office/api";
 import { OfficeTopbar } from "./office-topbar";
 
+export type OfficeStarterTemplate = "general-presentation" | "letterhead";
+
+export function readOfficeStarterTemplate(searchParams: Pick<URLSearchParams, "get">): OfficeStarterTemplate | null {
+  const starter = searchParams.get("starter");
+  return starter === "general-presentation" || starter === "letterhead" ? starter : null;
+}
+
 export function OfficeTemplateLibrary({ workspaceId, templateId }: { workspaceId: string; templateId?: string }) {
   const copy = useT();
   const t = copy.office;
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const starterTemplate = readOfficeStarterTemplate(searchParams);
+  const starterFamily: OfficeFamily = starterTemplate === "general-presentation" ? "presentation" : "document";
+  const starterName = starterTemplate === "general-presentation" ? t.starterPresentationTitle : starterTemplate === "letterhead" ? t.starterLetterheadTitle : "";
+  const starterDescription = starterTemplate === "general-presentation" ? t.starterPresentationInstructions : starterTemplate === "letterhead" ? t.starterLetterheadInstructions : "";
   const [templates, setTemplates] = useState<Array<Record<string, unknown>> | null>(null);
-  const [creating, setCreating] = useState(false);
-  const [family, setFamily] = useState<OfficeFamily>("document");
-  const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
+  const [creating, setCreating] = useState(starterTemplate !== null);
+  const [family, setFamily] = useState<OfficeFamily>(starterFamily);
+  const [name, setName] = useState(starterName);
+  const [description, setDescription] = useState(starterDescription);
   const [purgeConfirmation, setPurgeConfirmation] = useState("");
   const templatesHref = `/w/${workspaceId}/office/templates`;
 
   useEffect(() => { void listOfficeTemplates(workspaceId).then(setTemplates).catch(() => setTemplates([])); }, [workspaceId]);
+  useEffect(() => {
+    if (!starterTemplate) return;
+    setFamily(starterFamily);
+    setName(starterName);
+    setDescription(starterDescription);
+    setCreating(true);
+  }, [starterDescription, starterFamily, starterName, starterTemplate]);
   const selected = templateId ? templates?.find((template) => template.id === templateId) : undefined;
   const selectedName = selected ? String(selected.name ?? t.templateTitle) : null;
 
@@ -33,13 +52,26 @@ export function OfficeTemplateLibrary({ workspaceId, templateId }: { workspaceId
     router.push(`/w/${workspaceId}/office/${created.draftArtifactId}?templateId=${created.id}`);
   }
 
+  function openBlankTemplate() {
+    router.replace(templatesHref, { scroll: false });
+    setFamily("document");
+    setName("");
+    setDescription("");
+    setCreating(true);
+  }
+
+  function closeTemplate() {
+    setCreating(false);
+    if (starterTemplate) router.replace(templatesHref, { scroll: false });
+  }
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <OfficeTopbar
         workspaceId={workspaceId}
         breadcrumbs={selectedName ? [{ label: t.templates, href: templatesHref }, { label: selectedName }] : [{ label: t.templates }]}
         right={
-          <button type="button" onClick={() => setCreating(true)} className="inline-flex h-8 items-center gap-1.5 rounded-md bg-primary px-2.5 text-sm font-medium text-primary-foreground">
+          <button type="button" onClick={openBlankTemplate} className="inline-flex h-8 items-center gap-1.5 rounded-md bg-primary px-2.5 text-sm font-medium text-primary-foreground">
             <Plus className="size-4" aria-hidden /><span className="hidden sm:inline">{t.newTemplate}</span>
           </button>
         }
@@ -55,7 +87,7 @@ export function OfficeTemplateLibrary({ workspaceId, templateId }: { workspaceId
         )}
       </main>
 
-      <Dialog.Root open={creating} onOpenChange={setCreating}>
+      <Dialog.Root open={creating} onOpenChange={(open) => { if (open) setCreating(true); else closeTemplate(); }}>
         <Dialog.Portal>
           <Dialog.Backdrop className="fixed inset-0 z-[80] bg-foreground/35 backdrop-blur-[1px]" />
           <Dialog.Popup className="fixed inset-x-4 top-1/2 z-[81] mx-auto w-auto max-w-lg -translate-y-1/2 rounded-2xl border bg-background p-6 shadow-2xl outline-none">
@@ -64,14 +96,14 @@ export function OfficeTemplateLibrary({ workspaceId, templateId }: { workspaceId
                 <Dialog.Title className="text-lg font-semibold">{t.newTemplate}</Dialog.Title>
                 <Dialog.Description className="mt-1 text-sm text-muted-foreground">{t.newTemplateDescription}</Dialog.Description>
               </div>
-              <button type="button" aria-label={t.closeTemplateAria} title={t.closeTemplateAria} onClick={() => setCreating(false)} className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"><X className="size-4" aria-hidden /></button>
+              <button type="button" aria-label={t.closeTemplateAria} title={t.closeTemplateAria} onClick={closeTemplate} className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"><X className="size-4" aria-hidden /></button>
             </div>
             <form className="mt-5 grid gap-3" onSubmit={(event) => void submitTemplate(event)}>
               <Select value={family} onValueChange={(value) => { if (value) setFamily(value as OfficeFamily); }}><SelectTrigger aria-label={t.family} className="h-9 w-full">{family === "document" ? t.document : t.presentation}</SelectTrigger><SelectContent><SelectItem value="document">{t.document}</SelectItem><SelectItem value="presentation">{t.presentation}</SelectItem></SelectContent></Select>
               <input required value={name} onChange={(event) => setName(event.target.value)} placeholder={t.templateName} className="h-9 rounded border px-2" />
               <textarea required value={description} onChange={(event) => setDescription(event.target.value)} placeholder={t.templateInstructions} className="min-h-24 rounded border p-2" />
               <div className="mt-2 flex justify-end gap-2 border-t pt-4">
-                <button type="button" onClick={() => setCreating(false)} className="h-9 rounded border px-3 text-sm font-medium">{copy.common.cancel}</button>
+                <button type="button" onClick={closeTemplate} className="h-9 rounded border px-3 text-sm font-medium">{copy.common.cancel}</button>
                 <button type="submit" className="h-9 rounded bg-primary px-3 text-sm font-medium text-primary-foreground">{t.create}</button>
               </div>
             </form>

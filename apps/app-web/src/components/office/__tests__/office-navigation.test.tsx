@@ -5,6 +5,7 @@ import { en } from "@/lib/i18n/dictionaries/en";
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ back: vi.fn(), forward: vi.fn(), push: vi.fn(), replace: vi.fn() }),
+  useSearchParams: () => new URLSearchParams(),
 }));
 vi.mock("@/components/doc/doc-sidebar-data", () => ({
   useSidebarData: () => ({ sidebarCollapsed: false, setSidebarCollapsed: vi.fn() }),
@@ -15,6 +16,7 @@ vi.mock("next/link", () => ({
 
 import { OfficeTopbar } from "../office-topbar";
 import { OfficeCreate } from "../office-create";
+import { readOfficeStarterTemplate } from "../template-library";
 
 function wrap(node: React.ReactNode) {
   return renderToStaticMarkup(<I18nProvider locale="en" dict={en}>{node}</I18nProvider>);
@@ -36,5 +38,12 @@ describe("[COMP:app-web/office-navigation] Office route chrome", () => {
     expect(html).toContain("Back to Office");
     expect(html).toContain("Cancel");
     expect(html).toContain("Generate");
+  });
+
+  it("accepts only the supported starter-template deep links", () => {
+    expect(readOfficeStarterTemplate(new URLSearchParams("starter=general-presentation"))).toBe("general-presentation");
+    expect(readOfficeStarterTemplate(new URLSearchParams("starter=letterhead"))).toBe("letterhead");
+    expect(readOfficeStarterTemplate(new URLSearchParams("starter=unknown"))).toBeNull();
+    expect(readOfficeStarterTemplate(new URLSearchParams())).toBeNull();
   });
 });

@@ -25,6 +25,19 @@ describe("[COMP:app-web/office-home] Office home", () => {
     expect(html).not.toContain(">Active<");
     expect(html).not.toContain(">All<");
     expect(html).toContain(">Overview<");
+    expect(html).toContain("Start with your first templates");
+    expect(html).toContain("General presentation");
+    expect(html).toContain("Letterhead");
+    expect(html).toContain("/office/templates?starter=general-presentation");
+    expect(html).toContain("/office/templates?starter=letterhead");
+  });
+
+  it("keeps lifecycle-specific empty collections compact", () => {
+    navigation.search = "view=trash";
+    const html = renderToStaticMarkup(<I18nProvider locale="en" dict={en as unknown as Dictionary}><OfficeHome workspaceId="11111111-1111-4111-8111-111111111111" initialArtifacts={[]} /></I18nProvider>);
+    expect(html).toContain("No Office artifacts yet");
+    expect(html).not.toContain("Start with your first templates");
+    expect(html).not.toContain("starter=general-presentation");
   });
 
   it("reflects sidebar-selected lifecycle and family in the top bar breadcrumb", () => {
