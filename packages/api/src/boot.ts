@@ -407,11 +407,15 @@ import { officeCollaborationRoutes } from './routes/office-collaboration.js'
 import { officeImportRoutes } from './routes/office-imports.js'
 import { createOfficeImportWorker } from './office/import-worker.js'
 import { createOfficeTemplateCompileWorker } from './office/template-compile-worker.js'
+import { createOfficeGenerationWorker } from './office/generation-worker.js'
+import { createOfficeRevisionWorker } from './office/revision-worker.js'
+import { generateDocumentFromTemplate, reviseDocumentTargets } from './office/document-generation.js'
+import { generatePresentationFromTemplate, materializeOfficeTemplateBundleForGeneration, revisePresentationTargets } from './office/presentation-generation.js'
 import { officeReleaseRoutes } from './routes/office-releases.js'
 import { officeLifecycleRoutes } from './routes/office-lifecycle.js'
 import { officeOfflineRoutes } from './routes/office-offline.js'
 import { internalOfficeCheckpointRoutes } from './routes/internal-office-checkpoint.js'
-import { officeStateVector, snapshotToYDoc } from '@use-brian/office-model'
+import { officeStateVector, snapshotToYDoc, type OfficeArtifactSnapshot } from '@use-brian/office-model'
 import { publicShareRoutes } from './routes/public-share.js'
 import { publicSiteRoutes } from './routes/public-sites.js'
 import { createDomainProvisioner } from './domains/provisioner.js'
@@ -1967,10 +1971,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   })
   if (runWorkers) officeLifecycleWorker.start()
-  const officeGenerationAvailable = () => false
+  let wakeOfficeGeneration: ((userId: string) => void) | null = null
+  const officeGenerationAvailable = () => wakeOfficeGeneration !== null
   const officeService = createOfficeService({
-    // The route must not accept jobs until the durable generation runner and
-    // its pipeline dependencies are wired into this boot graph.
     generationAvailable: officeGenerationAvailable,
     createShell: officeArtifactStore.createShell,
     deleteEmptyShell: officeArtifactStore.deleteEmptyShell,
@@ -1978,6 +1981,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     resolveAccess: resolveOfficeAccess,
     createJob: officeGenerationStore.create,
     latestJob: officeGenerationStore.latestForArtifact,
+    wakeGeneration(userId) { wakeOfficeGeneration?.(userId) },
   })
   for (const tool of createOfficeTools({
     port: officeService,
@@ -4640,6 +4644,150 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     appendEvent: officeGenerationStore.appendEvent,
     finish: officeGenerationStore.finish,
   }) : null
+  const commitGeneratedOfficeSnapshot = async (params: { job: import('./db/office-generation.js').OfficeGenerationJobRow; snapshot: OfficeArtifactSnapshot; expectedVersion: number; kind: 'generation' | 'revision' }) => {
+    if (!filesApi) throw new Error('Office file storage is unavailable')
+    const bytes = new TextEncoder().encode(JSON.stringify(params.snapshot))
+    const hash = createHash('sha256').update(bytes).digest('hex')
+    const fileContext = { workspaceId: params.job.workspaceId, userId: params.job.initiatedByUserId, assistantKind: 'standard' as const, clearance: 'confidential' as const }
+    const saved = await filesApi.writeBytes(fileContext, {
+      path: `/office/artifacts/${params.job.artifactId}/versions/${params.expectedVersion + 1}-${hash}.json`,
+      bytes,
+      mime: 'application/json',
+      sensitivity: 'confidential',
+    })
+    if (!saved.ok) throw new Error(`Office snapshot save failed: ${saved.error.kind}`)
+    const committed = await officeArtifactStore.commitVersion({
+      userId: params.job.initiatedByUserId,
+      artifactId: params.job.artifactId,
+      expectedVersion: params.expectedVersion,
+      snapshotFileId: saved.value.id,
+      snapshotHash: hash,
+      operationClock: officeStateVector(snapshotToYDoc(params.snapshot)),
+      schemaVersion: params.snapshot.schemaVersion,
+      capabilityVersion: params.snapshot.capabilityVersion,
+      origin: params.kind === 'generation' ? 'generation' : 'ai',
+      authorType: params.job.assistantId ? 'assistant' : 'system',
+      authorAssistantId: params.job.assistantId ?? undefined,
+      summary: params.kind === 'generation' ? 'Office artifact generated' : 'Brian revision',
+      checkpointKind: params.kind,
+    })
+    if (!committed) {
+      await filesApi.delete(fileContext, saved.value.id).catch(() => undefined)
+      throw new Error('Office snapshot version conflict')
+    }
+    await officeLiveStore.initialize({ userId: params.job.initiatedByUserId, artifactId: params.job.artifactId, snapshot: params.snapshot })
+    return committed
+  }
+  const readOfficeTemplateBundle = async (userId: string, workspaceId: string, versionId: string) => {
+    if (!filesApi) return null
+    const version = await officeTemplateStore.getVersion(userId, versionId)
+    if (!version || version.workspaceId !== workspaceId || version.status !== 'admitted') return null
+    const read = await filesApi.readBytes({ workspaceId, userId, assistantKind: 'standard', clearance: 'confidential' }, version.bundleFileId)
+    if (!read.ok) throw new Error(`Office template bundle unavailable: ${read.error.kind}`)
+    const stored = JSON.parse(new TextDecoder().decode(read.value.bytes))
+    return materializeOfficeTemplateBundleForGeneration(stored, { id: version.id, version: version.version, status: 'admitted' })
+  }
+  const createGenerationRunner = (userId: string) => createOfficeGenerationWorker({
+    store: officeGenerationStore,
+    workerUserId: userId,
+    buildPipelineDeps(job) {
+      return {
+        async resolveAuthority() {
+          const projection = job.authorityProjection as { sensitivity?: unknown; visibilityUserIds?: unknown; compartments?: unknown; sourceHandles?: unknown }
+          return {
+            sensitivity: projection.sensitivity === 'public' || projection.sensitivity === 'confidential' ? projection.sensitivity : 'internal',
+            visibilityUserIds: Array.isArray(projection.visibilityUserIds) ? projection.visibilityUserIds.filter((value): value is string => typeof value === 'string') : [],
+            compartments: Array.isArray(projection.compartments) ? projection.compartments.filter((value): value is string => typeof value === 'string') : [],
+            sourceHandles: Array.isArray(projection.sourceHandles) ? projection.sourceHandles.filter((value): value is string => typeof value === 'string') : [],
+          }
+        },
+        async selectTemplate(brief) {
+          if (!brief.templateId) return { ambiguous: [] }
+          const template = await readOfficeTemplateBundle(job.initiatedByUserId, job.workspaceId, brief.templateId)
+          return template ? { template } : { ambiguous: [] }
+        },
+        async retrieveBrain(brief, authority) {
+          const context = {
+            workspaceId: job.workspaceId,
+            userId: job.initiatedByUserId,
+            assistantId: brief.assistantId,
+            assistantKind: 'app' as const,
+            clearance: authority.sensitivity,
+            compartments: authority.compartments,
+          }
+          const explicitIds = brief.sourceHandles.flatMap((handle) => {
+            const match = handle.match(/^knowledge:([0-9a-f-]{36})$/i)
+            return match?.[1] ? [match[1]] : []
+          })
+          const stopwords = new Set(['about', 'after', 'again', 'also', 'and', 'audience', 'create', 'deck', 'for', 'from', 'generate', 'help', 'intro', 'introduction', 'into', 'make', 'presentation', 'public', 'slide', 'slides', 'that', 'the', 'this', 'to', 'with'])
+          const terms = [...new Set(`${brief.outcome} ${brief.audience}`.toLocaleLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? [])]
+            .filter((term) => !stopwords.has(term))
+            .slice(0, 8)
+          const [explicit, searched] = await Promise.all([
+            Promise.all(explicitIds.map((id) => knowledgeStore.getById(context, id).catch(() => null))),
+            Promise.all(terms.map((term) => knowledgeStore.search(context, term, 4).catch(() => []))),
+          ])
+          const entries = new Map([...explicit.filter((entry) => entry !== null), ...searched.flat()].map((entry) => [entry.id, entry]))
+          return [...entries.values()].slice(0, 12).map((entry) => ({
+            handle: `knowledge:${entry.id}`,
+            excerpt: [entry.title, entry.summary, entry.content].filter(Boolean).join('\n').slice(0, 4_000),
+            sensitivity: entry.sensitivity,
+          }))
+        },
+        async inspectWebsite(url) {
+          const response = await fetch(url, { signal: AbortSignal.timeout(10_000), headers: { 'User-Agent': 'UseBrian-Office/1.0' } })
+          if (!response.ok) throw new Error(`Canonical website returned ${response.status}`)
+          const excerpt = (await response.text()).replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 8_000)
+          return [{ url, excerpt }]
+        },
+        async planClaims(brief, evidence) {
+          return [
+            { objectHint: brief.family, text: brief.outcome, classification: 'user_attested' as const, confidence: 1, sourceHandles: brief.sourceHandles },
+            ...evidence.brain.map((entry) => ({ objectHint: brief.family, text: entry.excerpt.slice(0, 1_000), classification: 'evidence_supported' as const, confidence: 0.9, sourceHandles: [entry.handle] })),
+            ...evidence.website.map((entry) => ({ objectHint: brief.family, text: entry.excerpt.slice(0, 1_000), classification: 'evidence_supported' as const, confidence: 0.8, sourceHandles: [entry.url] })),
+          ].slice(0, 100)
+        },
+        async construct(brief, evidence, claims, template) {
+          if (brief.family === 'document') return generateDocumentFromTemplate({ provider, model: backgroundModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, template })
+          if (brief.family === 'presentation') return generatePresentationFromTemplate({ provider, model: backgroundModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, evidence, claims, template })
+          throw new Error('Unsupported Office artifact family')
+        },
+        async processMedia(snapshot) { return snapshot },
+        async resolveResource(resourceId) {
+          const resource = await officeTemplateStore.getResource(job.initiatedByUserId, resourceId)
+          if (!resource?.fileId || resource.workspaceId !== job.workspaceId) return null
+          const read = await filesApi!.readBytes({ workspaceId: job.workspaceId, userId: job.initiatedByUserId, assistantKind: 'standard', clearance: 'confidential' }, resource.fileId)
+          return read.ok ? { bytes: read.value.bytes, mime: resource.mime } : null
+        },
+        async cancelled() { return Boolean((await officeGenerationStore.get(job.initiatedByUserId, job.id))?.cancelRequestedAt) },
+        async commit(snapshot) {
+          const committed = await commitGeneratedOfficeSnapshot({ job, snapshot, expectedVersion: 0, kind: 'generation' })
+          return { artifactId: job.artifactId, version: committed.version }
+        },
+      }
+    },
+  })
+  const officeRevisionWorker = filesApi ? createOfficeRevisionWorker({
+    claim: officeGenerationStore.claim,
+    getSnapshot: officeLiveStore.get,
+    async revise({ snapshot, targetIds, instruction }) {
+      if (snapshot.family === 'document') return reviseDocumentTargets({ provider, model: backgroundModel, snapshot, targetIds, instruction })
+      if (snapshot.family === 'presentation') return revisePresentationTargets({ provider, model: backgroundModel, snapshot, targetIds, instruction })
+      throw new Error('Targeted Brian revision requires a document or presentation')
+    },
+    async commit({ job, snapshot, expectedVersion }) {
+      return (await commitGeneratedOfficeSnapshot({ job, snapshot, expectedVersion, kind: 'revision' })).version
+    },
+    appendEvent: officeGenerationStore.appendEvent,
+    finish: officeGenerationStore.finish,
+  }) : null
+  if (filesApi) wakeOfficeGeneration = (userId: string) => {
+    void (async () => {
+      const generation = createGenerationRunner(userId)
+      while (await generation.runOnce() !== 'idle') { /* drain creation jobs for this member */ }
+      while (officeRevisionWorker && await officeRevisionWorker(userId)) { /* drain revision jobs for this member */ }
+    })().catch((error) => console.error('[office-generation-worker]', error))
+  }
   const wakeImport = (userId: string) => {
     if (officeImportWorker) void (async () => {
       while (await officeImportWorker(userId)) { /* drain eligible imports for this member */ }

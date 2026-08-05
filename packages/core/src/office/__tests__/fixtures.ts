@@ -135,6 +135,7 @@ export function templateBundle(family: 'document' | 'presentation' = 'document')
     whenNotToUse: ['Do not use for legal agreements'],
     exampleRequests: ['Create a board update'],
     fields: [{ id: id(42), name: 'summary.text', label: 'Summary', type: 'richText', required: true, repeating: false, minItems: 0, maxItems: 1, maxLength: 1_000, targetIds: [targetId], aiInstruction: 'Ground every factual statement.', locked: false }],
+    slideRecipes: family === 'presentation' && snapshot.family === 'presentation' ? [{ id: id(55), slideId: snapshot.slides[0].id, name: 'Opening', role: 'cover', whenToUse: 'Use to open the presentation.', whenNotToUse: 'Do not repeat this slide.', enabled: true, repeatable: false, minUses: 0, maxUses: 1, fieldIds: [id(42)], confidence: 1, inference: 'Fixture-authored routing.', reviewed: true }] : [],
     snapshot,
     resources: [],
     lockedObjectIds: [],

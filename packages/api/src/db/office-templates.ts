@@ -13,10 +13,22 @@ export function createOfficeTemplateStore(db: OfficeDbQuery = defaultOfficeDbQue
       return result.rows[0] ?? null
     },
 
-    async getResource(userId: string, resourceId: string): Promise<{ id: string; workspaceId: string; fileId: string | null; hash: string; mime: string; sensitivity: 'public' | 'internal' | 'confidential' } | null> {
-      const result = await db<{ id: string; workspaceId: string; fileId: string | null; hash: string; mime: string; sensitivity: 'public' | 'internal' | 'confidential' }>(userId, `
+    async getVersion(userId: string, versionId: string): Promise<{ id: string; templateId: string; workspaceId: string; version: number; status: 'draft' | 'admitted'; bundleFileId: string; bundleHash: string } | null> {
+      const result = await db<{ id: string; templateId: string; workspaceId: string; version: number; status: 'draft' | 'admitted'; bundleFileId: string; bundleHash: string }>(userId, `
+        SELECT id, template_id AS "templateId", workspace_id AS "workspaceId",
+               version::int AS version, status, bundle_file_id AS "bundleFileId",
+               bundle_hash AS "bundleHash"
+          FROM office_template_versions
+         WHERE id=$1
+      `, [versionId])
+      return result.rows[0] ?? null
+    },
+
+    async getResource(userId: string, resourceId: string): Promise<{ id: string; workspaceId: string; fileId: string | null; hash: string; mime: string; licence: { name?: unknown; url?: unknown; attribution?: unknown }; embeddingRights: 'allowed' | 'subset_only' | 'prohibited' | 'unknown'; sensitivity: 'public' | 'internal' | 'confidential' } | null> {
+      const result = await db<{ id: string; workspaceId: string; fileId: string | null; hash: string; mime: string; licence: { name?: unknown; url?: unknown; attribution?: unknown }; embeddingRights: 'allowed' | 'subset_only' | 'prohibited' | 'unknown'; sensitivity: 'public' | 'internal' | 'confidential' }>(userId, `
         SELECT id, workspace_id AS "workspaceId", file_id AS "fileId",
-               content_hash AS hash, mime, sensitivity
+               content_hash AS hash, mime, licence,
+               embedding_rights AS "embeddingRights", sensitivity
           FROM office_resources WHERE id=$1
       `, [resourceId])
       return result.rows[0] ?? null

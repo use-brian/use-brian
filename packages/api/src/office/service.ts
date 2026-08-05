@@ -70,6 +70,7 @@ export function createOfficeService(deps: OfficeServiceDeps): OfficeToolPort {
       if (!artifact || !access || !access.canComment) return null
       if (artifact.headVersion !== params.expectedVersion) return 'version_conflict'
       const job = await deps.createJob({ userId: params.userId, workspaceId: artifact.workspaceId, artifactId: artifact.id, assistantId: params.assistantId, jobKind: 'revise', brief: { instruction: params.instruction, targetIds: params.targetIds, expectedVersion: params.expectedVersion }, authorityProjection: { role: access.role }, baseArtifactVersion: artifact.headVersion, idempotencyKey: params.idempotencyKey })
+      deps.wakeGeneration?.(params.userId)
       return { jobId: job.id, mode: access.canEdit ? 'direct' : 'proposal' }
     },
   }
