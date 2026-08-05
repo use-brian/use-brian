@@ -5,7 +5,9 @@ import {
   compileOfficeTemplate,
   importOfficeDocument,
   importOfficePresentation,
+  type ExtractedOfficeResource,
   type OfficeTemplateAdmissionReceipt,
+  type OfficeTemplateResourceAdmission,
 } from '@use-brian/core'
 import type { OfficeArtifactSnapshot } from '@use-brian/office-model'
 import type { OfficeGenerationJobRow } from '../db/office-generation.js'
@@ -16,11 +18,31 @@ export type OfficeTemplateCompileWorkerDeps = {
   getTemplate(userId: string, templateId: string): Promise<{ id: string; workspaceId: string; family: 'document' | 'presentation'; name: string; description: string; sensitivity: 'public' | 'internal' | 'confidential'; draftArtifactId: string | null } | null>
   readSource(params: { userId: string; workspaceId: string; assistantId: string | null; fileId: string }): Promise<Uint8Array>
   initialize(params: { userId: string; artifactId: string; snapshot: OfficeArtifactSnapshot }): Promise<void>
+  saveImportedResource(params: { userId: string; workspaceId: string; resource: ExtractedOfficeResource }): Promise<OfficeTemplateResourceAdmission>
   saveBundle(params: { userId: string; workspaceId: string; templateId: string; hash: string; bytes: Uint8Array }): Promise<string>
   addVersion(params: { userId: string; templateId: string; workspaceId: string; bundleFileId: string; bundleHash: string; capabilityVersion: number; locales: string[]; tags: string[]; whenToUse: string[]; whenNotToUse: string[]; exampleRequests: string[]; fieldSchema: unknown; admissionReceipt: OfficeTemplateAdmissionReceipt; provenance: unknown; status: 'draft' | 'admitted' }): Promise<unknown>
   appendEvent(params: { userId: string; jobId: string; workspaceId: string; code: string; values: Record<string, string | number | boolean>; actorType: 'system'; safeNarration: string }): Promise<unknown>
   finish(params: { userId: string; jobId: string; leaseToken: string; status: 'completed' | 'failed'; stage: string; errorCode?: string; errorDetail?: string }): Promise<boolean>
   leaseMs?: number
+}
+
+function remapSnapshotResources(snapshot: OfficeArtifactSnapshot, admissions: readonly OfficeTemplateResourceAdmission[], extracted: readonly ExtractedOfficeResource[]): OfficeArtifactSnapshot {
+  const ids = new Map(extracted.map((resource, index) => [resource.ref.id, admissions[index]?.id ?? resource.ref.id]))
+  if (ids.size === 0) return snapshot
+  const remapped = structuredClone(snapshot) as OfficeArtifactSnapshot
+  remapped.resources = remapped.resources.map((resource) => ({ ...resource, id: ids.get(resource.id) ?? resource.id }))
+  const visit = (value: unknown): void => {
+    if (!value || typeof value !== 'object') return
+    if (!Array.isArray(value)) {
+      const object = value as Record<string, unknown>
+      for (const key of ['resourceId', 'posterResourceId', 'captionsResourceId']) {
+        if (typeof object[key] === 'string') object[key] = ids.get(object[key] as string) ?? object[key]
+      }
+    }
+    for (const child of Object.values(value)) visit(child)
+  }
+  visit(remapped)
+  return remapped
 }
 
 export function createOfficeTemplateCompileWorker(deps: OfficeTemplateCompileWorkerDeps) {
@@ -34,6 +56,7 @@ export function createOfficeTemplateCompileWorker(deps: OfficeTemplateCompileWor
       const template = await deps.getTemplate(userId, brief.templateId)
       if (!template || template.workspaceId !== job.workspaceId || template.draftArtifactId !== job.artifactId) throw new Error('template_compile_source_not_found')
       let live: { snapshot: OfficeArtifactSnapshot } | null
+      let resourceAdmissions: OfficeTemplateResourceAdmission[] = []
       if (brief.source?.kind === 'upload') {
         if (typeof brief.source.fileId !== 'string') throw new Error('invalid_template_upload_brief')
         const bytes = await deps.readSource({ userId, workspaceId: job.workspaceId, assistantId: job.assistantId, fileId: brief.source.fileId })
@@ -42,14 +65,15 @@ export function createOfficeTemplateCompileWorker(deps: OfficeTemplateCompileWor
           ? await importOfficeDocument(bytes, context)
           : await importOfficePresentation(bytes, context)
         if (!imported.ok || !imported.snapshot) throw new Error(imported.diagnostics.map((item) => `${item.path}: ${item.message}`).join('; ') || 'template_upload_import_failed')
-        const snapshot: OfficeArtifactSnapshot = {
+        resourceAdmissions = await Promise.all(imported.resources.map((resource) => deps.saveImportedResource({ userId, workspaceId: job.workspaceId, resource })))
+        const snapshot: OfficeArtifactSnapshot = remapSnapshotResources({
           ...imported.snapshot,
           artifactId: job.artifactId,
           workspaceId: job.workspaceId,
           templateVersionId: null,
           title: template.name,
           accessibility: { ...imported.snapshot.accessibility, title: template.name },
-        }
+        }, resourceAdmissions, imported.resources)
         await deps.initialize({ userId, artifactId: job.artifactId, snapshot })
         live = { snapshot }
       } else {
@@ -84,7 +108,7 @@ export function createOfficeTemplateCompileWorker(deps: OfficeTemplateCompileWor
       const compiled = await compileOfficeTemplate({
         authoringPath: brief.source?.kind === 'upload' ? 'upload' : brief.source?.kind === 'promote' ? 'promote_version' : 'scratch',
         draft,
-        resources: [],
+        resources: resourceAdmissions,
       })
       const bundleBytes = new TextEncoder().encode(JSON.stringify(compiled.bundle ?? draft))
       const bundleHash = createHash('sha256').update(bundleBytes).digest('hex')

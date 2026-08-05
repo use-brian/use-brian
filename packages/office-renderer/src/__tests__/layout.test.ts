@@ -18,6 +18,14 @@ describe('[COMP:office/layout] Deterministic Office layout', () => {
     expect(layoutOfficeArtifact(snapshot).issues).toContainEqual(expect.objectContaining({ code: 'overflow', objectId: id(57) }))
   })
 
+  it('checks rendered text ink instead of rejecting adjacent overlapping boxes', () => {
+    const snapshot: PresentationSnapshot = { schemaVersion: 1, capabilityVersion: 1, artifactId: id(71), workspaceId: id(2), family: 'presentation', locale: 'en-US', defaultLanguage: 'en-US', templateVersionId: null, rootId: id(72), title: 'Deck', resources: [], accessibility: { title: 'Deck' }, slideSize: { widthPt: 300, heightPt: 200 }, themeId: id(73), masters: [{ id: id(74), name: 'Master', lockedObjectIds: [] }], layouts: [{ id: id(75), masterId: id(74), name: 'Layout', placeholderIds: [] }], slides: [{ id: id(76), title: 'Slide', masterId: id(74), layoutId: id(75), notes: [], objects: [
+      { id: id(77), kind: 'text', geometry: { xPt: 10, yPt: 20, widthPt: 100, heightPt: 30, rotationDeg: 0 }, locked: false, alignment: 'start', verticalAlignment: 'top', runs: [{ id: id(78), text: 'Left', style }] },
+      { id: id(79), kind: 'text', geometry: { xPt: 90, yPt: 20, widthPt: 100, heightPt: 30, rotationDeg: 0 }, locked: false, alignment: 'end', verticalAlignment: 'top', runs: [{ id: id(80), text: 'Right', style }] },
+    ], readingOrder: [id(77), id(79)] }] }
+    expect(layoutOfficeArtifact(snapshot).issues).not.toContainEqual(expect.objectContaining({ code: 'collision' }))
+  })
+
   it('uses the display list for browser preview/goldens and refuses degraded fit', () => {
     const snapshot: DocumentSnapshot = { schemaVersion: 1, capabilityVersion: 1, artifactId: id(61), workspaceId: id(2), family: 'document', locale: 'en-US', defaultLanguage: 'en-US', templateVersionId: id(3), rootId: id(62), title: 'Fit', resources: [], accessibility: { title: 'Fit' }, sections: [{ id: id(63), page: { widthPt: 300, heightPt: 200, marginTopPt: 20, marginRightPt: 20, marginBottomPt: 20, marginLeftPt: 20, orientation: 'portrait' }, header: [], footer: [], showPageNumber: false, nodes: [{ id: id(64), kind: 'paragraph', styleName: 'Body', alignment: 'start', runs: [{ id: id(65), text: 'Long enough to violate a compiled field budget', style }] }] }] }
     const fit = fitOfficeArtifact(snapshot, { maxPages: 1, maxTextCharsByObject: { [id(65)]: 10 }, minimumFontSizePt: 10 })

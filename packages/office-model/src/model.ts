@@ -103,7 +103,7 @@ export const OfficeImageSchema = NodeBaseSchema.extend({
 
 export const OfficeChartSchema = NodeBaseSchema.extend({
   kind: z.literal('chart'),
-  chartType: z.enum(['bar', 'line', 'pie', 'doughnut']),
+  chartType: z.enum(['bar', 'line', 'pie', 'doughnut', 'scatter']),
   title: z.string().min(1).max(500),
   categories: z.array(z.string().max(500)).min(1).max(500),
   series: z.array(z.object({ name: z.string().min(1).max(200), values: z.array(z.number()).max(500) }).strict()).min(1).max(50),

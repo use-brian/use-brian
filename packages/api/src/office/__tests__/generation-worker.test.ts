@@ -81,7 +81,7 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
     expect(importStore.finish).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', errorCode: 'import_failed' }))
 
     const templateJob = { ...base, id: '30000000-0000-4000-8000-000000000012', jobKind: 'template_compile' as const } as OfficeGenerationJobRow
-    const templateDeps = { claim: vi.fn(async () => templateJob), getSnapshot: vi.fn(), getTemplate: vi.fn(), readSource: vi.fn(), initialize: vi.fn(), saveBundle: vi.fn(), addVersion: vi.fn(), appendEvent: vi.fn(async () => ({})), finish: vi.fn(async () => true) }
+    const templateDeps = { claim: vi.fn(async () => templateJob), getSnapshot: vi.fn(), getTemplate: vi.fn(), readSource: vi.fn(), initialize: vi.fn(), saveImportedResource: vi.fn(), saveBundle: vi.fn(), addVersion: vi.fn(), appendEvent: vi.fn(async () => ({})), finish: vi.fn(async () => true) }
     const templateWorker = createOfficeTemplateCompileWorker(templateDeps)
     await expect(templateWorker(base.initiatedByUserId)).resolves.toBe(true)
     expect(templateDeps.finish).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', errorCode: 'template_compile_failed' }))
@@ -125,6 +125,7 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
       getTemplate: vi.fn(async () => ({ id: templateId, workspaceId, family: 'presentation' as const, name: 'Company deck', description: 'Use for company introductions', sensitivity: 'internal' as const, draftArtifactId: artifactId })),
       readSource: vi.fn(async () => uploaded.bytes),
       initialize: vi.fn(async () => undefined),
+      saveImportedResource: vi.fn(),
       saveBundle: vi.fn(async () => '30000000-0000-4000-8000-000000000113'),
       addVersion: vi.fn(async () => ({ id: '30000000-0000-4000-8000-000000000114', version: 1 })),
       appendEvent: vi.fn(async () => ({})),

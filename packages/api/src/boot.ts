@@ -4607,6 +4607,25 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       return result.value.bytes
     },
     initialize: officeLiveStore.initialize,
+    async saveImportedResource({ userId, workspaceId, resource }) {
+      const path = `/office/resources/${resource.ref.hash}`
+      const ctx = { workspaceId, userId, assistantKind: 'standard' as const, clearance: 'confidential' as const }
+      const existing = await filesApi!.stat(ctx, path)
+      const fileId = existing.ok ? existing.value.id : await (async () => {
+        const saved = await filesApi!.writeBytes(ctx, { path, bytes: resource.bytes, mime: resource.ref.mime, sensitivity: resource.ref.sensitivity })
+        if (!saved.ok) throw new Error(`Office resource save failed: ${saved.error.kind}`)
+        return saved.value.id
+      })()
+      const persisted = await officeTemplateStore.addResource({
+        userId, workspaceId, kind: 'brand_media', name: resource.sourcePart, fileId,
+        hash: resource.ref.hash, mime: resource.ref.mime,
+        licence: { name: 'Workspace-uploaded source file' }, embeddingRights: 'allowed', sensitivity: resource.ref.sensitivity,
+      })
+      return {
+        id: persisted.id, bytes: resource.bytes, hash: resource.ref.hash, mime: resource.ref.mime,
+        licence: { name: 'Workspace-uploaded source file' }, embeddingRights: 'allowed',
+      }
+    },
     async saveBundle({ userId, workspaceId, templateId, hash, bytes }) {
       const path = `/office/templates/${templateId}/${hash}.json`
       const ctx = { workspaceId, userId, assistantKind: 'standard' as const, clearance: 'confidential' as const }

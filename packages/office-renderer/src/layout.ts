@@ -58,11 +58,58 @@ function textOf(runs: readonly OfficeRichTextRun[]): string {
   return runs.map((run) => run.text).join('')
 }
 
+function characterWidthFactor(character: string): number {
+  if (/\s/.test(character)) return 0.28
+  if (/[ilI1|.,'`:;]/.test(character)) return 0.28
+  if (/[mwMW@%&]/.test(character)) return 0.82
+  if (/[A-Z0-9]/.test(character)) return 0.6
+  return 0.5
+}
+
+function lineWidth(runs: readonly OfficeRichTextRun[]): number {
+  return runs.reduce((width, run) => width + [...run.text].reduce((sum, character) => sum + run.style.fontSizePt * characterWidthFactor(character), 0), 0)
+}
+
+function textLines(runs: readonly OfficeRichTextRun[]): OfficeRichTextRun[][] {
+  const lines: OfficeRichTextRun[][] = [[]]
+  for (const run of runs) {
+    const parts = run.text.split('\n')
+    for (const [index, text] of parts.entries()) {
+      if (index > 0) lines.push([])
+      if (text) lines[lines.length - 1].push({ ...run, text })
+    }
+  }
+  return lines
+}
+
+function textMetrics(runs: readonly OfficeRichTextRun[], widthPt: number): { widthPt: number; heightPt: number } {
+  const lines = textLines(runs)
+  const widths = lines.map(lineWidth)
+  const heightPt = lines.reduce((height, line, index) => {
+    const font = Math.max(8, ...line.map((run) => run.style.fontSizePt))
+    const wraps = Math.max(1, Math.ceil(widths[index] / Math.max(1, widthPt)))
+    return height + wraps * font * 1.15
+  }, 0)
+  return { widthPt: Math.min(widthPt, Math.max(0, ...widths)), heightPt }
+}
+
 function textHeight(runs: readonly OfficeRichTextRun[], widthPt: number): number {
-  const font = Math.max(8, ...runs.map((run) => run.style.fontSizePt))
-  const charsPerLine = Math.max(1, Math.floor(widthPt / (font * 0.52)))
-  const lines = Math.max(1, Math.ceil(textOf(runs).length / charsPerLine))
-  return lines * font * 1.25
+  return textMetrics(runs, widthPt).heightPt
+}
+
+function textInkBounds(object: Extract<PresentationObject, { kind: 'text' }>): OfficeDisplayPrimitive {
+  const metrics = textMetrics(object.runs, object.geometry.widthPt)
+  const xPt = object.alignment === 'center'
+    ? object.geometry.xPt + (object.geometry.widthPt - metrics.widthPt) / 2
+    : object.alignment === 'end'
+      ? object.geometry.xPt + object.geometry.widthPt - metrics.widthPt
+      : object.geometry.xPt
+  const yPt = object.verticalAlignment === 'middle'
+    ? object.geometry.yPt + (object.geometry.heightPt - metrics.heightPt) / 2
+    : object.verticalAlignment === 'bottom'
+      ? object.geometry.yPt + object.geometry.heightPt - metrics.heightPt
+      : object.geometry.yPt
+  return { id: object.id, kind: 'text', xPt, yPt, widthPt: metrics.widthPt, heightPt: metrics.heightPt, z: 0 }
 }
 
 function documentNodeHeight(node: DocumentFlowNode, widthPt: number): number {
@@ -150,7 +197,11 @@ function layoutPresentation(snapshot: PresentationSnapshot): OfficeLayoutResult 
     }
     for (let left = 0; left < primitives.length; left += 1) {
       for (let right = left + 1; right < primitives.length; right += 1) {
-        if (primitives[left].kind === 'text' && primitives[right].kind === 'text' && overlaps(primitives[left], primitives[right])) issues.push({ code: 'collision', objectId: primitives[right].id, message: `Text overlaps ${primitives[left].id}` })
+        if (primitives[left].kind === 'text' && primitives[right].kind === 'text') {
+          const leftObject = slide.objects[left]
+          const rightObject = slide.objects[right]
+          if (leftObject?.kind === 'text' && rightObject?.kind === 'text' && overlaps(textInkBounds(leftObject), textInkBounds(rightObject))) issues.push({ code: 'collision', objectId: primitives[right].id, message: `Text overlaps ${primitives[left].id}` })
+        }
       }
     }
     return { id: slide.id, widthPt: snapshot.slideSize.widthPt, heightPt: snapshot.slideSize.heightPt, primitives }
