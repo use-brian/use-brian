@@ -26,7 +26,8 @@ describe("[COMP:app-web/office-home] Office home", () => {
     expect(html).toContain(">All<");
     expect(html).toContain(">Files<");
     expect(html).toContain("Choose a template to create your first file");
-    expect(html).toContain('href="/w/11111111-1111-4111-8111-111111111111/office/templates?intent=use"');
+    expect(html).toContain('href="/w/11111111-1111-4111-8111-111111111111/office/new"');
+    expect(html).not.toContain("templates?intent=use");
     expect(html).not.toContain("General presentation");
     expect(html).not.toContain("Letterhead");
     expect(html).not.toContain(">Import<");

@@ -15,6 +15,7 @@ vi.mock("next/link", () => ({
 }));
 
 import { OfficeTopbar } from "../office-topbar";
+import { OfficeTemplatePicker, usableOfficeTemplates } from "../office-create";
 import { OfficeTemplateCard, OfficeTemplateLibrary, officeTemplateFamilyFromFileName, officeTemplateNameFromFile, readOfficeStarterTemplate } from "../template-library";
 
 function wrap(node: React.ReactNode) {
@@ -64,6 +65,21 @@ describe("[COMP:app-web/office-navigation] Office route chrome", () => {
     expect(html).toContain("Use template");
     expect(html).toContain("Document");
     expect(html).toContain("Presentation");
+  });
+
+  it("keeps Files New inside an admitted-template creation picker", () => {
+    const base = { sensitivity: "internal" as const, updatedAt: "2026-08-05T00:00:00.000Z", draftArtifactId: "template-artifact" };
+    const templates = usableOfficeTemplates([
+      { ...base, id: "admitted-template", family: "presentation", name: "Company deck", description: "Company presentations", lifecycleState: "admitted", currentVersionId: "version-1" },
+      { ...base, id: "draft-template", family: "document", name: "Draft letter", description: "Not published", lifecycleState: "draft", currentVersionId: null },
+    ]);
+    expect(templates.map((template) => template.id)).toEqual(["admitted-template"]);
+    const html = wrap(<OfficeTemplatePicker workspaceId="workspace-1" templates={templates} failed={false} onSelect={vi.fn()} />);
+    expect(html).toContain("Choose a template");
+    expect(html).toContain('data-office-template-choice="presentation"');
+    expect(html).toContain("Company deck");
+    expect(html).not.toContain("Draft letter");
+    expect(html).not.toContain('href="/w/workspace-1/office/templates"');
   });
 
   it("keeps draft templates in the shared editor but blocks artifact creation", () => {

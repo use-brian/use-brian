@@ -61,7 +61,7 @@ export function OfficeHome({ workspaceId, initialArtifacts }: { workspaceId: str
             <div className="flex max-w-[min(70vw,24rem)] items-center overflow-x-auto rounded-md border p-0.5" aria-label={t.fileFilters}>
               {(["all", "document", "presentation"] as const).map((item) => <Link key={item} href={filterHref(item)} aria-current={filter === item ? "page" : undefined} className={filter === item ? "rounded px-2 py-1 text-xs font-medium bg-foreground text-background" : "rounded px-2 py-1 text-xs text-muted-foreground hover:text-foreground"}>{item === "all" ? t.all : item === "document" ? t.documents : t.presentations}</Link>)}
             </div>
-            <Link aria-label={t.newArtifact} title={t.newArtifact} className="inline-flex size-8 items-center justify-center gap-2 rounded-md bg-action text-sm font-medium text-action-foreground shadow-sm transition-colors hover:bg-action/85 sm:w-auto sm:px-2.5" href={`${base}/templates?intent=use`}>
+            <Link aria-label={t.newArtifact} title={t.newArtifact} className="inline-flex size-8 items-center justify-center gap-2 rounded-md bg-action text-sm font-medium text-action-foreground shadow-sm transition-colors hover:bg-action/85 sm:w-auto sm:px-2.5" href={`${base}/new`}>
               <Plus className="size-4" aria-hidden /><span className="hidden sm:inline">{t.newArtifact}</span>
             </Link>
           </div>
@@ -74,7 +74,7 @@ export function OfficeHome({ workspaceId, initialArtifacts }: { workspaceId: str
           <section className="rounded-2xl border border-dashed px-6 py-14 text-center">
             <h2 className="font-medium">{t.firstArtifactEmptyTitle}</h2>
             <p className="mx-auto mt-1 max-w-lg text-sm text-muted-foreground">{t.firstArtifactEmptyBody}</p>
-            <Link href={`${base}/templates?intent=use`} className="mt-5 inline-flex h-9 items-center rounded-md bg-action px-4 text-sm font-medium text-action-foreground">{t.browseTemplates}</Link>
+            <Link href={`${base}/new`} className="mt-5 inline-flex h-9 items-center rounded-md bg-action px-4 text-sm font-medium text-action-foreground">{t.browseTemplates}</Link>
           </section>
         ) : (
           <div className="rounded-xl border border-dashed px-6 py-16 text-center">
