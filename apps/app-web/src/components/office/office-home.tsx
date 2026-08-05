@@ -74,20 +74,23 @@ export function OfficeHome({ workspaceId, initialArtifacts }: { workspaceId: str
       <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 p-4 sm:p-6 lg:p-8">
         <h1 className="sr-only">{t.homeTitle}</h1>
 
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b pb-3">
-          <div className="flex gap-1" role="tablist">
+        <div data-office-filter-bar="left" className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b pb-3">
+          <div className="flex shrink-0 gap-1" role="tablist">
             {(["active", "archived", "trash", "retained"] as const).map((item) => (
               <button key={item} type="button" role="tab" aria-selected={view === item} onClick={() => replaceFilters(item, filter)} className={cn("rounded-md px-3 py-1.5 text-sm", view === item ? "bg-muted font-medium" : "text-muted-foreground")}>
                 {t[item]}
               </button>
             ))}
           </div>
-          <div className="flex gap-1">
-            {(["all", "document", "presentation"] as const).map((item) => (
-              <button key={item} type="button" onClick={() => replaceFilters(view, item)} className={cn("rounded-full border px-3 py-1 text-xs", filter === item && "border-foreground bg-foreground text-background")}>
-                {item === "all" ? t.all : item === "document" ? t.documents : t.presentations}
-              </button>
-            ))}
+          <div className="flex shrink-0 items-center gap-3">
+            <span aria-hidden className="hidden h-5 w-px bg-border sm:block" />
+            <div className="flex gap-1">
+              {(["all", "document", "presentation"] as const).map((item) => (
+                <button key={item} type="button" onClick={() => replaceFilters(view, item)} className={cn("rounded-full border px-3 py-1 text-xs", filter === item && "border-foreground bg-foreground text-background")}>
+                  {item === "all" ? t.all : item === "document" ? t.documents : t.presentations}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
 
