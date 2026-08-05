@@ -15,6 +15,11 @@ vi.mock('../../db/users.js', () => ({
   resolveAssistantAccess: vi.fn(),
 }))
 
+const mockDiscoverCli = vi.fn()
+vi.mock('../../mcp/cli-transport.js', () => ({
+  discoverCliServer: (...args: unknown[]) => mockDiscoverCli(...args),
+}))
+
 import { assistantRoutes } from '../assistants.js'
 import { queryWithRLS } from '../../db/client.js'
 import { resolveAssistantAccess } from '../../db/users.js'
@@ -28,7 +33,11 @@ const mockAccess = vi.mocked(resolveAssistantAccess)
 
 const connectorStore = { list: vi.fn() }
 const assistantConnectorStore = { listForAssistant: vi.fn() }
-const connectorInstanceStore = { listByWorkspaceSystem: vi.fn() }
+const connectorInstanceStore = {
+  listByWorkspaceSystem: vi.fn(),
+  get: vi.fn(),
+  getAuthCredentialsSystem: vi.fn(),
+}
 const connectorGrantStore = { listForTargetSystem: vi.fn() }
 const mcpSettingsStore = { getPolicy: vi.fn(), setPolicy: vi.fn() }
 
@@ -37,7 +46,10 @@ beforeEach(() => {
   connectorStore.list.mockReset().mockResolvedValue([])
   assistantConnectorStore.listForAssistant.mockReset().mockResolvedValue([])
   connectorInstanceStore.listByWorkspaceSystem.mockReset().mockResolvedValue([])
+  connectorInstanceStore.get.mockReset().mockResolvedValue(null)
+  connectorInstanceStore.getAuthCredentialsSystem.mockReset().mockResolvedValue(null)
   connectorGrantStore.listForTargetSystem.mockReset().mockResolvedValue([])
+  mockDiscoverCli.mockReset().mockResolvedValue({ name: 'CLI', tools: [] })
   mcpSettingsStore.getPolicy.mockReset().mockResolvedValue(null)
   mcpSettingsStore.setPolicy.mockReset().mockResolvedValue(undefined)
 })
@@ -146,6 +158,43 @@ describe('[COMP:routes/assistants-connector-scoping] GET /:assistantId/connector
       (c) => c.id === 'gmail',
     )
     expect(gmail?.scope).toBe('team-grant')
+  })
+
+  it('projects every shared CLI instance as a separate connector card', async () => {
+    queueMembershipAndTeam('owner', 'ws-personal')
+    connectorGrantStore.listForTargetSystem.mockResolvedValueOnce([
+      {
+        grantedByUserId: 'u-owner',
+        instance: {
+          id: 'cli-newer', provider: 'cli', label: 'Project calendar',
+          url: null, custom: false, connected: true, config: {},
+          createdAt: new Date('2026-07-03T00:00:00Z'),
+        },
+      },
+      {
+        grantedByUserId: 'u-teammate',
+        instance: {
+          id: 'cli-primary', provider: 'cli', label: 'Proton calendar',
+          url: null, custom: false, connected: true, config: {},
+          createdAt: new Date('2026-07-01T00:00:00Z'),
+        },
+      },
+    ])
+
+    const res = await request(makeApp('u-owner')).get('/api/assistants/a-1/connectors')
+
+    expect(res.status).toBe(200)
+    const cli = (res.body.connectors as Array<{
+      id: string; providerId?: string; name: string; instanceId?: string
+    }>).filter((connector) => connector.providerId === 'cli')
+    expect(cli).toEqual([
+      expect.objectContaining({
+        id: 'cli:cli-primary', instanceId: 'cli-primary', name: 'Proton calendar',
+      }),
+      expect.objectContaining({
+        id: 'cli:cli-newer', instanceId: 'cli-newer', name: 'Project calendar',
+      }),
+    ])
   })
 
   it('projects every connected instance for repeated providers with independent extra-account governance', async () => {
@@ -424,6 +473,58 @@ describe('[COMP:routes/assistants-connector-scoping] account-bound connector gov
     expect(updated.status).toBe(200)
     expect(mcpSettingsStore.setPolicy).toHaveBeenCalledWith(expect.objectContaining({
       assistantId: 'a-1', serverName: 'github:github-work', toolName: 'githubCreateIssue', policy: 'allow',
+    }))
+  })
+})
+
+describe('[COMP:routes/assistants-connector-scoping] CLI instance governance routes', () => {
+  it('discovers the selected authorized CLI instance and composes L1/L2 policy', async () => {
+    mockAccess.mockResolvedValue({
+      assistant: { id: 'a-1', name: 'A', workspaceId: 'ws-1' },
+      role: 'owner',
+    } as never)
+    const instance = {
+      id: 'cli-1', scope: 'user', userId: 'u-owner', workspaceId: null,
+      provider: 'cli', label: 'Proton calendar', connected: true,
+      config: { cwd: '/tmp' },
+    }
+    connectorGrantStore.listForTargetSystem.mockResolvedValue([{ grantedByUserId: 'u-owner', instance }])
+    connectorInstanceStore.getAuthCredentialsSystem.mockResolvedValue({
+      type: 'cli', binaryPath: '/usr/bin/node', args: ['/tmp/proton.js'],
+    })
+    mockDiscoverCli.mockResolvedValue({
+      name: 'Proton calendar',
+      tools: [{ name: 'listEvents', description: 'Read calendar events' }],
+    })
+    mcpSettingsStore.getPolicy.mockImplementation(async (params: { assistantId: string }) => (
+      params.assistantId === 'a-1' ? { policy: 'block' } : { policy: 'allow' }
+    ))
+
+    const res = await request(makeApp('u-owner'))
+      .get('/api/assistants/a-1/connectors/cli%3Acli-1/tools')
+
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({
+      serverName: 'Proton calendar', providerId: 'cli', instanceId: 'cli-1',
+      tools: [{
+        name: 'listEvents', classification: 'read', appPolicy: 'allow',
+        assistantPolicy: 'block', effectivePolicy: 'block',
+      }],
+    })
+    expect(mockDiscoverCli).toHaveBeenCalledWith(expect.objectContaining({
+      binaryPath: '/usr/bin/node', args: ['/tmp/proton.js'], cwd: '/tmp',
+    }), 'Proton calendar')
+
+    const updated = await request(makeApp('u-owner'))
+      .post('/api/assistants/a-1/connectors/cli%3Acli-1/tools/policy')
+      .send({ serverName: 'Proton calendar', toolName: 'listEvents', policy: 'ask' })
+    expect(updated.status).toBe(200)
+    expect(mcpSettingsStore.setPolicy).toHaveBeenCalledWith(expect.objectContaining({
+      assistantId: 'a-1',
+      userId: 'u-owner',
+      serverName: 'Proton calendar',
+      toolName: 'listEvents',
+      policy: 'ask',
     }))
   })
 })

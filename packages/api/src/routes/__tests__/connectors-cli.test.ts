@@ -25,6 +25,8 @@ vi.mock('../../mcp/cli-transport.js', async (importOriginal) => {
 
 function makeApp() {
   const createUserInstance = vi.fn(async () => ({ id: INSTANCE_ID }))
+  const getPolicy = vi.fn(async () => null)
+  const setPolicy = vi.fn(async () => undefined)
   const get = vi.fn(async () => ({
     id: INSTANCE_ID,
     provider: 'cli',
@@ -41,8 +43,16 @@ function makeApp() {
   const router = connectorRoutes({
     connectorStore: {} as ConnectorStore,
     connectorInstanceStore,
+    mcpSettingsStore: { getPolicy, setPolicy } as never,
   })
-  return { app: createTestApp('/api/connectors', router, { userId: USER }), createUserInstance, get, getAuthCredentials }
+  return {
+    app: createTestApp('/api/connectors', router, { userId: USER }),
+    createUserInstance,
+    get,
+    getAuthCredentials,
+    getPolicy,
+    setPolicy,
+  }
 }
 
 describe('[COMP:api/connectors-cli-route] CLI connector routes', () => {
@@ -119,5 +129,21 @@ describe('[COMP:api/connectors-cli-route] CLI connector routes', () => {
         envKeys: [],
       },
     })
+  })
+
+  it('updates CLI tool policy through the instance-scoped tools route', async () => {
+    const { app, setPolicy } = makeApp()
+    const res = await request(app)
+      .post(`/api/connectors/${INSTANCE_ID}/tools/policy`)
+      .send({ serverName: 'Local tools', toolName: 'status', policy: 'block' })
+
+    expect(res.status).toBe(200)
+    expect(setPolicy).toHaveBeenCalledWith(expect.objectContaining({
+      assistantId: '00000000-0000-0000-0000-000000000000',
+      userId: USER,
+      serverName: 'Local tools',
+      toolName: 'status',
+      policy: 'block',
+    }))
   })
 })

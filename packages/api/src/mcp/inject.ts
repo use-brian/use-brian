@@ -787,6 +787,13 @@ export async function injectMcpTools(params: {
     if (cliInstances.length > 0 && connectorInstanceStore) {
       const cliDiscoveries = await Promise.allSettled(
         cliInstances.map(async (inst) => {
+          const governanceId = connectorInstanceGovernanceId('cli', inst.id)
+          if (
+            assistantConnectorStore
+            && !(await assistantConnectorStore.isEnabled(assistantId, governanceId, 'cli'))
+          ) {
+            return null
+          }
           const creds = await connectorInstanceStore.getAuthCredentialsSystem(inst.id)
           if (creds?.type !== 'cli') return null
 

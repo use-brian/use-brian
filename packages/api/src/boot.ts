@@ -3968,6 +3968,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     app.use('/api/connectors', requireAuth(env.JWT_SECRET), connectorRoutes({
       connectorStore,
       connectorInstanceStore,
+      mcpSettingsStore,
       gcsByo: {
         requireWorkspaceAdmin: async (userId, workspaceId) => {
           const m = await getWorkspaceMembershipWithClearanceSystem(userId, workspaceId)
