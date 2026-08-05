@@ -6,6 +6,7 @@ export {
   pollQrcodeStatus,
   ILINK_DEFAULT_BASE_URL,
   ILINK_CDN_BASE_URL,
+  ILINK_CHANNEL_VERSION,
   ILINK_STALE_TOKEN_ERRCODE,
   WeixinMessageType,
   WeixinItemType,

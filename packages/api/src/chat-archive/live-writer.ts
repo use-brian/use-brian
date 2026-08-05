@@ -1,0 +1,219 @@
+/**
+ * Local chat-archive producer. It owns no provider parsing: adapters pass an
+ * IncomingMessage and normalize.ts emits the shared append contract.
+ */
+
+import type pg from 'pg'
+import type { IncomingMessage, OutgoingDocument } from '@use-brian/channels'
+import { getPool } from '../db/client.js'
+import type { IngestSinkStore } from '../db/ingest-sink-store.js'
+import type { ExternalSinkFanout } from '../ingest/external-sink-fanout.js'
+import { normalizeInboundChatMessage, normalizeOutboundChatMessage } from './normalize.js'
+
+type Queryable = Pick<pg.ClientBase, 'query'>
+type ChannelSource = 'whatsapp' | 'telegram' | 'slack' | 'discord' | 'email' | 'msteams' | 'wechat'
+
+export type LiveArchiveContext = {
+  source: ChannelSource
+  ownerUserId: string
+  workspaceId: string | null
+  /** Exact channel connector when the route has one; avoids cross-account mixing. */
+  connectorInstanceId?: string | null
+  assistantId: string
+  assistantName: string
+  conversationId: string
+}
+
+export type LiveChatArchiveWriter = {
+  persistInbound<T>(
+    input: LiveArchiveContext & { message: IncomingMessage },
+    persist: (client?: Queryable) => Promise<T>,
+  ): Promise<T>
+  appendOutbound(input: LiveArchiveContext & {
+    sessionMessageId: string
+    providerMessageId?: string | null
+    text: string
+    documents?: OutgoingDocument[]
+    replyToProviderId?: string | null
+  }): Promise<void>
+}
+
+function assertLoopbackAppendUrl(value: string): string {
+  const url = new URL(value)
+  const hosts = new Set(['127.0.0.1', 'localhost', '[::1]'])
+  if (url.protocol !== 'http:' || !hosts.has(url.hostname)) {
+    throw new Error('BRIAN_MESSAGE_STORE_URL must be an http loopback URL')
+  }
+  if (url.pathname === '/' || url.pathname === '') url.pathname = '/append'
+  return url.toString()
+}
+
+export function createLiveChatArchiveWriter(deps: {
+  endpointUrl: string
+  secret: string
+  sinks: Pick<IngestSinkStore, 'ensureManagedLocalChatArchive'>
+  fanout: Pick<ExternalSinkFanout, 'fanout'>
+  pool?: pg.Pool
+}): LiveChatArchiveWriter {
+  const endpointUrl = assertLoopbackAppendUrl(deps.endpointUrl)
+  const pool = deps.pool ?? getPool()
+  const bindings = new Map<string, Promise<{ instanceId: string; workspaceId: string } | null>>()
+
+  async function resolveBinding(input: LiveArchiveContext): Promise<{ instanceId: string; workspaceId: string } | null> {
+    let workspaceId = input.workspaceId
+    if (!workspaceId) {
+      const workspace = await pool.query<{ id: string }>(
+        `SELECT id FROM workspaces
+          WHERE owner_user_id = $1 AND is_personal = true
+          ORDER BY created_at ASC LIMIT 1`,
+        [input.ownerUserId],
+      )
+      workspaceId = workspace.rows[0]?.id ?? null
+    }
+    if (!workspaceId) return null
+
+    const key = `${workspaceId}:${input.source}:${input.connectorInstanceId ?? 'auto'}`
+    let pending = bindings.get(key)
+    if (!pending) {
+      pending = (async () => {
+        const existing = input.connectorInstanceId
+          ? await pool.query<{ id: string }>(
+              `SELECT id FROM connector_instance
+                WHERE id = $1 AND provider = $2
+                  AND (
+                    (scope = 'workspace' AND workspace_id = $3)
+                    OR ingest_workspace_id = $3
+                    OR (scope = 'user' AND user_id = $4)
+                  )
+                LIMIT 1`,
+              [input.connectorInstanceId, input.source, workspaceId, input.ownerUserId],
+            )
+          : await pool.query<{ id: string }>(
+              `SELECT id FROM connector_instance
+                WHERE scope = 'workspace' AND workspace_id = $1 AND provider = $2
+                ORDER BY (config->>'managedBy' = 'local_chat_archive') ASC,
+                         connected DESC, created_at ASC
+                LIMIT 1`,
+              [workspaceId, input.source],
+            )
+        let instanceId = existing.rows[0]?.id
+        if (input.connectorInstanceId && !instanceId) return null
+        if (!instanceId) {
+          const inserted = await pool.query<{ id: string }>(
+            `INSERT INTO connector_instance
+               (scope, user_id, workspace_id, provider, label, custom,
+                credentials_type, config, sensitivity, connected,
+                ingestion_enabled, created_by)
+             VALUES ('workspace', NULL, $1, $2, $3, false, 'none',
+                     '{"managedBy":"local_chat_archive"}'::jsonb,
+                     'internal', true, false, $4)
+             ON CONFLICT DO NOTHING
+             RETURNING id`,
+            [workspaceId, input.source, `${input.source} chat archive`, input.ownerUserId],
+          )
+          instanceId = inserted.rows[0]?.id
+          if (!instanceId) {
+            const raced = await pool.query<{ id: string }>(
+              `SELECT id FROM connector_instance
+                WHERE scope = 'workspace' AND workspace_id = $1 AND provider = $2
+                  AND config->>'managedBy' = 'local_chat_archive'
+                LIMIT 1`,
+              [workspaceId, input.source],
+            )
+            instanceId = raced.rows[0]?.id
+          }
+        }
+        if (!instanceId) return null
+        await deps.sinks.ensureManagedLocalChatArchive({
+          connectorInstanceId: instanceId,
+          workspaceId,
+          endpointUrl,
+          secret: deps.secret,
+        })
+        return { instanceId, workspaceId }
+      })()
+      bindings.set(key, pending)
+      pending.catch(() => bindings.delete(key))
+    }
+    return pending
+  }
+
+  return {
+    async persistInbound(input, persist) {
+      let binding: { instanceId: string; workspaceId: string } | null
+      try {
+        binding = await resolveBinding(input)
+      } catch (err) {
+        console.warn('[chat-archive] inbound setup failed; saving session turn without archive:', err)
+        return persist()
+      }
+      if (!binding) return persist()
+
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN')
+        const stored = await persist(client)
+        await deps.fanout.fanout({
+          connectorInstanceId: binding.instanceId,
+          workspaceId: binding.workspaceId,
+          ownerUserId: input.ownerUserId,
+          source: input.source,
+          messages: [normalizeInboundChatMessage({ source: input.source, message: input.message })],
+          sourceCursor: { provider_message_id: input.message.messageId ?? null },
+        }, client)
+        await client.query('COMMIT')
+        return stored
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {})
+        throw err
+      } finally {
+        client.release()
+      }
+    },
+
+    async appendOutbound(input) {
+      const binding = await resolveBinding(input)
+      if (!binding) return
+      await deps.fanout.fanout({
+        connectorInstanceId: binding.instanceId,
+        workspaceId: binding.workspaceId,
+        ownerUserId: input.ownerUserId,
+        source: input.source,
+        messages: [normalizeOutboundChatMessage({
+          providerMessageId: input.providerMessageId || `session:${input.sessionMessageId}`,
+          conversationId: input.conversationId,
+          assistantId: input.assistantId,
+          assistantName: input.assistantName,
+          text: input.text,
+          documents: input.documents,
+          replyToProviderId: input.replyToProviderId,
+        })],
+        sourceCursor: { session_message_id: input.sessionMessageId },
+      })
+    },
+  }
+}
+
+let globalWriter: LiveChatArchiveWriter | null = null
+
+export function setGlobalLiveChatArchiveWriter(writer: LiveChatArchiveWriter | null): void {
+  globalWriter = writer
+}
+
+export async function persistInboundChatArchive<T>(
+  input: LiveArchiveContext & { message: IncomingMessage },
+  persist: (client?: Queryable) => Promise<T>,
+): Promise<T> {
+  return globalWriter ? globalWriter.persistInbound(input, persist) : persist()
+}
+
+export async function appendOutboundChatArchive(input: Parameters<LiveChatArchiveWriter['appendOutbound']>[0]): Promise<void> {
+  if (!globalWriter) return
+  try {
+    await globalWriter.appendOutbound(input)
+  } catch (err) {
+    // Delivery already happened. Keep the channel available and leave the
+    // persisted assistant row as the explicit repair source.
+    console.warn('[chat-archive] outbound enqueue failed:', err)
+  }
+}

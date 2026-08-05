@@ -171,6 +171,7 @@ import { EXTRACTION_MODEL } from './build-episode-ingestors.js'
 import { createMailboxSyncWorker } from './mailbox/sync-worker.js'
 import { setGlobalMailboxArchiveDeps } from './mailbox/archive-search-tool.js'
 import { setGlobalMailboxSyncDeps } from './mailbox/sync-tool.js'
+import { createChatArchiveTools } from './chat-archive/chat-tools.js'
 import { resolveIngestPlaceholders } from './ingest/placeholder-resolver.js'
 import { createMeteredProfileStore } from './db/metered-profile-store.js'
 import { createWorkspaceModelDefaultsStore } from './db/workspace-model-defaults-store.js'
@@ -251,7 +252,11 @@ import { createConnectorInstanceStore } from './db/connector-instance-store.js'
 import { createConnectorAppCredentialStore } from './db/connector-app-credential-store.js'
 import { createIngestSinkStore } from './db/ingest-sink-store.js'
 import { createIngestOutboxStore } from './db/ingest-outbox-store.js'
+import { createChatArchiveEnrichmentStore } from './db/chat-archive-enrichment-store.js'
+import { createExternalSinkFanout } from './ingest/external-sink-fanout.js'
 import { createExternalSinkRelay } from './ingest/external-sink-relay.js'
+import { createLiveChatArchiveWriter, setGlobalLiveChatArchiveWriter } from './chat-archive/live-writer.js'
+import { createChatArchiveEnrichmentWorker } from './chat-archive/enrichment-worker.js'
 import { createWorkspaceToolPolicyStore } from './db/workspace-tool-policy-store.js'
 import { buildOpenSyncCredentials } from './build-sync-credentials.js'
 import { createDbAssistantConnectorStore } from './db/assistant-connector-store.js'
@@ -584,6 +589,9 @@ export interface OpenApiEnv {
    */
   WECHAT_CONNECTOR_URL?: string
   WECHAT_CONNECTOR_SECRET?: string
+  /** Local-only chat archive sidecar. Both values are required together. */
+  BRIAN_MESSAGE_STORE_URL?: string
+  BRIAN_MESSAGE_STORE_HMAC_SECRET?: string
   LLM_PROVIDER_KEY_ENCRYPTION_KEY?: string
   // Blob storage. GCS wins when set; LOCAL_FILES_DIR enables durable
   // self-hosted local storage; otherwise non-Cloud-Run dev falls back to /tmp.
@@ -1796,6 +1804,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     )
     tools.set('listRecordings', createListRecordingsTool())
 
+    // Provider-neutral local chat history. These are base read tools rather
+    // than connector API tools: the archive remains available when a live
+    // WhatsApp / WeChat connection is offline, and every call owner-binds from
+    // ToolContext. The same instances are bridged into native agent surfaces.
+    for (const tool of createChatArchiveTools({ embedder: sharedEmbedder })) {
+      tools.set(tool.name, tool)
+    }
+
     // Bug report tool — the create sink is a port; open default returns a
     // synthetic id (no persistence). The platform injects its bug-report store.
     const reportBugTool = createReportBugTool({
@@ -1891,6 +1907,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const chatEpisodeIngestor: ChatEpisodeIngestor =
     builtIngestors?.chatEpisodeIngestor ?? (async () => {})
   const brainEpisodeIngestor: BrainEpisodeIngestor | undefined = builtIngestors?.brainEpisodeIngestor
+  const chatArchiveEnrichmentWorker = brainEpisodeIngestor
+    ? createChatArchiveEnrichmentWorker({
+        store: createChatArchiveEnrichmentStore(),
+        ingest: brainEpisodeIngestor,
+        resolveAssistantId: resolvePrimaryAssistantForWorkspace,
+      })
+    : null
+  if (runWorkers) chatArchiveEnrichmentWorker?.start()
 
   // Structural-synthesis P4 — the RESEARCH fill. A research-tier `assistant_call`
   // step with a `blueprintId` + page anchor fills the blueprint into the anchored
@@ -5339,6 +5363,33 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // advances only on ack (X3). See ingest-external-sink.md.
   const ingestSinkStore = createIngestSinkStore(credKey)
   const ingestOutboxStore = createIngestOutboxStore()
+  const externalSinkFanout = createExternalSinkFanout({
+    sinks: ingestSinkStore,
+    outbox: ingestOutboxStore,
+  })
+  if (
+    env.BRIAN_MESSAGE_STORE_URL
+    && env.BRIAN_MESSAGE_STORE_HMAC_SECRET
+    && credKey
+  ) {
+    setGlobalLiveChatArchiveWriter(createLiveChatArchiveWriter({
+      endpointUrl: env.BRIAN_MESSAGE_STORE_URL,
+      secret: env.BRIAN_MESSAGE_STORE_HMAC_SECRET,
+      sinks: ingestSinkStore,
+      fanout: externalSinkFanout,
+    }))
+  } else {
+    setGlobalLiveChatArchiveWriter(null)
+    const disabled = await ingestSinkStore.disableManagedLocalChatArchive()
+    if (disabled > 0) {
+      console.log(`[chat-archive] disabled ${disabled} stale managed sink(s)`)
+    }
+    if (env.BRIAN_MESSAGE_STORE_URL || env.BRIAN_MESSAGE_STORE_HMAC_SECRET) {
+      console.warn(
+        '[chat-archive] disabled: URL, HMAC secret, and CHANNEL_CREDENTIAL_KEY are all required',
+      )
+    }
+  }
   const externalSinkRelay = createExternalSinkRelay({
     outbox: ingestOutboxStore,
     sinks: ingestSinkStore,
@@ -5582,6 +5633,16 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             userContentBlocks: [{ type: 'text', text: input.text }],
             isGroupChat: input.isGroup,
             incomingChannelMessageId: input.messageId,
+            archiveIncoming: {
+              userId: input.senderPnJid ?? input.senderJid,
+              channelId: input.chatJid,
+              messageId: input.messageId,
+              text: input.text,
+              isGroupChat: input.isGroup,
+              timestamp: input.timestamp,
+              raw: null,
+            },
+            archiveConnectorInstanceId: channel.connectorInstanceId,
             modelAlias: undefined,
             adaptiveResearchEnabled: true,
             abortController,
@@ -5746,6 +5807,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     knowledgeSyncWorker.stop()
     mailboxSyncWorker.stop()
     externalSinkRelay.stop()
+    chatArchiveEnrichmentWorker?.stop()
     stuckSessionSweeper.stop()
     fileIngestWorker?.stop()
     linkedinImportWorker?.stop()

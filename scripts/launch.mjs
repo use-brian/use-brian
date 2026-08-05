@@ -12,8 +12,9 @@
  *   3. start the embedded PGLite brain server (pg-wire socket on :54329) and wait
  *      until it accepts connections - it migrates open-schema-v1 on first boot.
  *   4. start the api (:4000), doc-sync sidecar (:8080), app-web (:3003), local
- *      Discord Gateway connector (:8090), and local WhatsApp connector (:8091),
- *      all pointed at the local API; single-process event buses.
+ *      Discord Gateway connector (:8090), local WhatsApp connector (:8091),
+ *      local chat archive (:8092), and local WeChat connector (:8093), all
+ *      pointed at the local API; single-process event buses.
  *   5. open the browser straight into an authenticated session as the local
  *      owner (/auth/local-session auto-provisions one Personal workspace — no
  *      /login, no /teams, no "dev" identity).
@@ -30,6 +31,7 @@ import { fileURLToPath } from 'node:url'
 import { randomBytes } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { createInterface } from 'node:readline/promises'
+import { resolveMessageStoreLaunch } from './message-store-launch.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const CONFIG_DIR = join(homedir(), '.usebrian')
@@ -82,7 +84,7 @@ loadDotEnv(join(ROOT, '.env'))
 
 // The embedded brain uses a distinctive high port so it never collides with a
 // developer's local Postgres on the default 5432 (verified failure mode).
-const PORTS = { pglite: 54329, api: 4000, docSync: 8080, appWeb: 3003, discordConnector: 8090, waConnector: 8091 }
+const PORTS = { pglite: 54329, api: 4000, docSync: 8080, appWeb: 3003, discordConnector: 8090, waConnector: 8091, messageStore: 8092, wechatConnector: 8093 }
 
 // ── config (ChatGPT sign-in OR one API credential) ──────────────────
 mkdirSync(CONFIG_DIR, { recursive: true })
@@ -153,6 +155,13 @@ const discordConnectorSecret = process.env.DISCORD_CONNECTOR_SECRET || config.di
 // processes and persists the generated value; explicit env values support an
 // externally deployed connector.
 const waConnectorSecret = process.env.WA_CONNECTOR_SECRET || config.waConnectorSecret || randomBytes(32).toString('hex')
+// Shared API <-> WeChat iLink bridge secret. Pairing and long-polling require
+// the bridge even for local-only use, so the launcher owns and persists it.
+const wechatConnectorSecret = process.env.WECHAT_CONNECTOR_SECRET || config.wechatConnectorSecret || randomBytes(32).toString('hex')
+// Loopback API -> chat archive append authentication. The launcher owns both
+// processes, so this follows the same generate-once/persist lifecycle as the
+// other local bridge secrets and is never printed.
+const messageStoreHmacSecret = process.env.BRIAN_MESSAGE_STORE_HMAC_SECRET || config.messageStoreHmacSecret || randomBytes(32).toString('hex')
 // AES-GCM key that encrypts connector OAuth refresh-tokens / PATs at rest in
 // `connector_instance.credentials`. Without it the api boots with a null
 // credential key and `/api/connectors/:provider/store-credentials` returns 503,
@@ -162,7 +171,7 @@ const waConnectorSecret = process.env.WA_CONNECTOR_SECRET || config.waConnectorS
 const channelCredentialKey = config.channelCredentialKey || randomBytes(32).toString('base64')
 writeFileSync(
   CONFIG_FILE,
-  JSON.stringify({ ...config, ...(geminiKey ? { geminiApiKey: geminiKey } : {}), ...(preferredProvider ? { preferredProvider } : {}), jwtSecret, docSyncSecret, discordConnectorSecret, waConnectorSecret, channelCredentialKey, ownerName }, null, 2),
+  JSON.stringify({ ...config, ...(geminiKey ? { geminiApiKey: geminiKey } : {}), ...(preferredProvider ? { preferredProvider } : {}), jwtSecret, docSyncSecret, discordConnectorSecret, waConnectorSecret, wechatConnectorSecret, messageStoreHmacSecret, channelCredentialKey, ownerName }, null, 2),
 )
 
 // External-store escape hatch: a real Postgres URL skips the embedded brain.
@@ -170,6 +179,8 @@ const useEmbedded = !process.env.DATABASE_URL
 const databaseUrl = process.env.DATABASE_URL || `postgres://localhost:${PORTS.pglite}/postgres`
 const useLocalDiscordConnector = !process.env.DISCORD_CONNECTOR_URL
 const useLocalWaConnector = !process.env.WA_CONNECTOR_URL
+const useLocalWechatConnector = !process.env.WECHAT_CONNECTOR_URL
+const messageStoreLaunch = resolveMessageStoreLaunch({ root: ROOT, env: process.env })
 
 const env = {
   ...process.env,
@@ -194,6 +205,15 @@ const env = {
   DISCORD_CONNECTOR_SECRET: discordConnectorSecret,
   WA_CONNECTOR_URL: process.env.WA_CONNECTOR_URL || `http://127.0.0.1:${PORTS.waConnector}`,
   WA_CONNECTOR_SECRET: waConnectorSecret,
+  WECHAT_CONNECTOR_URL: process.env.WECHAT_CONNECTOR_URL || `http://127.0.0.1:${PORTS.wechatConnector}`,
+  WECHAT_CONNECTOR_SECRET: wechatConnectorSecret,
+  ...(messageStoreLaunch.enabled
+    ? {
+        BRIAN_MESSAGE_STORE_URL: `http://127.0.0.1:${PORTS.messageStore}`,
+        BRIAN_MESSAGE_STORE_HMAC_SECRET: messageStoreHmacSecret,
+        BRIAN_MESSAGE_STORE_ADDR: `127.0.0.1:${PORTS.messageStore}`,
+      }
+    : {}),
   API_INTERNAL_URL: `http://127.0.0.1:${PORTS.api}`,
   // The embedded brain is one PGLite instance with a single shared session;
   // concurrent pool connections clobber its unnamed prepared statement. Force
@@ -223,13 +243,19 @@ const children = []
 // OOMs alone, run()'s exit handler names it, and the launcher shuts down
 // cleanly. The platform repo already caps its API dev process the same way.
 // Sized generously above observed steady-state; override with USEBRIAN_HEAP_MB.
-const HEAP_MB = { pglite: 1024, api: 2048, 'doc-sync': 1024, 'app-web': 2048, 'discord-connector': 512, 'wa-connector': 512 }
-function run(label, cmd, args, extraEnv = {}) {
+const HEAP_MB = { pglite: 1024, api: 2048, 'doc-sync': 1024, 'app-web': 2048, 'discord-connector': 512, 'wa-connector': 512, 'wechat-connector': 512 }
+function run(label, cmd, args, extraEnv = {}, cwd = ROOT) {
   const heapMb = Number(process.env.USEBRIAN_HEAP_MB) || HEAP_MB[label]
   const nodeOptions = heapMb
     ? { NODE_OPTIONS: `${env.NODE_OPTIONS ?? ''} --max-old-space-size=${heapMb}`.trim() }
     : {}
-  const child = spawn(cmd, args, { cwd: ROOT, env: { ...env, ...nodeOptions, ...extraEnv }, stdio: ['ignore', 'inherit', 'inherit'] })
+  const child = spawn(cmd, args, { cwd, env: { ...env, ...nodeOptions, ...extraEnv }, stdio: ['ignore', 'inherit', 'inherit'] })
+  child.on('error', (err) => {
+    if (!shuttingDown) {
+      console.error(`[launch] could not start ${label}: ${err.message}`)
+      shutdown(1)
+    }
+  })
   child.on('exit', (code) => {
     if (!shuttingDown && code) { console.error(`[launch] ${label} exited with code ${code}; shutting down.`); shutdown(1) }
   })
@@ -374,6 +400,20 @@ if (useEmbedded) {
   console.log('[launch] DATABASE_URL set — using external Postgres (run migrations separately).')
 }
 
+if (messageStoreLaunch.enabled) {
+  console.log(`[launch] starting local chat message store (:${PORTS.messageStore}, ${messageStoreLaunch.source}) ...`)
+  run(
+    'message-store',
+    messageStoreLaunch.cmd,
+    messageStoreLaunch.args,
+    {},
+    messageStoreLaunch.cwd,
+  )
+  await waitForPort(PORTS.messageStore, 'chat message store')
+} else if (messageStoreLaunch.reason === 'not_found') {
+  console.log('[launch] chat message store checkout not found — local chat archive is disabled for this session.')
+}
+
 console.log('[launch] starting api (:4000), doc-sync (:8080), app-web (:3003) ...')
 run('api', 'pnpm', ['--filter', '@use-brian/api-open', 'exec', 'tsx', 'src/index.ts'])
 run('doc-sync', 'pnpm', ['--filter', '@use-brian/doc-sync', 'exec', 'tsx', 'src/index.ts'],
@@ -413,10 +453,20 @@ if (useLocalWaConnector) {
   })
   await waitForPort(PORTS.waConnector, 'WhatsApp connector')
 }
+if (useLocalWechatConnector) {
+  console.log(`[launch] starting WeChat connector (:${PORTS.wechatConnector}) ...`)
+  run('wechat-connector', 'pnpm', ['--filter', '@use-brian/wechat-connector', 'exec', 'tsx', 'src/index.ts'], {
+    PORT: String(PORTS.wechatConnector),
+    USEBRIAN_API_URL: `http://127.0.0.1:${PORTS.api}`,
+  })
+  await waitForPort(PORTS.wechatConnector, 'WeChat connector')
+}
 const entryUrl = `http://localhost:${PORTS.appWeb}/api/auth/local-session`
 const discordStatus = useLocalDiscordConnector ? ` · discord :${PORTS.discordConnector}` : ' · discord external'
 const waStatus = useLocalWaConnector ? ` · whatsapp :${PORTS.waConnector}` : ' · whatsapp external'
-console.log(`\n[launch] Use Brian is up. Opening ${entryUrl}\n  (api :${PORTS.api} · doc-sync :${PORTS.docSync} · app-web :${PORTS.appWeb}${discordStatus}${waStatus})\n  Ctrl-C to stop everything.\n`)
+const messageStoreStatus = messageStoreLaunch.enabled ? ` · chat-archive :${PORTS.messageStore}` : ' · chat-archive off'
+const wechatStatus = useLocalWechatConnector ? ` · wechat :${PORTS.wechatConnector}` : ' · wechat external'
+console.log(`\n[launch] Use Brian is up. Opening ${entryUrl}\n  (api :${PORTS.api} · doc-sync :${PORTS.docSync} · app-web :${PORTS.appWeb}${discordStatus}${waStatus}${messageStoreStatus}${wechatStatus})\n  Ctrl-C to stop everything.\n`)
 if (preferredProvider === 'openai-codex') {
   console.log('[launch] Open Settings → AI providers to complete ChatGPT sign-in.')
 }

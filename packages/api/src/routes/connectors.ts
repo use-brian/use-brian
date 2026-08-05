@@ -83,6 +83,7 @@ import { readMailboxSyncState, type MailboxBackfillScope, type MailboxSyncState 
 import { getGlobalMailboxSyncDeps } from '../mailbox/sync-tool.js'
 import { countEmailArchiveMessages } from '../db/email-archive-store.js'
 import type { MailboxAccountSettings } from '../mailbox/types.js'
+import { CHAT_ARCHIVE_SEARCH_TOOL } from '../chat-archive/tool-catalog.js'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -1228,6 +1229,22 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     const userId = req.userId
     if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
     const provider = req.params.provider
+
+    // Local WeChat archive instances are platform-managed connector rows, not
+    // remote MCP servers. Their whole interactive surface is one owner-bound
+    // native search tool; ingestion, coverage, and enrichment stay internal.
+    if (provider === 'wechat') {
+      res.json({
+        serverName: 'WeChat chat archive',
+        tools: [{
+          name: CHAT_ARCHIVE_SEARCH_TOOL.name,
+          description: CHAT_ARCHIVE_SEARCH_TOOL.description,
+          classification: CHAT_ARCHIVE_SEARCH_TOOL.classification,
+          policy: CHAT_ARCHIVE_SEARCH_TOOL.defaultPolicy,
+        }],
+      })
+      return
+    }
 
     // CLI catalogs are dynamic and instance-specific. The frontend addresses
     // them by connector_instance UUID so multiple local MCP servers do not
