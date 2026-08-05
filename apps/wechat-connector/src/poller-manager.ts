@@ -120,7 +120,18 @@ export function createPollerManager(options: PollerManagerOptions): PollerManage
     const dedup = createDedupBuffer()
     const signal = state.abort.signal
 
-    await client.notifyStart().catch(() => {})
+    try {
+      const notified = await client.notifyStart()
+      if (notified.ret !== undefined && notified.ret !== 0) {
+        console.warn(
+          `[wechat-poller] ${channelId}: notifystart returned ret=${notified.ret} errmsg=${notified.errmsg ?? ''}`,
+        )
+      }
+    } catch (err) {
+      // Tencent treats this as online reconciliation rather than the transport
+      // itself, so keep polling but retain the reason behind an offline badge.
+      console.warn(`[wechat-poller] ${channelId}: notifystart failed:`, err)
+    }
 
     let getUpdatesBuf = input.getUpdatesBuf ?? ''
     let nextTimeoutMs = LONG_POLL_TIMEOUT_MS
@@ -188,7 +199,9 @@ export function createPollerManager(options: PollerManagerOptions): PollerManage
     }
 
     state.snapshot.status = 'stopped'
-    await client.notifyStop().catch(() => {})
+    await client.notifyStop().catch((err) => {
+      console.warn(`[wechat-poller] ${channelId}: notifystop failed:`, err)
+    })
   }
 
   return {

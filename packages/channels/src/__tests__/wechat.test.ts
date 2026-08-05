@@ -9,6 +9,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createCipheriv } from 'node:crypto'
 import {
   createWechatAdapter,
+  createIlinkClient,
+  fetchBotQrcode,
+  ILINK_CHANNEL_VERSION,
   markdownToWechat,
   parseIlinkAesKey,
   decryptAesEcb,
@@ -37,6 +40,49 @@ function userMessage(overrides: Partial<WeixinMessage> = {}): WeixinMessage {
 }
 
 describe('[COMP:channels/wechat-adapter] WeChat adapter', () => {
+  describe('iLink client identity', () => {
+    afterEach(() => {
+      vi.unstubAllGlobals()
+    })
+
+    it('advertises the current Tencent wire version during QR pairing', async () => {
+      const fetchMock = vi.fn(async (_url: string | URL, init?: RequestInit) => {
+        const headers = new Headers(init?.headers)
+        expect(headers.get('iLink-App-Id')).toBe('bot')
+        expect(headers.get('iLink-App-ClientVersion')).toBe('132102')
+        const body = JSON.parse(String(init?.body ?? '{}')) as {
+          base_info?: { channel_version?: string; bot_agent?: string }
+        }
+        expect(body.base_info).toEqual({
+          channel_version: '2.4.6',
+          bot_agent: 'UseBrian/2.4.6',
+        })
+        return new Response(
+          JSON.stringify({ qrcode: 'qr-1', qrcode_img_content: 'https://qr.example/1' }),
+          { status: 200 },
+        )
+      })
+      vi.stubGlobal('fetch', fetchMock)
+
+      expect(ILINK_CHANNEL_VERSION).toBe('2.4.6')
+      await expect(fetchBotQrcode()).resolves.toEqual({
+        qrcode: 'qr-1',
+        qrcode_img_content: 'https://qr.example/1',
+      })
+    })
+
+    it('returns notifystart reconciliation failures to the poller', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () =>
+          new Response(JSON.stringify({ ret: -1, errmsg: 'not online' }), { status: 200 }),
+        ),
+      )
+      const client = createIlinkClient({ baseUrl: 'https://ilink.example', token: 'tok' })
+      await expect(client.notifyStart()).resolves.toEqual({ ret: -1, errmsg: 'not online' })
+    })
+  })
+
   describe('parseIncoming', () => {
     const adapter = createWechatAdapter({ baseUrl: 'https://ilink.example', botToken: 'tok' })
 

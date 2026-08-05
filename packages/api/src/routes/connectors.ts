@@ -58,7 +58,7 @@ import { Router } from 'express'
 import { constants as fsConstants, promises as fs } from 'node:fs'
 import * as nodePath from 'node:path'
 import { classifyTool, defaultPolicy } from '@use-brian/core'
-import { OFFICIAL_CONNECTORS, OFFICIAL_CONNECTOR_TOOLS, type ConnectorEntry } from '@use-brian/shared'
+import { CONFIGURABLE_APP_CREDENTIAL_CONNECTORS, OFFICIAL_CONNECTORS, OFFICIAL_CONNECTOR_TOOLS, msGraphScopes, type ConnectorEntry } from '@use-brian/shared'
 import type { ConnectorStore, ConnectorCredentials } from '../db/connector-store.js'
 import type { ConnectorInstanceStore, ConnectorInstance, ConnectorHealthStatus } from '../db/connector-instance-store.js'
 import { buildConnectorAuthHeaders } from '../mcp/auth-headers.js'
@@ -68,6 +68,11 @@ import type { GcsServiceAccountCredentials } from '../files/gcs-client.js'
 import { validateS3ByoBinding } from '../files/s3-byo-validate.js'
 import type { S3Credentials } from '../files/s3-client.js'
 import { normalizeShopDomain, packShopifyTokens, packShopifyAppCredentials, unpackShopifyAppCredentials, getShopIdentity, verifyShopifyOAuthQueryHmac, exchangeShopifyAuthorizationCode } from '../shopify/client.js'
+import type { ConnectorAppCredentialStore } from '../db/connector-app-credential-store.js'
+import { ConnectorAppCredentialAuthError } from '../db/connector-app-credential-store.js'
+import { getConnectorAppConfigStatus, resolveConnectorAppConfig } from '../connectors/app-credentials.js'
+import { exchangeMsGraphAuthorizationCode, packMsGraphTokens } from '../msgraph/token.js'
+import { decodeMsGraphIdToken } from '../msgraph/oauth.js'
 import { resolveShopifyDomain, type ShopifyDomainResolution } from '../shopify/resolve-domain.js'
 import { DESKTOP_OAUTH_EXCHANGERS, type DesktopOAuthExchangeResult } from '../connectors/desktop-oauth-exchange.js'
 import { resolveMailboxPreset } from '../mailbox/presets.js'
@@ -77,6 +82,7 @@ import { readMailboxSyncState, type MailboxBackfillScope, type MailboxSyncState 
 import { getGlobalMailboxSyncDeps } from '../mailbox/sync-tool.js'
 import { countEmailArchiveMessages } from '../db/email-archive-store.js'
 import type { MailboxAccountSettings } from '../mailbox/types.js'
+import { CHAT_ARCHIVE_SEARCH_TOOL } from '../chat-archive/tool-catalog.js'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -163,6 +169,14 @@ type ConnectorRouteOptions = {
    * → "Auth model".
    */
   shopifyVerifyToken?: typeof getShopIdentity
+  /**
+   * Enables the workspace-owned OAuth *app* credential endpoints
+   * (`GET/PUT/DELETE /:provider/app-credentials`) and the server-side
+   * `POST /msgraph/oauth-callback` exchange. Omitted → those routes 404 and
+   * the connector resolves its app pair from deployment config only, which is
+   * the pre-migration-383 behavior.
+   */
+  connectorAppCredentialStore?: ConnectorAppCredentialStore
 }
 
 /** Built-in connector that carries an external credential (excludes auth_type 'none'). */
@@ -1214,6 +1228,22 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
     const provider = req.params.provider
 
+    // Local WeChat archive instances are platform-managed connector rows, not
+    // remote MCP servers. Their whole interactive surface is one owner-bound
+    // native search tool; ingestion, coverage, and enrichment stay internal.
+    if (provider === 'wechat') {
+      res.json({
+        serverName: 'WeChat chat archive',
+        tools: [{
+          name: CHAT_ARCHIVE_SEARCH_TOOL.name,
+          description: CHAT_ARCHIVE_SEARCH_TOOL.description,
+          classification: CHAT_ARCHIVE_SEARCH_TOOL.classification,
+          policy: CHAT_ARCHIVE_SEARCH_TOOL.defaultPolicy,
+        }],
+      })
+      return
+    }
+
     // CLI catalogs are dynamic and instance-specific. The frontend addresses
     // them by connector_instance UUID so multiple local MCP servers do not
     // overwrite one shared `cli` tool catalog.
@@ -1552,6 +1582,259 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
       res.json({ ok: true, connectorInstanceId: instanceId })
     } catch (err) {
       console.error('[connectors] shopify oauth-callback failed:', err)
+      res.status(502).json({ error: 'token_exchange_failed' })
+    }
+  })
+
+  // ── Workspace-owned OAuth app credentials ──────────────────────
+  //
+  // A built-in connector's app pair (client id + secret) used to come only
+  // from deployment config. On the hosted product the person who registers
+  // that app is a customer admin who cannot reach the environment, so a
+  // workspace may bring its own registration instead — stored encrypted in
+  // `connector_app_credentials` (migration 394), resolved ahead of config by
+  // `resolveConnectorAppConfig`.
+  //
+  // The set of providers this is offered for is NARROW and lives in the shared
+  // registry (`CONFIGURABLE_APP_CREDENTIAL_CONNECTORS`). Accepting an
+  // arbitrary provider here would store credentials no exchange path reads.
+  //
+  // See docs/architecture/integrations/msgraph.md → "Auth".
+
+  /** 400s unless the provider opted into workspace-owned app credentials. */
+  function configurableProvider(req: { params: { provider?: string } }): string | null {
+    const provider = req.params.provider ?? ''
+    return CONFIGURABLE_APP_CREDENTIAL_CONNECTORS.has(provider) ? provider : null
+  }
+
+  /** Reject CR/LF and absurd lengths: these values are interpolated into a URL and a form body. */
+  function readAppPair(
+    input: { clientId?: unknown; clientSecret?: unknown } | undefined,
+  ): { clientId: string; clientSecret: string } | null {
+    const clientId = typeof input?.clientId === 'string' ? input.clientId.trim() : ''
+    const clientSecret = typeof input?.clientSecret === 'string' ? input.clientSecret.trim() : ''
+    if (!clientId || !clientSecret) return null
+    if (clientId.length > 2048 || clientSecret.length > 8192) return null
+    if (/[\r\n]/.test(clientId) || /[\r\n]/.test(clientSecret)) return null
+    return { clientId, clientSecret }
+  }
+
+  /**
+   * The tenant/authority hint. Entra accepts a directory id (uuid), a verified
+   * domain, or one of the named authorities; anything with a slash or
+   * whitespace would rewrite the token URL's path, so it is rejected outright.
+   */
+  function readTenantId(raw: unknown): string | null | undefined {
+    if (raw === null || raw === undefined || raw === '') return null
+    if (typeof raw !== 'string') return undefined
+    const tenantId = raw.trim()
+    if (!tenantId) return null
+    if (tenantId.length > 256 || !/^[A-Za-z0-9._-]+$/.test(tenantId)) return undefined
+    return tenantId
+  }
+
+  function mapAppCredentialError(err: unknown, res: import('express').Response): void {
+    if (err instanceof ConnectorAppCredentialAuthError) {
+      res.status(403).json({ error: err.reason })
+      return
+    }
+    const msg = err instanceof Error ? err.message : String(err)
+    if (msg.includes('CHANNEL_CREDENTIAL_KEY')) {
+      console.error('[connectors] app-credentials: encryption key not configured')
+      res.status(503).json({ error: 'Connector credential storage is not configured (CHANNEL_CREDENTIAL_KEY)' })
+      return
+    }
+    console.error('[connectors] app-credentials failed:', err)
+    res.status(500).json({ error: 'app_credentials_failed' })
+  }
+
+  // GET /:provider/app-credentials — which app a connect will actually use.
+  // Answers for the workspace when it owns a registration, else for the
+  // deployment. Never returns the secret; the client id is public (it rides in
+  // the authorize URL) and the frontend needs it to build that URL.
+  router.get('/:provider/app-credentials', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const provider = configurableProvider(req)
+    if (!provider) { res.status(404).json({ error: 'Connector does not support workspace app credentials' }); return }
+    const workspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId : ''
+    if (workspaceId && !UUID_RE.test(workspaceId)) { res.status(400).json({ error: 'Invalid workspaceId' }); return }
+
+    try {
+      const status = await getConnectorAppConfigStatus({
+        provider: provider as Parameters<typeof getConnectorAppConfigStatus>[0]['provider'],
+        actingUserId: userId,
+        workspaceId: workspaceId || null,
+        store: opts.connectorAppCredentialStore ?? null,
+      })
+      res.json(status)
+    } catch (err) {
+      mapAppCredentialError(err, res)
+    }
+  })
+
+  // PUT /:provider/app-credentials — register (or replace) the workspace's app.
+  //
+  // Owner/admin only, enforced in the store next to the write rather than here:
+  // both editions mount this route from their own file, and an authority check
+  // that lives in the route is a check one of them can forget.
+  router.put('/:provider/app-credentials', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const provider = configurableProvider(req)
+    if (!provider) { res.status(404).json({ error: 'Connector does not support workspace app credentials' }); return }
+    const store = opts.connectorAppCredentialStore
+    if (!store) { res.status(404).json({ error: 'Workspace app credentials are not available' }); return }
+
+    const body = (req.body ?? {}) as { workspaceId?: string; clientId?: unknown; clientSecret?: unknown; tenantId?: unknown }
+    if (!body.workspaceId || !UUID_RE.test(body.workspaceId)) { res.status(400).json({ error: 'Invalid workspaceId' }); return }
+    const pair = readAppPair(body)
+    if (!pair) { res.status(400).json({ error: 'invalid_app_credentials' }); return }
+    const tenantId = readTenantId(body.tenantId)
+    if (tenantId === undefined) { res.status(400).json({ error: 'invalid_tenant_id' }); return }
+
+    try {
+      const summary = await store.set({
+        actingUserId: userId,
+        workspaceId: body.workspaceId,
+        provider,
+        clientId: pair.clientId,
+        clientSecret: pair.clientSecret,
+        tenantId,
+      })
+      res.json({
+        ok: true,
+        configured: true,
+        source: 'workspace',
+        clientId: summary.clientId,
+        tenantId: summary.tenantId,
+        workspaceOwned: true,
+        updatedAt: summary.updatedAt.toISOString(),
+      })
+    } catch (err) {
+      mapAppCredentialError(err, res)
+    }
+  })
+
+  // DELETE /:provider/app-credentials — drop the workspace's app and fall back
+  // to deployment config. Existing connections keep working: their tokens can
+  // only be rotated by the app that minted them, and that pair lives in the
+  // instance envelope, not here.
+  router.delete('/:provider/app-credentials', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const provider = configurableProvider(req)
+    if (!provider) { res.status(404).json({ error: 'Connector does not support workspace app credentials' }); return }
+    const store = opts.connectorAppCredentialStore
+    if (!store) { res.status(404).json({ error: 'Workspace app credentials are not available' }); return }
+    const workspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId : ''
+    if (!UUID_RE.test(workspaceId)) { res.status(400).json({ error: 'Invalid workspaceId' }); return }
+
+    try {
+      const removed = await store.remove(userId, workspaceId, provider)
+      res.json({ ok: true, removed })
+    } catch (err) {
+      mapAppCredentialError(err, res)
+    }
+  })
+
+  // POST /msgraph/oauth-callback — the code exchange, server-side.
+  //
+  // Same split as `/shopify/oauth-callback` and for the same reason: app-web
+  // keeps only the job that needs its cookie (the state-nonce CSRF gate) and
+  // forwards the code here. The client secret — which for a workspace-owned
+  // app is a customer's, not ours — never leaves this process.
+  router.post('/msgraph/oauth-callback', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+
+    const body = (req.body ?? {}) as {
+      code?: string
+      redirectUri?: string
+      workspaceId?: string
+      createNew?: boolean
+      instanceId?: string
+      label?: string
+    }
+    const code = typeof body.code === 'string' ? body.code : ''
+    const redirectUri = typeof body.redirectUri === 'string' ? body.redirectUri : ''
+    if (!code || !redirectUri) { res.status(400).json({ error: 'invalid_callback' }); return }
+    if (body.workspaceId !== undefined && !UUID_RE.test(body.workspaceId)) {
+      res.status(400).json({ error: 'Invalid workspaceId' }); return
+    }
+    if (body.instanceId !== undefined && !UUID_RE.test(body.instanceId)) {
+      res.status(400).json({ error: 'Invalid instanceId' }); return
+    }
+
+    let app: Awaited<ReturnType<typeof resolveConnectorAppConfig>>
+    try {
+      app = await resolveConnectorAppConfig({
+        provider: 'msgraph',
+        workspaceId: body.workspaceId ?? null,
+        store: opts.connectorAppCredentialStore ?? null,
+      })
+    } catch (err) {
+      mapAppCredentialError(err, res)
+      return
+    }
+    if (!app) { res.status(400).json({ error: 'app_credentials_missing' }); return }
+
+    try {
+      const tokens = await exchangeMsGraphAuthorizationCode({
+        code,
+        clientId: app.clientId,
+        clientSecret: app.clientSecret,
+        redirectUri,
+        // The SAME set the authorize URL asked for — both derive from
+        // `msGraphScopes()` in @use-brian/shared so they cannot drift.
+        scope: msGraphScopes().join(' '),
+        // A workspace-owned app may be single-tenant, where `organizations`
+        // will not issue for it at all.
+        ...(app.source === 'workspace' && app.tenantId ? { tenantId: app.tenantId } : {}),
+      })
+
+      // A grant with no refresh token works for an hour and then dies
+      // permanently, so `exchangeMsGraphAuthorizationCode` already throws on
+      // one rather than returning a connection that is quietly terminal.
+      const claims = decodeMsGraphIdToken(tokens.idToken)
+      const email = claims.email ?? null
+
+      const stored = await persistConnectorInstance({
+        store: connectorInstanceStore,
+        userId,
+        provider: 'msgraph',
+        fallbackLabel: OFFICIAL_BY_ID.get('msgraph')?.name ?? 'Microsoft Teams',
+        credentials: {
+          type: 'oauth',
+          client_id: 'msgraph_oauth',
+          client_secret: packMsGraphTokens({
+            ...tokens,
+            ...(claims.tenantId ? { tenantId: claims.tenantId } : {}),
+            // Only a workspace-owned pair is pinned into the envelope. A
+            // deployment app is re-resolvable from config at refresh time, and
+            // copying it would freeze a rotated deployment secret into every
+            // grant issued before the rotation.
+            ...(app.source === 'workspace'
+              ? { appClientId: app.clientId, appClientSecret: app.clientSecret }
+              : {}),
+          }),
+        },
+        email,
+        label: body.label,
+        configPatch: null,
+        ...(body.instanceId ? { instanceId: body.instanceId } : {}),
+        ...(body.createNew ? { createNew: true } : {}),
+      })
+      if (!stored.ok) { res.status(stored.status).json({ error: stored.error }); return }
+
+      res.json({ ok: true, connectorInstanceId: stored.connectorInstanceId })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (msg.includes('CHANNEL_CREDENTIAL_KEY')) {
+        res.status(503).json({ error: 'Connector credential storage is not configured (CHANNEL_CREDENTIAL_KEY)' })
+        return
+      }
+      console.error('[connectors] msgraph oauth-callback failed:', err)
       res.status(502).json({ error: 'token_exchange_failed' })
     }
   })

@@ -164,6 +164,14 @@ const PRIMITIVE_CONFIGS: Partial<Record<EmbeddingPrimitive, PrimitiveConfig>> = 
     // tier, is what bounds them.
     recencyExpr: 'valid_from',
   },
+  // WhatsApp / WeChat archive segments — live delivery and history backfill
+  // share the same provider-neutral projection. `valid_from` is the original
+  // message clock; `created_at` is merely when the sidecar appended it.
+  chat_segment: {
+    table: 'chat_archive_segments',
+    textExpr: 'segment_text',
+    recencyExpr: 'valid_from',
+  },
 }
 
 function sha256(text: string): string {

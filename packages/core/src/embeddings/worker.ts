@@ -96,6 +96,10 @@ export const EMBEDDED_PRIMITIVES = [
   // full-mailbox corpus — subject-prefixed embed text via the
   // PRIMITIVE_CONFIGS entry. See docs/architecture/integrations/mailbox-imap.md.
   'email_segment',
+  // Provider-neutral WhatsApp / WeChat archive segments. The local sidecar
+  // appends these rows; the platform's shared worker owns their embeddings.
+  // See docs/architecture/integrations/chat-message-store.md.
+  'chat_segment',
 ] as const
 
 export type EmbeddingPrimitive = typeof EMBEDDED_PRIMITIVES[number]

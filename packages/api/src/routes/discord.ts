@@ -291,7 +291,17 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
 
       // 7. Sequentialize per Discord channel.
       await withChatLock(`discord:${incoming.channelId}`, () =>
-        processMessage({ adapter, incoming, assistant, channelUserId, ownerId, isIdentified, routing, ingestChannelMediaRef: options.ingestChannelMediaRef }),
+        processMessage({
+          adapter,
+          incoming,
+          assistant,
+          channelUserId,
+          ownerId,
+          isIdentified,
+          routing,
+          ingestChannelMediaRef: options.ingestChannelMediaRef,
+          archiveConnectorInstanceId: integration.connectorInstanceId,
+        }),
       )
     } catch (err) {
       console.error(`[discord] error processing message for channel ${incoming.channelId}:`, err)
@@ -360,6 +370,7 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
     isIdentified: boolean
     routing: { assistantId: string; modelAlias: string }
     ingestChannelMediaRef?: DiscordRouteOptions['ingestChannelMediaRef']
+    archiveConnectorInstanceId?: string | null
   }): Promise<void> {
     const { adapter, incoming, assistant, channelUserId, ownerId, isIdentified, routing, ingestChannelMediaRef } = params
     const channelId = incoming.channelId
@@ -520,6 +531,8 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
       isGroupChat: incoming.isGroupChat,
       replyToMessageId: incoming.replyToMessageId ?? null,
       incomingChannelMessageId: incoming.messageId ?? null,
+      archiveIncoming: incoming,
+      archiveConnectorInstanceId: params.archiveConnectorInstanceId,
       modelAlias: routing.modelAlias,
       adaptiveResearchEnabled: true,
       abortController,

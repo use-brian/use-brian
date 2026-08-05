@@ -2,10 +2,9 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
-  MSGRAPH_AUTHORIZE_URL,
-  MSGRAPH_TOKEN_URL,
+  MSGRAPH_DEFAULT_TENANT,
   buildMsGraphAuthorizeUrl,
-  decodeMsGraphIdToken,
+  msGraphAuthorizeUrl,
   msGraphScopes,
 } from "@/lib/msgraph-oauth";
 
@@ -18,10 +17,10 @@ import {
  * Microsoft endpoints and the parameter shape; the branch-ordering half is
  * pinned by `page.tsx` placing `id === "msgraph"` above that fallthrough.
  *
- * The tenant segment is asserted literally on purpose: `organizations` (not
- * `common`) is what keeps a personal Microsoft account out of the picker, and
- * it has to match `DEFAULT_TENANT` in `packages/api/src/msgraph/token.ts` or
- * the authorize and refresh halves of one round trip disagree.
+ * The default tenant segment is asserted literally on purpose: `organizations`
+ * (not `common`) is what keeps a personal Microsoft account out of the picker,
+ * and it has to match `DEFAULT_TENANT` in `packages/api/src/msgraph/token.ts`
+ * or the authorize and refresh halves of one round trip disagree.
  */
 describe("[COMP:msgraph/oauth] Microsoft Graph connector OAuth", () => {
   const state = "msgraph:11111111-1111-1111-1111-111111111111:abcdefghijklmnop";
@@ -31,12 +30,10 @@ describe("[COMP:msgraph/oauth] Microsoft Graph connector OAuth", () => {
   }
 
   it("targets the Entra endpoints, never Google's", () => {
-    expect(MSGRAPH_AUTHORIZE_URL).toBe(
+    expect(msGraphAuthorizeUrl()).toBe(
       "https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize",
     );
-    expect(MSGRAPH_TOKEN_URL).toBe(
-      "https://login.microsoftonline.com/organizations/oauth2/v2.0/token",
-    );
+    expect(MSGRAPH_DEFAULT_TENANT).toBe("organizations");
 
     const url = buildMsGraphAuthorizeUrl({
       clientId: "client-abc",
@@ -44,7 +41,7 @@ describe("[COMP:msgraph/oauth] Microsoft Graph connector OAuth", () => {
       state,
       scopes: ["offline_access", "ChannelMessage.Read.All"],
     });
-    expect(url.startsWith(`${MSGRAPH_AUTHORIZE_URL}?`)).toBe(true);
+    expect(url.startsWith(`${msGraphAuthorizeUrl()}?`)).toBe(true);
     expect(url).not.toContain("accounts.google.com");
     expect(url).not.toContain("googleapis.com");
   });
@@ -68,6 +65,27 @@ describe("[COMP:msgraph/oauth] Microsoft Graph connector OAuth", () => {
     expect(params.get("scope")).toBe("offline_access openid ChannelMessage.Read.All");
   });
 
+  /**
+   * A workspace that registered a SINGLE-tenant app cannot use
+   * `organizations` - Entra will not issue for it. The tenant travels with the
+   * credentials from the API so the authorize call and the token call (which
+   * reads the same stored row) cannot disagree about the authority.
+   */
+  it("pins the authority to a workspace's own tenant when it has one", () => {
+    const tenant = "72f988bf-86f1-41af-91ab-2d7cd011db47";
+    const url = buildMsGraphAuthorizeUrl({
+      clientId: "client-abc",
+      redirectUri: "https://app.usebrian.ai/api/auth/callback/msgraph",
+      state,
+      tenant,
+    });
+    expect(url.startsWith(`https://login.microsoftonline.com/${tenant}/oauth2/v2.0/authorize?`)).toBe(true);
+    // Blank / absent falls back rather than producing an empty path segment.
+    expect(msGraphAuthorizeUrl("")).toBe(msGraphAuthorizeUrl());
+    expect(msGraphAuthorizeUrl("   ")).toBe(msGraphAuthorizeUrl());
+    expect(msGraphAuthorizeUrl(null)).toBe(msGraphAuthorizeUrl());
+  });
+
   it("always requests offline_access and openid, and never duplicates a scope", () => {
     const scopes = msGraphScopes();
     expect(scopes).toContain("offline_access");
@@ -75,32 +93,42 @@ describe("[COMP:msgraph/oauth] Microsoft Graph connector OAuth", () => {
     expect(new Set(scopes).size).toBe(scopes.length);
   });
 
-  it("reads the tenant id and address out of an id_token", () => {
-    const claims = {
-      tid: "72f988bf-86f1-41af-91ab-2d7cd011db47",
-      preferred_username: "ada@contoso.onmicrosoft.com",
-      name: "Ada Lovelace",
-    };
-    const idToken = `${b64url('{"alg":"RS256"}')}.${b64url(JSON.stringify(claims))}.sig`;
-    expect(decodeMsGraphIdToken(idToken)).toEqual({
-      tenantId: "72f988bf-86f1-41af-91ab-2d7cd011db47",
-      email: "ada@contoso.onmicrosoft.com",
-    });
+  /**
+   * The load-bearing boundary of the workspace-owned-app design: the client
+   * secret may belong to a CUSTOMER (their own Entra registration, stored
+   * encrypted against their workspace), so app-web must never exchange a code.
+   * It verifies the CSRF nonce and forwards to the API, which holds the secret.
+   *
+   * Asserted against the source text because the failure it guards is someone
+   * "simplifying" the callback back into a direct token POST - which typechecks,
+   * passes every unit test, and quietly ships a customer secret into a Next.js
+   * runtime that has no way to read it on the hosted product anyway.
+   */
+  it("never exchanges the code in app-web", () => {
+    const callback = readFileSync(
+      resolve(process.cwd(), "src/app/api/auth/callback/msgraph/route.ts"),
+      "utf8",
+    );
+    const helper = readFileSync(resolve(process.cwd(), "src/lib/msgraph-oauth.ts"), "utf8");
+
+    // The exchange lives in the API; app-web posts the raw code to it.
+    expect(callback).toContain("/api/connectors/msgraph/oauth-callback");
+    // No token endpoint and no secret READ in either file. Matched on
+    // `process.env.` rather than the bare name so the comments explaining why
+    // the exchange moved are still allowed to name it.
+    expect(callback).not.toContain("oauth2/v2.0/token");
+    expect(callback).not.toContain("client_secret:");
+    expect(callback).not.toContain("process.env.MSGRAPH_CLIENT_SECRET");
+    expect(helper).not.toContain("client_secret:");
+    expect(helper).not.toContain("process.env.MSGRAPH_CLIENT_SECRET");
   });
 
-  it("prefers the email claim and tolerates a missing tenant", () => {
-    const idToken = `x.${b64url('{"email":"ada@contoso.com","preferred_username":"ada"}')}.sig`;
-    expect(decodeMsGraphIdToken(idToken)).toEqual({ email: "ada@contoso.com" });
-  });
-
-  it("returns no claims rather than throwing on a missing or malformed token", () => {
-    expect(decodeMsGraphIdToken(undefined)).toEqual({});
-    expect(decodeMsGraphIdToken("")).toEqual({});
-    expect(decodeMsGraphIdToken("not-a-jwt")).toEqual({});
-    expect(decodeMsGraphIdToken(`x.${b64url("not json")}.sig`)).toEqual({});
-  });
-
-  it("threads the public client id through Turbo without exposing the secret", () => {
+  /**
+   * The client id is NOT inlined at build time any more: it is per-workspace
+   * and only the API can resolve it. A `NEXT_PUBLIC_MSGRAPH_CLIENT_ID` here
+   * would silently win for every workspace on the deployment.
+   */
+  it("keeps both halves of the app pair out of the browser bundle", () => {
     const repoRoot = resolve(process.cwd(), "../..");
     const turbo = JSON.parse(readFileSync(resolve(repoRoot, "turbo.json"), "utf8")) as {
       tasks: { build: { env: string[] } };
@@ -108,16 +136,12 @@ describe("[COMP:msgraph/oauth] Microsoft Graph connector OAuth", () => {
     const nextConfig = readFileSync(resolve(process.cwd(), "next.config.ts"), "utf8");
     const envExample = readFileSync(resolve(repoRoot, ".env.example"), "utf8");
 
-    expect(turbo.tasks.build.env).toContain("MSGRAPH_CLIENT_ID");
+    expect(turbo.tasks.build.env).not.toContain("MSGRAPH_CLIENT_ID");
     expect(turbo.tasks.build.env).not.toContain("MSGRAPH_CLIENT_SECRET");
-    expect(nextConfig).toContain("process.env.MSGRAPH_CLIENT_ID");
+    expect(nextConfig).not.toContain("NEXT_PUBLIC_MSGRAPH_CLIENT_ID:");
     expect(nextConfig).not.toContain("process.env.MSGRAPH_CLIENT_SECRET");
+    // The deployment-wide fallback still exists, server-side, for self-hosts.
     expect(envExample).toContain("MSGRAPH_CLIENT_ID=");
     expect(envExample).toContain("MSGRAPH_CLIENT_SECRET=");
   });
 });
-
-/** Encode a JSON string as an unpadded base64url JWT segment. */
-function b64url(json: string): string {
-  return Buffer.from(json, "utf8").toString("base64url");
-}

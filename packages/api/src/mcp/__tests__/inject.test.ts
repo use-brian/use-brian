@@ -79,6 +79,7 @@ import {
   _getMcpDiscoveryCacheSize,
 } from '../inject.js'
 import { buildUnavailableCapabilitiesPrompt } from '../../routes/route-helpers.js'
+import { packMsGraphTokens } from '../../msgraph/token.js'
 
 function settingsStoreStub() {
   // Generous stub — the no-connector path touches few of these, but
@@ -1178,14 +1179,14 @@ describe('[COMP:api/mcp-inject] Microsoft Graph (msgraph) built-in', () => {
     'msTeamsFindPerson',
   ]
 
-  function msgraphStore(connected: boolean) {
+  function msgraphStore(connected: boolean, credentials?: string) {
     return {
       list: vi.fn().mockResolvedValue([
         { id: 'ci-ms', connectorId: 'msgraph', name: 'Microsoft Teams', connected, url: null, custom: false, createdAt: new Date('2026-01-01T00:00:00Z') },
       ]),
       getCredentials: vi.fn().mockResolvedValue({
         client_id: 'msgraph_oauth',
-        client_secret: JSON.stringify({
+        client_secret: credentials ?? JSON.stringify({
           accessToken: 'access-1',
           refreshToken: 'refresh-1',
           expiresAt: new Date(Date.now() + 3600_000).toISOString(),
@@ -1198,13 +1199,15 @@ describe('[COMP:api/mcp-inject] Microsoft Graph (msgraph) built-in', () => {
   async function inject(opts: {
     connected?: boolean
     settingsStore?: unknown
+    /** Override the stored envelope (e.g. one carrying a workspace app pair). */
+    credentials?: string
   } = {}): Promise<{ tools: Map<string, unknown>; unavailable: string[] }> {
     const tools = new Map()
     const result = await injectMcpTools({
       userId: 'u-1',
       assistantId: 'a-1',
       tools,
-      connectorStore: msgraphStore(opts.connected ?? true) as never,
+      connectorStore: msgraphStore(opts.connected ?? true, opts.credentials) as never,
       settingsStore: (opts.settingsStore ?? settingsStoreStub()) as never,
       keepBuiltinsDirect: true,
     })
@@ -1232,13 +1235,45 @@ describe('[COMP:api/mcp-inject] Microsoft Graph (msgraph) built-in', () => {
     expect(unavailable.join('\n')).toMatch(/Microsoft Teams: not connected/)
   })
 
-  it('no-ops entirely when no Entra app credentials are configured', async () => {
-    // Connector-less boot (open single-player): no MSGRAPH_CLIENT_ID/SECRET.
+  it('no-ops entirely on a connector-less boot', async () => {
+    // Open single-player: no MSGRAPH_CLIENT_ID/SECRET and nothing connected.
     // Silent — not even a not-connected notice, since nothing could connect.
+    getConnectorConfig.mockReturnValue(undefined)
+    const { tools, unavailable } = await inject({ connected: false })
+    for (const name of MSGRAPH_TOOLS) expect(tools.has(name)).toBe(false)
+    expect(unavailable.join('\n')).not.toMatch(/Microsoft Teams/)
+  })
+
+  /**
+   * Deployment config is no longer the GATE, only a fallback: a workspace that
+   * registered its own Entra app (migration 394) connects through an app this
+   * process has no env var for, and the pair rides in the grant envelope so
+   * the refresh path can find it without a workspace id.
+   */
+  it('injects a workspace-owned connection with no deployment config at all', async () => {
+    getConnectorConfig.mockReturnValue(undefined)
+    const { tools } = await inject({
+      credentials: packMsGraphTokens({
+        accessToken: 'at',
+        refreshToken: 'rt',
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        appClientId: 'ws-client',
+        appClientSecret: 'ws-secret',
+      }),
+    })
+    for (const name of MSGRAPH_TOOLS) expect([...tools.keys()], name).toContain(name)
+  })
+
+  /**
+   * Connected, but nothing can rotate the token — a self-host that removed its
+   * env config after users connected. Injecting tools that would all fail at
+   * the first refresh is worse than saying the connector is unavailable.
+   */
+  it('announces the gap when a connected grant has no app to refresh it', async () => {
     getConnectorConfig.mockReturnValue(undefined)
     const { tools, unavailable } = await inject()
     for (const name of MSGRAPH_TOOLS) expect(tools.has(name)).toBe(false)
-    expect(unavailable.join('\n')).not.toMatch(/Microsoft Teams/)
+    expect(unavailable.join('\n')).toMatch(/Microsoft Teams: not connected/)
   })
 
   it('lands blocked tools in unavailable[] instead of the tool map', async () => {
