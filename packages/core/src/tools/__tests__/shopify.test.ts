@@ -37,7 +37,9 @@ function mockApi(overrides: Partial<ShopifyApi> = {}): ShopifyApi {
     setVariantPrice: vi.fn().mockResolvedValue({
       productVariants: [{ id: 'gid://shopify/ProductVariant/5', title: 'Default Title', price: '439.00' }],
     }),
-    publishProduct: vi.fn().mockResolvedValue({ published_to: 'gid://shopify/Publication/1' }),
+    publishProduct: vi.fn().mockResolvedValue({
+      published_to: 'gid://shopify/Publication/1', product_status: 'ACTIVE', visible: true,
+    }),
     setProductMetafields: vi.fn().mockResolvedValue({
       metafields: [{ id: 'gid://shopify/Metafield/1', namespace: 'custom', key: 'ingredients', type: 'multi_line_text_field' }],
     }),
@@ -205,6 +207,33 @@ describe('[COMP:tools/shopify] Shopify tools', () => {
     const result = await tool.execute({ productId: '2', price: '439.00' }, {} as never)
     expect(result.isError).toBe(true)
     expect(String(result.data)).toMatch(/pass variantId/)
+  })
+
+  it('shopifyPublishProduct says a DRAFT product is still not visible', async () => {
+    // Verified live 2026-08-05: publishing a DRAFT succeeds and records the
+    // publication, but the storefront shows nothing until status is ACTIVE.
+    // Since products are created DRAFT, reporting a bare "published" here
+    // sends the owner looking for a product that is not there.
+    const publishProduct = vi.fn().mockResolvedValue({
+      published_to: 'gid://shopify/Publication/1', product_status: 'DRAFT', visible: false,
+    })
+    const tool = createShopifyTools(mockApi({ publishProduct })).find(
+      (t) => t.name === 'shopifyPublishProduct',
+    )!
+    const result = await tool.execute({ productId: '2' }, {} as never)
+    expect(result.isError).toBeFalsy()
+    const data = result.data as { visible: boolean; note: string }
+    expect(data.visible).toBe(false)
+    expect(data.note).toMatch(/NOT visible/)
+    expect(data.note).toMatch(/shopifyUpdateProduct/)
+  })
+
+  it('shopifyPublishProduct confirms visibility for an ACTIVE product', async () => {
+    const tool = createShopifyTools(mockApi()).find((t) => t.name === 'shopifyPublishProduct')!
+    const result = await tool.execute({ productId: '2' }, {} as never)
+    const data = result.data as { visible: boolean; note: string }
+    expect(data.visible).toBe(true)
+    expect(data.note).toMatch(/visible on the storefront/)
   })
 
   it('shopifyPublishProduct relays a missing Online Store channel', async () => {

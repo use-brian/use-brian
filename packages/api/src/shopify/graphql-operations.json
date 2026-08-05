@@ -319,18 +319,6 @@
       "deprecations": []
     },
     {
-      "name": "OnlineStorePublication",
-      "kind": "query",
-      "hash": "f61ac824e570a71f",
-      "valid": true,
-      "scopes": [
-        "read_publications"
-      ],
-      "deprecations": [
-        "The field Publication.name is deprecated. Use [Catalog.title](https://shopify.dev/api/admin-graphql/unstable/interfaces/Catalog#field-catalog-title) instead."
-      ]
-    },
-    {
       "name": "OpenFulfillmentOrders",
       "kind": "query",
       "hash": "f70e4b122f53eb92",
@@ -378,6 +366,19 @@
         "read_publications"
       ],
       "deprecations": []
+    },
+    {
+      "name": "PublishTargets",
+      "kind": "query",
+      "hash": "930ba954491521ea",
+      "valid": true,
+      "scopes": [
+        "read_products",
+        "read_publications"
+      ],
+      "deprecations": [
+        "The field Publication.name is deprecated. Use [Catalog.title](https://shopify.dev/api/admin-graphql/unstable/interfaces/Catalog#field-catalog-title) instead."
+      ]
     },
     {
       "name": "RefundOrder",

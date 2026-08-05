@@ -9,10 +9,10 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import {
   normalizeShopDomain,
+  shopifyGraphql,
   getShop,
   listOrders,
   listProducts,
-  getProduct,
   createProduct,
   updateProduct,
   addProductImage,
@@ -119,15 +119,45 @@ describeIf('[COMP:api/shopify-client] Shopify live dev-store', () => {
 
       // 4. Publish — needs write_publications, and needs the publication lookup
       //    to have matched this store's Online Store channel.
-      const published = (await publishProduct(AUTH, { productId: productId! })) as { published_to?: string }
-      expect(published.published_to).toMatch(/^gid:\/\/shopify\/Publication\//)
-
-      // Read back: the image is the one Shopify processes asynchronously, so
-      // assert on what is immediately authoritative.
-      const readBack = (await getProduct(AUTH, productId!)) as {
-        variants?: { edges?: Array<{ node?: { price?: string; sku?: string } }> }
+      //
+      // Publishing while DRAFT is deliberately exercised first: it succeeds,
+      // and it does NOT make the product visible. That combination is why the
+      // return value carries `visible` rather than a bare success.
+      const draftPublish = (await publishProduct(AUTH, { productId: productId! })) as {
+        published_to?: string; product_status?: string; visible?: boolean
       }
-      expect(readBack.variants?.edges?.[0]?.node?.price).toBe('439.00')
+      expect(draftPublish.published_to).toMatch(/^gid:\/\/shopify\/Publication\//)
+      expect(draftPublish.product_status).toBe('DRAFT')
+      expect(draftPublish.visible).toBe(false)
+
+      // 5. Activate — the step a "create a product" request actually needs, and
+      //    the one that makes the publication take effect.
+      await updateProduct(AUTH, { id: productId!, status: 'ACTIVE' })
+
+      // Assert publication from SHOPIFY's side, not ours. `published_to` is
+      // echoed from our own lookup, so on its own it proves nothing about
+      // whether the product actually reached a channel. This has to run BEFORE
+      // the archive below — archiving unpublishes from every sales channel.
+      const state = await shopifyGraphql<{
+        product?: {
+          variants?: { edges?: Array<{ node?: { price?: string } }> }
+          resourcePublications?: { edges?: Array<{ node?: { isPublished?: boolean; publication?: { name?: string } } }> }
+        }
+      }>(AUTH, `
+        query E2EProductState($id: ID!) {
+          product(id: $id) {
+            variants(first: 2) { edges { node { price } } }
+            resourcePublications(first: 10) { edges { node { isPublished publication { name } } } }
+          }
+        }
+      `, { id: productId })
+
+      expect(state.product?.variants?.edges?.[0]?.node?.price).toBe('439.00')
+      const live = (state.product?.resourcePublications?.edges ?? [])
+        .map((e) => e.node)
+        .filter((n) => n?.isPublished)
+      expect(live.length).toBeGreaterThan(0)
+      expect(live.map((n) => n?.publication?.name)).toContain('Online Store')
     } finally {
       // Archive rather than leave an ACTIVE test product on the storefront.
       await updateProduct(AUTH, { id: productId!, status: 'ARCHIVED' }).catch(() => {})

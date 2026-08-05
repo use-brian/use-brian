@@ -725,13 +725,16 @@ describe('[COMP:api/shopify-client] Shopify GraphQL client', () => {
     expect(mockFetch).toHaveBeenCalledTimes(1)
   })
 
-  it('publishProduct finds the Online Store publication and publishes to it', async () => {
+  it('publishProduct finds the Online Store publication and reports visibility', async () => {
     mockFetch
       .mockResolvedValueOnce(jsonResponse({
-        data: { publications: { edges: [
-          { node: { id: 'gid://shopify/Publication/9', name: 'Point of Sale', catalog: { title: 'Point of Sale' } } },
-          { node: { id: 'gid://shopify/Publication/1', name: 'Online Store', catalog: { title: 'Online Store' } } },
-        ] } },
+        data: {
+          product: { status: 'ACTIVE' },
+          publications: { edges: [
+            { node: { id: 'gid://shopify/Publication/9', name: 'Point of Sale', catalog: { title: 'Point of Sale' } } },
+            { node: { id: 'gid://shopify/Publication/1', name: 'Online Store', catalog: { title: 'Online Store' } } },
+          ] },
+        },
       }))
       .mockResolvedValueOnce(jsonResponse({
         data: { publishablePublish: { publishable: { availablePublicationsCount: { count: 2 } }, userErrors: [] } },
@@ -741,30 +744,67 @@ describe('[COMP:api/shopify-client] Shopify GraphQL client', () => {
 
     const publish = JSON.parse((mockFetch.mock.calls[1][1] as { body: string }).body)
     expect(publish.variables.input).toEqual([{ publicationId: 'gid://shopify/Publication/1' }])
-    expect(result).toEqual({ published_to: 'gid://shopify/Publication/1' })
+    expect(result).toEqual({
+      published_to: 'gid://shopify/Publication/1', product_status: 'ACTIVE', visible: true,
+    })
   })
 
-  it('publishProduct falls back to the deprecated name when catalog.title is absent', async () => {
+  it('publishProduct reports a DRAFT product as published but not visible', async () => {
+    // Live-verified 2026-08-05: publishing a DRAFT records the publication but
+    // the storefront shows nothing. Products are created DRAFT, so this is the
+    // common case, not the edge case.
     mockFetch
       .mockResolvedValueOnce(jsonResponse({
-        data: { publications: { edges: [{ node: { id: 'gid://shopify/Publication/1', name: 'Online Store' } }] } },
+        data: {
+          product: { status: 'DRAFT' },
+          publications: { edges: [{ node: { id: 'gid://shopify/Publication/1', catalog: { title: 'Online Store' } } }] },
+        },
       }))
       .mockResolvedValueOnce(jsonResponse({
         data: { publishablePublish: { publishable: {}, userErrors: [] } },
       }))
 
     await expect(publishProduct(AUTH, { productId: '2' })).resolves.toEqual({
+      published_to: 'gid://shopify/Publication/1', product_status: 'DRAFT', visible: false,
+    })
+  })
+
+  it('publishProduct falls back to the deprecated name when catalog.title is absent', async () => {
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse({
+        data: {
+          product: { status: 'ACTIVE' },
+          publications: { edges: [{ node: { id: 'gid://shopify/Publication/1', name: 'Online Store' } }] },
+        },
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        data: { publishablePublish: { publishable: {}, userErrors: [] } },
+      }))
+
+    await expect(publishProduct(AUTH, { productId: '2' })).resolves.toMatchObject({
       published_to: 'gid://shopify/Publication/1',
     })
   })
 
   it('publishProduct names the problem when the store has no Online Store channel', async () => {
     mockFetch.mockResolvedValueOnce(jsonResponse({
-      data: { publications: { edges: [{ node: { id: 'gid://shopify/Publication/9', catalog: { title: 'Point of Sale' } } }] } },
+      data: {
+        product: { status: 'ACTIVE' },
+        publications: { edges: [{ node: { id: 'gid://shopify/Publication/9', catalog: { title: 'Point of Sale' } } }] },
+      },
     }))
 
     await expect(publishProduct(AUTH, { productId: '2' }))
       .rejects.toThrow(/no Online Store sales channel.*Point of Sale/)
+    expect(mockFetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('publishProduct refuses an unknown product instead of publishing blind', async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({
+      data: { product: null, publications: { edges: [] } },
+    }))
+
+    await expect(publishProduct(AUTH, { productId: '999' })).rejects.toThrow(/product not found/)
     expect(mockFetch).toHaveBeenCalledTimes(1)
   })
 

@@ -1123,25 +1123,40 @@ export async function setVariantPrice(auth: ShopifyAuth, params: {
  * Publish a product to the Online Store sales channel. `productCreate` leaves
  * products unpublished no matter what `status` says, so without this a created
  * product never reaches the storefront.
+ *
+ * Publishing is necessary but NOT sufficient. Verified against a live store on
+ * 2026-08-05: publishing a DRAFT product succeeds and records the publication,
+ * but `resourcePublications` reports nothing until the product's status becomes
+ * ACTIVE, and the storefront shows nothing either. Since `shopifyCreateProduct`
+ * defaults to DRAFT, the natural sequence ends with a product that is
+ * "published" and invisible — so this reports the status back and the tool
+ * turns it into an explicit next step rather than a claim of success.
  */
 export async function publishProduct(auth: ShopifyAuth, params: {
   productId: string
   publicationId?: string
 }): Promise<unknown> {
-  let publicationId = params.publicationId ? toShopifyGid('Publication', params.publicationId) : undefined
+  const productGid = toShopifyGid('Product', params.productId)
 
+  // One round trip for both facts. `catalog.title` is the current field and
+  // `name` its deprecated predecessor; both are selected on purpose, because
+  // which one carries the channel label varies by store and picking the wrong
+  // publication fails as "published, but not on the storefront".
+  const lookup = await shopifyGraphql<{
+    product?: { status?: string }
+    publications?: { edges?: Array<{ node?: { id?: string; name?: string; catalog?: { title?: string } } }> }
+  }>(auth, `
+    query PublishTargets($id: ID!) {
+      product(id: $id) { status }
+      publications(first: 25) { edges { node { id name catalog { title } } } }
+    }
+  `, { id: productGid })
+
+  const productStatus = lookup.product?.status
+  if (!productStatus) throw new Error('Shopify API error: product not found (check the product id)')
+
+  let publicationId = params.publicationId ? toShopifyGid('Publication', params.publicationId) : undefined
   if (!publicationId) {
-    // `catalog.title` is the current field and `name` its deprecated
-    // predecessor. Both are selected on purpose: which one carries the channel
-    // label varies by store, and picking the wrong publication is a failure
-    // that only shows up as "published, but not on the storefront".
-    const lookup = await shopifyGraphql<{
-      publications?: { edges?: Array<{ node?: { id?: string; name?: string; catalog?: { title?: string } } }> }
-    }>(auth, `
-      query OnlineStorePublication {
-        publications(first: 25) { edges { node { id name catalog { title } } } }
-      }
-    `)
     const publications = (lookup.publications?.edges ?? [])
       .map((e) => e?.node)
       .filter((p): p is { id: string; name?: string; catalog?: { title?: string } } => typeof p?.id === 'string')
@@ -1163,9 +1178,10 @@ export async function publishProduct(auth: ShopifyAuth, params: {
         userErrors { field message }
       }
     }
-  `, { id: toShopifyGid('Product', params.productId), input: [{ publicationId }] })
+  `, { id: productGid, input: [{ publicationId }] })
   expectNoUserErrors(data, 'publishablePublish')
-  return { published_to: publicationId }
+
+  return { published_to: publicationId, product_status: productStatus, visible: productStatus === 'ACTIVE' }
 }
 
 export type ShopifyMetafieldInput = {

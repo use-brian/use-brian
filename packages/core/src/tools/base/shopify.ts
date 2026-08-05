@@ -1025,6 +1025,8 @@ export function createShopifyTools(
     description:
       'Publish a Shopify product to the Online Store so customers can see and buy it. ' +
       'Shopify creates products unpublished no matter what status they have, so a new product stays invisible on the storefront until this runs. ' +
+      'Publishing is necessary but not sufficient: a product whose status is DRAFT stays invisible even after publishing. ' +
+      'New products are created as DRAFT, so set the status to ACTIVE with shopifyUpdateProduct as well - this tool reports whether that is still needed. ' +
       'Check the product has an image and a price before publishing. ' +
       'Call this tool directly — the user will see an Approve/Deny prompt.',
     inputSchema: z.object({
@@ -1038,9 +1040,18 @@ export function createShopifyTools(
     async execute(input) {
       try {
         const data = ((await api.publishProduct(input)) ?? {}) as Json
+        const status = str(data, 'product_status')
+        const visible = bool(data, 'visible') === true
         return { data: {
           published_to: str(data, 'published_to'),
-          note: 'The product is now visible on the storefront if its status is ACTIVE.',
+          product_status: status,
+          visible,
+          // Not a hedge — a DRAFT product is genuinely not on the storefront
+          // after a successful publish. Saying "published" without this reads
+          // to the user as "live", and they will go looking for it.
+          note: visible
+            ? 'Published and visible on the storefront.'
+            : `Published, but the product status is ${status ?? 'not ACTIVE'} so it is NOT visible to customers yet. Set the status to ACTIVE with shopifyUpdateProduct to make it live.`,
         } }
       } catch (err) {
         return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
