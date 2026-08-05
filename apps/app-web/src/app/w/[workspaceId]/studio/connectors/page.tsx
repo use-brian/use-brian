@@ -2021,10 +2021,11 @@ function ConnectorsList() {
       return { ...prev, [connectorId]: { ...entry, tools: entry.tools.map((tool) => (tool.name === toolName ? { ...tool, policy } : tool)) } };
     });
     try {
-      await authFetch(`${API_URL}/api/connectors/${connectorId}/tools/policy`, {
+      const res = await authFetch(`${API_URL}/api/connectors/${connectorId}/tools/policy`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ serverName, toolName, policy }),
       });
+      if (!res.ok) throw new Error("Failed to update tool policy");
     } catch { loadTools(connectorId); }
   }
 
@@ -3278,7 +3279,7 @@ function ConnectorsList() {
                       <button
                         onClick={() => saveMsGraphApp(sel)}
                         disabled={!msgraphAppId.trim() || !msgraphAppSecret.trim() || connecting === rid}
-                        className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                        className="text-xs font-medium bg-action text-action-foreground px-3 py-1 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
                       >
                         {connecting === rid ? tc.msgraph.connectingBtn : tc.msgraph.connectBtn}
                       </button>
@@ -3918,7 +3919,7 @@ function ConnectorsList() {
                             currentPolicy: tool.policy as ToolPolicy,
                           }))}
                           onPolicyChange={(toolName, policy) =>
-                            handlePolicyChange(sel.id, entry?.serverName ?? sel.id, toolName, policy)
+                            handlePolicyChange(toolKey ?? sel.id, entry?.serverName ?? sel.id, toolName, policy)
                           }
                         />
                       );

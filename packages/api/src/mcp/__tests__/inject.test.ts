@@ -367,6 +367,44 @@ describe('[COMP:api/mcp-inject] granted CLI MCP overlay', () => {
     expect(tools.has('mcp_search')).toBe(true)
     expect(tools.has('mcp_call')).toBe(true)
   })
+
+  it('skips only the CLI instance disabled for this assistant', async () => {
+    discoverCliServer.mockImplementation(async (_params, name) => ({
+      name,
+      url: `stdio://${name}`,
+      tools: [{ name: `read${name}`, description: 'Read data', inputSchema: { type: 'object' } }],
+    }))
+    const instances = [
+      { id: 'cli-disabled-1', provider: 'cli', label: 'One', connected: true, config: {}, updatedAt: new Date(0) },
+      { id: 'cli-enabled-2', provider: 'cli', label: 'Two', connected: true, config: {}, updatedAt: new Date(0) },
+    ]
+    const isEnabled = vi.fn(async (_assistantId: string, governanceId: string) => governanceId !== 'cli:cli-disabled-1')
+    const tools = new Map()
+
+    await injectMcpTools({
+      userId: 'owner-1', assistantId: 'a-1', tools,
+      connectorStore: { list: vi.fn().mockResolvedValue([]) } as never,
+      settingsStore: settingsStoreStub() as never,
+      assistantConnectorStore: { isEnabled } as never,
+      connectorGrantStore: {
+        listForTargetSystem: vi.fn().mockResolvedValue(instances.map((instance) => ({
+          grantedByUserId: 'grantor-1', instance,
+        }))),
+      } as never,
+      connectorInstanceStore: {
+        listByWorkspaceSystem: vi.fn().mockResolvedValue([]),
+        getAuthCredentialsSystem: vi.fn().mockResolvedValue({
+          type: 'cli', binaryPath: '/usr/bin/node', args: ['/tmp/server.js'],
+        }),
+      } as never,
+      assistantTeamId: 'ws-shared',
+    })
+
+    expect(isEnabled).toHaveBeenCalledWith('a-1', 'cli:cli-disabled-1', 'cli')
+    expect(isEnabled).toHaveBeenCalledWith('a-1', 'cli:cli-enabled-2', 'cli')
+    expect(discoverCliServer).toHaveBeenCalledTimes(1)
+    expect(discoverCliServer).toHaveBeenCalledWith(expect.anything(), 'Two')
+  })
 })
 
 describe('[COMP:api/mcp-inject] custom connector auth threading', () => {

@@ -3,7 +3,7 @@
  *
  * The OSS-open half of the connector surface. The hosted edition mounts a
  * richer closed `/api/connectors` route (custom MCP CRUD, Google Drive
- * authorized-files, per-assistant tool policy); this open module implements the
+ * authorized-files); this open module implements the
  * built-in OAuth/PAT connector lifecycle that the open `apps/app-web` OAuth
  * callbacks and Studio → Connectors page drive:
  *
@@ -11,6 +11,7 @@
  *   GET    /api/connectors/directory                — the "browse to add" catalog
  *   POST   /api/connectors/directory/:id/add        — add an official connector
  *   GET    /api/connectors/:provider/tools          — the connector's tool catalog
+ *   POST   /api/connectors/:provider/tools/policy   — update app-level tool policy
  *   GET    /api/connectors/:provider/config         — the connector's JSON config
  *   PATCH  /api/connectors/:provider/config         — merge into the JSON config
  *   POST   /api/connectors/:provider/store-credentials — persist an OAuth/PAT grant
@@ -49,7 +50,7 @@
  * feature has one implementation across both editions.
  *
  * Out of scope for the open edition (handled by the closed route): Google Drive
- * authorized-files (`/gdrive/*`) and per-assistant tool policy (`/tools`).
+ * authorized-files (`/gdrive/*`).
  *
  * Component tag: [COMP:api/connectors-route].
  */
@@ -57,8 +58,9 @@
 import { Router } from 'express'
 import { constants as fsConstants, promises as fs } from 'node:fs'
 import * as nodePath from 'node:path'
-import { classifyTool, defaultPolicy } from '@use-brian/core'
+import { classifyTool, defaultPolicy, type McpSettingsStore } from '@use-brian/core'
 import {
+  APP_LEVEL_ASSISTANT_ID,
   CONFIGURABLE_APP_CREDENTIAL_CONNECTORS,
   connectorSupportsMultipleInstances,
   OFFICIAL_CONNECTORS,
@@ -128,6 +130,7 @@ type ConnectorRowOut = {
 type ConnectorRouteOptions = {
   connectorStore: ConnectorStore
   connectorInstanceStore: ConnectorInstanceStore
+  mcpSettingsStore?: McpSettingsStore
   /**
    * Enables the workspace-scoped bring-your-own GCS storage endpoints
    * (`/gcs/connect`, `/gcs/disconnect`). Omitted → those routes 404.
@@ -301,7 +304,7 @@ function instanceRow(inst: ConnectorInstance, isPrimary: boolean): ConnectorRowO
 }
 
 export function connectorRoutes(opts: ConnectorRouteOptions): Router {
-  const { connectorStore, connectorInstanceStore } = opts
+  const { connectorStore, connectorInstanceStore, mcpSettingsStore } = opts
   const router = Router()
 
   // Custom MCP connector CRUD. Mounted FIRST so the literal `/custom` and
@@ -1270,17 +1273,27 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
             cwd: typeof instance.config?.cwd === 'string' ? instance.config.cwd : undefined,
             timeoutMs: typeof instance.config?.timeoutMs === 'number' ? instance.config.timeoutMs : undefined,
           }, instance.label)
+          const tools = await Promise.all(server.tools.map(async (t) => {
+            const classification = classifyTool(t.name, t.description)
+            const fallback = defaultPolicy(classification)
+            const override = mcpSettingsStore
+              ? await mcpSettingsStore.getPolicy({
+                  assistantId: APP_LEVEL_ASSISTANT_ID,
+                  userId,
+                  serverName: server.name,
+                  toolName: t.name,
+                })
+              : null
+            return {
+              name: t.name,
+              description: t.description,
+              classification,
+              policy: override?.policy ?? fallback,
+            }
+          }))
           res.json({
             serverName: server.name,
-            tools: server.tools.map((t) => {
-              const classification = classifyTool(t.name, t.description)
-              return {
-                name: t.name,
-                description: t.description,
-                classification,
-                policy: defaultPolicy(classification),
-              }
-            }),
+            tools,
           })
           return
         }
@@ -1293,15 +1306,25 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     // Built-in: static registry catalog.
     const catalog = OFFICIAL_CONNECTOR_TOOLS[provider]
     if (catalog) {
-      const entry = OFFICIAL_BY_ID.get(provider)
-      res.json({
-        serverName: entry?.name ?? provider,
-        tools: catalog.map((t) => ({
+      const tools = await Promise.all(catalog.map(async (t) => {
+        const override = mcpSettingsStore
+          ? await mcpSettingsStore.getPolicy({
+              assistantId: APP_LEVEL_ASSISTANT_ID,
+              userId,
+              serverName: provider,
+              toolName: t.name,
+            })
+          : null
+        return {
           name: t.name,
           description: t.description,
           classification: t.classification,
-          policy: t.defaultPolicy,
-        })),
+          policy: override?.policy ?? t.defaultPolicy,
+        }
+      }))
+      res.json({
+        serverName: provider,
+        tools,
       })
       return
     }
@@ -1316,21 +1339,63 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
       const { discoverMcpServer } = await import('../mcp/client.js')
       const authCreds = await connectorStore.getAuthCredentials(userId, provider)
       const server = await discoverMcpServer(connector.url, connector.name, buildConnectorAuthHeaders(authCreds))
+      const tools = await Promise.all(server.tools.map(async (t) => {
+        const classification = classifyTool(t.name, t.description)
+        const fallback = defaultPolicy(classification)
+        const override = mcpSettingsStore
+          ? await mcpSettingsStore.getPolicy({
+              assistantId: APP_LEVEL_ASSISTANT_ID,
+              userId,
+              serverName: server.name,
+              toolName: t.name,
+            })
+          : null
+        return {
+          name: t.name,
+          description: t.description,
+          classification,
+          policy: override?.policy ?? fallback,
+        }
+      }))
       res.json({
         serverName: server.name,
-        tools: server.tools.map((t) => {
-          const classification = classifyTool(t.name, t.description)
-          return {
-            name: t.name,
-            description: t.description,
-            classification,
-            policy: defaultPolicy(classification),
-          }
-        }),
+        tools,
       })
     } catch (err) {
       console.error('[connectors] custom tool discovery failed:', err)
       res.status(500).json({ error: 'Failed to discover tools' })
+    }
+  })
+
+  // ── POST /:provider/tools/policy — update app-level policy ───
+  router.post('/:provider/tools/policy', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    if (!mcpSettingsStore) { res.status(500).json({ error: 'MCP settings not configured' }); return }
+
+    const { serverName, toolName, policy } = req.body as {
+      serverName?: string
+      toolName?: string
+      policy?: string
+    }
+    if (!serverName || !toolName || !policy || !['allow', 'ask', 'block'].includes(policy)) {
+      res.status(400).json({ error: 'Missing or invalid serverName, toolName, or policy' })
+      return
+    }
+
+    try {
+      await mcpSettingsStore.setPolicy({
+        assistantId: APP_LEVEL_ASSISTANT_ID,
+        userId,
+        serverName,
+        toolName,
+        policy: policy as 'allow' | 'ask' | 'block',
+        classification: classifyTool(toolName),
+      })
+      res.json({ ok: true })
+    } catch (err) {
+      console.error('[connectors] policy update failed:', err)
+      res.status(500).json({ error: 'Failed to update policy' })
     }
   })
 
