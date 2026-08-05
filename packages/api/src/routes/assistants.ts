@@ -22,6 +22,7 @@ import type { ConnectorStore } from '../db/connector-store.js'
 import {
   connectorInstanceGovernanceId,
   parseConnectorInstanceGovernanceId,
+  type ConnectorInstance,
   type ConnectorInstanceStore,
 } from '../db/connector-instance-store.js'
 import { buildConnectorAuthHeaders } from '../mcp/auth-headers.js'
@@ -85,7 +86,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
   async function verifyMembership(
     req: { userId?: string; params: AssistantParams },
     res: import('express').Response,
-  ): Promise<{ userId: string; role: string } | null> {
+  ): Promise<{ userId: string; role: string; workspaceId: string | null } | null> {
     const userId = req.userId
     if (!userId) {
       res.status(401).json({ error: 'Unauthorized' })
@@ -97,7 +98,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
       res.status(403).json({ error: 'Not a member of this assistant' })
       return null
     }
-    return { userId, role: access.role }
+    return { userId, role: access.role, workspaceId: access.assistant.workspaceId ?? null }
   }
 
   // ── GET /:assistantId — single assistant detail ────────────────
@@ -627,7 +628,8 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
       //   team-native > member-grant > personal
       // The oldest instance keeps the provider key for backward compatibility;
       // every additional instance gets a stable `<provider>:<instanceId>` key.
-      // IMAP predates this convention and keeps exact keys for every mailbox.
+      // Registry-declared exact-governance connectors keep exact keys for every
+      // instance because their accounts or discovered catalogs are independent.
       type Entry = {
         id: string
         providerId?: string
@@ -667,7 +669,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
             // Exact-governance account routers expose only usable accounts in
             // Assistant Tools; disconnected/auth-failed rows stay manageable
             // on the workspace connector surface.
-            if (!inst.connected || inst.healthStatus === 'auth_failed') continue
+            if (!inst.connected || (inst.provider !== 'cli' && inst.healthStatus === 'auth_failed')) continue
             const governanceId = connectorInstanceGovernanceId(inst.provider, inst.id)
             byKey.set(governanceId, {
               id: governanceId,
@@ -718,7 +720,8 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
         )
         // Preserve the existing one-grantor-per-provider precedence, but keep
         // every instance exposed by that winning grantor instead of collapsing
-        // the provider to its first row.
+        // the provider to its first row. CLI is the exception: runtime loads
+        // every explicitly granted server because each has its own catalog.
         const winningGrantorByProvider = new Map<string, string>()
         const instanceIndexByProvider = new Map<string, number>()
         const orderedGrants = [...grants].sort((a, b) =>
@@ -726,15 +729,17 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
             || String(a.instance.id).localeCompare(String(b.instance.id)),
         )
         for (const g of orderedGrants) {
-          if (teamNativeProviders.has(g.instance.provider)) continue
+          if (g.instance.provider !== 'cli' && teamNativeProviders.has(g.instance.provider)) continue
           const entry = registry.find((e) => e.id === g.instance.provider)
           if (g.instance.provider === 'whatsapp') continue
-          const winningGrantor = winningGrantorByProvider.get(g.instance.provider)
-          if (winningGrantor && winningGrantor !== g.grantedByUserId) continue
-          if (!winningGrantor) winningGrantorByProvider.set(g.instance.provider, g.grantedByUserId)
+          if (g.instance.provider !== 'cli') {
+            const winningGrantor = winningGrantorByProvider.get(g.instance.provider)
+            if (winningGrantor && winningGrantor !== g.grantedByUserId) continue
+            if (!winningGrantor) winningGrantorByProvider.set(g.instance.provider, g.grantedByUserId)
+          }
           if (ALL_EXACT_INSTANCE_GOVERNANCE_CONNECTOR_IDS.has(g.instance.provider)) {
             if (!g.instance.connected) continue
-            if (g.instance.healthStatus === 'auth_failed') continue
+            if (g.instance.provider !== 'cli' && g.instance.healthStatus === 'auth_failed') continue
             const governanceId = connectorInstanceGovernanceId(g.instance.provider, g.instance.id)
             byKey.set(governanceId, {
               id: governanceId,
@@ -923,6 +928,75 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
       : providerId
 
     try {
+      if (providerId === 'cli' && parsedGovernanceId && options.connectorInstanceStore) {
+        const instanceId = parsedGovernanceId.instanceId
+        let instance: ConnectorInstance | null = null
+        if (member.workspaceId) {
+          const [teamNative, grants] = await Promise.all([
+            options.connectorInstanceStore.listByWorkspaceSystem(member.workspaceId),
+            options.connectorGrantStore
+              ? options.connectorGrantStore.listForTargetSystem('workspace', member.workspaceId)
+              : Promise.resolve([]),
+          ])
+          instance = [
+            ...teamNative,
+            ...grants.map((grant) => grant.instance),
+          ].find((candidate) => candidate.id === instanceId && candidate.provider === 'cli') ?? null
+        } else {
+          instance = await options.connectorInstanceStore.get(member.userId, instanceId)
+          if (instance?.provider !== 'cli' || instance.scope !== 'user' || instance.userId !== member.userId) {
+            instance = null
+          }
+        }
+        if (!instance || !instance.connected) {
+          res.status(404).json({ error: 'CLI connector not found' })
+          return
+        }
+
+        const credentials = await options.connectorInstanceStore.getAuthCredentialsSystem(instance.id)
+        if (credentials?.type !== 'cli') {
+          res.status(409).json({ error: 'CLI connector credentials are missing or invalid' })
+          return
+        }
+        const { discoverCliServer } = await import('../mcp/cli-transport.js')
+        const server = await discoverCliServer({
+          binaryPath: credentials.binaryPath,
+          args: credentials.args,
+          env: instance.config?.env as Record<string, string> | undefined,
+          cwd: typeof instance.config?.cwd === 'string' ? instance.config.cwd : undefined,
+          timeoutMs: typeof instance.config?.timeoutMs === 'number' ? instance.config.timeoutMs : undefined,
+        }, instance.label)
+
+        const tools = await Promise.all(server.tools.map(async (tool) => {
+          const classification = classifyTool(tool.name, tool.description)
+          const fallback = defaultPolicy(classification)
+          const appOverride = await options.mcpSettingsStore!.getPolicy({
+            assistantId: APP_LEVEL_ASSISTANT_ID,
+            userId: member.userId,
+            serverName: server.name,
+            toolName: tool.name,
+          })
+          const assistantOverride = await options.mcpSettingsStore!.getPolicy({
+            assistantId,
+            userId: member.userId,
+            serverName: server.name,
+            toolName: tool.name,
+          })
+          const appPolicy = appOverride?.policy ?? fallback
+          const assistantPolicy = assistantOverride?.policy ?? fallback
+          return {
+            name: tool.name,
+            description: tool.description,
+            classification,
+            appPolicy,
+            assistantPolicy,
+            effectivePolicy: strictest(appPolicy, assistantPolicy),
+          }
+        }))
+        res.json({ tools, serverName: server.name, providerId, instanceId })
+        return
+      }
+
       if (OFFICIAL_CONNECTOR_TOOLS[providerId]) {
         const tools = await Promise.all(
           OFFICIAL_CONNECTOR_TOOLS[providerId].map(async (t) => {
@@ -1068,9 +1142,11 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
       const providerId = parsedGovernanceId && OFFICIAL_CONNECTOR_TOOLS[parsedGovernanceId.provider]
         ? parsedGovernanceId.provider
         : connectorId
-      const persistedServerName = OFFICIAL_CONNECTOR_TOOLS[providerId]
-        ? (parsedGovernanceId && providerId === parsedGovernanceId.provider ? connectorId : providerId)
-        : serverName
+      const persistedServerName = providerId === 'cli' && parsedGovernanceId
+        ? serverName
+        : OFFICIAL_CONNECTOR_TOOLS[providerId]
+          ? (parsedGovernanceId && providerId === parsedGovernanceId.provider ? connectorId : providerId)
+          : serverName
 
       await options.mcpSettingsStore.setPolicy({
         assistantId,

@@ -16,6 +16,15 @@ import {
   listOrders,
   updateProduct,
   addTags,
+  addProductImage,
+  setVariantPrice,
+  publishProduct,
+  setProductMetafields,
+  setProductOptions,
+  productTemplateFilename,
+  readProductTemplate,
+  createProductTemplate,
+  setProductTemplate,
   verifyShopifyWebhookHmac,
   verifyShopifyOAuthQueryHmac,
   buildShopifyAuthorizeUrl,
@@ -622,6 +631,384 @@ describe('[COMP:api/shopify-client] Shopify GraphQL client', () => {
     expect(parsed.searchParams.get('client_id')).toBe('cid')
   })
 
+  // ── Product authoring ────────────────────────────────────
+  // `productCreate` yields a product with no image, no price, and unpublished.
+  // These four operations finish the job, and each has a failure mode that
+  // looks like success if handled carelessly.
+
+  it('addProductImage stages, uploads the bytes, then attaches the resource', async () => {
+    const bytes = new Uint8Array([1, 2, 3, 4])
+    mockFetch
+      // 1. stagedUploadsCreate
+      .mockResolvedValueOnce(jsonResponse({
+        data: { stagedUploadsCreate: {
+          stagedTargets: [{
+            url: 'https://shopify-staged-uploads.storage.googleapis.com/bucket',
+            resourceUrl: 'https://shopify-staged-uploads.storage.googleapis.com/bucket/hojicha.jpg',
+            parameters: [{ name: 'key', value: 'tmp/hojicha.jpg' }, { name: 'policy', value: 'abc' }],
+          }],
+          userErrors: [],
+        } },
+      }))
+      // 2. the multipart POST to the bucket (not JSON)
+      .mockResolvedValueOnce({ ok: true, status: 204, text: () => Promise.resolve('') })
+      // 3. productUpdate + media
+      .mockResolvedValueOnce(jsonResponse({
+        data: { productUpdate: { product: { id: 'gid://shopify/Product/2' }, userErrors: [] } },
+      }))
+
+    await addProductImage(AUTH, { productId: '2', bytes, filename: 'hojicha.jpg', mimeType: 'image/jpeg', alt: 'Pouch' })
+
+    expect(mockFetch).toHaveBeenCalledTimes(3)
+    // The staged upload goes to the bucket Shopify nominated, NOT to Shopify,
+    // and must not carry the access token.
+    const [uploadUrl, uploadInit] = mockFetch.mock.calls[1]
+    expect(uploadUrl).toBe('https://shopify-staged-uploads.storage.googleapis.com/bucket')
+    expect((uploadInit as { headers?: unknown }).headers).toBeUndefined()
+    const form = (uploadInit as { body: FormData }).body
+    expect(form).toBeInstanceOf(FormData)
+    // Signed parameters must precede the file part or the bucket rejects it.
+    expect([...form.keys()]).toEqual(['key', 'policy', 'file'])
+
+    const attach = JSON.parse((mockFetch.mock.calls[2][1] as { body: string }).body)
+    expect(attach.variables.product.id).toBe('gid://shopify/Product/2')
+    expect(attach.variables.media[0]).toMatchObject({
+      mediaContentType: 'IMAGE',
+      originalSource: 'https://shopify-staged-uploads.storage.googleapis.com/bucket/hojicha.jpg',
+      alt: 'Pouch',
+    })
+  })
+
+  it('addProductImage throws when the bucket rejects the bytes, and never attaches', async () => {
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse({
+        data: { stagedUploadsCreate: {
+          stagedTargets: [{ url: 'https://bucket.example/upload', resourceUrl: 'https://bucket.example/r', parameters: [] }],
+          userErrors: [],
+        } },
+      }))
+      .mockResolvedValueOnce({ ok: false, status: 403, text: () => Promise.resolve('SignatureDoesNotMatch') })
+
+    await expect(addProductImage(AUTH, {
+      productId: '2', bytes: new Uint8Array([1]), filename: 'a.jpg', mimeType: 'image/jpeg',
+    })).rejects.toThrow(/403.*SignatureDoesNotMatch/)
+    // Two calls only — the attach never ran, so no product points at a
+    // resource that holds no bytes.
+    expect(mockFetch).toHaveBeenCalledTimes(2)
+  })
+
+  it('setVariantPrice resolves the lone default variant when none is named', async () => {
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse({
+        data: { product: { variants: { edges: [{ node: { id: 'gid://shopify/ProductVariant/5', title: 'Default Title' } }] } } },
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        data: { productVariantsBulkUpdate: { productVariants: [{ id: 'gid://shopify/ProductVariant/5', price: '439.00' }], userErrors: [] } },
+      }))
+
+    await setVariantPrice(AUTH, { productId: '2', price: '439.00', sku: 'HBM-60' })
+
+    const update = JSON.parse((mockFetch.mock.calls[1][1] as { body: string }).body)
+    expect(update.variables.variants[0]).toMatchObject({
+      id: 'gid://shopify/ProductVariant/5',
+      price: '439.00',
+      // SKU lives on inventoryItem in ProductVariantsBulkInput, not on the variant.
+      inventoryItem: { sku: 'HBM-60' },
+    })
+  })
+
+  it('setVariantPrice refuses a multi-variant product instead of pricing an arbitrary one', async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({
+      data: { product: { variants: { edges: [
+        { node: { id: 'gid://shopify/ProductVariant/5', title: '60g' } },
+        { node: { id: 'gid://shopify/ProductVariant/6', title: '120g' } },
+      ] } } },
+    }))
+
+    await expect(setVariantPrice(AUTH, { productId: '2', price: '439.00' }))
+      .rejects.toThrow(/2 variants - pass variantId.*60g.*120g/)
+    expect(mockFetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('publishProduct finds the Online Store publication and reports visibility', async () => {
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse({
+        data: {
+          product: { status: 'ACTIVE' },
+          publications: { edges: [
+            { node: { id: 'gid://shopify/Publication/9', name: 'Point of Sale', catalog: { title: 'Point of Sale' } } },
+            { node: { id: 'gid://shopify/Publication/1', name: 'Online Store', catalog: { title: 'Online Store' } } },
+          ] },
+        },
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        data: { publishablePublish: { publishable: { availablePublicationsCount: { count: 2 } }, userErrors: [] } },
+      }))
+
+    const result = await publishProduct(AUTH, { productId: '2' })
+
+    const publish = JSON.parse((mockFetch.mock.calls[1][1] as { body: string }).body)
+    expect(publish.variables.input).toEqual([{ publicationId: 'gid://shopify/Publication/1' }])
+    expect(result).toEqual({
+      published_to: 'gid://shopify/Publication/1', product_status: 'ACTIVE', visible: true,
+    })
+  })
+
+  it('publishProduct reports a DRAFT product as published but not visible', async () => {
+    // Live-verified 2026-08-05: publishing a DRAFT records the publication but
+    // the storefront shows nothing. Products are created DRAFT, so this is the
+    // common case, not the edge case.
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse({
+        data: {
+          product: { status: 'DRAFT' },
+          publications: { edges: [{ node: { id: 'gid://shopify/Publication/1', catalog: { title: 'Online Store' } } }] },
+        },
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        data: { publishablePublish: { publishable: {}, userErrors: [] } },
+      }))
+
+    await expect(publishProduct(AUTH, { productId: '2' })).resolves.toEqual({
+      published_to: 'gid://shopify/Publication/1', product_status: 'DRAFT', visible: false,
+    })
+  })
+
+  it('publishProduct falls back to the deprecated name when catalog.title is absent', async () => {
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse({
+        data: {
+          product: { status: 'ACTIVE' },
+          publications: { edges: [{ node: { id: 'gid://shopify/Publication/1', name: 'Online Store' } }] },
+        },
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        data: { publishablePublish: { publishable: {}, userErrors: [] } },
+      }))
+
+    await expect(publishProduct(AUTH, { productId: '2' })).resolves.toMatchObject({
+      published_to: 'gid://shopify/Publication/1',
+    })
+  })
+
+  it('publishProduct names the problem when the store has no Online Store channel', async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({
+      data: {
+        product: { status: 'ACTIVE' },
+        publications: { edges: [{ node: { id: 'gid://shopify/Publication/9', catalog: { title: 'Point of Sale' } } }] },
+      },
+    }))
+
+    await expect(publishProduct(AUTH, { productId: '2' }))
+      .rejects.toThrow(/no Online Store sales channel.*Point of Sale/)
+    expect(mockFetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('publishProduct refuses an unknown product instead of publishing blind', async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({
+      data: { product: null, publications: { edges: [] } },
+    }))
+
+    await expect(publishProduct(AUTH, { productId: '999' })).rejects.toThrow(/product not found/)
+    expect(mockFetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('setProductMetafields stamps the product ownerId onto every metafield', async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({
+      data: { metafieldsSet: { metafields: [{ id: 'gid://shopify/Metafield/1' }], userErrors: [] } },
+    }))
+
+    await setProductMetafields(AUTH, {
+      productId: '2',
+      metafields: [
+        { namespace: 'custom', key: 'ingredients', type: 'multi_line_text_field', value: '焙茶, 黑瑪卡' },
+        { namespace: 'custom', key: 'net_weight', type: 'single_line_text_field', value: '60g' },
+      ],
+    })
+
+    const sent = JSON.parse((mockFetch.mock.calls[0][1] as { body: string }).body)
+    expect(sent.variables.metafields).toHaveLength(2)
+    for (const m of sent.variables.metafields) {
+      expect(m.ownerId).toBe('gid://shopify/Product/2')
+    }
+  })
+
+  it('setProductMetafields throws on a userErrors payload rather than reporting success', async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({
+      data: { metafieldsSet: { metafields: [], userErrors: [{ field: ['type'], message: 'Type is invalid' }] } },
+    }))
+
+    await expect(setProductMetafields(AUTH, {
+      productId: '2',
+      metafields: [{ namespace: 'custom', key: 'x', type: 'bogus_type', value: '1' }],
+    })).rejects.toThrow(/Type is invalid/)
+  })
+
+  // ── Theme product templates: the containment ────────────────
+  //
+  // These write into the theme customers are served from, and a broken page is
+  // invisible in the Shopify admin. Every rule below is the reason this
+  // capability was allowed at all, so each gets a test.
+
+  it('productTemplateFilename derives the filename and refuses anything else', () => {
+    expect(productTemplateFilename('hojicha-black-maca')).toBe('templates/product.hojicha-black-maca.json')
+    expect(productTemplateFilename('pack_2')).toBe('templates/product.pack_2.json')
+    // Path traversal, other template families, and raw filenames are all
+    // rejected by construction — the caller supplies a suffix, never a path.
+    for (const bad of ['../../layout/theme', 'a/b', 'Product', 'x.json', '', ' ', 'templates/product.x.json', '-lead']) {
+      expect(() => productTemplateFilename(bad), bad).toThrow(/not a valid template suffix/)
+    }
+  })
+
+  it('createProductTemplate refuses to overwrite an existing template', async () => {
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse({ data: { themes: { edges: [
+        { node: { id: 'gid://shopify/OnlineStoreTheme/1', name: 'Dawn', role: 'MAIN' } },
+      ] } } }))
+      // section types available
+      .mockResolvedValueOnce(jsonResponse({ data: { theme: { files: { edges: [
+        { node: { filename: 'sections/main-product.liquid' } },
+      ] } } } }))
+      // the target filename already exists
+      .mockResolvedValueOnce(jsonResponse({ data: { theme: { files: { edges: [
+        { node: { filename: 'templates/product.taken.json', body: { content: '{}' } } },
+      ] } } } }))
+
+    await expect(createProductTemplate(AUTH, {
+      suffix: 'taken',
+      template: JSON.stringify({ sections: { main: { type: 'main-product' } }, order: ['main'] }),
+    })).rejects.toThrow(/already exists.*never overwritten/s)
+    // Three reads, no write.
+    expect(mockFetch).toHaveBeenCalledTimes(3)
+  })
+
+  it('createProductTemplate refuses a section type the theme does not have', async () => {
+    // A template naming a missing section renders as a BLANK page — it reads as
+    // a broken store rather than a bad write, so it never reaches the theme.
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse({ data: { themes: { edges: [
+        { node: { id: 'gid://shopify/OnlineStoreTheme/1', name: 'Dawn', role: 'MAIN' } },
+      ] } } }))
+      .mockResolvedValueOnce(jsonResponse({ data: { theme: { files: { edges: [
+        { node: { filename: 'sections/main-product.liquid' } },
+      ] } } } }))
+
+    await expect(createProductTemplate(AUTH, {
+      suffix: 'new-page',
+      template: JSON.stringify({
+        sections: { main: { type: 'main-product' }, extra: { type: 'blendit-faq' } },
+        order: ['main', 'extra'],
+      }),
+    })).rejects.toThrow(/no section type\(s\): blendit-faq/)
+    expect(mockFetch).toHaveBeenCalledTimes(2)
+  })
+
+  it('createProductTemplate refuses malformed template bodies before touching the theme', async () => {
+    const themes = () => jsonResponse({ data: { themes: { edges: [
+      { node: { id: 'gid://shopify/OnlineStoreTheme/1', name: 'Dawn', role: 'MAIN' } },
+    ] } } })
+
+    mockFetch.mockResolvedValueOnce(themes())
+    await expect(createProductTemplate(AUTH, { suffix: 'a', template: 'not json' }))
+      .rejects.toThrow(/not valid JSON/)
+
+    mockFetch.mockReset()
+    mockFetch.mockResolvedValueOnce(themes())
+    await expect(createProductTemplate(AUTH, { suffix: 'a', template: '{"sections":{}}' }))
+      .rejects.toThrow(/needs a "sections" object and an "order" array/)
+
+    mockFetch.mockReset()
+    mockFetch.mockResolvedValueOnce(themes())
+    await expect(createProductTemplate(AUTH, {
+      suffix: 'a',
+      template: JSON.stringify({ sections: { main: { type: 'main-product' } }, order: ['main', 'ghost'] }),
+    })).rejects.toThrow(/order lists section "ghost"/)
+  })
+
+  it('createProductTemplate writes exactly one product template on the happy path', async () => {
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse({ data: { themes: { edges: [
+        { node: { id: 'gid://shopify/OnlineStoreTheme/1', name: 'Dawn', role: 'MAIN' } },
+      ] } } }))
+      .mockResolvedValueOnce(jsonResponse({ data: { theme: { files: { edges: [
+        { node: { filename: 'sections/main-product.liquid' } },
+      ] } } } }))
+      .mockResolvedValueOnce(jsonResponse({ data: { theme: { files: { edges: [] } } } }))
+      .mockResolvedValueOnce(jsonResponse({ data: { themeFilesUpsert: {
+        upsertedThemeFiles: [{ filename: 'templates/product.hojicha.json', size: '2326' }], userErrors: [],
+      } } }))
+
+    const body = JSON.stringify({ sections: { main: { type: 'main-product' } }, order: ['main'] })
+    const result = await createProductTemplate(AUTH, { suffix: 'hojicha', template: body })
+
+    const write = JSON.parse((mockFetch.mock.calls[3][1] as { body: string }).body)
+    expect(write.variables.files).toHaveLength(1)
+    expect(write.variables.files[0].filename).toBe('templates/product.hojicha.json')
+    expect(write.variables.themeId).toBe('gid://shopify/OnlineStoreTheme/1')
+    expect(result).toMatchObject({ filename: 'templates/product.hojicha.json', suffix: 'hojicha' })
+  })
+
+  it('readProductTemplate strips the auto-generated banner Shopify prepends', async () => {
+    // Theme JSON is not valid JSON as stored — it carries a /* ... */ header.
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse({ data: { themes: { edges: [
+        { node: { id: 'gid://shopify/OnlineStoreTheme/1', name: 'Dawn', role: 'MAIN' } },
+      ] } } }))
+      .mockResolvedValueOnce(jsonResponse({ data: { theme: { files: { edges: [
+        { node: { filename: 'templates/product.json', body: { content: '/* auto-generated */\n{"sections":{},"order":[]}' } } },
+      ] } } } }))
+
+    const tpl = await readProductTemplate(AUTH, {})
+    expect(tpl.filename).toBe('templates/product.json')
+    // The raw body is returned verbatim so the model edits what really exists.
+    expect(tpl.content).toContain('auto-generated')
+  })
+
+  it('setProductTemplate validates the suffix before pointing a product at it', async () => {
+    // A typo here aims a live product at a template that does not exist.
+    await expect(setProductTemplate(AUTH, { productId: '2', templateSuffix: '../evil' }))
+      .rejects.toThrow(/not a valid template suffix/)
+    expect(mockFetch).not.toHaveBeenCalled()
+
+    mockFetch.mockResolvedValueOnce(jsonResponse({ data: { productUpdate: {
+      product: { id: 'gid://shopify/Product/2', templateSuffix: null }, userErrors: [],
+    } } }))
+    await setProductTemplate(AUTH, { productId: '2', templateSuffix: null })
+    const sent = JSON.parse((mockFetch.mock.calls[0][1] as { body: string }).body)
+    expect(sent.variables.product.templateSuffix).toBeNull()
+  })
+
+  it('setProductOptions renames the lone option and refuses a multi-option product', async () => {
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse({ data: { product: { options: [
+        { id: 'gid://shopify/ProductOption/1', name: 'Title', optionValues: [{ id: 'gid://shopify/ProductOptionValue/1', name: 'Default Title' }] },
+      ] } } }))
+      .mockResolvedValueOnce(jsonResponse({ data: { productOptionUpdate: {
+        product: { options: [{ name: 'Pack', optionValues: [{ name: '250g' }] }] }, userErrors: [],
+      } } }))
+
+    await setProductOptions(AUTH, { productId: '2', name: 'Pack', values: ['250g'] })
+    const sent = JSON.parse((mockFetch.mock.calls[1][1] as { body: string }).body)
+    expect(sent.variables.option).toMatchObject({ id: 'gid://shopify/ProductOption/1', name: 'Pack' })
+    expect(sent.variables.optionValuesToUpdate).toEqual([{ id: 'gid://shopify/ProductOptionValue/1', name: '250g' }])
+
+    mockFetch.mockReset()
+    mockFetch.mockResolvedValueOnce(jsonResponse({ data: { product: { options: [
+      { id: 'gid://shopify/ProductOption/1', name: 'Size', optionValues: [] },
+      { id: 'gid://shopify/ProductOption/2', name: 'Colour', optionValues: [] },
+    ] } } }))
+    await expect(setProductOptions(AUTH, { productId: '2', name: 'X' }))
+      .rejects.toThrow(/2 options - pass optionId.*Size.*Colour/s)
+  })
+
+  it('setProductOptions refuses more values than the option has, rather than dropping them', async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({ data: { product: { options: [
+      { id: 'gid://shopify/ProductOption/1', name: 'Title', optionValues: [{ id: 'gid://shopify/ProductOptionValue/1', name: 'Default Title' }] },
+    ] } } }))
+    await expect(setProductOptions(AUTH, { productId: '2', values: ['1包', '2包'] }))
+      .rejects.toThrow(/does not add variants/)
+  })
+
   // ── End-to-end (mocked GraphQL): the "last 5 orders" path ──
   // Tool factory → real client → mocked endpoint. The live twin runs in
   // client.integration.test.ts against a dev store when SHOPIFY_TEST_* is set.
@@ -681,6 +1068,15 @@ describe('[COMP:api/shopify-client] Shopify GraphQL client', () => {
       cancelOrder: nullApi,
       refundOrder: nullApi,
       completeDraftOrder: nullApi,
+      addProductImage: nullApi,
+      setVariantPrice: nullApi,
+      publishProduct: nullApi,
+      setProductMetafields: nullApi,
+      setProductOptions: nullApi,
+      listThemes: async () => [],
+      readProductTemplate: nullApi,
+      createProductTemplate: nullApi,
+      setProductTemplate: nullApi,
     })
     const listOrdersTool = tools.find((t) => t.name === 'shopifyListOrders')!
     const result = await listOrdersTool.execute({ first: 5 }, {} as never)

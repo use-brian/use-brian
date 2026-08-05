@@ -30,8 +30,8 @@ export const ConnectorEntrySchema = z.object({
    * Multi-instance connectors normally keep the provider id for their oldest
    * instance and use `<provider>:<instanceId>` for extras. Set this only when
    * every instance, including the oldest, must use an exact governance key
-   * (Company Email's account-routed tool set predates the primary/variant
-   * convention). Consumers derive behavior from the registry — they must not
+   * (for example, account-routed email tools or CLI servers with independent
+   * catalogs). Consumers derive behavior from the registry — they must not
    * hardcode provider ids.
    */
   all_instances_exact_governance: z.boolean().optional(),
@@ -292,6 +292,9 @@ export const OFFICIAL_CONNECTORS: ConnectorEntry[] = [
     oauth_required: false,
     enabled: true,
     tags: ['developer', 'local', 'oss'],
+    // Each CLI server discovers an independent tool catalog, so no instance
+    // can inherit the provider-level governance key from another server.
+    all_instances_exact_governance: true,
   },
 ]
 

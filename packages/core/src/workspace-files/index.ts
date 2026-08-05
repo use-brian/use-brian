@@ -38,6 +38,15 @@ export { createSendFileTool } from './send-file.js'
 
 export type { FileToolPolicy, ResolveFileToolPolicy } from './tool-helpers.js'
 
+// Exported so a non-files tool that reads a workspace file (shopifyAddProductImage)
+// reports failures in exactly the words the file tools use, rather than
+// inventing a second vocabulary for "not found" and "no workspace".
+export {
+  ctxFor as workspaceFilesCtxFor,
+  errorMessage as workspaceFilesErrorMessage,
+  workspaceGate as workspaceFilesGate,
+} from './tool-helpers.js'
+
 export {
   AttachmentCollector,
   MAX_ATTACHMENTS_PER_TURN,

@@ -33,8 +33,43 @@ function mockApi(overrides: Partial<ShopifyApi> = {}): ShopifyApi {
     cancelOrder: vi.fn().mockResolvedValue({ job: { id: 'j1' } }),
     refundOrder: vi.fn().mockResolvedValue({ refund: { id: 'gid://shopify/Refund/1' } }),
     completeDraftOrder: vi.fn().mockResolvedValue({ draftOrder: { id: 'gid://shopify/DraftOrder/9', status: 'COMPLETED' } }),
+    addProductImage: vi.fn().mockResolvedValue({ product: { id: 'gid://shopify/Product/2' } }),
+    setVariantPrice: vi.fn().mockResolvedValue({
+      productVariants: [{ id: 'gid://shopify/ProductVariant/5', title: 'Default Title', price: '439.00' }],
+    }),
+    publishProduct: vi.fn().mockResolvedValue({
+      published_to: 'gid://shopify/Publication/1', product_status: 'ACTIVE', visible: true,
+    }),
+    setProductMetafields: vi.fn().mockResolvedValue({
+      metafields: [{ id: 'gid://shopify/Metafield/1', namespace: 'custom', key: 'ingredients', type: 'multi_line_text_field' }],
+    }),
+    setProductOptions: vi.fn().mockResolvedValue({
+      product: { options: [{ name: 'Pack', optionValues: [{ name: '250g' }] }] },
+    }),
+    listThemes: vi.fn().mockResolvedValue([
+      { id: 'gid://shopify/OnlineStoreTheme/1', name: 'Dawn', role: 'MAIN' },
+    ]),
+    readProductTemplate: vi.fn().mockResolvedValue({
+      themeId: 'gid://shopify/OnlineStoreTheme/1', themeName: 'Dawn',
+      filename: 'templates/product.json', content: '{"sections":{},"order":[]}',
+    }),
+    createProductTemplate: vi.fn().mockResolvedValue({
+      theme: 'Dawn', filename: 'templates/product.demo.json', suffix: 'demo',
+    }),
+    setProductTemplate: vi.fn().mockResolvedValue({
+      product: { id: 'gid://shopify/Product/2', templateSuffix: 'demo' },
+    }),
     ...overrides,
   }
+}
+
+/** A `readFileBytes` that always succeeds, for the image-upload happy path. */
+function mockFileReader(overrides: { mimeType?: string; fileName?: string } = {}) {
+  return vi.fn().mockResolvedValue({
+    bytes: new Uint8Array([1, 2, 3]),
+    fileName: overrides.fileName ?? 'hojicha.jpg',
+    mimeType: overrides.mimeType ?? 'image/jpeg',
+  })
 }
 
 const READ_TOOLS = [
@@ -54,10 +89,18 @@ const READ_TOOLS = [
   'shopifyListDisputes',
   'shopifyListContent',
   'shopifySalesReport',
+  'shopifyListThemes',
+  'shopifyReadProductTemplate',
 ]
 const WRITE_TOOLS = [
   'shopifyUpdateProduct',
   'shopifyCreateProduct',
+  'shopifyAddProductImage',
+  'shopifySetProductPrice',
+  'shopifyPublishProduct',
+  'shopifySetProductMetafields',
+  'shopifySetProductOptions',
+  'shopifySetProductTemplate',
   'shopifyCreateDraftOrder',
   'shopifySendDraftOrderInvoice',
   'shopifyAddTags',
@@ -67,12 +110,17 @@ const WRITE_TOOLS = [
   'shopifyCreateDiscountCode',
   'shopifyCreateContent',
 ]
-const DESTRUCTIVE_TOOLS = ['shopifyCancelOrder', 'shopifyRefundOrder', 'shopifyCompleteDraftOrder']
+const DESTRUCTIVE_TOOLS = [
+  'shopifyCancelOrder', 'shopifyRefundOrder', 'shopifyCompleteDraftOrder',
+  // Writes a file into the theme customers are served from. A broken page is
+  // invisible in the Shopify admin, so this sits with the destructive verbs.
+  'shopifyCreateProductTemplate',
+]
 
 describe('[COMP:tools/shopify] Shopify tools', () => {
-  it('creates the full 29-tool catalog', () => {
+  it('creates the full 38-tool catalog', () => {
     const tools = createShopifyTools(mockApi())
-    expect(tools).toHaveLength(29)
+    expect(tools).toHaveLength(38)
     expect(tools.map((t) => t.name).sort()).toEqual(
       [...READ_TOOLS, ...WRITE_TOOLS, ...DESTRUCTIVE_TOOLS].sort(),
     )
@@ -101,6 +149,143 @@ describe('[COMP:tools/shopify] Shopify tools', () => {
         expect(tool.description, tool.name).toMatch(/Approve\/Deny/)
       }
     }
+  })
+
+  // ── Product authoring ──────────────────────────────────────
+  // A product created through the connector has no image, no price, and is
+  // unpublished. These four tools are what make it sellable, so each failure
+  // mode has to be loud rather than a cheerful-looking empty result.
+
+  it('shopifyAddProductImage uploads the workspace file it was handed', async () => {
+    const addProductImage = vi.fn().mockResolvedValue({ product: { id: 'gid://shopify/Product/2' } })
+    const readFileBytes = mockFileReader()
+    const tool = createShopifyTools(mockApi({ addProductImage }), { readFileBytes }).find(
+      (t) => t.name === 'shopifyAddProductImage',
+    )!
+    const result = await tool.execute(
+      { productId: '2', file: '/products/hojicha.jpg', alt: 'Hojicha Black Maca pouch' },
+      {} as never,
+    )
+    expect(readFileBytes).toHaveBeenCalledWith(expect.anything(), '/products/hojicha.jpg')
+    expect(addProductImage).toHaveBeenCalledWith(expect.objectContaining({
+      productId: '2',
+      filename: 'hojicha.jpg',
+      mimeType: 'image/jpeg',
+      alt: 'Hojicha Black Maca pouch',
+    }))
+    expect(result.isError).toBeFalsy()
+    expect(result.data).toMatchObject({ uploaded: 'hojicha.jpg' })
+  })
+
+  it('shopifyAddProductImage reports honestly when no file reader is wired', async () => {
+    // Silently omitting the tool would leave the model free to claim it
+    // attached an image it never touched.
+    const addProductImage = vi.fn()
+    const tool = createShopifyTools(mockApi({ addProductImage })).find(
+      (t) => t.name === 'shopifyAddProductImage',
+    )!
+    const result = await tool.execute({ productId: '2', file: 'abc' }, {} as never)
+    expect(result.isError).toBe(true)
+    expect(String(result.data)).toMatch(/not available/i)
+    expect(addProductImage).not.toHaveBeenCalled()
+  })
+
+  it('shopifyAddProductImage refuses a non-image file before uploading anything', async () => {
+    const addProductImage = vi.fn()
+    const readFileBytes = mockFileReader({ mimeType: 'application/pdf', fileName: 'spec.pdf' })
+    const tool = createShopifyTools(mockApi({ addProductImage }), { readFileBytes }).find(
+      (t) => t.name === 'shopifyAddProductImage',
+    )!
+    const result = await tool.execute({ productId: '2', file: 'spec.pdf' }, {} as never)
+    expect(result.isError).toBe(true)
+    expect(String(result.data)).toMatch(/not an image/i)
+    expect(addProductImage).not.toHaveBeenCalled()
+  })
+
+  it('shopifyAddProductImage surfaces a file-read failure instead of uploading', async () => {
+    const addProductImage = vi.fn()
+    const readFileBytes = vi.fn().mockResolvedValue({ error: 'File /nope.jpg not found in this workspace.' })
+    const tool = createShopifyTools(mockApi({ addProductImage }), { readFileBytes }).find(
+      (t) => t.name === 'shopifyAddProductImage',
+    )!
+    const result = await tool.execute({ productId: '2', file: '/nope.jpg' }, {} as never)
+    expect(result.isError).toBe(true)
+    expect(String(result.data)).toMatch(/not found/i)
+    expect(addProductImage).not.toHaveBeenCalled()
+  })
+
+  it('shopifySetProductPrice projects the priced variant back', async () => {
+    const tool = createShopifyTools(mockApi()).find((t) => t.name === 'shopifySetProductPrice')!
+    const result = await tool.execute({ productId: '2', price: '439.00' }, {} as never)
+    expect(result.data).toMatchObject({
+      variants: [{ id: 'gid://shopify/ProductVariant/5', price: '439.00' }],
+    })
+  })
+
+  it('shopifySetProductPrice relays a multi-variant refusal rather than guessing', async () => {
+    const setVariantPrice = vi.fn().mockRejectedValue(
+      new Error('Shopify API error: product has 3 variants - pass variantId. Variants: 1包 (gid://shopify/ProductVariant/5)'),
+    )
+    const tool = createShopifyTools(mockApi({ setVariantPrice })).find(
+      (t) => t.name === 'shopifySetProductPrice',
+    )!
+    const result = await tool.execute({ productId: '2', price: '439.00' }, {} as never)
+    expect(result.isError).toBe(true)
+    expect(String(result.data)).toMatch(/pass variantId/)
+  })
+
+  it('shopifyPublishProduct says a DRAFT product is still not visible', async () => {
+    // Verified live 2026-08-05: publishing a DRAFT succeeds and records the
+    // publication, but the storefront shows nothing until status is ACTIVE.
+    // Since products are created DRAFT, reporting a bare "published" here
+    // sends the owner looking for a product that is not there.
+    const publishProduct = vi.fn().mockResolvedValue({
+      published_to: 'gid://shopify/Publication/1', product_status: 'DRAFT', visible: false,
+    })
+    const tool = createShopifyTools(mockApi({ publishProduct })).find(
+      (t) => t.name === 'shopifyPublishProduct',
+    )!
+    const result = await tool.execute({ productId: '2' }, {} as never)
+    expect(result.isError).toBeFalsy()
+    const data = result.data as { visible: boolean; note: string }
+    expect(data.visible).toBe(false)
+    expect(data.note).toMatch(/NOT visible/)
+    expect(data.note).toMatch(/shopifyUpdateProduct/)
+  })
+
+  it('shopifyPublishProduct confirms visibility for an ACTIVE product', async () => {
+    const tool = createShopifyTools(mockApi()).find((t) => t.name === 'shopifyPublishProduct')!
+    const result = await tool.execute({ productId: '2' }, {} as never)
+    const data = result.data as { visible: boolean; note: string }
+    expect(data.visible).toBe(true)
+    expect(data.note).toMatch(/visible on the storefront/)
+  })
+
+  it('shopifyPublishProduct relays a missing Online Store channel', async () => {
+    const publishProduct = vi.fn().mockRejectedValue(
+      new Error('Shopify API error: this store has no Online Store sales channel, so a product cannot be published to a storefront. Channels found: none'),
+    )
+    const tool = createShopifyTools(mockApi({ publishProduct })).find(
+      (t) => t.name === 'shopifyPublishProduct',
+    )!
+    const result = await tool.execute({ productId: '2' }, {} as never)
+    expect(result.isError).toBe(true)
+    expect(String(result.data)).toMatch(/no Online Store sales channel/)
+  })
+
+  it('shopifySetProductMetafields warns that the theme decides visibility', async () => {
+    // A successful write is NOT a visible section. Without this note the model
+    // tells the merchant the page is updated when nothing rendered.
+    const tool = createShopifyTools(mockApi()).find((t) => t.name === 'shopifySetProductMetafields')!
+    expect(tool.description).toMatch(/theme/i)
+    const result = await tool.execute(
+      { productId: '2', metafields: [{ namespace: 'custom', key: 'ingredients', type: 'multi_line_text_field', value: '焙茶, 黑瑪卡' }] },
+      {} as never,
+    )
+    expect(result.data).toMatchObject({
+      metafields: [{ namespace: 'custom', key: 'ingredients' }],
+    })
+    expect(String((result.data as { note?: string }).note)).toMatch(/theme/i)
   })
 
   it('shopifyCreateDiscountCode rejects a missing or doubled discount value at the schema', async () => {
