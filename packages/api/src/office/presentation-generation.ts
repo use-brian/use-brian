@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import {
   collectStream,
+  fitOfficeArtifact,
   inferOfficeTemplateRouting,
   type LLMProvider,
   type Message,
@@ -22,6 +23,7 @@ import {
 } from '@use-brian/office-model'
 
 const TEXT_FIELD_TYPES = new Set<OfficeTemplateField['type']>(['plainText', 'richText', 'bulletList', 'date', 'number'])
+const MAX_FIT_ATTEMPTS = 3
 
 const PresentationPlanSchema = z.object({
   title: z.string().min(1).max(1_000),
@@ -45,6 +47,15 @@ const RevisionSchema = z.object({
 const PRESENTATION_SYSTEM_PROMPT = `You plan a concise presentation from an admitted slide-template catalogue. Return one JSON object and nothing else. Use only the supplied recipeId and fieldId values. Never invent a customer, metric, date, quote, award, integration, price, or commitment. Facts may come only from the user's request or supplied evidence. Prefer a coherent progression: opening, explanation, proof or detail, and closing. Respect every recipe's use guidance and repetition limit. Fill every required textual field. Omit optional fields that do not need to change so admitted brand copy and media remain intact. Use this exact shape: {"title":"...","slides":[{"recipeId":"uuid","title":"...","fields":[{"fieldId":"uuid","text":"..."}]}]}`
 
 const REVISION_SYSTEM_PROMPT = `You revise only the selected text in a presentation. The complete presentation context is read-only and exists only so you can preserve meaning, narrative flow, and facts. Preserve every fact and the intended slide role unless the instruction explicitly changes it. Do not copy surrounding text into the replacement. Return one JSON object and nothing else with this exact shape: {"replacements":[{"targetId":"uuid","text":"replacement"}]}. Include every supplied target exactly once and no other target.`
+
+type PresentationPlan = z.infer<typeof PresentationPlanSchema>
+type RevisionPlan = z.infer<typeof RevisionSchema>
+
+type MaterializedPresentation = {
+  snapshot: PresentationSnapshot
+  fieldByIdentity: Map<string, OfficeTemplateField>
+  readabilityExemptIds: string[]
+}
 
 function responseText(response: { content: Array<{ type: string; text?: string }> }): string {
   return response.content.map((block) => block.type === 'text' ? block.text ?? '' : '').join('').trim()
@@ -76,17 +87,32 @@ function replaceRuns(runs: OfficeRichTextRun[], text: string): OfficeRichTextRun
   }
   if (runs.length === 1) return [{ ...first, text }]
 
-  const words = text.trim() ? text.trim().split(/\s+/) : []
   const weights = runs.map((run) => Math.max(1, run.text.replace(/\s+/g, '').length))
   const totalWeight = weights.reduce((sum, weight) => sum + weight, 0)
-  let consumed = 0
-  let wordStart = 0
+  const characters = [...text]
+  const contentLength = characters.filter((character) => !/\s/.test(character)).length
+  let consumedWeight = 0
+  let consumedContent = 0
+  let characterStart = 0
   return runs.map((run, index) => {
-    consumed += weights[index] ?? 0
-    const wordEnd = index === runs.length - 1 ? words.length : Math.round((consumed / totalWeight) * words.length)
-    const segment = words.slice(wordStart, wordEnd).join(' ')
-    wordStart = wordEnd
-    return { ...run, text: segment + (segment && index < runs.length - 1 ? ' ' : '') }
+    consumedWeight += weights[index] ?? 0
+    if (index === runs.length - 1) return { ...run, text: characters.slice(characterStart).join('') }
+    const targetContent = Math.round((consumedWeight / totalWeight) * contentLength)
+    let characterEnd = characterStart
+    while (characterEnd < characters.length && consumedContent < targetContent) {
+      if (!/\s/.test(characters[characterEnd]!)) consumedContent += 1
+      characterEnd += 1
+    }
+    if (characterEnd > characterStart && characterEnd < characters.length && !/\s/.test(characters[characterEnd - 1]!) && !/\s/.test(characters[characterEnd]!)) {
+      while (characterEnd < characters.length && !/\s/.test(characters[characterEnd]!)) {
+        consumedContent += 1
+        characterEnd += 1
+      }
+    }
+    while (characterEnd < characters.length && /\s/.test(characters[characterEnd]!)) characterEnd += 1
+    const segment = characters.slice(characterStart, characterEnd).join('')
+    characterStart = characterEnd
+    return { ...run, text: segment }
   })
 }
 
@@ -117,6 +143,54 @@ function remapIdentities(value: unknown, identities: Map<string, string>): unkno
   if (Array.isArray(value)) return value.map((item) => remapIdentities(item, identities))
   if (!value || typeof value !== 'object') return value
   return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, remapIdentities(child, identities)]))
+}
+
+function collectReadabilityExemptIds(value: unknown, ids = new Set<string>()): Set<string> {
+  if (!value || typeof value !== 'object') return ids
+  if (!Array.isArray(value)) {
+    const object = value as Record<string, unknown>
+    const style = object.style as Record<string, unknown> | undefined
+    if (typeof object.id === 'string' && style && typeof style.fontSizePt === 'number' && style.fontSizePt < 8) ids.add(object.id)
+  }
+  for (const child of Object.values(value)) collectReadabilityExemptIds(child, ids)
+  return ids
+}
+
+function collectIds(value: unknown, ids = new Set<string>()): Set<string> {
+  if (!value || typeof value !== 'object') return ids
+  if (!Array.isArray(value)) {
+    const object = value as Record<string, unknown>
+    if (typeof object.id === 'string') ids.add(object.id)
+  }
+  for (const child of Object.values(value)) collectIds(child, ids)
+  return ids
+}
+
+function fitDiagnostics(materialized: MaterializedPresentation): Array<Record<string, unknown>> {
+  const fit = fitOfficeArtifact(materialized.snapshot, { readabilityExemptObjectIds: materialized.readabilityExemptIds })
+  if (fit.ok) return []
+  const objectContext = new Map<string, { slide: number; slideTitle: string; text: string | null }>()
+  for (const [slideIndex, slide] of materialized.snapshot.slides.entries()) {
+    for (const object of slide.objects) {
+      const context = { slide: slideIndex + 1, slideTitle: slide.title, text: textOfObject(object) }
+      for (const id of collectIds(object)) objectContext.set(id, context)
+    }
+  }
+  return fit.issues.map((issue) => {
+    const field = materialized.fieldByIdentity.get(issue.objectId)
+    const relatedId = issue.message.match(/[0-9a-f]{8}-[0-9a-f-]{27,}/i)?.[0]
+    const relatedField = relatedId ? materialized.fieldByIdentity.get(relatedId) : undefined
+    const message = relatedId
+      ? relatedField ? `Text overlaps field ${relatedField.label}` : 'Text overlaps another text region on this slide'
+      : issue.message
+    return {
+      code: issue.code,
+      message,
+      fieldId: field?.id,
+      fieldLabel: field?.label,
+      ...objectContext.get(issue.objectId),
+    }
+  })
 }
 
 function catalogueOf(template: OfficeTemplateBundle): unknown[] {
@@ -178,6 +252,61 @@ function validatePlan(template: OfficeTemplateBundle, rawPlan: unknown): z.infer
   return plan
 }
 
+function materializePresentation(params: {
+  artifactId: string
+  workspaceId: string
+  templateVersionId: string
+  template: OfficeTemplateBundle & { family: 'presentation'; snapshot: PresentationSnapshot }
+}, plan: PresentationPlan): MaterializedPresentation {
+  const recipes = new Map(params.template.slideRecipes.map((recipe) => [recipe.id, recipe]))
+  const fields = new Map(params.template.fields.map((field) => [field.id, field]))
+  const sourceSlides = new Map(params.template.snapshot.slides.map((slide) => [slide.id, slide]))
+  const fieldByIdentity = new Map<string, OfficeTemplateField>()
+  const readabilityExemptIds = new Set<string>()
+
+  const slides = plan.slides.map((plannedSlide) => {
+    const recipe = recipes.get(plannedSlide.recipeId)!
+    const sourceSlide = sourceSlides.get(recipe.slideId)!
+    const identities = collectIdentityMap(sourceSlide)
+    const slide = remapIdentities(sourceSlide, identities) as PresentationSnapshot['slides'][number]
+    for (const sourceId of collectReadabilityExemptIds(sourceSlide)) {
+      const generatedId = identities.get(sourceId)
+      if (generatedId) readabilityExemptIds.add(generatedId)
+    }
+    const replacements = new Map<string, { text: string; field: OfficeTemplateField }>()
+    for (const plannedField of plannedSlide.fields) {
+      const field = fields.get(plannedField.fieldId)!
+      for (const targetId of field.targetIds) {
+        const mappedTargetId = identities.get(targetId)
+        if (!mappedTargetId) throw new Error(`Presentation field ${field.label} targets a missing object`)
+        replacements.set(mappedTargetId, { text: plannedField.text, field })
+      }
+    }
+    slide.objects = slide.objects.map((object) => {
+      const replacement = replacements.get(object.id)
+      const next = replacement ? withObjectText(object, replacement.text) : object
+      if (replacement) for (const id of collectIds(next)) fieldByIdentity.set(id, replacement.field)
+      return next
+    })
+    slide.title = plannedSlide.title
+    return slide
+  })
+
+  const source = params.template.snapshot
+  const snapshot = assertOfficeArtifactSnapshot({
+    ...source,
+    artifactId: params.artifactId,
+    workspaceId: params.workspaceId,
+    templateVersionId: params.templateVersionId,
+    rootId: randomUUID(),
+    title: plan.title,
+    resources: params.template.resources,
+    accessibility: { ...source.accessibility, title: plan.title },
+    slides,
+  }) as PresentationSnapshot
+  return { snapshot, fieldByIdentity, readabilityExemptIds: [...readabilityExemptIds] }
+}
+
 export function materializeOfficeTemplateBundleForGeneration(input: unknown, identity: {
   id: string
   version: number
@@ -220,59 +349,35 @@ export async function generatePresentationFromTemplate(params: {
   template: OfficeTemplateBundle
 }): Promise<PresentationSnapshot> {
   if (params.template.family !== 'presentation' || params.template.snapshot.family !== 'presentation') throw new Error('Presentation generation requires a presentation template')
-  const catalogue = catalogueOf(params.template)
+  const template = params.template as OfficeTemplateBundle & { family: 'presentation'; snapshot: PresentationSnapshot }
+  const catalogue = catalogueOf(template)
   if (catalogue.length === 0) throw new Error('Presentation template has no enabled slide recipes')
   const evidence = {
     brain: params.evidence.brain.slice(0, 12).map((entry) => ({ ...entry, excerpt: entry.excerpt.slice(0, 4_000) })),
     website: params.evidence.website.slice(0, 2).map((entry) => ({ ...entry, excerpt: entry.excerpt.slice(0, 8_000) })),
     claims: params.claims.slice(0, 100),
   }
-  const response = await collectStream(params.provider.stream({
-    model: params.model,
-    systemPrompt: PRESENTATION_SYSTEM_PROMPT,
-    messages: [{
-      role: 'user',
-      content: `Outcome:\n${params.outcome}\n\nAudience:\n${params.audience}\n\nTemplate guidance:\n${params.template.description}\n\nAdmitted slide catalogue:\n${JSON.stringify(catalogue)}\n\nGrounding:\n${JSON.stringify(evidence)}`,
-    }] as Message[],
-    maxTokens: 8_000,
-    temperature: 0.2,
-  }))
-  const plan = validatePlan(params.template, parseJsonObject(responseText(response)))
-  const recipes = new Map(params.template.slideRecipes.map((recipe) => [recipe.id, recipe]))
-  const fields = new Map(params.template.fields.map((field) => [field.id, field]))
-  const sourceSlides = new Map(params.template.snapshot.slides.map((slide) => [slide.id, slide]))
-
-  const slides = plan.slides.map((plannedSlide) => {
-    const recipe = recipes.get(plannedSlide.recipeId)!
-    const sourceSlide = sourceSlides.get(recipe.slideId)!
-    const identities = collectIdentityMap(sourceSlide)
-    const slide = remapIdentities(sourceSlide, identities) as PresentationSnapshot['slides'][number]
-    const replacements = new Map<string, string>()
-    for (const plannedField of plannedSlide.fields) {
-      const field = fields.get(plannedField.fieldId)!
-      for (const targetId of field.targetIds) {
-        const mappedTargetId = identities.get(targetId)
-        if (!mappedTargetId) throw new Error(`Presentation field ${field.label} targets a missing object`)
-        replacements.set(mappedTargetId, plannedField.text)
-      }
-    }
-    slide.objects = slide.objects.map((object) => replacements.has(object.id) ? withObjectText(object, replacements.get(object.id)!) : object)
-    slide.title = plannedSlide.title
-    return slide
-  })
-
-  const source = params.template.snapshot
-  return assertOfficeArtifactSnapshot({
-    ...source,
-    artifactId: params.artifactId,
-    workspaceId: params.workspaceId,
-    templateVersionId: params.templateVersionId,
-    rootId: randomUUID(),
-    title: plan.title,
-    resources: params.template.resources,
-    accessibility: { ...source.accessibility, title: plan.title },
-    slides,
-  }) as PresentationSnapshot
+  const requestContext = `Outcome:\n${params.outcome}\n\nAudience:\n${params.audience}\n\nTemplate guidance:\n${template.description}\n\nAdmitted slide catalogue:\n${JSON.stringify(catalogue)}\n\nGrounding:\n${JSON.stringify(evidence)}`
+  let rejectedPlan: PresentationPlan | undefined
+  let diagnostics: Array<Record<string, unknown>> = []
+  for (let attempt = 1; attempt <= MAX_FIT_ATTEMPTS; attempt += 1) {
+    const repairContext = rejectedPlan
+      ? `\n\nThe previous plan was rejected by deterministic layout validation. Rewrite it more concisely or choose another admitted recipe without dropping required grounded meaning.\nRejected plan:\n${JSON.stringify(rejectedPlan)}\n\nFit diagnostics:\n${JSON.stringify(diagnostics)}`
+      : ''
+    const response = await collectStream(params.provider.stream({
+      model: params.model,
+      systemPrompt: PRESENTATION_SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: `${requestContext}${repairContext}` }] as Message[],
+      maxTokens: 8_000,
+      temperature: 0.2,
+    }))
+    const plan = validatePlan(template, parseJsonObject(responseText(response)))
+    const materialized = materializePresentation({ ...params, template }, plan)
+    diagnostics = fitDiagnostics(materialized)
+    if (diagnostics.length === 0) return materialized.snapshot
+    rejectedPlan = plan
+  }
+  throw new Error(`Presentation generation could not satisfy the admitted template fit constraints after ${MAX_FIT_ATTEMPTS} attempts: ${JSON.stringify(diagnostics)}`)
 }
 
 export async function revisePresentationTargets(params: {
@@ -299,20 +404,33 @@ export async function revisePresentationTargets(params: {
       return text === null ? [] : [{ targetId: object.id, selected: targetSet.has(object.id), text }]
     }),
   }))
-  const response = await collectStream(params.provider.stream({
-    model: params.model,
-    systemPrompt: REVISION_SYSTEM_PROMPT,
-    messages: [{ role: 'user', content: `Instruction:\n${params.instruction.replace(/(^|\s)@Brian\b/gi, '$1').trim()}\n\nSelected text:\n${JSON.stringify(selected)}\n\nComplete presentation context (read-only):\n${JSON.stringify(context)}` }] as Message[],
-    maxTokens: 3_000,
-    temperature: 0.2,
-  }))
-  const revision = RevisionSchema.parse(parseJsonObject(responseText(response)))
-  const replacements = new Map(revision.replacements.map((item) => [item.targetId, item.text]))
-  if (replacements.size !== targetSet.size || [...targetSet].some((id) => !replacements.has(id))) throw new Error('Presentation revision did not return every selected target')
-  const next = structuredClone(params.snapshot)
-  next.slides = next.slides.map((slide) => ({
-    ...slide,
-    objects: slide.objects.map((object) => replacements.has(object.id) ? withObjectText(object, replacements.get(object.id)!) : object),
-  }))
-  return assertOfficeArtifactSnapshot(next) as PresentationSnapshot
+  const requestContext = `Instruction:\n${params.instruction.replace(/(^|\s)@Brian\b/gi, '$1').trim()}\n\nSelected text:\n${JSON.stringify(selected)}\n\nComplete presentation context (read-only):\n${JSON.stringify(context)}`
+  const readabilityExemptIds = [...collectReadabilityExemptIds(params.snapshot)]
+  let rejectedRevision: RevisionPlan | undefined
+  let diagnostics: Array<Record<string, unknown>> = []
+  for (let attempt = 1; attempt <= MAX_FIT_ATTEMPTS; attempt += 1) {
+    const repairContext = rejectedRevision
+      ? `\n\nThe previous replacement was rejected by deterministic layout validation. Rewrite only the selected text more concisely.\nRejected replacement:\n${JSON.stringify(rejectedRevision)}\n\nFit diagnostics:\n${JSON.stringify(diagnostics)}`
+      : ''
+    const response = await collectStream(params.provider.stream({
+      model: params.model,
+      systemPrompt: REVISION_SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: `${requestContext}${repairContext}` }] as Message[],
+      maxTokens: 3_000,
+      temperature: 0.2,
+    }))
+    const revision = RevisionSchema.parse(parseJsonObject(responseText(response)))
+    const replacements = new Map(revision.replacements.map((item) => [item.targetId, item.text]))
+    if (replacements.size !== targetSet.size || [...targetSet].some((id) => !replacements.has(id))) throw new Error('Presentation revision did not return every selected target')
+    const next = structuredClone(params.snapshot)
+    next.slides = next.slides.map((slide) => ({
+      ...slide,
+      objects: slide.objects.map((object) => replacements.has(object.id) ? withObjectText(object, replacements.get(object.id)!) : object),
+    }))
+    const snapshot = assertOfficeArtifactSnapshot(next) as PresentationSnapshot
+    diagnostics = fitDiagnostics({ snapshot, fieldByIdentity: new Map(), readabilityExemptIds })
+    if (diagnostics.length === 0) return snapshot
+    rejectedRevision = revision
+  }
+  throw new Error(`Presentation revision could not satisfy the admitted template fit constraints after ${MAX_FIT_ATTEMPTS} attempts: ${JSON.stringify(diagnostics)}`)
 }

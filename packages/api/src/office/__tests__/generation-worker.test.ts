@@ -149,7 +149,7 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
     expect(legacy.slideRecipes).toHaveLength(snapshot.slides.length)
     expect(legacy.fields).toHaveLength(2)
     const generationPayload = JSON.stringify({ title: 'Use Brian introduction', slides: [
-      { recipeId: coverRecipeId, title: 'Meet Use Brian', fields: [{ fieldId: coverFieldId, text: 'A company brain that works with your team' }] },
+      { recipeId: coverRecipeId, title: 'Meet Use Brian', fields: [{ fieldId: coverFieldId, text: 'A company brain for your team' }] },
       { recipeId: closingRecipeId, title: 'Start with your knowledge', fields: [{ fieldId: closingFieldId, text: 'Give your team one place to ask and act' }] },
     ] })
     const generationProvider = { async *stream() { yield { type: 'message_start' as const, model: 'test' }; yield { type: 'text_delta' as const, text: generationPayload }; yield { type: 'message_end' as const, stopReason: 'end_turn' as const, usage: { inputTokens: 1, outputTokens: 1 } } } }
