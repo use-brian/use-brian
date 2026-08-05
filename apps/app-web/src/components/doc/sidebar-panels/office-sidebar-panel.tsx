@@ -38,10 +38,19 @@ export function OfficeSidebarNavigation({
   const t = useT().office;
   const base = `/w/${workspaceId}/office`;
   const atHome = pathname === base || pathname === `${base}/`;
-  const family = searchParams.get("family");
-  const view = searchParams.get("view");
+  const familyParam = searchParams.get("family");
+  const family = familyParam === "document" || familyParam === "presentation" ? familyParam : undefined;
+  const viewParam = searchParams.get("view");
+  const view = viewParam === "archived" || viewParam === "trash" || viewParam === "retained" ? viewParam : undefined;
   const atCreate = pathname === `${base}/new`;
   const atTemplates = pathname.startsWith(`${base}/templates`);
+
+  const familyHref = (nextFamily: "document" | "presentation") => {
+    const next = new URLSearchParams();
+    if (view) next.set("view", view);
+    next.set("family", nextFamily);
+    return `${base}?${next.toString()}`;
+  };
 
   const primary = [
     { href: base, label: t.overview, icon: Files, active: atHome && !family && !view },
@@ -49,8 +58,8 @@ export function OfficeSidebarNavigation({
     { href: `${base}/templates`, label: t.templates, icon: Shapes, active: atTemplates },
   ];
   const library = [
-    { href: `${base}?family=document`, label: t.documents, icon: FileText, active: atHome && family === "document" && !view },
-    { href: `${base}?family=presentation`, label: t.presentations, icon: Presentation, active: atHome && family === "presentation" && !view },
+    { href: familyHref("document"), label: t.documents, icon: FileText, active: atHome && family === "document" },
+    { href: familyHref("presentation"), label: t.presentations, icon: Presentation, active: atHome && family === "presentation" },
   ];
   const manage = [
     { href: `${base}?view=archived`, label: t.archived, icon: Archive, active: atHome && view === "archived" },

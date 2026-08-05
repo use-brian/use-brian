@@ -1,24 +1,38 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
 
+const navigation = vi.hoisted(() => ({ search: "" }));
+
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ back: vi.fn(), forward: vi.fn(), prefetch: vi.fn(), replace: vi.fn() }),
-  useSearchParams: () => new URLSearchParams(),
+  useSearchParams: () => new URLSearchParams(navigation.search),
 }));
 vi.mock("@/components/doc/doc-sidebar-data", () => ({ useSidebarData: () => ({ sidebarCollapsed: false, setSidebarCollapsed: vi.fn() }) }));
 import { OfficeHome } from "../office-home";
 
 describe("[COMP:app-web/office-home] Office home", () => {
-  it("keeps lifecycle and family filters in one left-anchored bar", () => {
+  beforeEach(() => {
+    navigation.search = "";
+  });
+
+  it("does not duplicate sidebar filters in the content pane", () => {
     const html = renderToStaticMarkup(<I18nProvider locale="en" dict={en as unknown as Dictionary}><OfficeHome workspaceId="11111111-1111-4111-8111-111111111111" initialArtifacts={[]} /></I18nProvider>);
-    const bar = html.match(/<div data-office-filter-bar="left" class="([^"]+)">/);
-    expect(bar?.[1]).toContain("flex-wrap");
-    expect(bar?.[1]).not.toContain("justify-between");
-    expect(html.indexOf(">Active<")).toBeLessThan(html.indexOf(">All<"));
-    expect(html).toContain('aria-hidden="true" class="hidden h-5 w-px bg-border sm:block"');
+    expect(html).not.toContain("data-office-filter-bar");
+    expect(html).not.toContain('role="tablist"');
+    expect(html).not.toContain(">Active<");
+    expect(html).not.toContain(">All<");
+    expect(html).toContain(">Overview<");
+  });
+
+  it("reflects sidebar-selected lifecycle and family in the top bar breadcrumb", () => {
+    navigation.search = "view=trash&family=presentation";
+    const html = renderToStaticMarkup(<I18nProvider locale="en" dict={en as unknown as Dictionary}><OfficeHome workspaceId="11111111-1111-4111-8111-111111111111" initialArtifacts={[]} /></I18nProvider>);
+    expect(html.indexOf(">Trash<")).toBeGreaterThan(-1);
+    expect(html.indexOf(">Trash<")).toBeLessThan(html.indexOf(">Presentations<"));
+    expect(html).not.toContain("data-office-filter-bar");
   });
 
   it("renders both admitted artifact families and their editor links", () => {

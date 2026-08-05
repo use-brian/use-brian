@@ -45,4 +45,11 @@ describe("[COMP:app-web/office-navigation] Office sidebar navigation", () => {
     const archived = render("/w/workspace-1/office", "view=archived");
     expect(archived).toMatch(/href="\/w\/workspace-1\/office\?view=archived" aria-current="page"/);
   });
+
+  it("layers a family selection onto the current lifecycle in the sidebar", () => {
+    const html = render("/w/workspace-1/office", "view=archived&family=document");
+    expect(html).toContain('href="/w/workspace-1/office?view=archived&amp;family=document" aria-current="page"');
+    expect(html).toContain('href="/w/workspace-1/office?view=archived&amp;family=presentation"');
+    expect(html).toContain('href="/w/workspace-1/office?view=archived" aria-current="page"');
+  });
 });
