@@ -242,6 +242,20 @@ describe('[COMP:api/connectors-route] /api/connectors', () => {
     })
   })
 
+  it('GET /wechat/tools exposes only the native archive search tool', async () => {
+    const { app } = makeApp('u1')
+    const res = await request(app).get('/api/connectors/wechat/tools')
+    expect(res.status).toBe(200)
+    expect(res.body.serverName).toBe('WeChat chat archive')
+    expect(res.body.tools).toEqual([
+      expect.objectContaining({
+        name: 'searchChatHistory',
+        classification: 'read',
+        policy: 'allow',
+      }),
+    ])
+  })
+
   it('GET /:provider/tools live-discovers a custom connector\'s tools', async () => {
     // A custom connector (provider = UUID, not in OFFICIAL_CONNECTOR_TOOLS) is
     // discovered live, so the Tools tab matches the settings-tab probe instead

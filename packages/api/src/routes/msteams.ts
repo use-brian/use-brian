@@ -274,7 +274,16 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
 
       // 10. Sequentialize per Teams conversation.
       await withChatLock(`msteams:${incoming.channelId}`, () =>
-        processMessage({ adapter, incoming, assistant, channelUserId, ownerId, isIdentified, routing }),
+        processMessage({
+          adapter,
+          incoming,
+          assistant,
+          channelUserId,
+          ownerId,
+          isIdentified,
+          routing,
+          archiveConnectorInstanceId: integration.connectorInstanceId,
+        }),
       )
     } catch (err) {
       console.error(`[msteams] error processing message for channel ${channelId}:`, err)
@@ -289,6 +298,7 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
     ownerId: string
     isIdentified: boolean
     routing: { assistantId: string; modelAlias: string }
+    archiveConnectorInstanceId?: string | null
   }): Promise<void> {
     const { adapter, incoming, assistant, channelUserId, ownerId, isIdentified, routing } = params
     const channelId = incoming.channelId
@@ -382,6 +392,8 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
       isGroupChat: incoming.isGroupChat,
       replyToMessageId: incoming.replyToMessageId ?? null,
       incomingChannelMessageId: incoming.messageId ?? null,
+      archiveIncoming: incoming,
+      archiveConnectorInstanceId: params.archiveConnectorInstanceId,
       modelAlias: routing.modelAlias,
       adaptiveResearchEnabled: true,
       abortController,

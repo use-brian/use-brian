@@ -27,7 +27,7 @@ import {
   EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote,
 } from '@use-brian/core'
 import type { FilesApi, OutboundAttachment } from '@use-brian/core'
-import type { OutgoingDocument } from '@use-brian/channels'
+import type { IncomingMessage, OutgoingDocument } from '@use-brian/channels'
 import { parseFollowUps } from '@use-brian/shared'
 import { runProactiveCompaction } from './proactive-compaction.js'
 import { notifyBrainWriteIfMatch } from '../brain-stream/notify.js'
@@ -77,6 +77,7 @@ import {
 import { billingPartyForAssistant } from '../billing-party.js'
 import { promotePastedText, shouldPromotePaste } from '../files/paste-promotion.js'
 import type { ArtifactPromoter } from '../files/artifact-promote.js'
+import { appendOutboundChatArchive, persistInboundChatArchive } from '../chat-archive/live-writer.js'
 
 /**
  * Per-turn memory index cap — see chat.ts for the rationale and
@@ -364,6 +365,14 @@ export type ChannelPipelineParams = {
    * message id; Telegram: message_id.
    */
   incomingChannelMessageId?: string | number | null
+  /**
+   * Parsed provider message for the shared local archive normalizer. Keeping
+   * this at the common pipeline boundary prevents per-adapter
+   * archive writers. Raw provider payloads are discarded by the normalizer.
+   */
+  archiveIncoming?: IncomingMessage
+  /** Exact connector backing this route, when known. */
+  archiveConnectorInstanceId?: string | null
 
   // ── Model ──
   /** The model alias string from the assistant record. */
@@ -756,21 +765,34 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   }
 
   // ── Persist inbound message (with topic label + reply context) ──
-  const userMessageRow = await addSessionMessage({
-    sessionId: session.id,
-    role: 'user',
-    content: userContentBlocks,
-    replyToText: replyResolved?.text ?? null,
-    topicLabel: classification?.topic_label ?? null,
-    topicConfidence: classification?.confidence ?? null,
-    channelMessageId:
-      incomingChannelMessageId !== undefined && incomingChannelMessageId !== null
-        ? String(incomingChannelMessageId)
-        : null,
-    // Per-message author for collaborative draft sessions. Other
-    // channels and personal sessions pass null/undefined.
-    senderUserId: senderUserId ?? null,
-  })
+  const persistUserMessage = (client?: Parameters<typeof addSessionMessage>[1]) =>
+    addSessionMessage({
+      sessionId: session.id,
+      role: 'user',
+      content: userContentBlocks,
+      replyToText: replyResolved?.text ?? null,
+      topicLabel: classification?.topic_label ?? null,
+      topicConfidence: classification?.confidence ?? null,
+      channelMessageId:
+        incomingChannelMessageId !== undefined && incomingChannelMessageId !== null
+          ? String(incomingChannelMessageId)
+          : null,
+      // Per-message author for collaborative draft sessions. Other
+      // channels and personal sessions pass null/undefined.
+      senderUserId: senderUserId ?? null,
+    }, client)
+  const userMessageRow = params.archiveIncoming
+    ? await persistInboundChatArchive({
+        source: channelType,
+        ownerUserId: ownerId,
+        workspaceId: assistant.workspaceId,
+        connectorInstanceId: params.archiveConnectorInstanceId,
+        assistantId: assistant.id,
+        assistantName: assistant.name,
+        conversationId: channelId,
+        message: params.archiveIncoming,
+      }, persistUserMessage)
+    : await persistUserMessage()
 
   // Surface the persisted user-message row to streaming channels so
   // the client can attach feedback / edit / retry actions to it, and
@@ -1308,6 +1330,22 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
           err instanceof Error ? err.message : String(err),
         )
       }
+    }
+    if (lastFlushedAssistantRowId && params.archiveIncoming) {
+      await appendOutboundChatArchive({
+        source: channelType,
+        ownerUserId: ownerId,
+        workspaceId: assistant.workspaceId,
+        connectorInstanceId: params.archiveConnectorInstanceId,
+        assistantId: assistant.id,
+        assistantName: assistant.name,
+        conversationId: channelId,
+        sessionMessageId: lastFlushedAssistantRowId,
+        providerMessageId: channelMessageId,
+        text,
+        documents,
+        replyToProviderId: params.archiveIncoming.messageId ?? null,
+      })
     }
   }
 

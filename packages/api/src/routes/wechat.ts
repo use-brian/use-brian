@@ -13,10 +13,12 @@
  *
  * `channelId` is the workspace `channels` row id (which bot); the DM peer is
  * `message.channelId` (== the sender's `ilink_user_id` — DMs only, W2). The
- * answering assistant resolves via `channel_assistants`, the sender maps to a
- * tier-2 shadow user (iLink exposes no email), and the turn runs through the
- * shared `processChannelMessage` pipeline. Outbound replies go API → iLink
- * REST directly (the adapter), never back through the connector (W3).
+ * answering assistant resolves via `channel_assistants`. The WeChat account
+ * that performed the QR binding maps to the assistant owner (the binding is
+ * the identity proof); every other sender maps to a tier-2 shadow user because
+ * iLink exposes no email. The turn then runs through the shared
+ * `processChannelMessage` pipeline. Outbound replies go API → iLink REST
+ * directly (the adapter), never back through the connector (W3).
  *
  * WeChat has no message edits and no buttons: tool confirmations are
  * text-only (yes / no / always / never), and instead of an edit-in-place
@@ -96,6 +98,11 @@ const MAX_MEDIA_BYTES = 25 * 1024 * 1024
 
 // Refresh the native typing indicator at most this often while a turn runs.
 const TYPING_REFRESH_MS = 5_000
+
+/** QR binding is the only reliable identity proof iLink supplies. */
+export function isBoundWechatOwner(senderId: string, credentials: WechatCredentials): boolean {
+  return Boolean(credentials.bound_user_id && credentials.bound_user_id === senderId)
+}
 
 const inboundSchema = z.object({
   channelId: z.string().min(1),
@@ -257,12 +264,11 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
         workspaceId: assistant.workspaceId ?? null,
       })
 
-      // 4. Resolve the WeChat sender → a platform user (tier-2 shadow user:
-      //    iLink exposes no email or display name, so identity stays
-      //    anonymous — session only, no memory consolidation).
+      // 4. Resolve the WeChat sender → a platform user. The QR-bound account
+      //    is the owner identity; all other contacts stay tier-2 shadows.
       let channelUserId = ownerId
       let isIdentified = true
-      if (options.channelUserStore && incoming.userId) {
+      if (!isBoundWechatOwner(incoming.userId, creds) && options.channelUserStore && incoming.userId) {
         try {
           const resolved = await resolveChannelUser(
             options.channelUserStore,
@@ -304,7 +310,19 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
 
       // 7. Sequentialize per DM peer.
       await withChatLock(`wechat:${channelId}:${peerId}`, () =>
-        processMessage({ adapter, incoming, assistant, channelUserId, ownerId, isIdentified, routing, channelId, creds, confirmKey }),
+        processMessage({
+          adapter,
+          incoming,
+          assistant,
+          channelUserId,
+          ownerId,
+          isIdentified,
+          routing,
+          channelId,
+          creds,
+          confirmKey,
+          archiveConnectorInstanceId: integration.connectorInstanceId,
+        }),
       )
     } catch (err) {
       console.error(`[wechat] error processing message for channel ${channelId}:`, err)
@@ -322,6 +340,7 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
     channelId: string
     creds: WechatCredentials
     confirmKey: string
+    archiveConnectorInstanceId?: string | null
   }): Promise<void> {
     const { adapter, incoming, assistant, channelUserId, ownerId, isIdentified, routing, channelId, creds, confirmKey } = params
     const peerId = incoming.channelId
@@ -422,6 +441,8 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
       isGroupChat: false,
       replyToMessageId: incoming.replyToMessageId ?? null,
       incomingChannelMessageId: incoming.messageId ?? null,
+      archiveIncoming: incoming,
+      archiveConnectorInstanceId: params.archiveConnectorInstanceId,
       modelAlias: routing.modelAlias,
       adaptiveResearchEnabled: true,
       abortController,

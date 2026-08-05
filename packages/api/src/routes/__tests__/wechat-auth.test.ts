@@ -13,7 +13,25 @@
 import { describe, it, expect, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
-import { wechatRoutes } from '../wechat.js'
+import { isBoundWechatOwner, wechatRoutes } from '../wechat.js'
+
+describe('[COMP:api/wechat-inbound] QR-bound owner identity', () => {
+  const credentials = {
+    bot_token: 'token',
+    base_url: 'https://ilink.example',
+    ilink_bot_id: 'bot@im.bot',
+    bound_user_id: 'owner@im.wechat',
+  }
+
+  it('recognizes only the WeChat account that performed the QR binding', () => {
+    expect(isBoundWechatOwner('owner@im.wechat', credentials)).toBe(true)
+    expect(isBoundWechatOwner('another-contact@im.wechat', credentials)).toBe(false)
+  })
+
+  it('fails closed for legacy credentials without a bound user', () => {
+    expect(isBoundWechatOwner('owner@im.wechat', { ...credentials, bound_user_id: undefined })).toBe(false)
+  })
+})
 
 function buildApp(connectorSecret: string) {
   const integrationStore = {

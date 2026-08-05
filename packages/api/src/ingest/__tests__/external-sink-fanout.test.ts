@@ -138,12 +138,13 @@ describe('[COMP:brain/ingest-outbox] landIngestEvent — atomic capture (D10)', 
   })
 
   it('commits the brain batch row and the outbox rows in ONE transaction', async () => {
+    const listEnabledByInstance = vi.fn(async () => [makeSink()])
     const enqueue = vi.fn(async (_params: unknown, client: { query: (t: string) => unknown }) => {
       await client.query('INSERT INTO ingest_outbox (test)')
       return { id: 'ob-1' }
     })
     const fanout = createExternalSinkFanout({
-      sinks: { listEnabledByInstance: async () => [makeSink()] },
+      sinks: { listEnabledByInstance },
       outbox: { enqueue: enqueue as never },
     })
 
@@ -169,6 +170,7 @@ describe('[COMP:brain/ingest-outbox] landIngestEvent — atomic capture (D10)', 
     expect(outboxIdx).toBeGreaterThan(batchIdx)
     expect(clientQueries).not.toContain('ROLLBACK')
     // the outbox enqueue rode the SAME transaction client
+    expect(listEnabledByInstance).toHaveBeenCalledWith('ci-1', fakeClient)
     expect(enqueue.mock.calls[0][1]).toBe(fakeClient)
     expect(fakeClient.release).toHaveBeenCalledOnce()
   })

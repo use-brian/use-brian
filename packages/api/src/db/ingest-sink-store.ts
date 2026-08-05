@@ -24,8 +24,11 @@
  * [COMP:api/ingest-sink-store]
  */
 
+import type pg from 'pg'
 import { getPool } from './client.js'
 import { decryptCredentials, encryptCredentials } from './credential-crypto.js'
+
+type Queryable = Pick<pg.ClientBase, 'query'>
 
 export type IngestSinkAuthKind = 'bearer' | 'hmac'
 export type IngestSinkMode = 'all' | 'rule_filtered'
@@ -38,6 +41,7 @@ export type IngestExternalSink = {
   authKind: IngestSinkAuthKind
   mode: IngestSinkMode
   enabled: boolean
+  managedBy?: 'local_chat_archive' | null
   hasSecret: boolean
   /** Opaque — last cursor the sink durably acked (X3). */
   lastAckCursor: unknown
@@ -73,6 +77,7 @@ const COLS = `
   auth_kind             AS "authKind",
   mode,
   enabled,
+  managed_by            AS "managedBy",
   (secret_ciphertext IS NOT NULL) AS "hasSecret",
   last_ack_cursor       AS "lastAckCursor",
   last_delivered_at     AS "lastDeliveredAt",
@@ -88,6 +93,7 @@ function rowToSink(row: Record<string, unknown>): IngestExternalSink {
     authKind: row.authKind as IngestSinkAuthKind,
     mode: row.mode as IngestSinkMode,
     enabled: row.enabled as boolean,
+    managedBy: (row.managedBy as 'local_chat_archive' | null) ?? null,
     hasSecret: row.hasSecret as boolean,
     lastAckCursor: row.lastAckCursor ?? null,
     lastDeliveredAt: (row.lastDeliveredAt as Date | null) ?? null,
@@ -100,7 +106,10 @@ export type IngestSinkStore = {
   get(id: string): Promise<IngestExternalSink | null>
   listByInstance(connectorInstanceId: string): Promise<IngestExternalSink[]>
   /** The fan-out read — only sinks that should receive events right now. */
-  listEnabledByInstance(connectorInstanceId: string): Promise<IngestExternalSink[]>
+  listEnabledByInstance(
+    connectorInstanceId: string,
+    client?: Queryable,
+  ): Promise<IngestExternalSink[]>
   update(id: string, patch: UpdateIngestSinkPatch): Promise<IngestExternalSink | null>
   remove(id: string): Promise<boolean>
   /** Decrypted outbound-auth secret — relay-only. Null when none stored. */
@@ -110,6 +119,15 @@ export type IngestSinkStore = {
    * stored opaquely; `last_delivered_at` stamps alongside it.
    */
   recordAck(id: string, ackCursor: unknown): Promise<void>
+  /** Upsert the one platform-owned loopback archive sink for an instance. */
+  ensureManagedLocalChatArchive(params: {
+    connectorInstanceId: string
+    workspaceId: string
+    endpointUrl: string
+    secret: string
+  }): Promise<IngestExternalSink>
+  /** Disable stale managed archive sinks without touching manual sinks. */
+  disableManagedLocalChatArchive(): Promise<number>
 }
 
 export function createIngestSinkStore(encryptionKey: Buffer | null): IngestSinkStore {
@@ -162,8 +180,8 @@ export function createIngestSinkStore(encryptionKey: Buffer | null): IngestSinkS
       return result.rows.map((r) => rowToSink(r as Record<string, unknown>))
     },
 
-    async listEnabledByInstance(connectorInstanceId) {
-      const result = await getPool().query(
+    async listEnabledByInstance(connectorInstanceId, client) {
+      const result = await (client ?? getPool()).query(
         `SELECT ${COLS} FROM ingest_external_sink
           WHERE connector_instance_id = $1 AND enabled = true
           ORDER BY created_at ASC`,
@@ -227,6 +245,41 @@ export function createIngestSinkStore(encryptionKey: Buffer | null): IngestSinkS
           WHERE id = $1`,
         [id, ackCursor === undefined ? null : JSON.stringify(ackCursor)],
       )
+    },
+
+    async ensureManagedLocalChatArchive(params) {
+      const result = await getPool().query(
+        `INSERT INTO ingest_external_sink
+           (connector_instance_id, workspace_id, endpoint_url, auth_kind,
+            secret_ciphertext, mode, enabled, managed_by)
+         VALUES ($1, $2, $3, 'hmac', $4, 'all', true, 'local_chat_archive')
+         ON CONFLICT (connector_instance_id, managed_by)
+           WHERE managed_by IS NOT NULL
+         DO UPDATE SET
+           workspace_id = EXCLUDED.workspace_id,
+           endpoint_url = EXCLUDED.endpoint_url,
+           auth_kind = 'hmac',
+           secret_ciphertext = EXCLUDED.secret_ciphertext,
+           mode = 'all',
+           enabled = true
+         RETURNING ${COLS}`,
+        [
+          params.connectorInstanceId,
+          params.workspaceId,
+          params.endpointUrl,
+          encryptSecret(params.secret),
+        ],
+      )
+      return rowToSink(result.rows[0] as Record<string, unknown>)
+    },
+
+    async disableManagedLocalChatArchive() {
+      const result = await getPool().query(
+        `UPDATE ingest_external_sink
+            SET enabled = false
+          WHERE managed_by = 'local_chat_archive' AND enabled = true`,
+      )
+      return result.rowCount ?? 0
     },
   }
 }
