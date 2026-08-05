@@ -132,6 +132,7 @@ import { TasksSidebarPanel } from "./sidebar-panels/tasks-sidebar-panel";
 import { CrmSidebarPanel } from "./sidebar-panels/crm-sidebar-panel";
 import { BrowsersSidebarPanel } from "./sidebar-panels/browsers-sidebar-panel";
 import { ChatSidebarPanel } from "./sidebar-panels/chat-sidebar-panel";
+import { OfficeSidebarPanel } from "./sidebar-panels/office-sidebar-panel";
 
 export type SidebarMove = {
   viewId: string;
@@ -747,11 +748,13 @@ export function DocSidebar(props: Props) {
       )}
 
       <div className="flex-1 min-h-0 overflow-y-auto px-2 pb-4">
-        {/* Suggested for you is the one persistent row shared by the whole
-            operator mini-app family. Keep it before each app's own sidebar
-            panel (and before Page's sections) so Tasks / CRM / Feed /
-            Browsers / Chat / custom apps never strand the needs-you badge in
-            Page alone. It remains absent on Brain / Studio / Workflow. */}
+        {/* Office puts its persistent local navigation first; the shared quiet
+            Suggested-for-you row follows it. Other operator apps still begin
+            with that row before their own surface panel. */}
+        {props.activeSurface === "office" ? (
+          <OfficeSidebarPanel workspaceId={workspaceId} />
+        ) : null}
+
         {activeOperatorApp !== null ? (
           <HomeDock workspaceId={workspaceId} />
         ) : null}

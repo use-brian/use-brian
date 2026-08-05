@@ -4,7 +4,10 @@ import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
 
-vi.mock("next/navigation", () => ({ useRouter: () => ({ back: vi.fn(), forward: vi.fn(), prefetch: vi.fn() }) }));
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ back: vi.fn(), forward: vi.fn(), prefetch: vi.fn(), replace: vi.fn() }),
+  useSearchParams: () => new URLSearchParams(),
+}));
 vi.mock("@/components/doc/doc-sidebar-data", () => ({ useSidebarData: () => ({ sidebarCollapsed: false, setSidebarCollapsed: vi.fn() }) }));
 import { OfficeHome } from "../office-home";
 

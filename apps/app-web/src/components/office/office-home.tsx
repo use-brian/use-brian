@@ -3,23 +3,40 @@
 /** Permission-filtered Office home and generation state. [COMP:app-web/office-home] */
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 import { FileText, Presentation, Plus, Shapes } from "lucide-react";
-import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 import { cn } from "@/lib/utils";
 import { listOfficeArtifacts, type OfficeArtifact, type OfficeFamily } from "@/lib/office/api";
 import { OfficeImport } from "./office-import";
+import { OfficeTopbar } from "./office-topbar";
 
 type View = "active" | "archived" | "trash" | "retained";
 type Filter = "all" | OfficeFamily;
 
 export function OfficeHome({ workspaceId, initialArtifacts }: { workspaceId: string; initialArtifacts?: OfficeArtifact[] }) {
   const t = useT().office;
-  const [view, setView] = useState<View>("active");
-  const [filter, setFilter] = useState<Filter>("all");
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const viewParam = searchParams.get("view");
+  const familyParam = searchParams.get("family");
+  const view: View = viewParam === "archived" || viewParam === "trash" || viewParam === "retained" ? viewParam : "active";
+  const filter: Filter = familyParam === "document" || familyParam === "presentation" ? familyParam : "all";
   const [artifacts, setArtifacts] = useState<OfficeArtifact[] | null>(initialArtifacts ?? null);
   const [failed, setFailed] = useState(false);
+  const base = `/w/${workspaceId}/office`;
+
+  function replaceFilters(nextView: View, nextFilter: Filter) {
+    const next = new URLSearchParams(searchParams.toString());
+    if (nextView === "active") next.delete("view");
+    else next.set("view", nextView);
+    if (nextFilter === "all") next.delete("family");
+    else next.set("family", nextFilter);
+    if (nextView !== view) setArtifacts(null);
+    const query = next.toString();
+    router.replace(query ? `${base}?${query}` : base, { scroll: false });
+  }
 
   useEffect(() => {
     if (initialArtifacts && view === "active") return;
@@ -38,35 +55,35 @@ export function OfficeHome({ workspaceId, initialArtifacts }: { workspaceId: str
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-background">
-      <OperatorTopbar app="office" />
-      <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 p-4 sm:p-6 lg:p-8">
-        <header className="flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <h1 className="text-2xl font-semibold tracking-tight">{t.homeTitle}</h1>
-            <p className="mt-1 text-sm text-muted-foreground">{t.homeDescription}</p>
-          </div>
-          <div className="flex gap-2">
+      <OfficeTopbar
+        workspaceId={workspaceId}
+        breadcrumbs={[{ label: t.overview }]}
+        right={
+          <div className="flex items-center gap-1">
             <OfficeImport workspaceId={workspaceId} />
-            <Link className="inline-flex h-9 items-center gap-2 rounded-md border px-3 text-sm font-medium" href={`/w/${workspaceId}/office/templates`}>
-              <Shapes className="size-4" aria-hidden />{t.templates}
+            <Link aria-label={t.templates} title={t.templates} className="inline-flex size-8 items-center justify-center gap-2 rounded-md border text-sm font-medium sm:w-auto sm:px-2.5" href={`${base}/templates`}>
+              <Shapes className="size-4" aria-hidden /><span className="hidden sm:inline">{t.templates}</span>
             </Link>
-            <Link className="inline-flex h-9 items-center gap-2 rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground" href={`/w/${workspaceId}/office/new`}>
-              <Plus className="size-4" aria-hidden />{t.create}
+            <Link aria-label={t.create} title={t.create} className="inline-flex size-8 items-center justify-center gap-2 rounded-md bg-primary text-sm font-medium text-primary-foreground sm:w-auto sm:px-2.5" href={`${base}/new`}>
+              <Plus className="size-4" aria-hidden /><span className="hidden sm:inline">{t.create}</span>
             </Link>
           </div>
-        </header>
+        }
+      />
+      <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 p-4 sm:p-6 lg:p-8">
+        <h1 className="sr-only">{t.homeTitle}</h1>
 
         <div className="flex flex-wrap items-center justify-between gap-3 border-b pb-3">
           <div className="flex gap-1" role="tablist">
             {(["active", "archived", "trash", "retained"] as const).map((item) => (
-              <button key={item} type="button" role="tab" aria-selected={view === item} onClick={() => { setArtifacts(null); setView(item); }} className={cn("rounded-md px-3 py-1.5 text-sm", view === item ? "bg-muted font-medium" : "text-muted-foreground")}>
+              <button key={item} type="button" role="tab" aria-selected={view === item} onClick={() => replaceFilters(item, filter)} className={cn("rounded-md px-3 py-1.5 text-sm", view === item ? "bg-muted font-medium" : "text-muted-foreground")}>
                 {t[item]}
               </button>
             ))}
           </div>
           <div className="flex gap-1">
             {(["all", "document", "presentation"] as const).map((item) => (
-              <button key={item} type="button" onClick={() => setFilter(item)} className={cn("rounded-full border px-3 py-1 text-xs", filter === item && "border-foreground bg-foreground text-background")}>
+              <button key={item} type="button" onClick={() => replaceFilters(view, item)} className={cn("rounded-full border px-3 py-1 text-xs", filter === item && "border-foreground bg-foreground text-background")}>
                 {item === "all" ? t.all : item === "document" ? t.documents : t.presentations}
               </button>
             ))}

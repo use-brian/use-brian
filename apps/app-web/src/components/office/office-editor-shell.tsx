@@ -4,7 +4,6 @@ import { useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { FileCheck2, FileText, History, MessageSquare, Presentation } from "lucide-react";
 import type { OfficeCommand } from "@use-brian/office-model";
-import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { PresenceAvatars } from "@/components/doc/presence-avatars";
 import { OfficeJobActivity } from "./job-activity";
 import { DocumentEditor } from "./document-editor";
@@ -18,6 +17,7 @@ import { usePresence, usePublishPresenceActivity, usePublishPresenceIdentity } f
 import { getUserInfo } from "@/lib/user";
 import { appendOfficeCommand, applyOfficeUpdate, yDocToSnapshot } from "@use-brian/office-model";
 import { appendOfflineCommand, classifyOfficeReconnect, listOfflineJournal, loadOfflinePackage, removeOfflineJournalEntry, removeOfflinePackage, type OfficeOfflineStatus } from "@/lib/office/offline";
+import { OfficeTopbar } from "./office-topbar";
 
 export function OfficeEditorShell({ workspaceId, artifactId }: { workspaceId: string; artifactId: string }) {
   const t = useT().office;
@@ -119,8 +119,8 @@ export function OfficeEditorShell({ workspaceId, artifactId }: { workspaceId: st
       }
     }).catch(() => undefined);
   }, [artifactId, collab.status, collab.synced]);
-  if (artifact === undefined) return <div className="flex flex-1 flex-col"><OperatorTopbar app="office" /><p className="m-auto text-sm text-muted-foreground">{t.editorLoading}</p></div>;
-  if (artifact === null) return <div className="flex flex-1 flex-col"><OperatorTopbar app="office" /><p className="m-auto text-sm text-destructive">{t.editorFailed}</p></div>;
+  if (artifact === undefined) return <div className="flex flex-1 flex-col"><OfficeTopbar workspaceId={workspaceId} breadcrumbs={[{ label: t.editorLoading }]} /><p className="m-auto text-sm text-muted-foreground">{t.editorLoading}</p></div>;
+  if (artifact === null) return <div className="flex flex-1 flex-col"><OfficeTopbar workspaceId={workspaceId} breadcrumbs={[{ label: t.editorFailed }]} /><p className="m-auto text-sm text-destructive">{t.editorFailed}</p></div>;
   const Icon = artifact.family === "document" ? FileText : Presentation;
   async function apply(command: OfficeCommand) {
     if (!live) return;
@@ -140,7 +140,7 @@ export function OfficeEditorShell({ workspaceId, artifactId }: { workspaceId: st
   const editor = live?.snapshot.family === "document" ? <DocumentEditor snapshot={live.snapshot} baseVersion={live.baseVersion} role={editorRole} suggestMode={suggestMode} onCommand={(command) => void apply(command)} onSelectTargets={setTargets} /> : live?.snapshot.family === "presentation" ? <PresentationEditor snapshot={live.snapshot} baseVersion={live.baseVersion} role={editorRole} suggestMode={suggestMode} onCommand={(command) => void apply(command)} onSelectTargets={setTargets} /> : <p className="m-auto text-sm text-muted-foreground">{t.running}</p>;
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <OperatorTopbar app="office" center={<div className="flex min-w-0 items-center gap-2 px-2"><Icon className="size-4 shrink-0" aria-hidden /><span className="truncate text-sm font-medium">{artifact.title}</span></div>} right={<PresenceAvatars users={presence} />} />
+      <OfficeTopbar workspaceId={workspaceId} breadcrumbs={[{ label: artifact.title }]} right={<div className="flex items-center gap-2"><Icon className="size-4 shrink-0 text-muted-foreground" aria-hidden /><PresenceAvatars users={presence} /></div>} />
       {offlineCopyAt ? <div className="border-b bg-amber-50 px-4 py-2 text-xs text-amber-950">{reconnectStatus === "needs_attention" ? t.offlineNeedsAttention : t.offlineCopy.replace("{time}", new Date(offlineCopyAt).toLocaleString())}</div> : null}
       {artifact.mode === "template" ? <div className="flex items-center justify-between gap-3 border-b bg-amber-50 px-4 py-2 text-xs font-medium text-amber-950"><span>{t.templateMode}</span>{templateId ? <button type="button" disabled={templateCompileState === "queued" || !live} className="rounded bg-amber-950 px-3 py-1.5 text-amber-50 disabled:opacity-50" onClick={() => { setTemplateCompileState("queued"); void compileOfficeTemplateDraft({ templateId, workspaceId, draftArtifactId: artifactId }).catch(() => setTemplateCompileState("failed")); }}>{templateCompileState === "queued" ? t.templateCompiling : templateCompileState === "failed" ? t.templateCompileFailed : t.templateAdmit}</button> : null}</div> : null}
       <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
