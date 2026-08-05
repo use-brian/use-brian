@@ -7,15 +7,17 @@ import type { OfficeCommand, OfficeRichTextRun, PresentationObject, Presentation
 import { addSlideCommand, defaultRun, deleteCommand, insertSlideObjectCommand, propertyCommand, reorderSlideCommand, textCommand } from "@/lib/office/editor-commands";
 import { useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
+import { PresentationGeometryToolbar, PresentationObjectFrame } from "./presentation-object-frame";
 
 export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, onCommand, onSelectTargets }: { snapshot: PresentationSnapshot; baseVersion: number; role: "view" | "comment" | "edit"; suggestMode: boolean; onCommand(command: OfficeCommand): void; onSelectTargets?(ids: string[]): void }) {
   const t = useT().office;
   const canChange = role === "edit" || role === "comment" && suggestMode;
   const [slideId, setSlideId] = useState(snapshot.slides[0].id);
   const [objectId, setObjectId] = useState<string | null>(null);
+  const [geometryPreview, setGeometryPreview] = useState<{ objectId: string; geometry: PresentationObject["geometry"] } | null>(null);
   const slide = snapshot.slides.find((candidate) => candidate.id === slideId) ?? snapshot.slides[0];
   const selected = useMemo(() => slide.objects.find((object) => object.id === objectId) ?? null, [objectId, slide.objects]);
-  const scale = 100 / snapshot.slideSize.widthPt;
+  const selectedForToolbar = selected && geometryPreview?.objectId === selected.id ? { ...selected, geometry: geometryPreview.geometry } as PresentationObject : selected;
   const emit = (command: OfficeCommand) => { if (canChange) onCommand(command); };
 
   useEffect(() => {
@@ -24,13 +26,13 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if ((event.key === "Delete" || event.key === "Backspace") && selected && canChange && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLTextAreaElement)) emit(deleteCommand(snapshot.artifactId, baseVersion, selected.id));
+      if ((event.key === "Delete" || event.key === "Backspace") && selected && canChange && !selected.locked && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLTextAreaElement) && !(event.target instanceof HTMLElement && event.target.isContentEditable)) emit(deleteCommand(snapshot.artifactId, baseVersion, selected.id));
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   });
 
-  function selectObject(id: string) { setObjectId(id); onSelectTargets?.([id]); }
+  function selectObject(id: string) { if (id !== objectId) setGeometryPreview(null); setObjectId(id); onSelectTargets?.([id]); }
   function addText() {
     const object: PresentationObject = { id: crypto.randomUUID(), kind: "text", geometry: { xPt: 72, yPt: 72, widthPt: 360, heightPt: 72, rotationDeg: 0 }, locked: false, runs: [defaultRun(t.newText)], alignment: "start", verticalAlignment: "top" };
     emit(insertSlideObjectCommand(snapshot.artifactId, baseVersion, slide.id, slide.objects.length, object));
@@ -43,11 +45,18 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
     const newId = crypto.randomUUID();
     emit(addSlideCommand(snapshot.artifactId, baseVersion, snapshot.slides.length, { id: newId, title: t.newSlide, masterId: snapshot.masters[0].id, layoutId: snapshot.layouts[0].id, objects: [], readingOrder: [], notes: [] }));
   }
+  function updateSelectedGeometry(path: string[], value: unknown) {
+    if (!selectedForToolbar || path[0] !== "geometry" || typeof value !== "number") return;
+    const key = path[1] as keyof PresentationObject["geometry"];
+    const geometry = { ...selectedForToolbar.geometry, [key]: value };
+    setGeometryPreview({ objectId: selectedForToolbar.id, geometry });
+    emit(propertyCommand(snapshot.artifactId, baseVersion, selectedForToolbar.id, path, value));
+  }
 
   return (
-    <div className={cn("grid min-h-0 flex-1 grid-cols-[6.5rem_minmax(0,1fr)]", selected ? "lg:grid-cols-[10rem_minmax(0,1fr)_13rem]" : "lg:grid-cols-[10rem_minmax(0,1fr)]")} data-office-editor="presentation" data-properties-open={selected ? "true" : "false"}>
+    <div className="grid min-h-0 flex-1 grid-cols-[6.5rem_minmax(0,1fr)] lg:grid-cols-[10rem_minmax(0,1fr)]" data-office-editor="presentation" data-properties-open={selected ? "true" : "false"}>
       <nav className="overflow-y-auto border-r bg-muted/30 p-2" aria-label={t.slideRail}>
-        {snapshot.slides.map((item, index) => <button key={item.id} type="button" onClick={() => { setSlideId(item.id); setObjectId(null); onSelectTargets?.([item.id]); }} className={cn("mb-2 block w-full rounded border bg-white p-1 text-left text-slate-900", item.id === slide.id && "ring-2 ring-primary")}><span className="text-[10px] text-slate-500">{index + 1}</span><span className="line-clamp-2 block text-xs">{item.title}</span></button>)}
+        {snapshot.slides.map((item, index) => <button key={item.id} type="button" onClick={() => { setSlideId(item.id); setObjectId(null); setGeometryPreview(null); onSelectTargets?.([item.id]); }} className={cn("mb-2 block w-full rounded border bg-white p-1 text-left text-slate-900", item.id === slide.id && "ring-2 ring-primary")}><span className="text-[10px] text-slate-500">{index + 1}</span><span className="line-clamp-2 block text-xs">{item.title}</span></button>)}
         <button type="button" onClick={addSlide} disabled={!canChange} className="flex w-full items-center justify-center gap-1 rounded border border-dashed p-2 text-xs disabled:opacity-40"><Plus className="size-3" />{t.newSlide}</button>
       </nav>
       <div className="flex min-h-0 flex-col overflow-auto bg-muted/40">
@@ -58,37 +67,15 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
           <button type="button" aria-label={t.moveSlideDown} disabled={!canChange || snapshot.slides.indexOf(slide) === snapshot.slides.length - 1} onClick={() => emit(reorderSlideCommand(snapshot.artifactId, baseVersion, slide.id, snapshot.slides.indexOf(slide) + 1))} className="rounded p-2 disabled:opacity-30"><ChevronDown className="size-4" /></button>
           {suggestMode ? <span className="ml-auto rounded-full bg-amber-100 px-2 py-1 text-xs text-amber-900">{t.suggesting}</span> : null}
         </div>
+        {selectedForToolbar ? <PresentationGeometryToolbar object={selectedForToolbar} disabled={!canChange || selectedForToolbar.locked} onProperty={updateSelectedGeometry} onDelete={() => emit(deleteCommand(snapshot.artifactId, baseVersion, selectedForToolbar.id))} /> : null}
         <div className="flex flex-1 items-center justify-center p-4 lg:p-8">
-          <div className="relative aspect-video w-full max-w-5xl overflow-hidden bg-white text-slate-950 shadow" style={{ aspectRatio: `${snapshot.slideSize.widthPt}/${snapshot.slideSize.heightPt}` }} onClick={() => setObjectId(null)}>
-            {slide.objects.map((object) => <SlideObject key={object.id} object={object} selected={object.id === objectId} canChange={canChange} scale={scale} onSelect={() => selectObject(object.id)} onText={(targetId, runs) => emit(textCommand(snapshot.artifactId, baseVersion, targetId, runs))} onProperty={(targetId, path, value) => emit(propertyCommand(snapshot.artifactId, baseVersion, targetId, path, value))} />)}
+          <div data-slide-canvas="true" className="relative aspect-video w-full max-w-5xl overflow-hidden bg-white text-slate-950 shadow" style={{ aspectRatio: `${snapshot.slideSize.widthPt}/${snapshot.slideSize.heightPt}` }} onClick={() => { setObjectId(null); setGeometryPreview(null); }}>
+            {slide.objects.map((object) => <PresentationObjectFrame key={object.id} object={object} selected={object.id === objectId} canChange={canChange} slideSize={snapshot.slideSize} onSelect={() => selectObject(object.id)} onText={(targetId, runs) => emit(textCommand(snapshot.artifactId, baseVersion, targetId, runs))} onGeometryPreview={(targetId, geometry) => setGeometryPreview(geometry ? { objectId: targetId, geometry } : null)} onGeometry={(targetId, geometry) => emit(propertyCommand(snapshot.artifactId, baseVersion, targetId, ["geometry"], geometry))} />)}
           </div>
         </div>
         <label className="border-t bg-background p-3 text-xs font-medium">{t.speakerNotes}<textarea disabled={!canChange} value={slide.notes.map((run) => run.text).join("")} onChange={(event) => emit(propertyCommand(snapshot.artifactId, baseVersion, slide.id, ["notes"], runsWithText(slide.notes, event.target.value)))} className="mt-1 min-h-16 w-full resize-y rounded border p-2 font-normal" /></label>
       </div>
-      {selected ? <aside className="hidden overflow-y-auto border-l bg-background p-3 lg:block">
-        <h2 className="text-sm font-semibold">{t.properties}</h2>
-        <GeometryInspector object={selected} disabled={!canChange} onProperty={(path, value) => emit(propertyCommand(snapshot.artifactId, baseVersion, selected.id, path, value))} onDelete={() => emit(deleteCommand(snapshot.artifactId, baseVersion, selected.id))} />
-      </aside> : null}
     </div>
   );
-}
-
-function SlideObject({ object, selected, canChange, scale, onSelect, onText, onProperty }: { object: PresentationObject; selected: boolean; canChange: boolean; scale: number; onSelect(): void; onText(id: string, runs: OfficeRichTextRun[]): void; onProperty(id: string, path: string[], value: unknown): void }) {
-  const t = useT().office;
-  const style: React.CSSProperties = { left: `${object.geometry.xPt * scale}%`, top: `${object.geometry.yPt * scale}%`, width: `${object.geometry.widthPt * scale}%`, height: `${object.geometry.heightPt * scale}%`, transform: `rotate(${object.geometry.rotationDeg}deg)` };
-  const frame = cn("absolute overflow-hidden border border-transparent", selected && "border-primary ring-1 ring-primary");
-  if (object.kind === "text") return <textarea onClick={(event) => { event.stopPropagation(); onSelect(); }} disabled={!canChange} value={object.runs.map((run) => run.text).join("")} onChange={(event) => onText(object.id, runsWithText(object.runs, event.target.value))} style={style} className={cn(frame, "resize-none bg-transparent p-1 outline-none")} />;
-  if (object.kind === "shape") return <button type="button" onClick={(event) => { event.stopPropagation(); onSelect(); }} style={{ ...style, backgroundColor: object.fill, borderColor: object.stroke }} className={frame}>{object.text.map((run) => run.text).join("")}</button>;
-  if (object.kind === "connector") return <button type="button" aria-label={t.connector} onClick={(event) => { event.stopPropagation(); onSelect(); }} style={style} className={cn(frame, "border-t-2")} />;
-  if (object.kind === "table") return <div onClick={(event) => { event.stopPropagation(); onSelect(); }} style={style} className={cn(frame, "bg-white")}><table className="h-full w-full border-collapse text-[8px]">{object.rows.map((row) => <tbody key={row.id}><tr>{row.cells.map((cell) => <td key={cell.id} className="border p-1">{cell.runs.map((run) => run.text).join("")}</td>)}</tr></tbody>)}</table></div>;
-  if (object.kind === "chart") return <button type="button" onClick={(event) => { event.stopPropagation(); onSelect(); }} style={style} className={cn(frame, "bg-slate-50 p-2 text-xs")}><strong>{object.title}</strong><span className="block text-slate-500">{object.chartType}</span></button>;
-  if (object.kind === "image") return <button type="button" onClick={(event) => { event.stopPropagation(); onSelect(); }} style={style} className={cn(frame, "bg-slate-100 text-xs text-slate-500")}>{object.altText || t.image}</button>;
-  return <button type="button" onClick={(event) => { event.stopPropagation(); onSelect(); }} style={style} className={cn(frame, "bg-slate-900 text-xs text-white")}>{t.video}</button>;
-}
-
-function GeometryInspector({ object, disabled, onProperty, onDelete }: { object: PresentationObject; disabled: boolean; onProperty(path: string[], value: unknown): void; onDelete(): void }) {
-  const t = useT().office;
-  const fields = [["xPt", t.x], ["yPt", t.y], ["widthPt", t.width], ["heightPt", t.height], ["rotationDeg", t.rotation]] as const;
-  return <div className="mt-4 space-y-3">{fields.map(([key, label]) => <label key={key} className="block text-xs">{label}<input type="number" disabled={disabled} value={object.geometry[key]} onChange={(event) => onProperty(["geometry", key], Number(event.target.value))} className="mt-1 h-8 w-full rounded border px-2" /></label>)}<button type="button" disabled={disabled} onClick={onDelete} className="text-xs text-destructive disabled:opacity-40">{t.deleteObject}</button></div>;
 }
 function runsWithText(runs: OfficeRichTextRun[], text: string): OfficeRichTextRun[] { return runs.length ? [{ ...runs[0], text }] : [defaultRun(text)]; }
