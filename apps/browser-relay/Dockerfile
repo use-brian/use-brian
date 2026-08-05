@@ -11,6 +11,8 @@ COPY pnpm-workspace.yaml pnpm-lock.yaml package.json turbo.json tsconfig.base.js
 COPY packages/shared/package.json packages/shared/tsconfig.json ./packages/shared/
 COPY packages/channels/package.json packages/channels/tsconfig.json ./packages/channels/
 COPY packages/doc-model/package.json packages/doc-model/tsconfig.json ./packages/doc-model/
+COPY packages/office-model/package.json packages/office-model/tsconfig.json ./packages/office-model/
+COPY packages/office-renderer/package.json packages/office-renderer/tsconfig.json ./packages/office-renderer/
 COPY packages/core/package.json packages/core/tsconfig.json ./packages/core/
 COPY packages/api/package.json packages/api/tsconfig.json ./packages/api/
 COPY packages/brian-kb/package.json packages/brian-kb/tsconfig.json ./packages/brian-kb/
@@ -25,6 +27,8 @@ FROM deps AS build
 COPY packages/shared/src ./packages/shared/src
 COPY packages/channels/src ./packages/channels/src
 COPY packages/doc-model/src ./packages/doc-model/src
+COPY packages/office-model/src ./packages/office-model/src
+COPY packages/office-renderer/src ./packages/office-renderer/src
 COPY packages/core/src ./packages/core/src
 COPY packages/core/scripts ./packages/core/scripts
 COPY packages/api/src ./packages/api/src
@@ -49,6 +53,8 @@ COPY pnpm-workspace.yaml pnpm-lock.yaml package.json ./
 COPY packages/shared/package.json ./packages/shared/
 COPY packages/channels/package.json ./packages/channels/
 COPY packages/doc-model/package.json ./packages/doc-model/
+COPY packages/office-model/package.json ./packages/office-model/
+COPY packages/office-renderer/package.json ./packages/office-renderer/
 COPY packages/core/package.json ./packages/core/
 COPY packages/api/package.json ./packages/api/
 COPY packages/brian-kb/package.json ./packages/brian-kb/
@@ -61,6 +67,8 @@ RUN pnpm install --frozen-lockfile --prod
 COPY --from=build /app/packages/shared/dist ./packages/shared/dist
 COPY --from=build /app/packages/channels/dist ./packages/channels/dist
 COPY --from=build /app/packages/doc-model/dist ./packages/doc-model/dist
+COPY --from=build /app/packages/office-model/dist ./packages/office-model/dist
+COPY --from=build /app/packages/office-renderer/dist ./packages/office-renderer/dist
 COPY --from=build /app/packages/core/dist ./packages/core/dist
 COPY --from=build /app/packages/api/dist ./packages/api/dist
 COPY --from=build /app/packages/brian-kb/dist ./packages/brian-kb/dist
