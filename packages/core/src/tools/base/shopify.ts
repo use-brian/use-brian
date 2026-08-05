@@ -11,7 +11,7 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool } from '../types.js'
+import { buildTool, type Tool, type ToolContext } from '../types.js'
 import { type Json, asRows, str, num, bool, obj, projectList } from './_connector-result.js'
 
 // ── Result projections ─────────────────────────────────────────
@@ -263,9 +263,45 @@ export type ShopifyApi = {
     note?: string
   }): Promise<unknown>
   completeDraftOrder(params: { draftOrderId: string; paymentPending?: boolean }): Promise<unknown>
+  // ── Product authoring ──
+  addProductImage(params: {
+    productId: string
+    bytes: Uint8Array
+    filename: string
+    mimeType: string
+    alt?: string
+  }): Promise<unknown>
+  setVariantPrice(params: {
+    productId: string
+    variantId?: string
+    price: string
+    compareAtPrice?: string
+    sku?: string
+  }): Promise<unknown>
+  publishProduct(params: { productId: string; publicationId?: string }): Promise<unknown>
+  setProductMetafields(params: {
+    productId: string
+    metafields: Array<{ namespace: string; key: string; type: string; value: string }>
+  }): Promise<unknown>
 }
 
-export function createShopifyTools(api: ShopifyApi): Tool[] {
+/**
+ * Byte source for `shopifyAddProductImage`. Deliberately narrower than
+ * `FilesApi`: the tool needs one read, and taking the whole interface would
+ * couple every Shopify wiring site to the files subsystem.
+ *
+ * Chat attachments are NOT a valid source — they live in `file_cache` and
+ * expire after 7 days. The model saves the photo to the brain first.
+ */
+export type ShopifyFileBytesReader = (
+  context: ToolContext,
+  idOrPath: string,
+) => Promise<{ bytes: Uint8Array; fileName: string; mimeType: string } | { error: string }>
+
+export function createShopifyTools(
+  api: ShopifyApi,
+  opts?: { readFileBytes?: ShopifyFileBytesReader },
+): Tool[] {
   const getShop = buildTool({
     name: 'shopifyGetShop',
     description:
@@ -892,6 +928,165 @@ export function createShopifyTools(api: ShopifyApi): Tool[] {
     },
   })
 
+  // ── Product authoring ────────────────────────────────────────
+  // `shopifyCreateProduct` alone yields a product that cannot be sold: no
+  // image, no price, and unpublished regardless of `status`. These four finish
+  // the job. See docs/architecture/integrations/shopify.md → "Product authoring".
+
+  const addProductImageTool = buildTool({
+    name: 'shopifyAddProductImage',
+    description:
+      'Add an image to a Shopify product from a file already saved in the workspace brain. ' +
+      'The file must be a workspace file - pass its id or absolute workspace path. ' +
+      'If the user just attached a photo to this chat, save it with saveFileToBrain FIRST, then call this with the saved path: ' +
+      'chat attachments are temporary and cannot be uploaded. ' +
+      'Shopify processes the image asynchronously, so it may take a few seconds to appear on the product. ' +
+      'Call this tool directly — the user will see an Approve/Deny prompt.',
+    inputSchema: z.object({
+      productId: z.string().describe('Product id (numeric or GID).'),
+      file: z.string().describe('Workspace file id (UUID) or absolute workspace path of the image.'),
+      alt: z.string().optional().describe('Alt text for accessibility and SEO.'),
+    }),
+    isConcurrencySafe: false,
+    isReadOnly: false,
+    requiresConfirmation: true,
+    timeoutMs: 60_000,
+    async execute(input, context) {
+      // No reader wired: say so. Silently omitting the tool would leave the
+      // model asserting it uploaded an image it never touched.
+      if (!opts?.readFileBytes) {
+        return {
+          data: 'Product images cannot be uploaded from this context - workspace file access is not available here. Ask the user to add the image in Shopify admin.',
+          isError: true,
+        }
+      }
+      try {
+        const file = await opts.readFileBytes(context, input.file)
+        if ('error' in file) return { data: file.error, isError: true }
+        if (!file.mimeType.startsWith('image/')) {
+          return { data: `That file is ${file.mimeType}, not an image. Shopify product media must be an image file.`, isError: true }
+        }
+        const data = ((await api.addProductImage({
+          productId: input.productId,
+          bytes: file.bytes,
+          filename: file.fileName,
+          mimeType: file.mimeType,
+          alt: input.alt,
+        })) ?? {}) as Json
+        const p = obj(data, 'product')
+        return { data: {
+          product_id: str(p, 'id'),
+          uploaded: file.fileName,
+          note: 'Shopify processes product images asynchronously - it may take a few seconds to appear.',
+        } }
+      } catch (err) {
+        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+      }
+    },
+  })
+
+  const setProductPriceTool = buildTool({
+    name: 'shopifySetProductPrice',
+    description:
+      'Set the price of a Shopify product variant (and optionally its compare-at price and SKU). ' +
+      'A newly created product has no price until this runs, so it cannot be sold. ' +
+      'Omit variantId for a single-variant product; a product with several variants requires one (the error lists them). ' +
+      'Prices are plain decimal strings in the store currency, e.g. "439.00" - never include a currency symbol. ' +
+      'Call this tool directly — the user will see an Approve/Deny prompt.',
+    inputSchema: z.object({
+      productId: z.string().describe('Product id (numeric or GID).'),
+      price: z.string().describe('Price as a decimal string in the store currency, e.g. "439.00".'),
+      compareAtPrice: z.string().optional().describe('Optional strike-through "was" price, same format.'),
+      sku: z.string().optional().describe('Optional SKU for the variant.'),
+      variantId: z.string().optional().describe('Variant id - required only when the product has more than one variant.'),
+    }),
+    isConcurrencySafe: false,
+    isReadOnly: false,
+    requiresConfirmation: true,
+    timeoutMs: 15_000,
+    async execute(input) {
+      try {
+        const data = ((await api.setVariantPrice(input)) ?? {}) as Json
+        const variants = asRows(data.productVariants).map((v) => ({
+          id: str(v, 'id'),
+          title: str(v, 'title'),
+          price: str(v, 'price'),
+          compare_at_price: str(v, 'compareAtPrice'),
+        }))
+        return { data: { variants } }
+      } catch (err) {
+        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+      }
+    },
+  })
+
+  const publishProductTool = buildTool({
+    name: 'shopifyPublishProduct',
+    description:
+      'Publish a Shopify product to the Online Store so customers can see and buy it. ' +
+      'Shopify creates products unpublished no matter what status they have, so a new product stays invisible on the storefront until this runs. ' +
+      'Check the product has an image and a price before publishing. ' +
+      'Call this tool directly — the user will see an Approve/Deny prompt.',
+    inputSchema: z.object({
+      productId: z.string().describe('Product id (numeric or GID).'),
+      publicationId: z.string().optional().describe('Sales channel publication id. Defaults to the Online Store.'),
+    }),
+    isConcurrencySafe: false,
+    isReadOnly: false,
+    requiresConfirmation: true,
+    timeoutMs: 15_000,
+    async execute(input) {
+      try {
+        const data = ((await api.publishProduct(input)) ?? {}) as Json
+        return { data: {
+          published_to: str(data, 'published_to'),
+          note: 'The product is now visible on the storefront if its status is ACTIVE.',
+        } }
+      } catch (err) {
+        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+      }
+    },
+  })
+
+  const setProductMetafieldsTool = buildTool({
+    name: 'shopifySetProductMetafields',
+    description:
+      'Set structured metafields on a Shopify product (ingredients, nutrition, FAQ, and similar). ' +
+      'IMPORTANT: a metafield only appears on the storefront if the product theme template is built to read that exact namespace and key. ' +
+      'Writing one does not put anything on the page by itself - if the user expects it visible, tell them their theme must reference it. ' +
+      'Common types: single_line_text_field, multi_line_text_field, rich_text_field, number_decimal, json, boolean. ' +
+      'Call this tool directly — the user will see an Approve/Deny prompt.',
+    inputSchema: z.object({
+      productId: z.string().describe('Product id (numeric or GID).'),
+      metafields: z.array(z.object({
+        namespace: z.string().describe('Metafield namespace, e.g. "custom".'),
+        key: z.string().describe('Metafield key, e.g. "ingredients".'),
+        type: z.string().describe('Shopify metafield type, e.g. "multi_line_text_field".'),
+        value: z.string().describe('Value as a string; JSON types take a JSON-encoded string.'),
+      })).min(1).describe('Metafields to set (existing namespace/key pairs are overwritten).'),
+    }),
+    isConcurrencySafe: false,
+    isReadOnly: false,
+    requiresConfirmation: true,
+    timeoutMs: 20_000,
+    async execute(input) {
+      try {
+        const data = ((await api.setProductMetafields(input)) ?? {}) as Json
+        const metafields = asRows(data.metafields).map((m) => ({
+          namespace: str(m, 'namespace'),
+          key: str(m, 'key'),
+          type: str(m, 'type'),
+        }))
+        return { data: {
+          metafields,
+          note: 'Written to the product. These render on the storefront only if the theme template reads them.',
+        } }
+      } catch (err) {
+        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+      }
+    },
+  })
+
   const sendDraftOrderInvoiceTool = buildTool({
     name: 'shopifySendDraftOrderInvoice',
     description:
@@ -1202,6 +1397,10 @@ export function createShopifyTools(api: ShopifyApi): Tool[] {
     salesReportTool,
     updateProductTool,
     createProductTool,
+    addProductImageTool,
+    setProductPriceTool,
+    publishProductTool,
+    setProductMetafieldsTool,
     createDraftOrderTool,
     sendDraftOrderInvoiceTool,
     addTagsTool,

@@ -163,6 +163,10 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'shopifySalesReport', description: 'Aggregate sales over a date range (count, revenue, top items)', classification: 'read', defaultPolicy: 'allow' },
     { name: 'shopifyUpdateProduct', description: 'Update product title, description, tags, status, or SEO', classification: 'write', defaultPolicy: 'ask' },
     { name: 'shopifyCreateProduct', description: 'Create a new product', classification: 'write', defaultPolicy: 'ask' },
+    { name: 'shopifyAddProductImage', description: 'Upload a workspace file to a product as a product image', classification: 'write', defaultPolicy: 'ask' },
+    { name: 'shopifySetProductPrice', description: 'Set a product variant price, compare-at price, and SKU', classification: 'write', defaultPolicy: 'ask' },
+    { name: 'shopifyPublishProduct', description: 'Publish a product to the Online Store so customers can see it', classification: 'write', defaultPolicy: 'ask' },
+    { name: 'shopifySetProductMetafields', description: 'Set structured metafields on a product (theme must read them to display)', classification: 'write', defaultPolicy: 'ask' },
     { name: 'shopifyCreateDraftOrder', description: 'Create a draft order (quote or invoice, never a charge)', classification: 'write', defaultPolicy: 'ask' },
     { name: 'shopifySendDraftOrderInvoice', description: 'Email the invoice for a draft order', classification: 'write', defaultPolicy: 'ask' },
     { name: 'shopifyAddTags', description: 'Add tags to an order, customer, or product', classification: 'write', defaultPolicy: 'ask' },
@@ -451,6 +455,11 @@ export const OFFICIAL_OAUTH_SCOPES: Record<string, string[]> = {
     'read_shopify_payments_accounts',
     'read_shopify_payments_payouts',
     'read_shopify_payments_disputes',
+    // shopifyPublishProduct only. `productCreate` leaves a product UNPUBLISHED
+    // no matter what `status` says, so without this pair a product created
+    // through the connector can never reach the storefront.
+    'read_publications',
+    'write_publications',
   ],
 }
 

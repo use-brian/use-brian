@@ -18,7 +18,7 @@
  * See docs/architecture/integrations/mcp.md → "Runtime".
  */
 
-import { wrapMcpTools, buildToolIndex, createMcpSearchTools, createGoogleCalendarTools, createGmailTools, createGoogleTasksTools, createGoogleDriveTools, createGoogleDocsTools, createGoogleSheetsTools, createGoogleSlidesTools, createGDriveFilesTools, createGitHubTools, createNotionTools, createFathomTools, createShopifyTools, createMsGraphTools, createKnowledgeTools, createAgentmailTools, createMailboxTools } from '@use-brian/core'
+import { wrapMcpTools, buildToolIndex, createMcpSearchTools, createGoogleCalendarTools, createGmailTools, createGoogleTasksTools, createGoogleDriveTools, createGoogleDocsTools, createGoogleSheetsTools, createGoogleSlidesTools, createGDriveFilesTools, createGitHubTools, createNotionTools, createFathomTools, createShopifyTools, createMsGraphTools, createKnowledgeTools, createAgentmailTools, createMailboxTools, workspaceFilesCtxFor, workspaceFilesErrorMessage, workspaceFilesGate } from '@use-brian/core'
 import type { Tool, McpSettingsStore, McpServerConfig, KnowledgeStoreInterface, KnowledgeRepoWriter, AuthorizedFile, GDriveFilesStore, GDriveFileKind, LocalSource, RemoteSource, EngineHooks, FilesApi, AgentmailToolApi, MailboxApi, MailboxAccountRouter } from '@use-brian/core'
 import { getGlobalEmailInboxProvider, type EmailInboxProvider } from '../agentmail/provider.js'
 import { renderEmailBody } from '@use-brian/channels'
@@ -102,6 +102,10 @@ import {
   cancelOrder as cancelShopifyOrder,
   refundOrder as refundShopifyOrder,
   completeDraftOrder as completeShopifyDraftOrder,
+  addProductImage as addShopifyProductImage,
+  setVariantPrice as setShopifyVariantPrice,
+  publishProduct as publishShopifyProduct,
+  setProductMetafields as setShopifyProductMetafields,
 } from '../shopify/client.js'
 import { createMsGraphClient } from '../msgraph/client.js'
 import {
@@ -276,6 +280,10 @@ export const INJECTED_BUILTIN_TOOLS_BY_CONNECTOR: Record<string, readonly string
     'shopifySalesReport',
     'shopifyUpdateProduct',
     'shopifyCreateProduct',
+    'shopifyAddProductImage',
+    'shopifySetProductPrice',
+    'shopifyPublishProduct',
+    'shopifySetProductMetafields',
     'shopifyCreateDraftOrder',
     'shopifySendDraftOrderInvoice',
     'shopifyAddTags',
@@ -879,7 +887,7 @@ export async function injectMcpTools(params: {
   await injectGitHubTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, extrasByProvider.get('github'), resolveInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore)
   await injectNotionTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, extrasByProvider.get('notion'), resolveInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore)
   await injectFathomTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, undefined, extrasByProvider.get('fathom'), resolveInstanceCreds, persistInstanceCreds)
-  await injectShopifyTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, undefined, extrasByProvider.get('shopify'), resolveInstanceCreds, persistInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore)
+  await injectShopifyTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, undefined, extrasByProvider.get('shopify'), resolveInstanceCreds, persistInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore, filesApi)
   // No extras argument: `msgraph` is `single_instance` in OFFICIAL_CONNECTORS
   // (one Microsoft identity per user), so it is never in
   // MULTI_INSTANCE_RUNTIME_PROVIDERS and `extrasByProvider` never holds it.
@@ -1028,6 +1036,7 @@ export async function injectMcpTools(params: {
             undefined, undefined, undefined,
             { report: reportHealth, instanceId: g.instance.id },
             assistantConnectorGrantsStore,
+            filesApi,
           )
         } else if (p === 'msgraph') {
           // Read-only Teams over a rotating refresh token. The synthetic
@@ -1253,6 +1262,7 @@ export async function injectMcpTools(params: {
             undefined, undefined, undefined,
             { report: reportHealth, instanceId: inst.id },
             assistantConnectorGrantsStore,
+            filesApi,
           )
         } else if (p === 'msgraph') {
           // A workspace-owned Microsoft identity. Reads and the rotated tuple
@@ -3175,6 +3185,8 @@ async function injectShopifyTools(
   healthProbe?: { report: HealthReporter; instanceId?: string | null },
   /** Per-assistant write-grant gate — see `gateToolsOnActionGrants`. */
   assistantConnectorGrantsStore?: import('../db/assistant-connector-grants-store.js').AssistantConnectorGrantsStore,
+  /** Workspace-file reader for `shopifyAddProductImage`. Absent → the tool reports it honestly. */
+  filesApi?: FilesApi,
 ): Promise<void> {
   const shopify = connectors.find((c) => c.connectorId === 'shopify' && c.connected)
   const shopifyEnabled = shopify && (!assistantConnectorStore || await assistantConnectorStore.isEnabled(assistantId, 'shopify'))
@@ -3255,6 +3267,24 @@ async function injectShopifyTools(
       cancelOrder: async (params) => cancelShopifyOrder(await tm.getAuth(), params),
       refundOrder: async (params) => refundShopifyOrder(await tm.getAuth(), params),
       completeDraftOrder: async (params) => completeShopifyDraftOrder(await tm.getAuth(), params),
+      addProductImage: async (params) => addShopifyProductImage(await tm.getAuth(), params),
+      setVariantPrice: async (params) => setShopifyVariantPrice(await tm.getAuth(), params),
+      publishProduct: async (params) => publishShopifyProduct(await tm.getAuth(), params),
+      setProductMetafields: async (params) => setShopifyProductMetafields(await tm.getAuth(), params),
+    }, {
+      readFileBytes: filesApi
+        ? async (context, idOrPath) => {
+            const gate = workspaceFilesGate(context.workspaceId)
+            if (gate) return { error: gate.data }
+            const res = await filesApi.readBytes(workspaceFilesCtxFor(context), idOrPath)
+            if (!res.ok) return { error: workspaceFilesErrorMessage(res.error) }
+            return {
+              bytes: res.value.bytes,
+              fileName: res.value.file.name,
+              mimeType: res.value.file.mime,
+            }
+          }
+        : undefined,
     }), 'shopify', assistantConnectorGrantsStore, assistantId)
   }
 

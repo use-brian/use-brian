@@ -424,12 +424,17 @@ export async function shopifyGraphql<T = unknown>(
 /**
  * Throw when a mutation payload carries `userErrors` — a failed write must be
  * loud, never silently partial.
+ *
+ * `errorsKey` exists because Shopify is not uniform here: `productCreateMedia`
+ * returns `mediaUserErrors`, not `userErrors`. Reading the wrong key finds an
+ * empty array and reports success on a rejected upload — the exact silent
+ * failure this helper exists to prevent — so the caller names the field.
  */
-function expectNoUserErrors(data: unknown, mutationKey: string): void {
+function expectNoUserErrors(data: unknown, mutationKey: string, errorsKey = 'userErrors'): void {
   const payload = (data as Record<string, unknown> | undefined)?.[mutationKey] as
-    | { userErrors?: Array<{ field?: string[] | null; message?: string }> }
+    | Record<string, Array<{ field?: string[] | null; message?: string }> | undefined>
     | undefined
-  const userErrors = payload?.userErrors ?? []
+  const userErrors = payload?.[errorsKey] ?? []
   if (userErrors.length > 0) {
     const detail = userErrors
       .map((e) => `${(e.field ?? []).join('.') || 'input'}: ${e.message ?? 'invalid'}`)
@@ -916,6 +921,280 @@ export async function createProduct(auth: ShopifyAuth, params: {
   `, { product: params })
   expectNoUserErrors(data, 'productCreate')
   return (data as Record<string, unknown>).productCreate
+}
+
+// ── Product authoring (image, price, publish, metafields) ────
+//
+// `productCreate` alone produces a product that cannot be sold: it takes no
+// media and no variant pricing, and Shopify creates it UNPUBLISHED regardless
+// of `status`. These four operations are what turn that draft into a real
+// listing. See docs/architecture/integrations/shopify.md → "Product authoring".
+
+// The three staged-upload steps below are deliberately NOT exported.
+// `addProductImage` is the only safe entry point: a caller that stages a target
+// and never attaches it leaves an orphaned upload behind.
+type ShopifyStagedTarget = {
+  url: string
+  resourceUrl: string
+  parameters: Array<{ name: string; value: string }>
+}
+
+/**
+ * Ask Shopify for a one-shot upload target for a product image. The bytes go
+ * to `url` (a Google Cloud Storage bucket, not Shopify), and the returned
+ * `resourceUrl` is what `attachProductMedia` consumes.
+ */
+async function stageProductImageUpload(auth: ShopifyAuth, params: {
+  filename: string
+  mimeType: string
+  fileSize: number
+}): Promise<ShopifyStagedTarget> {
+  const data = await shopifyGraphql<{
+    stagedUploadsCreate?: { stagedTargets?: ShopifyStagedTarget[] }
+  }>(auth, `
+    mutation StageProductImageUpload($input: [StagedUploadInput!]!) {
+      stagedUploadsCreate(input: $input) {
+        stagedTargets { url resourceUrl parameters { name value } }
+        userErrors { field message }
+      }
+    }
+  `, {
+    input: [{
+      resource: 'PRODUCT_IMAGE',
+      filename: params.filename,
+      mimeType: params.mimeType,
+      // UnsignedInt64 — must go over the wire as a string.
+      fileSize: String(params.fileSize),
+      httpMethod: 'POST',
+    }],
+  })
+  expectNoUserErrors(data, 'stagedUploadsCreate')
+  const target = data.stagedUploadsCreate?.stagedTargets?.[0]
+  if (!target?.url || !target?.resourceUrl) {
+    throw new Error('Shopify API error: no staged upload target was returned')
+  }
+  return target
+}
+
+/**
+ * POST the bytes to the staged target. This is NOT a Shopify API call — it is a
+ * plain multipart upload to the bucket Shopify nominated, so it carries no
+ * access token and gets no GraphQL error envelope.
+ *
+ * Field order is load-bearing: the bucket requires every signed parameter to
+ * precede the `file` part, and silently rejects the upload otherwise.
+ */
+async function uploadStagedBytes(params: {
+  target: ShopifyStagedTarget
+  bytes: Uint8Array
+  filename: string
+  mimeType: string
+}): Promise<void> {
+  const form = new FormData()
+  for (const p of params.target.parameters) form.append(p.name, p.value)
+  // Copy into a standalone ArrayBuffer: this package's lib set has no DOM
+  // `BlobPart`, and a view over a shared buffer would need that cast.
+  const buffer = params.bytes.slice().buffer as ArrayBuffer
+  form.append('file', new Blob([buffer], { type: params.mimeType }), params.filename)
+
+  const res = await fetch(params.target.url, { method: 'POST', body: form })
+  if (!res.ok) {
+    const err = await res.text().catch(() => '')
+    throw new Error(`Shopify upload error (${res.status}): ${err.slice(0, 300) || 'the staged upload was rejected'}`)
+  }
+}
+
+/**
+ * Attach an already-uploaded staged resource to a product as an image.
+ *
+ * Via `productUpdate`'s `media` argument, not `productCreateMedia` — the
+ * latter is deprecated in 2026-04 and names its errors `mediaUserErrors`.
+ */
+async function attachProductMedia(auth: ShopifyAuth, params: {
+  productId: string
+  resourceUrl: string
+  alt?: string
+}): Promise<unknown> {
+  const data = await shopifyGraphql(auth, `
+    mutation AttachProductMedia($product: ProductUpdateInput!, $media: [CreateMediaInput!]) {
+      productUpdate(product: $product, media: $media) {
+        product { id }
+        userErrors { field message }
+      }
+    }
+  `, {
+    product: { id: toShopifyGid('Product', params.productId) },
+    media: [{
+      mediaContentType: 'IMAGE',
+      originalSource: params.resourceUrl,
+      ...(params.alt ? { alt: params.alt } : {}),
+    }],
+  })
+  expectNoUserErrors(data, 'productUpdate')
+  return (data as Record<string, unknown>).productUpdate
+}
+
+/**
+ * Put an image on a product: reserve a staged target, POST the bytes to it,
+ * then attach the resulting resource. Three round trips, one call — the
+ * intermediate `resourceUrl` is meaningless on its own and a caller that
+ * stopped between steps would leave an orphaned upload.
+ */
+export async function addProductImage(auth: ShopifyAuth, params: {
+  productId: string
+  bytes: Uint8Array
+  filename: string
+  mimeType: string
+  alt?: string
+}): Promise<unknown> {
+  const target = await stageProductImageUpload(auth, {
+    filename: params.filename,
+    mimeType: params.mimeType,
+    fileSize: params.bytes.byteLength,
+  })
+  await uploadStagedBytes({
+    target,
+    bytes: params.bytes,
+    filename: params.filename,
+    mimeType: params.mimeType,
+  })
+  return attachProductMedia(auth, {
+    productId: params.productId,
+    resourceUrl: target.resourceUrl,
+    alt: params.alt,
+  })
+}
+
+/**
+ * Price a variant. With no `variantId` this targets the product's single
+ * default variant; a multi-variant product throws with the choices listed
+ * rather than guessing which one the caller meant.
+ */
+export async function setVariantPrice(auth: ShopifyAuth, params: {
+  productId: string
+  variantId?: string
+  price: string
+  compareAtPrice?: string
+  sku?: string
+}): Promise<unknown> {
+  const productId = toShopifyGid('Product', params.productId)
+  let variantId = params.variantId ? toShopifyGid('ProductVariant', params.variantId) : undefined
+
+  if (!variantId) {
+    const lookup = await shopifyGraphql<{
+      product?: { variants?: { edges?: Array<{ node?: { id?: string; title?: string } }> } }
+    }>(auth, `
+      query ProductVariantsForPricing($id: ID!) {
+        product(id: $id) { variants(first: 25) { edges { node { id title } } } }
+      }
+    `, { id: productId })
+    const variants = (lookup.product?.variants?.edges ?? [])
+      .map((e) => e?.node)
+      .filter((v): v is { id: string; title?: string } => typeof v?.id === 'string')
+    if (variants.length === 0) throw new Error('Shopify API error: product not found, or it has no variants')
+    if (variants.length > 1) {
+      const names = variants.map((v) => `${v.title ?? 'variant'} (${v.id})`).join(', ')
+      throw new Error(`Shopify API error: product has ${variants.length} variants - pass variantId. Variants: ${names}`)
+    }
+    variantId = variants[0].id
+  }
+
+  const data = await shopifyGraphql(auth, `
+    mutation SetVariantPrice($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+      productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+        productVariants { id title price compareAtPrice }
+        userErrors { field message }
+      }
+    }
+  `, {
+    productId,
+    variants: [{
+      id: variantId,
+      price: params.price,
+      ...(params.compareAtPrice !== undefined ? { compareAtPrice: params.compareAtPrice } : {}),
+      ...(params.sku !== undefined ? { inventoryItem: { sku: params.sku } } : {}),
+    }],
+  })
+  expectNoUserErrors(data, 'productVariantsBulkUpdate')
+  return (data as Record<string, unknown>).productVariantsBulkUpdate
+}
+
+/**
+ * Publish a product to the Online Store sales channel. `productCreate` leaves
+ * products unpublished no matter what `status` says, so without this a created
+ * product never reaches the storefront.
+ */
+export async function publishProduct(auth: ShopifyAuth, params: {
+  productId: string
+  publicationId?: string
+}): Promise<unknown> {
+  let publicationId = params.publicationId ? toShopifyGid('Publication', params.publicationId) : undefined
+
+  if (!publicationId) {
+    // `catalog.title` is the current field and `name` its deprecated
+    // predecessor. Both are selected on purpose: which one carries the channel
+    // label varies by store, and picking the wrong publication is a failure
+    // that only shows up as "published, but not on the storefront".
+    const lookup = await shopifyGraphql<{
+      publications?: { edges?: Array<{ node?: { id?: string; name?: string; catalog?: { title?: string } } }> }
+    }>(auth, `
+      query OnlineStorePublication {
+        publications(first: 25) { edges { node { id name catalog { title } } } }
+      }
+    `)
+    const publications = (lookup.publications?.edges ?? [])
+      .map((e) => e?.node)
+      .filter((p): p is { id: string; name?: string; catalog?: { title?: string } } => typeof p?.id === 'string')
+    const labelOf = (p: { name?: string; catalog?: { title?: string } }) => p.catalog?.title ?? p.name
+    const onlineStore = publications.find((p) => labelOf(p) === 'Online Store')
+    if (!onlineStore) {
+      const names = publications.map((p) => labelOf(p) ?? p.id).join(', ')
+      throw new Error(
+        `Shopify API error: this store has no Online Store sales channel, so a product cannot be published to a storefront. Channels found: ${names || 'none'}`,
+      )
+    }
+    publicationId = onlineStore.id
+  }
+
+  const data = await shopifyGraphql(auth, `
+    mutation PublishProduct($id: ID!, $input: [PublicationInput!]!) {
+      publishablePublish(id: $id, input: $input) {
+        publishable { availablePublicationsCount { count } }
+        userErrors { field message }
+      }
+    }
+  `, { id: toShopifyGid('Product', params.productId), input: [{ publicationId }] })
+  expectNoUserErrors(data, 'publishablePublish')
+  return { published_to: publicationId }
+}
+
+export type ShopifyMetafieldInput = {
+  namespace: string
+  key: string
+  type: string
+  value: string
+}
+
+/**
+ * Write structured fields onto a product. Storefront visibility is a THEME
+ * concern: a metafield only renders if the product template reads it, so a
+ * successful write here does not mean anything appeared on the page.
+ */
+export async function setProductMetafields(auth: ShopifyAuth, params: {
+  productId: string
+  metafields: ShopifyMetafieldInput[]
+}): Promise<unknown> {
+  const ownerId = toShopifyGid('Product', params.productId)
+  const data = await shopifyGraphql(auth, `
+    mutation SetProductMetafields($metafields: [MetafieldsSetInput!]!) {
+      metafieldsSet(metafields: $metafields) {
+        metafields { id namespace key type }
+        userErrors { field message code }
+      }
+    }
+  `, { metafields: params.metafields.map((m) => ({ ownerId, ...m })) })
+  expectNoUserErrors(data, 'metafieldsSet')
+  return (data as Record<string, unknown>).metafieldsSet
 }
 
 export async function sendDraftOrderInvoice(auth: ShopifyAuth, draftOrderId: string): Promise<unknown> {

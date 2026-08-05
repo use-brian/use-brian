@@ -16,6 +16,10 @@ import {
   listOrders,
   updateProduct,
   addTags,
+  addProductImage,
+  setVariantPrice,
+  publishProduct,
+  setProductMetafields,
   verifyShopifyWebhookHmac,
   verifyShopifyOAuthQueryHmac,
   buildShopifyAuthorizeUrl,
@@ -622,6 +626,179 @@ describe('[COMP:api/shopify-client] Shopify GraphQL client', () => {
     expect(parsed.searchParams.get('client_id')).toBe('cid')
   })
 
+  // ── Product authoring ────────────────────────────────────
+  // `productCreate` yields a product with no image, no price, and unpublished.
+  // These four operations finish the job, and each has a failure mode that
+  // looks like success if handled carelessly.
+
+  it('addProductImage stages, uploads the bytes, then attaches the resource', async () => {
+    const bytes = new Uint8Array([1, 2, 3, 4])
+    mockFetch
+      // 1. stagedUploadsCreate
+      .mockResolvedValueOnce(jsonResponse({
+        data: { stagedUploadsCreate: {
+          stagedTargets: [{
+            url: 'https://shopify-staged-uploads.storage.googleapis.com/bucket',
+            resourceUrl: 'https://shopify-staged-uploads.storage.googleapis.com/bucket/hojicha.jpg',
+            parameters: [{ name: 'key', value: 'tmp/hojicha.jpg' }, { name: 'policy', value: 'abc' }],
+          }],
+          userErrors: [],
+        } },
+      }))
+      // 2. the multipart POST to the bucket (not JSON)
+      .mockResolvedValueOnce({ ok: true, status: 204, text: () => Promise.resolve('') })
+      // 3. productUpdate + media
+      .mockResolvedValueOnce(jsonResponse({
+        data: { productUpdate: { product: { id: 'gid://shopify/Product/2' }, userErrors: [] } },
+      }))
+
+    await addProductImage(AUTH, { productId: '2', bytes, filename: 'hojicha.jpg', mimeType: 'image/jpeg', alt: 'Pouch' })
+
+    expect(mockFetch).toHaveBeenCalledTimes(3)
+    // The staged upload goes to the bucket Shopify nominated, NOT to Shopify,
+    // and must not carry the access token.
+    const [uploadUrl, uploadInit] = mockFetch.mock.calls[1]
+    expect(uploadUrl).toBe('https://shopify-staged-uploads.storage.googleapis.com/bucket')
+    expect((uploadInit as { headers?: unknown }).headers).toBeUndefined()
+    const form = (uploadInit as { body: FormData }).body
+    expect(form).toBeInstanceOf(FormData)
+    // Signed parameters must precede the file part or the bucket rejects it.
+    expect([...form.keys()]).toEqual(['key', 'policy', 'file'])
+
+    const attach = JSON.parse((mockFetch.mock.calls[2][1] as { body: string }).body)
+    expect(attach.variables.product.id).toBe('gid://shopify/Product/2')
+    expect(attach.variables.media[0]).toMatchObject({
+      mediaContentType: 'IMAGE',
+      originalSource: 'https://shopify-staged-uploads.storage.googleapis.com/bucket/hojicha.jpg',
+      alt: 'Pouch',
+    })
+  })
+
+  it('addProductImage throws when the bucket rejects the bytes, and never attaches', async () => {
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse({
+        data: { stagedUploadsCreate: {
+          stagedTargets: [{ url: 'https://bucket.example/upload', resourceUrl: 'https://bucket.example/r', parameters: [] }],
+          userErrors: [],
+        } },
+      }))
+      .mockResolvedValueOnce({ ok: false, status: 403, text: () => Promise.resolve('SignatureDoesNotMatch') })
+
+    await expect(addProductImage(AUTH, {
+      productId: '2', bytes: new Uint8Array([1]), filename: 'a.jpg', mimeType: 'image/jpeg',
+    })).rejects.toThrow(/403.*SignatureDoesNotMatch/)
+    // Two calls only — the attach never ran, so no product points at a
+    // resource that holds no bytes.
+    expect(mockFetch).toHaveBeenCalledTimes(2)
+  })
+
+  it('setVariantPrice resolves the lone default variant when none is named', async () => {
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse({
+        data: { product: { variants: { edges: [{ node: { id: 'gid://shopify/ProductVariant/5', title: 'Default Title' } }] } } },
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        data: { productVariantsBulkUpdate: { productVariants: [{ id: 'gid://shopify/ProductVariant/5', price: '439.00' }], userErrors: [] } },
+      }))
+
+    await setVariantPrice(AUTH, { productId: '2', price: '439.00', sku: 'HBM-60' })
+
+    const update = JSON.parse((mockFetch.mock.calls[1][1] as { body: string }).body)
+    expect(update.variables.variants[0]).toMatchObject({
+      id: 'gid://shopify/ProductVariant/5',
+      price: '439.00',
+      // SKU lives on inventoryItem in ProductVariantsBulkInput, not on the variant.
+      inventoryItem: { sku: 'HBM-60' },
+    })
+  })
+
+  it('setVariantPrice refuses a multi-variant product instead of pricing an arbitrary one', async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({
+      data: { product: { variants: { edges: [
+        { node: { id: 'gid://shopify/ProductVariant/5', title: '60g' } },
+        { node: { id: 'gid://shopify/ProductVariant/6', title: '120g' } },
+      ] } } },
+    }))
+
+    await expect(setVariantPrice(AUTH, { productId: '2', price: '439.00' }))
+      .rejects.toThrow(/2 variants - pass variantId.*60g.*120g/)
+    expect(mockFetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('publishProduct finds the Online Store publication and publishes to it', async () => {
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse({
+        data: { publications: { edges: [
+          { node: { id: 'gid://shopify/Publication/9', name: 'Point of Sale', catalog: { title: 'Point of Sale' } } },
+          { node: { id: 'gid://shopify/Publication/1', name: 'Online Store', catalog: { title: 'Online Store' } } },
+        ] } },
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        data: { publishablePublish: { publishable: { availablePublicationsCount: { count: 2 } }, userErrors: [] } },
+      }))
+
+    const result = await publishProduct(AUTH, { productId: '2' })
+
+    const publish = JSON.parse((mockFetch.mock.calls[1][1] as { body: string }).body)
+    expect(publish.variables.input).toEqual([{ publicationId: 'gid://shopify/Publication/1' }])
+    expect(result).toEqual({ published_to: 'gid://shopify/Publication/1' })
+  })
+
+  it('publishProduct falls back to the deprecated name when catalog.title is absent', async () => {
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse({
+        data: { publications: { edges: [{ node: { id: 'gid://shopify/Publication/1', name: 'Online Store' } }] } },
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        data: { publishablePublish: { publishable: {}, userErrors: [] } },
+      }))
+
+    await expect(publishProduct(AUTH, { productId: '2' })).resolves.toEqual({
+      published_to: 'gid://shopify/Publication/1',
+    })
+  })
+
+  it('publishProduct names the problem when the store has no Online Store channel', async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({
+      data: { publications: { edges: [{ node: { id: 'gid://shopify/Publication/9', catalog: { title: 'Point of Sale' } } }] } },
+    }))
+
+    await expect(publishProduct(AUTH, { productId: '2' }))
+      .rejects.toThrow(/no Online Store sales channel.*Point of Sale/)
+    expect(mockFetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('setProductMetafields stamps the product ownerId onto every metafield', async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({
+      data: { metafieldsSet: { metafields: [{ id: 'gid://shopify/Metafield/1' }], userErrors: [] } },
+    }))
+
+    await setProductMetafields(AUTH, {
+      productId: '2',
+      metafields: [
+        { namespace: 'custom', key: 'ingredients', type: 'multi_line_text_field', value: '焙茶, 黑瑪卡' },
+        { namespace: 'custom', key: 'net_weight', type: 'single_line_text_field', value: '60g' },
+      ],
+    })
+
+    const sent = JSON.parse((mockFetch.mock.calls[0][1] as { body: string }).body)
+    expect(sent.variables.metafields).toHaveLength(2)
+    for (const m of sent.variables.metafields) {
+      expect(m.ownerId).toBe('gid://shopify/Product/2')
+    }
+  })
+
+  it('setProductMetafields throws on a userErrors payload rather than reporting success', async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({
+      data: { metafieldsSet: { metafields: [], userErrors: [{ field: ['type'], message: 'Type is invalid' }] } },
+    }))
+
+    await expect(setProductMetafields(AUTH, {
+      productId: '2',
+      metafields: [{ namespace: 'custom', key: 'x', type: 'bogus_type', value: '1' }],
+    })).rejects.toThrow(/Type is invalid/)
+  })
+
   // ── End-to-end (mocked GraphQL): the "last 5 orders" path ──
   // Tool factory → real client → mocked endpoint. The live twin runs in
   // client.integration.test.ts against a dev store when SHOPIFY_TEST_* is set.
@@ -681,6 +858,10 @@ describe('[COMP:api/shopify-client] Shopify GraphQL client', () => {
       cancelOrder: nullApi,
       refundOrder: nullApi,
       completeDraftOrder: nullApi,
+      addProductImage: nullApi,
+      setVariantPrice: nullApi,
+      publishProduct: nullApi,
+      setProductMetafields: nullApi,
     })
     const listOrdersTool = tools.find((t) => t.name === 'shopifyListOrders')!
     const result = await listOrdersTool.execute({ first: 5 }, {} as never)

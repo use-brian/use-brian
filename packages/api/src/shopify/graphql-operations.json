@@ -11,6 +11,17 @@
       "deprecations": []
     },
     {
+      "name": "AttachProductMedia",
+      "kind": "mutation",
+      "hash": "c6afefb79e035695",
+      "valid": true,
+      "scopes": [
+        "write_products",
+        "read_products"
+      ],
+      "deprecations": []
+    },
+    {
       "name": "CancelOrder",
       "kind": "mutation",
       "hash": "94bdd5739e3e9ee2",
@@ -308,6 +319,18 @@
       "deprecations": []
     },
     {
+      "name": "OnlineStorePublication",
+      "kind": "query",
+      "hash": "f61ac824e570a71f",
+      "valid": true,
+      "scopes": [
+        "read_publications"
+      ],
+      "deprecations": [
+        "The field Publication.name is deprecated. Use [Catalog.title](https://shopify.dev/api/admin-graphql/unstable/interfaces/Catalog#field-catalog-title) instead."
+      ]
+    },
+    {
       "name": "OpenFulfillmentOrders",
       "kind": "query",
       "hash": "f70e4b122f53eb92",
@@ -332,6 +355,27 @@
         "read_shopify_payments",
         "read_shopify_payments_accounts",
         "read_shopify_payments_payouts"
+      ],
+      "deprecations": []
+    },
+    {
+      "name": "ProductVariantsForPricing",
+      "kind": "query",
+      "hash": "0169db322ea69b9f",
+      "valid": true,
+      "scopes": [
+        "read_products"
+      ],
+      "deprecations": []
+    },
+    {
+      "name": "PublishProduct",
+      "kind": "mutation",
+      "hash": "a3cdb625823e5fe1",
+      "valid": true,
+      "scopes": [
+        "write_publications",
+        "read_publications"
       ],
       "deprecations": []
     },
@@ -392,6 +436,25 @@
       "deprecations": []
     },
     {
+      "name": "SetProductMetafields",
+      "kind": "mutation",
+      "hash": "dbc5d16970783722",
+      "valid": true,
+      "scopes": [],
+      "deprecations": []
+    },
+    {
+      "name": "SetVariantPrice",
+      "kind": "mutation",
+      "hash": "cb009f61730720c7",
+      "valid": true,
+      "scopes": [
+        "write_products",
+        "read_products"
+      ],
+      "deprecations": []
+    },
+    {
       "name": "ShopInfo",
       "kind": "query",
       "hash": "befacdb7b3f4f447",
@@ -400,6 +463,14 @@
       "deprecations": [
         "The field ShopPlan.displayName is deprecated. Use `publicDisplayName` instead."
       ]
+    },
+    {
+      "name": "StageProductImageUpload",
+      "kind": "mutation",
+      "hash": "67cfd0a825109c77",
+      "valid": true,
+      "scopes": [],
+      "deprecations": []
     },
     {
       "name": "SubscribeTopic",
