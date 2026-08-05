@@ -2020,10 +2020,11 @@ function ConnectorsList() {
       return { ...prev, [connectorId]: { ...entry, tools: entry.tools.map((tool) => (tool.name === toolName ? { ...tool, policy } : tool)) } };
     });
     try {
-      await authFetch(`${API_URL}/api/connectors/${connectorId}/tools/policy`, {
+      const res = await authFetch(`${API_URL}/api/connectors/${connectorId}/tools/policy`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ serverName, toolName, policy }),
       });
+      if (!res.ok) throw new Error("Failed to update tool policy");
     } catch { loadTools(connectorId); }
   }
 
@@ -3919,7 +3920,7 @@ function ConnectorsList() {
                             currentPolicy: tool.policy as ToolPolicy,
                           }))}
                           onPolicyChange={(toolName, policy) =>
-                            handlePolicyChange(sel.id, entry?.serverName ?? sel.id, toolName, policy)
+                            handlePolicyChange(toolKey ?? sel.id, entry?.serverName ?? sel.id, toolName, policy)
                           }
                         />
                       );

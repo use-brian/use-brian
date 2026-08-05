@@ -69,6 +69,8 @@ function makeApp(userId?: string) {
     deleteInstance: vi.fn().mockResolvedValue(true),
     getConfig: vi.fn().mockResolvedValue({}),
     setConfig: vi.fn().mockResolvedValue(undefined),
+    getPolicy: vi.fn().mockResolvedValue(null),
+    setPolicy: vi.fn().mockResolvedValue(undefined),
   }
   const connectorStore = {
     setConnected: m.setConnected,
@@ -98,6 +100,7 @@ function makeApp(userId?: string) {
   app.use('/api/connectors', connectorRoutes({
     connectorStore,
     connectorInstanceStore,
+    mcpSettingsStore: { getPolicy: m.getPolicy, setPolicy: m.setPolicy } as never,
     shopifyVerifyToken: m.shopifyVerifyToken,
   }))
   return { app, ...m }
@@ -232,7 +235,7 @@ describe('[COMP:api/connectors-route] /api/connectors', () => {
     const { app } = makeApp('u1')
     const res = await request(app).get('/api/connectors/github/tools')
     expect(res.status).toBe(200)
-    expect(res.body.serverName).toBe('GitHub')
+    expect(res.body.serverName).toBe('github')
     expect(Array.isArray(res.body.tools)).toBe(true)
     expect(res.body.tools.length).toBeGreaterThan(0)
     expect(res.body.tools[0]).toMatchObject({
@@ -240,6 +243,28 @@ describe('[COMP:api/connectors-route] /api/connectors', () => {
       classification: expect.any(String),
       policy: expect.stringMatching(/allow|ask|block/),
     })
+  })
+
+  it('reads and writes app-level connector tool policy', async () => {
+    const { app, getPolicy, setPolicy } = makeApp('u1')
+    getPolicy.mockResolvedValue({ policy: 'block' })
+
+    const listed = await request(app).get('/api/connectors/github/tools')
+    expect(listed.status).toBe(200)
+    expect(listed.body.tools[0].policy).toBe('block')
+
+    const toolName = listed.body.tools[0].name as string
+    const updated = await request(app)
+      .post('/api/connectors/github/tools/policy')
+      .send({ serverName: 'github', toolName, policy: 'ask' })
+    expect(updated.status).toBe(200)
+    expect(setPolicy).toHaveBeenCalledWith(expect.objectContaining({
+      assistantId: '00000000-0000-0000-0000-000000000000',
+      userId: 'u1',
+      serverName: 'github',
+      toolName,
+      policy: 'ask',
+    }))
   })
 
   it('GET /:provider/tools live-discovers a custom connector\'s tools', async () => {

@@ -22,6 +22,7 @@ import type { ConnectorStore } from '../db/connector-store.js'
 import {
   connectorInstanceGovernanceId,
   parseConnectorInstanceGovernanceId,
+  type ConnectorInstance,
   type ConnectorInstanceStore,
 } from '../db/connector-instance-store.js'
 import { buildConnectorAuthHeaders } from '../mcp/auth-headers.js'
@@ -83,7 +84,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
   async function verifyMembership(
     req: { userId?: string; params: AssistantParams },
     res: import('express').Response,
-  ): Promise<{ userId: string; role: string } | null> {
+  ): Promise<{ userId: string; role: string; workspaceId: string | null } | null> {
     const userId = req.userId
     if (!userId) {
       res.status(401).json({ error: 'Unauthorized' })
@@ -95,7 +96,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
       res.status(403).json({ error: 'Not a member of this assistant' })
       return null
     }
-    return { userId, role: access.role }
+    return { userId, role: access.role, workspaceId: access.assistant.workspaceId ?? null }
   }
 
   // ── GET /:assistantId — single assistant detail ────────────────
@@ -623,8 +624,8 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
       // Build the unified list, applying the same precedence the engine
       // uses at tool-injection time (see packages/api/src/mcp/inject.ts):
       //   team-native > member-grant > personal
-      // Most toggles are keyed by provider. Account-bound IMAP rows use a
-      // stable `imap:<instanceId>` governance id, matching runtime injection.
+      // Most toggles are keyed by provider. Instance-catalog connectors use a
+      // stable `<provider>:<instanceId>` governance id, matching runtime injection.
       type Entry = {
         id: string
         providerId?: string
@@ -655,6 +656,23 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
           // WhatsApp channel infrastructure owns connector_instance rows for
           // credentials and attribution, but it exposes no assistant tools.
           if (inst.provider === 'whatsapp') continue
+          if (inst.provider === 'cli') {
+            const governanceId = connectorInstanceGovernanceId('cli', inst.id)
+            byKey.set(governanceId, {
+              id: governanceId,
+              providerId: 'cli',
+              name: inst.label,
+              custom: false,
+              connected: inst.connected,
+              enabled: settingsMap.get(governanceId) ?? settingsMap.get('cli') ?? true,
+              icon_url: entry?.icon_url,
+              category: entry?.category,
+              scope: 'team-native',
+              instanceId: inst.id,
+              sortCreatedAt: inst.createdAt,
+            })
+            continue
+          }
           if (inst.provider === 'imap') {
             // Mirror the runtime IMAP overlay: disconnected/auth-failed
             // accounts are managed in Studio but are not routed tools here.
@@ -703,9 +721,29 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
         // later member's mailbox never appears callable when it is shadowed.
         let winningImapGrantor: string | undefined
         for (const g of grants) {
+          const entry = registry.find((e) => e.id === g.instance.provider)
+          if (g.instance.provider === 'cli') {
+            if (!g.instance.connected) continue
+            const governanceId = connectorInstanceGovernanceId('cli', g.instance.id)
+            if (byKey.has(governanceId)) continue
+            byKey.set(governanceId, {
+              id: governanceId,
+              providerId: 'cli',
+              name: g.instance.label,
+              custom: false,
+              connected: true,
+              enabled: settingsMap.get(governanceId) ?? settingsMap.get('cli') ?? true,
+              icon_url: entry?.icon_url,
+              category: entry?.category,
+              scope: 'team-grant',
+              grantedByUserId: g.grantedByUserId,
+              instanceId: g.instance.id,
+              sortCreatedAt: g.instance.createdAt,
+            })
+            continue
+          }
           if (teamNativeProviders.has(g.instance.provider)) continue
           const existing = byKey.get(g.instance.provider)
-          const entry = registry.find((e) => e.id === g.instance.provider)
           if (g.instance.provider === 'whatsapp') continue
           if (g.instance.provider === 'imap') {
             if (!g.instance.connected) continue
@@ -749,8 +787,9 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
       // claimed by team-native or grant, since the engine would shadow
       // them anyway.
       for (const c of userConnectors) {
-        const governanceId = c.connectorId === 'imap'
-          ? connectorInstanceGovernanceId('imap', c.id)
+        const instanceScoped = c.connectorId === 'imap' || c.connectorId === 'cli'
+        const governanceId = instanceScoped
+          ? connectorInstanceGovernanceId(c.connectorId, c.id)
           : c.connectorId
         const existing = byKey.get(governanceId)
         if (existing) continue
@@ -758,7 +797,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
         const entry = registry.find((e) => e.id === c.connectorId)
         byKey.set(governanceId, {
           id: governanceId,
-          ...(c.connectorId === 'imap' ? { providerId: 'imap', instanceId: c.id } : {}),
+          ...(instanceScoped ? { providerId: c.connectorId, instanceId: c.id } : {}),
           name: c.connectorId === 'imap' ? (c.connectedEmail ?? c.name) : c.name,
           url: c.url ?? undefined,
           custom: c.custom,
@@ -767,7 +806,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
           icon_url: entry?.icon_url,
           category: entry?.category ?? (c.custom ? undefined : 'community' as const),
           scope: 'personal',
-          ...(c.connectorId === 'imap' ? { sortCreatedAt: c.createdAt } : {}),
+          ...(instanceScoped ? { sortCreatedAt: c.createdAt } : {}),
         })
       }
 
@@ -801,7 +840,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
 
       const connectors = Array.from(byKey.values())
         .sort((a, b) => {
-          if (a.providerId !== 'imap' || b.providerId !== 'imap') return 0
+          if (!a.providerId || a.providerId !== b.providerId) return 0
           return (a.sortCreatedAt?.getTime() ?? 0) - (b.sortCreatedAt?.getTime() ?? 0)
             || a.id.localeCompare(b.id)
         })
@@ -870,10 +909,83 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
 
     const { assistantId, connectorId } = req.params as { assistantId: string; connectorId: string }
     const parsedGovernanceId = parseConnectorInstanceGovernanceId(connectorId)
-    const providerId = parsedGovernanceId?.provider === 'imap' ? 'imap' : connectorId
-    const governanceId = providerId === 'imap' && parsedGovernanceId ? connectorId : providerId
+    const instanceScopedProvider = parsedGovernanceId
+      && (parsedGovernanceId.provider === 'imap' || parsedGovernanceId.provider === 'cli')
+      ? parsedGovernanceId.provider
+      : null
+    const providerId = instanceScopedProvider ?? connectorId
+    const governanceId = instanceScopedProvider ? connectorId : providerId
 
     try {
+      if (providerId === 'cli' && parsedGovernanceId && options.connectorInstanceStore) {
+        const instanceId = parsedGovernanceId.instanceId
+        let instance: ConnectorInstance | null = null
+        if (member.workspaceId) {
+          const [teamNative, grants] = await Promise.all([
+            options.connectorInstanceStore.listByWorkspaceSystem(member.workspaceId),
+            options.connectorGrantStore
+              ? options.connectorGrantStore.listForTargetSystem('workspace', member.workspaceId)
+              : Promise.resolve([]),
+          ])
+          instance = [
+            ...teamNative,
+            ...grants.map((grant) => grant.instance),
+          ].find((candidate) => candidate.id === instanceId && candidate.provider === 'cli') ?? null
+        } else {
+          instance = await options.connectorInstanceStore.get(member.userId, instanceId)
+          if (instance?.provider !== 'cli' || instance.scope !== 'user' || instance.userId !== member.userId) {
+            instance = null
+          }
+        }
+        if (!instance || !instance.connected) {
+          res.status(404).json({ error: 'CLI connector not found' })
+          return
+        }
+
+        const credentials = await options.connectorInstanceStore.getAuthCredentialsSystem(instance.id)
+        if (credentials?.type !== 'cli') {
+          res.status(409).json({ error: 'CLI connector credentials are missing or invalid' })
+          return
+        }
+        const { discoverCliServer } = await import('../mcp/cli-transport.js')
+        const server = await discoverCliServer({
+          binaryPath: credentials.binaryPath,
+          args: credentials.args,
+          env: instance.config?.env as Record<string, string> | undefined,
+          cwd: typeof instance.config?.cwd === 'string' ? instance.config.cwd : undefined,
+          timeoutMs: typeof instance.config?.timeoutMs === 'number' ? instance.config.timeoutMs : undefined,
+        }, instance.label)
+
+        const tools = await Promise.all(server.tools.map(async (tool) => {
+          const classification = classifyTool(tool.name, tool.description)
+          const fallback = defaultPolicy(classification)
+          const appOverride = await options.mcpSettingsStore!.getPolicy({
+            assistantId: APP_LEVEL_ASSISTANT_ID,
+            userId: member.userId,
+            serverName: server.name,
+            toolName: tool.name,
+          })
+          const assistantOverride = await options.mcpSettingsStore!.getPolicy({
+            assistantId,
+            userId: member.userId,
+            serverName: server.name,
+            toolName: tool.name,
+          })
+          const appPolicy = appOverride?.policy ?? fallback
+          const assistantPolicy = assistantOverride?.policy ?? fallback
+          return {
+            name: tool.name,
+            description: tool.description,
+            classification,
+            appPolicy,
+            assistantPolicy,
+            effectivePolicy: strictest(appPolicy, assistantPolicy),
+          }
+        }))
+        res.json({ tools, serverName: server.name, providerId, instanceId })
+        return
+      }
+
       if (OFFICIAL_CONNECTOR_TOOLS[providerId]) {
         const tools = await Promise.all(
           OFFICIAL_CONNECTOR_TOOLS[providerId].map(async (t) => {
@@ -1016,10 +1128,15 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
     try {
       const classification = classifyTool(toolName)
       const parsedGovernanceId = parseConnectorInstanceGovernanceId(connectorId)
-      const providerId = parsedGovernanceId?.provider === 'imap' ? 'imap' : connectorId
-      const persistedServerName = OFFICIAL_CONNECTOR_TOOLS[providerId]
-        ? (providerId === 'imap' && parsedGovernanceId ? connectorId : providerId)
-        : serverName
+      const providerId = parsedGovernanceId
+        && (parsedGovernanceId.provider === 'imap' || parsedGovernanceId.provider === 'cli')
+        ? parsedGovernanceId.provider
+        : connectorId
+      const persistedServerName = providerId === 'cli' && parsedGovernanceId
+        ? serverName
+        : OFFICIAL_CONNECTOR_TOOLS[providerId]
+          ? (providerId === 'imap' && parsedGovernanceId ? connectorId : providerId)
+          : serverName
 
       await options.mcpSettingsStore.setPolicy({
         assistantId,

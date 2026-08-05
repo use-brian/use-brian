@@ -1338,8 +1338,8 @@ type UserConnector = {
   // credential, synthesized by the route so its per-assistant tool
   // policy is governable here.
   scope?: "personal" | "team-native" | "team-grant" | "builtin";
-  // Backing connector_instance id. IMAP uses it for one independently governed
-  // top-level card per mailbox; team-native rows also use it for workspace
+  // Backing connector_instance id. IMAP and CLI use it for independently
+  // governed top-level cards; team-native rows also use it for workspace
   // policy routes.
   instanceId?: string;
 };
