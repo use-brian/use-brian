@@ -283,6 +283,17 @@ export type ShopifyApi = {
     productId: string
     metafields: Array<{ namespace: string; key: string; type: string; value: string }>
   }): Promise<unknown>
+  setProductOptions(params: {
+    productId: string
+    optionId?: string
+    name?: string
+    values?: string[]
+  }): Promise<unknown>
+  // ── Theme product templates ──
+  listThemes(): Promise<Array<{ id: string; name: string; role: string }>>
+  readProductTemplate(params: { themeId?: string; suffix?: string }): Promise<unknown>
+  createProductTemplate(params: { themeId?: string; suffix: string; template: string }): Promise<unknown>
+  setProductTemplate(params: { productId: string; templateSuffix: string | null }): Promise<unknown>
 }
 
 /**
@@ -1098,6 +1109,150 @@ export function createShopifyTools(
     },
   })
 
+  const setProductOptionsTool = buildTool({
+    name: 'shopifySetProductOptions',
+    description:
+      'Rename a Shopify product\'s option and its values - the labels shown on the storefront variant picker. ' +
+      'New products always start with the placeholder option "Title" with the single value "Default Title", which looks unfinished on a real listing; ' +
+      'set something meaningful like name "Size" with values ["250g"]. ' +
+      'This RENAMES existing values, it does not add new variants. Single-option products only unless you pass optionId. ' +
+      'Call this tool directly — the user will see an Approve/Deny prompt.',
+    inputSchema: z.object({
+      productId: z.string().describe('Product id (numeric or GID).'),
+      name: z.string().optional().describe('New option name, e.g. "Size" or "Pack".'),
+      values: z.array(z.string()).optional().describe('New value labels, in the option\'s existing order. Cannot be longer than the current value list.'),
+      optionId: z.string().optional().describe('Option id - required only when the product has more than one option.'),
+    }),
+    isConcurrencySafe: false,
+    isReadOnly: false,
+    requiresConfirmation: true,
+    timeoutMs: 15_000,
+    async execute(input) {
+      try {
+        const data = ((await api.setProductOptions(input)) ?? {}) as Json
+        const options = asRows(obj(data, 'product')?.options).map((o) => ({
+          name: str(o, 'name'),
+          values: asRows(o.optionValues).map((v) => str(v, 'name')),
+        }))
+        return { data: { options } }
+      } catch (err) {
+        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+      }
+    },
+  })
+
+  // ── Theme product templates ──────────────────────────────────
+  // The only theme surface here, and deliberately narrow: a rich product page
+  // is theme sections on a per-product template, so authoring one is the
+  // difference between "the product exists" and "the page looks right". It is
+  // also the one write that can break a storefront for every visitor.
+
+  const listThemesTool = buildTool({
+    name: 'shopifyListThemes',
+    description:
+      'List the store\'s online store themes with their ids and roles. The MAIN theme is the live one customers see. ' +
+      'Use before reading or creating a product page template when the user has more than one theme.',
+    inputSchema: z.object({}),
+    isConcurrencySafe: true,
+    isReadOnly: true,
+    timeoutMs: 15_000,
+    async execute() {
+      try {
+        const themes = await api.listThemes()
+        return { data: { themes } }
+      } catch (err) {
+        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+      }
+    },
+  })
+
+  const readProductTemplateTool = buildTool({
+    name: 'shopifyReadProductTemplate',
+    description:
+      'Read a product page template from the theme, as JSON. Omit suffix for the theme default (templates/product.json), ' +
+      'or pass the suffix of an existing product\'s template to use its page layout as the model for a new one. ' +
+      'To give a new product a rich page: read the template of a product whose page already looks right, edit the section settings text, ' +
+      'then write it with shopifyCreateProductTemplate. Always clone from the SAME theme - section types differ between themes.',
+    inputSchema: z.object({
+      suffix: z.string().optional().describe('Template suffix to read, e.g. "detox-protein-mix". Omit for the theme default.'),
+      themeId: z.string().optional().describe('Theme id. Defaults to the live (MAIN) theme.'),
+    }),
+    isConcurrencySafe: true,
+    isReadOnly: true,
+    timeoutMs: 20_000,
+    async execute(input) {
+      try {
+        const data = ((await api.readProductTemplate(input)) ?? {}) as Json
+        return { data: {
+          theme: str(data, 'themeName'),
+          theme_id: str(data, 'themeId'),
+          filename: str(data, 'filename'),
+          template: str(data, 'content'),
+        } }
+      } catch (err) {
+        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+      }
+    },
+  })
+
+  const createProductTemplateTool = buildTool({
+    name: 'shopifyCreateProductTemplate',
+    description:
+      'Create a NEW product page template in the theme, then point a product at it with shopifySetProductTemplate. ' +
+      'This writes a file into the live theme, so build the template by reading an existing one with shopifyReadProductTemplate and editing its section settings - do not write one from scratch. ' +
+      'Only product templates can be written; existing templates are never overwritten (they may be another product\'s live page), and every section type must already exist in that theme. ' +
+      'Call this tool directly — the user will see an Approve/Deny prompt.',
+    inputSchema: z.object({
+      suffix: z.string().describe('New template suffix, lowercase with hyphens, e.g. "hojicha-black-maca". Becomes templates/product.<suffix>.json.'),
+      template: z.string().describe('The complete template JSON: a "sections" object and an "order" array.'),
+      themeId: z.string().optional().describe('Theme id. Defaults to the live (MAIN) theme.'),
+    }),
+    isConcurrencySafe: false,
+    isReadOnly: false,
+    // Destructive, not merely write: this lands in the theme customers are
+    // served from, and a bad page is not visible in the Shopify admin.
+    requiresConfirmation: true,
+    timeoutMs: 30_000,
+    async execute(input) {
+      try {
+        const data = ((await api.createProductTemplate(input)) ?? {}) as Json
+        return { data: {
+          theme: str(data, 'theme'),
+          filename: str(data, 'filename'),
+          suffix: str(data, 'suffix'),
+          note: 'Created. The page does not change until a product is pointed at it with shopifySetProductTemplate.',
+        } }
+      } catch (err) {
+        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+      }
+    },
+  })
+
+  const setProductTemplateTool = buildTool({
+    name: 'shopifySetProductTemplate',
+    description:
+      'Point a Shopify product at a page template, changing the layout its product page uses. ' +
+      'Pass the suffix of a template that already exists in the theme; pass null to go back to the theme default. ' +
+      'Call this tool directly — the user will see an Approve/Deny prompt.',
+    inputSchema: z.object({
+      productId: z.string().describe('Product id (numeric or GID).'),
+      templateSuffix: z.string().nullable().describe('Template suffix, e.g. "hojicha-black-maca", or null for the theme default.'),
+    }),
+    isConcurrencySafe: false,
+    isReadOnly: false,
+    requiresConfirmation: true,
+    timeoutMs: 15_000,
+    async execute(input) {
+      try {
+        const data = ((await api.setProductTemplate(input)) ?? {}) as Json
+        const p = obj(data, 'product')
+        return { data: { id: str(p, 'id'), template_suffix: str(p, 'templateSuffix') ?? '(theme default)' } }
+      } catch (err) {
+        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+      }
+    },
+  })
+
   const sendDraftOrderInvoiceTool = buildTool({
     name: 'shopifySendDraftOrderInvoice',
     description:
@@ -1412,6 +1567,11 @@ export function createShopifyTools(
     setProductPriceTool,
     publishProductTool,
     setProductMetafieldsTool,
+    setProductOptionsTool,
+    listThemesTool,
+    readProductTemplateTool,
+    createProductTemplateTool,
+    setProductTemplateTool,
     createDraftOrderTool,
     sendDraftOrderInvoiceTool,
     addTagsTool,

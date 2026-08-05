@@ -1213,6 +1213,292 @@ export async function setProductMetafields(auth: ShopifyAuth, params: {
   return (data as Record<string, unknown>).metafieldsSet
 }
 
+// ── Product options ──────────────────────────────────────────
+
+/**
+ * Rename a product's option and its values. `productCreate` always yields the
+ * placeholder option `Title` / `Default Title`, which is what a storefront
+ * shows on the variant picker — a real listing needs e.g. `數量` / `1包`.
+ *
+ * Single-option products only unless `optionId` is given: renaming the wrong
+ * option of a multi-option product is silent damage.
+ */
+export async function setProductOptions(auth: ShopifyAuth, params: {
+  productId: string
+  optionId?: string
+  name?: string
+  values?: string[]
+}): Promise<unknown> {
+  const productId = toShopifyGid('Product', params.productId)
+  const lookup = await shopifyGraphql<{
+    product?: { options?: Array<{ id?: string; name?: string; optionValues?: Array<{ id?: string; name?: string }> }> }
+  }>(auth, `
+    query ProductOptionsForRename($id: ID!) {
+      product(id: $id) { options { id name optionValues { id name } } }
+    }
+  `, { id: productId })
+
+  const options = (lookup.product?.options ?? [])
+    .filter((o): o is { id: string; name?: string; optionValues?: Array<{ id?: string; name?: string }> } => typeof o?.id === 'string')
+  if (options.length === 0) throw new Error('Shopify API error: product not found, or it has no options')
+
+  const target = params.optionId
+    ? options.find((o) => o.id === toShopifyGid('ProductOption', params.optionId!))
+    : options.length === 1 ? options[0] : undefined
+  if (!target) {
+    const names = options.map((o) => `${o.name ?? 'option'} (${o.id})`).join(', ')
+    throw new Error(`Shopify API error: product has ${options.length} options - pass optionId. Options: ${names}`)
+  }
+
+  const existing = (target.optionValues ?? [])
+    .filter((v): v is { id: string; name?: string } => typeof v?.id === 'string')
+  if (params.values && params.values.length > existing.length) {
+    throw new Error(
+      `Shopify API error: ${params.values.length} values given but the option has ${existing.length}. This renames existing values; it does not add variants.`,
+    )
+  }
+  const optionValuesToUpdate = (params.values ?? [])
+    .map((name, i) => (existing[i] ? { id: existing[i].id, name } : null))
+    .filter((v): v is { id: string; name: string } => v !== null)
+
+  const data = await shopifyGraphql(auth, `
+    mutation SetProductOptions($productId: ID!, $option: OptionUpdateInput!, $optionValuesToUpdate: [OptionValueUpdateInput!]) {
+      productOptionUpdate(productId: $productId, option: $option, optionValuesToUpdate: $optionValuesToUpdate) {
+        product { options { name optionValues { name } } }
+        userErrors { field message code }
+      }
+    }
+  `, {
+    productId,
+    option: { id: target.id, ...(params.name !== undefined ? { name: params.name } : {}) },
+    optionValuesToUpdate,
+  })
+  expectNoUserErrors(data, 'productOptionUpdate')
+  return (data as Record<string, unknown>).productOptionUpdate
+}
+
+// ── Theme product templates ──────────────────────────────────
+//
+// The only theme surface the connector has, and it is deliberately narrow.
+// A rich product page is theme sections on a per-product template — the same
+// thing a merchant makes by duplicating a template in the theme editor — so
+// authoring one is the difference between "a product exists" and "the page
+// looks right". It is also the one write here that can break a storefront for
+// every visitor, so the containment below is load-bearing, not decoration:
+//
+//   * ONLY `templates/product.<suffix>.json` — never layout/, config/,
+//     sections/, assets/, snippets/, or any other template family.
+//   * CREATE ONLY — an existing file is refused, never overwritten.
+//   * The body must parse, and every section type it references must exist in
+//     the theme. A template naming a section the theme does not have renders
+//     as a blank page, which looks like a broken store rather than a bad write.
+//
+// Spec: docs/architecture/integrations/shopify.md → "Theme product templates".
+
+/** `templates/product.hojicha-black-maca.json` — nothing else is writable. */
+const PRODUCT_TEMPLATE_FILENAME = /^templates\/product\.[a-z0-9][a-z0-9_-]*\.json$/
+/** Suffix as the merchant types it; the filename is derived, never supplied. */
+const TEMPLATE_SUFFIX = /^[a-z0-9][a-z0-9_-]*$/
+
+export function productTemplateFilename(suffix: string): string {
+  const clean = suffix.trim()
+  if (!TEMPLATE_SUFFIX.test(clean)) {
+    throw new Error(
+      `Shopify API error: "${suffix}" is not a valid template suffix. Use lowercase letters, numbers, hyphens and underscores, e.g. "hojicha-black-maca".`,
+    )
+  }
+  const filename = `templates/product.${clean}.json`
+  // Belt and braces: the suffix pattern already excludes traversal, but the
+  // filename is what reaches the API, so it is what gets asserted.
+  if (!PRODUCT_TEMPLATE_FILENAME.test(filename)) {
+    throw new Error(`Shopify API error: refusing to write ${filename} - only product templates may be written.`)
+  }
+  return filename
+}
+
+export type ShopifyTheme = { id: string; name: string; role: string }
+
+export async function listThemes(auth: ShopifyAuth): Promise<ShopifyTheme[]> {
+  const data = await shopifyGraphql<{
+    themes?: { edges?: Array<{ node?: { id?: string; name?: string; role?: string } }> }
+  }>(auth, `
+    query ListThemes { themes(first: 20) { edges { node { id name role } } } }
+  `)
+  return (data.themes?.edges ?? [])
+    .map((e) => e?.node)
+    .filter((t): t is { id: string; name?: string; role?: string } => typeof t?.id === 'string')
+    .map((t) => ({ id: t.id, name: t.name ?? '(unnamed)', role: t.role ?? 'UNKNOWN' }))
+}
+
+/** The MAIN (published) theme, unless a specific one was named. */
+async function resolveTheme(auth: ShopifyAuth, themeId?: string): Promise<ShopifyTheme> {
+  const themes = await listThemes(auth)
+  if (themes.length === 0) throw new Error('Shopify API error: this store has no online store themes')
+  if (themeId) {
+    const wanted = toShopifyGid('OnlineStoreTheme', themeId)
+    const found = themes.find((t) => t.id === wanted)
+    if (!found) {
+      throw new Error(`Shopify API error: no theme ${themeId}. Themes: ${themes.map((t) => `${t.name} (${t.id}, ${t.role})`).join(', ')}`)
+    }
+    return found
+  }
+  const main = themes.find((t) => t.role === 'MAIN')
+  if (!main) throw new Error('Shopify API error: this store has no published (MAIN) theme - pass themeId')
+  return main
+}
+
+async function readThemeFiles(auth: ShopifyAuth, themeId: string, filenames: string[]): Promise<Map<string, string>> {
+  const data = await shopifyGraphql<{
+    theme?: { files?: { edges?: Array<{ node?: { filename?: string; body?: { content?: string } } }> } }
+  }>(auth, `
+    query ReadThemeFiles($id: ID!, $filenames: [String!]) {
+      theme(id: $id) {
+        files(first: 50, filenames: $filenames) {
+          edges { node { filename body { ... on OnlineStoreThemeFileBodyText { content } } } }
+        }
+      }
+    }
+  `, { id: themeId, filenames })
+  const out = new Map<string, string>()
+  for (const edge of data.theme?.files?.edges ?? []) {
+    const name = edge?.node?.filename
+    if (name) out.set(name, edge.node?.body?.content ?? '')
+  }
+  return out
+}
+
+/**
+ * Shopify prepends an auto-generated `/* ... *\/` banner to theme JSON, so the
+ * file is not valid JSON as stored. Strip it before parsing.
+ */
+function parseThemeJson(raw: string): Record<string, unknown> {
+  const stripped = raw.replace(/\/\*[\s\S]*?\*\//g, '').trim()
+  return JSON.parse(stripped) as Record<string, unknown>
+}
+
+export type ShopifyProductTemplate = {
+  themeId: string
+  themeName: string
+  filename: string
+  suffix: string | null
+  content: string
+}
+
+/**
+ * Read a product template so the model can clone and edit it. `suffix` omitted
+ * reads the theme's base `templates/product.json`.
+ */
+export async function readProductTemplate(auth: ShopifyAuth, params: {
+  themeId?: string
+  suffix?: string
+}): Promise<ShopifyProductTemplate> {
+  const theme = await resolveTheme(auth, params.themeId)
+  const filename = params.suffix ? productTemplateFilename(params.suffix) : 'templates/product.json'
+  const files = await readThemeFiles(auth, theme.id, [filename])
+  const content = files.get(filename)
+  if (content === undefined) {
+    throw new Error(`Shopify API error: ${filename} does not exist in theme "${theme.name}"`)
+  }
+  return { themeId: theme.id, themeName: theme.name, filename, suffix: params.suffix ?? null, content }
+}
+
+/** Section types the theme actually ships, from `sections/*.liquid`. */
+async function themeSectionTypes(auth: ShopifyAuth, themeId: string): Promise<Set<string>> {
+  const data = await shopifyGraphql<{
+    theme?: { files?: { edges?: Array<{ node?: { filename?: string } }> } }
+  }>(auth, `
+    query ThemeSectionTypes($id: ID!) {
+      theme(id: $id) { files(first: 250, filenames: ["sections/*.liquid"]) { edges { node { filename } } } }
+    }
+  `, { id: themeId })
+  const types = new Set<string>()
+  for (const edge of data.theme?.files?.edges ?? []) {
+    const m = /^sections\/(.+)\.liquid$/.exec(edge?.node?.filename ?? '')
+    if (m) types.add(m[1])
+  }
+  return types
+}
+
+/**
+ * Create a NEW per-product template. Never overwrites: an existing file is a
+ * hard refusal, because the file this would clobber is the live page of some
+ * other product.
+ */
+export async function createProductTemplate(auth: ShopifyAuth, params: {
+  themeId?: string
+  suffix: string
+  template: string
+}): Promise<unknown> {
+  const theme = await resolveTheme(auth, params.themeId)
+  const filename = productTemplateFilename(params.suffix)
+
+  let parsed: Record<string, unknown>
+  try {
+    parsed = parseThemeJson(params.template)
+  } catch (err) {
+    throw new Error(`Shopify API error: the template is not valid JSON (${err instanceof Error ? err.message : String(err)})`)
+  }
+  const sections = parsed.sections as Record<string, { type?: string }> | undefined
+  const order = parsed.order as string[] | undefined
+  if (!sections || typeof sections !== 'object' || !Array.isArray(order)) {
+    throw new Error('Shopify API error: a product template needs a "sections" object and an "order" array')
+  }
+  for (const id of order) {
+    if (!sections[id]) throw new Error(`Shopify API error: order lists section "${id}" but sections has no such entry`)
+  }
+
+  // A template naming a section the theme lacks renders as a blank page — it
+  // looks like a broken store, not a bad write, so it is refused here.
+  const available = await themeSectionTypes(auth, theme.id)
+  const missing = [...new Set(Object.values(sections).map((s) => s?.type).filter((t): t is string => !!t))]
+    .filter((t) => !available.has(t))
+  if (missing.length > 0) {
+    throw new Error(
+      `Shopify API error: theme "${theme.name}" has no section type(s): ${missing.join(', ')}. ` +
+      `Clone a template from this same theme instead of writing one from scratch.`,
+    )
+  }
+
+  const existing = await readThemeFiles(auth, theme.id, [filename])
+  if (existing.has(filename)) {
+    throw new Error(
+      `Shopify API error: ${filename} already exists in theme "${theme.name}". Templates are never overwritten - it may be another product's live page. Choose a different suffix.`,
+    )
+  }
+
+  const data = await shopifyGraphql(auth, `
+    mutation CreateProductTemplate($themeId: ID!, $files: [OnlineStoreThemeFilesUpsertFileInput!]!) {
+      themeFilesUpsert(themeId: $themeId, files: $files) {
+        upsertedThemeFiles { filename size }
+        userErrors { field message code }
+      }
+    }
+  `, { themeId: theme.id, files: [{ filename, body: { type: 'TEXT', value: params.template } }] })
+  expectNoUserErrors(data, 'themeFilesUpsert')
+  return { theme: theme.name, theme_id: theme.id, filename, suffix: params.suffix }
+}
+
+/** Point a product at a template suffix (or back at the default with null). */
+export async function setProductTemplate(auth: ShopifyAuth, params: {
+  productId: string
+  templateSuffix: string | null
+}): Promise<unknown> {
+  const suffix = params.templateSuffix === null ? null : params.templateSuffix.trim()
+  // Validate through the same gate as the writer so a typo cannot point a
+  // product at a template that does not exist.
+  if (suffix !== null) productTemplateFilename(suffix)
+  const data = await shopifyGraphql(auth, `
+    mutation SetProductTemplate($product: ProductUpdateInput!) {
+      productUpdate(product: $product) {
+        product { id templateSuffix }
+        userErrors { field message }
+      }
+    }
+  `, { product: { id: toShopifyGid('Product', params.productId), templateSuffix: suffix } })
+  expectNoUserErrors(data, 'productUpdate')
+  return (data as Record<string, unknown>).productUpdate
+}
+
 export async function sendDraftOrderInvoice(auth: ShopifyAuth, draftOrderId: string): Promise<unknown> {
   const data = await shopifyGraphql(auth, `
     mutation SendDraftOrderInvoice($id: ID!) {

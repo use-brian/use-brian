@@ -167,6 +167,13 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'shopifySetProductPrice', description: 'Set a product variant price, compare-at price, and SKU', classification: 'write', defaultPolicy: 'ask' },
     { name: 'shopifyPublishProduct', description: 'Publish a product to the Online Store so customers can see it', classification: 'write', defaultPolicy: 'ask' },
     { name: 'shopifySetProductMetafields', description: 'Set structured metafields on a product (theme must read them to display)', classification: 'write', defaultPolicy: 'ask' },
+    { name: 'shopifySetProductOptions', description: 'Rename a product option and its values (the storefront variant picker labels)', classification: 'write', defaultPolicy: 'ask' },
+    { name: 'shopifyListThemes', description: 'List online store themes and which one is live', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'shopifyReadProductTemplate', description: 'Read a product page template from the theme', classification: 'read', defaultPolicy: 'allow' },
+    // Destructive, not write: this lands a file in the theme customers are
+    // served from, and a broken page is invisible in the Shopify admin.
+    { name: 'shopifyCreateProductTemplate', description: 'Create a new product page template in the theme', classification: 'destructive', defaultPolicy: 'ask' },
+    { name: 'shopifySetProductTemplate', description: 'Change which page template a product uses', classification: 'write', defaultPolicy: 'ask' },
     { name: 'shopifyCreateDraftOrder', description: 'Create a draft order (quote or invoice, never a charge)', classification: 'write', defaultPolicy: 'ask' },
     { name: 'shopifySendDraftOrderInvoice', description: 'Email the invoice for a draft order', classification: 'write', defaultPolicy: 'ask' },
     { name: 'shopifyAddTags', description: 'Add tags to an order, customer, or product', classification: 'write', defaultPolicy: 'ask' },
@@ -460,6 +467,19 @@ export const OFFICIAL_OAUTH_SCOPES: Record<string, string[]> = {
     // through the connector can never reach the storefront.
     'read_publications',
     'write_publications',
+    // NOT listed, on purpose: `read_themes` / `write_themes`.
+    //
+    // The four theme-template tools need them, but theme access is the most
+    // dangerous grant this connector could ask for — a bad write breaks the
+    // storefront for every visitor, and unlike a bad product it is invisible
+    // in the Shopify admin. Requesting it from every merchant to serve the
+    // minority who author product pages is a trust cost that buys nothing for
+    // the rest, so it is OPT-IN: a merchant who wants page authoring adds the
+    // pair to their own app, and until they do the tools fail with Shopify's
+    // own honest "Required access: read_themes access scope" error rather than
+    // silently doing nothing. Moving them into this list would flip that
+    // default for every install — do it deliberately or not at all.
+    // See docs/architecture/integrations/shopify.md → "Theme product templates".
   ],
 }
 

@@ -106,6 +106,11 @@ import {
   setVariantPrice as setShopifyVariantPrice,
   publishProduct as publishShopifyProduct,
   setProductMetafields as setShopifyProductMetafields,
+  setProductOptions as setShopifyProductOptions,
+  listThemes as listShopifyThemes,
+  readProductTemplate as readShopifyProductTemplate,
+  createProductTemplate as createShopifyProductTemplate,
+  setProductTemplate as setShopifyProductTemplate,
 } from '../shopify/client.js'
 import { createMsGraphClient } from '../msgraph/client.js'
 import {
@@ -284,6 +289,11 @@ export const INJECTED_BUILTIN_TOOLS_BY_CONNECTOR: Record<string, readonly string
     'shopifySetProductPrice',
     'shopifyPublishProduct',
     'shopifySetProductMetafields',
+    'shopifySetProductOptions',
+    'shopifyListThemes',
+    'shopifyReadProductTemplate',
+    'shopifyCreateProductTemplate',
+    'shopifySetProductTemplate',
     'shopifyCreateDraftOrder',
     'shopifySendDraftOrderInvoice',
     'shopifyAddTags',
@@ -3271,6 +3281,11 @@ async function injectShopifyTools(
       setVariantPrice: async (params) => setShopifyVariantPrice(await tm.getAuth(), params),
       publishProduct: async (params) => publishShopifyProduct(await tm.getAuth(), params),
       setProductMetafields: async (params) => setShopifyProductMetafields(await tm.getAuth(), params),
+      setProductOptions: async (params) => setShopifyProductOptions(await tm.getAuth(), params),
+      listThemes: async () => listShopifyThemes(await tm.getAuth()),
+      readProductTemplate: async (params) => readShopifyProductTemplate(await tm.getAuth(), params),
+      createProductTemplate: async (params) => createShopifyProductTemplate(await tm.getAuth(), params),
+      setProductTemplate: async (params) => setShopifyProductTemplate(await tm.getAuth(), params),
     }, {
       readFileBytes: filesApi
         ? async (context, idOrPath) => {

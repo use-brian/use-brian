@@ -43,6 +43,22 @@ function mockApi(overrides: Partial<ShopifyApi> = {}): ShopifyApi {
     setProductMetafields: vi.fn().mockResolvedValue({
       metafields: [{ id: 'gid://shopify/Metafield/1', namespace: 'custom', key: 'ingredients', type: 'multi_line_text_field' }],
     }),
+    setProductOptions: vi.fn().mockResolvedValue({
+      product: { options: [{ name: 'Pack', optionValues: [{ name: '250g' }] }] },
+    }),
+    listThemes: vi.fn().mockResolvedValue([
+      { id: 'gid://shopify/OnlineStoreTheme/1', name: 'Dawn', role: 'MAIN' },
+    ]),
+    readProductTemplate: vi.fn().mockResolvedValue({
+      themeId: 'gid://shopify/OnlineStoreTheme/1', themeName: 'Dawn',
+      filename: 'templates/product.json', content: '{"sections":{},"order":[]}',
+    }),
+    createProductTemplate: vi.fn().mockResolvedValue({
+      theme: 'Dawn', filename: 'templates/product.demo.json', suffix: 'demo',
+    }),
+    setProductTemplate: vi.fn().mockResolvedValue({
+      product: { id: 'gid://shopify/Product/2', templateSuffix: 'demo' },
+    }),
     ...overrides,
   }
 }
@@ -73,6 +89,8 @@ const READ_TOOLS = [
   'shopifyListDisputes',
   'shopifyListContent',
   'shopifySalesReport',
+  'shopifyListThemes',
+  'shopifyReadProductTemplate',
 ]
 const WRITE_TOOLS = [
   'shopifyUpdateProduct',
@@ -81,6 +99,8 @@ const WRITE_TOOLS = [
   'shopifySetProductPrice',
   'shopifyPublishProduct',
   'shopifySetProductMetafields',
+  'shopifySetProductOptions',
+  'shopifySetProductTemplate',
   'shopifyCreateDraftOrder',
   'shopifySendDraftOrderInvoice',
   'shopifyAddTags',
@@ -90,12 +110,17 @@ const WRITE_TOOLS = [
   'shopifyCreateDiscountCode',
   'shopifyCreateContent',
 ]
-const DESTRUCTIVE_TOOLS = ['shopifyCancelOrder', 'shopifyRefundOrder', 'shopifyCompleteDraftOrder']
+const DESTRUCTIVE_TOOLS = [
+  'shopifyCancelOrder', 'shopifyRefundOrder', 'shopifyCompleteDraftOrder',
+  // Writes a file into the theme customers are served from. A broken page is
+  // invisible in the Shopify admin, so this sits with the destructive verbs.
+  'shopifyCreateProductTemplate',
+]
 
 describe('[COMP:tools/shopify] Shopify tools', () => {
-  it('creates the full 33-tool catalog', () => {
+  it('creates the full 38-tool catalog', () => {
     const tools = createShopifyTools(mockApi())
-    expect(tools).toHaveLength(33)
+    expect(tools).toHaveLength(38)
     expect(tools.map((t) => t.name).sort()).toEqual(
       [...READ_TOOLS, ...WRITE_TOOLS, ...DESTRUCTIVE_TOOLS].sort(),
     )

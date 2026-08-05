@@ -19,6 +19,11 @@ import {
   setVariantPrice,
   publishProduct,
   setProductMetafields,
+  setProductOptions,
+  listThemes,
+  readProductTemplate,
+  createProductTemplate,
+  setProductTemplate,
   type ShopifyAuth,
 } from '../client.js'
 
@@ -153,6 +158,14 @@ describeIf('[COMP:api/shopify-client] Shopify live dev-store', () => {
       `, { id: productId })
 
       expect(state.product?.variants?.edges?.[0]?.node?.price).toBe('439.00')
+
+      // 6. Options — a real listing needs meaningful picker labels, not the
+      //    placeholder "Title" / "Default Title" productCreate leaves behind.
+      const renamed = (await setProductOptions(AUTH, {
+        productId: productId!, name: 'Pack', values: ['250g'],
+      })) as { product?: { options?: Array<{ name?: string; optionValues?: Array<{ name?: string }> }> } }
+      expect(renamed.product?.options?.[0]?.name).toBe('Pack')
+      expect(renamed.product?.options?.[0]?.optionValues?.[0]?.name).toBe('250g')
       const live = (state.product?.resourcePublications?.edges ?? [])
         .map((e) => e.node)
         .filter((n) => n?.isPublished)
@@ -161,6 +174,68 @@ describeIf('[COMP:api/shopify-client] Shopify live dev-store', () => {
     } finally {
       // Archive rather than leave an ACTIVE test product on the storefront.
       await updateProduct(AUTH, { id: productId!, status: 'ARCHIVED' }).catch(() => {})
+    }
+  })
+
+  // ── Theme product templates, live ──────────────────────────
+  //
+  // This writes a real file into a real theme, so it is the one place the
+  // containment can be proven rather than asserted: the suffix gate, the
+  // no-overwrite refusal, the section-type check, and that a cloned template
+  // actually attaches to a product. Cleans up after itself.
+  //
+  // Needs read_themes + write_themes, which are NOT in the connector's default
+  // scope list (see builtin-connectors.ts) — without them Shopify answers with
+  // its own scope error and this row fails loudly rather than silently passing.
+  it('clones a product template, attaches it, and refuses to overwrite', { timeout: 120_000 }, async () => {
+    const themes = await listThemes(AUTH)
+    expect(themes.length).toBeGreaterThan(0)
+    const main = themes.find((t) => t.role === 'MAIN')
+    expect(main, 'store needs a published theme').toBeTruthy()
+
+    const base = await readProductTemplate(AUTH, {})
+    expect(base.filename).toBe('templates/product.json')
+
+    const suffix = 'ub-e2e-clone'
+    const product = (await createProduct(AUTH, {
+      title: 'Use Brian e2e template check',
+      tags: ['use-brian-e2e'],
+      status: 'DRAFT',
+    })) as { product?: { id?: string } }
+    const productId = product.product?.id
+
+    try {
+      const created = (await createProductTemplate(AUTH, {
+        suffix,
+        template: base.content,
+      })) as { filename?: string }
+      expect(created.filename).toBe(`templates/product.${suffix}.json`)
+
+      // Create-only: the second write must be refused, not silently applied.
+      await expect(createProductTemplate(AUTH, { suffix, template: base.content }))
+        .rejects.toThrow(/already exists/)
+
+      const attached = (await setProductTemplate(AUTH, { productId: productId!, templateSuffix: suffix })) as {
+        product?: { templateSuffix?: string }
+      }
+      expect(attached.product?.templateSuffix).toBe(suffix)
+
+      // Reading it back through the same gate proves the file is really there.
+      const readBack = await readProductTemplate(AUTH, { suffix })
+      expect(readBack.filename).toBe(`templates/product.${suffix}.json`)
+      expect(readBack.content.length).toBeGreaterThan(0)
+    } finally {
+      if (productId) {
+        await setProductTemplate(AUTH, { productId, templateSuffix: null }).catch(() => {})
+        await updateProduct(AUTH, { id: productId, status: 'ARCHIVED' }).catch(() => {})
+      }
+      // Remove the template file — leaving test artefacts in a live theme is
+      // exactly the mess this capability has to avoid.
+      await shopifyGraphql(AUTH, `
+        mutation CleanupE2ETemplate($themeId: ID!, $files: [String!]!) {
+          themeFilesDelete(themeId: $themeId, files: $files) { deletedThemeFiles { filename } userErrors { message } }
+        }
+      `, { themeId: main!.id, files: [`templates/product.${suffix}.json`] }).catch(() => {})
     }
   })
 })
