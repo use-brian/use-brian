@@ -17,8 +17,9 @@
  * row updates live (signals, never data). Labels resolve server-side under
  * the SESSION's clearance; a `null` label renders the unavailable state
  * rather than hiding the pin. Files dropped on Pins (or chosen from Add) go
- * through the durable direct-ingest route before their returned file ids are
- * pinned; transient chat-upload ids are never used.
+ * through the durable storage-only route before their returned file ids are
+ * pinned; transient chat-upload ids are never used, and pinning never implies
+ * consent to distill or extract.
  *
  * Spec: docs/architecture/features/chat-app.md → "Pinned room context".
  * [COMP:app-web/chat-context-pins]
@@ -64,9 +65,14 @@ import {
 import { listViews } from "@/lib/api/views";
 import { fetchWorkspaceTasks } from "@/lib/api/tasks";
 import { fetchWorkspaceCrm } from "@/lib/api/crm";
-import { ingestFiles, MAX_INGEST_FILE_BYTES } from "@/lib/api/ingest";
+import {
+  LARGE_FILE_CONFIRM_BYTES,
+  MAX_STORED_FILE_BYTES,
+  storeFiles,
+} from "@/lib/api/ingest";
 import { useFileDrop } from "@/lib/use-file-drop";
 import { partitionUpload } from "@/lib/use-file-attachments";
+import { confirmDialog } from "@/components/ui/confirm-dialog";
 import {
   EMPTY_WORKER_RUN_SUMMARY,
   fetchWorkerRunSummary,
@@ -111,6 +117,7 @@ type FileUpload = {
   fileName: string;
   status: "uploading" | "error";
   error?: string;
+  progress?: number;
 };
 
 const WORK_BENCH_ID = "chat-work-bench";
@@ -321,7 +328,10 @@ export function ChatContextPins({
       let uploads: FileUpload[] = [];
       const updateUpload = (
         id: string,
-        update: { status: "error"; error: string } | null,
+        update:
+          | { status: "error"; error: string }
+          | { progress: number }
+          | null,
       ) => {
         setFileUploads((current) =>
           current.flatMap((item) => {
@@ -336,14 +346,32 @@ export function ChatContextPins({
 
       try {
         const { attach, rejected } = await partitionUpload(files, {
-          maxBytes: MAX_INGEST_FILE_BYTES,
+          maxBytes: MAX_STORED_FILE_BYTES,
           canRouteMedia: false,
         });
+        const confirmed: File[] = [];
+        for (const file of attach) {
+          if (file.size > LARGE_FILE_CONFIRM_BYTES) {
+            const size = `${(file.size / (1024 * 1024)).toFixed(1)} MB`;
+            const ok = await confirmDialog({
+              title: t.largeFileTitle,
+              description: format(t.largeFileDescription, {
+                fileName: file.name,
+                size,
+              }),
+              confirmLabel: t.largeFileConfirm,
+              cancelLabel: t.largeFileCancel,
+            });
+            if (!ok) continue;
+          }
+          confirmed.push(file);
+        }
         const uploadStartedAt = Date.now();
-        uploads = attach.map((file, index) => ({
+        uploads = confirmed.map((file, index) => ({
           id: `${file.name}-${file.lastModified}-${index}-${uploadStartedAt}`,
           fileName: file.name,
           status: "uploading" as const,
+          progress: 0,
         }));
         const rejectedUploads: FileUpload[] = rejected.map(
           ({ file, reason }, index) => ({
@@ -361,11 +389,22 @@ export function ChatContextPins({
           ...rejectedUploads,
           ...uploads,
         ]);
-        if (attach.length === 0) return;
+        if (confirmed.length === 0) return;
 
         let anyPinned = false;
         let anyFailed = rejected.length > 0;
-        const results = await ingestFiles(workspaceId, attach);
+        const uploadIdByFile = new Map(
+          confirmed.map((file, index) => [file, uploads[index].id]),
+        );
+        const results = await storeFiles(workspaceId, confirmed, {
+          onProgress: (file, uploadedBytes, totalBytes) => {
+            const uploadId = uploadIdByFile.get(file);
+            if (!uploadId) return;
+            updateUpload(uploadId, {
+              progress: Math.min(100, Math.round((uploadedBytes / totalBytes) * 100)),
+            });
+          },
+        });
         for (let index = 0; index < uploads.length; index += 1) {
           const upload = uploads[index];
           const result = results[index];
@@ -915,6 +954,11 @@ export function ChatContextPins({
                   {upload.error && (
                     <div className="truncate text-[10px] text-destructive">
                       {upload.error}
+                    </div>
+                  )}
+                  {upload.status === "uploading" && upload.progress !== undefined && (
+                    <div className="text-[10px] text-muted-foreground">
+                      {format(t.uploadingProgress, { percent: upload.progress })}
                     </div>
                   )}
                 </div>

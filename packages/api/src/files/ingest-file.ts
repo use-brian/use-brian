@@ -3,7 +3,8 @@
  *
  * One file:
  *   1. stores the original bytes in workspace_files,
- *   2. derives text locally or through an injected PDF/image distiller,
+ *   2. when `process !== false`, derives text locally or through an injected
+ *      PDF/image distiller,
  *   3. indexes segments and decomposes the text through Pipeline B.
  *
  * [COMP:files/ingest]
@@ -80,6 +81,21 @@ export function createFileIngestor(deps: FileIngestorDeps): FileIngestor {
     })
     if (!stored.ok) throw new FileIngestError(stored.error.kind, stored.error)
     const file = stored.value
+
+    // Upload is not consent to interpret. The Work Bench uses this branch to
+    // create a durable pin while keeping parse/distill/index/Pipeline B behind
+    // a later, explicit user decision.
+    if (input.process === false) {
+      return {
+        fileName: input.fileName,
+        fileId: file.id,
+        path: file.path,
+        sizeBytes: file.sizeBytes,
+        distilled: false,
+        decomposed: false,
+        counts: EMPTY_COUNTS,
+      }
+    }
 
     let text: string
     let distilled = false

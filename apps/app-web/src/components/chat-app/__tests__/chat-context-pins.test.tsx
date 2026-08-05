@@ -21,7 +21,8 @@ import type { Dictionary } from "@/lib/i18n/dictionaries";
 
 const listSessionPins = vi.fn().mockResolvedValue([]);
 const addSessionPin = vi.fn().mockResolvedValue(undefined);
-const ingestFiles = vi.fn().mockResolvedValue([]);
+const storeFiles = vi.fn().mockResolvedValue([]);
+const confirmDialog = vi.fn().mockResolvedValue(true);
 const fetchWorkerRunSummary = vi.fn().mockResolvedValue({
   total: 0,
   running: 0,
@@ -37,7 +38,12 @@ vi.mock("@/lib/api/session-pins", () => ({
 }));
 vi.mock("@/lib/api/ingest", () => ({
   MAX_INGEST_FILE_BYTES: 30 * 1024 * 1024,
-  ingestFiles: (...args: unknown[]) => ingestFiles(...args),
+  MAX_STORED_FILE_BYTES: 1024 * 1024 * 1024,
+  LARGE_FILE_CONFIRM_BYTES: 100 * 1024 * 1024,
+  storeFiles: (...args: unknown[]) => storeFiles(...args),
+}));
+vi.mock("@/components/ui/confirm-dialog", () => ({
+  confirmDialog: (...args: unknown[]) => confirmDialog(...args),
 }));
 vi.mock("@/lib/api/views", () => ({
   listViews: vi.fn().mockResolvedValue([]),
@@ -81,7 +87,8 @@ describe("[COMP:app-web/chat-context-pins] Work Bench section", () => {
   beforeEach(() => {
     listSessionPins.mockReset().mockResolvedValue([]);
     addSessionPin.mockReset().mockResolvedValue(undefined);
-    ingestFiles.mockReset().mockResolvedValue([]);
+    storeFiles.mockReset().mockResolvedValue([]);
+    confirmDialog.mockReset().mockResolvedValue(true);
     fetchWorkerRunSummary.mockReset().mockResolvedValue({
       total: 0,
       running: 0,
@@ -324,8 +331,8 @@ describe("[COMP:app-web/chat-context-pins] Work Bench section", () => {
     container.remove();
   });
 
-  it("ingests a dropped file durably before pinning its returned file id", async () => {
-    ingestFiles.mockResolvedValue([
+  it("stores a dropped file without ingestion before pinning its returned file id", async () => {
+    storeFiles.mockResolvedValue([
       { fileName: "launch-brief.txt", ok: true, fileId: "file-durable-1" },
     ]);
     const container = document.createElement("div");
@@ -366,7 +373,11 @@ describe("[COMP:app-web/chat-context-pins] Work Bench section", () => {
     });
 
     expect(drop.defaultPrevented).toBe(true);
-    expect(ingestFiles).toHaveBeenCalledWith("workspace-1", [file]);
+    expect(storeFiles).toHaveBeenCalledWith(
+      "workspace-1",
+      [file],
+      expect.objectContaining({ onProgress: expect.any(Function) }),
+    );
     expect(addSessionPin).toHaveBeenCalledWith("session-1", {
       kind: "file",
       refId: "file-durable-1",
@@ -377,7 +388,55 @@ describe("[COMP:app-web/chat-context-pins] Work Bench section", () => {
     container.remove();
   });
 
-  it("rejects an oversized dropped file before durable ingest and explains the 30 MB limit", async () => {
+  it("asks before starting a file upload above 100 MB and cancellation creates no upload", async () => {
+    confirmDialog.mockResolvedValue(false);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <I18nProvider locale="en" dict={dict}>
+          <ChatContextPins
+            sessionId="session-1"
+            workspaceId="workspace-1"
+            refreshKey={0}
+            startedByName="Ada"
+            expanded
+            onExpandedChange={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const file = new File(["pdf"], "catalog.pdf", {
+      type: "application/pdf",
+      lastModified: 2,
+    });
+    Object.defineProperty(file, "size", { value: 101 * 1024 * 1024 });
+    const pinsSection = container.querySelector<HTMLElement>(
+      'section[aria-label="Pinned context"]',
+    );
+    const drop = new Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, "dataTransfer", {
+      value: { files: [file], types: ["Files"] },
+    });
+    await act(async () => {
+      pinsSection!.dispatchEvent(drop);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(confirmDialog).toHaveBeenCalledWith(expect.objectContaining({
+      title: "Upload a large file?",
+      description: expect.stringContaining("catalog.pdf is 101.0 MB"),
+    }));
+    expect(storeFiles).not.toHaveBeenCalled();
+    expect(addSessionPin).not.toHaveBeenCalled();
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it("rejects an oversized dropped file before durable storage and explains the 1 GB limit", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -401,7 +460,7 @@ describe("[COMP:app-web/chat-context-pins] Work Bench section", () => {
       type: "application/pdf",
       lastModified: 2,
     });
-    Object.defineProperty(file, "size", { value: 30 * 1024 * 1024 + 1 });
+    Object.defineProperty(file, "size", { value: 1024 * 1024 * 1024 + 1 });
     const pinsSection = container.querySelector<HTMLElement>(
       'section[aria-label="Pinned context"]',
     );
@@ -415,11 +474,11 @@ describe("[COMP:app-web/chat-context-pins] Work Bench section", () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
-    expect(ingestFiles).not.toHaveBeenCalled();
+    expect(storeFiles).not.toHaveBeenCalled();
     expect(addSessionPin).not.toHaveBeenCalled();
     expect(container.textContent).toContain("price-list.pdf");
     expect(container.textContent).toContain(
-      "That file is too large to pin (max 30 MB).",
+      "That file is too large to pin (max 1 GB).",
     );
 
     act(() => root.unmount());

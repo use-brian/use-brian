@@ -11,6 +11,11 @@ import type { FileIngestor } from '../files/ingest-port.js'
 import type { ArtifactPromoter } from '../files/artifact-promote.js'
 import { resolveUser } from './route-helpers.js'
 import { mintFilePreviewToken, verifyFilePreviewToken } from './file-preview-token.js'
+import {
+  ChunkedUploadError,
+  MAX_CHUNKED_UPLOAD_BYTES,
+  type ChunkedFileUploadService,
+} from '../files/chunked-upload.js'
 
 /** Silent-path PDFs promote store-only above this (native inlineData stays the read path below). */
 const PDF_STORE_ONLY_MIN_BYTES = 2 * 1024 * 1024
@@ -80,6 +85,11 @@ export function isAllowedMime(mime: string): boolean {
  *     only when a blob client is configured (`ingestor` passed). See
  *     docs/architecture/features/files.md → "Direct ingest".
  *
+ * POST /api/files/store (multipart, field "files")
+ *   - Same durable byte write and membership gate as `/ingest`, but does not
+ *     parse, distill, index, create an Episode, or run Pipeline B. Used when a
+ *     user is staging context before deciding what Brian should do with it.
+ *
  * `ingestor` is null on a files-less deploy; the ingest route then 503s.
  */
 export function fileRoutes(
@@ -101,6 +111,8 @@ export function fileRoutes(
    * always passes `JWT_SECRET`. See file-preview-token.ts.
    */
   previewSecret?: string | null,
+  /** Large durable-file lane. Metadata crosses the API; exact parts do not. */
+  chunkedUploads?: ChunkedFileUploadService | null,
 ): Router {
   const router = Router()
 
@@ -273,16 +285,13 @@ export function fileRoutes(
     }
   })
 
-  /**
-   * POST /api/files/ingest — store raw bytes + decompose content into the brain.
-   *
-   * Multipart field "files"; body field "workspaceId" (required). Deterministic
-   * (no chat turn): each file's bytes land in workspace_files AND its content is
-   * distilled/parsed to text and run through Pipeline B. Per-file results.
-   */
-  router.post('/ingest', ingestUpload.array('files', MAX_FILES_PER_REQUEST), async (req, res) => {
+  const handleDurableUpload = async (
+    req: Request,
+    res: Response,
+    processFile: boolean,
+  ) => {
     if (!ingestor) {
-      res.status(503).json({ error: 'File ingest is not available on this deployment.' })
+      res.status(503).json({ error: 'Durable file storage is not available on this deployment.' })
       return
     }
     const files = (req.files as Express.Multer.File[] | undefined) ?? []
@@ -291,7 +300,9 @@ export function fileRoutes(
       return
     }
     if (files.length > MAX_INGEST_FILES) {
-      res.status(400).json({ error: `Too many files: ingest accepts at most ${MAX_INGEST_FILES} per request.` })
+      res.status(400).json({
+        error: `Too many files: durable ${processFile ? 'ingest' : 'storage'} accepts at most ${MAX_INGEST_FILES} per request.`,
+      })
       return
     }
 
@@ -324,8 +335,8 @@ export function fileRoutes(
       compartments: assistant.compartments,
     }
 
-    // Sequential — each file does a model distill + a Pipeline B pass, so we
-    // bound concurrent model calls rather than fanning out per file.
+    // Sequential keeps multipart writes bounded. On /ingest it also bounds the
+    // model distill + Pipeline B calls; /store exits after the byte write.
     const results = []
     for (const file of files) {
       // Recover a UTF-8 filename mojibaked by multer's latin1 decode (see /upload).
@@ -335,7 +346,12 @@ export function fileRoutes(
         continue
       }
       try {
-        const r = await ingestor({ fileName, mime: file.mimetype, bytes: file.buffer }, ctx)
+        const r = await ingestor({
+          fileName,
+          mime: file.mimetype,
+          bytes: file.buffer,
+          process: processFile,
+        }, ctx)
         results.push({
           fileName,
           ok: true,
@@ -352,13 +368,157 @@ export function fileRoutes(
             ? 'Workspace storage quota exceeded.'
             : err instanceof FileIngestError && err.kind === 'conflict'
               ? 'A file with that name is already in your brain.'
-              : `Failed to ingest ${fileName}: ${(err as Error).message}`
-        console.error('File ingest error:', err)
+              : `Failed to ${processFile ? 'ingest' : 'store'} ${fileName}: ${(err as Error).message}`
+        console.error(`File ${processFile ? 'ingest' : 'storage'} error:`, err)
         results.push({ fileName, ok: false, error: message })
       }
     }
 
     res.json({ files: results })
+  }
+
+  /**
+   * POST /api/files/store — store raw bytes only.
+   *
+   * This is the reversible staging boundary for chat/room context. It returns
+   * durable ids but deliberately performs no semantic work.
+   */
+  router.post('/store', ingestUpload.array('files', MAX_FILES_PER_REQUEST), async (req, res) => {
+    await handleDurableUpload(req, res, false)
+  })
+
+  const ChunkedStartBody = z.object({
+    workspaceId: z.string().min(1),
+    fileName: z.string().min(1).max(1024),
+    mime: z.string().min(1).max(255),
+    sizeBytes: z.number().int().positive().max(MAX_CHUNKED_UPLOAD_BYTES),
+  })
+  const ChunkedWorkspaceBody = z.object({ workspaceId: z.string().min(1) })
+
+  async function chunkedContext(req: Request, res: Response, workspaceId: string) {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) {
+      res.status(401).json({ error: 'Unauthorized' })
+      return null
+    }
+    const assistant = await getWorkspacePrimaryAssistant(userId, workspaceId)
+    if (!assistant || !assistant.workspaceId) {
+      res.status(404).json({ error: 'Not found' })
+      return null
+    }
+    return {
+      workspaceId: assistant.workspaceId,
+      userId,
+      assistantId: assistant.id,
+      assistantKind: assistant.kind,
+      clearance: assistant.clearance,
+      compartments: assistant.compartments,
+    }
+  }
+
+  function sendChunkedError(res: Response, err: unknown): void {
+    if (!(err instanceof ChunkedUploadError)) {
+      console.error('[files/chunked-upload] unexpected error:', err)
+      res.status(500).json({ error: 'upload_failed', detail: 'Could not upload this file.' })
+      return
+    }
+    const status =
+      err.kind === 'invalid' ? 400
+        : err.kind === 'too_large' || err.kind === 'quota_exceeded' ? 413
+          : err.kind === 'not_found' ? 404
+            : err.kind === 'expired' ? 410
+              : 409
+    res.status(status).json({ error: err.kind, detail: err.message })
+  }
+
+  /** Start a 24-hour direct-to-storage upload and mint exact-part PUT URLs. */
+  router.post('/uploads/start', async (req, res) => {
+    if (!chunkedUploads) {
+      res.status(503).json({ error: 'file_storage_unavailable' })
+      return
+    }
+    const parsed = ChunkedStartBody.safeParse(req.body)
+    if (!parsed.success) {
+      const tooLarge = typeof req.body?.sizeBytes === 'number' && req.body.sizeBytes > MAX_CHUNKED_UPLOAD_BYTES
+      res.status(tooLarge ? 413 : 400).json({
+        error: tooLarge ? 'too_large' : 'invalid_upload',
+        detail: tooLarge ? 'Each file must be 1 GiB or smaller.' : 'Invalid upload metadata.',
+      })
+      return
+    }
+    if (!isAllowedMime(parsed.data.mime)) {
+      res.status(400).json({ error: 'unsupported_file_type', detail: `Unsupported file type: ${parsed.data.mime}` })
+      return
+    }
+    const ctx = await chunkedContext(req, res, parsed.data.workspaceId)
+    if (!ctx) return
+    try {
+      res.status(201).json(await chunkedUploads.start(ctx, parsed.data))
+    } catch (err) {
+      sendChunkedError(res, err)
+    }
+  })
+
+  /** Verify exact parts, stream-assemble the final object, and commit its row. */
+  router.post('/uploads/:uploadId/complete', async (req, res) => {
+    if (!chunkedUploads) {
+      res.status(503).json({ error: 'file_storage_unavailable' })
+      return
+    }
+    const parsed = ChunkedWorkspaceBody.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_upload', detail: 'workspaceId is required.' })
+      return
+    }
+    const ctx = await chunkedContext(req, res, parsed.data.workspaceId)
+    if (!ctx) return
+    try {
+      const file = await chunkedUploads.complete(ctx, req.params.uploadId)
+      res.json({
+        fileName: file.name,
+        ok: true,
+        fileId: file.id,
+        path: file.path,
+        sizeBytes: file.sizeBytes,
+        distilled: false,
+        decomposed: false,
+        counts: { entities: 0, edges: 0, memories: 0, tasks: 0 },
+      })
+    } catch (err) {
+      sendChunkedError(res, err)
+    }
+  })
+
+  /** Abort an incomplete upload and delete any staged part objects. */
+  router.delete('/uploads/:uploadId', async (req, res) => {
+    if (!chunkedUploads) {
+      res.status(503).json({ error: 'file_storage_unavailable' })
+      return
+    }
+    const parsed = ChunkedWorkspaceBody.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_upload', detail: 'workspaceId is required.' })
+      return
+    }
+    const ctx = await chunkedContext(req, res, parsed.data.workspaceId)
+    if (!ctx) return
+    try {
+      await chunkedUploads.abort(ctx, req.params.uploadId)
+      res.status(204).end()
+    } catch (err) {
+      sendChunkedError(res, err)
+    }
+  })
+
+  /**
+   * POST /api/files/ingest — store raw bytes + decompose content into the brain.
+   *
+   * Multipart field "files"; body field "workspaceId" (required). Deterministic
+   * (no chat turn): each file's bytes land in workspace_files AND its content is
+   * distilled/parsed to text and run through Pipeline B. Per-file results.
+   */
+  router.post('/ingest', ingestUpload.array('files', MAX_FILES_PER_REQUEST), async (req, res) => {
+    await handleDurableUpload(req, res, true)
   })
 
   /**
@@ -593,7 +753,9 @@ export function fileRoutes(
   router.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
     if (err instanceof MulterError) {
       if (err.code === 'LIMIT_FILE_SIZE') {
-        const maxFileSize = req.path === '/ingest' ? MAX_INGEST_FILE_SIZE : MAX_CACHE_FILE_SIZE
+        const maxFileSize = req.path === '/ingest' || req.path === '/store'
+          ? MAX_INGEST_FILE_SIZE
+          : MAX_CACHE_FILE_SIZE
         res.status(413).json({
           error: 'file_too_large',
           detail: `Each file must be ${maxFileSize / (1024 * 1024)} MB or smaller.`,

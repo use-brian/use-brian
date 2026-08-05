@@ -1,11 +1,11 @@
 /**
- * File-ingest SDK (app-web) — ordinary files use POST /api/files/ingest;
+ * Durable-file SDK (app-web) — ordinary files either stage with
+ * POST /api/files/store or explicitly decompose with POST /api/files/ingest;
  * LinkedIn ZIP archives use the dedicated lossless /api/imports/linkedin queue.
  *
- * One multipart request stores each file's raw bytes in the workspace brain
- * AND decomposes its content into entities / memories / tasks (Pipeline B),
- * server-side and deterministically (no chat turn). Returns a per-file result.
- * Backs the Home "Add files to your brain" drop block.
+ * Both paths preserve the original bytes. Only `/ingest` decomposes content
+ * into entities / memories / tasks (Pipeline B). `/store` is the reversible
+ * staging boundary used by Pins before the user has supplied a purpose.
  *
  * Specs: docs/architecture/features/files.md -> "Direct ingest" and
  * docs/architecture/brain/linkedin-import.md.
@@ -17,6 +17,10 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
 /** Keep one multipart body below Cloud Run's 32 MiB HTTP/1 request ceiling. */
 export const MAX_INGEST_FILE_BYTES = 30 * 1024 * 1024;
+/** Work Bench storage-only lane. Larger files are split into signed PUT parts. */
+export const MAX_STORED_FILE_BYTES = 1024 * 1024 * 1024;
+/** A transfer above this size needs an explicit pre-flight confirmation. */
+export const LARGE_FILE_CONFIRM_BYTES = 100 * 1024 * 1024;
 
 export type IngestCounts = {
   entities: number;
@@ -57,9 +61,10 @@ export function totalAdded(counts: IngestCounts | undefined): number {
  * Request failures become that file's `ok: false` result, preserving successful
  * siblings and the caller's positional reconciliation.
  */
-export async function ingestFiles(
+async function uploadDurableFiles(
   workspaceId: string,
   files: File[],
+  action: "store" | "ingest",
 ): Promise<IngestFileResult[]> {
   const results: IngestFileResult[] = [];
   for (const file of files) {
@@ -69,7 +74,7 @@ export async function ingestFiles(
 
     try {
       // Don't set Content-Type — the browser adds the multipart boundary.
-      const res = await authFetch(`${API_URL}/api/files/ingest`, {
+      const res = await authFetch(`${API_URL}/api/files/${action}`, {
         method: "POST",
         body: formData,
       });
@@ -100,6 +105,146 @@ export async function ingestFiles(
     }
   }
   return results;
+}
+
+type ChunkedUploadStart = {
+  uploadId: string;
+  parts: Array<{
+    index: number;
+    offset: number;
+    sizeBytes: number;
+    url: string;
+  }>;
+};
+
+export type StoreFilesOptions = {
+  onProgress?: (file: File, uploadedBytes: number, totalBytes: number) => void;
+};
+
+const waitForRetry = (ms: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+async function putChunkWithRetry(url: string, bytes: Blob): Promise<void> {
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const response = await fetch(url, {
+        method: "PUT",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: bytes,
+      });
+      if (!response.ok) throw new Error(`Part upload failed (HTTP ${response.status})`);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < 2) await waitForRetry(250 * (attempt + 1));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("Part upload failed");
+}
+
+async function storeFileChunked(
+  workspaceId: string,
+  file: File,
+  options: StoreFilesOptions,
+): Promise<IngestFileResult> {
+  const startResponse = await authFetch(`${API_URL}/api/files/uploads/start`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      workspaceId,
+      fileName: file.name,
+      mime: file.type || "application/octet-stream",
+      sizeBytes: file.size,
+    }),
+  });
+  const start = (await startResponse.json().catch(() => null)) as
+    | (ChunkedUploadStart & { error?: string; detail?: string })
+    | null;
+  if (!startResponse.ok || !start?.uploadId || !Array.isArray(start.parts)) {
+    throw new Error(start?.detail ?? start?.error ?? `Upload failed (HTTP ${startResponse.status})`);
+  }
+
+  let completed = false;
+  try {
+    let uploadedBytes = 0;
+    let cursor = 0;
+    const workers = Array.from(
+      { length: Math.min(3, start.parts.length) },
+      async () => {
+        while (cursor < start.parts.length) {
+          const part = start.parts[cursor];
+          cursor += 1;
+          const slice = file.slice(part.offset, part.offset + part.sizeBytes);
+          if (slice.size !== part.sizeBytes) throw new Error("Upload part size changed");
+          await putChunkWithRetry(part.url, slice);
+          uploadedBytes += part.sizeBytes;
+          options.onProgress?.(file, uploadedBytes, file.size);
+        }
+      },
+    );
+    await Promise.all(workers);
+
+    const completeResponse = await authFetch(
+      `${API_URL}/api/files/uploads/${encodeURIComponent(start.uploadId)}/complete`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceId }),
+      },
+    );
+    const result = (await completeResponse.json().catch(() => null)) as
+      | (IngestFileResult & { detail?: string })
+      | null;
+    if (!completeResponse.ok || !result?.ok || !result.fileId) {
+      throw new Error(result?.detail ?? result?.error ?? `Upload failed (HTTP ${completeResponse.status})`);
+    }
+    completed = true;
+    return result;
+  } finally {
+    if (!completed) {
+      await authFetch(`${API_URL}/api/files/uploads/${encodeURIComponent(start.uploadId)}`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceId }),
+      }).catch(() => undefined);
+    }
+  }
+}
+
+/** Store durable bytes without parsing, distilling, indexing, or Pipeline B. */
+export function storeFiles(
+  workspaceId: string,
+  files: File[],
+  options: StoreFilesOptions = {},
+): Promise<IngestFileResult[]> {
+  return (async () => {
+    const results: IngestFileResult[] = [];
+    for (const file of files) {
+      if (file.size <= MAX_INGEST_FILE_BYTES) {
+        results.push(...await uploadDurableFiles(workspaceId, [file], "store"));
+        continue;
+      }
+      try {
+        results.push(await storeFileChunked(workspaceId, file, options));
+      } catch (error) {
+        results.push({
+          fileName: file.name,
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    return results;
+  })();
+}
+
+/** Store and explicitly decompose files into the workspace brain. */
+export function ingestFiles(
+  workspaceId: string,
+  files: File[],
+): Promise<IngestFileResult[]> {
+  return uploadDurableFiles(workspaceId, files, "ingest");
 }
 
 type LinkedInImportResponse = {

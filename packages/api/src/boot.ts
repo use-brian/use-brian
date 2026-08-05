@@ -334,12 +334,14 @@ import {
 import { goalsRoutes } from './routes/goals.js'
 import { createDbCrmStore } from './db/crm-store.js'
 import { createDbWorkspaceFilesStore } from './db/workspace-files-store.js'
+import { createWorkspaceFileUploadsStore } from './db/workspace-file-uploads-store.js'
 import { getWorkspaceFileById } from './db/workspace-files.js'
 import { createGcsFilesClient, type GcsFilesClient } from './files/gcs-client.js'
 import { createLocalFilesClient, resolveLocalFilesBaseDir } from './files/local-files-client.js'
 import { localFilesTransferRoutes } from './routes/local-files-transfer.js'
 import { openRecordingsRoutes } from './routes/recordings.js'
 import { createFilesApi, createSingletonFilesClientResolver, type FilesClientResolver } from './files/files-api.js'
+import { createChunkedFileUploadService, type ChunkedFileUploadService } from './files/chunked-upload.js'
 import { createSearchFileContentTool } from './files/file-artifact-tools.js'
 import {
   createChatSearchRecordingTool,
@@ -1289,6 +1291,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   })
   const crmStore = createDbCrmStore()
   const workspaceFilesStore = createDbWorkspaceFilesStore()
+  const workspaceFileUploadsStore = createWorkspaceFileUploadsStore()
   const workflowStore = createDbWorkflowStore()
   const workflowRunStore = createDbWorkflowRunStore()
   const pendingApprovalsStore = createPendingApprovalsStore()
@@ -2090,6 +2093,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // TDZ-safe: pre-assignment access reads `null` and degrades honestly.
   let filesApi: ReturnType<typeof createFilesApi> | null = null
   let filesResolver: FilesClientResolver | null = null
+  let chunkedFileUploads: ChunkedFileUploadService | null = null
 
   const calleeExecutor = createCalleeExecutor({
     provider,
@@ -3057,6 +3061,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       store: workspaceFilesStore,
       auditStore: workspaceAuditStore,
     })
+    chunkedFileUploads = createChunkedFileUploadService({
+      resolver: filesResolver,
+      filesStore: workspaceFilesStore,
+      uploadsStore: workspaceFileUploadsStore,
+      auditStore: workspaceAuditStore,
+    })
     // Effective allow/ask/block for a files tool — the same L1 (app-level
     // sentinel) + L2 (per-assistant) strictest-wins resolution the Studio /
     // Assistant tool-policy UIs display and write (`mcp_tool_settings`,
@@ -3833,7 +3843,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   app.use('/api/feedback', optionalAuth(env.JWT_SECRET), feedbackRoutes())
 
-  app.use('/api/files', optionalAuth(env.JWT_SECRET), fileRoutes(fileStore, fileIngestor as never, artifactPromoter))
+  app.use(
+    '/api/files',
+    optionalAuth(env.JWT_SECRET),
+    fileRoutes(fileStore, fileIngestor as never, artifactPromoter, undefined, chunkedFileUploads),
+  )
   if (filesApi) {
     app.use(
       '/api/imports/linkedin',
@@ -5490,6 +5504,17 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       }, 6 * 60 * 60 * 1000)
     : null
 
+  // ── chunked workspace-file upload reaper ──
+  // Expired sessions are no longer completable. Reclaim their direct-upload
+  // parts, plus any completed-session parts whose immediate cleanup retried.
+  const chunkedUploadReaper = runWorkers && chunkedFileUploads
+    ? startJitteredInterval(() => {
+        void chunkedFileUploads!.sweepExpired()
+          .then((n) => { if (n > 0) console.log(`[chunked-upload-reaper] cleaned ${n} upload(s)`) })
+          .catch((err) => console.error('[chunked-upload-reaper] sweep failed:', err))
+      }, 60 * 60 * 1000)
+    : null
+
   // ── Knowledge sync worker ──
   // Uses the `syncCredentials` resolver built once above (platform closed
   // factory, or the open resolver over the connector stores).
@@ -6042,6 +6067,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     officeLifecycleWorker.stop()
     await codexProviderManager?.close()
     if (fileCacheReaper) stopJitteredInterval(fileCacheReaper)
+    if (chunkedUploadReaper) stopJitteredInterval(chunkedUploadReaper)
     await supportDiagnosticsManager?.stop()
     await analytics.shutdown()
     if (server) await new Promise<void>((res) => server!.close(() => res()))
