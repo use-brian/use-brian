@@ -2,20 +2,11 @@ import type { PGlite } from '@electric-sql/pglite'
 import { createHash } from 'node:crypto'
 import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { toPgliteMigrationSql } from '@use-brian/api/migrations/pglite-sql.js'
 
 const migrationRuns = new WeakMap<PGlite, Promise<void>>()
 const OSS_CHANNELS_330 = '330_oss_channels.sql'
 const OSS_CHANNELS_330_SHA256 = '64aeddde4c05bd186b638be0b0c02f477dd16afb20358c00446b2e9d0d739c1e'
-
-function withoutOuterTransaction(sql: string, file: string): string {
-  const begins = sql.match(/^BEGIN;\s*$/gm)?.length ?? 0
-  const commits = sql.match(/^COMMIT;\s*$/gm)?.length ?? 0
-  if (begins === 0 && commits === 0) return sql
-  if (begins !== 1 || commits !== 1) {
-    throw new Error(`${file}: expected one outer BEGIN/COMMIT pair`)
-  }
-  return sql.replace(/^BEGIN;\s*$/m, '').replace(/^COMMIT;\s*$/m, '')
-}
 
 function concurrentIndexStatements(sql: string): string[] | null {
   if (!/concurrently/i.test(sql) || /^\s*BEGIN/im.test(sql)) return null
@@ -127,7 +118,7 @@ async function migratePgliteExclusive(db: PGlite, migrationsDir: string): Promis
       const existing = await tx.query<{ name: string }>('SELECT name FROM public._migrations WHERE name = $1', [file])
       if (existing.rows.length > 0) return false
 
-      await tx.exec(withoutOuterTransaction(ddl, file))
+      await tx.exec(toPgliteMigrationSql(ddl, file))
       for (const insert of seedRaw.split('\n').filter((l) => l.trimStart().startsWith('INSERT'))) {
         await tx.exec(insert)
       }

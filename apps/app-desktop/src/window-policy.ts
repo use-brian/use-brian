@@ -143,6 +143,21 @@ export function isLoginNavigation(targetUrl: string): boolean {
 
 export type LoginNavAction = "pkce" | "local-session" | "none";
 
+/**
+ * A cloud login redirect is ambiguous: it can mean "no session", but it can
+ * also be the renderer racing the shell keep-alive after the one-hour access
+ * cookie expired. A still-present refresh credential wins — recover it in
+ * place instead of turning a transient redirect into a visible sign-out.
+ */
+export type LoginRecoveryAction = LoginNavAction | "recover-session";
+
+export function decideLoginRecoveryAction(
+  loginAction: LoginNavAction,
+  hasRefreshCredential: boolean,
+): LoginRecoveryAction {
+  return loginAction === "pkce" && hasRefreshCredential ? "recover-session" : loginAction;
+}
+
 export type RedirectAction = "gateway" | LoginNavAction | "navigation";
 
 /**

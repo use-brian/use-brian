@@ -251,7 +251,7 @@ function RunApprovalActions({
             type="button"
             disabled={busy}
             onClick={() => void respond("approved")}
-            className="text-xs px-3 py-1.5 rounded-md bg-primary text-primary-foreground font-medium hover:opacity-90 disabled:opacity-50"
+            className="text-xs px-3 py-1.5 rounded-md bg-action text-action-foreground font-medium hover:opacity-90 disabled:opacity-50"
           >
             {t.approvalsPage.approveAction}
           </button>

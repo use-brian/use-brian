@@ -148,6 +148,12 @@ importers:
       '@use-brian/doc-model':
         specifier: workspace:*
         version: link:../../packages/doc-model
+      '@use-brian/office-model':
+        specifier: workspace:*
+        version: link:../../packages/office-model
+      '@use-brian/office-renderer':
+        specifier: workspace:*
+        version: link:../../packages/office-renderer
       '@use-brian/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -361,6 +367,9 @@ importers:
       '@use-brian/doc-model':
         specifier: workspace:*
         version: link:../../packages/doc-model
+      '@use-brian/office-model':
+        specifier: workspace:*
+        version: link:../../packages/office-model
       dotenv:
         specifier: ^16
         version: 16.6.1
@@ -487,6 +496,9 @@ importers:
       '@use-brian/doc-model':
         specifier: workspace:*
         version: link:../doc-model
+      '@use-brian/office-model':
+        specifier: workspace:*
+        version: link:../office-model
       '@use-brian/shared':
         specifier: workspace:*
         version: link:../shared
@@ -514,6 +526,9 @@ importers:
       pg:
         specifier: ^8
         version: 8.21.0
+      yjs:
+        specifier: 13.6.31
+        version: 13.6.31
       zod:
         specifier: ^3.24
         version: 3.25.76
@@ -632,6 +647,12 @@ importers:
       '@use-brian/brian-kb':
         specifier: workspace:*
         version: link:../brian-kb
+      '@use-brian/office-model':
+        specifier: workspace:*
+        version: link:../office-model
+      '@use-brian/office-renderer':
+        specifier: workspace:*
+        version: link:../office-renderer
       '@use-brian/shared':
         specifier: workspace:*
         version: link:../shared
@@ -644,9 +665,6 @@ importers:
       exceljs:
         specifier: ^4.4.0
         version: 4.4.0
-      image-size:
-        specifier: ^2.0.2
-        version: 2.0.2
       jszip:
         specifier: ^3.10.1
         version: 3.10.1
@@ -751,6 +769,38 @@ importers:
       '@types/node':
         specifier: ^20.19.39
         version: 20.19.43
+      typescript:
+        specifier: ^5.7
+        version: 5.9.3
+      vitest:
+        specifier: ^3
+        version: 3.2.6(@types/debug@4.1.13)(@types/node@20.19.43)(jiti@2.7.0)(jsdom@29.1.1(@noble/hashes@1.8.0))(lightningcss@1.32.0)(tsx@4.22.4)
+
+  packages/office-model:
+    dependencies:
+      yjs:
+        specifier: 13.6.31
+        version: 13.6.31
+      zod:
+        specifier: ^3.24
+        version: 3.25.76
+    devDependencies:
+      '@types/node':
+        specifier: ^20.19.39
+        version: 20.19.43
+      typescript:
+        specifier: ^5.7
+        version: 5.9.3
+      vitest:
+        specifier: ^3
+        version: 3.2.6(@types/debug@4.1.13)(@types/node@20.19.43)(jiti@2.7.0)(jsdom@29.1.1(@noble/hashes@1.8.0))(lightningcss@1.32.0)(tsx@4.22.4)
+
+  packages/office-renderer:
+    dependencies:
+      '@use-brian/office-model':
+        specifier: workspace:*
+        version: link:../office-model
+    devDependencies:
       typescript:
         specifier: ^5.7
         version: 5.9.3
@@ -5225,11 +5275,6 @@ packages:
 
   image-size@1.2.1:
     resolution: {integrity: sha512-rH+46sQJ2dlwfjfhCyNx5thzrv+dtmBIhPHk0zgRUukHzZ/kRueTJXoYYsclBaKcSMBWuGbOFXtioLpzTb5euw==}
-    engines: {node: '>=16.x'}
-    hasBin: true
-
-  image-size@2.0.2:
-    resolution: {integrity: sha512-IRqXKlaXwgSMAMtpNzZa1ZAe8m+Sa1770Dhk8VkSsP9LS+iHD62Zd8FQKs8fbPiagBE7BzoFX23cxFnwshpV6w==}
     engines: {node: '>=16.x'}
     hasBin: true
 
@@ -10496,7 +10541,7 @@ snapshots:
       chai: 5.3.3
       tinyrainbow: 2.0.0
 
-  '@vitest/mocker@3.2.6(vite@6.4.3(@types/node@20.19.43)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.22.4))':
+  '@vitest/mocker@3.2.6(vite@6.4.3(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.22.4))':
     dependencies:
       '@vitest/spy': 3.2.6
       estree-walker: 3.0.3
@@ -12053,7 +12098,7 @@ snapshots:
       eslint: 9.39.4(jiti@2.7.0)
       eslint-import-resolver-node: 0.3.10
       eslint-import-resolver-typescript: 3.10.1(eslint-plugin-import@2.32.0(@typescript-eslint/parser@8.61.1(eslint@9.39.4(jiti@2.7.0))(typescript@5.9.3))(eslint@9.39.4(jiti@2.7.0)))(eslint@9.39.4(jiti@2.7.0))
-      eslint-plugin-import: 2.32.0(@typescript-eslint/parser@8.61.1(eslint@9.39.4(jiti@2.7.0))(typescript@5.9.3))(eslint-import-resolver-typescript@3.10.1(eslint-plugin-import@2.32.0(@typescript-eslint/parser@8.61.1(eslint@9.39.4(jiti@2.7.0))(typescript@5.9.3))(eslint@9.39.4(jiti@2.7.0)))(eslint@9.39.4(jiti@2.7.0)))(eslint@9.39.4(jiti@2.7.0))
+      eslint-plugin-import: 2.32.0(@typescript-eslint/parser@8.61.1(eslint@9.39.4(jiti@2.7.0))(typescript@5.9.3))(eslint-import-resolver-typescript@3.10.1)(eslint@9.39.4(jiti@2.7.0))
       eslint-plugin-jsx-a11y: 6.10.2(eslint@9.39.4(jiti@2.7.0))
       eslint-plugin-react: 7.37.5(eslint@9.39.4(jiti@2.7.0))
       eslint-plugin-react-hooks: 7.1.1(eslint@9.39.4(jiti@2.7.0))
@@ -12086,7 +12131,7 @@ snapshots:
       tinyglobby: 0.2.17
       unrs-resolver: 1.12.2
     optionalDependencies:
-      eslint-plugin-import: 2.32.0(@typescript-eslint/parser@8.61.1(eslint@9.39.4(jiti@2.7.0))(typescript@5.9.3))(eslint-import-resolver-typescript@3.10.1(eslint-plugin-import@2.32.0(@typescript-eslint/parser@8.61.1(eslint@9.39.4(jiti@2.7.0))(typescript@5.9.3))(eslint@9.39.4(jiti@2.7.0)))(eslint@9.39.4(jiti@2.7.0)))(eslint@9.39.4(jiti@2.7.0))
+      eslint-plugin-import: 2.32.0(@typescript-eslint/parser@8.61.1(eslint@9.39.4(jiti@2.7.0))(typescript@5.9.3))(eslint-import-resolver-typescript@3.10.1)(eslint@9.39.4(jiti@2.7.0))
     transitivePeerDependencies:
       - supports-color
 
@@ -12101,7 +12146,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  eslint-plugin-import@2.32.0(@typescript-eslint/parser@8.61.1(eslint@9.39.4(jiti@2.7.0))(typescript@5.9.3))(eslint-import-resolver-typescript@3.10.1(eslint-plugin-import@2.32.0(@typescript-eslint/parser@8.61.1(eslint@9.39.4(jiti@2.7.0))(typescript@5.9.3))(eslint@9.39.4(jiti@2.7.0)))(eslint@9.39.4(jiti@2.7.0)))(eslint@9.39.4(jiti@2.7.0)):
+  eslint-plugin-import@2.32.0(@typescript-eslint/parser@8.61.1(eslint@9.39.4(jiti@2.7.0))(typescript@5.9.3))(eslint-import-resolver-typescript@3.10.1)(eslint@9.39.4(jiti@2.7.0)):
     dependencies:
       '@rtsao/scc': 1.1.0
       array-includes: 3.1.9
@@ -12948,8 +12993,6 @@ snapshots:
   image-size@1.2.1:
     dependencies:
       queue: 6.0.2
-
-  image-size@2.0.2: {}
 
   imapflow@1.4.8:
     dependencies:
@@ -16071,7 +16114,7 @@ snapshots:
     dependencies:
       '@types/chai': 5.2.3
       '@vitest/expect': 3.2.6
-      '@vitest/mocker': 3.2.6(vite@6.4.3(@types/node@20.19.43)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.22.4))
+      '@vitest/mocker': 3.2.6(vite@6.4.3(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.22.4))
       '@vitest/pretty-format': 3.2.6
       '@vitest/runner': 3.2.6
       '@vitest/snapshot': 3.2.6

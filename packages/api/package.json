@@ -30,6 +30,7 @@
     "@use-brian/channels": "workspace:*",
     "@use-brian/core": "workspace:*",
     "@use-brian/doc-model": "workspace:*",
+    "@use-brian/office-model": "workspace:*",
     "@use-brian/shared": "workspace:*",
     "dotenv": "^16",
     "express": "^5",
@@ -39,6 +40,7 @@
     "multer": "^2.1.1",
     "nodemailer": "^8.0.9",
     "pg": "^8",
+    "yjs": "13.6.31",
     "zod": "^3.24"
   },
   "devDependencies": {

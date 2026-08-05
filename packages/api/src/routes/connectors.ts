@@ -59,7 +59,15 @@ import { Router } from 'express'
 import { constants as fsConstants, promises as fs } from 'node:fs'
 import * as nodePath from 'node:path'
 import { classifyTool, defaultPolicy, type McpSettingsStore } from '@use-brian/core'
-import { APP_LEVEL_ASSISTANT_ID, CONFIGURABLE_APP_CREDENTIAL_CONNECTORS, OFFICIAL_CONNECTORS, OFFICIAL_CONNECTOR_TOOLS, msGraphScopes, type ConnectorEntry } from '@use-brian/shared'
+import {
+  APP_LEVEL_ASSISTANT_ID,
+  CONFIGURABLE_APP_CREDENTIAL_CONNECTORS,
+  connectorSupportsMultipleInstances,
+  OFFICIAL_CONNECTORS,
+  OFFICIAL_CONNECTOR_TOOLS,
+  msGraphScopes,
+  type ConnectorEntry,
+} from '@use-brian/shared'
 import type { ConnectorStore, ConnectorCredentials } from '../db/connector-store.js'
 import type { ConnectorInstanceStore, ConnectorInstance, ConnectorHealthStatus } from '../db/connector-instance-store.js'
 import { buildConnectorAuthHeaders } from '../mcp/auth-headers.js'
@@ -267,7 +275,7 @@ function placeholderRow(entry: ConnectorEntry): ConnectorRowOut {
     custom: false,
     isPlaceholder: true,
     isPrimary: true,
-    addable: entry.auth_type !== 'none' && !entry.single_instance,
+    addable: connectorSupportsMultipleInstances(entry),
     oauthRequired: entry.oauth_required,
     category: entry.category,
   }
@@ -282,7 +290,7 @@ function instanceRow(inst: ConnectorInstance, isPrimary: boolean): ConnectorRowO
     name: entry?.name ?? inst.label,
     label: inst.label,
     isPrimary,
-    addable: entry ? entry.auth_type !== 'none' && !entry.single_instance : false,
+    addable: entry ? connectorSupportsMultipleInstances(entry) : false,
     description: entry?.description,
     connected: inst.connected,
     ingestionEnabled: inst.ingestionEnabled,
@@ -1146,7 +1154,7 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
           ...entry,
           added: insts.length > 0,
           connected: insts.some((i) => i.connected),
-          addable: entry.auth_type !== 'none' && !entry.single_instance,
+          addable: connectorSupportsMultipleInstances(entry),
         }
       })
       res.json({ directory })

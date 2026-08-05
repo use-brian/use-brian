@@ -60,6 +60,7 @@ import { ConnectorToolList, type ToolPolicy } from "@/components/connectors/conn
 import { ConnectorIcon } from "@/components/connectors/connector-icon";
 import { SensitivityBadge } from "@/components/sensitivity-badge";
 import { AddConnectorMenu } from "@/components/connectors/add-connector-menu";
+import { StudioTopbarActions } from "@/components/studio/studio-topbar";
 import { PreflightHeadersSection } from "@/components/connectors/preflight-headers-section";
 import { readPreflightHeaders } from "@/lib/connector-preflight-headers";
 import { ActorIdentityToggle } from "@/components/connectors/actor-identity-toggle";
@@ -414,7 +415,7 @@ function GDriveAuthorizedFiles() {
               onClick={open}
               disabled={isOpening || disabled}
               title={disabledReason}
-              className="text-[11px] font-medium px-3 py-1 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-40 transition-colors shrink-0"
+              className="text-[11px] font-medium px-3 py-1 rounded-lg bg-action text-action-foreground hover:bg-action/90 disabled:opacity-40 transition-colors shrink-0"
             >
               {isOpening ? gd.opening : gd.addFromDrive}
             </button>
@@ -2494,9 +2495,7 @@ function ConnectorsList() {
 
   return (
     <div className="space-y-5">
-      {/* Intro row — the page's one primary action, the Add menu (the topbar
-          breadcrumb names the section; no description paragraph). */}
-      <div className="flex justify-end">
+      <StudioTopbarActions>
         <AddConnectorMenu
           label={tc.addConnector}
           browseLabel={tc.browseDirectory}
@@ -2504,7 +2503,7 @@ function ConnectorsList() {
           onBrowseDirectory={() => setShowBrowse(true)}
           onAddCustom={() => setShowAddForm(true)}
         />
-      </div>
+      </StudioTopbarActions>
 
       {/* Custom MCP server form — opened from the Add menu. */}
       {showAddForm && (
@@ -2551,7 +2550,7 @@ function ConnectorsList() {
               {tc.cancel}
             </button>
             <button onClick={handleAddCustom} disabled={!newName.trim() || !newUrl.trim()}
-              className="text-xs font-medium bg-primary text-primary-foreground px-4 py-1.5 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors">
+              className="text-xs font-medium bg-action text-action-foreground px-4 py-1.5 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors">
               {tc.add}
             </button>
           </div>
@@ -2787,7 +2786,7 @@ function ConnectorsList() {
                         <button
                           onClick={() => handleWsReconnect(sel)}
                           disabled={!wsReconnectSecret.trim() || connecting === rid}
-                          className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                          className="text-xs font-medium bg-action text-action-foreground px-3 py-1 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
                         >
                           {connecting === rid ? tc.savingBtn : tc.saveBtn}
                         </button>
@@ -2832,7 +2831,7 @@ function ConnectorsList() {
                         </button>
                         <button
                           onClick={() => handleWsSaveDetails(sel)}
-                          className="text-xs font-medium bg-primary text-primary-foreground px-4 py-1.5 rounded-lg hover:bg-primary/90 transition-colors"
+                          className="text-xs font-medium bg-action text-action-foreground px-4 py-1.5 rounded-lg hover:bg-action/90 transition-colors"
                         >
                           {tc.saveBtn}
                         </button>
@@ -3106,7 +3105,7 @@ function ConnectorsList() {
                     <button
                       onClick={() => handleConnect(sel)}
                       disabled={connecting === rid}
-                      className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 transition-colors disabled:opacity-50"
+                      className="text-xs font-medium bg-action text-action-foreground px-3 py-1 rounded-lg hover:bg-action/90 transition-colors disabled:opacity-50"
                     >
                       {connecting === rid ? tc.connectingBtn : tc.connectBtn}
                     </button>
@@ -3204,7 +3203,7 @@ function ConnectorsList() {
                       <button
                         onClick={() => handleSavePat(sel)}
                         disabled={!patInput.trim() || connecting === rid}
-                        className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                        className="text-xs font-medium bg-action text-action-foreground px-3 py-1 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
                       >
                         {connecting === rid ? tc.savingBtn : tc.saveBtn}
                       </button>
@@ -3280,7 +3279,7 @@ function ConnectorsList() {
                       <button
                         onClick={() => saveMsGraphApp(sel)}
                         disabled={!msgraphAppId.trim() || !msgraphAppSecret.trim() || connecting === rid}
-                        className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                        className="text-xs font-medium bg-action text-action-foreground px-3 py-1 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
                       >
                         {connecting === rid ? tc.msgraph.connectingBtn : tc.msgraph.connectBtn}
                       </button>
@@ -3380,7 +3379,7 @@ function ConnectorsList() {
                       <button
                         onClick={() => startShopifyByoConnect(sel)}
                         disabled={!shopifyDomain.trim() || !shopifyAppId.trim() || !shopifyAppSecret.trim() || connecting === rid || shopifyResolving}
-                        className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                        className="text-xs font-medium bg-action text-action-foreground px-3 py-1 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
                       >
                         {connecting === rid ? tc.shopify.connectingBtn : tc.shopify.appConnectBtn}
                       </button>
@@ -3459,7 +3458,7 @@ function ConnectorsList() {
                       <button
                         onClick={() => handleSaveGcs(sel)}
                         disabled={!gcsKey.trim() || !gcsBucket.trim() || connecting === rid}
-                        className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                        className="text-xs font-medium bg-action text-action-foreground px-3 py-1 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
                       >
                         {connecting === rid ? tc.gcs.validatingBtn : tc.gcs.connectBtn}
                       </button>
@@ -3524,7 +3523,7 @@ function ConnectorsList() {
                       <button
                         onClick={() => handleSaveS3(sel)}
                         disabled={!s3Bucket.trim() || !s3AccessKeyId.trim() || !s3SecretKey.trim() || connecting === rid}
-                        className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                        className="text-xs font-medium bg-action text-action-foreground px-3 py-1 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
                       >
                         {connecting === rid ? tc.s3.validatingBtn : tc.s3.connectBtn}
                       </button>
@@ -3555,7 +3554,7 @@ function ConnectorsList() {
                       <button
                         onClick={() => handleSaveLocal(sel)}
                         disabled={!localDirPath.trim() || connecting === rid}
-                        className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                        className="text-xs font-medium bg-action text-action-foreground px-3 py-1 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
                       >
                         {connecting === rid ? tc.local.connectingBtn : tc.local.connectBtn}
                       </button>
@@ -3607,7 +3606,7 @@ function ConnectorsList() {
                       <button
                         onClick={() => handleSaveCli(sel)}
                         disabled={!newCliLabel.trim() || !newCliBinaryPath.trim() || connecting === rid}
-                        className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                        className="text-xs font-medium bg-action text-action-foreground px-3 py-1 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
                       >
                         {connecting === rid ? tc.cli.connectingBtn : tc.cli.connectBtn}
                       </button>
@@ -3731,7 +3730,7 @@ function ConnectorsList() {
                       <button
                         onClick={() => handleSaveImap(sel)}
                         disabled={!imapEmail.trim().includes("@") || !imapPassword || connecting === rid}
-                        className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                        className="text-xs font-medium bg-action text-action-foreground px-3 py-1 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
                       >
                         {connecting === rid ? tc.imap.verifyingBtn : tc.imap.connectBtn}
                       </button>
@@ -3770,7 +3769,7 @@ function ConnectorsList() {
                       <button
                         onClick={() => handleSaveAddAnother(sel.id)}
                         disabled={!addPat.trim() || connecting === `add:${sel.id}`}
-                        className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                        className="text-xs font-medium bg-action text-action-foreground px-3 py-1 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
                       >
                         {connecting === `add:${sel.id}` ? tc.savingBtn : tc.addAccountBtn}
                       </button>
@@ -3980,7 +3979,7 @@ function ConnectorsList() {
                           <button
                             onClick={() => handleSaveCustom(sel.id)}
                             disabled={!editName.trim() || !editUrl.trim()}
-                            className="text-xs font-medium bg-primary text-primary-foreground px-4 py-1.5 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                            className="text-xs font-medium bg-action text-action-foreground px-4 py-1.5 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
                           >
                             {tc.saveBtn}
                           </button>
@@ -4020,7 +4019,7 @@ function ConnectorsList() {
                         {cliEnvKeys.length > 0 && <p className="text-[11px] text-muted-foreground">{tc.cli.envKeys.replace("{keys}", cliEnvKeys.join(", "))}</p>}
                         <p className="text-[11px] text-muted-foreground">{tc.cli.updateNote}</p>
                         {cliError && <p className="text-xs text-destructive">{cliError}</p>}
-                        <button onClick={() => handleUpdateCli(sel)} disabled={!cliLabel.trim() || !cliBinaryPath.trim() || connecting === rid} className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1.5 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors">
+                        <button onClick={() => handleUpdateCli(sel)} disabled={!cliLabel.trim() || !cliBinaryPath.trim() || connecting === rid} className="text-xs font-medium bg-action text-action-foreground px-3 py-1.5 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors">
                           {connecting === rid ? tc.cli.connectingBtn : tc.cli.updateBtn}
                         </button>
                       </div>

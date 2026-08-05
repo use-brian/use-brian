@@ -138,7 +138,7 @@ export function ImapSyncPanel({ instanceId }: { instanceId?: string } = {}) {
             <button
               onClick={() => void armBackfill("12m")}
               disabled={arming}
-              className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
+              className="text-xs font-medium bg-action text-action-foreground px-3 py-1 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
             >
               {tm.scope12m}
             </button>

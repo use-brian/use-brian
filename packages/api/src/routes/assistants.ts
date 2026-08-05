@@ -30,7 +30,9 @@ import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
 import type { McpSettingsStore, JobStore, CapabilityStore } from '@use-brian/core'
 import {
   APP_LEVEL_ASSISTANT_ID,
+  ALL_EXACT_INSTANCE_GOVERNANCE_CONNECTOR_IDS,
   BUILTIN_PRIMITIVE_CONNECTOR_IDS,
+  MULTI_INSTANCE_CONNECTOR_IDS,
   OFFICIAL_CONNECTOR_TOOLS,
   OFFICIAL_CONNECTORS,
   type ConnectorEntry,
@@ -624,8 +626,10 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
       // Build the unified list, applying the same precedence the engine
       // uses at tool-injection time (see packages/api/src/mcp/inject.ts):
       //   team-native > member-grant > personal
-      // Most toggles are keyed by provider. Instance-catalog connectors use a
-      // stable `<provider>:<instanceId>` governance id, matching runtime injection.
+      // The oldest instance keeps the provider key for backward compatibility;
+      // every additional instance gets a stable `<provider>:<instanceId>` key.
+      // Registry-declared exact-governance connectors keep exact keys for every
+      // instance because their accounts or discovered catalogs are independent.
       type Entry = {
         id: string
         providerId?: string
@@ -640,70 +644,69 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
         grantedByUserId?: string
         /** Internal ordering key for account-bound cards; stripped from JSON. */
         sortCreatedAt?: Date
+        /** Internal provider grouping key; stripped from JSON. */
+        sortProvider?: string
         /**
-         * The backing connector_instance id. IMAP cards use it to keep every
-         * account's governance independent; team-native cards also use it for
-         * the clearance-gated workspace tool-policy routes.
+         * The backing connector_instance id. Multi-account cards use it for
+         * exact governance; team-native cards also use it for the
+         * clearance-gated workspace tool-policy routes.
          */
         instanceId?: string
       }
       const byKey = new Map<string, Entry>()
 
       if (assistantTeamId && options.connectorInstanceStore) {
-        const teamNative = await options.connectorInstanceStore.listByWorkspaceSystem(assistantTeamId)
+        const teamNative = (await options.connectorInstanceStore.listByWorkspaceSystem(assistantTeamId))
+          .sort((a, b) => (a.createdAt?.getTime() ?? 0) - (b.createdAt?.getTime() ?? 0)
+            || String(a.id).localeCompare(String(b.id)))
+        const instanceIndexByProvider = new Map<string, number>()
         for (const inst of teamNative) {
           const entry = registry.find((e) => e.id === inst.provider)
           // WhatsApp channel infrastructure owns connector_instance rows for
           // credentials and attribution, but it exposes no assistant tools.
           if (inst.provider === 'whatsapp') continue
-          if (inst.provider === 'cli') {
-            const governanceId = connectorInstanceGovernanceId('cli', inst.id)
+          if (ALL_EXACT_INSTANCE_GOVERNANCE_CONNECTOR_IDS.has(inst.provider)) {
+            // Exact-governance account routers expose only usable accounts in
+            // Assistant Tools; disconnected/auth-failed rows stay manageable
+            // on the workspace connector surface.
+            if (!inst.connected || (inst.provider !== 'cli' && inst.healthStatus === 'auth_failed')) continue
+            const governanceId = connectorInstanceGovernanceId(inst.provider, inst.id)
             byKey.set(governanceId, {
               id: governanceId,
-              providerId: 'cli',
-              name: inst.label,
-              custom: false,
-              connected: inst.connected,
-              enabled: settingsMap.get(governanceId) ?? settingsMap.get('cli') ?? true,
-              icon_url: entry?.icon_url,
-              category: entry?.category,
-              scope: 'team-native',
-              instanceId: inst.id,
-              sortCreatedAt: inst.createdAt,
-            })
-            continue
-          }
-          if (inst.provider === 'imap') {
-            // Mirror the runtime IMAP overlay: disconnected/auth-failed
-            // accounts are managed in Studio but are not routed tools here.
-            if (!inst.connected || inst.healthStatus === 'auth_failed') continue
-            const governanceId = connectorInstanceGovernanceId('imap', inst.id)
-            byKey.set(governanceId, {
-              id: governanceId,
-              providerId: 'imap',
+              providerId: inst.provider,
               name: inst.connectedEmail ?? inst.label,
               custom: false,
               connected: inst.connected,
-              enabled: settingsMap.get(governanceId) ?? settingsMap.get('imap') ?? true,
+              enabled: settingsMap.get(governanceId) ?? settingsMap.get(inst.provider) ?? true,
               icon_url: entry?.icon_url,
               category: entry?.category,
               scope: 'team-native',
               instanceId: inst.id,
               sortCreatedAt: inst.createdAt,
+              sortProvider: inst.provider,
             })
             continue
           }
-          byKey.set(inst.provider, {
-            id: inst.provider,
+          const providerIndex = instanceIndexByProvider.get(inst.provider) ?? 0
+          instanceIndexByProvider.set(inst.provider, providerIndex + 1)
+          const governanceId = ALL_EXACT_INSTANCE_GOVERNANCE_CONNECTOR_IDS.has(inst.provider)
+            || (MULTI_INSTANCE_CONNECTOR_IDS.has(inst.provider) && providerIndex > 0)
+            ? connectorInstanceGovernanceId(inst.provider, inst.id)
+            : inst.provider
+          byKey.set(governanceId, {
+            id: governanceId,
+            ...(MULTI_INSTANCE_CONNECTOR_IDS.has(inst.provider) ? { providerId: inst.provider } : {}),
             name: inst.label,
             url: inst.url ?? undefined,
             custom: inst.custom,
             connected: inst.connected,
-            enabled: settingsMap.get(inst.provider) ?? true,
+            enabled: settingsMap.get(governanceId) ?? settingsMap.get(inst.provider) ?? true,
             icon_url: entry?.icon_url,
             category: entry?.category,
             scope: 'team-native',
             instanceId: inst.id,
+            sortCreatedAt: inst.createdAt,
+            sortProvider: inst.provider,
           })
         }
       }
@@ -715,70 +718,67 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
             .filter((connector) => connector.scope === 'team-native')
             .map((connector) => connector.providerId ?? connector.id),
         )
-        // `undefined` means no connected IMAP grant has claimed provider
-        // precedence yet. Once set, even an auth-failed oldest grantor keeps
-        // the provider claim (runtime does the same and emits reconnect), so a
-        // later member's mailbox never appears callable when it is shadowed.
-        let winningImapGrantor: string | undefined
-        for (const g of grants) {
+        // Preserve the existing one-grantor-per-provider precedence, but keep
+        // every instance exposed by that winning grantor instead of collapsing
+        // the provider to its first row. CLI is the exception: runtime loads
+        // every explicitly granted server because each has its own catalog.
+        const winningGrantorByProvider = new Map<string, string>()
+        const instanceIndexByProvider = new Map<string, number>()
+        const orderedGrants = [...grants].sort((a, b) =>
+          (a.instance.createdAt?.getTime() ?? 0) - (b.instance.createdAt?.getTime() ?? 0)
+            || String(a.instance.id).localeCompare(String(b.instance.id)),
+        )
+        for (const g of orderedGrants) {
+          if (g.instance.provider !== 'cli' && teamNativeProviders.has(g.instance.provider)) continue
           const entry = registry.find((e) => e.id === g.instance.provider)
-          if (g.instance.provider === 'cli') {
-            if (!g.instance.connected) continue
-            const governanceId = connectorInstanceGovernanceId('cli', g.instance.id)
-            if (byKey.has(governanceId)) continue
-            byKey.set(governanceId, {
-              id: governanceId,
-              providerId: 'cli',
-              name: g.instance.label,
-              custom: false,
-              connected: true,
-              enabled: settingsMap.get(governanceId) ?? settingsMap.get('cli') ?? true,
-              icon_url: entry?.icon_url,
-              category: entry?.category,
-              scope: 'team-grant',
-              grantedByUserId: g.grantedByUserId,
-              instanceId: g.instance.id,
-              sortCreatedAt: g.instance.createdAt,
-            })
-            continue
-          }
-          if (teamNativeProviders.has(g.instance.provider)) continue
-          const existing = byKey.get(g.instance.provider)
           if (g.instance.provider === 'whatsapp') continue
-          if (g.instance.provider === 'imap') {
+          if (g.instance.provider !== 'cli') {
+            const winningGrantor = winningGrantorByProvider.get(g.instance.provider)
+            if (winningGrantor && winningGrantor !== g.grantedByUserId) continue
+            if (!winningGrantor) winningGrantorByProvider.set(g.instance.provider, g.grantedByUserId)
+          }
+          if (ALL_EXACT_INSTANCE_GOVERNANCE_CONNECTOR_IDS.has(g.instance.provider)) {
             if (!g.instance.connected) continue
-            winningImapGrantor ??= g.grantedByUserId
-            if (winningImapGrantor !== g.grantedByUserId) continue
-            if (g.instance.healthStatus === 'auth_failed') continue
-            const governanceId = connectorInstanceGovernanceId('imap', g.instance.id)
+            if (g.instance.provider !== 'cli' && g.instance.healthStatus === 'auth_failed') continue
+            const governanceId = connectorInstanceGovernanceId(g.instance.provider, g.instance.id)
             byKey.set(governanceId, {
               id: governanceId,
-              providerId: 'imap',
+              providerId: g.instance.provider,
               name: g.instance.connectedEmail ?? g.instance.label,
               custom: false,
               connected: g.instance.connected,
-              enabled: settingsMap.get(governanceId) ?? settingsMap.get('imap') ?? true,
+              enabled: settingsMap.get(governanceId) ?? settingsMap.get(g.instance.provider) ?? true,
               icon_url: entry?.icon_url,
               category: entry?.category,
               scope: 'team-grant',
               grantedByUserId: g.grantedByUserId,
               instanceId: g.instance.id,
               sortCreatedAt: g.instance.createdAt,
+              sortProvider: g.instance.provider,
             })
             continue
           }
-          if (existing) continue
-          byKey.set(g.instance.provider, {
-            id: g.instance.provider,
+          const providerIndex = instanceIndexByProvider.get(g.instance.provider) ?? 0
+          instanceIndexByProvider.set(g.instance.provider, providerIndex + 1)
+          const governanceId = ALL_EXACT_INSTANCE_GOVERNANCE_CONNECTOR_IDS.has(g.instance.provider)
+            || (MULTI_INSTANCE_CONNECTOR_IDS.has(g.instance.provider) && providerIndex > 0)
+            ? connectorInstanceGovernanceId(g.instance.provider, g.instance.id)
+            : g.instance.provider
+          byKey.set(governanceId, {
+            id: governanceId,
+            ...(MULTI_INSTANCE_CONNECTOR_IDS.has(g.instance.provider) ? { providerId: g.instance.provider } : {}),
             name: g.instance.label,
             url: g.instance.url ?? undefined,
             custom: g.instance.custom,
             connected: g.instance.connected,
-            enabled: settingsMap.get(g.instance.provider) ?? true,
+            enabled: settingsMap.get(governanceId) ?? settingsMap.get(g.instance.provider) ?? true,
             icon_url: entry?.icon_url,
             category: entry?.category,
             scope: 'team-grant',
             grantedByUserId: g.grantedByUserId,
+            instanceId: g.instance.id,
+            sortCreatedAt: g.instance.createdAt,
+            sortProvider: g.instance.provider,
           })
         }
       }
@@ -786,19 +786,29 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
       // Layer in personal connectors — but skip any provider already
       // claimed by team-native or grant, since the engine would shadow
       // them anyway.
-      for (const c of userConnectors) {
-        const instanceScoped = c.connectorId === 'imap' || c.connectorId === 'cli'
-        const governanceId = instanceScoped
+      const instanceIndexByProvider = new Map<string, number>()
+      const orderedUserConnectors = [...userConnectors].sort((a, b) =>
+        (a.createdAt?.getTime() ?? 0) - (b.createdAt?.getTime() ?? 0)
+          || String(a.id).localeCompare(String(b.id)),
+      )
+      for (const c of orderedUserConnectors) {
+        const providerIndex = instanceIndexByProvider.get(c.connectorId) ?? 0
+        instanceIndexByProvider.set(c.connectorId, providerIndex + 1)
+        const governanceId = ALL_EXACT_INSTANCE_GOVERNANCE_CONNECTOR_IDS.has(c.connectorId)
           ? connectorInstanceGovernanceId(c.connectorId, c.id)
-          : c.connectorId
+          : MULTI_INSTANCE_CONNECTOR_IDS.has(c.connectorId) && providerIndex > 0
+            ? connectorInstanceGovernanceId(c.connectorId, c.id)
+            : c.connectorId
         const existing = byKey.get(governanceId)
         if (existing) continue
         if (!BUILTIN_IDS.has(c.connectorId) && !c.connected) continue
         const entry = registry.find((e) => e.id === c.connectorId)
         byKey.set(governanceId, {
           id: governanceId,
-          ...(instanceScoped ? { providerId: c.connectorId, instanceId: c.id } : {}),
-          name: c.connectorId === 'imap' ? (c.connectedEmail ?? c.name) : c.name,
+          ...(MULTI_INSTANCE_CONNECTOR_IDS.has(c.connectorId)
+            ? { providerId: c.connectorId, instanceId: c.id }
+            : {}),
+          name: c.connectedEmail ?? c.name,
           url: c.url ?? undefined,
           custom: c.custom,
           connected: c.connected,
@@ -806,7 +816,8 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
           icon_url: entry?.icon_url,
           category: entry?.category ?? (c.custom ? undefined : 'community' as const),
           scope: 'personal',
-          ...(instanceScoped ? { sortCreatedAt: c.createdAt } : {}),
+          sortCreatedAt: c.createdAt,
+          sortProvider: c.connectorId,
         })
       }
 
@@ -840,11 +851,11 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
 
       const connectors = Array.from(byKey.values())
         .sort((a, b) => {
-          if (!a.providerId || a.providerId !== b.providerId) return 0
+          if (a.sortProvider !== b.sortProvider) return 0
           return (a.sortCreatedAt?.getTime() ?? 0) - (b.sortCreatedAt?.getTime() ?? 0)
             || a.id.localeCompare(b.id)
         })
-        .map(({ sortCreatedAt: _sortCreatedAt, ...connector }) => connector)
+        .map(({ sortCreatedAt: _sortCreatedAt, sortProvider: _sortProvider, ...connector }) => connector)
       res.json({ connectors })
     } catch (err) {
       console.error('[assistants] list connectors failed:', err)
@@ -909,12 +920,12 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
 
     const { assistantId, connectorId } = req.params as { assistantId: string; connectorId: string }
     const parsedGovernanceId = parseConnectorInstanceGovernanceId(connectorId)
-    const instanceScopedProvider = parsedGovernanceId
-      && (parsedGovernanceId.provider === 'imap' || parsedGovernanceId.provider === 'cli')
+    const providerId = parsedGovernanceId && OFFICIAL_CONNECTOR_TOOLS[parsedGovernanceId.provider]
       ? parsedGovernanceId.provider
-      : null
-    const providerId = instanceScopedProvider ?? connectorId
-    const governanceId = instanceScopedProvider ? connectorId : providerId
+      : connectorId
+    const governanceId = parsedGovernanceId && providerId === parsedGovernanceId.provider
+      ? connectorId
+      : providerId
 
     try {
       if (providerId === 'cli' && parsedGovernanceId && options.connectorInstanceStore) {
@@ -1128,14 +1139,13 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
     try {
       const classification = classifyTool(toolName)
       const parsedGovernanceId = parseConnectorInstanceGovernanceId(connectorId)
-      const providerId = parsedGovernanceId
-        && (parsedGovernanceId.provider === 'imap' || parsedGovernanceId.provider === 'cli')
+      const providerId = parsedGovernanceId && OFFICIAL_CONNECTOR_TOOLS[parsedGovernanceId.provider]
         ? parsedGovernanceId.provider
         : connectorId
       const persistedServerName = providerId === 'cli' && parsedGovernanceId
         ? serverName
         : OFFICIAL_CONNECTOR_TOOLS[providerId]
-          ? (providerId === 'imap' && parsedGovernanceId ? connectorId : providerId)
+          ? (parsedGovernanceId && providerId === parsedGovernanceId.provider ? connectorId : providerId)
           : serverName
 
       await options.mcpSettingsStore.setPolicy({

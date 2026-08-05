@@ -579,7 +579,7 @@ function EmbedFailedFallback({
           target="_blank"
           rel="noreferrer noopener"
           onClick={(e) => e.stopPropagation()}
-          className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
+          className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium bg-action text-action-foreground hover:bg-action/90 transition-colors"
         >
           {format(t.postEmbed.openOnArrow, { platform: label })}
         </a>

@@ -23,7 +23,7 @@
  * `env` option, not `getEnv()`.
  */
 
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type http from 'node:http'
 
 import express, { type Express } from 'express'
@@ -87,7 +87,7 @@ import {
   createRetrievalTools,
   createViewTools,
   createFileTools,
-  createDeckTools,
+  createOfficeTools,
   type FileToolPolicy,
   createFindPageTool,
   createIngestRuleTools,
@@ -334,12 +334,14 @@ import {
 import { goalsRoutes } from './routes/goals.js'
 import { createDbCrmStore } from './db/crm-store.js'
 import { createDbWorkspaceFilesStore } from './db/workspace-files-store.js'
+import { createWorkspaceFileUploadsStore } from './db/workspace-file-uploads-store.js'
 import { getWorkspaceFileById } from './db/workspace-files.js'
 import { createGcsFilesClient, type GcsFilesClient } from './files/gcs-client.js'
 import { createLocalFilesClient, resolveLocalFilesBaseDir } from './files/local-files-client.js'
 import { localFilesTransferRoutes } from './routes/local-files-transfer.js'
 import { openRecordingsRoutes } from './routes/recordings.js'
 import { createFilesApi, createSingletonFilesClientResolver, type FilesClientResolver } from './files/files-api.js'
+import { createChunkedFileUploadService, type ChunkedFileUploadService } from './files/chunked-upload.js'
 import { createSearchFileContentTool } from './files/file-artifact-tools.js'
 import {
   createChatSearchRecordingTool,
@@ -388,8 +390,28 @@ import { createDeliveryTargetResolver } from './scheduling/delivery-target.js'
 import { viewsRoutes } from './routes/views.js'
 import { teamspacesRoutes } from './routes/teamspaces.js'
 import { createTeamspaceStore } from './db/teamspace-store.js'
-import { decksRoutes } from './routes/decks.js'
-import { createDeckStore } from './db/deck-store.js'
+import { createOfficeArtifactStore } from './db/office-artifacts.js'
+import { createOfficeTemplateStore } from './db/office-templates.js'
+import { createOfficeGenerationStore } from './db/office-generation.js'
+import { createOfficeCommentStore } from './db/office-comments.js'
+import { createOfficeLiveStore } from './db/office-live.js'
+import { createOfficeReleaseStore } from './db/office-release.js'
+import { createOfficeService } from './office/service.js'
+import { deriveOfficeSnapshot } from './office/release.js'
+import { createOfficeLifecycleWorker } from './office/lifecycle-worker.js'
+import { resolveOfficeAccess } from './office/access.js'
+import { officeArtifactRoutes } from './routes/office-artifacts.js'
+import { officeJobRoutes } from './routes/office-jobs.js'
+import { officeTemplateRoutes } from './routes/office-templates.js'
+import { officeCollaborationRoutes } from './routes/office-collaboration.js'
+import { officeImportRoutes } from './routes/office-imports.js'
+import { createOfficeImportWorker } from './office/import-worker.js'
+import { createOfficeTemplateCompileWorker } from './office/template-compile-worker.js'
+import { officeReleaseRoutes } from './routes/office-releases.js'
+import { officeLifecycleRoutes } from './routes/office-lifecycle.js'
+import { officeOfflineRoutes } from './routes/office-offline.js'
+import { internalOfficeCheckpointRoutes } from './routes/internal-office-checkpoint.js'
+import { officeStateVector, snapshotToYDoc } from '@use-brian/office-model'
 import { publicShareRoutes } from './routes/public-share.js'
 import { publicSiteRoutes } from './routes/public-sites.js'
 import { createDomainProvisioner } from './domains/provisioner.js'
@@ -408,7 +430,7 @@ import { setKnowledgeEventDispatcher } from './knowledge-event-fanout.js'
 import { createRecordingSynthesizer, type RecordingSynthesizeFn } from './synthesis/recording-synthesizer.js'
 import { processOpenRecording } from './recordings/process-recording.js'
 import { createOpenRecordingProcessWorker } from './recordings/recording-process-worker.js'
-import { updateRecording } from './db/recordings-store.js'
+import { getRecording, updateRecording } from './db/recordings-store.js'
 import { mergeEpisodeSourceRef } from './db/episodes-store.js'
 import { createResearchSynthesizer } from './synthesis/research-synthesizer.js'
 import { createGenerateSynthesizer, type GenerateSynthesizeFn } from './synthesis/generate-synthesizer.js'
@@ -706,6 +728,8 @@ export interface OpenApiPorts {
    * Pipeline B wiring; default absent — OSS ingest is uncharged.
    */
   ingestCharge?: (episode: { id: string; workspaceId: string; sourceKind: string; createdByUserId: string }) => Promise<void>
+  /** Hosted recording-duration credit quote; absent in OSS/self-hosted. */
+  recordingSurchargeCredits?: (durationSeconds: number) => number
   /**
    * Metered model lane billing (model-registry.md L8/L15) — the closed
    * `5 + ceil(cost/$0.040)` estimate / spend-cap / charge seams. Default
@@ -1269,6 +1293,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   })
   const crmStore = createDbCrmStore()
   const workspaceFilesStore = createDbWorkspaceFilesStore()
+  const workspaceFileUploadsStore = createWorkspaceFileUploadsStore()
   const workflowStore = createDbWorkflowStore()
   const workflowRunStore = createDbWorkflowRunStore()
   const pendingApprovalsStore = createPendingApprovalsStore()
@@ -1869,18 +1894,23 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       'reprocessRecording',
       createReprocessRecordingTool({
         getRecording: async (actorUserId, recordingId) => {
-          const ep = await getEpisodeByIdSystem(actorUserId, recordingId, {})
-          return ep
+          const recording = await getRecording(actorUserId, recordingId)
+          return recording
             ? {
-                id: ep.id,
-                workspaceId: ep.workspaceId,
-                sourceKind: ep.sourceKind,
-                sourceRef: (ep.sourceRef ?? null) as Record<string, unknown> | null,
+                id: recording.id,
+                workspaceId: recording.workspaceId,
+                sourceKind: 'recording',
+                sourceRef: {
+                  gcsKey: recording.gcsKey,
+                  fileName: recording.fileName,
+                },
+                durationMs: recording.durationMs,
               }
             : null
         },
         hasProcessed: hasCompletedRecordingJob,
         enqueue: enqueueRecordingJob,
+        surchargeCredits: ports.recordingSurchargeCredits,
       }),
     )
 
@@ -1894,6 +1924,67 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }
 
   const allTools = buildAllTools()
+  const officeArtifactStore = createOfficeArtifactStore()
+  const officeTemplateStore = createOfficeTemplateStore()
+  const officeGenerationStore = createOfficeGenerationStore()
+  const officeCommentStore = createOfficeCommentStore()
+  const officeLiveStore = createOfficeLiveStore()
+  const officeReleaseStore = createOfficeReleaseStore()
+  const officeLifecycleWorker = createOfficeLifecycleWorker({
+    async sweep() {
+      const result = await query<{ advanced: number }>(`
+        WITH advanced_artifacts AS (
+          UPDATE office_artifacts a SET
+            lifecycle_state=CASE WHEN lifecycle_state='trash' THEN 'retained' ELSE 'purged' END,
+            updated_at=now()
+          WHERE legal_hold=FALSE AND (
+            (lifecycle_state='trash' AND retain_at <= now()) OR
+            (lifecycle_state='retained' AND purge_at <= now())
+          )
+          RETURNING id,workspace_id,head_version,lifecycle_state
+        ), revoked AS (
+          UPDATE office_offline_packages p SET revoked_at=now(),complete=FALSE,updated_at=now()
+           FROM advanced_artifacts a WHERE p.artifact_id=a.id AND a.lifecycle_state='purged' AND p.revoked_at IS NULL
+        ), artifact_audit AS (
+          INSERT INTO office_audit_events(workspace_id,artifact_id,event_type,artifact_version,reason)
+          SELECT workspace_id,id,'office.lifecycle.'||lifecycle_state,head_version,'Retention clock elapsed' FROM advanced_artifacts
+        ), advanced_templates AS (
+          UPDATE office_templates t SET
+            lifecycle_state=CASE WHEN lifecycle_state='trash' THEN 'retained' ELSE 'purged' END,
+            updated_at=now()
+          WHERE legal_hold=FALSE AND (
+            (lifecycle_state='trash' AND retain_at <= now()) OR
+            (lifecycle_state='retained' AND purge_at <= now() AND NOT EXISTS (
+              SELECT 1 FROM office_artifacts a JOIN office_template_versions v ON v.id=a.template_version_id
+               WHERE v.template_id=t.id AND a.lifecycle_state <> 'purged'
+            ))
+          )
+          RETURNING id
+        )
+        SELECT (SELECT count(*) FROM advanced_artifacts)+(SELECT count(*) FROM advanced_templates) AS advanced
+      `)
+      return Number(result.rows[0]?.advanced ?? 0)
+    },
+  })
+  if (runWorkers) officeLifecycleWorker.start()
+  const officeGenerationAvailable = () => false
+  const officeService = createOfficeService({
+    // The route must not accept jobs until the durable generation runner and
+    // its pipeline dependencies are wired into this boot graph.
+    generationAvailable: officeGenerationAvailable,
+    createShell: officeArtifactStore.createShell,
+    deleteEmptyShell: officeArtifactStore.deleteEmptyShell,
+    getArtifact: officeArtifactStore.get,
+    resolveAccess: resolveOfficeAccess,
+    createJob: officeGenerationStore.create,
+    latestJob: officeGenerationStore.latestForArtifact,
+  })
+  for (const tool of createOfficeTools({
+    port: officeService,
+    appOrigin: env.AUTHED_APP_URL ?? env.APP_URL,
+  })) {
+    allTools.set(tool.name, tool)
+  }
 
   // ── Episode ingestors — built by the platform factory over boot's stores
   //    (open default: no-op chat ingest, undefined brain ingest). ──
@@ -2014,7 +2105,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // TDZ-safe: pre-assignment access reads `null` and degrades honestly.
   let filesApi: ReturnType<typeof createFilesApi> | null = null
   let filesResolver: FilesClientResolver | null = null
-  let deckStore: ReturnType<typeof createDeckStore> | null = null
+  let chunkedFileUploads: ChunkedFileUploadService | null = null
 
   const calleeExecutor = createCalleeExecutor({
     provider,
@@ -2982,6 +3073,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       store: workspaceFilesStore,
       auditStore: workspaceAuditStore,
     })
+    chunkedFileUploads = createChunkedFileUploadService({
+      resolver: filesResolver,
+      filesStore: workspaceFilesStore,
+      uploadsStore: workspaceFileUploadsStore,
+      auditStore: workspaceAuditStore,
+    })
     // Effective allow/ask/block for a files tool — the same L1 (app-level
     // sentinel) + L2 (per-assistant) strictest-wins resolution the Studio /
     // Assistant tool-policy UIs display and write (`mcp_tool_settings`,
@@ -3056,23 +3153,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       saveFileBytes: fileTools.saveFileBytes,
     }
 
-    // ── Decks (first-party PPTX) ──
-    // Persistent deck artifacts: workspace_decks row (spec) + stable
-    // workspace file decks/<id>.pptx. Rides the files capability (output is
-    // a workspace file), so tools live inside the filesBlobClient guard.
-    // The read/export ROUTER mounts with the other authed routers at the
-    // END of boot — an early bare `/api` requireAuth guard here would 401
-    // every public mount registered after it (the Mini App outage class;
-    // graded by invariants/route-mount-order). See
-    // docs/architecture/features/deck-generation.md.
-    // previewUrl targets the AUTHENTICATED app origin (app.usebrian.ai) — the
-    // /w/… deck route lives in app-web, and the marketing site does NOT
-    // redirect /w/* (MOVED_TO_APP_PREFIXES covers only pre-consolidation
-    // paths). Same fallback chain as the computer-use take-over link below.
-    deckStore = createDeckStore()
-    for (const tool of createDeckTools({ filesApi, deckStore, appOrigin: env.AUTHED_APP_URL ?? env.APP_URL })) {
-      allTools.set(tool.name, tool)
-    }
     // Direct file ingest is open: store the original bytes, derive text, then
     // run the same boot-built Pipeline B ingestor used by brain MCP and docs.
     if (brainEpisodeIngestor) {
@@ -3586,6 +3666,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     workspaceFilesStore,
     filesApi: filesApi ?? undefined,
     usageStore,
+    recordingSurchargeCredits: ports.recordingSurchargeCredits,
     // Doc-page → brain distillation runner — backs the `ingestPage` chat tool.
     ingestPage: ingestPageRunner
       ? ({ userId, pageId }) => ingestPageRunner({ userId, pageId })
@@ -3775,7 +3856,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   app.use('/api/feedback', optionalAuth(env.JWT_SECRET), feedbackRoutes())
 
-  app.use('/api/files', optionalAuth(env.JWT_SECRET), fileRoutes(fileStore, fileIngestor as never, artifactPromoter))
+  app.use(
+    '/api/files',
+    optionalAuth(env.JWT_SECRET),
+    fileRoutes(fileStore, fileIngestor as never, artifactPromoter, undefined, chunkedFileUploads),
+  )
   if (filesApi) {
     app.use(
       '/api/imports/linkedin',
@@ -4478,12 +4563,201 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const docNotificationsStore = createDbDocNotificationsStore()
   app.use('/api', requireAuth(env.JWT_SECRET), commentRoutes({ commentThreadStore }))
   app.use('/api', requireAuth(env.JWT_SECRET), inboxRoutes({ commentThreadStore, docNotificationsStore }))
-  // Deck live-preview read + export surface (tools registered in the files
-  // block above; absent files backend = no decks, so the mount is guarded).
-  if (deckStore && filesApi) {
-    app.use('/api', requireAuth(env.JWT_SECRET), decksRoutes({ deckStore, filesApi }))
+  app.use('/api/office', requireAuth(env.JWT_SECRET), officeArtifactRoutes({
+    service: officeService,
+    generationAvailable: officeGenerationAvailable,
+    async list(userId, workspaceId, view) {
+      const artifacts = await officeArtifactStore.list(userId, workspaceId, view)
+      const visible = await Promise.all(artifacts.map((artifact) => officeService.get({ userId, artifactId: artifact.id })))
+      return visible.filter((artifact): artifact is NonNullable<typeof artifact> => artifact !== null)
+    },
+    restoreVersion: officeArtifactStore.restoreVersion,
+    getArtifact: officeArtifactStore.get,
+    listVersions: officeArtifactStore.listVersions,
+    async canRestore(userId, artifactId) {
+      return (await resolveOfficeAccess(userId, artifactId))?.canRestore ?? false
+    },
+  }))
+  app.use('/api/office', requireAuth(env.JWT_SECRET), officeJobRoutes({
+    get: officeGenerationStore.get,
+    events: officeGenerationStore.listEvents,
+    steer: officeGenerationStore.steer,
+    cancel: officeGenerationStore.cancel,
+  }))
+  const officeImportWorker = filesApi ? createOfficeImportWorker({
+    store: officeGenerationStore,
+    async readSource({ userId, workspaceId, assistantId, fileId }) {
+      const result = await filesApi!.readBytes({ workspaceId, userId, assistantId, assistantKind: 'standard', clearance: 'confidential' }, fileId)
+      if (!result.ok) throw new Error(`Office import source unavailable: ${result.error.kind}`)
+      return result.value.bytes
+    },
+    initialize: officeLiveStore.initialize,
+    async context({ userId, artifactId, templateVersionId }) {
+      const artifact = await officeArtifactStore.get(userId, artifactId)
+      if (!artifact) throw new Error('Office import artifact not found')
+      return { artifactId, workspaceId: artifact.workspaceId, templateVersionId, locale: 'en', defaultLanguage: 'en', title: artifact.title }
+    },
+  }) : null
+  const officeTemplateCompileWorker = filesApi ? createOfficeTemplateCompileWorker({
+    claim: officeGenerationStore.claim,
+    getSnapshot: officeLiveStore.get,
+    getTemplate: officeTemplateStore.get,
+    async readSource({ userId, workspaceId, assistantId, fileId }) {
+      const result = await filesApi!.readBytes({ workspaceId, userId, assistantId, assistantKind: 'standard', clearance: 'confidential' }, fileId)
+      if (!result.ok) throw new Error(`Office template source unavailable: ${result.error.kind}`)
+      return result.value.bytes
+    },
+    initialize: officeLiveStore.initialize,
+    async saveBundle({ userId, workspaceId, templateId, hash, bytes }) {
+      const path = `/office/templates/${templateId}/${hash}.json`
+      const ctx = { workspaceId, userId, assistantKind: 'standard' as const, clearance: 'confidential' as const }
+      const existing = await filesApi!.stat(ctx, path)
+      if (existing.ok) return existing.value.id
+      const saved = await filesApi!.writeBytes(ctx, { path, bytes, mime: 'application/json', sensitivity: 'confidential' })
+      if (!saved.ok) throw new Error(`Office template bundle save failed: ${saved.error.kind}`)
+      return saved.value.id
+    },
+    addVersion: officeTemplateStore.addVersion,
+    appendEvent: officeGenerationStore.appendEvent,
+    finish: officeGenerationStore.finish,
+  }) : null
+  const wakeImport = (userId: string) => {
+    if (officeImportWorker) void (async () => {
+      while (await officeImportWorker(userId)) { /* drain eligible imports for this member */ }
+    })().catch((error) => console.error('[office-import-worker]', error))
   }
-
+  const wakeTemplateCompile = (userId: string) => {
+    if (officeTemplateCompileWorker) void (async () => {
+      while (await officeTemplateCompileWorker(userId)) { /* drain eligible template compilations for this member */ }
+    })().catch((error) => console.error('[office-template-compile-worker]', error))
+  }
+  app.use('/api/office', requireAuth(env.JWT_SECRET), officeTemplateRoutes({
+    list: officeTemplateStore.list,
+    getTemplate: officeTemplateStore.get,
+    getArtifact: officeArtifactStore.get,
+    getSnapshot: officeLiveStore.get,
+    createDraft: officeTemplateStore.createDraft,
+    createTemplateShell: officeArtifactStore.createShell,
+    initializeDraft: officeLiveStore.initializeIfMissing,
+    deleteEmptyDraft: officeTemplateStore.deleteEmptyDraft,
+    deleteEmptyShell: officeArtifactStore.deleteEmptyShell,
+    createCompileJob: officeGenerationStore.create,
+    wakeCompile: wakeTemplateCompile,
+    transitionLifecycle: officeTemplateStore.transitionLifecycle,
+  }))
+  app.use('/api/office', requireAuth(env.JWT_SECRET), officeCollaborationRoutes({
+    getArtifact: officeArtifactStore.get,
+    resolveAccess: resolveOfficeAccess,
+    getSnapshot: officeLiveStore.get,
+    appendCommand: officeLiveStore.appendCommand,
+    listThreads: officeCommentStore.listThreads,
+    createThread: officeCommentStore.createThread,
+    reply: officeCommentStore.reply,
+    resolve: officeCommentStore.resolve,
+    createSuggestion: officeCommentStore.createSuggestion,
+    decideSuggestion: officeCommentStore.decideSuggestion,
+    service: officeService,
+  }))
+  app.use('/api/office', requireAuth(env.JWT_SECRET), officeImportRoutes({
+    available: () => Boolean(officeImportWorker),
+    createShell: officeArtifactStore.createShell,
+    deleteEmptyShell: officeArtifactStore.deleteEmptyShell,
+    createJob: officeGenerationStore.create,
+    wake: wakeImport,
+  }))
+  app.use('/', internalOfficeCheckpointRoutes({
+    sharedSecret: process.env.DOC_SYNC_SECRET,
+    async checkpoint(artifactId, expectedVersion, canonicalHash) {
+      if (!filesApi) return 'not_found'
+      const raw = await query<{ id: string; workspaceId: string; ownerUserId: string; headVersion: number }>(`SELECT id,workspace_id AS "workspaceId",owner_user_id AS "ownerUserId",head_version::int AS "headVersion" FROM office_artifacts WHERE id=$1 AND lifecycle_state='active'`, [artifactId])
+      const artifact = raw.rows[0]
+      if (!artifact) return 'not_found'
+      const live = await officeLiveStore.getOfflineSource(artifact.ownerUserId, artifactId)
+      if (!live) return 'not_found'
+      const bytes = new TextEncoder().encode(JSON.stringify(live.snapshot))
+      const actualHash = createHash('sha256').update(bytes).digest('hex')
+      if (actualHash !== canonicalHash) return 'conflict'
+      // A prior settle may have advanced the immutable head while this newer
+      // settle was already in flight. The API updates live.baseVersion after
+      // every successful checkpoint, so rebasing is safe only when that live
+      // base equals the current head and the requested hash is still the exact
+      // live hash. Otherwise this remains a hard CAS conflict.
+      const casVersion = artifact.headVersion === expectedVersion ? expectedVersion : live.baseVersion === artifact.headVersion ? artifact.headVersion : null
+      if (casVersion === null) return 'conflict'
+      const fileContext = { workspaceId: artifact.workspaceId, userId: artifact.ownerUserId, assistantKind: 'standard' as const, clearance: 'confidential' as const }
+      const saved = await filesApi.writeBytes(fileContext, { path: `/office/artifacts/${artifactId}/versions/${casVersion + 1}-${canonicalHash}.json`, bytes, mime: 'application/json', sensitivity: 'confidential' })
+      if (!saved.ok) throw new Error(`Office checkpoint save failed: ${saved.error.kind}`)
+      const version = await officeArtifactStore.commitVersion({ userId: artifact.ownerUserId, artifactId, expectedVersion: casVersion, snapshotFileId: saved.value.id, snapshotHash: canonicalHash, operationClock: live.stateVector, schemaVersion: live.snapshot.schemaVersion, capabilityVersion: live.snapshot.capabilityVersion, origin: 'manual', authorType: 'system', summary: 'Collaborative editing checkpoint' })
+      if (!version) {
+        await filesApi.delete(fileContext, saved.value.id).catch(() => undefined)
+        return 'conflict'
+      }
+      await query(`UPDATE office_collab_documents SET base_version=$2,updated_at=now() WHERE artifact_id=$1`, [artifactId, version.version])
+      return { version: version.version }
+    },
+  }))
+  const readOfficeResource = async (userId: string, workspaceId: string, resourceId: string) => {
+    if (!filesApi) return null
+    const [resource, membership] = await Promise.all([
+      officeTemplateStore.getResource(userId, resourceId),
+      query<{ clearance: 'public' | 'internal' | 'confidential' }>(`SELECT clearance FROM workspace_members WHERE workspace_id=$1 AND user_id=$2`, [workspaceId, userId]),
+    ])
+    if (!resource?.fileId || resource.workspaceId !== workspaceId) return null
+    const clearance = membership.rows[0]?.clearance
+    const rank = { public: 0, internal: 1, confidential: 2 } as const
+    if (!clearance || rank[clearance] < rank[resource.sensitivity]) return null
+    const read = await filesApi.readBytes({ workspaceId, userId, assistantKind: 'standard', clearance }, resource.fileId)
+    return read.ok ? { bytes: read.value.bytes, mime: resource.mime, hash: resource.hash } : null
+  }
+  const loadOfficeReleaseContext = async (userId: string, artifactId: string) => {
+    const [artifact, access, live, head] = await Promise.all([officeArtifactStore.get(userId, artifactId), resolveOfficeAccess(userId, artifactId), officeLiveStore.get(userId, artifactId), officeArtifactStore.getHeadVersion(userId, artifactId)])
+    if (!artifact || !access || !live) return null
+    const [claims, media] = artifact.headVersionId ? await Promise.all([officeReleaseStore.listClaims(userId, artifactId, artifact.headVersionId), officeReleaseStore.listMedia(userId, artifactId, artifact.headVersionId)]) : [[], []]
+    return { artifact: { ...artifact, headVersionId: head?.snapshotHash === live.canonicalHash ? artifact.headVersionId : null }, access, snapshot: live.snapshot, claims, media }
+  }
+  if (filesApi) app.use('/api/office', requireAuth(env.JWT_SECRET), officeReleaseRoutes({
+    load: loadOfficeReleaseContext,
+    resolveResource: (userId, workspaceId) => async (resourceId) => readOfficeResource(userId, workspaceId, resourceId),
+    async saveReleasedFile({ userId, workspaceId, artifactId, version, action, extension, mime, bytes }) {
+      const saved = await filesApi!.writeBytes({ workspaceId, userId, assistantKind: 'standard', clearance: 'confidential' }, { path: `/office/releases/${artifactId}/v${version}-${action}-${randomUUID()}.${extension}`, bytes, mime, sensitivity: 'confidential' })
+      if (!saved.ok) throw new Error(`Office release file save failed: ${saved.error.kind}`)
+      return saved.value.id
+    },
+    createRecord: officeReleaseStore.createRelease,
+    async createDerivative({ userId, source, title, sensitivity, selectedObjectIds, visibilityUserIds }) {
+      const shell = await officeArtifactStore.createShell({ userId, workspaceId: source.artifact.workspaceId, family: source.artifact.family, title, templateVersionId: source.artifact.templateVersionId, capabilityVersion: source.artifact.capabilityVersion, sensitivity, visibilityUserIds })
+      const snapshot = deriveOfficeSnapshot({ source: source.snapshot, artifactId: shell.id, title, selectedObjectIds: selectedObjectIds.length ? selectedObjectIds : undefined })
+      const bytes = new TextEncoder().encode(JSON.stringify(snapshot))
+      const hash = createHash('sha256').update(bytes).digest('hex')
+      const saved = await filesApi!.writeBytes({ workspaceId: shell.workspaceId, userId, assistantKind: 'standard', clearance: 'confidential' }, { path: `/office/artifacts/${shell.id}/versions/1-${hash}.json`, bytes, mime: 'application/json', sensitivity })
+      if (!saved.ok) throw new Error(`Office derivative snapshot save failed: ${saved.error.kind}`)
+      const doc = snapshotToYDoc(snapshot)
+      const version = await officeArtifactStore.commitVersion({ userId, artifactId: shell.id, expectedVersion: 0, snapshotFileId: saved.value.id, snapshotHash: hash, operationClock: officeStateVector(doc), schemaVersion: snapshot.schemaVersion, capabilityVersion: snapshot.capabilityVersion, origin: 'manual', authorType: 'user', authorUserId: userId, summary: `Reviewed derivative of ${source.artifact.id}`, checkpointKind: 'release' })
+      if (!version) throw new Error('Office derivative version conflict')
+      await Promise.all([
+        officeLiveStore.initialize({ userId, artifactId: shell.id, snapshot }),
+        officeArtifactStore.addSource({ userId, artifactId: shell.id, artifactVersionId: version.id, workspaceId: shell.workspaceId, sourceArtifactId: source.artifact.id, sourceVersion: String(source.artifact.headVersion), sensitivity }),
+      ])
+      return { artifactId: shell.id, version: version.version }
+    },
+  }))
+  app.use('/api/office', requireAuth(env.JWT_SECRET), officeLifecycleRoutes({ resolveAccess: resolveOfficeAccess, transition: officeArtifactStore.transitionLifecycle, revokeOffline: officeReleaseStore.revokeOfflinePackages }))
+  if (filesApi) app.use('/api/office', requireAuth(env.JWT_SECRET), officeOfflineRoutes({
+    signingSecret: env.JWT_SECRET,
+    async load(userId, artifactId) {
+      const [artifact, access, live, comments, history] = await Promise.all([officeArtifactStore.get(userId, artifactId), resolveOfficeAccess(userId, artifactId), officeLiveStore.getOfflineSource(userId, artifactId), officeCommentStore.listThreads(userId, artifactId), officeArtifactStore.listVersions(userId, artifactId)])
+      return artifact && access && live ? { artifact, access, snapshot: live.snapshot, update: live.update, stateVector: live.stateVector, seq: live.seq, comments, history } : null
+    },
+    readResource: readOfficeResource,
+    async savePackage({ userId, workspaceId, artifactId, deviceId, bytes }) {
+      const saved = await filesApi!.writeBytes({ workspaceId, userId, assistantKind: 'standard', clearance: 'confidential' }, { path: `/office/offline/${artifactId}/${encodeURIComponent(deviceId)}-${randomUUID()}.json`, bytes, mime: 'application/json', sensitivity: 'confidential' })
+      if (!saved.ok) throw new Error(`Office offline package save failed: ${saved.error.kind}`)
+      return saved.value.id
+    },
+    upsert: officeReleaseStore.upsertOfflinePackage,
+    resolveAccess: resolveOfficeAccess,
+    appendCommand: officeLiveStore.appendCommand,
+  }))
   // (The public /api/brain/stream SSE mount lives ABOVE the bare `/api`
   // requireAuth guards — see the block next to workflowWebhookRoutes.)
   app.use('/api/brain', requireAuth(env.JWT_SECRET), brainRoutes({ entitiesStore, entityLinksStore, retrievalStore, knowledgeStore, workspaceSkillStore, connectorInstanceStore }))
@@ -5263,6 +5537,17 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       }, 6 * 60 * 60 * 1000)
     : null
 
+  // ── chunked workspace-file upload reaper ──
+  // Expired sessions are no longer completable. Reclaim their direct-upload
+  // parts, plus any completed-session parts whose immediate cleanup retried.
+  const chunkedUploadReaper = runWorkers && chunkedFileUploads
+    ? startJitteredInterval(() => {
+        void chunkedFileUploads!.sweepExpired()
+          .then((n) => { if (n > 0) console.log(`[chunked-upload-reaper] cleaned ${n} upload(s)`) })
+          .catch((err) => console.error('[chunked-upload-reaper] sweep failed:', err))
+      }, 60 * 60 * 1000)
+    : null
+
   // ── Knowledge sync worker ──
   // Uses the `syncCredentials` resolver built once above (platform closed
   // factory, or the open resolver over the connector stores).
@@ -5812,8 +6097,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     fileIngestWorker?.stop()
     linkedinImportWorker?.stop()
     recordingProcessWorker?.stop()
+    officeLifecycleWorker.stop()
     await codexProviderManager?.close()
     if (fileCacheReaper) stopJitteredInterval(fileCacheReaper)
+    if (chunkedUploadReaper) stopJitteredInterval(chunkedUploadReaper)
     await supportDiagnosticsManager?.stop()
     await analytics.shutdown()
     if (server) await new Promise<void>((res) => server!.close(() => res()))

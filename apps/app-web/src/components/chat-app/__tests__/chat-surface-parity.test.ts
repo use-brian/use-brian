@@ -15,6 +15,10 @@ const source = readFileSync(
   fileURLToPath(new URL("../chat-surface.tsx", import.meta.url)),
   "utf8",
 );
+const workspaceChromeSource = readFileSync(
+  fileURLToPath(new URL("../../doc/workspace-chrome.tsx", import.meta.url)),
+  "utf8",
+);
 
 describe("[COMP:app-web/chat-parity] Chat surface parity", () => {
   it("composes the shared pick, drop, paste, and upload-chip affordances", () => {
@@ -24,8 +28,10 @@ describe("[COMP:app-web/chat-parity] Chat surface parity", () => {
     expect(source).toContain("<AttachmentChips");
     expect(source).toContain("<Paperclip");
     expect(source).toContain("imageFilesFromClipboard(event.clipboardData)");
-    expect(source).toContain("allowEmptySend={att.hasReady}");
+    expect(source).toContain("allowEmptySend={att.hasReady || pendingRecordings.length > 0}");
     expect(source).toContain("att.uploading");
+    expect(source).toContain("recordingUpload.stage(file)");
+    expect(source).toContain("attachedRecordingIds: turnRecordingIds");
   });
 
   it("carries ready files and previews through a turn and restored history", () => {
@@ -53,5 +59,14 @@ describe("[COMP:app-web/chat-parity] Chat surface parity", () => {
     expect(source).toContain("components={CHAT_MARKDOWN_COMPONENTS}");
     expect(source).toContain("retryAssistantMessage");
     expect(source).toContain("retryUserMessage");
+  });
+
+  it("keeps the composer footer on one stable row without a dock overlay", () => {
+    expect(source).toContain("grid-cols-[minmax(0,1fr)_auto]");
+    expect(source).toContain("order-1 col-span-2 w-full");
+    expect(source).not.toContain('rowClassName="flex flex-wrap');
+    expect(workspaceChromeSource).toContain(
+      'embeddedChatSuppressed || activeSurface === "chat"',
+    );
   });
 });

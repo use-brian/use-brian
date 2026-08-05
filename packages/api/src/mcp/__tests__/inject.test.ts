@@ -1092,6 +1092,121 @@ describe('[COMP:api/mcp-inject] grant overlay instance binding', () => {
     expect(names.some((n) => n.startsWith('googleCalendar'))).toBe(false)
     expect(names.some((n) => n.startsWith('googleTasks'))).toBe(false)
   })
+
+  it('injects every exposed Gmail account and honors an exact extra-account enable switch', async () => {
+    const { connectorStore, connectorInstanceStore, connectorGrantStore } = stores()
+    connectorGrantStore.listForTargetSystem.mockResolvedValue([
+      {
+        grantedByUserId: 'grantor-1',
+        instance: {
+          id: 'ci-gm-exposed', provider: 'gmail', label: 'Personal Gmail',
+          connectedEmail: 'personal@example.com', connected: true, healthStatus: 'ok',
+          custom: false, url: null, createdAt: new Date('2026-07-01T00:00:00Z'),
+        },
+      },
+      {
+        grantedByUserId: 'grantor-1',
+        instance: {
+          id: 'ci-gm-work', provider: 'gmail', label: 'Work Gmail',
+          connectedEmail: 'work@example.com', connected: true, healthStatus: 'ok',
+          custom: false, url: null, createdAt: new Date('2026-07-02T00:00:00Z'),
+        },
+      },
+    ])
+    const assistantConnectorStore = {
+      isEnabled: vi.fn().mockResolvedValue(true),
+    }
+    const tools = new Map()
+
+    await injectMcpTools({
+      userId: 'owner-1', assistantId: 'a-1', tools,
+      connectorStore: connectorStore as never,
+      settingsStore: settingsStoreStub() as never,
+      assistantConnectorStore: assistantConnectorStore as never,
+      connectorInstanceStore: connectorInstanceStore as never,
+      connectorGrantStore: connectorGrantStore as never,
+      assistantTeamId: 'ws-fls', keepBuiltinsDirect: true,
+    })
+
+    const names = [...tools.keys()] as string[]
+    expect(names).toContain('gmailSendMessage')
+    const variant = names.find((name) => name.startsWith('gmailSendMessage__'))
+    expect(variant).toBeTruthy()
+    expect((tools.get(variant!) as { description: string }).description).toMatch(/^\[Work Gmail\]/)
+    expect(assistantConnectorStore.isEnabled).toHaveBeenCalledWith(
+      'a-1', 'gmail:ci-gm-work', 'gmail',
+    )
+
+    assistantConnectorStore.isEnabled.mockImplementation(async (
+      _assistantId: string,
+      connectorId: string,
+    ) => connectorId !== 'gmail:ci-gm-work')
+    const disabledTools = new Map()
+    await injectMcpTools({
+      userId: 'owner-1', assistantId: 'a-1', tools: disabledTools,
+      connectorStore: connectorStore as never,
+      settingsStore: settingsStoreStub() as never,
+      assistantConnectorStore: assistantConnectorStore as never,
+      connectorInstanceStore: connectorInstanceStore as never,
+      connectorGrantStore: connectorGrantStore as never,
+      assistantTeamId: 'ws-fls', keepBuiltinsDirect: true,
+    })
+    expect([...disabledTools.keys()].some((name) => String(name).startsWith('gmailSendMessage__'))).toBe(false)
+
+    // Exact account switches are independent in both directions: disabling
+    // the canonical account must not hide a secondary account that has an
+    // explicit enabled row.
+    assistantConnectorStore.isEnabled.mockImplementation(async (
+      _assistantId: string,
+      connectorId: string,
+    ) => connectorId !== 'gmail')
+    const extraOnlyTools = new Map()
+    await injectMcpTools({
+      userId: 'owner-1', assistantId: 'a-1', tools: extraOnlyTools,
+      connectorStore: connectorStore as never,
+      settingsStore: settingsStoreStub() as never,
+      assistantConnectorStore: assistantConnectorStore as never,
+      connectorInstanceStore: connectorInstanceStore as never,
+      connectorGrantStore: connectorGrantStore as never,
+      assistantTeamId: 'ws-fls', keepBuiltinsDirect: true,
+    })
+    expect(extraOnlyTools.has('gmailSendMessage')).toBe(false)
+    expect([...extraOnlyTools.keys()].some((name) => String(name).startsWith('gmailSendMessage__'))).toBe(true)
+  })
+
+  it('injects every exposed GitHub account as an exact-credential variant', async () => {
+    const connectorStore = {
+      list: vi.fn().mockResolvedValue([
+        { id: 'ci-gh-primary', connectorId: 'github', name: 'GitHub - hinson', connected: true, createdAt: new Date('2026-07-01T00:00:00Z') },
+        { id: 'ci-gh-work', connectorId: 'github', name: 'GitHub - brian', connected: true, createdAt: new Date('2026-07-02T00:00:00Z') },
+      ]),
+    }
+    const connectorInstanceStore = {
+      getCredentialsSystem: vi.fn(async (id: string) => ({ client_id: 'github_pat', client_secret: `pat-${id}` })),
+      updateCredentialsSystem: vi.fn(), markHealth: vi.fn(),
+      listByWorkspaceSystem: vi.fn().mockResolvedValue([]),
+    }
+    const connectorGrantStore = {
+      listForTargetSystem: vi.fn().mockResolvedValue([
+        { grantedByUserId: 'grantor-1', instance: { id: 'ci-gh-primary', provider: 'github', label: 'GitHub - hinson', connected: true, healthStatus: 'ok', custom: false, url: null, createdAt: new Date('2026-07-01T00:00:00Z') } },
+        { grantedByUserId: 'grantor-1', instance: { id: 'ci-gh-work', provider: 'github', label: 'GitHub - brian', connected: true, healthStatus: 'ok', custom: false, url: null, createdAt: new Date('2026-07-02T00:00:00Z') } },
+      ]),
+    }
+    const tools = new Map()
+
+    await injectMcpTools({
+      userId: 'owner-1', assistantId: 'a-1', tools,
+      connectorStore: connectorStore as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorInstanceStore: connectorInstanceStore as never,
+      connectorGrantStore: connectorGrantStore as never,
+      assistantTeamId: 'ws-fls', keepBuiltinsDirect: true,
+    })
+
+    const names = [...tools.keys()] as string[]
+    expect(names).toContain('githubListIssues')
+    expect(names.some((name) => name.startsWith('githubListIssues__'))).toBe(true)
+  })
 })
 
 describe('[COMP:integrations/connector-health] team-native connector health gate', () => {

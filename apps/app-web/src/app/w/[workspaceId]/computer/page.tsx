@@ -43,7 +43,7 @@ export function BrowsersEmptyState() {
             href={BROWSER_EXTENSION_INSTALL_URL}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex h-8 items-center justify-center rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+            className="inline-flex h-8 items-center justify-center rounded-md bg-action px-3 text-xs font-medium text-action-foreground transition-colors hover:bg-action/90"
           >
             {t.installAction}
           </a>

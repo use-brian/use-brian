@@ -13,6 +13,7 @@ import {
 
 const WS = '11111111-1111-4111-8111-111111111111'
 const IID = '22222222-2222-4222-8222-222222222222'
+const IID_EXTRA = '44444444-4444-4444-8444-444444444444'
 const GID = '33333333-3333-4333-8333-333333333333'
 
 function instance(overrides: Partial<ConnectorInstance> = {}): ConnectorInstance {
@@ -159,6 +160,41 @@ describe('[COMP:api/connector-instances-route] connector instance routes', () =>
       .send({ policy: 'allow', classification: 'write' })
     expect(updated.status).toBe(200)
     expect(setPolicy).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: WS, serverName: 'github', toolName: 'issues', updatedBy: 'u1' }))
+  })
+
+  it('uses an exact policy key for an additional workspace-owned account', async () => {
+    const { app, get, listByWorkspace, listForWorkspace, setPolicy } = makeApp()
+    const primary = instance({ id: IID, createdAt: new Date('2026-07-01T00:00:00Z') })
+    const extra = instance({
+      id: IID_EXTRA,
+      label: 'Workspace GitHub — work',
+      createdAt: new Date('2026-07-02T00:00:00Z'),
+    })
+    get.mockResolvedValue(extra)
+    listByWorkspace.mockResolvedValue([extra, primary])
+    listForWorkspace.mockResolvedValue([
+      { serverName: 'github', toolName: 'issues', policy: 'ask' },
+      { serverName: `github:${IID_EXTRA}`, toolName: 'issues', policy: 'block' },
+      { serverName: `github:${IID}`, toolName: 'issues', policy: 'allow' },
+    ] as never)
+
+    const listed = await request(app)
+      .get(`/api/workspaces/${WS}/connectors/${IID_EXTRA}/tool-policies`)
+    expect(listed.status).toBe(200)
+    expect(listed.body.policies).toEqual([
+      expect.objectContaining({ serverName: `github:${IID_EXTRA}`, toolName: 'issues', policy: 'block' }),
+    ])
+
+    const updated = await request(app)
+      .put(`/api/workspaces/${WS}/connectors/${IID_EXTRA}/tools/issues/policy`)
+      .send({ policy: 'allow', classification: 'write' })
+    expect(updated.status).toBe(200)
+    expect(setPolicy).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: WS,
+      serverName: `github:${IID_EXTRA}`,
+      toolName: 'issues',
+      updatedBy: 'u1',
+    }))
   })
 
   it('uses an instance policy key for IMAP and falls back tool-by-tool to the legacy provider row', async () => {

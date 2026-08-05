@@ -62,7 +62,6 @@ export const WORKSPACE_FLUSH_TABLES = [
   'browser_sessions',
   // Pages + docs (saved_views cascades the page tree)
   'saved_views',
-  'workspace_decks',
   'blueprint_records',
   'entity_instances',
   'comment_threads',

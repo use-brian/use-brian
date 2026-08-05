@@ -68,6 +68,8 @@
   --color-secondary: var(--secondary);
   --color-primary-foreground: var(--primary-foreground);
   --color-primary: var(--primary);
+  --color-action-foreground: var(--action-foreground);
+  --color-action: var(--action);
   --color-popover-foreground: var(--popover-foreground);
   --color-popover: var(--popover);
   --color-card-foreground: var(--card-foreground);
@@ -84,10 +86,10 @@
    `:root` / `.dark` below. The only other palette is `custom`: a workspace-
    shared, AI-generated theme whose tokens are injected as a <style> at runtime
    (see lib/theme.tsx), keyed to `data-palette="custom"` on <html>. The visual
-   TREATMENTS (button fill, active-row pill, sidebar wash, text selection) are
-   token-driven (--btn-*, --nav-active-*, --sidebar-surface-image, --selection-2)
-   so Notion renders FLAT/authentic while `custom` renders the fancy gradient +
-   glow versions — see the treatment rules near `.doc-btn-glow`.
+   TREATMENTS (active-row pill, sidebar wash, text selection) are token-driven
+   (--nav-active-*, --sidebar-surface-image, --selection-2). Filled actions use
+   the palette's neutral foreground/background contrast pair via --action*, so
+   an accent colour never takes over the interface as a field of CTA pills.
    Palettes: notion (default) · custom (AI-generated).
    ============================================================================ */
 
@@ -102,6 +104,8 @@
   --popover-foreground: #37352F;
   --primary: #2383E2;
   --primary-foreground: #FFFFFF;
+  --action: var(--foreground);
+  --action-foreground: var(--background);
   --secondary: #F1F1EF;
   --secondary-foreground: #37352F;
   --muted: #F7F6F3;
@@ -128,11 +132,7 @@
   --sidebar-border: #E9E9E7;
   --sidebar-ring: #2383E2;
 
-  /* Treatment tokens — DEFAULT = flat (Notion). Brand palettes override below.
-     Notion's active row is a flat grey, its buttons are flat blue, no glow. */
-  --btn-image: none;
-  --btn-glow: 0 1px 2px color-mix(in oklab, var(--foreground) 12%, transparent);
-  --btn-glow-hover: 0 2px 4px color-mix(in oklab, var(--foreground) 16%, transparent);
+  /* Treatment tokens — DEFAULT = flat (Notion). Brand palettes override below. */
   /* Active/selected pill — intentionally a touch STRONGER than the hover wash
      (`--sidebar-accent`). A faint grey reads fine as a transient hover, but as an
      always-on selected pill it blends into the sidebar, so the active nav item /
@@ -152,11 +152,11 @@
    AA on them — white-on-#2383E2 ≈ 3.9:1 (the user-message bubble + CTA labels)
    and #2383E2-as-text ≈ 4.0:1 on #252525 (the "Thinking…"/tool-timeline accents).
    We use Notion's OWN dark-mode blue #529CCA, which reads ~5:1 as accent
-   text/icons on these surfaces, and flip --primary-foreground to a deep navy so
-   every `bg-primary` fill (Send, FAB, CTAs) stays AA-legible as dark-ink-on-soft-
-   blue. --accent-2 tracks --primary (Notion's duotone collapses to one hue), and
-   --ring / --sidebar-primary / --sidebar-ring move with it. Light keeps the
-   authentic #2383E2 (see :root). ── */
+   text/icons on these surfaces, and flip --primary-foreground to a deep navy for
+   the compact accent fills that remain. Actions use the neutral --action pair,
+   which follows foreground/background automatically. --accent-2 tracks primary
+   (Notion's duotone collapses to one hue), and ring/sidebar accents move with it.
+   Light keeps the authentic #2383E2 (see :root). ── */
 .dark {
   --background: #191919;
   --foreground: #D4D4D4;
@@ -188,22 +188,11 @@
 }
 
 /* The `custom` palette — an AI-generated theme whose core tokens are injected as
-   a <style> at runtime (see lib/theme.tsx) — opts into the FANCY treatments
-   (gradient fill + layered glow + duotone selection + sidebar wash), keyed off
-   its own core tokens so they render in its hues. Notion (the default :root
-   above) keeps the flat treatments. */
+   a <style> at runtime (see lib/theme.tsx) — opts into branded navigation,
+   selection, and sidebar treatments keyed off its own hues. Filled actions stay
+   on the neutral --action pair and therefore inherit the generated theme's own
+   foreground/background contrast. */
 [data-palette="custom"] {
-  --btn-image: linear-gradient(135deg, var(--primary), var(--accent-2));
-  --btn-glow:
-    inset 0 1px 0 color-mix(in oklab, white 22%, transparent),
-    0 1px 2px color-mix(in oklab, var(--foreground) 9%, transparent),
-    0 6px 18px -6px color-mix(in oklab, var(--ring) 45%, transparent),
-    0 10px 30px -12px color-mix(in oklab, var(--accent-2) 50%, transparent);
-  --btn-glow-hover:
-    inset 0 1px 0 color-mix(in oklab, white 28%, transparent),
-    0 1px 2px color-mix(in oklab, var(--foreground) 11%, transparent),
-    0 9px 24px -6px color-mix(in oklab, var(--ring) 60%, transparent),
-    0 14px 38px -12px color-mix(in oklab, var(--accent-2) 65%, transparent);
   --nav-active-bg: linear-gradient(135deg, var(--primary), var(--accent-2));
   --nav-active-fg: var(--primary-foreground);
   --nav-active-glow:
@@ -1756,21 +1745,6 @@
 }
 
 @layer components {
-  /* Primary (filled) buttons. Treatment is token-driven so it adapts per palette
-     (see the PALETTE SYSTEM block): `--btn-image` paints a gradient fill on the
-     brand palettes and is `none` on Notion (so the flat `bg-primary` shows), and
-     `--btn-glow` / `--btn-glow-hover` carry the layered coloured glow on brand
-     palettes vs a subtle neutral shadow on Notion. Animates via the Button base's
-     `transition-all`. Applied through the Button `default` variant in
-     `components/ui/button.tsx`. */
-  .doc-btn-glow {
-    background-image: var(--btn-image, none);
-    box-shadow: var(--btn-glow);
-  }
-  .doc-btn-glow:hover {
-    box-shadow: var(--btn-glow-hover, var(--btn-glow));
-  }
-
   /* Constrained, centered reading column for non-full-width doc pages.
      Wraps the page body (title + editor) so it reads at a comfortable measure
      (~720px); the full-width mode swaps this for `w-full` in doc-shell.tsx.

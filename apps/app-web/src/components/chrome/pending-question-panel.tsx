@@ -143,8 +143,8 @@ export function PendingQuestionPanel({
             onClick={() => void onSubmit()}
             disabled={submitting || cancelling || answer.trim().length === 0}
             className={cn(
-              "rounded-md bg-primary px-3 py-1 text-[12px] font-medium text-primary-foreground",
-              "transition-colors hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed",
+              "rounded-md bg-action px-3 py-1 text-[12px] font-medium text-action-foreground",
+              "transition-colors hover:bg-action/90 disabled:opacity-50 disabled:cursor-not-allowed",
             )}
           >
             {submitting ? dict.submitting : dict.submit}

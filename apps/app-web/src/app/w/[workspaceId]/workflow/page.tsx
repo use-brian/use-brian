@@ -162,7 +162,7 @@ export default function WorkflowPage() {
             onClick={() => setCreateOpen(true)}
             className={cn(
               "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium",
-              "bg-primary text-primary-foreground hover:opacity-90 transition-opacity",
+              "bg-action text-action-foreground hover:opacity-90 transition-opacity",
             )}
           >
             <svg
@@ -228,7 +228,7 @@ export default function WorkflowPage() {
           <button
             type="button"
             onClick={() => setCreateOpen(true)}
-            className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium bg-primary text-primary-foreground hover:opacity-90"
+            className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium bg-action text-action-foreground hover:opacity-90"
           >
             {t.workflowPage.list.emptyCta}
           </button>

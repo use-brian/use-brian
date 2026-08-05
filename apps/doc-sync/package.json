@@ -15,6 +15,7 @@
     "@hocuspocus/server": "^4.1.0",
     "@use-brian/api": "workspace:*",
     "@use-brian/doc-model": "workspace:*",
+    "@use-brian/office-model": "workspace:*",
     "@use-brian/core": "workspace:*",
     "dotenv": "^16",
     "ws": "^8.21.0",

@@ -44,15 +44,18 @@ vi.mock('../../db/entities-store.js', () => ({
 }))
 vi.mock('../../db/workspace-files.js', () => ({ updateWorkspaceFileMeta: vi.fn() }))
 vi.mock('../../db/tasks.js', () => ({ updateTask: vi.fn() }))
+vi.mock('../../db/task-admission-store.js', () => ({ rejectTask: vi.fn() }))
 vi.mock('../../brain-stream/notify.js', () => ({ notifyBrainInboxChange: vi.fn() }))
 
 import { brainInboxRoutes } from '../brain-inbox.js'
 import { query } from '../../db/client.js'
 import { updateTask } from '../../db/tasks.js'
+import { rejectTask } from '../../db/task-admission-store.js'
 import { appendBrainVerification } from '../../db/brain-inbox-store.js'
 
 const mockQuery = vi.mocked(query)
 const mockUpdate = vi.mocked(updateTask)
+const mockReject = vi.mocked(rejectTask)
 const mockAudit = vi.mocked(appendBrainVerification)
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -99,6 +102,12 @@ describe('[COMP:api/tasks-bulk-route] POST /:workspaceId/tasks/bulk', () => {
     ).toBe(400)
     expect(
       (await request(app).post(URL).send({ action: 'update', ids: ['t1'], set: { priority: 'mega' } })).status,
+    ).toBe(400)
+    expect(
+      (await request(app).post(URL).send({ action: 'delete', ids: ['t1'], reason: 'no' })).status,
+    ).toBe(400)
+    expect(
+      (await request(app).post(URL).send({ action: 'delete', ids: ['t1'], create_rule: true })).status,
     ).toBe(400)
   })
 
@@ -155,5 +164,61 @@ describe('[COMP:api/tasks-bulk-route] POST /:workspaceId/tasks/bulk', () => {
       expect.objectContaining({ targetKind: 'task', targetId: 't1', action: 'delete' }),
     )
     expect(mockUpdate).not.toHaveBeenCalled()
+  })
+
+  it('applies one shared reason as an independent tombstone and narrow active rule per task', async () => {
+    const app = makeApp()
+    queueRow('w1')
+    queueRow('w1')
+    mockReject
+      .mockResolvedValueOnce({
+        task: { id: 't1' },
+        tombstoneId: 'ts1',
+        activeRuleId: 'rule1',
+        proposedRuleId: null,
+      } as any)
+      .mockResolvedValueOnce({
+        task: { id: 't2' },
+        tombstoneId: 'ts2',
+        activeRuleId: 'rule2',
+        proposedRuleId: null,
+      } as any)
+
+    const reason = 'Slack discussion about existing work is not a new task.'
+    const res = await request(app)
+      .post(URL)
+      .send({
+        action: 'delete',
+        ids: ['t1', 't2'],
+        reason,
+        create_rule: true,
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({
+      ok: true,
+      results: [
+        { id: 't1', ok: true, tombstoned: true, activeRuleId: 'rule1' },
+        { id: 't2', ok: true, tombstoned: true, activeRuleId: 'rule2' },
+      ],
+    })
+    expect(mockReject).toHaveBeenNthCalledWith(1, {
+      workspaceId: 'w1',
+      userId: 'u1',
+      taskId: 't1',
+      reason,
+      createRule: true,
+    })
+    expect(mockReject).toHaveBeenNthCalledWith(2, {
+      workspaceId: 'w1',
+      userId: 'u1',
+      taskId: 't2',
+      reason,
+      createRule: true,
+    })
+    expect(mockAudit).toHaveBeenCalledTimes(2)
+    // Only the two ownership probes touch the route-level query seam; the
+    // rejection primitive owns each atomic delete/tombstone/rule transaction.
+    expect(mockQuery).toHaveBeenCalledTimes(2)
   })
 })

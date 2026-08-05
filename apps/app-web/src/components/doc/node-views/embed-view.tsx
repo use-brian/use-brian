@@ -761,7 +761,7 @@ function DiagramSourceEditor({
             type="button"
             onClick={() => onSave(trimmed)}
             disabled={!canSave}
-            className="rounded bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:opacity-40"
+            className="rounded bg-action px-2.5 py-1 text-xs font-medium text-action-foreground hover:opacity-90 disabled:opacity-40"
           >
             {t.update}
           </button>

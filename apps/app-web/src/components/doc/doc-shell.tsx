@@ -591,6 +591,7 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
           model: ChatSeed["model"];
           researchMode: boolean;
           fileIds?: string[];
+          attachedRecordingIds?: string[];
         },
         targetViewId?: string,
         fromResume?: boolean,
@@ -618,6 +619,7 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
         model: pending.model,
         researchMode: pending.researchMode,
         fileIds: pending.fileIds,
+        attachedRecordingIds: pending.attachedRecordingIds,
       },
       pending.targetViewId,
       true,
@@ -938,7 +940,12 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
   // does, and that tool is stripped for doc assistants).
   async function handleBuildPage(
     text: string,
-    opts: { model: ChatSeed["model"]; researchMode: boolean; fileIds?: string[] },
+    opts: {
+      model: ChatSeed["model"];
+      researchMode: boolean;
+      fileIds?: string[];
+      attachedRecordingIds?: string[];
+    },
     targetViewId?: string,
     fromResume = false,
   ) {
@@ -959,6 +966,7 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
         model: opts.model,
         researchMode: opts.researchMode,
         fileIds: opts.fileIds,
+        attachedRecordingIds: opts.attachedRecordingIds,
         targetViewId,
         ts: Date.now(),
       });
@@ -988,6 +996,9 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
         researchMode: opts.researchMode,
         ...(opts.fileIds && opts.fileIds.length > 0
           ? { fileIds: opts.fileIds }
+          : {}),
+        ...(opts.attachedRecordingIds && opts.attachedRecordingIds.length > 0
+          ? { attachedRecordingIds: opts.attachedRecordingIds }
           : {}),
       });
       // The turn is seeded — intent fulfilled, drop the stash.
@@ -1345,7 +1356,7 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
                         <button
                           type="button"
                           onClick={() => void handleSaveAsTemplate(pageView.id, true)}
-                          className="rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground hover:bg-primary/90"
+                          className="rounded-md bg-action px-2.5 py-1 text-xs font-medium text-action-foreground hover:bg-action/90"
                         >
                           {t.templateAuthoringFinish}
                         </button>

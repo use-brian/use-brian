@@ -122,7 +122,7 @@ export function PublicChatView({ token, meta }: { token: string; meta: PublicCha
           )}
           {messages.map((m) =>
             m.role === "user" ? (
-              <div key={m.key} className="ml-auto max-w-[85%] rounded-2xl bg-primary px-4 py-2.5 text-sm text-primary-foreground whitespace-pre-wrap">
+              <div key={m.key} className="ml-auto max-w-[85%] rounded-2xl bg-secondary px-4 py-2.5 text-sm text-secondary-foreground whitespace-pre-wrap">
                 {m.content}
               </div>
             ) : (
@@ -171,7 +171,7 @@ export function PublicChatView({ token, meta }: { token: string; meta: PublicCha
             type="submit"
             disabled={pending || !draft.trim()}
             aria-label={t.send}
-            className="flex h-[42px] w-[42px] shrink-0 items-center justify-center rounded-xl bg-primary text-primary-foreground disabled:opacity-40"
+            className="flex h-[42px] w-[42px] shrink-0 items-center justify-center rounded-xl bg-action text-action-foreground disabled:opacity-40"
           >
             <ArrowUp className="h-4 w-4" />
           </button>

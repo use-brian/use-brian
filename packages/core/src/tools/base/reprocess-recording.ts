@@ -8,13 +8,12 @@ import { buildTool } from '../types.js'
  * upload flow and `confirmRecordingProcessing` enqueue through. No parallel
  * mechanism (see docs/architecture/media/transcription.md §"Re-processing").
  *
- * Double-ingestion guard (the invariant): a recording that ALREADY completed a
- * processing run is never silently re-processed. The first call returns the
- * cost context and instructs the model to ask the user; only an explicit
- * `confirm: true` (after the user agreed) enqueues. An in-flight job is a
- * no-op (queue-level idempotency). The duration surcharge is idempotent per
- * recording, so a re-run never double-bills credits — the spend is the
- * re-transcription COGS plus extraction.
+ * Consent guard (the invariant): an uploaded recording is never silently
+ * processed, and a completed one is never silently re-processed. The first
+ * call returns purpose/cost context and instructs the model to ask the user;
+ * only explicit `confirm: true` after agreement enqueues. An in-flight job is
+ * a no-op (queue-level idempotency). The duration surcharge is idempotent per
+ * recording, so a re-run never double-bills credits.
  *
  * [COMP:recordings/reprocess-recording-tool]
  */
@@ -31,6 +30,7 @@ export type ReprocessRecordingDeps = {
     workspaceId: string
     sourceKind: string
     sourceRef: Record<string, unknown> | null
+    durationMs?: number | null
   } | null>
   /** True when a processing run already completed for this recording. */
   hasProcessed: (recordingId: string) => Promise<boolean>
@@ -41,24 +41,31 @@ export type ReprocessRecordingDeps = {
     actingUserId: string
     blueprintSlug?: string | null
   }) => Promise<{ enqueued: boolean; jobId: string | null }>
+  /** Hosted credit quote; absent in OSS/self-hosted. */
+  surchargeCredits?: (durationSeconds: number) => number
 }
 
 export function createReprocessRecordingTool(deps: ReprocessRecordingDeps) {
   return buildTool({
     name: 'reprocessRecording',
     description:
-      'Re-run transcription and brain ingestion for a recording whose audio is already stored ' +
-      '(e.g. a recording whose earlier processing failed or produced nothing usable). ' +
-      'If the recording already completed a processing run, the first call returns a confirmation request instead of running — ' +
-      'relay it to the user (re-processing re-transcribes at model cost and re-files the transcript; ' +
-      'the duration surcharge is NOT charged again), and call again with confirm: true only after they agree.',
+      'Process or re-process a recording whose audio is already stored. Uploading is NOT consent to transcribe. ' +
+      'First clarify the desired outcome and blueprint, then call without confirm to obtain the confirmation wording. ' +
+      'Call with confirm: true only after the user explicitly agrees. Re-processing re-transcribes at model cost and ' +
+      're-files the transcript; the duration surcharge is not charged again.',
     inputSchema: z.object({
       recordingId: z.string().describe('The recording (Episode) id.'),
+      blueprintSlug: z
+        .string()
+        .trim()
+        .min(1)
+        .optional()
+        .describe('Optional blueprint id chosen with the user. Omit for ingest-only.'),
       confirm: z
         .boolean()
         .optional()
         .describe(
-          'Pass true ONLY after the user has explicitly agreed to re-process an already-processed recording.',
+          'Pass true ONLY after the user has explicitly agreed to process this stored recording with the chosen outcome.',
         ),
     }),
     isConcurrencySafe: false,
@@ -84,16 +91,29 @@ export function createReprocessRecordingTool(deps: ReprocessRecordingDeps) {
         }
       }
 
-      // The double-ingestion gate: a completed recording re-processes only on
-      // an explicit, user-approved confirm.
-      if ((await deps.hasProcessed(rec.id)) && input.confirm !== true) {
+      const alreadyProcessed = await deps.hasProcessed(rec.id)
+      // The consent gate applies to first processing too: an upload is a
+      // reversible storage action, never implied permission to transcribe.
+      if (input.confirm !== true) {
         const name = sref.fileName ?? 'This recording'
+        const durationSeconds = rec.durationMs == null
+          ? null
+          : Math.max(0, Math.round(rec.durationMs / 1000))
+        const duration = durationSeconds == null
+          ? ''
+          : ` It is about ${Math.max(1, Math.round(durationSeconds / 60))} minutes long.`
+        const credits = durationSeconds == null || !deps.surchargeCredits
+          ? ''
+          : ` Estimated processing cost: ${deps.surchargeCredits(durationSeconds)} credits.`
         return {
-          data:
-            `CONFIRMATION REQUIRED — ${name} already completed a processing run. ` +
-            'Re-processing re-transcribes the audio (model cost) and files the transcript into the brain again ' +
-            '(the duration surcharge is NOT charged twice, but extracted memories may duplicate). ' +
-            'Ask the user whether to proceed, and call this tool again with confirm: true only if they agree.',
+          data: alreadyProcessed
+            ? `CONFIRMATION REQUIRED — ${name} already completed a processing run.${duration}${credits} ` +
+              'Re-processing re-transcribes the audio and files the transcript into the brain again ' +
+              '(the duration surcharge is not charged twice, but extracted memories may duplicate). ' +
+              'Ask the user whether to proceed, and call this tool again with confirm: true only if they agree.'
+            : `CONFIRMATION REQUIRED — ${name} is uploaded but has not been processed.${duration}${credits} ` +
+              `Proposed outcome: ${input.blueprintSlug ? `use blueprint "${input.blueprintSlug}"` : 'ingest-only (no brief page)'}. ` +
+              'Ask the user to confirm this outcome, and call this tool again with confirm: true only if they agree.',
         }
       }
 
@@ -101,7 +121,7 @@ export function createReprocessRecordingTool(deps: ReprocessRecordingDeps) {
         recordingId: rec.id,
         workspaceId: rec.workspaceId,
         actingUserId: context.userId,
-        blueprintSlug: null,
+        blueprintSlug: input.blueprintSlug?.trim() || null,
       })
       if (!enqueued) {
         return { data: 'That recording is already being processed — no new run was started.' }

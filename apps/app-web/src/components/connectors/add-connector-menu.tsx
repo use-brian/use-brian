@@ -62,7 +62,7 @@ export function AddConnectorMenu({
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
         aria-haspopup="menu"
-        className="text-sm font-medium bg-primary text-primary-foreground px-4 py-2 rounded-lg hover:bg-primary/90 transition-colors"
+        className="text-sm font-medium bg-action text-action-foreground px-4 py-2 rounded-lg hover:bg-action/90 transition-colors"
       >
         {label}
       </button>

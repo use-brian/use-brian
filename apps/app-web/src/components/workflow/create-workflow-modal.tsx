@@ -273,7 +273,7 @@ export function CreateWorkflowModal({ onClose }: Props) {
                 disabled={submitting}
                 className={cn(
                   "px-4 py-2 rounded-md text-sm font-medium",
-                  "bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50",
+                  "bg-action text-action-foreground hover:opacity-90 disabled:opacity-50",
                 )}
               >
                 {submitting ? t.workflowPage.builder.saving : t.workflowPage.builder.saveCreateBtn}

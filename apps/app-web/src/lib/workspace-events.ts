@@ -62,7 +62,6 @@ import {
   WORKFLOW_REFRESH_EVENT,
   type WorkflowRefreshDetail,
 } from "@/lib/workflow-events";
-import { DECK_REFRESH_EVENT, type DeckRefreshDetail } from "@/lib/deck-events";
 import {
   ASSISTANT_REFRESH_EVENT,
   type AssistantRefreshDetail,
@@ -90,7 +89,6 @@ type WorkspacePrimitive =
   | "approval"
   | "skill"
   | "scheduled_job"
-  | "deck"
   | "assistant"
   | "workspace_config";
 
@@ -181,16 +179,6 @@ export function routeWorkspaceChange(
           detail: { workspaceId: payload.workspaceId, rowId: payload.rowId },
         },
       ];
-    case "deck":
-      return [
-        {
-          event: DECK_REFRESH_EVENT,
-          detail: {
-            workspaceId: payload.workspaceId,
-            rowId: payload.rowId,
-          } satisfies DeckRefreshDetail,
-        },
-      ];
     case "assistant":
       return [
         {
@@ -223,7 +211,6 @@ export function allDomainDispatches(workspaceId: string): DomainDispatch[] {
     { event: WORKFLOW_REFRESH_EVENT, detail: { workspaceId, primitive: null } },
     { event: SKILL_REFRESH_EVENT, detail: { workspaceId } },
     { event: SCHEDULED_JOB_REFRESH_EVENT, detail: { workspaceId } },
-    { event: DECK_REFRESH_EVENT, detail: { workspaceId } },
     { event: ASSISTANT_REFRESH_EVENT, detail: { workspaceId } },
     { event: HOME_APPS_REFRESH_EVENT, detail: { workspaceId } },
   ];

@@ -278,7 +278,7 @@ export function FeedOnboarding({
               type="button"
               onClick={() => confirmPick(picked)}
               disabled={picked.length === 0}
-              className="inline-flex h-8 w-full items-center justify-center rounded-lg bg-primary px-3 text-[12.5px] font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+              className="inline-flex h-8 w-full items-center justify-center rounded-lg bg-action px-3 text-[12.5px] font-medium text-action-foreground transition-colors hover:bg-action/90 disabled:opacity-50"
             >
               {t.home.pickCta}
             </button>
@@ -315,7 +315,7 @@ export function FeedOnboarding({
               <button
                 type="submit"
                 disabled={voiceHandle.trim().replace(/^@/, "").length === 0}
-                className="inline-flex h-8 w-full items-center justify-center rounded-lg bg-primary px-3 text-[12.5px] font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+                className="inline-flex h-8 w-full items-center justify-center rounded-lg bg-action px-3 text-[12.5px] font-medium text-action-foreground transition-colors hover:bg-action/90 disabled:opacity-50"
               >
                 {t.home.onboardVoiceCta}
               </button>
@@ -353,7 +353,7 @@ export function FeedOnboarding({
                 <button
                   type="submit"
                   disabled={busy}
-                  className="inline-flex h-8 w-full items-center justify-center rounded-lg bg-primary px-3 text-[12.5px] font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+                  className="inline-flex h-8 w-full items-center justify-center rounded-lg bg-action px-3 text-[12.5px] font-medium text-action-foreground transition-colors hover:bg-action/90 disabled:opacity-50"
                 >
                   {busy ? t.home.emptyCreating : t.home.emptyCta}
                 </button>

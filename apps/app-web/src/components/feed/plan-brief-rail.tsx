@@ -455,7 +455,7 @@ export function PlanBriefRail({
                   .filter(Boolean),
               })
             }
-            className="inline-flex h-8 w-full items-center justify-center rounded-lg bg-primary px-3 text-[12.5px] font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+            className="inline-flex h-8 w-full items-center justify-center rounded-lg bg-action px-3 text-[12.5px] font-medium text-action-foreground transition-colors hover:bg-action/90 disabled:opacity-50"
           >
             {tp.saveBrief}
           </button>

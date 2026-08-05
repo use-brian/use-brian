@@ -20,6 +20,12 @@ export type FileIngestInput = {
   fileName: string
   mime: string
   bytes: Buffer
+  /**
+   * Whether to derive text and run Pipeline B after storing the bytes.
+   * Defaults to true. Chat/pin staging passes false so durability never
+   * implies consent to interpret the file.
+   */
+  process?: boolean
   /** Defaults to `/uploads/<fileName>`. */
   path?: string
   /** File-row sensitivity. Defaults to `internal`. */

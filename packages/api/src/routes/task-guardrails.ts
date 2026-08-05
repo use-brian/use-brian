@@ -52,7 +52,20 @@ const predicateSchema = z.object({
   lanes: z.array(z.enum(['extracted', 'assistant'])).max(2).optional(),
   title_matches: z.array(z.string().min(2).max(120)).max(10).optional(),
   channel_refs: z.array(z.string().min(1).max(128)).max(20).optional(),
-  require: z.array(z.enum(['assignee', 'due'])).max(2).optional(),
+  require: z
+    .array(
+      z.enum([
+        'assignee',
+        'due',
+        'description',
+        'resolved_target',
+        'explicit_commitment',
+        'completion_signal',
+        'agent_ready',
+      ]),
+    )
+    .max(7)
+    .optional(),
 })
 
 const createRuleSchema = z.object({
@@ -228,6 +241,9 @@ export function taskGuardrailRoutes({
         due: candidate.due,
         source: 'extracted',
         sourceEpisodeId: candidate.sourceEpisodeId,
+        attributes: candidate.quality?.description
+          ? { description: candidate.quality.description }
+          : undefined,
       })
       await resolveCandidate({
         workspaceId: req.params.workspaceId,

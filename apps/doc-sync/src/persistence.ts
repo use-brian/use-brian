@@ -172,6 +172,28 @@ export async function notifyPageUpdated(params: {
   }
 }
 
+/** Best-effort promotion of a settled Office Yjs snapshot into immutable
+ * version history. The API owns workspace_files, so doc-sync sends only the
+ * artifact/hash/CAS tuple over the existing shared-secret channel. */
+export async function notifyOfficeCheckpoint(params: {
+  artifactId: string
+  expectedVersion: number
+  canonicalHash: string
+  config: { apiBaseUrl: string; syncSecret: string; doFetch?: typeof fetch }
+}): Promise<'checkpointed' | 'conflict' | 'error'> {
+  const doFetch = params.config.doFetch ?? fetch
+  try {
+    const response = await doFetch(`${params.config.apiBaseUrl.replace(/\/+$/, '')}/internal/office-checkpoint`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-doc-sync-secret': params.config.syncSecret },
+      body: JSON.stringify({ artifactId: params.artifactId, expectedVersion: params.expectedVersion, canonicalHash: params.canonicalHash }),
+    })
+    return response.status === 409 ? 'conflict' : response.ok ? 'checkpointed' : 'error'
+  } catch {
+    return 'error'
+  }
+}
+
 /**
  * What `loadPageUpdate` found. The caller MUST distinguish the two: a
  * `persisted` update is the doc's own history and is always safe to apply,

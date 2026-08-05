@@ -13,11 +13,11 @@ import type { RetrievalActor } from '../../retrieval/types.js'
  * boundary uses, so coverage, provenance (`source_episode_id`), metering, and
  * failure surfacing are identical to a fresh ingest.
  *
- * Double-ingestion guard (the invariant): a file that ALREADY produced an
- * episode is never silently re-ingested. The first call returns the cost
- * context and instructs the model to ask the user; only an explicit
- * `confirm: true` (after the user agreed) enqueues. An in-flight job is a
- * no-op (queue-level idempotency).
+ * Consent guard (the invariant): storing or pinning a file is not permission to
+ * interpret it. The first call always returns the proposed work and instructs
+ * the model to ask the user; only explicit `confirm: true` after agreement
+ * enqueues. Previously-ingested files add the duplicate-memory warning. An
+ * in-flight job is a no-op (queue-level idempotency).
  *
  * [COMP:files/ingest-stored-file-tool]
  */
@@ -52,9 +52,9 @@ export function createIngestStoredFileTool(deps: IngestStoredFileDeps) {
       'Start deterministic brain ingestion for a file that is already stored in this workspace ' +
       '(parse → index → knowledge extraction, the same pipeline an upload uses). ' +
       'Use when the user asks to ingest, re-ingest, or "file into the brain" an existing stored file. ' +
-      'If the file was already ingested before, the first call returns a confirmation request instead of running — ' +
-      'relay it to the user (re-ingesting spends model credits and can duplicate extracted memories), ' +
-      'and call again with confirm: true only after they agree. ' +
+      'Uploading or pinning is NOT consent to interpret: first clarify the user\'s purpose, then call without confirm ' +
+      'to obtain the confirmation wording. Call with confirm: true only after the user explicitly agrees. ' +
+      'Re-ingesting a previously processed file can duplicate extracted memories. ' +
       'Not for audio/video recordings — use reprocessRecording for those.',
     inputSchema: z.object({
       fileId: z.string().describe('The stored file id (from the file listing or search results).'),
@@ -62,7 +62,7 @@ export function createIngestStoredFileTool(deps: IngestStoredFileDeps) {
         .boolean()
         .optional()
         .describe(
-          'Pass true ONLY after the user has explicitly agreed to re-ingest an already-ingested file.',
+          'Pass true ONLY after the user has explicitly agreed to parse, index, and extract this stored file.',
         ),
     }),
     isConcurrencySafe: false,
@@ -85,16 +85,18 @@ export function createIngestStoredFileTool(deps: IngestStoredFileDeps) {
         }
       }
 
-      // The double-ingestion gate: an already-ingested file re-ingests only on
-      // an explicit, user-approved confirm.
-      if (file.sourceEpisodeId && input.confirm !== true) {
+      // The consent gate applies to first ingest too: storage/pinning is a
+      // reversible action and cannot silently turn into knowledge extraction.
+      if (input.confirm !== true) {
         const sizeKb = Math.max(1, Math.round(file.sizeBytes / 1024))
         return {
-          data:
-            `CONFIRMATION REQUIRED — "${file.name}" (${sizeKb} KB) was already ingested into the brain. ` +
-            'Re-ingesting runs knowledge extraction again: it spends model credits and may duplicate extracted memories ' +
-            '(entities deduplicate; memories do not). ' +
-            'Ask the user whether to proceed, and call this tool again with confirm: true only if they agree.',
+          data: file.sourceEpisodeId
+            ? `CONFIRMATION REQUIRED — "${file.name}" (${sizeKb} KB) was already ingested into the brain. ` +
+              'Re-ingesting runs parsing, indexing, and knowledge extraction again: it spends model credits and may duplicate extracted memories ' +
+              '(entities deduplicate; memories do not). Ask the user whether to proceed, and call this tool again with confirm: true only if they agree.'
+            : `CONFIRMATION REQUIRED — "${file.name}" (${sizeKb} KB) is stored but has not been ingested. ` +
+              'Ingesting will parse and index its content, then extract knowledge such as memories, entities, and possible tasks. ' +
+              'Ask what outcome the user wants and whether to proceed; call this tool again with confirm: true only after they explicitly agree.',
         }
       }
 

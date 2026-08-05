@@ -2455,10 +2455,10 @@ describe('[COMP:brain/pipeline-b] windowed extraction', () => {
  */
 describe('[COMP:tasks/admission] Pipeline B — extraction lane gate', () => {
   function taskCollector() {
-    const rows: Array<{ title: string }> = []
+    const rows: Array<{ title: string; attributes?: Record<string, unknown> }> = []
     const tasks = {
-      create: async (params: { title: string }) => {
-        rows.push({ title: params.title })
+      create: async (params: { title: string; attributes?: Record<string, unknown> }) => {
+        rows.push({ title: params.title, attributes: params.attributes })
         return { id: `task-${rows.length}`, title: params.title }
       },
     } as unknown as PipelineBDeps['tasks']
@@ -2474,6 +2474,41 @@ describe('[COMP:tasks/admission] Pipeline B — extraction lane gate', () => {
       memories: [],
       ephemeral: [],
       tags: [],
+    })
+  }
+
+  function readinessWith(
+    titles: string[],
+    over: Partial<{
+      classification: 'ready' | 'needs_spec' | 'not_a_task'
+      evidence_quote: string | null
+      commitment: 'explicit' | 'implicit' | 'hedged' | 'none'
+      objective: string | null
+      target: string | null
+      description: string | null
+      starting_point_kind: 'explicit' | 'discoverable' | 'missing'
+      starting_point: string | null
+      completion_signal: string | null
+      missing: string[]
+      explanation: string
+    }> = {},
+  ): string {
+    return JSON.stringify({
+      assessments: titles.map((title, index) => ({
+        index,
+        classification: 'ready',
+        evidence_quote: 'chatter',
+        commitment: 'explicit',
+        objective: title,
+        target: 'the named work item',
+        description: `${title}. Start from the named work item and finish when the requested result is complete.`,
+        starting_point_kind: 'discoverable',
+        starting_point: 'Locate the named work item in the workspace.',
+        completion_signal: 'The requested result is complete.',
+        missing: [],
+        explanation: 'Explicit and actionable.',
+        ...over,
+      })),
     })
   }
 
@@ -2517,7 +2552,11 @@ describe('[COMP:tasks/admission] Pipeline B — extraction lane gate', () => {
   it('drops a task the workspace already rejected, and records the audit row', async () => {
     const { rows, tasks } = taskCollector()
     const recorded: any[] = []
-    const provider = sequencedProvider([extractionWith(['List tasks']), classification])
+    const provider = sequencedProvider([
+      extractionWith(['List tasks']),
+      readinessWith(['List tasks']),
+      classification,
+    ])
     await processEpisode(
       baseEpisode(),
       'chatter',
@@ -2557,6 +2596,7 @@ describe('[COMP:tasks/admission] Pipeline B — extraction lane gate', () => {
     const recorded: any[] = []
     const provider = sequencedProvider([
       extractionWith(['Fix the GitHub 401 error', 'Book the venue']),
+      readinessWith(['Fix the GitHub 401 error', 'Book the venue']),
       classification,
     ])
     await processEpisode(
@@ -2585,42 +2625,91 @@ describe('[COMP:tasks/admission] Pipeline B — extraction lane gate', () => {
   it('injects the workspace policy into the extraction prompt', async () => {
     const { tasks } = taskCollector()
     const { provider, requests } = capturingProvider([extractionWith([]), classification])
+    const loadPolicyForPrompt = vi.fn(async () => ({
+      rules: [
+        {
+          id: 'r1',
+          workspaceId: 'ws-1',
+          status: 'active' as const,
+          effect: 'deny' as const,
+          predicate: {},
+          nlClause: "Don't create tasks from standup acknowledgements",
+          reason: null,
+          origin: 'user' as const,
+          createdAt: new Date(),
+        },
+      ],
+      tombstones: [],
+      openTasks: [{ id: 'task-1', title: 'Integrate Teams', similarity: 0.875 }],
+    }))
     await processEpisode(
       baseEpisode(),
-      'chatter',
+      'We discussed progress on Integrate Teams',
       makeDeps({
         ...baseDepsFor(provider, tasks),
         taskAdmission: admissionPort({
-          loadPolicyForPrompt: async () => ({
-            rules: [
-              {
-                id: 'r1',
-                workspaceId: 'ws-1',
-                status: 'active' as const,
-                effect: 'deny' as const,
-                predicate: {},
-                nlClause: "Don't create tasks from standup acknowledgements",
-                reason: null,
-                origin: 'user' as const,
-                createdAt: new Date(),
-              },
-            ],
-            tombstones: [],
-          }),
+          loadPolicyForPrompt,
         }),
       }),
     )
 
     const prompt = String(requests[0]?.messages?.[0]?.content ?? '')
+    expect(loadPolicyForPrompt).toHaveBeenCalledWith(
+      'ws-1',
+      'We discussed progress on Integrate Teams',
+    )
     expect(prompt).toContain('Workspace task policy')
     expect(prompt).toContain("Don't create tasks from standup acknowledgements")
+    expect(prompt).toContain('Already tracked: "Integrate Teams"')
+  })
+
+  it('passes the Episode channel ref into deterministic rule evaluation', async () => {
+    const { rows, tasks } = taskCollector()
+    const recorded: any[] = []
+    const provider = sequencedProvider([
+      extractionWith(['Post the update']),
+      readinessWith(['Post the update']),
+      classification,
+    ])
+    await processEpisode(
+      baseEpisode({ sourceKind: 'slack_thread', channelRef: 'C456' }),
+      'Post the update',
+      makeDeps({
+        ...baseDepsFor(provider, tasks),
+        taskAdmission: admissionPort({
+          listActiveRules: async () => [
+            {
+              id: 'rule-channel',
+              workspaceId: 'ws-1',
+              status: 'active',
+              effect: 'deny',
+              predicate: { lanes: ['extracted'], channel_refs: ['C456'] },
+              nlClause: 'Do not create tasks from this channel',
+              reason: null,
+              origin: 'user',
+              createdAt: new Date(),
+            },
+          ],
+          recordCandidate: async (input) => {
+            recorded.push(input)
+          },
+        }),
+      }),
+    )
+
+    expect(rows).toHaveLength(0)
+    expect(recorded[0]).toMatchObject({ status: 'dropped', reasonCode: 'rule' })
   })
 
   it('extracts normally when the policy lookup fails', async () => {
     // A policy read that throws must not fail the extraction — the gate is
     // still there as the backstop.
     const { rows, tasks } = taskCollector()
-    const provider = sequencedProvider([extractionWith(['Book the venue']), classification])
+    const provider = sequencedProvider([
+      extractionWith(['Book the venue']),
+      readinessWith(['Book the venue']),
+      classification,
+    ])
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     await processEpisode(
       baseEpisode(),
@@ -2636,5 +2725,140 @@ describe('[COMP:tasks/admission] Pipeline B — extraction lane gate', () => {
     )
     expect(rows.map((r) => r.title)).toEqual(['Book the venue'])
     warn.mockRestore()
+  })
+})
+
+describe('[COMP:tasks/task-readiness] Pipeline B — grounded automatic task quality', () => {
+  const classification = JSON.stringify({
+    inferred_sensitivity: 'internal',
+    brief_reason: 'routine',
+  })
+
+  function extraction(title: string): string {
+    return JSON.stringify({
+      summary: 'Conversation.',
+      entities: [],
+      edges: [],
+      tasks: [{ text: title, due_iso: null, assignee_ref: null }],
+      memories: [],
+      ephemeral: [],
+      tags: [],
+    })
+  }
+
+  function readiness(over: Record<string, unknown>): string {
+    return JSON.stringify({
+      assessments: [{
+        index: 0,
+        classification: 'ready',
+        evidence_quote: 'Ship the pricing page update by Friday',
+        commitment: 'explicit',
+        objective: 'Ship the pricing page update',
+        target: 'Pricing page',
+        description: 'Update the pricing page by Friday. Start from the existing pricing page implementation. Done when the updated page is live.',
+        starting_point_kind: 'discoverable',
+        starting_point: 'Locate the existing pricing page implementation.',
+        completion_signal: 'The updated pricing page is live.',
+        missing: [],
+        explanation: 'Explicit commitment with enough execution context.',
+        ...over,
+      }],
+    })
+  }
+
+  function admissionPort(recorded: any[]) {
+    return {
+      listActiveRules: async () => [],
+      findSimilarTombstones: async () => [],
+      findSimilarTasks: async () => [],
+      recordCandidate: async (input: unknown) => { recorded.push(input) },
+    } as NonNullable<PipelineBDeps['taskAdmission']>
+  }
+
+  function taskStore(rows: Array<{ title: string; attributes?: Record<string, unknown> }>) {
+    return {
+      create: async (params: { title: string; attributes?: Record<string, unknown> }) => {
+        rows.push(params)
+        return { id: `task-${rows.length}`, title: params.title }
+      },
+    } as unknown as PipelineBDeps['tasks']
+  }
+
+  it('drops the grounded but hedged "pull a group" slop class', async () => {
+    const rows: Array<{ title: string }> = []
+    const recorded: any[] = []
+    const provider = sequencedProvider([
+      extraction('Pull a group'),
+      readiness({
+        classification: 'not_a_task',
+        evidence_quote: 'i pull a group maybe',
+        commitment: 'hedged',
+        objective: null,
+        target: null,
+        description: null,
+        starting_point_kind: 'missing',
+        starting_point: null,
+        completion_signal: null,
+        missing: ['commitment', 'objective', 'target', 'description', 'starting_point', 'completion_signal'],
+        explanation: 'The speaker hedged with maybe and did not identify a target or purpose.',
+      }),
+      classification,
+    ])
+
+    await processEpisode(
+      baseEpisode({ sourceKind: 'slack_thread' }),
+      'Ashley: i pull a group maybe',
+      makeDeps({ provider, tasks: taskStore(rows), taskAdmission: admissionPort(recorded) }),
+    )
+
+    expect(rows).toHaveLength(0)
+    expect(recorded[0]).toMatchObject({
+      status: 'dropped',
+      reasonCode: 'not_a_task',
+      quality: { evidenceVerified: true, commitment: 'hedged' },
+    })
+  })
+
+  it('fails closed to Suggestions when the judge quote is not in the Episode', async () => {
+    const rows: Array<{ title: string }> = []
+    const recorded: any[] = []
+    const provider = sequencedProvider([
+      extraction('Ship the pricing page update'),
+      readiness({ evidence_quote: 'A sentence that was never said' }),
+      classification,
+    ])
+
+    await processEpisode(
+      baseEpisode({ sourceKind: 'slack_thread' }),
+      'Ashley: Ship the pricing page update by Friday',
+      makeDeps({ provider, tasks: taskStore(rows), taskAdmission: admissionPort(recorded) }),
+    )
+
+    expect(rows).toHaveLength(0)
+    expect(recorded[0]).toMatchObject({
+      status: 'pending',
+      reasonCode: 'quality_unverified',
+      quality: { evidenceVerified: false },
+    })
+  })
+
+  it('creates a grounded agent-ready task with the judged description', async () => {
+    const rows: Array<{ title: string; attributes?: Record<string, unknown> }> = []
+    const recorded: any[] = []
+    const provider = sequencedProvider([
+      extraction('Ship the pricing page update'),
+      readiness({}),
+      classification,
+    ])
+
+    await processEpisode(
+      baseEpisode({ sourceKind: 'slack_thread' }),
+      'Ashley: Ship the pricing page update by Friday',
+      makeDeps({ provider, tasks: taskStore(rows), taskAdmission: admissionPort(recorded) }),
+    )
+
+    expect(recorded).toHaveLength(0)
+    expect(rows).toHaveLength(1)
+    expect(rows[0].attributes?.description).toContain('Done when the updated page is live')
   })
 })

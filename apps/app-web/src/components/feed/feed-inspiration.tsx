@@ -233,7 +233,7 @@ function InspirationPageLayout({
             type="button"
             onClick={runScan}
             disabled={scanning || noKeywords}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-primary text-primary-foreground px-3 h-8 text-[12.5px] font-medium hover:bg-primary/90 active:bg-primary/85 disabled:opacity-50 transition-colors press"
+            className="inline-flex items-center gap-1.5 rounded-lg bg-action text-action-foreground px-3 h-8 text-[12.5px] font-medium hover:bg-action/90 active:bg-action/85 disabled:opacity-50 transition-colors press"
           >
             {scanning ? <SpinnerIcon /> : <PlayIcon />}
             {scanning ? td.scanning : td.runButton}
@@ -511,7 +511,7 @@ function InspirationConfigForm({
             type="button"
             onClick={() => onSave(config)}
             disabled={saving}
-            className="rounded-xl bg-primary text-primary-foreground px-4 h-9 text-sm font-medium hover:bg-primary/90 disabled:opacity-50"
+            className="rounded-lg bg-action text-action-foreground px-4 h-9 text-sm font-medium hover:bg-action/90 disabled:opacity-50"
           >
             {saving ? td.saving : td.save}
           </button>
@@ -615,7 +615,7 @@ function CandidateCard({
             type="button"
             onClick={() => void startDraft("inspiration-original")}
             disabled={creating !== null}
-            className="rounded-lg bg-primary text-primary-foreground px-3 h-8 text-xs font-medium hover:bg-primary/90 disabled:opacity-40 transition-colors"
+            className="rounded-lg bg-action text-action-foreground px-3 h-8 text-xs font-medium hover:bg-action/90 disabled:opacity-40 transition-colors"
           >
             {creating === "original" ? td.opening : td.draftInspiredPost}
           </button>
@@ -682,7 +682,7 @@ function EmptyState({
       <button
         type="button"
         onClick={onRun}
-        className="inline-flex items-center gap-1.5 rounded-xl bg-primary text-primary-foreground px-4 h-9 text-sm font-medium hover:bg-primary/90 mt-1"
+        className="inline-flex items-center gap-1.5 rounded-lg bg-action text-action-foreground px-4 h-9 text-sm font-medium hover:bg-action/90 mt-1"
       >
         <PlayIcon />
         {td.runAgain}
@@ -734,7 +734,7 @@ function NotConnectedState({
       </p>
       <Link
         href={feedPath(workspaceId)}
-        className="inline-flex items-center justify-center rounded-lg bg-primary px-3 h-8 text-[12.5px] font-medium text-primary-foreground hover:bg-primary/90"
+        className="inline-flex items-center justify-center rounded-lg bg-action px-3 h-8 text-[12.5px] font-medium text-action-foreground hover:bg-action/90"
       >
         {format(t.draftSessions.connectCta, { platform: label })}
       </Link>
