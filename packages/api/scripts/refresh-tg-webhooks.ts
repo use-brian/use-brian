@@ -1,10 +1,10 @@
 /**
- * One-shot: re-register every BYO Telegram webhook.
+ * One-shot: re-register every BYO Telegram webhook and command menu.
  *
  * Doubles as the channel-integrations-split cutover step — it re-points each
  * webhook at the new `/webhook/telegram/:channelId` URL scheme (migration 158;
  * see docs/plans/channel-integrations-split.md) and refreshes the
- * `allowed_updates` set (now includes `my_chat_member`) at the same time.
+ * `allowed_updates` set and installs the `/ask` command at the same time.
  *
  * Context: packages/channels/src/telegram/api.ts → setWebhook() now asks
  * Telegram to send membership-change updates in addition to messages and
@@ -25,7 +25,7 @@
  *   DATABASE_URL="$LOCAL_URL" \
  *     pnpm --filter @use-brian/api tsx scripts/refresh-tg-webhooks.ts
  *
- * Idempotent — running twice just re-POSTs the same setWebhook call.
+ * Idempotent — running twice just re-POSTs the same Telegram configuration.
  */
 
 import dotenv from 'dotenv'
@@ -38,7 +38,7 @@ import {
   decryptCredentials,
   type TelegramCredentials,
 } from '../src/db/channel-integrations.js'
-import { createTelegramApi } from '@use-brian/channels'
+import { createTelegramApi, TELEGRAM_BOT_COMMANDS } from '@use-brian/channels'
 
 const DATABASE_URL = process.env.DATABASE_URL
 const WEBHOOK_BASE_URL = process.env.WEBHOOK_BASE_URL
@@ -83,6 +83,7 @@ async function refresh(): Promise<void> {
 
       try {
         await api.setWebhook(webhookUrl, creds.webhook_secret)
+        await api.upsertMyCommands(TELEGRAM_BOT_COMMANDS)
         ok += 1
         console.log(`  ✓ integration ${row.id} (channel ${row.channel_id})`)
       } catch (err) {
