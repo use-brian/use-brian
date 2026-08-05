@@ -12,7 +12,7 @@ export function OfficeCardPreview({ artifact }: { artifact: OfficeArtifact }) {
   const [snapshot, setSnapshot] = useState<OfficeArtifactSnapshot | null>(null);
 
   useEffect(() => {
-    if (Number(artifact.version) <= 0) return;
+    if (!canLoadOfficeCardPreview(artifact)) return;
     const host = hostRef.current;
     let live = true;
     let started = false;
@@ -40,13 +40,17 @@ export function OfficeCardPreview({ artifact }: { artifact: OfficeArtifact }) {
       live = false;
       observer.disconnect();
     };
-  }, [artifact.artifactId, artifact.version]);
+  }, [artifact.artifactId, artifact.mode, artifact.version]);
 
   return (
-    <div ref={hostRef} className="relative flex aspect-[16/10] items-center justify-center overflow-hidden border-b bg-muted/45 p-3" aria-hidden="true">
+    <div ref={hostRef} data-office-card-preview-shell={artifact.family} className="relative flex aspect-[16/10] items-center justify-center overflow-hidden border-b bg-muted/45 p-3" aria-hidden="true">
       {snapshot ? <OfficeCardPreviewCanvas snapshot={snapshot} /> : <OfficePreviewPlaceholder family={artifact.family} />}
     </div>
   );
+}
+
+export function canLoadOfficeCardPreview(artifact: OfficeArtifact): boolean {
+  return artifact.artifactId.length > 0 && (Number(artifact.version) > 0 || artifact.mode === "template");
 }
 
 export function OfficeCardPreviewCanvas({ snapshot }: { snapshot: OfficeArtifactSnapshot }) {

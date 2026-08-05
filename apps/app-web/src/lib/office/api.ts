@@ -5,6 +5,17 @@ import type { OfficeArtifactSnapshot, OfficeCommand } from "@use-brian/office-mo
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
 export type OfficeFamily = "document" | "presentation";
+export type OfficeTemplate = {
+  id: string;
+  family: OfficeFamily;
+  name: string;
+  description: string;
+  lifecycleState: "draft" | "admitted" | "deprecated" | "trash" | "retained";
+  currentVersionId: string | null;
+  draftArtifactId: string | null;
+  sensitivity: "public" | "internal" | "confidential";
+  updatedAt: string;
+};
 export type OfficeArtifact = {
   artifactId: string;
   family: OfficeFamily;
@@ -177,8 +188,8 @@ export async function steerOfficeJob(jobId: string, instruction: string): Promis
   );
 }
 
-export async function listOfficeTemplates(workspaceId: string): Promise<Array<Record<string, unknown>>> {
-  const body = await json<{ templates: Array<Record<string, unknown>> }>(
+export async function listOfficeTemplates(workspaceId: string): Promise<OfficeTemplate[]> {
+  const body = await json<{ templates: OfficeTemplate[] }>(
     await authFetch(`${API_URL}/api/office/templates?workspaceId=${encodeURIComponent(workspaceId)}`),
     "office_templates_failed",
   );

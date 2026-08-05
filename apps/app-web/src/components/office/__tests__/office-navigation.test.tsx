@@ -17,7 +17,7 @@ vi.mock("next/link", () => ({
 import { OfficeTopbar } from "../office-topbar";
 import { OfficeCreate } from "../office-create";
 import { OfficeImportTemplateEmptyState } from "../office-import";
-import { OfficeTemplateLibrary, officeTemplateNameFromFile, readOfficeStarterTemplate } from "../template-library";
+import { OfficeTemplateCard, OfficeTemplateLibrary, officeTemplateNameFromFile, readOfficeStarterTemplate } from "../template-library";
 
 function wrap(node: React.ReactNode) {
   return renderToStaticMarkup(<I18nProvider locale="en" dict={en}>{node}</I18nProvider>);
@@ -54,6 +54,20 @@ describe("[COMP:app-web/office-navigation] Office route chrome", () => {
     const html = wrap(<OfficeTemplateLibrary workspaceId="workspace-1" />);
     expect(html).toContain("Import template");
     expect(html).toContain("New template");
+  });
+
+  it("renders visual template cards with explicit Document and Presentation identities", () => {
+    const base = { lifecycleState: "admitted" as const, currentVersionId: "version-1", sensitivity: "internal" as const, updatedAt: "2026-08-05T00:00:00.000Z" };
+    const html = wrap(<div>
+      <OfficeTemplateCard workspaceId="workspace-1" template={{ ...base, id: "doc-template", family: "document", name: "Letterhead", description: "Company letters", draftArtifactId: "doc-artifact" }} />
+      <OfficeTemplateCard workspaceId="workspace-1" template={{ ...base, id: "ppt-template", family: "presentation", name: "Company deck", description: "Company presentations", draftArtifactId: "ppt-artifact" }} />
+    </div>);
+    expect(html).toContain('data-office-template-card="document"');
+    expect(html).toContain('data-office-template-family="presentation"');
+    expect(html).toContain('data-office-card-preview-shell="document"');
+    expect(html).toContain('href="/w/workspace-1/office/templates/ppt-template"');
+    expect(html).toContain("Document");
+    expect(html).toContain("Presentation");
   });
 
   it("replaces the dead import control with starter-template recovery links", () => {

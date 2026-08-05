@@ -4,10 +4,11 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Dialog } from "@base-ui/react/dialog";
-import { Plus, Upload, X } from "lucide-react";
+import { FileText, Plus, Presentation, Upload, X } from "lucide-react";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { useT } from "@/lib/i18n/client";
-import { createOfficeTemplate, getOfficeJob, importOfficeTemplateDraft, listOfficeTemplates, transitionOfficeTemplateLifecycle, uploadOfficeSource, type OfficeFamily } from "@/lib/office/api";
+import { createOfficeTemplate, getOfficeJob, importOfficeTemplateDraft, listOfficeTemplates, transitionOfficeTemplateLifecycle, uploadOfficeSource, type OfficeArtifact, type OfficeFamily, type OfficeTemplate } from "@/lib/office/api";
+import { OfficeCardPreview } from "./office-card-preview";
 import { OfficeTopbar } from "./office-topbar";
 
 export type OfficeStarterTemplate = "general-presentation" | "letterhead";
@@ -40,7 +41,7 @@ export function OfficeTemplateLibrary({ workspaceId, templateId }: { workspaceId
   const starterFamily: OfficeFamily = starterTemplate === "general-presentation" ? "presentation" : "document";
   const starterName = starterTemplate === "general-presentation" ? t.starterPresentationTitle : starterTemplate === "letterhead" ? t.starterLetterheadTitle : "";
   const starterDescription = starterTemplate === "general-presentation" ? t.starterPresentationInstructions : starterTemplate === "letterhead" ? t.starterLetterheadInstructions : "";
-  const [templates, setTemplates] = useState<Array<Record<string, unknown>> | null>(null);
+  const [templates, setTemplates] = useState<OfficeTemplate[] | null>(null);
   const [creating, setCreating] = useState(starterTemplate !== null);
   const [family, setFamily] = useState<OfficeFamily>(starterFamily);
   const [name, setName] = useState(starterName);
@@ -62,7 +63,7 @@ export function OfficeTemplateLibrary({ workspaceId, templateId }: { workspaceId
     setCreating(true);
   }, [starterDescription, starterFamily, starterName, starterTemplate]);
   const selected = templateId ? templates?.find((template) => template.id === templateId) : undefined;
-  const selectedName = selected ? String(selected.name ?? t.templateTitle) : null;
+  const selectedName = selected?.name ?? null;
 
   async function submitTemplate(event: React.FormEvent) {
     event.preventDefault();
@@ -133,10 +134,10 @@ export function OfficeTemplateLibrary({ workspaceId, templateId }: { workspaceId
         <h1 className="text-2xl font-semibold">{selectedName ?? t.templateTitle}</h1>
         <p className="mt-1 text-sm text-muted-foreground">{t.templateDescription}</p>
 
-        {selected ? <div className="mt-5 space-y-3 rounded-md bg-amber-50 p-3 text-sm text-amber-950"><p>{t.templateMode}</p><div className="flex flex-wrap gap-2">{selected.lifecycleState === "admitted" ? <button type="button" onClick={() => void transitionOfficeTemplateLifecycle(String(selected.id), "deprecate", "Deprecated from template library")} className="rounded border border-amber-900 px-3 py-2">{t.deprecateTemplate}</button> : selected.lifecycleState === "deprecated" || selected.lifecycleState === "trash" || selected.lifecycleState === "retained" ? <button type="button" onClick={() => void transitionOfficeTemplateLifecycle(String(selected.id), "restore", "Restored from template library")} className="rounded border border-amber-900 px-3 py-2">{t.restore}</button> : null}{selected.lifecycleState !== "trash" && selected.lifecycleState !== "retained" && selected.lifecycleState !== "purged" ? <button type="button" onClick={() => void transitionOfficeTemplateLifecycle(String(selected.id), "trash", "Moved to Trash from template library")} className="rounded border border-destructive px-3 py-2 text-destructive">{t.moveToTrash}</button> : null}</div>{selected.lifecycleState === "trash" || selected.lifecycleState === "retained" ? <div className="space-y-2"><input value={purgeConfirmation} onChange={(event) => setPurgeConfirmation(event.target.value)} placeholder={String(selected.name)} className="h-9 w-full rounded border px-2" /><button type="button" disabled={purgeConfirmation !== String(selected.name)} onClick={() => void transitionOfficeTemplateLifecycle(String(selected.id), "purge", "Permanent template deletion confirmed by exact name")} className="rounded bg-destructive px-3 py-2 text-destructive-foreground disabled:opacity-50">{t.deletePermanently}</button></div> : null}</div> : null}
+        {selected ? <div className="mt-5 space-y-3 rounded-md bg-amber-50 p-3 text-sm text-amber-950"><p>{t.templateMode}</p><div className="flex flex-wrap gap-2">{selected.lifecycleState === "admitted" ? <button type="button" onClick={() => void transitionOfficeTemplateLifecycle(String(selected.id), "deprecate", "Deprecated from template library")} className="rounded border border-amber-900 px-3 py-2">{t.deprecateTemplate}</button> : selected.lifecycleState === "deprecated" || selected.lifecycleState === "trash" || selected.lifecycleState === "retained" ? <button type="button" onClick={() => void transitionOfficeTemplateLifecycle(String(selected.id), "restore", "Restored from template library")} className="rounded border border-amber-900 px-3 py-2">{t.restore}</button> : null}{selected.lifecycleState !== "trash" && selected.lifecycleState !== "retained" ? <button type="button" onClick={() => void transitionOfficeTemplateLifecycle(String(selected.id), "trash", "Moved to Trash from template library")} className="rounded border border-destructive px-3 py-2 text-destructive">{t.moveToTrash}</button> : null}</div>{selected.lifecycleState === "trash" || selected.lifecycleState === "retained" ? <div className="space-y-2"><input value={purgeConfirmation} onChange={(event) => setPurgeConfirmation(event.target.value)} placeholder={String(selected.name)} className="h-9 w-full rounded border px-2" /><button type="button" disabled={purgeConfirmation !== String(selected.name)} onClick={() => void transitionOfficeTemplateLifecycle(String(selected.id), "purge", "Permanent template deletion confirmed by exact name")} className="rounded bg-destructive px-3 py-2 text-destructive-foreground disabled:opacity-50">{t.deletePermanently}</button></div> : null}</div> : null}
 
         {templates === null ? <p className="py-16 text-center text-sm text-muted-foreground">{t.loading}</p> : templates.length === 0 ? <p className="mt-8 rounded-xl border border-dashed p-12 text-center text-sm text-muted-foreground">{t.noTemplates}</p> : (
-          <div className="mt-8 grid gap-3 sm:grid-cols-2">{templates.map((template) => <Link key={String(template.id)} href={`${templatesHref}/${String(template.id)}`} className="rounded-xl border p-4"><h2 className="font-medium">{String(template.name)}</h2><p className="mt-2 text-sm text-muted-foreground">{String(template.description ?? "")}</p></Link>)}</div>
+          <div className="mt-8 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">{templates.map((template) => <OfficeTemplateCard key={template.id} workspaceId={workspaceId} template={template} />)}</div>
         )}
       </main>
 
@@ -195,5 +196,45 @@ export function OfficeTemplateLibrary({ workspaceId, templateId }: { workspaceId
         </Dialog.Portal>
       </Dialog.Root>
     </div>
+  );
+}
+
+export function OfficeTemplateCard({ workspaceId, template }: { workspaceId: string; template: OfficeTemplate }) {
+  const t = useT().office;
+  const document = template.family === "document";
+  const Icon = document ? FileText : Presentation;
+  const previewArtifact: OfficeArtifact = {
+    artifactId: template.draftArtifactId ?? "",
+    family: template.family,
+    mode: "template",
+    title: template.name,
+    version: template.currentVersionId ? 1 : 0,
+    lifecycleState: "active",
+    role: "edit",
+  };
+
+  return (
+    <Link
+      href={`/w/${workspaceId}/office/templates/${template.id}`}
+      data-office-template-card={template.family}
+      className="group overflow-hidden rounded-xl border bg-card transition-colors hover:border-foreground/30"
+    >
+      <div className="relative">
+        <OfficeCardPreview artifact={previewArtifact} />
+        <span
+          data-office-template-family={template.family}
+          className={document
+            ? "absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-2 py-1 text-xs font-semibold text-white shadow-sm"
+            : "absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-md bg-amber-500 px-2 py-1 text-xs font-semibold text-amber-950 shadow-sm"}
+        >
+          <Icon className="size-3.5" aria-hidden />
+          <span>{document ? t.document : t.presentation}</span>
+        </span>
+      </div>
+      <div className="p-4">
+        <h2 className="line-clamp-2 font-medium group-hover:underline">{template.name}</h2>
+        <p className="mt-2 line-clamp-2 min-h-10 text-sm text-muted-foreground">{template.description}</p>
+      </div>
+    </Link>
   );
 }
