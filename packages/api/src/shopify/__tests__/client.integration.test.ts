@@ -6,11 +6,19 @@
  */
 
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
 import {
   normalizeShopDomain,
   getShop,
   listOrders,
   listProducts,
+  getProduct,
+  createProduct,
+  updateProduct,
+  addProductImage,
+  setVariantPrice,
+  publishProduct,
+  setProductMetafields,
   type ShopifyAuth,
 } from '../client.js'
 
@@ -51,5 +59,78 @@ describeIf('[COMP:api/shopify-client] Shopify live dev-store', () => {
       edges?: Array<{ node?: { id?: string; title?: string } }>
     }
     expect(Array.isArray(products.edges)).toBe(true)
+  })
+
+  // ── Product authoring, live ────────────────────────────────
+  //
+  // The mocked twin in client.test.ts proves the request shapes. Only this can
+  // prove the parts a mock cannot reach: that the staged-upload multipart POST
+  // is accepted by the real bucket, that write_publications was actually
+  // granted, that 'Online Store' is the label this store's publication carries,
+  // and that metafieldsSet accepts the types we send.
+  //
+  // It CREATES a product and leaves it ARCHIVED (there is no productDelete in
+  // the client). Run against a dev/test store only.
+  it('creates, images, prices, publishes, and annotates a product', { timeout: 120_000 }, async () => {
+    const created = (await createProduct(AUTH, {
+      title: 'Use Brian e2e product authoring check',
+      descriptionHtml: '<p>Created by the live integration suite. Safe to delete.</p>',
+      vendor: 'Use Brian',
+      productType: 'Test',
+      tags: ['use-brian-e2e'],
+      status: 'DRAFT',
+    })) as { product?: { id?: string; handle?: string } }
+    const productId = created.product?.id
+    expect(productId).toMatch(/^gid:\/\/shopify\/Product\//)
+
+    try {
+      // 1. Image — the staged-upload path. SHOPIFY_TEST_IMAGE_PATH lets a real
+      //    product photo drive this; otherwise a generated 1x1 PNG.
+      const imagePath = process.env.SHOPIFY_TEST_IMAGE_PATH
+      const bytes = imagePath
+        ? new Uint8Array(readFileSync(imagePath))
+        : new Uint8Array(Buffer.from(
+            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+            'base64',
+          ))
+      await addProductImage(AUTH, {
+        productId: productId!,
+        bytes,
+        filename: imagePath ? 'product.jpg' : 'pixel.png',
+        mimeType: imagePath ? 'image/jpeg' : 'image/png',
+        alt: 'Use Brian e2e check',
+      })
+
+      // 2. Price — resolves the lone default variant.
+      const priced = (await setVariantPrice(AUTH, {
+        productId: productId!,
+        price: '439.00',
+        sku: 'UB-E2E-1',
+      })) as { productVariants?: Array<{ price?: string }> }
+      expect(priced.productVariants?.[0]?.price).toBe('439.00')
+
+      // 3. Metafields — the types have to be ones Shopify accepts.
+      await setProductMetafields(AUTH, {
+        productId: productId!,
+        metafields: [
+          { namespace: 'custom', key: 'ub_e2e_note', type: 'multi_line_text_field', value: 'live check' },
+        ],
+      })
+
+      // 4. Publish — needs write_publications, and needs the publication lookup
+      //    to have matched this store's Online Store channel.
+      const published = (await publishProduct(AUTH, { productId: productId! })) as { published_to?: string }
+      expect(published.published_to).toMatch(/^gid:\/\/shopify\/Publication\//)
+
+      // Read back: the image is the one Shopify processes asynchronously, so
+      // assert on what is immediately authoritative.
+      const readBack = (await getProduct(AUTH, productId!)) as {
+        variants?: { edges?: Array<{ node?: { price?: string; sku?: string } }> }
+      }
+      expect(readBack.variants?.edges?.[0]?.node?.price).toBe('439.00')
+    } finally {
+      // Archive rather than leave an ACTIVE test product on the storefront.
+      await updateProduct(AUTH, { id: productId!, status: 'ARCHIVED' }).catch(() => {})
+    }
   })
 })
