@@ -4,11 +4,10 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { ArrowRight, FileText, Presentation, Plus, Shapes } from "lucide-react";
+import { FileText, Presentation, Plus } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 import { isOfficeStartFailed, listOfficeArtifacts, type OfficeArtifact, type OfficeFamily } from "@/lib/office/api";
-import { OfficeImport } from "./office-import";
 import { OfficeCardPreview } from "./office-card-preview";
 import { OfficeTopbar } from "./office-topbar";
 
@@ -40,12 +39,17 @@ export function OfficeHome({ workspaceId, initialArtifacts }: { workspaceId: str
     () => (artifacts ?? []).filter((artifact) => filter === "all" || artifact.family === filter),
     [artifacts, filter],
   );
-  const showStarterTemplates = view === "active" && filter === "all";
   const breadcrumbs = [
-    ...(view === "active" ? [] : [{ label: t[view] }]),
+    { label: view === "active" ? t.files : t[view] },
     ...(filter === "all" ? [] : [{ label: filter === "document" ? t.documents : t.presentations }]),
   ];
-  if (breadcrumbs.length === 0) breadcrumbs.push({ label: t.overview });
+  const filterHref = (next: Filter) => {
+    const query = new URLSearchParams();
+    if (view !== "active") query.set("view", view);
+    if (next !== "all") query.set("family", next);
+    const serialized = query.toString();
+    return serialized ? `${base}?${serialized}` : base;
+  };
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-background">
@@ -53,13 +57,12 @@ export function OfficeHome({ workspaceId, initialArtifacts }: { workspaceId: str
         workspaceId={workspaceId}
         breadcrumbs={breadcrumbs}
         right={
-          <div className="flex items-center gap-1">
-            <OfficeImport workspaceId={workspaceId} />
-            <Link aria-label={t.templates} title={t.templates} className="inline-flex size-8 items-center justify-center gap-2 rounded-md border text-sm font-medium sm:w-auto sm:px-2.5" href={`${base}/templates`}>
-              <Shapes className="size-4" aria-hidden /><span className="hidden sm:inline">{t.templates}</span>
-            </Link>
-            <Link aria-label={t.create} title={t.create} className="inline-flex size-8 items-center justify-center gap-2 rounded-md bg-action text-sm font-medium text-action-foreground shadow-sm transition-colors hover:bg-action/85 sm:w-auto sm:px-2.5" href={`${base}/new`}>
-              <Plus className="size-4" aria-hidden /><span className="hidden sm:inline">{t.create}</span>
+          <div className="flex items-center gap-1.5">
+            <div className="flex max-w-[min(70vw,24rem)] items-center overflow-x-auto rounded-md border p-0.5" aria-label={t.fileFilters}>
+              {(["all", "document", "presentation"] as const).map((item) => <Link key={item} href={filterHref(item)} aria-current={filter === item ? "page" : undefined} className={filter === item ? "rounded px-2 py-1 text-xs font-medium bg-foreground text-background" : "rounded px-2 py-1 text-xs text-muted-foreground hover:text-foreground"}>{item === "all" ? t.all : item === "document" ? t.documents : t.presentations}</Link>)}
+            </div>
+            <Link aria-label={t.newArtifact} title={t.newArtifact} className="inline-flex size-8 items-center justify-center gap-2 rounded-md bg-action text-sm font-medium text-action-foreground shadow-sm transition-colors hover:bg-action/85 sm:w-auto sm:px-2.5" href={`${base}/templates?intent=use`}>
+              <Plus className="size-4" aria-hidden /><span className="hidden sm:inline">{t.newArtifact}</span>
             </Link>
           </div>
         }
@@ -67,28 +70,11 @@ export function OfficeHome({ workspaceId, initialArtifacts }: { workspaceId: str
       <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 p-4 sm:p-6 lg:p-8">
         <h1 className="sr-only">{t.homeTitle}</h1>
 
-        {artifacts === null ? <p className="py-16 text-center text-sm text-muted-foreground">{t.loading}</p> : failed ? <p className="py-16 text-center text-sm text-destructive">{t.loadFailed}</p> : visible.length === 0 ? showStarterTemplates ? (
-          <section className="rounded-2xl border border-dashed px-5 py-10 sm:px-8" aria-labelledby="office-starter-templates-title">
-            <div className="mx-auto max-w-2xl">
-              <div className="text-center">
-                <h2 id="office-starter-templates-title" className="font-medium">{t.starterTemplatesTitle}</h2>
-                <p className="mt-1 text-sm text-muted-foreground">{t.starterTemplatesBody}</p>
-              </div>
-              <div className="mt-6 grid gap-3 sm:grid-cols-2">
-                <Link href={`${base}/templates?starter=general-presentation`} className="group flex min-h-40 flex-col rounded-xl border bg-card p-4 text-left transition-colors hover:border-foreground/30">
-                  <span className="flex size-9 items-center justify-center rounded-lg bg-muted"><Presentation className="size-4" aria-hidden /></span>
-                  <h3 className="mt-4 font-medium">{t.starterPresentationTitle}</h3>
-                  <p className="mt-1 text-sm text-muted-foreground">{t.starterPresentationBody}</p>
-                  <span className="mt-auto flex items-center gap-1 pt-4 text-sm font-medium">{t.createStarterTemplate}<ArrowRight className="size-4 transition-transform group-hover:translate-x-0.5" aria-hidden /></span>
-                </Link>
-                <Link href={`${base}/templates?starter=letterhead`} className="group flex min-h-40 flex-col rounded-xl border bg-card p-4 text-left transition-colors hover:border-foreground/30">
-                  <span className="flex size-9 items-center justify-center rounded-lg bg-muted"><FileText className="size-4" aria-hidden /></span>
-                  <h3 className="mt-4 font-medium">{t.starterLetterheadTitle}</h3>
-                  <p className="mt-1 text-sm text-muted-foreground">{t.starterLetterheadBody}</p>
-                  <span className="mt-auto flex items-center gap-1 pt-4 text-sm font-medium">{t.createStarterTemplate}<ArrowRight className="size-4 transition-transform group-hover:translate-x-0.5" aria-hidden /></span>
-                </Link>
-              </div>
-            </div>
+        {artifacts === null ? <p className="py-16 text-center text-sm text-muted-foreground">{t.loading}</p> : failed ? <p className="py-16 text-center text-sm text-destructive">{t.loadFailed}</p> : visible.length === 0 ? view === "active" && filter === "all" ? (
+          <section className="rounded-2xl border border-dashed px-6 py-14 text-center">
+            <h2 className="font-medium">{t.firstArtifactEmptyTitle}</h2>
+            <p className="mx-auto mt-1 max-w-lg text-sm text-muted-foreground">{t.firstArtifactEmptyBody}</p>
+            <Link href={`${base}/templates?intent=use`} className="mt-5 inline-flex h-9 items-center rounded-md bg-action px-4 text-sm font-medium text-action-foreground">{t.browseTemplates}</Link>
           </section>
         ) : (
           <div className="rounded-xl border border-dashed px-6 py-16 text-center">

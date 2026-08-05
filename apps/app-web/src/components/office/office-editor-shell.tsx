@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { FileCheck2, FileText, History, MessageSquare, PanelRightClose, PanelRightOpen, Presentation, Sparkles } from "lucide-react";
+import { FileCheck2, FileText, MessageSquare, PanelRightClose, PanelRightOpen, Presentation, Sparkles } from "lucide-react";
 import type { OfficeCommand } from "@use-brian/office-model";
 import { PresenceAvatars } from "@/components/doc/presence-avatars";
 import { OfficeJobActivity } from "./job-activity";
@@ -12,7 +12,7 @@ import { OfficeComments } from "./comments/office-comments";
 import { OfficeReview } from "./office-review";
 import { OfficeStartRecovery } from "./office-start-recovery";
 import { useT } from "@/lib/i18n/client";
-import { compileOfficeTemplateDraft, getOfficeArtifact, getOfficeSnapshot, initializeOfficeTemplateDraft, isOfficeStartFailed, listOfficeVersions, OfficeApiError, submitOfficeCommand, syncOfficeOfflineCommands, transitionOfficeLifecycle, type OfficeArtifact, type OfficeCommentThread, type OfficeLiveSnapshot } from "@/lib/office/api";
+import { compileOfficeTemplateDraft, getOfficeArtifact, getOfficeSnapshot, initializeOfficeTemplateDraft, isOfficeStartFailed, OfficeApiError, submitOfficeCommand, syncOfficeOfflineCommands, transitionOfficeLifecycle, type OfficeArtifact, type OfficeCommentThread, type OfficeLiveSnapshot } from "@/lib/office/api";
 import { useCollabProvider } from "@/lib/collab/use-collab-provider";
 import { usePresence, usePublishPresenceActivity, usePublishPresenceIdentity } from "@/lib/collab/use-presence";
 import { getUserInfo } from "@/lib/user";
@@ -27,9 +27,8 @@ export function OfficeEditorShell({ workspaceId, artifactId }: { workspaceId: st
   const [artifact, setArtifact] = useState<OfficeArtifact | null | undefined>();
   const [live, setLive] = useState<OfficeLiveSnapshot | null>(null);
   const [targets, setTargets] = useState<string[]>([]);
-  const [panel, setPanel] = useState<"activity" | "comments" | "history" | "review">("activity");
+  const [panel, setPanel] = useState<"activity" | "comments" | "review">("activity");
   const [panelOpen, setPanelOpen] = useState(true);
-  const [versions, setVersions] = useState<Array<{ id: string; version: number; summary: string; origin: string; createdAt: string }>>([]);
   const [suggestMode, setSuggestMode] = useState(false);
   const [templateCompileState, setTemplateCompileState] = useState<"idle" | "queued" | "failed">("idle");
   const [cachedUpdate, setCachedUpdate] = useState<Uint8Array | null>(null);
@@ -85,7 +84,6 @@ export function OfficeEditorShell({ workspaceId, artifactId }: { workspaceId: st
         if (!cached) { setArtifact(null); return; }
         setArtifact(cached.payload.artifact);
         setLive({ snapshot: cached.payload.snapshot, seq: cached.payload.seq, baseVersion: cached.payload.baseVersion });
-        setVersions(cached.payload.history);
         setCachedComments(cached.payload.comments);
         setCachedUpdate(Uint8Array.from(atob(cached.payload.yjsUpdate), (character) => character.charCodeAt(0)));
         setOfflineCopyAt(cached.savedAt);
@@ -170,29 +168,25 @@ export function OfficeEditorShell({ workspaceId, artifactId }: { workspaceId: st
       {artifact.mode === "template" ? <div className="flex items-center justify-between gap-3 border-b bg-amber-50 px-4 py-2 text-xs font-medium text-amber-950"><span>{t.templateMode}</span>{templateId ? <button type="button" disabled={templateCompileState === "queued" || !live} className="rounded bg-amber-950 px-3 py-1.5 text-amber-50 disabled:opacity-50" onClick={() => { setTemplateCompileState("queued"); void compileOfficeTemplateDraft({ templateId, workspaceId, draftArtifactId: artifactId }).catch(() => setTemplateCompileState("failed")); }}>{templateCompileState === "queued" ? t.templateCompiling : templateCompileState === "failed" ? t.templateCompileFailed : t.templateAdmit}</button> : null}</div> : null}
       <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
         <main className="flex min-h-0 flex-1 overflow-hidden bg-muted/30">{editor}</main>
-        <aside className={cn("shrink-0 overflow-y-auto border-t bg-background transition-[width] lg:border-l lg:border-t-0", panelOpen ? "w-full lg:w-72" : "w-full lg:w-12")} data-office-panel={panelOpen ? "open" : "collapsed"}>
+        <aside className={cn("shrink-0 overflow-y-auto border-t bg-background transition-[width] lg:border-l lg:border-t-0", panelOpen ? "w-full lg:w-64" : "w-full lg:w-12")} data-office-panel={panelOpen ? "open" : "collapsed"}>
           {panelOpen ? <>
             <div className="flex items-center justify-between gap-2 border-b p-2">
               <div className="flex min-w-0 items-center gap-2"><span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-blue-50 text-blue-600"><Sparkles className="size-3.5" aria-hidden /></span><div className="min-w-0"><p className="truncate text-xs font-semibold">{t.brian}</p><p className="truncate text-[11px] text-muted-foreground">{t.workspaceAssistant}</p></div></div>
               <button type="button" onClick={() => setPanelOpen(false)} aria-label={t.collapseAssistantPanel} title={t.collapseAssistantPanel} className="rounded p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground"><PanelRightClose className="size-4" /></button>
             </div>
-            <div className="grid grid-cols-4 border-b p-1">
+            <div className="grid grid-cols-3 border-b p-1">
               <PanelButton active={panel === "activity"} label={t.brian} icon={<Sparkles className="size-3" />} onClick={() => setPanel("activity")} />
               <PanelButton active={panel === "comments"} label={t.comments} icon={<MessageSquare className="size-3" />} onClick={() => setPanel("comments")} />
-              <PanelButton active={panel === "history"} label={t.history} icon={<History className="size-3" />} onClick={() => { setPanel("history"); if (!offlineCopyAt) void listOfficeVersions(artifactId).then(setVersions); }} />
-              <PanelButton active={panel === "review"} label={t.review} icon={<FileCheck2 className="size-3" />} onClick={() => setPanel("review")} />
+              <PanelButton active={panel === "review"} label={t.fileActions} icon={<FileCheck2 className="size-3" />} onClick={() => setPanel("review")} />
             </div>
-            {artifact.role === "edit" ? <label className="flex items-center gap-2 border-b p-3 text-xs"><input type="checkbox" checked={suggestMode} onChange={(event) => setSuggestMode(event.target.checked)} />{t.suggestMode}</label> : null}
             {panel === "activity" ? <OfficeJobActivity jobId={artifact.job?.id} onOpenComments={() => setPanel("comments")} /> : null}
             {panel === "comments" ? <div className="p-3"><OfficeComments artifactId={artifactId} version={artifact.version} targetIds={targets} anchorKind={artifact.family === "document" ? "block" : "object"} canComment={artifact.role !== "view"} offline={collab.status === "disconnected" || Boolean(offlineCopyAt)} initialThreads={cachedComments ?? undefined} /></div> : null}
-            {panel === "history" ? <ol className="space-y-3 p-3">{versions.map((version) => <li key={version.id} className="border-l-2 pl-3 text-sm"><p>{version.summary}</p><span className="text-xs text-muted-foreground">{version.origin} · {version.version}</span></li>)}</ol> : null}
             {panel === "review" ? <OfficeReview artifact={artifact} artifactId={artifactId} workspaceId={workspaceId} selectedObjectIds={targets} onLifecycle={setArtifact} offlineCopy={Boolean(offlineCopyAt)} /> : null}
           </> : <div className="flex items-center gap-1 p-1 lg:flex-col">
             <button type="button" onClick={() => setPanelOpen(true)} aria-label={t.expandAssistantPanel} title={t.expandAssistantPanel} className="rounded p-2 text-muted-foreground hover:bg-muted hover:text-foreground"><PanelRightOpen className="size-4" /></button>
             <CompactPanelButton active={panel === "activity"} label={t.brian} icon={<Sparkles className="size-4" />} onClick={() => { setPanel("activity"); setPanelOpen(true); }} />
             <CompactPanelButton active={panel === "comments"} label={t.comments} icon={<MessageSquare className="size-4" />} onClick={() => { setPanel("comments"); setPanelOpen(true); }} />
-            <CompactPanelButton active={panel === "history"} label={t.history} icon={<History className="size-4" />} onClick={() => { setPanel("history"); setPanelOpen(true); if (!offlineCopyAt) void listOfficeVersions(artifactId).then(setVersions); }} />
-            <CompactPanelButton active={panel === "review"} label={t.review} icon={<FileCheck2 className="size-4" />} onClick={() => { setPanel("review"); setPanelOpen(true); }} />
+            <CompactPanelButton active={panel === "review"} label={t.fileActions} icon={<FileCheck2 className="size-4" />} onClick={() => { setPanel("review"); setPanelOpen(true); }} />
           </div>}
         </aside>
       </div>

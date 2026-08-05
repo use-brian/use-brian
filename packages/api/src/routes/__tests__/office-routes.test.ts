@@ -6,6 +6,8 @@ import { officeJobRoutes } from '../office-jobs.js'
 import { officeTemplateRoutes } from '../office-templates.js'
 import { internalOfficeCheckpointRoutes } from '../internal-office-checkpoint.js'
 import { OfficeGenerationUnavailableError } from '../../office/service.js'
+import { guidedTemplateSnapshot } from '../office-templates.js'
+import { OfficeArtifactSnapshotSchema, preflightOfficeCandidate } from '@use-brian/office-model'
 
 const USER = '20000000-0000-4000-8000-000000000001'
 const WORKSPACE = '20000000-0000-4000-8000-000000000002'
@@ -61,9 +63,23 @@ describe('[COMP:api/office-routes] Office API routes', () => {
     await request(test.server).post(`/api/office/jobs/${JOB}/steering`).send({ instruction: 'Emphasize retention' }).expect(202)
     expect(test.jobs.steer).toHaveBeenCalledWith({ userId: USER, workspaceId: WORKSPACE, jobId: JOB, instruction: 'Emphasize retention' })
     await request(test.server).post(`/api/office/jobs/${JOB}/cancel`).send({}).expect(202)
-    await request(test.server).post('/api/office/templates').send({ workspaceId: WORKSPACE, family: 'presentation', name: 'Pitch', description: 'Company pitch', sensitivity: 'internal' }).expect(201)
+    await request(test.server).post('/api/office/templates').send({ workspaceId: WORKSPACE, family: 'presentation', name: 'Pitch', description: 'Company pitch', creationMethod: 'guided', sensitivity: 'internal' }).expect(201)
     expect(test.templates.createDraft).toHaveBeenCalledWith(expect.objectContaining({ draftArtifactId: ARTIFACT }))
-    expect(test.templates.initializeDraft).toHaveBeenCalledWith(expect.objectContaining({ artifactId: ARTIFACT, snapshot: expect.objectContaining({ artifactId: ARTIFACT, family: 'presentation', templateVersionId: null }) }))
+    expect(test.templates.initializeDraft).toHaveBeenCalledWith(expect.objectContaining({ artifactId: ARTIFACT, snapshot: expect.objectContaining({ artifactId: ARTIFACT, family: 'presentation', templateVersionId: null, slides: expect.arrayContaining([expect.objectContaining({ title: 'Title' }), expect.objectContaining({ title: 'Content' })]) }) }))
+  })
+
+  it('seeds guided template drafts with editable canonical structure', () => {
+    const document = guidedTemplateSnapshot({ artifactId: ARTIFACT, workspaceId: WORKSPACE, family: 'document', title: 'Letterhead', guidance: 'Formal letters with company contact details.' })
+    expect(() => OfficeArtifactSnapshotSchema.parse(document)).not.toThrow()
+    expect(preflightOfficeCandidate(document).ok).toBe(true)
+    expect(document.family).toBe('document')
+    if (document.family === 'document') expect(document.sections[0].nodes).toMatchObject([{ kind: 'heading' }, { kind: 'paragraph' }, { kind: 'heading' }, { kind: 'paragraph' }])
+
+    const presentation = guidedTemplateSnapshot({ artifactId: ARTIFACT, workspaceId: WORKSPACE, family: 'presentation', title: 'Company deck', guidance: 'Use for general introductions and updates.' })
+    expect(() => OfficeArtifactSnapshotSchema.parse(presentation)).not.toThrow()
+    expect(preflightOfficeCandidate(presentation).ok).toBe(true)
+    expect(presentation.family).toBe('presentation')
+    if (presentation.family === 'presentation') expect(presentation.slides.map((slide) => slide.title)).toEqual(['Title', 'Content'])
   })
 
   it('idempotently initializes a linked legacy template draft', async () => {

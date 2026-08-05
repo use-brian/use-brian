@@ -15,8 +15,6 @@ vi.mock("next/link", () => ({
 }));
 
 import { OfficeTopbar } from "../office-topbar";
-import { OfficeCreate } from "../office-create";
-import { OfficeImportTemplateEmptyState } from "../office-import";
 import { OfficeTemplateCard, OfficeTemplateLibrary, officeTemplateNameFromFile, readOfficeStarterTemplate } from "../template-library";
 
 function wrap(node: React.ReactNode) {
@@ -33,14 +31,6 @@ describe("[COMP:app-web/office-navigation] Office route chrome", () => {
     expect(html).toContain("RIGHT");
   });
 
-  it("gives the direct Create page explicit navigation and cancellation", () => {
-    const html = wrap(<OfficeCreate workspaceId="workspace-1" />);
-    expect(html).toContain("Create with Brian");
-    expect(html).toContain("Back to Office");
-    expect(html).toContain("Cancel");
-    expect(html).toContain("Generate");
-  });
-
   it("accepts only the supported starter-template deep links", () => {
     expect(readOfficeStarterTemplate(new URLSearchParams("starter=general-presentation"))).toBe("general-presentation");
     expect(readOfficeStarterTemplate(new URLSearchParams("starter=letterhead"))).toBe("letterhead");
@@ -48,12 +38,13 @@ describe("[COMP:app-web/office-navigation] Office route chrome", () => {
     expect(readOfficeStarterTemplate(new URLSearchParams())).toBeNull();
   });
 
-  it("offers template-file import separately from blank template creation", () => {
+  it("offers exactly Upload and guided Generate as template creation paths", () => {
     expect(officeTemplateNameFromFile("Company overview.pptx")).toBe("Company overview");
     expect(officeTemplateNameFromFile("Letterhead.DOCX")).toBe("Letterhead");
     const html = wrap(<OfficeTemplateLibrary workspaceId="workspace-1" />);
-    expect(html).toContain("Import template");
-    expect(html).toContain("New template");
+    expect(html).toContain("Upload template");
+    expect(html).toContain("Generate template");
+    expect(html).not.toContain("New template");
   });
 
   it("renders visual template cards with explicit Document and Presentation identities", () => {
@@ -66,14 +57,16 @@ describe("[COMP:app-web/office-navigation] Office route chrome", () => {
     expect(html).toContain('data-office-template-family="presentation"');
     expect(html).toContain('data-office-card-preview-shell="document"');
     expect(html).toContain('href="/w/workspace-1/office/templates/ppt-template"');
+    expect(html).toContain('href="/w/workspace-1/office/new?templateId=ppt-template&amp;templateVersionId=version-1"');
+    expect(html).toContain("Use template");
     expect(html).toContain("Document");
     expect(html).toContain("Presentation");
   });
 
-  it("replaces the dead import control with starter-template recovery links", () => {
-    const html = wrap(<OfficeImportTemplateEmptyState workspaceId="workspace-1" />);
-    expect(html).toContain("Import needs an admitted template");
-    expect(html).toContain('href="/w/workspace-1/office/templates?starter=general-presentation"');
-    expect(html).toContain('href="/w/workspace-1/office/templates?starter=letterhead"');
+  it("keeps draft templates in the shared editor but blocks artifact creation", () => {
+    const html = wrap(<OfficeTemplateCard workspaceId="workspace-1" template={{ id: "draft-template", family: "document", name: "Draft", description: "Work in progress", lifecycleState: "draft", currentVersionId: null, draftArtifactId: "draft-artifact", sensitivity: "internal", updatedAt: "2026-08-05T00:00:00.000Z" }} />);
+    expect(html).toContain('href="/w/workspace-1/office/draft-artifact?templateId=draft-template"');
+    expect(html).toContain("Edit template");
+    expect(html).not.toContain("Use template");
   });
 });

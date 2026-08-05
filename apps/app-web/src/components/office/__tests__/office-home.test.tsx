@@ -18,26 +18,26 @@ describe("[COMP:app-web/office-home] Office home", () => {
     navigation.search = "";
   });
 
-  it("does not duplicate sidebar filters in the content pane", () => {
+  it("keeps file-type filters and template-first New in the top bar", () => {
     const html = renderToStaticMarkup(<I18nProvider locale="en" dict={en as unknown as Dictionary}><OfficeHome workspaceId="11111111-1111-4111-8111-111111111111" initialArtifacts={[]} /></I18nProvider>);
     expect(html).not.toContain("data-office-filter-bar");
     expect(html).not.toContain('role="tablist"');
     expect(html).not.toContain(">Active<");
-    expect(html).not.toContain(">All<");
-    expect(html).toContain(">Overview<");
-    expect(html).toContain("Start with your first templates");
-    expect(html).toContain("General presentation");
-    expect(html).toContain("Letterhead");
-    expect(html).toContain("/office/templates?starter=general-presentation");
-    expect(html).toContain("/office/templates?starter=letterhead");
+    expect(html).toContain(">All<");
+    expect(html).toContain(">Files<");
+    expect(html).toContain("Choose a template to create your first file");
+    expect(html).toContain('href="/w/11111111-1111-4111-8111-111111111111/office/templates?intent=use"');
+    expect(html).not.toContain("General presentation");
+    expect(html).not.toContain("Letterhead");
+    expect(html).not.toContain(">Import<");
   });
 
   it("keeps lifecycle-specific empty collections compact", () => {
     navigation.search = "view=trash";
     const html = renderToStaticMarkup(<I18nProvider locale="en" dict={en as unknown as Dictionary}><OfficeHome workspaceId="11111111-1111-4111-8111-111111111111" initialArtifacts={[]} /></I18nProvider>);
     expect(html).toContain("No Office artifacts yet");
-    expect(html).not.toContain("Start with your first templates");
-    expect(html).not.toContain("starter=general-presentation");
+    expect(html).not.toContain("Choose a template to create your first file");
+    expect(html).not.toContain("starter=");
   });
 
   it("reflects sidebar-selected lifecycle and family in the top bar breadcrumb", () => {

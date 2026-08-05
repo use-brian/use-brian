@@ -44,14 +44,21 @@ export function officeTemplateRoutes(deps: OfficeTemplatesRouteDeps): Router {
   router.post('/templates', async (req, res) => {
     const userId = (req as { userId?: string }).userId
     if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
-    const body = z.object({ workspaceId: z.string().uuid(), family: z.enum(['document', 'presentation']), name: z.string().min(1).max(255), description: z.string().min(1).max(4_000), sensitivity: z.enum(['public', 'internal', 'confidential']).default('internal') }).strict().safeParse(req.body)
+    const body = z.object({ workspaceId: z.string().uuid(), family: z.enum(['document', 'presentation']), name: z.string().min(1).max(255), description: z.string().min(1).max(4_000), creationMethod: z.enum(['guided', 'upload']).default('guided'), sensitivity: z.enum(['public', 'internal', 'confidential']).default('internal') }).strict().safeParse(req.body)
     if (!body.success) return void res.status(400).json({ error: 'Invalid template draft', issues: body.error.issues })
     let artifact: { id: string } | null = null
     let template: { id: string } | null = null
     try {
       artifact = await deps.createTemplateShell({ userId, workspaceId: body.data.workspaceId, family: body.data.family, title: body.data.name, templateVersionId: null, capabilityVersion: 1, sensitivity: body.data.sensitivity, mode: 'template' })
-      template = await deps.createDraft({ userId, ...body.data, draftArtifactId: artifact.id })
-      await deps.initializeDraft({ userId, artifactId: artifact.id, snapshot: blankTemplateSnapshot({ artifactId: artifact.id, workspaceId: body.data.workspaceId, family: body.data.family, title: body.data.name }) })
+      const { creationMethod, ...draft } = body.data
+      template = await deps.createDraft({ userId, ...draft, draftArtifactId: artifact.id })
+      await deps.initializeDraft({
+        userId,
+        artifactId: artifact.id,
+        snapshot: creationMethod === 'guided'
+          ? guidedTemplateSnapshot({ artifactId: artifact.id, workspaceId: body.data.workspaceId, family: body.data.family, title: body.data.name, guidance: body.data.description })
+          : blankTemplateSnapshot({ artifactId: artifact.id, workspaceId: body.data.workspaceId, family: body.data.family, title: body.data.name }),
+      })
     } catch (cause) {
       await Promise.allSettled([
         template ? deps.deleteEmptyDraft(userId, template.id) : Promise.resolve(false),
@@ -144,5 +151,62 @@ export function blankTemplateSnapshot(params: { artifactId: string; workspaceId:
     masters: [{ id: masterId, name: 'Master', lockedObjectIds: [] }],
     layouts: [{ id: layoutId, masterId, name: 'Blank', placeholderIds: [] }],
     slides: [{ id: randomUUID(), title: 'Slide 1', masterId, layoutId, objects: [], readingOrder: [], notes: [] }],
+  }
+}
+
+const templateTextStyle = (fontSizePt: number, bold = false) => ({
+  fontFamily: 'Arial',
+  fontSizePt,
+  bold,
+  italic: false,
+  underline: false,
+  strike: false,
+  color: '#202124',
+})
+
+/** Seeds a useful, editable template draft from the member's guidance.
+ * Artifact generation still requires the resulting draft to pass normal
+ * template compilation and publish as an admitted immutable version. */
+export function guidedTemplateSnapshot(params: { artifactId: string; workspaceId: string; family: 'document' | 'presentation'; title: string; guidance: string }): OfficeArtifactSnapshot {
+  const base = blankTemplateSnapshot(params)
+  const guidance = params.guidance.trim().replace(/\s+/g, ' ').slice(0, 480)
+  if (base.family === 'document') {
+    return {
+      ...base,
+      sections: base.sections.map((section, index) => index === 0 ? {
+        ...section,
+        nodes: [
+          { id: randomUUID(), kind: 'heading', level: 1, styleName: 'Heading 1', runs: [{ id: randomUUID(), text: params.title, style: templateTextStyle(28, true) }] },
+          { id: randomUUID(), kind: 'paragraph', styleName: 'Body', alignment: 'start', runs: [{ id: randomUUID(), text: guidance, style: templateTextStyle(11) }] },
+          { id: randomUUID(), kind: 'heading', level: 2, styleName: 'Heading 2', runs: [{ id: randomUUID(), text: 'Section heading', style: templateTextStyle(18, true) }] },
+          { id: randomUUID(), kind: 'paragraph', styleName: 'Body', alignment: 'start', runs: [{ id: randomUUID(), text: 'Replace this text with content for the artifact.', style: templateTextStyle(11) }] },
+        ],
+      } : section),
+    }
+  }
+  const masterId = base.masters[0].id
+  const layoutId = base.layouts[0].id
+  const titleId = randomUUID()
+  const subtitleId = randomUUID()
+  const contentTitleId = randomUUID()
+  const contentBodyId = randomUUID()
+  return {
+    ...base,
+    layouts: [{ ...base.layouts[0], name: 'General', placeholderIds: [] }],
+    slides: [{
+      id: randomUUID(), title: 'Title', masterId, layoutId, notes: [],
+      objects: [
+        { id: titleId, kind: 'text', geometry: { xPt: 72, yPt: 150, widthPt: 816, heightPt: 72, rotationDeg: 0 }, locked: false, alignment: 'center', verticalAlignment: 'middle', runs: [{ id: randomUUID(), text: params.title, style: templateTextStyle(34, true) }] },
+        { id: subtitleId, kind: 'text', geometry: { xPt: 144, yPt: 240, widthPt: 672, heightPt: 90, rotationDeg: 0 }, locked: false, alignment: 'center', verticalAlignment: 'top', runs: [{ id: randomUUID(), text: guidance, style: templateTextStyle(16) }] },
+      ],
+      readingOrder: [titleId, subtitleId],
+    }, {
+      id: randomUUID(), title: 'Content', masterId, layoutId, notes: [],
+      objects: [
+        { id: contentTitleId, kind: 'text', geometry: { xPt: 60, yPt: 42, widthPt: 840, heightPt: 54, rotationDeg: 0 }, locked: false, alignment: 'start', verticalAlignment: 'middle', runs: [{ id: randomUUID(), text: 'Section title', style: templateTextStyle(26, true) }] },
+        { id: contentBodyId, kind: 'text', geometry: { xPt: 72, yPt: 132, widthPt: 816, heightPt: 300, rotationDeg: 0 }, locked: false, alignment: 'start', verticalAlignment: 'top', runs: [{ id: randomUUID(), text: 'Replace this text with the main ideas, evidence, and visuals for the artifact.', style: templateTextStyle(18) }] },
+      ],
+      readingOrder: [contentTitleId, contentBodyId],
+    }],
   }
 }
