@@ -7,6 +7,7 @@ import {
   parseRefreshBounce,
   decideLoadFailureAction,
   decideLoginAction,
+  decideLoginRecoveryAction,
   decideRedirectAction,
   shouldAttemptLocalMint,
   LOCAL_MINT_COOLDOWN_MS,
@@ -212,6 +213,21 @@ describe("[COMP:app-desktop/window-policy] decideLoginAction (per-target, §2.3)
     expect(decideLoginAction("https://app.usebrian.ai/w/x/p/y", cloud)).toBe("none");
     expect(decideLoginAction("http://localhost:3003/w/x", local)).toBe("none");
     expect(decideLoginAction("not a url", local)).toBe("none");
+  });
+});
+
+describe("[COMP:app-desktop/window-policy] decideLoginRecoveryAction", () => {
+  it("recovers a cloud session instead of treating a raced /login redirect as sign-out", () => {
+    expect(decideLoginRecoveryAction("pkce", true)).toBe("recover-session");
+  });
+
+  it("starts PKCE only when the cloud refresh credential is actually absent", () => {
+    expect(decideLoginRecoveryAction("pkce", false)).toBe("pkce");
+  });
+
+  it("does not change local-session or ordinary navigation decisions", () => {
+    expect(decideLoginRecoveryAction("local-session", true)).toBe("local-session");
+    expect(decideLoginRecoveryAction("none", true)).toBe("none");
   });
 });
 

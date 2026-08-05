@@ -75,6 +75,7 @@ import {
 import {
   classifyNavigation,
   decideLoginAction,
+  decideLoginRecoveryAction,
   decideRedirectAction,
   parseRefreshBounce,
   decideLoadFailureAction,
@@ -482,11 +483,12 @@ function createWindow(): BrowserWindow {
   }
 
   // Outbound links and untrusted origins open in the system browser; sign-in
-  // navigations route per target (PKCE for cloud, the local-owner session mint
-  // for a local brain); the app frame stays pinned to the app origin.
+  // navigations route per target (cloud first recovers an existing refresh
+  // session, otherwise PKCE; local uses the local-owner session mint); the app
+  // frame stays pinned to the app origin.
   win.webContents.setWindowOpenHandler(({ url }) => {
     const login = decideLoginAction(url, { auth: cfg.targetAuth, appOrigin: cfg.appOrigin });
-    if (login === "pkce") promptSignIn();
+    if (login === "pkce") void recoverCloudSessionOrSignIn(currentTrustedAppUrl(win));
     else if (login === "local-session") void mintLocalSession();
     else void shell.openExternal(url);
     return { action: "deny" };
@@ -495,14 +497,15 @@ function createWindow(): BrowserWindow {
   win.webContents.on("will-redirect", handleRedirect);
 
   // Never leave a blank window on a main-frame load failure. A SIGNED-IN user
-  // (a refresh token in the jar) whose load fails for lack of network gets the
-  // offline landing + auto-retry, never the sign-in landing — a network blip is
-  // not a sign-out. Only a user with no session goes to sign-in. The verdict is
+  // (a refresh token in the jar, or bundled safeStorage tokens) whose load fails
+  // for lack of network gets the offline landing + auto-retry, never the sign-in
+  // landing — a network blip is not a sign-out. Only a user with no session goes
+  // to sign-in. The verdict is
   // the pure `decideLoadFailureAction`; this just enacts it. `-3` (ERR_ABORTED)
   // and our own `file:` landing are handled inside the helper.
   win.webContents.on("did-fail-load", (_e, errorCode, _desc, failedUrl, isMainFrame) => {
     void (async () => {
-      const hasSession = !!(await readJarCookie("refresh_token"));
+      const hasSession = await hasPersistedSession();
       switch (
         decideLoadFailureAction({ errorCode, isMainFrame, failedUrl, hasSession, target: cfg.target })
       ) {
@@ -604,13 +607,13 @@ function destroyRecorderOverlay(): void {
 
 function handleNavigation(event: Event, url: string): void {
   // A login page or OAuth hop must never load in-window — cancel it and route
-  // per target (§2.3): the cloud target shows the sign-in landing (the user
-  // starts the system-browser PKCE flow from there); a local target mints the
+  // per target (§2.3): the cloud target first recovers any durable refresh
+  // session and starts PKCE only when none remains; a local target mints the
   // local-owner session via the app-web trigger route instead.
   const login = decideLoginAction(url, { auth: cfg.targetAuth, appOrigin: cfg.appOrigin });
   if (login !== "none") {
     event.preventDefault();
-    if (login === "pkce") promptSignIn();
+    if (login === "pkce") void recoverCloudSessionOrSignIn(currentTrustedAppUrl(ensureWindow()));
     else void mintLocalSession();
     return;
   }
@@ -621,7 +624,7 @@ function handleNavigation(event: Event, url: string): void {
   const bounceNext = cfg.bundled ? null : parseRefreshBounce(url, cfg.appOrigin);
   if (bounceNext) {
     event.preventDefault();
-    void resumeAfterRefresh(bounceNext);
+    void resumeAfterRefresh(bounceNext, { preserveLoadedContent: true });
     return;
   }
   if (classifyNavigation(url, cfg.appOrigin) === "external") {
@@ -1916,6 +1919,52 @@ async function readJarCookie(name: string): Promise<string | null> {
   return cookies[0]?.value ?? null;
 }
 
+/** Session presence across the shell's two auth stores. */
+async function hasPersistedSession(): Promise<boolean> {
+  return cfg.bundled ? readStoredTokens() !== null : (await readJarCookie("refresh_token")) !== null;
+}
+
+/**
+ * Return the currently visible, trusted app URL. A cancelled auth navigation
+ * leaves this document alive, so a transient refresh can preserve its cached
+ * brain content instead of replacing it with a landing page.
+ */
+function currentTrustedAppUrl(win: BrowserWindow): string | null {
+  if (win.isDestroyed() || win.webContents.isDestroyed()) return null;
+  const currentUrl = win.webContents.getURL();
+  if (classifyNavigation(currentUrl, cfg.appOrigin) !== "internal") return null;
+  if (decideLoginAction(currentUrl, { auth: cfg.targetAuth, appOrigin: cfg.appOrigin }) !== "none") {
+    return null;
+  }
+  return currentUrl;
+}
+
+/**
+ * A `/login` redirect is not proof that the user signed out. If the durable
+ * refresh credential still exists, join the shell's single-flight refresh and
+ * resume the document that was visible before the redirect. Only an absent or
+ * definitively rejected credential reaches the sign-in landing.
+ */
+async function recoverCloudSessionOrSignIn(resumeUrl: string | null): Promise<void> {
+  const action = decideLoginRecoveryAction("pkce", await hasPersistedSession());
+  if (action !== "recover-session") {
+    promptSignIn();
+    return;
+  }
+
+  if (cfg.bundled) {
+    // Bundled mode refreshes through the renderer's Bearer-token source. A
+    // stored credential means this navigation raced that source; reload the
+    // local bundle rather than presenting a false sign-out.
+    await loadApp(ensureWindow());
+    return;
+  }
+
+  await resumeAfterRefresh(resumeUrl ?? cfg.appUrl, {
+    preserveLoadedContent: resumeUrl !== null,
+  });
+}
+
 // ── Saved-account store (jar I/O) ──────────────────────────────
 // The shell's host-only copy of the web's `accounts_store`/`accounts_dir`. Pure
 // reads/transforms live in `desktop-accounts.ts`; only the jar I/O is here.
@@ -2018,12 +2067,14 @@ function refreshSessionInPlace(): Promise<RefreshOutcome> {
 
 /**
  * Complete an intercepted refresh bounce: refresh shell-side, then load the
- * bounce's validated `next`. Both failure shapes fall to the sign-in landing —
- * the intercepted navigation was already cancelled, so loading nothing could
- * leave a blank window, and re-loading `next` unauthenticated would just
- * bounce again in a tight loop while the API is unreachable.
+ * bounce's validated `next`. A dead credential reaches sign-in; a transient
+ * failure preserves an already-loaded trusted page, or shows the offline
+ * landing when there was no page to preserve.
  */
-async function resumeAfterRefresh(nextUrl: string): Promise<void> {
+async function resumeAfterRefresh(
+  nextUrl: string,
+  opts: { preserveLoadedContent?: boolean } = {},
+): Promise<void> {
   const outcome = await refreshSessionInPlace();
   if (outcome === "refreshed") {
     try {
@@ -2034,10 +2085,12 @@ async function resumeAfterRefresh(nextUrl: string): Promise<void> {
     return;
   }
   if (outcome === "failed") {
-    // Transient (offline / 5xx) — the refresh token is still valid. Show the
-    // offline landing and auto-retry; do NOT bounce to sign-in. This was a
-    // path of the "Mac goes offline → logged out" bug.
-    showOffline(ensureWindow());
+    // Transient (offline / 5xx) — the refresh token is still valid. When the
+    // intercepted navigation was cancelled over a trusted app document, leave
+    // it visible so its cached brain remains available; a later tick retries.
+    // Cold/blank loads still get the explicit offline landing + auto-retry.
+    const win = ensureWindow();
+    if (!opts.preserveLoadedContent || !currentTrustedAppUrl(win)) showOffline(win);
     return;
   }
   // "signed-out" — the refresh token is dead. A local target re-mints instead
