@@ -8,6 +8,10 @@ describe('[COMP:office/model] Office canonical model', () => {
     expect(OfficeArtifactSnapshotSchema.parse(presentationFixture()).family).toBe('presentation')
   })
 
+  it('allows a scratch template snapshot before it has a source template version', () => {
+    expect(OfficeArtifactSnapshotSchema.parse({ ...documentFixture(), templateVersionId: null }).templateVersionId).toBeNull()
+  })
+
   it('rejects unknown fields and incomplete reading order', () => {
     expect(() => OfficeArtifactSnapshotSchema.parse({ ...documentFixture(), surprise: true })).toThrow()
     const presentation = presentationFixture()

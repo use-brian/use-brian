@@ -3,9 +3,11 @@ import { Router } from 'express'
 import { z } from 'zod'
 import type { OfficeArtifactRow } from '../db/office-artifacts.js'
 import type { OfficeArtifactToolProjection, OfficeToolPort } from '@use-brian/core'
+import { OfficeGenerationUnavailableError } from '../office/service.js'
 
 export type OfficeArtifactsRouteDeps = {
   service: OfficeToolPort
+  generationAvailable(): boolean
   list(userId: string, workspaceId: string, view: 'active' | 'archived' | 'trash' | 'retained'): Promise<OfficeArtifactToolProjection[]>
   restoreVersion(params: { userId: string; artifactId: string; targetVersionId: string; expectedVersion: number; summary: string }): Promise<{ id: string; version: number } | null>
   getArtifact(userId: string, artifactId: string): Promise<OfficeArtifactRow | null>
@@ -28,6 +30,12 @@ const CreateSchema = z.object({
 
 export function officeArtifactRoutes(deps: OfficeArtifactsRouteDeps): Router {
   const router = Router()
+  router.get('/capabilities', (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
+    res.json({ generationAvailable: deps.generationAvailable() })
+  })
+
   router.get('/artifacts', async (req, res) => {
     const userId = (req as { userId?: string }).userId
     if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
@@ -42,8 +50,13 @@ export function officeArtifactRoutes(deps: OfficeArtifactsRouteDeps): Router {
     if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
     const body = CreateSchema.safeParse(req.body)
     if (!body.success) return void res.status(400).json({ error: 'Invalid Office creation request', issues: body.error.issues })
-    const created = await deps.service.create({ userId, ...body.data })
-    res.status(202).json(created)
+    try {
+      const created = await deps.service.create({ userId, ...body.data })
+      res.status(202).json(created)
+    } catch (cause) {
+      if (cause instanceof OfficeGenerationUnavailableError) return void res.status(503).json({ error: cause.code })
+      throw cause
+    }
   })
 
   router.get('/artifacts/:artifactId', async (req, res) => {

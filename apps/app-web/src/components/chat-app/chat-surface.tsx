@@ -15,9 +15,10 @@
  * the `@use-brian/chat-ui` primitives instead (`useChatSession` for state,
  * `useMessageStream` for the SSE-over-POST loop, `ChatComposer`,
  * `ChatMarkdown`), which is exactly what that package exists for
- * (chat-miniapp-home-config.md T4). The dock keeps floating over this surface
- * like every other one (T2) — it is a different thread lifecycle, not a
- * duplicate of this one.
+ * (chat-miniapp-home-config.md T4). The ambient dock stays mounted by the
+ * persistent workspace chrome, but is hidden on this route: showing a second
+ * chat launcher over the full-page composer duplicates the affordance and can
+ * cover Send at narrower viewport sizes.
  *
  * The transcript chrome DOES follow the dock's look and streaming behaviour,
  * through the same shared pieces rather than a fork: `ChatActivityFeed` /
@@ -99,6 +100,7 @@ import {
   Square,
   User,
   Users,
+  X,
 } from "lucide-react";
 import { createSSEBuffer, parseSSEStream } from "@use-brian/chat-ui";
 import { OperatorTopbar } from "@/components/operator/operator-topbar";
@@ -180,7 +182,10 @@ import {
   FileDropOverlay,
 } from "@/components/doc/attachment-chips";
 import { MessageAttachments } from "@/components/doc/message-attachment-card";
-import { useRecordingUpload } from "@/lib/recordings/use-recording-upload";
+import {
+  useRecordingUpload,
+  type StagedRecording,
+} from "@/lib/recordings/use-recording-upload";
 import {
   ChatDocumentCard,
   ChatDocumentViewer,
@@ -457,20 +462,23 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   }, [activeSessionId, activeShared, personalSessions, assistants, pickedAssistantId, primaryAssistant]);
 
   // The full-page surface uses the SAME attachment lanes as the dock:
-  // transient cache upload for ordinary files, direct recording ingestion for
-  // video / recording-length audio, and one tray for pick, drop, and paste.
+  // transient cache upload for ordinary files and storage-only recording
+  // staging for video / recording-length audio. Processing follows only after
+  // the chat clarifies purpose and the user explicitly agrees.
   const recordingUpload = useRecordingUpload(
     workspaceId,
     activeAssistant?.id ?? "",
   );
+  const [pendingRecordings, setPendingRecordings] = useState<StagedRecording[]>([]);
   const att = useFileAttachments(
     () => sessionIdRef.current ?? undefined,
     {
       onRouteMedia: activeAssistant
-        ? (files) => {
-            void (async () => {
-              for (const file of files) await recordingUpload.run(file);
-            })();
+        ? async (files) => {
+            for (const file of files) {
+              const staged = await recordingUpload.stage(file);
+              if (staged) setPendingRecordings((current) => [...current, staged]);
+            }
           }
         : undefined,
     },
@@ -1019,14 +1027,18 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     const trimmed = (override?.text ?? input).trim();
     const usesComposerTray = override?.fileIds === undefined;
     const turnFileIds = override?.fileIds ?? att.fileIds();
+    const turnRecordingIds = usesComposerTray
+      ? pendingRecordings.map((recording) => recording.recordingId)
+      : [];
     // Snapshot the interlocutor at send time — the turn belongs to it even
     // if the resolution inputs shift while the reply streams.
     const interlocutor = activeAssistant;
     if (
-      (!trimmed && turnFileIds.length === 0) ||
+      (!trimmed && turnFileIds.length === 0 && turnRecordingIds.length === 0) ||
       !interlocutor ||
       chat.state.isStreaming ||
       (usesComposerTray && att.uploading) ||
+      (usesComposerTray && recordingUpload.status === "uploading") ||
       pendingQuestion
     ) {
       return;
@@ -1052,6 +1064,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       askArmed ||
       mentioned.length > 0 ||
       turnFileIds.length > 0 ||
+      turnRecordingIds.length > 0 ||
       researchMode ||
       override?.forceAddress === true;
     setAskArmed(false);
@@ -1131,6 +1144,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     } satisfies SurfaceMessage);
     setInput("");
     if (usesComposerTray) att.detach();
+    if (usesComposerTray) setPendingRecordings([]);
     setError(null);
     setQueuedNotice(false);
     responseGroupAbortRef.current = false;
@@ -1179,6 +1193,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         // distil the same upload again.
         ...(targetIndex === 0 && turnFileIds.length > 0
           ? { fileIds: turnFileIds }
+          : {}),
+        ...(targetIndex === 0 && turnRecordingIds.length > 0
+          ? { attachedRecordingIds: turnRecordingIds }
           : {}),
         ...(override?.truncateFromMessageId
           ? { truncateFromMessageId: override.truncateFromMessageId }
@@ -1646,7 +1663,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       await loadTranscript(sessionIdRef.current);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [input, activeAssistant, activeSessionId, activeShared, askArmed, model, researchMode, view, workspaceId, chat.state.isStreaming, refreshPendingQuestion, reloadShared, resetTurnActivity, selectSession, startingShared, stream, t, tChat.toolNarration, att.attachments, att.uploading, att.fileIds, att.detach, pendingQuestion, assistants]);
+  }, [input, activeAssistant, activeSessionId, activeShared, askArmed, model, researchMode, view, workspaceId, chat.state.isStreaming, refreshPendingQuestion, reloadShared, resetTurnActivity, selectSession, startingShared, stream, t, tChat.toolNarration, att.attachments, att.uploading, att.fileIds, att.detach, pendingQuestion, pendingRecordings, recordingUpload.status, assistants]);
 
   const retryUserMessage = useCallback(
     (messageId: string) => {
@@ -2086,8 +2103,13 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         onKeyDown={handleMentionKeyDown}
         onSend={() => void send()}
         disabled={!!pendingQuestion}
-        sendDisabled={chat.state.isStreaming || !activeAssistant || att.uploading}
-        allowEmptySend={att.hasReady}
+        sendDisabled={
+          chat.state.isStreaming ||
+          !activeAssistant ||
+          att.uploading ||
+          recordingUpload.status === "uploading"
+        }
+        allowEmptySend={att.hasReady || pendingRecordings.length > 0}
         onPaste={(event) => {
           if (pendingQuestion) return;
           const images = imageFilesFromClipboard(event.clipboardData);
@@ -2106,12 +2128,14 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             <span className="sr-only">{t.send}</span>
           </>
         }
-        // One flex-wrap container: the textarea takes the full first line
-        // (`order-1 basis-full`), the control row wraps beneath it
-        // (interlocutor `order-2 mr-auto`, Send/Stop `order-3`).
-        rowClassName="flex flex-wrap items-center gap-1 px-2 pb-2"
+        // An explicit two-row grid keeps the footer stable at every width:
+        // textarea spans row one, while the shrinkable controls and fixed Send
+        // share row two. The old wrapping flex row could strand Send alone on a
+        // third line when the assistant / Ask labels reached their min-content
+        // widths.
+        rowClassName="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-1 px-2 pb-2"
         textareaClassName={cn(
-          "order-1 max-h-[240px] min-w-0 basis-full resize-none overflow-y-auto",
+          "order-1 col-span-2 w-full max-h-[240px] min-w-0 resize-none overflow-y-auto",
           "bg-transparent px-1.5 pt-2.5 pb-1 text-sm leading-relaxed outline-none",
           "placeholder:text-muted-foreground focus-visible:shadow-none",
         )}
@@ -2122,6 +2146,29 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
               onRemove={att.remove}
               className="px-3 pt-2.5"
             />
+            {pendingRecordings.length > 0 ? (
+              <div className="flex flex-wrap gap-1.5 px-3 pt-2.5">
+                {pendingRecordings.map((recording) => (
+                  <span
+                    key={recording.recordingId}
+                    className="inline-flex items-center gap-1 rounded border border-border bg-muted/40 px-2 py-0.5 text-xs text-muted-foreground"
+                  >
+                    <span aria-hidden>◉</span>
+                    {tRecordings.chatStagedChip.replace("{name}", recording.title)}
+                    <button
+                      type="button"
+                      onClick={() => setPendingRecordings((current) =>
+                        current.filter((item) => item.recordingId !== recording.recordingId)
+                      )}
+                      aria-label={`${tAttach.remove} ${recording.title}`}
+                      className="rounded p-0.5 hover:bg-muted"
+                    >
+                      <X className="size-3" aria-hidden />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            ) : null}
             {recordingUpload.status !== "idle" ? (
               <p
                 role="status"
@@ -2142,7 +2189,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           </>
         }
         slotPreInput={
-          <div className="order-2 mr-auto flex min-w-0 items-center gap-0.5">
+          <div className="order-2 flex min-w-0 items-center gap-0.5">
             <input
               ref={fileInputRef}
               type="file"
@@ -2206,7 +2253,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         }
         sendButtonClassName={cn(
           "order-3 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg",
-          "bg-primary text-primary-foreground transition-colors hover:bg-primary/90",
+          "bg-action text-action-foreground transition-colors hover:bg-action/90",
           "focus-visible:shadow-none disabled:opacity-40 disabled:pointer-events-none",
           chat.state.isStreaming && "hidden",
         )}

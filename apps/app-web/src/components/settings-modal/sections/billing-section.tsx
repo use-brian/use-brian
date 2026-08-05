@@ -490,7 +490,7 @@ export function BillingSection() {
             <button
               onClick={() => openPortal("payment_method_update")}
               disabled={portalSubmitting}
-              className="text-sm font-medium mt-3 bg-primary text-primary-foreground px-4 py-2 rounded-lg hover:bg-primary/90 transition-colors disabled:opacity-60"
+              className="text-sm font-medium mt-3 bg-action text-action-foreground px-4 py-2 rounded-lg hover:bg-action/90 transition-colors disabled:opacity-60"
             >
               {portalSubmitting
                 ? t.settings.billing.opening
@@ -633,7 +633,7 @@ export function BillingSection() {
               <button
                 onClick={() => openPortal()}
                 disabled={portalSubmitting}
-                className="text-sm font-medium bg-primary text-primary-foreground px-4 py-2 rounded-lg hover:bg-primary/90 transition-colors shrink-0 disabled:opacity-60 disabled:cursor-not-allowed"
+                className="text-sm font-medium bg-action text-action-foreground px-4 py-2 rounded-lg hover:bg-action/90 transition-colors shrink-0 disabled:opacity-60 disabled:cursor-not-allowed"
               >
                 {portalSubmitting
                   ? t.settings.billing.opening

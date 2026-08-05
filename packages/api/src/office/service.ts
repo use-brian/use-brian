@@ -4,11 +4,22 @@ import type { OfficeGenerationJobRow } from '../db/office-generation.js'
 import type { ResolvedOfficeAccess } from './access.js'
 
 export type OfficeServiceDeps = {
+  generationAvailable(): boolean
   createShell(params: { userId: string; workspaceId: string; family: 'document' | 'presentation'; title: string; templateVersionId: string | null; capabilityVersion: number; sensitivity: 'public' | 'internal' | 'confidential'; visibilityUserIds?: string[]; requiredCompartments?: string[] }): Promise<OfficeArtifactRow>
+  deleteEmptyShell(userId: string, artifactId: string): Promise<boolean>
   getArtifact(userId: string, artifactId: string): Promise<OfficeArtifactRow | null>
   resolveAccess(userId: string, artifactId: string): Promise<ResolvedOfficeAccess | null>
   createJob(params: { userId: string; workspaceId: string; artifactId: string; assistantId: string | null; jobKind: OfficeGenerationJobRow['jobKind']; brief: unknown; authorityProjection: unknown; templateVersionId?: string; baseArtifactVersion?: number; idempotencyKey: string }): Promise<OfficeGenerationJobRow>
   latestJob(userId: string, artifactId: string): Promise<OfficeGenerationJobRow | null>
+  wakeGeneration?(userId: string): void
+}
+
+export class OfficeGenerationUnavailableError extends Error {
+  readonly code = 'office_generation_unavailable'
+
+  constructor() {
+    super('Office generation is unavailable because no generation runner is configured')
+  }
 }
 
 function titleFromOutcome(outcome: string, family: 'document' | 'presentation'): string {
@@ -19,6 +30,7 @@ function titleFromOutcome(outcome: string, family: 'document' | 'presentation'):
 export function createOfficeService(deps: OfficeServiceDeps): OfficeToolPort {
   return {
     async create(params) {
+      if (!deps.generationAvailable()) throw new OfficeGenerationUnavailableError()
       const artifact = await deps.createShell({ userId: params.userId, workspaceId: params.workspaceId, family: params.family, title: titleFromOutcome(params.outcome, params.family), templateVersionId: params.templateId ?? null, capabilityVersion: 1, sensitivity: 'internal' })
       const brief = {
         workspaceId: params.workspaceId,
@@ -34,8 +46,16 @@ export function createOfficeService(deps: OfficeServiceDeps): OfficeToolPort {
         companyHasNoWebsite: params.companyHasNoWebsite,
         idempotencyKey: params.idempotencyKey,
       }
-      const job = await deps.createJob({ userId: params.userId, workspaceId: params.workspaceId, artifactId: artifact.id, assistantId: params.assistantId, jobKind: 'create', brief, authorityProjection: { sensitivity: 'internal', visibilityUserIds: [], compartments: [], sourceHandles: params.sourceHandles }, templateVersionId: params.templateId, idempotencyKey: params.idempotencyKey })
-      return { artifactId: artifact.id, jobId: job.id }
+      let job: OfficeGenerationJobRow
+      try {
+        job = await deps.createJob({ userId: params.userId, workspaceId: params.workspaceId, artifactId: artifact.id, assistantId: params.assistantId, jobKind: 'create', brief, authorityProjection: { sensitivity: 'internal', visibilityUserIds: [], compartments: [], sourceHandles: params.sourceHandles }, templateVersionId: params.templateId, idempotencyKey: params.idempotencyKey })
+      } catch (cause) {
+        await deps.deleteEmptyShell(params.userId, artifact.id)
+        throw cause
+      }
+      if (job.artifactId !== artifact.id) await deps.deleteEmptyShell(params.userId, artifact.id)
+      deps.wakeGeneration?.(params.userId)
+      return { artifactId: job.artifactId, jobId: job.id }
     },
 
     async get(params) {

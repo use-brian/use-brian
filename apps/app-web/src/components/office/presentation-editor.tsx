@@ -18,6 +18,7 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
   const slide = snapshot.slides.find((candidate) => candidate.id === slideId) ?? snapshot.slides[0];
   const selected = useMemo(() => slide.objects.find((object) => object.id === objectId) ?? null, [objectId, slide.objects]);
   const selectedForToolbar = selected && geometryPreview?.objectId === selected.id ? { ...selected, geometry: geometryPreview.geometry } as PresentationObject : selected;
+  const slideAspectRatio = `${snapshot.slideSize.widthPt} / ${snapshot.slideSize.heightPt}`;
   const emit = (command: OfficeCommand) => { if (canChange) onCommand(command); };
 
   useEffect(() => {
@@ -56,7 +57,7 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
   return (
     <div className="grid min-h-0 flex-1 grid-cols-[6.5rem_minmax(0,1fr)] lg:grid-cols-[10rem_minmax(0,1fr)]" data-office-editor="presentation" data-properties-open={selected ? "true" : "false"}>
       <nav className="overflow-y-auto border-r bg-muted/30 p-2" aria-label={t.slideRail}>
-        {snapshot.slides.map((item, index) => <button key={item.id} type="button" onClick={() => { setSlideId(item.id); setObjectId(null); setGeometryPreview(null); onSelectTargets?.([item.id]); }} className={cn("mb-2 block w-full rounded border bg-white p-1 text-left text-slate-900", item.id === slide.id && "ring-2 ring-primary")}><span className="text-[10px] text-slate-500">{index + 1}</span><span className="line-clamp-2 block text-xs">{item.title}</span></button>)}
+        {snapshot.slides.map((item, index) => <button key={item.id} type="button" data-slide-thumbnail="true" style={{ aspectRatio: slideAspectRatio }} onClick={() => { setSlideId(item.id); setObjectId(null); setGeometryPreview(null); onSelectTargets?.([item.id]); }} className={cn("relative mb-2 block aspect-video w-full overflow-hidden rounded border bg-white p-1 text-left text-slate-900", item.id === slide.id && "ring-2 ring-primary")}><span className="text-[10px] text-slate-500">{index + 1}</span><span className="line-clamp-2 block text-xs">{item.title}</span></button>)}
         <button type="button" onClick={addSlide} disabled={!canChange} className="flex w-full items-center justify-center gap-1 rounded border border-dashed p-2 text-xs disabled:opacity-40"><Plus className="size-3" />{t.newSlide}</button>
       </nav>
       <div className="flex min-h-0 flex-col overflow-auto bg-muted/40">
@@ -69,7 +70,7 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
         </div>
         {selectedForToolbar ? <PresentationGeometryToolbar object={selectedForToolbar} disabled={!canChange || selectedForToolbar.locked} onProperty={updateSelectedGeometry} onDelete={() => emit(deleteCommand(snapshot.artifactId, baseVersion, selectedForToolbar.id))} /> : null}
         <div className="flex flex-1 items-center justify-center p-4 lg:p-8">
-          <div data-slide-canvas="true" className="relative aspect-video w-full max-w-5xl overflow-hidden bg-white text-slate-950 shadow" style={{ aspectRatio: `${snapshot.slideSize.widthPt}/${snapshot.slideSize.heightPt}` }} onClick={() => { setObjectId(null); setGeometryPreview(null); }}>
+          <div data-slide-canvas="true" className="relative aspect-video w-full max-w-5xl overflow-hidden bg-white text-slate-950 shadow" style={{ aspectRatio: slideAspectRatio }} onClick={() => { setObjectId(null); setGeometryPreview(null); }}>
             {slide.objects.map((object) => <PresentationObjectFrame key={object.id} object={object} selected={object.id === objectId} canChange={canChange} slideSize={snapshot.slideSize} onSelect={() => selectObject(object.id)} onText={(targetId, runs) => emit(textCommand(snapshot.artifactId, baseVersion, targetId, runs))} onGeometryPreview={(targetId, geometry) => setGeometryPreview(geometry ? { objectId: targetId, geometry } : null)} onGeometry={(targetId, geometry) => emit(propertyCommand(snapshot.artifactId, baseVersion, targetId, ["geometry"], geometry))} />)}
           </div>
         </div>

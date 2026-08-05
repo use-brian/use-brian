@@ -108,9 +108,10 @@ export function pageIdFromInAppHref(
  *                       live view; the 5th operator app under Home
  *   - `'chat'`          `/chat` — the full-page Chat operator app (Personal +
  *                       Workspace views over web sessions); the 6th operator
- *                       app under Home. Distinct from the floating chat dock,
- *                       which keeps floating over every surface including this
- *                       one (chat-app.md → "Relationship to the dock")
+ *                       app under Home. Distinct from the ambient floating
+ *                       dock, which stays mounted but hides on this route so it
+ *                       cannot duplicate or cover the full-page composer
+ *                       (chat-app.md → "Relationship to the dock")
  *   - `'apps'`          `/apps/<appId>` — the shared surface EVERY custom
  *                       (workspace-built) Home app renders on, inside an
  *                       opaque-origin iframe. One segment, many apps: the

@@ -430,7 +430,7 @@ import { setKnowledgeEventDispatcher } from './knowledge-event-fanout.js'
 import { createRecordingSynthesizer, type RecordingSynthesizeFn } from './synthesis/recording-synthesizer.js'
 import { processOpenRecording } from './recordings/process-recording.js'
 import { createOpenRecordingProcessWorker } from './recordings/recording-process-worker.js'
-import { updateRecording } from './db/recordings-store.js'
+import { getRecording, updateRecording } from './db/recordings-store.js'
 import { mergeEpisodeSourceRef } from './db/episodes-store.js'
 import { createResearchSynthesizer } from './synthesis/research-synthesizer.js'
 import { createGenerateSynthesizer, type GenerateSynthesizeFn } from './synthesis/generate-synthesizer.js'
@@ -728,6 +728,8 @@ export interface OpenApiPorts {
    * Pipeline B wiring; default absent — OSS ingest is uncharged.
    */
   ingestCharge?: (episode: { id: string; workspaceId: string; sourceKind: string; createdByUserId: string }) => Promise<void>
+  /** Hosted recording-duration credit quote; absent in OSS/self-hosted. */
+  recordingSurchargeCredits?: (durationSeconds: number) => number
   /**
    * Metered model lane billing (model-registry.md L8/L15) — the closed
    * `5 + ceil(cost/$0.040)` estimate / spend-cap / charge seams. Default
@@ -1892,18 +1894,23 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       'reprocessRecording',
       createReprocessRecordingTool({
         getRecording: async (actorUserId, recordingId) => {
-          const ep = await getEpisodeByIdSystem(actorUserId, recordingId, {})
-          return ep
+          const recording = await getRecording(actorUserId, recordingId)
+          return recording
             ? {
-                id: ep.id,
-                workspaceId: ep.workspaceId,
-                sourceKind: ep.sourceKind,
-                sourceRef: (ep.sourceRef ?? null) as Record<string, unknown> | null,
+                id: recording.id,
+                workspaceId: recording.workspaceId,
+                sourceKind: 'recording',
+                sourceRef: {
+                  gcsKey: recording.gcsKey,
+                  fileName: recording.fileName,
+                },
+                durationMs: recording.durationMs,
               }
             : null
         },
         hasProcessed: hasCompletedRecordingJob,
         enqueue: enqueueRecordingJob,
+        surchargeCredits: ports.recordingSurchargeCredits,
       }),
     )
 
@@ -1960,8 +1967,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   })
   if (runWorkers) officeLifecycleWorker.start()
+  const officeGenerationAvailable = () => false
   const officeService = createOfficeService({
+    // The route must not accept jobs until the durable generation runner and
+    // its pipeline dependencies are wired into this boot graph.
+    generationAvailable: officeGenerationAvailable,
     createShell: officeArtifactStore.createShell,
+    deleteEmptyShell: officeArtifactStore.deleteEmptyShell,
     getArtifact: officeArtifactStore.get,
     resolveAccess: resolveOfficeAccess,
     createJob: officeGenerationStore.create,
@@ -3654,6 +3666,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     workspaceFilesStore,
     filesApi: filesApi ?? undefined,
     usageStore,
+    recordingSurchargeCredits: ports.recordingSurchargeCredits,
     // Doc-page → brain distillation runner — backs the `ingestPage` chat tool.
     ingestPage: ingestPageRunner
       ? ({ userId, pageId }) => ingestPageRunner({ userId, pageId })
@@ -4551,6 +4564,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api', requireAuth(env.JWT_SECRET), inboxRoutes({ commentThreadStore, docNotificationsStore }))
   app.use('/api/office', requireAuth(env.JWT_SECRET), officeArtifactRoutes({
     service: officeService,
+    generationAvailable: officeGenerationAvailable,
     async list(userId, workspaceId, view) {
       const artifacts = await officeArtifactStore.list(userId, workspaceId, view)
       const visible = await Promise.all(artifacts.map((artifact) => officeService.get({ userId, artifactId: artifact.id })))
@@ -4587,6 +4601,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     claim: officeGenerationStore.claim,
     getSnapshot: officeLiveStore.get,
     getTemplate: officeTemplateStore.get,
+    async readSource({ userId, workspaceId, assistantId, fileId }) {
+      const result = await filesApi!.readBytes({ workspaceId, userId, assistantId, assistantKind: 'standard', clearance: 'confidential' }, fileId)
+      if (!result.ok) throw new Error(`Office template source unavailable: ${result.error.kind}`)
+      return result.value.bytes
+    },
+    initialize: officeLiveStore.initialize,
     async saveBundle({ userId, workspaceId, templateId, hash, bytes }) {
       const path = `/office/templates/${templateId}/${hash}.json`
       const ctx = { workspaceId, userId, assistantKind: 'standard' as const, clearance: 'confidential' as const }
@@ -4601,15 +4621,25 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     finish: officeGenerationStore.finish,
   }) : null
   const wakeImport = (userId: string) => {
-    if (officeImportWorker) void officeImportWorker(userId).catch((error) => console.error('[office-import-worker]', error))
+    if (officeImportWorker) void (async () => {
+      while (await officeImportWorker(userId)) { /* drain eligible imports for this member */ }
+    })().catch((error) => console.error('[office-import-worker]', error))
   }
   const wakeTemplateCompile = (userId: string) => {
-    if (officeTemplateCompileWorker) void officeTemplateCompileWorker(userId).catch((error) => console.error('[office-template-compile-worker]', error))
+    if (officeTemplateCompileWorker) void (async () => {
+      while (await officeTemplateCompileWorker(userId)) { /* drain eligible template compilations for this member */ }
+    })().catch((error) => console.error('[office-template-compile-worker]', error))
   }
   app.use('/api/office', requireAuth(env.JWT_SECRET), officeTemplateRoutes({
     list: officeTemplateStore.list,
+    getTemplate: officeTemplateStore.get,
+    getArtifact: officeArtifactStore.get,
+    getSnapshot: officeLiveStore.get,
     createDraft: officeTemplateStore.createDraft,
     createTemplateShell: officeArtifactStore.createShell,
+    initializeDraft: officeLiveStore.initializeIfMissing,
+    deleteEmptyDraft: officeTemplateStore.deleteEmptyDraft,
+    deleteEmptyShell: officeArtifactStore.deleteEmptyShell,
     createCompileJob: officeGenerationStore.create,
     wakeCompile: wakeTemplateCompile,
     transitionLifecycle: officeTemplateStore.transitionLifecycle,
@@ -4628,7 +4658,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     service: officeService,
   }))
   app.use('/api/office', requireAuth(env.JWT_SECRET), officeImportRoutes({
+    available: () => Boolean(officeImportWorker),
     createShell: officeArtifactStore.createShell,
+    deleteEmptyShell: officeArtifactStore.deleteEmptyShell,
     createJob: officeGenerationStore.create,
     wake: wakeImport,
   }))

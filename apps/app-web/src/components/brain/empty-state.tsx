@@ -455,7 +455,7 @@ function McpCard() {
           type="button"
           onClick={handleGenerate}
           disabled={!activeId || creating}
-          className="inline-flex items-center justify-center gap-1.5 text-[12px] font-medium bg-primary text-primary-foreground px-3 py-2 rounded-lg hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors w-full"
+          className="inline-flex items-center justify-center gap-1.5 text-[12px] font-medium bg-action text-action-foreground px-3 py-2 rounded-lg hover:bg-action/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors w-full"
         >
           {creating ? (
             <>
@@ -470,7 +470,7 @@ function McpCard() {
         <button
           type="button"
           onClick={handleCopy}
-          className="inline-flex items-center justify-center gap-1.5 text-[12px] font-medium bg-primary text-primary-foreground px-3 py-2 rounded-lg hover:bg-primary/90 transition-colors w-full"
+          className="inline-flex items-center justify-center gap-1.5 text-[12px] font-medium bg-action text-action-foreground px-3 py-2 rounded-lg hover:bg-action/90 transition-colors w-full"
         >
           {copied ? (
             <>

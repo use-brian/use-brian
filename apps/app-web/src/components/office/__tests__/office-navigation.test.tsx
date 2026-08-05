@@ -16,7 +16,8 @@ vi.mock("next/link", () => ({
 
 import { OfficeTopbar } from "../office-topbar";
 import { OfficeCreate } from "../office-create";
-import { readOfficeStarterTemplate } from "../template-library";
+import { OfficeImportTemplateEmptyState } from "../office-import";
+import { OfficeTemplateLibrary, officeTemplateNameFromFile, readOfficeStarterTemplate } from "../template-library";
 
 function wrap(node: React.ReactNode) {
   return renderToStaticMarkup(<I18nProvider locale="en" dict={en}>{node}</I18nProvider>);
@@ -45,5 +46,20 @@ describe("[COMP:app-web/office-navigation] Office route chrome", () => {
     expect(readOfficeStarterTemplate(new URLSearchParams("starter=letterhead"))).toBe("letterhead");
     expect(readOfficeStarterTemplate(new URLSearchParams("starter=unknown"))).toBeNull();
     expect(readOfficeStarterTemplate(new URLSearchParams())).toBeNull();
+  });
+
+  it("offers template-file import separately from blank template creation", () => {
+    expect(officeTemplateNameFromFile("Company overview.pptx")).toBe("Company overview");
+    expect(officeTemplateNameFromFile("Letterhead.DOCX")).toBe("Letterhead");
+    const html = wrap(<OfficeTemplateLibrary workspaceId="workspace-1" />);
+    expect(html).toContain("Import template");
+    expect(html).toContain("New template");
+  });
+
+  it("replaces the dead import control with starter-template recovery links", () => {
+    const html = wrap(<OfficeImportTemplateEmptyState workspaceId="workspace-1" />);
+    expect(html).toContain("Import needs an admitted template");
+    expect(html).toContain('href="/w/workspace-1/office/templates?starter=general-presentation"');
+    expect(html).toContain('href="/w/workspace-1/office/templates?starter=letterhead"');
   });
 });

@@ -1,4 +1,5 @@
 /** Durable Office job/event/steering store. [COMP:api/office-generation] */
+import { APP_LEVEL_ASSISTANT_ID } from '@use-brian/shared'
 import { defaultOfficeDbQuery, type OfficeDbQuery } from './office-artifacts.js'
 
 export type OfficeGenerationJobRow = {
@@ -45,6 +46,18 @@ const JOB_COLUMNS = `id, workspace_id AS "workspaceId", artifact_id AS "artifact
   lease_expires_at AS "leaseExpiresAt", cancel_requested_at AS "cancelRequestedAt",
   error_code AS "errorCode", created_at AS "createdAt", updated_at AS "updatedAt"`
 
+// The lease claim updates through a candidate CTE, so every projected column
+// must resolve to the UPDATE target rather than the joined candidate row.
+const CLAIMED_JOB_COLUMNS = `j.id, j.workspace_id AS "workspaceId", j.artifact_id AS "artifactId",
+  j.initiated_by_user_id AS "initiatedByUserId", j.assistant_id AS "assistantId",
+  j.job_kind AS "jobKind", j.status, j.stage, j.brief,
+  j.authority_projection AS "authorityProjection",
+  j.template_version_id AS "templateVersionId",
+  j.base_artifact_version::int AS "baseArtifactVersion", j.checkpoint,
+  j.checkpoint_version AS "checkpointVersion", j.lease_token AS "leaseToken",
+  j.lease_expires_at AS "leaseExpiresAt", j.cancel_requested_at AS "cancelRequestedAt",
+  j.error_code AS "errorCode", j.created_at AS "createdAt", j.updated_at AS "updatedAt"`
+
 export function createOfficeGenerationStore(db: OfficeDbQuery = defaultOfficeDbQuery) {
   return {
     async create(params: { userId: string; workspaceId: string; artifactId: string; assistantId: string | null; jobKind: OfficeGenerationJobRow['jobKind']; brief: unknown; authorityProjection: unknown; templateVersionId?: string; baseArtifactVersion?: number; idempotencyKey: string }): Promise<OfficeGenerationJobRow> {
@@ -57,7 +70,7 @@ export function createOfficeGenerationStore(db: OfficeDbQuery = defaultOfficeDbQ
         ON CONFLICT (workspace_id, initiated_by_user_id, idempotency_key)
         DO UPDATE SET updated_at = office_generation_jobs.updated_at
         RETURNING ${JOB_COLUMNS}
-      `, [params.workspaceId, params.artifactId, params.userId, params.assistantId, params.jobKind, JSON.stringify(params.brief), JSON.stringify(params.authorityProjection), params.templateVersionId ?? null, params.baseArtifactVersion ?? 0, params.idempotencyKey])
+      `, [params.workspaceId, params.artifactId, params.userId, params.assistantId === APP_LEVEL_ASSISTANT_ID ? null : params.assistantId, params.jobKind, JSON.stringify(params.brief), JSON.stringify(params.authorityProjection), params.templateVersionId ?? null, params.baseArtifactVersion ?? 0, params.idempotencyKey])
       if (!result.rows[0]) throw new Error('Office generation job insert returned no row')
       return result.rows[0]
     },
@@ -88,7 +101,7 @@ export function createOfficeGenerationStore(db: OfficeDbQuery = defaultOfficeDbQ
                attempt = attempt + 1, started_at = COALESCE(started_at, now()),
                updated_at = now()
           FROM candidate c WHERE j.id = c.id
-        RETURNING ${JOB_COLUMNS}
+        RETURNING ${CLAIMED_JOB_COLUMNS}
       `, [params.leaseToken, params.leaseMs, params.jobKinds ?? ['create']])
       return result.rows[0] ?? null
     },

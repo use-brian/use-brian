@@ -22,7 +22,12 @@ import {
   resolveAssignee,
   type AssignableMember,
 } from "@/components/brain/property-edit";
-import { taskPriority, type TaskRow, type TaskStatus } from "@/lib/api/tasks";
+import {
+  taskIcon,
+  taskPriority,
+  type TaskRow,
+  type TaskStatus,
+} from "@/lib/api/tasks";
 import { taskProject } from "@/lib/tasks-view";
 import { STATUS_DOT } from "./task-cells";
 
@@ -106,6 +111,7 @@ export function TaskBoard({
                     : null;
                 const priority = taskPriority(row);
                 const project = taskProject(row);
+                const icon = taskIcon(row);
                 return (
                   <div
                     key={row.id}
@@ -124,10 +130,15 @@ export function TaskBoard({
                     <button
                       type="button"
                       onClick={() => onOpenRecord(row)}
-                      className="block w-full text-left text-[13px] font-medium leading-snug text-foreground hover:underline"
+                      className="flex w-full items-start gap-1.5 text-left text-[13px] font-medium leading-snug text-foreground hover:underline"
                       draggable={false}
                     >
-                      {row.title}
+                      {icon && (
+                        <span className="mt-px shrink-0 text-[15px] leading-none" aria-hidden>
+                          {icon}
+                        </span>
+                      )}
+                      <span className="min-w-0 break-words">{row.title}</span>
                     </button>
                     <div className="mt-2 flex items-center gap-1.5">
                       {priority && (

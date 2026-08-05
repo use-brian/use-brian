@@ -212,28 +212,26 @@ export function CommentThreadBody({
   // or sends a reply.
   const pinnedRef = React.useRef(scrollToEnd ?? false);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
-  // Recordings attached to THIS reply, queued but not yet sent. A
+  // Recordings attached to THIS reply, stored but not yet sent. A
   // recording-sized audio/video dropped in chat routes to the recording
-  // pipeline (its own cost confirm + async transcribe) rather than the inline
-  // file_cache path; the turn references it here so the assistant acknowledges
-  // + links instead of pretending to read it. See recordings.md → "Chat entry".
+  // pipeline rather than the inline file_cache path; attachment stops before
+  // blueprint choice or transcription. The turn references it here so the
+  // assistant asks what the user wants. See recordings.md → "Chat entry".
   const rec = useRecordingUpload(workspaceId, assistantId);
   const [pendingRecordings, setPendingRecordings] = React.useState<
     { recordingId: string; title: string }[]
   >([]);
   const att = useFileAttachments(() => thread.sessionId, {
-    onRouteMedia: (files) => {
-      void (async () => {
-        for (const file of files) {
-          const res = await rec.run(file);
-          if (res) {
-            setPendingRecordings((prev) => [
-              ...prev,
-              { recordingId: res.recordingId, title: file.name },
-            ]);
-          }
+    onRouteMedia: async (files) => {
+      for (const file of files) {
+        const staged = await rec.stage(file);
+        if (staged) {
+          setPendingRecordings((prev) => [
+            ...prev,
+            { recordingId: staged.recordingId, title: staged.title },
+          ]);
         }
-      })();
+      }
     },
   });
   const drop = useFileDrop((files) => void att.upload(files));
@@ -502,7 +500,12 @@ export function CommentThreadBody({
     const hasRecordings = attachedRecordingIds.length > 0;
     const model = override ? override.model : controls.model;
     const researchMode = override ? override.researchMode : controls.researchMode;
-    if ((!body && !hasFiles && !hasRecordings) || busy || att.uploading) return;
+    if (
+      (!body && !hasFiles && !hasRecordings) ||
+      busy ||
+      att.uploading ||
+      rec.status === "uploading"
+    ) return;
     // A reconnected turn is streaming into the bubble (a refresh mid-reply) —
     // block a manual send so the composer can't double-drive it. The seed
     // override path runs before any reconnect, so it's exempt.
@@ -929,7 +932,7 @@ export function CommentThreadBody({
                   className="inline-flex items-center gap-1 rounded border border-border bg-muted/40 px-2 py-0.5 text-xs text-muted-foreground"
                 >
                   <span aria-hidden>◉</span>
-                  {tRec.chatQueuedChip.replace("{name}", r.title)}
+                  {tRec.chatStagedChip.replace("{name}", r.title)}
                 </span>
               ))}
             </div>
@@ -964,9 +967,15 @@ export function CommentThreadBody({
             <button
               type="button"
               onClick={() => void sendReply()}
-              disabled={busy || streaming !== null || att.uploading || (!draft.trim() && !(aiReply && att.hasReady))}
+              disabled={
+                busy ||
+                streaming !== null ||
+                att.uploading ||
+                rec.status === "uploading" ||
+                (!draft.trim() && !(aiReply && (att.hasReady || pendingRecordings.length > 0)))
+              }
               aria-label={busy ? t.sending : t.send}
-              className="inline-flex size-7 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground transition-colors hover:bg-primary/90 disabled:bg-foreground/10 disabled:text-muted-foreground"
+              className="inline-flex size-7 shrink-0 items-center justify-center rounded-full bg-action text-action-foreground transition-colors hover:bg-action/90 disabled:bg-foreground/10 disabled:text-muted-foreground"
             >
               <ArrowUp className="size-4" />
             </button>

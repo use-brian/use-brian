@@ -81,6 +81,7 @@ type RoutedSeed = {
   model?: ChatSeed["model"];
   researchMode?: boolean;
   fileIds?: string[];
+  attachedRecordingIds?: string[];
   anchorBlockId?: string;
   nonce: number;
   target: "desktop" | "mobile";
@@ -112,11 +113,12 @@ export function WorkspaceChrome({
   // workflow, approvals, brain, skills — stays live without its own stream.
   useWorkspaceEvents(workspaceId);
   const activeSurface = surfaceFromPathname(pathname);
-  // Views that embed their OWN chat (the skill editor / the skill creator's
-  // doc stage) take a suppression hold — two docks never coexist on a surface.
-  // The hoisted dock HIDES (not unmounts) while suppressed, so a turn that's
-  // already streaming survives the suppression window.
-  const dockSuppressed = useChatDockSuppressed();
+  // Views that embed their OWN chat take a suppression hold. The full Chat app
+  // is route-known and hides the dock directly: a second launcher there can
+  // cover the full-page composer's Send action at narrower widths. The hoisted
+  // dock HIDES (not unmounts) in both cases, so an in-flight turn survives.
+  const embeddedChatSuppressed = useChatDockSuppressed();
+  const dockSuppressed = embeddedChatSuppressed || activeSurface === "chat";
   // Page-collab "another member is running on this page" guard, published by
   // `DocShell` (the only place with the page's Yjs provider); null off `/p`.
   const docOthersRun = useDocChatOthersRun();
@@ -206,6 +208,7 @@ export function WorkspaceChrome({
         model: detail.model,
         researchMode: detail.researchMode,
         fileIds: detail.fileIds,
+        attachedRecordingIds: detail.attachedRecordingIds,
         anchorBlockId: detail.anchorBlockId,
         nonce: seedNonceRef.current,
         target: isDesktop ? "desktop" : "mobile",

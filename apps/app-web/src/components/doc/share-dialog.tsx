@@ -652,7 +652,7 @@ export function ShareDialog({
                 type="button"
                 onClick={() => void handleInvite()}
                 disabled={!inviteQuery.trim()}
-                className="shrink-0 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+                className="shrink-0 rounded-md bg-action px-3 py-1.5 text-sm font-medium text-action-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
               >
                 {t.invite}
               </button>
@@ -859,7 +859,7 @@ export function ShareDialog({
                     href={publishUrl}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="flex-1 rounded-md bg-primary px-3 py-2 text-center text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90"
+                    className="flex-1 rounded-md bg-action px-3 py-2 text-center text-sm font-medium text-action-foreground transition-opacity hover:opacity-90"
                   >
                     {t.viewSite}
                   </a>
@@ -873,7 +873,7 @@ export function ShareDialog({
                   type="button"
                   onClick={() => void doPublish()}
                   disabled={busy}
-                  className="inline-flex w-full items-center justify-center gap-1.5 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+                  className="inline-flex w-full items-center justify-center gap-1.5 rounded-md bg-action px-3 py-2 text-sm font-medium text-action-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
                 >
                   <Globe className="size-4" aria-hidden />
                   {t.publishCta}

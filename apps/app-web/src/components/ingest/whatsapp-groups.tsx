@@ -184,7 +184,7 @@ function WhatsappGroupRow({
           "shrink-0 rounded-md px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-50 " +
           (group.enabled
             ? "border border-border text-muted-foreground hover:text-destructive"
-            : "bg-primary text-primary-foreground hover:bg-primary/90")
+            : "bg-action text-action-foreground hover:bg-action/90")
         }
       >
         {busy ? wa.working : group.enabled ? wa.disableAction : wa.enableAction}

@@ -255,7 +255,7 @@ const ArtifactCommonSchema = z.object({
   workspaceId: OfficeUuidSchema,
   locale: z.string().min(2).max(35),
   defaultLanguage: z.string().min(2).max(35),
-  templateVersionId: OfficeUuidSchema,
+  templateVersionId: OfficeUuidSchema.nullable(),
   rootId: OfficeUuidSchema,
   title: z.string().min(1).max(1_000),
   resources: z.array(OfficeResourceRefSchema).max(20_000),

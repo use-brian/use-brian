@@ -16,6 +16,13 @@ export type OfficeArtifact = {
   job?: { id: string; status: string; stage: string };
 };
 
+export function isOfficeStartFailed(artifact: OfficeArtifact): boolean {
+  return artifact.lifecycleState === "active"
+    && artifact.mode !== "template"
+    && Number(artifact.version) === 0
+    && !artifact.job;
+}
+
 export type OfficeJob = {
   id: string;
   workspaceId: string;
@@ -48,7 +55,11 @@ export class OfficeApiError extends Error {
 }
 
 async function json<T>(response: Response, fallback: string): Promise<T> {
-  if (!response.ok) throw new OfficeApiError(fallback, response.status);
+  if (!response.ok) {
+    const body = await response.clone().json().catch(() => null) as { error?: unknown } | null;
+    const message = typeof body?.error === "string" ? body.error : fallback;
+    throw new OfficeApiError(message, response.status);
+  }
   return response.json() as Promise<T>;
 }
 
@@ -83,6 +94,13 @@ export async function createOfficeArtifact(input: {
       body: JSON.stringify({ ...input, sourceHandles: input.sourceHandles ?? [] }),
     }),
     "office_create_failed",
+  );
+}
+
+export async function getOfficeCapabilities(): Promise<{ generationAvailable: boolean }> {
+  return json(
+    await authFetch(`${API_URL}/api/office/capabilities`),
+    "office_capabilities_failed",
   );
 }
 
@@ -171,12 +189,28 @@ export async function createOfficeTemplate(input: { workspaceId: string; family:
   return json(await authFetch(`${API_URL}/api/office/templates`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...input, sensitivity: "internal" }) }), "office_template_create_failed");
 }
 
+export async function initializeOfficeTemplateDraft(input: { templateId: string; workspaceId: string; draftArtifactId: string }): Promise<OfficeLiveSnapshot> {
+  return json(await authFetch(`${API_URL}/api/office/templates/${encodeURIComponent(input.templateId)}/draft/initialize`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workspaceId: input.workspaceId, draftArtifactId: input.draftArtifactId }),
+  }), "office_template_initialize_failed");
+}
+
 export async function compileOfficeTemplateDraft(input: { templateId: string; workspaceId: string; draftArtifactId: string }): Promise<{ jobId: string }> {
   return json(await authFetch(`${API_URL}/api/office/templates/${encodeURIComponent(input.templateId)}/compile`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ workspaceId: input.workspaceId, draftArtifactId: input.draftArtifactId, assistantId: null, source: { kind: "scratch" }, idempotencyKey: crypto.randomUUID() }),
   }), "office_template_compile_failed");
+}
+
+export async function importOfficeTemplateDraft(input: { templateId: string; workspaceId: string; draftArtifactId: string; fileId: string }): Promise<{ jobId: string }> {
+  return json(await authFetch(`${API_URL}/api/office/templates/${encodeURIComponent(input.templateId)}/compile`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workspaceId: input.workspaceId, draftArtifactId: input.draftArtifactId, assistantId: null, source: { kind: "upload", fileId: input.fileId }, idempotencyKey: crypto.randomUUID() }),
+  }), "office_template_import_failed");
 }
 
 export async function transitionOfficeTemplateLifecycle(templateId: string, action: "deprecate" | "restore" | "trash" | "purge", reason: string): Promise<Record<string, unknown>> {

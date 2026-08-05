@@ -36,6 +36,14 @@ const taskApi = vi.hoisted(() => ({
   bulkTasks: vi.fn(),
 }));
 
+const brainApi = vi.hoisted(() => ({
+  deleteBrainRow: vi.fn(),
+}));
+
+const dialogs = vi.hoisted(() => ({
+  promptDialog: vi.fn(),
+}));
+
 const guardrailApi = vi.hoisted(() => ({
   loadTaskCandidates: vi.fn(),
   acceptTaskCandidate: vi.fn(),
@@ -55,6 +63,15 @@ vi.mock("@/lib/api/tasks", async (importOriginal) => {
     bulkTasks: taskApi.bulkTasks,
   };
 });
+
+vi.mock("@/lib/api/brain-inbox", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/api/brain-inbox")>();
+  return { ...actual, deleteBrainRow: brainApi.deleteBrainRow };
+});
+
+vi.mock("@/components/ui/prompt-dialog", () => ({
+  promptDialog: dialogs.promptDialog,
+}));
 
 vi.mock("@/lib/api/workspace-roster", () => ({
   loadWorkspaceRoster: vi.fn().mockResolvedValue([]),
@@ -109,7 +126,7 @@ const rows: TaskRow[] = [
     due: null,
     tags: [],
     parentId: null,
-    attributes: {},
+    attributes: { icon: "🚀" },
     updatedAt: "2026-07-26T09:00:00.000Z",
   },
   {
@@ -158,6 +175,8 @@ beforeEach(() => {
   taskApi.fetchWorkspaceTasks.mockReset();
   taskApi.fetchWorkspaceTasks.mockResolvedValue(rows);
   taskApi.bulkTasks.mockReset();
+  brainApi.deleteBrainRow.mockReset().mockResolvedValue({ ok: true });
+  dialogs.promptDialog.mockReset().mockResolvedValue(null);
   guardrailApi.loadTaskCandidates.mockReset().mockResolvedValue([]);
   guardrailApi.loadTaskRules.mockReset().mockResolvedValue([]);
   guardrailApi.loadTaskTombstones.mockReset().mockResolvedValue([]);
@@ -177,6 +196,15 @@ afterEach(() => {
 });
 
 describe("[COMP:app-web/tasks-surface] current-filter select all", () => {
+  it("renders an assigned icon immediately before the task title", async () => {
+    await renderSurface();
+
+    const titleButton = container!.querySelector(
+      'button[title="Open task"]',
+    );
+    expect(titleButton?.textContent).toBe("🚀Unassigned task");
+  });
+
   it("opens task rules from the Tasks top bar", async () => {
     await renderSurface();
 
@@ -289,5 +317,96 @@ describe("[COMP:app-web/tasks-surface] current-filter select all", () => {
       200,
       1,
     ]);
+  });
+
+  it("requires one reason and teaches from every task in a bulk delete", async () => {
+    dialogs.promptDialog.mockResolvedValue(
+      "Slack discussion about existing work is not a new task.",
+    );
+    await renderSurface();
+
+    await act(async () => {
+      buttonNamed("Select all 2 matching").click();
+    });
+    await act(async () => {
+      buttonNamed("Delete").click();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(dialogs.promptDialog).toHaveBeenCalledWith({
+      title: "Delete tasks and teach Brian",
+      description:
+        "Tell Brian why these 2 tasks should not exist. They will be deleted, and each task will add its own narrow active rule.",
+      placeholder:
+        "Example: Discussion about an existing task is context, not a new commitment.",
+      confirmLabel: "Delete and add rules",
+      cancelLabel: "Cancel",
+    });
+    expect(brainApi.deleteBrainRow).toHaveBeenCalledTimes(2);
+    for (const id of ["task-unassigned", "task-assigned"]) {
+      expect(brainApi.deleteBrainRow).toHaveBeenCalledWith(
+        "workspace-1",
+        "task",
+        id,
+        {
+          reason: "Slack discussion about existing work is not a new task.",
+          createRule: true,
+        },
+      );
+    }
+  });
+
+  it("sends the shared reason through the large-selection server lane", async () => {
+    const manyRows = Array.from({ length: 51 }, (_, index) => ({
+      ...rows[0]!,
+      id: `task-${index}`,
+      title: `Task ${index}`,
+    }));
+    taskApi.fetchWorkspaceTasks.mockResolvedValue(manyRows);
+    taskApi.bulkTasks.mockImplementation(
+      async (_workspaceId: string, body: { ids: string[] }) => ({
+        ok: true,
+        results: body.ids.map((id) => ({ id, ok: true })),
+      }),
+    );
+    dialogs.promptDialog.mockResolvedValue("This is recurring Slack discussion.");
+    navigation.search = "view=board";
+    await renderSurface();
+
+    await act(async () => {
+      buttonNamed("Select all 51 matching").click();
+    });
+    await act(async () => {
+      buttonNamed("Delete").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(taskApi.bulkTasks).toHaveBeenCalledWith("workspace-1", {
+      action: "delete",
+      ids: manyRows.map((row) => row.id),
+      reason: "This is recurring Slack discussion.",
+      create_rule: true,
+    });
+    expect(brainApi.deleteBrainRow).not.toHaveBeenCalled();
+  });
+
+  it("keeps the selection when a bulk-delete reason is too short", async () => {
+    dialogs.promptDialog.mockResolvedValue("no");
+    await renderSurface();
+
+    await act(async () => {
+      buttonNamed("Select all 2 matching").click();
+    });
+    await act(async () => {
+      buttonNamed("Delete").click();
+      await Promise.resolve();
+    });
+
+    expect(brainApi.deleteBrainRow).not.toHaveBeenCalled();
+    expect(container!.textContent).toContain("2 selected");
+    expect(container!.textContent).toContain("Enter at least 3 characters.");
   });
 });

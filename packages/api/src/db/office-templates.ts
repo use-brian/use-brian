@@ -3,9 +3,11 @@ import { defaultOfficeDbQuery, type OfficeDbQuery } from './office-artifacts.js'
 
 export function createOfficeTemplateStore(db: OfficeDbQuery = defaultOfficeDbQuery) {
   return {
-    async get(userId: string, templateId: string): Promise<{ id: string; workspaceId: string; name: string; description: string; sensitivity: 'public' | 'internal' | 'confidential' } | null> {
-      const result = await db<{ id: string; workspaceId: string; name: string; description: string; sensitivity: 'public' | 'internal' | 'confidential' }>(userId, `
-        SELECT id, workspace_id AS "workspaceId", name, description, sensitivity
+    async get(userId: string, templateId: string): Promise<{ id: string; workspaceId: string; family: 'document' | 'presentation'; name: string; description: string; sensitivity: 'public' | 'internal' | 'confidential'; lifecycleState: 'draft' | 'admitted' | 'deprecated' | 'trash' | 'retained'; draftArtifactId: string | null } | null> {
+      const result = await db<{ id: string; workspaceId: string; family: 'document' | 'presentation'; name: string; description: string; sensitivity: 'public' | 'internal' | 'confidential'; lifecycleState: 'draft' | 'admitted' | 'deprecated' | 'trash' | 'retained'; draftArtifactId: string | null }>(userId, `
+        SELECT id, workspace_id AS "workspaceId", family, name, description,
+               sensitivity, lifecycle_state AS "lifecycleState",
+               draft_artifact_id AS "draftArtifactId"
           FROM office_templates WHERE id = $1 AND lifecycle_state <> 'purged'
       `, [templateId])
       return result.rows[0] ?? null
@@ -23,7 +25,8 @@ export function createOfficeTemplateStore(db: OfficeDbQuery = defaultOfficeDbQue
     async list(userId: string, workspaceId: string, family?: 'document' | 'presentation'): Promise<Array<Record<string, unknown>>> {
       const result = await db<Record<string, unknown>>(userId, `
         SELECT id, family, name, description, lifecycle_state AS "lifecycleState",
-               current_version_id AS "currentVersionId", sensitivity,
+               current_version_id AS "currentVersionId",
+               draft_artifact_id AS "draftArtifactId", sensitivity,
                updated_at AS "updatedAt"
           FROM office_templates
          WHERE workspace_id = $1
@@ -39,14 +42,30 @@ export function createOfficeTemplateStore(db: OfficeDbQuery = defaultOfficeDbQue
       return result.rows
     },
 
-    async createDraft(params: { userId: string; workspaceId: string; family: 'document' | 'presentation'; name: string; description: string; sensitivity: 'public' | 'internal' | 'confidential' }): Promise<{ id: string }> {
+    async createDraft(params: { userId: string; workspaceId: string; family: 'document' | 'presentation'; name: string; description: string; sensitivity: 'public' | 'internal' | 'confidential'; draftArtifactId: string }): Promise<{ id: string }> {
       const result = await db<{ id: string }>(params.userId, `
         INSERT INTO office_templates
-          (workspace_id, family, name, description, owner_user_id, sensitivity)
-        VALUES ($1,$2,$3,$4,$5,$6) RETURNING id
-      `, [params.workspaceId, params.family, params.name, params.description, params.userId, params.sensitivity])
+          (workspace_id, family, name, description, owner_user_id, sensitivity,
+           draft_artifact_id)
+        VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id
+      `, [params.workspaceId, params.family, params.name, params.description, params.userId, params.sensitivity, params.draftArtifactId])
       if (!result.rows[0]) throw new Error('Office template draft insert returned no row')
       return result.rows[0]
+    },
+
+    async deleteEmptyDraft(userId: string, templateId: string): Promise<boolean> {
+      const result = await db<{ id: string }>(userId, `
+        DELETE FROM office_templates t
+         WHERE t.id = $1
+           AND t.owner_user_id = $2
+           AND t.lifecycle_state = 'draft'
+           AND t.current_version_id IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM office_template_versions v WHERE v.template_id = t.id
+           )
+        RETURNING t.id
+      `, [templateId, userId])
+      return result.rows.length === 1
     },
 
     async addVersion(params: { userId: string; templateId: string; workspaceId: string; bundleFileId: string; bundleHash: string; capabilityVersion: number; locales: string[]; tags: string[]; whenToUse: string[]; whenNotToUse: string[]; exampleRequests: string[]; fieldSchema: unknown; admissionReceipt: unknown; provenance: unknown; status: 'draft' | 'admitted' }): Promise<{ id: string; version: number }> {

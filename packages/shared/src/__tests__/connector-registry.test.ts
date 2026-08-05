@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { OFFICIAL_CONNECTORS, ConnectorEntrySchema } from '../connector-registry.js'
+import {
+  ALL_EXACT_INSTANCE_GOVERNANCE_CONNECTOR_IDS,
+  connectorSupportsMultipleInstances,
+  ConnectorEntrySchema,
+  MULTI_INSTANCE_CONNECTOR_IDS,
+  OFFICIAL_CONNECTORS,
+} from '../connector-registry.js'
 import { OFFICIAL_CONNECTOR_TOOLS, OFFICIAL_OAUTH_SCOPES } from '../builtin-connectors.js'
 import { TOOL_DISPLAY_NAMES } from '../tool-display-names.js'
 
@@ -50,7 +56,7 @@ describe('[COMP:shared/connector-registry] Official connector registry', () => {
         // `organizations`, which narrows the picker to work/school accounts
         // but not to a single tenant, so a second work account stays possible
         // in principle. The flag is what keeps msgraph out of
-        // MULTI_INSTANCE_RUNTIME_PROVIDERS, so the injector needs no
+        // MULTI_INSTANCE_CONNECTOR_IDS, so the injector needs no
         // `extrasByProvider` plumbing; flipping it means wiring those extras
         // into injectMsGraphTools in the same change.
         single_instance: true,
@@ -105,6 +111,19 @@ describe('[COMP:shared/connector-registry] Official connector registry', () => {
   })
 
   describe('Cross-table integrity (derived, never a hardcoded id list)', () => {
+    it('derives every multi-instance and all-exact governance id from registry metadata', () => {
+      const expectedMulti = OFFICIAL_CONNECTORS
+        .filter(connectorSupportsMultipleInstances)
+        .map((connector) => connector.id)
+      const expectedAllExact = OFFICIAL_CONNECTORS
+        .filter((connector) => connector.all_instances_exact_governance)
+        .map((connector) => connector.id)
+
+      expect([...MULTI_INSTANCE_CONNECTOR_IDS]).toEqual(expectedMulti)
+      expect([...ALL_EXACT_INSTANCE_GOVERNANCE_CONNECTOR_IDS]).toEqual(expectedAllExact)
+      expect(expectedAllExact.every((id) => MULTI_INSTANCE_CONNECTOR_IDS.has(id))).toBe(true)
+    })
+
     it('every registered tool has a TOOL_DISPLAY_NAMES entry', () => {
       // Without one, a confirmation prompt shows the raw tool id. Same rule
       // `pnpm check` grades as `invariants/connector-registry` → no-display-name.

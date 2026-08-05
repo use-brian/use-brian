@@ -204,7 +204,7 @@ export async function verifyBrainRow(
  *  - memory: scope, sensitivity, summary, detail
  *  - entity: display_name, sensitivity
  *  - workspace_file: sensitivity, tags
- *  - task: title, status, due_at, tags, assignee_id, priority */
+ *  - task: title, status, due_at, tags, assignee_id, priority, description, icon */
 export type AdjustMemoryChanges = {
   scope?: "personal" | "workspace_shared" | "workspace";
   sensitivity?: "public" | "internal" | "confidential";
@@ -225,6 +225,9 @@ export type AdjustMemoryChanges = {
   /** task adjust — the conventional `attributes.description` page body
    *  (markdown, ≤10k chars); null clears. */
   description?: string | null;
+  /** task adjust — the conventional `attributes.icon` emoji (≤16 Unicode
+   *  code points); null clears. */
+  icon?: string | null;
   /** contact adjust — null clears. */
   email?: string | null;
   /** contact adjust — null clears. */
@@ -445,16 +448,51 @@ export async function promoteEntityToCrm(
 }
 
 /** Soft-delete a row. Generic across primitives. */
+export type DeleteBrainRowOptions = {
+  /** Task-only rejection feedback. A reason writes a tombstone. */
+  reason?: string;
+  /** Task-only explicit consent to activate a narrow deny rule. */
+  createRule?: boolean;
+};
+
 export async function deleteBrainRow(
   workspaceId: string,
   primitive: BrainPrimitive,
   rowId: string,
-): Promise<{ ok: true } | { ok: false; error: string }> {
+  options?: DeleteBrainRowOptions,
+): Promise<
+  | {
+      ok: true;
+      tombstoned?: boolean;
+      activeRuleId?: string | null;
+      proposedRuleId?: string | null;
+    }
+  | { ok: false; error: string }
+> {
+  const reason = options?.reason?.trim();
   const res = await authFetch(
     `${API_URL}/api/brain-inbox/${encodeURIComponent(workspaceId)}/${primitive}/${encodeURIComponent(rowId)}`,
-    { method: "DELETE" },
+    {
+      method: "DELETE",
+      ...(reason
+        ? {
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              reason,
+              create_rule: options?.createRule === true,
+            }),
+          }
+        : {}),
+    },
   );
-  if (res.ok) return { ok: true };
+  if (res.ok) {
+    const data = (await res.json().catch(() => ({}))) as {
+      tombstoned?: boolean;
+      activeRuleId?: string | null;
+      proposedRuleId?: string | null;
+    };
+    return { ok: true, ...data };
+  }
   const data = (await res.json().catch(() => ({}))) as { error?: string };
   return { ok: false, error: data.error ?? `Delete failed (${res.status})` };
 }

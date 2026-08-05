@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { FileCheck2, FileText, History, MessageSquare, PanelRightClose, PanelRightOpen, Presentation, Sparkles } from "lucide-react";
 import type { OfficeCommand } from "@use-brian/office-model";
 import { PresenceAvatars } from "@/components/doc/presence-avatars";
@@ -10,8 +10,9 @@ import { DocumentEditor } from "./document-editor";
 import { PresentationEditor } from "./presentation-editor";
 import { OfficeComments } from "./comments/office-comments";
 import { OfficeReview } from "./office-review";
+import { OfficeStartRecovery } from "./office-start-recovery";
 import { useT } from "@/lib/i18n/client";
-import { compileOfficeTemplateDraft, getOfficeArtifact, getOfficeSnapshot, listOfficeVersions, OfficeApiError, submitOfficeCommand, syncOfficeOfflineCommands, type OfficeArtifact, type OfficeCommentThread, type OfficeLiveSnapshot } from "@/lib/office/api";
+import { compileOfficeTemplateDraft, getOfficeArtifact, getOfficeSnapshot, initializeOfficeTemplateDraft, isOfficeStartFailed, listOfficeVersions, OfficeApiError, submitOfficeCommand, syncOfficeOfflineCommands, transitionOfficeLifecycle, type OfficeArtifact, type OfficeCommentThread, type OfficeLiveSnapshot } from "@/lib/office/api";
 import { useCollabProvider } from "@/lib/collab/use-collab-provider";
 import { usePresence, usePublishPresenceActivity, usePublishPresenceIdentity } from "@/lib/collab/use-presence";
 import { getUserInfo } from "@/lib/user";
@@ -22,6 +23,7 @@ import { cn } from "@/lib/utils";
 
 export function OfficeEditorShell({ workspaceId, artifactId }: { workspaceId: string; artifactId: string }) {
   const t = useT().office;
+  const router = useRouter();
   const [artifact, setArtifact] = useState<OfficeArtifact | null | undefined>();
   const [live, setLive] = useState<OfficeLiveSnapshot | null>(null);
   const [targets, setTargets] = useState<string[]>([]);
@@ -34,8 +36,10 @@ export function OfficeEditorShell({ workspaceId, artifactId }: { workspaceId: st
   const [cachedComments, setCachedComments] = useState<OfficeCommentThread[] | null>(null);
   const [offlineCopyAt, setOfflineCopyAt] = useState<string | null>(null);
   const [reconnectStatus, setReconnectStatus] = useState<OfficeOfflineStatus>("synced");
+  const [recoveryState, setRecoveryState] = useState<"idle" | "moving" | "failed">("idle");
+  const [templateDraftFailed, setTemplateDraftFailed] = useState(false);
   const templateId = useSearchParams().get("templateId");
-  const collab = useCollabProvider(artifact?.lifecycleState !== undefined && artifact.lifecycleState !== "active" ? null : `office:${artifactId}`);
+  const collab = useCollabProvider(artifact && live && artifact.lifecycleState === "active" && !isOfficeStartFailed(artifact) ? `office:${artifactId}` : null);
   const currentUser = getUserInfo();
   usePublishPresenceIdentity(collab.provider, currentUser);
   usePublishPresenceActivity(collab.provider);
@@ -53,7 +57,21 @@ export function OfficeEditorShell({ workspaceId, artifactId }: { workspaceId: st
         setCachedComments(null);
         setReconnectStatus("synced");
         setSuggestMode(nextArtifact.role === "comment");
-        try { setLive(await getOfficeSnapshot(artifactId)); } catch { if (nextArtifact.job && !["failed", "cancelled"].includes(nextArtifact.job.status)) timer = setTimeout(load, 1500); }
+        setTemplateDraftFailed(false);
+        try {
+          setLive(await getOfficeSnapshot(artifactId));
+        } catch (error) {
+          const uninitializedTemplate = nextArtifact.mode === "template" && templateId && error instanceof OfficeApiError && error.status === 409 && error.message === "artifact_not_ready";
+          if (uninitializedTemplate) {
+            try {
+              setLive(await initializeOfficeTemplateDraft({ templateId, workspaceId, draftArtifactId: artifactId }));
+              return;
+            } catch {
+              setTemplateDraftFailed(true);
+            }
+          }
+          if (nextArtifact.job && !["failed", "cancelled"].includes(nextArtifact.job.status)) timer = setTimeout(load, 1500);
+        }
       } catch (error) {
         if (!active) return;
         const denied = error instanceof OfficeApiError && [401, 403, 404].includes(error.status);
@@ -79,7 +97,7 @@ export function OfficeEditorShell({ workspaceId, artifactId }: { workspaceId: st
     const reconnect = () => { void load(); };
     window.addEventListener("online", reconnect);
     return () => { active = false; if (timer) clearTimeout(timer); window.removeEventListener("online", reconnect); };
-  }, [artifactId]);
+  }, [artifactId, templateId, workspaceId]);
   useEffect(() => {
     if (!cachedUpdate || !collab.doc) return;
     applyOfficeUpdate(collab.doc, cachedUpdate);
@@ -124,6 +142,11 @@ export function OfficeEditorShell({ workspaceId, artifactId }: { workspaceId: st
   if (artifact === undefined) return <div className="flex flex-1 flex-col"><OfficeTopbar workspaceId={workspaceId} breadcrumbs={[{ label: t.editorLoading }]} /><p className="m-auto text-sm text-muted-foreground">{t.editorLoading}</p></div>;
   if (artifact === null) return <div className="flex flex-1 flex-col"><OfficeTopbar workspaceId={workspaceId} breadcrumbs={[{ label: t.editorFailed }]} /><p className="m-auto text-sm text-destructive">{t.editorFailed}</p></div>;
   const Icon = artifact.family === "document" ? FileText : Presentation;
+  if (templateDraftFailed) return <div className="flex flex-1 flex-col"><OfficeTopbar workspaceId={workspaceId} breadcrumbs={[{ label: artifact.title }]} /><p className="m-auto text-sm text-destructive">{t.editorFailed}</p></div>;
+  if (isOfficeStartFailed(artifact)) return <OfficeStartRecovery workspaceId={workspaceId} title={artifact.title} family={artifact.family} canTrash={artifact.role === "edit"} state={recoveryState} onTrash={() => {
+    setRecoveryState("moving");
+    void transitionOfficeLifecycle(artifactId, "trash", "Office creation did not start").then(() => router.push(`/w/${workspaceId}/office`)).catch(() => setRecoveryState("failed"));
+  }} />;
   async function apply(command: OfficeCommand) {
     if (!live) return;
     if (artifact!.lifecycleState !== "active") return;

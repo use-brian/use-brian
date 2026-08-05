@@ -128,7 +128,7 @@ function ErrorFallback({
       <button
         type="button"
         onClick={reset}
-        className="mt-1 inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+        className="mt-1 inline-flex items-center gap-1.5 rounded-md bg-action px-3 py-1.5 text-xs font-medium text-action-foreground transition-colors hover:bg-action/90"
       >
         <RefreshCw className="size-3.5" aria-hidden />
         {t.boundaryReload}

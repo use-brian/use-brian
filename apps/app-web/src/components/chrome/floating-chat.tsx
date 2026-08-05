@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Floating chat panel for app-web — the "ask AI to create a view"
+ * Floating chat panel for app-web — the ambient "Ask anything…"
  * affordance. It is mounted ONCE in `WorkspaceChrome` (the persistent
  * workspace layout) at `origin="doc"` and serves EVERY tab, so an in-flight
  * turn keeps streaming when the user switches surfaces and the conversation
@@ -13,7 +13,7 @@
  * docs/architecture/features/doc.md → "One dock, every surface".
  *
  *   ┌─ collapsed pill (bottom-middle) ───────────────────────┐
- *   │  Idle: "Ask for a view…"  ·  Streaming: mirrors live  │
+ *   │  Idle: "Ask anything…"  ·  Streaming: mirrors live    │
  *   │  tool / streaming preview from the expanded panel.    │
  *   └────────────────────────────────────────────────────────┘
  *
@@ -198,7 +198,10 @@ import {
   readyAttachments,
   useFileAttachments,
 } from "@/lib/use-file-attachments";
-import { useRecordingUpload } from "@/lib/recordings/use-recording-upload";
+import {
+  useRecordingUpload,
+  type StagedRecording,
+} from "@/lib/recordings/use-recording-upload";
 import { useDockRecorder } from "@/lib/recorder/use-dock-recorder";
 import {
   getDockRecorderSessionId,
@@ -418,6 +421,8 @@ type FloatingChatProps = {
     /** Ready attachment ids staged on the seeding surface (the landing's file
      *  picker / drop) — ride this turn as `/api/chat` `fileIds`. */
     fileIds?: string[];
+    /** Recording ids staged without processing on the seeding surface. */
+    attachedRecordingIds?: string[];
     /**
      * Empty-line "Space for AI" anchor: the inline AI box's block. Rides the
      * autoSend turn as `docAnchorBlockId` so the generation lands after that
@@ -542,25 +547,23 @@ export function FloatingChat({
   // (its creature icon) instead of a generic chat glyph. Only the floating
   // launcher renders the FAB, so the fetch is skipped in side-panel mode.
   const [assistant, setAssistant] = useState<AssistantIdentity | null>(null);
-  // Attached video is too large for the cache upload (Cloud Run's 32 MiB edge
-  // cap / the 20 MB multer limit) and the model can't consume it inline, so
-  // hand it to the recordings pipeline instead: direct-to-GCS upload → server
-  // cost estimate → transcribe + file to the brain. `run` shows the full
-  // pre-flight confirm — cost AND the blueprint picker (seeded from the
-  // workspace default; no selection is passed here) — so a chat-dropped
-  // recording can fill a blueprint exactly like a Studio upload.
+  // Recording-sized media bypasses the multipart cap and uploads directly to
+  // storage, but attachment is not permission to transcribe. Keep the staged
+  // ids in the composer so the next turn can clarify purpose first.
   // See docs/architecture/media/transcription.md.
   const activeAssistantId = selectedAssistantId || assistantId;
   const rec = useRecordingUpload(workspaceId, activeAssistantId);
+  const [pendingRecordings, setPendingRecordings] = useState<StagedRecording[]>([]);
   const att = useFileAttachments(() => sessionIdRef.current ?? undefined, {
     // Only offer routing when we have a workspace + assistant to bind the
     // recording to; otherwise video falls to the guard (unsupported-here) chip.
     onRouteMedia:
       workspaceId && activeAssistantId
-        ? (videos) => {
-            void (async () => {
-              for (const file of videos) await rec.run(file);
-            })();
+        ? async (videos) => {
+            for (const file of videos) {
+              const staged = await rec.stage(file);
+              if (staged) setPendingRecordings((current) => [...current, staged]);
+            }
           }
         : undefined,
   });
@@ -1347,15 +1350,26 @@ export function FloatingChat({
         /** Attachment ids handed in from the seeding surface (the landing),
          *  used instead of this chat's own staged tray for the build turn. */
         fileIds?: string[];
+        /** Staged recording ids handed in from the seeding surface. */
+        attachedRecordingIds?: string[];
       },
     ): Promise<boolean> => {
       // Guard block — each early-return reports `false` so callers (the seed
       // effect) know the send didn't start and must not burn the nonce.
       const trimmed = text.trim();
       const seededFileIds = override?.fileIds ?? [];
-      if (!trimmed && !att.hasReady && seededFileIds.length === 0) return false;
+      const turnRecordingIds =
+        override?.attachedRecordingIds ??
+        pendingRecordings.map((recording) => recording.recordingId);
+      if (
+        !trimmed &&
+        !att.hasReady &&
+        seededFileIds.length === 0 &&
+        turnRecordingIds.length === 0
+      ) return false;
       if (stream.inFlight()) return false;
       if (att.uploading) return false;
+      if (rec.status === "uploading") return false;
       // Suspended on a question — the answer flows through the inline
       // panel (POST /answer), never a fresh chat turn. Guards the Retry
       // path too, which calls sendMessage directly past the disabled composer.
@@ -1396,6 +1410,7 @@ export function FloatingChat({
       session.appendMessage(userMessage);
       setInput("");
       att.detach();
+      setPendingRecordings([]);
       setError(null);
       setNotice(null);
       setResumePolling(false);
@@ -1409,6 +1424,9 @@ export function FloatingChat({
         body: {
           message: trimmed,
           ...(turnFileIds.length > 0 ? { fileIds: turnFileIds } : {}),
+          ...(turnRecordingIds.length > 0
+            ? { attachedRecordingIds: turnRecordingIds }
+            : {}),
           sessionId: sessionIdRef.current ?? undefined,
           // The landing's picker overrides the chat's current tier for the
           // build turn; otherwise the chat's own selection is used. An armed
@@ -2215,7 +2233,7 @@ export function FloatingChat({
       // Indicate to the caller (e.g. seed effect) that a stream actually started.
       return true;
     },
-    [selectedAssistantId, workspaceId, origin, isDocOrigin, model, metered, researchMode, session, stream, t, resetTurnBuffers, pendingQuestion, att],
+    [selectedAssistantId, workspaceId, origin, isDocOrigin, model, metered, researchMode, session, stream, t, resetTurnBuffers, pendingQuestion, pendingRecordings, rec.status, att],
   );
 
   // ── Dock live recording (docs/architecture/media/live-capture.md) ──────
@@ -2292,6 +2310,9 @@ export function FloatingChat({
           : {}),
         ...(seedRequest.fileIds && seedRequest.fileIds.length > 0
           ? { fileIds: seedRequest.fileIds }
+          : {}),
+        ...(seedRequest.attachedRecordingIds && seedRequest.attachedRecordingIds.length > 0
+          ? { attachedRecordingIds: seedRequest.attachedRecordingIds }
           : {}),
       }).then((started) => {
         // Only mark the nonce consumed when the turn actually fired.
@@ -2470,9 +2491,9 @@ export function FloatingChat({
   const collapsedConfirmations =
     collapseResolvedConfirmations(resolvedConfirmations);
 
-  // Idle copy — the doc dock nudges toward the page ("Ask for a view…");
-  // a surface dock stays neutral ("Ask anything…"), with the view-context
-  // nudge carried by the chip + the ambient block's surface line instead.
+  // Idle copy stays generic: the dock can answer, research, create, and edit;
+  // page or surface context is carried by the target chip instead of implying
+  // that every prompt must request a view.
   const idlePlaceholder = isDocOrigin ? t.placeholder : t.surfacePlaceholder;
 
   // Pill activity label — mirrors apps/web's collapsed-pill behaviour
@@ -2871,8 +2892,8 @@ export function FloatingChat({
             // Enter/Send so the user drafts their next message during the
             // assistant's turn instead of staring at a locked input.
             disabled={!!pendingQuestion || offline}
-            sendDisabled={isStreaming}
-            allowEmptySend={att.hasReady}
+            sendDisabled={isStreaming || rec.status === "uploading"}
+            allowEmptySend={att.hasReady || pendingRecordings.length > 0}
             // Paste a screenshot / copied image straight into the chat — it
             // stages as an attachment chip exactly like the paperclip or a
             // drag-drop and rides the next send (staging mid-stream is fine).
@@ -2900,6 +2921,29 @@ export function FloatingChat({
                 <DockRecorderNotice rec={recorder} className="mb-1.5" />
                 <DockRecorderStrip rec={recorder} className="mb-1.5" />
                 <AttachmentChips attachments={att.attachments} onRemove={att.remove} />
+                {pendingRecordings.length > 0 ? (
+                  <div className="flex flex-wrap gap-1.5">
+                    {pendingRecordings.map((recording) => (
+                      <span
+                        key={recording.recordingId}
+                        className="inline-flex items-center gap-1 rounded border border-border bg-muted/40 px-2 py-0.5 text-xs text-muted-foreground"
+                      >
+                        <span aria-hidden>◉</span>
+                        {tRec.chatStagedChip.replace("{name}", recording.title)}
+                        <button
+                          type="button"
+                          onClick={() => setPendingRecordings((current) =>
+                            current.filter((item) => item.recordingId !== recording.recordingId)
+                          )}
+                          aria-label={`${tAttach.remove} ${recording.title}`}
+                          className="rounded p-0.5 hover:bg-muted"
+                        >
+                          <X className="size-3" aria-hidden />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
                 {rec.status !== "idle" ? (
                   <p
                     className={
@@ -2951,8 +2995,8 @@ export function FloatingChat({
             // Hide the built-in Send button while streaming so the
             // adjacent Stop button takes its place visually.
             sendButtonClassName={cn(
-              "shrink-0 rounded-md bg-primary px-3 py-2 text-xs font-medium text-primary-foreground",
-              "transition-colors hover:bg-primary/90 disabled:opacity-50 disabled:pointer-events-none",
+              "shrink-0 rounded-md bg-action px-3 py-2 text-xs font-medium text-action-foreground",
+              "transition-colors hover:bg-action/90 disabled:opacity-50 disabled:pointer-events-none",
               isStreaming && "hidden",
             )}
             slotPostInput={

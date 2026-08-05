@@ -11,6 +11,8 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderToString } from "react-dom/server";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
@@ -19,6 +21,10 @@ import { EmptyPageLanding } from "../empty-page-landing";
 import { CHAT_SEED_EVENT, requestChatSeed } from "@/lib/chat-seed";
 
 const dict = en as unknown as Dictionary;
+const landingSource = readFileSync(
+  fileURLToPath(new URL("../empty-page-landing.tsx", import.meta.url)),
+  "utf8",
+);
 
 function wrap(node: React.ReactNode): string {
   return renderToString(
@@ -67,6 +73,14 @@ describe("[COMP:app-web/empty-page-landing] Landing chatter + recents", () => {
     // hidden multi-file input backs it.
     expect(html).toContain(`aria-label="${dict.attachments.attach}"`);
     expect(html).toMatch(/type="file"[^>]*multiple/);
+  });
+
+  it("stages routed media and carries its id instead of starting processing", () => {
+    expect(landingSource).toContain("const staged = await rec.stage(file)");
+    expect(landingSource).toContain(
+      "attachedRecordingIds: pendingRecordings.map",
+    );
+    expect(landingSource).not.toContain("await rec.run(file)");
   });
 
   it("renders the 'start with a blank page' escape hatch button", () => {
@@ -134,7 +148,7 @@ describe("[COMP:app-web/empty-page-landing] chat-seed bus", () => {
     vi.unstubAllGlobals();
   });
 
-  it("dispatches a CHAT_SEED_EVENT carrying the prefill + autoSend", () => {
+  it("dispatches a CHAT_SEED_EVENT carrying staged attachment ids", () => {
     const dispatch = vi.fn();
     vi.stubGlobal("window", { dispatchEvent: dispatch });
     vi.stubGlobal(
@@ -149,15 +163,57 @@ describe("[COMP:app-web/empty-page-landing] chat-seed bus", () => {
       },
     );
 
-    requestChatSeed({ prefill: "make me a board", autoSend: true });
+    requestChatSeed({
+      prefill: "make me a board",
+      autoSend: true,
+      fileIds: ["file-1"],
+      attachedRecordingIds: ["recording-1"],
+    });
 
     expect(dispatch).toHaveBeenCalledTimes(1);
-    const evt = dispatch.mock.calls[0][0] as { type: string; detail: { prefill: string; autoSend?: boolean } };
+    const evt = dispatch.mock.calls[0][0] as {
+      type: string;
+      detail: {
+        prefill: string;
+        autoSend?: boolean;
+        fileIds?: string[];
+        attachedRecordingIds?: string[];
+      };
+    };
     expect(evt.type).toBe(CHAT_SEED_EVENT);
-    expect(evt.detail).toEqual({ prefill: "make me a board", autoSend: true });
+    expect(evt.detail).toEqual({
+      prefill: "make me a board",
+      autoSend: true,
+      fileIds: ["file-1"],
+      attachedRecordingIds: ["recording-1"],
+    });
   });
 
-  it("drops a blank prefill without dispatching", () => {
+  it("dispatches an attachment-only seed so chat can clarify intent", () => {
+    const dispatch = vi.fn();
+    vi.stubGlobal("window", { dispatchEvent: dispatch });
+    vi.stubGlobal(
+      "CustomEvent",
+      class {
+        type: string;
+        detail: unknown;
+        constructor(type: string, init?: { detail?: unknown }) {
+          this.type = type;
+          this.detail = init?.detail;
+        }
+      },
+    );
+
+    requestChatSeed({ prefill: "", attachedRecordingIds: ["recording-1"] });
+
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(dispatch.mock.calls[0][0]).toMatchObject({
+      type: CHAT_SEED_EVENT,
+      detail: { prefill: "", attachedRecordingIds: ["recording-1"] },
+    });
+  });
+
+  it("drops a blank seed without attachments", () => {
     const dispatch = vi.fn();
     vi.stubGlobal("window", { dispatchEvent: dispatch });
     requestChatSeed({ prefill: "   " });

@@ -160,7 +160,7 @@ export function WorkspaceLlmKeyBlock() {
               <button
                 onClick={save}
                 disabled={saving || !keyInput.trim()}
-                className="text-sm font-medium bg-primary text-primary-foreground px-4 py-2 rounded-lg hover:bg-primary/90 transition-colors disabled:opacity-50"
+                className="text-sm font-medium bg-action text-action-foreground px-4 py-2 rounded-lg hover:bg-action/90 transition-colors disabled:opacity-50"
               >
                 {saving ? t.workspaceDetailInline.purposeSaving : t.workspaceDetailInline.save}
               </button>

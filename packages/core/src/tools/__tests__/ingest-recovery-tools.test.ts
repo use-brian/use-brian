@@ -5,8 +5,8 @@ import type { ToolContext } from '../types.js'
 
 // The user-reachable ingestion-recovery tools (file-artifacts.md §"Re-ingest",
 // transcription.md §"Re-processing"). The invariant under test in both: an
-// already-ingested/processed target is NEVER silently re-run — the first call
-// asks for a user-approved confirm; only confirm: true enqueues.
+// staged or already-ingested/processed target is NEVER silently run — the first
+// call asks for a user-approved confirm; only confirm: true enqueues.
 
 const ctx: ToolContext = {
   userId: 'u-1',
@@ -36,9 +36,20 @@ describe('[COMP:files/ingest-stored-file-tool] ingestFile', () => {
     }
   }
 
-  it('enqueues a never-ingested file without confirmation', async () => {
+  it('GUARD: a staged never-ingested file requires confirmation', async () => {
     const deps = makeDeps()
     const res = await createIngestStoredFileTool(deps).execute({ fileId: 'f-1' }, ctx)
+    expect(String(res.data)).toContain('CONFIRMATION REQUIRED')
+    expect(String(res.data)).toContain('has not been ingested')
+    expect(deps.enqueue).not.toHaveBeenCalled()
+  })
+
+  it('confirm: true ingests a staged file', async () => {
+    const deps = makeDeps()
+    const res = await createIngestStoredFileTool(deps).execute(
+      { fileId: 'f-1', confirm: true },
+      ctx,
+    )
     expect(res.isError).toBeFalsy()
     expect(deps.enqueue).toHaveBeenCalledWith(
       expect.objectContaining({ fileId: 'f-1', workspaceId: 'ws-1', actingUserId: 'u-1', sourceLabel: 'upload' }),
@@ -62,7 +73,7 @@ describe('[COMP:files/ingest-stored-file-tool] ingestFile', () => {
   it('an in-flight job reports "already being ingested" without erroring', async () => {
     const deps = makeDeps()
     deps.enqueue.mockResolvedValue({ enqueued: false, jobId: null })
-    const res = await createIngestStoredFileTool(deps).execute({ fileId: 'f-1' }, ctx)
+    const res = await createIngestStoredFileTool(deps).execute({ fileId: 'f-1', confirm: true }, ctx)
     expect(String(res.data)).toContain('already being ingested')
   })
 
@@ -94,12 +105,14 @@ describe('[COMP:recordings/reprocess-recording-tool] reprocessRecording', () => 
     workspaceId: 'ws-1',
     sourceKind: 'recording',
     sourceRef: { gcsKey: 'k', fileName: 'meeting.mp4' } as Record<string, unknown> | null,
+    durationMs: 20 * 60 * 1000,
   }
   function makeDeps(rec: Partial<typeof REC> | null = {}, processed = true) {
     return {
       getRecording: vi.fn(async () => (rec === null ? null : { ...REC, ...rec })),
       hasProcessed: vi.fn(async () => processed),
       enqueue: vi.fn(async () => ({ enqueued: true, jobId: 'job-1' as string | null })),
+      surchargeCredits: vi.fn(() => 2),
     }
   }
 
@@ -122,11 +135,29 @@ describe('[COMP:recordings/reprocess-recording-tool] reprocessRecording', () => 
     )
   })
 
-  it('a never-processed recording (earlier run failed) enqueues without confirmation', async () => {
+  it('GUARD: a staged never-processed recording requires purpose + cost confirmation', async () => {
     const deps = makeDeps({}, false)
-    const res = await createReprocessRecordingTool(deps).execute({ recordingId: 'rec-1' }, ctx)
+    const res = await createReprocessRecordingTool(deps).execute(
+      { recordingId: 'rec-1', blueprintSlug: 'meeting-notes' },
+      ctx,
+    )
+    expect(String(res.data)).toContain('CONFIRMATION REQUIRED')
+    expect(String(res.data)).toContain('20 minutes')
+    expect(String(res.data)).toContain('2 credits')
+    expect(String(res.data)).toContain('meeting-notes')
+    expect(deps.enqueue).not.toHaveBeenCalled()
+  })
+
+  it('confirm: true processes a staged recording with the chosen blueprint', async () => {
+    const deps = makeDeps({}, false)
+    const res = await createReprocessRecordingTool(deps).execute(
+      { recordingId: 'rec-1', blueprintSlug: 'meeting-notes', confirm: true },
+      ctx,
+    )
     expect(res.isError).toBeFalsy()
-    expect(deps.enqueue).toHaveBeenCalledTimes(1)
+    expect(deps.enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({ blueprintSlug: 'meeting-notes' }),
+    )
   })
 
   it('refuses a recording from another workspace, a non-recording episode, and missing audio', async () => {
@@ -146,7 +177,10 @@ describe('[COMP:recordings/reprocess-recording-tool] reprocessRecording', () => 
   it('an in-flight job reports "already being processed" without erroring', async () => {
     const deps = makeDeps({}, false)
     deps.enqueue.mockResolvedValue({ enqueued: false, jobId: null })
-    const res = await createReprocessRecordingTool(deps).execute({ recordingId: 'rec-1' }, ctx)
+    const res = await createReprocessRecordingTool(deps).execute(
+      { recordingId: 'rec-1', confirm: true },
+      ctx,
+    )
     expect(String(res.data)).toContain('already being processed')
   })
 })

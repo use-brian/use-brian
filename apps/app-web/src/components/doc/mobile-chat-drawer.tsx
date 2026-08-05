@@ -85,6 +85,8 @@ type Props = {
     /** Ready attachment ids staged on the landing — forwarded to
      *  `<FloatingChat>` with the seed and sent as `/api/chat` `fileIds`. */
     fileIds?: string[];
+    /** Recording ids staged without processing on the landing. */
+    attachedRecordingIds?: string[];
     /** Empty-line "Space for AI" anchor — rides the autoSend turn as
      *  `docAnchorBlockId` (forwarded to `<FloatingChat>` with the seed). */
     anchorBlockId?: string;
@@ -235,7 +237,7 @@ export function MobileChatDrawer({
             />
           </span>
         ) : (
-          <span className="inline-flex h-14 w-14 items-center justify-center rounded-full bg-primary text-primary-foreground">
+          <span className="inline-flex h-14 w-14 items-center justify-center rounded-full bg-action text-action-foreground">
             <MessageSquare className="size-5" aria-hidden />
           </span>
         )}
@@ -324,4 +326,3 @@ export function MobileChatDrawer({
     </div>
   );
 }
-

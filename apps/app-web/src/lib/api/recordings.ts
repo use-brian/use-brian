@@ -7,9 +7,10 @@
  *   3. POST /api/recordings/:id/estimate → server-probed duration + surcharge.
  *   4. POST /api/recordings/:id/process  → transcribe + segment + ingest + bill.
  *
- * The estimate (step 3) is shown in a confirm dialog before process (step 4) so
- * the duration surcharge is accepted before any model call. See
- * `lib/recordings/use-recording-upload.ts` for the UI flow.
+ * An explicit processing surface shows the estimate (step 3) in a confirm
+ * dialog before step 4. A chat attachment deliberately stops after step 3 and
+ * carries the staged recording id into conversation first. See
+ * `lib/recordings/use-recording-upload.ts` for both flows.
  */
 
 import { authFetch } from "@/lib/auth-fetch";

@@ -864,7 +864,7 @@ export function ChatContextPins({
                     type="button"
                     disabled={busy || !urlValue.trim()}
                     onClick={() => void addPin({ kind: "url", url: urlValue.trim() })}
-                    className="rounded-md bg-primary px-2.5 py-1 text-[11px] font-medium text-primary-foreground disabled:opacity-50"
+                    className="rounded-md bg-action px-2.5 py-1 text-[11px] font-medium text-action-foreground disabled:opacity-50"
                   >
                     {t.pinAction}
                   </button>
@@ -885,7 +885,7 @@ export function ChatContextPins({
                     onClick={() =>
                       void addPin({ kind: "instruction", text: instructionValue.trim() })
                     }
-                    className="rounded-md bg-primary px-2.5 py-1 text-[11px] font-medium text-primary-foreground disabled:opacity-50"
+                    className="rounded-md bg-action px-2.5 py-1 text-[11px] font-medium text-action-foreground disabled:opacity-50"
                   >
                     {t.pinAction}
                   </button>

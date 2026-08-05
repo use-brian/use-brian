@@ -27,6 +27,7 @@
  */
 
 import {
+  TASK_ADMISSION_THRESHOLDS,
   normalizeTaskTitle,
   proposeRuleFromTombstones,
   significantTokens,
@@ -34,6 +35,7 @@ import {
   type ScoredTask,
   type ScoredTombstone,
   type TaskAdmissionPort,
+  type TaskReadinessAssessment,
   type TaskGuardrailStore,
   type TaskLane,
   type TaskRuleEffect,
@@ -106,6 +108,8 @@ const TOMBSTONE_SELECT = `
 
 /** Recent tombstones shown to the extractor as negative examples. */
 const PROMPT_TOMBSTONE_LIMIT = 8
+/** Relevant live tasks shown before extraction so discussion is not re-titled. */
+const PROMPT_OPEN_TASK_LIMIT = 8
 /** Cap on similarity candidates — the gate only ever uses the best one. */
 const SIMILARITY_LIMIT = 5
 /** Tombstones the proposer clusters over. Bounded so a long-lived workspace
@@ -179,8 +183,8 @@ export async function recordCandidate(input: RecordCandidateInput): Promise<void
     `INSERT INTO task_candidates (
        workspace_id, title, due, source_kind, lane, source_episode_id,
        created_by_assistant_id, status, reason_code, matched_task_id,
-       matched_rule_id, matched_tombstone_id, similarity, expires_at
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+       matched_rule_id, matched_tombstone_id, similarity, quality, expires_at
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
     [
       input.workspaceId,
       input.title,
@@ -195,16 +199,19 @@ export async function recordCandidate(input: RecordCandidateInput): Promise<void
       input.matchedRuleId ?? null,
       input.matchedTombstoneId ?? null,
       input.similarity ?? null,
+      JSON.stringify(input.quality ?? {}),
       input.expiresAt,
     ],
   )
 }
 
-export async function loadPolicyForPrompt(workspaceId: string): Promise<{
+export async function loadPolicyForPrompt(workspaceId: string, content?: string): Promise<{
   rules: TaskRuleRecord[]
   tombstones: TaskTombstoneRecord[]
+  openTasks: ScoredTask[]
 }> {
-  const [rules, tombstones] = await Promise.all([
+  const relevantContent = content?.trim() ?? ''
+  const [rules, tombstones, openTasks] = await Promise.all([
     listActiveRules(workspaceId),
     query<TombstoneRow>(
       `SELECT ${TOMBSTONE_SELECT} FROM task_tombstones
@@ -213,8 +220,22 @@ export async function loadPolicyForPrompt(workspaceId: string): Promise<{
         LIMIT ${PROMPT_TOMBSTONE_LIMIT}`,
       [workspaceId],
     ).then((r) => r.rows.map(toTombstone)),
+    relevantContent
+      ? query<{ id: string; title: string; sim: number }>(
+          `SELECT id, title, word_similarity(lower(title), lower($2)) AS sim
+             FROM tasks
+            WHERE workspace_id = $1
+              AND valid_to IS NULL
+              AND retracted_at IS NULL
+              AND status NOT IN ('done', 'archived')
+              AND word_similarity(lower(title), lower($2)) >= $3
+            ORDER BY sim DESC
+            LIMIT ${PROMPT_OPEN_TASK_LIMIT}`,
+          [workspaceId, relevantContent, TASK_ADMISSION_THRESHOLDS.NEAR_DUPLICATE_HOLD],
+        ).then((r) => r.rows.map((row) => ({ id: row.id, title: row.title, similarity: row.sim })))
+      : Promise.resolve([] as ScoredTask[]),
   ])
-  return { rules, tombstones }
+  return { rules, tombstones, openTasks }
 }
 
 /** The port, ready to inject at boot. */
@@ -335,9 +356,12 @@ export async function rejectTask(input: {
   userId: string
   taskId: string
   reason: string
+  /** Explicit Tasks-UI consent to create/reuse an active narrow deny rule. */
+  createRule?: boolean
 }): Promise<{
   title: string
   tombstoneId: string
+  activeRuleId: string | null
   proposedRuleId: string | null
   proposedRuleClause: string | null
 } | null> {
@@ -345,6 +369,7 @@ export async function rejectTask(input: {
   let title: string
   let tombstoneId: string
   let sourceKind: string | null
+  let activeRuleId: string | null = null
   try {
     await client.query('BEGIN')
 
@@ -353,8 +378,10 @@ export async function rejectTask(input: {
       title: string
       source: string | null
       source_kind: string | null
+      channel_ref: string | null
     }>(
-      `SELECT t.id, t.title, t.source, e.source_kind
+      `SELECT t.id, t.title, t.source, e.source_kind,
+              COALESCE(e.source_ref->>'channel_id', e.source_ref->>'channel_ref') AS channel_ref
          FROM tasks t
          LEFT JOIN episodes e ON e.id = t.source_episode_id
         WHERE t.id = $1 AND t.workspace_id = $2
@@ -367,6 +394,7 @@ export async function rejectTask(input: {
     }
     title = existing.rows[0].title
     sourceKind = existing.rows[0].source_kind
+    const channelRef = existing.rows[0].channel_ref
     const lane: TaskLane = existing.rows[0].source === 'extracted' ? 'extracted' : 'assistant'
 
     await client.query(
@@ -400,6 +428,40 @@ export async function rejectTask(input: {
     )
     tombstoneId = inserted.rows[0].id
 
+    if (input.createRule) {
+      const predicate: TaskRulePredicate = {
+        lanes: [lane],
+        title_matches: [normalizeTaskTitle(title)],
+        ...(sourceKind ? { source_kinds: [sourceKind] } : {}),
+        ...(channelRef ? { channel_refs: [channelRef] } : {}),
+      }
+      const existingRule = await client.query<{ id: string }>(
+        `SELECT id FROM task_rules
+          WHERE workspace_id = $1 AND effect = 'deny' AND predicate = $2::jsonb
+          LIMIT 1`,
+        [input.workspaceId, JSON.stringify(predicate)],
+      )
+      if (existingRule.rows.length > 0) {
+        activeRuleId = existingRule.rows[0].id
+        await client.query(
+          `UPDATE task_rules
+              SET status = 'active', nl_clause = $3, reason = $3,
+                  origin = 'user', created_by_user_id = $4
+            WHERE workspace_id = $1 AND id = $2`,
+          [input.workspaceId, activeRuleId, input.reason, input.userId],
+        )
+      } else {
+        const rule = await client.query<{ id: string }>(
+          `INSERT INTO task_rules
+             (workspace_id, status, effect, predicate, nl_clause, reason, origin, created_by_user_id)
+           VALUES ($1, 'active', 'deny', $2::jsonb, $3, $3, 'user', $4)
+           RETURNING id`,
+          [input.workspaceId, JSON.stringify(predicate), input.reason, input.userId],
+        )
+        activeRuleId = rule.rows[0].id
+      }
+    }
+
     await client.query('COMMIT')
   } catch (err) {
     await rollbackAndRelease(client)
@@ -412,19 +474,21 @@ export async function rejectTask(input: {
   // or surface as an error on the delete.
   let proposedRuleId: string | null = null
   let proposedRuleClause: string | null = null
-  try {
-    const proposal = await maybeProposeRule(input.workspaceId, tombstoneId)
-    proposedRuleId = proposal?.id ?? null
-    proposedRuleClause = proposal?.nlClause ?? null
-  } catch (err) {
-    console.warn(
-      `[task-guardrails] rule proposal failed for workspace ${input.workspaceId}: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    )
+  if (!input.createRule) {
+    try {
+      const proposal = await maybeProposeRule(input.workspaceId, tombstoneId)
+      proposedRuleId = proposal?.id ?? null
+      proposedRuleClause = proposal?.nlClause ?? null
+    } catch (err) {
+      console.warn(
+        `[task-guardrails] rule proposal failed for workspace ${input.workspaceId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      )
+    }
   }
 
-  return { title, tombstoneId, proposedRuleId, proposedRuleClause }
+  return { title, tombstoneId, activeRuleId, proposedRuleId, proposedRuleClause }
 }
 
 /**
@@ -510,6 +574,7 @@ export type TaskCandidateRow = {
   matchedTaskId: string | null
   matchedTaskTitle: string | null
   similarity: number | null
+  quality: TaskReadinessAssessment | null
   createdAt: Date
   expiresAt: Date
 }
@@ -519,6 +584,7 @@ const CANDIDATE_SELECT = `
   c.source_kind AS "sourceKind", c.lane, c.source_episode_id AS "sourceEpisodeId",
   c.status, c.reason_code AS "reasonCode", c.matched_task_id AS "matchedTaskId",
   m.title AS "matchedTaskTitle", c.similarity,
+  NULLIF(c.quality, '{}'::jsonb) AS quality,
   c.created_at AS "createdAt", c.expires_at AS "expiresAt"
 `
 

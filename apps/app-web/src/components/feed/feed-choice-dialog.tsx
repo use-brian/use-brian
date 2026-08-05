@@ -51,7 +51,7 @@ type PendingChoice = ChoiceOptions & {
 function variantClass(variant: ChoiceVariant): string {
   return variant === "destructive"
     ? "bg-destructive text-white hover:bg-destructive/90"
-    : "bg-primary text-primary-foreground hover:bg-primary/90";
+    : "bg-action text-action-foreground hover:bg-action/90";
 }
 
 function BusyLabel({ label }: { label: string }) {

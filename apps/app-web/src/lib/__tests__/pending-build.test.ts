@@ -11,6 +11,8 @@ const base: PendingBuild = {
   text: "show me the Q3 pipeline by stage",
   model: "pro",
   researchMode: false,
+  fileIds: ["file-1"],
+  attachedRecordingIds: ["recording-1"],
   ts: 1_000_000,
 };
 
@@ -38,6 +40,9 @@ describe("[COMP:app-web/pending-build] pending build resume", () => {
       expect(parsePendingBuild(JSON.stringify(noText))).toBeNull();
       expect(parsePendingBuild(JSON.stringify({ ...base, ts: "soon" }))).toBeNull();
       expect(parsePendingBuild(JSON.stringify({ ...base, model: 7 }))).toBeNull();
+      expect(
+        parsePendingBuild(JSON.stringify({ ...base, attachedRecordingIds: [7] })),
+      ).toBeNull();
     });
   });
 

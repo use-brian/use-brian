@@ -233,7 +233,7 @@ export function TaskRulesPanel({
                             type="button"
                             disabled={busyId === rule.id}
                             onClick={() => void toggle(rule, "active")}
-                            className="rounded bg-primary px-2 py-1 text-xs text-primary-foreground disabled:opacity-50"
+                            className="rounded bg-action px-2 py-1 text-xs text-action-foreground disabled:opacity-50"
                           >
                             {rule.status === "proposed"
                               ? t.ruleActivate

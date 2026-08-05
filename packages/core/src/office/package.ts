@@ -44,7 +44,7 @@ export type OfficePackagePreflight = {
 export type OfficeImportContext = {
   artifactId: string
   workspaceId: string
-  templateVersionId: string
+  templateVersionId: string | null
   locale: string
   defaultLanguage: string
   title: string

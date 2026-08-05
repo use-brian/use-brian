@@ -1,8 +1,9 @@
 "use client";
 
 /**
- * Recording upload flow hook (recording-to-brain). Drives: pick file → upload
- * (direct-to-GCS) → server estimate → confirm-dialog preview → process
+ * Recording upload flow hook (recording-to-brain). It exposes two boundaries:
+ * `stage` drives pick file → direct-to-GCS upload → server estimate and stops;
+ * `run` continues through confirm-dialog preview → process
  * (ENQUEUE: the worker service transcribes + segments + ingests + charges in
  * the background, so terminal success here means "queued", never
  * "transcribed"). Returns inline status + message (app-web has no global
@@ -63,11 +64,64 @@ import type { SearchableSelectItem } from "@/components/ui/searchable-select";
 
 export type RecordingUploadStatus = "idle" | "uploading" | "processing" | "done" | "error";
 
+export type StagedRecording = {
+  recordingId: string;
+  title: string;
+  durationSeconds: number;
+  surchargeCredits: number;
+};
+
 export function useRecordingUpload(workspaceId: string, assistantId: string) {
   const t = useT();
   const [status, setStatus] = useState<RecordingUploadStatus>("idle");
   const [message, setMessage] = useState<string>("");
   const [result, setResult] = useState<RecordingQueued | null>(null);
+
+  /**
+   * Store a chat attachment and prove its duration, but do not ask for a
+   * blueprint or start transcription. The returned id rides the user's next
+   * chat turn so purpose can be clarified before any semantic work begins.
+   */
+  const stage = useCallback(
+    async (
+      file: File,
+      opts?: { kind?: "memo" | "meeting" },
+    ): Promise<StagedRecording | null> => {
+      setResult(null);
+      setMessage("");
+      try {
+        setStatus("uploading");
+        const { recordingId } = await startRecordingUpload({
+          workspaceId,
+          assistantId,
+          file,
+          ...(opts?.kind ? { kind: opts.kind } : {}),
+        });
+        const estimate = await estimateRecording(recordingId);
+        const staged = {
+          recordingId,
+          title: file.name,
+          durationSeconds: estimate.durationSeconds,
+          surchargeCredits: estimate.surchargeCredits,
+        };
+        setStatus("done");
+        setMessage(t.recordings.staged);
+        return staged;
+      } catch (e) {
+        setStatus("error");
+        const code = e instanceof RecordingApiError ? e.code : undefined;
+        setMessage(
+          code === "too_long"
+            ? t.recordings.tooLong
+            : code === "could_not_read_duration"
+              ? t.recordings.cannotReadDuration
+              : t.recordings.failed,
+        );
+        return null;
+      }
+    },
+    [workspaceId, assistantId, t],
+  );
 
   /**
    * Install the meeting starter and return its new blueprint id, or undefined
@@ -226,5 +280,5 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
     [workspaceId, assistantId, t, installStarter],
   );
 
-  return { run, status, message, result };
+  return { stage, run, status, message, result };
 }

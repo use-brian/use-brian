@@ -42,6 +42,8 @@ export type PendingBuild = {
   /** Ready attachment ids — session-agnostic server rows, so they outlive the
    *  reload and the replayed turn can still reference them. */
   fileIds?: string[];
+  /** Recording ids staged without processing before the auth redirect. */
+  attachedRecordingIds?: string[];
   /** Build into this existing draft (empty-draft landing) vs minting a new one. */
   targetViewId?: string;
   /** Epoch ms when stashed — drives the freshness TTL. */
@@ -87,6 +89,11 @@ export function parsePendingBuild(raw: string | null): PendingBuild | null {
   }
   // `model` is optional but, when present, must be a string tier.
   if (p.model !== undefined && typeof p.model !== "string") return null;
+  if (
+    p.attachedRecordingIds !== undefined &&
+    (!Array.isArray(p.attachedRecordingIds) ||
+      !p.attachedRecordingIds.every((id) => typeof id === "string"))
+  ) return null;
   return parsed as PendingBuild;
 }
 

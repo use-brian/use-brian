@@ -14,6 +14,8 @@ describe("[COMP:app-web/office-presentation-editor] Presentation editor", () => 
     for (const text of ["Slide", "Title", "Shape", en.office.connector, "Image", "Revenue", "Cell", en.office.video, "Notes"]) expect(html).toContain(text);
     expect(html).toContain('data-office-editor="presentation"');
     expect(html).toContain('data-properties-open="false"');
+    expect(html).toContain('data-slide-thumbnail="true"');
+    expect(html).toContain('aspect-ratio:960 / 540');
     expect(html).not.toContain(`>${en.office.properties}<`);
   });
 

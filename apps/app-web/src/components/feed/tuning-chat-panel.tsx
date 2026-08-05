@@ -574,7 +574,7 @@ export const TuningChatPanel = forwardRef<
                 <div key={msg.id} className="flex justify-end group">
                   <div className="max-w-[85%] space-y-1">
                     {msg.text && (
-                      <div className="inline-block max-w-full rounded-2xl rounded-br-md bg-primary px-3.5 py-2 text-[14px] leading-[1.5] text-primary-foreground shadow-sm whitespace-pre-wrap break-words">
+                      <div className="inline-block max-w-full rounded-2xl rounded-br-md bg-secondary px-3.5 py-2 text-[14px] leading-[1.5] text-secondary-foreground shadow-sm whitespace-pre-wrap break-words">
                         {msg.text}
                       </div>
                     )}
@@ -745,7 +745,7 @@ export const TuningChatPanel = forwardRef<
               <button
                 onClick={() => void onSend()}
                 disabled={!input.trim()}
-                className="p-2 rounded-xl bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-30 disabled:cursor-not-allowed transition-colors shadow-sm shrink-0"
+                className="p-2 rounded-xl bg-action text-action-foreground hover:bg-action/90 disabled:opacity-30 disabled:cursor-not-allowed transition-colors shadow-sm shrink-0"
                 title={t.send}
               >
                 <SendIcon />

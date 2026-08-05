@@ -64,6 +64,23 @@ export function createOfficeLiveStore(db: OfficeDbQuery = defaultOfficeDbQuery) 
       `, [params.artifactId, Buffer.from(bytes), Buffer.from(officeStateVector(doc)), hash])
     },
 
+    async initializeIfMissing(params: { userId: string; artifactId: string; snapshot: OfficeArtifactSnapshot }): Promise<boolean> {
+      if (params.snapshot.artifactId !== params.artifactId) throw new Error('Office live snapshot artifact mismatch')
+      const preflight = preflightOfficeCandidate(params.snapshot)
+      if (!preflight.ok) throw new Error(`Office live snapshot failed preflight: ${preflight.diagnostics.map((item) => `${item.path}: ${item.message}`).join('; ')}`)
+      const doc = snapshotToYDoc(params.snapshot)
+      const bytes = encodeOfficeState(doc)
+      const hash = createHash('sha256').update(JSON.stringify(params.snapshot)).digest('hex')
+      const result = await db<{ artifactId: string }>(params.userId, `
+        INSERT INTO office_collab_documents
+          (artifact_id,workspace_id,ydoc,state_vector,canonical_hash,base_version,seq)
+        SELECT $1,a.workspace_id,$2,$3,$4,a.head_version,1 FROM office_artifacts a WHERE a.id=$1
+        ON CONFLICT (artifact_id) DO NOTHING
+        RETURNING artifact_id AS "artifactId"
+      `, [params.artifactId, Buffer.from(bytes), Buffer.from(officeStateVector(doc)), hash])
+      return result.rows.length === 1
+    },
+
     async appendCommand(params: { userId: string; artifactId: string; expectedSeq: number; command: OfficeCommand }): Promise<OfficeLiveSnapshot | 'conflict' | null> {
       const current = await get(params.userId, params.artifactId)
       if (!current) return null

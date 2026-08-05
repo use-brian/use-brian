@@ -8,7 +8,7 @@ import { APP_LEVEL_ASSISTANT_ID } from "@use-brian/shared";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { OfficeTopbar } from "./office-topbar";
 import { useT } from "@/lib/i18n/client";
-import { createOfficeArtifact, type OfficeFamily } from "@/lib/office/api";
+import { createOfficeArtifact, getOfficeCapabilities, OfficeApiError, type OfficeFamily } from "@/lib/office/api";
 import { cn } from "@/lib/utils";
 
 function OfficeCreateForm({
@@ -29,7 +29,8 @@ function OfficeCreateForm({
   const [website, setWebsite] = useState("");
   const [noWebsite, setNoWebsite] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState(false);
+  const [error, setError] = useState<"failed" | "unavailable" | null>(null);
+  const [generationAvailable, setGenerationAvailable] = useState<boolean | null>(null);
   const dirty = family !== "document" || Boolean(outcome || audience || website || noWebsite);
 
   useEffect(() => {
@@ -43,10 +44,26 @@ function OfficeCreateForm({
     return () => window.removeEventListener("beforeunload", warnBeforeUnload);
   }, [dirty]);
 
+  useEffect(() => {
+    let active = true;
+    void getOfficeCapabilities()
+      .then((capabilities) => {
+        if (!active) return;
+        setGenerationAvailable(capabilities.generationAvailable);
+        if (!capabilities.generationAvailable) setError("unavailable");
+      })
+      .catch(() => {
+        if (!active) return;
+        setGenerationAvailable(false);
+        setError("failed");
+      });
+    return () => { active = false; };
+  }, []);
+
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     setBusy(true);
-    setError(false);
+    setError(null);
     try {
       const created = await createOfficeArtifact({
         workspaceId,
@@ -59,8 +76,8 @@ function OfficeCreateForm({
         idempotencyKey: crypto.randomUUID(),
       });
       router.push(`/w/${workspaceId}/office/${created.artifactId}`);
-    } catch {
-      setError(true);
+    } catch (cause) {
+      setError(cause instanceof OfficeApiError && cause.message === "office_generation_unavailable" ? "unavailable" : "failed");
       setBusy(false);
     }
   }
@@ -69,20 +86,20 @@ function OfficeCreateForm({
     <h1 className="text-2xl font-semibold">{t.newTitle}</h1>
     <p className="mt-2 text-sm text-muted-foreground">{t.newDescription}</p>
     <form onSubmit={submit} className="mt-8 space-y-6">
-      <fieldset>
-        <legend className="mb-2 text-sm font-medium">{t.family}</legend>
-        <div className="grid grid-cols-2 gap-2">
-          {(["document", "presentation"] as const).map((item) => <button key={item} type="button" onClick={() => setFamily(item)} className={cn("rounded-lg border p-4 text-left text-sm", family === item && "border-primary ring-1 ring-primary")}>{item === "document" ? t.document : t.presentation}</button>)}
-        </div>
-      </fieldset>
-      <label className="block text-sm font-medium">{t.outcome}<textarea required value={outcome} onChange={(event) => setOutcome(event.target.value)} placeholder={t.outcomePlaceholder} className="mt-2 min-h-32 w-full rounded-md border bg-background p-3 font-normal" /></label>
-      <label className="block text-sm font-medium">{t.audience}<input required value={audience} onChange={(event) => setAudience(event.target.value)} placeholder={t.audiencePlaceholder} className="mt-2 h-10 w-full rounded-md border bg-background px-3 font-normal" /></label>
-      <label className="block text-sm font-medium">{t.website}<input type="url" disabled={noWebsite} value={website} onChange={(event) => setWebsite(event.target.value)} placeholder={t.websitePlaceholder} className="mt-2 h-10 w-full rounded-md border bg-background px-3 font-normal disabled:opacity-50" /></label>
-      <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={noWebsite} onChange={(event) => setNoWebsite(event.target.checked)} />{t.noWebsite}</label>
-      {error ? <p role="alert" className="text-sm text-destructive">{t.createFailed}</p> : null}
+          <fieldset>
+            <legend className="mb-2 text-sm font-medium">{t.family}</legend>
+            <div className="grid grid-cols-2 gap-2">
+              {(["document", "presentation"] as const).map((item) => <button key={item} type="button" onClick={() => setFamily(item)} className={cn("rounded-lg border p-4 text-left text-sm", family === item && "border-primary ring-1 ring-primary")}>{item === "document" ? t.document : t.presentation}</button>)}
+            </div>
+          </fieldset>
+          <label className="block text-sm font-medium">{t.outcome}<textarea required value={outcome} onChange={(event) => setOutcome(event.target.value)} placeholder={t.outcomePlaceholder} className="mt-2 min-h-32 w-full rounded-md border bg-background p-3 font-normal" /></label>
+          <label className="block text-sm font-medium">{t.audience}<input required value={audience} onChange={(event) => setAudience(event.target.value)} placeholder={t.audiencePlaceholder} className="mt-2 h-10 w-full rounded-md border bg-background px-3 font-normal" /></label>
+          <label className="block text-sm font-medium">{t.website}<input type="url" disabled={noWebsite} value={website} onChange={(event) => setWebsite(event.target.value)} placeholder={t.websitePlaceholder} className="mt-2 h-10 w-full rounded-md border bg-background px-3 font-normal disabled:opacity-50" /></label>
+          <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={noWebsite} onChange={(event) => setNoWebsite(event.target.checked)} />{t.noWebsite}</label>
+          {error ? <p role="alert" className="text-sm text-destructive">{error === "unavailable" ? t.createUnavailable : t.createFailed}</p> : null}
       <div className="flex justify-end gap-2 border-t pt-5">
         <button type="button" onClick={onCancel} className="h-10 rounded-md border px-4 text-sm font-medium">{copy.common.cancel}</button>
-        <button type="submit" disabled={busy || !outcome.trim() || !audience.trim() || (!noWebsite && !website)} className="h-10 rounded-md bg-primary px-5 text-sm font-medium text-primary-foreground disabled:opacity-50">{busy ? t.generating : t.generate}</button>
+        <button type="submit" disabled={generationAvailable !== true || busy || !outcome.trim() || !audience.trim() || (!noWebsite && !website)} className="h-10 rounded-md bg-action px-5 text-sm font-medium text-action-foreground disabled:opacity-50">{busy ? t.generating : t.generate}</button>
       </div>
     </form>
   </div>;

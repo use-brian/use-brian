@@ -420,7 +420,7 @@ function HostedUpgradeSection() {
           href={HOSTED_UPGRADE_URL}
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex items-center rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+          className="inline-flex items-center rounded-md bg-action px-3 py-2 text-sm font-medium text-action-foreground hover:bg-action/90"
         >
           {t.chrome.settingsModal.upgrade.cta}
         </a>

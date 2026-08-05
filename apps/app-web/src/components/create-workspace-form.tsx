@@ -142,7 +142,7 @@ export function CreateWorkspaceForm({
           disabled={creating || !canSubmit}
           className={cn(
             "inline-flex items-center justify-center",
-            "rounded-md bg-primary text-primary-foreground hover:bg-primary/90",
+            "rounded-md bg-action text-action-foreground hover:bg-action/90",
             "px-3 py-1.5 text-xs font-medium transition-colors",
             "disabled:opacity-50 disabled:cursor-not-allowed",
           )}

@@ -5,6 +5,7 @@ import { officeArtifactRoutes } from '../office-artifacts.js'
 import { officeJobRoutes } from '../office-jobs.js'
 import { officeTemplateRoutes } from '../office-templates.js'
 import { internalOfficeCheckpointRoutes } from '../internal-office-checkpoint.js'
+import { OfficeGenerationUnavailableError } from '../../office/service.js'
 
 const USER = '20000000-0000-4000-8000-000000000001'
 const WORKSPACE = '20000000-0000-4000-8000-000000000002'
@@ -23,12 +24,18 @@ function app() {
     revise: vi.fn(async () => ({ jobId: JOB, mode: 'direct' as const })),
   }
   const job = { id: JOB, workspaceId: WORKSPACE, artifactId: ARTIFACT, initiatedByUserId: USER, assistantId: ASSISTANT, jobKind: 'create' as const, status: 'running' as const, stage: 'grounding', brief: {}, authorityProjection: {}, templateVersionId: null, baseArtifactVersion: 0, checkpoint: {}, checkpointVersion: 2, leaseToken: null, leaseExpiresAt: null, cancelRequestedAt: null, errorCode: null, createdAt: new Date(), updatedAt: new Date() }
-  const artifacts = { service, list: vi.fn(async () => [projection]), restoreVersion: vi.fn(async () => ({ id: 'v2', version: 2 })), getArtifact: vi.fn(async () => ({ id: ARTIFACT } as never)), listVersions: vi.fn(async () => []), canRestore: vi.fn(async () => true) }
+  const artifacts = { service, generationAvailable: vi.fn(() => true), list: vi.fn(async () => [projection]), restoreVersion: vi.fn(async () => ({ id: 'v2', version: 2 })), getArtifact: vi.fn(async () => ({ id: ARTIFACT } as never)), listVersions: vi.fn(async () => []), canRestore: vi.fn(async () => true) }
   const jobs = { get: vi.fn(async () => job), events: vi.fn(async () => [{ seq: 1, code: 'office.job.queued' } as never]), steer: vi.fn(async () => ({ id: 'steer-1' })), cancel: vi.fn(async () => true) }
   const templates = {
     list: vi.fn(async () => []),
+    getTemplate: vi.fn(async () => ({ id: 'template-1', workspaceId: WORKSPACE, family: 'document' as const, name: 'Pitch', lifecycleState: 'draft' as const, draftArtifactId: ARTIFACT })),
+    getArtifact: vi.fn(async () => ({ id: ARTIFACT, workspaceId: WORKSPACE, family: 'document', mode: 'template', title: 'Pitch', headVersion: 0, headVersionId: null, lifecycleState: 'active' } as never)),
+    getSnapshot: vi.fn(async () => null),
     createDraft: vi.fn(async () => ({ id: 'template-1' })),
     createTemplateShell: vi.fn(async () => ({ id: ARTIFACT })),
+    initializeDraft: vi.fn(async () => true),
+    deleteEmptyDraft: vi.fn(async () => true),
+    deleteEmptyShell: vi.fn(async () => true),
     createCompileJob: vi.fn(async () => ({ id: JOB })),
     transitionLifecycle: vi.fn(async () => ({ id: 'template-1', lifecycleState: 'deprecated' })),
   }
@@ -41,6 +48,7 @@ function app() {
 describe('[COMP:api/office-routes] Office API routes', () => {
   it('creates a shell/job and exposes permission-filtered artifact state', async () => {
     const test = app()
+    await request(test.server).get('/api/office/capabilities').expect(200, { generationAvailable: true })
     await request(test.server).post('/api/office/artifacts').send({ workspaceId: WORKSPACE, assistantId: ASSISTANT, family: 'document', outcome: 'Create a board report', audience: 'Board', sourceHandles: [], canonicalWebsite: 'https://example.com', companyHasNoWebsite: false, idempotencyKey: 'request-12345678' }).expect(202, { artifactId: ARTIFACT, jobId: JOB })
     const read = await request(test.server).get(`/api/office/artifacts/${ARTIFACT}`).expect(200)
     expect(read.body.artifact).toMatchObject({ artifactId: ARTIFACT, role: 'edit', job: { id: JOB, stage: 'queued' } })
@@ -54,6 +62,16 @@ describe('[COMP:api/office-routes] Office API routes', () => {
     expect(test.jobs.steer).toHaveBeenCalledWith({ userId: USER, workspaceId: WORKSPACE, jobId: JOB, instruction: 'Emphasize retention' })
     await request(test.server).post(`/api/office/jobs/${JOB}/cancel`).send({}).expect(202)
     await request(test.server).post('/api/office/templates').send({ workspaceId: WORKSPACE, family: 'presentation', name: 'Pitch', description: 'Company pitch', sensitivity: 'internal' }).expect(201)
+    expect(test.templates.createDraft).toHaveBeenCalledWith(expect.objectContaining({ draftArtifactId: ARTIFACT }))
+    expect(test.templates.initializeDraft).toHaveBeenCalledWith(expect.objectContaining({ artifactId: ARTIFACT, snapshot: expect.objectContaining({ artifactId: ARTIFACT, family: 'presentation', templateVersionId: null }) }))
+  })
+
+  it('idempotently initializes a linked legacy template draft', async () => {
+    const test = app()
+    const live = { snapshot: { family: 'document' }, seq: 1, baseVersion: 0 }
+    test.templates.getSnapshot.mockResolvedValueOnce(null).mockResolvedValueOnce(live as never)
+    await request(test.server).post('/api/office/templates/template-1/draft/initialize').send({ workspaceId: WORKSPACE, draftArtifactId: ARTIFACT }).expect(201, live)
+    expect(test.templates.initializeDraft).toHaveBeenCalledOnce()
   })
 
   it('rejects invalid boundaries before touching stores', async () => {
@@ -61,6 +79,12 @@ describe('[COMP:api/office-routes] Office API routes', () => {
     await request(test.server).post('/api/office/artifacts').send({ workspaceId: 'bad' }).expect(400)
     await request(test.server).post(`/api/office/jobs/${JOB}/steering`).send({ instruction: '' }).expect(400)
     expect(test.artifacts.service.create).not.toHaveBeenCalled()
+  })
+
+  it('returns a typed retryable error when no generation runner is configured', async () => {
+    const test = app()
+    test.artifacts.service.create.mockRejectedValueOnce(new OfficeGenerationUnavailableError())
+    await request(test.server).post('/api/office/artifacts').send({ workspaceId: WORKSPACE, assistantId: ASSISTANT, family: 'presentation', outcome: 'Company introduction', audience: 'Public', sourceHandles: [], canonicalWebsite: 'https://example.com', companyHasNoWebsite: false, idempotencyKey: 'request-12345678' }).expect(503, { error: 'office_generation_unavailable' })
   })
 })
 

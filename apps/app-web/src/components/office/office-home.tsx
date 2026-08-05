@@ -7,7 +7,7 @@ import { useSearchParams } from "next/navigation";
 import { ArrowRight, FileText, Presentation, Plus, Shapes } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
-import { listOfficeArtifacts, type OfficeArtifact, type OfficeFamily } from "@/lib/office/api";
+import { isOfficeStartFailed, listOfficeArtifacts, type OfficeArtifact, type OfficeFamily } from "@/lib/office/api";
 import { OfficeImport } from "./office-import";
 import { OfficeCardPreview } from "./office-card-preview";
 import { OfficeTopbar } from "./office-topbar";
@@ -58,7 +58,7 @@ export function OfficeHome({ workspaceId, initialArtifacts }: { workspaceId: str
             <Link aria-label={t.templates} title={t.templates} className="inline-flex size-8 items-center justify-center gap-2 rounded-md border text-sm font-medium sm:w-auto sm:px-2.5" href={`${base}/templates`}>
               <Shapes className="size-4" aria-hidden /><span className="hidden sm:inline">{t.templates}</span>
             </Link>
-            <Link aria-label={t.create} title={t.create} className="inline-flex size-8 items-center justify-center gap-2 rounded-md bg-primary text-sm font-medium text-primary-foreground sm:w-auto sm:px-2.5" href={`${base}/new`}>
+            <Link aria-label={t.create} title={t.create} className="inline-flex size-8 items-center justify-center gap-2 rounded-md bg-action text-sm font-medium text-action-foreground shadow-sm transition-colors hover:bg-action/85 sm:w-auto sm:px-2.5" href={`${base}/new`}>
               <Plus className="size-4" aria-hidden /><span className="hidden sm:inline">{t.create}</span>
             </Link>
           </div>
@@ -111,7 +111,7 @@ export function OfficeHome({ workspaceId, initialArtifacts }: { workspaceId: str
                     <div className="mt-2 flex justify-end text-xs text-muted-foreground">
                       <span>{format(t.version, { version: artifact.version })}</span>
                     </div>
-                    {artifact.job ? <p className="mt-3 text-xs font-medium">{t[artifact.job.status as keyof Pick<typeof t, "queued" | "running" | "completed" | "failed" | "cancelled">] ?? artifact.job.stage}</p> : null}
+                    {isOfficeStartFailed(artifact) ? <p className="mt-3 text-xs font-medium text-destructive">{t.startFailed}</p> : artifact.job ? <p className="mt-3 text-xs font-medium">{t[artifact.job.status as keyof Pick<typeof t, "queued" | "running" | "completed" | "failed" | "cancelled">] ?? artifact.job.stage}</p> : null}
                   </div>
                 </Link>
               );

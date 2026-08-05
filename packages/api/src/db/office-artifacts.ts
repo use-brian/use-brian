@@ -33,7 +33,7 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
         SELECT id, workspace_id AS "workspaceId", family, mode, title,
                creator_user_id AS "creatorUserId", owner_user_id AS "ownerUserId",
                template_version_id AS "templateVersionId",
-               head_version_id AS "headVersionId", head_version AS "headVersion",
+               head_version_id AS "headVersionId", head_version::int AS "headVersion",
                capability_version AS "capabilityVersion", sensitivity,
                lifecycle_state AS "lifecycleState", updated_at AS "updatedAt"
           FROM office_artifacts
@@ -65,7 +65,7 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
         RETURNING id, workspace_id AS "workspaceId", family, mode, title,
                   creator_user_id AS "creatorUserId", owner_user_id AS "ownerUserId",
                   template_version_id AS "templateVersionId",
-                  head_version_id AS "headVersionId", head_version AS "headVersion",
+                  head_version_id AS "headVersionId", head_version::int AS "headVersion",
                   capability_version AS "capabilityVersion", sensitivity,
                   lifecycle_state AS "lifecycleState", updated_at AS "updatedAt"
       `, [params.workspaceId, params.family, params.title, params.userId, params.templateVersionId, params.capabilityVersion, params.sensitivity, params.visibilityUserIds ?? [], params.requiredCompartments ?? [], params.mode ?? 'artifact'])
@@ -74,12 +74,26 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
       return row
     },
 
+    async deleteEmptyShell(userId: string, artifactId: string): Promise<boolean> {
+      const result = await db<{ id: string }>(userId, `
+        DELETE FROM office_artifacts a
+         WHERE a.id = $1
+           AND a.head_version = 0
+           AND a.head_version_id IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM office_generation_jobs j WHERE j.artifact_id = a.id
+           )
+        RETURNING a.id
+      `, [artifactId])
+      return result.rows.length === 1
+    },
+
     async get(userId: string, artifactId: string): Promise<OfficeArtifactRow | null> {
       const result = await db<OfficeArtifactRow>(userId, `
         SELECT id, workspace_id AS "workspaceId", family, mode, title,
                creator_user_id AS "creatorUserId", owner_user_id AS "ownerUserId",
                template_version_id AS "templateVersionId",
-               head_version_id AS "headVersionId", head_version AS "headVersion",
+               head_version_id AS "headVersionId", head_version::int AS "headVersion",
                capability_version AS "capabilityVersion", sensitivity,
                lifecycle_state AS "lifecycleState", updated_at AS "updatedAt"
           FROM office_artifacts WHERE id = $1

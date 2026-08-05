@@ -17,7 +17,8 @@
  * brain-inbox wire (`adjustBrainRow` / `deleteBrainRow`, supersession-aware:
  * every edit mints a new row id) — a client loop for small selections
  * (per-row retry UX), the server bulk lane (`bulkTasks`) past
- * `SERVER_BULK_THRESHOLD`. Destructive bulk goes through `confirmDialog`.
+ * `SERVER_BULK_THRESHOLD`. Destructive bulk collects a required reason so
+ * every rejected task teaches the workspace independently.
  *
  * Spec: docs/architecture/features/tasks.md → "Operator surface".
  * [COMP:app-web/tasks-surface]
@@ -41,7 +42,7 @@ import { TaskSuggestions } from "@/components/tasks/task-suggestions";
 import { TaskRulesPanel } from "@/components/tasks/task-rules-panel";
 import { format } from "@/lib/i18n/format";
 import { Checkbox } from "@/components/ui/checkbox";
-import { confirmDialog } from "@/components/ui/confirm-dialog";
+import { promptDialog } from "@/components/ui/prompt-dialog";
 import {
   adjustBrainRow,
   deleteBrainRow,
@@ -50,6 +51,7 @@ import {
 import {
   bulkTasks,
   fetchWorkspaceTasks,
+  taskIcon,
   taskPriority,
   type BulkTaskSet,
   type TaskPriority,
@@ -316,7 +318,7 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
             /** Uniform change for the server lane, or null = client-loop only. */
             serverSet: BulkTaskSet | null;
           }
-        | { kind: "delete" },
+        | { kind: "delete"; reason: string },
     ) => {
       const ids = selectedVisible;
       if (ids.length === 0 || bulkBusy) return;
@@ -339,7 +341,12 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
             const batchIds = ids.slice(offset, offset + SERVER_BULK_BATCH_SIZE);
             const body =
               apply.kind === "delete"
-                ? ({ action: "delete", ids: batchIds } as const)
+                ? ({
+                    action: "delete",
+                    ids: batchIds,
+                    reason: apply.reason,
+                    create_rule: true,
+                  } as const)
                 : ({
                     action: "update",
                     ids: batchIds,
@@ -375,7 +382,10 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
           const row = (rows ?? []).find((r) => r.id === id);
           if (!row) continue;
           if (apply.kind === "delete") {
-            const result = await deleteBrainRow(workspaceId, "task", id);
+            const result = await deleteBrainRow(workspaceId, "task", id, {
+              reason: apply.reason,
+              createRule: true,
+            });
             if (result.ok) {
               setRows((prev) => prev.filter((r) => r.id !== id));
               setSelected((prev) => {
@@ -418,14 +428,20 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
   const bulkDelete = useCallback(async () => {
     const count = selectedVisible.length;
     if (count === 0) return;
-    const ok = await confirmDialog({
+    const answer = await promptDialog({
       title: t.bulkDeleteTitle,
       description: format(t.bulkDeleteConfirm, { count: String(count) }),
-      confirmLabel: t.bulkDelete,
+      placeholder: t.deleteReasonPlaceholder,
+      confirmLabel: t.bulkDeleteAndAddRules,
       cancelLabel: t.cancel,
-      variant: "destructive",
     });
-    if (ok) void runBulk({ kind: "delete" });
+    if (answer === null) return;
+    const reason = answer.trim();
+    if (reason.length < 3) {
+      setBulkError(t.deleteReasonTooShort);
+      return;
+    }
+    void runBulk({ kind: "delete", reason });
   }, [selectedVisible, runBulk, t]);
 
   // ── Render ────────────────────────────────────────────────────────────
@@ -963,6 +979,23 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
             roster={roster}
             projects={projects}
             commitField={commitField}
+            onDelete={async (reason) => {
+              const result = await deleteBrainRow(
+                workspaceId,
+                "task",
+                openTask.id,
+                { reason, createRule: true },
+              );
+              if (!result.ok) return result;
+              setRows((prev) => prev.filter((row) => row.id !== openTask.id));
+              setSelected((prev) => {
+                const next = new Set(prev);
+                next.delete(openTask.id);
+                return next;
+              });
+              requestBrainRefresh(workspaceId);
+              return { ok: true };
+            }}
             onClose={() => setOpenTaskId(null)}
           />
         )}
@@ -1000,6 +1033,7 @@ function TaskTableRow({
   ) => Promise<{ ok: boolean; error?: string }>;
 }) {
   const t = useT().tasksPage;
+  const icon = taskIcon(row);
   return (
     <div
       className={cn(
@@ -1020,9 +1054,14 @@ function TaskTableRow({
         type="button"
         onClick={() => onOpen(row)}
         title={t.openRecord}
-        className="truncate py-1 text-left text-[13.5px] font-medium text-foreground hover:underline"
+        className="flex min-w-0 items-center gap-1.5 py-1 text-left text-[13.5px] font-medium text-foreground hover:underline"
       >
-        {row.title}
+        {icon && (
+          <span className="shrink-0 text-[15px] leading-none" aria-hidden>
+            {icon}
+          </span>
+        )}
+        <span className="truncate">{row.title}</span>
       </button>
       <StatusCell
         value={row.status}

@@ -382,7 +382,7 @@ export function DockRecorderRecovery({ rec, className }: { rec: DockRecorderApi;
               setBusy(s.id);
               void rec.saveRecovery(s.id).finally(() => setBusy(null));
             }}
-            className="shrink-0 rounded-md bg-primary px-2 py-1 font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+            className="shrink-0 rounded-md bg-action px-2 py-1 font-medium text-action-foreground transition-colors hover:bg-action/90 disabled:opacity-50"
           >
             {busy === s.id ? t.recoverySaving : t.recoverySave}
           </button>

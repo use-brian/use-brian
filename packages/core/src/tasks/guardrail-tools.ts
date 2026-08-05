@@ -132,10 +132,20 @@ const predicateShape = z.object({
     .optional()
     .describe('Channel ids the rule is scoped to (e.g. a Slack channel id). Omit for all channels.'),
   require: z
-    .array(z.enum(['assignee', 'due']))
-    .max(2)
+    .array(
+      z.enum([
+        'assignee',
+        'due',
+        'description',
+        'resolved_target',
+        'explicit_commitment',
+        'completion_signal',
+        'agent_ready',
+      ]),
+    )
+    .max(7)
     .optional()
-    .describe('For effect "require" only: fields a task must have. Anything missing them is held for review instead of created.'),
+    .describe('For effect "require" only: operational or readiness facts a task must have. Anything missing them is held for review instead of created. The core automatic-ingestion agent-readiness floor cannot be relaxed.'),
 })
 
 export function createTaskGuardrailTools(

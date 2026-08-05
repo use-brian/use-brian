@@ -7,7 +7,7 @@
  * Mirrors `brain-topbar.tsx`'s left-cluster grammar on the page surface
  * (background tokens, not the sidebar palette):
  *
- *   [ ☰ ] [ ‹ ] [ › ]  Studio / {section}
+ *   [ ☰ ] [ ‹ ] [ › ]  Studio / {section}                    {actions}
  *    │      │     │      └─ breadcrumb: "Studio" navigates to the studio
  *    │      │     │         root (→ Connectors); the section segment is the
  *    │      │     │         active section's label from `STUDIO_GROUPS`.
@@ -22,6 +22,8 @@
  * [COMP:app-web/studio-topbar]
  */
 
+import { useEffect, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import Link from "next/link";
 import { useRouter, usePathname } from "next/navigation";
 import {
@@ -41,6 +43,23 @@ const iconBtnCls =
 
 const crumbBtnCls =
   "shrink-0 rounded px-1 py-0.5 text-[13px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground";
+
+export const STUDIO_TOPBAR_ACTIONS_ID = "studio-topbar-actions";
+
+/**
+ * Mount a route page's stateful primary action in the persistent Studio chrome.
+ * The page remains the action's React owner, so opening an inline form does not
+ * require lifting section-specific state into `studio/layout.tsx`.
+ */
+export function StudioTopbarActions({ children }: { children: ReactNode }) {
+  const [target, setTarget] = useState<HTMLElement | null>(null);
+
+  useEffect(() => {
+    setTarget(document.getElementById(STUDIO_TOPBAR_ACTIONS_ID));
+  }, []);
+
+  return target ? createPortal(children, target) : null;
+}
 
 export function StudioTopbar({ workspaceId }: { workspaceId: string }) {
   const t = useT();
@@ -96,7 +115,7 @@ export function StudioTopbar({ workspaceId }: { workspaceId: string }) {
         onClick={() => router.back()}
         aria-label={docCopy.topbarBackAria}
         title={docCopy.topbarBackAria}
-        className={iconBtnCls}
+        className={cn(iconBtnCls, "max-sm:hidden")}
       >
         <ChevronLeft className="size-4" aria-hidden />
       </button>
@@ -105,7 +124,7 @@ export function StudioTopbar({ workspaceId }: { workspaceId: string }) {
         onClick={() => router.forward()}
         aria-label={docCopy.topbarForwardAria}
         title={docCopy.topbarForwardAria}
-        className={cn(iconBtnCls, "mr-1")}
+        className={cn(iconBtnCls, "mr-1 max-sm:hidden")}
       >
         <ChevronRight className="size-4" aria-hidden />
       </button>
@@ -113,7 +132,7 @@ export function StudioTopbar({ workspaceId }: { workspaceId: string }) {
       {/* Breadcrumb — Studio / {section}. */}
       <nav
         aria-label={t.studioPage.title}
-        className="flex min-w-0 shrink-0 items-center gap-0.5"
+        className="flex min-w-0 items-center gap-0.5 overflow-hidden"
       >
         <Link href={`/w/${workspaceId}/studio`} className={crumbBtnCls}>
           {t.studioPage.title}
@@ -123,12 +142,18 @@ export function StudioTopbar({ workspaceId }: { workspaceId: string }) {
             <span aria-hidden className="text-muted-foreground/40">
               /
             </span>
-            <span className="shrink-0 px-1 py-0.5 text-[13px] font-medium text-foreground">
+            <span className="truncate px-1 py-0.5 text-[13px] font-medium text-foreground">
               {sectionLabel}
             </span>
           </>
         )}
       </nav>
+
+      <div className="min-w-2 flex-1" aria-hidden />
+      <div
+        id={STUDIO_TOPBAR_ACTIONS_ID}
+        className="flex shrink-0 items-center gap-2 pl-2"
+      />
     </div>
   );
 }
