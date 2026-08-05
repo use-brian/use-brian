@@ -151,6 +151,9 @@ importers:
       '@use-brian/office-model':
         specifier: workspace:*
         version: link:../../packages/office-model
+      '@use-brian/office-renderer':
+        specifier: workspace:*
+        version: link:../../packages/office-renderer
       '@use-brian/shared':
         specifier: workspace:*
         version: link:../../packages/shared

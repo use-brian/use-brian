@@ -36,6 +36,7 @@
     "@use-brian/chat-ui": "workspace:*",
     "@use-brian/doc-model": "workspace:*",
     "@use-brian/office-model": "workspace:*",
+    "@use-brian/office-renderer": "workspace:*",
     "@use-brian/shared": "workspace:*",
     "@use-brian/views-renderer": "workspace:*",
     "class-variance-authority": "^0.7.1",

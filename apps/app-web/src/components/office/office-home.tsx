@@ -10,6 +10,7 @@ import { format } from "@/lib/i18n/format";
 import { cn } from "@/lib/utils";
 import { listOfficeArtifacts, type OfficeArtifact, type OfficeFamily } from "@/lib/office/api";
 import { OfficeImport } from "./office-import";
+import { OfficeCardPreview } from "./office-card-preview";
 import { OfficeTopbar } from "./office-topbar";
 
 type View = "active" | "archived" | "trash" | "retained";
@@ -100,14 +101,19 @@ export function OfficeHome({ workspaceId, initialArtifacts }: { workspaceId: str
             {visible.map((artifact) => {
               const Icon = artifact.family === "document" ? FileText : Presentation;
               return (
-                <Link key={artifact.artifactId} href={`/w/${workspaceId}/office/${artifact.artifactId}`} className="group rounded-xl border bg-card p-4 transition-colors hover:border-foreground/30">
-                  <Icon className="size-5 text-muted-foreground" aria-hidden />
-                  <h2 className="mt-8 line-clamp-2 font-medium group-hover:underline">{artifact.title}</h2>
-                  <div className="mt-2 flex justify-between text-xs text-muted-foreground">
-                    <span>{artifact.family === "document" ? t.document : t.presentation}</span>
-                    <span>{format(t.version, { version: artifact.version })}</span>
+                <Link key={artifact.artifactId} href={`/w/${workspaceId}/office/${artifact.artifactId}`} className="group overflow-hidden rounded-xl border bg-card transition-colors hover:border-foreground/30">
+                  <OfficeCardPreview artifact={artifact} />
+                  <div className="p-4">
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <Icon className="size-4" aria-hidden />
+                      <span>{artifact.family === "document" ? t.document : t.presentation}</span>
+                    </div>
+                    <h2 className="mt-3 line-clamp-2 font-medium group-hover:underline">{artifact.title}</h2>
+                    <div className="mt-2 flex justify-end text-xs text-muted-foreground">
+                      <span>{format(t.version, { version: artifact.version })}</span>
+                    </div>
+                    {artifact.job ? <p className="mt-3 text-xs font-medium">{t[artifact.job.status as keyof Pick<typeof t, "queued" | "running" | "completed" | "failed" | "cancelled">] ?? artifact.job.stage}</p> : null}
                   </div>
-                  {artifact.job ? <p className="mt-3 text-xs font-medium">{t[artifact.job.status as keyof Pick<typeof t, "queued" | "running" | "completed" | "failed" | "cancelled">] ?? artifact.job.stage}</p> : null}
                 </Link>
               );
             })}
