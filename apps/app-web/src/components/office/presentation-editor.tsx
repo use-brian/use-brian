@@ -19,6 +19,10 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
   const emit = (command: OfficeCommand) => { if (canChange) onCommand(command); };
 
   useEffect(() => {
+    if (!objectId) onSelectTargets?.([slide.id]);
+  }, [objectId, onSelectTargets, slide.id]);
+
+  useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if ((event.key === "Delete" || event.key === "Backspace") && selected && canChange && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLTextAreaElement)) emit(deleteCommand(snapshot.artifactId, baseVersion, selected.id));
     };
@@ -41,7 +45,7 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
   }
 
   return (
-    <div className="grid min-h-0 flex-1 grid-cols-[6.5rem_minmax(0,1fr)] lg:grid-cols-[10rem_minmax(0,1fr)_15rem]" data-office-editor="presentation">
+    <div className={cn("grid min-h-0 flex-1 grid-cols-[6.5rem_minmax(0,1fr)]", selected ? "lg:grid-cols-[10rem_minmax(0,1fr)_13rem]" : "lg:grid-cols-[10rem_minmax(0,1fr)]")} data-office-editor="presentation" data-properties-open={selected ? "true" : "false"}>
       <nav className="overflow-y-auto border-r bg-muted/30 p-2" aria-label={t.slideRail}>
         {snapshot.slides.map((item, index) => <button key={item.id} type="button" onClick={() => { setSlideId(item.id); setObjectId(null); onSelectTargets?.([item.id]); }} className={cn("mb-2 block w-full rounded border bg-white p-1 text-left text-slate-900", item.id === slide.id && "ring-2 ring-primary")}><span className="text-[10px] text-slate-500">{index + 1}</span><span className="line-clamp-2 block text-xs">{item.title}</span></button>)}
         <button type="button" onClick={addSlide} disabled={!canChange} className="flex w-full items-center justify-center gap-1 rounded border border-dashed p-2 text-xs disabled:opacity-40"><Plus className="size-3" />{t.newSlide}</button>
@@ -61,10 +65,10 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
         </div>
         <label className="border-t bg-background p-3 text-xs font-medium">{t.speakerNotes}<textarea disabled={!canChange} value={slide.notes.map((run) => run.text).join("")} onChange={(event) => emit(propertyCommand(snapshot.artifactId, baseVersion, slide.id, ["notes"], runsWithText(slide.notes, event.target.value)))} className="mt-1 min-h-16 w-full resize-y rounded border p-2 font-normal" /></label>
       </div>
-      <aside className="hidden overflow-y-auto border-l bg-background p-3 lg:block">
+      {selected ? <aside className="hidden overflow-y-auto border-l bg-background p-3 lg:block">
         <h2 className="text-sm font-semibold">{t.properties}</h2>
-        {selected ? <GeometryInspector object={selected} disabled={!canChange} onProperty={(path, value) => emit(propertyCommand(snapshot.artifactId, baseVersion, selected.id, path, value))} onDelete={() => emit(deleteCommand(snapshot.artifactId, baseVersion, selected.id))} /> : <p className="mt-3 text-xs text-muted-foreground">{t.selectObject}</p>}
-      </aside>
+        <GeometryInspector object={selected} disabled={!canChange} onProperty={(path, value) => emit(propertyCommand(snapshot.artifactId, baseVersion, selected.id, path, value))} onDelete={() => emit(deleteCommand(snapshot.artifactId, baseVersion, selected.id))} />
+      </aside> : null}
     </div>
   );
 }
