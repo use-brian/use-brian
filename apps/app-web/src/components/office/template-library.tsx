@@ -1,12 +1,14 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Dialog } from "@base-ui/react/dialog";
-import { FileText, Presentation, Sparkles, Upload, X } from "lucide-react";
+import { FileText, FileUp, Presentation, Sparkles, Upload, X } from "lucide-react";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { useT } from "@/lib/i18n/client";
+import { cn } from "@/lib/utils";
+import { useFileDrop } from "@/lib/use-file-drop";
 import { createOfficeTemplate, getOfficeJob, importOfficeTemplateDraft, listOfficeTemplates, transitionOfficeTemplateLifecycle, uploadOfficeSource, type OfficeArtifact, type OfficeFamily, type OfficeTemplate } from "@/lib/office/api";
 import { OfficeCardPreview } from "./office-card-preview";
 import { OfficeTopbar } from "./office-topbar";
@@ -21,6 +23,13 @@ export function readOfficeStarterTemplate(searchParams: Pick<URLSearchParams, "g
 
 export function officeTemplateNameFromFile(fileName: string): string {
   return fileName.replace(/\.(docx|pptx)$/i, "").trim() || fileName;
+}
+
+export function officeTemplateFamilyFromFileName(fileName: string): OfficeFamily | null {
+  const normalized = fileName.trim().toLowerCase();
+  if (normalized.endsWith(".docx")) return "document";
+  if (normalized.endsWith(".pptx")) return "presentation";
+  return null;
 }
 
 async function waitForTemplateImport(jobId: string): Promise<void> {
@@ -50,9 +59,25 @@ export function OfficeTemplateLibrary({ workspaceId, templateId }: { workspaceId
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadName, setUploadName] = useState("");
   const [uploadGuidance, setUploadGuidance] = useState("");
-  const [uploadState, setUploadState] = useState<"idle" | "working" | "failed">("idle");
+  const [uploadState, setUploadState] = useState<"idle" | "working" | "invalid" | "failed">("idle");
   const [purgeConfirmation, setPurgeConfirmation] = useState("");
+  const uploadInputRef = useRef<HTMLInputElement>(null);
   const templatesHref = `/w/${workspaceId}/office/templates`;
+
+  const selectUploadFiles = useCallback((fileList: FileList | File[]) => {
+    const file = Array.from(fileList)[0] ?? null;
+    if (!file) return;
+    if (!officeTemplateFamilyFromFileName(file.name)) {
+      setUploadFile(null);
+      setUploadName("");
+      setUploadState("invalid");
+      return;
+    }
+    setUploadFile(file);
+    setUploadName(officeTemplateNameFromFile(file.name));
+    setUploadState("idle");
+  }, []);
+  const uploadDrop = useFileDrop(selectUploadFiles, { disabled: uploadState === "working" });
 
   useEffect(() => { void listOfficeTemplates(workspaceId).then(setTemplates).catch(() => setTemplates([])); }, [workspaceId]);
   useEffect(() => {
@@ -111,6 +136,7 @@ export function OfficeTemplateLibrary({ workspaceId, templateId }: { workspaceId
     setUploadName("");
     setUploadGuidance("");
     setUploadState("idle");
+    if (uploadInputRef.current) uploadInputRef.current.value = "";
     setUploadOpen(true);
   }
 
@@ -194,16 +220,64 @@ export function OfficeTemplateLibrary({ workspaceId, templateId }: { workspaceId
       <Dialog.Root open={uploadOpen} onOpenChange={(open) => { if (open) setUploadOpen(true); else closeTemplateUpload(); }}>
         <Dialog.Portal>
           <Dialog.Backdrop className="fixed inset-0 z-[80] bg-foreground/35 backdrop-blur-[1px]" />
-          <Dialog.Popup className="fixed inset-x-4 top-1/2 z-[81] mx-auto w-auto max-w-lg -translate-y-1/2 rounded-2xl border bg-background p-6 shadow-2xl outline-none">
+          <Dialog.Popup className="fixed inset-x-4 top-1/2 z-[81] mx-auto w-auto max-w-xl -translate-y-1/2 rounded-2xl border bg-background p-6 shadow-2xl outline-none">
             <div className="flex items-start justify-between gap-4">
               <div><Dialog.Title className="text-lg font-semibold">{t.uploadTemplateTitle}</Dialog.Title><Dialog.Description className="mt-1 text-sm text-muted-foreground">{t.uploadTemplateDescription}</Dialog.Description></div>
               <button type="button" disabled={uploadState === "working"} aria-label={t.closeTemplateAria} title={t.closeTemplateAria} onClick={closeTemplateUpload} className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"><X className="size-4" aria-hidden /></button>
             </div>
             <form className="mt-5 grid gap-3" onSubmit={(event) => void submitTemplateUpload(event)}>
-              <input type="file" accept=".docx,.pptx,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.presentationml.presentation" disabled={uploadState === "working"} onChange={(event) => { const file = event.target.files?.[0] ?? null; setUploadFile(file); if (file) setUploadName(officeTemplateNameFromFile(file.name)); setUploadState("idle"); }} className="block w-full rounded border text-sm file:mr-3 file:border-0 file:border-r file:bg-muted file:px-3 file:py-2 file:text-sm file:font-medium" />
-              {uploadFile ? <p className="text-xs text-muted-foreground">{uploadFile.name.toLowerCase().endsWith(".pptx") ? t.presentation : t.document}</p> : <p className="text-xs text-muted-foreground">{t.chooseTemplateFile}</p>}
-              <input required disabled={uploadState === "working"} value={uploadName} onChange={(event) => setUploadName(event.target.value)} placeholder={t.templateName} className="h-9 rounded border px-2 disabled:opacity-60" />
-              <textarea required disabled={uploadState === "working"} value={uploadGuidance} onChange={(event) => setUploadGuidance(event.target.value)} placeholder={t.templateInstructions} className="min-h-24 rounded border p-2 disabled:opacity-60" />
+              <button
+                {...uploadDrop.dropProps}
+                type="button"
+                disabled={uploadState === "working"}
+                onClick={() => uploadInputRef.current?.click()}
+                aria-label={uploadFile ? t.uploadReplaceHint : t.chooseTemplateFile}
+                data-office-template-dropzone={uploadDrop.isDragging ? "active" : uploadFile ? "selected" : "empty"}
+                className={cn(
+                  "group relative flex min-h-44 w-full flex-col items-center justify-center rounded-2xl border border-dashed px-6 py-7 text-center outline-none transition-all focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60",
+                  uploadDrop.isDragging
+                    ? "scale-[1.01] border-primary bg-primary/[0.06] shadow-sm"
+                    : uploadFile
+                      ? "border-foreground/20 bg-muted/35 hover:border-foreground/35 hover:bg-muted/55"
+                      : "border-border bg-muted/20 hover:border-foreground/30 hover:bg-muted/40",
+                )}
+              >
+                {uploadDrop.isDragging ? (
+                  <>
+                    <span className="grid size-12 place-items-center rounded-2xl bg-primary/10 text-primary"><FileUp className="size-6" aria-hidden /></span>
+                    <span className="mt-4 text-sm font-semibold text-primary">{t.uploadDropActive}</span>
+                  </>
+                ) : uploadFile ? (
+                  <>
+                    <span className={uploadFile.name.toLowerCase().endsWith(".pptx") ? "grid size-12 place-items-center rounded-2xl bg-amber-500/15 text-amber-700" : "grid size-12 place-items-center rounded-2xl bg-blue-500/15 text-blue-700"}>
+                      {uploadFile.name.toLowerCase().endsWith(".pptx") ? <Presentation className="size-6" aria-hidden /> : <FileText className="size-6" aria-hidden />}
+                    </span>
+                    <span className="mt-4 max-w-full truncate text-sm font-semibold text-foreground">{uploadFile.name}</span>
+                    <span className="mt-1 text-xs text-muted-foreground">{uploadFile.name.toLowerCase().endsWith(".pptx") ? t.presentation : t.document}</span>
+                    <span className="mt-3 text-xs font-medium text-primary group-hover:underline">{t.uploadReplaceHint}</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="grid size-12 place-items-center rounded-2xl bg-foreground/[0.06] text-foreground"><FileUp className="size-6" aria-hidden /></span>
+                    <span className="mt-4 text-sm font-semibold text-foreground">{t.uploadDropTitle}</span>
+                    <span className="mt-1 text-sm text-muted-foreground">{t.uploadDropBody}</span>
+                    <span className="mt-3 rounded-full border bg-background px-2.5 py-1 text-[11px] font-medium text-muted-foreground">{t.uploadDropFormats}</span>
+                  </>
+                )}
+              </button>
+              <input
+                ref={uploadInputRef}
+                type="file"
+                accept=".docx,.pptx,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                disabled={uploadState === "working"}
+                onChange={(event) => { if (event.target.files) selectUploadFiles(event.target.files); event.target.value = ""; }}
+                className="sr-only"
+                tabIndex={-1}
+                aria-hidden
+              />
+              {uploadState === "invalid" ? <p role="alert" className="text-sm text-destructive">{t.uploadInvalidFile}</p> : null}
+              <input required disabled={uploadState === "working"} value={uploadName} onChange={(event) => setUploadName(event.target.value)} placeholder={t.templateName} className="h-10 rounded-xl border bg-background px-3 text-sm outline-none transition-shadow focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60" />
+              <textarea required disabled={uploadState === "working"} value={uploadGuidance} onChange={(event) => setUploadGuidance(event.target.value)} placeholder={t.templateInstructions} className="min-h-24 rounded-xl border bg-background p-3 text-sm outline-none transition-shadow focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60" />
               {uploadState === "failed" ? <p role="alert" className="text-sm text-destructive">{t.importTemplateFailed}</p> : null}
               <div className="mt-2 flex justify-end gap-2 border-t pt-4"><button type="button" disabled={uploadState === "working"} onClick={closeTemplateUpload} className="h-9 rounded border px-3 text-sm font-medium disabled:opacity-50">{copy.common.cancel}</button><button type="submit" disabled={!uploadFile || uploadState === "working" || !uploadName.trim() || !uploadGuidance.trim()} className="h-9 rounded bg-action px-3 text-sm font-medium text-action-foreground disabled:opacity-50">{uploadState === "working" ? t.importTemplateWorking : t.uploadTemplateAction}</button></div>
             </form>

@@ -15,7 +15,7 @@ vi.mock("next/link", () => ({
 }));
 
 import { OfficeTopbar } from "../office-topbar";
-import { OfficeTemplateCard, OfficeTemplateLibrary, officeTemplateNameFromFile, readOfficeStarterTemplate } from "../template-library";
+import { OfficeTemplateCard, OfficeTemplateLibrary, officeTemplateFamilyFromFileName, officeTemplateNameFromFile, readOfficeStarterTemplate } from "../template-library";
 
 function wrap(node: React.ReactNode) {
   return renderToStaticMarkup(<I18nProvider locale="en" dict={en}>{node}</I18nProvider>);
@@ -41,6 +41,9 @@ describe("[COMP:app-web/office-navigation] Office route chrome", () => {
   it("offers exactly Upload and guided Generate as template creation paths", () => {
     expect(officeTemplateNameFromFile("Company overview.pptx")).toBe("Company overview");
     expect(officeTemplateNameFromFile("Letterhead.DOCX")).toBe("Letterhead");
+    expect(officeTemplateFamilyFromFileName("Company overview.pptx")).toBe("presentation");
+    expect(officeTemplateFamilyFromFileName("Letterhead.DOCX")).toBe("document");
+    expect(officeTemplateFamilyFromFileName("notes.pdf")).toBeNull();
     const html = wrap(<OfficeTemplateLibrary workspaceId="workspace-1" />);
     expect(html).toContain("Upload template");
     expect(html).toContain("Generate template");
