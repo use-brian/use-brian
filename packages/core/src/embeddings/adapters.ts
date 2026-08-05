@@ -39,6 +39,7 @@ export const VERTEX_EMBEDDING_MODEL_ID = GEMINI_EMBEDDING_MODEL_ID
 /** DashScope's multilingual embedding model; v3 supports an explicit `dimensions`. */
 const DASHSCOPE_EMBEDDING_MODEL = 'text-embedding-v3'
 export const DASHSCOPE_EMBEDDING_MODEL_ID = 'dashscope:text-embedding-v3'
+const DASHSCOPE_EMBEDDING_BATCH_MAX = 10
 
 const COST_PER_M_TOKENS_USD = 0.025
 
@@ -163,46 +164,53 @@ export function createDashScopeEmbedder(
     async embed(texts: string[]): Promise<number[][]> {
       if (texts.length === 0) return []
 
-      const response = await fetch(`${baseUrl}/embeddings`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model: DASHSCOPE_EMBEDDING_MODEL,
-          input: texts,
-          // Explicit, never defaulted — see the dimensions invariant above.
-          dimensions: GEMINI_EMBEDDING_DIMENSIONS,
-          encoding_format: 'float',
-        }),
-        signal: opts.signal,
-      })
+      const vectors: number[][] = []
+      for (let offset = 0; offset < texts.length; offset += DASHSCOPE_EMBEDDING_BATCH_MAX) {
+        const chunk = texts.slice(offset, offset + DASHSCOPE_EMBEDDING_BATCH_MAX)
+        const response = await fetch(`${baseUrl}/embeddings`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify({
+            model: DASHSCOPE_EMBEDDING_MODEL,
+            input: chunk,
+            // Explicit, never defaulted — see the dimensions invariant above.
+            dimensions: GEMINI_EMBEDDING_DIMENSIONS,
+            encoding_format: 'float',
+          }),
+          signal: opts.signal,
+        })
 
-      if (!response.ok) {
-        const errBody = await response.text()
-        throw new Error(`DashScope embedding API error ${response.status}: ${errBody}`)
-      }
+        if (!response.ok) {
+          const errBody = await response.text()
+          throw new Error(`DashScope embedding API error ${response.status}: ${errBody}`)
+        }
 
-      const json = (await response.json()) as DashScopeEmbedResponse
-      const data = json.data ?? []
-      if (data.length !== texts.length) {
-        throw new Error(
-          `DashScope embedding API returned ${data.length} vectors for ${texts.length} inputs`,
-        )
-      }
-
-      const ordered = [...data].sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
-      return ordered.map((d, i) => {
-        if (!d.embedding) throw new Error(`DashScope embedding API returned no vector for input ${i}`)
-        if (d.embedding.length !== GEMINI_EMBEDDING_DIMENSIONS) {
+        const json = (await response.json()) as DashScopeEmbedResponse
+        const data = json.data ?? []
+        if (data.length !== chunk.length) {
           throw new Error(
-            `DashScope returned ${d.embedding.length}-dim vector, expected ${GEMINI_EMBEDDING_DIMENSIONS}. ` +
-            `The stored vector column is fixed-width — refusing to write a mismatched vector.`,
+            `DashScope embedding API returned ${data.length} vectors for ${chunk.length} inputs`,
           )
         }
-        return d.embedding
-      })
+
+        const ordered = [...data].sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
+        vectors.push(...ordered.map((d, i) => {
+          if (!d.embedding) {
+            throw new Error(`DashScope embedding API returned no vector for input ${offset + i}`)
+          }
+          if (d.embedding.length !== GEMINI_EMBEDDING_DIMENSIONS) {
+            throw new Error(
+              `DashScope returned ${d.embedding.length}-dim vector, expected ${GEMINI_EMBEDDING_DIMENSIONS}. ` +
+              `The stored vector column is fixed-width — refusing to write a mismatched vector.`,
+            )
+          }
+          return d.embedding
+        }))
+      }
+      return vectors
     },
   }
 }

@@ -177,6 +177,12 @@ export class SupportCapsuleBuilder {
       messages: string
       analytics: string
       failedWorkflows: string
+      archiveMessages: string
+      archiveUnembedded: string
+      archiveOutboxPending: string
+      archiveOutboxDead: string
+      archiveEnrichmentFailed: string
+      archiveBackfillsFailed: string
     }>(
       `SELECT
          (SELECT count(*)::text FROM sessions s
@@ -189,7 +195,25 @@ export class SupportCapsuleBuilder {
          (SELECT count(*)::text FROM analytics_events e
           WHERE e.user_id = $2 AND e.created_at BETWEEN $3 AND $4) AS analytics,
          (SELECT count(*)::text FROM workflow_runs
-          WHERE workspace_id = $1 AND status IN ('failed', 'timeout')) AS "failedWorkflows"`,
+          WHERE workspace_id = $1 AND status IN ('failed', 'timeout')) AS "failedWorkflows",
+         (SELECT count(*)::text FROM chat_archive_messages
+          WHERE workspace_id = $1) AS "archiveMessages",
+         (SELECT count(*)::text FROM chat_archive_segments
+          WHERE workspace_id = $1 AND embedding IS NULL) AS "archiveUnembedded",
+         (SELECT count(*)::text FROM ingest_outbox o
+          JOIN ingest_external_sink s ON s.id = o.sink_id
+          WHERE o.workspace_id = $1
+            AND s.managed_by = 'local_chat_archive'
+            AND o.status IN ('pending', 'processing')) AS "archiveOutboxPending",
+         (SELECT count(*)::text FROM ingest_outbox o
+          JOIN ingest_external_sink s ON s.id = o.sink_id
+          WHERE o.workspace_id = $1
+            AND s.managed_by = 'local_chat_archive'
+            AND o.status = 'dead') AS "archiveOutboxDead",
+         (SELECT count(*)::text FROM chat_archive_enrichment_windows
+          WHERE workspace_id = $1 AND status IN ('failed', 'dead')) AS "archiveEnrichmentFailed",
+         (SELECT count(*)::text FROM chat_archive_backfill_runs
+          WHERE workspace_id = $1 AND status = 'failed') AS "archiveBackfillsFailed"`,
       [capture.workspaceId, capture.userId, capture.startedAt, capture.expiresAt],
     )
 
@@ -256,6 +280,9 @@ export class SupportCapsuleBuilder {
           dashscope: Boolean(process.env.DASHSCOPE_API_KEY),
           localFiles: Boolean(process.env.LOCAL_FILES_DIR),
           browserRelay: Boolean(process.env.BROWSER_RELAY_URL),
+          localMessageStore: Boolean(
+            process.env.BRIAN_MESSAGE_STORE_URL && process.env.BRIAN_MESSAGE_STORE_HMAC_SECRET,
+          ),
         },
       },
       database: {
@@ -265,6 +292,12 @@ export class SupportCapsuleBuilder {
           messages: Number.parseInt(healthResult.rows[0]?.messages ?? '0', 10),
           analytics: Number.parseInt(healthResult.rows[0]?.analytics ?? '0', 10),
           failedWorkflows: Number.parseInt(healthResult.rows[0]?.failedWorkflows ?? '0', 10),
+          archiveMessages: Number.parseInt(healthResult.rows[0]?.archiveMessages ?? '0', 10),
+          archiveUnembedded: Number.parseInt(healthResult.rows[0]?.archiveUnembedded ?? '0', 10),
+          archiveOutboxPending: Number.parseInt(healthResult.rows[0]?.archiveOutboxPending ?? '0', 10),
+          archiveOutboxDead: Number.parseInt(healthResult.rows[0]?.archiveOutboxDead ?? '0', 10),
+          archiveEnrichmentFailed: Number.parseInt(healthResult.rows[0]?.archiveEnrichmentFailed ?? '0', 10),
+          archiveBackfillsFailed: Number.parseInt(healthResult.rows[0]?.archiveBackfillsFailed ?? '0', 10),
         },
       },
       captureEvents: events.map((event) => ({

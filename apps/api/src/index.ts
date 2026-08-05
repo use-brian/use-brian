@@ -100,6 +100,12 @@ const env: OpenApiEnv = {
   // supplies both values; bare API boots leave WhatsApp unavailable when unset.
   WA_CONNECTOR_URL: process.env.WA_CONNECTOR_URL,
   WA_CONNECTOR_SECRET: process.env.WA_CONNECTOR_SECRET,
+  // Optional local WeChat iLink bridge. The launcher starts it and supplies
+  // both values so Studio QR pairing and inbound polling are available.
+  WECHAT_CONNECTOR_URL: process.env.WECHAT_CONNECTOR_URL,
+  WECHAT_CONNECTOR_SECRET: process.env.WECHAT_CONNECTOR_SECRET,
+  BRIAN_MESSAGE_STORE_URL: process.env.BRIAN_MESSAGE_STORE_URL,
+  BRIAN_MESSAGE_STORE_HMAC_SECRET: process.env.BRIAN_MESSAGE_STORE_HMAC_SECRET,
 }
 
 // Wire the OPEN Pipeline B episode ingestors so brain distillation (doc-page

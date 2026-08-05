@@ -324,6 +324,26 @@ describe('[COMP:embeddings/adapters] Per-adapter embedders', () => {
     const e = createDashScopeEmbedder('k', 'https://ds.test/v1')
     await expect(withFetch(fetchFn, () => e.embed(['hi']))).rejects.toThrow(/768|fixed-width/)
   })
+
+  it('DashScope splits large jobs into API-sized batches and preserves input order', async () => {
+    const fetchFn = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const input = (JSON.parse(String(init?.body)) as { input: string[] }).input
+      const data = input.map((value, index) => ({
+        index,
+        embedding: new Array(768).fill(Number(value.slice(1))),
+      })).reverse()
+      return new Response(JSON.stringify({ data }), { status: 200 })
+    })
+    const e = createDashScopeEmbedder('k', 'https://ds.test/v1')
+    const out = await withFetch(fetchFn as unknown as typeof fetch, () =>
+      e.embed(Array.from({ length: 11 }, (_, i) => `v${i}`)),
+    )
+
+    expect(fetchFn).toHaveBeenCalledTimes(2)
+    expect((JSON.parse(String(fetchFn.mock.calls[0]?.[1]?.body)) as { input: string[] }).input).toHaveLength(10)
+    expect((JSON.parse(String(fetchFn.mock.calls[1]?.[1]?.body)) as { input: string[] }).input).toHaveLength(1)
+    expect(out.map((vector) => vector[0])).toEqual(Array.from({ length: 11 }, (_, i) => i))
+  })
 })
 
 describe('[COMP:engine/tool-pairing] Signature strip is provider-gated', () => {

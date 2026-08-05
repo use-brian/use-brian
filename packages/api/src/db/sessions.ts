@@ -1,3 +1,4 @@
+import type pg from 'pg'
 import { query } from './client.js'
 
 export type Session = {
@@ -752,8 +753,8 @@ export async function addSessionMessage(params: {
   senderAssistantId?: string | null
   /** Outbound file attachments (assistant rows only — `sendFile`, migration 273). */
   attachments?: SessionMessageAttachment[]
-}): Promise<SessionMessage> {
-  const result = await query<SessionMessage>(
+}, client?: Pick<pg.ClientBase, 'query'>): Promise<SessionMessage> {
+  const sql =
     `INSERT INTO session_messages
        (session_id, role, content, sequence_num,
         reply_to_text, topic_label, topic_confidence, channel_message_id, sender_user_id, sender_assistant_id, attachments)
@@ -769,8 +770,8 @@ export async function addSessionMessage(params: {
                channel_message_id as "channelMessageId",
                sender_user_id as "senderUserId",
                sender_assistant_id as "senderAssistantId",
-               attachments`,
-    [
+               attachments`
+  const values = [
       params.sessionId,
       params.role,
       JSON.stringify(params.content),
@@ -781,8 +782,10 @@ export async function addSessionMessage(params: {
       params.senderUserId ?? null,
       params.senderAssistantId ?? null,
       JSON.stringify(params.attachments ?? []),
-    ],
-  )
+    ]
+  const result = client
+    ? await client.query<SessionMessage>(sql, values)
+    : await query<SessionMessage>(sql, values)
 
   return result.rows[0]
 }

@@ -103,7 +103,10 @@ export function createExternalSinkFanout(deps: {
     client?: Queryable,
   ): Promise<FanoutResult> => {
     if (event.messages.length === 0) return { enqueued: [] }
-    const sinks = await deps.sinks.listEnabledByInstance(event.connectorInstanceId)
+    // When the producer supplied a transaction client, every database step
+    // must reuse it. Checking sinks out through the pool here can deadlock a
+    // saturated local pool while the caller is already holding this client.
+    const sinks = await deps.sinks.listEnabledByInstance(event.connectorInstanceId, client)
     const receiving = sinks.filter((s) => sinkAcceptsEvent(s.mode, event.decision))
     const enqueued: IngestOutboxRow[] = []
     for (const sink of receiving) {
