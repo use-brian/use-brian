@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 
 const migration = readFileSync(
-  new URL('../../../migrations/395_chat_message_archive.sql', import.meta.url),
+  new URL('../../../migrations/405_chat_message_archive.sql', import.meta.url),
   'utf8',
 )
 
