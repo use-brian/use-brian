@@ -137,7 +137,27 @@ describe('[COMP:api/skill-store] WorkspaceSkillStore — workspace CRUD', () => 
     expect(sql).toContain('name = $1')
     expect(sql).toContain('content = $2')
     expect(sql).toContain('workspace_id = $')
+    expect(sql).toContain('valid_to IS NULL')
+    expect(sql).toContain("state <> 'archived'")
     expect(sql).toContain("write_origin = 'foreground'")
+  })
+
+  it('update can atomically compare the saved instruction revision', async () => {
+    mockRls.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    const expected = {
+      name: 'My Skill',
+      description: 'Does things',
+      whenToUse: 'when needed',
+      content: 'Step 1.',
+    }
+    await expect(
+      ws.update('u-1', 'ws-1', 'sk-uuid-1', { content: 'Step 2.' }, expected),
+    ).resolves.toBeNull()
+    const sql = mockRls.mock.calls[0][1] as string
+    expect(sql).toContain('name IS NOT DISTINCT FROM')
+    expect(sql).toContain('description IS NOT DISTINCT FROM')
+    expect(sql).toContain('when_to_use IS NOT DISTINCT FROM')
+    expect(sql).toContain('content IS NOT DISTINCT FROM')
   })
 
   it('delete is a bi-temporal close (UPDATE, not DELETE)', async () => {
