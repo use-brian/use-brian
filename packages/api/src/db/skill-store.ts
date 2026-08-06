@@ -83,6 +83,9 @@ export type UpdateSkillInput = {
   sensitivity?: 'public' | 'internal' | 'confidential'
 }
 
+/** Saved instruction fields used as an atomic compare-and-set guard. */
+export type ExpectedSkillRevision = Pick<WorkspaceSkill, 'name' | 'description' | 'whenToUse' | 'content'>
+
 // ── Row types ──────────────────────────────────────────────────────
 
 /** Full row including every V2 column — used by curator + admin paths. */
@@ -287,6 +290,7 @@ export type WorkspaceSkillStore = {
     workspaceId: string,
     skillId: string,
     updates: UpdateSkillInput,
+    expected?: ExpectedSkillRevision,
   ): Promise<WorkspaceSkill | null>
   /** Structural-synthesis Phase 2: link (or clear) the v2 blueprint this skill
    * fills. Side-effect-free (no verify stamp / write_origin flip) — it records a
@@ -546,7 +550,7 @@ export function createDbWorkspaceSkillStore(hooks?: WorkspaceSkillStoreHooks): W
       return skill
     },
 
-    async update(userId, workspaceId, skillId, updates) {
+    async update(userId, workspaceId, skillId, updates, expected) {
       const sets: string[] = []
       const values: unknown[] = []
       let idx = 1
@@ -602,6 +606,20 @@ export function createDbWorkspaceSkillStore(hooks?: WorkspaceSkillStoreHooks): W
         values.push(SKILL_ACTIVATION_THRESHOLD)
         sets.push(`activated_at = COALESCE(activated_at, now())`)
       }
+      let expectedClause = ''
+      if (expected) {
+        const expectedPredicates: string[] = []
+        for (const [column, value] of [
+          ['name', expected.name],
+          ['description', expected.description],
+          ['when_to_use', expected.whenToUse ?? null],
+          ['content', expected.content],
+        ] as const) {
+          expectedPredicates.push(`${column} IS NOT DISTINCT FROM $${idx++}`)
+          values.push(value)
+        }
+        expectedClause = ` AND ${expectedPredicates.join(' AND ')}`
+      }
       values.push(skillId, workspaceId)
 
       const result = await queryWithRLS<WorkspaceSkillRow>(
@@ -609,6 +627,7 @@ export function createDbWorkspaceSkillStore(hooks?: WorkspaceSkillStoreHooks): W
         `UPDATE workspace_skills SET ${sets.join(', ')}
          WHERE id = $${idx++} AND workspace_id = $${idx}
            AND valid_to IS NULL AND state <> 'archived'
+           ${expectedClause}
          RETURNING ${COLS_ALL}`,
         values,
       )

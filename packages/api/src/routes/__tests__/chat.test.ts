@@ -447,11 +447,13 @@ describe('[COMP:api/chat-route] updateViewedSkill', () => {
     name: 'Original skill',
     description: 'Original description',
     content: 'Original instructions',
+    sensitivity: 'internal' as const,
   }
   const revision = workspaceSkillRevision(original)
   const context = {
     userId: 'user-1',
     workspaceId: 'workspace-1',
+    clearance: 'internal',
   } as ToolContext
 
   it('is confirmation-gated and updates only the closed-over skill row', async () => {
@@ -477,6 +479,12 @@ describe('[COMP:api/chat-route] updateViewedSkill', () => {
       'workspace-1',
       'skill-1',
       { content: 'Revised instructions' },
+      {
+        name: 'Original skill',
+        description: 'Original description',
+        whenToUse: undefined,
+        content: 'Original instructions',
+      },
     )
   })
 
@@ -516,6 +524,12 @@ describe('[COMP:api/chat-route] updateViewedSkill', () => {
       'workspace-1',
       'skill-1',
       { description: 'Updated' },
+      {
+        name: 'Original skill',
+        description: 'Original description',
+        whenToUse: undefined,
+        content: 'Original instructions',
+      },
     )
   })
 
@@ -527,6 +541,7 @@ describe('[COMP:api/chat-route] updateViewedSkill', () => {
       name: 'Original skill',
       description: 'Changed since approval',
       content: 'Original instructions',
+      sensitivity: 'internal' as const,
     }
     const update = vi.fn()
     const tool = createUpdateViewedSkillTool({
@@ -547,10 +562,34 @@ describe('[COMP:api/chat-route] updateViewedSkill', () => {
       'Skill: Original skill',
       'Description: Proposed description',
       'Instructions: Proposed\ninstructions',
+      'Effect: Approving verifies and activates this skill at certified confidence.',
     ])
     await expect(tool.execute(input, context)).resolves.toMatchObject({
       isError: true,
       data: expect.stringContaining('changed while this update was awaiting approval'),
+    })
+    expect(update).not.toHaveBeenCalled()
+  })
+
+  it('fails closed when the assistant clearance is below the skill sensitivity', async () => {
+    const confidential = { ...original, sensitivity: 'confidential' as const }
+    const update = vi.fn()
+    const tool = createUpdateViewedSkillTool({
+      workspaceSkillStore: { getByIdSystem: vi.fn(async () => confidential), update } as never,
+      workspaceId: 'workspace-1',
+      skillRowId: 'skill-1',
+      skillName: 'Original skill',
+      expectedRevision: revision,
+      assistantClearance: 'public',
+    })
+
+    await expect(tool.execute({
+      skillRowId: 'skill-1',
+      expectedRevision: revision,
+      description: 'Updated',
+    }, context)).resolves.toMatchObject({
+      isError: true,
+      data: expect.stringContaining('does not have clearance'),
     })
     expect(update).not.toHaveBeenCalled()
   })

@@ -43,7 +43,7 @@ import { resolveModel, ensureServableModel, backgroundLatencyBudgetMs, backgroun
 import { registryRow } from '@use-brian/shared/model-registry'
 import type { ConnectorStore } from '../db/connector-store.js'
 import { getToolDisplayName, stripFollowUps, stripCommentThreadReplyTag } from '@use-brian/shared'
-import { resolveUser, buildBrowserEscalationPrompt, buildUnavailableCapabilitiesPrompt, injectSkills, checkUsageBudget, applyMcpInjection, type CreditBudgetGate } from './route-helpers.js'
+import { resolveUser, buildBrowserEscalationPrompt, buildUnavailableCapabilitiesPrompt, injectSkills, isSkillOfferable, checkUsageBudget, applyMcpInjection, type CreditBudgetGate } from './route-helpers.js'
 import { createDocRunClient } from '../doc/run-presence-client.js'
 import type { AssistantRunChannel } from '@use-brian/doc-model'
 import {
@@ -984,6 +984,7 @@ export function createUpdateViewedSkillTool(args: {
   skillRowId?: string
   skillName?: string
   expectedRevision?: string
+  assistantClearance?: 'public' | 'internal' | 'confidential'
 }): Tool {
   const scoped = Boolean(args.workspaceId && args.skillRowId && args.skillName)
   return buildTool({
@@ -1020,6 +1021,9 @@ export function createUpdateViewedSkillTool(args: {
       for (const [field, value] of Object.entries(updates)) {
         lines.push(`${labels[field] ?? field}: ${value === null ? '(clear)' : String(value)}`)
       }
+      if ('name' in updates || 'content' in updates) {
+        lines.push('Effect: Approving verifies and activates this skill at certified confidence.')
+      }
       return lines
     },
     async execute(input, ctx) {
@@ -1036,6 +1040,10 @@ export function createUpdateViewedSkillTool(args: {
       if (!current || current.workspaceId !== ctx.workspaceId || current.state === 'archived') {
         return { data: 'The open skill is no longer available.', isError: true }
       }
+      const assistantClearance = args.assistantClearance ?? ctx.assistantClearance ?? ctx.clearance ?? 'public'
+      if (!isSkillOfferable(current, { assistantClearance })) {
+        return { data: 'This assistant does not have clearance to update the open skill.', isError: true }
+      }
       if (workspaceSkillRevision(current) !== input.expectedRevision) {
         return {
           data: 'The skill changed while this update was awaiting approval. Review the latest version and try again.',
@@ -1048,9 +1056,15 @@ export function createUpdateViewedSkillTool(args: {
         ctx.workspaceId,
         skillRowId,
         updates,
+        {
+          name: current.name,
+          description: current.description,
+          whenToUse: current.whenToUse,
+          content: current.content,
+        },
       )
       if (!updated) {
-        return { data: 'The open skill is no longer available.', isError: true }
+        return { data: 'The skill changed before the approved update could be saved. Review the latest version and try again.', isError: true }
       }
       return { data: `Saved the approved changes to ${JSON.stringify(updated.name)}.` }
     },
@@ -3823,7 +3837,10 @@ export function chatRoutes(options: WebChatOptions): Router {
             { actingUserId: user.id },
           )
           const viewedSkill = workspaceSkills.find(
-            (s) => s.rowId === requestedViewingSkillRowId && s.state !== 'archived',
+            (s) =>
+              s.rowId === requestedViewingSkillRowId &&
+              s.state !== 'archived' &&
+              isSkillOfferable(s, { assistantClearance: assistant.clearance }),
           )
           if (viewedSkill) {
             userVisibleContextParts.push(buildViewingSkillBlock(viewedSkill))
@@ -3833,6 +3850,7 @@ export function chatRoutes(options: WebChatOptions): Router {
               skillRowId: viewedSkill.rowId,
               skillName: viewedSkill.name,
               expectedRevision: workspaceSkillRevision(viewedSkill),
+              assistantClearance: assistant.clearance,
             })
           }
         } catch (err) {
