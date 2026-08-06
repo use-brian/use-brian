@@ -1,5 +1,14 @@
 export type { FileStore, CachedFile } from './types.js'
-export { parseFileContent, parseDocxToMarkdown, shouldInline } from './parsers.js'
+export {
+  parseFileContent,
+  parseDocxToMarkdown,
+  shouldInline,
+  type ParsedFileContent,
+} from './parsers.js'
+export { htmlToMarkdown, type HtmlToMarkdownResult } from './html.js'
+export { parseOdfToMarkdown, type OdfKind, type OdfParseResult } from './odf.js'
+export { parseEpubToMarkdown, type EpubParseResult } from './epub.js'
+export { parseEmlToMarkdown, type EmlParseResult } from './eml.js'
 export { distillFileToText, type DistillOptions, type DistillResult } from './distill.js'
 export { extractPdfText } from './pdf-text.js'
 export { renderPdfPages, probePdfPageCount, type RenderedPdfPage, type RenderPdfPagesResult } from './pdf-pages.js'

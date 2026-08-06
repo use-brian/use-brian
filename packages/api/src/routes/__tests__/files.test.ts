@@ -711,4 +711,24 @@ describe('[COMP:files/ingest] resolveUploadMime', () => {
   it('accepts XHTML, which the parser handled before the gate did', () => {
     expect(isAllowedMime('application/xhtml+xml')).toBe(true)
   })
+
+  it('accepts the formats whose parsers now exist', () => {
+    for (const mime of [
+      'application/vnd.oasis.opendocument.text',
+      'application/vnd.oasis.opendocument.spreadsheet',
+      'application/vnd.oasis.opendocument.presentation',
+      'application/epub+zip',
+      'message/rfc822',
+    ]) {
+      expect(isAllowedMime(mime)).toBe(true)
+    }
+  })
+
+  it('resolves the new formats from an extension when the sender said nothing', () => {
+    expect(resolveUploadMime('application/octet-stream', 'plan.ODT')).toBe(
+      'application/vnd.oasis.opendocument.text',
+    )
+    expect(resolveUploadMime('', 'book.epub')).toBe('application/epub+zip')
+    expect(resolveUploadMime('application/octet-stream', 'saved.eml')).toBe('message/rfc822')
+  })
 })

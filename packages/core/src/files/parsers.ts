@@ -8,6 +8,9 @@ import { gfm } from 'turndown-plugin-gfm'
 import { parseXlsxToMarkdown } from './xlsx.js'
 import { parsePptxToMarkdown } from './pptx.js'
 import { htmlToMarkdown } from './html.js'
+import { parseOdfToMarkdown } from './odf.js'
+import { parseEpubToMarkdown } from './epub.js'
+import { parseEmlToMarkdown } from './eml.js'
 import { estimateStringTokens } from '../compaction/compact.js'
 
 const DOCX_MIME =
@@ -49,6 +52,20 @@ function extensionOf(fileName: string): string {
 const HTML_MIMES = new Set(['text/html', 'application/xhtml+xml', 'application/html'])
 const HTML_EXTS = new Set(['.html', '.htm', '.xhtml'])
 const RTF_MIMES = new Set(['text/rtf', 'application/rtf'])
+
+/** OpenDocument: the LibreOffice family, and Google Docs/Sheets/Slides' default export. */
+const ODF_MIME_PREFIX = 'application/vnd.oasis.opendocument'
+const ODF_EXTS = new Set(['.odt', '.ods', '.odp'])
+const EPUB_MIMES = new Set(['application/epub+zip'])
+const EML_MIMES = new Set(['message/rfc822', 'application/mbox'])
+const EML_EXTS = new Set(['.eml', '.mbox'])
+
+/** Human label for the summary line of each OpenDocument shape. */
+const ODF_LABEL = {
+  text: 'Document',
+  spreadsheet: 'Spreadsheet',
+  presentation: 'Presentation',
+} as const
 
 /**
  * Match on mime OR extension. A browser reports `text/html` for an `.html`
@@ -196,6 +213,83 @@ export async function parseFileContent(
       return placeholder(
         `[Spreadsheet: ${fileName}. Could not parse as .xlsx (${reason}).]`,
         `Spreadsheet: ${fileName}`,
+      )
+    }
+  }
+
+  // OpenDocument — the LibreOffice family and Google Workspace's default
+  // export. Same deterministic zip+XML extraction as the OOXML branches above;
+  // one walker covers all three shapes (see odf.ts).
+  if (mimeType.startsWith(ODF_MIME_PREFIX) || ODF_EXTS.has(ext)) {
+    try {
+      const { text, kind, sections, rows } = await parseOdfToMarkdown(buffer)
+      const label = ODF_LABEL[kind]
+      if (!text) {
+        return placeholder(
+          `[${label}: ${fileName}. No extractable text (the file may be empty or image-only).]`,
+          `${label}: ${fileName}`,
+        )
+      }
+      const detail =
+        kind === 'spreadsheet'
+          ? `${rows} rows, ${sections} sheets`
+          : kind === 'presentation'
+            ? `${sections} slides`
+            : `${text.length} chars`
+      return { text, summary: `${label}: ${fileName} (${detail})` }
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : 'unknown error'
+      return placeholder(
+        `[Document: ${fileName}. Could not parse as OpenDocument (${reason}).]`,
+        `Document: ${fileName}`,
+      )
+    }
+  }
+
+  // EPUB is a zip of XHTML in spine order, so each chapter rides the same
+  // whole-body converter an uploaded .html file does.
+  if (EPUB_MIMES.has(mimeType) || ext === '.epub') {
+    try {
+      const { text, title, chapters } = await parseEpubToMarkdown(buffer)
+      if (!text) {
+        return placeholder(
+          `[Book: ${fileName}. No extractable text (the EPUB may be image-only or DRM-protected).]`,
+          `Book: ${fileName}`,
+        )
+      }
+      const heading = title && !text.startsWith('#') ? `# ${title}\n\n` : ''
+      const full = `${heading}${text}`
+      return { text: full, summary: `Book: ${fileName} (${chapters} chapters, ${full.length} chars)` }
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : 'unknown error'
+      return placeholder(
+        `[Book: ${fileName}. Could not parse as EPUB (${reason}).]`,
+        `Book: ${fileName}`,
+      )
+    }
+  }
+
+  // A saved email. The envelope becomes a header block and the body rides the
+  // plain part, or the HTML alternative through the same converter.
+  if (EML_MIMES.has(mimeType) || EML_EXTS.has(ext)) {
+    try {
+      const { text, subject, attachments } = await parseEmlToMarkdown(buffer)
+      if (!text) {
+        return placeholder(
+          `[Email: ${fileName}. No extractable body (the message may carry attachments only).]`,
+          `Email: ${fileName}`,
+        )
+      }
+      const attachPart = attachments.length ? `, ${attachments.length} attachments` : ''
+      return {
+        text,
+        summary: `Email: ${subject || fileName} (${text.length} chars${attachPart})`,
+      }
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : 'unknown error'
+      return placeholder(
+        `[Email: ${fileName}. Could not parse as an email message (${reason}).]`,
+        `Email: ${fileName}`,
       )
     }
   }

@@ -66,6 +66,13 @@ export const ALLOWED_MIME_PREFIXES = [
   'application/msword',
   'application/vnd.ms-excel',
   'application/vnd.ms-powerpoint',
+  // OpenDocument (.odt/.ods/.odp) — LibreOffice, and Google Workspace's
+  // default export. Extracted deterministically by core `files/odf.ts`.
+  'application/vnd.oasis.opendocument',
+  // EPUB: a zip of XHTML, converted chapter by chapter (core `files/epub.ts`).
+  'application/epub+zip',
+  // A saved email message (core `files/eml.ts`).
+  'message/rfc822',
 ]
 
 export function isAllowedMime(mime: string): boolean {
@@ -109,6 +116,11 @@ const UPLOAD_EXTENSION_MIME: Record<string, string> = {
   xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   ppt: 'application/vnd.ms-powerpoint',
   pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  odt: 'application/vnd.oasis.opendocument.text',
+  ods: 'application/vnd.oasis.opendocument.spreadsheet',
+  odp: 'application/vnd.oasis.opendocument.presentation',
+  epub: 'application/epub+zip',
+  eml: 'message/rfc822',
 }
 
 /**
