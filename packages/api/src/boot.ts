@@ -4991,7 +4991,17 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     const [artifact, access, live, head] = await Promise.all([officeArtifactStore.get(userId, artifactId), resolveOfficeAccess(userId, artifactId), officeLiveStore.get(userId, artifactId), officeArtifactStore.getHeadVersion(userId, artifactId)])
     if (!artifact || !access || !live) return null
     const [claims, media] = artifact.headVersionId ? await Promise.all([officeReleaseStore.listClaims(userId, artifactId, artifact.headVersionId), officeReleaseStore.listMedia(userId, artifactId, artifact.headVersionId)]) : [[], []]
-    return { artifact: { ...artifact, headVersionId: head?.snapshotHash === live.canonicalHash ? artifact.headVersionId : null }, access, snapshot: live.snapshot, claims, media }
+    // The brand's APPROVED claims register (docs/architecture/features/brand.md
+    // → "Claims reach the release gate"). Best-effort: a brand read failing must
+    // not make a release impossible, and no brand simply contributes nothing.
+    let brandClaims: readonly import('@use-brian/shared').BrandClaim[] | undefined
+    try {
+      const brand = await getBrandStore().get(userId, artifact.workspaceId)
+      brandClaims = brand?.activeRecord?.claims
+    } catch (err) {
+      console.warn('[office-release] brand claims lookup failed:', err)
+    }
+    return { artifact: { ...artifact, headVersionId: head?.snapshotHash === live.canonicalHash ? artifact.headVersionId : null }, access, snapshot: live.snapshot, claims, brandClaims, media }
   }
   if (filesApi) app.use('/api/office', requireAuth(env.JWT_SECRET), officeReleaseRoutes({
     load: loadOfficeReleaseContext,
