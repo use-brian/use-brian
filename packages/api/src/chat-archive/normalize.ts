@@ -2,7 +2,7 @@
 
 import { createHash } from 'node:crypto'
 import type { IncomingMessage, OutgoingDocument } from '@use-brian/channels'
-import type { CanonicalIngestMessage } from '@use-brian/shared'
+import type { AnyCanonicalIngestMessage, CanonicalIngestMessage, CanonicalIngestMessageV2 } from '@use-brian/shared'
 
 function sentAt(value: number): string {
   const millis = Number.isFinite(value) ? (value < 1_000_000_000_000 ? value * 1000 : value) : 0
@@ -22,17 +22,36 @@ function derivedMessageId(source: string, message: IncomingMessage): string {
   })).digest('hex')}`
 }
 
-function mediaKind(message: IncomingMessage): CanonicalIngestMessage['kind'] {
+function mediaKind(message: IncomingMessage): CanonicalIngestMessageV2['kind'] {
   if (message.mediaType === 'photo') return 'image'
   if (message.mediaType === 'voice' || message.mediaType === 'audio') return 'voice'
+  if (message.mediaType === 'video') return 'video'
   if (message.mediaType || message.files?.length) return 'file'
   if (/^https?:\/\/\S+$/i.test(message.text.trim())) return 'link'
   return 'text'
 }
 
-function mediaRef(message: IncomingMessage): CanonicalIngestMessage['media_ref'] {
+function mediaRef(message: IncomingMessage): CanonicalIngestMessage['media_ref'] | CanonicalIngestMessageV2['media_ref'] {
+  if (message.archiveMediaRef) {
+    return {
+      asset_id: message.archiveMediaRef.assetId,
+      sha256: message.archiveMediaRef.sha256,
+      availability: 'stored',
+      filename: message.archiveMediaRef.filename,
+      mime: message.archiveMediaRef.mime,
+      size_bytes: message.archiveMediaRef.sizeBytes,
+    }
+  }
   const file = message.files?.[0]
   if (!message.mediaType && !message.mediaUrl && !file) return null
+  if (message.archiveMediaAvailability) {
+    return {
+      availability: message.archiveMediaAvailability,
+      filename: message.mediaName ?? file?.name ?? '',
+      mime: message.mediaMime ?? file?.mimeType ?? '',
+      size_bytes: Math.max(0, message.mediaSizeBytes ?? 0),
+    }
+  }
   return {
     filename: message.mediaName || file?.name || 'attachment',
     mime: message.mediaMime || file?.mimeType || 'application/octet-stream',
@@ -43,7 +62,7 @@ function mediaRef(message: IncomingMessage): CanonicalIngestMessage['media_ref']
 export function normalizeInboundChatMessage(input: {
   source: string
   message: IncomingMessage
-}): CanonicalIngestMessage {
+}): AnyCanonicalIngestMessage {
   const { source, message } = input
   return {
     provider_message_id: message.messageId || derivedMessageId(source, message),
@@ -59,7 +78,7 @@ export function normalizeInboundChatMessage(input: {
     // Provider payloads can contain tokens and connector secrets. Live capture
     // needs no reparsing, so the safest sanitized payload is no payload.
     raw_provider_blob: null,
-  }
+  } as AnyCanonicalIngestMessage
 }
 
 export function normalizeOutboundChatMessage(input: {

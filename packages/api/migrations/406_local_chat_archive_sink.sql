@@ -1,4 +1,4 @@
--- 396_local_chat_archive_sink.sql  (OPEN tables -> packages/api/migrations/)
+-- 406_local_chat_archive_sink.sql  (OPEN tables -> packages/api/migrations/)
 --
 -- Marks the one platform-managed, loopback-only brian-message-store sink per
 -- connector instance. Manual external sinks keep managed_by NULL and are never

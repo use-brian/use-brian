@@ -543,6 +543,38 @@ describe('[COMP:wa-connector/media-routing] inbound media relay routing', () => 
     vi.unstubAllGlobals()
   })
 
+  it('reuses an already-stored archive asset without downloading or uploading again', async () => {
+    const { downloadMediaMessage } = await import('@whiskeysockets/baileys')
+    const fetchMock = vi.fn(async (url: unknown, _init?: { method?: string }) => {
+      if (String(url).endsWith('/internal/whatsapp/media-upload-url')) {
+        return {
+          ok: true,
+          json: async () => ({
+            assetId: '4a1e6bd8-0000-4000-8000-000000000001',
+            alreadyStored: true,
+            gcsKey: 'workspace/chat-archive-asset',
+            storageUri: 'file://workspace/chat-archive-asset',
+            sizeBytes: 9_000_000,
+            uploadUrl: 'http://127.0.0.1:4000/internal/chat-archive/media/asset/content',
+          }),
+        }
+      }
+      return { ok: true }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await connected()
+
+    await emitMedia({ videoMessage: { mimetype: 'video/mp4', fileLength: 9_000_000 } })
+
+    expect(vi.mocked(downloadMediaMessage)).not.toHaveBeenCalled()
+    expect(inboundBody(fetchMock).mediaRef).toMatchObject({
+      assetId: '4a1e6bd8-0000-4000-8000-000000000001',
+      sizeBytes: 9_000_000,
+    })
+    expect(fetchMock.mock.calls.some((call) => (call[1] as { method?: string })?.method === 'PUT')).toBe(false)
+    vi.unstubAllGlobals()
+  })
+
   it('includes the API response body when upload URL minting fails', async () => {
     const { downloadMediaMessage } = await import('@whiskeysockets/baileys')
     const error = vi.spyOn(console, 'error').mockImplementation(() => {})

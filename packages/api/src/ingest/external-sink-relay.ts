@@ -1,6 +1,6 @@
 /**
  * External-sink relay worker — drains `ingest_outbox` to each sink's
- * endpoint under `ub.ingest.append.v1`
+ * endpoint under v1, or v2 for the platform-managed local archive
  * (docs/architecture/brain/ingest-external-sink.md → "The relay").
  *
  * Loop shape follows `createBatchWorker` (setInterval + re-entry guard +
@@ -31,10 +31,13 @@
 import { sanitize } from '@use-brian/core'
 import {
   INGEST_APPEND_CONTRACT_V1,
+  INGEST_APPEND_CONTRACT_V2,
   INGEST_APPEND_IDEMPOTENCY_HEADER,
   INGEST_APPEND_SIGNATURE_HEADER,
-  ingestAppendResponseSchema,
-  type IngestAppendRequest,
+  anyIngestAppendResponseSchema,
+  type AnyIngestAppendRequest,
+  type CanonicalIngestMessage,
+  type CanonicalIngestMessageV2,
 } from '@use-brian/shared'
 import type { IngestOutboxRow, IngestOutboxStore } from '../db/ingest-outbox-store.js'
 import type { IngestSinkStore } from '../db/ingest-sink-store.js'
@@ -75,16 +78,47 @@ export type ExternalSinkRelay = {
   readonly isRunning: boolean
 }
 
-export function buildAppendRequest(row: IngestOutboxRow): IngestAppendRequest {
+function toV1Message(message: Record<string, unknown>): CanonicalIngestMessage {
+  const media = message.media_ref as Record<string, unknown> | null | undefined
   return {
-    contract: INGEST_APPEND_CONTRACT_V1,
+    ...(message as unknown as CanonicalIngestMessage),
+    kind: message.kind === 'video' ? 'file' : message.kind as CanonicalIngestMessage['kind'],
+    media_ref: media ? {
+      filename: String(media.filename ?? ''),
+      mime: String(media.mime ?? ''),
+      size_bytes: Math.max(0, Number(media.size_bytes ?? 0)),
+    } : null,
+  }
+}
+
+function toV2Message(message: Record<string, unknown>): CanonicalIngestMessageV2 {
+  const media = message.media_ref as Record<string, unknown> | null | undefined
+  if (!media) return { ...(message as unknown as CanonicalIngestMessageV2), media_ref: null }
+  const stored = media.availability === 'stored' && media.asset_id && media.sha256
+  return {
+    ...(message as unknown as CanonicalIngestMessageV2),
+    media_ref: {
+      ...(stored ? { asset_id: String(media.asset_id), sha256: String(media.sha256) } : {}),
+      availability: stored ? 'stored' : media.availability === 'failed' ? 'failed' : 'missing',
+      filename: String(media.filename ?? ''),
+      mime: String(media.mime ?? ''),
+      size_bytes: Math.max(0, Number(media.size_bytes ?? 0)),
+    },
+  }
+}
+
+export function buildAppendRequest(row: IngestOutboxRow, managedLocal = false): AnyIngestAppendRequest {
+  return {
+    contract: managedLocal ? INGEST_APPEND_CONTRACT_V2 : INGEST_APPEND_CONTRACT_V1,
     instance_id: row.connectorInstanceId,
     source: row.source,
     workspace_id: row.workspaceId,
     owner_user_id: row.ownerUserId,
     cursor: row.sourceCursor ?? null,
-    messages: row.messages as IngestAppendRequest['messages'],
-  }
+    messages: row.messages.map((message) => managedLocal
+      ? toV2Message(message as Record<string, unknown>)
+      : toV1Message(message as Record<string, unknown>)),
+  } as AnyIngestAppendRequest
 }
 
 export function createExternalSinkRelay(deps: ExternalSinkRelayDeps): ExternalSinkRelay {
@@ -117,7 +151,8 @@ export function createExternalSinkRelay(deps: ExternalSinkRelayDeps): ExternalSi
       return
     }
 
-    const body = JSON.stringify(buildAppendRequest(row))
+    const request = buildAppendRequest(row, sink.managedBy === 'local_chat_archive')
+    const body = JSON.stringify(request)
     const headers: Record<string, string> = {
       'content-type': 'application/json',
       [INGEST_APPEND_IDEMPOTENCY_HEADER]: row.batchId,
@@ -146,9 +181,9 @@ export function createExternalSinkRelay(deps: ExternalSinkRelayDeps): ExternalSi
     }
 
     if (res.status === 200) {
-      let parsed: ReturnType<typeof ingestAppendResponseSchema.safeParse>
+      let parsed: ReturnType<typeof anyIngestAppendResponseSchema.safeParse>
       try {
-        parsed = ingestAppendResponseSchema.safeParse(await res.json())
+        parsed = anyIngestAppendResponseSchema.safeParse(await res.json())
       } catch {
         await deps.outbox.fail(row.id, 'ack unreadable: response body is not JSON')
         return
@@ -158,6 +193,10 @@ export function createExternalSinkRelay(deps: ExternalSinkRelayDeps): ExternalSi
         return
       }
       const ack = parsed.data
+      if (ack.contract !== request.contract) {
+        await deps.outbox.fail(row.id, `ack contract ${ack.contract} does not match request ${request.contract}`)
+        return
+      }
       if (ack.accepted + ack.duplicates !== row.messages.length) {
         await deps.outbox.fail(
           row.id,

@@ -358,33 +358,48 @@ export function createSocketManager(options: SocketManagerOptions): SocketManage
     const res = await fetch(`${apiUrl}/internal/whatsapp/media-upload-url`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Connector-Secret': connectorSecret },
-      body: JSON.stringify({ channelId, mime: mediaInfo.mimeType, fileName: mediaInfo.fileName ?? null }),
+      body: JSON.stringify({
+        channelId,
+        providerMessageId: msg.key.id,
+        kind: mediaInfo.mimeType.startsWith('image/') ? 'image'
+          : mediaInfo.mimeType.startsWith('video/') ? 'video'
+            : mediaInfo.mimeType.startsWith('audio/') ? 'voice' : 'file',
+        mime: mediaInfo.mimeType,
+        fileName: mediaInfo.fileName ?? null,
+        sizeBytes: mediaInfo.fileLength ?? 0,
+      }),
     })
     if (!res.ok) {
       const detail = (await res.text().catch(() => '')).slice(0, 300)
       throw new Error(`media-upload-url failed: ${res.status} ${res.statusText}${detail ? `: ${detail}` : ''}`)
     }
-    const { gcsKey, uploadUrl, storageUri } = (await res.json()) as { gcsKey: string; uploadUrl: string; storageUri?: string }
+    const { assetId, alreadyStored, gcsKey, uploadUrl, storageUri, sizeBytes } = (await res.json()) as {
+      assetId?: string; alreadyStored?: boolean; gcsKey: string; uploadUrl: string
+      storageUri?: string; sizeBytes?: number
+    }
 
-    const stream = (await downloadMediaMessage(msg, 'stream', {})) as unknown as import('node:stream').Readable
-    const headers: Record<string, string> = { 'Content-Type': mediaInfo.mimeType }
-    if (mediaInfo.fileLength) headers['Content-Length'] = String(mediaInfo.fileLength)
-    const put = await fetch(uploadUrl, {
-      method: 'PUT',
-      headers,
-      body: stream as unknown as ReadableStream,
-      duplex: 'half', // Node streaming request body requires half-duplex.
-    } as RequestInit & { duplex: 'half' })
-    if (!put.ok) throw new Error(`GCS PUT failed: ${put.status} ${put.statusText}`)
+    if (!alreadyStored) {
+      const stream = (await downloadMediaMessage(msg, 'stream', {})) as unknown as import('node:stream').Readable
+      const headers: Record<string, string> = { 'Content-Type': mediaInfo.mimeType }
+      if (mediaInfo.fileLength) headers['Content-Length'] = String(mediaInfo.fileLength)
+      const put = await fetch(uploadUrl, {
+        method: 'PUT',
+        headers,
+        body: stream as unknown as ReadableStream,
+        duplex: 'half', // Node streaming request body requires half-duplex.
+      } as RequestInit & { duplex: 'half' })
+      if (!put.ok) throw new Error(`media PUT failed: ${put.status} ${put.statusText}`)
+    }
 
     return {
+      ...(assetId ? { assetId } : {}),
       gcsKey,
       // Echo the BYO storage URI back with the bytes so the API stamps the exact
       // bucket the bytes were PUT to (race-free vs. recomputing at /inbound).
       ...(storageUri ? { storageUri } : {}),
       mimeType: mediaInfo.mimeType,
       ...(mediaInfo.fileName ? { fileName: mediaInfo.fileName } : {}),
-      ...(mediaInfo.fileLength ? { sizeBytes: mediaInfo.fileLength } : {}),
+      ...(sizeBytes || mediaInfo.fileLength ? { sizeBytes: sizeBytes || mediaInfo.fileLength } : {}),
     }
   }
 
@@ -722,6 +737,8 @@ export function createSocketManager(options: SocketManagerOptions): SocketManage
     if (!editInfo && isDownloadableMedia(msg.message ?? undefined)) {
       const mediaInfo = extractMediaInfo(msg.message ?? undefined)
       if (mediaInfo) {
+        mediaMimeType = mediaInfo.mimeType
+        mediaFileName = mediaInfo.fileName
         if (shouldStreamMedia(mediaInfo, MAX_MEDIA_BYTES)) {
           try {
             mediaRef = await streamMediaToGcs(channelId, msg, mediaInfo)
@@ -734,8 +751,6 @@ export function createSocketManager(options: SocketManagerOptions): SocketManage
             const buffer = (await downloadMediaMessage(msg, 'buffer', {})) as Buffer
             if (buffer.length <= MAX_MEDIA_BYTES) {
               mediaBase64 = buffer.toString('base64')
-              mediaMimeType = mediaInfo.mimeType
-              mediaFileName = mediaInfo.fileName
             } else {
               // fileLength under-reported the true size — stream it instead of dropping.
               try {
@@ -778,7 +793,9 @@ export function createSocketManager(options: SocketManagerOptions): SocketManage
       quotedMessageId: replyContext?.id,
       quotedBody: replyContext?.body,
       ...(editInfo && { isEdit: true, editedMessageId: editInfo.editedMessageId }),
-      ...(mediaBase64 && { mediaBase64, mediaMimeType, mediaFileName }),
+      ...(mediaBase64 && { mediaBase64 }),
+      ...(mediaMimeType && { mediaMimeType }),
+      ...(mediaFileName && { mediaFileName }),
       ...(mediaRef && { mediaRef }),
     }
 

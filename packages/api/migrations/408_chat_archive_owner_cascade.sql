@@ -1,4 +1,4 @@
--- 398_chat_archive_owner_cascade.sql  (OPEN tables -> packages/api/migrations/)
+-- 408_chat_archive_owner_cascade.sql  (OPEN tables -> packages/api/migrations/)
 -- Account deletion must remove every person-compartmented chat archive root.
 
 BEGIN;

@@ -25,6 +25,7 @@ export type LiveArchiveContext = {
 }
 
 export type LiveChatArchiveWriter = {
+  appendInbound(input: LiveArchiveContext & { message: IncomingMessage }): Promise<void>
   persistInbound<T>(
     input: LiveArchiveContext & { message: IncomingMessage },
     persist: (client?: Queryable) => Promise<T>,
@@ -139,6 +140,19 @@ export function createLiveChatArchiveWriter(deps: {
   }
 
   return {
+    async appendInbound(input) {
+      const binding = await resolveBinding(input)
+      if (!binding) return
+      await deps.fanout.fanout({
+        connectorInstanceId: binding.instanceId,
+        workspaceId: binding.workspaceId,
+        ownerUserId: input.ownerUserId,
+        source: input.source,
+        messages: [normalizeInboundChatMessage({ source: input.source, message: input.message })],
+        sourceCursor: { provider_message_id: input.message.messageId ?? null },
+      })
+    },
+
     async persistInbound(input, persist) {
       let binding: { instanceId: string; workspaceId: string } | null
       try {
@@ -205,6 +219,13 @@ export async function persistInboundChatArchive<T>(
   persist: (client?: Queryable) => Promise<T>,
 ): Promise<T> {
   return globalWriter ? globalWriter.persistInbound(input, persist) : persist()
+}
+
+export async function appendInboundChatArchive(
+  input: Parameters<LiveChatArchiveWriter['appendInbound']>[0],
+): Promise<void> {
+  if (!globalWriter) return
+  await globalWriter.appendInbound(input)
 }
 
 export async function appendOutboundChatArchive(input: Parameters<LiveChatArchiveWriter['appendOutbound']>[0]): Promise<void> {

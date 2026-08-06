@@ -1,4 +1,4 @@
--- 397_chat_archive_enrichment.sql  (OPEN tables -> packages/api/migrations/)
+-- 407_chat_archive_enrichment.sql  (OPEN tables -> packages/api/migrations/)
 -- Platform-owned Pipeline B window ledger for raw chat archive messages.
 
 BEGIN;

@@ -52,6 +52,8 @@ import type { ConnectorStore } from '../db/connector-store.js'
 import { getToolDisplayName, formatConfirmationInput } from '@use-brian/shared'
 import { processChannelMessage } from './channel-pipeline.js'
 import { billingPartyForAssistant } from '../billing-party.js'
+import type { ChatArchiveMediaService } from '../chat-archive/media-service.js'
+import { archiveMediaRef } from '../chat-archive/media-service.js'
 
 export type WechatRouteOptions = {
   /** Servable background-lane model, resolved at boot; forwarded to the
@@ -82,6 +84,7 @@ export type WechatRouteOptions = {
   episodicStore?: import('@use-brian/core').EpisodicStore
   sessionStateStore?: import('@use-brian/core').SessionStateStore
   capabilityStore: import('@use-brian/core').CapabilityStore
+  archiveMedia?: ChatArchiveMediaService
 }
 
 // Natural-language → decision mapping for WeChat text-based confirmation
@@ -94,7 +97,8 @@ const DECISION_MAP: Record<string, ConfirmationDecision> = {
 }
 
 // Refuse media downloads above this — matches the document cap elsewhere.
-const MAX_MEDIA_BYTES = 25 * 1024 * 1024
+const MAX_SMALL_MEDIA_BYTES = 25 * 1024 * 1024
+const MAX_LARGE_MEDIA_BYTES = 500 * 1024 * 1024
 
 // Refresh the native typing indicator at most this often while a turn runs.
 const TYPING_REFRESH_MS = 5_000
@@ -353,16 +357,72 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
     const userContentBlocks: ContentBlock[] = []
     const mediaItem = raw ? findWechatMediaItem(raw.item_list) : null
     if (mediaItem) {
+      const fallbackKind = mediaItem.video_item ? 'video'
+        : mediaItem.voice_item ? 'voice'
+          : mediaItem.image_item ? 'image' : 'file'
+      incoming.mediaType = fallbackKind === 'image' ? 'photo'
+        : fallbackKind === 'file' ? 'document' : fallbackKind
+      incoming.mediaMime = fallbackKind === 'image' ? 'image/jpeg'
+        : fallbackKind === 'video' ? 'video/mp4'
+          : fallbackKind === 'voice' ? 'audio/silk' : 'application/octet-stream'
+      incoming.mediaName = fallbackKind === 'image' ? 'image'
+        : fallbackKind === 'video' ? 'video.mp4'
+          : fallbackKind === 'voice' ? 'voice.silk' : mediaItem.file_item?.file_name ?? 'file.bin'
+      incoming.mediaSizeBytes = 0
+      incoming.archiveMediaAvailability = 'missing'
       try {
-        const media = await downloadWechatMediaItem(mediaItem)
-        if (media && media.data.length > MAX_MEDIA_BYTES) {
+        const maxBytes = fallbackKind === 'video' || fallbackKind === 'voice'
+          ? MAX_LARGE_MEDIA_BYTES : MAX_SMALL_MEDIA_BYTES
+        const media = await downloadWechatMediaItem(mediaItem, { maxBytes })
+        if (!media) throw new Error('iLink media item did not contain downloadable bytes')
+        const archiveKind = media.mime === 'image/gif' ? 'video' : media.kind
+        incoming.mediaType = archiveKind === 'image' ? 'photo'
+          : archiveKind === 'file' ? 'document' : archiveKind
+        incoming.mediaMime = media.mime
+        incoming.mediaName = media.name
+        incoming.mediaSizeBytes = media.data.length
+        if (
+          options.archiveMedia
+          && assistant.workspaceId
+          && incoming.messageId
+        ) {
+          try {
+            const instanceId = await options.archiveMedia.resolveBinding({
+              workspaceId: assistant.workspaceId,
+              ownerUserId: ownerId,
+              source: 'wechat',
+              instanceId: params.archiveConnectorInstanceId,
+            })
+            const asset = await options.archiveMedia.storeBuffer({
+              workspaceId: assistant.workspaceId,
+              instanceId,
+              ownerUserId: ownerId,
+              source: 'wechat',
+              providerMessageId: incoming.messageId,
+              kind: archiveKind,
+              filename: media.name,
+              mime: media.mime,
+              sizeBytes: media.data.length,
+              bytes: media.data,
+            })
+            const ref = archiveMediaRef(asset)
+            incoming.archiveMediaRef = {
+              assetId: ref.asset_id!, sha256: ref.sha256!, filename: ref.filename,
+              mime: ref.mime, sizeBytes: ref.size_bytes,
+            }
+          } catch (err) {
+            incoming.archiveMediaAvailability = 'failed'
+            console.error('[wechat] local archive media staging failed:', err)
+          }
+        }
+        if (media.data.length > maxBytes) {
           userContentBlocks.push({
             type: 'text',
-            text: `[The user sent a ${media.kind} over ${Math.round(MAX_MEDIA_BYTES / 1024 / 1024)} MB - too large to process on WeChat. Ask them to share it another way.]`,
+            text: `[The user sent a ${media.kind} over ${Math.round(maxBytes / 1024 / 1024)} MB - too large to process.]`,
           })
-        } else if (media?.kind === 'image') {
+        } else if (media.kind === 'image') {
           userContentBlocks.push({ type: 'image', mimeType: media.mime, data: media.data.toString('base64') })
-        } else if (media?.kind === 'file') {
+        } else if (media.kind === 'file') {
           if (media.mime === 'application/pdf') {
             userContentBlocks.push({ type: 'image', mimeType: media.mime, data: media.data.toString('base64') })
           } else {
@@ -383,20 +443,19 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
               })
             }
           }
-        } else if (media?.kind === 'voice') {
-          // SILK-encoded voice without server STT — transcription is a
-          // documented v1 gap (docs/architecture/channels/wechat.md → Deferred).
+        } else if (media.kind === 'voice') {
           userContentBlocks.push({
             type: 'text',
-            text: '[The user sent a voice message that could not be transcribed. Ask them to type it instead.]',
+            text: '[The user sent a voice message. It is stored and being transcribed for chat-history search.]',
           })
-        } else if (media?.kind === 'video') {
+        } else if (media.kind === 'video') {
           userContentBlocks.push({
             type: 'text',
-            text: '[The user sent a video. Video is not supported on WeChat yet - let them know.]',
+            text: '[The user sent a video. It is stored and being processed for chat-history search.]',
           })
         }
       } catch (err) {
+        incoming.archiveMediaAvailability = 'failed'
         console.error('[wechat] media download/decrypt failed:', err)
         userContentBlocks.push({
           type: 'text',
