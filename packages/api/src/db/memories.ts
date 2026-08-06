@@ -3,6 +3,7 @@ import { buildAccessPredicate } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
 import { getPool, query } from './client.js'
 import { emitMentionedEdges } from './edge-hooks.js'
+import { excludeExternalPrincipalsSql } from './external-principal.js'
 
 export type { AccessContext }
 
@@ -693,49 +694,10 @@ function systemAssistantScopeSql(a: string, w: string, idx: number): string {
                AND ${w} = (SELECT workspace_id FROM assistants WHERE id = $${idx})))`
 }
 
-/**
- * The auth-provider-id prefixes that mark a shadow user as an **external
- * principal** — a company's own client talking to the workspace's assistant
- * through the public API (`api:<keyId>:<externalUserId>`) or a public chat
- * link (`chatlink:<linkId>:<visitorId>`). Both are minted by
- * `executePublicTurn`; nothing else writes these namespaces, so they are
- * external by construction.
- *
- * Membership was considered and rejected as the discriminator: Slack /
- * Telegram teammate shadows are non-members but are genuinely team, and
- * excluding them would silently change intended teammate consolidation.
- * See `docs/plans/client-principal.md` §6.1 (decision D1).
- */
-const EXTERNAL_PRINCIPAL_PREFIXES = ['api:%', 'chatlink:%'] as const
-
-/**
- * `AND NOT EXISTS (…)` fragment excluding rows authored by an external
- * principal (see `EXTERNAL_PRINCIPAL_PREFIXES`). Takes no bind params — the
- * prefixes are compile-time constants, so callers can splice it into any
- * query without renumbering placeholders.
- *
- * Why SQL-side and not worker-side: the team-consolidation index projection
- * carries no `userId` at all, so filtering in `phases.ts` would need a
- * widened projection to reach a worse result. The exclusion belongs at the
- * store, where both team passes inherit it through one edit.
- *
- * `u` is the (optionally alias-qualified) `user_id` column; qualify it
- * consistently with the surrounding query. A NULL `user_id` is never
- * external, so the row survives — unchanged from pre-exclusion behavior.
- *
- * Spec: `docs/architecture/context-engine/memory-consolidation.md` →
- * "External principals".
- */
-function excludeExternalPrincipalsSql(u: string): string {
-  const likes = EXTERNAL_PRINCIPAL_PREFIXES.map(
-    (p) => `ep_u.auth_provider_id LIKE '${p}'`,
-  ).join(' OR ')
-  return `AND NOT EXISTS (
-             SELECT 1 FROM users ep_u
-              WHERE ep_u.id = ${u}
-                AND ep_u.auth_provider = 'channel'
-                AND (${likes}))`
-}
+// The external-principal exclusion below is shared with its runtime twin
+// `isExternalPrincipal` (which decides whether a turn accrues a client
+// contact) — both derive from one namespace list in `./external-principal.js`,
+// imported at the top of this file. See `docs/plans/client-principal.md` §6.1.
 
 /**
  * System-level memory index for the consolidation worker. Filters on

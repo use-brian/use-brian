@@ -29,6 +29,8 @@ import {
   sanitize as sanitizeAnalytics,
   stripUnsignedToolUses, modelRequiresToolSignatures,
   modelToCompactionTier,
+  clientCompartment,
+  unionCompartments,
 } from '@use-brian/core'
 import type {
   LLMProvider,
@@ -52,6 +54,8 @@ import { notifyBrainWriteIfMatch } from '../brain-stream/notify.js'
 import { applyMcpInjection, buildUnavailableCapabilitiesPrompt } from './route-helpers.js'
 import { formatPrivateRuntimeContext } from './_prompt-builder.js'
 import { getConnectorUserId, getWorkspacePlan, resolveReadCeilingsSystem } from '../db/workspace-store.js'
+import { isExternalPrincipal } from '../db/external-principal.js'
+import { accrueClientPrincipal } from './client-accrual.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
 import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
@@ -353,6 +357,26 @@ export async function executePublicTurn(
      ON CONFLICT (assistant_id, user_id) DO NOTHING`,
     [assistant.id, user.id],
   )
+
+  // ── 4b. Client accrual ───────────────────────────────────
+  // What this turn leaves behind about the external client it serves: the
+  // `client:<externalUserId>` compartment stamp (the client-vs-client wall,
+  // D12) and, on an identified turn, a team-visible contact record (D11).
+  // Returns an empty stamp for a resolved teammate, so a public-API turn on
+  // behalf of a real member behaves exactly as before. See client-accrual.ts.
+  const accrual = await accrueClientPrincipal({
+    user,
+    workspaceId: assistant.workspaceId ?? null,
+    assistantId: assistant.id,
+    identityNamespace: input.identityNamespace,
+    externalUserId: body.externalUserId,
+    externalUserName: body.externalUserName,
+    email: claimedEmail ?? null,
+    orgId: body.claims?.orgId ?? null,
+    identified: isIdentified,
+    analytics: deps.analytics,
+    ownerId,
+  })
 
   // ── 5. Session ───────────────────────────────────────────
   const channelId = body.sessionId ?? body.externalUserId
@@ -674,7 +698,14 @@ export async function executePublicTurn(
         compartments: readCompartments,
         assistantClearance: assistant.clearance,
         assistantCompartments: assistant.compartments,
-        assistantDefaultCompartments: assistant.defaultCompartments,
+        // Every CRM / memory / task / knowledge write on this turn unions this
+        // in (`unionCompartments(accumulator, assistantDefaultCompartments)`),
+        // so adding the client's compartment here stamps the whole turn from
+        // one seam. Empty for a teammate — see client-accrual.ts.
+        assistantDefaultCompartments: unionCompartments(
+          assistant.defaultCompartments,
+          accrual.compartments,
+        ),
         workspaceId: assistant.workspaceId ?? undefined,
         assistantKind: assistant.kind,
         userTimezone: owner.timezone ?? undefined,

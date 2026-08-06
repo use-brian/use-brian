@@ -18,6 +18,37 @@
  */
 
 /**
+ * Reserved namespace for machine-minted per-client compartments.
+ *
+ * Operator-authored compartment keys are a small taxonomy a human curates in
+ * Studio (`compartments.key` matches `/^[a-z0-9][a-z0-9-]{0,38}$/`, so it can
+ * never contain a colon). Client compartments are the opposite: one per
+ * external principal, minted by the turn pipeline, unbounded in cardinality,
+ * and never registered. Keeping them in their own namespace is what lets the
+ * picker filter them out by rule instead of by list.
+ *
+ * Load-bearing, not decorative. A client contact row is `user_id` NULL (so the
+ * team can see it at all), which means the automatic `user_id` partition is no
+ * longer the client-vs-client wall — the compartment is. See
+ * `docs/plans/client-principal.md` decisions D9 and D12.
+ */
+export const CLIENT_COMPARTMENT_PREFIX = 'client:'
+
+/**
+ * Mint the compartment for one external principal. The `externalUserId` is the
+ * consumer's own durable index key, carried verbatim so an operator reading a
+ * row can tell whose it is.
+ */
+export function clientCompartment(externalUserId: string): string {
+  return `${CLIENT_COMPARTMENT_PREFIX}${externalUserId}`
+}
+
+/** Is this key in the reserved, machine-minted client namespace? */
+export function isClientCompartment(key: string): boolean {
+  return key.startsWith(CLIENT_COMPARTMENT_PREFIX)
+}
+
+/**
  * Per-turn accumulator. Call `note(row.compartments)` on every row read into
  * context; `compartments` returns the deduped union seen so far (starts empty).
  * Derived writes union this in so a row distilled from `{research}` + `{finance}`
