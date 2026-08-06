@@ -60,7 +60,10 @@ async function writeObject(slide: Slide, object: PresentationObject, resolveReso
   if (object.kind === 'shape') {
     const shape = (object.shape === 'roundedRectangle' ? 'roundRect' : object.shape === 'rectangle' ? 'rect' : object.shape === 'triangle' ? 'triangle' : object.shape === 'ellipse' ? 'ellipse' : 'line') as ShapeName
     slide.addShape(shape, { ...box, fill: object.fill ? { color: hex(object.fill) } : { color: 'FFFFFF', transparency: 100 }, line: object.stroke ? { color: hex(object.stroke), width: object.strokeWidthPt } : { type: 'none' } })
-    if (object.text.length) slide.addText(richText(object.text), { ...box, margin: 2 })
+    if (object.text.length) {
+      const align = object.alignment === 'start' || !object.alignment ? 'left' : object.alignment === 'end' ? 'right' : object.alignment
+      slide.addText(richText(object.text), { ...box, align, valign: object.verticalAlignment ?? 'middle', margin: 0 })
+    }
     return
   }
   if (object.kind === 'connector') {

@@ -44,7 +44,7 @@ export function getGlobalMailboxArchiveDeps(): MailboxArchiveDeps | null {
 const archiveSearchShape = {
   query: z
     .string()
-    .describe('What to look for across the synced mailbox, in natural language.'),
+    .describe('What to look for across the synced email archive, in natural language.'),
   topK: z
     .number()
     .int()
@@ -69,8 +69,8 @@ const archiveAccountField = z
   .string()
   .optional()
   .describe(
-    'Which connected company mailbox to search, by its email address. ' +
-    'Omit to search the primary (first-connected) mailbox. Only needed when more than one mailbox is connected.',
+    'Which connected email account to search, by its email address. ' +
+    'Omit to search the primary (first-connected) email account. Only needed when more than one email account is connected.',
   )
 
 /** A connected mailbox archive, primary first — bound at injection, never model input. */
@@ -99,14 +99,14 @@ export function createSearchEmailArchiveTool(opts: CreateArchiveSearchToolOption
   return buildTool({
     name: 'searchEmailArchive',
     description:
-      "Semantic search over the user's SYNCED company-mailbox archive — meaning-based recall across the whole mailbox history " +
+      "Search the user's synced email archive by meaning across the full email history " +
       '("what did the landlord say about the deposit"), even when exact words are unknown. ' +
       'Results carry a message id (`folder:uid`) usable with imapGetMessage for the full message. ' +
       'For fresh or exact lookups (new mail, a known sender/date), use imapSearchMessages instead — the archive syncs on a delay. ' +
       'For cross-source company knowledge, use searchBrain. ' +
       (opts.boundAccount
-        ? `This tool is bound to ${opts.boundAccount.email}; use the separately named tool set for another mailbox.`
-        : 'If more than one company mailbox is connected, pass `account` (the mailbox email) to choose which; omit it for the primary.'),
+        ? `This tool is bound to the email account ${opts.boundAccount.email}; use the separately named tool set for another email account.`
+        : 'If more than one email account is connected, pass `account` (the email address) to choose which; omit it for the primary.'),
     inputSchema: z.object({ ...archiveSearchShape, ...accountInputShape }),
     isReadOnly: true,
     isConcurrencySafe: true,
@@ -115,7 +115,7 @@ export function createSearchEmailArchiveTool(opts: CreateArchiveSearchToolOption
     async execute(input) {
       const accounts = opts.accounts
       if (accounts.length === 0) {
-        return { data: 'No company mailbox is connected. Connect one in Studio → Connectors, then try again.', isError: true }
+        return { data: 'No email account is connected through IMAP/SMTP. Connect one in Studio → Connectors, then try again.', isError: true }
       }
       let target: ArchiveAccountRef | undefined = opts.boundAccount
       const inputWithAccount = input as unknown as { account?: unknown }
@@ -127,7 +127,7 @@ export function createSearchEmailArchiveTool(opts: CreateArchiveSearchToolOption
         target = accounts.find((a) => a.email.trim().toLowerCase() === wanted)
         if (!target) {
           return {
-            data: `No connected company mailbox "${selectedAccount}". Connected mailboxes: ${accounts.map((a) => a.email).join(', ')}.`,
+            data: `No connected email account "${selectedAccount}". Connected email accounts: ${accounts.map((a) => a.email).join(', ')}.`,
             isError: true,
           }
         }

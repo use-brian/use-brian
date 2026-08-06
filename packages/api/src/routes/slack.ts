@@ -1044,7 +1044,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
   const isAv = (m: string) => m.startsWith('audio/') || m.startsWith('video/')
   const brainMediaFiles =
     ingestChannelMediaRef && assistant.workspaceId && incoming.files?.length
-      ? incoming.files.filter((f) => classifyMedia(f.mimeType) !== 'unsupported')
+      ? incoming.files.filter((f) => classifyMedia(f.mimeType, f.name) !== 'unsupported')
       : []
   for (const f of brainMediaFiles) {
     ingestChannelMediaRef!({
@@ -1131,10 +1131,18 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
         userContentBlocks.push({ type: 'image', mimeType: dl.mimeType, data: dl.buffer.toString('base64') })
       } else {
         const parsed = await parseFileContent(dl.buffer, dl.mimeType, dl.name)
-        userContentBlocks.push({
-          type: 'text',
-          text: `<attached_file name="${dl.name}" type="${dl.mimeType}">\n${parsed.text}\n</attached_file>`,
-        })
+        if (parsed.mediaMimeType === 'application/pdf' || parsed.mediaMimeType?.startsWith('image/')) {
+          userContentBlocks.push({
+            type: 'image',
+            mimeType: parsed.mediaMimeType,
+            data: dl.buffer.toString('base64'),
+          })
+        } else {
+          userContentBlocks.push({
+            type: 'text',
+            text: `<attached_file name="${dl.name}" type="${dl.mimeType}">\n${parsed.text}\n</attached_file>`,
+          })
+        }
       }
     }
   }

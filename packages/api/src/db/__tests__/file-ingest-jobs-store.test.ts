@@ -34,23 +34,27 @@ describe('[COMP:files/file-ingest-jobs-store] file-ingest job queue', () => {
     expect(res).toEqual({ enqueued: false, jobId: null })
   })
 
-  it('enqueue defaults source_label to "upload" and assistant_id to NULL', async () => {
+  it('enqueue defaults source_label to "upload", assistant_id to NULL, mode to "silent"', async () => {
+    // `silent` is the conservative default on purpose (migration 404): it is the
+    // mode that never spends a model distill, so a caller that forgets to say
+    // what it is cannot accidentally buy one.
     mockQuery.mockResolvedValueOnce({ rows: [{ id: 'job-1' }] } as never)
     await enqueueFileIngestJob({ fileId: 'file-1', workspaceId: 'ws-1', actingUserId: 'u-1' })
     expect(mockQuery).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO file_ingest_jobs'),
-      ['file-1', 'ws-1', 'u-1', null, 'upload'],
+      ['file-1', 'ws-1', 'u-1', null, 'upload', 'silent'],
     )
   })
 
-  it('enqueue forwards assistant_id and a custom source_label', async () => {
+  it('enqueue forwards assistant_id, a custom source_label and an explicit mode', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [{ id: 'job-2' }] } as never)
     await enqueueFileIngestJob({
-      fileId: 'file-1', workspaceId: 'ws-1', actingUserId: 'u-1', assistantId: 'a-1', sourceLabel: 'paste',
+      fileId: 'file-1', workspaceId: 'ws-1', actingUserId: 'u-1', assistantId: 'a-1',
+      sourceLabel: 'paste', mode: 'explicit',
     })
     expect(mockQuery).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO file_ingest_jobs'),
-      ['file-1', 'ws-1', 'u-1', 'a-1', 'paste'],
+      ['file-1', 'ws-1', 'u-1', 'a-1', 'paste', 'explicit'],
     )
   })
 

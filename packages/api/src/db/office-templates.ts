@@ -3,8 +3,8 @@ import { defaultOfficeDbQuery, type OfficeDbQuery } from './office-artifacts.js'
 
 export function createOfficeTemplateStore(db: OfficeDbQuery = defaultOfficeDbQuery) {
   return {
-    async get(userId: string, templateId: string): Promise<{ id: string; workspaceId: string; family: 'document' | 'presentation'; name: string; description: string; sensitivity: 'public' | 'internal' | 'confidential'; lifecycleState: 'draft' | 'admitted' | 'deprecated' | 'trash' | 'retained'; draftArtifactId: string | null } | null> {
-      const result = await db<{ id: string; workspaceId: string; family: 'document' | 'presentation'; name: string; description: string; sensitivity: 'public' | 'internal' | 'confidential'; lifecycleState: 'draft' | 'admitted' | 'deprecated' | 'trash' | 'retained'; draftArtifactId: string | null }>(userId, `
+    async get(userId: string, templateId: string): Promise<{ id: string; workspaceId: string; family: 'document' | 'presentation' | 'spreadsheet'; name: string; description: string; sensitivity: 'public' | 'internal' | 'confidential'; lifecycleState: 'draft' | 'admitted' | 'deprecated' | 'trash' | 'retained'; draftArtifactId: string | null } | null> {
+      const result = await db<{ id: string; workspaceId: string; family: 'document' | 'presentation' | 'spreadsheet'; name: string; description: string; sensitivity: 'public' | 'internal' | 'confidential'; lifecycleState: 'draft' | 'admitted' | 'deprecated' | 'trash' | 'retained'; draftArtifactId: string | null }>(userId, `
         SELECT id, workspace_id AS "workspaceId", family, name, description,
                sensitivity, lifecycle_state AS "lifecycleState",
                draft_artifact_id AS "draftArtifactId"
@@ -13,16 +13,28 @@ export function createOfficeTemplateStore(db: OfficeDbQuery = defaultOfficeDbQue
       return result.rows[0] ?? null
     },
 
-    async getResource(userId: string, resourceId: string): Promise<{ id: string; workspaceId: string; fileId: string | null; hash: string; mime: string; sensitivity: 'public' | 'internal' | 'confidential' } | null> {
-      const result = await db<{ id: string; workspaceId: string; fileId: string | null; hash: string; mime: string; sensitivity: 'public' | 'internal' | 'confidential' }>(userId, `
+    async getVersion(userId: string, versionId: string): Promise<{ id: string; templateId: string; workspaceId: string; version: number; status: 'draft' | 'admitted'; bundleFileId: string; bundleHash: string } | null> {
+      const result = await db<{ id: string; templateId: string; workspaceId: string; version: number; status: 'draft' | 'admitted'; bundleFileId: string; bundleHash: string }>(userId, `
+        SELECT id, template_id AS "templateId", workspace_id AS "workspaceId",
+               version::int AS version, status, bundle_file_id AS "bundleFileId",
+               bundle_hash AS "bundleHash"
+          FROM office_template_versions
+         WHERE id=$1
+      `, [versionId])
+      return result.rows[0] ?? null
+    },
+
+    async getResource(userId: string, resourceId: string): Promise<{ id: string; workspaceId: string; fileId: string | null; hash: string; mime: string; licence: { name?: unknown; url?: unknown; attribution?: unknown }; embeddingRights: 'allowed' | 'subset_only' | 'prohibited' | 'unknown'; sensitivity: 'public' | 'internal' | 'confidential' } | null> {
+      const result = await db<{ id: string; workspaceId: string; fileId: string | null; hash: string; mime: string; licence: { name?: unknown; url?: unknown; attribution?: unknown }; embeddingRights: 'allowed' | 'subset_only' | 'prohibited' | 'unknown'; sensitivity: 'public' | 'internal' | 'confidential' }>(userId, `
         SELECT id, workspace_id AS "workspaceId", file_id AS "fileId",
-               content_hash AS hash, mime, sensitivity
+               content_hash AS hash, mime, licence,
+               embedding_rights AS "embeddingRights", sensitivity
           FROM office_resources WHERE id=$1
       `, [resourceId])
       return result.rows[0] ?? null
     },
 
-    async list(userId: string, workspaceId: string, family?: 'document' | 'presentation'): Promise<Array<Record<string, unknown>>> {
+    async list(userId: string, workspaceId: string, family?: 'document' | 'presentation' | 'spreadsheet'): Promise<Array<Record<string, unknown>>> {
       const result = await db<Record<string, unknown>>(userId, `
         SELECT id, family, name, description, lifecycle_state AS "lifecycleState",
                current_version_id AS "currentVersionId",
@@ -42,7 +54,7 @@ export function createOfficeTemplateStore(db: OfficeDbQuery = defaultOfficeDbQue
       return result.rows
     },
 
-    async createDraft(params: { userId: string; workspaceId: string; family: 'document' | 'presentation'; name: string; description: string; sensitivity: 'public' | 'internal' | 'confidential'; draftArtifactId: string }): Promise<{ id: string }> {
+    async createDraft(params: { userId: string; workspaceId: string; family: 'document' | 'presentation' | 'spreadsheet'; name: string; description: string; sensitivity: 'public' | 'internal' | 'confidential'; draftArtifactId: string }): Promise<{ id: string }> {
       const result = await db<{ id: string }>(params.userId, `
         INSERT INTO office_templates
           (workspace_id, family, name, description, owner_user_id, sensitivity,
@@ -51,6 +63,25 @@ export function createOfficeTemplateStore(db: OfficeDbQuery = defaultOfficeDbQue
       `, [params.workspaceId, params.family, params.name, params.description, params.userId, params.sensitivity, params.draftArtifactId])
       if (!result.rows[0]) throw new Error('Office template draft insert returned no row')
       return result.rows[0]
+    },
+
+    async getDraftRouting(userId: string, templateId: string): Promise<unknown | null> {
+      const result = await db<{ draftRouting: unknown | null }>(userId, `
+        SELECT draft_routing AS "draftRouting"
+          FROM office_templates
+         WHERE id=$1 AND lifecycle_state='draft'
+      `, [templateId])
+      return result.rows[0]?.draftRouting ?? null
+    },
+
+    async saveDraftRouting(params: { userId: string; templateId: string; routing: unknown }): Promise<boolean> {
+      const result = await db<{ id: string }>(params.userId, `
+        UPDATE office_templates
+           SET draft_routing=$2::jsonb, updated_at=now()
+         WHERE id=$1 AND lifecycle_state='draft'
+        RETURNING id
+      `, [params.templateId, JSON.stringify(params.routing)])
+      return result.rows.length === 1
     },
 
     async deleteEmptyDraft(userId: string, templateId: string): Promise<boolean> {

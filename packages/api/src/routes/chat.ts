@@ -501,6 +501,13 @@ type WebChatOptions = {
    */
   introspectionTools?: Tool[]
   /**
+   * Confirmation-gated private-chat -> workspace-room handoff. Constructed at
+   * boot but admitted only for owner-scoped web sessions by
+   * `mayOfferWorkspaceChatHandoff`, so channels/callees/workflows/public API
+   * never see it.
+   */
+  workspaceChatHandoffTool?: Tool
+  /**
    * Dynamic "workspace blueprints" system-prompt section — closed-world
    * (empty string when the workspace has no blueprints). Carries the
    * bound-vs-unbound application posture. Never part of Layer 1.
@@ -831,6 +838,24 @@ export function isDocSurface(session: {
   channelType: string
 }): boolean {
   return session.appOrigin === 'doc' || session.channelType === 'doc_thread'
+}
+
+/**
+ * Natural-language workspace-room creation is an audience change, so the tool
+ * exists only on a workspace-bound PRIVATE web session. Keep this pure and
+ * re-check the same conditions in the persistence port at execute time.
+ *
+ * [COMP:api/workspace-chat-handoff]
+ */
+export function mayOfferWorkspaceChatHandoff(
+  session: { visibility: string | null; channelType: string },
+  assistantWorkspaceId: string | null | undefined,
+): boolean {
+  return (
+    !!assistantWorkspaceId &&
+    session.visibility === 'owner' &&
+    session.channelType === 'web'
+  )
 }
 
 /**
@@ -3915,6 +3940,20 @@ export function chatRoutes(options: WebChatOptions): Router {
       allTools.set('deleteMemory', deleteMemory)
       if (updateViewedSkillTool) {
         allTools.set(updateViewedSkillTool.name, updateViewedSkillTool)
+      }
+
+      // A private web conversation can explicitly hand its reviewed current
+      // work to a new workspace room. This is per-turn admission, not a global
+      // base tool: public API, messaging channels, rooms, workflows, workers,
+      // and inter-assistant callees must never discover it.
+      if (
+        options.workspaceChatHandoffTool &&
+        mayOfferWorkspaceChatHandoff(session, assistant.workspaceId)
+      ) {
+        allTools.set(
+          options.workspaceChatHandoffTool.name,
+          options.workspaceChatHandoffTool,
+        )
       }
 
       // updateSelfProfile — Identity Phase 2 groundwork. Available

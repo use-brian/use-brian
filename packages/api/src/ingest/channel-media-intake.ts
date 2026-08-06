@@ -18,6 +18,7 @@
 import type { CreateEpisodeInput, EpisodeRecord, EpisodeSensitivity } from '../db/episodes-store.js'
 import type { Recording } from '../db/recordings-store.js'
 import { buildChannelSessionKey } from '../db/pending-recording-confirmations-store.js'
+import { isStructuredDocument } from '@use-brian/core'
 
 /** A normalized inbound attachment whose bytes are already in GCS. */
 export type ChannelMediaRef = {
@@ -64,17 +65,15 @@ export type ChannelMediaRef = {
 
 export type ChannelMediaKind = 'audio_video' | 'document' | 'unsupported'
 
-/** v1 document set — what `parseFileContent` / the distiller can turn into text. */
-const DOCUMENT_MIME_PREFIXES = ['application/pdf', 'text/', 'application/json']
-const DOCUMENT_MIME_EXACT = [
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  'application/msword',
-]
-
-export function classifyMedia(mime: string): ChannelMediaKind {
-  const m = mime.toLowerCase()
+/** What `parseFileContent` / the distiller can preserve or turn into text. */
+export function classifyMedia(mime: string, fileName?: string | null): ChannelMediaKind {
+  const m = mime.toLowerCase().split(';', 1)[0]!.trim()
   if (m.startsWith('audio/') || m.startsWith('video/')) return 'audio_video'
-  if (DOCUMENT_MIME_PREFIXES.some((p) => m.startsWith(p)) || DOCUMENT_MIME_EXACT.includes(m)) {
+  if (
+    m.startsWith('text/') ||
+    m === 'application/json' ||
+    isStructuredDocument(m, fileName ?? undefined)
+  ) {
     return 'document'
   }
   return 'unsupported'
@@ -251,7 +250,7 @@ export async function ingestChannelMedia(
     return { status: 'rejected', reason: 'too_large' }
   }
 
-  const kind = classifyMedia(ref.mime)
+  const kind = classifyMedia(ref.mime, ref.fileName)
   if (kind === 'unsupported') return { status: 'rejected', reason: 'unsupported' }
 
   if (deps.checkQuota) {

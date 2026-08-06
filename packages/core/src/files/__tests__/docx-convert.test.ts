@@ -32,7 +32,7 @@ describe('[COMP:files/docx-convert] .docx → Block[]', () => {
     expect(allText).toContain('Launched in three regions')
     expect(allText).toContain('Hired two engineers')
 
-    // The bullets survive as list items (mammoth maps <ul><li> reliably).
+    // The bullets survive as list items in the deterministic Markdown parse.
     expect(recovered.some((b) => b.kind === 'bulleted_list_item')).toBe(true)
   })
 

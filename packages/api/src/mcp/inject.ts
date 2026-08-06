@@ -1924,8 +1924,10 @@ export function clearStaleNotConnectedNotices(
 
 function notConnectedNotice(displayName: string, capabilities: string): string {
   return (
-    `${displayName}: not connected for this assistant, so ${capabilities} are unavailable this turn. ` +
-    'If the user asks for one, say so plainly in your own words and point them to Studio then Connectors to connect it. ' +
+    `${displayName}: not connected for this assistant, so only this connector's ${capabilities} are unavailable this turn. ` +
+    'Another connected service may still provide the broader capability. Use an available tool that matches the requested account and identity; ' +
+    'do not mention this missing service when another available tool can fulfill the task. ' +
+    'If the task truly requires this service and no available tool can fulfill it, say so plainly in your own words and point the user to Studio then Connectors to connect it. ' +
     'Do not quote this notice back to them, and do not claim a tool call failed.'
   )
 }

@@ -1,13 +1,294 @@
 import { describe, expect, it, vi } from 'vitest'
-import { exportOfficePresentation } from '@use-brian/core'
-import type { PresentationSnapshot } from '@use-brian/office-model'
+import { exportOfficePresentation, type Message } from '@use-brian/core'
+import type { DocumentSnapshot, PresentationSnapshot, SpreadsheetSnapshot } from '@use-brian/office-model'
 import { createOfficeGenerationWorker } from '../generation-worker.js'
 import { createOfficeImportWorker } from '../import-worker.js'
 import { createOfficeService } from '../service.js'
 import { createOfficeTemplateCompileWorker } from '../template-compile-worker.js'
+import { generateDocumentFromTemplate, reviseDocumentTargets } from '../document-generation.js'
+import { generatePresentationFromTemplate, materializeOfficeTemplateBundleForGeneration, revisePresentationTargets } from '../presentation-generation.js'
+import { generateSpreadsheetFromTemplate, reviseSpreadsheetTargets } from '../spreadsheet-generation.js'
 import type { OfficeGenerationJobRow } from '../../db/office-generation.js'
 
 describe('[COMP:api/office-generation] Office generation worker', () => {
+  it('constructs a letter by replacing template fields while preserving the canonical shell', async () => {
+    const uid = (n: number) => `30000000-0000-4000-8000-${String(n).padStart(12, '0')}`
+    const style = { fontFamily: 'Arial', fontSizePt: 11, bold: false, italic: false, underline: false, strike: false, color: '#111111' }
+    const paragraph = (n: number, text: string) => ({ id: uid(n), kind: 'paragraph' as const, runs: [{ id: uid(n + 100), text, style }], styleName: 'Body', alignment: 'start' as const })
+    const snapshot = {
+      schemaVersion: 1 as const, capabilityVersion: 1 as const, artifactId: uid(1), workspaceId: uid(2), family: 'document' as const,
+      locale: 'en-US', defaultLanguage: 'en-US', templateVersionId: null, rootId: uid(3), title: 'Letterhead', resources: [], accessibility: { title: 'Letterhead' },
+      sections: [{ id: uid(4), page: { widthPt: 595.3, heightPt: 841.9, marginTopPt: 72, marginRightPt: 62, marginBottomPt: 68, marginLeftPt: 62, orientation: 'portrait' as const }, header: [{ id: uid(5), text: 'Use Brian', style }], footer: [{ id: uid(6), text: 'USEBRIAN.AI', style }], showPageNumber: false, nodes: [paragraph(10, '{{LETTER_DATE}}'), paragraph(11, '{{RECIPIENT_NAME}}'), paragraph(12, '{{SUBJECT}}'), paragraph(13, '{{SALUTATION}}'), paragraph(14, '{{LETTER_BODY}}'), paragraph(15, '{{CLOSING}}'), paragraph(16, '{{SIGNATORY_NAME}}')] }],
+    }
+    const payload = JSON.stringify({ title: 'Salary adjustment', letterDate: '6 August 2026', recipientName: 'Alex Morgan', recipientTitle: '', recipientOrganisation: 'Example Labs', recipientAddress: ['1 Example Road'], subject: 'Salary adjustment', salutation: 'Dear Alex,', bodyParagraphs: ['Your annual salary will change to HKD 720,000.', 'All other terms remain unchanged.'], closing: 'Sincerely,', signatoryName: 'Jordan Lee', signatoryTitle: 'People Lead' })
+    const provider = { async *stream() { yield { type: 'message_start' as const, model: 'test' }; yield { type: 'text_delta' as const, text: payload }; yield { type: 'message_end' as const, stopReason: 'end_turn' as const, usage: { inputTokens: 1, outputTokens: 1 } } } }
+    const generated = await generateDocumentFromTemplate({ provider: provider as never, model: 'test', artifactId: uid(20), workspaceId: uid(2), templateVersionId: uid(21), outcome: 'Adjust Alex salary', audience: 'Alex', template: { id: uid(21), workspaceId: uid(2), family: 'document', version: 1, status: 'admitted', name: 'Letterhead', description: 'Company letters', tags: ['company'], locales: ['en-US'], whenToUse: ['letters'], whenNotToUse: ['slides'], exampleRequests: ['Write a letter'], fields: [], slideRecipes: [], snapshot, resources: [], lockedObjectIds: [], allowedRepeatTargetIds: [], requiredEvidence: [], sensitivity: 'internal', visibilityUserIds: [], capabilityVersion: 1, sourceHash: 'a'.repeat(64) } })
+    expect(generated.artifactId).toBe(uid(20))
+    expect(generated.sections[0].header.map((run) => run.text).join('')).toBe('Use Brian')
+    expect(generated.sections[0].nodes.map((node) => 'runs' in node ? node.runs.map((run) => run.text).join('') : '')).toContain('Your annual salary will change to HKD 720,000.')
+    expect(JSON.stringify(generated)).not.toContain('{{')
+  })
+
+  it('fills the admitted placeholder vocabulary of a non-letter document template', async () => {
+    const uid = (n: number) => `35000000-0000-4000-8000-${String(n).padStart(12, '0')}`
+    const style = { fontFamily: 'Arial', fontSizePt: 11, bold: false, italic: false, underline: false, strike: false, color: '#111111' }
+    const cell = (n: number, text: string) => ({ id: uid(n), runs: [{ id: uid(n + 100), text, style }], rowSpan: 1, colSpan: 1 })
+    const snapshot: DocumentSnapshot = {
+      schemaVersion: 1, capabilityVersion: 1, artifactId: uid(1), workspaceId: uid(2), family: 'document', locale: 'en-US', defaultLanguage: 'en-US', templateVersionId: null, rootId: uid(3), title: 'Invoice template', resources: [], accessibility: { title: 'Invoice template' },
+      sections: [{
+        id: uid(4), page: { widthPt: 595.3, heightPt: 841.9, marginTopPt: 72, marginRightPt: 62, marginBottomPt: 68, marginLeftPt: 62, orientation: 'portrait' },
+        header: [{ id: uid(5), text: 'Invoice {{INVOICE_NUMBER}}', style }],
+        footer: [{ id: uid(6), text: '{{OPTIONAL_NOTE}}', style }], showPageNumber: false,
+        nodes: [{ id: uid(10), kind: 'table', headerRows: 1, columnWidthsPt: [80, 160], widthPt: 240, layout: 'fixed', margins: { topPt: 2, rightPt: 4, bottomPt: 2, leftPt: 4 }, borders: { bottom: { color: '#34D3FF', widthPt: 1.125, style: 'solid' }, insideVertical: { color: '#DCE9EE', widthPt: 0.625, style: 'solid' } }, rows: [
+          { id: uid(11), cells: [cell(12, 'Customer'), cell(13, '{{CUSTOMER_NAME}}')] },
+          { id: uid(14), cells: [cell(15, 'Total'), cell(16, '{{TOTAL}}')] },
+        ] }],
+      }],
+    }
+    const template = { id: uid(21), workspaceId: uid(2), family: 'document' as const, version: 1, status: 'admitted' as const, name: 'Invoice', description: 'Use for customer invoices', tags: ['invoice'], locales: ['en-US'], whenToUse: ['invoices'], whenNotToUse: ['letters'], exampleRequests: ['Create an invoice'], fields: [], slideRecipes: [], snapshot, resources: [], lockedObjectIds: [], allowedRepeatTargetIds: [], requiredEvidence: [], sensitivity: 'internal' as const, visibilityUserIds: [], capabilityVersion: 1, sourceHash: 'e'.repeat(64) }
+    const payload = JSON.stringify({ title: 'Invoice INV-2026-001', values: { CUSTOMER_NAME: 'Northstar Studio Ltd.', INVOICE_NUMBER: 'INV-2026-001', OPTIONAL_NOTE: '', TOTAL: 'USD 11,000.00' } })
+    const requests: Array<{ systemPrompt?: string; messages?: Message[] }> = []
+    const provider = { async *stream(request: { systemPrompt?: string; messages?: Message[] }) { requests.push(request); yield { type: 'message_start' as const, model: 'test' }; yield { type: 'text_delta' as const, text: payload }; yield { type: 'message_end' as const, stopReason: 'end_turn' as const, usage: { inputTokens: 1, outputTokens: 1 } } } }
+
+    const generated = await generateDocumentFromTemplate({ provider: provider as never, model: 'test', artifactId: uid(20), workspaceId: uid(2), templateVersionId: uid(21), outcome: 'Create the supplied invoice', audience: 'Accounts payable', template })
+
+    expect(generated.title).toBe('Invoice INV-2026-001')
+    expect(generated.sections[0]?.header.map((run) => run.text).join('')).toBe('Invoice INV-2026-001')
+    expect(JSON.stringify(generated)).toContain('Northstar Studio Ltd.')
+    expect(JSON.stringify(generated)).toContain('USD 11,000.00')
+    expect(JSON.stringify(generated)).not.toContain('{{')
+    expect(generated.sections[0]?.nodes[0]).toMatchObject({ kind: 'table', columnWidthsPt: [80, 160], widthPt: 240, layout: 'fixed', margins: { leftPt: 4 }, borders: { bottom: { color: '#34D3FF', widthPt: 1.125, style: 'solid' } } })
+    expect(requests[0]?.systemPrompt).toContain('every supplied placeholder key exactly once')
+    expect(JSON.stringify(requests[0]?.messages)).toContain('CUSTOMER_NAME')
+  })
+
+  it('fails generic document generation when the model omits an admitted placeholder', async () => {
+    const uid = (n: number) => `36000000-0000-4000-8000-${String(n).padStart(12, '0')}`
+    const style = { fontFamily: 'Arial', fontSizePt: 11, bold: false, italic: false, underline: false, strike: false, color: '#111111' }
+    const snapshot: DocumentSnapshot = {
+      schemaVersion: 1, capabilityVersion: 1, artifactId: uid(1), workspaceId: uid(2), family: 'document', locale: 'en-US', defaultLanguage: 'en-US', templateVersionId: null, rootId: uid(3), title: 'Invoice template', resources: [], accessibility: { title: 'Invoice template' },
+      sections: [{ id: uid(4), page: { widthPt: 595.3, heightPt: 841.9, marginTopPt: 72, marginRightPt: 62, marginBottomPt: 68, marginLeftPt: 62, orientation: 'portrait' }, header: [], footer: [], showPageNumber: false, nodes: [{ id: uid(5), kind: 'paragraph', runs: [{ id: uid(6), text: '{{INVOICE_NUMBER}} {{TOTAL}}', style }], styleName: 'Body', alignment: 'start' }] }],
+    }
+    const template = { id: uid(21), workspaceId: uid(2), family: 'document' as const, version: 1, status: 'admitted' as const, name: 'Invoice', description: 'Use for customer invoices', tags: ['invoice'], locales: ['en-US'], whenToUse: ['invoices'], whenNotToUse: ['letters'], exampleRequests: ['Create an invoice'], fields: [], slideRecipes: [], snapshot, resources: [], lockedObjectIds: [], allowedRepeatTargetIds: [], requiredEvidence: [], sensitivity: 'internal' as const, visibilityUserIds: [], capabilityVersion: 1, sourceHash: 'f'.repeat(64) }
+    const payload = JSON.stringify({ title: 'Invoice INV-2026-001', values: { INVOICE_NUMBER: 'INV-2026-001' } })
+    const provider = { async *stream() { yield { type: 'message_start' as const, model: 'test' }; yield { type: 'text_delta' as const, text: payload }; yield { type: 'message_end' as const, stopReason: 'end_turn' as const, usage: { inputTokens: 1, outputTokens: 1 } } } }
+
+    await expect(generateDocumentFromTemplate({ provider: provider as never, model: 'test', artifactId: uid(20), workspaceId: uid(2), templateVersionId: uid(21), outcome: 'Create the supplied invoice', audience: 'Accounts payable', template })).rejects.toThrow('missing: TOTAL')
+  })
+
+  it('gives targeted document revisions read-only surrounding context without mutating it', async () => {
+    const uid = (n: number) => `33000000-0000-4000-8000-${String(n).padStart(12, '0')}`
+    const style = { fontFamily: 'Arial', fontSizePt: 11, bold: false, italic: false, underline: false, strike: false, color: '#111111' }
+    const paragraph = (n: number, text: string) => ({ id: uid(n), kind: 'paragraph' as const, runs: [{ id: uid(n + 100), text, style }], styleName: 'Body', alignment: 'start' as const })
+    const targetId = uid(11)
+    const snapshot = {
+      schemaVersion: 1 as const, capabilityVersion: 1 as const, artifactId: uid(1), workspaceId: uid(2), family: 'document' as const,
+      locale: 'en-US', defaultLanguage: 'en-US', templateVersionId: uid(4), rootId: uid(3), title: 'Salary adjustment', resources: [], accessibility: { title: 'Salary adjustment' },
+      sections: [{ id: uid(5), page: { widthPt: 595.3, heightPt: 841.9, marginTopPt: 72, marginRightPt: 62, marginBottomPt: 68, marginLeftPt: 62, orientation: 'portrait' as const }, header: [], footer: [], showPageNumber: false, nodes: [
+        paragraph(10, 'Your annual salary will be adjusted to HKD 780,000, effective 1 September 2026.'),
+        paragraph(11, 'This adjustment reflects our appreciation for your work.'),
+        paragraph(12, 'All other terms and conditions remain unchanged.'),
+      ] }],
+    }
+    let modelRequest: { systemPrompt?: string; messages?: Message[] } | undefined
+    const payload = JSON.stringify({ replacements: [{ targetId, text: 'We deeply appreciate your work.' }] })
+    const provider = { async *stream(request: { systemPrompt?: string; messages?: Message[] }) { modelRequest = request; yield { type: 'message_start' as const, model: 'test' }; yield { type: 'text_delta' as const, text: payload }; yield { type: 'message_end' as const, stopReason: 'end_turn' as const, usage: { inputTokens: 1, outputTokens: 1 } } } }
+
+    const revised = await reviseDocumentTargets({ provider: provider as never, model: 'test', snapshot, targetIds: [targetId], instruction: '@Brian make this warmer and preserve the amount, date, and other terms' })
+
+    expect(modelRequest?.systemPrompt).toContain('complete document context is read-only')
+    expect(modelRequest?.messages?.[0]?.content).toContain('HKD 780,000')
+    expect(modelRequest?.messages?.[0]?.content).toContain('1 September 2026')
+    expect(modelRequest?.messages?.[0]?.content).toContain('All other terms and conditions remain unchanged.')
+    expect(modelRequest?.messages?.[0]?.content).not.toContain('@Brian')
+    expect(revised.sections[0].nodes.map((node) => 'runs' in node ? node.runs.map((run) => run.text).join('') : '')).toEqual([
+      'Your annual salary will be adjusted to HKD 780,000, effective 1 September 2026.',
+      'We deeply appreciate your work.',
+      'All other terms and conditions remain unchanged.',
+    ])
+  })
+
+  it('fills typed spreadsheet placeholders while preserving workbook fidelity', async () => {
+    const uid = (n: number) => `32000000-0000-4000-8000-${String(n).padStart(12, '0')}`
+    const snapshot: SpreadsheetSnapshot = {
+      schemaVersion: 1, capabilityVersion: 1, artifactId: uid(1), workspaceId: uid(2), family: 'spreadsheet',
+      locale: 'en-US', defaultLanguage: 'en-US', templateVersionId: null, rootId: uid(3), title: 'Invoice template', resources: [], accessibility: { title: 'Invoice template' },
+      activeSheetId: uid(10), calculationMode: 'automatic', worksheets: [
+        {
+          id: uid(10), name: 'Invoice', visibility: 'visible',
+          cells: [
+            { id: uid(20), address: 'A1', valueType: 'string', value: 'INVOICE', style: { font: { family: 'Aptos Display', sizePt: 24, bold: true, italic: false, underline: false, strike: false, color: '#0F1925' } }, locked: true },
+            { id: uid(21), address: 'C6', valueType: 'string', value: '{{SELLER_LEGAL_NAME}}', style: { fill: '#EEF7FF' }, locked: false },
+            { id: uid(22), address: 'G6', valueType: 'string', value: '{{INVOICE_NUMBER}}', style: {}, locked: false },
+            { id: uid(23), address: 'G7', valueType: 'string', value: '{{ISSUE_DATE}}', numberFormat: 'yyyy-mm-dd', style: {}, locked: false },
+            { id: uid(24), address: 'E20', valueType: 'string', value: '{{QTY1}}', numberFormat: '0', style: {}, locked: false },
+            { id: uid(25), address: 'H29', valueType: 'string', value: '{{TAX_RATE}}', numberFormat: '0.0%', style: {}, locked: false },
+            { id: uid(26), address: 'H32', valueType: 'string', value: '{{SUBTOTAL}}', numberFormat: '$#,##0.00', style: {}, locked: false },
+            { id: uid(27), address: 'H36', valueType: 'string', value: '{{BALANCE_DUE}}', numberFormat: '$#,##0.00', style: {}, locked: false },
+            { id: uid(28), address: 'H40', valueType: 'number', value: null, formula: 'H32+H36', calculatedValue: null, numberFormat: '$#,##0.00', style: {}, locked: false },
+          ],
+          merges: ['A1:D2'], rowDimensions: [{ index: 1, heightPt: 24, hidden: false }], columnDimensions: [{ index: 1, widthChars: 18, hidden: false }], freeze: { rows: 4, columns: 0 },
+          images: [], validations: [], conditionalFormats: [],
+          print: { printArea: 'A1:H48', paperSize: 'A4', orientation: 'portrait', fitToWidth: 1, fitToHeight: 1, margins: { leftIn: 0.35, rightIn: 0.35, topIn: 0.25, bottomIn: 0.25, headerIn: 0, footerIn: 0 }, horizontalCentered: true, verticalCentered: true, showGridLines: false, showHeadings: false },
+        },
+        {
+          id: uid(11), name: 'Setup', visibility: 'hidden', cells: [], merges: [], rowDimensions: [], columnDimensions: [], freeze: { rows: 0, columns: 0 }, images: [], validations: [], conditionalFormats: [],
+          print: { paperSize: 'A4', orientation: 'portrait', fitToWidth: 1, fitToHeight: 1, margins: { leftIn: 0.7, rightIn: 0.7, topIn: 0.75, bottomIn: 0.75, headerIn: 0.3, footerIn: 0.3 }, horizontalCentered: false, verticalCentered: false, showGridLines: false, showHeadings: false },
+        },
+      ],
+    }
+    const resource = { id: uid(30), kind: 'image' as const, hash: 'c'.repeat(64), mime: 'image/png', sensitivity: 'internal' as const }
+    const template = { id: uid(40), workspaceId: uid(2), family: 'spreadsheet' as const, version: 1, status: 'admitted' as const, name: 'Invoice', description: 'Approved company invoice', tags: ['invoice'], locales: ['en-US'], whenToUse: ['billing'], whenNotToUse: ['presentations'], exampleRequests: ['Create an invoice'], fields: [], slideRecipes: [], snapshot, resources: [resource], lockedObjectIds: [], allowedRepeatTargetIds: [], requiredEvidence: [], sensitivity: 'internal' as const, visibilityUserIds: [], capabilityVersion: 1, sourceHash: 'd'.repeat(64) }
+    const payload = JSON.stringify({ title: 'Invoice INV-2026-001', values: {
+      BALANCE_DUE: { valueType: 'number', value: 9_000 },
+      INVOICE_NUMBER: { valueType: 'string', value: 'INV-2026-001' },
+      ISSUE_DATE: { valueType: 'date', value: '2026-08-06T00:00:00.000Z' },
+      QTY1: { valueType: 'number', value: 1 },
+      SELLER_LEGAL_NAME: { valueType: 'string', value: 'Use Brian Labs Ltd.' },
+      SUBTOTAL: { valueType: 'number', value: 10_000 },
+      TAX_RATE: { valueType: 'number', value: 0.1 },
+    } })
+    let modelRequest: { systemPrompt?: string; messages?: Message[] } | undefined
+    const provider = { async *stream(request: { systemPrompt?: string; messages?: Message[] }) { modelRequest = request; yield { type: 'message_start' as const, model: 'test' }; yield { type: 'text_delta' as const, text: payload }; yield { type: 'message_end' as const, stopReason: 'end_turn' as const, usage: { inputTokens: 1, outputTokens: 1 } } } }
+
+    const generated = await generateSpreadsheetFromTemplate({ provider: provider as never, model: 'test', artifactId: uid(50), workspaceId: uid(51), templateVersionId: uid(40), outcome: 'August invoice\nfor Example Labs', audience: 'Accounts payable', template })
+
+    expect(generated).toMatchObject({ artifactId: uid(50), workspaceId: uid(51), templateVersionId: uid(40), title: 'Invoice INV-2026-001', accessibility: { title: 'Invoice INV-2026-001' }, activeSheetId: uid(10), resources: [resource] })
+    expect(generated.worksheets.map((sheet) => [sheet.name, sheet.visibility])).toEqual([['Invoice', 'visible'], ['Setup', 'hidden']])
+    expect(generated.worksheets[0]).toMatchObject({ merges: ['A1:D2'], freeze: { rows: 4, columns: 0 }, print: { printArea: 'A1:H48', fitToWidth: 1, fitToHeight: 1 } })
+    expect(generated.worksheets[0]?.cells.find((cell) => cell.address === 'C6')).toMatchObject({ valueType: 'string', value: 'Use Brian Labs Ltd.', style: { fill: '#EEF7FF' } })
+    expect(generated.worksheets[0]?.cells.find((cell) => cell.address === 'G7')).toMatchObject({ valueType: 'date', value: '2026-08-06T00:00:00.000Z', numberFormat: 'yyyy-mm-dd' })
+    expect(generated.worksheets[0]?.cells.find((cell) => cell.address === 'H29')).toMatchObject({ valueType: 'number', value: 0.1, numberFormat: '0.0%' })
+    expect(generated.worksheets[0]?.cells.find((cell) => cell.address === 'H40')).toMatchObject({ formula: 'H32+H36', calculatedValue: 19_000, numberFormat: '$#,##0.00' })
+    expect(JSON.stringify(generated)).not.toContain('{{')
+    expect(modelRequest?.systemPrompt).toContain('every supplied placeholder key exactly once')
+    expect(modelRequest?.systemPrompt).toContain('company and person names')
+    expect(modelRequest?.systemPrompt).toContain('character-for-character')
+    expect(modelRequest?.messages?.[0]?.content).toContain('SELLER_LEGAL_NAME')
+    expect(modelRequest?.messages?.[0]?.content).toContain('0.0%')
+    expect(generated.worksheets[0]).not.toBe(snapshot.worksheets[0])
+    expect(snapshot).toMatchObject({ artifactId: uid(1), workspaceId: uid(2), templateVersionId: null, title: 'Invoice template', resources: [] })
+  })
+
+  it('revises only selected spreadsheet literals and recalculates without changing styles', async () => {
+    const uid = (n: number) => `37000000-0000-4000-8000-${String(n).padStart(12, '0')}`
+    const targetId = uid(20)
+    const snapshot: SpreadsheetSnapshot = {
+      schemaVersion: 1, capabilityVersion: 1, artifactId: uid(1), workspaceId: uid(2), family: 'spreadsheet', locale: 'en-US', defaultLanguage: 'en-US', templateVersionId: uid(4), rootId: uid(3), title: 'Invoice INV-2026-001', resources: [], accessibility: { title: 'Invoice INV-2026-001' }, activeSheetId: uid(10), calculationMode: 'automatic',
+      worksheets: [{ id: uid(10), name: 'Invoice', visibility: 'visible', cells: [
+        { id: targetId, address: 'C6', valueType: 'string', value: 'Use Brian Labs Ltd.', style: { fill: '#EEF7FF' }, locked: false },
+        { id: uid(21), address: 'H32', valueType: 'number', value: 10_000, numberFormat: '$#,##0.00', style: {}, locked: false },
+        { id: uid(22), address: 'H36', valueType: 'number', value: 9_000, numberFormat: '$#,##0.00', style: {}, locked: false },
+        { id: uid(23), address: 'H40', valueType: 'number', value: null, formula: 'H32+H36', calculatedValue: 19_000, numberFormat: '$#,##0.00', style: {}, locked: false },
+      ], merges: [], rowDimensions: [], columnDimensions: [], freeze: { rows: 0, columns: 0 }, images: [], validations: [], conditionalFormats: [], print: { paperSize: 'A4', orientation: 'portrait', fitToWidth: 1, fitToHeight: 1, margins: { leftIn: 0.7, rightIn: 0.7, topIn: 0.75, bottomIn: 0.75, headerIn: 0.3, footerIn: 0.3 }, horizontalCentered: false, verticalCentered: false, showGridLines: false, showHeadings: false } }],
+    }
+    const modelRequests: Array<{ systemPrompt?: string; messages?: Message[] }> = []
+    const payloads = [
+      JSON.stringify({ replacements: [{ targetId, text: 'Use Brian Labs Ltd.' }] }),
+      JSON.stringify({ replacements: [{ targetId, text: 'Use Brian Commerce Ltd.' }] }),
+    ]
+    const provider = { async *stream(request: { systemPrompt?: string; messages?: Message[] }) { const payload = payloads[modelRequests.length]!; modelRequests.push(request); yield { type: 'message_start' as const, model: 'test' }; yield { type: 'text_delta' as const, text: payload }; yield { type: 'message_end' as const, stopReason: 'end_turn' as const, usage: { inputTokens: 1, outputTokens: 1 } } } }
+
+    const revised = await reviseSpreadsheetTargets({ provider: provider as never, model: 'test', snapshot, targetIds: [targetId], instruction: '@Brian change only the seller legal name to Use Brian Commerce Ltd.' })
+
+    expect(revised.worksheets[0]?.cells.find((cell) => cell.id === targetId)).toMatchObject({ value: 'Use Brian Commerce Ltd.', style: { fill: '#EEF7FF' } })
+    expect(revised.worksheets[0]?.cells.find((cell) => cell.address === 'H36')).toMatchObject({ value: 9_000 })
+    expect(revised.worksheets[0]?.cells.find((cell) => cell.address === 'H40')).toMatchObject({ formula: 'H32+H36', calculatedValue: 19_000 })
+    expect(modelRequests).toHaveLength(2)
+    expect(modelRequests[0]?.messages?.[0]?.content).not.toContain('@Brian')
+    expect(modelRequests[0]?.messages?.[0]?.content).toContain('Invoice')
+    expect(modelRequests[1]?.messages?.[0]?.content).toContain('Office spreadsheet revision returned no changes')
+  })
+
+  it('constructs and revises a presentation through admitted recipes without changing its visual system', async () => {
+    const uid = (n: number) => `31000000-0000-4000-8000-${String(n).padStart(12, '0')}`
+    const style = { fontFamily: 'Arial', fontSizePt: 32, bold: true, italic: false, underline: false, strike: false, color: '#111111' }
+    const geometry = { xPt: 72, yPt: 72, widthPt: 600, heightPt: 72, rotationDeg: 0 }
+    const masterId = uid(4)
+    const layoutId = uid(5)
+    const coverTitleId = uid(20)
+    const closingTitleId = uid(30)
+    const brandShapeId = uid(21)
+    const snapshot: PresentationSnapshot = {
+      schemaVersion: 1, capabilityVersion: 1, artifactId: uid(1), workspaceId: uid(2), family: 'presentation', locale: 'en-US', defaultLanguage: 'en-US', templateVersionId: null, rootId: uid(3), title: 'Brand deck', resources: [], accessibility: { title: 'Brand deck' }, slideSize: { widthPt: 960, heightPt: 540 }, themeId: uid(6),
+      masters: [{ id: masterId, name: 'Brand master', lockedObjectIds: [] }],
+      layouts: [{ id: layoutId, masterId, name: 'Brand layout', placeholderIds: [] }],
+      slides: [
+        { id: uid(10), title: 'Cover', masterId, layoutId, objects: [
+          { id: coverTitleId, kind: 'text', geometry, locked: false, runs: [{ id: uid(120), text: 'Template title', style }], alignment: 'start', verticalAlignment: 'top' },
+          { id: brandShapeId, kind: 'shape', geometry: { ...geometry, yPt: 450, heightPt: 20 }, locked: true, shape: 'rectangle', fill: '#0066FF', strokeWidthPt: 0, text: [], altText: 'Brand bar' },
+        ], readingOrder: [coverTitleId, brandShapeId], notes: [] },
+        { id: uid(11), title: 'Closing', masterId, layoutId, objects: [
+          { id: closingTitleId, kind: 'text', geometry, locked: false, runs: [{ id: uid(130), text: 'Template close', style }], alignment: 'start', verticalAlignment: 'top' },
+        ], readingOrder: [closingTitleId], notes: [] },
+      ],
+    }
+    const coverFieldId = uid(40)
+    const closingFieldId = uid(41)
+    const coverRecipeId = uid(50)
+    const closingRecipeId = uid(51)
+    const template = {
+      id: uid(60), workspaceId: uid(2), family: 'presentation' as const, version: 1, status: 'admitted' as const, name: 'Brand deck', description: 'Use the brand presentation system', tags: ['company'], locales: ['en-US'], whenToUse: ['company introductions'], whenNotToUse: ['letters'], exampleRequests: ['Introduce the company'],
+      fields: [
+        { id: coverFieldId, name: 'cover.title', label: 'Cover title', type: 'plainText' as const, required: true, repeating: false, minItems: 0, maxItems: 1, maxLength: 100, targetIds: [coverTitleId], aiInstruction: 'State the presentation promise', locked: false },
+        { id: closingFieldId, name: 'closing.title', label: 'Closing title', type: 'plainText' as const, required: true, repeating: false, minItems: 0, maxItems: 1, maxLength: 100, targetIds: [closingTitleId], aiInstruction: 'Close with one action', locked: false },
+      ],
+      slideRecipes: [
+        { id: coverRecipeId, slideId: uid(10), name: 'Cover', role: 'cover' as const, whenToUse: 'Open the deck', whenNotToUse: '', enabled: true, repeatable: false, minUses: 1, maxUses: 1, fieldIds: [coverFieldId], confidence: 1, inference: 'fixture', reviewed: true },
+        { id: closingRecipeId, slideId: uid(11), name: 'Closing', role: 'closing' as const, whenToUse: 'Close the deck', whenNotToUse: '', enabled: true, repeatable: false, minUses: 1, maxUses: 1, fieldIds: [closingFieldId], confidence: 1, inference: 'fixture', reviewed: true },
+      ],
+      snapshot, resources: [], lockedObjectIds: [brandShapeId], allowedRepeatTargetIds: [], requiredEvidence: [], sensitivity: 'internal' as const, visibilityUserIds: [], capabilityVersion: 1, sourceHash: 'b'.repeat(64),
+    }
+    const legacy = materializeOfficeTemplateBundleForGeneration({ ...template, fields: [], slideRecipes: undefined }, { id: uid(60), version: 1, status: 'admitted' })
+    expect(legacy.slideRecipes).toHaveLength(snapshot.slides.length)
+    expect(legacy.fields).toHaveLength(2)
+    const legacyCoverRecipe = legacy.slideRecipes.find((recipe) => recipe.slideId === snapshot.slides[0].id)!
+    const legacyCoverField = legacy.fields.find((field) => field.targetIds.includes(coverTitleId))!
+    const overLengthPayload = JSON.stringify({ title: 'Use Brian introduction', slides: [{ recipeId: legacyCoverRecipe.id, title: 'Meet Use Brian', fields: [{ fieldId: legacyCoverField.id, text: 'X'.repeat((legacyCoverField.maxLength ?? 0) + 1) }] }] })
+    const repairedPayload = JSON.stringify({ title: 'Use Brian introduction', slides: [{ recipeId: legacyCoverRecipe.id, title: 'Meet Use Brian', fields: [{ fieldId: legacyCoverField.id, text: 'A company brain for your team' }] }] })
+    const repairRequests: Array<{ systemPrompt?: string; messages?: Message[] }> = []
+    const repairPayloads = [overLengthPayload, repairedPayload]
+    const repairProvider = { async *stream(request: { systemPrompt?: string; messages?: Message[] }) { repairRequests.push(request); yield { type: 'message_start' as const, model: 'test' }; yield { type: 'text_delta' as const, text: repairPayloads.shift()! }; yield { type: 'message_end' as const, stopReason: 'end_turn' as const, usage: { inputTokens: 1, outputTokens: 1 } } } }
+    const repaired = await generatePresentationFromTemplate({ provider: repairProvider as never, model: 'test', artifactId: uid(71), workspaceId: uid(2), templateVersionId: uid(60), outcome: 'Create an introduction', audience: 'Public', evidence: { brain: [], website: [], conflicts: [] }, claims: [], template: legacy })
+    expect(repairRequests).toHaveLength(2)
+    expect(repairRequests[0]?.systemPrompt).toContain("each field's maxLength")
+    expect(repairRequests[1]?.messages?.[0]?.content).toContain('Text exceeds the admitted field character limit')
+    expect(repaired.slides[0]?.objects.find((object) => object.kind === 'text' && object.runs.some((run) => run.text.includes('company brain')))).toBeTruthy()
+
+    let exhaustedAttempts = 0
+    const exhaustedProvider = { async *stream() { exhaustedAttempts += 1; yield { type: 'message_start' as const, model: 'test' }; yield { type: 'text_delta' as const, text: overLengthPayload }; yield { type: 'message_end' as const, stopReason: 'end_turn' as const, usage: { inputTokens: 1, outputTokens: 1 } } } }
+    await expect(generatePresentationFromTemplate({ provider: exhaustedProvider as never, model: 'test', artifactId: uid(72), workspaceId: uid(2), templateVersionId: uid(60), outcome: 'Create an introduction', audience: 'Public', evidence: { brain: [], website: [], conflicts: [] }, claims: [], template: legacy })).rejects.toMatchObject({ code: 'presentation_fit_failed' })
+    expect(exhaustedAttempts).toBe(3)
+    const generationPayload = JSON.stringify({ title: 'Use Brian introduction', slides: [
+      { recipeId: coverRecipeId, title: 'Meet Use Brian', fields: [{ fieldId: coverFieldId, text: 'A company brain for your team' }] },
+      { recipeId: closingRecipeId, title: 'Start with your knowledge', fields: [{ fieldId: closingFieldId, text: 'Give your team one place to ask and act' }] },
+    ] })
+    const generationProvider = { async *stream() { yield { type: 'message_start' as const, model: 'test' }; yield { type: 'text_delta' as const, text: generationPayload }; yield { type: 'message_end' as const, stopReason: 'end_turn' as const, usage: { inputTokens: 1, outputTokens: 1 } } } }
+    const generated = await generatePresentationFromTemplate({ provider: generationProvider as never, model: 'test', artifactId: uid(70), workspaceId: uid(2), templateVersionId: uid(60), outcome: 'Create a two-slide introduction', audience: 'Public', evidence: { brain: [], website: [], conflicts: [] }, claims: [], template })
+
+    expect(generated.slides).toHaveLength(2)
+    expect(generated.slides[0]?.id).not.toBe(snapshot.slides[0]?.id)
+    expect(generated.slides[0]?.masterId).toBe(masterId)
+    expect(generated.slides[0]?.layoutId).toBe(layoutId)
+    expect(generated.slides[0]?.objects.find((object) => object.kind === 'text' && object.runs.some((run) => run.text.includes('company brain')))).toBeTruthy()
+    expect(generated.slides[0]?.objects.find((object) => object.kind === 'shape')).toMatchObject({ fill: '#0066FF', locked: true })
+    expect(new Set(generated.slides.flatMap((slide) => [slide.id, ...slide.objects.map((object) => object.id)])).size).toBe(5)
+
+    const revisedTarget = generated.slides[0]!.objects.find((object) => object.kind === 'text')!
+    const untouchedBrand = structuredClone(generated.slides[0]!.objects.find((object) => object.kind === 'shape'))
+    const revisionPayload = JSON.stringify({ replacements: [{ targetId: revisedTarget.id, text: 'Your company knowledge, ready to act' }] })
+    let revisionRequest: { systemPrompt?: string; messages?: Message[] } | undefined
+    const revisionProvider = { async *stream(request: { systemPrompt?: string; messages?: Message[] }) { revisionRequest = request; yield { type: 'message_start' as const, model: 'test' }; yield { type: 'text_delta' as const, text: revisionPayload }; yield { type: 'message_end' as const, stopReason: 'end_turn' as const, usage: { inputTokens: 1, outputTokens: 1 } } } }
+    const revised = await revisePresentationTargets({ provider: revisionProvider as never, model: 'test', snapshot: generated, targetIds: [revisedTarget.id], instruction: '@Brian make this direct' })
+    expect(revisionRequest?.systemPrompt).toContain('complete presentation context is read-only')
+    expect(revisionRequest?.messages?.[0]?.content).toContain('Give your team one place to ask and act')
+    expect(revisionRequest?.messages?.[0]?.content).not.toContain('@Brian')
+    const revisedText = revised.slides[0]?.objects.find((object) => object.id === revisedTarget.id)
+    expect(revisedText?.kind === 'text' ? revisedText.runs.map((run) => run.text).join('') : null).toBe('Your company knowledge, ready to act')
+    expect(revised.slides[0]?.objects.find((object) => object.kind === 'shape')).toEqual(untouchedBrand)
+    expect(revised.slides[0]?.objects.find((object) => object.id === revisedTarget.id)?.geometry).toEqual(revisedTarget.geometry)
+  })
+
   it('removes an empty artifact shell when durable job admission fails', async () => {
     const failure = new Error('job insert failed')
     const deps = {
@@ -61,6 +342,34 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
     expect(deps.deleteEmptyShell).toHaveBeenCalledWith('user-1', 'new-shell')
   })
 
+  it('projects a safe job failure code without internal error detail', async () => {
+    const deps = {
+      generationAvailable: vi.fn(() => true), createShell: vi.fn(), deleteEmptyShell: vi.fn(), createJob: vi.fn(),
+      getArtifact: vi.fn(async () => ({ id: 'artifact-1', family: 'presentation', mode: 'artifact', title: 'Company introduction', headVersion: 0, lifecycleState: 'active' } as never)),
+      resolveAccess: vi.fn(async () => ({ role: 'edit' } as never)),
+      latestJob: vi.fn(async () => ({ id: 'job-1', status: 'failed', stage: 'failed', errorCode: 'presentation_fit_failed', errorDetail: 'Internal fit diagnostics' } as never)),
+    }
+    const service = createOfficeService(deps)
+
+    await expect(service.get({ userId: 'user-1', artifactId: 'artifact-1' })).resolves.toEqual({
+      artifactId: 'artifact-1', family: 'presentation', mode: 'artifact', title: 'Company introduction', version: 0,
+      lifecycleState: 'active', role: 'edit', job: { id: 'job-1', status: 'failed', stage: 'failed', errorCode: 'presentation_fit_failed' },
+    })
+  })
+
+  it('wakes the durable worker after an explicit @Brian revision is admitted', async () => {
+    const wakeGeneration = vi.fn()
+    const deps = {
+      generationAvailable: vi.fn(() => true), createShell: vi.fn(), deleteEmptyShell: vi.fn(),
+      getArtifact: vi.fn(async () => ({ id: 'artifact-1', workspaceId: 'workspace-1', headVersion: 2 } as never)),
+      resolveAccess: vi.fn(async () => ({ canComment: true, canEdit: true } as never)),
+      createJob: vi.fn(async () => ({ id: 'revision-job' } as never)), latestJob: vi.fn(), wakeGeneration,
+    }
+    const service = createOfficeService(deps)
+    await expect(service.revise({ userId: 'user-1', assistantId: 'assistant-1', artifactId: 'artifact-1', instruction: '@Brian shorten this', targetIds: ['target-1'], expectedVersion: 2, idempotencyKey: 'revision-12345678' })).resolves.toEqual({ jobId: 'revision-job', mode: 'direct' })
+    expect(wakeGeneration).toHaveBeenCalledWith('user-1')
+  })
+
   it('claims work, persists localized events, and records a terminal failure', async () => {
     const job = { id: '30000000-0000-4000-8000-000000000001', workspaceId: '30000000-0000-4000-8000-000000000002', artifactId: '30000000-0000-4000-8000-000000000003', initiatedByUserId: '30000000-0000-4000-8000-000000000004', assistantId: '30000000-0000-4000-8000-000000000005', jobKind: 'create', status: 'queued', stage: 'queued', brief: {}, authorityProjection: {}, templateVersionId: null, baseArtifactVersion: 0, checkpoint: {}, checkpointVersion: 0, leaseToken: null, leaseExpiresAt: null, cancelRequestedAt: null, errorCode: null, createdAt: new Date(), updatedAt: new Date() } as OfficeGenerationJobRow
     const store = { claim: vi.fn(async () => job), checkpoint: vi.fn(async () => true), appendEvent: vi.fn(async () => ({})), drainSteering: vi.fn(async () => []), finish: vi.fn(async () => true) }
@@ -81,7 +390,7 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
     expect(importStore.finish).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', errorCode: 'import_failed' }))
 
     const templateJob = { ...base, id: '30000000-0000-4000-8000-000000000012', jobKind: 'template_compile' as const } as OfficeGenerationJobRow
-    const templateDeps = { claim: vi.fn(async () => templateJob), getSnapshot: vi.fn(), getTemplate: vi.fn(), readSource: vi.fn(), initialize: vi.fn(), saveImportedResource: vi.fn(), saveBundle: vi.fn(), addVersion: vi.fn(), appendEvent: vi.fn(async () => ({})), finish: vi.fn(async () => true) }
+    const templateDeps = { claim: vi.fn(async () => templateJob), getSnapshot: vi.fn(), getTemplate: vi.fn(), readSource: vi.fn(), initialize: vi.fn(), saveImportedResource: vi.fn(), loadResourceAdmissions: vi.fn(async () => []), getDraftRouting: vi.fn(), saveDraftRouting: vi.fn(async () => true), saveBundle: vi.fn(), addVersion: vi.fn(), appendEvent: vi.fn(async () => ({})), finish: vi.fn(async () => true) }
     const templateWorker = createOfficeTemplateCompileWorker(templateDeps)
     await expect(templateWorker(base.initiatedByUserId)).resolves.toBe(true)
     expect(templateDeps.finish).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', errorCode: 'template_compile_failed' }))
@@ -126,6 +435,9 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
       readSource: vi.fn(async () => uploaded.bytes),
       initialize: vi.fn(async () => undefined),
       saveImportedResource: vi.fn(),
+      loadResourceAdmissions: vi.fn(async () => []),
+      getDraftRouting: vi.fn(async () => null),
+      saveDraftRouting: vi.fn(async () => true),
       saveBundle: vi.fn(async () => '30000000-0000-4000-8000-000000000113'),
       addVersion: vi.fn(async () => ({ id: '30000000-0000-4000-8000-000000000114', version: 1 })),
       appendEvent: vi.fn(async () => ({})),
@@ -139,7 +451,8 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
     const initialized = (deps.initialize.mock.calls as unknown as Array<[{ snapshot: PresentationSnapshot }]>)[0]?.[0].snapshot
     expect(initialized?.family === 'presentation' ? initialized.slides[0]?.title : null).toBe('Imported slide')
     expect(deps.getSnapshot).not.toHaveBeenCalled()
-    expect(deps.addVersion).toHaveBeenCalledWith(expect.objectContaining({ status: 'admitted' }))
+    expect(deps.saveDraftRouting).toHaveBeenCalledWith(expect.objectContaining({ templateId, routing: expect.objectContaining({ source: 'upload', slideRecipes: [expect.objectContaining({ slideId: expect.any(String) })] }) }))
+    expect(deps.addVersion).not.toHaveBeenCalled()
     expect(deps.finish).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed' }))
   })
 })

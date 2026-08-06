@@ -210,6 +210,9 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   askAssistant: 'Ask another assistant',
   listConnectedAssistants: 'List connected assistants',
 
+  // Chat handoff
+  shareCurrentWorkToWorkspace: 'Share current work to workspace',
+
   // Q5 Views (§16)
   renderView: 'Render a view',
   saveView: 'Save view',
@@ -259,6 +262,7 @@ const TOOL_STATUS_NAMES: Record<string, string> = {
   notionSearch: 'Searching Notion',
   notionCreatePage: 'Creating a Notion page',
   useSkill: 'Using a skill',
+  shareCurrentWorkToWorkspace: 'Creating a workspace chat',
   // Browser / computer-use. These are fallbacks before the input arrives;
   // `describeToolInput` overrides the URL-carrying ones with the page host
   // ("Browsing news.ycombinator.com") so the timeline says WHERE, not just WHAT.

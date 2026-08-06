@@ -219,16 +219,16 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
   // docs/architecture/integrations/mailbox-imap.md). Generic `imap` provider;
   // AliMail is a connect-time preset, never a branded connector (D1).
   imap: [
-    { name: 'imapSearchMessages', description: "Search the user's company mailbox (INBOX + Sent)", classification: 'read', defaultPolicy: 'allow' },
-    { name: 'imapGetMessage', description: 'Read a specific email from the company mailbox', classification: 'read', defaultPolicy: 'allow' },
-    { name: 'imapSendMessage', description: "Send an email with optional workspace-file attachments from the user's company mailbox", classification: 'write', defaultPolicy: 'ask' },
+    { name: 'imapSearchMessages', description: "Summarize, check, or search email in the user's connected email account (INBOX + Sent)", classification: 'read', defaultPolicy: 'allow' },
+    { name: 'imapGetMessage', description: "Read a specific email from the user's connected email account", classification: 'read', defaultPolicy: 'allow' },
+    { name: 'imapSendMessage', description: "Send email with optional workspace-file attachments from the user's connected email account", classification: 'write', defaultPolicy: 'ask' },
     // Read/allow like syncMailboxNow: it writes only inside the workspace
     // (one inbound email attachment becomes a workspace file). Any later
     // egress stays separately gated by sendFile or imapSendMessage.
     // See mailbox-imap.md → "Attachments".
     { name: 'imapSaveAttachment', description: 'Save an email attachment into the workspace as a file', classification: 'read', defaultPolicy: 'allow' },
-    { name: 'searchEmailArchive', description: 'Semantic search across the synced mailbox archive', classification: 'read', defaultPolicy: 'allow' },
-    { name: 'syncMailboxNow', description: 'Pull new mail into the searchable archive now', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'searchEmailArchive', description: 'Search the synced email archive by meaning', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'syncMailboxNow', description: 'Pull new email into the searchable email archive now', classification: 'read', defaultPolicy: 'allow' },
   ],
   // Workspace Files — Q3 / company-brain §10. Note: this row is for
   // governance display (Settings ▸ Connectors, Assistant ▸ Tools) only.

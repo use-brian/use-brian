@@ -367,10 +367,21 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
             userContentBlocks.push({ type: 'image', mimeType: media.mime, data: media.data.toString('base64') })
           } else {
             const parsedFile = await parseFileContent(media.data, media.mime, media.name)
-            userContentBlocks.push({
-              type: 'text',
-              text: `<attached_file name="${media.name}" type="${media.mime}">\n${parsedFile.text}\n</attached_file>`,
-            })
+            if (
+              parsedFile.mediaMimeType === 'application/pdf' ||
+              parsedFile.mediaMimeType?.startsWith('image/')
+            ) {
+              userContentBlocks.push({
+                type: 'image',
+                mimeType: parsedFile.mediaMimeType,
+                data: media.data.toString('base64'),
+              })
+            } else {
+              userContentBlocks.push({
+                type: 'text',
+                text: `<attached_file name="${media.name}" type="${media.mime}">\n${parsedFile.text}\n</attached_file>`,
+              })
+            }
           }
         } else if (media?.kind === 'voice') {
           // SILK-encoded voice without server STT — transcription is a

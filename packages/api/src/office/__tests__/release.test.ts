@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { deriveOfficeSnapshot, reviewOfficeRelease } from '../release.js'
 import { nextOfficeLifecycleState } from '../lifecycle-worker.js'
-import { documentSnapshot, id } from '../../../../core/src/office/__tests__/fixtures.js'
+import { completeSpreadsheetSnapshot, documentSnapshot, id } from '../../../../core/src/office/__tests__/fixtures.js'
 
 function input(overrides: Record<string, unknown> = {}) {
   return { snapshot: documentSnapshot(), expectedVersion: 3, currentVersion: 3, headVersionId: id(30), lifecycleState: 'active', canEdit: true, artifactSensitivity: 'internal' as const, action: 'export' as const, destination: { sensitivity: 'internal' as const, external: false }, claims: [], media: [], ...overrides }
@@ -26,6 +26,12 @@ describe('[COMP:api/office-release] Office exact-head release', () => {
     if (derivative.family !== 'document') throw new Error('expected document derivative')
     expect(derivative.sections.flatMap((section) => section.nodes).map((node) => node.id)).toEqual([chosen])
     expect(source.sections[0].nodes.length).toBeGreaterThan(1)
+  })
+
+  it('reviews a spreadsheet PDF against its explicit sheet and print area', () => {
+    const snapshot = completeSpreadsheetSnapshot()
+    const receipt = reviewOfficeRelease(input({ snapshot, format: 'pdf', spreadsheetPdf: { sheetId: snapshot.activeSheetId, printArea: 'A1:C20', calculationMode: 'automatic', expectedPageCount: 1, preset: 'worksheet' } }))
+    expect(receipt).toMatchObject({ status: 'ready', spreadsheetPdf: { sheetId: snapshot.activeSheetId, sheetName: 'Invoice', printArea: 'A1:C20', expectedPageCount: 1, renderer: 'libreoffice', issues: [] } })
   })
 
   it('advances the two retention clocks but never a legal hold', () => {

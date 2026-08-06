@@ -20,12 +20,14 @@ describe('[COMP:files/tabular-profile] Tabular profile', () => {
   ].join('\n')
 
   describe('isTabular', () => {
-    it('recognises csv, tsv and xlsx', () => {
+    it('recognises csv, tsv, Excel, and OpenDocument spreadsheets', () => {
       expect(isTabular('text/csv', 'a.csv')).toBe(true)
       expect(isTabular('text/tab-separated-values', 'a.tsv')).toBe(true)
       expect(
         isTabular('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'a.xlsx'),
       ).toBe(true)
+      expect(isTabular('application/octet-stream', 'a.XLSM')).toBe(true)
+      expect(isTabular('application/vnd.oasis.opendocument.spreadsheet', 'a.ods')).toBe(true)
     })
 
     it('does not claim prose or binary formats', () => {

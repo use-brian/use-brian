@@ -1,6 +1,11 @@
 // [COMP:brain/open-channel-media-deps] - open universal intake dependencies.
 
-import { parseFileContent, type FilesApi, type FilesContext } from '@use-brian/core'
+import {
+  documentMimeType,
+  parseFileContent,
+  type FilesApi,
+  type FilesContext,
+} from '@use-brian/core'
 import { createRecording } from '../db/recordings-store.js'
 import { createEpisode } from '../db/episodes-store.js'
 import { countRecentRecordingJobs, enqueueRecordingJob } from '../db/recording-jobs-store.js'
@@ -50,7 +55,11 @@ export function createOpenChannelMediaIntakeDeps(infra: {
               limitBytes: CHANNEL_DOCUMENT_PARSE_MAX_BYTES,
             }
           }
-          const { text, summary } = await parseFileContent(blob.bytes, mime, fileName ?? 'document')
+          const { text, summary, mediaMimeType, detectedFormat } = await parseFileContent(
+            blob.bytes,
+            mime,
+            fileName ?? 'document',
+          )
           if (!text.trim()) return { status: 'empty' }
 
           // `parseFileContent` returns BASE64 for inline media (a PDF or an
@@ -61,18 +70,24 @@ export function createOpenChannelMediaIntakeDeps(infra: {
           // base64 straight into decomposition: the brain ingested garbage and
           // said nothing. Deriving real text needs a model distill, which this
           // seam has no port for, so report it honestly instead.
-          if (!infra.filesApi && (mime === 'application/pdf' || mime.startsWith('image/'))) {
+          if (
+            !infra.filesApi &&
+            (mediaMimeType === 'application/pdf' || mediaMimeType?.startsWith('image/'))
+          ) {
             return { status: 'store_only_needs_distill' }
           }
 
           if (infra.filesApi) {
+            const effectiveMime =
+              mediaMimeType ??
+              (detectedFormat ? documentMimeType(detectedFormat) : mime)
             const ctx: FilesContext = { workspaceId, userId: actingUserId, assistantId }
             const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
             const safeName = (fileName ?? 'document').replace(/[^\p{L}\p{N}._-]+/gu, '-').slice(0, 120) || 'document'
             const stored = await infra.filesApi.writeBytes(ctx, {
               path: `/uploads/channel/${stamp}-${safeName}`,
               bytes: blob.bytes,
-              mime,
+              mime: effectiveMime,
               title: fileName ?? 'document',
               ...(summary ? { summary } : {}),
               sensitivity: sensitivity === 'private' || sensitivity === 'secret' ? 'confidential' : sensitivity,

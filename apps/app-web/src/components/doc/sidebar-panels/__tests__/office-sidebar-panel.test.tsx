@@ -28,28 +28,23 @@ describe("[COMP:app-web/office-navigation] Office sidebar navigation", () => {
     expect(suggested).toBeLessThan(office);
   });
 
-  it("keeps all Office destinations reachable from every Office route", () => {
+  it("keeps only Files, Templates, and Trash in normal Office navigation", () => {
     const html = render("/w/workspace-1/office/new");
     expect(html).toContain('aria-label="Office navigation"');
     expect(html).toContain('href="/w/workspace-1/office"');
-    expect(html).toContain('href="/w/workspace-1/office/new"');
     expect(html).toContain('href="/w/workspace-1/office/templates"');
-    expect(html).toContain('href="/w/workspace-1/office?family=document"');
     expect(html).toContain('href="/w/workspace-1/office?view=trash"');
+    expect(html).not.toContain("Documents");
+    expect(html).not.toContain("Presentations");
+    expect(html).not.toContain("Archived");
+    expect(html).not.toContain("Retained");
     expect(html).toContain('aria-current="page"');
   });
 
-  it("marks URL-backed family and lifecycle views active", () => {
+  it("keeps family filtering under Files and marks Trash separately", () => {
     const documents = render("/w/workspace-1/office", "family=document");
-    expect(documents).toMatch(/href="\/w\/workspace-1\/office\?family=document" aria-current="page"/);
-    const archived = render("/w/workspace-1/office", "view=archived");
-    expect(archived).toMatch(/href="\/w\/workspace-1\/office\?view=archived" aria-current="page"/);
-  });
-
-  it("layers a family selection onto the current lifecycle in the sidebar", () => {
-    const html = render("/w/workspace-1/office", "view=archived&family=document");
-    expect(html).toContain('href="/w/workspace-1/office?view=archived&amp;family=document" aria-current="page"');
-    expect(html).toContain('href="/w/workspace-1/office?view=archived&amp;family=presentation"');
-    expect(html).toContain('href="/w/workspace-1/office?view=archived" aria-current="page"');
+    expect(documents).toMatch(/href="\/w\/workspace-1\/office" aria-current="page"/);
+    const trash = render("/w/workspace-1/office", "view=trash&family=document");
+    expect(trash).toMatch(/href="\/w\/workspace-1\/office\?view=trash" aria-current="page"/);
   });
 });

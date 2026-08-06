@@ -1,7 +1,7 @@
 /**
- * Workflow fallback - the card grid the list page paints, plus the chrome row
- * (no workflow layout renders one). Also covers `/workflow/<id>` and its run
- * detail sub-route.
+ * Workflow fallback - the card grid the list page paints. The persistent
+ * Workflow top bar is provided by `workflow/layout.tsx`; this fallback covers
+ * the list, board, and run-detail sub-routes.
  *
  * Spec: docs/architecture/features/perceived-performance.md
  */

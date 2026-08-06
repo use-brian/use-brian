@@ -55,11 +55,11 @@ export function InfoTip({ text }: { text: string }) {
         </span>
       }
       side="top"
+      delay={0}
     >
       <button
         type="button"
         aria-label={text}
-        tabIndex={-1}
         className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-muted-foreground/60 hover:text-foreground"
       >
         <svg
