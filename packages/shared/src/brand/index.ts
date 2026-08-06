@@ -49,3 +49,5 @@ export {
   type BrandRight,
   type BrandSource,
 } from './record.js'
+
+export { brandThemeSeed, type BrandThemeSeedInput } from './theme-seed.js'
