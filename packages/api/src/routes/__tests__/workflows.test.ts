@@ -288,6 +288,33 @@ describe('[COMP:api/workflows-route] schedule trigger → backing scheduled_jobs
     expect(res.status).toBe(204)
     expect(jobStore.delete).toHaveBeenCalledWith('job-1')
   })
+
+  it('PATCH rejects definition/trigger edits on a system-managed workflow (409)', async () => {
+    // Mig 411: a `managed_by` workflow is materialized by its owning feature;
+    // hand-edits through the builder would be clobbered on the next
+    // re-materialization, so the route refuses them outright.
+    workflowStore.getById.mockResolvedValueOnce(wf({ managedBy: 'knowledge' }))
+
+    const res = await request(app('u-1'))
+      .patch('/api/workflows/wf-1')
+      .send({ definition: { startStepId: 's1', steps: [] } })
+
+    expect(res.status).toBe(409)
+    expect(res.body.managedBy).toBe('knowledge')
+    expect(workflowStore.update).not.toHaveBeenCalled()
+  })
+
+  it('PATCH still allows rename / enable on a managed workflow', async () => {
+    workflowStore.getById.mockResolvedValueOnce(wf({ managedBy: 'knowledge' }))
+    workflowStore.update.mockResolvedValueOnce(wf({ managedBy: 'knowledge', enabled: false }))
+
+    const res = await request(app('u-1'))
+      .patch('/api/workflows/wf-1')
+      .send({ enabled: false })
+
+    expect(res.status).toBe(200)
+    expect(workflowStore.update).toHaveBeenCalledWith('u-1', 'wf-1', expect.objectContaining({ enabled: false }))
+  })
 })
 
 describe('[COMP:api/workflows-route] GET /pages/:pageId/workflow-runs', () => {

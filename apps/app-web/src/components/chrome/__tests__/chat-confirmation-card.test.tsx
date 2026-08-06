@@ -212,6 +212,50 @@ describe("[COMP:app-web/chat-confirmation-card] ChatConfirmationCard", () => {
     expect(text).toContain("Memory: office wifi password location");
   });
 
+  it("renders an updateKnowledgeEntry diff as a styled monospace block, prose lines intact", () => {
+    // The KB update preview: the server appends a unified diff after a
+    // `Changes:` marker (knowledge-base.md → "Update previews are diffs").
+    renderCard(
+      confirmation({
+        toolName: "updateKnowledgeEntry",
+        displayName: undefined,
+        input: { id: "e-1", content: "new body" },
+        description: undefined,
+        displayLines: [
+          'Update knowledge entry "Vault fees" (products/vault/fees)',
+          "Change: correct the maker fee",
+          "Changes:",
+          "@@ -3,3 +3,3 @@",
+          "  context line",
+          "- Maker fee is 10 bps.",
+          "+ Maker fee is 5 bps.",
+        ],
+      }),
+    );
+    const pre = host!.querySelector("pre");
+    expect(pre).not.toBeNull();
+    const preText = pre!.textContent ?? "";
+    expect(preText).toContain("- Maker fee is 10 bps.");
+    expect(preText).toContain("+ Maker fee is 5 bps.");
+    // Prose lines stay OUTSIDE the diff block.
+    expect(preText).not.toContain("correct the maker fee");
+    expect(host!.textContent).toContain("Change: correct the maker fee");
+  });
+
+  it("keeps plain-list rendering for other tools even when a line looks diff-shaped", () => {
+    renderCard(
+      confirmation({
+        toolName: "deleteMemory",
+        displayName: undefined,
+        input: {},
+        description: undefined,
+        displayLines: ["- looks like a deletion but is prose"],
+      }),
+    );
+    expect(host!.querySelector("pre")).toBeNull();
+    expect(host!.textContent).toContain("- looks like a deletion but is prose");
+  });
+
   it("fires onApprove/onDeny with the toolCallId and disables while approving", () => {
     const onApprove = vi.fn();
     const onDeny = vi.fn();

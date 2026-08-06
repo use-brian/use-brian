@@ -19,7 +19,18 @@
 import { Router } from 'express'
 import { query, queryWithRLS } from '../db/client.js'
 import { resolveAssistantAccess } from '../db/users.js'
-import type { KnowledgeStore } from '../db/knowledge-store.js'
+import type { KnowledgeStore, KnowledgeSource } from '../db/knowledge-store.js'
+import {
+  KbMaintenanceConfigSchema,
+  buildMaintenanceWorkflow,
+  type KbMaintenanceStore,
+} from '../knowledge/maintenance.js'
+import {
+  syncWorkflowScheduleTrigger,
+  clearWorkflowScheduleTriggers,
+  type JobStore,
+  type WorkflowStore,
+} from '@use-brian/core'
 import type { ConnectorInstance, ConnectorInstanceStore } from '../db/connector-instance-store.js'
 import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
 import { listUsableWorkspaceConnectors } from '../connectors/usable-connectors.js'
@@ -107,6 +118,17 @@ type KnowledgeRouteOptions = {
   knowledgeRepoWriter?: KnowledgeRepoWriter
   /** Test seam for the loopback-only local folder action. */
   openLocalPath?: (path: string) => Promise<void>
+  /**
+   * Self-maintain agents (mig 411). All four are needed for the maintenance
+   * routes to mount usefully: the config store, the workflow store the
+   * materialized workflow is written through, and (daily mode only) the
+   * scheduled-jobs reconciliation pair. Absent store(s) → the maintenance
+   * routes answer 503.
+   */
+  kbMaintenanceStore?: KbMaintenanceStore
+  workflowStore?: WorkflowStore
+  jobStore?: JobStore
+  resolvePrimary?: (workspaceId: string) => Promise<string | null>
 }
 
 function isLoopbackAddress(address: string | undefined): boolean {
@@ -1067,8 +1089,41 @@ export function workspaceKnowledgeRoutes({
   githubOps = DEFAULT_GITHUB_OPS,
   knowledgeRepoWriter,
   openLocalPath = openPathWithSystem,
+  kbMaintenanceStore,
+  workflowStore,
+  jobStore,
+  resolvePrimary,
 }: KnowledgeRouteOptions): Router {
   const router = Router({ mergeParams: true })
+
+  /**
+   * Tear down a source's maintenance agent + its managed workflow. Called on
+   * source disconnect (config cascades via FK; the workflow row would
+   * otherwise be orphaned) and on explicit maintenance DELETE. Best-effort:
+   * a teardown failure never blocks the source operation.
+   */
+  async function teardownMaintenance(sourceId: string): Promise<void> {
+    if (!kbMaintenanceStore) return
+    try {
+      const agent = await kbMaintenanceStore.getBySource(sourceId)
+      if (!agent) return
+      if (agent.workflowId) {
+        if (jobStore) {
+          await clearWorkflowScheduleTriggers({ jobStore }, agent.workflowId).catch(() => {})
+        }
+        // Managed-only delete — never able to remove a user-authored workflow.
+        await query(`DELETE FROM workflows WHERE id = $1 AND managed_by = 'knowledge'`, [agent.workflowId])
+      }
+      await kbMaintenanceStore.deleteBySource(sourceId)
+    } catch (err) {
+      console.warn('[knowledge:workspace] maintenance teardown failed:', err)
+    }
+  }
+
+  /** Writable precondition for enabling self-maintain on a source. */
+  function sourceWritable(source: KnowledgeSource): boolean {
+    return source.sourceType === 'local' ? !!knowledgeRepoWriter : source.writeAccess === true
+  }
 
   async function verifyWorkspaceMember(
     req: { userId?: string; params: { workspaceId: string } },
@@ -1378,8 +1433,16 @@ export function workspaceKnowledgeRoutes({
     const auth = await verifyWorkspaceMember(req as any, res)
     if (!auth) return
     try {
-      const sources = await knowledgeStore.listSources(auth.workspaceId)
-      res.json({ sources })
+      const [sources, counts] = await Promise.all([
+        knowledgeStore.listSources(auth.workspaceId),
+        knowledgeStore.countEntriesBySource(auth.workspaceId).catch(() => []),
+      ])
+      const bySource = new Map(counts.map((c) => [c.sourceId, c.count]))
+      res.json({
+        sources: sources.map((s) => ({ ...s, entryCount: bySource.get(s.id) ?? 0 })),
+        // The manual pool (source_id IS NULL) — the rail's pseudo-row count.
+        manualCount: bySource.get(null) ?? 0,
+      })
     } catch (err) {
       console.error('[knowledge:workspace] list sources failed:', err)
       res.status(500).json({ error: 'Failed to list sources' })
@@ -1472,6 +1535,9 @@ export function workspaceKnowledgeRoutes({
       if (!source || source.workspaceId !== auth.workspaceId) {
         res.status(404).json({ error: 'Source not found' }); return
       }
+      // Retire the self-maintain agent first — the config row cascades with
+      // the source FK, but its managed workflow would otherwise be orphaned.
+      await teardownMaintenance(sourceId)
       await knowledgeStore.deleteBySource(sourceId)
       const deleted = await knowledgeStore.deleteSource(sourceId)
       if (!deleted) { res.status(404).json({ error: 'Source not found' }); return }
@@ -1500,6 +1566,222 @@ export function workspaceKnowledgeRoutes({
     } catch (err) {
       console.error('[knowledge:workspace] trigger sync failed:', err)
       res.status(500).json({ error: 'Failed to trigger sync' })
+    }
+  })
+
+  // ── PATCH /sources/:id — per-source settings ──────────────────
+  // v1 field: `defaultSensitivity` (mig 410) — the tier stamped on synced
+  // entries with no explicit frontmatter stamp. Changing it resets
+  // `last_synced_sha` so the next sync full-walks and re-parses every file
+  // (the only authoritative re-stamp — incremental sync never revisits
+  // unchanged files, and legacy rows have unknown stamp provenance), then
+  // kicks the worker so the walk starts now instead of at the next tick.
+  // See docs/architecture/features/knowledge-base.md → "Per-source default
+  // sensitivity".
+
+  router.patch('/sources/:id', async (req, res) => {
+    const auth = await verifyWorkspaceMember(req as any, res)
+    if (!auth) return
+    const sourceId = (req.params as { id: string }).id
+    const { defaultSensitivity } = req.body as { defaultSensitivity?: unknown }
+    if (defaultSensitivity !== 'public' && defaultSensitivity !== 'internal' && defaultSensitivity !== 'confidential') {
+      res.status(400).json({ error: 'defaultSensitivity must be one of public, internal, confidential' })
+      return
+    }
+    try {
+      const source = await knowledgeStore.getSource(sourceId)
+      if (!source || source.workspaceId !== auth.workspaceId) {
+        res.status(404).json({ error: 'Source not found' }); return
+      }
+      if (source.defaultSensitivity === defaultSensitivity) {
+        res.json({ source })
+        return
+      }
+      const updated = await knowledgeStore.updateSourceDefaultSensitivity(sourceId, defaultSensitivity)
+      if (!updated) { res.status(404).json({ error: 'Source not found' }); return }
+      // Best-effort immediate re-walk; the 15-minute tick covers a miss.
+      if (triggerSync) {
+        triggerSync(sourceId).catch((err) =>
+          console.warn('[knowledge:workspace] default-sensitivity re-sync kick failed:', err),
+        )
+      }
+      res.json({ source: updated, resyncScheduled: true })
+    } catch (err) {
+      console.error('[knowledge:workspace] update source settings failed:', err)
+      res.status(500).json({ error: 'Failed to update source settings' })
+    }
+  })
+
+  // ── Self-maintain agent (mig 411) ─────────────────────────────
+  // GET    /sources/:id/maintenance — config + budget usage (null = not set up)
+  // PUT    /sources/:id/maintenance — create/update config; (re)materializes
+  //                                   the managed workflow
+  // DELETE /sources/:id/maintenance — remove config + the managed workflow
+  //
+  // See docs/architecture/features/knowledge-base.md → "Self-maintain agents".
+
+  async function resolveMaintenanceSource(
+    auth: NonNullable<Awaited<ReturnType<typeof verifyWorkspaceMember>>>,
+    sourceId: string,
+    res: import('express').Response,
+  ): Promise<KnowledgeSource | null> {
+    const source = await knowledgeStore.getSource(sourceId)
+    if (!source || source.workspaceId !== auth.workspaceId) {
+      res.status(404).json({ error: 'Source not found' })
+      return null
+    }
+    return source
+  }
+
+  router.get('/sources/:id/maintenance', async (req, res) => {
+    const auth = await verifyWorkspaceMember(req as any, res)
+    if (!auth) return
+    if (!kbMaintenanceStore) {
+      res.status(503).json({ error: 'Self-maintain is not configured on this server.' })
+      return
+    }
+    try {
+      const source = await resolveMaintenanceSource(auth, (req.params as { id: string }).id, res)
+      if (!source) return
+      const agent = await kbMaintenanceStore.getBySource(source.id)
+      if (!agent) {
+        res.json({ agent: null, writable: sourceWritable(source) })
+        return
+      }
+      const attemptsThisWeek = agent.workflowId
+        ? await kbMaintenanceStore.countRecentProposalAttempts(agent.workflowId)
+        : 0
+      res.json({ agent, attemptsThisWeek, writable: sourceWritable(source) })
+    } catch (err) {
+      console.error('[knowledge:workspace] get maintenance failed:', err)
+      res.status(500).json({ error: 'Failed to load the maintenance agent' })
+    }
+  })
+
+  router.put('/sources/:id/maintenance', async (req, res) => {
+    const auth = await verifyWorkspaceMember(req as any, res)
+    if (!auth) return
+    if (!kbMaintenanceStore || !workflowStore) {
+      res.status(503).json({ error: 'Self-maintain is not configured on this server.' })
+      return
+    }
+    const parsed = KbMaintenanceConfigSchema.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({
+        error: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+      })
+      return
+    }
+    const config = parsed.data
+    if (config.signals.mode === 'daily' && (!jobStore || !resolvePrimary)) {
+      res.status(501).json({ error: 'Scheduled review is not available on this server. Use the knowledge-events signal instead.' })
+      return
+    }
+    try {
+      const source = await resolveMaintenanceSource(auth, (req.params as { id: string }).id, res)
+      if (!source) return
+      // A read-only source cannot self-maintain — the whole point is the
+      // write-back loop, and the write tools would never be exposed anyway.
+      if (!sourceWritable(source)) {
+        res.status(409).json({
+          error: source.sourceType === 'local'
+            ? 'Local write-back is not configured on this server.'
+            : 'This source is read-only (its GitHub connector cannot push). Reconnect it with a read-write token first.',
+          reason: 'not_writable',
+        })
+        return
+      }
+
+      const materialized = buildMaintenanceWorkflow(config, {
+        id: source.id,
+        repo: source.repo,
+        rootPath: source.rootPath,
+        sourceType: source.sourceType,
+      })
+
+      const existing = await kbMaintenanceStore.getBySource(source.id)
+      let workflow = existing?.workflowId
+        ? await workflowStore.update(auth.userId, existing.workflowId, {
+            name: materialized.name,
+            description: materialized.description,
+            definition: materialized.definition,
+            trigger: materialized.trigger,
+            enabled: config.enabled,
+          })
+        : null
+      if (!workflow) {
+        // First enable, or the previously materialized workflow was deleted.
+        workflow = await workflowStore.create({
+          userId: auth.userId,
+          workspaceId: auth.workspaceId,
+          name: materialized.name,
+          description: materialized.description,
+          definition: materialized.definition,
+          trigger: materialized.trigger,
+          managedBy: 'knowledge',
+        })
+        if (!config.enabled) {
+          await workflowStore.update(auth.userId, workflow.id, { enabled: false })
+        }
+      }
+      const workflowId = workflow.id
+
+      // Scheduled-jobs reconciliation — the SAME shared helper the builder
+      // PATCH uses, so a daily-mode agent actually fires and a mode change
+      // (or disable) clears the firing row.
+      if (jobStore && resolvePrimary) {
+        try {
+          if (config.enabled && materialized.trigger.kind === 'schedule') {
+            await syncWorkflowScheduleTrigger(
+              { jobStore, resolvePrimary },
+              {
+                workflowId,
+                workspaceId: auth.workspaceId,
+                userId: auth.userId,
+                schedule: materialized.trigger.schedule,
+                timezone: materialized.trigger.timezone ?? 'UTC',
+                mode: materialized.trigger.mode,
+              },
+            )
+          } else {
+            await clearWorkflowScheduleTriggers({ jobStore }, workflowId)
+          }
+        } catch (err) {
+          console.warn('[knowledge:workspace] maintenance schedule reconcile failed:', err)
+        }
+      }
+
+      const agent = await kbMaintenanceStore.upsert({
+        workspaceId: auth.workspaceId,
+        sourceId: source.id,
+        workflowId,
+        config,
+        createdBy: auth.userId,
+      })
+      res.json({ agent })
+    } catch (err) {
+      console.error('[knowledge:workspace] put maintenance failed:', err)
+      res.status(500).json({ error: 'Failed to save the maintenance agent' })
+    }
+  })
+
+  router.delete('/sources/:id/maintenance', async (req, res) => {
+    const auth = await verifyWorkspaceMember(req as any, res)
+    if (!auth) return
+    if (!kbMaintenanceStore) {
+      res.status(503).json({ error: 'Self-maintain is not configured on this server.' })
+      return
+    }
+    try {
+      const source = await resolveMaintenanceSource(auth, (req.params as { id: string }).id, res)
+      if (!source) return
+      const agent = await kbMaintenanceStore.getBySource(source.id)
+      if (!agent) { res.status(404).json({ error: 'No maintenance agent on this source' }); return }
+      await teardownMaintenance(source.id)
+      res.status(204).end()
+    } catch (err) {
+      console.error('[knowledge:workspace] delete maintenance failed:', err)
+      res.status(500).json({ error: 'Failed to remove the maintenance agent' })
     }
   })
 

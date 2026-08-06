@@ -13,6 +13,7 @@ const SOURCE = {
   rootPath: 'docs/kb',
   connectorInstanceId: 'ci1',
   writeAccess: true as boolean | null,
+  defaultSensitivity: 'internal' as const,
 }
 
 // Live repo file: frontmatter + the body the DB mirror holds.

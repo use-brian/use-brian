@@ -16,7 +16,7 @@
  * [COMP:app-web/chat-confirmation-card]
  */
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { TriangleAlert } from "lucide-react";
 import type { PendingConfirmation } from "@use-brian/chat-ui";
 import { useT } from "@/lib/i18n/client";
@@ -27,6 +27,90 @@ import {
   extractEmailSender,
   parseToolPreview,
 } from "@/lib/approval-previews";
+
+/** A unified-diff-notation line (server-computed KB update preview). */
+function isDiffLine(line: string): boolean {
+  return (
+    line.startsWith("@@ ") ||
+    line.startsWith("+ ") ||
+    line.startsWith("- ") ||
+    line.startsWith("  ")
+  );
+}
+
+/**
+ * Display lines with diff awareness. `updateKnowledgeEntry` confirmations
+ * carry a server-computed unified diff after a `Changes:` marker (only the
+ * server holds the old body — see knowledge-base.md → "Update previews are
+ * diffs"); those lines render as a styled monospace diff block instead of
+ * prose bullets. Every other tool keeps the plain list.
+ */
+function ConfirmationLines({
+  toolName,
+  lines,
+}: {
+  toolName: string;
+  lines: string[];
+}) {
+  if (toolName !== "updateKnowledgeEntry") {
+    return (
+      <ul className="text-xs text-muted-foreground space-y-0.5">
+        {lines.map((line, i) => (
+          <li key={i} className="whitespace-pre-wrap break-words">
+            {line}
+          </li>
+        ))}
+      </ul>
+    );
+  }
+
+  // Split into prose lines and consecutive diff runs, preserving order.
+  const blocks: Array<{ kind: "prose"; line: string } | { kind: "diff"; lines: string[] }> = [];
+  for (const line of lines) {
+    if (isDiffLine(line)) {
+      const last = blocks[blocks.length - 1];
+      if (last && last.kind === "diff") last.lines.push(line);
+      else blocks.push({ kind: "diff", lines: [line] });
+    } else {
+      blocks.push({ kind: "prose", line });
+    }
+  }
+
+  return (
+    <div className="space-y-1">
+      {blocks.map((block, i): ReactNode =>
+        block.kind === "prose" ? (
+          <p key={i} className="text-xs text-muted-foreground whitespace-pre-wrap break-words">
+            {block.line}
+          </p>
+        ) : (
+          <pre
+            key={i}
+            className="max-h-64 overflow-auto rounded-md border border-border/60 bg-background/60 px-2 py-1.5 font-mono text-[11px] leading-relaxed"
+          >
+            {block.lines.map((line, j) => (
+              <div
+                key={j}
+                className={cn(
+                  "whitespace-pre-wrap break-words",
+                  line.startsWith("@@")
+                    ? "text-muted-foreground/70"
+                    : line.startsWith("+")
+                      ? "text-emerald-600 dark:text-emerald-400"
+                      : line.startsWith("-")
+                        ? "text-red-600 dark:text-red-400"
+                        : "text-muted-foreground",
+                )}
+              >
+                {line}
+              </div>
+            ))}
+          </pre>
+        ),
+      )}
+    </div>
+  );
+}
 
 export function ChatConfirmationCard({
   confirmation,
@@ -80,13 +164,10 @@ export function ChatConfirmationCard({
             ) : null}
             {confirmation.displayLines &&
             confirmation.displayLines.length > 0 ? (
-              <ul className="text-xs text-muted-foreground space-y-0.5">
-                {confirmation.displayLines.map((line, i) => (
-                  <li key={i} className="whitespace-pre-wrap break-words">
-                    {line}
-                  </li>
-                ))}
-              </ul>
+              <ConfirmationLines
+                toolName={confirmation.toolName}
+                lines={confirmation.displayLines}
+              />
             ) : null}
           </>
         )}

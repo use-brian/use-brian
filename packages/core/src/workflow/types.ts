@@ -616,6 +616,14 @@ export type WorkflowRecord = {
   lifecycleReason: string | null
   /** Mig 308. User veto — a pinned workflow is exempt from automatic archival. */
   pinned: boolean
+  /**
+   * Mig 411. Non-NULL = this workflow is owned by a product feature
+   * (v1 value: `'knowledge'` — a KB self-maintain agent). The builder PATCH
+   * route rejects hand-edits of a managed workflow's definition/trigger;
+   * edits go through the owning feature's config UI, which re-materializes
+   * the definition. NULL = a normal user-authored workflow.
+   */
+  managedBy: string | null
   createdAt: Date
   updatedAt: Date
 }
@@ -727,6 +735,8 @@ export type WorkflowStore = {
     modelAlias?: WorkflowModelAlias
     maxTurns?: number | null
     researchMode?: boolean
+    /** Mig 411. Product-feature ownership marker (e.g. `'knowledge'`). */
+    managedBy?: string | null
   }): Promise<WorkflowRecord>
 
   getById(userId: string, id: string): Promise<WorkflowRecord | null>

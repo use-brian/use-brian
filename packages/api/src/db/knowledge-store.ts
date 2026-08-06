@@ -76,6 +76,11 @@ export type KnowledgeSource = {
    */
   writeAccess: boolean | null
   writeAccessCheckedAt: Date | null
+  /**
+   * Tier stamped on synced entries whose frontmatter has no explicit (valid)
+   * `sensitivity:` (migration 410). Explicit frontmatter always wins.
+   */
+  defaultSensitivity: Sensitivity
   createdAt: Date
 }
 
@@ -181,6 +186,7 @@ const SOURCE_COLUMNS = `
   last_synced_sha AS "lastSyncedSha", last_synced_at AS "lastSyncedAt",
   sync_error AS "syncError", connector_instance_id AS "connectorInstanceId",
   write_access AS "writeAccess", write_access_checked_at AS "writeAccessCheckedAt",
+  default_sensitivity AS "defaultSensitivity",
   created_at AS "createdAt"
 ` as const
 
@@ -263,6 +269,12 @@ export type KnowledgeStore = {
     workspaceId: string; path: string; title: string
     summary?: string | null; content: string; tags?: string[]; relatedIds?: string[]
     sensitivity: Sensitivity
+    /**
+     * Whether `sensitivity` came from an explicit frontmatter stamp (mig 410
+     * provenance). Omitted (legacy caller) → stored as NULL = unknown,
+     * treated as explicit by the default-sensitivity re-stamp walk.
+     */
+    sensitivityExplicit?: boolean
     /** Compartment set (MLS category axis) to stamp on the row. Default '{}'. */
     compartments?: string[]
     metadata?: Record<string, unknown>; sourceId?: string | null; sourceSha?: string | null
@@ -291,6 +303,12 @@ export type KnowledgeStore = {
   updateRelatedIds(id: string, relatedIds: string[]): Promise<void>
   hasEntriesForAssistant(assistantId: string): Promise<boolean>
 
+  /**
+   * Per-source entry counts for the workspace (Studio ▸ Knowledge rail).
+   * `sourceId: null` = the manual pool. Sources with zero entries are absent.
+   */
+  countEntriesBySource(workspaceId: string): Promise<Array<{ sourceId: string | null; count: number }>>
+
   // Sources
   createSource(params: {
     workspaceId: string; sourceType: KnowledgeSourceType; repo: string; branch?: string; rootPath?: string
@@ -304,6 +322,15 @@ export type KnowledgeStore = {
   updateSourceSync(id: string, sha: string, error?: string | null): Promise<void>
   /** Persist the PAT write-capability probe result (migration 310). */
   updateSourceWriteAccess(id: string, writeAccess: boolean): Promise<void>
+  /**
+   * Change a source's default sensitivity (mig 410) and reset
+   * `last_synced_sha` to NULL so the next sync tick full-walks the tree —
+   * re-parsing every file is the only authoritative way to re-stamp
+   * non-explicit entries (legacy rows have unknown provenance, and an
+   * incremental sync never revisits unchanged files). Returns the updated
+   * source or null when the id is unknown.
+   */
+  updateSourceDefaultSensitivity(id: string, tier: Sensitivity): Promise<KnowledgeSource | null>
   getSourcesDueForSync(): Promise<KnowledgeSource[]>
 
   // Per-assistant source scoping (denylist). No row = source enabled for the
@@ -471,8 +498,8 @@ export function createDbKnowledgeStore(): KnowledgeStore {
       // Needed for the lifecycle action — the sync worker calls this for both.
       const result = await query<KnowledgeEntry & { __inserted: boolean }>(
         `INSERT INTO knowledge_entries
-           (workspace_id, path, title, summary, content, tags, related_ids, sensitivity, metadata, source_id, source_sha, compartments)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+           (workspace_id, path, title, summary, content, tags, related_ids, sensitivity, sensitivity_explicit, metadata, source_id, source_sha, compartments)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
          ON CONFLICT (workspace_id, path) DO UPDATE SET
            title = EXCLUDED.title,
            summary = EXCLUDED.summary,
@@ -480,6 +507,7 @@ export function createDbKnowledgeStore(): KnowledgeStore {
            tags = EXCLUDED.tags,
            related_ids = COALESCE(EXCLUDED.related_ids, knowledge_entries.related_ids),
            sensitivity = EXCLUDED.sensitivity,
+           sensitivity_explicit = EXCLUDED.sensitivity_explicit,
            metadata = EXCLUDED.metadata,
            source_id = EXCLUDED.source_id,
            source_sha = EXCLUDED.source_sha,
@@ -488,7 +516,8 @@ export function createDbKnowledgeStore(): KnowledgeStore {
         [
           params.workspaceId, params.path, params.title,
           params.summary ?? null, params.content, params.tags ?? [],
-          params.relatedIds ?? [], params.sensitivity, JSON.stringify(params.metadata ?? {}),
+          params.relatedIds ?? [], params.sensitivity, params.sensitivityExplicit ?? null,
+          JSON.stringify(params.metadata ?? {}),
           params.sourceId ?? null, params.sourceSha ?? null,
           params.compartments ?? [],
         ],
@@ -709,6 +738,17 @@ export function createDbKnowledgeStore(): KnowledgeStore {
 
     // ── Sources ─────────────────────────────────────────────
 
+    async countEntriesBySource(workspaceId) {
+      const result = await query<{ sourceId: string | null; count: string }>(
+        `SELECT source_id AS "sourceId", COUNT(*) AS count
+         FROM knowledge_entries
+         WHERE workspace_id = $1
+         GROUP BY source_id`,
+        [workspaceId],
+      )
+      return result.rows.map((r) => ({ sourceId: r.sourceId, count: Number(r.count) }))
+    },
+
     async createSource(params) {
       const result = await query<KnowledgeSource>(
         `INSERT INTO workspace_knowledge_sources
@@ -771,6 +811,17 @@ export function createDbKnowledgeStore(): KnowledgeStore {
          WHERE id = $2`,
         [writeAccess, id],
       )
+    },
+
+    async updateSourceDefaultSensitivity(id, tier) {
+      const result = await query<KnowledgeSource>(
+        `UPDATE workspace_knowledge_sources
+         SET default_sensitivity = $1, last_synced_sha = NULL
+         WHERE id = $2
+         RETURNING ${SOURCE_COLUMNS}`,
+        [tier, id],
+      )
+      return result.rows[0] ?? null
     },
 
     async getSourcesDueForSync() {

@@ -44,9 +44,14 @@ export function parseMarkdownFile(filePath: string, rawContent: string): ParsedE
 
   const rawSensitivity = frontmatter.sensitivity
   let sensitivity: Sensitivity = 'internal'
+  // Explicit = a VALID frontmatter stamp. An invalid value falls back and
+  // counts as not-explicit, so the sync worker's per-source default (mig 410)
+  // applies to it the same as to an unstamped file.
+  let sensitivityExplicit = false
   if (rawSensitivity !== undefined) {
     if (isSensitivity(rawSensitivity)) {
       sensitivity = rawSensitivity
+      sensitivityExplicit = true
     } else {
       console.warn(
         `[kb-parser] invalid sensitivity=${JSON.stringify(rawSensitivity)} in ${filePath}, defaulting to internal`,
@@ -61,7 +66,7 @@ export function parseMarkdownFile(filePath: string, rawContent: string): ParsedE
     }
   }
 
-  return { path, title, summary, content: body, tags, related, sensitivity, metadata }
+  return { path, title, summary, content: body, tags, related, sensitivity, sensitivityExplicit, metadata }
 }
 
 // ── helpers ──────────────────────────────────────────────────

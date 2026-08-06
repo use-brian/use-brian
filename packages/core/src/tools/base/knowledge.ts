@@ -17,6 +17,7 @@
 import { z } from 'zod'
 import { buildTool, type Tool, type ToolContext } from '../types.js'
 import type { KnowledgeStoreInterface, KnowledgeRepoWriter } from '../../knowledge/types.js'
+import { unifiedDiffLines } from '../../knowledge/text-diff.js'
 import { RANK, researchWriteFloor, type Sensitivity } from '../../security/sensitivity.js'
 import { unionCompartments } from '../../security/compartments.js'
 
@@ -423,7 +424,20 @@ export function createKnowledgeTools(
             : 'Manual entry — updates the workspace knowledge base',
         ]
         if (args.changeSummary) lines.push(`Change: ${args.changeSummary}`)
-        if (args.content) lines.push(`New body: ${bodyPreview(args.content)}`)
+        // "View proposed change": old-vs-new unified diff, computed here
+        // because only the server holds the old body. The web card renders
+        // these lines as a styled diff block (keyed on this tool's name);
+        // channel surfaces show them as plain text. Falls back to the flat
+        // body preview when the diff is empty (whitespace-only edit).
+        if (args.content) {
+          const diff = unifiedDiffLines(entry.content, args.content, { maxLines: 40 })
+          if (diff.length > 0) {
+            lines.push('Changes:')
+            lines.push(...diff)
+          } else {
+            lines.push(`New body: ${bodyPreview(args.content)}`)
+          }
+        }
         return lines
       } catch {
         return null

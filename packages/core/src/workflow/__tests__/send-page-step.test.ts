@@ -54,6 +54,7 @@ function makeFakeStores() {
         lifecycleTransitionedAt: null,
         lifecycleReason: null,
         pinned: false,
+        managedBy: null,
         createdAt: now,
         updatedAt: now,
       } satisfies WorkflowRecord

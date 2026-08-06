@@ -61,6 +61,7 @@ const WORKFLOW_SELECT = `
   lifecycle_transitioned_at AS "lifecycleTransitionedAt",
   lifecycle_reason    AS "lifecycleReason",
   pinned,
+  managed_by          AS "managedBy",
   created_at          AS "createdAt",
   updated_at          AS "updatedAt"
 `
@@ -85,6 +86,7 @@ type WorkflowRow = {
   lifecycleTransitionedAt: Date | null
   lifecycleReason: string | null
   pinned: boolean
+  managedBy: string | null
   createdAt: Date
   updatedAt: Date
 }
@@ -138,6 +140,7 @@ function rowToWorkflow(row: WorkflowRow): WorkflowRecord {
     lifecycleTransitionedAt: row.lifecycleTransitionedAt,
     lifecycleReason: row.lifecycleReason,
     pinned: row.pinned,
+    managedBy: row.managedBy,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   }
@@ -157,18 +160,19 @@ export function createDbWorkflowStore(): WorkflowStore {
       modelAlias,
       maxTurns,
       researchMode,
+      managedBy,
     }) {
       const result = await queryWithRLS<WorkflowRow>(
         userId,
         `INSERT INTO workflows (
            workspace_id, created_by, name, description, definition, trigger,
            webhook_slug, webhook_secret,
-           model_alias, max_turns, research_mode
+           model_alias, max_turns, research_mode, managed_by
          )
          VALUES (
            $1, $2, $3, $4, $5, COALESCE($6::jsonb, '{"kind":"manual"}'::jsonb),
            $7, $8,
-           COALESCE($9, 'pro'), $10, COALESCE($11, false)
+           COALESCE($9, 'pro'), $10, COALESCE($11, false), $12
          )
          RETURNING ${WORKFLOW_SELECT}`,
         [
@@ -183,6 +187,7 @@ export function createDbWorkflowStore(): WorkflowStore {
           modelAlias ?? null,
           maxTurns ?? null,
           researchMode ?? null,
+          managedBy ?? null,
         ],
       )
       const record = rowToWorkflow(result.rows[0])
