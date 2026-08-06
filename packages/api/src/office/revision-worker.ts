@@ -7,7 +7,7 @@ import type { OfficeGenerationJobRow } from '../db/office-generation.js'
 export type OfficeRevisionWorkerDeps = {
   claim(params: { userId: string; leaseToken: string; leaseMs: number; jobKinds: OfficeGenerationJobRow['jobKind'][] }): Promise<OfficeGenerationJobRow | null>
   getSnapshot(userId: string, artifactId: string): Promise<{ snapshot: OfficeArtifactSnapshot; baseVersion: number } | null>
-  revise(params: { snapshot: OfficeArtifactSnapshot; targetIds: string[]; instruction: string }): Promise<OfficeArtifactSnapshot>
+  revise(params: { snapshot: OfficeArtifactSnapshot; targetIds: string[]; instruction: string; job: OfficeGenerationJobRow }): Promise<OfficeArtifactSnapshot>
   commit(params: { job: OfficeGenerationJobRow; snapshot: OfficeArtifactSnapshot; expectedVersion: number }): Promise<number>
   appendEvent(params: { userId: string; jobId: string; workspaceId: string; code: string; values: Record<string, string | number | boolean>; actorType: 'system'; safeNarration: string }): Promise<unknown>
   finish(params: { userId: string; jobId: string; leaseToken: string; status: 'completed' | 'failed'; stage: string; errorCode?: string; errorDetail?: string }): Promise<boolean>
@@ -24,7 +24,7 @@ export function createOfficeRevisionWorker(deps: OfficeRevisionWorkerDeps) {
       if (typeof brief.instruction !== 'string' || !Array.isArray(brief.targetIds) || !brief.targetIds.every((id) => typeof id === 'string') || typeof brief.expectedVersion !== 'number') throw new Error('invalid_revision_brief')
       const live = await deps.getSnapshot(userId, job.artifactId)
       if (!live || live.baseVersion !== brief.expectedVersion) throw new Error('revision_version_conflict')
-      const snapshot = await deps.revise({ snapshot: live.snapshot, targetIds: brief.targetIds, instruction: brief.instruction })
+      const snapshot = await deps.revise({ snapshot: live.snapshot, targetIds: brief.targetIds, instruction: brief.instruction, job })
       const version = await deps.commit({ job, snapshot, expectedVersion: brief.expectedVersion })
       await deps.appendEvent({ userId, jobId: job.id, workspaceId: job.workspaceId, code: 'office.job.completed', values: { version }, actorType: 'system', safeNarration: 'Revision completed' })
       await deps.finish({ userId, jobId: job.id, leaseToken, status: 'completed', stage: 'completed' })

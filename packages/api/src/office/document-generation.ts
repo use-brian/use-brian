@@ -172,7 +172,27 @@ function replaceLetterPlaceholders(snapshot: DocumentSnapshot, values: z.infer<t
   return replaceDocumentPlaceholders({ snapshot, title: values.title, replacements, bodyParagraphs: values.bodyParagraphs })
 }
 
+
+/**
+ * Append the brand voice fragment to a generation system prompt.
+ *
+ * Office generation builds its own prompts and never routes through
+ * `buildFullSystemPrompt`, so the `# Brand` L1 block never reached it — the
+ * assistant honoured the brand voice in chat and ignored it when generating
+ * the company's documents. This is the seam that closes that.
+ *
+ * Appended AFTER the format and factual rules, and the fragment says so
+ * itself: a voice instruction must never be able to talk the model out of the
+ * JSON shape or the never-invent-a-fact rules those prompts exist to enforce.
+ */
+function withBrandVoice(systemPrompt: string, brandVoice?: string | null): string {
+  const fragment = brandVoice?.trim()
+  return fragment ? `${systemPrompt}\n\n${fragment}` : systemPrompt
+}
+
 export async function generateDocumentFromTemplate(params: {
+  /** Brand voice fragment (`buildBrandVoiceFragment`). Absent → no brand instruction. */
+  brandVoice?: string | null
   provider: LLMProvider
   model: string
   artifactId: string
@@ -188,7 +208,7 @@ export async function generateDocumentFromTemplate(params: {
   const isLetter = placeholders.includes('LETTER_BODY')
   const response = await collectStream(params.provider.stream({
     model: params.model,
-    systemPrompt: isLetter ? LETTER_SYSTEM_PROMPT : GENERIC_DOCUMENT_SYSTEM_PROMPT,
+    systemPrompt: withBrandVoice(isLetter ? LETTER_SYSTEM_PROMPT : GENERIC_DOCUMENT_SYSTEM_PROMPT, params.brandVoice),
     messages: [{ role: 'user', content: isLetter
       ? `Outcome:\n${params.outcome}\n\nAudience:\n${params.audience}\n\nTemplate guidance:\n${params.template.description}`
       : `Outcome:\n${params.outcome}\n\nAudience:\n${params.audience}\n\nTemplate guidance:\n${params.template.description}\n\nAllowed placeholders:\n${JSON.stringify(placeholders)}\n\nTemplate text near placeholders:\n${JSON.stringify(documentTemplateContext(params.template.snapshot))}` }] as Message[],
@@ -239,6 +259,8 @@ function documentContext(snapshot: DocumentSnapshot, ids: Set<string>): Array<{ 
 }
 
 export async function reviseDocumentTargets(params: {
+  /** Brand voice fragment (`buildBrandVoiceFragment`). Absent → no brand instruction. */
+  brandVoice?: string | null
   provider: LLMProvider
   model: string
   snapshot: DocumentSnapshot
@@ -250,7 +272,7 @@ export async function reviseDocumentTargets(params: {
   if (selected.length !== targetSet.size) throw new Error('One or more revision targets no longer exist')
   const response = await collectStream(params.provider.stream({
     model: params.model,
-    systemPrompt: REVISION_SYSTEM_PROMPT,
+    systemPrompt: withBrandVoice(REVISION_SYSTEM_PROMPT, params.brandVoice),
     messages: [{ role: 'user', content: `Instruction:\n${params.instruction.replace(/(^|\s)@Brian\b/gi, '$1').trim()}\n\nSelected text:\n${JSON.stringify(selected)}\n\nComplete document context (read-only):\n${JSON.stringify(documentContext(params.snapshot, targetSet))}` }] as Message[],
     maxTokens: 2_500,
     temperature: 0.2,

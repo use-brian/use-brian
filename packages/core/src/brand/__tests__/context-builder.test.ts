@@ -14,7 +14,7 @@
 
 import { describe, it, expect } from 'vitest'
 import { BrandRecordSchema, type BrandRecord } from '@use-brian/shared'
-import { BRAND_DIGEST_CHAR_CAP, buildBrandContext } from '../context-builder.js'
+import { BRAND_DIGEST_CHAR_CAP, buildBrandContext, buildBrandVoiceFragment } from '../context-builder.js'
 
 function record(overrides: Record<string, unknown> = {}): BrandRecord {
   return BrandRecordSchema.parse({
@@ -181,5 +181,56 @@ describe('[COMP:brand/prompt-context] cap', () => {
     expect(block).toContain('do not save them as memories')
     expect(block).not.toContain('zzzz')
     expect(block.length).toBeLessThanOrEqual(BRAND_DIGEST_CHAR_CAP)
+  })
+})
+
+describe('[COMP:brand/prompt-context] generation voice fragment', () => {
+  it('carries the writing rules a generator can act on', () => {
+    const fragment = buildBrandVoiceFragment(record())!
+    expect(fragment).toContain('Northwind Ferry - two words, both capitalized')
+    expect(fragment).toContain('unsinkable, cheapest')
+    expect(fragment).toContain('Punctual: Lead with the time and the fact')
+    expect(fragment).toContain('crossing, sailing')
+  })
+
+  it('omits the digest scaffolding that a generation prompt cannot use', () => {
+    const fragment = buildBrandVoiceFragment(record())!
+    // No pointer lines (there is no tool surface here) and no memory-dedup
+    // guard (there is no memory system in a one-shot generation call).
+    expect(fragment).not.toContain('# Brand')
+    expect(fragment).not.toContain('do not save them as memories')
+    expect(fragment).not.toContain('approved version')
+  })
+
+  it('subordinates itself to the format and factual rules', () => {
+    // It is appended AFTER the JSON-shape and never-invent-a-fact rules, so it
+    // must say plainly that it does not override them — otherwise a voice
+    // instruction could talk the model out of the output contract.
+    expect(buildBrandVoiceFragment(record())!).toContain('where they conflict, they win')
+  })
+
+  it('returns null for a brand with a name but no voice', () => {
+    // A name alone is not a voice; emitting a block would add tokens to every
+    // generation for no behavioural change.
+    const bare = BrandRecordSchema.parse({ naming: { name: 'Northwind Ferry' } })
+    expect(buildBrandVoiceFragment(bare)).toBeNull()
+  })
+
+  it('returns null for no record at all', () => {
+    expect(buildBrandVoiceFragment(null)).toBeNull()
+  })
+
+  it('stays bounded for an over-specified brand', () => {
+    const big = record({
+      messaging: {
+        voice: Array.from({ length: 12 }, (_, i) => ({ trait: `T${i}`, means: 'x'.repeat(200), avoid: 'y'.repeat(200) })),
+        preferred: Array.from({ length: 40 }, (_, i) => `preferred-term-${i}`),
+        avoid: Array.from({ length: 40 }, (_, i) => `avoided-term-${i}`),
+      },
+    })
+    const fragment = buildBrandVoiceFragment(big)!
+    // A generation prompt's budget belongs mostly to the artifact's own
+    // instructions.
+    expect(fragment.length).toBeLessThan(1500)
   })
 })

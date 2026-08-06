@@ -405,6 +405,7 @@ import { teamspacesRoutes } from './routes/teamspaces.js'
 import { createTeamspaceStore } from './db/teamspace-store.js'
 import { createOfficeArtifactStore } from './db/office-artifacts.js'
 import { getBrandStore } from './db/brand-store.js'
+import { buildBrandVoiceFragment } from '@use-brian/core'
 import { createOfficeTemplateStore } from './db/office-templates.js'
 import { createOfficeGenerationStore } from './db/office-generation.js'
 import { createOfficeCommentStore } from './db/office-comments.js'
@@ -4843,9 +4844,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           ].slice(0, 100)
         },
         async construct(brief, evidence, claims, template) {
-          if (brief.family === 'document') return generateDocumentFromTemplate({ provider, model: backgroundModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, template })
-          if (brief.family === 'presentation') return generatePresentationFromTemplate({ provider, model: backgroundModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, evidence, claims, template })
-          return generateSpreadsheetFromTemplate({ provider, model: backgroundModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, template })
+          const brandVoice = await resolveBrandVoice(job.initiatedByUserId, job.workspaceId)
+          if (brief.family === 'document') return generateDocumentFromTemplate({ provider, model: backgroundModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, template, brandVoice })
+          if (brief.family === 'presentation') return generatePresentationFromTemplate({ provider, model: backgroundModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, evidence, claims, template, brandVoice })
+          return generateSpreadsheetFromTemplate({ provider, model: backgroundModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, template, brandVoice })
         },
         async processMedia(snapshot) { return snapshot },
         async resolveResource(resourceId) {
@@ -4862,13 +4864,33 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       }
     },
   })
+  /**
+   * The brand voice fragment for an Office generation or revision.
+   *
+   * Office generation builds its own system prompts and never routes through
+   * `buildFullSystemPrompt`, so the `# Brand` L1 block never reached it: the
+   * assistant honoured the brand voice in chat and ignored it when generating
+   * the company's documents. Resolved per job, best-effort — a brand read
+   * failing must not fail a generation, and no approved brand adds nothing.
+   */
+  const resolveBrandVoice = async (userId: string, workspaceId: string): Promise<string | null> => {
+    try {
+      const record = (await getBrandStore().get(userId, workspaceId))?.activeRecord ?? null
+      return buildBrandVoiceFragment(record)
+    } catch (err) {
+      console.warn('[office] brand voice lookup failed:', err)
+      return null
+    }
+  }
+
   const officeRevisionWorker = filesApi ? createOfficeRevisionWorker({
     claim: officeGenerationStore.claim,
     getSnapshot: officeLiveStore.get,
-    async revise({ snapshot, targetIds, instruction }) {
-      if (snapshot.family === 'document') return reviseDocumentTargets({ provider, model: backgroundModel, snapshot, targetIds, instruction })
-      if (snapshot.family === 'presentation') return revisePresentationTargets({ provider, model: backgroundModel, snapshot, targetIds, instruction })
-      return reviseSpreadsheetTargets({ provider, model: backgroundModel, snapshot, targetIds, instruction })
+    async revise({ snapshot, targetIds, instruction, job }) {
+      const brandVoice = await resolveBrandVoice(job.initiatedByUserId, job.workspaceId)
+      if (snapshot.family === 'document') return reviseDocumentTargets({ provider, model: backgroundModel, snapshot, targetIds, instruction, brandVoice })
+      if (snapshot.family === 'presentation') return revisePresentationTargets({ provider, model: backgroundModel, snapshot, targetIds, instruction, brandVoice })
+      return reviseSpreadsheetTargets({ provider, model: backgroundModel, snapshot, targetIds, instruction, brandVoice })
     },
     async commit({ job, snapshot, expectedVersion }) {
       return (await commitGeneratedOfficeSnapshot({ job, snapshot, expectedVersion, kind: 'revision' })).version

@@ -16,6 +16,7 @@ export {
 export {
   BRAND_DIGEST_CHAR_CAP,
   buildBrandContext,
+  buildBrandVoiceFragment,
   type BrandDigestInput,
 } from './context-builder.js'
 

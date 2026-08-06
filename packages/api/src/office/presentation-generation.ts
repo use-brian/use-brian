@@ -348,7 +348,27 @@ export function materializeOfficeTemplateBundleForGeneration(input: unknown, ide
   })
 }
 
+
+/**
+ * Append the brand voice fragment to a generation system prompt.
+ *
+ * Office generation builds its own prompts and never routes through
+ * `buildFullSystemPrompt`, so the `# Brand` L1 block never reached it — the
+ * assistant honoured the brand voice in chat and ignored it when generating
+ * the company's documents. This is the seam that closes that.
+ *
+ * Appended AFTER the format and factual rules, and the fragment says so
+ * itself: a voice instruction must never be able to talk the model out of the
+ * JSON shape or the never-invent-a-fact rules those prompts exist to enforce.
+ */
+function withBrandVoice(systemPrompt: string, brandVoice?: string | null): string {
+  const fragment = brandVoice?.trim()
+  return fragment ? `${systemPrompt}\n\n${fragment}` : systemPrompt
+}
+
 export async function generatePresentationFromTemplate(params: {
+  /** Brand voice fragment (`buildBrandVoiceFragment`). Absent → no brand instruction. */
+  brandVoice?: string | null
   provider: LLMProvider
   model: string
   artifactId: string
@@ -378,7 +398,7 @@ export async function generatePresentationFromTemplate(params: {
       : ''
     const response = await collectStream(params.provider.stream({
       model: params.model,
-      systemPrompt: PRESENTATION_SYSTEM_PROMPT,
+      systemPrompt: withBrandVoice(PRESENTATION_SYSTEM_PROMPT, params.brandVoice),
       messages: [{ role: 'user', content: `${requestContext}${repairContext}` }] as Message[],
       maxTokens: 8_000,
       temperature: 0.2,
@@ -408,6 +428,8 @@ export async function generatePresentationFromTemplate(params: {
 }
 
 export async function revisePresentationTargets(params: {
+  /** Brand voice fragment (`buildBrandVoiceFragment`). Absent → no brand instruction. */
+  brandVoice?: string | null
   provider: LLMProvider
   model: string
   snapshot: PresentationSnapshot
@@ -451,7 +473,7 @@ export async function revisePresentationTargets(params: {
       : ''
     const response = await collectStream(params.provider.stream({
       model: params.model,
-      systemPrompt: REVISION_SYSTEM_PROMPT,
+      systemPrompt: withBrandVoice(REVISION_SYSTEM_PROMPT, params.brandVoice),
       messages: [{ role: 'user', content: `${requestContext}${repairContext}` }] as Message[],
       maxTokens: 3_000,
       temperature: 0.2,

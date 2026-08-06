@@ -209,3 +209,60 @@ export function buildBrandContext(input: BrandDigestInput | null): string | null
   const body = kept.join('\n\n')
   return `${HEADER}\n${body}${footer}`
 }
+
+/**
+ * A compact "write in this voice" fragment for a GENERATION prompt.
+ *
+ * Distinct from {@link buildBrandContext} on purpose. The L1 digest is an
+ * ambient block for a conversational turn: it carries pointer lines to the
+ * full record and the D11 memory-dedup guard, both of which are noise in a
+ * one-shot generation call that has no tool surface and no memory system to
+ * dedup against. Reusing it here would spend a generation prompt's budget on
+ * instructions the model cannot act on.
+ *
+ * ## Why this exists at all
+ *
+ * Office generation builds its own system prompts (`LETTER_SYSTEM_PROMPT` and
+ * friends) and never routes through `buildFullSystemPrompt`, so the `# Brand`
+ * block never reached it. The result was the feature's headline promise being
+ * false exactly where it is most visible: the assistant honoured the brand
+ * voice in chat and ignored it when generating the company's documents.
+ *
+ * Returns `null` when the record carries no writing rules worth stating — a
+ * brand with only a name should add nothing to a generation prompt.
+ *
+ * [COMP:brand/prompt-context]
+ */
+export function buildBrandVoiceFragment(record: BrandRecord | null): string | null {
+  if (!record) return null
+
+  const lines: string[] = []
+  const naming = record.naming
+  const displayName = naming.publicName || naming.name
+
+  if (naming.capitalization) lines.push(`- Write the name exactly as: ${naming.capitalization}`)
+  else lines.push(`- Refer to the company as "${displayName}".`)
+  if (naming.restrictedTerms.length > 0) {
+    lines.push(`- Never use these terms: ${naming.restrictedTerms.join(', ')}`)
+  }
+
+  const voice = record.messaging?.voice ?? []
+  for (const trait of voice.slice(0, 6)) {
+    lines.push(`- ${trait.trait}: ${trait.means}. Avoid: ${trait.avoid}`)
+  }
+  const preferred = record.messaging?.preferred ?? []
+  const avoid = record.messaging?.avoid ?? []
+  if (preferred.length > 0) lines.push(`- Prefer these words: ${preferred.join(', ')}`)
+  if (avoid.length > 0) lines.push(`- Avoid these words: ${avoid.join(', ')}`)
+  for (const note of (record.messaging?.toneNotes ?? []).slice(0, 3)) lines.push(`- ${note}`)
+
+  // A name alone is not a voice. Emitting a block that says only "call the
+  // company X" would add tokens to every generation for no behavioural change.
+  if (lines.length <= 1 && voice.length === 0) return null
+
+  const body = lines.join('\n')
+  // Hard cap for the same reason the digest has one: a generation prompt's
+  // budget belongs mostly to the artifact's own instructions.
+  const capped = body.length > 1200 ? `${body.slice(0, 1200).replace(/\n[^\n]*$/, '')}` : body
+  return `Brand voice for ${displayName} — follow it in every word you write. It does not override the output format or the factual rules above; where they conflict, they win.\n${capped}`
+}
