@@ -26,7 +26,7 @@ export type OfficeArtifact = {
   version: number;
   lifecycleState: "active" | "archived" | "trash" | "retained" | "purged";
   role: "view" | "comment" | "edit";
-  job?: { id: string; status: string; stage: string };
+  job?: { id: string; status: string; stage: string; errorCode: string | null };
 };
 
 export function isOfficeStartFailed(artifact: OfficeArtifact): boolean {
@@ -42,7 +42,16 @@ export type OfficeJob = {
   artifactId: string;
   status: "queued" | "running" | "needs_input" | "completed" | "failed" | "cancelled";
   stage: string;
+  errorCode: string | null;
 };
+
+export type OfficeJobFailureKind = "presentation_fit" | "fit" | "unexpected";
+
+export function officeJobFailureKind(errorCode: string | null | undefined): OfficeJobFailureKind {
+  if (errorCode === "presentation_fit_failed") return "presentation_fit";
+  if (errorCode === "fit_failed") return "fit";
+  return "unexpected";
+}
 
 export type OfficeJobEvent = {
   id: string;

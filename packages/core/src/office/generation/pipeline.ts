@@ -10,7 +10,7 @@ import { exportOfficeDocument, reparseOfficeDocument } from '../docx/index.js'
 import { exportOfficePresentation, reparseOfficePresentation } from '../pptx/index.js'
 import { exportOfficeSpreadsheet, reparseOfficeSpreadsheet } from '../xlsx/index.js'
 import { officeSemanticHash, type OfficeResourceResolver } from '../package.js'
-import { OfficeGenerationBriefSchema, type OfficeAuthorityProjection, type OfficeClaimPlanEntry, type OfficeEvidencePacket, type OfficeGenerationBrief, type OfficeGenerationEvent, type OfficeGenerationOutcome, type OfficeGenerationStage } from './contracts.js'
+import { OfficeGenerationBriefSchema, OfficeGenerationFailure, type OfficeAuthorityProjection, type OfficeClaimPlanEntry, type OfficeEvidencePacket, type OfficeGenerationBrief, type OfficeGenerationEvent, type OfficeGenerationOutcome, type OfficeGenerationStage } from './contracts.js'
 
 export type OfficeGenerationCheckpoint = {
   stage: OfficeGenerationStage
@@ -126,7 +126,8 @@ export async function runOfficeGenerationPipeline(input: unknown, deps: OfficeGe
     return { status: 'completed', artifactId: committed.artifactId, version: committed.version, exportBytes: exported.bytes, semanticHash: exported.semanticHash }
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : 'Office generation failed'
-    await deps.emit({ stage: 'failed', code: 'office.job.failed', params: { code: 'pipeline_failed' } })
-    return { status: 'failed', code: 'pipeline_failed', message }
+    const code = cause instanceof OfficeGenerationFailure ? cause.code : 'pipeline_failed'
+    await deps.emit({ stage: 'failed', code: 'office.job.failed', params: { code } })
+    return { status: 'failed', code, message }
   }
 }

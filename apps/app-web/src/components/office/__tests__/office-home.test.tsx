@@ -78,4 +78,12 @@ describe("[COMP:app-web/office-home] Office home", () => {
     expect(html).toContain("Start failed");
     expect(html).not.toContain(">Working<");
   });
+
+  it("shows a typed presentation-fit reason instead of only Failed", () => {
+    const html = renderToStaticMarkup(<I18nProvider locale="en" dict={en as unknown as Dictionary}><OfficeHome workspaceId="11111111-1111-4111-8111-111111111111" initialArtifacts={[
+      { artifactId: "66666666-6666-4666-8666-666666666666", family: "presentation", mode: "artifact", title: "Company introduction", version: 0, lifecycleState: "active", role: "edit", job: { id: "77777777-7777-4777-8777-777777777777", status: "failed", stage: "failed", errorCode: "presentation_fit_failed" } },
+    ]} /></I18nProvider>);
+    expect(html).toContain(en.office.presentationFitFailed);
+    expect(html).not.toContain(">Failed<");
+  });
 });

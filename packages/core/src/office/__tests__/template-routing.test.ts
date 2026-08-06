@@ -73,4 +73,18 @@ describe('[COMP:office/template-routing] Presentation template routing', () => {
       'process.slide-3.content-1',
     ]))
   })
+
+  it('derives text limits from box geometry and inherited display typography', () => {
+    const snapshot = structuredClone(completePresentationSnapshot())
+    const closing = snapshot.slides[1].objects[0]
+    if (closing?.kind !== 'text') throw new Error('Fixture closing object must be text')
+    closing.geometry = { ...closing.geometry, widthPt: 570, heightPt: 135 }
+    closing.runs = closing.runs.map((run) => ({ ...run, style: { ...run.style, fontSizePt: 42 } }))
+
+    const routing = inferOfficeTemplateRouting(snapshot, 'upload')
+    const field = routing.fields.find((candidate) => candidate.targetIds.includes(closing.id))
+
+    expect(field?.maxLength).toBe(54)
+    expect(field?.maxLength).toBeLessThan(70)
+  })
 })

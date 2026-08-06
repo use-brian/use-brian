@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { OfficeGenerationFailure } from '../generation/contracts.js'
 import { runOfficeGenerationPipeline, type OfficeGenerationPipelineDeps } from '../generation/pipeline.js'
 import { runOfficeEdit } from '../generation/edit-runner.js'
 import { documentSnapshot, id, templateBundle } from './fixtures.js'
@@ -67,6 +68,18 @@ describe('[COMP:office/generation] Office generation pipeline', () => {
     changedRun.runs[0].id = id(999)
     test.value.construct = vi.fn(async () => changed)
     await expect(runOfficeGenerationPipeline(brief(), test.value)).resolves.toMatchObject({ status: 'failed', code: 'fit_failed' })
+  })
+
+  it('preserves a typed safe failure code from a generation constructor', async () => {
+    const test = deps()
+    test.value.construct = vi.fn(async () => {
+      throw new OfficeGenerationFailure('presentation_fit_failed', 'Internal presentation fit diagnostics')
+    })
+
+    await expect(runOfficeGenerationPipeline(brief(), test.value)).resolves.toMatchObject({
+      status: 'failed',
+      code: 'presentation_fit_failed',
+    })
   })
 })
 

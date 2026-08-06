@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Check, Route, Sparkles, Trash2 } from "lucide-react";
-import type { OfficeTemplateField, OfficeTemplateRoutingDraft, OfficeTemplateSlideRecipe, PresentationObject, PresentationSnapshot } from "@use-brian/office-model";
+import { presentationTextCapacity, type OfficeTemplateField, type OfficeTemplateRoutingDraft, type OfficeTemplateSlideRecipe, type PresentationObject, type PresentationSnapshot } from "@use-brian/office-model";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { format, useT } from "@/lib/i18n/client";
 import { getOfficeTemplateRouting, saveOfficeTemplateRouting, type OfficeTemplateSlideRole } from "@/lib/office/api";
@@ -179,6 +179,7 @@ export function TemplateRoutingInspector({ templateId, snapshot, selectedTargetI
     if (!type) return;
     const fieldId = crypto.randomUUID();
     const nextNumber = recipe.fieldIds.length + 1;
+    const maxLength = presentationTextCapacity(selectedObject);
     const field: OfficeTemplateField = {
       id: fieldId,
       name: `${recipe.role.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}.content-${nextNumber}`,
@@ -188,7 +189,7 @@ export function TemplateRoutingInspector({ templateId, snapshot, selectedTargetI
       repeating: false,
       minItems: 0,
       maxItems: 1,
-      ...(TEXT_TYPES.includes(type) ? { maxLength: Math.max(40, Math.min(4_000, Math.round(selectedObject.geometry.widthPt * selectedObject.geometry.heightPt / 45))) } : {}),
+      ...(maxLength ? { maxLength } : {}),
       targetIds: [selectedObject.id],
       aiInstruction: t.routingDefaultInstruction,
       locked: false,

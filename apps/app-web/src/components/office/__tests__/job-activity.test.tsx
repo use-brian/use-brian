@@ -20,6 +20,7 @@ const job = (status: OfficeJob["status"]): OfficeJob => ({
   artifactId: "10000000-0000-4000-8000-000000000003",
   status,
   stage: status,
+  errorCode: null,
 });
 
 describe("[COMP:app-web/office-iteration-panel] Office iteration panel", () => {
@@ -38,5 +39,13 @@ describe("[COMP:app-web/office-iteration-panel] Office iteration panel", () => {
     expect(html).toContain(en.office.revisionReadyHint);
     expect(html).toContain(en.office.openComments);
     expect(html).not.toContain(en.office.iterationPlaceholder);
+  });
+
+  it("explains a typed presentation-fit failure with an actionable reason", () => {
+    const html = render({ ...job("failed"), errorCode: "presentation_fit_failed" });
+    expect(html).toContain(en.office.presentationFitFailed);
+    expect(html).toContain(en.office.presentationFitFailedBody);
+    expect(html).toContain('role="alert"');
+    expect(html).not.toContain(en.office.revisionReadyHint);
   });
 });

@@ -242,6 +242,23 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
     const legacy = materializeOfficeTemplateBundleForGeneration({ ...template, fields: [], slideRecipes: undefined }, { id: uid(60), version: 1, status: 'admitted' })
     expect(legacy.slideRecipes).toHaveLength(snapshot.slides.length)
     expect(legacy.fields).toHaveLength(2)
+    const legacyCoverRecipe = legacy.slideRecipes.find((recipe) => recipe.slideId === snapshot.slides[0].id)!
+    const legacyCoverField = legacy.fields.find((field) => field.targetIds.includes(coverTitleId))!
+    const overLengthPayload = JSON.stringify({ title: 'Use Brian introduction', slides: [{ recipeId: legacyCoverRecipe.id, title: 'Meet Use Brian', fields: [{ fieldId: legacyCoverField.id, text: 'X'.repeat((legacyCoverField.maxLength ?? 0) + 1) }] }] })
+    const repairedPayload = JSON.stringify({ title: 'Use Brian introduction', slides: [{ recipeId: legacyCoverRecipe.id, title: 'Meet Use Brian', fields: [{ fieldId: legacyCoverField.id, text: 'A company brain for your team' }] }] })
+    const repairRequests: Array<{ systemPrompt?: string; messages?: Message[] }> = []
+    const repairPayloads = [overLengthPayload, repairedPayload]
+    const repairProvider = { async *stream(request: { systemPrompt?: string; messages?: Message[] }) { repairRequests.push(request); yield { type: 'message_start' as const, model: 'test' }; yield { type: 'text_delta' as const, text: repairPayloads.shift()! }; yield { type: 'message_end' as const, stopReason: 'end_turn' as const, usage: { inputTokens: 1, outputTokens: 1 } } } }
+    const repaired = await generatePresentationFromTemplate({ provider: repairProvider as never, model: 'test', artifactId: uid(71), workspaceId: uid(2), templateVersionId: uid(60), outcome: 'Create an introduction', audience: 'Public', evidence: { brain: [], website: [], conflicts: [] }, claims: [], template: legacy })
+    expect(repairRequests).toHaveLength(2)
+    expect(repairRequests[0]?.systemPrompt).toContain("each field's maxLength")
+    expect(repairRequests[1]?.messages?.[0]?.content).toContain('Text exceeds the admitted field character limit')
+    expect(repaired.slides[0]?.objects.find((object) => object.kind === 'text' && object.runs.some((run) => run.text.includes('company brain')))).toBeTruthy()
+
+    let exhaustedAttempts = 0
+    const exhaustedProvider = { async *stream() { exhaustedAttempts += 1; yield { type: 'message_start' as const, model: 'test' }; yield { type: 'text_delta' as const, text: overLengthPayload }; yield { type: 'message_end' as const, stopReason: 'end_turn' as const, usage: { inputTokens: 1, outputTokens: 1 } } } }
+    await expect(generatePresentationFromTemplate({ provider: exhaustedProvider as never, model: 'test', artifactId: uid(72), workspaceId: uid(2), templateVersionId: uid(60), outcome: 'Create an introduction', audience: 'Public', evidence: { brain: [], website: [], conflicts: [] }, claims: [], template: legacy })).rejects.toMatchObject({ code: 'presentation_fit_failed' })
+    expect(exhaustedAttempts).toBe(3)
     const generationPayload = JSON.stringify({ title: 'Use Brian introduction', slides: [
       { recipeId: coverRecipeId, title: 'Meet Use Brian', fields: [{ fieldId: coverFieldId, text: 'A company brain for your team' }] },
       { recipeId: closingRecipeId, title: 'Start with your knowledge', fields: [{ fieldId: closingFieldId, text: 'Give your team one place to ask and act' }] },
@@ -323,6 +340,21 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
       idempotencyKey: 'request-12345678',
     })).resolves.toEqual({ artifactId: 'original-artifact', jobId: 'original-job' })
     expect(deps.deleteEmptyShell).toHaveBeenCalledWith('user-1', 'new-shell')
+  })
+
+  it('projects a safe job failure code without internal error detail', async () => {
+    const deps = {
+      generationAvailable: vi.fn(() => true), createShell: vi.fn(), deleteEmptyShell: vi.fn(), createJob: vi.fn(),
+      getArtifact: vi.fn(async () => ({ id: 'artifact-1', family: 'presentation', mode: 'artifact', title: 'Company introduction', headVersion: 0, lifecycleState: 'active' } as never)),
+      resolveAccess: vi.fn(async () => ({ role: 'edit' } as never)),
+      latestJob: vi.fn(async () => ({ id: 'job-1', status: 'failed', stage: 'failed', errorCode: 'presentation_fit_failed', errorDetail: 'Internal fit diagnostics' } as never)),
+    }
+    const service = createOfficeService(deps)
+
+    await expect(service.get({ userId: 'user-1', artifactId: 'artifact-1' })).resolves.toEqual({
+      artifactId: 'artifact-1', family: 'presentation', mode: 'artifact', title: 'Company introduction', version: 0,
+      lifecycleState: 'active', role: 'edit', job: { id: 'job-1', status: 'failed', stage: 'failed', errorCode: 'presentation_fit_failed' },
+    })
   })
 
   it('wakes the durable worker after an explicit @Brian revision is admitted', async () => {
