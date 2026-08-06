@@ -944,20 +944,32 @@ export function buildViewingSkillBlock(skill: {
     skill.content.length > 6000
       ? `${skill.content.slice(0, 6000)}\n…(truncated)`
       : skill.content
+  const revision = workspaceSkillRevision(skill)
   return (
     `# Currently viewing — workspace skill\n` +
     `The user has this workspace skill open in the Brain skill editor right now. ` +
     `When they say "this skill" — or ask about the skill they are looking at — they mean this one.\n\n` +
-    `Skill: ${JSON.stringify(skill.name)} (row id: ${skill.rowId}, status: ${status})\n` +
+    `Skill: ${JSON.stringify(skill.name)} (row id: ${skill.rowId}, revision: ${revision}, status: ${status})\n` +
     `Description: ${skill.description}\n` +
     (skill.whenToUse ? `When to use: ${skill.whenToUse}\n` : '') +
     `\nSaved instructions (markdown):\n` +
     `\`\`\`\`markdown\n${body}\n\`\`\`\`\n\n` +
     `This is the last SAVED version — edits the user has typed in the editor but not saved ` +
     `are not visible to you. When they ask to change this skill, call \`updateViewedSkill\` ` +
-    `with the row id above and only the fields that should change; the user will approve the update before it is saved. ` +
+    `with the row id and revision above and only the fields that should change; the user will approve the update before it is saved. ` +
     `Only propose revised text in chat when the user explicitly asks for a draft instead of an update.`
   )
+}
+
+export function workspaceSkillRevision(skill: {
+  name: string
+  description: string
+  whenToUse?: string
+  content: string
+}): string {
+  return createHash('sha256')
+    .update(JSON.stringify([skill.name, skill.description, skill.whenToUse ?? null, skill.content]))
+    .digest('hex')
 }
 
 /**
@@ -967,10 +979,11 @@ export function buildViewingSkillBlock(skill: {
  * load-bearing: the store treats a human-approved name/body edit as certification.
  */
 export function createUpdateViewedSkillTool(args: {
-  workspaceSkillStore: Pick<WorkspaceSkillStore, 'update'>
+  workspaceSkillStore: Pick<WorkspaceSkillStore, 'getByIdSystem' | 'update'>
   workspaceId?: string
   skillRowId?: string
   skillName?: string
+  expectedRevision?: string
 }): Tool {
   const scoped = Boolean(args.workspaceId && args.skillRowId && args.skillName)
   return buildTool({
@@ -982,24 +995,32 @@ export function createUpdateViewedSkillTool(args: {
     inputSchema: z
       .object({
         skillRowId: z.string().min(1).describe('The row id shown in the currently-viewing skill context.'),
+        expectedRevision: z.string().length(64).describe('The revision shown in the currently-viewing skill context.'),
         name: z.string().trim().min(1).max(100).optional(),
         description: z.string().trim().max(250).optional(),
         whenToUse: z.string().trim().max(300).nullable().optional(),
         content: z.string().trim().min(1).max(5000).optional(),
       })
       .refine(
-        ({ skillRowId: _skillRowId, ...updates }) =>
+        ({ skillRowId: _skillRowId, expectedRevision: _expectedRevision, ...updates }) =>
           Object.values(updates).some((value) => value !== undefined),
         { message: 'Provide at least one field to update.' },
       ),
     hiddenFromModel: !scoped,
     requiresConfirmation: true,
     async describeConfirmation(input) {
-      const { skillRowId, ...updates } = input as Record<string, unknown>
-      return [
-        `Skill: ${args.skillName ?? String(skillRowId)}`,
-        `Fields: ${Object.keys(updates).join(', ')}`,
-      ]
+      const { skillRowId, expectedRevision: _expectedRevision, ...updates } = input as Record<string, unknown>
+      const lines = [`Skill: ${args.skillName ?? String(skillRowId)}`]
+      const labels: Record<string, string> = {
+        name: 'Name',
+        description: 'Description',
+        whenToUse: 'When to use',
+        content: 'Instructions',
+      }
+      for (const [field, value] of Object.entries(updates)) {
+        lines.push(`${labels[field] ?? field}: ${value === null ? '(clear)' : String(value)}`)
+      }
+      return lines
     },
     async execute(input, ctx) {
       if (!ctx.workspaceId || (args.workspaceId && ctx.workspaceId !== args.workspaceId)) {
@@ -1008,7 +1029,20 @@ export function createUpdateViewedSkillTool(args: {
       if (args.skillRowId && input.skillRowId !== args.skillRowId) {
         return { data: 'The requested skill does not match the skill open in the editor.', isError: true }
       }
-      const { skillRowId, ...updates } = input
+      if (args.expectedRevision && input.expectedRevision !== args.expectedRevision) {
+        return { data: 'The requested revision does not match the skill open in the editor.', isError: true }
+      }
+      const current = await args.workspaceSkillStore.getByIdSystem(input.skillRowId)
+      if (!current || current.workspaceId !== ctx.workspaceId || current.state === 'archived') {
+        return { data: 'The open skill is no longer available.', isError: true }
+      }
+      if (workspaceSkillRevision(current) !== input.expectedRevision) {
+        return {
+          data: 'The skill changed while this update was awaiting approval. Review the latest version and try again.',
+          isError: true,
+        }
+      }
+      const { skillRowId, expectedRevision: _expectedRevision, ...updates } = input
       const updated = await args.workspaceSkillStore.update(
         ctx.userId,
         ctx.workspaceId,
@@ -3780,12 +3814,11 @@ export function chatRoutes(options: WebChatOptions): Router {
       if (
         typeof requestedViewingSkillRowId === 'string' &&
         requestedViewingSkillRowId &&
-        assistant.workspaceId
+        assistant.workspaceId &&
+        options.workspaceSkillStore
       ) {
         try {
-          const { createDbWorkspaceSkillStore } = await import('../db/skill-store.js')
-          const workspaceSkillStore = createDbWorkspaceSkillStore()
-          const workspaceSkills = await workspaceSkillStore.listForWorkspace(
+          const workspaceSkills = await options.workspaceSkillStore.listForWorkspace(
             assistant.workspaceId,
             { actingUserId: user.id },
           )
@@ -3795,10 +3828,11 @@ export function chatRoutes(options: WebChatOptions): Router {
           if (viewedSkill) {
             userVisibleContextParts.push(buildViewingSkillBlock(viewedSkill))
             updateViewedSkillTool = createUpdateViewedSkillTool({
-              workspaceSkillStore,
+              workspaceSkillStore: options.workspaceSkillStore,
               workspaceId: assistant.workspaceId,
               skillRowId: viewedSkill.rowId,
               skillName: viewedSkill.name,
+              expectedRevision: workspaceSkillRevision(viewedSkill),
             })
           }
         } catch (err) {

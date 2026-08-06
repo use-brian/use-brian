@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { appAssistantForbidsResearch, appAssistantForbidsCoordinator, isAdaptiveResearchEligible, isUserBlocked, sanitizeTitle, buildActivePageInstruction, buildViewingSkillBlock, createUpdateViewedSkillTool, resolveStickyChannelId, isDocSurface, isAppSurface, attachUserVisibleContext, settleInlineToolApproval, buildAttachedRecordingContext, buildUnscopedFileAttachmentInstruction } from '../chat.js'
+import { appAssistantForbidsResearch, appAssistantForbidsCoordinator, isAdaptiveResearchEligible, isUserBlocked, sanitizeTitle, buildActivePageInstruction, buildViewingSkillBlock, createUpdateViewedSkillTool, workspaceSkillRevision, resolveStickyChannelId, isDocSurface, isAppSurface, attachUserVisibleContext, settleInlineToolApproval, buildAttachedRecordingContext, buildUnscopedFileAttachmentInstruction } from '../chat.js'
 import type { ConfirmationResolver, Message, ToolContext } from '@use-brian/core'
 import type { PendingApproval, PendingApprovalsStore } from '../../db/pending-approvals-store.js'
 
@@ -440,6 +440,15 @@ describe('[COMP:api/chat-route] buildViewingSkillBlock', () => {
 })
 
 describe('[COMP:api/chat-route] updateViewedSkill', () => {
+  const original = {
+    rowId: 'skill-1',
+    workspaceId: 'workspace-1',
+    state: 'active' as const,
+    name: 'Original skill',
+    description: 'Original description',
+    content: 'Original instructions',
+  }
+  const revision = workspaceSkillRevision(original)
   const context = {
     userId: 'user-1',
     workspaceId: 'workspace-1',
@@ -447,17 +456,19 @@ describe('[COMP:api/chat-route] updateViewedSkill', () => {
 
   it('is confirmation-gated and updates only the closed-over skill row', async () => {
     const update = vi.fn(async () => ({ name: 'Updated skill', state: 'active' }))
+    const getByIdSystem = vi.fn(async () => original)
     const tool = createUpdateViewedSkillTool({
-      workspaceSkillStore: { update } as never,
+      workspaceSkillStore: { getByIdSystem, update } as never,
       workspaceId: 'workspace-1',
       skillRowId: 'skill-1',
       skillName: 'Original skill',
+      expectedRevision: revision,
     })
 
     expect(tool.requiresConfirmation).toBe(true)
     expect(tool.hiddenFromModel).toBe(false)
     await expect(
-      tool.execute({ skillRowId: 'skill-1', content: 'Revised instructions' }, context),
+      tool.execute({ skillRowId: 'skill-1', expectedRevision: revision, content: 'Revised instructions' }, context),
     ).resolves.toEqual({
       data: 'Saved the approved changes to "Updated skill".',
     })
@@ -472,21 +483,22 @@ describe('[COMP:api/chat-route] updateViewedSkill', () => {
   it('rejects empty updates and fails closed on a workspace mismatch', async () => {
     const update = vi.fn()
     const tool = createUpdateViewedSkillTool({
-      workspaceSkillStore: { update } as never,
+      workspaceSkillStore: { getByIdSystem: vi.fn(), update } as never,
       workspaceId: 'workspace-1',
       skillRowId: 'skill-1',
       skillName: 'Original skill',
+      expectedRevision: revision,
     })
 
-    expect(tool.inputSchema.safeParse({ skillRowId: 'skill-1' }).success).toBe(false)
+    expect(tool.inputSchema.safeParse({ skillRowId: 'skill-1', expectedRevision: revision }).success).toBe(false)
     await expect(
       tool.execute(
-        { skillRowId: 'skill-1', description: 'New description' },
+        { skillRowId: 'skill-1', expectedRevision: revision, description: 'New description' },
         { ...context, workspaceId: 'workspace-2' },
       ),
     ).resolves.toMatchObject({ isError: true })
     await expect(
-      tool.execute({ skillRowId: 'skill-2', description: 'New description' }, context),
+      tool.execute({ skillRowId: 'skill-2', expectedRevision: revision, description: 'New description' }, context),
     ).resolves.toMatchObject({ isError: true })
     expect(update).not.toHaveBeenCalled()
   })
@@ -494,17 +506,53 @@ describe('[COMP:api/chat-route] updateViewedSkill', () => {
   it('keeps a hidden boot-registry instance for durable approval replay', async () => {
     const update = vi.fn(async () => ({ name: 'Updated skill', state: 'active' }))
     const tool = createUpdateViewedSkillTool({
-      workspaceSkillStore: { update } as never,
+      workspaceSkillStore: { getByIdSystem: vi.fn(async () => original), update } as never,
     })
 
     expect(tool.hiddenFromModel).toBe(true)
-    await tool.execute({ skillRowId: 'skill-1', description: 'Updated' }, context)
+    await tool.execute({ skillRowId: 'skill-1', expectedRevision: revision, description: 'Updated' }, context)
     expect(update).toHaveBeenCalledWith(
       'user-1',
       'workspace-1',
       'skill-1',
       { description: 'Updated' },
     )
+  })
+
+  it('shows proposed values for review and rejects a stale approved update', async () => {
+    const current = {
+      rowId: 'skill-1',
+      workspaceId: 'workspace-1',
+      state: 'active',
+      name: 'Original skill',
+      description: 'Changed since approval',
+      content: 'Original instructions',
+    }
+    const update = vi.fn()
+    const tool = createUpdateViewedSkillTool({
+      workspaceSkillStore: { getByIdSystem: vi.fn(async () => current), update } as never,
+      workspaceId: 'workspace-1',
+      skillRowId: 'skill-1',
+      skillName: 'Original skill',
+      expectedRevision: revision,
+    })
+    const input = {
+      skillRowId: 'skill-1',
+      expectedRevision: revision,
+      description: 'Proposed description',
+      content: 'Proposed\ninstructions',
+    }
+
+    await expect(tool.describeConfirmation!(input, context)).resolves.toEqual([
+      'Skill: Original skill',
+      'Description: Proposed description',
+      'Instructions: Proposed\ninstructions',
+    ])
+    await expect(tool.execute(input, context)).resolves.toMatchObject({
+      isError: true,
+      data: expect.stringContaining('changed while this update was awaiting approval'),
+    })
+    expect(update).not.toHaveBeenCalled()
   })
 })
 

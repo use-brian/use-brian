@@ -82,7 +82,7 @@ export function ChatConfirmationCard({
             confirmation.displayLines.length > 0 ? (
               <ul className="text-xs text-muted-foreground space-y-0.5">
                 {confirmation.displayLines.map((line, i) => (
-                  <li key={i} className="break-words">
+                  <li key={i} className="whitespace-pre-wrap break-words">
                     {line}
                   </li>
                 ))}

@@ -39,7 +39,7 @@
  * [COMP:app-web/brain-skill-editor]
  */
 
-import { use, useCallback, useEffect, useState } from "react";
+import { use, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter, useParams } from "next/navigation";
 import { cn } from "@/lib/utils";
@@ -97,10 +97,10 @@ function SkillEditorInner({ skillRowId }: { skillRowId: string }) {
     undefined,
   );
 
-  const reload = useCallback(async () => {
+  const reload = useCallback(async (shouldApply?: () => boolean) => {
     if (!activeId) return;
     const next = await getWorkspaceSkill(activeId, skillRowId);
-    setSkill(next);
+    if (!shouldApply || shouldApply()) setSkill(next);
   }, [activeId, skillRowId]);
 
   useEffect(() => {
@@ -149,7 +149,7 @@ function SkillEditorInner({ skillRowId }: { skillRowId: string }) {
       workspaceId={activeId!}
       skill={skill}
       backHref={backHref}
-      onSaved={() => void reload()}
+      onSaved={(shouldApply) => void reload(shouldApply)}
     />
   );
 }
@@ -165,7 +165,7 @@ function SkillEditor({
   workspaceId: string;
   skill: WorkspaceSkillSummary;
   backHref: string;
-  onSaved: () => void;
+  onSaved: (shouldApply?: () => boolean) => void;
 }) {
   const t = useT();
   const router = useRouter();
@@ -191,6 +191,7 @@ function SkillEditor({
   const [category, setCategory] = useState<SkillCategory>(skillCategoryOf(skill));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const editRevisionRef = useRef(0);
 
   // Resync drafts when the loaded row changes (a reload after save/confirm).
   useEffect(() => {
@@ -198,11 +199,19 @@ function SkillEditor({
     setDescription(skill.description);
     setWhenToUse(skill.whenToUse ?? "");
     setContent(skill.content);
+    setCategory(skillCategoryOf(skill));
     setError(null);
   }, [skill]);
 
   const patch = buildSkillPatch(skill, { name, description, whenToUse, content, category });
   const dirty = Object.keys(patch).length > 0;
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
+
+  function applyLocalEdit<T>(setter: (value: T) => void, value: T) {
+    editRevisionRef.current += 1;
+    setter(value);
+  }
 
   // Assistant edits and curator writes arrive over the workspace stream. Pull
   // the saved row into the open editor, but never overwrite local hand edits.
@@ -214,7 +223,8 @@ function SkillEditor({
         detail.workspaceId === workspaceId &&
         (!detail.rowId || detail.rowId === skill.rowId)
       ) {
-        onSaved();
+        const editRevision = editRevisionRef.current;
+        onSaved(() => editRevisionRef.current === editRevision && !dirtyRef.current);
       }
     };
     window.addEventListener(SKILL_REFRESH_EVENT, handleSkillRefresh);
@@ -312,13 +322,13 @@ function SkillEditor({
 
           <SkillDocument
             name={name}
-            onNameChange={setName}
+            onNameChange={(value) => applyLocalEdit(setName, value)}
             description={description}
-            onDescriptionChange={setDescription}
+            onDescriptionChange={(value) => applyLocalEdit(setDescription, value)}
             whenToUse={whenToUse}
-            onWhenToUseChange={setWhenToUse}
+            onWhenToUseChange={(value) => applyLocalEdit(setWhenToUse, value)}
             content={content}
-            onContentChange={setContent}
+            onContentChange={(value) => applyLocalEdit(setContent, value)}
           />
 
           {/* The skill's bundle — reference / template / script files the
@@ -346,7 +356,7 @@ function SkillEditor({
             skill={skill}
             status={status}
             category={category}
-            onCategoryChange={setCategory}
+            onCategoryChange={(value) => applyLocalEdit(setCategory, value)}
           />
           <AccessGroup
             workspaceId={workspaceId}
