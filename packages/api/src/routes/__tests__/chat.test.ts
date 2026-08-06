@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
-import { appAssistantForbidsResearch, appAssistantForbidsCoordinator, isAdaptiveResearchEligible, isUserBlocked, sanitizeTitle, buildActivePageInstruction, buildViewingSkillBlock, resolveStickyChannelId, isDocSurface, isAppSurface, attachUserVisibleContext, settleInlineToolApproval, buildAttachedRecordingContext, buildUnscopedFileAttachmentInstruction, mayOfferWorkspaceChatHandoff } from '../chat.js'
-import type { ConfirmationResolver, Message } from '@use-brian/core'
+import { appAssistantForbidsResearch, appAssistantForbidsCoordinator, isAdaptiveResearchEligible, isUserBlocked, sanitizeTitle, buildActivePageInstruction, buildViewingSkillBlock, createUpdateViewedSkillTool, workspaceSkillRevision, resolveStickyChannelId, isDocSurface, isAppSurface, attachUserVisibleContext, settleInlineToolApproval, buildAttachedRecordingContext, buildUnscopedFileAttachmentInstruction, mayOfferWorkspaceChatHandoff, turnInputAdmission } from '../chat.js'
+import type { ConfirmationResolver, Message, ToolContext } from '@use-brian/core'
 import type { PendingApproval, PendingApprovalsStore } from '../../db/pending-approvals-store.js'
 
 describe('[COMP:api/chat-route] staged recording context', () => {
@@ -445,12 +445,12 @@ describe('[COMP:api/chat-route] buildViewingSkillBlock', () => {
     expect(out).toContain('this skill')
   })
 
-  it('is tool-agnostic and honest about the editor: last SAVED version, propose text in chat', () => {
+  it('steers requested edits to the scoped update tool instead of manual copy/save', () => {
     const out = buildViewingSkillBlock(base)
-    // Tool-awareness rule: never name a tool that may not be injected.
-    expect(out).not.toMatch(/skill_manage|proposeSkill|patchPage|useSkill/)
     expect(out).toContain('last SAVED version')
-    expect(out).toContain('propose the exact revised text in chat')
+    expect(out).toContain('`updateViewedSkill`')
+    expect(out).toContain('user will approve')
+    expect(out).not.toContain('apply and save it themselves')
   })
 
   it('derives status: stale wins, never-activated reads as suggested', () => {
@@ -468,6 +468,162 @@ describe('[COMP:api/chat-route] buildViewingSkillBlock', () => {
     const long = buildViewingSkillBlock({ ...base, content: 'x'.repeat(7000) })
     expect(long).toContain('…(truncated)')
     expect(long.length).toBeLessThan(7000)
+  })
+})
+
+describe('[COMP:api/chat-route] updateViewedSkill', () => {
+  const original = {
+    rowId: 'skill-1',
+    workspaceId: 'workspace-1',
+    state: 'active' as const,
+    name: 'Original skill',
+    description: 'Original description',
+    content: 'Original instructions',
+    sensitivity: 'internal' as const,
+  }
+  const revision = workspaceSkillRevision(original)
+  const context = {
+    userId: 'user-1',
+    workspaceId: 'workspace-1',
+    clearance: 'internal',
+  } as ToolContext
+
+  it('is confirmation-gated and updates only the closed-over skill row', async () => {
+    const update = vi.fn(async () => ({ name: 'Updated skill', state: 'active' }))
+    const getByIdSystem = vi.fn(async () => original)
+    const tool = createUpdateViewedSkillTool({
+      workspaceSkillStore: { getByIdSystem, update } as never,
+      workspaceId: 'workspace-1',
+      skillRowId: 'skill-1',
+      skillName: 'Original skill',
+      expectedRevision: revision,
+    })
+
+    expect(tool.requiresConfirmation).toBe(true)
+    expect(tool.hiddenFromModel).toBe(false)
+    await expect(
+      tool.execute({ skillRowId: 'skill-1', expectedRevision: revision, content: 'Revised instructions' }, context),
+    ).resolves.toEqual({
+      data: 'Saved the approved changes to "Updated skill".',
+    })
+    expect(update).toHaveBeenCalledWith(
+      'user-1',
+      'workspace-1',
+      'skill-1',
+      { content: 'Revised instructions' },
+      {
+        name: 'Original skill',
+        description: 'Original description',
+        whenToUse: undefined,
+        content: 'Original instructions',
+      },
+    )
+  })
+
+  it('rejects empty updates and fails closed on a workspace mismatch', async () => {
+    const update = vi.fn()
+    const tool = createUpdateViewedSkillTool({
+      workspaceSkillStore: { getByIdSystem: vi.fn(), update } as never,
+      workspaceId: 'workspace-1',
+      skillRowId: 'skill-1',
+      skillName: 'Original skill',
+      expectedRevision: revision,
+    })
+
+    expect(tool.inputSchema.safeParse({ skillRowId: 'skill-1', expectedRevision: revision }).success).toBe(false)
+    await expect(
+      tool.execute(
+        { skillRowId: 'skill-1', expectedRevision: revision, description: 'New description' },
+        { ...context, workspaceId: 'workspace-2' },
+      ),
+    ).resolves.toMatchObject({ isError: true })
+    await expect(
+      tool.execute({ skillRowId: 'skill-2', expectedRevision: revision, description: 'New description' }, context),
+    ).resolves.toMatchObject({ isError: true })
+    expect(update).not.toHaveBeenCalled()
+  })
+
+  it('keeps a hidden boot-registry instance for durable approval replay', async () => {
+    const update = vi.fn(async () => ({ name: 'Updated skill', state: 'active' }))
+    const tool = createUpdateViewedSkillTool({
+      workspaceSkillStore: { getByIdSystem: vi.fn(async () => original), update } as never,
+    })
+
+    expect(tool.hiddenFromModel).toBe(true)
+    await tool.execute({ skillRowId: 'skill-1', expectedRevision: revision, description: 'Updated' }, context)
+    expect(update).toHaveBeenCalledWith(
+      'user-1',
+      'workspace-1',
+      'skill-1',
+      { description: 'Updated' },
+      {
+        name: 'Original skill',
+        description: 'Original description',
+        whenToUse: undefined,
+        content: 'Original instructions',
+      },
+    )
+  })
+
+  it('shows proposed values for review and rejects a stale approved update', async () => {
+    const current = {
+      rowId: 'skill-1',
+      workspaceId: 'workspace-1',
+      state: 'active',
+      name: 'Original skill',
+      description: 'Changed since approval',
+      content: 'Original instructions',
+      sensitivity: 'internal' as const,
+    }
+    const update = vi.fn()
+    const tool = createUpdateViewedSkillTool({
+      workspaceSkillStore: { getByIdSystem: vi.fn(async () => current), update } as never,
+      workspaceId: 'workspace-1',
+      skillRowId: 'skill-1',
+      skillName: 'Original skill',
+      expectedRevision: revision,
+    })
+    const input = {
+      skillRowId: 'skill-1',
+      expectedRevision: revision,
+      description: 'Proposed description',
+      content: 'Proposed\ninstructions',
+    }
+
+    await expect(tool.describeConfirmation!(input, context)).resolves.toEqual([
+      'Skill: Original skill',
+      'Description: Proposed description',
+      'Instructions: Proposed\ninstructions',
+      'Effect: Approving verifies and activates this skill at certified confidence.',
+    ])
+    await expect(tool.execute(input, context)).resolves.toMatchObject({
+      isError: true,
+      data: expect.stringContaining('changed while this update was awaiting approval'),
+    })
+    expect(update).not.toHaveBeenCalled()
+  })
+
+  it('fails closed when the assistant clearance is below the skill sensitivity', async () => {
+    const confidential = { ...original, sensitivity: 'confidential' as const }
+    const update = vi.fn()
+    const tool = createUpdateViewedSkillTool({
+      workspaceSkillStore: { getByIdSystem: vi.fn(async () => confidential), update } as never,
+      workspaceId: 'workspace-1',
+      skillRowId: 'skill-1',
+      skillName: 'Original skill',
+      expectedRevision: revision,
+      assistantClearance: 'public',
+    })
+
+    await expect(tool.execute({
+      skillRowId: 'skill-1',
+      expectedRevision: revision,
+      description: 'Updated',
+    }, context)).resolves.toMatchObject({
+      isError: true,
+      data: expect.stringContaining('does not have clearance'),
+    })
+    expect(update).not.toHaveBeenCalled()
   })
 })
 
@@ -562,5 +718,41 @@ describe('[COMP:api/chat-route] attachUserVisibleContext — provenance boundary
     expect(userRolePayload).not.toContain('# Open commitments')
     expect(userRolePayload).not.toContain('# User Context')
     expect(blocks.at(-1)?.text).toBe(actualQuestion)
+  })
+})
+
+describe('[COMP:api/chat-route] mid-turn input admission', () => {
+  const ordinary = { clientMidTurn: false, isRoom: false, mode: null }
+  const midTurn = { clientMidTurn: true, isRoom: false, mode: null }
+
+  it('runs an ordinary send', () => {
+    expect(turnInputAdmission(ordinary)).toBe('run')
+  })
+
+  it('queues a send the client marked mid-turn, instead of starting a second turn', () => {
+    // Two loops over one history interleave, and the second reads the first
+    // one's half-written state.
+    expect(turnInputAdmission(midTurn)).toBe('queue')
+  })
+
+  it('never queues a send the client did not mark', () => {
+    // The client is the only party that knows whether ITS stream is live, and
+    // that is deliberately the whole condition: keying off `sessions.status`
+    // instead would make a session left `running` by a crashed turn swallow
+    // every later send into an inbox nothing will ever drain.
+    expect(turnInputAdmission(ordinary)).toBe('run')
+  })
+
+  it('leaves rooms on their own follow-up-turn path', () => {
+    // A room message is a durable post every member must see immediately,
+    // whether or not the assistant takes it — the opposite of the
+    // persist-on-drain contract the inbox is built on.
+    expect(turnInputAdmission({ ...midTurn, isRoom: true })).toBe('run')
+  })
+
+  it('keeps the draft rejection', () => {
+    expect(turnInputAdmission({ ...midTurn, mode: 'draft' })).toBe('reject')
+    // ...but an ordinary send into a draft is unaffected.
+    expect(turnInputAdmission({ ...ordinary, mode: 'draft' })).toBe('run')
   })
 })

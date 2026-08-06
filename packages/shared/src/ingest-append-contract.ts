@@ -1,6 +1,7 @@
 /**
- * `ub.ingest.append.v1` — the published guidance schema for external ingest
- * sinks (docs/architecture/brain/ingest-external-sink.md → "The append
+ * `ub.ingest.append.v1` and local-media-aware `ub.ingest.append.v2` — the
+ * published guidance schemas for ingest sinks
+ * (docs/architecture/brain/ingest-external-sink.md → "Append
  * contract"; plan docs/plans/ingestion-external-endpoint.md §4).
  *
  * An external service that wants the platform's normalized event stream
@@ -9,8 +10,8 @@
  * (`packages/api/src/ingest/external-sink-relay.ts`) is the only producer;
  * consumers include the wechat-brian / whatsapp-brian archive services.
  *
- * Contract rules (frozen — breaking changes bump the version, never mutate
- * in place, X8):
+ * Contract rules (each version is frozen — breaking changes bump the version,
+ * never mutate in place, X8):
  *
  *   - Idempotency is the CONSUMER's job, keyed `(instance_id,
  *     provider_message_id)` per message (X4). The relay retries freely
@@ -39,6 +40,8 @@ import { z } from 'zod'
 
 /** Contract identifier carried in every request and response body. */
 export const INGEST_APPEND_CONTRACT_V1 = 'ub.ingest.append.v1'
+/** Media-aware contract used by the platform-managed local archive sink. */
+export const INGEST_APPEND_CONTRACT_V2 = 'ub.ingest.append.v2'
 
 /**
  * Whole-batch idempotency key header — the outbox row's `batch_id`, stable
@@ -56,7 +59,7 @@ export const INGEST_APPEND_SIGNATURE_HEADER = 'x-ub-signature'
 /** JSON value passthrough for opaque fields (cursor, raw provider blob). */
 const opaqueJson = z.unknown()
 
-export const canonicalIngestMessageSchema = z.object({
+const canonicalMessageFields = {
   /** Idempotency key together with `instance_id`. */
   provider_message_id: z.string().min(1),
   conversation_id: z.string().min(1),
@@ -79,9 +82,39 @@ export const canonicalIngestMessageSchema = z.object({
   reply_to_provider_id: z.string().nullable(),
   /** Opaque provider payload kept for reparse; never interpreted here. */
   raw_provider_blob: opaqueJson.nullable(),
-})
+}
+
+/** Frozen v1 message shape. */
+export const canonicalIngestMessageSchema = z.object(canonicalMessageFields)
 
 export type CanonicalIngestMessage = z.infer<typeof canonicalIngestMessageSchema>
+
+export const ingestMediaRefV2Schema = z.object({
+  asset_id: z.string().uuid().optional(),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  availability: z.enum(['stored', 'missing', 'failed']),
+  filename: z.string(),
+  mime: z.string(),
+  size_bytes: z.number().int().nonnegative(),
+}).superRefine((value, ctx) => {
+  if (value.availability !== 'stored') return
+  if (!value.asset_id) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['asset_id'], message: 'asset_id is required when availability is stored' })
+  }
+  if (!value.sha256) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['sha256'], message: 'sha256 is required when availability is stored' })
+  }
+})
+
+/** V2 retains every v1 field while adding video and a durable media asset. */
+export const canonicalIngestMessageV2Schema = z.object({
+  ...canonicalMessageFields,
+  kind: z.enum(['text', 'image', 'video', 'voice', 'file', 'link']),
+  media_ref: ingestMediaRefV2Schema.nullable(),
+})
+
+export type CanonicalIngestMessageV2 = z.infer<typeof canonicalIngestMessageV2Schema>
+export type AnyCanonicalIngestMessage = CanonicalIngestMessage | CanonicalIngestMessageV2
 
 export const ingestAppendRequestSchema = z.object({
   contract: z.literal(INGEST_APPEND_CONTRACT_V1),
@@ -98,6 +131,19 @@ export const ingestAppendRequestSchema = z.object({
 })
 
 export type IngestAppendRequest = z.infer<typeof ingestAppendRequestSchema>
+
+export const ingestAppendRequestV2Schema = z.object({
+  contract: z.literal(INGEST_APPEND_CONTRACT_V2),
+  instance_id: z.string().uuid(),
+  source: z.string().min(1),
+  workspace_id: z.string().uuid(),
+  owner_user_id: z.string().uuid().nullable(),
+  cursor: opaqueJson.nullable(),
+  messages: z.array(canonicalIngestMessageV2Schema).min(1),
+})
+
+export type IngestAppendRequestV2 = z.infer<typeof ingestAppendRequestV2Schema>
+export type AnyIngestAppendRequest = IngestAppendRequest | IngestAppendRequestV2
 
 /**
  * Per-conversation coverage report (messaging-archive D11) — how an external
@@ -127,3 +173,17 @@ export const ingestAppendResponseSchema = z.object({
 })
 
 export type IngestAppendResponse = z.infer<typeof ingestAppendResponseSchema>
+
+export const ingestAppendResponseV2Schema = z.object({
+  contract: z.literal(INGEST_APPEND_CONTRACT_V2),
+  accepted: z.number().int().nonnegative(),
+  duplicates: z.number().int().nonnegative(),
+  ack_cursor: opaqueJson.optional(),
+  coverage: ingestAppendCoverageSchema.optional(),
+})
+
+export type IngestAppendResponseV2 = z.infer<typeof ingestAppendResponseV2Schema>
+export const anyIngestAppendResponseSchema = z.union([
+  ingestAppendResponseSchema,
+  ingestAppendResponseV2Schema,
+])

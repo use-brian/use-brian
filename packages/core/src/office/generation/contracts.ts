@@ -83,3 +83,13 @@ export type OfficeGenerationOutcome =
   | { status: 'needs_input'; code: 'website_required' | 'template_ambiguous' | 'material_fact_missing'; question: string }
   | { status: 'failed'; code: string; message: string }
   | { status: 'cancelled' }
+
+export type OfficeGenerationFailureCode = 'presentation_fit_failed'
+
+/** A typed pipeline failure whose code is safe to project to members. */
+export class OfficeGenerationFailure extends Error {
+  constructor(readonly code: OfficeGenerationFailureCode, message: string) {
+    super(message)
+    this.name = 'OfficeGenerationFailure'
+  }
+}

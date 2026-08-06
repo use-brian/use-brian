@@ -118,6 +118,8 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   shopifyListDisputes: 'List disputes',
   shopifyListContent: 'List store content',
   shopifySalesReport: 'Run sales report',
+  shopifyStorefrontFunnel: 'Check storefront funnel',
+  shopifyAnalyticsQuery: 'Query store analytics',
   shopifyUpdateProduct: 'Update product',
   shopifyCreateProduct: 'Create product',
   shopifyAddProductImage: 'Add product image',
@@ -219,6 +221,9 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
 
   // Doc pages
   findPage: 'Find a doc page',
+
+  // Workspace skills
+  updateViewedSkill: 'Update workspace skill',
 }
 
 /**
@@ -245,6 +250,7 @@ export function getToolDisplayName(toolName: string): string {
  */
 const TOOL_STATUS_NAMES: Record<string, string> = {
   saveMemory: 'Saving to memory',
+  updateViewedSkill: 'Updating workspace skill',
   getMemory: 'Recalling memories',
   webSearch: 'Searching the web',
   urlReader: 'Reading a page',

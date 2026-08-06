@@ -22,7 +22,7 @@ function app() {
   const server = express()
   server.use(express.json())
   server.use((req, _res, next) => { (req as { userId?: string }).userId = USER; next() })
-  const projection = { artifactId: ARTIFACT, family: 'document' as const, title: 'Report', version: 0, lifecycleState: 'active' as const, role: 'edit' as const, job: { id: JOB, status: 'queued', stage: 'queued' } }
+  const projection = { artifactId: ARTIFACT, family: 'document' as const, title: 'Report', version: 0, lifecycleState: 'active' as const, role: 'edit' as const, job: { id: JOB, status: 'queued', stage: 'queued', errorCode: null } }
   const service = {
     create: vi.fn(async () => ({ artifactId: ARTIFACT, jobId: JOB })),
     get: vi.fn(async () => projection),
@@ -58,7 +58,7 @@ describe('[COMP:api/office-routes] Office API routes', () => {
     await request(test.server).get('/api/office/capabilities').expect(200, { generationAvailable: true, generationFamilies: ['document', 'presentation', 'spreadsheet'] })
     await request(test.server).post('/api/office/artifacts').send({ workspaceId: WORKSPACE, assistantId: ASSISTANT, family: 'document', outcome: 'Create a board report', audience: 'Board', sourceHandles: [], canonicalWebsite: 'https://example.com', companyHasNoWebsite: false, idempotencyKey: 'request-12345678' }).expect(202, { artifactId: ARTIFACT, jobId: JOB })
     const read = await request(test.server).get(`/api/office/artifacts/${ARTIFACT}`).expect(200)
-    expect(read.body.artifact).toMatchObject({ artifactId: ARTIFACT, role: 'edit', job: { id: JOB, stage: 'queued' } })
+    expect(read.body.artifact).toMatchObject({ artifactId: ARTIFACT, role: 'edit', job: { id: JOB, stage: 'queued', errorCode: null } })
   })
 
   it('lets an active editor restore an earlier artifact version', async () => {

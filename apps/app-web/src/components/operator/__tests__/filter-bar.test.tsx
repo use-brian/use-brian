@@ -13,7 +13,12 @@ import { renderToString } from "react-dom/server";
 
 vi.mock("@/lib/i18n/client", () => ({
   useT: () => ({
-    filterBar: { filter: "Filter", clearFilter: "Clear filter", view: "View" },
+    filterBar: {
+      filter: "Filter",
+      clearFilter: "Clear filter",
+      view: "View",
+      more: "+{count}",
+    },
   }),
 }));
 
@@ -60,7 +65,7 @@ describe("[COMP:app-web/operator-filter-bar] FilterBar render contract", () => {
     const html = renderToString(
       <FilterBar
         defs={DEFS}
-        active={{ stage: "proposal" }}
+        active={{ stage: ["proposal"] }}
         onSet={() => {}}
         search=""
         onSearch={() => {}}
@@ -70,8 +75,74 @@ describe("[COMP:app-web/operator-filter-bar] FilterBar render contract", () => {
     expect(html).toContain("Stage");
     expect(html).toContain("Proposal");
     expect(html).toContain("Clear filter");
+    // A single value carries no overflow badge.
+    expect(html).not.toContain("+1");
     // The other def stays behind the funnel.
     expect(html).not.toContain("Acme");
+  });
+
+  it("a multi-value filter stays pill-sized: lead label + overflow count", () => {
+    const html = renderToString(
+      <FilterBar
+        defs={DEFS}
+        active={{ stage: ["proposal", "lead"] }}
+        onSet={() => {}}
+        search=""
+        onSearch={() => {}}
+        searchPlaceholder="Search"
+      />,
+    );
+    // Selection order leads, so the pill reads "Stage · Proposal +1"...
+    expect(html).toContain("Proposal");
+    expect(html).toContain("+1");
+    // ...and the full set is still reachable, in the trigger's title.
+    expect(html).toContain("Proposal, Lead");
+    // Only ONE pill for the property, however many values it holds.
+    expect(html.match(/Clear filter/g)).toHaveLength(1);
+  });
+
+  it("an empty value array is inactive — no pill", () => {
+    const html = renderToString(
+      <FilterBar
+        defs={DEFS}
+        active={{ stage: [] }}
+        onSet={() => {}}
+        search=""
+        onSearch={() => {}}
+        searchPlaceholder="Search"
+      />,
+    );
+    expect(html).not.toContain("Clear filter");
+    expect(html).not.toContain("Proposal");
+  });
+
+  it("an option's leading art rides its pill, sized for the pill", () => {
+    const html = renderToString(
+      <FilterBar
+        defs={[
+          {
+            key: "assignee",
+            label: "Assignee",
+            options: [
+              {
+                value: "u1",
+                label: "Ada Lovelace",
+                icon: (size: number) => (
+                  <img src="/a.png" width={size} height={size} alt="" />
+                ),
+              },
+            ],
+          },
+        ]}
+        active={{ assignee: ["u1"] }}
+        onSet={() => {}}
+        search=""
+        onSearch={() => {}}
+        searchPlaceholder="Search"
+      />,
+    );
+    expect(html).toContain('src="/a.png"');
+    expect(html).toContain('width="14"');
   });
 
   it("search keeps the input open while a query is applied", () => {

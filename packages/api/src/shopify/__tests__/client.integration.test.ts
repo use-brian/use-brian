@@ -24,6 +24,8 @@ import {
   readProductTemplate,
   createProductTemplate,
   setProductTemplate,
+  runShopifyqlQuery,
+  storefrontFunnel,
   type ShopifyAuth,
 } from '../client.js'
 
@@ -238,4 +240,41 @@ describeIf('[COMP:api/shopify-client] Shopify live dev-store', () => {
       `, { themeId: main!.id, files: [`templates/product.${suffix}.json`] }).catch(() => {})
     }
   })
+
+  // ── Storefront analytics (ShopifyQL) ───────────────────────
+  //
+  // These need `read_reports` on the app AND the two-step propagation (release
+  // a version, then open the app in the store admin). Without it Shopify
+  // answers with an ACCESS_DENIED naming the scope - which is the honest
+  // failure, so the assertion below reports it rather than skipping quietly.
+
+  it('runs the storefront funnel query against the live store', async () => {
+    const result = await storefrontFunnel(AUTH, { since: '-30d' })
+    // Column names are the contract - if Shopify renames a metric the funnel
+    // silently loses a column, and the derived drop-off stops being computed.
+    const names = result.columns.map((c) => c.name)
+    expect(names).toContain('sessions')
+    expect(names).toContain('sessions_with_cart_additions')
+    expect(names).toContain('sessions_that_reached_checkout')
+    expect(result.shopifyql).toContain("human_or_bot_session = 'human'")
+    // A quiet dev store legitimately returns one all-zero row; what must hold
+    // is that the query PARSED, which reaching here already proves.
+    expect(Array.isArray(result.rows)).toBe(true)
+  }, 60_000)
+
+  it('accepts every groupBy dimension the tool offers', async () => {
+    // The enum is a promise to the model that any of these parses. An invented
+    // dimension name would only ever surface here.
+    for (const groupBy of ['referrer_source', 'session_device_type', 'session_country'] as const) {
+      const result = await storefrontFunnel(AUTH, { since: '-7d', groupBy, limit: 5 })
+      expect(result.columns.map((c) => c.name)).toContain(groupBy)
+    }
+  }, 120_000)
+
+  it('surfaces a bad field name as a parse error rather than an empty table', async () => {
+    // The silent-failure guard, proven against Shopify rather than a mock:
+    // a typo must not come back as "no sessions".
+    await expect(runShopifyqlQuery(AUTH, 'FROM sessions SHOW sesions SINCE -7d'))
+      .rejects.toThrow(/rejected/i)
+  }, 60_000)
 })

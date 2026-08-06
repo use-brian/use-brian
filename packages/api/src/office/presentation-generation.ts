@@ -6,6 +6,7 @@ import {
   collectStream,
   fitOfficeArtifact,
   inferOfficeTemplateRouting,
+  OfficeGenerationFailure,
   type LLMProvider,
   type Message,
   type OfficeClaimPlanEntry,
@@ -44,12 +45,23 @@ const RevisionSchema = z.object({
   }).strict()).min(1).max(100),
 }).strict()
 
-const PRESENTATION_SYSTEM_PROMPT = `You plan a concise presentation from an admitted slide-template catalogue. Return one JSON object and nothing else. Use only the supplied recipeId and fieldId values. Never invent a customer, metric, date, quote, award, integration, price, or commitment. Facts may come only from the user's request or supplied evidence. Prefer a coherent progression: opening, explanation, proof or detail, and closing. Respect every recipe's use guidance and repetition limit. Fill every required textual field. Omit optional fields that do not need to change so admitted brand copy and media remain intact. Use this exact shape: {"title":"...","slides":[{"recipeId":"uuid","title":"...","fields":[{"fieldId":"uuid","text":"..."}]}]}`
+const PRESENTATION_SYSTEM_PROMPT = `You plan a concise presentation from an admitted slide-template catalogue. Return one JSON object and nothing else. Use only the supplied recipeId and fieldId values. Never invent a customer, metric, date, quote, award, integration, price, or commitment. Facts may come only from the user's request or supplied evidence. Prefer a coherent progression: opening, explanation, proof or detail, and closing. Respect every recipe's use guidance, repetition limit, and each field's maxLength. Fill every required textual field. Omit optional fields that do not need to change so admitted brand copy and media remain intact. Use this exact shape: {"title":"...","slides":[{"recipeId":"uuid","title":"...","fields":[{"fieldId":"uuid","text":"..."}]}]}`
 
 const REVISION_SYSTEM_PROMPT = `You revise only the selected text in a presentation. The complete presentation context is read-only and exists only so you can preserve meaning, narrative flow, and facts. Preserve every fact and the intended slide role unless the instruction explicitly changes it. Do not copy surrounding text into the replacement. Return one JSON object and nothing else with this exact shape: {"replacements":[{"targetId":"uuid","text":"replacement"}]}. Every selected entry marked required must appear exactly once. A slide-scoped entry not marked required is allowed but should appear only when the instruction requires changing it. Never return a target outside the selected entries.`
 
 type PresentationPlan = z.infer<typeof PresentationPlanSchema>
 type RevisionPlan = z.infer<typeof RevisionSchema>
+
+class PresentationFieldLengthError extends Error {
+  constructor(
+    readonly plan: PresentationPlan,
+    readonly field: OfficeTemplateField,
+    readonly actualLength: number,
+  ) {
+    super(`Presentation field ${field.label} exceeds its maximum length`)
+    this.name = 'PresentationFieldLengthError'
+  }
+}
 
 type MaterializedPresentation = {
   snapshot: PresentationSnapshot
@@ -237,7 +249,7 @@ function validatePlan(template: OfficeTemplateBundle, rawPlan: unknown): z.infer
       suppliedFields.add(plannedField.fieldId)
       const field = fields.get(plannedField.fieldId)
       if (!field || !allowedFields.has(field.id) || field.locked || !TEXT_FIELD_TYPES.has(field.type)) throw new Error('Presentation plan wrote an unavailable template field')
-      if (field.maxLength !== undefined && plannedField.text.length > field.maxLength) throw new Error(`Presentation field ${field.label} exceeds its maximum length`)
+      if (field.maxLength !== undefined && plannedField.text.length > field.maxLength) throw new PresentationFieldLengthError(plan, field, plannedField.text.length)
       if (field.required && !plannedField.text.trim()) throw new Error(`Presentation field ${field.label} is required`)
     }
     for (const fieldId of recipe.fieldIds) {
@@ -371,13 +383,28 @@ export async function generatePresentationFromTemplate(params: {
       maxTokens: 8_000,
       temperature: 0.2,
     }))
-    const plan = validatePlan(template, parseJsonObject(responseText(response)))
+    let plan: PresentationPlan
+    try {
+      plan = validatePlan(template, parseJsonObject(responseText(response)))
+    } catch (cause) {
+      if (!(cause instanceof PresentationFieldLengthError)) throw cause
+      rejectedPlan = cause.plan
+      diagnostics = [{
+        code: 'max_length',
+        message: 'Text exceeds the admitted field character limit',
+        fieldId: cause.field.id,
+        fieldLabel: cause.field.label,
+        maxLength: cause.field.maxLength ?? 0,
+        actualLength: cause.actualLength,
+      }]
+      continue
+    }
     const materialized = materializePresentation({ ...params, template }, plan)
     diagnostics = fitDiagnostics(materialized)
     if (diagnostics.length === 0) return materialized.snapshot
     rejectedPlan = plan
   }
-  throw new Error(`Presentation generation could not satisfy the admitted template fit constraints after ${MAX_FIT_ATTEMPTS} attempts: ${JSON.stringify(diagnostics)}`)
+  throw new OfficeGenerationFailure('presentation_fit_failed', `Presentation generation could not satisfy the admitted template fit constraints after ${MAX_FIT_ATTEMPTS} attempts: ${JSON.stringify(diagnostics)}`)
 }
 
 export async function revisePresentationTargets(params: {

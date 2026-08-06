@@ -8,15 +8,19 @@
 import { describe, it, expect } from "vitest";
 import {
   ALPHA_EASE_EPSILON,
+  EDGE_REST_WIDTH,
   GRID_TARGET_PX,
+  GROUP_SPRING_CLEARANCE,
   HALO_PADDING,
   HUB_DEGREE_FLOOR,
   HUB_SMALL_GRAPH,
+  INITIAL_FIT_MAX_GROUP_RADIUS_PX,
   INITIAL_FIT_MAX_NODE_RADIUS_PX,
   INITIAL_FIT_MAX_SCALE,
   NODE_RADIUS_MAX,
   NODE_RADIUS_MIN,
   PULSE_PERIOD_MS,
+  aggregateEdgeWidth,
   boundedViewportFit,
   clusterLabelAlpha,
   communityHalos,
@@ -29,6 +33,7 @@ import {
   makeClusterForce,
   makeCollideForce,
   mergePositions,
+  radiusAwareLinkDistance,
   mixHex,
   nodePhase,
   nodeRadius,
@@ -73,6 +78,19 @@ describe("[COMP:app-web/graph-canvas] graph canvas rendering math", () => {
         maxNodeRadius: 11.5,
       });
       expect(fit.scale).toBeCloseTo(INITIAL_FIT_MAX_NODE_RADIUS_PX / 11.5);
+    });
+
+    it("lets a group-bearing projection frame geometrically under the group px cap", () => {
+      // Same large-container bounds — with the group ceiling the radius
+      // cap (30/11.5 ≈ 2.6) no longer binds; the absolute 2.5× does.
+      const fit = boundedViewportFit({
+        width: 1000,
+        height: 800,
+        bounds: { x: [-5, 5], y: [-5, 5] },
+        maxNodeRadius: 11.5,
+        maxNodeRadiusPx: INITIAL_FIT_MAX_GROUP_RADIUS_PX,
+      });
+      expect(fit.scale).toBe(INITIAL_FIT_MAX_SCALE);
     });
   });
 
@@ -127,6 +145,54 @@ describe("[COMP:app-web/graph-canvas] graph canvas rendering math", () => {
       force(1);
       expect(a).toMatchObject({ x: 0, y: 0 });
       expect(b).toMatchObject({ x: 100, y: 0 });
+    });
+
+    it("honors per-node padding so containers keep label clearance", () => {
+      type Padded = { x: number; y: number; degree: number; pad: number };
+      const a: Padded = { x: 0, y: 0, degree: 0, pad: 16 };
+      const b: Padded = { x: 1, y: 0, degree: 0, pad: 4 };
+      const force = makeCollideForce(() => 10, {
+        padding: (n) => (n as Padded).pad,
+      });
+      force.initialize([a, b]);
+      for (let i = 0; i < 60; i++) force(1);
+      // radii 10 + 10, padding 16 + 4 → rest distance ≥ 40.
+      expect(Math.hypot(b.x - a.x, b.y - a.y)).toBeGreaterThanOrEqual(
+        40 - 0.05,
+      );
+    });
+  });
+
+  describe("radiusAwareLinkDistance", () => {
+    it("keeps the tuned base for entry-only edges", () => {
+      expect(radiusAwareLinkDistance(28, 7, 7, false)).toBe(28);
+      expect(radiusAwareLinkDistance(160, 11.5, 11.5, false)).toBe(160);
+    });
+
+    it("stretches a container edge to clear both radii plus label room", () => {
+      expect(radiusAwareLinkDistance(28, 10, 11.5, true)).toBe(
+        10 + 11.5 + GROUP_SPRING_CLEARANCE,
+      );
+    });
+
+    it("never shrinks below the base (long inter-community bridges win)", () => {
+      expect(radiusAwareLinkDistance(160, 7, 8, true)).toBe(160);
+    });
+  });
+
+  describe("aggregateEdgeWidth", () => {
+    it("keeps the uniform rest width for unweighted edges", () => {
+      expect(aggregateEdgeWidth()).toBe(EDGE_REST_WIDTH);
+      expect(aggregateEdgeWidth(1)).toBe(EDGE_REST_WIDTH);
+      expect(aggregateEdgeWidth(0)).toBe(EDGE_REST_WIDTH);
+    });
+
+    it("grows with the represented relationship count and caps", () => {
+      const w4 = aggregateEdgeWidth(4);
+      const w32 = aggregateEdgeWidth(32);
+      expect(w4).toBeGreaterThan(EDGE_REST_WIDTH);
+      expect(w32).toBeGreaterThan(w4);
+      expect(aggregateEdgeWidth(100000)).toBe(2.4);
     });
   });
 

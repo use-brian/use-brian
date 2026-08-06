@@ -27,6 +27,8 @@
     "exceljs": "^4.4.0",
     "jszip": "^3.10.1",
     "linkedom": "^0.18.0",
+    "turndown": "^7.2.4",
+    "turndown-plugin-gfm": "^1.0.2",
     "opencc-js": "^1.4.1",
     "pdfjs-dist": "~5.6.205",
     "pptxgenjs": "^4.0.1",
@@ -37,6 +39,7 @@
   },
   "devDependencies": {
     "@types/node": "^20.19.39",
+    "@types/turndown": "^5.0.6",
     "dotenv": "^16",
     "typescript": "^5.7",
     "vitest": "^3"

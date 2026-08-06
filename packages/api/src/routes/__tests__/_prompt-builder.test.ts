@@ -170,6 +170,58 @@ describe('[COMP:prompt/builder] User Context — presence vs anchor (travel)', (
   })
 })
 
+describe('[COMP:prompt/builder] User Context — speaker identity', () => {
+  it('leads the block with the speaker line, before the datetime line', () => {
+    const out = buildFullSystemPrompt({
+      ...baseArgs,
+      speakerIdentity: { name: 'Hinson', email: 'hinson@example.com' },
+    })
+    expect(out).toContain(
+      '# User Context\nYou are talking with: Hinson (hinson@example.com), the authenticated sender of the newest message.\nCurrent date and time:',
+    )
+  })
+
+  it('renders name-only when no email is provided', () => {
+    const out = buildFullSystemPrompt({
+      ...baseArgs,
+      speakerIdentity: { name: 'Hinson' },
+    })
+    expect(out).toContain('You are talking with: Hinson, the authenticated sender')
+    expect(out).not.toContain('Hinson (')
+  })
+
+  it('skips the line when the identity is null, missing, or whitespace-named', () => {
+    for (const speakerIdentity of [null, undefined, { name: '   ' }]) {
+      const out = buildFullSystemPrompt({ ...baseArgs, speakerIdentity })
+      expect(out).not.toContain('You are talking with:')
+      expect(out).toContain('# User Context\nCurrent date and time:')
+    }
+  })
+
+  it('keeps the line in the travel (dual-line) form too', () => {
+    const out = buildFullSystemPrompt({
+      ...baseArgs,
+      timezone: 'Asia/Tokyo',
+      anchorTimezone: 'Asia/Hong_Kong',
+      speakerIdentity: { name: 'Hinson', email: 'hinson@example.com' },
+    })
+    expect(out).toContain(
+      '# User Context\nYou are talking with: Hinson (hinson@example.com), the authenticated sender of the newest message.\nCurrent local time (where the user is now):',
+    )
+  })
+
+  it('stays in private runtime context, never the stable prefix or user-visible prefix', () => {
+    const split = buildSplitSystemPrompt({
+      ...baseArgs,
+      speakerIdentity: { name: 'Hinson', email: 'hinson@example.com' },
+      replyContext: { text: 'quoted line', fromAssistant: true },
+    })
+    expect(split.privateRuntimeContext).toContain('You are talking with: Hinson')
+    expect(split.stablePrompt).not.toContain('You are talking with:')
+    expect(split.userVisibleContext).not.toContain('You are talking with:')
+  })
+})
+
 describe('[COMP:prompt/builder] Optional blocks', () => {
   it('omits reply context when input is null', () => {
     const out = buildFullSystemPrompt({ ...baseArgs, replyContext: null })

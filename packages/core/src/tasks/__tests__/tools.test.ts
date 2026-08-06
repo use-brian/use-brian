@@ -699,6 +699,68 @@ describe('[COMP:tasks/tools] attributes (sprint planning)', () => {
   })
 })
 
+// The task body. `description` is a conventional `attributes` key (the v1
+// schema is frozen against typed scalar columns), but the tools surface it as
+// its own field: `attributes` is the user's free-form bag AND a whole-object
+// replace, so prose written "into attributes" either never gets written or
+// clobbers the sprint keys beside it.
+describe('[COMP:tasks/tools] description', () => {
+  const body = 'Rewrite the pricing page copy. Start from the current /pricing route. Done when the new copy is live.'
+
+  it('saveTask writes the body into attributes.description', async () => {
+    const store = makeFakeStore()
+    const { saveTask } = createTaskTools(store)
+    await saveTask.execute({ title: 'Rewrite pricing copy', description: body }, ctx)
+    expect(store.rows[0].attributes).toEqual({ description: body })
+  })
+
+  it('saveTask keeps description alongside user attribute keys', async () => {
+    const store = makeFakeStore()
+    const { saveTask } = createTaskTools(store)
+    await saveTask.execute(
+      { title: 'A', description: body, attributes: { estimate_days: 2 } },
+      ctx,
+    )
+    expect(store.rows[0].attributes).toEqual({ estimate_days: 2, description: body })
+  })
+
+  it('updateTask merges the body onto the live bag, so siblings survive', async () => {
+    const store = makeFakeStore()
+    const { saveTask, updateTask } = createTaskTools(store)
+    await saveTask.execute(
+      { title: 'A', attributes: { priority: 'high', icon: '🚀', estimate_days: 2 } },
+      ctx,
+    )
+    await updateTask.execute({ id: store.rows[0].id, description: body }, ctx)
+    expect(store.rows[0].attributes).toEqual({
+      priority: 'high',
+      icon: '🚀',
+      estimate_days: 2,
+      description: body,
+    })
+  })
+
+  it('updateTask clears the body on null without touching siblings', async () => {
+    const store = makeFakeStore()
+    const { saveTask, updateTask } = createTaskTools(store)
+    await saveTask.execute({ title: 'A', description: body, attributes: { priority: 'low' } }, ctx)
+    await updateTask.execute({ id: store.rows[0].id, description: null }, ctx)
+    expect(store.rows[0].attributes).toEqual({ priority: 'low' })
+  })
+
+  it('updateTask on an unknown id returns the supersession-aware recovery message', async () => {
+    const store = makeFakeStore()
+    const { updateTask } = createTaskTools(store)
+    const result = await updateTask.execute(
+      { id: '00000000-0000-0000-0000-000000000999', description: body },
+      ctx,
+    )
+    expect(result.isError).toBe(true)
+    expect(result.data).toContain('Do NOT retry this exact id')
+    expect(store.rows).toHaveLength(0)
+  })
+})
+
 // `depends_on` task → task edge wiring. The edge type is in the locked
 // vocabulary (`edges.ts:66`, decisions-log 2026-05-14). The tool layer
 // threads `depends_on: [uuid]` through to `store.create({ dependsOn })`

@@ -12,7 +12,7 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
 type TaskLane = "extracted" | "assistant";
 
-type TaskRuleEffect = "deny" | "require";
+type TaskRuleEffect = "deny" | "require" | "allow";
 export type TaskRuleStatus = "active" | "proposed" | "disabled";
 
 export type TaskRulePredicate = {
@@ -43,7 +43,7 @@ export type TaskRule = {
   createdAt: string;
 };
 
-/** Why a candidate did not become a task. */
+/** Why a candidate did not become a task (or, for `auto_rule`, why it did). */
 type TaskCandidateReason =
   | "tombstoned"
   | "rule"
@@ -52,7 +52,9 @@ type TaskCandidateReason =
   | "near_duplicate"
   | "not_a_task"
   | "needs_spec"
-  | "quality_unverified";
+  | "quality_unverified"
+  | "suggested"
+  | "auto_rule";
 
 type TaskReadinessAssessment = {
   classification: "ready" | "needs_spec" | "not_a_task";
@@ -82,14 +84,18 @@ export type TaskCandidate = {
   title: string;
   due: string | null;
   sourceKind: string | null;
+  channelRef: string | null;
   lane: TaskLane;
   sourceEpisodeId: string | null;
   status: string;
   reasonCode: TaskCandidateReason;
   matchedTaskId: string | null;
   matchedTaskTitle: string | null;
+  matchedRuleId: string | null;
+  matchedRuleClause: string | null;
   similarity: number | null;
   quality: TaskReadinessAssessment | null;
+  createdTaskId: string | null;
   createdAt: string;
   expiresAt: string;
 };
@@ -115,9 +121,11 @@ async function json<T>(res: Response, what: string): Promise<T> {
 
 export async function loadTaskCandidates(
   workspaceId: string,
+  status: "pending" | "auto_accepted" = "pending",
 ): Promise<TaskCandidate[]> {
+  const query = status === "auto_accepted" ? "?status=auto_accepted" : "";
   const res = await authFetch(
-    `${API_URL}/api/task-guardrails/${workspaceId}/candidates`,
+    `${API_URL}/api/task-guardrails/${workspaceId}/candidates${query}`,
   );
   const body = await json<{ candidates: TaskCandidate[] }>(
     res,
@@ -126,15 +134,32 @@ export async function loadTaskCandidates(
   return body.candidates;
 }
 
+/**
+ * Approve a suggestion into a real task. `title` approves under a corrected
+ * title; `always` additionally activates a class-level allow rule so future
+ * ready suggestions from this source/channel auto-create.
+ */
 export async function acceptTaskCandidate(
   workspaceId: string,
   candidateId: string,
-): Promise<void> {
+  opts: { title?: string; always?: boolean } = {},
+): Promise<{ allowRuleId: string | null }> {
   const res = await authFetch(
     `${API_URL}/api/task-guardrails/${workspaceId}/candidates/${candidateId}/accept`,
-    { method: "POST" },
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...(opts.title ? { title: opts.title } : {}),
+        ...(opts.always ? { always: true } : {}),
+      }),
+    },
   );
-  await json(res, "accept suggestion");
+  const body = await json<{ allowRuleId?: string | null }>(
+    res,
+    "accept suggestion",
+  );
+  return { allowRuleId: body.allowRuleId ?? null };
 }
 
 /**

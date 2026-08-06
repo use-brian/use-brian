@@ -60,7 +60,7 @@ export function createChatArchiveTools(deps: ChatArchiveToolDeps = {}): Tool[] {
       conversationId: z.string().min(1).optional().describe('Exact provider conversation id from a prior result.'),
       sender: z.string().min(1).optional().describe('Sender id or display-name substring.'),
       direction: z.enum(['inbound', 'outbound']).optional(),
-      kind: z.enum(['text', 'image', 'voice', 'file', 'link']).optional(),
+      kind: z.enum(['text', 'image', 'video', 'voice', 'file', 'link']).optional(),
       ...timeFilters,
     }),
     isReadOnly: true,
@@ -93,6 +93,7 @@ export function createChatArchiveTools(deps: ChatArchiveToolDeps = {}): Tool[] {
           data: {
             hits: result.hits,
             embeddingCoverage: result.embeddingCoverage.note ?? 'complete for the selected filters',
+            mediaCoverage: result.mediaCoverage,
           },
         }
       } catch (err) {

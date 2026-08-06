@@ -8,7 +8,8 @@ import { query } from '../db/client.js'
 import { buildPinnedContextBlock } from '../resolve-session-pins.js'
 import { getSelfEntityId } from '../db/memories.js'
 import { getRecording, type Recording } from '../db/recordings-store.js'
-import { queryLoop, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, decodeExternalCostMeta, buildWorkspaceFilesContext, SensitivityAccumulator, CompartmentAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSupervisorSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, parsePresentedDocumentInput, type PresentedDocumentInput, type MediaBackend } from '@use-brian/core'
+import { queryLoop, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, decodeExternalCostMeta, buildWorkspaceFilesContext, SensitivityAccumulator, CompartmentAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSupervisorSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, parsePresentedDocumentInput, buildTool, type PresentedDocumentInput, type MediaBackend } from '@use-brian/core'
+import { deliverTurnInput, registerTurnInbox } from '../turn-inbox.js'
 import { insertClaimProvenance, getClaimsForLatestAssistantMessage } from '../db/claim-provenance-store.js'
 import type { ToolResultMeta, SessionStateStore, SessionStateRecord, PlanStore, AmbientSurface } from '@use-brian/core'
 import { runProactiveCompaction } from './proactive-compaction.js'
@@ -43,7 +44,7 @@ import { resolveModel, ensureServableModel, backgroundLatencyBudgetMs, backgroun
 import { registryRow } from '@use-brian/shared/model-registry'
 import type { ConnectorStore } from '../db/connector-store.js'
 import { getToolDisplayName, stripFollowUps, stripCommentThreadReplyTag } from '@use-brian/shared'
-import { resolveUser, buildBrowserEscalationPrompt, buildUnavailableCapabilitiesPrompt, injectSkills, checkUsageBudget, applyMcpInjection, type CreditBudgetGate } from './route-helpers.js'
+import { resolveUser, buildBrowserEscalationPrompt, buildUnavailableCapabilitiesPrompt, injectSkills, isSkillOfferable, checkUsageBudget, applyMcpInjection, type CreditBudgetGate } from './route-helpers.js'
 import { createDocRunClient } from '../doc/run-presence-client.js'
 import type { AssistantRunChannel } from '@use-brian/doc-model'
 import {
@@ -64,6 +65,7 @@ import type { DeferredConfirmationStore } from '../db/deferred-confirmation-stor
 import type { JobStore } from '@use-brian/core'
 import type { PendingApprovalsStore, ApprovalKind } from '../db/pending-approvals-store.js'
 import type { SessionResumeStore } from '../db/session-resume-store.js'
+import type { WorkspaceSkillStore } from '../db/skill-store.js'
 
 // Module-level map of active confirmation resolvers, keyed by sessionId.
 // Cleaned up on turn_complete or stream close.
@@ -943,10 +945,9 @@ export function buildActivePageInstruction(args: {
  * whose request carried `viewingSkillRowId` (the app-web floating dock on
  * the Brain skill editor route sends it, path-derived). Gives the model the
  * skill's SAVED contents so "this skill" resolves to what the user is
- * looking at. Deliberately tool-agnostic (tool-awareness rule): it never
- * promises an edit capability — the honest default is proposing revised
- * text in chat for the user to apply and save. Kept pure + exported so
- * `chat.test.ts` asserts the shape without booting the route.
+ * looking at. This block is added only alongside the scoped update tool, so
+ * naming that capability here obeys the tool-awareness rule. Kept pure +
+ * exported so `chat.test.ts` asserts the shape without booting the route.
  */
 export function buildViewingSkillBlock(skill: {
   rowId: string
@@ -969,19 +970,131 @@ export function buildViewingSkillBlock(skill: {
     skill.content.length > 6000
       ? `${skill.content.slice(0, 6000)}\n…(truncated)`
       : skill.content
+  const revision = workspaceSkillRevision(skill)
   return (
     `# Currently viewing — workspace skill\n` +
     `The user has this workspace skill open in the Brain skill editor right now. ` +
     `When they say "this skill" — or ask about the skill they are looking at — they mean this one.\n\n` +
-    `Skill: ${JSON.stringify(skill.name)} (row id: ${skill.rowId}, status: ${status})\n` +
+    `Skill: ${JSON.stringify(skill.name)} (row id: ${skill.rowId}, revision: ${revision}, status: ${status})\n` +
     `Description: ${skill.description}\n` +
     (skill.whenToUse ? `When to use: ${skill.whenToUse}\n` : '') +
     `\nSaved instructions (markdown):\n` +
     `\`\`\`\`markdown\n${body}\n\`\`\`\`\n\n` +
     `This is the last SAVED version — edits the user has typed in the editor but not saved ` +
-    `are not visible to you, and you cannot type into their editor. When they ask for ` +
-    `changes, propose the exact revised text in chat so they can apply and save it themselves.`
+    `are not visible to you. When they ask to change this skill, call \`updateViewedSkill\` ` +
+    `with the row id and revision above and only the fields that should change; the user will approve the update before it is saved. ` +
+    `Only propose revised text in chat when the user explicitly asks for a draft instead of an update.`
   )
+}
+
+export function workspaceSkillRevision(skill: {
+  name: string
+  description: string
+  whenToUse?: string
+  content: string
+}): string {
+  return createHash('sha256')
+    .update(JSON.stringify([skill.name, skill.description, skill.whenToUse ?? null, skill.content]))
+    .digest('hex')
+}
+
+/**
+ * A visible instance is scoped to the skill already resolved through the
+ * editor's RLS read and rejects any mismatched row id. The hidden boot instance
+ * accepts the frozen, approved id only for restart-safe replay. Confirmation is
+ * load-bearing: the store treats a human-approved name/body edit as certification.
+ */
+export function createUpdateViewedSkillTool(args: {
+  workspaceSkillStore: Pick<WorkspaceSkillStore, 'getByIdSystem' | 'update'>
+  workspaceId?: string
+  skillRowId?: string
+  skillName?: string
+  expectedRevision?: string
+  assistantClearance?: 'public' | 'internal' | 'confidential'
+}): Tool {
+  const scoped = Boolean(args.workspaceId && args.skillRowId && args.skillName)
+  return buildTool({
+    name: 'updateViewedSkill',
+    description:
+      `Update the workspace skill currently open in the user's editor${args.skillName ? ` (${JSON.stringify(args.skillName)})` : ''}. ` +
+      'Pass only fields the user asked to change; omitted fields remain unchanged. This tool is scoped ' +
+      'to the open skill and asks the user to approve before saving.',
+    inputSchema: z
+      .object({
+        skillRowId: z.string().min(1).describe('The row id shown in the currently-viewing skill context.'),
+        expectedRevision: z.string().length(64).describe('The revision shown in the currently-viewing skill context.'),
+        name: z.string().trim().min(1).max(100).optional(),
+        description: z.string().trim().max(250).optional(),
+        whenToUse: z.string().trim().max(300).nullable().optional(),
+        content: z.string().trim().min(1).max(5000).optional(),
+      })
+      .refine(
+        ({ skillRowId: _skillRowId, expectedRevision: _expectedRevision, ...updates }) =>
+          Object.values(updates).some((value) => value !== undefined),
+        { message: 'Provide at least one field to update.' },
+      ),
+    hiddenFromModel: !scoped,
+    requiresConfirmation: true,
+    async describeConfirmation(input) {
+      const { skillRowId, expectedRevision: _expectedRevision, ...updates } = input as Record<string, unknown>
+      const lines = [`Skill: ${args.skillName ?? String(skillRowId)}`]
+      const labels: Record<string, string> = {
+        name: 'Name',
+        description: 'Description',
+        whenToUse: 'When to use',
+        content: 'Instructions',
+      }
+      for (const [field, value] of Object.entries(updates)) {
+        lines.push(`${labels[field] ?? field}: ${value === null ? '(clear)' : String(value)}`)
+      }
+      if ('name' in updates || 'content' in updates) {
+        lines.push('Effect: Approving verifies and activates this skill at certified confidence.')
+      }
+      return lines
+    },
+    async execute(input, ctx) {
+      if (!ctx.workspaceId || (args.workspaceId && ctx.workspaceId !== args.workspaceId)) {
+        return { data: 'The open skill is not in this assistant workspace.', isError: true }
+      }
+      if (args.skillRowId && input.skillRowId !== args.skillRowId) {
+        return { data: 'The requested skill does not match the skill open in the editor.', isError: true }
+      }
+      if (args.expectedRevision && input.expectedRevision !== args.expectedRevision) {
+        return { data: 'The requested revision does not match the skill open in the editor.', isError: true }
+      }
+      const current = await args.workspaceSkillStore.getByIdSystem(input.skillRowId)
+      if (!current || current.workspaceId !== ctx.workspaceId || current.state === 'archived') {
+        return { data: 'The open skill is no longer available.', isError: true }
+      }
+      const assistantClearance = args.assistantClearance ?? ctx.assistantClearance ?? ctx.clearance ?? 'public'
+      if (!isSkillOfferable(current, { assistantClearance })) {
+        return { data: 'This assistant does not have clearance to update the open skill.', isError: true }
+      }
+      if (workspaceSkillRevision(current) !== input.expectedRevision) {
+        return {
+          data: 'The skill changed while this update was awaiting approval. Review the latest version and try again.',
+          isError: true,
+        }
+      }
+      const { skillRowId, expectedRevision: _expectedRevision, ...updates } = input
+      const updated = await args.workspaceSkillStore.update(
+        ctx.userId,
+        ctx.workspaceId,
+        skillRowId,
+        updates,
+        {
+          name: current.name,
+          description: current.description,
+          whenToUse: current.whenToUse,
+          content: current.content,
+        },
+      )
+      if (!updated) {
+        return { data: 'The skill changed before the approved update could be saved. Review the latest version and try again.', isError: true }
+      }
+      return { data: `Saved the approved changes to ${JSON.stringify(updated.name)}.` }
+    },
+  })
 }
 
 /**
@@ -1114,6 +1227,42 @@ const roomQueueWaiters = new Set<string>()
  *              lands in its coalesced backlog. Exactly one follow-up turn
  *              runs no matter how many mentions arrive mid-turn.
  */
+/**
+ * Queue-vs-run for an ORDINARY session (mid-turn input). Pure so the
+ * invariant is testable; the route resolves the inputs.
+ *
+ *   - `run`    — no turn in flight. An ordinary send.
+ *   - `queue`  — a turn is in flight: hand this message to it rather than
+ *                starting a second one on the same history.
+ *   - `reject` — a turn is in flight on a DRAFT session. Unchanged behaviour
+ *                (`draft_session_busy`); concurrent-turn queueing for drafts
+ *                stays deferred. `sharedTurnRejection` already emits that
+ *                error upstream of the route's call, so this arm is the rule
+ *                stated where the queue decision lives — a future reordering
+ *                cannot accidentally start queueing drafts.
+ *
+ * **Rooms never reach the inbox.** A room message is a durable post every
+ * member must see the instant it is sent, whether or not the assistant ever
+ * picks it up (multiplayer chat D2/T2) — the exact opposite of the
+ * persist-on-drain contract mid-turn input is built on. Rooms answer a
+ * mid-turn mention with the T5 follow-up turn instead. Converging the two is
+ * `docs/plans/multiplayer-chat.md` §7.
+ *
+ * See docs/architecture/engine/mid-turn-input.md.
+ */
+export type TurnInputAdmission = 'run' | 'queue' | 'reject'
+export function turnInputAdmission(params: {
+  /** The client set `midTurn` — it has a live stream open on this session. */
+  clientMidTurn: boolean
+  isRoom: boolean
+  mode: string | null
+}): TurnInputAdmission {
+  if (!params.clientMidTurn) return 'run'
+  if (params.isRoom) return 'run'
+  if (params.mode === 'draft') return 'reject'
+  return 'queue'
+}
+
 export type RoomTurnAdmission = 'run' | 'wait' | 'fold'
 export function roomTurnAdmission(params: {
   status: string
@@ -1553,10 +1702,21 @@ export function chatRoutes(options: WebChatOptions): Router {
   const router = Router()
 
   router.post('/', async (req, res) => {
-    const { message: rawMessage, sessionId: requestedSessionId, model: requestedModel, fileIds, attachedRecordingIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, appOrigin: requestedAppOrigin, followupChips: requestedFollowupChips, viewingSkillRowId: requestedViewingSkillRowId, meteredProfileId, meteredToolRounds, meteredAccepted, ask: requestedAsk, roomResponseGroup: rawRoomResponseGroup } = req.body as {
+    const { message: rawMessage, sessionId: requestedSessionId, model: requestedModel, fileIds, attachedRecordingIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, appOrigin: requestedAppOrigin, followupChips: requestedFollowupChips, viewingSkillRowId: requestedViewingSkillRowId, meteredProfileId, meteredToolRounds, meteredAccepted, ask: requestedAsk, roomResponseGroup: rawRoomResponseGroup, steer: requestedSteer, inputId: requestedInputId, midTurn: requestedMidTurn } = req.body as {
       message?: string
       sessionId?: string
       model?: string
+      /**
+       * Mid-turn input (docs/architecture/engine/mid-turn-input.md). When this
+       * session already has a turn running, the message is handed to THAT turn
+       * instead of starting a second one. `steer` asks the running turn to take
+       * it at the earliest safe point rather than the next boundary; `inputId`
+       * is the client's idempotency key, so pressing Steer on a message that is
+       * already queued upgrades it rather than sending it twice.
+       */
+      midTurn?: boolean
+      steer?: boolean
+      inputId?: string
       /**
        * The composer's Ask affordance (multiplayer chat D1/T3): the client
        * marks address intent on a workspace-shared chat so this message runs
@@ -1740,6 +1900,9 @@ export function chatRoutes(options: WebChatOptions): Router {
     // the success-path cleanup never runs on those, and each missed eviction
     // is a permanent entry in a process-lifetime Map.
     let turnResolver: ConfirmationResolver | null = null
+    // Open while the query loop runs so a message sent mid-turn has somewhere
+    // to land. Closed on every exit path.
+    let turnInboxHandle: { close(): void } | null = null
 
     try {
       const jwtUserId = (req as { userId?: string }).userId
@@ -2171,6 +2334,72 @@ export function chatRoutes(options: WebChatOptions): Router {
 
       sessionIdForError = session.id
 
+      const isRoomSession = isSharedChatSession(session)
+
+      // ── Mid-turn input (queue / steer) ────────────────────────────
+      // This session already has a turn running: hand the message to THAT turn
+      // instead of starting a second one on the same history. The running loop
+      // takes it at its next safe boundary — or, for a steer, interrupts its
+      // in-flight response to take it sooner.
+      //
+      // Nothing is persisted here. A queued message joins the transcript only
+      // when the turn drains it; if the turn ends without taking it, the client
+      // (which still holds it, rendered as a queued bubble) sends it as an
+      // ordinary turn. That is what lets the server-side queue be a lossy
+      // in-memory map rather than a table with orphan rows to sweep.
+      // See docs/architecture/engine/mid-turn-input.md.
+      if (turnInputAdmission({
+        clientMidTurn: requestedMidTurn === true,
+        isRoom: isRoomSession,
+        mode: session.mode,
+      }) === 'queue') {
+        const text = typeof message === 'string' ? message.trim() : ''
+        const carriesAttachments =
+          (Array.isArray(fileIds) && fileIds.length > 0) ||
+          (Array.isArray(attachedRecordingIds) && attachedRecordingIds.length > 0)
+        if (!text || carriesAttachments) {
+          // Attachments (and empty sends) need the full pre-turn pipeline —
+          // cache reads, PDF distillation, transcription — which lives past
+          // this point and belongs to a turn of its own. The client holds
+          // these locally and sends them when the stream ends; this is the
+          // safety net for one that posts anyway, and it must never fall
+          // through into a second concurrent turn.
+          sendEvent('error', {
+            code: 'turn_in_flight',
+            error: 'This chat is mid-turn. Attachments are sent with the next turn.',
+          })
+          res.end()
+          return
+        }
+        const inputId =
+          typeof requestedInputId === 'string' && requestedInputId
+            ? requestedInputId.slice(0, 64)
+            : crypto.randomUUID()
+        const mode = requestedSteer === true ? 'steer' as const : 'queued' as const
+        const delivered = deliverTurnInput({
+          sessionId: session.id,
+          input: {
+            id: inputId,
+            text,
+            mode,
+            receivedAt: Date.now(),
+            // Only where a session has more than one human in it — telling a
+            // 1:1 assistant its own user's name adds nothing.
+            ...(isMultiParticipantSession(session) && user.name ? { from: user.name } : {}),
+          },
+        })
+        sendEvent('session', { sessionId: session.id })
+        sendEvent('input_queued', { inputId, mode, delivered })
+        sendEvent('done', {})
+        res.end()
+        options.analytics?.logEvent({
+          userId: user.id, assistantId: assistant.id, sessionId: session.id,
+          eventName: 'turn_input_queued', channelType: 'web',
+          metadata: { mode: sanitize(mode), delivered_locally: delivered },
+        })
+        return
+      }
+
       // ── Multiplayer room gate (T2/T3/T5) ──────────────────────────
       // In a workspace-shared chat the assistant is a MEMBER, not a vending
       // machine: it speaks only when addressed. The server decides
@@ -2179,8 +2408,8 @@ export function chatRoutes(options: WebChatOptions): Router {
       // message landing mid-turn queues exactly ONE follow-up turn over the
       // backlog (T5) instead of `shared_session_busy` (D2). Posts are rows
       // read at assembly time, never in-memory buffers — that is what keeps
-      // the §7 mid-task-steering door open.
-      const isRoomSession = isSharedChatSession(session)
+      // the §7 mid-task-steering door open. (`isRoomSession` is resolved
+      // above — the mid-turn-input gate needs it first.)
       let roomResponseGroupContext: {
         assistants: RoomResponseGroupAssistant[]
         currentIndex: number
@@ -3505,6 +3734,17 @@ export function chatRoutes(options: WebChatOptions): Router {
             : null,
         assistantInstructions: assistant.systemPrompt,
         workspaceEvolutionSnippet,
+        // Who is speaking — the authenticated member behind this request.
+        // Web sessions know this positively, so the model never has to ask
+        // "which team member are you?" to resolve "me" / "my tasks". In a
+        // shared room the request is authenticated as the newest sender, so
+        // the line stays correct per turn. See chat-app.md → "Attribution
+        // reaches the model".
+        speakerIdentity: user.name?.trim()
+          ? { name: user.name.trim(), email: user.email }
+          : user.email
+            ? { name: user.email }
+            : null,
         currentDateTime,
         timezone: presenceTz,
         anchorTimezone: anchorTz,
@@ -3525,6 +3765,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       const userVisibleContextParts: string[] = splitPrompt.userVisibleContext
         ? [splitPrompt.userVisibleContext]
         : []
+      let updateViewedSkillTool: Tool | null = null
 
       // Shared-chat participants are application-derived runtime metadata.
       // They remain private even though doing so makes this system suffix
@@ -3740,18 +3981,31 @@ export function chatRoutes(options: WebChatOptions): Router {
       if (
         typeof requestedViewingSkillRowId === 'string' &&
         requestedViewingSkillRowId &&
-        assistant.workspaceId
+        assistant.workspaceId &&
+        options.workspaceSkillStore
       ) {
         try {
-          const { createDbWorkspaceSkillStore } = await import('../db/skill-store.js')
-          const workspaceSkills = await createDbWorkspaceSkillStore().listForWorkspace(
+          const workspaceSkills = await options.workspaceSkillStore.listForWorkspace(
             assistant.workspaceId,
             { actingUserId: user.id },
           )
           const viewedSkill = workspaceSkills.find(
-            (s) => s.rowId === requestedViewingSkillRowId && s.state !== 'archived',
+            (s) =>
+              s.rowId === requestedViewingSkillRowId &&
+              s.state !== 'archived' &&
+              isSkillOfferable(s, { assistantClearance: assistant.clearance }),
           )
-          if (viewedSkill) userVisibleContextParts.push(buildViewingSkillBlock(viewedSkill))
+          if (viewedSkill) {
+            userVisibleContextParts.push(buildViewingSkillBlock(viewedSkill))
+            updateViewedSkillTool = createUpdateViewedSkillTool({
+              workspaceSkillStore: options.workspaceSkillStore,
+              workspaceId: assistant.workspaceId,
+              skillRowId: viewedSkill.rowId,
+              skillName: viewedSkill.name,
+              expectedRevision: workspaceSkillRevision(viewedSkill),
+              assistantClearance: assistant.clearance,
+            })
+          }
         } catch (err) {
           console.error('[chat] viewing-skill context injection failed:', err)
         }
@@ -3812,6 +4066,9 @@ export function chatRoutes(options: WebChatOptions): Router {
       allTools.set('saveMemory', saveMemory)
       allTools.set('getMemory', getMemory)
       allTools.set('deleteMemory', deleteMemory)
+      if (updateViewedSkillTool) {
+        allTools.set(updateViewedSkillTool.name, updateViewedSkillTool)
+      }
 
       // A private web conversation can explicitly hand its reviewed current
       // work to a new workspace room. This is per-turn admission, not a global
@@ -4906,6 +5163,13 @@ export function chatRoutes(options: WebChatOptions): Router {
         await updateSessionStatus(session.id, 'running')
       }
 
+      // Open the mid-turn inbox now that the slot is ours. Everything sent
+      // into this session from here until the outer `finally` lands in the
+      // running loop instead of starting a second turn.
+      // See docs/architecture/engine/mid-turn-input.md.
+      const turnInbox = registerTurnInbox(session.id)
+      turnInboxHandle = turnInbox
+
       // Assistant-run presence — announce to every tab viewing this doc page
       // that a run just opened, attributed to this member + the channel they
       // came from (works for Telegram/Slack/web triggers with no browser open).
@@ -5488,6 +5752,12 @@ export function chatRoutes(options: WebChatOptions): Router {
           // terminal behavior since they don't construct that hook. See
           // docs/architecture/engine/askquestion-suspend-resume.md.
           questionResumeEnabled: !!assistant.workspaceId,
+          // Mid-turn input — a message sent while this turn runs joins it at
+          // the loop's next safe boundary (or interrupts the in-flight
+          // response, for a steer). Nothing is ever delivered into a room's
+          // inbox (their mid-turn path is the T5 follow-up turn), so the port
+          // is inert there. See docs/architecture/engine/mid-turn-input.md.
+          turnInbox: turnInbox.port,
         })) {
           if (abortController.signal.aborted) break
 
@@ -5743,6 +6013,59 @@ export function chatRoutes(options: WebChatOptions): Router {
           }
           if (event.type === 'status') {
             sendEvent('status', { message: event.message })
+          }
+          if (event.type === 'turn_input') {
+            // The loop took a message the user sent mid-turn. THIS is where it
+            // becomes part of the conversation: it is persisted as an ordinary
+            // user row now, not when it was queued, so a turn that dies before
+            // draining leaves no unanswered row behind (the client still holds
+            // it and re-sends). Written directly rather than buffered — the
+            // pairing invariant covers assistant/tool_result pairs, and a plain
+            // user row sits outside that contract.
+            // See docs/architecture/engine/mid-turn-input.md.
+            for (const queuedInput of event.inputs) {
+              try {
+                const storedQueued = await addSessionMessage({
+                  sessionId: session.id,
+                  role: 'user',
+                  content: [{ type: 'text', text: queuedInput.text }],
+                  ...(isMultiParticipantSession(session)
+                    ? { senderUserId: user.id }
+                    : {}),
+                })
+                // The client finalises its streaming bubble on this event,
+                // promotes the queued chip to a real user bubble, and starts a
+                // fresh assistant bubble — without it the reply written BEFORE
+                // this message would look like the answer to it.
+                sendEvent('input_applied', {
+                  inputId: queuedInput.id,
+                  mode: event.mode,
+                  messageId: storedQueued.id,
+                })
+                if (session.mode === 'draft' || isSharedChatSession(session)) {
+                  publishSessionEvent({
+                    kind: 'user_message_saved',
+                    sessionId: session.id,
+                    payload: {
+                      id: storedQueued.id,
+                      sequenceNum: storedQueued.sequenceNum,
+                      senderUserId: user.id,
+                      content: storedQueued.content,
+                    },
+                  })
+                }
+              } catch (err) {
+                // The model has already been handed the text by the time this
+                // runs, so a persistence failure must not abort the turn — it
+                // costs the transcript one row, not the reply.
+                console.warn('[chat] failed to persist mid-turn input:', err)
+              }
+            }
+            options.analytics?.logEvent({
+              userId: user.id, assistantId: assistant.id, sessionId: session.id,
+              eventName: 'turn_input_applied', channelType: 'web',
+              metadata: { mode: sanitize(event.mode), count: event.inputs.length },
+            })
           }
           if (event.type === 'assistant_turn') {
             // Per-turn buffering. Each assistant_turn arrives with its own
@@ -6642,6 +6965,10 @@ export function chatRoutes(options: WebChatOptions): Router {
       if (docRunPageId) {
         void docRunClient?.end(docRunPageId)
       }
+      // Stop holding mid-turn messages for a turn that is over. Identity-
+      // guarded inside, so a crashed turn's late close can't evict its
+      // successor's inbox.
+      turnInboxHandle?.close()
     }
   })
 

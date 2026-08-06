@@ -120,6 +120,23 @@ export type BuildPromptParams = {
    * collapses the block to its original single-line form.
    */
   anchorTimezone?: string | null
+  /**
+   * The authenticated human behind this request — the sender of the
+   * newest user turn. Rendered as the lead line of `# User Context` so
+   * "me" / "my tasks" resolves deterministically instead of the model
+   * guessing among workspace members it knows from team memory.
+   *
+   * Only routes that positively know the speaker pass this: the web
+   * chat route (authenticated member). `channel-pipeline.ts` does not —
+   * messaging groups withhold speaker identity by design. In a
+   * workspace-shared room each request is authenticated as whoever sent
+   * the newest message, so the line stays correct per turn there;
+   * per-turn sender labels cover earlier turns. Application-derived, so
+   * it stays in private runtime context. `null` / empty name skips the
+   * line. See `docs/architecture/context-engine/layer-1-system-prompt.md`
+   * → "Speaker identity".
+   */
+  speakerIdentity?: { name: string; email?: string | null } | null
   memoryContext: string
   /**
    * `# Workspace Files` index — the L1 ambient awareness block for the
@@ -351,11 +368,18 @@ function collectPromptSections(
   //    a Hong Kong-anchored user in Tokyo got told "1:40 AM in Tokyo"
   //    instead of "2:40 AM in Tokyo" because the time string carried
   //    the anchor offset but the model swapped in the trip city).
+  const speakerName = p.speakerIdentity?.name?.trim()
+  const speakerLine = speakerName
+    ? `You are talking with: ${speakerName}${
+        p.speakerIdentity?.email ? ` (${p.speakerIdentity.email})` : ''
+      }, the authenticated sender of the newest message.\n`
+    : ''
   const travelling =
     p.anchorTimezone && p.anchorTimezone.length > 0 && p.anchorTimezone !== p.timezone
   if (travelling) {
     sections.push(
       `# User Context\n` +
+        speakerLine +
         `Current local time (where the user is now): ${p.currentDateTime}\n` +
         `Local timezone: ${p.timezone}\n` +
         `Home timezone (used for recurring reminders / scheduled jobs): ${p.anchorTimezone}\n` +
@@ -363,7 +387,7 @@ function collectPromptSections(
     )
   } else {
     sections.push(
-      `# User Context\nCurrent date and time: ${p.currentDateTime}\nTimezone: ${p.timezone}`,
+      `# User Context\n${speakerLine}Current date and time: ${p.currentDateTime}\nTimezone: ${p.timezone}`,
     )
   }
 

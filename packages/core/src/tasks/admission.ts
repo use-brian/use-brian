@@ -71,7 +71,7 @@ export const PROPOSAL_CLUSTER_MATCH = 0.5
 /** Which write path produced the candidate. */
 export type TaskLane = 'extracted' | 'assistant'
 
-export type TaskRuleEffect = 'deny' | 'require'
+export type TaskRuleEffect = 'deny' | 'require' | 'allow'
 export type TaskRuleStatus = 'active' | 'proposed' | 'disabled'
 export type TaskRuleRequirement =
   | 'assignee'
@@ -189,9 +189,21 @@ export type TaskAdmissionReasonCode =
   | 'not_a_task'
   | 'needs_spec'
   | 'quality_unverified'
+  | 'suggested'
+  | 'auto_rule'
 
 export type TaskAdmissionDecision =
-  | { outcome: 'allow'; warning?: TaskAdmissionWarning }
+  | {
+      outcome: 'allow'
+      warning?: TaskAdmissionWarning
+      /**
+       * Set when an active `allow` rule is what admitted an extracted
+       * candidate. The caller records the auto-approval audit case
+       * (`status='auto_accepted'`) after the task write, so the review view
+       * can show what the rule did.
+       */
+      autoRuleId?: string
+    }
   | {
       outcome: 'hold' | 'drop'
       reasonCode: TaskAdmissionReasonCode
@@ -258,15 +270,22 @@ export type RecordCandidateInput = {
   due: Date | null
   lane: TaskLane
   sourceKind: string | null
+  channelRef?: string | null
   sourceEpisodeId: string | null
   createdByAssistantId: string | null
-  status: 'pending' | 'dropped'
+  /**
+   * `auto_accepted` is the audit case a rule-driven auto-creation writes
+   * AFTER the task exists (it never waits in the tray): `createdTaskId` +
+   * `matchedRuleId` are set, `reasonCode` is `auto_rule`.
+   */
+  status: 'pending' | 'dropped' | 'auto_accepted'
   reasonCode: TaskAdmissionReasonCode
   matchedTaskId?: string | null
   matchedRuleId?: string | null
   matchedTombstoneId?: string | null
   similarity?: number | null
   quality?: TaskReadinessAssessment | null
+  createdTaskId?: string | null
   expiresAt: Date
 }
 
@@ -430,6 +449,9 @@ export function validateRulePredicate(
   if (effect === 'require' && !predicate.require?.length) {
     return 'A require rule needs at least one requirement (assignee, due, description, resolved_target, explicit_commitment, completion_signal, or agent_ready).'
   }
+  if (effect === 'allow' && !hasCondition) {
+    return 'An allow rule needs at least one condition (source_kinds, lanes, title_matches, or channel_refs) — an empty predicate would auto-create every suggestion in the workspace.'
+  }
   return null
 }
 
@@ -455,12 +477,22 @@ export type EvaluateTaskAdmissionInput = {
  *   5. unverified/underspecified quality -> hold
  *   6. unsatisfied require rule -> hold
  *   7. near-dup   >= 0.65       -> hold
- *   8. otherwise                -> allow
+ *   8. extracted lane: active allow rule -> allow (auto_rule);
+ *      otherwise                -> hold 'suggested' (suggestion-first default)
+ *      assistant lane:          -> allow
  *
  * `not_a_task` is the only inferred silent drop: it requires a separately
  * judged, source-verified absence of commitment (or explicit hedging). A real
  * but incomplete commitment holds, because a guardrail that silently eats real
  * work is worse than the slop it replaces.
+ *
+ * SUGGESTION-FIRST (2026-08-06). The extracted lane's terminal branch is no
+ * longer a plain allow: nobody asked for the task, so even a candidate that
+ * passes every check waits in Suggestions until the user approves it - unless
+ * the workspace has activated an `allow` rule for its class, which is the
+ * explicit opt-in back to auto-creation. Allow rules sit BELOW the whole
+ * floor on purpose: they can never resurrect a tombstoned, denied, unready,
+ * or duplicate candidate.
  */
 export function evaluateTaskAdmission(
   input: EvaluateTaskAdmissionInput,
@@ -569,6 +601,29 @@ export function evaluateTaskAdmission(
       explanation: `Held for review — this looks similar to the open task "${dup.title}" [${dup.id}].`,
       matchedTaskId: dup.id,
       similarity: dup.similarity,
+    }
+  }
+
+  // 8. Terminal branch. Assistant lane: the human asked, create. Extracted
+  //    lane: suggestion-first - only an active `allow` rule (the workspace's
+  //    explicit opt-in) auto-creates; everything else waits for review.
+  if (candidate.lane === 'extracted') {
+    // The floor is above the rule: an allow rule may only auto-create a
+    // candidate the readiness judge verified as agent-ready. A candidate
+    // with no quality assessment at all (a wired gate without the judge)
+    // stays a suggestion rather than sneaking past the floor.
+    if (isTaskAgentReady(candidate.quality)) {
+      for (const rule of rules) {
+        if (rule.effect !== 'allow') continue
+        if (!matchesPredicate(rule.predicate, candidate)) continue
+        return { outcome: 'allow', autoRuleId: rule.id }
+      }
+    }
+    return {
+      outcome: 'hold',
+      reasonCode: 'suggested',
+      explanation:
+        'Suggested — automatic task creation is off by default. Approve it in the Tasks app, or add an allow rule to auto-create tasks like this.',
     }
   }
 
@@ -682,6 +737,7 @@ export async function admitTask(
       due: candidate.due ?? null,
       lane: candidate.lane,
       sourceKind: candidate.sourceKind ?? null,
+      channelRef: candidate.channelRef ?? null,
       sourceEpisodeId: candidate.sourceEpisodeId ?? null,
       createdByAssistantId: candidate.createdByAssistantId ?? null,
       status: decision.outcome === 'hold' ? 'pending' : 'dropped',
@@ -735,7 +791,9 @@ export function buildTaskPolicyPromptBlock(
   const clauses = [
     ...new Set(
       rules
-        .filter((r) => r.status === 'active' && r.nlClause?.trim())
+        // An allow rule is a permission, not a rejection - its sentence must
+        // never appear under "do NOT emit them".
+        .filter((r) => r.status === 'active' && r.effect !== 'allow' && r.nlClause?.trim())
         .map((r) => r.nlClause!.trim()),
     ),
   ]

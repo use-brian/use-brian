@@ -371,6 +371,8 @@ export type ChannelPipelineParams = {
    * archive writers. Raw provider payloads are discarded by the normalizer.
    */
   archiveIncoming?: IncomingMessage
+  /** The route already enqueued this inbound archive row before invoking the pipeline. */
+  archiveInboundAlreadyPersisted?: boolean
   /** Exact connector backing this route, when known. */
   archiveConnectorInstanceId?: string | null
 
@@ -781,7 +783,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       // channels and personal sessions pass null/undefined.
       senderUserId: senderUserId ?? null,
     }, client)
-  const userMessageRow = params.archiveIncoming
+  const userMessageRow = params.archiveIncoming && !params.archiveInboundAlreadyPersisted
     ? await persistInboundChatArchive({
         source: channelType,
         ownerUserId: ownerId,

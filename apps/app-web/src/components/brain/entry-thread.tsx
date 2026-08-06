@@ -56,6 +56,11 @@ import {
   useMessageStream,
   type ToolUsed,
 } from "@use-brian/chat-ui";
+import {
+  useMidTurnQueue,
+  joinQueuedInputs,
+} from "@/lib/use-mid-turn-queue";
+import { QueuedInputs } from "@/components/ui/queued-inputs";
 import { chatMarkdownCodeComponents } from "@/components/chrome/chat-code-block";
 import { originClue } from "./source-origin";
 import {
@@ -225,6 +230,7 @@ export function EntryThread({
   const t = useT();
   const labels = t.brainPage.detailDrawer;
   const review = t.memoriesReview;
+  const tQueue = t.chat.queue;
 
   const [turns, setTurns] = useState<ThreadTurn[]>([]);
   const [draft, setDraft] = useState("");
@@ -244,8 +250,23 @@ export function EntryThread({
   // Destructured because the hook returns a fresh object each render while
   // the methods themselves are stable — effects must depend on the methods,
   // or their cleanup aborts the in-flight stream on every re-render.
-  const { start: startStream, abort: abortStream } = useMessageStream();
+  const stream = useMessageStream();
+  const { start: startStream, abort: abortStream } = stream;
   const stoppedRef = useRef(false);
+  /**
+   * Mid-turn input (queue + steer) — asking a follow-up while the answer is
+   * still streaming hands it to the RUNNING turn instead of being blocked by
+   * the `busy` guard. See docs/architecture/engine/mid-turn-input.md.
+   */
+  const midTurn = useMidTurnQueue({
+    stream,
+    getSessionId: () => sessionRef.current?.sessionId,
+    workspaceId,
+  });
+  /** `send` is called from its own terminal `finally` (the mid-turn flush);
+   *  reading it through a ref is what makes that see the post-`setBusy(false)`
+   *  closure rather than the one that still thinks the turn is running. */
+  const sendRef = useRef<((raw: string) => Promise<void>) | null>(null);
 
   // Per-turn accumulators. Refs so the streaming callbacks never close over
   // stale state; `flush` commits them per event — React batches the setState
@@ -336,9 +357,14 @@ export function EntryThread({
     return ctx;
   }
 
-  async function send(raw: string) {
+  async function send(raw: string, steer = false) {
     const text = raw.trim();
-    if (busy || text.length === 0) return;
+    if (text.length === 0) return;
+    // A turn is already running: hand this to it rather than dropping it.
+    if (busy) {
+      if (midTurn.queue(text, steer)) setDraft("");
+      return;
+    }
     setDraft("");
     setBusy(true);
     setSessionError(null);
@@ -437,6 +463,26 @@ export function EntryThread({
               }
               break;
             }
+            // The running turn took a follow-up we queued mid-stream. Close
+            // the answer segment written before it arrived and open a new
+            // one, so the earlier text does not read as its answer.
+            // See docs/architecture/engine/mid-turn-input.md.
+            case "input_applied": {
+              const inputId =
+                typeof payload.inputId === "string" ? payload.inputId : null;
+              if (!inputId) break;
+              const queuedEntry = midTurn.take(inputId);
+              if (!queuedEntry) break;
+              setTurns((prev) => [
+                ...prev,
+                { role: "user", text: queuedEntry.text },
+                { role: "assistant", text: "", tools: [] },
+              ]);
+              textRef.current = "";
+              toolsRef.current = [];
+              reasoningRef.current = "";
+              break;
+            }
             case "error": {
               const message =
                 typeof payload.message === "string"
@@ -471,8 +517,19 @@ export function EntryThread({
       flush();
       setReasoningTail("");
       setBusy(false);
+      // Anything still queued was never taken by this turn (it finished
+      // first, the user hit Stop, or the delivery was lost) — ask it as an
+      // ordinary follow-up. Deferred so `sendRef` picks up the closure where
+      // `busy` is already false.
+      const stillWaiting = midTurn.drain();
+      if (stillWaiting.length > 0) {
+        const joined = joinQueuedInputs(stillWaiting);
+        setTimeout(() => void sendRef.current?.(joined), 0);
+      }
     }
   }
+
+  sendRef.current = send;
 
   function stop() {
     stoppedRef.current = true;
@@ -587,6 +644,14 @@ export function EntryThread({
         </p>
       )}
 
+      {/* Follow-ups handed to the running turn, not yet taken by it.
+          See docs/architecture/engine/mid-turn-input.md. */}
+      <QueuedInputs
+        inputs={midTurn.queued}
+        dict={tQueue}
+        onSteer={midTurn.steer}
+      />
+
       <div className="flex flex-col gap-1.5">
         {/* Composite field: the box draws the focus ring, the inner
             textarea opts out of the global :focus-visible ring
@@ -616,7 +681,7 @@ export function EntryThread({
             placeholder={review.askInputPlaceholder}
             className="max-h-40 flex-1 resize-none field-sizing-content bg-transparent text-sm outline-none focus-visible:shadow-none placeholder:text-muted-foreground/60"
           />
-          {busy ? (
+          {busy && (
             <button
               type="button"
               onClick={stop}
@@ -626,22 +691,26 @@ export function EntryThread({
             >
               <Square className="size-2.5" fill="currentColor" aria-hidden />
             </button>
-          ) : (
-            <button
-              type="button"
-              onClick={() => void send(draft)}
-              disabled={!canSend}
-              aria-label={review.send}
-              className={cn(
-                "mb-0.5 inline-flex size-6 shrink-0 items-center justify-center rounded-full transition-colors",
-                canSend
-                  ? "bg-action text-action-foreground hover:bg-action/90"
-                  : "bg-muted text-muted-foreground",
-              )}
-            >
-              <ArrowUp className="size-3.5" aria-hidden />
-            </button>
           )}
+          {/* Send stays live during a turn — it QUEUES into the running one
+              (muted to mark the difference). See mid-turn-input.md. */}
+          <button
+            type="button"
+            onClick={() => void send(draft)}
+            disabled={!canSend}
+            aria-label={busy ? tQueue.send : review.send}
+            title={busy ? tQueue.send : review.send}
+            className={cn(
+              "mb-0.5 inline-flex size-6 shrink-0 items-center justify-center rounded-full transition-colors",
+              !canSend
+                ? "bg-muted text-muted-foreground"
+                : busy
+                  ? "bg-muted text-foreground/80 hover:bg-muted/80"
+                  : "bg-action text-action-foreground hover:bg-action/90",
+            )}
+          >
+            <ArrowUp className="size-3.5" aria-hidden />
+          </button>
         </div>
         <p className="text-[11px] text-muted-foreground/60">
           {labels.threadDisclosure}

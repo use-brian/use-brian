@@ -58,6 +58,7 @@ import {
   createReportBugTool,
   createConfirmRecordingProcessingTool,
   geminiTranscriber,
+  qwenAsrTranscriber,
   qwenFiletransTranscriber,
   withTranscriberFallback,
   type RecordingTranscriber,
@@ -161,7 +162,7 @@ import {
 } from './db/content-planning-store.js'
 import { createDbMagicLinkStore } from './db/magic-link-store.js'
 import { createSmtpClient, createWorkspaceSmtpTransport } from './email/smtp-client.js'
-import { chatRoutes, runSessionResume, tryResolveLiveToolApproval } from './routes/chat.js'
+import { chatRoutes, createUpdateViewedSkillTool, runSessionResume, tryResolveLiveToolApproval } from './routes/chat.js'
 import {
   menuForClass,
   MutableProviderAvailability,
@@ -255,10 +256,18 @@ import { createConnectorAppCredentialStore } from './db/connector-app-credential
 import { createIngestSinkStore } from './db/ingest-sink-store.js'
 import { createIngestOutboxStore } from './db/ingest-outbox-store.js'
 import { createChatArchiveEnrichmentStore } from './db/chat-archive-enrichment-store.js'
+import { createChatArchiveMediaStore } from './db/chat-archive-media-store.js'
 import { createExternalSinkFanout } from './ingest/external-sink-fanout.js'
 import { createExternalSinkRelay } from './ingest/external-sink-relay.js'
-import { createLiveChatArchiveWriter, setGlobalLiveChatArchiveWriter } from './chat-archive/live-writer.js'
+import {
+  appendInboundChatArchive,
+  createLiveChatArchiveWriter,
+  setGlobalLiveChatArchiveWriter,
+} from './chat-archive/live-writer.js'
 import { createChatArchiveEnrichmentWorker } from './chat-archive/enrichment-worker.js'
+import { chatArchiveMediaRoutes } from './chat-archive/media-routes.js'
+import { createChatArchiveMediaService, type ChatArchiveMediaService } from './chat-archive/media-service.js'
+import { createChatArchiveMediaWorker, type ChatArchiveMediaWorker } from './chat-archive/media-worker.js'
 import { createWorkspaceToolPolicyStore } from './db/workspace-tool-policy-store.js'
 import { buildOpenSyncCredentials } from './build-sync-credentials.js'
 import { createDbAssistantConnectorStore } from './db/assistant-connector-store.js'
@@ -1124,7 +1133,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use((req, res, next) => {
     // Signed local-file PUTs are raw byte streams. Let their route consume the
     // request directly even when the uploaded file itself is JSON.
-    if (req.path === '/api/local-files') {
+    if (
+      req.path === '/api/local-files'
+      || (req.method === 'PUT' && /^\/internal\/chat-archive\/media\/[^/]+\/content$/.test(req.path))
+    ) {
       next()
       return
     }
@@ -1932,6 +1944,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }
 
   const allTools = buildAllTools()
+  // Hidden during ordinary turns; the skill-editor route replaces it with an
+  // RLS-scoped visible instance. Keeping the same implementation in the boot
+  // registry lets an approved call replay safely after a process restart.
+  allTools.set('updateViewedSkill', createUpdateViewedSkillTool({ workspaceSkillStore }))
   const officeArtifactStore = createOfficeArtifactStore()
   const officeTemplateStore = createOfficeTemplateStore()
   const officeGenerationStore = createOfficeGenerationStore()
@@ -2114,6 +2130,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   let filesApi: ReturnType<typeof createFilesApi> | null = null
   let filesResolver: FilesClientResolver | null = null
   let chunkedFileUploads: ChunkedFileUploadService | null = null
+  let chatArchiveMediaService: ChatArchiveMediaService | null = null
+  let chatArchiveMediaWorker: ChatArchiveMediaWorker | null = null
 
   const calleeExecutor = createCalleeExecutor({
     provider,
@@ -5646,6 +5664,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         markDone: markFileIngestJobDone,
         markFailed: markFileIngestJobFailed,
         filesApi,
+        // Spent only on `mode: 'explicit'` jobs — the queue now carries the
+        // explicit POST /ingest path, which distilled PDFs/images back when it
+        // ran inline. Silent promotion stays store-only (worker gates on mode).
+        distill: async ({ buffer, mime }) =>
+          (await distillFileToText({ buffer, mime }, { backend: mediaBackend })).text,
         ...(brainEpisodeIngestor ? { brainIngest: brainEpisodeIngestor } : {}),
       })
     : null
@@ -5709,6 +5732,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     recordingTranscribers.push(geminiTranscriber({ apiKey: env.GEMINI_API_KEY }))
   }
   if (env.DASHSCOPE_API_KEY) {
+    recordingTranscribers.push(qwenAsrTranscriber({ apiKey: env.DASHSCOPE_API_KEY }))
     recordingTranscribers.push(qwenFiletransTranscriber({ apiKey: env.DASHSCOPE_API_KEY }))
   }
   const recordingTranscriber = recordingTranscribers.length === 0
@@ -5716,6 +5740,27 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     : recordingTranscribers.length === 1
       ? recordingTranscribers[0]
       : withTranscriberFallback(recordingTranscribers[0], ...recordingTranscribers.slice(1))
+
+  if (filesResolver && env.BRIAN_MESSAGE_STORE_HMAC_SECRET) {
+    const mediaStore = createChatArchiveMediaStore()
+    chatArchiveMediaService = createChatArchiveMediaService({ store: mediaStore, filesResolver })
+    chatArchiveMediaWorker = createChatArchiveMediaWorker({
+      store: mediaStore,
+      filesResolver,
+      transcriber: recordingTranscriber,
+      resolveTranscriptionLanguage: async (workspaceId) =>
+        (await getWorkspaceTranscriptionPrefs(workspaceId)).languageCode,
+      distill: async ({ buffer, mime, prompt }) =>
+        (await distillFileToText({ buffer, mime }, { backend: mediaBackend, prompt })).text,
+    })
+    app.use('/internal/chat-archive', chatArchiveMediaRoutes({
+      service: chatArchiveMediaService,
+      hmacSecret: env.BRIAN_MESSAGE_STORE_HMAC_SECRET,
+      baseUrl: `http://127.0.0.1:${port}`,
+    }))
+    if (runWorkers) chatArchiveMediaWorker.start()
+  }
+
   const recordingProcessWorker = filesResolver && filesBlobClient && filesApi
     ? createOpenRecordingProcessWorker({
         claim: claimNextRecordingJob,
@@ -6154,12 +6199,19 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
               userId: input.senderPnJid ?? input.senderJid,
               channelId: input.chatJid,
               messageId: input.messageId,
-              text: input.text,
+              text: /^<media:[^>]+>$/.test(input.text.trim()) ? '' : input.text,
+              mediaType: input.archiveMediaType,
+              mediaMime: input.archiveMediaMime,
+              mediaName: input.archiveMediaName,
+              mediaSizeBytes: input.archiveMediaSizeBytes,
+              archiveMediaRef: input.archiveMediaRef,
+              archiveMediaAvailability: input.archiveMediaAvailability,
               isGroupChat: input.isGroup,
               timestamp: input.timestamp,
               raw: null,
             },
             archiveConnectorInstanceId: channel.connectorInstanceId,
+            archiveInboundAlreadyPersisted: input.archiveInboundPersisted,
             modelAlias: undefined,
             adaptiveResearchEnabled: true,
             abortController,
@@ -6202,6 +6254,19 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         ingestor: whatsapp.ingestor,
         bot: whatsapp.bot,
         filesResolver: filesResolver ?? undefined,
+        archiveMedia: chatArchiveMediaService ?? undefined,
+        archiveMediaHmacSecret: env.BRIAN_MESSAGE_STORE_HMAC_SECRET,
+        archiveMediaBaseUrl: `http://127.0.0.1:${port}`,
+        archiveIncoming: (input) => appendInboundChatArchive({
+          source: 'whatsapp',
+          workspaceId: input.workspaceId,
+          ownerUserId: input.ownerUserId,
+          connectorInstanceId: input.connectorInstanceId,
+          assistantId: '',
+          assistantName: '',
+          conversationId: input.message.channelId,
+          message: input.message,
+        }),
         passUnknownToFallback: ports.whatsappOfficialFallback,
       }))
     }
@@ -6285,6 +6350,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
           connectorInstanceStore, knowledgeStore, gdriveFilesStore, workspaceFilesStore, analytics,
           skillStore, episodicStore, sessionStateStore,
+          archiveMedia: chatArchiveMediaService ?? undefined,
         }))
       }
     }
@@ -6325,6 +6391,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     mailboxSyncWorker.stop()
     externalSinkRelay.stop()
     chatArchiveEnrichmentWorker?.stop()
+    chatArchiveMediaWorker?.stop()
     stuckSessionSweeper.stop()
     fileIngestWorker?.stop()
     linkedinImportWorker?.stop()

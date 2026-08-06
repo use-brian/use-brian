@@ -29,6 +29,20 @@ export type IncomingMessage = {
   mediaDurationSec?: number
   /** File size in bytes when the webhook payload carries it. Used to refuse files over the channel's download limit before attempting a doomed download. */
   mediaSizeBytes?: number
+  /**
+   * Platform-local durable archive asset. Channel routes set this only after
+   * bytes have been staged and fingerprinted; provider URLs/base64 never enter
+   * the archive outbox.
+   */
+  archiveMediaRef?: {
+    assetId: string
+    sha256: string
+    filename: string
+    mime: string
+    sizeBytes: number
+  }
+  /** Explicit terminal acquisition failure when provider media could not be stored. */
+  archiveMediaAvailability?: 'missing' | 'failed'
   files?: IncomingFile[]
   replyToMessageId?: string
   isEdit?: boolean

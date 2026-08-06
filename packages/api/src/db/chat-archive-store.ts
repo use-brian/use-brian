@@ -29,7 +29,16 @@ const TOP_K_MAX = 20
 const CANDIDATE_MAX = 80
 
 export type ChatDirection = 'inbound' | 'outbound'
-export type ChatKind = 'text' | 'image' | 'voice' | 'file' | 'link'
+export type ChatKind = 'text' | 'image' | 'video' | 'voice' | 'file' | 'link'
+
+export type ChatArchiveMediaCoverage = {
+  total: number
+  ready: number
+  pending: number
+  missing: number
+  failed: number
+  unsupported: number
+}
 
 export type ChatArchiveHit = {
   segment_id: string
@@ -48,6 +57,13 @@ export type ChatArchiveHit = {
   reply_to_provider_id: string | null
   segment_index: number
   segment_text: string
+  segment_metadata: Record<string, unknown>
+  media_asset: {
+    asset_id: string
+    upload_status: string
+    extraction_status: string
+    last_error: string | null
+  } | null
 }
 
 type ChatArchiveRow = Omit<ChatArchiveHit, 'sent_at' | 'segment_index'> & {
@@ -73,6 +89,7 @@ export type SearchChatArchiveInput = {
 export type SearchChatArchiveResult = {
   hits: ChatArchiveHit[]
   embeddingCoverage: SegmentCoverage
+  mediaCoverage: ChatArchiveMediaCoverage
 }
 
 type ChatEmbedder = { embed(texts: string[]): Promise<number[][]> }
@@ -102,7 +119,14 @@ export async function searchChatArchive(
     m.media_ref,
     m.reply_to_provider_id,
     s.segment_index,
-    s.segment_text`
+    s.segment_text,
+    s.metadata AS segment_metadata,
+    CASE WHEN a.id IS NULL THEN NULL ELSE jsonb_build_object(
+      'asset_id', a.id,
+      'upload_status', a.upload_status,
+      'extraction_status', a.extraction_status,
+      'last_error', a.last_error
+    ) END AS media_asset`
 
   const vectorRows: ChatArchiveRow[] = []
   if (deps?.embedder && text) {
@@ -120,6 +144,7 @@ export async function searchChatArchive(
           `SELECT ${selectCols}, s.embedding <=> $${vectorIdx}::vector AS distance
              FROM chat_archive_segments s
              JOIN chat_archive_messages m ON m.id = s.message_id
+             LEFT JOIN chat_archive_media_assets a ON a.message_id = m.id
             WHERE ${where}
               AND s.embedding IS NOT NULL
             ORDER BY s.embedding <=> $${vectorIdx}::vector
@@ -153,6 +178,7 @@ export async function searchChatArchive(
       `SELECT ${selectCols}, (${match.hits}) AS term_hits
          FROM chat_archive_segments s
          JOIN chat_archive_messages m ON m.id = s.message_id
+         LEFT JOIN chat_archive_media_assets a ON a.message_id = m.id
         WHERE ${where}
           AND ${match.where}
         ORDER BY term_hits DESC, m.sent_at DESC, s.segment_index
@@ -219,6 +245,50 @@ export async function searchChatArchive(
   return {
     hits: diversified.map(toChatArchiveHit),
     embeddingCoverage: await probeEmbeddingCoverage(input, baseWhere),
+    mediaCoverage: await probeMediaCoverage(input, baseWhere),
+  }
+}
+
+async function probeMediaCoverage(
+  input: SearchChatArchiveInput,
+  baseWhere: (values: unknown[]) => string,
+): Promise<ChatArchiveMediaCoverage> {
+  const empty = { total: 0, ready: 0, pending: 0, missing: 0, failed: 0, unsupported: 0 }
+  try {
+    const values: unknown[] = []
+    const where = baseWhere(values)
+    const result = await queryWithRLS<Record<keyof ChatArchiveMediaCoverage, string>>(
+      input.ownerUserId,
+      `SELECT
+         (count(DISTINCT m.id) FILTER (WHERE m.media_ref IS NOT NULL))::text AS total,
+         (count(DISTINCT m.id) FILTER (WHERE a.extraction_status = 'ready'))::text AS ready,
+         (count(DISTINCT m.id) FILTER (
+           WHERE a.id IS NOT NULL
+             AND (a.upload_status IN ('uploading','uploaded') OR a.extraction_status IN ('pending','processing'))
+         ))::text AS pending,
+         (count(DISTINCT m.id) FILTER (
+           WHERE m.media_ref->>'availability' = 'missing'
+              OR (a.id IS NULL AND NOT (m.media_ref ? 'availability'))
+         ))::text AS missing,
+         (count(DISTINCT m.id) FILTER (
+           WHERE m.media_ref->>'availability' = 'failed'
+              OR a.upload_status = 'failed' OR a.extraction_status = 'failed'
+         ))::text AS failed,
+         (count(DISTINCT m.id) FILTER (WHERE a.extraction_status = 'unsupported'))::text AS unsupported
+       FROM chat_archive_segments s
+       JOIN chat_archive_messages m ON m.id = s.message_id
+       LEFT JOIN chat_archive_media_assets a ON a.message_id = m.id
+       WHERE ${where}`,
+      values,
+    )
+    const row = result.rows[0]
+    if (!row) return empty
+    return Object.fromEntries(
+      Object.keys(empty).map((key) => [key, Number(row[key as keyof ChatArchiveMediaCoverage] ?? 0)]),
+    ) as ChatArchiveMediaCoverage
+  } catch (err) {
+    console.warn('[searchChatArchive] media coverage probe failed:', err instanceof Error ? err.message : String(err))
+    return empty
   }
 }
 
@@ -332,6 +402,8 @@ function toChatArchiveHit(row: ChatArchiveRow): ChatArchiveHit {
     reply_to_provider_id: row.reply_to_provider_id,
     segment_index: Number(row.segment_index),
     segment_text: row.segment_text,
+    segment_metadata: row.segment_metadata ?? {},
+    media_asset: row.media_asset ?? null,
   }
 }
 
@@ -342,7 +414,8 @@ function toMillis(value: string | Date): number {
 
 // ── Contextual get ─────────────────────────────────────────────
 
-export type ChatArchiveMessage = Omit<ChatArchiveHit, 'segment_id' | 'segment_index' | 'segment_text'>
+export type ChatArchiveMessage = Omit<ChatArchiveHit,
+  'segment_id' | 'segment_index' | 'segment_text' | 'segment_metadata' | 'media_asset'>
 
 type ChatArchiveMessageRow = Omit<ChatArchiveMessage, 'sent_at'> & { sent_at: string | Date }
 

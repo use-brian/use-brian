@@ -71,6 +71,21 @@ export type WhatsappBotInput = {
    * THIS video, not the user's latest. See channel-pipeline `mediaEpisodeId`.
    */
   mediaEpisodeId?: string
+  /** Durable local archive asset prepared by the inbound route. */
+  archiveMediaRef?: {
+    assetId: string
+    sha256: string
+    filename: string
+    mime: string
+    sizeBytes: number
+  }
+  archiveMediaType?: 'photo' | 'document' | 'voice' | 'audio' | 'video'
+  archiveMediaMime?: string
+  archiveMediaName?: string
+  archiveMediaSizeBytes?: number
+  archiveMediaAvailability?: 'missing' | 'failed'
+  /** Set only after the BYON route durably enqueues the archive append. */
+  archiveInboundPersisted?: boolean
 }
 
 /**

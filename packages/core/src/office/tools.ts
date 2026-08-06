@@ -11,7 +11,7 @@ export type OfficeArtifactToolProjection = {
   version: number
   lifecycleState: 'active' | 'archived' | 'trash' | 'retained'
   role: 'view' | 'comment' | 'edit'
-  job?: { id: string; status: string; stage: string }
+  job?: { id: string; status: string; stage: string; errorCode: string | null }
 }
 
 export type OfficeToolPort = {

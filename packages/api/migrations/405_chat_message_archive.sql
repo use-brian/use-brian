@@ -1,4 +1,4 @@
--- 395_chat_message_archive.sql  (OPEN tables -> use-brian/packages/api/migrations/)
+-- 405_chat_message_archive.sql  (OPEN tables -> use-brian/packages/api/migrations/)
 --
 -- Local provider-neutral interactive-chat archive and search projection.
 -- `brian-message-store` consumes ub.ingest.append.v1 and writes these tables;

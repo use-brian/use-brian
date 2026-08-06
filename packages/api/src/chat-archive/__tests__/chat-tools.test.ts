@@ -22,6 +22,7 @@ describe('[COMP:tools/chat-archive] native chat archive tools', () => {
     const search = vi.fn(async (_input: unknown) => ({
       hits: [{ message_id: 'm-1' }],
       embeddingCoverage: { partial: true, unembeddedInScope: 5, capped: false, note: 'partial' },
+	  mediaCoverage: { total: 2, ready: 1, pending: 1, missing: 0, failed: 0, unsupported: 0 },
     }))
     const tool = createChatArchiveTools({ search: search as never })[0]!
     const result = await tool.execute({ query: 'deposit', source: 'whatsapp', kind: 'text' }, context)
@@ -31,7 +32,11 @@ describe('[COMP:tools/chat-archive] native chat archive tools', () => {
       source: 'whatsapp',
       kind: 'text',
     })
-    expect(result.data).toEqual({ hits: [{ message_id: 'm-1' }], embeddingCoverage: 'partial' })
+	expect(result.data).toEqual({
+		hits: [{ message_id: 'm-1' }],
+		embeddingCoverage: 'partial',
+		mediaCoverage: { total: 2, ready: 1, pending: 1, missing: 0, failed: 0, unsupported: 0 },
+	})
   })
 
   it('rejects an invalid time before calling the store', async () => {

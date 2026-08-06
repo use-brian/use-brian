@@ -24,6 +24,19 @@ export type ChatAction =
   | { type: 'message/append'; message: Message }
   | { type: 'message/replace'; messageId: string; message: Message }
   | { type: 'message/rekey'; messageId: string; id: string }
+  /**
+   * Set (or clear, with `state: null`) a message's mid-turn queued state.
+   * Clearing is what `input_applied` does: the running turn took the message,
+   * so it stops being "waiting" and becomes an ordinary user bubble.
+   */
+  | { type: 'message/queued'; messageId: string; state: 'pending' | 'steering' | null }
+  /**
+   * Drop a message from the thread. Used for exactly one thing today: a
+   * queued message the running turn never took. The host removes it and
+   * re-sends it as an ordinary turn, which appends it again — leaving it in
+   * place would show it twice.
+   */
+  | { type: 'message/remove'; messageId: string }
   | { type: 'stream/start' }
   | { type: 'stream/append'; text: string }
   | { type: 'stream/reset' }
@@ -74,6 +87,25 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         messages: state.messages.map((m) =>
           m.id === action.messageId ? { ...m, id: action.id } : m,
         ),
+      }
+
+    case 'message/queued':
+      return {
+        ...state,
+        messages: state.messages.map((m) => {
+          if (m.id !== action.messageId) return m
+          if (action.state === null) {
+            const { queued: _dropped, ...rest } = m
+            return rest
+          }
+          return { ...m, queued: action.state }
+        }),
+      }
+
+    case 'message/remove':
+      return {
+        ...state,
+        messages: state.messages.filter((m) => m.id !== action.messageId),
       }
 
     case 'stream/start':

@@ -2,6 +2,7 @@
  * [COMP:office/template-routing] */
 import {
   OfficeTemplateRoutingDraftSchema,
+  presentationTextCapacity,
   type OfficeArtifactSnapshot,
   type OfficeTemplateField,
   type OfficeTemplateRoutingDraft,
@@ -104,12 +105,6 @@ function fieldInstruction(type: OfficeTemplateField['type']): string {
   return 'Write concise content for this exact visual region and preserve the intended hierarchy.'
 }
 
-function maxTextLength(object: PresentationObject): number | undefined {
-  const type = fieldType(object)
-  if (type !== 'plainText' && type !== 'richText' && type !== 'bulletList') return undefined
-  return Math.max(40, Math.min(4_000, Math.round(object.geometry.widthPt * object.geometry.heightPt / 45)))
-}
-
 function inferPresentationRouting(snapshot: PresentationSnapshot, source: OfficeTemplateRoutingDraft['source']): OfficeTemplateRoutingDraft {
   const fields: OfficeTemplateField[] = []
   const slideRecipes: OfficeTemplateSlideRecipe[] = snapshot.slides.map((slide, slideIndex) => {
@@ -132,7 +127,7 @@ function inferPresentationRouting(snapshot: PresentationSnapshot, source: Office
         repeating: false,
         minItems: 0,
         maxItems: 1,
-        maxLength: maxTextLength(object),
+        maxLength: presentationTextCapacity(object),
         targetIds: [object.id],
         aiInstruction: fieldInstruction(type),
         locked: false,

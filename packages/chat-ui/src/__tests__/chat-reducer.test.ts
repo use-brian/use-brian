@@ -196,3 +196,60 @@ describe('[COMP:chat-ui/chat-reducer] chat reducer', () => {
     expect(cleared.replyTo).toBeNull()
   })
 })
+
+describe('[COMP:chat-ui/chat-reducer] mid-turn queued messages', () => {
+  const queuedMessage = (id: string): Message => ({
+    id,
+    role: 'user',
+    text: 'and what about Jack?',
+    timestamp: new Date('2026-08-06T10:00:00Z'),
+    queued: 'pending',
+  })
+
+  it('clears the queued flag when the running turn takes the message', () => {
+    const state = chatReducer(
+      { ...initialChatState, messages: [queuedMessage('input-1')] },
+      { type: 'message/queued', messageId: 'input-1', state: null },
+    )
+    // Absent, not `undefined`-valued — the flag is what the UI renders a
+    // "Queued" chip from, so it must not survive as a falsy key.
+    expect('queued' in state.messages[0]).toBe(false)
+    expect(state.messages[0].text).toBe('and what about Jack?')
+  })
+
+  it('upgrades a pending message to steering in place', () => {
+    const state = chatReducer(
+      { ...initialChatState, messages: [queuedMessage('input-1')] },
+      { type: 'message/queued', messageId: 'input-1', state: 'steering' },
+    )
+    expect(state.messages).toHaveLength(1)
+    expect(state.messages[0].queued).toBe('steering')
+  })
+
+  it('removes a queued message the turn never took', () => {
+    // The host drops it and re-sends as an ordinary turn; leaving it would
+    // show the message twice.
+    const state = chatReducer(
+      {
+        ...initialChatState,
+        messages: [
+          { id: 'm1', role: 'assistant', text: 'answer', timestamp: new Date() },
+          queuedMessage('input-1'),
+        ],
+      },
+      { type: 'message/remove', messageId: 'input-1' },
+    )
+    expect(state.messages.map((m) => m.id)).toEqual(['m1'])
+  })
+
+  it('leaves other messages untouched', () => {
+    const other: Message = {
+      id: 'm1', role: 'user', text: 'first', timestamp: new Date(),
+    }
+    const state = chatReducer(
+      { ...initialChatState, messages: [other, queuedMessage('input-1')] },
+      { type: 'message/queued', messageId: 'input-1', state: null },
+    )
+    expect(state.messages[0]).toBe(other)
+  })
+})

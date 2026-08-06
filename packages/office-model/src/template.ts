@@ -5,6 +5,7 @@ import {
   OfficeResourceRefSchema,
   OfficeSensitivitySchema,
   OfficeUuidSchema,
+  type PresentationObject,
 } from './model.js'
 
 export const OfficeTemplateFieldSchema = z
@@ -40,6 +41,19 @@ export const OfficeTemplateSlideRoleSchema = z.enum([
   'closing',
   'appendix',
 ])
+
+/**
+ * Conservative planning capacity for template-bound presentation text.
+ * The renderer remains authoritative for the actual glyph mix and wrapping.
+ */
+export function presentationTextCapacity(object: PresentationObject): number | undefined {
+  const runs = object.kind === 'text' ? object.runs : object.kind === 'shape' ? object.text : undefined
+  if (!runs?.length) return undefined
+  const maximumFontSizePt = Math.max(1, ...runs.map((run) => run.style.fontSizePt))
+  const lineCount = Math.max(1, Math.floor(object.geometry.heightPt / (maximumFontSizePt * 1.15)))
+  const charactersPerLine = Math.max(1, Math.floor(object.geometry.widthPt / (maximumFontSizePt * 0.5)))
+  return Math.min(4_000, lineCount * charactersPerLine)
+}
 
 export const OfficeTemplateSlideRecipeSchema = z
   .object({

@@ -7,7 +7,7 @@ import { useSearchParams } from "next/navigation";
 import { FileSpreadsheet, FileText, Presentation, Plus } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
-import { isOfficeStartFailed, listOfficeArtifacts, type OfficeArtifact, type OfficeFamily } from "@/lib/office/api";
+import { isOfficeStartFailed, listOfficeArtifacts, officeJobFailureKind, type OfficeArtifact, type OfficeFamily } from "@/lib/office/api";
 import { OfficeCardPreview } from "./office-card-preview";
 import { OfficeTopbar } from "./office-topbar";
 
@@ -86,8 +86,11 @@ export function OfficeHome({ workspaceId, initialArtifacts }: { workspaceId: str
             {visible.map((artifact) => {
               const Icon = artifact.family === "document" ? FileText : artifact.family === "presentation" ? Presentation : FileSpreadsheet;
               const startFailed = isOfficeStartFailed(artifact);
+              const failureKind = officeJobFailureKind(artifact.job?.errorCode);
               const status = startFailed
                 ? t.startFailed
+                : artifact.job?.status === "failed"
+                  ? failureKind === "presentation_fit" ? t.presentationFitFailed : failureKind === "fit" ? t.fitFailed : t.failed
                 : artifact.job
                   ? t[artifact.job.status as keyof Pick<typeof t, "queued" | "running" | "completed" | "failed" | "cancelled">] ?? artifact.job.stage
                   : null;

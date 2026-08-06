@@ -25,6 +25,9 @@ import {
   type CrmDealRow,
   type DealStage,
 } from "@/lib/api/crm";
+// One codec for the multi-value URL shape across both operator surfaces —
+// see tasks-view.ts (docs/architecture/features/tasks.md carries the spec).
+import { multiParam } from "@/lib/tasks-view";
 
 // ── Attention quick-filters ─────────────────────────────────────────────
 
@@ -129,12 +132,16 @@ export type CrmViewState = {
   view: ViewMode;
   /** Active attention quick-filter, or null. */
   quick: CrmQuickFilter | null;
-  /** Deal stage filter (empty = all). */
+  /**
+   * Deal stage filter (empty = all). Like every property filter here, it is
+   * a SET — OR within the property, AND across properties, matching the
+   * Tasks surface (they drive the same `FilterBar`).
+   */
   stages: DealStage[];
-  /** `null` = any; `"none"` = unlinked; else a company entity id. */
-  company: string | "none" | null;
-  /** `null` = any; else a tag (contacts/companies). */
-  tag: string | null;
+  /** Company filter: entity ids and/or `"none"` (unlinked). Empty = any. */
+  company: string[];
+  /** Tag filter (contacts/companies): any-of. Empty = any. */
+  tag: string[];
   /** Free-text needle over names (+ email/domain). */
   q: string;
   sort: DealSortKey;
@@ -147,8 +154,8 @@ export const DEFAULT_CRM_VIEW: CrmViewState = {
   view: "board",
   quick: null,
   stages: [],
-  company: null,
-  tag: null,
+  company: [],
+  tag: [],
   q: "",
   sort: "updated",
   closed: false,
@@ -185,18 +192,18 @@ export function crmViewFromSearch(
   const section =
     oneOf(params.get("section"), CRM_SECTIONS) ??
     (quick ? sectionForQuickFilter(quick) : DEFAULT_CRM_VIEW.section);
-  const stages = (params.get("stage") ?? "")
-    .split(",")
-    .filter((s): s is DealStage => (STAGE_KEYS as readonly string[]).includes(s));
-  const companyRaw = params.get("company");
-  const tagRaw = params.get("tag");
+  const stages = multiParam(params, "stage", { splitCommas: true }).filter(
+    (s): s is DealStage => (STAGE_KEYS as readonly string[]).includes(s),
+  );
   return {
     section,
     view: oneOf(params.get("view"), VIEW_MODES) ?? DEFAULT_CRM_VIEW.view,
     quick,
     stages,
-    company: companyRaw === null || companyRaw === "" ? null : companyRaw,
-    tag: tagRaw === null || tagRaw === "" ? null : tagRaw,
+    // Company ids are opaque and comma-free, so they comma-join; tags are
+    // user text and repeat the param instead (a tag may contain a comma).
+    company: multiParam(params, "company", { splitCommas: true }),
+    tag: multiParam(params, "tag", { splitCommas: false }),
     q: params.get("q") ?? "",
     sort: oneOf(params.get("sort"), DEAL_SORT_KEYS) ?? DEFAULT_CRM_VIEW.sort,
     closed: params.get("closed") === "1",
@@ -212,8 +219,9 @@ export function searchFromCrmView(state: CrmViewState): string {
   if (state.view !== DEFAULT_CRM_VIEW.view) params.set("view", state.view);
   if (state.quick) params.set("filter", state.quick);
   if (state.stages.length > 0) params.set("stage", state.stages.join(","));
-  if (state.company !== null) params.set("company", state.company);
-  if (state.tag !== null) params.set("tag", state.tag);
+  if (state.company.length > 0) params.set("company", state.company.join(","));
+  // Repeated, never joined — a tag may contain a comma.
+  for (const tag of state.tag) params.append("tag", tag);
   if (state.q.length > 0) params.set("q", state.q);
   if (state.sort !== DEFAULT_CRM_VIEW.sort) params.set("sort", state.sort);
   if (state.closed) params.set("closed", "1");
@@ -266,6 +274,26 @@ export function crmTagOptions(
 
 // ── Applying the state ──────────────────────────────────────────────────
 
+/** Any-of over the company set (`"none"` = unlinked); empty = unfiltered. */
+function matchesCompany(
+  row: { companyId: string | null },
+  company: readonly string[],
+): boolean {
+  if (company.length === 0) return true;
+  return company.some((c) =>
+    c === "none" ? row.companyId === null : row.companyId === c,
+  );
+}
+
+/** Any-of over the tag set; empty = unfiltered. */
+function matchesTag(
+  row: { tags: readonly string[] },
+  tag: readonly string[],
+): boolean {
+  if (tag.length === 0) return true;
+  return tag.some((t) => row.tags.includes(t));
+}
+
 /** Filter deals to the view state. The closed fold applies FIRST (won/lost
  *  hide unless revealed or explicitly stage-filtered in); quick filters
  *  pick their own slice (they only ever match open stages). */
@@ -284,11 +312,7 @@ export function applyDealFilters(
     } else if (!state.closed && !isOpenStage(row.stage)) {
       return false;
     }
-    if (state.company !== null) {
-      if (state.company === "none") {
-        if (row.companyId !== null) return false;
-      } else if (row.companyId !== state.company) return false;
-    }
+    if (!matchesCompany(row, state.company)) return false;
     if (needle) {
       const company = row.companyId
         ? (companyNames.get(row.companyId) ?? "")
@@ -311,12 +335,8 @@ export function applyContactFilters(
   return rows.filter((row) => {
     if (state.quick === "orphaned" && !matchesContactQuickFilter(row, "orphaned"))
       return false;
-    if (state.company !== null) {
-      if (state.company === "none") {
-        if (row.companyId !== null) return false;
-      } else if (row.companyId !== state.company) return false;
-    }
-    if (state.tag !== null && !row.tags.includes(state.tag)) return false;
+    if (!matchesCompany(row, state.company)) return false;
+    if (!matchesTag(row, state.tag)) return false;
     if (
       needle &&
       !row.name.toLowerCase().includes(needle) &&
@@ -333,7 +353,7 @@ export function applyCompanyFilters(
 ): CrmCompanyRow[] {
   const needle = state.q.trim().toLowerCase();
   return rows.filter((row) => {
-    if (state.tag !== null && !row.tags.includes(state.tag)) return false;
+    if (!matchesTag(row, state.tag)) return false;
     if (
       needle &&
       !row.name.toLowerCase().includes(needle) &&

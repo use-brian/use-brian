@@ -10,6 +10,7 @@ import {
   fileExtension,
   type DocumentFormat,
 } from './document-formats.js'
+import { isHtmlFile, parseHtmlToMarkdown } from './html.js'
 import { OfficeArchiveLimitError } from './office-archive-safety.js'
 import { parsePptxToMarkdown } from './pptx.js'
 import { parseXlsxToMarkdown } from './xlsx.js'
@@ -249,6 +250,22 @@ export async function parseFileContent(
   }
 
   if (format) return parseStructuredDocument(buffer, format, fileName)
+
+  // HTML is not an AnyDoc format, so it would otherwise land on the generic
+  // `text/*` branch below and be handed back as raw markup — stylesheets,
+  // scripts and all — as if it were the document. Placed after byte detection
+  // so a mislabeled Office payload named `.html` still parses as what it is.
+  // See ./html.ts for what the raw-markup path cost in production.
+  if (isHtmlFile(mimeType, fileName)) {
+    const text = parseHtmlToMarkdown(buffer.toString('utf-8'))
+    if (!text) {
+      return {
+        text: `[Web page: ${fileName}. No readable text (the page may render entirely through scripts).]`,
+        summary: `Web page: ${fileName}`,
+      }
+    }
+    return { text, summary: `Web page: ${fileName} (${text.length} chars)` }
+  }
 
   if (mimeType.startsWith('text/') || mimeType === 'application/json') {
     const text = buffer.toString('utf-8')

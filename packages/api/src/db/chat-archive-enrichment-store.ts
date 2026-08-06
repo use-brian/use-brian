@@ -11,9 +11,12 @@ export type ChatArchiveEnrichmentMessage = {
   senderDisplay: string | null
   sentAt: Date
   direction: 'inbound' | 'outbound'
-  kind: 'text' | 'image' | 'voice' | 'file' | 'link'
+  kind: 'text' | 'image' | 'video' | 'voice' | 'file' | 'link'
   bodyText: string | null
   mediaRef: { filename?: string; mime?: string; size_bytes?: number } | null
+  derivedText?: string | null
+  assetId?: string | null
+  extractionStatus?: string | null
 }
 
 export type ChatArchiveEnrichmentWindow = {
@@ -62,9 +65,17 @@ async function loadMessages(client: Pick<pg.ClientBase, 'query'>, windowId: stri
             m.provider_message_id AS "providerMessageId",
             m.sender_id AS "senderId", m.sender_display AS "senderDisplay",
             m.sent_at AS "sentAt", m.direction, m.kind,
-            m.body_text AS "bodyText", m.media_ref AS "mediaRef", m.source
+            m.body_text AS "bodyText", m.media_ref AS "mediaRef", m.source,
+            derived.text AS "derivedText", a.id::text AS "assetId",
+            a.extraction_status AS "extractionStatus"
        FROM chat_archive_enrichment_messages em
        JOIN chat_archive_messages m ON m.id = em.message_id
+       LEFT JOIN chat_archive_media_assets a ON a.message_id = m.id
+       LEFT JOIN LATERAL (
+         SELECT string_agg(s.segment_text, E'\n' ORDER BY s.segment_index) AS text
+           FROM chat_archive_segments s
+          WHERE s.message_id = m.id AND s.segment_index > 0 AND s.retracted_at IS NULL
+       ) derived ON true
       WHERE em.window_id = $1
       ORDER BY m.sent_at ASC, m.id ASC`,
     [windowId],
@@ -118,6 +129,16 @@ export function createChatArchiveEnrichmentStore(
                     m.owner_user_id AS "ownerUserId", m.conversation_id AS "conversationId"
                FROM chat_archive_messages m
               WHERE (m.body_text IS NOT NULL OR m.media_ref IS NOT NULL)
+                AND (
+                  m.media_ref IS NULL
+                  OR NOT (m.media_ref ? 'availability')
+                  OR m.media_ref->>'availability' IN ('missing','failed')
+                  OR EXISTS (
+                    SELECT 1 FROM chat_archive_media_assets a
+                     WHERE a.message_id = m.id AND a.upload_status = 'stored'
+                       AND a.extraction_status IN ('ready','failed','unsupported')
+                  )
+                )
                 AND NOT EXISTS (
                   SELECT 1 FROM chat_archive_enrichment_messages em WHERE em.message_id = m.id
                 )
@@ -139,6 +160,16 @@ export function createChatArchiveEnrichmentStore(
                FROM chat_archive_messages m
               WHERE m.instance_id = $1 AND m.conversation_id = $2
                 AND (m.body_text IS NOT NULL OR m.media_ref IS NOT NULL)
+                AND (
+                  m.media_ref IS NULL
+                  OR NOT (m.media_ref ? 'availability')
+                  OR m.media_ref->>'availability' IN ('missing','failed')
+                  OR EXISTS (
+                    SELECT 1 FROM chat_archive_media_assets a
+                     WHERE a.message_id = m.id AND a.upload_status = 'stored'
+                       AND a.extraction_status IN ('ready','failed','unsupported')
+                  )
+                )
                 AND NOT EXISTS (
                   SELECT 1 FROM chat_archive_enrichment_messages em WHERE em.message_id = m.id
                 )

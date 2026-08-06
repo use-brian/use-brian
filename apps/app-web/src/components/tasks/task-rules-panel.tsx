@@ -185,7 +185,9 @@ export function TaskRulesPanel({
                           <span className="rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">
                             {rule.effect === "deny"
                               ? t.ruleDeny
-                              : t.ruleRequire}
+                              : rule.effect === "allow"
+                                ? t.ruleAllow
+                                : t.ruleRequire}
                           </span>
                           {rule.status === "proposed" ? (
                             <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[11px] text-amber-700 dark:text-amber-400">
