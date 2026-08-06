@@ -34,6 +34,14 @@ type FilterOption = {
   label: string;
   /** Optional status-dot tint class rendered before the label. */
   dot?: string;
+  /**
+   * Optional leading art (avatar, glyph) rendered before the label. Takes the
+   * diameter in px so one option reads right at both sizes it appears at —
+   * 20 in the picker list, 14 inside the applied pill — which a fixed node
+   * cannot do (`UserAvatar` sizes itself with inline styles a class can't
+   * override).
+   */
+  icon?: (size: number) => React.ReactNode;
 };
 
 export type FilterDef = {
@@ -66,6 +74,7 @@ function OptionRow({
         selected && "bg-muted/60",
       )}
     >
+      {option.icon?.(20)}
       {option.dot && (
         <span className={cn("size-2 shrink-0 rounded-full", option.dot)} aria-hidden />
       )}
@@ -92,6 +101,7 @@ function FilterPill({
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger className="inline-flex h-full items-center gap-1 pl-2.5 pr-1">
           <span className="text-muted-foreground">{def.label}</span>
+          {current?.icon?.(14)}
           {current?.dot && (
             <span className={cn("size-2 rounded-full", current.dot)} aria-hidden />
           )}

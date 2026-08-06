@@ -28,11 +28,13 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   ChevronRight,
+  CircleUserRound,
   Kanban,
   ListChecks,
   Rows3,
   ShieldCheck,
 } from "lucide-react";
+import { UserAvatar } from "@/components/ui/user-avatar";
 import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { cn } from "@/lib/utils";
 import { mutateSurfaceCache, useCachedResource } from "@/lib/surface-cache";
