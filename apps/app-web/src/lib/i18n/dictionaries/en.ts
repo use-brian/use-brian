@@ -374,6 +374,8 @@ export const en = {
       shopifyListDisputes: "Listing disputes",
       shopifyListContent: "Listing store content",
       shopifySalesReport: "Running sales report",
+      shopifyStorefrontFunnel: "Checking storefront funnel",
+      shopifyAnalyticsQuery: "Querying store analytics",
       shopifyUpdateProduct: "Updating product",
       shopifyCreateProduct: "Creating product",
       shopifyAddProductImage: "Adding product image",

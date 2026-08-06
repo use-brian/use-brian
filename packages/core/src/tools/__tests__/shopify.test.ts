@@ -20,6 +20,8 @@ function mockApi(overrides: Partial<ShopifyApi> = {}): ShopifyApi {
     listDisputes: vi.fn().mockResolvedValue({ disputes: emptyConn }),
     listContent: vi.fn().mockResolvedValue(emptyConn),
     fetchOrdersRange: vi.fn().mockResolvedValue({ orders: [], truncated: false }),
+    storefrontFunnel: vi.fn().mockResolvedValue({ columns: [], rows: [], shopifyql: 'FROM sessions SHOW sessions' }),
+    runAnalyticsQuery: vi.fn().mockResolvedValue({ columns: [], rows: [] }),
     updateProduct: vi.fn().mockResolvedValue({ product: { id: 'gid://shopify/Product/1', title: 'Widget' } }),
     createProduct: vi.fn().mockResolvedValue({ product: { id: 'gid://shopify/Product/2', title: 'New', status: 'DRAFT' } }),
     createDraftOrder: vi.fn().mockResolvedValue({ draftOrder: { id: 'gid://shopify/DraftOrder/9', name: '#D9' } }),
@@ -89,6 +91,8 @@ const READ_TOOLS = [
   'shopifyListDisputes',
   'shopifyListContent',
   'shopifySalesReport',
+  'shopifyStorefrontFunnel',
+  'shopifyAnalyticsQuery',
   'shopifyListThemes',
   'shopifyReadProductTemplate',
 ]
@@ -120,7 +124,7 @@ const DESTRUCTIVE_TOOLS = [
 describe('[COMP:tools/shopify] Shopify tools', () => {
   it('creates the full 38-tool catalog', () => {
     const tools = createShopifyTools(mockApi())
-    expect(tools).toHaveLength(38)
+    expect(tools).toHaveLength(40)
     expect(tools.map((t) => t.name).sort()).toEqual(
       [...READ_TOOLS, ...WRITE_TOOLS, ...DESTRUCTIVE_TOOLS].sort(),
     )
@@ -386,6 +390,52 @@ describe('[COMP:tools/shopify] Shopify tools', () => {
       query: 'created_at:>=2026-07-01 created_at:<=2026-07-31',
       maxOrders: 500,
     })
+  })
+
+  it('shopifyStorefrontFunnel derives the cart drop-off and keys rows by column name', async () => {
+    const api = mockApi({
+      storefrontFunnel: vi.fn().mockResolvedValue({
+        columns: [
+          { name: 'sessions', dataType: 'number' },
+          { name: 'sessions_with_cart_additions', dataType: 'number' },
+          { name: 'sessions_that_reached_checkout', dataType: 'number' },
+          { name: 'sessions_that_completed_checkout', dataType: 'number' },
+        ],
+        rows: [[1000, 180, 60, 42]],
+        shopifyql: 'FROM sessions SHOW ...',
+      }),
+    })
+    const tool = createShopifyTools(api).find((t) => t.name === 'shopifyStorefrontFunnel')!
+    const result = await tool.execute({ since: '-7d' }, {} as never)
+    const data = result.data as Record<string, unknown>
+    const rows = data.rows as Array<Record<string, unknown>>
+    expect(rows[0].sessions).toBe(1000)
+    // 180 added to cart, only 60 ever reached checkout.
+    expect(rows[0].added_to_cart_but_never_reached_checkout).toBe(120)
+    expect(rows[0].reached_checkout_but_never_completed).toBe(18)
+  })
+
+  it('shopifyStorefrontFunnel states that cart abandoners cannot be contacted', async () => {
+    const tool = createShopifyTools(mockApi()).find((t) => t.name === 'shopifyStorefrontFunnel')!
+    const result = await tool.execute({}, {} as never)
+    const note = String((result.data as Record<string, unknown>).note)
+    expect(note).toMatch(/cannot be identified or contacted/i)
+    // The description must steer the model off the wrong tool for "who abandoned?".
+    expect(tool.description).toMatch(/shopifyListAbandonedCheckouts/)
+  })
+
+  it('shopifyAnalyticsQuery reports a rejected query as an error, never as empty data', async () => {
+    const api = mockApi({
+      runAnalyticsQuery: vi.fn().mockRejectedValue(
+        new Error("ShopifyQL query was rejected: unknown field 'sesions'"),
+      ),
+    })
+    const tool = createShopifyTools(api).find((t) => t.name === 'shopifyAnalyticsQuery')!
+    const result = await tool.execute({ query: 'FROM sessions SHOW sesions' }, {} as never)
+    expect(result.isError).toBe(true)
+    expect(String(result.data)).toMatch(/rejected/i)
+    // The specific failure must survive to the model so it can fix the query.
+    expect(String(result.data)).toMatch(/sesions/)
   })
 
   it('shopifyGetPayoutsSummary flags non-Shopify-Payments stores honestly', async () => {

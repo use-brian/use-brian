@@ -320,6 +320,8 @@ export const ja: Dictionary = {
       shopifyListDisputes: "チャージバックを一覧中",
       shopifyListContent: "ストアコンテンツを一覧中",
       shopifySalesReport: "売上レポートを作成中",
+      shopifyStorefrontFunnel: "ストアの購入導線を分析中",
+      shopifyAnalyticsQuery: "ストア分析データを照会中",
       shopifyUpdateProduct: "商品を更新中",
       shopifyCreateProduct: "商品を作成中",
       shopifyAddProductImage: "商品画像を追加中",

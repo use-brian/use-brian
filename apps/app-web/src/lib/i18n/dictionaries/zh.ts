@@ -316,6 +316,8 @@ export const zh: Dictionary = {
       shopifyListDisputes: "正在列出爭議款項",
       shopifyListContent: "正在列出商店內容",
       shopifySalesReport: "正在產生銷售報表",
+      shopifyStorefrontFunnel: "正在分析商店轉換流程",
+      shopifyAnalyticsQuery: "正在查詢商店分析數據",
       shopifyUpdateProduct: "正在更新商品",
       shopifyCreateProduct: "正在建立商品",
       shopifyAddProductImage: "正在加入商品圖片",

@@ -181,6 +181,64 @@ const disputeRow = (d: Json) => ({
   order_id: str(obj(d, 'order'), 'id'),
 })
 
+// ── Storefront analytics ───────────────────────────────────────
+
+/** Tabular ShopifyQL result: column metadata plus positional rows. */
+type ShopifyqlTable = {
+  columns: Array<{ name: string; dataType: string }>
+  rows: unknown[][]
+}
+
+/** Mirrors `SESSION_DIMENSIONS` in the API client - names from Shopify's `sessions` schema. */
+const SESSION_DIMENSIONS = [
+  'referrer_source',
+  'session_device_type',
+  'session_device_browser',
+  'session_device_os',
+  'session_country',
+  'session_region',
+] as const
+type SessionDimension = (typeof SESSION_DIMENSIONS)[number]
+
+/** Positional ShopifyQL rows → objects keyed by column name, which a model reads far better. */
+function tableToObjects(table: ShopifyqlTable): Array<Record<string, unknown>> {
+  return table.rows.map((row) => {
+    const out: Record<string, unknown> = {}
+    table.columns.forEach((col, i) => { out[col.name] = row[i] })
+    return out
+  })
+}
+
+const numberish = (v: unknown): number | undefined => {
+  const n = typeof v === 'number' ? v : Number.parseFloat(String(v ?? ''))
+  return Number.isFinite(n) ? n : undefined
+}
+
+/**
+ * The funnel gap the merchant actually asks about: sessions that added
+ * something to a cart and never reached the checkout page.
+ *
+ * Returned as a COUNT and nothing else, deliberately. These sessions are
+ * anonymous - Shopify's `sessions` schema is aggregate, and the identified
+ * abandoned-checkout list only ever covers people who *reached* checkout. So
+ * this number can be reported and acted on in aggregate (fix the cart page,
+ * the shipping estimate, the payment options) but the people behind it cannot
+ * be named or emailed. `shopifyListAbandonedCheckouts` is a DIFFERENT, smaller
+ * population and answers a different question.
+ */
+function cartDropoff(row: Record<string, unknown>): Record<string, unknown> | undefined {
+  const added = numberish(row.sessions_with_cart_additions)
+  const reached = numberish(row.sessions_that_reached_checkout)
+  if (added === undefined || reached === undefined) return undefined
+  const completed = numberish(row.sessions_that_completed_checkout)
+  return {
+    added_to_cart_but_never_reached_checkout: Math.max(0, added - reached),
+    ...(completed !== undefined
+      ? { reached_checkout_but_never_completed: Math.max(0, reached - completed) }
+      : {}),
+  }
+}
+
 // ── API port ───────────────────────────────────────────────────
 
 type ShopifyListParams = { query?: string; first?: number; cursor?: string }
@@ -202,6 +260,15 @@ export type ShopifyApi = {
   listDisputes(params: { first?: number }): Promise<unknown>
   listContent(params: { kind: 'pages' | 'articles' | 'blogs'; query?: string; first?: number; cursor?: string }): Promise<unknown>
   fetchOrdersRange(params: { query?: string; maxOrders?: number }): Promise<{ orders: unknown[]; truncated: boolean }>
+  storefrontFunnel(params: {
+    since?: string
+    until?: string
+    groupBy?: SessionDimension
+    timeseries?: 'day' | 'week' | 'month'
+    compareToPreviousPeriod?: boolean
+    limit?: number
+  }): Promise<ShopifyqlTable & { shopifyql: string }>
+  runAnalyticsQuery(query: string): Promise<ShopifyqlTable>
   updateProduct(params: {
     id: string
     title?: string
@@ -904,6 +971,85 @@ export function createShopifyTools(
     },
   })
 
+  const storefrontFunnelTool = buildTool({
+    name: 'shopifyStorefrontFunnel',
+    description:
+      'Storefront conversion funnel from Shopify analytics: sessions, visitors, how many added to cart, ' +
+      'how many reached checkout, how many completed, and the conversion rate. Bot traffic is always excluded. ' +
+      'Use this to find WHERE shoppers drop out - it also reports how many sessions added to cart but never ' +
+      'reached checkout. Those sessions are anonymous and CANNOT be identified or emailed; ' +
+      'shopifyListAbandonedCheckouts is a different and smaller group (only people who reached checkout) ' +
+      'and is the only one you can contact. Group by traffic source or device to see which segment converts worst.',
+    inputSchema: z.object({
+      since: z.string().optional().describe('Start of the window: a relative offset like "-30d" / "-12m", or a date "YYYY-MM-DD". Default "-30d".'),
+      until: z.string().optional().describe('End of the window: "today" or "YYYY-MM-DD". Default "today".'),
+      groupBy: z.enum(SESSION_DIMENSIONS).optional().describe('Break the funnel down by one dimension.'),
+      timeseries: z.enum(['day', 'week', 'month']).optional().describe('Return one row per period instead of one total.'),
+      compareToPreviousPeriod: z.boolean().optional().describe('Add percent-change columns against the preceding window of equal length. Use this when asked what changed.'),
+      limit: z.number().optional().describe('Max rows when grouping (default unlimited, capped at 100).'),
+    }),
+    isConcurrencySafe: true,
+    isReadOnly: true,
+    timeoutMs: 60_000,
+    async execute(input) {
+      try {
+        const table = await api.storefrontFunnel({
+          since: input.since,
+          until: input.until,
+          groupBy: input.groupBy,
+          timeseries: input.timeseries,
+          compareToPreviousPeriod: input.compareToPreviousPeriod,
+          limit: input.limit,
+        })
+        const rows = tableToObjects(table).map((row) => {
+          const dropoff = cartDropoff(row)
+          return dropoff ? { ...row, ...dropoff } : row
+        })
+        return { data: {
+          period: `${input.since ?? '-30d'} to ${input.until ?? 'today'}`,
+          rows,
+          row_count: rows.length,
+          note:
+            'Sessions here are anonymous aggregates. A session that added to cart but never reached checkout ' +
+            'cannot be identified or contacted - report it as a count and act on it by fixing the cart or ' +
+            'checkout experience, not by reaching out to individuals.',
+          shopifyql: table.shopifyql,
+        } }
+      } catch (err) {
+        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+      }
+    },
+  })
+
+  const analyticsQueryTool = buildTool({
+    name: 'shopifyAnalyticsQuery',
+    description:
+      'Run a raw ShopifyQL query against the store analytics for questions the other tools do not cover ' +
+      '(traffic, marketing campaigns, site-search terms, customer recency and lifetime spend). ' +
+      'Read-only. Prefer shopifyStorefrontFunnel for anything about the conversion funnel - it cannot fail to parse. ' +
+      'Syntax is "FROM <schema> SHOW <metrics> ...", never SELECT. Schemas include sessions, sales, orders, products, ' +
+      'customers, campaign_sessions, searches, search_queries. If the query is rejected, the error names the problem - ' +
+      'fix the field or schema name and retry; never report a rejected query as "no data".',
+    inputSchema: z.object({
+      query: z.string().describe('The ShopifyQL query, e.g. "FROM customers SHOW new_customer_records TIMESERIES month SINCE -6m".'),
+    }),
+    isConcurrencySafe: true,
+    isReadOnly: true,
+    timeoutMs: 60_000,
+    async execute(input) {
+      try {
+        const table = await api.runAnalyticsQuery(input.query)
+        return { data: {
+          rows: tableToObjects(table),
+          row_count: table.rows.length,
+          columns: table.columns.map((c) => c.name),
+        } }
+      } catch (err) {
+        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+      }
+    },
+  })
+
   const createProductTool = buildTool({
     name: 'shopifyCreateProduct',
     description:
@@ -1561,6 +1707,8 @@ export function createShopifyTools(
     listDisputesTool,
     listContentTool,
     salesReportTool,
+    storefrontFunnelTool,
+    analyticsQueryTool,
     updateProductTool,
     createProductTool,
     addProductImageTool,

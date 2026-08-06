@@ -118,6 +118,8 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   shopifyListDisputes: 'List disputes',
   shopifyListContent: 'List store content',
   shopifySalesReport: 'Run sales report',
+  shopifyStorefrontFunnel: 'Check storefront funnel',
+  shopifyAnalyticsQuery: 'Query store analytics',
   shopifyUpdateProduct: 'Update product',
   shopifyCreateProduct: 'Create product',
   shopifyAddProductImage: 'Add product image',
