@@ -7,6 +7,7 @@ import TurndownService from 'turndown'
 import { gfm } from 'turndown-plugin-gfm'
 import { parseXlsxToMarkdown } from './xlsx.js'
 import { parsePptxToMarkdown } from './pptx.js'
+import { isHtmlFile, parseHtmlToMarkdown } from './html.js'
 import { estimateStringTokens } from '../compaction/compact.js'
 
 const DOCX_MIME =
@@ -47,6 +48,20 @@ export async function parseFileContent(
   mimeType: string,
   fileName: string,
 ): Promise<{ text: string; summary: string }> {
+  // HTML before the generic `text/*` branch, which would hand back the raw
+  // markup — stylesheets, scripts and all — as if it were the document. See
+  // ./html.ts for what that cost in production.
+  if (isHtmlFile(mimeType, fileName)) {
+    const text = parseHtmlToMarkdown(buffer.toString('utf-8'))
+    if (!text) {
+      return {
+        text: `[Web page: ${fileName}. No readable text (the page may render entirely through scripts).]`,
+        summary: `Web page: ${fileName}`,
+      }
+    }
+    return { text, summary: `Web page: ${fileName} (${text.length} chars)` }
+  }
+
   if (mimeType.startsWith('text/') || mimeType === 'application/json') {
     const text = buffer.toString('utf-8')
     return {

@@ -1,5 +1,6 @@
 export type { FileStore, CachedFile } from './types.js'
 export { parseFileContent, parseDocxToMarkdown, shouldInline } from './parsers.js'
+export { parseHtmlToMarkdown, isHtmlFile } from './html.js'
 export { distillFileToText, type DistillOptions, type DistillResult } from './distill.js'
 export { extractPdfText } from './pdf-text.js'
 export { renderPdfPages, probePdfPageCount, type RenderedPdfPage, type RenderPdfPagesResult } from './pdf-pages.js'
