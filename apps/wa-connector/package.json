@@ -13,7 +13,7 @@
   },
   "dependencies": {
     "@google-cloud/storage": "^7.15.0",
-    "@whiskeysockets/baileys": "7.0.0-rc13",
+    "@whiskeysockets/baileys": "7.0.0-rc14",
     "express": "^5",
     "pg": "^8",
     "pino": "^9.6.0",

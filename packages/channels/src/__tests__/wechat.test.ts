@@ -252,7 +252,7 @@ describe('[COMP:channels/wechat-adapter] WeChat adapter', () => {
       expect(sniffImageMime(Buffer.from('random data here'))).toBe('image/jpeg')
     })
 
-    it('prioritizes image > video > file > voice-without-STT', () => {
+    it('prioritizes image > video > file > voice and retains voice bytes with STT', () => {
       const voiceWithStt = {
         type: WeixinItemType.VOICE,
         voice_item: { media: { encrypt_query_param: 'v' }, text: 'stt' },
@@ -262,7 +262,7 @@ describe('[COMP:channels/wechat-adapter] WeChat adapter', () => {
         file_item: { media: { encrypt_query_param: 'f', aes_key: 'k' }, file_name: 'a.txt' },
       }
       expect(findWechatMediaItem([voiceWithStt, file])).toBe(file)
-      expect(findWechatMediaItem([voiceWithStt])).toBeNull()
+      expect(findWechatMediaItem([voiceWithStt])).toBe(voiceWithStt)
     })
 
     it('downloads and decrypts an encrypted image item', async () => {
@@ -287,6 +287,23 @@ describe('[COMP:channels/wechat-adapter] WeChat adapter', () => {
       expect(result!.kind).toBe('image')
       expect(result!.mime).toBe('image/png')
       expect(result!.data).toEqual(png)
+    })
+
+    it('stops a CDN response when media exceeds the caller limit', async () => {
+      const key = Buffer.from('0123456789abcdef')
+      const cipher = createCipheriv('aes-128-ecb', key, null)
+      const encrypted = Buffer.concat([cipher.update(Buffer.alloc(64)), cipher.final()])
+      const fetchImpl = vi.fn(async () => new Response(new Uint8Array(encrypted), { status: 200 })) as unknown as typeof fetch
+
+      await expect(downloadWechatMediaItem(
+        {
+          type: WeixinItemType.IMAGE,
+          image_item: {
+            media: { full_url: 'https://cdn.example/large', aes_key: key.toString('base64') },
+          },
+        },
+        { fetchImpl, maxBytes: 32 },
+      )).rejects.toThrow('exceeds 32 bytes')
     })
   })
 

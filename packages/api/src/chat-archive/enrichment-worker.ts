@@ -14,7 +14,9 @@ export function renderChatArchiveWindow(window: ChatArchiveEnrichmentWindow): st
       message.mediaRef?.filename ? `: ${message.mediaRef.filename}` : '',
       ']',
     ].join('')
-    return `[${message.sentAt.toISOString()}] ${sender} (${message.direction}): ${body.slice(0, 2000)}`
+    const derived = message.derivedText?.trim()
+    const content = derived ? `${body}\n[derived ${message.kind} content]\n${derived}` : body
+    return `[${message.sentAt.toISOString()}] ${sender} (${message.direction}): ${content.slice(0, 4000)}`
   }).join('\n').slice(0, 16_000)
 }
 
@@ -62,12 +64,14 @@ export function createChatArchiveEnrichmentWorker(deps: {
             window.firstProviderMessageId,
             window.lastProviderMessageId,
           ],
+          media_asset_ids: [...new Set(window.messages.flatMap((message) => message.assetId ? [message.assetId] : []))],
         },
         contentRef: {
           source_kind: 'channel_window',
           archive_instance_id: window.instanceId,
           conversation_id: window.conversationId,
           message_id_range: [window.firstMessageId, window.lastMessageId],
+          media_asset_ids: [...new Set(window.messages.flatMap((message) => message.assetId ? [message.assetId] : []))],
         },
       })
       await deps.store.complete(window.id)
