@@ -43,6 +43,11 @@ export interface OfflineSyncState {
   pending: number;
 }
 
+/** SSR and the first client render must share the same optimistic value. */
+export function initialNavigatorOnline(): true {
+  return true;
+}
+
 // ── Collab-socket signal (module store) ────────────────────────
 // True unless a mounted doc page reports its sync socket as down. Pages
 // publish on status change and reset to true on unmount, so no open doc
@@ -90,9 +95,7 @@ export function useIsOffline(): boolean {
  * module flag, and flushes the queued writes on the offline→online rising edge.
  */
 export function useOfflineSync(): OfflineSyncState {
-  const [navOnline, setNavOnline] = useState(() =>
-    typeof navigator === "undefined" ? true : navigator.onLine,
-  );
+  const [navOnline, setNavOnline] = useState(initialNavigatorOnline);
   const [pending, setPending] = useState(0);
   const prevRef = useRef<Connectivity>("online");
   const collabUp = useSyncExternalStore(

@@ -44,7 +44,8 @@ import {
 import { bridgeConnection } from './ws-bridge.js'
 import { createRunRegistry, type RunRegistry } from './run-registry.js'
 import { parseSyncDocumentName } from './document-router.js'
-import { loadOfficeUpdate, storeOfficeSnapshot } from './office-collab.js'
+import { loadOfficeUpdate, replaceLiveOfficeSnapshot, storeOfficeSnapshot } from './office-collab.js'
+import { OfficeArtifactSnapshotSchema } from '@use-brian/office-model'
 
 // Local dev: load the monorepo-root .env (the service runs from
 // apps/doc-sync, so the default cwd .env isn't where the shared
@@ -381,6 +382,50 @@ async function handleInternalApply(
   }
 }
 
+/** Replace a committed Office head inside the authoritative in-memory Y.Doc.
+ * This is the Office twin of `/internal/apply`: API-side generation/revision
+ * commits immutable history, then calls here before reporting success so an
+ * already-connected editor cannot later settle stale content over that head. */
+async function handleInternalOfficeReplace(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  if (!isInternalAuthorized(req)) {
+    res.writeHead(401)
+    res.end()
+    return
+  }
+  let payload: { artifactId?: unknown; snapshot?: unknown }
+  try {
+    payload = (await readJsonBody(req)) as typeof payload
+  } catch {
+    res.writeHead(400, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'invalid json' }))
+    return
+  }
+  if (typeof payload.artifactId !== 'string') {
+    res.writeHead(400, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'artifactId required' }))
+    return
+  }
+  const parsed = OfficeArtifactSnapshotSchema.safeParse(payload.snapshot)
+  if (!parsed.success || parsed.data.artifactId !== payload.artifactId) {
+    res.writeHead(400, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'invalid Office snapshot' }))
+    return
+  }
+  const connection = await hocuspocus.openDirectConnection(`office:${payload.artifactId}`, { service: true })
+  try {
+    await connection.transact((doc) => {
+      replaceLiveOfficeSnapshot(doc as unknown as Y.Doc, parsed.data)
+    })
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ ok: true }))
+  } finally {
+    await connection.disconnect()
+  }
+}
+
 /** Shared `DOC_SYNC_SECRET` gate for the internal (server-to-server) routes. */
 function isInternalAuthorized(req: IncomingMessage): boolean {
   return (
@@ -477,6 +522,14 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
       console.error('[doc-sync] /internal/apply error', err)
       if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: 'apply failed' }))
+    })
+    return
+  }
+  if (req.method === 'POST' && req.url && req.url.startsWith('/internal/office/replace')) {
+    handleInternalOfficeReplace(req, res).catch((err) => {
+      console.error('[doc-sync] /internal/office/replace error', err)
+      if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'Office replace failed' }))
     })
     return
   }

@@ -18,9 +18,14 @@ vi.mock("@/lib/api/views", () => ({
 import {
   publishCollabConnected,
   getCollabConnected,
+  initialNavigatorOnline,
 } from "../use-offline-sync";
 
 describe("[COMP:app-web/use-offline-sync] collab-socket signal store", () => {
+  it("uses an SSR-safe optimistic value for the first client render", () => {
+    expect(initialNavigatorOnline()).toBe(true);
+  });
+
   it("defaults to connected (no open doc must not read as degraded)", () => {
     expect(getCollabConnected()).toBe(true);
   });

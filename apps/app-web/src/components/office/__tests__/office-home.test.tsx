@@ -58,6 +58,9 @@ describe("[COMP:app-web/office-home] Office home", () => {
     expect(html).toContain("Pitch");
     expect(html).toContain("/office/22222222-2222-4222-8222-222222222222");
     expect(html).toContain("/office/33333333-3333-4333-8333-333333333333");
+    expect(html).toContain('data-office-file-grid="true"');
+    expect(html).toContain('grid-cols-[repeat(auto-fill,minmax(15rem,1fr))]');
+    expect(html.match(/data-office-file-card-footer="true"/g)).toHaveLength(2);
   });
 
   it("marks a version-zero artifact with no job as a failed start", () => {

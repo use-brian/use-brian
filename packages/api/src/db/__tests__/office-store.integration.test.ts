@@ -80,6 +80,19 @@ describe('[COMP:api/office-store] Office stores', () => {
     expect(await createOfficeArtifactStore(conflict.query).commitVersion({ userId: 'u1', artifactId: 'a1', expectedVersion: 0, snapshotFileId: 'f1', snapshotHash: 'b'.repeat(64), operationClock: new Uint8Array(), schemaVersion: 1, capabilityVersion: 1, origin: 'manual', authorType: 'user', summary: 'Stale' })).toBeNull()
   })
 
+  it('restores an immutable version and the collaborative live snapshot atomically', async () => {
+    const db = fakeDb({ 'JOIN live': [{ id: 'v3', version: 3 }] })
+    const restored = await createOfficeArtifactStore(db.query).restoreVersion({
+      userId: 'u1', artifactId: 'a1', targetVersionId: 'v1', expectedVersion: 2,
+      summary: 'Restore v1', liveUpdate: new Uint8Array([1, 2]),
+      liveStateVector: new Uint8Array([3]), liveCanonicalHash: 'e'.repeat(64),
+    })
+    expect(restored).toEqual({ id: 'v3', version: 3 })
+    expect(db.calls[0]?.sql).toContain('INSERT INTO office_collab_documents')
+    expect(db.calls[0]?.sql).toContain('base_version=EXCLUDED.base_version')
+    expect(db.calls[0]?.params.slice(0, 5)).toEqual(['a1', 'v1', 2, 'u1', 'Restore v1'])
+  })
+
   it('creates immutable template versions and declarative resources', async () => {
     const db = fakeDb({ 'WITH next': [{ id: 'tv1', version: 1 }], 'INSERT INTO office_resources': [{ id: 'r1' }] })
     const store = createOfficeTemplateStore(db.query)
@@ -97,10 +110,29 @@ describe('[COMP:api/office-store] Office stores', () => {
     expect(db.calls[1]?.sql).toContain('NOT EXISTS')
   })
 
+  it('stores human-reviewed routing only on the mutable template draft', async () => {
+    const routing = { source: 'upload', fields: [], slideRecipes: [] }
+    const db = fakeDb({ 'SELECT draft_routing': [{ draftRouting: routing }], 'UPDATE office_templates': [{ id: 't1' }] })
+    const store = createOfficeTemplateStore(db.query)
+    await expect(store.getDraftRouting('u1', 't1')).resolves.toEqual(routing)
+    await expect(store.saveDraftRouting({ userId: 'u1', templateId: 't1', routing })).resolves.toBe(true)
+    expect(db.calls[1]?.sql).toContain("lifecycle_state='draft'")
+    expect(db.calls[1]?.params).toEqual(['t1', JSON.stringify(routing)])
+  })
+
   it('stores one thread plus idempotent explicit-Brian trigger message', async () => {
     const db = fakeDb({ 'WITH thread': [{ threadId: 't1', messageId: 'm1' }] })
     const receipt = await createOfficeCommentStore(db.query).createThread({ userId: 'u1', workspaceId: 'w1', artifactId: 'a1', artifactVersionId: 'v1', anchor: { kind: 'object', targetIds: ['o1'] }, body: '@Brian tighten this', brianTriggerKey: 'event-1' })
     expect(receipt).toEqual({ threadId: 't1', messageId: 'm1' })
-    expect(db.calls[0].sql).toContain("CASE WHEN $11 IS NULL THEN NULL ELSE 'queued' END")
+    expect(db.calls[0].sql).toContain('$11::text')
+    expect(db.calls[0].sql).toContain("CASE WHEN $11::text IS NULL THEN NULL ELSE 'queued' END")
+  })
+
+  it('types the optional Brian trigger key in comment replies', async () => {
+    const db = fakeDb({ 'INSERT INTO office_comment_messages': [{ id: 'm2' }] })
+    const receipt = await createOfficeCommentStore(db.query).reply({ userId: 'u1', workspaceId: 'w1', threadId: 't1', body: '@Brian tighten this', brianTriggerKey: 'event-2' })
+    expect(receipt).toEqual({ id: 'm2' })
+    expect(db.calls[0].sql).toContain('$6::text')
+    expect(db.calls[0].sql).toContain("CASE WHEN $6::text IS NULL THEN NULL ELSE 'queued' END")
   })
 })

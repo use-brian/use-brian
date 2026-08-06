@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Dialog } from "@base-ui/react/dialog";
-import { FileText, FileUp, Presentation, Sparkles, Upload, X } from "lucide-react";
+import { FileSpreadsheet, FileText, FileUp, Presentation, Sparkles, Upload, X } from "lucide-react";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
@@ -13,22 +13,23 @@ import { createOfficeTemplate, getOfficeJob, importOfficeTemplateDraft, listOffi
 import { OfficeCardPreview } from "./office-card-preview";
 import { OfficeTopbar } from "./office-topbar";
 
-export type OfficeStarterTemplate = "general-presentation" | "letterhead";
+export type OfficeStarterTemplate = "general-presentation" | "letterhead" | "invoice";
 
 /** Backward-compatible only: old deep links now prefill the single Generate path. */
 export function readOfficeStarterTemplate(searchParams: Pick<URLSearchParams, "get">): OfficeStarterTemplate | null {
   const starter = searchParams.get("starter");
-  return starter === "general-presentation" || starter === "letterhead" ? starter : null;
+  return starter === "general-presentation" || starter === "letterhead" || starter === "invoice" ? starter : null;
 }
 
 export function officeTemplateNameFromFile(fileName: string): string {
-  return fileName.replace(/\.(docx|pptx)$/i, "").trim() || fileName;
+  return fileName.replace(/\.(docx|pptx|xlsx)$/i, "").trim() || fileName;
 }
 
 export function officeTemplateFamilyFromFileName(fileName: string): OfficeFamily | null {
   const normalized = fileName.trim().toLowerCase();
   if (normalized.endsWith(".docx")) return "document";
   if (normalized.endsWith(".pptx")) return "presentation";
+  if (normalized.endsWith(".xlsx")) return "spreadsheet";
   return null;
 }
 
@@ -51,7 +52,7 @@ export function OfficeTemplateLibrary({ workspaceId, templateId }: { workspaceId
   const choosingForArtifact = searchParams.get("intent") === "use";
   const [templates, setTemplates] = useState<OfficeTemplate[] | null>(null);
   const [generateOpen, setGenerateOpen] = useState(starterTemplate !== null);
-  const [family, setFamily] = useState<OfficeFamily>(starterTemplate === "general-presentation" ? "presentation" : "document");
+  const [family, setFamily] = useState<OfficeFamily>(starterTemplate === "general-presentation" ? "presentation" : starterTemplate === "invoice" ? "spreadsheet" : "document");
   const [name, setName] = useState("");
   const [guidance, setGuidance] = useState("");
   const [generateState, setGenerateState] = useState<"idle" | "working" | "failed">("idle");
@@ -96,10 +97,14 @@ export function OfficeTemplateLibrary({ workspaceId, templateId }: { workspaceId
       setFamily("presentation");
       setName(t.starterPresentationTitle);
       setGuidance(t.starterPresentationInstructions);
-    } else {
+    } else if (starter === "letterhead") {
       setFamily("document");
       setName(t.starterLetterheadTitle);
       setGuidance(t.starterLetterheadInstructions);
+    } else {
+      setFamily("spreadsheet");
+      setName(t.starterInvoiceTitle);
+      setGuidance(t.starterInvoiceInstructions);
     }
     setGenerateState("idle");
   }
@@ -205,9 +210,9 @@ export function OfficeTemplateLibrary({ workspaceId, templateId }: { workspaceId
               <div><Dialog.Title className="text-lg font-semibold">{t.generateTemplateTitle}</Dialog.Title><Dialog.Description className="mt-1 text-sm text-muted-foreground">{t.generateTemplateDescription}</Dialog.Description></div>
               <button type="button" disabled={generateState === "working"} aria-label={t.closeTemplateAria} title={t.closeTemplateAria} onClick={closeGenerate} className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"><X className="size-4" aria-hidden /></button>
             </div>
-            <div className="mt-4"><p className="text-xs font-medium text-muted-foreground">{t.guidedExamples}</p><div className="mt-2 flex flex-wrap gap-2"><button type="button" onClick={() => applyStarter("general-presentation")} className="rounded-full border px-3 py-1.5 text-xs">{t.starterPresentationTitle}</button><button type="button" onClick={() => applyStarter("letterhead")} className="rounded-full border px-3 py-1.5 text-xs">{t.starterLetterheadTitle}</button></div></div>
+            <div className="mt-4"><p className="text-xs font-medium text-muted-foreground">{t.guidedExamples}</p><div className="mt-2 flex flex-wrap gap-2"><button type="button" onClick={() => applyStarter("general-presentation")} className="rounded-full border px-3 py-1.5 text-xs">{t.starterPresentationTitle}</button><button type="button" onClick={() => applyStarter("letterhead")} className="rounded-full border px-3 py-1.5 text-xs">{t.starterLetterheadTitle}</button><button type="button" onClick={() => applyStarter("invoice")} className="rounded-full border px-3 py-1.5 text-xs">{t.starterInvoiceTitle}</button></div></div>
             <form className="mt-5 grid gap-3" onSubmit={(event) => void submitGuidedTemplate(event)}>
-              <Select value={family} onValueChange={(value) => { if (value) setFamily(value as OfficeFamily); }}><SelectTrigger aria-label={t.family} className="h-9 w-full">{family === "document" ? t.document : t.presentation}</SelectTrigger><SelectContent><SelectItem value="document">{t.document}</SelectItem><SelectItem value="presentation">{t.presentation}</SelectItem></SelectContent></Select>
+              <Select value={family} onValueChange={(value) => { if (value) setFamily(value as OfficeFamily); }}><SelectTrigger aria-label={t.family} className="h-9 w-full">{familyLabel(t, family)}</SelectTrigger><SelectContent><SelectItem value="document">{t.document}</SelectItem><SelectItem value="presentation">{t.presentation}</SelectItem><SelectItem value="spreadsheet">{t.spreadsheet}</SelectItem></SelectContent></Select>
               <input required disabled={generateState === "working"} value={name} onChange={(event) => setName(event.target.value)} placeholder={t.templateName} className="h-9 rounded border px-2 disabled:opacity-60" />
               <textarea required disabled={generateState === "working"} value={guidance} onChange={(event) => setGuidance(event.target.value)} placeholder={t.templateInstructions} className="min-h-28 rounded border p-2 disabled:opacity-60" />
               {generateState === "failed" ? <p role="alert" className="text-sm text-destructive">{t.generateTemplateFailed}</p> : null}
@@ -249,11 +254,11 @@ export function OfficeTemplateLibrary({ workspaceId, templateId }: { workspaceId
                   </>
                 ) : uploadFile ? (
                   <>
-                    <span className={uploadFile.name.toLowerCase().endsWith(".pptx") ? "grid size-12 place-items-center rounded-2xl bg-amber-500/15 text-amber-700" : "grid size-12 place-items-center rounded-2xl bg-blue-500/15 text-blue-700"}>
-                      {uploadFile.name.toLowerCase().endsWith(".pptx") ? <Presentation className="size-6" aria-hidden /> : <FileText className="size-6" aria-hidden />}
+                    <span className={uploadFile.name.toLowerCase().endsWith(".pptx") ? "grid size-12 place-items-center rounded-2xl bg-amber-500/15 text-amber-700" : uploadFile.name.toLowerCase().endsWith(".xlsx") ? "grid size-12 place-items-center rounded-2xl bg-emerald-500/15 text-emerald-700" : "grid size-12 place-items-center rounded-2xl bg-blue-500/15 text-blue-700"}>
+                      {uploadFile.name.toLowerCase().endsWith(".pptx") ? <Presentation className="size-6" aria-hidden /> : uploadFile.name.toLowerCase().endsWith(".xlsx") ? <FileSpreadsheet className="size-6" aria-hidden /> : <FileText className="size-6" aria-hidden />}
                     </span>
                     <span className="mt-4 max-w-full truncate text-sm font-semibold text-foreground">{uploadFile.name}</span>
-                    <span className="mt-1 text-xs text-muted-foreground">{uploadFile.name.toLowerCase().endsWith(".pptx") ? t.presentation : t.document}</span>
+                    <span className="mt-1 text-xs text-muted-foreground">{familyLabel(t, officeTemplateFamilyFromFileName(uploadFile.name) ?? "document")}</span>
                     <span className="mt-3 text-xs font-medium text-primary group-hover:underline">{t.uploadReplaceHint}</span>
                   </>
                 ) : (
@@ -268,7 +273,7 @@ export function OfficeTemplateLibrary({ workspaceId, templateId }: { workspaceId
               <input
                 ref={uploadInputRef}
                 type="file"
-                accept=".docx,.pptx,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                accept=".docx,.pptx,.xlsx,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 disabled={uploadState === "working"}
                 onChange={(event) => { if (event.target.files) selectUploadFiles(event.target.files); event.target.value = ""; }}
                 className="sr-only"
@@ -291,7 +296,8 @@ export function OfficeTemplateLibrary({ workspaceId, templateId }: { workspaceId
 export function OfficeTemplateCard({ workspaceId, template }: { workspaceId: string; template: OfficeTemplate }) {
   const t = useT().office;
   const document = template.family === "document";
-  const Icon = document ? FileText : Presentation;
+  const presentation = template.family === "presentation";
+  const Icon = document ? FileText : presentation ? Presentation : FileSpreadsheet;
   const previewArtifact: OfficeArtifact = { artifactId: template.draftArtifactId ?? "", family: template.family, mode: "template", title: template.name, version: template.currentVersionId ? 1 : 0, lifecycleState: "active", role: "edit" };
   const canUse = template.lifecycleState === "admitted" && Boolean(template.currentVersionId);
   const canEdit = template.lifecycleState === "draft" && Boolean(template.draftArtifactId);
@@ -299,7 +305,7 @@ export function OfficeTemplateCard({ workspaceId, template }: { workspaceId: str
   return (
     <article data-office-template-card={template.family} className="group overflow-hidden rounded-xl border bg-card transition-colors hover:border-foreground/30">
       <Link href={`/w/${workspaceId}/office/templates/${template.id}`} aria-label={template.name}>
-        <div className="relative"><OfficeCardPreview artifact={previewArtifact} /><span data-office-template-family={template.family} className={document ? "absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-2 py-1 text-xs font-semibold text-white shadow-sm" : "absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-md bg-amber-500 px-2 py-1 text-xs font-semibold text-amber-950 shadow-sm"}><Icon className="size-3.5" aria-hidden /><span>{document ? t.document : t.presentation}</span></span></div>
+        <div className="relative"><OfficeCardPreview artifact={previewArtifact} /><span data-office-template-family={template.family} className={document ? "absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-2 py-1 text-xs font-semibold text-white shadow-sm" : presentation ? "absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-md bg-amber-500 px-2 py-1 text-xs font-semibold text-amber-950 shadow-sm" : "absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-md bg-emerald-600 px-2 py-1 text-xs font-semibold text-white shadow-sm"}><Icon className="size-3.5" aria-hidden /><span>{familyLabel(t, template.family)}</span></span></div>
         <div className="px-4 pt-4"><h2 className="line-clamp-2 font-medium group-hover:underline">{template.name}</h2><p className="mt-2 line-clamp-2 min-h-10 text-sm text-muted-foreground">{template.description}</p></div>
       </Link>
       <div className="p-4 pt-3">
@@ -308,3 +314,5 @@ export function OfficeTemplateCard({ workspaceId, template }: { workspaceId: str
     </article>
   );
 }
+
+function familyLabel(t: ReturnType<typeof useT>["office"], family: OfficeFamily): string { return family === "document" ? t.document : family === "presentation" ? t.presentation : t.spreadsheet; }

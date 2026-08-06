@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { appAssistantForbidsResearch, appAssistantForbidsCoordinator, isAdaptiveResearchEligible, isUserBlocked, sanitizeTitle, buildActivePageInstruction, buildViewingSkillBlock, resolveStickyChannelId, isDocSurface, isAppSurface, attachUserVisibleContext, settleInlineToolApproval, buildAttachedRecordingContext, buildUnscopedFileAttachmentInstruction } from '../chat.js'
+import { appAssistantForbidsResearch, appAssistantForbidsCoordinator, isAdaptiveResearchEligible, isUserBlocked, sanitizeTitle, buildActivePageInstruction, buildViewingSkillBlock, resolveStickyChannelId, isDocSurface, isAppSurface, attachUserVisibleContext, settleInlineToolApproval, buildAttachedRecordingContext, buildUnscopedFileAttachmentInstruction, mayOfferWorkspaceChatHandoff } from '../chat.js'
 import type { ConfirmationResolver, Message } from '@use-brian/core'
 import type { PendingApproval, PendingApprovalsStore } from '../../db/pending-approvals-store.js'
 
@@ -52,6 +52,38 @@ describe('[COMP:api/chat-route] unscoped file attachment intent', () => {
   it('does not override an instruction supplied with the file', () => {
     expect(buildUnscopedFileAttachmentInstruction(true, 'Summarize this contract')).toBe('')
     expect(buildUnscopedFileAttachmentInstruction(false, '')).toBe('')
+  })
+})
+
+describe('[COMP:api/workspace-chat-handoff] per-turn admission', () => {
+  it('admits owner-scoped web chats in the current workspace', () => {
+    expect(
+      mayOfferWorkspaceChatHandoff(
+        { visibility: 'owner', channelType: 'web' },
+        'workspace-1',
+      ),
+    ).toBe(true)
+  })
+
+  it('rejects workspace rooms, non-web sessions, and workspace-less assistants', () => {
+    expect(
+      mayOfferWorkspaceChatHandoff(
+        { visibility: 'workspace', channelType: 'web' },
+        'workspace-1',
+      ),
+    ).toBe(false)
+    expect(
+      mayOfferWorkspaceChatHandoff(
+        { visibility: 'owner', channelType: 'telegram' },
+        'workspace-1',
+      ),
+    ).toBe(false)
+    expect(
+      mayOfferWorkspaceChatHandoff(
+        { visibility: 'owner', channelType: 'web' },
+        null,
+      ),
+    ).toBe(false)
   })
 })
 

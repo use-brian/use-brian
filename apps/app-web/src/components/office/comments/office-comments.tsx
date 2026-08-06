@@ -3,11 +3,11 @@
 /** Semantic/spatial Office comments with explicit @Brian invocation. [COMP:app-web/office-comments] */
 import { useEffect, useState } from "react";
 import { APP_LEVEL_ASSISTANT_ID } from "@use-brian/shared";
-import { createOfficeComment, listOfficeComments, resolveOfficeComment, type OfficeCommentThread } from "@/lib/office/api";
+import { createOfficeComment, listOfficeComments, resolveOfficeComment, waitForOfficeJob, type OfficeCommentThread } from "@/lib/office/api";
 import { useT } from "@/lib/i18n/client";
 import { appendOfflineCommand, listOfflineJournal, removeOfflineJournalEntry } from "@/lib/office/offline";
 
-export function OfficeComments({ artifactId, version, targetIds, anchorKind = "object", canComment, offline = false, initialThreads }: { artifactId: string; version: number; targetIds: string[]; anchorKind?: OfficeCommentThread["anchor"]["kind"]; canComment: boolean; offline?: boolean; initialThreads?: OfficeCommentThread[] }) {
+export function OfficeComments({ artifactId, version, targetIds, anchorKind = "object", canComment, offline = false, initialThreads, onRevisionCompleted }: { artifactId: string; version: number; targetIds: string[]; anchorKind?: OfficeCommentThread["anchor"]["kind"]; canComment: boolean; offline?: boolean; initialThreads?: OfficeCommentThread[]; onRevisionCompleted?(): void | Promise<void> }) {
   const t = useT().office;
   const [threads, setThreads] = useState<OfficeCommentThread[]>(initialThreads ?? []);
   const [body, setBody] = useState("");
@@ -38,7 +38,13 @@ export function OfficeComments({ artifactId, version, targetIds, anchorKind = "o
         const seq = Date.now() * 1_000 + Math.floor(Math.random() * 1_000);
         await appendOfflineCommand({ artifactId, seq, kind: "comment", anchor: { kind: anchorKind, targetIds }, body: body.trim(), invokeBrian, createdAt });
         setThreads((current) => [...current, { id: `offline:${seq}`, artifactVersionId: String(version), anchorKind, anchor: { kind: anchorKind, targetIds }, status: "open", messages: [{ id: `offline-message:${seq}`, authorType: "user", body: body.trim(), createdAt }] }]);
-      } else await createOfficeComment({ artifactId, anchor: { kind: anchorKind, targetIds }, body: body.trim(), invokeBrian });
+      } else {
+        const created = await createOfficeComment({ artifactId, anchor: { kind: anchorKind, targetIds }, body: body.trim(), invokeBrian });
+        if (created.revision && typeof created.revision === "object") {
+          const job = await waitForOfficeJob(created.revision.jobId);
+          if (job.status === "completed") await onRevisionCompleted?.();
+        }
+      }
       setBody("");
       if (!offline) await reload();
     } finally { setBusy(false); }

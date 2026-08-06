@@ -6,6 +6,7 @@ import {
   encodeOfficeState,
   officeStateVector,
   preflightOfficeCandidate,
+  replaceOfficeSnapshot,
   snapshotToYDoc,
   yDocToSnapshot,
   type OfficeArtifactSnapshot,
@@ -14,6 +15,17 @@ import type { SysQuery } from './persistence.js'
 
 export function officeSnapshotUpdate(snapshot: OfficeArtifactSnapshot): Uint8Array {
   return encodeOfficeState(snapshotToYDoc(snapshot))
+}
+
+/** Apply a committed AI/import head to the authoritative live Y.Doc in place.
+ * The caller owns access/secret checks; this helper owns canonical validation
+ * and command-log compaction. */
+export function replaceLiveOfficeSnapshot(ydoc: Y.Doc, snapshot: OfficeArtifactSnapshot): OfficeArtifactSnapshot {
+  replaceOfficeSnapshot(ydoc, snapshot)
+  const materialized = yDocToSnapshot(ydoc)
+  const preflight = preflightOfficeCandidate(materialized)
+  if (!preflight.ok) throw new Error(`Office replacement snapshot failed preflight: ${preflight.diagnostics.map((item) => `${item.path}: ${item.message}`).join('; ')}`)
+  return materialized
 }
 
 export async function loadOfficeUpdate(params: {

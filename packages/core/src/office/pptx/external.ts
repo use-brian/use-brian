@@ -55,7 +55,12 @@ function point(value: string | null | undefined, fallback = 0): number {
 
 function boundedFontSize(value: string | null | undefined, fallback: number): number {
   const parsed = Number(value)
-  return Number.isFinite(parsed) ? Math.min(144, Math.max(8, parsed / 100)) : fallback
+  return Number.isFinite(parsed) ? Math.min(144, Math.max(1, parsed / 100)) : fallback
+}
+
+function booleanProperty(value: string | null | undefined, fallback: boolean): boolean {
+  if (value === null || value === undefined) return fallback
+  return value === '1' || value === 'true'
 }
 
 function colorFrom(parent: XmlParent | undefined, theme: Record<string, string>, fallback?: string): string | undefined {
@@ -90,10 +95,10 @@ function textStyle(properties: XmlElement | undefined, fallback: TextStyle, them
   return {
     fontFamily: (properties ? first(properties, 'a:latin')?.getAttribute('typeface') : undefined) || fallback.fontFamily,
     fontSizePt: boundedFontSize(properties?.getAttribute('sz'), fallback.fontSizePt),
-    bold: properties?.getAttribute('b') === '1' || properties?.getAttribute('b') === 'true' || fallback.bold,
-    italic: properties?.getAttribute('i') === '1' || properties?.getAttribute('i') === 'true' || fallback.italic,
-    underline: Boolean(properties?.getAttribute('u') && properties?.getAttribute('u') !== 'none') || fallback.underline,
-    strike: Boolean(properties?.getAttribute('strike') && properties?.getAttribute('strike') !== 'noStrike') || fallback.strike,
+    bold: booleanProperty(properties?.getAttribute('b'), fallback.bold),
+    italic: booleanProperty(properties?.getAttribute('i'), fallback.italic),
+    underline: properties?.getAttribute('u') === null || properties?.getAttribute('u') === undefined ? fallback.underline : properties.getAttribute('u') !== 'none',
+    strike: properties?.getAttribute('strike') === null || properties?.getAttribute('strike') === undefined ? fallback.strike : properties.getAttribute('strike') !== 'noStrike',
     color: colorFrom(properties, theme, fallback.color) ?? fallback.color,
   }
 }
@@ -108,7 +113,7 @@ function textRuns(owner: XmlElement, seed: string, theme: Record<string, string>
   const paragraphs = elements(owner, 'a:p')
   for (const [paragraphIndex, paragraph] of paragraphs.entries()) {
     const rawParagraphDefault = textStyle(first(paragraph, 'a:defRPr'), defaultStyle(), theme)
-    const paragraphDefault = { ...rawParagraphDefault, fontSizePt: Math.max(8, rawParagraphDefault.fontSizePt * fontScale) }
+    const paragraphDefault = { ...rawParagraphDefault, fontSizePt: Math.max(1, rawParagraphDefault.fontSizePt * fontScale) }
     if (paragraphIndex > 0) {
       runs.push({ id: stableOfficeUuid(`${seed}:paragraph:${paragraphIndex}:break`), text: '\n', style: paragraphDefault })
     }
@@ -127,7 +132,7 @@ function textRuns(owner: XmlElement, seed: string, theme: Record<string, string>
         text,
         style: (() => {
           const style = textStyle(first(node, 'a:rPr'), rawParagraphDefault, theme)
-          return { ...style, fontSizePt: Math.max(8, style.fontSizePt * fontScale) }
+          return { ...style, fontSizePt: Math.max(1, style.fontSizePt * fontScale) }
         })(),
       })
       runIndex += 1
@@ -203,7 +208,7 @@ function shapeObject(owner: XmlElement, seed: string, partPath: string, theme: R
   return {
     id: stableOfficeUuid(seed), kind: 'shape', geometry: objectGeometry, locked: false, shape,
     fill, stroke, strokeWidthPt: line ? Math.max(0, point(line.getAttribute('w'), 1)) : 0,
-    text: runs, altText: description || name || undefined,
+    text: runs, alignment: alignment(owner), verticalAlignment: verticalAlignment(owner), altText: description || name || undefined,
   }
 }
 
@@ -326,6 +331,46 @@ function slideBackground(document: XmlDocument, seed: string, widthPt: number, h
   }
 }
 
+function relationshipsPartPath(partPath: string): string {
+  return `${posix.dirname(partPath)}/_rels/${posix.basename(partPath)}.rels`
+}
+
+function relationshipOfType(relationships: Map<string, { target: string; type: string }>, suffix: string) {
+  return [...relationships.values()].find((relationship) => relationship.type.endsWith(suffix))
+}
+
+async function inheritedVisualObjects(params: {
+  document: XmlDocument | undefined
+  partPath: string | undefined
+  seed: string
+  relationships: Map<string, { target: string; type: string }>
+  zip: JSZip
+  resourcesByHash: Map<string, ExtractedOfficeResource>
+  theme: Record<string, string>
+}): Promise<PresentationObject[]> {
+  if (!params.document || !params.partPath) return []
+  const tree = first(params.document, 'p:spTree')
+  if (!tree) return []
+  const objects: PresentationObject[] = []
+  let objectIndex = 0
+  for (const owner of Array.from(tree.children) as XmlElement[]) {
+    if (owner.tagName === 'p:nvGrpSpPr' || owner.tagName === 'p:grpSpPr') continue
+    // Placeholder text belongs to the slide instance. Rendering the layout or
+    // master prompt beneath that instance would duplicate title/body content.
+    if (first(owner, 'p:ph')) continue
+    const objectSeed = `${params.seed}:${objectIndex}`
+    let object: PresentationObject
+    if (owner.tagName === 'p:sp') object = shapeObject(owner, objectSeed, params.partPath, params.theme)
+    else if (owner.tagName === 'p:pic') object = await pictureObject({ owner, seed: objectSeed, partPath: params.partPath, relationships: params.relationships, zip: params.zip, resourcesByHash: params.resourcesByHash })
+    else if (owner.tagName === 'p:graphicFrame') object = await graphicFrameObject({ owner, seed: objectSeed, partPath: params.partPath, relationships: params.relationships, zip: params.zip, theme: params.theme })
+    else if (owner.tagName === 'p:cxnSp' || owner.tagName === 'p:grpSp') throw new Error(`${params.partPath}: ${owner.tagName} is not yet supported for lossless import`)
+    else continue
+    objects.push({ ...object, locked: true })
+    objectIndex += 1
+  }
+  return objects
+}
+
 export async function importExternalPresentation(zip: JSZip, context: OfficeImportContext): Promise<{ snapshot: PresentationSnapshot; resources: ExtractedOfficeResource[] }> {
   const presentationXml = await zip.file('ppt/presentation.xml')?.async('string')
   if (!presentationXml) throw new Error('ppt/presentation.xml: presentation part is missing')
@@ -338,33 +383,58 @@ export async function importExternalPresentation(zip: JSZip, context: OfficeImpo
   const slidePaths = Object.keys(zip.files)
     .filter((path) => /^ppt\/slides\/slide\d+\.xml$/.test(path))
     .sort((left, right) => Number(left.match(/slide(\d+)/)?.[1] ?? 0) - Number(right.match(/slide(\d+)/)?.[1] ?? 0))
-  const masterId = stableOfficeUuid(`${context.artifactId}:master`)
-  const layoutId = stableOfficeUuid(`${context.artifactId}:layout`)
   const resourcesByHash = new Map<string, ExtractedOfficeResource>()
+  const masters = new Map<string, PresentationSnapshot['masters'][number]>()
+  const layouts = new Map<string, PresentationSnapshot['layouts'][number]>()
   const slides = []
   for (const [slideIndex, partPath] of slidePaths.entries()) {
     const xml = await zip.file(partPath)!.async('string')
     const document = parseXml(xml)
-    const relationshipPart = `${posix.dirname(partPath)}/_rels/${posix.basename(partPath)}.rels`
-    const relationships = relationshipMap(await zip.file(relationshipPart)?.async('string'))
+    const relationships = relationshipMap(await zip.file(relationshipsPartPath(partPath))?.async('string'))
+    const layoutRelationship = relationshipOfType(relationships, '/slideLayout')
+    const layoutPath = layoutRelationship ? relationshipPath(partPath, layoutRelationship.target) : undefined
+    const layoutXml = layoutPath ? await zip.file(layoutPath)?.async('string') : undefined
+    const layoutDocument = layoutXml ? parseXml(layoutXml) : undefined
+    const layoutRelationships = layoutPath ? relationshipMap(await zip.file(relationshipsPartPath(layoutPath))?.async('string')) : new Map<string, { target: string; type: string }>()
+    const masterRelationship = relationshipOfType(layoutRelationships, '/slideMaster')
+    const masterPath = layoutPath && masterRelationship ? relationshipPath(layoutPath, masterRelationship.target) : undefined
+    const masterXml = masterPath ? await zip.file(masterPath)?.async('string') : undefined
+    const masterDocument = masterXml ? parseXml(masterXml) : undefined
+    const masterRelationships = masterPath ? relationshipMap(await zip.file(relationshipsPartPath(masterPath))?.async('string')) : new Map<string, { target: string; type: string }>()
+    const masterKey = masterPath ?? 'default'
+    const layoutKey = layoutPath ?? 'default'
+    const masterId = stableOfficeUuid(`${context.artifactId}:master:${masterKey}`)
+    const layoutId = stableOfficeUuid(`${context.artifactId}:layout:${layoutKey}`)
+    if (!masters.has(masterId)) masters.set(masterId, { id: masterId, name: first(masterDocument ?? presentation, 'p:cSld')?.getAttribute('name') || 'Imported master', lockedObjectIds: [] })
+    if (!layouts.has(layoutId)) layouts.set(layoutId, { id: layoutId, masterId, name: first(layoutDocument ?? presentation, 'p:cSld')?.getAttribute('name') || 'Imported layout', placeholderIds: [] })
     const seed = `${context.artifactId}:slide:${slideIndex}`
     const objects: PresentationObject[] = []
     const background = slideBackground(document, `${seed}:background`, widthPt, heightPt, theme)
+      ?? (layoutDocument ? slideBackground(layoutDocument, `${seed}:background`, widthPt, heightPt, theme) : null)
+      ?? (masterDocument ? slideBackground(masterDocument, `${seed}:background`, widthPt, heightPt, theme) : null)
     if (background) objects.push(background)
+    const slideRoot = first(document, 'p:sld')
+    const layoutRoot = layoutDocument && first(layoutDocument, 'p:sldLayout')
+    if (slideRoot?.getAttribute('showMasterSp') !== '0' && layoutRoot?.getAttribute('showMasterSp') !== '0') {
+      objects.push(...await inheritedVisualObjects({ document: masterDocument, partPath: masterPath, seed: `${seed}:master`, relationships: masterRelationships, zip, resourcesByHash, theme }))
+    }
+    objects.push(...await inheritedVisualObjects({ document: layoutDocument, partPath: layoutPath, seed: `${seed}:layout`, relationships: layoutRelationships, zip, resourcesByHash, theme }))
     const tree = first(document, 'p:spTree')
     if (!tree) throw new Error(`${partPath}: slide object tree is missing`)
+    const directObjects: PresentationObject[] = []
     let objectIndex = 0
     for (const owner of Array.from(tree.children) as XmlElement[]) {
       if (owner.tagName === 'p:nvGrpSpPr' || owner.tagName === 'p:grpSpPr') continue
       const objectSeed = `${seed}:object:${objectIndex}`
-      if (owner.tagName === 'p:sp') objects.push(shapeObject(owner, objectSeed, partPath, theme))
-      else if (owner.tagName === 'p:pic') objects.push(await pictureObject({ owner, seed: objectSeed, partPath, relationships, zip, resourcesByHash }))
-      else if (owner.tagName === 'p:graphicFrame') objects.push(await graphicFrameObject({ owner, seed: objectSeed, partPath, relationships, zip, theme }))
+      if (owner.tagName === 'p:sp') directObjects.push(shapeObject(owner, objectSeed, partPath, theme))
+      else if (owner.tagName === 'p:pic') directObjects.push(await pictureObject({ owner, seed: objectSeed, partPath, relationships, zip, resourcesByHash }))
+      else if (owner.tagName === 'p:graphicFrame') directObjects.push(await graphicFrameObject({ owner, seed: objectSeed, partPath, relationships, zip, theme }))
       else if (owner.tagName === 'p:cxnSp' || owner.tagName === 'p:grpSp') throw new Error(`${partPath}: ${owner.tagName} is not yet supported for lossless import`)
       else continue
       objectIndex += 1
     }
-    const title = objects.flatMap((object) => object.kind === 'text' ? object.runs : object.kind === 'shape' ? object.text : []).map((run) => run.text).join('').trim().slice(0, 500) || `Slide ${slideIndex + 1}`
+    objects.push(...directObjects)
+    const title = directObjects.flatMap((object) => object.kind === 'text' ? object.runs : object.kind === 'shape' ? object.text : []).map((run) => run.text).join('').trim().slice(0, 500) || `Slide ${slideIndex + 1}`
     slides.push({ id: stableOfficeUuid(seed), title, masterId, layoutId, objects, readingOrder: objects.map((object) => object.id), notes: [] })
   }
   if (slides.length === 0) throw new Error('ppt/slides: presentation contains no slides')
@@ -376,8 +446,7 @@ export async function importExternalPresentation(zip: JSZip, context: OfficeImpo
       templateVersionId: context.templateVersionId, rootId: stableOfficeUuid(`${context.artifactId}:root`), title: context.title,
       resources: resources.map((resource) => resource.ref), accessibility: { title: context.title },
       slideSize: { widthPt, heightPt }, themeId: stableOfficeUuid(`${context.artifactId}:theme`),
-      masters: [{ id: masterId, name: 'Imported master', lockedObjectIds: [] }],
-      layouts: [{ id: layoutId, masterId, name: 'Imported layout', placeholderIds: [] }], slides,
+      masters: [...masters.values()], layouts: [...layouts.values()], slides,
     },
     resources,
   }

@@ -39,4 +39,11 @@ describe("[COMP:app-web/office-iteration-panel] Office file actions", () => {
     expect(html).not.toContain('aria-label="Release action"');
     expect(html).not.toContain('aria-label="Destination sensitivity"');
   });
+
+  it("adds native XLSX download and explicit PDF preview for spreadsheets", () => {
+    const html = render("spreadsheet");
+    expect(html).toContain("Download XLSX");
+    expect(html).toContain("Preview invoice PDF");
+    expect(html).not.toContain(">Present<");
+  });
 });

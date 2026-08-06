@@ -4,8 +4,8 @@ import type { OfficeGenerationJobRow } from '../db/office-generation.js'
 import type { ResolvedOfficeAccess } from './access.js'
 
 export type OfficeServiceDeps = {
-  generationAvailable(): boolean
-  createShell(params: { userId: string; workspaceId: string; family: 'document' | 'presentation'; title: string; templateVersionId: string | null; capabilityVersion: number; sensitivity: 'public' | 'internal' | 'confidential'; visibilityUserIds?: string[]; requiredCompartments?: string[] }): Promise<OfficeArtifactRow>
+  generationAvailable(family?: 'document' | 'presentation' | 'spreadsheet'): boolean
+  createShell(params: { userId: string; workspaceId: string; family: 'document' | 'presentation' | 'spreadsheet'; title: string; templateVersionId: string | null; capabilityVersion: number; sensitivity: 'public' | 'internal' | 'confidential'; visibilityUserIds?: string[]; requiredCompartments?: string[] }): Promise<OfficeArtifactRow>
   deleteEmptyShell(userId: string, artifactId: string): Promise<boolean>
   getArtifact(userId: string, artifactId: string): Promise<OfficeArtifactRow | null>
   resolveAccess(userId: string, artifactId: string): Promise<ResolvedOfficeAccess | null>
@@ -22,15 +22,15 @@ export class OfficeGenerationUnavailableError extends Error {
   }
 }
 
-function titleFromOutcome(outcome: string, family: 'document' | 'presentation'): string {
+function titleFromOutcome(outcome: string, family: 'document' | 'presentation' | 'spreadsheet'): string {
   const line = outcome.trim().split(/[\n.!?]/)[0]?.trim()
-  return (line || (family === 'document' ? 'Untitled document' : 'Untitled presentation')).slice(0, 1_000)
+  return (line || (family === 'document' ? 'Untitled document' : family === 'presentation' ? 'Untitled presentation' : 'Untitled spreadsheet')).slice(0, 1_000)
 }
 
 export function createOfficeService(deps: OfficeServiceDeps): OfficeToolPort {
   return {
     async create(params) {
-      if (!deps.generationAvailable()) throw new OfficeGenerationUnavailableError()
+      if (!deps.generationAvailable(params.family)) throw new OfficeGenerationUnavailableError()
       const artifact = await deps.createShell({ userId: params.userId, workspaceId: params.workspaceId, family: params.family, title: titleFromOutcome(params.outcome, params.family), templateVersionId: params.templateId ?? null, capabilityVersion: 1, sensitivity: 'internal' })
       const brief = {
         workspaceId: params.workspaceId,

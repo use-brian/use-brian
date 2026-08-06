@@ -1,12 +1,13 @@
 import { describe, expect, it, vi } from 'vitest'
 import { exportOfficePresentation, type Message } from '@use-brian/core'
-import type { DocumentSnapshot, PresentationSnapshot } from '@use-brian/office-model'
+import type { DocumentSnapshot, PresentationSnapshot, SpreadsheetSnapshot } from '@use-brian/office-model'
 import { createOfficeGenerationWorker } from '../generation-worker.js'
 import { createOfficeImportWorker } from '../import-worker.js'
 import { createOfficeService } from '../service.js'
 import { createOfficeTemplateCompileWorker } from '../template-compile-worker.js'
 import { generateDocumentFromTemplate, reviseDocumentTargets } from '../document-generation.js'
 import { generatePresentationFromTemplate, materializeOfficeTemplateBundleForGeneration, revisePresentationTargets } from '../presentation-generation.js'
+import { generateSpreadsheetFromTemplate, reviseSpreadsheetTargets } from '../spreadsheet-generation.js'
 import type { OfficeGenerationJobRow } from '../../db/office-generation.js'
 
 describe('[COMP:api/office-generation] Office generation worker', () => {
@@ -38,7 +39,7 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
         id: uid(4), page: { widthPt: 595.3, heightPt: 841.9, marginTopPt: 72, marginRightPt: 62, marginBottomPt: 68, marginLeftPt: 62, orientation: 'portrait' },
         header: [{ id: uid(5), text: 'Invoice {{INVOICE_NUMBER}}', style }],
         footer: [{ id: uid(6), text: '{{OPTIONAL_NOTE}}', style }], showPageNumber: false,
-        nodes: [{ id: uid(10), kind: 'table', headerRows: 1, rows: [
+        nodes: [{ id: uid(10), kind: 'table', headerRows: 1, columnWidthsPt: [80, 160], widthPt: 240, layout: 'fixed', margins: { topPt: 2, rightPt: 4, bottomPt: 2, leftPt: 4 }, borders: { bottom: { color: '#34D3FF', widthPt: 1.125, style: 'solid' }, insideVertical: { color: '#DCE9EE', widthPt: 0.625, style: 'solid' } }, rows: [
           { id: uid(11), cells: [cell(12, 'Customer'), cell(13, '{{CUSTOMER_NAME}}')] },
           { id: uid(14), cells: [cell(15, 'Total'), cell(16, '{{TOTAL}}')] },
         ] }],
@@ -56,6 +57,7 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
     expect(JSON.stringify(generated)).toContain('Northstar Studio Ltd.')
     expect(JSON.stringify(generated)).toContain('USD 11,000.00')
     expect(JSON.stringify(generated)).not.toContain('{{')
+    expect(generated.sections[0]?.nodes[0]).toMatchObject({ kind: 'table', columnWidthsPt: [80, 160], widthPt: 240, layout: 'fixed', margins: { leftPt: 4 }, borders: { bottom: { color: '#34D3FF', widthPt: 1.125, style: 'solid' } } })
     expect(requests[0]?.systemPrompt).toContain('every supplied placeholder key exactly once')
     expect(JSON.stringify(requests[0]?.messages)).toContain('CUSTOMER_NAME')
   })
@@ -104,6 +106,98 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
       'We deeply appreciate your work.',
       'All other terms and conditions remain unchanged.',
     ])
+  })
+
+  it('fills typed spreadsheet placeholders while preserving workbook fidelity', async () => {
+    const uid = (n: number) => `32000000-0000-4000-8000-${String(n).padStart(12, '0')}`
+    const snapshot: SpreadsheetSnapshot = {
+      schemaVersion: 1, capabilityVersion: 1, artifactId: uid(1), workspaceId: uid(2), family: 'spreadsheet',
+      locale: 'en-US', defaultLanguage: 'en-US', templateVersionId: null, rootId: uid(3), title: 'Invoice template', resources: [], accessibility: { title: 'Invoice template' },
+      activeSheetId: uid(10), calculationMode: 'automatic', worksheets: [
+        {
+          id: uid(10), name: 'Invoice', visibility: 'visible',
+          cells: [
+            { id: uid(20), address: 'A1', valueType: 'string', value: 'INVOICE', style: { font: { family: 'Aptos Display', sizePt: 24, bold: true, italic: false, underline: false, strike: false, color: '#0F1925' } }, locked: true },
+            { id: uid(21), address: 'C6', valueType: 'string', value: '{{SELLER_LEGAL_NAME}}', style: { fill: '#EEF7FF' }, locked: false },
+            { id: uid(22), address: 'G6', valueType: 'string', value: '{{INVOICE_NUMBER}}', style: {}, locked: false },
+            { id: uid(23), address: 'G7', valueType: 'string', value: '{{ISSUE_DATE}}', numberFormat: 'yyyy-mm-dd', style: {}, locked: false },
+            { id: uid(24), address: 'E20', valueType: 'string', value: '{{QTY1}}', numberFormat: '0', style: {}, locked: false },
+            { id: uid(25), address: 'H29', valueType: 'string', value: '{{TAX_RATE}}', numberFormat: '0.0%', style: {}, locked: false },
+            { id: uid(26), address: 'H32', valueType: 'string', value: '{{SUBTOTAL}}', numberFormat: '$#,##0.00', style: {}, locked: false },
+            { id: uid(27), address: 'H36', valueType: 'string', value: '{{BALANCE_DUE}}', numberFormat: '$#,##0.00', style: {}, locked: false },
+            { id: uid(28), address: 'H40', valueType: 'number', value: null, formula: 'H32+H36', calculatedValue: null, numberFormat: '$#,##0.00', style: {}, locked: false },
+          ],
+          merges: ['A1:D2'], rowDimensions: [{ index: 1, heightPt: 24, hidden: false }], columnDimensions: [{ index: 1, widthChars: 18, hidden: false }], freeze: { rows: 4, columns: 0 },
+          images: [], validations: [], conditionalFormats: [],
+          print: { printArea: 'A1:H48', paperSize: 'A4', orientation: 'portrait', fitToWidth: 1, fitToHeight: 1, margins: { leftIn: 0.35, rightIn: 0.35, topIn: 0.25, bottomIn: 0.25, headerIn: 0, footerIn: 0 }, horizontalCentered: true, verticalCentered: true, showGridLines: false, showHeadings: false },
+        },
+        {
+          id: uid(11), name: 'Setup', visibility: 'hidden', cells: [], merges: [], rowDimensions: [], columnDimensions: [], freeze: { rows: 0, columns: 0 }, images: [], validations: [], conditionalFormats: [],
+          print: { paperSize: 'A4', orientation: 'portrait', fitToWidth: 1, fitToHeight: 1, margins: { leftIn: 0.7, rightIn: 0.7, topIn: 0.75, bottomIn: 0.75, headerIn: 0.3, footerIn: 0.3 }, horizontalCentered: false, verticalCentered: false, showGridLines: false, showHeadings: false },
+        },
+      ],
+    }
+    const resource = { id: uid(30), kind: 'image' as const, hash: 'c'.repeat(64), mime: 'image/png', sensitivity: 'internal' as const }
+    const template = { id: uid(40), workspaceId: uid(2), family: 'spreadsheet' as const, version: 1, status: 'admitted' as const, name: 'Invoice', description: 'Approved company invoice', tags: ['invoice'], locales: ['en-US'], whenToUse: ['billing'], whenNotToUse: ['presentations'], exampleRequests: ['Create an invoice'], fields: [], slideRecipes: [], snapshot, resources: [resource], lockedObjectIds: [], allowedRepeatTargetIds: [], requiredEvidence: [], sensitivity: 'internal' as const, visibilityUserIds: [], capabilityVersion: 1, sourceHash: 'd'.repeat(64) }
+    const payload = JSON.stringify({ title: 'Invoice INV-2026-001', values: {
+      BALANCE_DUE: { valueType: 'number', value: 9_000 },
+      INVOICE_NUMBER: { valueType: 'string', value: 'INV-2026-001' },
+      ISSUE_DATE: { valueType: 'date', value: '2026-08-06T00:00:00.000Z' },
+      QTY1: { valueType: 'number', value: 1 },
+      SELLER_LEGAL_NAME: { valueType: 'string', value: 'Use Brian Labs Ltd.' },
+      SUBTOTAL: { valueType: 'number', value: 10_000 },
+      TAX_RATE: { valueType: 'number', value: 0.1 },
+    } })
+    let modelRequest: { systemPrompt?: string; messages?: Message[] } | undefined
+    const provider = { async *stream(request: { systemPrompt?: string; messages?: Message[] }) { modelRequest = request; yield { type: 'message_start' as const, model: 'test' }; yield { type: 'text_delta' as const, text: payload }; yield { type: 'message_end' as const, stopReason: 'end_turn' as const, usage: { inputTokens: 1, outputTokens: 1 } } } }
+
+    const generated = await generateSpreadsheetFromTemplate({ provider: provider as never, model: 'test', artifactId: uid(50), workspaceId: uid(51), templateVersionId: uid(40), outcome: 'August invoice\nfor Example Labs', audience: 'Accounts payable', template })
+
+    expect(generated).toMatchObject({ artifactId: uid(50), workspaceId: uid(51), templateVersionId: uid(40), title: 'Invoice INV-2026-001', accessibility: { title: 'Invoice INV-2026-001' }, activeSheetId: uid(10), resources: [resource] })
+    expect(generated.worksheets.map((sheet) => [sheet.name, sheet.visibility])).toEqual([['Invoice', 'visible'], ['Setup', 'hidden']])
+    expect(generated.worksheets[0]).toMatchObject({ merges: ['A1:D2'], freeze: { rows: 4, columns: 0 }, print: { printArea: 'A1:H48', fitToWidth: 1, fitToHeight: 1 } })
+    expect(generated.worksheets[0]?.cells.find((cell) => cell.address === 'C6')).toMatchObject({ valueType: 'string', value: 'Use Brian Labs Ltd.', style: { fill: '#EEF7FF' } })
+    expect(generated.worksheets[0]?.cells.find((cell) => cell.address === 'G7')).toMatchObject({ valueType: 'date', value: '2026-08-06T00:00:00.000Z', numberFormat: 'yyyy-mm-dd' })
+    expect(generated.worksheets[0]?.cells.find((cell) => cell.address === 'H29')).toMatchObject({ valueType: 'number', value: 0.1, numberFormat: '0.0%' })
+    expect(generated.worksheets[0]?.cells.find((cell) => cell.address === 'H40')).toMatchObject({ formula: 'H32+H36', calculatedValue: 19_000, numberFormat: '$#,##0.00' })
+    expect(JSON.stringify(generated)).not.toContain('{{')
+    expect(modelRequest?.systemPrompt).toContain('every supplied placeholder key exactly once')
+    expect(modelRequest?.systemPrompt).toContain('company and person names')
+    expect(modelRequest?.systemPrompt).toContain('character-for-character')
+    expect(modelRequest?.messages?.[0]?.content).toContain('SELLER_LEGAL_NAME')
+    expect(modelRequest?.messages?.[0]?.content).toContain('0.0%')
+    expect(generated.worksheets[0]).not.toBe(snapshot.worksheets[0])
+    expect(snapshot).toMatchObject({ artifactId: uid(1), workspaceId: uid(2), templateVersionId: null, title: 'Invoice template', resources: [] })
+  })
+
+  it('revises only selected spreadsheet literals and recalculates without changing styles', async () => {
+    const uid = (n: number) => `37000000-0000-4000-8000-${String(n).padStart(12, '0')}`
+    const targetId = uid(20)
+    const snapshot: SpreadsheetSnapshot = {
+      schemaVersion: 1, capabilityVersion: 1, artifactId: uid(1), workspaceId: uid(2), family: 'spreadsheet', locale: 'en-US', defaultLanguage: 'en-US', templateVersionId: uid(4), rootId: uid(3), title: 'Invoice INV-2026-001', resources: [], accessibility: { title: 'Invoice INV-2026-001' }, activeSheetId: uid(10), calculationMode: 'automatic',
+      worksheets: [{ id: uid(10), name: 'Invoice', visibility: 'visible', cells: [
+        { id: targetId, address: 'C6', valueType: 'string', value: 'Use Brian Labs Ltd.', style: { fill: '#EEF7FF' }, locked: false },
+        { id: uid(21), address: 'H32', valueType: 'number', value: 10_000, numberFormat: '$#,##0.00', style: {}, locked: false },
+        { id: uid(22), address: 'H36', valueType: 'number', value: 9_000, numberFormat: '$#,##0.00', style: {}, locked: false },
+        { id: uid(23), address: 'H40', valueType: 'number', value: null, formula: 'H32+H36', calculatedValue: 19_000, numberFormat: '$#,##0.00', style: {}, locked: false },
+      ], merges: [], rowDimensions: [], columnDimensions: [], freeze: { rows: 0, columns: 0 }, images: [], validations: [], conditionalFormats: [], print: { paperSize: 'A4', orientation: 'portrait', fitToWidth: 1, fitToHeight: 1, margins: { leftIn: 0.7, rightIn: 0.7, topIn: 0.75, bottomIn: 0.75, headerIn: 0.3, footerIn: 0.3 }, horizontalCentered: false, verticalCentered: false, showGridLines: false, showHeadings: false } }],
+    }
+    const modelRequests: Array<{ systemPrompt?: string; messages?: Message[] }> = []
+    const payloads = [
+      JSON.stringify({ replacements: [{ targetId, text: 'Use Brian Labs Ltd.' }] }),
+      JSON.stringify({ replacements: [{ targetId, text: 'Use Brian Commerce Ltd.' }] }),
+    ]
+    const provider = { async *stream(request: { systemPrompt?: string; messages?: Message[] }) { const payload = payloads[modelRequests.length]!; modelRequests.push(request); yield { type: 'message_start' as const, model: 'test' }; yield { type: 'text_delta' as const, text: payload }; yield { type: 'message_end' as const, stopReason: 'end_turn' as const, usage: { inputTokens: 1, outputTokens: 1 } } } }
+
+    const revised = await reviseSpreadsheetTargets({ provider: provider as never, model: 'test', snapshot, targetIds: [targetId], instruction: '@Brian change only the seller legal name to Use Brian Commerce Ltd.' })
+
+    expect(revised.worksheets[0]?.cells.find((cell) => cell.id === targetId)).toMatchObject({ value: 'Use Brian Commerce Ltd.', style: { fill: '#EEF7FF' } })
+    expect(revised.worksheets[0]?.cells.find((cell) => cell.address === 'H36')).toMatchObject({ value: 9_000 })
+    expect(revised.worksheets[0]?.cells.find((cell) => cell.address === 'H40')).toMatchObject({ formula: 'H32+H36', calculatedValue: 19_000 })
+    expect(modelRequests).toHaveLength(2)
+    expect(modelRequests[0]?.messages?.[0]?.content).not.toContain('@Brian')
+    expect(modelRequests[0]?.messages?.[0]?.content).toContain('Invoice')
+    expect(modelRequests[1]?.messages?.[0]?.content).toContain('Office spreadsheet revision returned no changes')
   })
 
   it('constructs and revises a presentation through admitted recipes without changing its visual system', async () => {
@@ -264,7 +358,7 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
     expect(importStore.finish).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', errorCode: 'import_failed' }))
 
     const templateJob = { ...base, id: '30000000-0000-4000-8000-000000000012', jobKind: 'template_compile' as const } as OfficeGenerationJobRow
-    const templateDeps = { claim: vi.fn(async () => templateJob), getSnapshot: vi.fn(), getTemplate: vi.fn(), readSource: vi.fn(), initialize: vi.fn(), saveImportedResource: vi.fn(), saveBundle: vi.fn(), addVersion: vi.fn(), appendEvent: vi.fn(async () => ({})), finish: vi.fn(async () => true) }
+    const templateDeps = { claim: vi.fn(async () => templateJob), getSnapshot: vi.fn(), getTemplate: vi.fn(), readSource: vi.fn(), initialize: vi.fn(), saveImportedResource: vi.fn(), loadResourceAdmissions: vi.fn(async () => []), getDraftRouting: vi.fn(), saveDraftRouting: vi.fn(async () => true), saveBundle: vi.fn(), addVersion: vi.fn(), appendEvent: vi.fn(async () => ({})), finish: vi.fn(async () => true) }
     const templateWorker = createOfficeTemplateCompileWorker(templateDeps)
     await expect(templateWorker(base.initiatedByUserId)).resolves.toBe(true)
     expect(templateDeps.finish).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', errorCode: 'template_compile_failed' }))
@@ -309,6 +403,9 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
       readSource: vi.fn(async () => uploaded.bytes),
       initialize: vi.fn(async () => undefined),
       saveImportedResource: vi.fn(),
+      loadResourceAdmissions: vi.fn(async () => []),
+      getDraftRouting: vi.fn(async () => null),
+      saveDraftRouting: vi.fn(async () => true),
       saveBundle: vi.fn(async () => '30000000-0000-4000-8000-000000000113'),
       addVersion: vi.fn(async () => ({ id: '30000000-0000-4000-8000-000000000114', version: 1 })),
       appendEvent: vi.fn(async () => ({})),
@@ -322,7 +419,8 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
     const initialized = (deps.initialize.mock.calls as unknown as Array<[{ snapshot: PresentationSnapshot }]>)[0]?.[0].snapshot
     expect(initialized?.family === 'presentation' ? initialized.slides[0]?.title : null).toBe('Imported slide')
     expect(deps.getSnapshot).not.toHaveBeenCalled()
-    expect(deps.addVersion).toHaveBeenCalledWith(expect.objectContaining({ status: 'admitted' }))
+    expect(deps.saveDraftRouting).toHaveBeenCalledWith(expect.objectContaining({ templateId, routing: expect.objectContaining({ source: 'upload', slideRecipes: [expect.objectContaining({ slideId: expect.any(String) })] }) }))
+    expect(deps.addVersion).not.toHaveBeenCalled()
     expect(deps.finish).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed' }))
   })
 })

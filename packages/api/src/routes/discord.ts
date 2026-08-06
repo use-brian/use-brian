@@ -382,7 +382,7 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
     const isAv = (m: string) => m.startsWith('audio/') || m.startsWith('video/')
     const brainMediaFiles =
       ingestChannelMediaRef && assistant.workspaceId && incoming.files?.length
-        ? incoming.files.filter((f) => classifyMedia(f.mimeType) !== 'unsupported')
+        ? incoming.files.filter((f) => classifyMedia(f.mimeType, f.name) !== 'unsupported')
         : []
     for (const f of brainMediaFiles) {
       ingestChannelMediaRef!({
@@ -444,10 +444,21 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
           userContentBlocks.push({ type: 'image', mimeType: dl.mimeType, data: dl.buffer.toString('base64') })
         } else {
           const parsedFile = await parseFileContent(dl.buffer, dl.mimeType, dl.name)
-          userContentBlocks.push({
-            type: 'text',
-            text: `<attached_file name="${dl.name}" type="${dl.mimeType}">\n${parsedFile.text}\n</attached_file>`,
-          })
+          if (
+            parsedFile.mediaMimeType === 'application/pdf' ||
+            parsedFile.mediaMimeType?.startsWith('image/')
+          ) {
+            userContentBlocks.push({
+              type: 'image',
+              mimeType: parsedFile.mediaMimeType,
+              data: dl.buffer.toString('base64'),
+            })
+          } else {
+            userContentBlocks.push({
+              type: 'text',
+              text: `<attached_file name="${dl.name}" type="${dl.mimeType}">\n${parsedFile.text}\n</attached_file>`,
+            })
+          }
         }
       }
     }

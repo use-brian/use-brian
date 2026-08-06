@@ -11,6 +11,8 @@
  */
 
 import {
+  detectDocumentFormat,
+  documentMimeType,
   parseFileContent,
   type FilesApi,
   type FilesContext,
@@ -61,6 +63,13 @@ export function createFileIngestor(deps: FileIngestorDeps): FileIngestor {
   const parse = deps.parse ?? parseFileContent
 
   return async function ingestFile(input, ctx) {
+    // A store-only pin is reversible staging, not consent to interpret bytes.
+    // Content detection begins only on the explicit processing path.
+    const detectedFormat =
+      input.process === false
+        ? undefined
+        : await detectDocumentFormat(input.bytes, input.mime, input.fileName)
+    const effectiveMime = detectedFormat ? documentMimeType(detectedFormat) : input.mime
     const filesCtx: FilesContext = {
       workspaceId: ctx.workspaceId,
       userId: ctx.userId,
@@ -75,7 +84,7 @@ export function createFileIngestor(deps: FileIngestorDeps): FileIngestor {
     const stored = await deps.filesApi.writeBytes(filesCtx, {
       path,
       bytes: input.bytes,
-      mime: input.mime,
+      mime: effectiveMime,
       title: input.fileName,
       sensitivity,
     })
@@ -99,8 +108,8 @@ export function createFileIngestor(deps: FileIngestorDeps): FileIngestor {
 
     let text: string
     let distilled = false
-    if (needsDistill(input.mime)) {
-      text = (await deps.distill({ buffer: input.bytes, mime: input.mime, fileName: input.fileName })).trim()
+    if (needsDistill(effectiveMime)) {
+      text = (await deps.distill({ buffer: input.bytes, mime: effectiveMime, fileName: input.fileName })).trim()
       distilled = true
     } else {
       const parsed = await parse(input.bytes, input.mime, input.fileName)

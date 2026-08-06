@@ -2,13 +2,14 @@
 import { randomUUID } from 'node:crypto'
 import { Router } from 'express'
 import { z } from 'zod'
-import type { OfficeArtifactSnapshot } from '@use-brian/office-model'
+import { inferOfficeTemplateRouting, officeTemplateRoutingDiagnostics } from '@use-brian/core'
+import { OfficeTemplateRoutingDraftSchema, type OfficeArtifactSnapshot } from '@use-brian/office-model'
 import type { OfficeArtifactRow } from '../db/office-artifacts.js'
 
 type TemplateDraftRow = {
   id: string
   workspaceId: string
-  family: 'document' | 'presentation'
+  family: 'document' | 'presentation' | 'spreadsheet'
   name: string
   lifecycleState: 'draft' | 'admitted' | 'deprecated' | 'trash' | 'retained'
   draftArtifactId: string | null
@@ -17,13 +18,15 @@ type TemplateDraftRow = {
 type TemplateLiveSnapshot = { snapshot: OfficeArtifactSnapshot; seq: number; baseVersion: number }
 
 export type OfficeTemplatesRouteDeps = {
-  list(userId: string, workspaceId: string, family?: 'document' | 'presentation'): Promise<unknown[]>
+  list(userId: string, workspaceId: string, family?: 'document' | 'presentation' | 'spreadsheet'): Promise<unknown[]>
   getTemplate(userId: string, templateId: string): Promise<TemplateDraftRow | null>
   getArtifact(userId: string, artifactId: string): Promise<OfficeArtifactRow | null>
   getSnapshot(userId: string, artifactId: string): Promise<TemplateLiveSnapshot | null>
-  createDraft(params: { userId: string; workspaceId: string; family: 'document' | 'presentation'; name: string; description: string; sensitivity: 'public' | 'internal' | 'confidential'; draftArtifactId: string }): Promise<{ id: string }>
-  createTemplateShell(params: { userId: string; workspaceId: string; family: 'document' | 'presentation'; title: string; templateVersionId: null; capabilityVersion: number; sensitivity: 'public' | 'internal' | 'confidential'; mode: 'template' }): Promise<{ id: string }>
+  createDraft(params: { userId: string; workspaceId: string; family: 'document' | 'presentation' | 'spreadsheet'; name: string; description: string; sensitivity: 'public' | 'internal' | 'confidential'; draftArtifactId: string }): Promise<{ id: string }>
+  createTemplateShell(params: { userId: string; workspaceId: string; family: 'document' | 'presentation' | 'spreadsheet'; title: string; templateVersionId: null; capabilityVersion: number; sensitivity: 'public' | 'internal' | 'confidential'; mode: 'template' }): Promise<{ id: string }>
   initializeDraft(params: { userId: string; artifactId: string; snapshot: OfficeArtifactSnapshot }): Promise<boolean>
+  getDraftRouting(userId: string, templateId: string): Promise<unknown | null>
+  saveDraftRouting(params: { userId: string; templateId: string; routing: unknown }): Promise<boolean>
   deleteEmptyDraft(userId: string, templateId: string): Promise<boolean>
   deleteEmptyShell(userId: string, artifactId: string): Promise<boolean>
   createCompileJob(params: { userId: string; workspaceId: string; artifactId: string; assistantId: string | null; jobKind: 'template_compile'; brief: unknown; authorityProjection: unknown; idempotencyKey: string }): Promise<{ id: string }>
@@ -37,14 +40,14 @@ export function officeTemplateRoutes(deps: OfficeTemplatesRouteDeps): Router {
     const userId = (req as { userId?: string }).userId
     if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
     const workspaceId = z.string().uuid().safeParse(req.query.workspaceId)
-    const family = z.enum(['document', 'presentation']).optional().safeParse(req.query.family)
+    const family = z.enum(['document', 'presentation', 'spreadsheet']).optional().safeParse(req.query.family)
     if (!workspaceId.success || !family.success) return void res.status(400).json({ error: 'Invalid template query' })
     res.json({ templates: await deps.list(userId, workspaceId.data, family.data) })
   })
   router.post('/templates', async (req, res) => {
     const userId = (req as { userId?: string }).userId
     if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
-    const body = z.object({ workspaceId: z.string().uuid(), family: z.enum(['document', 'presentation']), name: z.string().min(1).max(255), description: z.string().min(1).max(4_000), creationMethod: z.enum(['guided', 'upload']).default('guided'), sensitivity: z.enum(['public', 'internal', 'confidential']).default('internal') }).strict().safeParse(req.body)
+    const body = z.object({ workspaceId: z.string().uuid(), family: z.enum(['document', 'presentation', 'spreadsheet']), name: z.string().min(1).max(255), description: z.string().min(1).max(4_000), creationMethod: z.enum(['guided', 'upload']).default('guided'), sensitivity: z.enum(['public', 'internal', 'confidential']).default('internal') }).strict().safeParse(req.body)
     if (!body.success) return void res.status(400).json({ error: 'Invalid template draft', issues: body.error.issues })
     let artifact: { id: string } | null = null
     let template: { id: string } | null = null
@@ -52,13 +55,15 @@ export function officeTemplateRoutes(deps: OfficeTemplatesRouteDeps): Router {
       artifact = await deps.createTemplateShell({ userId, workspaceId: body.data.workspaceId, family: body.data.family, title: body.data.name, templateVersionId: null, capabilityVersion: 1, sensitivity: body.data.sensitivity, mode: 'template' })
       const { creationMethod, ...draft } = body.data
       template = await deps.createDraft({ userId, ...draft, draftArtifactId: artifact.id })
+      const snapshot = creationMethod === 'guided'
+        ? guidedTemplateSnapshot({ artifactId: artifact.id, workspaceId: body.data.workspaceId, family: body.data.family, title: body.data.name, guidance: body.data.description })
+        : blankTemplateSnapshot({ artifactId: artifact.id, workspaceId: body.data.workspaceId, family: body.data.family, title: body.data.name })
       await deps.initializeDraft({
         userId,
         artifactId: artifact.id,
-        snapshot: creationMethod === 'guided'
-          ? guidedTemplateSnapshot({ artifactId: artifact.id, workspaceId: body.data.workspaceId, family: body.data.family, title: body.data.name, guidance: body.data.description })
-          : blankTemplateSnapshot({ artifactId: artifact.id, workspaceId: body.data.workspaceId, family: body.data.family, title: body.data.name }),
+        snapshot,
       })
+      if (!await deps.saveDraftRouting({ userId, templateId: template.id, routing: inferOfficeTemplateRouting(snapshot, creationMethod === 'guided' ? 'guided' : 'upload') })) throw new Error('template_routing_not_saved')
     } catch (cause) {
       await Promise.allSettled([
         template ? deps.deleteEmptyDraft(userId, template.id) : Promise.resolve(false),
@@ -87,6 +92,38 @@ export function officeTemplateRoutes(deps: OfficeTemplatesRouteDeps): Router {
     if (!live) return void res.status(409).json({ error: 'template_draft_not_ready' })
     res.status(created ? 201 : 200).json(live)
   })
+  router.get('/templates/:templateId/routing', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
+    const templateId = String(req.params.templateId)
+    const template = await deps.getTemplate(userId, templateId)
+    if (!template?.draftArtifactId || template.lifecycleState !== 'draft') return void res.status(404).json({ error: 'Template draft not found' })
+    const snapshot = await deps.getSnapshot(userId, template.draftArtifactId)
+    if (!snapshot) return void res.status(409).json({ error: 'template_draft_not_ready' })
+    let routing = await deps.getDraftRouting(userId, templateId)
+    if (!routing) {
+      routing = inferOfficeTemplateRouting(snapshot.snapshot)
+      if (!await deps.saveDraftRouting({ userId, templateId, routing })) return void res.status(409).json({ error: 'template_routing_not_saved' })
+    }
+    const parsed = OfficeTemplateRoutingDraftSchema.safeParse(routing)
+    if (!parsed.success) return void res.status(409).json({ error: 'template_routing_invalid', issues: parsed.error.issues })
+    res.json({ routing: parsed.data })
+  })
+  router.put('/templates/:templateId/routing', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
+    const body = z.object({ routing: OfficeTemplateRoutingDraftSchema }).strict().safeParse(req.body)
+    if (!body.success) return void res.status(400).json({ error: 'Invalid template routing draft', issues: body.error.issues })
+    const templateId = String(req.params.templateId)
+    const template = await deps.getTemplate(userId, templateId)
+    if (!template?.draftArtifactId || template.lifecycleState !== 'draft') return void res.status(404).json({ error: 'Template draft not found' })
+    const snapshot = await deps.getSnapshot(userId, template.draftArtifactId)
+    if (!snapshot) return void res.status(409).json({ error: 'template_draft_not_ready' })
+    const diagnostics = officeTemplateRoutingDiagnostics(snapshot.snapshot, body.data.routing)
+    if (diagnostics.length > 0) return void res.status(400).json({ error: 'template_routing_invalid', diagnostics })
+    if (!await deps.saveDraftRouting({ userId, templateId, routing: body.data.routing })) return void res.status(409).json({ error: 'template_routing_not_saved' })
+    res.json({ routing: body.data.routing })
+  })
   router.post('/templates/:templateId/compile', async (req, res) => {
     const userId = (req as { userId?: string }).userId
     if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
@@ -113,7 +150,7 @@ export function officeTemplateRoutes(deps: OfficeTemplatesRouteDeps): Router {
   return router
 }
 
-export function blankTemplateSnapshot(params: { artifactId: string; workspaceId: string; family: 'document' | 'presentation'; title: string }): OfficeArtifactSnapshot {
+export function blankTemplateSnapshot(params: { artifactId: string; workspaceId: string; family: 'document' | 'presentation' | 'spreadsheet'; title: string }): OfficeArtifactSnapshot {
   const common = {
     schemaVersion: 1 as const,
     capabilityVersion: 1 as const,
@@ -139,6 +176,16 @@ export function blankTemplateSnapshot(params: { artifactId: string; workspaceId:
         showPageNumber: true,
         nodes: [],
       }],
+    }
+  }
+  if (params.family === 'spreadsheet') {
+    const sheetId = randomUUID()
+    return {
+      ...common,
+      family: 'spreadsheet',
+      activeSheetId: sheetId,
+      calculationMode: 'automatic',
+      worksheets: [{ id: sheetId, name: 'Sheet1', visibility: 'visible', cells: [], merges: [], rowDimensions: [], columnDimensions: [], freeze: { rows: 0, columns: 0 }, images: [], validations: [], conditionalFormats: [], print: { paperSize: 'A4', orientation: 'portrait', fitToWidth: 1, fitToHeight: 1, margins: { leftIn: 0.7, rightIn: 0.7, topIn: 0.75, bottomIn: 0.75, headerIn: 0.3, footerIn: 0.3 }, horizontalCentered: false, verticalCentered: false, showGridLines: false, showHeadings: false } }],
     }
   }
   const masterId = randomUUID()
@@ -167,7 +214,7 @@ const templateTextStyle = (fontSizePt: number, bold = false) => ({
 /** Seeds a useful, editable template draft from the member's guidance.
  * Artifact generation still requires the resulting draft to pass normal
  * template compilation and publish as an admitted immutable version. */
-export function guidedTemplateSnapshot(params: { artifactId: string; workspaceId: string; family: 'document' | 'presentation'; title: string; guidance: string }): OfficeArtifactSnapshot {
+export function guidedTemplateSnapshot(params: { artifactId: string; workspaceId: string; family: 'document' | 'presentation' | 'spreadsheet'; title: string; guidance: string }): OfficeArtifactSnapshot {
   const base = blankTemplateSnapshot(params)
   const guidance = params.guidance.trim().replace(/\s+/g, ' ').slice(0, 480)
   if (base.family === 'document') {
@@ -182,6 +229,21 @@ export function guidedTemplateSnapshot(params: { artifactId: string; workspaceId
           { id: randomUUID(), kind: 'paragraph', styleName: 'Body', alignment: 'start', runs: [{ id: randomUUID(), text: 'Replace this text with content for the artifact.', style: templateTextStyle(11) }] },
         ],
       } : section),
+    }
+  }
+  if (base.family === 'spreadsheet') {
+    const sheet = base.worksheets[0]
+    return {
+      ...base,
+      worksheets: [{
+        ...sheet,
+        cells: [
+          { id: randomUUID(), address: 'A1', valueType: 'string', value: params.title, style: { font: { family: 'Arial', sizePt: 18, bold: true, italic: false, underline: false, strike: false, color: '#131A24' } }, locked: false },
+          { id: randomUUID(), address: 'A3', valueType: 'string', value: guidance, style: { font: { family: 'Arial', sizePt: 10, bold: false, italic: false, underline: false, strike: false, color: '#526577' }, alignment: { wrapText: true, textRotation: 0, indent: 0 } }, locked: false },
+        ],
+        columnDimensions: [{ index: 1, widthChars: 42, hidden: false }],
+        rowDimensions: [{ index: 1, heightPt: 28, hidden: false }, { index: 3, heightPt: 42, hidden: false }],
+      }],
     }
   }
   const masterId = base.masters[0].id
