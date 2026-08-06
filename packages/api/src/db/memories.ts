@@ -694,6 +694,50 @@ function systemAssistantScopeSql(a: string, w: string, idx: number): string {
 }
 
 /**
+ * The auth-provider-id prefixes that mark a shadow user as an **external
+ * principal** — a company's own client talking to the workspace's assistant
+ * through the public API (`api:<keyId>:<externalUserId>`) or a public chat
+ * link (`chatlink:<linkId>:<visitorId>`). Both are minted by
+ * `executePublicTurn`; nothing else writes these namespaces, so they are
+ * external by construction.
+ *
+ * Membership was considered and rejected as the discriminator: Slack /
+ * Telegram teammate shadows are non-members but are genuinely team, and
+ * excluding them would silently change intended teammate consolidation.
+ * See `docs/plans/client-principal.md` §6.1 (decision D1).
+ */
+const EXTERNAL_PRINCIPAL_PREFIXES = ['api:%', 'chatlink:%'] as const
+
+/**
+ * `AND NOT EXISTS (…)` fragment excluding rows authored by an external
+ * principal (see `EXTERNAL_PRINCIPAL_PREFIXES`). Takes no bind params — the
+ * prefixes are compile-time constants, so callers can splice it into any
+ * query without renumbering placeholders.
+ *
+ * Why SQL-side and not worker-side: the team-consolidation index projection
+ * carries no `userId` at all, so filtering in `phases.ts` would need a
+ * widened projection to reach a worse result. The exclusion belongs at the
+ * store, where both team passes inherit it through one edit.
+ *
+ * `u` is the (optionally alias-qualified) `user_id` column; qualify it
+ * consistently with the surrounding query. A NULL `user_id` is never
+ * external, so the row survives — unchanged from pre-exclusion behavior.
+ *
+ * Spec: `docs/architecture/context-engine/memory-consolidation.md` →
+ * "External principals".
+ */
+function excludeExternalPrincipalsSql(u: string): string {
+  const likes = EXTERNAL_PRINCIPAL_PREFIXES.map(
+    (p) => `ep_u.auth_provider_id LIKE '${p}'`,
+  ).join(' OR ')
+  return `AND NOT EXISTS (
+             SELECT 1 FROM users ep_u
+              WHERE ep_u.id = ${u}
+                AND ep_u.auth_provider = 'channel'
+                AND (${likes}))`
+}
+
+/**
  * System-level memory index for the consolidation worker. Filters on
  * `(assistant_id, user_id)` only — no workspace partition, no
  * visibility-double, no clearance ceiling. See `permissions.md`
@@ -1344,6 +1388,15 @@ export async function logConsolidation(params: {
 /**
  * Enumerate the distinct (assistant_id, user_id) tuples with any memories.
  * Used by the consolidation worker to pick which users need a tick.
+ *
+ * External principals are excluded, so a company's clients get **no**
+ * background personal consolidation (Light / REM / Deep / soul). This is a
+ * cost gate, not an isolation one: every external client of an assistant
+ * would otherwise draw recurring LLM spend on the owner's budget, forever,
+ * scaling with the consumer's user base. Their live `saveMemory` /
+ * `getMemory` and per-turn memory context are untouched. Default-off is a
+ * product decision (`docs/plans/client-principal.md` D7); flipping it means
+ * editing only this exclusion.
  */
 export async function listMemoryUsers(): Promise<Array<{ assistantId: string; userId: string }>> {
   // A primary's memories are stored `workspace_shared` (assistant_id
@@ -1364,6 +1417,7 @@ export async function listMemoryUsers(): Promise<Array<{ assistantId: string; us
               m.user_id AS "userId"
          FROM memories m
         WHERE m.valid_to IS NULL
+          ${excludeExternalPrincipalsSql('m.user_id')}
      ) t
      WHERE "assistantId" IS NOT NULL`,
     [],
@@ -1609,6 +1663,11 @@ export async function getWorkspaceMemoryIndex(
  * System-level workspace memory index for the team consolidation
  * worker. Filters on `(assistant_id, workspace_id)` only — see
  * `permissions.md` § Privileged-service exception.
+ *
+ * External principals are excluded: the team pass compares every pair in
+ * this index and merges one row's `detail` into another's, so leaving two
+ * different clients' rows in the same index is a cross-client content
+ * merge. See `excludeExternalPrincipalsSql`.
  */
 export async function getWorkspaceMemoryIndexSystem(
   assistantId: string,
@@ -1624,6 +1683,7 @@ export async function getWorkspaceMemoryIndexSystem(
      WHERE ${systemAssistantScopeSql('assistant_id', 'workspace_id', 1)} AND workspace_id = $2
        AND valid_to IS NULL
        AND confidence > 0
+       ${excludeExternalPrincipalsSql('memories.user_id')}
      ORDER BY updated_at DESC`,
     [assistantId, workspaceId],
   )
@@ -1915,6 +1975,15 @@ export async function listWorkspaceMemoryGroups(): Promise<Array<{ assistantId: 
   return result.rows
 }
 
+/**
+ * Team-pass metrics scan, surfaced as the store's `listTeamWithMetrics`.
+ *
+ * External principals are excluded for the same reason as
+ * `getWorkspaceMemoryIndexSystem`, one step worse: `runTeamDeepConsolidation`
+ * hard-deletes every row it scores below the prune threshold, so an
+ * unfiltered scan lets one workspace's team pass delete another client's
+ * memories. See `excludeExternalPrincipalsSql`.
+ */
 export async function listWorkspaceMemoriesWithMetrics(
   assistantId: string,
   workspaceId: string,
@@ -1935,7 +2004,8 @@ export async function listWorkspaceMemoriesWithMetrics(
             GREATEST(EXTRACT(EPOCH FROM (now() - created_at)) / 86400, 0)::int as "ageDays",
             created_at as "createdAt"
      FROM memories
-     WHERE ${systemAssistantScopeSql('assistant_id', 'workspace_id', 1)} AND workspace_id = $2 AND valid_to IS NULL${pageSql}`,
+     WHERE ${systemAssistantScopeSql('assistant_id', 'workspace_id', 1)} AND workspace_id = $2 AND valid_to IS NULL
+       ${excludeExternalPrincipalsSql('memories.user_id')}${pageSql}`,
     params,
   )
   return result.rows
