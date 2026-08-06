@@ -6,7 +6,7 @@
  * [COMP:app-web/use-offline-sync]
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, expectTypeOf, it, vi } from "vitest";
 
 vi.mock("@/lib/api/views", () => ({
   renameView: vi.fn(),
@@ -24,6 +24,10 @@ import {
 describe("[COMP:app-web/use-offline-sync] collab-socket signal store", () => {
   it("uses an SSR-safe optimistic value for the first client render", () => {
     expect(initialNavigatorOnline()).toBe(true);
+  });
+
+  it("keeps navigator state writable after the optimistic first render", () => {
+    expectTypeOf(initialNavigatorOnline()).toEqualTypeOf<boolean>();
   });
 
   it("defaults to connected (no open doc must not read as degraded)", () => {

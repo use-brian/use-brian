@@ -44,7 +44,7 @@ export interface OfflineSyncState {
 }
 
 /** SSR and the first client render must share the same optimistic value. */
-export function initialNavigatorOnline(): true {
+export function initialNavigatorOnline(): boolean {
   return true;
 }
 
