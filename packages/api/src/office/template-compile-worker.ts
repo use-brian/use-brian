@@ -11,7 +11,9 @@ import {
   type ExtractedOfficeResource,
   type OfficeTemplateAdmissionReceipt,
   type OfficeTemplateResourceAdmission,
+  type BrandTypographyContext,
 } from '@use-brian/core'
+import { getBrandStore } from '../db/brand-store.js'
 import { OfficeTemplateRoutingDraftSchema, type OfficeArtifactSnapshot } from '@use-brian/office-model'
 import type { OfficeGenerationJobRow } from '../db/office-generation.js'
 
@@ -128,10 +130,22 @@ export function createOfficeTemplateCompileWorker(deps: OfficeTemplateCompileWor
         capabilityVersion: live.snapshot.capabilityVersion,
         sourceHash,
       }
+      // The brand's APPROVED typography + rights registers
+      // (docs/architecture/features/brand.md → "Typography reaches the template
+      // compiler"). Best-effort and warning-only: a brand read failing must not
+      // fail template admission, and no brand contributes nothing.
+      let brand: BrandTypographyContext | undefined
+      try {
+        const record = (await getBrandStore().get(userId, job.workspaceId))?.activeRecord
+        if (record) brand = { typography: record.typography, rights: record.rights }
+      } catch (err) {
+        console.warn('[office-template] brand typography lookup failed:', err)
+      }
       const compiled = await compileOfficeTemplate({
         authoringPath: routing.source === 'upload' ? 'upload' : routing.source === 'promote' ? 'promote_version' : 'scratch',
         draft,
         resources: resourceAdmissions,
+        brand,
       })
       const bundleBytes = new TextEncoder().encode(JSON.stringify(compiled.bundle ?? draft))
       const bundleHash = createHash('sha256').update(bundleBytes).digest('hex')

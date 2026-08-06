@@ -16,6 +16,7 @@ import { exportOfficePresentation, reparseOfficePresentation } from '../pptx/ind
 import { exportOfficeSpreadsheet, reparseOfficeSpreadsheet } from '../xlsx/index.js'
 import { officeSemanticHash, type OfficeResourcePayload, type OfficeResourceResolver } from '../package.js'
 import { officeTemplateRoutingDiagnostics } from './routing.js'
+import { reviewBrandTypography, type BrandTypographyContext } from './brand-typography.js'
 
 export type OfficeTemplateAuthoringPath = 'upload' | 'scratch' | 'promote_version'
 
@@ -106,6 +107,15 @@ export async function compileOfficeTemplate(params: {
   authoringPath: OfficeTemplateAuthoringPath
   draft: unknown
   resources: readonly OfficeTemplateResourceAdmission[]
+  /**
+   * The workspace's ACTIVE APPROVED brand typography + rights registers, when
+   * it has one. Contributes WARNINGS only (a font family the brand does not
+   * account for, or one with no recorded licence) — the compiler's own font
+   * checks stay errors, because those are about a file being legally
+   * embeddable rather than about what the company is licensed for. Absent →
+   * contributes nothing.
+   */
+  brand?: BrandTypographyContext
 }): Promise<CompiledOfficeTemplate> {
   const parsed = OfficeTemplateBundleSchema.safeParse(params.draft)
   if (!parsed.success) {
@@ -118,6 +128,7 @@ export async function compileOfficeTemplate(params: {
   diagnostics.push(...preflightOfficeCandidate(draft.snapshot).diagnostics)
   diagnostics.push(...resourceDiagnostics(draft, params.resources))
   diagnostics.push(...officeTemplateRoutingDiagnostics(draft.snapshot, { fields: draft.fields, slideRecipes: draft.slideRecipes }).map((message) => ({ severity: 'error' as const, code: 'template.routing_invalid', path: 'slideRecipes', message })))
+  if (params.brand) diagnostics.push(...reviewBrandTypography({ snapshot: draft.snapshot, brand: params.brand }))
 
   const ids = collectIds(draft.snapshot)
   for (const [index, field] of draft.fields.entries()) {

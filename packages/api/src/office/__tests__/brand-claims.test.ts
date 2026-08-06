@@ -39,7 +39,7 @@ function docSaying(text: string): DocumentSnapshot {
       id: id(5),
       page: { widthPt: 612, heightPt: 792, marginTopPt: 72, marginRightPt: 72, marginBottomPt: 72, marginLeftPt: 72, orientation: 'portrait' },
       header: [], footer: [], showPageNumber: true,
-      nodes: [{ id: id(90), kind: 'paragraph', styleName: 'Body', runs: [{ id: id(91), text, style }] }],
+      nodes: [{ id: id(90), kind: 'paragraph', styleName: 'Body', alignment: 'start', runs: [{ id: id(91), text, style }] }],
     }],
   } as DocumentSnapshot
 }

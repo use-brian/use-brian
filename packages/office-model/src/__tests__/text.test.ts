@@ -34,7 +34,7 @@ describe('[COMP:office/artifact-text] documents', () => {
     section.header = [run(100, 'Header line')]
     section.footer = [run(101, 'Footer line')]
     section.nodes.push(
-      { id: id(102), kind: 'heading', level: 1, styleName: 'H1', runs: [run(103, 'A heading')] },
+      { id: id(102), kind: 'heading', level: 1, styleName: 'H1', alignment: 'start', runs: [run(103, 'A heading')] },
       { id: id(104), kind: 'list', ordered: false, level: 0, items: [{ id: id(105), runs: [run(106, 'A bullet')] }] },
       {
         id: id(107), kind: 'table', headerRows: 1,
@@ -112,7 +112,7 @@ describe('[COMP:office/artifact-text] spreadsheets', () => {
 describe('[COMP:office/artifact-text] hygiene', () => {
   it('drops empty and whitespace-only fragments', () => {
     const doc = documentFixture() as DocumentSnapshot
-    doc.sections[0].nodes.push({ id: id(300), kind: 'paragraph', styleName: 'Body', runs: [run(301, '   ')] })
+    doc.sections[0].nodes.push({ id: id(300), kind: 'paragraph', styleName: 'Body', alignment: 'start', runs: [run(301, '   ')] })
     expect(collectArtifactText(doc).every((f) => f.text.trim().length > 0)).toBe(true)
   })
 
@@ -122,7 +122,7 @@ describe('[COMP:office/artifact-text] hygiene', () => {
     // sentence — which is exactly how a claim gate silently stops working.
     const doc = documentFixture() as DocumentSnapshot
     doc.sections[0].nodes.push({
-      id: id(400), kind: 'paragraph', styleName: 'Body',
+      id: id(400), kind: 'paragraph', styleName: 'Body', alignment: 'start',
       runs: [run(401, 'We are the '), { ...run(402, 'safest'), style: { ...style, bold: true } }, run(403, ' crossing available.')],
     })
     expect(texts(collectArtifactText(doc))).toContain('We are the safest crossing available.')

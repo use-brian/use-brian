@@ -140,3 +140,55 @@ export function collectArtifactText(snapshot: OfficeArtifactSnapshot): ArtifactT
   }
   return out
 }
+
+/**
+ * Every font family the snapshot actually uses, deduplicated and sorted.
+ *
+ * Font RESOURCE refs carry only `{id, kind, hash, mime, sensitivity}` — no
+ * family name — so a template's typography cannot be checked against a brand
+ * record through the resource list. The families are on the text styles, which
+ * is what this walks.
+ *
+ * Same reason to live here as `collectArtifactText`: the moment a new
+ * text-bearing node kind is added to the model, a walker in another package
+ * silently stops seeing it.
+ *
+ * [COMP:office/artifact-text]
+ */
+export function collectFontFamilies(snapshot: OfficeArtifactSnapshot): string[] {
+  const seen = new Set<string>()
+  const take = (runs: readonly OfficeRichTextRun[] | undefined): void => {
+    for (const run of runs ?? []) {
+      const family = run.style.fontFamily.trim()
+      if (family.length > 0) seen.add(family)
+    }
+  }
+
+  if (snapshot.family === 'document') {
+    for (const section of snapshot.sections) {
+      take(section.header)
+      take(section.footer)
+      for (const node of section.nodes) {
+        if (node.kind === 'paragraph' || node.kind === 'heading') take(node.runs)
+        else if (node.kind === 'list') for (const item of node.items) take(item.runs)
+        else if (node.kind === 'table') for (const row of node.rows) for (const cell of row.cells) take(cell.runs)
+      }
+    }
+  } else if (snapshot.family === 'presentation') {
+    for (const slide of snapshot.slides) {
+      for (const object of slide.objects) {
+        if (object.kind === 'text') take(object.runs)
+        else if (object.kind === 'shape') take(object.text)
+        else if (object.kind === 'table') for (const row of object.rows) for (const cell of row.cells) take(cell.runs)
+      }
+    }
+  } else {
+    for (const sheet of snapshot.worksheets) {
+      for (const cell of sheet.cells) {
+        const family = cell.style.font?.family?.trim()
+        if (family && family.length > 0) seen.add(family)
+      }
+    }
+  }
+  return [...seen].sort()
+}
