@@ -30,7 +30,11 @@ import {
 // up the workspace owner + its primary assistant, and `loadActiveCapabilities`
 // reads `assistant_capabilities`. Bridge-shape tests below stub both query
 // shapes so the resolver can build a ToolContext without a real database.
-vi.mock('../../db/client.js', () => ({
+// Partial mock: `query` is stubbed, but the agent-clearance ALS helpers
+// (`runWithAgentClearance` / `currentAgentClearance`) stay REAL so the
+// agent-principal wrap tests observe the actual context propagation.
+vi.mock('../../db/client.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../db/client.js')>()),
   query: vi.fn().mockImplementation(async (sql: string) => {
     if (sql.includes('assistant_capabilities')) {
       return { rows: [{ capability: 'tasks' }, { capability: 'crm' }] }
@@ -947,6 +951,28 @@ describe('[COMP:api/brain-mcp-page-tools] doc-page tools (readPage / listPages /
     const tools = buildBrainTools({ ...BASE, scope: 'read_write' })
     const names = tools.map((t) => t.name)
     for (const n of ['readPage', 'editPage', 'deletePage', 'createPage']) expect(names).not.toContain(n)
+  })
+
+  it('doc-page handlers run inside the agent-principal wrap (teamspace agent access)', async () => {
+    // The store call must observe `app.agent_clearance` context = the key's
+    // effective clearance (primary 'confidential', maxClearance null), so the
+    // saved_views agent leg — clearance vs teamspace sensitivity, never the
+    // owner account's memberships — applies to brain-key page reads.
+    const { currentAgentClearance } = await import('../../db/client.js')
+    const seen: Array<string | undefined> = []
+    const docTools = docToolsStub({
+      getVersionedPage: async () => {
+        seen.push(currentAgentClearance())
+        return SAMPLE_PAGE
+      },
+    })
+    const tools = buildBrainTools({ ...BASE, scope: 'read', docTools })
+    const readPage = tools.find((t) => t.name === 'readPage')!
+    const result = await readPage.handler({ pageId: 'p1' })
+    expect(result.isError).toBeFalsy()
+    expect(seen).toEqual(['confidential'])
+    // Outside any handler there is no agent context (fail-closed).
+    expect(currentAgentClearance()).toBeUndefined()
   })
 
   it('createPage mints a new page via createDraft and returns its id', async () => {

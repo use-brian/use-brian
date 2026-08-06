@@ -86,7 +86,7 @@ import type {
   ToolContext,
   Embedder,
 } from '@use-brian/core'
-import { query } from '../db/client.js'
+import { query, runWithAgentClearance } from '../db/client.js'
 import { searchRecording as searchRecordingFn, readRecordingRange, type RecordingSegmentHit } from '../db/retrieval-store.js'
 import { searchFileSegments as searchFileSegmentsFn, readFileSegmentRange, type FileSegmentHit } from '../db/retrieval-store.js'
 import type { BrainKeyScope } from '../db/brain-keys-store.js'
@@ -1055,15 +1055,34 @@ function buildDocPageTools(
     },
   }
 
+  // Agent-principal wrap (teamspaces.md → "Agent access"): a brain-key call
+  // binds to (workspace owner, primary assistant), so without this wrap a
+  // page's teamspace visibility would hinge on the OWNER ACCOUNT's
+  // teamspace memberships — the 2026-08-07 incident. Each doc-page handler
+  // runs inside `runWithAgentClearance(ctx.clearance)` (the key's effective
+  // clearance: primary assistant capped by the key's maxClearance), so the
+  // saved_views agent leg resolves teamspace pages by clearance vs
+  // sensitivity. Only the doc-page tools get the wrap — nothing else on the
+  // brain surface reads saved_views.
+  const asAgentPrincipal = (tool: BrainTool): BrainTool => ({
+    ...tool,
+    handler: async (args) => {
+      const ctx = await resolveCtx()
+      if ('error' in ctx) return text(ctx.error, true)
+      // resolveCtx caches, so the handler's own resolveCtx() re-read is free.
+      return runWithAgentClearance(ctx.clearance, () => tool.handler(args))
+    },
+  })
+
   return {
-    readPage,
-    listPages,
-    editPage,
-    deletePage,
-    createPage,
-    listPageTemplates: listPageTemplatesTool,
-    createPageFromTemplate,
-    createPageTemplate,
+    readPage: asAgentPrincipal(readPage),
+    listPages: asAgentPrincipal(listPages),
+    editPage: asAgentPrincipal(editPage),
+    deletePage: asAgentPrincipal(deletePage),
+    createPage: asAgentPrincipal(createPage),
+    listPageTemplates: asAgentPrincipal(listPageTemplatesTool),
+    createPageFromTemplate: asAgentPrincipal(createPageFromTemplate),
+    createPageTemplate: asAgentPrincipal(createPageTemplate),
   }
 }
 
