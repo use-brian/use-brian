@@ -644,6 +644,8 @@ export const zh: Dictionary = {
       ingestAdding: "加入中",
       ingestReady: "待加入",
       ingestStored: "已保存",
+      ingestAnalyzing: "分析中",
+      ingestAddedToBrain: "已加入大腦",
       ingestAdded: "項已加入大腦",
       ingestFailed: "失敗",
       ingestRemove: "移除",
