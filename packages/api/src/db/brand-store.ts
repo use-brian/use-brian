@@ -372,7 +372,7 @@ export function createBrandStore(): BrandStore {
         // retired: on a brand's first approval nothing was superseded, and
         // emitting it anyway would make "the brand's positioning changed"
         // subscriptions fire on a brand that had no prior positioning.
-        if (priorVersion !== null) {
+        if (priorVersion != null) {
           publishBrandLifecycle({
             workspaceId,
             brandId: approved.id,

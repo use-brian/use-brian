@@ -246,6 +246,7 @@ import { createDeferredConfirmationStore } from './db/deferred-confirmation-stor
 import { createDbKnowledgeStore } from './db/knowledge-store.js'
 import { createKnowledgeRepoWriter } from './knowledge/repo-writer.js'
 import { knowledgeRoutes, workspaceKnowledgeRoutes } from './routes/knowledge.js'
+import { brandRoutes } from './routes/brand.js'
 import { getBranchHead, getRepoTree, getFileContents, compareCommits, getRepoPermissions } from './github/client.js'
 import { startBrainStreamFanout } from './brain-stream/sse-fanout.js'
 import { brainStreamRoutes } from './routes/brain-stream.js'
@@ -5085,6 +5086,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   // workspace-scoped knowledge route resolves edit-proposal PATs through the
   // same `syncCredentials` resolver the sync worker uses.
+  // Brand primitive — one open router mounted here so both editions serve it
+  // (never on the forked /api/connectors pair; see routes/brand.ts).
+  app.use('/api/workspaces/:workspaceId/brand', requireAuth(env.JWT_SECRET), brandRoutes())
+
   app.use('/api/workspaces/:workspaceId/knowledge', requireAuth(env.JWT_SECRET), workspaceKnowledgeRoutes({
     knowledgeStore,
     allowLocalSources: env.LOCAL_FILESYSTEM_SOURCES_ENABLED === true,

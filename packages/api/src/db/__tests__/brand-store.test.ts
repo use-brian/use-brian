@@ -55,6 +55,13 @@ vi.mock('../client.js', () => ({
   }),
 }))
 
+const published: Array<Record<string, unknown>> = []
+vi.mock('../../brand-event-fanout.js', () => ({
+  publishBrandLifecycle: (event: Record<string, unknown>) => {
+    published.push(event)
+  },
+}))
+
 const { createBrandStore } = await import('../brand-store.js')
 
 const USER = '00000000-0000-4000-8000-000000000001'
@@ -109,6 +116,7 @@ beforeEach(() => {
   released.length = 0
   txRows = []
   txCursor = 0
+  published.length = 0
   vi.clearAllMocks()
 })
 
@@ -118,7 +126,7 @@ describe('[COMP:brand/store] approve', () => {
     txRows = [
       [], // BEGIN
       [], // SET LOCAL
-      [{ draft: RECORD }], // SELECT ... FOR UPDATE
+      [{ draft: RECORD, prior_version: null }], // SELECT ... FOR UPDATE
       [{ next_version: 1 }], // next version number
       [versionRow()], // INSERT INTO workspace_brand_versions
       [brandRow()], // UPDATE workspace_brands
@@ -170,18 +178,48 @@ describe('[COMP:brand/store] approve', () => {
     seedApproveRows()
     const store = createBrandStore()
     await store.approve(USER, WORKSPACE, BRAND, USER)
-    const select = txCalls.find((c) => /SELECT draft FROM workspace_brands/i.test(c.sql))
+    const select = txCalls.find((c) => /FROM workspace_brands b/i.test(c.sql))
     // Without FOR UPDATE two approvers both read draft N and both try to
     // insert version N+1; the unique index rejects one with a constraint
     // error instead of the honest "nothing to approve".
-    expect(flat(select!.sql)).toContain('FOR UPDATE')
+    // `FOR UPDATE OF b` (not a bare FOR UPDATE): the statement LEFT JOINs the
+    // versions table, and locking an immutable row would be both pointless and
+    // a contention source.
+    expect(flat(select!.sql)).toContain('FOR UPDATE OF b')
+  })
+
+  it('emits approved, and superseded only when a version was actually retired', async () => {
+    seedApproveRows()
+    await createBrandStore().approve(USER, WORKSPACE, BRAND, USER)
+    // First approval: nothing was retired, so a `superseded` event here would
+    // fire "the brand's positioning changed" subscriptions on a brand that had
+    // no prior positioning.
+    expect(published.map((e) => e.action)).toEqual(['approved'])
+    expect(published[0].writtenBy).toBe('user')
+
+    published.length = 0
+    txCalls.length = 0
+    txCursor = 0
+    txRows = [
+      [], [],
+      [{ draft: RECORD, prior_version: 1 }],
+      [{ next_version: 2 }],
+      [versionRow({ version: 2 })],
+      [brandRow({ active_version: 2 })],
+      [],
+    ]
+    await createBrandStore().approve(USER, WORKSPACE, BRAND, USER)
+    // Superseded first: the retirement of v1 precedes the activation of v2.
+    expect(published.map((e) => e.action)).toEqual(['superseded', 'approved'])
+    expect(published[0].version).toBe(1)
+    expect(published[1].version).toBe(2)
   })
 
   it('is a no-op when there is no draft in flight', async () => {
     txRows = [
       [], // BEGIN
       [], // SET LOCAL
-      [{ draft: null }], // SELECT ... FOR UPDATE
+      [{ draft: null, prior_version: null }], // SELECT ... FOR UPDATE
     ]
     const store = createBrandStore()
     const result = await store.approve(USER, WORKSPACE, BRAND, USER)
