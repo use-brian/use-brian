@@ -216,6 +216,9 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
 
   // Doc pages
   findPage: 'Find a doc page',
+
+  // Workspace skills
+  updateViewedSkill: 'Update workspace skill',
 }
 
 /**
@@ -242,6 +245,7 @@ export function getToolDisplayName(toolName: string): string {
  */
 const TOOL_STATUS_NAMES: Record<string, string> = {
   saveMemory: 'Saving to memory',
+  updateViewedSkill: 'Updating workspace skill',
   getMemory: 'Recalling memories',
   webSearch: 'Searching the web',
   urlReader: 'Reading a page',

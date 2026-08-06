@@ -137,6 +137,8 @@ describe('[COMP:api/skill-store] WorkspaceSkillStore — workspace CRUD', () => 
     expect(sql).toContain('name = $1')
     expect(sql).toContain('content = $2')
     expect(sql).toContain('workspace_id = $')
+    expect(sql).toContain('valid_to IS NULL')
+    expect(sql).toContain("state <> 'archived'")
     expect(sql).toContain("write_origin = 'foreground'")
   })
 

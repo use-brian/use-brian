@@ -608,6 +608,7 @@ export function createDbWorkspaceSkillStore(hooks?: WorkspaceSkillStoreHooks): W
         userId,
         `UPDATE workspace_skills SET ${sets.join(', ')}
          WHERE id = $${idx++} AND workspace_id = $${idx}
+           AND valid_to IS NULL AND state <> 'archived'
          RETURNING ${COLS_ALL}`,
         values,
       )

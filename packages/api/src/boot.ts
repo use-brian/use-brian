@@ -159,7 +159,7 @@ import {
 } from './db/content-planning-store.js'
 import { createDbMagicLinkStore } from './db/magic-link-store.js'
 import { createSmtpClient, createWorkspaceSmtpTransport } from './email/smtp-client.js'
-import { chatRoutes, runSessionResume, tryResolveLiveToolApproval } from './routes/chat.js'
+import { chatRoutes, createUpdateViewedSkillTool, runSessionResume, tryResolveLiveToolApproval } from './routes/chat.js'
 import {
   menuForClass,
   MutableProviderAvailability,
@@ -1924,6 +1924,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }
 
   const allTools = buildAllTools()
+  // Hidden during ordinary turns; the skill-editor route replaces it with an
+  // RLS-scoped visible instance. Keeping the same implementation in the boot
+  // registry lets an approved call replay safely after a process restart.
+  allTools.set('updateViewedSkill', createUpdateViewedSkillTool({ workspaceSkillStore }))
   const officeArtifactStore = createOfficeArtifactStore()
   const officeTemplateStore = createOfficeTemplateStore()
   const officeGenerationStore = createOfficeGenerationStore()

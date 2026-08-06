@@ -102,7 +102,7 @@ export type WorkspaceChangePayload = {
 export const SKILL_REFRESH_EVENT = "sidan:skill-refresh";
 export const SCHEDULED_JOB_REFRESH_EVENT = "sidan:scheduled-job-refresh";
 
-type SkillRefreshDetail = {
+export type SkillRefreshDetail = {
   workspaceId: string | null;
   rowId?: string;
 };

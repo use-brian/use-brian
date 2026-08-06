@@ -8,7 +8,7 @@ import { query } from '../db/client.js'
 import { buildPinnedContextBlock } from '../resolve-session-pins.js'
 import { getSelfEntityId } from '../db/memories.js'
 import { getRecording, type Recording } from '../db/recordings-store.js'
-import { queryLoop, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, decodeExternalCostMeta, buildWorkspaceFilesContext, SensitivityAccumulator, CompartmentAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSupervisorSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, parsePresentedDocumentInput, type PresentedDocumentInput, type MediaBackend } from '@use-brian/core'
+import { queryLoop, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, decodeExternalCostMeta, buildWorkspaceFilesContext, SensitivityAccumulator, CompartmentAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSupervisorSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, parsePresentedDocumentInput, buildTool, type PresentedDocumentInput, type MediaBackend } from '@use-brian/core'
 import { insertClaimProvenance, getClaimsForLatestAssistantMessage } from '../db/claim-provenance-store.js'
 import type { ToolResultMeta, SessionStateStore, SessionStateRecord, PlanStore, AmbientSurface } from '@use-brian/core'
 import { runProactiveCompaction } from './proactive-compaction.js'
@@ -64,6 +64,7 @@ import type { DeferredConfirmationStore } from '../db/deferred-confirmation-stor
 import type { JobStore } from '@use-brian/core'
 import type { PendingApprovalsStore, ApprovalKind } from '../db/pending-approvals-store.js'
 import type { SessionResumeStore } from '../db/session-resume-store.js'
+import type { WorkspaceSkillStore } from '../db/skill-store.js'
 
 // Module-level map of active confirmation resolvers, keyed by sessionId.
 // Cleaned up on turn_complete or stream close.
@@ -918,10 +919,9 @@ export function buildActivePageInstruction(args: {
  * whose request carried `viewingSkillRowId` (the app-web floating dock on
  * the Brain skill editor route sends it, path-derived). Gives the model the
  * skill's SAVED contents so "this skill" resolves to what the user is
- * looking at. Deliberately tool-agnostic (tool-awareness rule): it never
- * promises an edit capability — the honest default is proposing revised
- * text in chat for the user to apply and save. Kept pure + exported so
- * `chat.test.ts` asserts the shape without booting the route.
+ * looking at. This block is added only alongside the scoped update tool, so
+ * naming that capability here obeys the tool-awareness rule. Kept pure +
+ * exported so `chat.test.ts` asserts the shape without booting the route.
  */
 export function buildViewingSkillBlock(skill: {
   rowId: string
@@ -954,9 +954,73 @@ export function buildViewingSkillBlock(skill: {
     `\nSaved instructions (markdown):\n` +
     `\`\`\`\`markdown\n${body}\n\`\`\`\`\n\n` +
     `This is the last SAVED version — edits the user has typed in the editor but not saved ` +
-    `are not visible to you, and you cannot type into their editor. When they ask for ` +
-    `changes, propose the exact revised text in chat so they can apply and save it themselves.`
+    `are not visible to you. When they ask to change this skill, call \`updateViewedSkill\` ` +
+    `with the row id above and only the fields that should change; the user will approve the update before it is saved. ` +
+    `Only propose revised text in chat when the user explicitly asks for a draft instead of an update.`
   )
+}
+
+/**
+ * A visible instance is scoped to the skill already resolved through the
+ * editor's RLS read and rejects any mismatched row id. The hidden boot instance
+ * accepts the frozen, approved id only for restart-safe replay. Confirmation is
+ * load-bearing: the store treats a human-approved name/body edit as certification.
+ */
+export function createUpdateViewedSkillTool(args: {
+  workspaceSkillStore: Pick<WorkspaceSkillStore, 'update'>
+  workspaceId?: string
+  skillRowId?: string
+  skillName?: string
+}): Tool {
+  const scoped = Boolean(args.workspaceId && args.skillRowId && args.skillName)
+  return buildTool({
+    name: 'updateViewedSkill',
+    description:
+      `Update the workspace skill currently open in the user's editor${args.skillName ? ` (${JSON.stringify(args.skillName)})` : ''}. ` +
+      'Pass only fields the user asked to change; omitted fields remain unchanged. This tool is scoped ' +
+      'to the open skill and asks the user to approve before saving.',
+    inputSchema: z
+      .object({
+        skillRowId: z.string().min(1).describe('The row id shown in the currently-viewing skill context.'),
+        name: z.string().trim().min(1).max(100).optional(),
+        description: z.string().trim().max(250).optional(),
+        whenToUse: z.string().trim().max(300).nullable().optional(),
+        content: z.string().trim().min(1).max(5000).optional(),
+      })
+      .refine(
+        ({ skillRowId: _skillRowId, ...updates }) =>
+          Object.values(updates).some((value) => value !== undefined),
+        { message: 'Provide at least one field to update.' },
+      ),
+    hiddenFromModel: !scoped,
+    requiresConfirmation: true,
+    async describeConfirmation(input) {
+      const { skillRowId, ...updates } = input as Record<string, unknown>
+      return [
+        `Skill: ${args.skillName ?? String(skillRowId)}`,
+        `Fields: ${Object.keys(updates).join(', ')}`,
+      ]
+    },
+    async execute(input, ctx) {
+      if (!ctx.workspaceId || (args.workspaceId && ctx.workspaceId !== args.workspaceId)) {
+        return { data: 'The open skill is not in this assistant workspace.', isError: true }
+      }
+      if (args.skillRowId && input.skillRowId !== args.skillRowId) {
+        return { data: 'The requested skill does not match the skill open in the editor.', isError: true }
+      }
+      const { skillRowId, ...updates } = input
+      const updated = await args.workspaceSkillStore.update(
+        ctx.userId,
+        ctx.workspaceId,
+        skillRowId,
+        updates,
+      )
+      if (!updated) {
+        return { data: 'The open skill is no longer available.', isError: true }
+      }
+      return { data: `Saved the approved changes to ${JSON.stringify(updated.name)}.` }
+    },
+  })
 }
 
 /**
@@ -3500,6 +3564,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       const userVisibleContextParts: string[] = splitPrompt.userVisibleContext
         ? [splitPrompt.userVisibleContext]
         : []
+      let updateViewedSkillTool: Tool | null = null
 
       // Shared-chat participants are application-derived runtime metadata.
       // They remain private even though doing so makes this system suffix
@@ -3719,14 +3784,23 @@ export function chatRoutes(options: WebChatOptions): Router {
       ) {
         try {
           const { createDbWorkspaceSkillStore } = await import('../db/skill-store.js')
-          const workspaceSkills = await createDbWorkspaceSkillStore().listForWorkspace(
+          const workspaceSkillStore = createDbWorkspaceSkillStore()
+          const workspaceSkills = await workspaceSkillStore.listForWorkspace(
             assistant.workspaceId,
             { actingUserId: user.id },
           )
           const viewedSkill = workspaceSkills.find(
             (s) => s.rowId === requestedViewingSkillRowId && s.state !== 'archived',
           )
-          if (viewedSkill) userVisibleContextParts.push(buildViewingSkillBlock(viewedSkill))
+          if (viewedSkill) {
+            userVisibleContextParts.push(buildViewingSkillBlock(viewedSkill))
+            updateViewedSkillTool = createUpdateViewedSkillTool({
+              workspaceSkillStore,
+              workspaceId: assistant.workspaceId,
+              skillRowId: viewedSkill.rowId,
+              skillName: viewedSkill.name,
+            })
+          }
         } catch (err) {
           console.error('[chat] viewing-skill context injection failed:', err)
         }
@@ -3787,6 +3861,9 @@ export function chatRoutes(options: WebChatOptions): Router {
       allTools.set('saveMemory', saveMemory)
       allTools.set('getMemory', getMemory)
       allTools.set('deleteMemory', deleteMemory)
+      if (updateViewedSkillTool) {
+        allTools.set(updateViewedSkillTool.name, updateViewedSkillTool)
+      }
 
       // updateSelfProfile — Identity Phase 2 groundwork. Available
       // whenever the entity store is wired AND the assistant has a

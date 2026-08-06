@@ -65,6 +65,10 @@ import {
 } from "@/lib/skills-view";
 import { SKILL_BODY_MAX_CHARS } from "@/lib/skill-markdown";
 import { requestBrainRefresh } from "@/lib/brain-events";
+import {
+  SKILL_REFRESH_EVENT,
+  type SkillRefreshDetail,
+} from "@/lib/workspace-events";
 import { useIsOffline } from "@/lib/offline/use-offline-sync";
 import { SkillDocument } from "@/components/brain/skill-document";
 import { SkillFilesSection } from "@/components/brain/skill-files-section";
@@ -200,6 +204,23 @@ function SkillEditor({
   const patch = buildSkillPatch(skill, { name, description, whenToUse, content, category });
   const dirty = Object.keys(patch).length > 0;
 
+  // Assistant edits and curator writes arrive over the workspace stream. Pull
+  // the saved row into the open editor, but never overwrite local hand edits.
+  useEffect(() => {
+    const handleSkillRefresh = (event: Event) => {
+      const detail = (event as CustomEvent<SkillRefreshDetail>).detail;
+      if (
+        !dirty &&
+        detail.workspaceId === workspaceId &&
+        (!detail.rowId || detail.rowId === skill.rowId)
+      ) {
+        onSaved();
+      }
+    };
+    window.addEventListener(SKILL_REFRESH_EVENT, handleSkillRefresh);
+    return () => window.removeEventListener(SKILL_REFRESH_EVENT, handleSkillRefresh);
+  }, [dirty, onSaved, skill.rowId, workspaceId]);
+
   async function save() {
     if (offline) return;
     if (!name.trim()) {
@@ -310,8 +331,8 @@ function SkillEditor({
         {/* ── Right rail — the properties: Suggested decision first, then
             About + Access soft cards, destructive Delete last. AI iteration
             on a skill happens through the shared floating assistant dock,
-            which sees the skill the user is viewing (viewingSkillRowId on
-            /api/chat) — the embedded rail chat is creator-only now. ──────── */}
+            which sees and can update the viewed skill after inline approval;
+            the embedded rail chat is creator-only now. ──────────────────── */}
         <aside className="mt-10 flex flex-col gap-4 text-sm lg:mt-0">
           {unverified && (
             <ConfirmCard
