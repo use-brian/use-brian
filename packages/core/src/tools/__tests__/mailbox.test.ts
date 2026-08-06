@@ -120,6 +120,21 @@ describe('[COMP:tools/mailbox-imap] Company mailbox tools', () => {
     expect(get.isReadOnly).toBe(true)
   })
 
+  it('treats IMAP/SMTP as a transport that may bind a Gmail-hosted address', () => {
+    const gmailAddress = 'maya@gmail.com'
+    const tools = createMailboxTools(
+      singleMailboxRouter(makeApi(), gmailAddress),
+      { boundAccountEmail: gmailAddress },
+    )
+    const search = toolByName(tools, 'imapSearchMessages')
+    const send = toolByName(tools, 'imapSendMessage')
+
+    expect(search.description).toMatch(/may be hosted by Gmail/i)
+    expect(search.description).not.toMatch(/not Gmail/i)
+    expect(send.description).toContain(gmailAddress)
+    expect(send.description).toMatch(/gmail\.com/i)
+  })
+
   it('applies the 90-day default window and default result cap (D12 #4)', async () => {
     const api = makeApi()
     const search = toolByName(toolsFor(api), 'imapSearchMessages')

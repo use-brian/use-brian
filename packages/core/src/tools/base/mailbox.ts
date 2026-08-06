@@ -395,7 +395,9 @@ export function createMailboxTools(
   const searchMessages = buildTool({
     name: 'imapSearchMessages',
     description:
-      "Search the user's own company mailbox (their connected IMAP account — corporate email, not Gmail and not the assistant's address). " +
+      "Search the user's own mailbox through its connected IMAP/SMTP account. " +
+      'IMAP/SMTP is the connection method, not the provider: the bound mailbox may be hosted by Gmail/Google Workspace, AliMail, or another provider. ' +
+      "It is the user's exact bound address, never the assistant's own address. " +
       'Searches INBOX and Sent by default, so "what did I reply to X" is answerable; pass `folder` to search elsewhere. ' +
       'Server-side search is substring matching with no ranking — iterate like grep: start with 2-4 `keywords` (they are OR\'d in one round trip, so include synonyms), ' +
       'then refine by sender, subject, or date. Results come back grouped into conversation threads with snippets. ' +
@@ -494,8 +496,9 @@ export function createMailboxTools(
   const sendMessage = buildTool({
     name: 'imapSendMessage',
     description:
-      "Send an email from the user's own company mailbox (their connected IMAP/SMTP account) — the recipient sees the user's corporate address as the sender. " +
-      'This is the ONLY tool that sends as the corporate address: if it is unavailable, say so — never silently substitute another email identity for it (or it for them). ' +
+      "Send an email from the user's own mailbox through its connected IMAP/SMTP account. " +
+      'The bound mailbox may be hosted by Gmail/Google Workspace (including an address ending in gmail.com), AliMail, or another provider; the recipient sees the exact bound address as the sender. ' +
+      'This is the ONLY tool that sends as that bound address: if it is unavailable, say so — never silently substitute another email identity for it (or it for them). ' +
       'Call this tool directly — the user will see an Approve/Deny prompt. ' +
       'To reply on an existing thread, pass the original message\'s id as `inReplyTo` so the reply threads correctly. ' +
       'Copy additional people with `cc` (visible to every recipient) or `bcc` (hidden from the others); put an internal colleague you are looping in on `cc` unless the user asks to keep them hidden. ' +
