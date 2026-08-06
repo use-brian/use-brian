@@ -29,7 +29,7 @@ describe("[COMP:app-web/office-presentation-editor] Presentation direct manipula
     const snapshot = presentationFixture();
     const object = snapshot.slides[0].objects[0];
     const html = renderToStaticMarkup(<I18nProvider locale="en" dict={en as unknown as Dictionary}>
-      <PresentationObjectFrame object={object} selected canChange slideSize={snapshot.slideSize} onSelect={vi.fn()} onText={vi.fn()} onGeometryPreview={vi.fn()} onGeometry={vi.fn()} />
+      <PresentationObjectFrame artifactId={snapshot.artifactId} object={object} selected canChange slideSize={snapshot.slideSize} onSelect={vi.fn()} onText={vi.fn()} onGeometryPreview={vi.fn()} onGeometry={vi.fn()} />
       <PresentationGeometryToolbar object={object} disabled={false} onProperty={vi.fn()} onDelete={vi.fn()} />
     </I18nProvider>);
     expect(html).toContain('data-direct-manipulation="true"');

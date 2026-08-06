@@ -36,8 +36,12 @@ describe('[COMP:brain/channel-media-intake] classifyMedia', () => {
     expect(classifyMedia('application/pdf')).toBe('document')
     expect(classifyMedia('text/plain')).toBe('document')
     expect(classifyMedia('application/vnd.openxmlformats-officedocument.wordprocessingml.document')).toBe('document')
+    expect(classifyMedia('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')).toBe('document')
+    expect(classifyMedia('application/octet-stream', 'forecast.PPTX')).toBe('document')
+    expect(classifyMedia('application/octet-stream', 'brief.odt')).toBe('document')
     expect(classifyMedia('image/png')).toBe('unsupported')
     expect(classifyMedia('application/zip')).toBe('unsupported')
+    expect(classifyMedia('application/octet-stream', 'archive.zip')).toBe('unsupported')
   })
 })
 

@@ -25,6 +25,29 @@ function canonical(value: unknown): string {
 
 export function officeOfflineRoutes(deps: OfficeOfflineRouteDeps): Router {
   const router = Router()
+  router.get('/artifacts/:artifactId/resources/:resourceId', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
+    const artifactId = String(req.params.artifactId)
+    const resourceId = String(req.params.resourceId)
+    const context = await deps.load(userId, artifactId)
+    if (!context) return void res.status(404).json({ error: 'Office resource not found' })
+    const ref = context.snapshot.resources.find((resource) => resource.id === resourceId)
+    if (!ref) return void res.status(404).json({ error: 'Office resource not found' })
+    const resource = await deps.readResource(userId, context.artifact.workspaceId, resourceId)
+    const bytesHash = resource ? createHash('sha256').update(resource.bytes).digest('hex') : null
+    if (!resource || resource.hash !== ref.hash || bytesHash !== ref.hash) {
+      return void res.status(409).json({ error: 'office_resource_incomplete', resourceId })
+    }
+    const etag = `"${ref.hash}"`
+    res.setHeader('Cache-Control', 'private, max-age=31536000, immutable')
+    res.setHeader('Content-Type', ref.mime)
+    res.setHeader('Content-Length', resource.bytes.byteLength)
+    res.setHeader('ETag', etag)
+    res.setHeader('X-Content-Type-Options', 'nosniff')
+    if (req.headers['if-none-match'] === etag) return void res.status(304).end()
+    res.send(Buffer.from(resource.bytes))
+  })
   router.post('/artifacts/:artifactId/offline-packages', async (req, res) => {
     const userId = (req as { userId?: string }).userId
     if (!userId) return void res.status(401).json({ error: 'Unauthorized' })

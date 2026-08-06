@@ -26,6 +26,7 @@ import {
   validateDiscordCredentials,
   validateMsTeamsCredentials,
   createTelegramApi,
+  TELEGRAM_BOT_COMMANDS,
   createSlackApi,
 } from '@use-brian/channels'
 import type { WorkspaceStore } from '../db/workspace-store.js'
@@ -730,6 +731,9 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
     try {
       const api = createTelegramApi({ token: parsed.data.botToken })
       await api.setWebhook(webhookUrl, webhookSecret)
+      api.upsertMyCommands(TELEGRAM_BOT_COMMANDS).catch((err) => {
+        console.warn('[channels] Telegram command registration failed:', err)
+      })
     } catch (err) {
       res.status(500).json({
         error: 'Failed to register Telegram webhook',

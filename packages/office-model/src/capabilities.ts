@@ -57,6 +57,10 @@ export const officeCapabilityManifest = {
     implemented('placeholder', 'presentation'), implemented('textBox', 'presentation'), implemented('basicShape', 'presentation'),
     implemented('connector', 'presentation'), implemented('zOrder', 'presentation'), implemented('speakerNotes', 'presentation'),
     implemented('slideReorder', 'presentation'),
+    implemented('worksheet', 'spreadsheet'), implemented('cellValue', 'spreadsheet'), implemented('cellFormula', 'spreadsheet'),
+    implemented('cellStyle', 'spreadsheet'), implemented('mergedCell', 'spreadsheet'), implemented('rowColumnDimensions', 'spreadsheet'),
+    implemented('freezePane', 'spreadsheet'), implemented('dataValidation', 'spreadsheet'), implemented('conditionalFormatting', 'spreadsheet'),
+    implemented('worksheetImage', 'spreadsheet'), implemented('spreadsheetPrintSetup', 'spreadsheet'), implemented('spreadsheetPdf', 'spreadsheet'),
     rejected('macro', 'shared', 'Macros and executable package content are not supported'),
     rejected('externalRelationship', 'shared', 'External data/media relationships are not fetched or preserved'),
     rejected('animation', 'presentation', 'Animations, transitions, and timing trees are not supported'),
@@ -71,6 +75,10 @@ export const officeCapabilityManifest = {
     rejected('trackedChanges', 'document', 'Imported Office tracked changes are not supported'),
     rejected('hiddenSlide', 'presentation', 'Hidden slides and custom shows are not supported'),
     rejected('embeddedWorksheet', 'presentation', 'Embedded worksheets and linked charts are not supported'),
+    rejected('workbookMacro', 'spreadsheet', 'Workbook macros and executable code are not supported'),
+    rejected('workbookExternalLink', 'spreadsheet', 'External workbook links and connections are not fetched or preserved'),
+    rejected('pivotTable', 'spreadsheet', 'Pivot tables and data models are not supported'),
+    rejected('powerQuery', 'spreadsheet', 'Power Query and external data refresh are not supported'),
   ] satisfies OfficeCapability[],
 } as const
 
@@ -129,6 +137,12 @@ export function preflightOfficeCandidate(input: unknown): OfficePreflightResult 
       }
       if (object.kind === 'image' && typeof object.resourceId === 'string' && object.decorative !== true && !object.altText) {
         diagnostics.push({ severity: 'error', code: 'accessibility.alt_text', path, message: 'Non-decorative images require alt text', capabilityId: 'image' })
+      }
+      if ('from' in object && 'to' in object && typeof object.resourceId === 'string' && !resourceIds.has(object.resourceId)) {
+        diagnostics.push({ severity: 'error', code: 'resource.missing', path, message: `Referenced resource ${object.resourceId} is missing` })
+      }
+      if (typeof object.address === 'string' && typeof object.error === 'string') {
+        diagnostics.push({ severity: 'error', code: 'spreadsheet.formula_error', path, message: `Cell ${object.address} contains ${object.error}`, capabilityId: 'cellFormula' })
       }
     }
     for (const [key, child] of Object.entries(value)) visit(child, path ? `${path}.${key}` : key)

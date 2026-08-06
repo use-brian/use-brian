@@ -1,4 +1,4 @@
-import type { DocumentSnapshot, OfficeTemplateBundle, PresentationSnapshot } from '@use-brian/office-model'
+import type { DocumentSnapshot, OfficeTemplateBundle, PresentationSnapshot, SpreadsheetSnapshot } from '@use-brian/office-model'
 import type { OfficeResourceResolver } from '../package.js'
 
 export const id = (value: number): string => `10000000-0000-4000-8000-${value.toString().padStart(12, '0')}`
@@ -106,6 +106,45 @@ export function completePresentationSnapshot(): PresentationSnapshot {
   }
 }
 
+export function completeSpreadsheetSnapshot(): SpreadsheetSnapshot {
+  const sheetId = id(70)
+  return {
+    schemaVersion: 1,
+    capabilityVersion: 1,
+    artifactId: id(71),
+    workspaceId: id(2),
+    family: 'spreadsheet',
+    locale: 'en-US',
+    defaultLanguage: 'en-US',
+    templateVersionId: id(3),
+    rootId: id(72),
+    title: 'Invoice',
+    resources: [resources[0]],
+    accessibility: { title: 'Invoice' },
+    activeSheetId: sheetId,
+    calculationMode: 'automatic',
+    worksheets: [{
+      id: sheetId,
+      name: 'Invoice',
+      visibility: 'visible',
+      cells: [
+        { id: id(73), address: 'A1', valueType: 'string', value: 'Invoice', style: { font: { family: 'Arial', sizePt: 18, bold: true, italic: false, underline: false, strike: false, color: '#10202C' }, fill: '#EAF9FF', alignment: { horizontal: 'left', vertical: 'middle', wrapText: false, textRotation: 0, indent: 0 } }, locked: false },
+        { id: id(74), address: 'A2', valueType: 'number', value: 2, numberFormat: '#,##0.00', style: {}, locked: false },
+        { id: id(75), address: 'B2', valueType: 'number', value: 3, numberFormat: '#,##0.00', style: {}, locked: false },
+        { id: id(76), address: 'C2', valueType: 'number', value: null, formula: 'ROUND(A2*B2,2)', calculatedValue: 6, numberFormat: '#,##0.00', style: { border: { bottom: { style: 'double', color: '#10202C' } } }, locked: false },
+      ],
+      merges: ['A1:C1'],
+      rowDimensions: [{ index: 1, heightPt: 28, hidden: false }],
+      columnDimensions: [{ index: 1, widthChars: 24, hidden: false }, { index: 2, widthChars: 12, hidden: false }, { index: 3, widthChars: 14, hidden: false }],
+      freeze: { rows: 1, columns: 0 },
+      images: [{ id: id(77), resourceId: imageId, altText: 'Company logo', decorative: false, from: { row: 0, column: 2 }, to: { row: 1, column: 3 } }],
+      validations: [{ id: id(78), range: 'A2:A10', type: 'whole', operator: 'between', formulas: ['0', '1000'], allowBlank: true }],
+      conditionalFormats: [{ id: id(79), range: 'C2:C10', ruleType: 'cellIs', operator: 'greaterThan', formulas: ['0'], style: { fill: '#D1FAE5' }, priority: 1 }],
+      print: { printArea: 'A1:C20', paperSize: 'A4', orientation: 'portrait', fitToWidth: 1, fitToHeight: 1, margins: { leftIn: 0.35, rightIn: 0.35, topIn: 0.25, bottomIn: 0.25, headerIn: 0, footerIn: 0 }, horizontalCentered: true, verticalCentered: true, showGridLines: false, showHeadings: false },
+    }],
+  }
+}
+
 function presentationSnapshot(): PresentationSnapshot {
   const complete = completePresentationSnapshot()
   const first = complete.slides[0]
@@ -135,6 +174,7 @@ export function templateBundle(family: 'document' | 'presentation' = 'document')
     whenNotToUse: ['Do not use for legal agreements'],
     exampleRequests: ['Create a board update'],
     fields: [{ id: id(42), name: 'summary.text', label: 'Summary', type: 'richText', required: true, repeating: false, minItems: 0, maxItems: 1, maxLength: 1_000, targetIds: [targetId], aiInstruction: 'Ground every factual statement.', locked: false }],
+    slideRecipes: family === 'presentation' && snapshot.family === 'presentation' ? [{ id: id(55), slideId: snapshot.slides[0].id, name: 'Opening', role: 'cover', whenToUse: 'Use to open the presentation.', whenNotToUse: 'Do not repeat this slide.', enabled: true, repeatable: false, minUses: 0, maxUses: 1, fieldIds: [id(42)], confidence: 1, inference: 'Fixture-authored routing.', reviewed: true }] : [],
     snapshot,
     resources: [],
     lockedObjectIds: [],

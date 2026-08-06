@@ -45,7 +45,7 @@ export function buildOpenChannelHosts(ctx: BootContext): ChannelHostHooks {
         },
         storage: resolved.gcs,
         intakeDeps,
-        ...(input.mime && classifyMedia(input.mime) === 'document'
+        ...(input.mime && classifyMedia(input.mime, input.fileName) === 'document'
           ? { maxBytes: CHANNEL_DOCUMENT_PARSE_MAX_BYTES }
           : {}),
       })

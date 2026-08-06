@@ -8,7 +8,9 @@
  * accordion into a master-detail: a rail grouping every connector by sharing
  * state (in display order: Shared with workspace / Available in this
  * workspace / Personal / Available — workspace-active groups first,
- * `lib/connector-groups.ts`; plus an always-on Built-in group for
+ * `lib/connector-groups.ts`; Available defaults to the featured four and
+ * sends every other not-yet-connected row to the directory marketplace;
+ * plus an always-on Built-in group for
  * first-party workspace primitives like Workspace Files, which carry no
  * connect/disconnect state), with the selected connector's management panel
  * beside it. Every connector is
@@ -68,7 +70,10 @@ import { MediaTokenToggle } from "@/components/connectors/media-token-toggle";
 import { ImapSyncPanel } from "@/components/connectors/imap-sync-panel";
 import { useWorkspaces } from "@/contexts/workspace-context";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
-import { groupConnectors } from "@/lib/connector-groups";
+import {
+  curateAvailableConnectors,
+  groupConnectors,
+} from "@/lib/connector-groups";
 import { connectorRemovalConfirmationModel } from "@/lib/connector-removal-confirmation";
 import {
   isPatConnector,
@@ -2429,6 +2434,23 @@ function ConnectorsList() {
     exposedGrants,
     builtinIds: BUILTIN_PRIMITIVE_CONNECTOR_IDS,
   });
+  const availableCuration = curateAvailableConnectors(grouped.available);
+  // A direct link such as Telegram's `?connect=shopify` may target a row that
+  // is normally directory-only. Surface that one row while it is selected so
+  // its detail/connect form remains reachable; this does not change the
+  // ordinary four-item default.
+  const selectedHiddenAvailable = availableCuration.hidden.find(
+    (connector) =>
+      rowId(connector) === selected || connector.id === selected,
+  );
+  const visibleAvailable = selectedHiddenAvailable
+    ? [...availableCuration.featured, selectedHiddenAvailable]
+    : availableCuration.featured;
+  const hiddenAvailable = selectedHiddenAvailable
+    ? availableCuration.hidden.filter(
+        (connector) => connector !== selectedHiddenAvailable,
+      )
+    : availableCuration.hidden;
   // Workspace-active groups render first (exposed + workspace-shared rows are
   // what the workspace's assistants actually run on); Personal — connected to
   // the member but not enabled in this workspace — sits below them.
@@ -2436,9 +2458,13 @@ function ConnectorsList() {
     { id: "shared", label: tc.groupShared, rows: grouped.shared },
     { id: "workspace", label: tc.groupWorkspaceShared, rows: grouped.workspace },
     { id: "personal", label: tc.groupPersonal, rows: grouped.personal },
-    { id: "available", label: tc.groupAvailable, rows: grouped.available },
+    { id: "available", label: tc.groupAvailable, rows: visibleAvailable },
     { id: "builtin", label: tc.groupBuiltin, rows: grouped.builtin },
-  ].filter((g) => g.rows.length > 0);
+  ].filter(
+    (group) =>
+      group.rows.length > 0 ||
+      (group.id === "available" && hiddenAvailable.length > 0),
+  );
   const railOrder = railGroups.flatMap((g) => g.rows);
   const sel =
     railOrder.find((c) => rowId(c) === selected) ??
@@ -2581,7 +2607,7 @@ function ConnectorsList() {
 
       {/* ── Master-detail: grouped rail + selected connector panel ── */}
       <div className="flex flex-col gap-6 md:flex-row">
-        {/* Rail — every connector, grouped by sharing state. */}
+        {/* Rail — active rows plus the curated Available shortlist. */}
         <aside className="w-full md:w-64 shrink-0 self-start">
           <nav aria-label={tc.railAriaLabel} className="flex flex-col gap-3">
             {railGroups.map((g) => (
@@ -2633,6 +2659,29 @@ function ConnectorsList() {
                     );
                   })}
                 </ul>
+                {g.id === "available" && hiddenAvailable.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setShowBrowse(true)}
+                    className="mt-1 flex w-full items-center gap-2 rounded-md border border-dashed border-border px-2 py-2 text-left text-xs font-medium text-muted-foreground transition-colors hover:border-primary/40 hover:bg-muted/60 hover:text-foreground"
+                  >
+                    <span
+                      aria-hidden
+                      className="grid h-7 w-7 shrink-0 grid-cols-2 gap-0.5 rounded-md bg-muted p-1.5"
+                    >
+                      <span className="rounded-[1px] bg-current opacity-70" />
+                      <span className="rounded-[1px] bg-current opacity-45" />
+                      <span className="rounded-[1px] bg-current opacity-45" />
+                      <span className="rounded-[1px] bg-current opacity-70" />
+                    </span>
+                    <span>
+                      {tc.browseOtherConnectors.replace(
+                        "{count}",
+                        String(hiddenAvailable.length),
+                      )}
+                    </span>
+                  </button>
+                )}
               </div>
             ))}
           </nav>

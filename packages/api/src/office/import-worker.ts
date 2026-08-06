@@ -1,6 +1,6 @@
-/** Bounded DOCX/PPTX worker: parse, canonicalize, preflight, then initialize collaboration. [COMP:api/office-generation] */
+/** Bounded DOCX/PPTX/XLSX worker: parse, canonicalize, preflight, then initialize collaboration. [COMP:api/office-generation] */
 import { randomUUID } from 'node:crypto'
-import { importOfficeDocument, importOfficePresentation, type OfficeImportContext } from '@use-brian/core'
+import { importOfficeDocument, importOfficePresentation, importOfficeSpreadsheet, type OfficeImportContext } from '@use-brian/core'
 import type { OfficeArtifactSnapshot } from '@use-brian/office-model'
 import type { createOfficeGenerationStore } from '../db/office-generation.js'
 
@@ -20,9 +20,9 @@ export function createOfficeImportWorker(deps: OfficeImportWorkerDeps) {
     if (!job) return false
     try {
       const brief = job.brief as { sourceFileId?: unknown; family?: unknown }
-      if (typeof brief.sourceFileId !== 'string' || (brief.family !== 'document' && brief.family !== 'presentation') || !job.templateVersionId) throw new Error('invalid_import_brief')
+      if (typeof brief.sourceFileId !== 'string' || (brief.family !== 'document' && brief.family !== 'presentation' && brief.family !== 'spreadsheet') || !job.templateVersionId) throw new Error('invalid_import_brief')
       const [bytes, context] = await Promise.all([deps.readSource({ userId, workspaceId: job.workspaceId, assistantId: job.assistantId, fileId: brief.sourceFileId }), deps.context({ userId, artifactId: job.artifactId, templateVersionId: job.templateVersionId })])
-      const result = brief.family === 'document' ? await importOfficeDocument(bytes, context) : await importOfficePresentation(bytes, context)
+      const result = brief.family === 'document' ? await importOfficeDocument(bytes, context) : brief.family === 'presentation' ? await importOfficePresentation(bytes, context) : await importOfficeSpreadsheet(bytes, context)
       if (!result.ok || !result.snapshot) throw new Error(result.diagnostics.map((item) => `${item.path}: ${item.message}`).join('; ') || 'office_import_failed')
       await deps.initialize({ userId, artifactId: job.artifactId, snapshot: result.snapshot })
       await deps.store.appendEvent({ userId, jobId: job.id, workspaceId: job.workspaceId, code: 'office.job.completed', values: { family: brief.family }, actorType: 'system', safeNarration: 'Import completed' })

@@ -72,7 +72,7 @@ describe('[COMP:tools/email-archive-search] searchEmailArchive tool', () => {
     })
 
     expect((tool.inputSchema as unknown as { shape: Record<string, unknown> }).shape).not.toHaveProperty('account')
-    expect(tool.description).toContain('bound to ops@corp.com')
+    expect(tool.description).toContain('bound to the email account ops@corp.com')
     await tool.execute({ query: 'invoice' }, CTX)
     expect(search).toHaveBeenCalledWith(expect.objectContaining({ instanceId: 'inst-ops' }), undefined)
   })
@@ -88,6 +88,8 @@ describe('[COMP:tools/email-archive-search] searchEmailArchive tool', () => {
     expect(tool.description).toMatch(/imapSearchMessages/)
     expect(tool.description).toMatch(/searchBrain/)
     expect(tool.description).toMatch(/syncs on a delay/i)
+    expect(tool.description).toMatch(/^Search the user's synced email archive/)
+    expect(tool.description).not.toMatch(/company[- ]mailbox/i)
   })
 
   it('passes the embedder through and surfaces store failures honestly', async () => {

@@ -75,3 +75,12 @@ export {
   presentedDocumentInputSchema,
 } from './base/present-document.js'
 export type { PresentedDocumentInput } from './base/present-document.js'
+export {
+  createWorkspaceChatHandoffTool,
+  WORKSPACE_CHAT_HANDOFF_MAX_CHARS,
+  workspaceChatHandoffInputSchema,
+} from './base/workspace-chat-handoff.js'
+export type {
+  WorkspaceChatHandoffInput,
+  WorkspaceChatHandoffPort,
+} from './base/workspace-chat-handoff.js'

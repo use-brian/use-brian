@@ -549,6 +549,39 @@ describe('[COMP:api/telegram-byo-route] forum-topic routing', () => {
     expect(pipelineCalls[0]).toMatchObject({ channelId: '-1001234567890:topic:7', isGroupChat: true })
   })
 
+  it('routes a privacy-mode /ask command without an @mention', async () => {
+    const app = createTestApp(
+      '/webhook/telegram-byo',
+      telegramByoRoutes({
+        provider: {} as never,
+        systemPrompt: '',
+        tools: new Map(),
+        memoryStore: {} as never,
+        integrationStore: makeIntegrationStore() as never,
+        capabilityStore: {} as never,
+        apiUrl: 'http://test',
+      }),
+    )
+
+    const update = buildForumUpdate({
+      updateId: 11,
+      messageId: 201,
+      threadId: 7,
+      text: '/ask summarize this thread',
+    }) as { message: { entities: Array<{ type: string; offset: number; length: number }> } }
+    update.message.entities = [{ type: 'bot_command', offset: 0, length: 4 }]
+    await postUpdate(app, update)
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    expect(pipelineCalls).toHaveLength(1)
+    expect(pipelineCalls[0]).toMatchObject({
+      channelId: '-1001234567890:topic:7',
+      messageText: 'summarize this thread',
+      isGroupChat: true,
+    })
+  })
+
   it('keeps the bare chat id when the supergroup is not a forum', async () => {
     const app = createTestApp(
       '/webhook/telegram-byo',

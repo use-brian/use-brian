@@ -15,6 +15,10 @@ export type TelegramApiOptions = {
  */
 export const TELEGRAM_BOT_DOWNLOAD_LIMIT_BYTES = 20 * 1024 * 1024
 
+export const TELEGRAM_BOT_COMMANDS = [
+  { command: 'ask', description: 'Ask Brian anything' },
+] as const
+
 // Retry tuning — see docs/architecture/channels/adapter-pattern.md § "Rate-limit retry".
 // Cap honours the chat-lock's held PG connection: waiting much longer would
 // stall the pool for no user-visible benefit.
@@ -191,6 +195,17 @@ export function createTelegramApi(options: TelegramApiOptions) {
         // as feedback signal".
         allowed_updates: ['message', 'callback_query', 'my_chat_member', 'message_reaction'],
       }),
+
+    setMyCommands: (commands: ReadonlyArray<{ command: string; description: string }>) =>
+      call<true>('setMyCommands', { commands }),
+
+    upsertMyCommands: async (commands: ReadonlyArray<{ command: string; description: string }>) => {
+      const existing = await call<Array<{ command: string; description: string }>>('getMyCommands')
+      const incomingNames = new Set(commands.map((command) => command.command))
+      return call<true>('setMyCommands', {
+        commands: [...existing.filter((command) => !incomingNames.has(command.command)), ...commands],
+      })
+    },
 
     deleteWebhook: () => call<true>('deleteWebhook'),
 

@@ -131,6 +131,31 @@ describe('[COMP:files/ingest] createFileIngestor', () => {
     expect(result.decomposed).toBe(true)
   })
 
+  it('distills a PDF detected from bytes even when its transport metadata says text', async () => {
+    const fw = fakeWriteBytes()
+    const ing = fakeIngest({ entities: 1, edges: 0, memories: 0, tasks: 0 })
+    const distill = vi.fn(async () => 'byte-detected PDF markdown')
+    const parse = vi.fn(async () => ({ text: 'SHOULD NOT BE CALLED', summary: '' }))
+    const ingestFile = createFileIngestor({
+      filesApi: { writeBytes: fw.writeBytes } as unknown as FilesApi,
+      ingest: ing.ingest as never,
+      distill,
+      parse: parse as never,
+    })
+
+    await ingestFile(
+      { fileName: 'download.txt', mime: 'text/plain', bytes: Buffer.from('%PDF-1.7\nbody') },
+      ctx,
+    )
+
+    expect(fw.calls[0].mime).toBe('application/pdf')
+    expect(distill).toHaveBeenCalledWith(
+      expect.objectContaining({ mime: 'application/pdf', fileName: 'download.txt' }),
+    )
+    expect(parse).not.toHaveBeenCalled()
+    expect(ing.calls[0].content).toBe('byte-detected PDF markdown')
+  })
+
   it('stores a blank PDF without decomposing it', async () => {
     const fw = fakeWriteBytes()
     const ing = fakeIngest({ entities: 0, edges: 0, memories: 0, tasks: 0 })

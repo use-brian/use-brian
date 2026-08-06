@@ -15,6 +15,8 @@
 //
 // No em dash anywhere (block text can surface in user-facing renders).
 
+import { isTabularDocument } from './document-formats.js'
+
 export type ColumnType = 'integer' | 'decimal' | 'date' | 'boolean' | 'text' | 'empty'
 
 export type ColumnProfile = {
@@ -47,13 +49,13 @@ export type TableProfile = {
 }
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-const TABULAR_MIMES = new Set(['text/csv', 'text/tab-separated-values', XLSX_MIME])
-const TABULAR_EXTS = ['.csv', '.tsv', '.xlsx']
 
 export function isTabular(mime: string, fileName: string): boolean {
-  if (TABULAR_MIMES.has(mime)) return true
-  const lower = fileName.toLowerCase()
-  return TABULAR_EXTS.some((e) => lower.endsWith(e))
+  return (
+    mime === 'text/tab-separated-values' ||
+    fileName.toLowerCase().endsWith('.tsv') ||
+    isTabularDocument(mime, fileName)
+  )
 }
 
 const DELIMITER_CANDIDATES = [',', ';', '\t', '|'] as const

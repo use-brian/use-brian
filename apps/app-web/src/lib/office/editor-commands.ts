@@ -1,6 +1,6 @@
 /** One command vocabulary for every adaptive Office input surface. */
 import { APP_LEVEL_ASSISTANT_ID } from "@use-brian/shared";
-import type { OfficeCommand, OfficeRichTextRun, PresentationObject } from "@use-brian/office-model";
+import type { OfficeCommand, OfficeRichTextRun, PresentationObject, SpreadsheetCell, SpreadsheetWorksheet } from "@use-brian/office-model";
 
 const actor = { type: "user" as const, id: APP_LEVEL_ASSISTANT_ID };
 const base = (artifactId: string, baseVersion: number) => ({ commandId: crypto.randomUUID(), artifactId, baseVersion, actor, origin: "manual" as const });
@@ -32,6 +32,15 @@ export function addSlideCommand(artifactId: string, baseVersion: number, index: 
 export function reorderSlideCommand(artifactId: string, baseVersion: number, slideId: string, index: number): OfficeCommand {
   return { ...base(artifactId, baseVersion), kind: "reorderSlide", slideId, index };
 }
+
+export function setSpreadsheetCellCommand(params: { artifactId: string; baseVersion: number; sheetId: string; cellId: string; address: string; valueType: Extract<SpreadsheetCell["valueType"], "blank" | "string" | "number" | "boolean" | "date">; value: SpreadsheetCell["value"]; formula?: string }): OfficeCommand {
+  return { ...base(params.artifactId, params.baseVersion), kind: "setSpreadsheetCell", sheetId: params.sheetId, cellId: params.cellId, address: params.address, valueType: params.valueType, value: params.value, formula: params.formula };
+}
+
+export function addWorksheetCommand(artifactId: string, baseVersion: number, index: number, worksheet: SpreadsheetWorksheet): OfficeCommand { return { ...base(artifactId, baseVersion), kind: "addWorksheet", index, worksheet }; }
+export function renameWorksheetCommand(artifactId: string, baseVersion: number, sheetId: string, name: string): OfficeCommand { return { ...base(artifactId, baseVersion), kind: "renameWorksheet", sheetId, name }; }
+export function reorderWorksheetCommand(artifactId: string, baseVersion: number, sheetId: string, index: number): OfficeCommand { return { ...base(artifactId, baseVersion), kind: "reorderWorksheet", sheetId, index }; }
+export function deleteWorksheetCommand(artifactId: string, baseVersion: number, sheetId: string): OfficeCommand { return { ...base(artifactId, baseVersion), kind: "deleteWorksheet", sheetId }; }
 
 export function defaultRun(text = ""): OfficeRichTextRun {
   return { id: crypto.randomUUID(), text, style: { fontFamily: "Arial", fontSizePt: 11, bold: false, italic: false, underline: false, strike: false, color: "#111111" } };

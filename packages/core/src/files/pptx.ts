@@ -12,6 +12,7 @@
  * decision, not a parsing one. See docs/architecture/engine/file-handling.md.
  */
 import JSZip from 'jszip'
+import { assertSafeOfficeArchive } from './office-archive-safety.js'
 
 function decodeEntities(s: string): string {
   return s
@@ -86,6 +87,7 @@ async function notesFor(zip: JSZip, slidePath: string): Promise<string> {
 }
 
 export async function parsePptxToMarkdown(buffer: Buffer): Promise<string> {
+  await assertSafeOfficeArchive(buffer)
   const zip = await JSZip.loadAsync(buffer)
   const slides = await orderedSlidePaths(zip)
 

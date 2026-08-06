@@ -37,8 +37,3 @@ export async function readBuildStamp(explicit?: RuntimeLike): Promise<string | n
   }
   return cached
 }
-
-/** Test seam: drop the memo so a fresh stamp can be read. */
-export function resetBuildStampCache(): void {
-  cached = undefined
-}

@@ -42,8 +42,8 @@ const syncAccountField = z
   .string()
   .optional()
   .describe(
-    'Which connected company mailbox to sync, by its email address. ' +
-    'Omit to sync the primary (first-connected) mailbox. Only needed when more than one mailbox is connected.',
+    'Which connected email account to sync, by its email address. ' +
+    'Omit to sync the primary (first-connected) email account. Only needed when more than one email account is connected.',
   )
 
 /** A connected mailbox, primary first — bound at injection, never model input. */
@@ -66,13 +66,13 @@ export function createSyncMailboxNowTool(opts: CreateSyncMailboxNowToolOptions):
   return buildTool({
     name: 'syncMailboxNow',
     description:
-      "Pull new mail from the user's company mailbox into the searchable archive right now. " +
+      "Pull new email from the user's connected email account into the searchable email archive right now. " +
       'The archive otherwise syncs on a few-minute delay, so call this first when the user asks about very recent mail and you intend to answer with searchEmailArchive. ' +
       'For a single fresh or exact lookup (a known sender, subject, or date), imapSearchMessages queries the live server directly and needs no sync. ' +
       'Returns how many new messages were pulled. ' +
       (opts.boundAccount
-        ? `This tool is bound to ${opts.boundAccount.email}; use the separately named tool set for another mailbox.`
-        : 'If more than one company mailbox is connected, pass `account` (the mailbox email) to choose which; omit it for the primary.'),
+        ? `This tool is bound to the email account ${opts.boundAccount.email}; use the separately named tool set for another email account.`
+        : 'If more than one email account is connected, pass `account` (the email address) to choose which; omit it for the primary.'),
     inputSchema: z.object(accountInputShape),
     isReadOnly: false,
     isConcurrencySafe: false,
@@ -81,7 +81,7 @@ export function createSyncMailboxNowTool(opts: CreateSyncMailboxNowToolOptions):
     async execute(input) {
       const accounts = opts.accounts
       if (accounts.length === 0) {
-        return { data: 'No company mailbox is connected. Connect one in Studio → Connectors, then try again.', isError: true }
+        return { data: 'No email account is connected through IMAP/SMTP. Connect one in Studio → Connectors, then try again.', isError: true }
       }
       let target: SyncAccountRef | undefined = opts.boundAccount
       const inputWithAccount = input as unknown as { account?: unknown }
@@ -93,7 +93,7 @@ export function createSyncMailboxNowTool(opts: CreateSyncMailboxNowToolOptions):
         target = accounts.find((a) => a.email.trim().toLowerCase() === wanted)
         if (!target) {
           return {
-            data: `No connected company mailbox "${selectedAccount}". Connected mailboxes: ${accounts.map((a) => a.email).join(', ')}.`,
+            data: `No connected email account "${selectedAccount}". Connected email accounts: ${accounts.map((a) => a.email).join(', ')}.`,
             isError: true,
           }
         }

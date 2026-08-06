@@ -15,6 +15,7 @@ import type {
   PresentationSnapshot,
 } from "@use-brian/office-model";
 import { useT } from "@/lib/i18n/client";
+import { getOfficeResourceObjectUrl } from "@/lib/office/api";
 import { cn } from "@/lib/utils";
 
 type PresentationGeometry = PresentationObject["geometry"];
@@ -110,6 +111,7 @@ interface Interaction {
 }
 
 export function PresentationObjectFrame({
+  artifactId,
   object,
   selected,
   canChange,
@@ -119,6 +121,7 @@ export function PresentationObjectFrame({
   onGeometryPreview,
   onGeometry,
 }: {
+  artifactId: string;
   object: PresentationObject;
   selected: boolean;
   canChange: boolean;
@@ -279,7 +282,19 @@ export function PresentationObjectFrame({
       onKeyDown={onFrameKeyDown}
     >
       <div className="h-full w-full overflow-hidden">
-        {renderObjectContent(object, objectText, t, editingText, textAreaRef, editable, onText, () => setEditingText(false))}
+        {editingText && object.kind === "text"
+          ? <textarea
+              ref={textAreaRef}
+              data-slide-text-editor="true"
+              value={objectText}
+              style={{ ...richTextRunStyle(object.runs[0], slideSize), textAlign: object.alignment }}
+              onPointerDown={(event) => event.stopPropagation()}
+              onChange={(event) => onText(object.id, runsWithText(object.runs, event.target.value))}
+              onBlur={() => setEditingText(false)}
+              onKeyDown={(event) => { if (event.key === "Escape") event.currentTarget.blur(); }}
+              className="h-full w-full resize-none bg-transparent outline-none"
+            />
+          : <PresentationObjectVisual artifactId={artifactId} object={object} slideSize={slideSize} />}
       </div>
       {selected && editable && !editingText ? <>
         <span aria-hidden className="pointer-events-none absolute left-1/2 top-[-1.4rem] h-[1.15rem] border-l border-primary" />
@@ -305,36 +320,121 @@ export function PresentationObjectFrame({
   );
 }
 
-function renderObjectContent(
-  object: PresentationObject,
-  objectText: string,
-  t: ReturnType<typeof useT>["office"],
-  editingText: boolean,
-  textAreaRef: React.RefObject<HTMLTextAreaElement | null>,
-  editable: boolean,
-  onText: (id: string, runs: OfficeRichTextRun[]) => void,
-  finishTextEditing: () => void,
-) {
+type PresentationRenderScale = "responsive" | "points";
+
+function scaledPointSize(valuePt: number, slideSize: SlideSize, renderScale: PresentationRenderScale): string {
+  return renderScale === "points" ? `${valuePt}px` : `${valuePt / slideSize.widthPt * 100}cqw`;
+}
+
+function richTextRunStyle(run: OfficeRichTextRun | undefined, slideSize: SlideSize, renderScale: PresentationRenderScale = "responsive"): CSSProperties {
+  if (!run) return {};
+  const decorations = [run.style.underline && "underline", run.style.strike && "line-through"].filter(Boolean).join(" ");
+  const family = run.style.fontFamily;
+  const fontFamily = /mono|courier|consolas/i.test(family)
+    ? `${JSON.stringify(family)}, "SFMono-Regular", Menlo, Monaco, Consolas, monospace`
+    : /serif|times|georgia|cambria/i.test(family)
+      ? `${JSON.stringify(family)}, Georgia, "Times New Roman", serif`
+      : /aptos/i.test(family)
+        ? `${JSON.stringify(family)}, "Segoe UI", system-ui, Arial, Helvetica, sans-serif`
+        : `${JSON.stringify(family)}, Arial, Helvetica, sans-serif`;
+  return {
+    color: run.style.color,
+    backgroundColor: run.style.highlight,
+    fontFamily,
+    fontSize: scaledPointSize(run.style.fontSizePt, slideSize, renderScale),
+    fontStyle: run.style.italic ? "italic" : "normal",
+    fontWeight: run.style.bold ? 700 : 400,
+    textDecoration: decorations || "none",
+  };
+}
+
+function RichTextRuns({ runs, slideSize, renderScale }: { runs: OfficeRichTextRun[]; slideSize: SlideSize; renderScale: PresentationRenderScale }) {
+  return <>{runs.map((run) => <span key={run.id} style={richTextRunStyle(run, slideSize, renderScale)}>{run.text}</span>)}</>;
+}
+
+function OfficeResourceImage({ artifactId, resourceId, alt, fallback }: { artifactId: string; resourceId: string; alt: string; fallback: string }) {
+  const [source, setSource] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    setFailed(false);
+    getOfficeResourceObjectUrl(artifactId, resourceId)
+      .then((url) => { if (active) setSource(url); })
+      .catch(() => { if (active) setFailed(true); });
+    return () => { active = false; };
+  }, [artifactId, resourceId]);
+
+  if (!source) return <div data-office-resource-image={failed ? "failed" : "loading"} className="flex h-full w-full items-center justify-center bg-slate-100 text-[0.7rem] text-slate-500">{fallback}</div>;
+  return <img data-office-resource-image="ready" src={source} alt={alt} draggable={false} className="block h-full w-full object-fill" />;
+}
+
+const CHART_COLORS = ["#34D3FF", "#14B8A6", "#FACC15", "#FB923C", "#F472B6", "#A78BFA"];
+
+function chartPoint(index: number, count: number): number {
+  return count <= 1 ? 500 : 60 + index / (count - 1) * 880;
+}
+
+function pieSlicePath(start: number, end: number, radius: number): string {
+  const startX = 500 + radius * Math.cos(start);
+  const startY = 250 + radius * Math.sin(start);
+  const endX = 500 + radius * Math.cos(end);
+  const endY = 250 + radius * Math.sin(end);
+  const largeArc = end - start > Math.PI ? 1 : 0;
+  return `M 500 250 L ${startX} ${startY} A ${radius} ${radius} 0 ${largeArc} 1 ${endX} ${endY} Z`;
+}
+
+function PresentationChartVisual({ object, slideSize, renderScale }: { object: Extract<PresentationObject, { kind: "chart" }>; slideSize: SlideSize; renderScale: PresentationRenderScale }) {
+  const values = object.series.flatMap((series) => series.values);
+  const maxValue = Math.max(1, ...values.map((value) => Math.abs(value)));
+  const pieValues = object.series[0]?.values.map((value) => Math.max(0, value)) ?? [];
+  const pieTotal = pieValues.reduce((sum, value) => sum + value, 0) || 1;
+  let pieAngle = -Math.PI / 2;
+  return <div data-presentation-chart={object.chartType} className="relative h-full w-full overflow-hidden">
+    <strong className="absolute left-[3%] top-[1%] z-10 max-w-[94%] truncate" style={{ fontSize: scaledPointSize(12, slideSize, renderScale) }}>{object.title}</strong>
+    <svg viewBox="0 0 1000 500" preserveAspectRatio="none" aria-label={object.altText} className="h-full w-full">
+      {object.chartType === "bar" ? object.series.flatMap((series, seriesIndex) => series.values.map((value, valueIndex) => {
+        const categoryCount = Math.max(1, object.categories.length);
+        const groupWidth = 820 / categoryCount;
+        const barWidth = groupWidth / Math.max(1, object.series.length) * 0.72;
+        const height = Math.abs(value) / maxValue * 350;
+        const x = 100 + valueIndex * groupWidth + seriesIndex * groupWidth / object.series.length;
+        return <rect key={`${series.name}-${valueIndex}`} x={x} y={430 - height} width={barWidth} height={height} fill={CHART_COLORS[seriesIndex % CHART_COLORS.length]} />;
+      })) : null}
+      {object.chartType === "line" || object.chartType === "scatter" ? object.series.map((series, seriesIndex) => {
+        const points = series.values.map((value, index) => `${chartPoint(index, series.values.length)},${430 - value / maxValue * 350}`).join(" ");
+        return <g key={series.name}>
+          {object.chartType === "line" ? <polyline points={points} fill="none" stroke={CHART_COLORS[seriesIndex % CHART_COLORS.length]} strokeWidth="8" vectorEffect="non-scaling-stroke" /> : null}
+          {series.values.map((value, index) => <circle key={index} cx={chartPoint(index, series.values.length)} cy={430 - value / maxValue * 350} r="12" fill={CHART_COLORS[seriesIndex % CHART_COLORS.length]} />)}
+        </g>;
+      }) : null}
+      {object.chartType === "pie" || object.chartType === "doughnut" ? pieValues.map((value, index) => {
+        const start = pieAngle;
+        pieAngle += value / pieTotal * Math.PI * 2;
+        return <path key={index} d={pieSlicePath(start, pieAngle, 190)} fill={CHART_COLORS[index % CHART_COLORS.length]} />;
+      }) : null}
+      {object.chartType === "doughnut" ? <circle cx="500" cy="250" r="92" fill="white" /> : null}
+    </svg>
+  </div>;
+}
+
+export function PresentationObjectVisual({ artifactId, object, slideSize, renderScale = "responsive" }: { artifactId: string; object: PresentationObject; slideSize: SlideSize; renderScale?: PresentationRenderScale }) {
+  const t = useT().office;
   if (object.kind === "text") {
-    return editingText
-      ? <textarea
-          ref={textAreaRef}
-          data-slide-text-editor="true"
-          value={objectText}
-          onPointerDown={(event) => event.stopPropagation()}
-          onChange={(event) => onText(object.id, runsWithText(object.runs, event.target.value))}
-          onBlur={finishTextEditing}
-          onKeyDown={(event) => { if (event.key === "Escape") event.currentTarget.blur(); }}
-          className="h-full w-full resize-none bg-transparent p-1 outline-none"
-        />
-      : <div className="h-full w-full whitespace-pre-wrap p-1">{objectText}</div>;
+    const justifyContent = object.verticalAlignment === "middle" ? "center" : object.verticalAlignment === "bottom" ? "flex-end" : "flex-start";
+    return <div data-presentation-object-visual="text" className="flex h-full w-full flex-col whitespace-pre-wrap" style={{ justifyContent, textAlign: object.alignment, overflowWrap: "break-word", lineHeight: 1.05 }}><div className="w-full"><RichTextRuns runs={object.runs} slideSize={slideSize} renderScale={renderScale} /></div></div>;
   }
-  if (object.kind === "shape") return <div style={{ backgroundColor: object.fill, borderColor: object.stroke }} className="flex h-full w-full items-center justify-center border">{objectText}</div>;
-  if (object.kind === "connector") return <div aria-label={t.connector} style={{ borderColor: object.stroke }} className="mt-[1px] h-0 w-full border-t-2" />;
-  if (object.kind === "table") return <table className="h-full w-full border-collapse bg-white text-[8px]"><tbody>{object.rows.map((row) => <tr key={row.id}>{row.cells.map((cell) => <td key={cell.id} className="border p-1">{cell.runs.map((run) => run.text).join("")}</td>)}</tr>)}</tbody></table>;
-  if (object.kind === "chart") return <div className="h-full w-full bg-slate-50 p-2 text-xs"><strong>{object.title}</strong><span className="block text-slate-500">{object.chartType}</span></div>;
-  if (object.kind === "image") return <div className="flex h-full w-full items-center justify-center bg-slate-100 text-xs text-slate-500">{object.altText || t.image}</div>;
-  return <div className="flex h-full w-full items-center justify-center bg-slate-900 text-xs text-white">{t.video}</div>;
+  if (object.kind === "shape") {
+    if (object.shape === "triangle") return <div data-presentation-object-visual="shape" className="relative h-full w-full" style={{ backgroundColor: object.fill, clipPath: "polygon(50% 0, 100% 100%, 0 100%)" }} />;
+    if (object.shape === "line") return <div data-presentation-object-visual="shape" className="relative h-full w-full"><span className="absolute left-0 top-1/2 w-full" style={{ borderTopColor: object.stroke, borderTopStyle: "solid", borderTopWidth: scaledPointSize(object.strokeWidthPt, slideSize, renderScale) }} /></div>;
+    const justifyContent = object.verticalAlignment === "top" ? "flex-start" : object.verticalAlignment === "bottom" ? "flex-end" : "center";
+    return <div data-presentation-object-visual="shape" style={{ backgroundColor: object.fill, borderColor: object.stroke, borderRadius: object.shape === "ellipse" ? "50%" : object.shape === "roundedRectangle" ? "8%" : undefined, borderStyle: object.stroke ? "solid" : undefined, borderWidth: object.stroke ? scaledPointSize(object.strokeWidthPt, slideSize, renderScale) : undefined, justifyContent, textAlign: object.alignment ?? "center" }} className="flex h-full w-full flex-col whitespace-pre-wrap"><RichTextRuns runs={object.text} slideSize={slideSize} renderScale={renderScale} /></div>;
+  }
+  if (object.kind === "connector") return <div data-presentation-object-visual="connector" aria-label={t.connector} className="relative h-full w-full"><span className="absolute left-0 top-1/2 w-full border-t" style={{ borderColor: object.stroke }} /></div>;
+  if (object.kind === "table") return <table data-presentation-object-visual="table" className="h-full w-full table-fixed border-collapse bg-white"><tbody>{object.rows.map((row) => <tr key={row.id}>{row.cells.map((cell) => <td key={cell.id} rowSpan={cell.rowSpan} colSpan={cell.colSpan} className="overflow-hidden border border-slate-400 align-middle"><RichTextRuns runs={cell.runs} slideSize={slideSize} renderScale={renderScale} /></td>)}</tr>)}</tbody></table>;
+  if (object.kind === "chart") return <PresentationChartVisual object={object} slideSize={slideSize} renderScale={renderScale} />;
+  if (object.kind === "image") return <OfficeResourceImage artifactId={artifactId} resourceId={object.resourceId} alt={object.decorative ? "" : object.altText} fallback={object.altText || t.image} />;
+  return <div data-presentation-object-visual="video" className="relative h-full w-full bg-slate-900"><OfficeResourceImage artifactId={artifactId} resourceId={object.posterResourceId} alt={object.altText} fallback={t.video} /><span aria-hidden className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 border-y-[0.6rem] border-l-[1rem] border-y-transparent border-l-white/90" /></div>;
 }
 
 export function PresentationGeometryToolbar({

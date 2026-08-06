@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { createTelegramAdapter, parseTopicChannelId, type TelegramAdapterConfig } from '../telegram/adapter.js'
-import { createTelegramApi, isTelegramThreadNotFoundError, TelegramApiError } from '../telegram/api.js'
+import { createTelegramApi, isTelegramThreadNotFoundError, TELEGRAM_BOT_COMMANDS, TelegramApiError } from '../telegram/api.js'
 import { chunkText } from '../chunking.js'
 import { createDedupBuffer } from '../dedup.js'
 import { createTelegramWebhookHandler, verifyTelegramWebhook } from '../telegram/webhook.js'
@@ -285,6 +285,107 @@ describe('[COMP:channels/telegram] createTelegramAdapter', () => {
     expect(msg!.text).toBe('what time is it?')
     expect(msg!.isGroupChat).toBe(true)
     expect(msg!.isMentioned).toBe(true)
+  })
+
+  it('accepts /ask as an explicit group invocation', () => {
+    const msg = adapter.parseIncoming({
+      update_id: 31,
+      message: {
+        message_id: 103,
+        from: { id: 42, first_name: 'Alice' },
+        chat: { id: -100, type: 'supergroup' },
+        date: 1700000000,
+        text: '/ask what time is it?',
+        entities: [{ type: 'bot_command', offset: 0, length: 4 }],
+      },
+    })
+    expect(msg).toMatchObject({ text: 'what time is it?', isMentioned: true })
+  })
+
+  it('accepts /ask addressed to this bot and strips the full command', () => {
+    const msg = adapter.parseIncoming({
+      update_id: 32,
+      message: {
+        message_id: 104,
+        from: { id: 42, first_name: 'Alice' },
+        chat: { id: -100, type: 'supergroup' },
+        date: 1700000000,
+        text: '/ask@TestBot what time is it?',
+        entities: [{ type: 'bot_command', offset: 0, length: 12 }],
+      },
+    })
+    expect(msg).toMatchObject({ text: 'what time is it?', isMentioned: true })
+  })
+
+  it('rejects /ask addressed to another bot even when mention filtering is off', () => {
+    const openAdapter = createTelegramAdapter({
+      token: 'test-token',
+      botUsername: 'testbot',
+      config: { requireMention: false },
+    })
+    const msg = openAdapter.parseIncoming({
+      update_id: 33,
+      message: {
+        message_id: 105,
+        from: { id: 42, first_name: 'Alice' },
+        chat: { id: -100, type: 'supergroup' },
+        date: 1700000000,
+        text: '/ask@otherbot what time is it?',
+        entities: [{ type: 'bot_command', offset: 0, length: 13 }],
+      },
+    })
+    expect(msg).toBeNull()
+  })
+
+  it('does not trust slash text without Telegram bot_command metadata', () => {
+    const msg = adapter.parseIncoming({
+      update_id: 34,
+      message: {
+        message_id: 106,
+        from: { id: 42, first_name: 'Alice' },
+        chat: { id: -100, type: 'supergroup' },
+        date: 1700000000,
+        text: '/ask what time is it?',
+      },
+    })
+    expect(msg).toBeNull()
+  })
+
+  it('accepts /ask in a media caption through caption_entities', () => {
+    const msg = adapter.parseIncoming({
+      update_id: 35,
+      message: {
+        message_id: 107,
+        from: { id: 42, first_name: 'Alice' },
+        chat: { id: -100, type: 'supergroup' },
+        date: 1700000000,
+        caption: '/ask@TestBot inspect this',
+        caption_entities: [{ type: 'bot_command', offset: 0, length: 12 }],
+        photo: [{ file_id: 'photo-id' }],
+      },
+    })
+    expect(msg).toMatchObject({ text: 'inspect this', mediaUrl: 'photo-id', isMentioned: true })
+  })
+
+  it('rejects a caption command addressed to another bot when filtering is off', () => {
+    const openAdapter = createTelegramAdapter({
+      token: 'test-token',
+      botUsername: 'testbot',
+      config: { requireMention: false },
+    })
+    const msg = openAdapter.parseIncoming({
+      update_id: 36,
+      message: {
+        message_id: 108,
+        from: { id: 42, first_name: 'Alice' },
+        chat: { id: -100, type: 'supergroup' },
+        date: 1700000000,
+        caption: '/ask@otherbot inspect this',
+        caption_entities: [{ type: 'bot_command', offset: 0, length: 13 }],
+        photo: [{ file_id: 'photo-id' }],
+      },
+    })
+    expect(msg).toBeNull()
   })
 
   it('parses photo messages', () => {
@@ -811,6 +912,42 @@ describe('[COMP:channels/telegram] api 429 retry', () => {
       const api = createTelegramApi({ token: 'test-token' })
       await expect(api.sendChatAction('42', 'typing')).rejects.toThrow(/Too Many Requests/)
       expect(calls).toBe(1)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+})
+
+describe('[COMP:channels/telegram] api command registration', () => {
+  it('merges /ask into the existing command menu', async () => {
+    let captured: Record<string, unknown> = {}
+    const mock = vi.fn(async (url: string, init?: { body?: string }) => {
+      if (url.endsWith('/getMyCommands')) {
+        return {
+          ok: true,
+          json: async () => ({
+            ok: true,
+            result: [
+              { command: 'start', description: 'Start the bot' },
+              { command: 'ask', description: 'Old description' },
+            ],
+          }),
+        } as unknown as Response
+      }
+      expect(url.endsWith('/setMyCommands')).toBe(true)
+      captured = init?.body ? (JSON.parse(init.body) as Record<string, unknown>) : {}
+      return { ok: true, json: async () => ({ ok: true, result: true }) } as unknown as Response
+    })
+    vi.stubGlobal('fetch', mock)
+    try {
+      const api = createTelegramApi({ token: 'test-token' })
+      await api.upsertMyCommands(TELEGRAM_BOT_COMMANDS)
+      expect(captured).toEqual({
+        commands: [
+          { command: 'start', description: 'Start the bot' },
+          { command: 'ask', description: 'Ask Brian anything' },
+        ],
+      })
     } finally {
       vi.unstubAllGlobals()
     }
@@ -1349,15 +1486,15 @@ describe('[COMP:channels/telegram] requireMention overrides', () => {
   })
 })
 
-describe('[COMP:channels/telegram] replies are not an addressing trigger', () => {
+describe('[COMP:channels/telegram] replies address only the owning bot', () => {
   // The Claw Center rotating-replies incident: six BYO bots (one per forum
   // topic) all receive every group message; reply-based triggering let every
-  // bot answer a reply to any bot's message. Replying is now NEVER a trigger —
-  // only the requireMention rule (mention, or a per-topic override) decides.
+  // bot answer a reply to any bot's message. Exact identity matching lets the
+  // owning bot answer while keeping every co-resident bot out.
   const BOT_ID = 7654321
 
   function buildReplyMessage(params: {
-    repliedFrom: { id: number; is_bot?: boolean }
+    repliedFrom: { id: number; is_bot?: boolean; username?: string }
     mention?: boolean
   }): Record<string, unknown> {
     const text = params.mention ? '@testbot follow-up question' : 'follow-up question'
@@ -1389,15 +1526,37 @@ describe('[COMP:channels/telegram] replies are not an addressing trigger', () =>
     return { seen, adapter }
   }
 
-  it('drops a reply to the bot\'s OWN message under requireMention=true (replying never triggers)', () => {
+  it('delivers a reply to the bot\'s own message under requireMention=true', () => {
     const { seen, adapter } = collect({ requireMention: true })
     adapter.handleWebhook(buildReplyMessage({ repliedFrom: { id: BOT_ID, is_bot: true } }))
-    expect(seen).toEqual([])
+    expect(seen).toEqual(['follow-up question'])
   })
 
   it('drops a reply to ANOTHER bot\'s message under requireMention=true', () => {
     const { seen, adapter } = collect({ requireMention: true })
     adapter.handleWebhook(buildReplyMessage({ repliedFrom: { id: 999999, is_bot: true } }))
+    expect(seen).toEqual([])
+  })
+
+  it('matches the replied-to bot username when the token has no parseable ID', () => {
+    const seen: string[] = []
+    const adapter = createTelegramAdapter({
+      token: 'opaque-token',
+      botUsername: 'testbot',
+      config: { requireMention: true },
+      onMessage: (m) => { seen.push(m.text ?? '') },
+    })
+    adapter.handleWebhook(buildReplyMessage({
+      repliedFrom: { id: BOT_ID, is_bot: true, username: 'TestBot' },
+    }))
+    expect(seen).toEqual(['follow-up question'])
+  })
+
+  it('does not trust a matching username when the token identifies another bot ID', () => {
+    const { seen, adapter } = collect({ requireMention: true })
+    adapter.handleWebhook(buildReplyMessage({
+      repliedFrom: { id: 999999, is_bot: true, username: 'testbot' },
+    }))
     expect(seen).toEqual([])
   })
 

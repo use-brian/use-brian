@@ -14,7 +14,11 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { groupConnectors } from "../connector-groups";
+import {
+  curateAvailableConnectors,
+  FEATURED_AVAILABLE_CONNECTOR_IDS,
+  groupConnectors,
+} from "../connector-groups";
 
 const rows = {
   exposedGithub: { connectorInstanceId: "inst-gh", connected: true, name: "GitHub" },
@@ -131,5 +135,50 @@ describe("[COMP:app-web/connector-groups] groupConnectors", () => {
     });
     expect(grouped.builtin).toEqual([]);
     expect(grouped.available).toEqual([filesPlaceholder]);
+  });
+});
+
+describe("[COMP:app-web/connector-groups] curateAvailableConnectors", () => {
+  it("shows only the four featured providers in product order", () => {
+    const available = [
+      { id: "notion", connected: false, name: "Notion" },
+      { id: "gdrive", connected: false, name: "Google Drive" },
+      { id: "github", connected: false, name: "GitHub" },
+      { id: "gmail", connected: false, name: "Gmail" },
+      { id: "gcal", connected: false, name: "Google Calendar" },
+      { id: "imap", connected: false, name: "Company Email" },
+    ];
+
+    const curated = curateAvailableConnectors(available);
+
+    expect(curated.featured.map((connector) => connector.id)).toEqual(
+      FEATURED_AVAILABLE_CONNECTOR_IDS,
+    );
+    expect(curated.hidden.map((connector) => connector.id)).toEqual([
+      "notion",
+      "gmail",
+    ]);
+    expect(available.map((connector) => connector.id)).toEqual([
+      "notion",
+      "gdrive",
+      "github",
+      "gmail",
+      "gcal",
+      "imap",
+    ]);
+  });
+
+  it("does not feature a custom connector that collides with an official slug", () => {
+    const customCalendar = {
+      id: "gcal",
+      connected: false,
+      custom: true,
+      name: "My calendar MCP",
+    };
+
+    expect(curateAvailableConnectors([customCalendar])).toEqual({
+      featured: [],
+      hidden: [customCalendar],
+    });
   });
 });

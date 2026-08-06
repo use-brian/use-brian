@@ -3,8 +3,14 @@
 import {
   exportOfficeDocument,
   exportOfficePresentation,
+  exportOfficeSpreadsheet,
+  exportOfficeSpreadsheetPdf,
+  preflightSpreadsheetPdf,
   reparseOfficeDocument,
   reparseOfficePresentation,
+  reparseOfficeSpreadsheet,
+  type SpreadsheetPdfReceipt,
+  type SpreadsheetPdfRequest,
   type OfficeResourceResolver,
 } from '@use-brian/core'
 import {
@@ -31,6 +37,7 @@ export type OfficeReleaseReceipt = {
   acknowledgedCodes: string[]
   semanticHash?: string
   layoutSerialization?: string
+  spreadsheetPdf?: SpreadsheetPdfReceipt
 }
 
 const RANK = { public: 0, internal: 1, confidential: 2 } as const
@@ -48,6 +55,8 @@ export function reviewOfficeRelease(params: {
   claims: readonly OfficeReleaseClaim[]
   media: readonly OfficeReleaseMedia[]
   acknowledgement?: OfficeReleaseAcknowledgement
+  format?: 'native' | 'pdf'
+  spreadsheetPdf?: SpreadsheetPdfRequest
 }): OfficeReleaseReceipt {
   const blocks: OfficeReleaseIssue[] = []
   const warnings: OfficeReleaseIssue[] = []
@@ -58,6 +67,12 @@ export function reviewOfficeRelease(params: {
   if (RANK[params.destination.sensitivity] < RANK[params.artifactSensitivity]) blocks.push({ code: 'access.derivative_required', message: 'A separately reviewed derivative is required for this broader destination.' })
   const preflight = preflightOfficeCandidate(params.snapshot)
   for (const diagnostic of preflight.diagnostics.filter((item) => item.severity === 'error')) blocks.push({ code: `capability.${diagnostic.code}`, message: diagnostic.message, subjectId: diagnostic.path })
+  const spreadsheetPdf = params.snapshot.family === 'spreadsheet' && params.format === 'pdf' && params.spreadsheetPdf
+    ? preflightSpreadsheetPdf(params.snapshot, params.spreadsheetPdf).receipt
+    : undefined
+  if (params.format === 'pdf' && params.snapshot.family !== 'spreadsheet') blocks.push({ code: 'format.pdf_spreadsheet_only', message: 'PDF release is available for spreadsheets only.' })
+  if (params.snapshot.family === 'spreadsheet' && params.format === 'pdf' && !params.spreadsheetPdf) blocks.push({ code: 'format.pdf_request_required', message: 'Spreadsheet PDF release requires an explicit worksheet and print area.' })
+  for (const issue of spreadsheetPdf?.issues ?? []) (issue.severity === 'error' ? blocks : warnings).push({ code: `spreadsheet.${issue.code}`, message: issue.message, subjectId: issue.address })
   for (const claim of params.claims) {
     if (claim.status === 'superseded' || claim.status === 'resolved') continue
     if (claim.classification === 'unsupported_conflicted' || claim.confidence < 0.7 || claim.severity === 'high') warnings.push({ code: `claim.${claim.id}.${claim.reasonCode}`, message: 'A weak, stale, unsupported, or conflicted claim needs review.', subjectId: claim.id })
@@ -79,25 +94,38 @@ export function reviewOfficeRelease(params: {
     blocks,
     warnings,
     acknowledgedCodes,
+    spreadsheetPdf,
   }
 }
 
-export async function prepareOfficeRelease(params: Parameters<typeof reviewOfficeRelease>[0] & { resolveResource?: OfficeResourceResolver }): Promise<{ receipt: OfficeReleaseReceipt; bytes?: Uint8Array; mime?: string; extension?: 'docx' | 'pptx' }> {
+export async function prepareOfficeRelease(params: Parameters<typeof reviewOfficeRelease>[0] & { resolveResource?: OfficeResourceResolver }): Promise<{ receipt: OfficeReleaseReceipt; bytes?: Uint8Array; mime?: string; extension?: 'docx' | 'pptx' | 'xlsx' | 'pdf' }> {
   const receipt = reviewOfficeRelease(params)
   if (receipt.status !== 'ready') return { receipt }
   const resolveResource = params.resolveResource ?? (async () => null)
   try {
+    if (params.snapshot.family === 'spreadsheet' && params.format === 'pdf' && params.spreadsheetPdf) {
+      const exportedPdf = await exportOfficeSpreadsheetPdf(params.snapshot, params.spreadsheetPdf, resolveResource)
+      const spreadsheetPdf = exportedPdf.receipt
+      if (!exportedPdf.bytes || spreadsheetPdf.issues.some((issue) => issue.severity === 'error')) {
+        return { receipt: { ...receipt, status: 'blocked', spreadsheetPdf, blocks: [...receipt.blocks, ...spreadsheetPdf.issues.filter((issue) => issue.severity === 'error').map((issue) => ({ code: `spreadsheet.${issue.code}`, message: issue.message, subjectId: issue.address }))] } }
+      }
+      return { receipt: { ...receipt, spreadsheetPdf }, bytes: exportedPdf.bytes, mime: exportedPdf.mime, extension: 'pdf' }
+    }
     const exported = params.snapshot.family === 'document'
       ? await exportOfficeDocument(params.snapshot, resolveResource)
-      : await exportOfficePresentation(params.snapshot, resolveResource)
+      : params.snapshot.family === 'presentation'
+        ? await exportOfficePresentation(params.snapshot, resolveResource)
+        : await exportOfficeSpreadsheet(params.snapshot, resolveResource)
     const reopened = params.snapshot.family === 'document'
       ? await reparseOfficeDocument(exported.bytes)
-      : await reparseOfficePresentation(exported.bytes)
+      : params.snapshot.family === 'presentation'
+        ? await reparseOfficePresentation(exported.bytes)
+        : await reparseOfficeSpreadsheet(exported.bytes)
     return {
       receipt: { ...receipt, semanticHash: reopened.semanticHash, layoutSerialization: reopened.layoutSerialization },
       bytes: exported.bytes,
-      mime: params.snapshot.family === 'document' ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' : 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-      extension: params.snapshot.family === 'document' ? 'docx' : 'pptx',
+      mime: params.snapshot.family === 'document' ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' : params.snapshot.family === 'presentation' ? 'application/vnd.openxmlformats-officedocument.presentationml.presentation' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      extension: params.snapshot.family === 'document' ? 'docx' : params.snapshot.family === 'presentation' ? 'pptx' : 'xlsx',
     }
   } catch (cause) {
     return { receipt: { ...receipt, status: 'blocked', blocks: [...receipt.blocks, { code: 'export.reparse_failed', message: cause instanceof Error ? cause.message : 'Export or reparse validation failed.' }] } }
@@ -112,6 +140,14 @@ export function deriveOfficeSnapshot(params: { source: OfficeArtifactSnapshot; a
       artifactId: params.artifactId,
       title: params.title,
       sections: selected ? params.source.sections.map((section) => ({ ...section, nodes: section.nodes.filter((node) => selected.has(node.id)) })).filter((section) => section.nodes.length > 0) : params.source.sections,
+    }
+  }
+  if (params.source.family === 'spreadsheet') {
+    return {
+      ...params.source,
+      artifactId: params.artifactId,
+      title: params.title,
+      worksheets: selected ? params.source.worksheets.map((sheet) => ({ ...sheet, cells: sheet.cells.filter((cell) => selected.has(cell.id)) })).filter((sheet) => sheet.cells.length > 0) : params.source.worksheets,
     }
   }
   return {

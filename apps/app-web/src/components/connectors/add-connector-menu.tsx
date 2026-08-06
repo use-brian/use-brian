@@ -4,10 +4,10 @@
  * AddConnectorMenu — the single "Add connector" entry point for the unified
  * Studio -> Connectors list (app-web).
  *
- * Ported verbatim from `apps/web/src/components/connectors/add-connector-menu.tsx`
- * (app consolidation §9 #5). No app-local imports, so it copies cleanly.
+ * Originally ported from `apps/web/src/components/connectors/add-connector-menu.tsx`
+ * during app consolidation §9 #5.
  *
- * A primary button that opens a small menu with the two ways to add a
+ * A compact top-bar action that opens a small menu with the two ways to add a
  * connector: pick one from the directory, or point at a custom MCP server.
  *
  * See docs/architecture/integrations/mcp.md → "Personal vs workspace
@@ -17,6 +17,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
+import { Plus } from "lucide-react";
 
 export function AddConnectorMenu({
   label,
@@ -62,8 +63,9 @@ export function AddConnectorMenu({
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
         aria-haspopup="menu"
-        className="text-sm font-medium bg-action text-action-foreground px-4 py-2 rounded-lg hover:bg-action/90 transition-colors"
+        className="inline-flex h-7 items-center gap-1 rounded-md border border-border px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
       >
+        <Plus className="size-3.5" aria-hidden />
         {label}
       </button>
       {open && (
