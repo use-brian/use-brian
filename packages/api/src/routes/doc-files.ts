@@ -33,7 +33,7 @@ import type {
 import type { GcsFilesClient } from '../files/gcs-client.js'
 import type { FilesClientResolver } from '../files/files-api.js'
 import { buildStorageKey } from '../files/gcs-client.js'
-import { isAllowedMime } from './files.js'
+import { isAllowedMime, resolveUploadMime } from './files.js'
 
 const MAX_FILE_SIZE = 20 * 1024 * 1024 // 20 MB
 const MAX_FILES_PER_REQUEST = 10
@@ -153,8 +153,11 @@ export function docFilesRoutes(deps: DocFilesDeps): Router {
       // re-decode latin1→UTF-8 to recover UTF-8 names (no-op for ASCII).
       const fileName = Buffer.from(file.originalname, 'latin1').toString('utf8')
 
-      if (!isAllowedMime(file.mimetype)) {
-        results.push({ error: `Unsupported file type: ${file.mimetype}`, name: fileName })
+      // Kept in lockstep with the /api/files gate: judge on the resolved
+      // mime, not the raw header (see resolveUploadMime in routes/files.ts).
+      const mime = resolveUploadMime(file.mimetype, fileName)
+      if (!isAllowedMime(mime)) {
+        results.push({ error: `Unsupported file type: ${mime}`, name: fileName })
         continue
       }
 
@@ -164,7 +167,7 @@ export function docFilesRoutes(deps: DocFilesDeps): Router {
         const result = await filesApi.writeBytes(ctx, {
           path,
           bytes: file.buffer,
-          mime: file.mimetype,
+          mime,
           title: fileName,
         })
 

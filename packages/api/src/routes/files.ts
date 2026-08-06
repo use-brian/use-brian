@@ -59,6 +59,9 @@ export const ALLOWED_MIME_PREFIXES = [
   'audio/',
   'application/pdf',
   'application/json',
+  // XHTML takes the same whole-body Markdown conversion as text/html
+  // (core `files/html.ts`); the parser matched it before the gate did.
+  'application/xhtml+xml',
   'application/vnd.openxmlformats-officedocument',
   'application/msword',
   'application/vnd.ms-excel',
@@ -67,6 +70,62 @@ export const ALLOWED_MIME_PREFIXES = [
 
 export function isAllowedMime(mime: string): boolean {
   return ALLOWED_MIME_PREFIXES.some((prefix) => mime.startsWith(prefix))
+}
+
+/** What a sender reports when it has nothing better than "some bytes". */
+const UNINFORMATIVE_MIMES = new Set(['', 'application/octet-stream', 'binary/octet-stream'])
+
+/**
+ * Extension → mime, restricted to types the allowlist **already** accepts.
+ *
+ * Deliberately not a general mime table: this can only rescue a file that
+ * would have been accepted had the sender labelled it properly, so it cannot
+ * widen the gate. An extension absent from here keeps whatever mime it
+ * arrived with and is judged on that — a `.zip` is still refused.
+ */
+const UPLOAD_EXTENSION_MIME: Record<string, string> = {
+  txt: 'text/plain',
+  log: 'text/plain',
+  md: 'text/markdown',
+  markdown: 'text/markdown',
+  csv: 'text/csv',
+  tsv: 'text/tab-separated-values',
+  json: 'application/json',
+  jsonl: 'application/json',
+  ndjson: 'application/json',
+  yaml: 'text/yaml',
+  yml: 'text/yaml',
+  xml: 'text/xml',
+  html: 'text/html',
+  htm: 'text/html',
+  xhtml: 'application/xhtml+xml',
+  vtt: 'text/vtt',
+  srt: 'text/plain',
+  ics: 'text/calendar',
+  pdf: 'application/pdf',
+  doc: 'application/msword',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xls: 'application/vnd.ms-excel',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  ppt: 'application/vnd.ms-powerpoint',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+}
+
+/**
+ * Resolve the mime an upload should be judged and stored under.
+ *
+ * A browser fills `File.type` from an OS registry, so the SAME `.md` or
+ * `.html` file is `text/markdown` on one machine and `application/octet-stream`
+ * on another — and the second one was refused with "Unsupported file type:
+ * application/octet-stream", which reads as "we don't support Markdown". The
+ * gate should decide on what the file is, not on how well the sender's
+ * machine is configured. A mime that says something is always believed.
+ */
+export function resolveUploadMime(mime: string, fileName: string): string {
+  if (!UNINFORMATIVE_MIMES.has((mime ?? '').trim().toLowerCase())) return mime
+  const dot = fileName.lastIndexOf('.')
+  if (dot <= 0 || dot === fileName.length - 1) return mime
+  return UPLOAD_EXTENSION_MIME[fileName.slice(dot + 1).toLowerCase()] ?? mime
 }
 
 /**
@@ -171,10 +230,13 @@ export function fileRoutes(
         // "3.46.35 PM.png") arrives mojibaked ("3.46.35â€¯PM.png"). Re-decode
         // latin1→UTF-8 to recover it; a no-op for pure-ASCII names.
         const fileName = Buffer.from(file.originalname, 'latin1').toString('utf8')
+        // Judge and store under the resolved mime, not the raw header: an
+        // unregistered extension arrives as application/octet-stream.
+        const mime = resolveUploadMime(file.mimetype, fileName)
 
-        if (!isAllowedMime(file.mimetype)) {
+        if (!isAllowedMime(mime)) {
           results.push({
-            error: `Unsupported file type: ${file.mimetype}`,
+            error: `Unsupported file type: ${mime}`,
             fileName,
           })
           continue
@@ -183,7 +245,7 @@ export function fileRoutes(
         try {
           const { text, summary } = await parseFileContent(
             file.buffer,
-            file.mimetype,
+            mime,
             fileName,
           )
 
@@ -192,17 +254,17 @@ export function fileRoutes(
           // decoded and transcribed in `chat.ts` before Gemini sees it).
           // Text-extractable files store the parsed text.
           const isInlineMedia =
-            file.mimetype.startsWith('image/') ||
-            file.mimetype.startsWith('audio/') ||
-            file.mimetype === 'application/pdf'
+            mime.startsWith('image/') ||
+            mime.startsWith('audio/') ||
+            mime === 'application/pdf'
           const content = isInlineMedia
-            ? `data:${file.mimetype};base64,${file.buffer.toString('base64')}`
+            ? `data:${mime};base64,${file.buffer.toString('base64')}`
             : text
 
           const cached = await fileStore.cache({
             sessionId: session.id,
             fileName,
-            mimeType: file.mimetype,
+            mimeType: mime,
             content,
             summary,
             sizeBytes: file.size,
@@ -217,7 +279,7 @@ export function fileRoutes(
           // store-only (chunking a PDF needs a model distill — explicit-ingest
           // territory). Never fails the upload: null → cache-only fallback.
           let artifact: { fileId: string; path: string; indexing: string } | null = null
-          const isPdf = file.mimetype === 'application/pdf'
+          const isPdf = mime === 'application/pdf'
           const promotable =
             artifactPromoter &&
             fileWorkspaceId &&
@@ -225,7 +287,7 @@ export function fileRoutes(
           if (promotable) {
             const promoted = await artifactPromoter!({
               fileName,
-              mime: file.mimetype,
+              mime,
               bytes: file.buffer,
               parsedText: isPdf ? '' : text,
               summary,
@@ -341,14 +403,18 @@ export function fileRoutes(
     for (const file of files) {
       // Recover a UTF-8 filename mojibaked by multer's latin1 decode (see /upload).
       const fileName = Buffer.from(file.originalname, 'latin1').toString('utf8')
-      if (!isAllowedMime(file.mimetype)) {
-        results.push({ fileName, ok: false, error: `Unsupported file type: ${file.mimetype}` })
+      // Same resolution as /upload: an unregistered extension arrives as
+      // application/octet-stream and would otherwise be refused as if the
+      // format were unsupported.
+      const mime = resolveUploadMime(file.mimetype, fileName)
+      if (!isAllowedMime(mime)) {
+        results.push({ fileName, ok: false, error: `Unsupported file type: ${mime}` })
         continue
       }
       try {
         const r = await ingestor({
           fileName,
-          mime: file.mimetype,
+          mime,
           bytes: file.buffer,
           process: processFile,
         }, ctx)
@@ -361,6 +427,12 @@ export function fileRoutes(
           distilled: r.distilled,
           decomposed: r.decomposed,
           counts: r.counts,
+          // `ok: true` only means the bytes are durable. These three say what
+          // the brain actually got, so a partial read cannot present as a
+          // complete one. See files/ingest-port.ts.
+          segments: r.segments,
+          truncated: r.truncated,
+          skipped: r.skipped,
         })
       } catch (err) {
         const message =

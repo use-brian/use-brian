@@ -40,6 +40,15 @@ export type IngestFileResult = {
   /** Content was decomposed through Pipeline B (false = stored only). */
   decomposed?: boolean;
   counts?: IngestCounts;
+  /** Segments written to the retrieval index. */
+  segments?: number;
+  /**
+   * The segment cap stopped chunking before the file's tail: part of the
+   * document is stored but not searchable. Rendered, never swallowed.
+   */
+  truncated?: boolean;
+  /** Set when the file was stored but deliberately not interpreted. */
+  skipped?: "unsupported_type" | "empty" | "not_requested";
   /** Dedicated, lossless LinkedIn archive queue result (ZIPs bypass Pipeline B). */
   linkedinImport?: {
     runId: string;

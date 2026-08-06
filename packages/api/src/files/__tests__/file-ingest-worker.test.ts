@@ -30,7 +30,7 @@ function baseDeps(over: Partial<FileIngestWorkerDeps> = {}): FileIngestWorkerDep
     markFailed: vi.fn(async () => ({ retrying: false })),
     filesApi: { readBytes: vi.fn(async () => readOk('text/markdown')) },
     parse: vi.fn(async () => ({ text: 'hello world', summary: 's' })),
-    index: vi.fn(async () => ({ segmentsInserted: 1, segmentCount: 1, truncated: false })),
+    index: vi.fn(async () => ({ segmentsInserted: 1, segmentCount: 1, truncated: false, truncatedAtChar: null })),
     setIndexing: vi.fn(async () => {}),
     brainIngest: vi.fn(async () => ({ episodeId: 'ep-1' }) as never),
     stampSourceEpisode: vi.fn(async () => {}),
@@ -114,6 +114,27 @@ describe('[COMP:files/file-ingest-worker] file-ingest drain loop', () => {
     expect(deps.markDone).toHaveBeenCalledWith('job-1')
   })
 
+  it('a parser placeholder is skipped, never chunked or decomposed', async () => {
+    const deps = baseDeps({
+      claim: claimOnce(job()),
+      filesApi: { readBytes: vi.fn(async () => readOk('application/msword', 'old.doc')) },
+      parse: vi.fn(async () => ({
+        text: '[Document: old.doc. The legacy .doc format is not supported; re-save as .docx to extract its text.]',
+        summary: 'Document: old.doc',
+        placeholder: true as const,
+      })),
+    })
+    const w = createFileIngestWorker(deps)
+    await w.tick()
+
+    // The note is ours, not the document's: indexing it would answer future
+    // searches with our error string, decomposing it would pay a model call.
+    expect(deps.index).not.toHaveBeenCalled()
+    expect(deps.brainIngest).not.toHaveBeenCalled()
+    expect(deps.setIndexing).toHaveBeenCalledWith('file-1', expect.objectContaining({ status: 'skipped', reason: 'unsupported_type' }))
+    expect(deps.markDone).toHaveBeenCalledWith('job-1')
+  })
+
   it('a processing error marks the job failed AND stamps metadata.indexing failed', async () => {
     const deps = baseDeps({
       claim: claimOnce(job()),
@@ -133,7 +154,7 @@ describe('[COMP:files/file-ingest-worker] file-ingest drain loop', () => {
     const gate = new Promise<void>((r) => { release = r })
     const deps = baseDeps({
       claim: vi.fn<() => Promise<FileIngestJob | null>>().mockResolvedValueOnce(job()).mockResolvedValue(null),
-      index: vi.fn(async () => { await gate; return { segmentsInserted: 1, segmentCount: 1, truncated: false } }),
+      index: vi.fn(async () => { await gate; return { segmentsInserted: 1, segmentCount: 1, truncated: false, truncatedAtChar: null } }),
     })
     const w = createFileIngestWorker(deps)
 

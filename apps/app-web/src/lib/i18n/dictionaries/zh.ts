@@ -646,6 +646,8 @@ export const zh: Dictionary = {
       ingestStored: "已保存",
       ingestAdded: "項已加入大腦",
       ingestFailed: "失敗",
+      ingestNotReadable: "已保存，內容無法讀取",
+      ingestTruncated: "部分未建立索引",
       ingestRemove: "移除",
       ingestClear: "清除",
       linkedinArchiveAlone: "請單獨加入 LinkedIn ZIP，以便核對每一列資料。",

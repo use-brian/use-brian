@@ -18,6 +18,9 @@
 
 import type { FetchProvider, FetchResult } from './fetch-stack.js'
 import { isXHost } from './fetch-xai.js'
+// The nesting guard is shared with the upload path's HTML → Markdown
+// converter; both hand untrusted markup to a DOM. One implementation.
+import { exceedsEstimatedHtmlNestingDepth } from '../../files/html.js'
 
 const READABILITY_MAX_HTML_CHARS = 1_000_000
 const READABILITY_MAX_NESTING_DEPTH = 3_000
@@ -123,72 +126,6 @@ export const readabilityProvider: FetchProvider = {
       return null
     }
   },
-}
-
-// ── HTML nesting depth guard ──────────────────────────────────────
-
-/**
- * Cheap heuristic to skip Readability+DOM parsing on pathological HTML
- * (deep nesting causes stack/memory blowups). Not an HTML parser — tuned
- * to catch attacker-controlled "<div><div>..." cases.
- */
-function exceedsEstimatedHtmlNestingDepth(html: string, maxDepth: number): boolean {
-  const voidTags = new Set([
-    'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
-    'link', 'meta', 'param', 'source', 'track', 'wbr',
-  ])
-
-  let depth = 0
-  const len = html.length
-  for (let i = 0; i < len; i++) {
-    if (html.charCodeAt(i) !== 60) continue // '<'
-    const next = html.charCodeAt(i + 1)
-    if (next === 33 || next === 63) continue // <! ...> or <? ...>
-
-    let j = i + 1
-    let closing = false
-    if (html.charCodeAt(j) === 47) {
-      closing = true
-      j += 1
-    }
-    while (j < len && html.charCodeAt(j) <= 32) j += 1
-
-    const nameStart = j
-    while (j < len) {
-      const c = html.charCodeAt(j)
-      const isNameChar =
-        (c >= 65 && c <= 90) ||
-        (c >= 97 && c <= 122) ||
-        (c >= 48 && c <= 57) ||
-        c === 58 ||
-        c === 45
-      if (!isNameChar) break
-      j += 1
-    }
-    const tagName = html.slice(nameStart, j).toLowerCase()
-    if (!tagName) continue
-
-    if (closing) {
-      depth = Math.max(0, depth - 1)
-      continue
-    }
-    if (voidTags.has(tagName)) continue
-
-    // Self-closing detection: scan a short window for "/>".
-    let selfClosing = false
-    for (let k = j; k < len && k < j + 200; k++) {
-      const c = html.charCodeAt(k)
-      if (c === 62) {
-        if (html.charCodeAt(k - 1) === 47) selfClosing = true
-        break
-      }
-    }
-    if (selfClosing) continue
-
-    depth += 1
-    if (depth > maxDepth) return true
-  }
-  return false
 }
 
 function normalizeWhitespace(text: string): string {

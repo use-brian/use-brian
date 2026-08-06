@@ -50,7 +50,7 @@ export type FileIngestWorkerDeps = {
   /** The workspace FilesApi (BYO-aware); only `readBytes` is used. */
   filesApi: FileIngestReadPort
   /** Parse bytes -> canonical text. Default: `parseFileContent` (@use-brian/core). */
-  parse?: (buffer: Buffer, mime: string, fileName: string) => Promise<{ text: string; summary: string }>
+  parse?: typeof parseFileContent
   /** Chunk parsed text into file_segments (idempotent). Default: `indexFileArtifact`. */
   index?: (input: {
     fileId: string
@@ -152,6 +152,18 @@ export function createFileIngestWorker(deps: FileIngestWorkerDeps): FileIngestWo
       text = await deps.distill({ buffer: bytes, mime })
     } else {
       const parsed = await parse(bytes, mime, fileName)
+      // A parser placeholder is our own note about why extraction did not
+      // happen, not content. Chunking it would answer future searches with
+      // our error string; decomposing it would pay a model call to summarise
+      // it. Same rule as the synchronous ingestor.
+      if (parsed.placeholder) {
+        await setIndexing(job.fileId, {
+          status: 'skipped',
+          reason: 'unsupported_type',
+          indexedAt: new Date().toISOString(),
+        })
+        return
+      }
       text = parsed.text
     }
 

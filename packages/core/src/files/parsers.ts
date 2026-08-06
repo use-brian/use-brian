@@ -7,6 +7,7 @@ import TurndownService from 'turndown'
 import { gfm } from 'turndown-plugin-gfm'
 import { parseXlsxToMarkdown } from './xlsx.js'
 import { parsePptxToMarkdown } from './pptx.js'
+import { htmlToMarkdown } from './html.js'
 import { estimateStringTokens } from '../compaction/compact.js'
 
 const DOCX_MIME =
@@ -38,6 +39,48 @@ export async function parseDocxToMarkdown(buffer: Buffer): Promise<string> {
   return docxToMarkdown.turndown(html).trim()
 }
 
+/** Lower-cased final extension including the dot, or `''` when there is none. */
+function extensionOf(fileName: string): string {
+  const dot = fileName.lastIndexOf('.')
+  if (dot <= 0) return ''
+  return fileName.slice(dot).toLowerCase()
+}
+
+const HTML_MIMES = new Set(['text/html', 'application/xhtml+xml', 'application/html'])
+const HTML_EXTS = new Set(['.html', '.htm', '.xhtml'])
+const RTF_MIMES = new Set(['text/rtf', 'application/rtf'])
+
+/**
+ * Match on mime OR extension. A browser reports `text/html` for an `.html`
+ * pick, but a file arriving from a channel adapter, an email part, or an OS
+ * with no registration can carry `application/octet-stream` while still
+ * plainly being a web page.
+ */
+function isHtml(mimeType: string, ext: string): boolean {
+  return HTML_MIMES.has(mimeType.toLowerCase()) || HTML_EXTS.has(ext)
+}
+
+export type ParsedFileContent = {
+  text: string
+  summary: string
+  /**
+   * True when `text` is the parser's OWN note about why extraction did not
+   * happen ("the legacy .xls format is not supported…"), not document content.
+   *
+   * The chat path wants that note inline — the model reads it and tells the
+   * user to re-save the file. The ingest path must not: chunking it writes our
+   * error string into `file_segments` as if it were knowledge, and decomposing
+   * it spends a Pipeline B model call to summarise a sentence we wrote
+   * ourselves. Callers that persist decide; the parser only reports.
+   */
+  placeholder?: true
+}
+
+/** A parse outcome that is a stated reason, not content. */
+function placeholder(text: string, summary: string): ParsedFileContent {
+  return { text, summary, placeholder: true }
+}
+
 /**
  * Parse file content to text based on MIME type.
  * Returns { text, summary } where summary is a short description for inline use.
@@ -46,7 +89,51 @@ export async function parseFileContent(
   buffer: Buffer,
   mimeType: string,
   fileName: string,
-): Promise<{ text: string; summary: string }> {
+): Promise<ParsedFileContent> {
+  const ext = extensionOf(fileName)
+
+  // HTML is checked BEFORE the generic `text/` branch, which would otherwise
+  // swallow `text/html` and hand raw markup — doctype, `<head>`, the entire
+  // stylesheet — to chunking and extraction. See html.ts for why the whole
+  // body is converted rather than Readability-extracted.
+  if (isHtml(mimeType, ext)) {
+    const html = buffer.toString('utf-8')
+    const { markdown, title, mode } = await htmlToMarkdown(html)
+    if (!markdown) {
+      return placeholder(
+        `[Web page: ${fileName}. No extractable text (the document may be script-rendered or image-only).]`,
+        `Web page: ${fileName}`,
+      )
+    }
+    const heading = title && !markdown.startsWith('#') ? `# ${title}\n\n` : ''
+    const note =
+      mode === 'stripped'
+        ? `\n\n[Note: ${fileName} could not be parsed as a document tree, so its markup was removed textually. Structure (headings, lists, tables) is not preserved.]`
+        : ''
+    const text = `${heading}${markdown}${note}`
+    return { text, summary: `Web page: ${fileName} (${text.length} chars of Markdown)` }
+  }
+
+  // RTF arrives as `text/rtf`, so the generic `text/` branch used to accept it
+  // and hand the brain a document that is mostly control words
+  // (`{\rtf1\ansi\deff0{\fonttbl…`) — the same failure as raw HTML, in another
+  // costume. A faithful RTF reader is a real parser, not a regex, so this
+  // follows the legacy-binary precedent: state the limit and name the fix.
+  if (RTF_MIMES.has(mimeType.toLowerCase()) || ext === '.rtf') {
+    return placeholder(
+      `[Document: ${fileName}. The .rtf format is not supported; re-save as .docx or PDF to extract its text.]`,
+      `Document: ${fileName}`,
+    )
+  }
+
+  // Checked before the `text/` branch too: a `.csv` almost always arrives as
+  // `text/csv`, which that branch matches first — so the row-count summary
+  // this branch exists to produce was unreachable for the common case.
+  if (ext === '.csv' || mimeType === 'text/csv') {
+    const text = buffer.toString('utf-8')
+    return { text, summary: `CSV: ${fileName} (${text.split('\n').length} rows)` }
+  }
+
   if (mimeType.startsWith('text/') || mimeType === 'application/json') {
     const text = buffer.toString('utf-8')
     return {
@@ -86,20 +173,15 @@ export async function parseFileContent(
     }
   }
 
-  if (fileName.endsWith('.csv')) {
-    const text = buffer.toString('utf-8')
-    return { text, summary: `CSV: ${fileName} (${text.split('\n').length} rows)` }
-  }
-
   if (mimeType === XLSX_MIME || fileName.toLowerCase().endsWith('.xlsx')) {
     // Each worksheet → a Markdown table (computed values, not formulas).
     try {
       const { text, sheets, totalRows } = await parseXlsxToMarkdown(buffer)
       if (!text) {
-        return {
-          text: `[Spreadsheet: ${fileName}. No extractable cells (the workbook may be empty).]`,
-          summary: `Spreadsheet: ${fileName}`,
-        }
+        return placeholder(
+          `[Spreadsheet: ${fileName}. No extractable cells (the workbook may be empty).]`,
+          `Spreadsheet: ${fileName}`,
+        )
       }
       // The row count is load-bearing, not decoration: it is how a reader (and
       // the model) can tell a complete parse from a short one. See issue #273.
@@ -111,19 +193,19 @@ export async function parseFileContent(
       }
     } catch (err) {
       const reason = err instanceof Error ? err.message : 'unknown error'
-      return {
-        text: `[Spreadsheet: ${fileName}. Could not parse as .xlsx (${reason}).]`,
-        summary: `Spreadsheet: ${fileName}`,
-      }
+      return placeholder(
+        `[Spreadsheet: ${fileName}. Could not parse as .xlsx (${reason}).]`,
+        `Spreadsheet: ${fileName}`,
+      )
     }
   }
 
   if (mimeType === 'application/vnd.ms-excel' || fileName.toLowerCase().endsWith('.xls')) {
     // Legacy binary .xls (BIFF) — ExcelJS reads only the XML .xlsx format.
-    return {
-      text: `[Spreadsheet: ${fileName}. The legacy .xls format is not supported; re-save as .xlsx to extract its cells.]`,
-      summary: `Spreadsheet: ${fileName}`,
-    }
+    return placeholder(
+      `[Spreadsheet: ${fileName}. The legacy .xls format is not supported; re-save as .xlsx to extract its cells.]`,
+      `Spreadsheet: ${fileName}`,
+    )
   }
 
   if (mimeType === PPTX_MIME || fileName.toLowerCase().endsWith('.pptx')) {
@@ -132,27 +214,27 @@ export async function parseFileContent(
     try {
       const text = await parsePptxToMarkdown(buffer)
       if (!text) {
-        return {
-          text: `[Presentation: ${fileName}. No extractable text (the slides may be image-only).]`,
-          summary: `Presentation: ${fileName}`,
-        }
+        return placeholder(
+          `[Presentation: ${fileName}. No extractable text (the slides may be image-only).]`,
+          `Presentation: ${fileName}`,
+        )
       }
       return { text, summary: `Presentation: ${fileName} (${text.length} chars)` }
     } catch (err) {
       const reason = err instanceof Error ? err.message : 'unknown error'
-      return {
-        text: `[Presentation: ${fileName}. Could not parse as .pptx (${reason}).]`,
-        summary: `Presentation: ${fileName}`,
-      }
+      return placeholder(
+        `[Presentation: ${fileName}. Could not parse as .pptx (${reason}).]`,
+        `Presentation: ${fileName}`,
+      )
     }
   }
 
   if (mimeType === 'application/vnd.ms-powerpoint' || fileName.toLowerCase().endsWith('.ppt')) {
     // Legacy binary .ppt predates Office Open XML and is not parsed here.
-    return {
-      text: `[Presentation: ${fileName}. The legacy .ppt format is not supported; re-save as .pptx to extract its text.]`,
-      summary: `Presentation: ${fileName}`,
-    }
+    return placeholder(
+      `[Presentation: ${fileName}. The legacy .ppt format is not supported; re-save as .pptx to extract its text.]`,
+      `Presentation: ${fileName}`,
+    )
   }
 
   if (mimeType === DOCX_MIME || fileName.toLowerCase().endsWith('.docx')) {
@@ -164,34 +246,34 @@ export async function parseFileContent(
     try {
       const text = await parseDocxToMarkdown(buffer)
       if (!text) {
-        return {
-          text: `[Document: ${fileName}. No extractable text (the file may be empty or image-only).]`,
-          summary: `Document: ${fileName}`,
-        }
+        return placeholder(
+          `[Document: ${fileName}. No extractable text (the file may be empty or image-only).]`,
+          `Document: ${fileName}`,
+        )
       }
       return { text, summary: `Document: ${fileName} (${text.length} chars)` }
     } catch (err) {
       const reason = err instanceof Error ? err.message : 'unknown error'
-      return {
-        text: `[Document: ${fileName}. Could not parse as .docx (${reason}).]`,
-        summary: `Document: ${fileName}`,
-      }
+      return placeholder(
+        `[Document: ${fileName}. Could not parse as .docx (${reason}).]`,
+        `Document: ${fileName}`,
+      )
     }
   }
 
   if (mimeType === 'application/msword' || fileName.toLowerCase().endsWith('.doc')) {
     // Legacy binary .doc predates Office Open XML; mammoth cannot read it.
     // Honest, actionable placeholder beats a silent failure.
-    return {
-      text: `[Document: ${fileName}. The legacy .doc format is not supported; re-save as .docx to extract its text.]`,
-      summary: `Document: ${fileName}`,
-    }
+    return placeholder(
+      `[Document: ${fileName}. The legacy .doc format is not supported; re-save as .docx to extract its text.]`,
+      `Document: ${fileName}`,
+    )
   }
 
-  return {
-    text: `[File: ${fileName}, type: ${mimeType}. Content type not supported for text extraction.]`,
-    summary: `File: ${fileName} (${mimeType})`,
-  }
+  return placeholder(
+    `[File: ${fileName}, type: ${mimeType}. Content type not supported for text extraction.]`,
+    `File: ${fileName} (${mimeType})`,
+  )
 }
 
 /**

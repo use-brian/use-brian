@@ -739,6 +739,8 @@ export const en = {
       ingestStored: "Stored",
       ingestAdded: "added to brain",
       ingestFailed: "Failed",
+      ingestNotReadable: "Saved, text not readable",
+      ingestTruncated: "part not indexed",
       ingestRemove: "Remove",
       ingestClear: "Clear",
       linkedinArchiveAlone: "Add a LinkedIn ZIP by itself so every row can be reconciled.",

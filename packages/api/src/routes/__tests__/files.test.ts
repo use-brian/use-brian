@@ -31,7 +31,7 @@ vi.mock('@use-brian/core', async () => {
   }
 })
 
-import { fileRoutes } from '../files.js'
+import { fileRoutes, isAllowedMime, resolveUploadMime } from '../files.js'
 import { findOrCreateUser, getDefaultAssistant, findUserById, findAssistantById, getWorkspacePrimaryAssistant } from '../../db/users.js'
 import { findOrCreateSession, findSessionById } from '../../db/sessions.js'
 import { getWorkspaceFileById } from '../../db/workspace-files.js'
@@ -670,5 +670,45 @@ describe('[COMP:api/files-reingest] POST /:fileId/ingest', () => {
 
     expect((await request(app(null)).post('/api/files/f-1/ingest').send({ workspaceId: 'ws-1' })).status).toBe(401)
     expect((await request(app()).post('/api/files/f-1/ingest').send({})).status).toBe(400)
+  })
+})
+
+/**
+ * A browser fills `File.type` from an OS registry, so the same `.md` or
+ * `.html` file is typed on one machine and `application/octet-stream` on
+ * another. The gate used to refuse the second one with "Unsupported file
+ * type: application/octet-stream", which reads as "we don't support Markdown".
+ */
+describe('[COMP:files/ingest] resolveUploadMime', () => {
+  it('believes a mime that says something', () => {
+    expect(resolveUploadMime('text/markdown', 'notes.md')).toBe('text/markdown')
+    expect(resolveUploadMime('image/png', 'shot.png')).toBe('image/png')
+  })
+
+  it('resolves from the extension when the sender said nothing useful', () => {
+    expect(resolveUploadMime('application/octet-stream', 'notes.md')).toBe('text/markdown')
+    expect(resolveUploadMime('', 'report.html')).toBe('text/html')
+    expect(resolveUploadMime('binary/octet-stream', 'plan.HTM')).toBe('text/html')
+    expect(resolveUploadMime('application/octet-stream', 'rows.CSV')).toBe('text/csv')
+    expect(resolveUploadMime('application/octet-stream', 'deck.pptx')).toBe(
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    )
+  })
+
+  it('cannot widen the gate: an unmapped extension keeps its useless mime', () => {
+    expect(resolveUploadMime('application/octet-stream', 'archive.zip')).toBe(
+      'application/octet-stream',
+    )
+    expect(isAllowedMime(resolveUploadMime('application/octet-stream', 'archive.zip'))).toBe(false)
+    expect(resolveUploadMime('application/octet-stream', 'db.sqlite')).toBe(
+      'application/octet-stream',
+    )
+    expect(resolveUploadMime('application/octet-stream', 'noextension')).toBe(
+      'application/octet-stream',
+    )
+  })
+
+  it('accepts XHTML, which the parser handled before the gate did', () => {
+    expect(isAllowedMime('application/xhtml+xml')).toBe(true)
   })
 })

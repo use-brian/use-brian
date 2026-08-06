@@ -24,6 +24,8 @@ export type IndexFileArtifactResult = {
   segmentCount: number
   /** True when MAX_SEGMENTS_PER_FILE stopped chunking before the tail. */
   truncated: boolean
+  /** Offset where the un-chunked tail begins, when `truncated`. */
+  truncatedAtChar: number | null
 }
 
 type ParentRow = {
@@ -94,5 +96,5 @@ export async function indexFileArtifact(input: {
     ...(truncated ? { truncatedAtChar } : {}),
     indexedAt: new Date().toISOString(),
   })
-  return { segmentsInserted, segmentCount: segments.length, truncated }
+  return { segmentsInserted, segmentCount: segments.length, truncated, truncatedAtChar }
 }

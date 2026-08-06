@@ -238,10 +238,28 @@ function StatusLabel({
       <span className="text-emerald-600 dark:text-emerald-400">{t.linkedinImportQueued}</span>
     );
   }
+  // "ok" only means the bytes are durable. A file the parser could not read,
+  // and a file whose tail fell past the segment cap, both used to render as an
+  // unqualified success — so a partial read was indistinguishable from a
+  // complete one. Both now say so.
+  const skipped = item.result?.skipped;
+  if (skipped === "unsupported_type" || skipped === "empty") {
+    return (
+      <span className="text-amber-600 dark:text-amber-400">{t.ingestNotReadable}</span>
+    );
+  }
   const n = totalAdded(item.result?.counts);
-  return n > 0 ? (
-    <span className="text-emerald-600 dark:text-emerald-400">{`${n} ${t.ingestAdded}`}</span>
-  ) : (
-    <span className="text-emerald-600 dark:text-emerald-400">{t.ingestStored}</span>
+  const truncated = item.result?.truncated === true;
+  return (
+    <span
+      className={
+        truncated
+          ? "text-amber-600 dark:text-amber-400"
+          : "text-emerald-600 dark:text-emerald-400"
+      }
+    >
+      {n > 0 ? `${n} ${t.ingestAdded}` : t.ingestStored}
+      {truncated ? ` (${t.ingestTruncated})` : ""}
+    </span>
   );
 }

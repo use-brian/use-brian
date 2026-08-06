@@ -7,6 +7,12 @@
  *      PDF/image distiller,
  *   3. indexes segments and decomposes the text through Pipeline B.
  *
+ * Every outcome that is NOT "stored, indexed and decomposed in full" reports
+ * why: a `skipped` reason when the file was stored but not interpreted, and
+ * `truncated` when the segment cap stopped chunking before the tail. The
+ * result type is the only place a caller can learn either, so a field left off
+ * here is a loss the user never hears about.
+ *
  * [COMP:files/ingest]
  */
 
@@ -82,54 +88,94 @@ export function createFileIngestor(deps: FileIngestorDeps): FileIngestor {
     if (!stored.ok) throw new FileIngestError(stored.error.kind, stored.error)
     const file = stored.value
 
+    /** Shared by every return: the bytes are durable from here on. */
+    const base = {
+      fileName: input.fileName,
+      fileId: file.id,
+      path: file.path,
+      sizeBytes: file.sizeBytes,
+    }
+
     // Upload is not consent to interpret. The Work Bench uses this branch to
     // create a durable pin while keeping parse/distill/index/Pipeline B behind
     // a later, explicit user decision.
     if (input.process === false) {
       return {
-        fileName: input.fileName,
-        fileId: file.id,
-        path: file.path,
-        sizeBytes: file.sizeBytes,
+        ...base,
         distilled: false,
         decomposed: false,
         counts: EMPTY_COUNTS,
+        skipped: 'not_requested',
+      }
+    }
+
+    // Audio and video belong to the recording pipeline (transcription, its own
+    // segments, its own metering). `parseFileContent` returns '' for audio, so
+    // without this branch the result would say `empty` — true, but it reads as
+    // "your file had no content" rather than "this lane does not handle it".
+    // Same vocabulary the async worker uses.
+    if (input.mime.startsWith('audio/') || input.mime.startsWith('video/')) {
+      return {
+        ...base,
+        distilled: false,
+        decomposed: false,
+        counts: EMPTY_COUNTS,
+        skipped: 'media_owned_by_recordings',
       }
     }
 
     let text: string
     let distilled = false
+    let isPlaceholder = false
     if (needsDistill(input.mime)) {
       text = (await deps.distill({ buffer: input.bytes, mime: input.mime, fileName: input.fileName })).trim()
       distilled = true
     } else {
       const parsed = await parse(input.bytes, input.mime, input.fileName)
       text = parsed.text.trim()
+      isPlaceholder = parsed.placeholder === true
     }
 
-    if (text) {
-      try {
-        await indexFileArtifact({
-          fileId: file.id,
-          workspaceId: ctx.workspaceId,
-          text,
-          actingUserId: ctx.userId,
-        })
-      } catch (err) {
-        console.error('[files/ingest] segment indexing failed (continuing to decompose):', err)
+    // A placeholder is the parser telling us it could not read the file. It is
+    // not content, so it must not be chunked into `file_segments` (where it
+    // would answer searches as if it were knowledge) and must not be
+    // decomposed (a Pipeline B pass costs a model call to summarise a sentence
+    // we wrote ourselves). Store the bytes, report the reason, stop.
+    if (isPlaceholder) {
+      return {
+        ...base,
+        distilled,
+        decomposed: false,
+        counts: EMPTY_COUNTS,
+        skipped: 'unsupported_type',
       }
     }
 
     if (!text) {
       return {
-        fileName: input.fileName,
-        fileId: file.id,
-        path: file.path,
-        sizeBytes: file.sizeBytes,
+        ...base,
         distilled,
         decomposed: false,
         counts: EMPTY_COUNTS,
+        skipped: 'empty',
       }
+    }
+
+    let segments: number | undefined
+    let truncated = false
+    let truncatedAtChar: number | null = null
+    try {
+      const indexed = await indexFileArtifact({
+        fileId: file.id,
+        workspaceId: ctx.workspaceId,
+        text,
+        actingUserId: ctx.userId,
+      })
+      segments = indexed.segmentCount
+      truncated = indexed.truncated
+      truncatedAtChar = indexed.truncatedAtChar
+    } catch (err) {
+      console.error('[files/ingest] segment indexing failed (continuing to decompose):', err)
     }
 
     const result = await deps.ingest({
@@ -146,10 +192,7 @@ export function createFileIngestor(deps: FileIngestorDeps): FileIngestor {
     })
 
     return {
-      fileName: input.fileName,
-      fileId: file.id,
-      path: file.path,
-      sizeBytes: file.sizeBytes,
+      ...base,
       distilled,
       decomposed: result.extracted,
       counts: {
@@ -158,6 +201,8 @@ export function createFileIngestor(deps: FileIngestorDeps): FileIngestor {
         memories: result.memoriesWritten.length,
         tasks: result.tasksWritten.length,
       },
+      ...(segments === undefined ? {} : { segments }),
+      ...(truncated ? { truncated, ...(truncatedAtChar === null ? {} : { truncatedAtChar }) } : {}),
     }
   }
 }

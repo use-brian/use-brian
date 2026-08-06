@@ -657,6 +657,8 @@ export const ja: Dictionary = {
       ingestStored: "保存済み",
       ingestAdded: "件をブレインに追加",
       ingestFailed: "失敗",
+      ingestNotReadable: "保存済み、本文は読み取れません",
+      ingestTruncated: "一部は未索引",
       ingestRemove: "削除",
       ingestClear: "クリア",
       linkedinArchiveAlone: "全行を照合するため、LinkedIn ZIP は単独で追加してください。",
