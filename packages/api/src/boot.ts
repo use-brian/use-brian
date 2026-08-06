@@ -88,6 +88,7 @@ import {
   createRetrievalTools,
   createViewTools,
   createFileTools,
+  createBrandTools,
   createOfficeTools,
   type FileToolPolicy,
   createFindPageTool,
@@ -402,6 +403,7 @@ import { viewsRoutes } from './routes/views.js'
 import { teamspacesRoutes } from './routes/teamspaces.js'
 import { createTeamspaceStore } from './db/teamspace-store.js'
 import { createOfficeArtifactStore } from './db/office-artifacts.js'
+import { getBrandStore } from './db/brand-store.js'
 import { createOfficeTemplateStore } from './db/office-templates.js'
 import { createOfficeGenerationStore } from './db/office-generation.js'
 import { createOfficeCommentStore } from './db/office-comments.js'
@@ -2803,6 +2805,25 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // one instruction; tasks.md → "Bulk tools").
   allTools.set('bulkUpdateTasks', taskTools.bulkUpdateTasks)
   allTools.set('archiveTasks', taskTools.archiveTasks)
+
+  // ── Brand primitive ──
+  // Boot-built like the file tools (NOT through mcp/inject.ts): both carry
+  // `requiresCapability: 'brand'`, so the per-turn `filterToolsByCapabilities`
+  // call is what gates them and the Studio Built-in rail's toggle is the off
+  // switch. `updateBrandDraft` writes the draft only — approval is a Studio
+  // action no tool can reach. See docs/architecture/features/brand.md.
+  const brandTools = createBrandTools(getBrandStore(), {
+    onEvent: (evt, ctx) => {
+      const base = { userId: ctx.userId, assistantId: ctx.assistantId, sessionId: ctx.sessionId, channelType: ctx.channelType }
+      if (evt.type === 'brand_read') {
+        analytics.logEvent({ ...base, eventName: 'brand_read', metadata: { brand_id: sanitizeAnalytics(evt.brandId ?? ''), hit: evt.brandId !== null } })
+      } else if (evt.type === 'brand_draft_updated') {
+        analytics.logEvent({ ...base, eventName: 'brand_draft_updated', metadata: { brand_id: sanitizeAnalytics(evt.brandId), groups: sanitizeAnalytics(evt.groups.join(',')) } })
+      }
+    },
+  })
+  allTools.set('getBrand', brandTools.getBrand)
+  allTools.set('updateBrandDraft', brandTools.updateBrandDraft)
 
   // Guardrail tools — rejecting a task WITH a reason is what teaches the
   // workspace; archiveTasks above is routine cleanup and deliberately teaches

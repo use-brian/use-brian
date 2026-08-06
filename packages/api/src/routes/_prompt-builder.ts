@@ -148,6 +148,20 @@ export type BuildPromptParams = {
    */
   workspaceFilesContext?: string | null
   /**
+   * `# Brand` digest — the ambient positioning block for the brand primitive
+   * (docs/architecture/features/brand.md). Built by `buildBrandContext()`
+   * from `@use-brian/core`, from the ACTIVE APPROVED version of the
+   * workspace's default brand. Sits in the stable prefix beside
+   * `# Workspace Files` so it rides the prompt cache; never a volatile
+   * user-role tail (the prompt-cache-alignment invariant).
+   *
+   * `null` when the assistant lacks the `brand` capability, no workspace is
+   * bound, or no brand has ever been approved — which is every existing
+   * workspace and every OSS install, so the block is a zero-byte delta until
+   * someone actually approves a brand.
+   */
+  brandContext?: string | null
+  /**
    * Always-on session-state tier. Formatted by `buildSessionStateBlock`
    * in `@use-brian/core`. Unlike `episodicContext`, this is injected on
    * every turn regardless of topic-classifier verdict — its job is to
@@ -315,6 +329,15 @@ function collectPromptSections(
   //      can ride the prompt cache.
   if (p.workspaceFilesContext && p.workspaceFilesContext.trim().length > 0) {
     sections.push(p.workspaceFilesContext)
+  }
+
+  // 3.6. Brand digest (docs/architecture/features/brand.md). Conditional on
+  //      the `brand` capability AND an approved brand existing — the caller
+  //      decides whether to build it at all. Sits beside the files index in
+  //      the stable prefix: it changes only when someone approves a new brand
+  //      version, so it costs one cache miss per approval, not one per turn.
+  if (p.brandContext && p.brandContext.trim().length > 0) {
+    sections.push(p.brandContext)
   }
 
   // 4. Skills fragment.

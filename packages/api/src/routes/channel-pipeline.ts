@@ -27,6 +27,7 @@ import {
   EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote,
 } from '@use-brian/core'
 import type { FilesApi, OutboundAttachment } from '@use-brian/core'
+import { resolveBrandContext } from '../brand/prompt-context.js'
 import type { IncomingMessage, OutgoingDocument } from '@use-brian/channels'
 import { parseFollowUps } from '@use-brian/shared'
 import { runProactiveCompaction } from './proactive-compaction.js'
@@ -1010,6 +1011,17 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     }
   }
 
+  // Brand L1 digest (docs/architecture/features/brand.md). The gates
+  // (capability + an APPROVED default brand) and the store live in
+  // `resolveBrandContext`, so every channel shares one chokepoint instead of
+  // each webhook factory forwarding a store.
+  const brandContext = await resolveBrandContext({
+    userId,
+    workspaceId: assistant.workspaceId,
+    hasCapability: activeCapabilities.has('brand'),
+    logLabel: channelType,
+  })
+
   // ── System prompt assembly (shared builder) ──
   const currentDateTime = new Date().toLocaleString('en-US', {
     timeZone: userTimezone,
@@ -1050,6 +1062,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     anchorTimezone,
     memoryContext,
     workspaceFilesContext,
+    brandContext,
     sessionStateBlock,
     episodicContext,
     topicHint: classification,

@@ -254,6 +254,15 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'sendFile',    description: 'Attach a workspace file to the reply as a downloadable document', classification: 'read',       defaultPolicy: 'allow' },
     { name: 'fileDelete',  description: 'Permanently delete a workspace file',                           classification: 'destructive', defaultPolicy: 'ask' },
   ],
+  // Brand — the positioning record (docs/architecture/features/brand.md).
+  // Boot-injected like `files` (see BOOT_INJECTED_BUILTIN_TOOLS below), NOT
+  // through mcp/inject.ts. `updateBrandDraft` is classified `write`, not
+  // `destructive`: it can only ever replace the mutable draft, and approval
+  // — the irreversible step — is a Studio action no tool can reach.
+  brand: [
+    { name: 'getBrand', description: 'Read the workspace brand record (tokens, voice, claims, rights, sources)', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'updateBrandDraft', description: 'Propose a change to the brand draft (an owner or admin approves it in Studio)', classification: 'write', defaultPolicy: 'ask' },
+  ],
   office: [
     { name: 'createOfficeArtifact', description: 'Start a durable Brian-native Document or Presentation job', classification: 'write', defaultPolicy: 'allow' },
     { name: 'getOfficeArtifact', description: 'Read an Office artifact and its current generation state', classification: 'read', defaultPolicy: 'allow' },
@@ -525,6 +534,12 @@ export const BOOT_INJECTED_BUILTIN_TOOLS: Record<string, readonly string[]> = {
     'createOfficeArtifact',
     'getOfficeArtifact',
     'reviseOfficeArtifact',
+  ],
+  // Brand (docs/architecture/features/brand.md): wired at boot from
+  // packages/core/src/brand/tools.ts, gated on the `brand` capability.
+  brand: [
+    'getBrand',
+    'updateBrandDraft',
   ],
   // Computer use (docs/architecture/engine/computer-use.md): wired at boot
   // from packages/core/src/sandbox/tools.ts, always present (a missing

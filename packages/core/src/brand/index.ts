@@ -12,3 +12,16 @@ export {
   type BrandApproval,
   type BrandStore,
 } from './types.js'
+
+export {
+  BRAND_DIGEST_CHAR_CAP,
+  buildBrandContext,
+  type BrandDigestInput,
+} from './context-builder.js'
+
+export {
+  createBrandTools,
+  type BrandToolEvent,
+  type BrandToolEventContext,
+  type BrandToolOptions,
+} from './tools.js'

@@ -232,6 +232,17 @@ export const OFFICIAL_CONNECTORS: ConnectorEntry[] = [
     tags: ['workspace', 'productivity', 'documents', 'presentations'],
   },
   {
+    id: 'brand',
+    name: 'Brand',
+    description:
+      'Let the assistant read your brand positioning - voice, vocabulary, color and type tokens, logo bindings, approved claims - and propose changes for your approval. First-party record; no external account required.',
+    category: 'official',
+    auth_type: 'none',
+    oauth_required: false,
+    enabled: true,
+    tags: ['workspace', 'brand', 'productivity'],
+  },
+  {
     id: 'computer',
     name: 'Computer Use',
     description: 'Let the assistant browse and act in a controlled browser: your own Chrome via the Use Brian extension for account-sensitive sites, or a cloud browser for public ones. Sends require your approval.',

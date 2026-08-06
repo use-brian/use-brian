@@ -146,6 +146,24 @@ function toVersionSummary(row: VersionRow): BrandVersionSummary {
   }
 }
 
+let shared: BrandStore | null = null
+
+/**
+ * The process-wide brand store.
+ *
+ * Unlike the workspace-files store, this one has nothing to configure — no
+ * blob client, no bucket, no credential — so there is no deployment in which
+ * it is legitimately absent once migration 413 has run. Every consumer
+ * reaching it through one accessor is what keeps a new channel surface from
+ * silently shipping without the brand digest: there is no dependency to
+ * forget to thread. Consumers that need a seam (tests) inject a fake
+ * `BrandStore` directly.
+ */
+export function getBrandStore(): BrandStore {
+  if (!shared) shared = createBrandStore()
+  return shared
+}
+
 export function createBrandStore(): BrandStore {
   return {
     async list(userId, workspaceId) {

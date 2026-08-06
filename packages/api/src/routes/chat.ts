@@ -21,6 +21,7 @@ import { recordOverheadUsage } from './_overhead-usage.js'
 import { composeRecoveryMessage } from './_recovery-message.js'
 import { composeEmptyTurnSynthesis } from './_empty-turn-synthesis.js'
 import { resolveReplyText } from './_reply-context.js'
+import { resolveBrandContext } from '../brand/prompt-context.js'
 import {
   attachUserVisibleContext,
   buildSplitSystemPrompt,
@@ -3498,6 +3499,17 @@ export function chatRoutes(options: WebChatOptions): Router {
         }
       }
 
+      // Brand L1 digest (docs/architecture/features/brand.md). The gates
+      // (capability + an APPROVED default brand) and the store live in
+      // `resolveBrandContext`, so this route and every channel share one
+      // chokepoint instead of each forwarding a store.
+      const brandContext = await resolveBrandContext({
+        userId: user.id,
+        workspaceId: assistant.workspaceId,
+        hasCapability: activeCapabilities.has('brand'),
+        logLabel: 'chat',
+      })
+
       // Recall logging — TWO separate channels:
       //
       //   (a) `memories.recall_count` aggregate — historically inflated when
@@ -3750,6 +3762,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         anchorTimezone: anchorTz,
         memoryContext,
         workspaceFilesContext,
+        brandContext,
         sessionStateBlock,
         activePlanBlock: planBlock,
         episodicContext,

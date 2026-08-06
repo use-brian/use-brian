@@ -112,6 +112,19 @@ function FilesIcon() {
   );
 }
 
+function BrandIcon() {
+  // Brand — a palette-and-swatch glyph. Strokes only, no fill, so it inherits
+  // the surrounding text color in both dark and light themes.
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" xmlns="http://www.w3.org/2000/svg">
+      <path d="M12 3a9 9 0 1 0 0 18h1.5a2 2 0 0 0 1.6-3.2l-.3-.4a2 2 0 0 1 1.6-3.2H19a2.5 2.5 0 0 0 2.5-2.5A8.9 8.9 0 0 0 12 3Z" />
+      <circle cx="7.5" cy="11.5" r="1" />
+      <circle cx="11" cy="7.5" r="1" />
+      <circle cx="15.5" cy="9" r="1" />
+    </svg>
+  );
+}
+
 function ComputerIcon() {
   // Computer use — monitor + cursor glyph. Strokes only, no fill, so it
   // inherits the surrounding text color in both dark and light themes.
@@ -320,6 +333,7 @@ export function ConnectorIcon({
     case "whatsapp": return <WhatsAppIcon />;
     case "files": return <FilesIcon />;
     case "computer": return <ComputerIcon />;
+    case "brand": return <BrandIcon />;
     case "gcs": return <GcsIcon />;
     case "s3": return <S3Icon />;
     case "msteams": return <MsTeamsIcon />;
