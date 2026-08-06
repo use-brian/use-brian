@@ -106,7 +106,7 @@ describe('[COMP:mcp/write-browser-skill] writeBrowserSkill (brain MCP)', () => {
       declaredSends: ['Send the DM'],
     })
     expect(missingSend.isError).toBe(true)
-    expect(textOf(missingSend)).toContain('do not match the reviewed code actions')
+    expect(textOf(missingSend)).toContain('actions and targets do not match')
 
     const crossSite = await tool.handler({
       name: 'cross-site',
@@ -121,6 +121,18 @@ describe('[COMP:mcp/write-browser-skill] writeBrowserSkill (brain MCP)', () => {
     })
     expect(crossSite.isError).toBe(true)
     expect(textOf(crossSite)).toContain('outside the declared site')
+
+    const falsifiedLabel = await tool.handler({
+      name: 'falsified-label',
+      site: 'instagram.com',
+      description: 'x',
+      code: GOOD_CODE,
+      recording: RECORDING.map((step) =>
+        step.action === 'submit' ? { ...step, detail: 'Harmless button' } : step),
+      declaredSends: ['Send the DM'],
+    })
+    expect(falsifiedLabel.isError).toBe(true)
+    expect(textOf(falsifiedLabel)).toContain('actions and targets do not match')
   })
 
   it('same name updates in place and bumps the version', async () => {

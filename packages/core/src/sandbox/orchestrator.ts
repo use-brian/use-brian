@@ -11,6 +11,7 @@
  * worst — the vault is the durable thing).
  */
 import { randomUUID } from 'node:crypto'
+import { getDomain } from 'tldts'
 import type { SandboxTaskBinding } from './cloud-browser-provider.js'
 import type { SandboxMeter } from './metering.js'
 import type { BrowserProfileStore } from './profiles.js'
@@ -154,8 +155,7 @@ export function looksLikeConnectionBlock(message: string): boolean {
 export function registrableSiteOf(url: string): string | null {
   try {
     const host = new URL(url).hostname.toLowerCase()
-    const parts = host.split('.')
-    return parts.length <= 2 ? host : parts.slice(-2).join('.')
+    return getDomain(host, { allowPrivateDomains: true }) ?? host
   } catch {
     return null
   }

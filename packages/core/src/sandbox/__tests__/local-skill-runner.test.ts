@@ -195,4 +195,28 @@ describe('[COMP:sandbox/local-skill-runner] Local browser skill recording and re
       ],
     })).toContain('unsupported local action')
   })
+
+  it('rejects falsified labels and reordered recording steps', () => {
+    const code =
+      'def run(runner, params):\n    runner.open("https://example.com/")\n    runner.click(runner.find("Continue"))\n'
+    const contract = extractEffectContract({ code, site: 'example.com' })
+    expect(validateLocalRecording({
+      site: 'example.com',
+      code,
+      contract,
+      recording: [
+        { step: 1, action: 'open', url: 'https://example.com/' },
+        { step: 2, action: 'click', detail: 'Different target' },
+      ],
+    })).toContain('actions and targets do not match')
+    expect(validateLocalRecording({
+      site: 'example.com',
+      code,
+      contract,
+      recording: [
+        { step: 2, action: 'open', url: 'https://example.com/' },
+        { step: 1, action: 'click', detail: 'Continue' },
+      ],
+    })).toContain('strictly increasing')
+  })
 })

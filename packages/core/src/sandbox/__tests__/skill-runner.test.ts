@@ -285,6 +285,30 @@ describe('[COMP:sandbox/approval-grants] Grants auto-approve with an audit row; 
     expect(result.isError).toBe(true)
   })
 
+  it('a skill version update voids the old grant and requires fresh approval', async () => {
+    const { provider, approvals, grantStore, skillStore, tools, addSkill, profiles } = await build()
+    const skill = await addSkill('dm-followers', SENDING_CODE)
+    const grant = await grantStore.create({
+      workspaceId: 'ws-1',
+      skillId: skill.id,
+      profileId: profiles['Personal IG'].id,
+      grantedBy: 'user-1',
+    })
+    await skillStore.update(skill.id, { description: 'changed behavior' })
+    provider.scriptSkillRun(oneSendScript({ ref: '@e6', label: 'Send', description: 'Send DM to a new follower' }))
+
+    const running = run(tools.runBrowserSkill, { skill: 'dm-followers' })
+    let pendingId: string | null = null
+    for (let i = 0; i < 200 && !pendingId; i++) {
+      await new Promise((r) => setTimeout(r, 5))
+      for (const [id, row] of approvals.rows) if (row.status === 'pending') pendingId = id
+    }
+    expect(pendingId).toBeTruthy()
+    expect(grantStore.grants.get(grant.id)?.status).toBe('voided')
+    approvals.respond(pendingId!, 'approved')
+    await expect(running).resolves.toMatchObject({ isError: false })
+  })
+
   it('the VERB CEILING is never grant-satisfiable: a payment send queues for a human even when granted (R2-1)', async () => {
     const { provider, approvals, grantStore, tools, addSkill, profiles } = await build()
     const skill = await addSkill('dm-followers', SENDING_CODE)
@@ -326,12 +350,14 @@ describe('[COMP:sandbox/logic-block] The block artifact carries its review artif
 describe('[COMP:sandbox/runner-shim] The governed shim protocol (R2-9)', () => {
   it('generates a shim whose ONLY terminal verb handshakes through request/decision files', async () => {
     const { buildRunnerShimSource, sendRequestPath, sendDecisionPath } = await import('../runner-shim.js')
-    const source = buildRunnerShimSource({ sendTimeoutSeconds: 60 })
+    const source = buildRunnerShimSource({ sendTimeoutSeconds: 60, allowedSite: 'instagram.com' })
     // submit writes the request, polls the decision, and NEVER clicks unapproved.
     expect(source).toContain('def submit(ref, description=None):')
     expect(source).toContain('send-%d.request.json')
     expect(source).toContain('send-%d.decision.json')
     expect(source).toContain('raise RunnerDenied')
+    expect(source).toContain('ALLOWED_SITE = "instagram.com"')
+    expect(source).toContain('browser skill left declared site')
     // The stub path records "would send" instead of firing (rehearsal).
     expect(source).toContain('_would_send.append')
     expect(sendRequestPath(3)).toBe('.runner/send-3.request.json')

@@ -13,6 +13,9 @@ import { registrableSiteOf } from './orchestrator.js'
 
 const MAX_LOCAL_SKILL_STEPS = 100
 const LOCAL_RECORDING_ACTIONS = new Set(['open', 'snapshot', 'click', 'fill', 'submit'])
+const LOCAL_CODE_VERBS = new Set(['open', 'snapshot', 'find', 'click', 'fill', 'submit'])
+
+type ActionSignature = { action: 'open' | 'click' | 'fill' | 'submit'; target: string }
 
 function isTerminalStep(step: BrowserSkillRecordingStep): boolean {
   return step.action === 'submit' || (
@@ -21,13 +24,45 @@ function isTerminalStep(step: BrowserSkillRecordingStep): boolean {
   )
 }
 
+function reviewedCodeActions(code: string): { actions?: ActionSignature[]; error?: string } {
+  const verbs = [...code.matchAll(/runner\.(\w+)\s*\(/g)].map((match) => match[1])
+  const unsupported = verbs.find((verb) => !LOCAL_CODE_VERBS.has(verb))
+  if (unsupported) return { error: `The reviewed code uses unsupported local verb runner.${unsupported}.` }
+
+  const matches = [...code.matchAll(/runner\.(open|click|fill|submit)\s*\(/g)]
+  const actions: ActionSignature[] = []
+  const literal = '((?:"(?:\\\\.|[^"\\\\])*")|(?:\'(?:\\\\.|[^\'\\\\])*\'))'
+  for (const match of matches) {
+    const action = match[1] as ActionSignature['action']
+    const tail = code.slice(match.index)
+    const pattern = action === 'open'
+      ? new RegExp(`^runner\\.open\\s*\\(\\s*${literal}`)
+      : new RegExp(`^runner\\.${action}\\s*\\(\\s*runner\\.find\\s*\\(\\s*${literal}`)
+    const targetMatch = pattern.exec(tail)
+    if (!targetMatch) {
+      return { error: `runner.${action} must use a literal ${action === 'open' ? 'URL' : 'runner.find label'} for deterministic local replay.` }
+    }
+    const raw = targetMatch[1]
+    const target = raw.startsWith('"')
+      ? JSON.parse(raw) as string
+      : raw.slice(1, -1).replace(/\\'/g, "'").replace(/\\\\/g, '\\')
+    actions.push({ action, target })
+  }
+  return { actions }
+}
+
 /** Fail closed before replaying a storyboard that diverges from its reviewed code contract. */
 export function validateLocalRecording(
   skill: Pick<BrowserSkill, 'site' | 'code' | 'recording' | 'contract'>,
 ): string | null {
   let opens = 0
   let sends = 0
+  let previousStep = Number.NEGATIVE_INFINITY
   for (const step of skill.recording) {
+    if (step.step <= previousStep) {
+      return 'Recording step numbers must be unique and strictly increasing.'
+    }
+    previousStep = step.step
     if (!LOCAL_RECORDING_ACTIONS.has(step.action)) {
       return `Recording step ${step.step} uses unsupported local action "${step.action}".`
     }
@@ -42,15 +77,28 @@ export function validateLocalRecording(
     if (isTerminalStep(step)) sends += 1
   }
   if (opens === 0) return 'The local recording must contain an open step for its declared site.'
-  const codeActions = [...skill.code.matchAll(/runner\.(open|click|fill|submit)\s*\(/g)].map((match) => match[1])
+  const reviewed = reviewedCodeActions(skill.code)
+  if (reviewed.error) return reviewed.error
+  const codeActions = reviewed.actions ?? []
   const recordingActions = skill.recording
     .filter((step) => step.action !== 'snapshot')
-    .map((step) => step.action)
-  if (codeActions.join(',') !== recordingActions.join(',')) {
-    return `The recording actions (${recordingActions.join(', ')}) do not match the reviewed code actions (${codeActions.join(', ')}).`
+    .map((step) => ({
+      action: step.action,
+      target: step.action === 'open' ? step.url ?? '' : step.detail ?? '',
+    }))
+  if (JSON.stringify(codeActions) !== JSON.stringify(recordingActions)) {
+    return 'The recording actions and targets do not match the reviewed code.'
   }
   if (sends !== skill.contract.terminalSends.length) {
     return `The recording contains ${sends} terminal send(s), but its reviewed code contract contains ${skill.contract.terminalSends.length}.`
+  }
+  const recordedSends = skill.recording.filter(isTerminalStep)
+  for (let i = 0; i < recordedSends.length; i += 1) {
+    const recorded = recordedSends[i]!
+    const declared = skill.contract.terminalSends[i]?.description ?? null
+    if ((recorded.description ?? recorded.detail ?? null) !== declared) {
+      return `Recording terminal send ${i + 1} does not match the reviewed code description.`
+    }
   }
   return null
 }

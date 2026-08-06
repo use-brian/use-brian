@@ -702,6 +702,9 @@ importers:
       sharp:
         specifier: ^0.34.3
         version: 0.34.5
+      tldts:
+        specifier: 7.4.3
+        version: 7.4.3
       turndown:
         specifier: ^7.2.4
         version: 7.2.4

@@ -229,7 +229,10 @@ export function createSkillRunnerTools(opts: CreateSkillRunnerToolsOptions): {
     await writeScratch(
       sandboxId,
       RUNNER_MODULE_PATH,
-      buildRunnerShimSource({ sendTimeoutSeconds: Math.ceil(approvalWaitMs / 1000) + 60 }),
+      buildRunnerShimSource({
+        sendTimeoutSeconds: Math.ceil(approvalWaitMs / 1000) + 60,
+        allowedSite: skill.site,
+      }),
     )
     await writeScratch(sandboxId, BLOCK_MODULE_PATH, skill.code)
     await writeScratch(sandboxId, ENTRY_PATH, buildEntrySource())

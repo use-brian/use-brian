@@ -89,6 +89,10 @@ export async function decideTerminalSend(
       profileId: profile.id,
     })
     if (grant) {
+      if (skill.version > 1 && Date.parse(grant.createdAt) <= Date.parse(skill.updatedAt)) {
+        await grants.void(grant.id, `skill updated to v${skill.version}`)
+        return decideTerminalSend({ ...params, grants: null })
+      }
       const use = await grants.recordUse(grant.id)
       if (use.withinBudget && use.withinRate) {
         await approvals.recordAutoApproved({
