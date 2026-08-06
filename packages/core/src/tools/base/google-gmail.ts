@@ -149,9 +149,12 @@ export function createGmailTools(
       'Copy additional people with `cc` (visible to every recipient) or `bcc` (hidden from the others); ' +
       'put an internal colleague you are looping in on `cc` unless the user asks to keep them hidden. ' +
       'Workspace files can be attached as real email attachments (the recipient gets the file itself, never a link): ' +
-      'pass their ids or paths in `attachments`. Only files already saved in the workspace brain can be attached; ' +
-      'confidential files cannot be emailed. Limits: 10 attachments, 18 MB total. ' +
-      'If attaching fails, relay the reason honestly — never claim a file was attached when it was not.',
+      'pass their ids or paths in `attachments`. Only files already SAVED in the workspace brain can be attached — ' +
+      'a photo or document the user just sent in this conversation is an upload, not a saved file yet, so save it first ' +
+      'and pass the path that save returns. An `<attached_file id="…">` id will NOT resolve here. ' +
+      'Confidential files cannot be emailed. Limits: 10 attachments, 18 MB total. ' +
+      'If attaching fails, relay the reason honestly and do not send the email claiming an attachment that is not on it — ' +
+      'either send it without and say so, or stop and tell the user what is blocking you.',
     inputSchema: z.object({
       to: z.array(z.string()).min(1).max(20).describe('Recipient email addresses.'),
       cc: z.array(z.string()).max(20).optional().describe('CC addresses: copied recipients, visible to everyone on the email.'),

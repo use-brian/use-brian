@@ -338,11 +338,15 @@ export function createAgentWriteTools(deps: AgentWriteToolDeps): Tool[] {
       const assistantId = inserted.rows[0].id
       if (input.kind === 'standard') {
         // §17 default-on grants for standard assistants — mirrors the
-        // workspace route's creation side effects.
+        // workspace route's creation side effects via the same shared
+        // constant, so an assistant drafted by an agent is not a
+        // second-class one (this site was two capabilities behind).
         await query(
           `INSERT INTO assistant_capabilities (assistant_id, capability, granted_by_user_id, reason)
            VALUES ($1, 'tasks', $2, '§17 default-on at standard creation (agent surface)'),
-                  ($1, 'crm',   $2, '§17 default-on at standard creation (agent surface)')`,
+                  ($1, 'crm',   $2, '§17 default-on at standard creation (agent surface)'),
+                  ($1, 'goals', $2, 'goals default-on at standard creation (agent surface)'),
+                  ($1, 'files', $2, 'built-in primitive — default-on at standard creation (agent surface)')`,
           [assistantId, ctx.userId],
         )
       }

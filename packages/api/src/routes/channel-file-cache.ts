@@ -63,3 +63,26 @@ export async function cacheInboundImage(input: CacheInboundImageInput): Promise<
     return null
   }
 }
+
+/**
+ * Cache an inbound image AND render the `<attached_file id="…">` envelope for
+ * it — the whole save-on-request seam in one call.
+ *
+ * The Telegram routes get this for free because they hand their downloads to
+ * `buildFileContentBlocks`, which stamps the tag. Slack, Discord, MS Teams and
+ * WeChat build their content blocks by hand and pushed a bare `image` block
+ * with **no tag at all**, so on those channels a photo was not merely
+ * unsaveable — the model had no identifier for it in any form. This helper is
+ * what makes wiring them a two-line change instead of four hand-rolled
+ * re-implementations of an envelope that has to match byte for byte (the
+ * model is matching on the tag shape it sees in web chat).
+ *
+ * Returns `''` when there is nothing to reference (non-image, no store,
+ * workspace-less assistant, or a cache failure) — every caller can append
+ * unconditionally and keep the pre-existing block-only turn on any miss.
+ */
+export async function cacheInboundImageTag(input: CacheInboundImageInput): Promise<string> {
+  const id = await cacheInboundImage(input)
+  if (!id) return ''
+  return `<attached_file id="${id}" name="${input.file.fileName}" type="${input.file.mime}">[image]</attached_file>`
+}
