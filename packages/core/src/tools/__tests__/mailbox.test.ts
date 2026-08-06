@@ -102,21 +102,30 @@ beforeEach(() => {
 })
 
 describe('[COMP:tools/mailbox-imap] Company mailbox tools', () => {
-  it('declares the identity lane: sends as the user\'s corporate address, ask-gated, never a silent substitute', () => {
+  it('advertises ordinary email summaries, checks, reads, and sends before the IMAP connection detail', () => {
     const tools = toolsFor(makeApi())
     const send = toolByName(tools, 'imapSendMessage')
-    expect(send.description).toContain('company mailbox')
+    expect(send.description).toMatch(/^Send email from the user's connected email account/)
+    expect(send.description).toMatch(/ordinary email sending/i)
+    expect(send.description).toMatch(/connected through IMAP\/SMTP/i)
     expect(send.description).toMatch(/never silently substitute/i)
+    expect(send.description).not.toMatch(/company mailbox/i)
     expect(send.requiresConfirmation).toBe(true)
     expect(send.isReadOnly).toBe(false)
 
     const search = toolByName(tools, 'imapSearchMessages')
+    expect(search.description).toMatch(/^Search email in the user's connected email account/)
+    expect(search.description).toMatch(/summarize email, check recent email, or find specific email/i)
+    expect(search.description).toMatch(/connected through IMAP\/SMTP/i)
+    expect(search.description).not.toMatch(/company mailbox/i)
     expect(search.isReadOnly).toBe(true)
     expect(search.requiresConfirmation).toBeFalsy()
     // D12 #3 — the description must say sent mail is in the default scope.
     expect(search.description).toMatch(/INBOX and Sent/i)
 
     const get = toolByName(tools, 'imapGetMessage')
+    expect(get.description).toMatch(/^Read a full email from the user's connected email account/)
+    expect(get.description).not.toMatch(/company mailbox/i)
     expect(get.isReadOnly).toBe(true)
   })
 
@@ -318,7 +327,7 @@ describe('[COMP:tools/mailbox-imap] Multi-account routing (account param, defaul
     const search = toolByName(createMailboxTools(empty), 'imapSearchMessages')
     const result = await search.execute({ keywords: ['x'] }, CTX)
     expect(result.isError).toBe(true)
-    expect(result.data).toMatch(/no company mailbox/i)
+    expect(result.data).toMatch(/no email account is connected through IMAP\/SMTP/i)
   })
 
   it('account-bound variants hide the router field and fix the sender identity', async () => {
@@ -327,7 +336,7 @@ describe('[COMP:tools/mailbox-imap] Multi-account routing (account param, defaul
     for (const tool of tools) {
       const shape = (tool.inputSchema as unknown as { shape: Record<string, unknown> }).shape
       expect(shape).not.toHaveProperty('account')
-      expect(tool.description).toContain(`bound to ${EMAIL}`)
+      expect(tool.description).toContain(`bound to the email account ${EMAIL}`)
     }
 
     const send = toolByName(tools, 'imapSendMessage')
@@ -480,6 +489,8 @@ describe('[COMP:tools/imap-attachments] imapSaveAttachment (email bytes → work
     // place for tool-name references (Layer 1 stays tool-agnostic).
     expect(tool.description).toContain('sendFile')
     expect(tool.description).toContain('imapGetMessage')
+    expect(tool.description).toMatch(/email in the user's connected email account/i)
+    expect(tool.description).not.toMatch(/company mailbox/i)
   })
 
   it('only advertises the save chain from imapGetMessage when attachments are wired', () => {

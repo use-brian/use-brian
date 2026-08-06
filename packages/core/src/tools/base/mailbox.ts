@@ -258,7 +258,7 @@ function truncateSnippet(s: string | undefined): string | undefined {
 }
 
 function mailboxError(err: unknown): { data: string; isError: true } {
-  return { data: `Mailbox error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+  return { data: `Email account error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
 }
 
 /** A connected company mailbox, primary (first-connected) first. */
@@ -300,11 +300,11 @@ function resolveMailboxAccount(
 ): { ok: true; api: MailboxApi; email: string } | { ok: false; error: string } {
   const accounts = router.list()
   if (accounts.length === 0) {
-    return { ok: false, error: 'No company mailbox is connected. Connect one in Studio → Connectors, then try again.' }
+    return { ok: false, error: 'No email account is connected through IMAP/SMTP. Connect one in Studio → Connectors, then try again.' }
   }
   const pick = (email: string): { ok: true; api: MailboxApi; email: string } | { ok: false; error: string } => {
     const api = router.get(email)
-    return api ? { ok: true, api, email } : { ok: false, error: `Company mailbox ${email} is unavailable right now.` }
+    return api ? { ok: true, api, email } : { ok: false, error: `Email account ${email} is unavailable right now.` }
   }
   if (account) {
     const wanted = account.trim().toLowerCase()
@@ -312,7 +312,7 @@ function resolveMailboxAccount(
     if (!match) {
       return {
         ok: false,
-        error: `No connected company mailbox "${account}". Connected mailboxes: ${accounts.map((a) => a.email).join(', ')}.`,
+        error: `No connected email account "${account}". Connected email accounts: ${accounts.map((a) => a.email).join(', ')}.`,
       }
     }
     return pick(match.email)
@@ -325,8 +325,8 @@ const accountField = z
   .string()
   .optional()
   .describe(
-    'Which connected company mailbox to use, by its email address. ' +
-    'Omit to use the primary (first-connected) mailbox. Only needed when more than one mailbox is connected.',
+    'Which connected email account to use, by its email address. ' +
+    'Omit to use the primary (first-connected) email account. Only needed when more than one email account is connected.',
   )
 
 /**
@@ -390,13 +390,13 @@ export function createMailboxTools(
     return resolveMailboxAccount(router, selected)
   }
   const accountRoutingDescription = boundAccountEmail
-    ? `This tool is bound to ${boundAccountEmail}; use the separately named tool set for another mailbox.`
-    : 'If more than one company mailbox is connected, pass `account` (the mailbox email) to choose which; omit it for the primary.'
+    ? `This tool is bound to the email account ${boundAccountEmail}; use the separately named tool set for another email account.`
+    : 'If more than one email account is connected, pass `account` (the email address) to choose which; omit it for the primary.'
   const searchMessages = buildTool({
     name: 'imapSearchMessages',
     description:
-      "Search the user's own mailbox through its connected IMAP/SMTP account. " +
-      'IMAP/SMTP is the connection method, not the provider: the bound mailbox may be hosted by Gmail/Google Workspace, AliMail, or another provider. ' +
+      "Search email in the user's connected email account. Use this to summarize email, check recent email, or find specific email regardless of provider. " +
+      'The email account is connected through IMAP/SMTP, which is the connection method rather than the provider; it may be hosted by Gmail/Google Workspace, AliMail, or another provider. ' +
       "It is the user's exact bound address, never the assistant's own address. " +
       'Searches INBOX and Sent by default, so "what did I reply to X" is answerable; pass `folder` to search elsewhere. ' +
       'Server-side search is substring matching with no ranking — iterate like grep: start with 2-4 `keywords` (they are OR\'d in one round trip, so include synonyms), ' +
@@ -465,7 +465,7 @@ export function createMailboxTools(
   const getMessage = buildTool({
     name: 'imapGetMessage',
     description:
-      "Read a full email from the user's connected company mailbox by id (the `id` returned by imapSearchMessages, shaped `folder:uid`). " +
+      "Read a full email from the user's connected email account by id (the `id` returned by imapSearchMessages, shaped `folder:uid`). " +
       'Returns headers, the text body, and the attachment list (filename, type, size, and the `partId` that identifies each part). ' +
       // Only claim the save path exists when it was actually wired — the
       // tool-awareness rule applied at the description level.
@@ -496,8 +496,8 @@ export function createMailboxTools(
   const sendMessage = buildTool({
     name: 'imapSendMessage',
     description:
-      "Send an email from the user's own mailbox through its connected IMAP/SMTP account. " +
-      'The bound mailbox may be hosted by Gmail/Google Workspace (including an address ending in gmail.com), AliMail, or another provider; the recipient sees the exact bound address as the sender. ' +
+      "Send email from the user's connected email account. Use this for ordinary email sending from the user's exact bound address, regardless of provider. " +
+      'The email account is connected through IMAP/SMTP and may be hosted by Gmail/Google Workspace (including an address ending in gmail.com), AliMail, or another provider; the recipient sees the exact bound address as the sender. ' +
       'This is the ONLY tool that sends as that bound address: if it is unavailable, say so — never silently substitute another email identity for it (or it for them). ' +
       'Call this tool directly — the user will see an Approve/Deny prompt. ' +
       'To reply on an existing thread, pass the original message\'s id as `inReplyTo` so the reply threads correctly. ' +
@@ -703,7 +703,7 @@ export function createMailboxTools(
         name: 'imapSaveAttachment',
         requiresCapability: 'files',
         description:
-          "Save one attachment from an email in the user's company mailbox into the workspace as a real file, then attach it to your reply with sendFile. " +
+          "Save one attachment from an email in the user's connected email account into the workspace as a real file, then attach it to your reply with sendFile. " +
           'Use this when the user asks for a document that arrived by email (a boarding pass, invoice, statement, contract) — read the message with imapGetMessage first, take the `partId` of the attachment you want from its attachment list, save it here, then pass the returned `fileId` to sendFile. ' +
           `One attachment per call, up to ${formatMb(MAILBOX_ATTACHMENT_MAX_BYTES)}. ` +
           accountRoutingDescription,

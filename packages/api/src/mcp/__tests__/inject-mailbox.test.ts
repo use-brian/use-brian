@@ -135,7 +135,12 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
     expect(rows).toBeDefined()
     const send = rows.find((t) => t.name === 'imapSendMessage')
     expect(send).toMatchObject({ classification: 'write', defaultPolicy: 'ask' })
-    expect(rows.find((t) => t.name === 'imapSearchMessages')).toMatchObject({ classification: 'read', defaultPolicy: 'allow' })
+    expect(send?.description).toMatch(/^Send email.*connected email account/i)
+    expect(send?.description).not.toMatch(/company mailbox/i)
+    const search = rows.find((t) => t.name === 'imapSearchMessages')
+    expect(search).toMatchObject({ classification: 'read', defaultPolicy: 'allow' })
+    expect(search?.description).toMatch(/^Summarize, check, or search email/i)
+    expect(search?.description).not.toMatch(/company mailbox/i)
     expect(rows.find((t) => t.name === 'imapGetMessage')).toMatchObject({ classification: 'read', defaultPolicy: 'allow' })
   })
 
@@ -145,6 +150,8 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
     expect(tools.has('imapGetMessage')).toBe(true)
     expect(tools.has('imapSendMessage')).toBe(true)
     expect(tools.get('imapSendMessage')?.requiresConfirmation).toBe(true)
+    expect(tools.get('imapSearchMessages')?.description).toMatch(/summarize email, check recent email/i)
+    expect(tools.get('imapSendMessage')?.description).toMatch(/ordinary email sending/i)
 
     // Gmail OAuth is absent in this fixture, but email is available through
     // the injected IMAP/SMTP mailbox. Its notice must not turn a missing
