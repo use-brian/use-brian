@@ -60,6 +60,7 @@ import type { TaskStore } from '../tasks/types.js'
 import {
   admitTask,
   buildTaskPolicyPromptBlock,
+  DROPPED_CANDIDATE_TTL_DAYS,
   verifyTaskEvidenceQuote,
   type TaskAdmissionPort,
   type TaskReadinessAssessment,
@@ -371,8 +372,28 @@ const TASK_READINESS_MISSING_FACTS = [
   'completion_signal',
 ] as const satisfies readonly TaskReadinessMissingFact[]
 
+// One judge call per slice of candidates, NOT one call per episode.
+//
+// `mergeExtractionOutputs` concatenates each window's task list, so the
+// per-window cap of 30 is not an episode cap: a multi-window document produced
+// 73 candidates in one call on 2026-08-05. That call could never validate —
+// `index` was capped at 29 — so ALL 73 fell back to `unverifiedTaskReadiness`,
+// which is why every automatic task since the judge shipped held in Suggestions
+// with a null description. Slicing bounds the schema, bounds the output budget
+// below, and scopes a failure to its own slice instead of the whole episode.
+const TASK_READINESS_BATCH_SIZE = 10
+
+// Output cap per judge call, sized per candidate. gemini-3 thinks on every turn
+// and thought tokens count against `maxOutputTokens` (providers/gemini.ts) — the
+// same trap EXTRACTION_MAX_OUTPUT_TOKENS documents below, which the judge was
+// written after and did not inherit. A full assessment is seven prose fields
+// including a description of up to 2 000 chars, so a flat 4 096 left a 6-item
+// batch competing with its own reasoning and truncated mid-object.
+const TASK_READINESS_THINKING_TOKENS = 3_072
+const TASK_READINESS_TOKENS_PER_CANDIDATE = 700
+
 const judgedTaskReadinessSchema = z.object({
-  index: z.number().int().min(0).max(29),
+  index: z.number().int().min(0).max(TASK_READINESS_BATCH_SIZE - 1),
   classification: z.enum(TASK_READINESS_CLASSIFICATIONS),
   evidence_quote: z.string().min(1).max(500).nullable(),
   commitment: z.enum(TASK_COMMITMENT_KINDS),
@@ -387,7 +408,7 @@ const judgedTaskReadinessSchema = z.object({
 })
 
 const taskReadinessOutputSchema = z.object({
-  assessments: z.array(judgedTaskReadinessSchema).max(30),
+  assessments: z.array(judgedTaskReadinessSchema).max(TASK_READINESS_BATCH_SIZE),
 })
 
 const TASK_READINESS_RESPONSE_SCHEMA: Record<string, unknown> = {
@@ -395,6 +416,7 @@ const TASK_READINESS_RESPONSE_SCHEMA: Record<string, unknown> = {
   properties: {
     assessments: {
       type: 'array',
+      maxItems: TASK_READINESS_BATCH_SIZE,
       items: {
         type: 'object',
         properties: {
@@ -865,7 +887,7 @@ Classify every candidate independently:
 
 The evidence_quote must be a verbatim quote from Source content that proves the commitment or its absence. Keep it short. Words such as "maybe", "might", and "could", plus jokes and exploratory suggestions, are hedged unless another source line explicitly commits. A phrase such as "pull a group" has no usable target or purpose by itself.
 
-For ready candidates, description must be self-contained and grounded in the source: state the objective/context, where or how to start (an explicit place/tool when named, otherwise a genuinely discoverable path), and what observable result means done. Do not prescribe a tool the source does not support. If any required fact would have to be invented, return needs_spec and list it in missing.
+Write a description for every ready AND needs_spec candidate: self-contained, grounded in the source, stating the objective/context, where or how to start (an explicit place/tool when named, otherwise a genuinely discoverable path), and what observable result means done. Do not prescribe a tool the source does not support. For a needs_spec candidate, describe only what the source DOES establish and leave the gap named in missing — never fill it by guessing. A description does not promote a candidate: classification is judged on the facts, and if any required fact would have to be invented, return needs_spec and list it in missing. Return null only when the source supports nothing beyond the title.
 
 Output exactly:
 {
@@ -888,10 +910,14 @@ ${taskPolicy}`
 }
 
 /**
- * One independent, batched readiness judgment for automatic task candidates.
- * The extractor never grades its own output. Any failure is converted into one
- * unverified assessment per candidate so admission fails closed to Suggestions
- * while entity/memory ingestion continues.
+ * One independent readiness judgment per candidate. The extractor never grades
+ * its own output. Any failure is converted into one unverified assessment per
+ * candidate so admission fails closed to Suggestions while entity/memory
+ * ingestion continues.
+ *
+ * Candidates are judged in slices of `TASK_READINESS_BATCH_SIZE`, sequentially
+ * (matching the extraction window loop's rate-limit posture). A slice that
+ * fails degrades only its own candidates.
  *
  * [COMP:tasks/task-readiness]
  */
@@ -903,6 +929,34 @@ export async function judgeTaskReadinessBatch(
   taskPolicy = '',
 ): Promise<TaskReadinessAssessment[]> {
   if (tasks.length === 0) return []
+  const assessments: TaskReadinessAssessment[] = []
+  for (let offset = 0; offset < tasks.length; offset += TASK_READINESS_BATCH_SIZE) {
+    assessments.push(
+      ...(await judgeTaskReadinessSlice(
+        episode,
+        content,
+        tasks.slice(offset, offset + TASK_READINESS_BATCH_SIZE),
+        deps,
+        taskPolicy,
+        offset,
+      )),
+    )
+  }
+  return assessments
+}
+
+/** One judge call over at most `TASK_READINESS_BATCH_SIZE` candidates. */
+async function judgeTaskReadinessSlice(
+  episode: PipelineBEpisode,
+  content: string,
+  tasks: readonly ExtractedTask[],
+  deps: PipelineBDeps,
+  taskPolicy: string,
+  offset: number,
+): Promise<TaskReadinessAssessment[]> {
+  // Name the slice in every warning: with more than one call per episode, an
+  // episode id alone cannot tell you which candidates lost their judgment.
+  const where = `episode ${episode.id} candidates ${offset}-${offset + tasks.length - 1}`
   const fallback = () =>
     tasks.map(() =>
       unverifiedTaskReadiness('Brian could not independently verify this candidate.'),
@@ -914,7 +968,8 @@ export async function judgeTaskReadinessBatch(
         model: deps.model,
         systemPrompt: TASK_READINESS_SYSTEM_PROMPT,
         messages: [{ role: 'user', content: buildTaskReadinessPrompt(content, tasks, taskPolicy) }],
-        maxTokens: 4_096,
+        maxTokens:
+          TASK_READINESS_THINKING_TOKENS + tasks.length * TASK_READINESS_TOKENS_PER_CANDIDATE,
         temperature: 0,
         responseFormat: 'json',
         responseSchema: TASK_READINESS_RESPONSE_SCHEMA,
@@ -927,7 +982,7 @@ export async function judgeTaskReadinessBatch(
     })
 
     if (response.stopReason === 'max_tokens' || response.stopReason === 'incomplete') {
-      console.warn(`[pipeline-b] task readiness judgment truncated for episode ${episode.id}`)
+      console.warn(`[pipeline-b] task readiness judgment truncated for ${where}`)
       return fallback()
     }
 
@@ -935,10 +990,16 @@ export async function judgeTaskReadinessBatch(
       .filter((block) => block.type === 'text')
       .map((block) => (block.type === 'text' ? block.text : ''))
       .join('')
+    // A turn that spent its whole budget thinking returns no text block at all.
+    // Say that, rather than letting JSON.parse('') report it as a syntax error.
+    if (!rawText.trim()) {
+      console.warn(`[pipeline-b] task readiness judgment returned no text for ${where}`)
+      return fallback()
+    }
     const parsed = taskReadinessOutputSchema.safeParse(JSON.parse(rawText))
     if (!parsed.success) {
       console.warn(
-        `[pipeline-b] task readiness judgment invalid for episode ${episode.id}: ${parsed.error.issues[0]?.message ?? 'schema mismatch'}`,
+        `[pipeline-b] task readiness judgment invalid for ${where}: ${parsed.error.issues[0]?.message ?? 'schema mismatch'}`,
       )
       return fallback()
     }
@@ -976,7 +1037,7 @@ export async function judgeTaskReadinessBatch(
     })
   } catch (err) {
     console.warn(
-      `[pipeline-b] task readiness judgment failed for episode ${episode.id}: ${
+      `[pipeline-b] task readiness judgment failed for ${where}: ${
         err instanceof Error ? err.message : String(err)
       }`,
     )
@@ -1608,6 +1669,7 @@ export async function processEpisode(
   // can see the guardrail working without opening the candidates table.
   let tasksHeld = 0
   let tasksBlocked = 0
+  let tasksAutoRuled = 0
   if (deps.tasks && createsTasks) {
     for (const [taskIndex, ex] of payload.tasks.entries()) {
       try {
@@ -1619,9 +1681,13 @@ export async function processEpisode(
         }
 
         // Admission gate — the extracted lane. Unlike the assistant lane, a
-        // `hold` here is exactly right: nobody asked for this task, so an
-        // ambiguous near-duplicate waits in the suggestions tray instead of
-        // landing in the list. `admitTask` writes the tray/audit row itself.
+        // `hold` here is exactly right: nobody asked for this task. With
+        // suggestion-first, the DEFAULT outcome for a candidate that passes
+        // every check is also a hold (`suggested`); only an active `allow`
+        // rule auto-creates. `admitTask` writes the tray/audit row itself
+        // for holds/drops; the auto-approval audit case is recorded below,
+        // after the write, because it needs the created task id.
+        let autoRuleId: string | undefined
         if (deps.taskAdmission) {
           const verdict = await admitTask(deps.taskAdmission, {
             workspaceId: episode.workspaceId,
@@ -1639,6 +1705,7 @@ export async function processEpisode(
             else tasksBlocked++
             continue
           }
+          if (verdict.outcome === 'allow') autoRuleId = verdict.autoRuleId
         }
 
         const task = await deps.tasks.create({
@@ -1657,6 +1724,37 @@ export async function processEpisode(
             : undefined,
         })
         tasksWritten.push({ id: task.id })
+
+        // Rule-driven auto-creation leaves an audit case the review view
+        // shows beside pending suggestions. Best-effort: losing the audit
+        // row is strictly better than losing the task.
+        if (autoRuleId && deps.taskAdmission) {
+          tasksAutoRuled++
+          try {
+            await deps.taskAdmission.recordCandidate({
+              workspaceId: episode.workspaceId,
+              title: ex.text,
+              due,
+              lane: 'extracted',
+              sourceKind: episode.sourceKind,
+              channelRef: episode.channelRef ?? null,
+              sourceEpisodeId: episode.id,
+              createdByAssistantId: episode.createdByAssistantId,
+              status: 'auto_accepted',
+              reasonCode: 'auto_rule',
+              matchedRuleId: autoRuleId,
+              createdTaskId: task.id,
+              quality,
+              expiresAt: new Date(Date.now() + DROPPED_CANDIDATE_TTL_DAYS * 24 * 60 * 60 * 1000),
+            })
+          } catch (err) {
+            console.warn(
+              `[pipeline-b] auto-accept audit record failed for episode ${episode.id}: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            )
+          }
+        }
       } catch (err) {
         console.warn(
           `[pipeline-b] task write failed for episode ${episode.id}: ${
@@ -1674,9 +1772,9 @@ export async function processEpisode(
       }`,
     )
   }
-  if (tasksHeld > 0 || tasksBlocked > 0) {
+  if (tasksHeld > 0 || tasksBlocked > 0 || tasksAutoRuled > 0) {
     console.log(
-      `[pipeline-b] episode ${episode.id} — task guardrails: ${tasksWritten.length} created, ${tasksHeld} held for review, ${tasksBlocked} blocked`,
+      `[pipeline-b] episode ${episode.id} — task guardrails: ${tasksWritten.length} created (${tasksAutoRuled} by allow rule), ${tasksHeld} suggested/held, ${tasksBlocked} blocked`,
     )
   }
 

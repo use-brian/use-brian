@@ -209,17 +209,17 @@ export function createTaskGuardrailTools(
     name: 'saveTaskRule',
     requiresCapability: 'tasks',
     description:
-      'Record a standing rule about when tasks may be created in this workspace. Use when the user states a policy ("stop making tasks out of standup chatter", "never create a task without an owner", "no tasks from the #random channel"). ' +
+      'Record a standing rule about when tasks may be created in this workspace. Use when the user states a policy ("stop making tasks out of standup chatter", "never create a task without an owner", "no tasks from the #random channel", "always create the tasks Brian suggests from #support"). ' +
       'Pass BOTH `when` (the machine-checkable conditions) and `nl_clause` (the user\'s sentence). The conditions are enforced exactly; the sentence is additionally shown to the extractor, which is the only enforcement a rule gets when it cannot be reduced to conditions. ' +
       'If a policy is genuinely fuzzy ("only things I actually committed to"), still pass it as `nl_clause` with the narrowest honest `when` you can — and tell the user it is best-effort guidance rather than a hard block.',
     inputSchema: z.object({
       effect: z
-        .enum(['deny', 'require'])
+        .enum(['deny', 'require', 'allow'])
         .describe(
-          '"deny" blocks matching tasks outright. "require" holds matching tasks for review until they have the fields listed in `when.require`.',
+          '"deny" blocks matching tasks outright. "require" holds matching tasks for review until they have the fields listed in `when.require`. "allow" opts matching, agent-ready suggestions back into automatic creation — by default extracted tasks only land as suggestions for review.',
         ),
       when: predicateShape.describe(
-        'Conditions, ANDed together. A "deny" rule needs at least one of source_kinds / lanes / title_matches / channel_refs — an empty condition set would block every task in the workspace and is rejected.',
+        'Conditions, ANDed together. A "deny" or "allow" rule needs at least one of source_kinds / lanes / title_matches / channel_refs — an empty condition set would apply to every task in the workspace and is rejected.',
       ),
       nl_clause: z
         .string()

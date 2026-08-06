@@ -622,16 +622,20 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
               defs={filterDefs}
               active={
                 view.section === "deals"
-                  ? { stage: view.quick ? null : (view.stages[0] ?? null), company: view.company }
+                  ? {
+                      // A quick-filter owns the stage slice; its pill would lie.
+                      stage: view.quick ? [] : view.stages,
+                      company: view.company,
+                    }
                   : view.section === "contacts"
                     ? { company: view.company, tag: view.tag }
                     : { tag: view.tag }
               }
-              onSet={(key, value) => {
+              onSet={(key, values) => {
                 if (key === "stage")
-                  setView({ quick: null, stages: value ? [value as DealStage] : [] });
-                else if (key === "company") setView({ company: value });
-                else if (key === "tag") setView({ tag: value });
+                  setView({ quick: null, stages: values as DealStage[] });
+                else if (key === "company") setView({ company: values });
+                else if (key === "tag") setView({ tag: values });
               }}
               search={view.q}
               onSearch={(q) => setView({ q })}

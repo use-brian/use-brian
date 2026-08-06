@@ -12,7 +12,9 @@
  *   PATCH  /:workspaceId/rules/:id              — activate / disable
  *   DELETE /:workspaceId/rules/:id              — delete
  *   GET    /:workspaceId/candidates             — the suggestions tray
+ *                                                 (?status=auto_accepted → rule audit cases)
  *   POST   /:workspaceId/candidates/:id/accept  — promote to a real task
+ *                                                 (body {title?} edit, {always?} allow rule)
  *   POST   /:workspaceId/candidates/:id/dismiss — drop it (optionally with a reason)
  *   GET    /:workspaceId/tombstones             — what the workspace has rejected
  *   DELETE /:workspaceId/tombstones/:id         — un-teach one
@@ -38,7 +40,9 @@ import {
   createRule,
   deleteRule,
   deleteTombstone,
+  findOrCreateAllowRule,
   getCandidate,
+  listAutoAcceptedCandidates,
   listPendingCandidates,
   listRules,
   listTombstones,
@@ -69,7 +73,7 @@ const predicateSchema = z.object({
 })
 
 const createRuleSchema = z.object({
-  effect: z.enum(['deny', 'require']),
+  effect: z.enum(['deny', 'require', 'allow']),
   when: predicateSchema,
   nl_clause: z.string().min(3).max(300).nullish(),
   reason: z.string().max(500).nullish(),
@@ -82,6 +86,17 @@ const patchRuleSchema = z.object({
 
 const dismissSchema = z.object({
   reason: z.string().min(3).max(500).nullish(),
+})
+
+const acceptSchema = z.object({
+  /** Feedback edit: approve under a corrected title. */
+  title: z.string().min(3).max(512).nullish(),
+  /**
+   * "Always create tasks like this" — activates a class-level allow rule
+   * (source kind + channel when known) so future ready suggestions of this
+   * class auto-create.
+   */
+  always: z.boolean().optional(),
 })
 
 export type TaskGuardrailRouteOptions = {
@@ -210,7 +225,12 @@ export function taskGuardrailRoutes({
   router.get('/:workspaceId/candidates', async (req, res) => {
     if (!(await requireWorkspaceMember(req as any, res))) return
     try {
-      const candidates = await listPendingCandidates(req.params.workspaceId)
+      // `?status=auto_accepted` returns the audit cases an allow rule turned
+      // straight into tasks; default is the pending tray.
+      const candidates =
+        req.query.status === 'auto_accepted'
+          ? await listAutoAcceptedCandidates(req.params.workspaceId)
+          : await listPendingCandidates(req.params.workspaceId)
       res.json({ candidates })
     } catch (err) {
       console.error('[task-guardrails] list candidates failed:', err)
@@ -225,19 +245,32 @@ export function taskGuardrailRoutes({
    * at the suggestion and the thing that held it, and said yes. Re-gating would
    * block their own decision with the same near-duplicate that produced the
    * suggestion in the first place.
+   *
+   * Body (optional): `{ title }` approves under a corrected title (the
+   * feedback edit); `{ always: true }` additionally activates a class-level
+   * allow rule so future ready suggestions from this source/channel
+   * auto-create — the explicit opt-in back to automatic creation.
    */
   router.post('/:workspaceId/candidates/:id/accept', async (req, res) => {
     if (!(await requireWorkspaceMember(req as any, res))) return
     const userId = (req as any).userId as string
+
+    const parsed = acceptSchema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      res.status(400).json({ error: 'title must be 3-512 characters when provided' })
+      return
+    }
+
     try {
       const candidate = await getCandidate(req.params.workspaceId, req.params.id)
       if (!candidate || candidate.status !== 'pending') {
         res.status(404).json({ error: 'Suggestion not found' })
         return
       }
+      const title = parsed.data.title?.trim() || candidate.title
       const task = await createTask(userId, {
         workspaceId: req.params.workspaceId,
-        title: candidate.title,
+        title,
         due: candidate.due,
         source: 'extracted',
         sourceEpisodeId: candidate.sourceEpisodeId,
@@ -252,7 +285,26 @@ export function taskGuardrailRoutes({
         status: 'accepted',
         createdTaskId: task.id,
       })
-      res.json({ ok: true, task })
+
+      // The rule activation is best-effort AFTER the accept: the task is the
+      // thing the user asked for, and a rule failure must not undo it.
+      let allowRuleId: string | null = null
+      if (parsed.data.always && (candidate.sourceKind || candidate.channelRef)) {
+        try {
+          const rule = await findOrCreateAllowRule({
+            workspaceId: req.params.workspaceId,
+            userId,
+            sourceKind: candidate.sourceKind,
+            channelRef: candidate.channelRef,
+            nlClause: allowRuleClause(candidate.sourceKind, candidate.channelRef),
+          })
+          allowRuleId = rule.id
+        } catch (err) {
+          console.warn('[task-guardrails] allow-rule activation failed:', err)
+        }
+      }
+
+      res.json({ ok: true, task, allowRuleId })
     } catch (err) {
       console.error('[task-guardrails] accept candidate failed:', err)
       res.status(500).json({ error: 'Failed to accept suggestion' })
@@ -333,4 +385,17 @@ export function taskGuardrailRoutes({
   })
 
   return router
+}
+
+/**
+ * The auto-composed sentence stored as the allow rule's `nl_clause`. Shown in
+ * the rules panel and returned to the client, so it must read as the policy
+ * the user just opted into.
+ */
+function allowRuleClause(sourceKind: string | null, channelRef: string | null): string {
+  if (sourceKind && channelRef) {
+    return `Automatically create ready task suggestions from ${sourceKind} (channel ${channelRef}).`
+  }
+  if (channelRef) return `Automatically create ready task suggestions from channel ${channelRef}.`
+  return `Automatically create ready task suggestions from ${sourceKind}.`
 }

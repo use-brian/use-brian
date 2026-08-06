@@ -139,6 +139,15 @@ export const ja: Dictionary = {
     researchHint: "ディープリサーチを切り替え — ウェブとブレインを横断して統合します",
     researchHintExhausted: "無料のリサーチを使い切りました。クリックしてアップグレード",
     abort: "生成を停止",
+    queue: {
+      send: "キューに追加",
+      hint: "進行中の返信に差し込みます。Cmd+Enter で優先。",
+      pending: "待機中",
+      steering: "優先中",
+      steer: "優先",
+      steerHint: "現在のステップの完了を待たずに今すぐ反映します",
+      attachmentsWait: "添付ファイルは次のターンで送信されます",
+    },
     // コンポーザー上部のコンテキストチップ — このチャットが対象とする
     // ページを示す。開いているページは編集され、ページ未選択の場合は
     // 次のメッセージで新しい下書きが作成される。
@@ -3019,6 +3028,7 @@ export const ja: Dictionary = {
         "このビューは最新の {count} 件に基づいています。ワークスペースにはグラフの取得上限を超える項目があります。",
       density: {
         groupLabel: "{name}・{count} 件",
+        groupCount: "{count} 件",
         summary: "{loaded} 件を読込・見やすさのため {grouped} 件をグループ化",
         collapse: "展開したグループを折りたたむ",
       },
@@ -4500,6 +4510,7 @@ export const ja: Dictionary = {
     clearFilter: "フィルターを解除",
     view: "表示",
     resize: "パネル幅を調整",
+    more: "+{count}",
   },
   tasksPage: {
     title: "タスク",
@@ -4547,6 +4558,7 @@ export const ja: Dictionary = {
     showCompleted: "完了も表示",
     viewTable: "テーブル",
     viewBoard: "ボード",
+    viewSuggestions: "提案",
     dueBucketOverdue: "期限超過",
     dueBucketToday: "今日",
     dueBucketWeek: "今週",
@@ -4604,6 +4616,23 @@ export const ja: Dictionary = {
       suggestionsTitle: "提案",
       suggestionsSubtitle:
         "確認待ちのため、リストには追加されていません。ここにあるものはまだタスクではありません。",
+      suggestionsViewSubtitle:
+        "Brian はチャットやチャンネルからタスクを自動作成せず、ここに提案します。承認・修正・見送りができます。「常に」で承認すると、この種類は自動作成ルールになります。",
+      suggestionsLoading: "提案を読み込み中...",
+      suggestionsEmpty: "現在、提案はありません。",
+      suggestionsEmptyHint:
+        "チャット、チャンネル、録音の中で Brian が約束を見つけると、自動でタスクにはせず、確認のためにここに表示します。",
+      editTitleLabel: "承認前にタイトルを編集",
+      detailsToggle: "詳細",
+      evidenceLabel: "出典:",
+      acceptAlways: "常に",
+      acceptAlwaysHint:
+        "承認し、今後は同じソースからの準備が整った提案を自動的に作成します",
+      reasonSuggested: "アクティビティからの提案",
+      autoCreatedTitle: "ルールによる自動作成 ({count})",
+      autoCreatedByRule: "許可ルールにより作成",
+      bannerText: "{count}件の提案タスクが確認待ちです",
+      bannerReview: "確認する",
       accept: "追加する",
       dismiss: "タスクではない",
       dismissTitle: "これがタスクでない理由は?",
@@ -4647,6 +4676,7 @@ export const ja: Dictionary = {
       ruleDelete: "削除",
       ruleDeny: "ブロック",
       ruleRequire: "必須",
+      ruleAllow: "自動作成",
       ruleGuidanceOnly: "ガイダンスのみ",
       ruleGuidanceHint:
         "機械的に判定できる条件がないため、強制ではなく抽出時のガイダンスとして渡されます。",

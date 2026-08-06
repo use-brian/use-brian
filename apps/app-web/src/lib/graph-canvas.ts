@@ -52,6 +52,13 @@ const NODE_DEGREE_CAP = 12;
  * screen-radius ceiling keeps a large group or hub from dominating. */
 export const INITIAL_FIT_MAX_SCALE = 2.5;
 export const INITIAL_FIT_MAX_NODE_RADIUS_PX = 18;
+/** Screen-radius ceiling for GROUP-bearing projections. Entry discs never
+ * exceed `NODE_RADIUS_MAX` 7, so the 18px cap only ever binds on group
+ * containers (radius up to 11.5) — where it strangled the overview to
+ * ~1.57×, rendering the bubble map as a tiny huddle in an empty canvas.
+ * Group bubbles ARE the content at the overview; let the geometric fit
+ * frame them (a 30px-radius container on a laptop canvas is calm). */
+export const INITIAL_FIT_MAX_GROUP_RADIUS_PX = 30;
 const INITIAL_FIT_PADDING_PX = 60;
 
 export type GraphBounds = {
@@ -77,6 +84,9 @@ export function boundedViewportFit(input: {
   bounds: GraphBounds;
   maxNodeRadius: number;
   padding?: number;
+  /** Screen-radius ceiling override — pass
+   *  `INITIAL_FIT_MAX_GROUP_RADIUS_PX` for group-bearing projections. */
+  maxNodeRadiusPx?: number;
 }): ViewportFit {
   const padding = Math.max(0, input.padding ?? INITIAL_FIT_PADDING_PX);
   const spanX = Math.max(1e-9, input.bounds.x[1] - input.bounds.x[0]);
@@ -88,9 +98,10 @@ export function boundedViewportFit(input: {
       (Math.max(1, input.height) - padding * 2) / spanY,
     ),
   );
+  const maxRadiusPx = input.maxNodeRadiusPx ?? INITIAL_FIT_MAX_NODE_RADIUS_PX;
   const radiusScale =
     input.maxNodeRadius > 0
-      ? INITIAL_FIT_MAX_NODE_RADIUS_PX / input.maxNodeRadius
+      ? maxRadiusPx / input.maxNodeRadius
       : INITIAL_FIT_MAX_SCALE;
 
   return {
@@ -122,7 +133,39 @@ export function nodeRadius(degree: number): number {
  * draw their labels into each other when the discs are merely
  * non-overlapping.
  */
-const COLLIDE_PADDING = 4;
+export const COLLIDE_PADDING = 4;
+/**
+ * Per-disc padding for GROUP (container) nodes. Group bubbles carry the
+ * overview's primary read — a name line plus a count line below a 7–11.5
+ * unit disc — so entry-scale padding lets adjacent bubbles draw their
+ * labels through each other. Sized so two large groups rest ≥ ~52 units
+ * apart center-to-center.
+ */
+export const GROUP_COLLIDE_PADDING = 16;
+
+/**
+ * Extra spring length past the two endpoint radii for an edge touching a
+ * group (container) disc. The entry-tuned link distances (28 intra / 160
+ * inter) assume 2.5–7 unit discs; a pair of 10-unit containers on a
+ * 28-unit spring huddles rim-to-rim with no room for either label.
+ */
+export const GROUP_SPRING_CLEARANCE = 52;
+
+/**
+ * Radius-aware spring length. Entry↔entry edges keep the tuned base;
+ * an edge with a container (group) endpoint stretches to clear both
+ * radii plus label room, so overview bubbles spread into a readable
+ * map instead of a huddle. Never shorter than the base.
+ */
+export function radiusAwareLinkDistance(
+  base: number,
+  ra: number,
+  rb: number,
+  hasContainerEndpoint: boolean,
+): number {
+  if (!hasContainerEndpoint) return base;
+  return Math.max(base, ra + rb + GROUP_SPRING_CLEARANCE);
+}
 
 type ForceNode = { x?: number; y?: number; degree?: number };
 
@@ -131,13 +174,20 @@ type ForceNode = { x?: number; y?: number; degree?: number };
  * pair is pushed apart along its separation vector until discs (plus
  * padding) no longer intersect. Coincident nodes (zero distance — fresh
  * spawns) are separated along a caller-suppliable unit `jiggle` vector so
- * tests stay deterministic.
+ * tests stay deterministic. `padding` may be a per-node function (group
+ * containers carry more label clearance than entry discs).
  */
 export function makeCollideForce(
   getRadius: (node: ForceNode) => number,
-  opts: { padding?: number; strength?: number; jiggle?: () => number } = {},
+  opts: {
+    padding?: number | ((node: ForceNode) => number);
+    strength?: number;
+    jiggle?: () => number;
+  } = {},
 ): ((alpha: number) => void) & { initialize: (nodes: ForceNode[]) => void } {
   const padding = opts.padding ?? COLLIDE_PADDING;
+  const padOf =
+    typeof padding === "function" ? padding : () => padding as number;
   const strength = opts.strength ?? 0.8;
   const jiggle = opts.jiggle ?? (() => Math.random() - 0.5);
   let nodes: ForceNode[] = [];
@@ -146,12 +196,12 @@ export function makeCollideForce(
     const n = nodes.length;
     for (let i = 0; i < n; i++) {
       const a = nodes[i];
-      const ra = getRadius(a) + padding;
+      const ra = getRadius(a) + padOf(a);
       for (let j = i + 1; j < n; j++) {
         const b = nodes[j];
         // Per-disc padding on both endpoints — the rest gap between two
-        // discs is 2 × padding.
-        const r = ra + getRadius(b) + padding;
+        // discs is padding(a) + padding(b).
+        const r = ra + getRadius(b) + padOf(b);
         let dx = (b.x ?? 0) - (a.x ?? 0);
         let dy = (b.y ?? 0) - (a.y ?? 0);
         let d2 = dx * dx + dy * dy;
@@ -344,6 +394,14 @@ export const LABEL_FONT_PX = 11;
 export const LABEL_FONT_PX_EMPHASIZED = 12.5;
 const LABEL_MAX_CHARS = 28;
 
+/** Group (container) labels render as TWO lines — the name, then a
+ *  muted count line — instead of the one-line "name · N entries"
+ *  composition, which ran ~150px wide and overlapped every neighbour
+ *  at the overview. The name line truncates tighter than entry labels. */
+export const GROUP_NAME_MAX_CHARS = 24;
+/** On-screen font size of the group count line, CSS px. */
+export const GROUP_COUNT_FONT_PX = 9;
+
 /** On-screen cluster-heading font size in CSS px — larger than the node
  *  label so the group topic reads as a banner over the blob. */
 export const CLUSTER_LABEL_FONT_PX = 15;
@@ -353,6 +411,21 @@ export const CLUSTER_LABEL_MAX_CHARS = 22;
 /** Hard-truncate long display names so one entity can't paint a banner. */
 export function truncateLabel(name: string, max: number = LABEL_MAX_CHARS): string {
   return name.length > max ? `${name.slice(0, max - 1)}…` : name;
+}
+
+/** Rest width of an edge carrying no aggregate weight. */
+export const EDGE_REST_WIDTH = 0.6;
+
+/**
+ * Rest width for a projected aggregate edge — log growth with the number
+ * of source relationships it represents (`BrainGraphEdge.count`), capped
+ * so no thread turns into a bar. Overview group↔group edges therefore
+ * encode connection strength; entry edges (count absent or 1) keep the
+ * uniform rest width.
+ */
+export function aggregateEdgeWidth(count?: number): number {
+  if (!count || count <= 1) return EDGE_REST_WIDTH;
+  return Math.min(2.4, EDGE_REST_WIDTH + Math.log2(count) * 0.45);
 }
 
 /** Per-frame easing rate for dim transitions (fraction of remaining gap). */

@@ -118,6 +118,43 @@ const statusEnum = z.enum(STATUS_VALUES)
 const idShape = z.string().uuid()
 const tagShape = z.array(z.string().min(1).max(64)).max(20)
 
+/**
+ * The task body. A conventional `attributes` key, not a column — the v1 schema
+ * is frozen against typed scalar fields (tasks.md §1) — but the tools surface
+ * it as a first-class field anyway: `attributes` is the USER's free-form bag
+ * and `updateTask` replaces it wholesale, so a model asked to write prose
+ * "into attributes" either omits it or clobbers the sprint keys beside it.
+ * Same 10 000-char ceiling the brain-inbox `/adjust` boundary enforces.
+ */
+const descriptionShape = z.string().max(10_000)
+
+/**
+ * Supersession-aware guidance: every task edit mints a NEW id (bi-temporal
+ * supersession), and the dominant prod failure here was the model re-editing
+ * with a stale id and retrying it into the 5-strike breaker (11 breaker hits /
+ * 43% updateTask failure rate, 2026-07-07 ability audit §2.2). Tell it exactly
+ * how to recover and explicitly forbid the retry.
+ */
+function taskNotFoundMessage(id: string): string {
+  return `Task ${id} not found in workspace. If you edited this task earlier, that edit returned a NEW task id (every update supersedes the row) — reuse the id from that result, or call listTasks/getTask to re-resolve. Do NOT retry this exact id.`
+}
+
+/**
+ * Merge a description into a task's attribute bag without disturbing its
+ * siblings (`priority`, `icon`, sprint keys). `null` removes the key — the
+ * same merge contract the REST `/adjust` branch honors.
+ */
+function mergeDescription(
+  base: Record<string, unknown> | undefined,
+  description: string | null,
+): Record<string, unknown> {
+  const attrs = { ...(base ?? {}) }
+  const trimmed = description?.trim()
+  if (trimmed) attrs.description = description
+  else delete attrs.description
+  return attrs
+}
+
 function eventCtx(context: { userId: string; assistantId: string; sessionId: string; channelType: string }): TaskToolEventContext {
   return {
     userId: context.userId,
@@ -229,13 +266,16 @@ export function createTaskTools(
       'Status defaults to `todo` if omitted. Use `updateTask` to change a task later, or the `closeTask` / `reopenTask` shortcuts for the common state transition.',
     inputSchema: z.object({
       title: z.string().min(1).max(512).describe('Short, action-oriented title (e.g. "Review Q1 plan", "Ship migration 113").'),
+      description: descriptionShape.optional().describe(
+        'What the task actually is, written so whoever opens it later can act without reading this conversation: the objective and context, where or how to start, and what result means done. Markdown. Write one whenever the conversation supports it — a bare title makes the reader reconstruct the ask. Ground it in what was said; never invent a target, a tool, or a deadline the user did not give you.',
+      ),
       assignee_id: idShape.optional().describe('UUID of a workspace_members row (NOT a user_id). Omit if the task is unassigned. Call `listWorkspaceMembers` to resolve a person named in chat to their member id — usually filled in only when the user has named someone.'),
       due: isoDateOrDateTime.optional().describe('Resolve relative phrases like "Friday" to an absolute value in `userTimezone`: a zone-qualified ISO-8601 timestamp (offset or "Z") or a bare date.'),
       tags: tagShape.optional(),
       parent_id: idShape.nullable().optional().describe('UUID of an existing same-workspace task to nest this one under. Omit or pass null for a top-level task. The DB rejects cross-workspace parents.'),
       status: statusEnum.optional().describe('Defaults to `todo`. Use `archived` instead of deleting.'),
       external_ref: z.record(z.unknown()).optional().describe('Reserved for sync-engine round-tripping ({provider, id, url}). Leave empty unless the user is asking you to mirror an existing Linear/Asana task.'),
-      attributes: z.record(z.unknown()).optional().describe('Free-form JSONB for user-defined per-task keys — typically sprint estimation / ordering / velocity (e.g. `estimate_days`, `estimate_points`, `order`). Schema is unvalidated; whatever keys the workspace converges on. Whole object overwrites on `updateTask` — read with `getTask` first if you only want to change one key.'),
+      attributes: z.record(z.unknown()).optional().describe('Free-form JSONB for user-defined per-task keys — typically sprint estimation / ordering / velocity (e.g. `estimate_days`, `estimate_points`, `order`). Schema is unvalidated; whatever keys the workspace converges on. Use the `description` field rather than a `description` key here. Whole object overwrites on `updateTask` — read with `getTask` first if you only want to change one key.'),
       depends_on: z.array(idShape).max(50).optional().describe('Task ids this task depends on. Each becomes a task→task `depends_on` graph edge — the daily turn topologically reasons over the dependency graph (A depends_on B means "do B before A"). Same-workspace ids only. v1 limitation: append-only — emits new edges but does not remove existing ones. To restructure a dependency graph, soft-delete (`status: archived`) and re-create.'),
       links: explicitLinksField,
       override_guardrail: tolerantBoolean()
@@ -308,7 +348,10 @@ export function createTaskTools(
           tags: input.tags,
           parentId: input.parent_id ?? null,
           externalRef: input.external_ref,
-          attributes: input.attributes,
+          attributes:
+            input.description !== undefined
+              ? mergeDescription(input.attributes, input.description)
+              : input.attributes,
           compartments: unionCompartments(
             context.compartmentAccumulator?.compartments,
             context.assistantDefaultCompartments,
@@ -472,19 +515,7 @@ export function createTaskTools(
       }
       throw err
     }
-    if (!updated) {
-      // Supersession-aware guidance: every task edit mints a NEW id
-      // (bi-temporal supersession), and the dominant prod failure here was
-      // the model re-editing with a stale id and retrying it into the
-      // 5-strike breaker (11 breaker hits / 43% updateTask failure rate,
-      // 2026-07-07 ability audit §2.2). Tell it exactly how to recover and
-      // explicitly forbid the retry.
-      return {
-        data:
-          `Task ${id} not found in workspace. If you edited this task earlier, that edit returned a NEW task id (every update supersedes the row) — reuse the id from that result, or call listTasks/getTask to re-resolve. Do NOT retry this exact id.`,
-        isError: true,
-      }
-    }
+    if (!updated) return { data: taskNotFoundMessage(id), isError: true }
     return { ok: true, record: updated, changedFields: Object.keys(fields) }
   }
 
@@ -498,6 +529,9 @@ export function createTaskTools(
     inputSchema: z.object({
       id: idShape,
       title: z.string().min(1).max(512).optional(),
+      description: descriptionShape.nullable().optional().describe(
+        'Replace the task body — the objective and context, where or how to start, and what result means done. Markdown. Pass null to clear it. Merged into the task, so sibling attribute keys (priority, icon, sprint fields) survive; this is a full replacement of the body text itself, so include what you want kept.',
+      ),
       status: statusEnum.optional(),
       assignee_id: idShape.nullable().optional().describe('workspace_members id — call `listWorkspaceMembers` to resolve a name. Pass null to unassign.'),
       due: isoDateOrDateTime.nullable().optional(),
@@ -520,6 +554,33 @@ export function createTaskTools(
       if (input.external_ref !== undefined) fields.externalRef = input.external_ref
       if (input.attributes !== undefined) fields.attributes = input.attributes
       if (input.depends_on !== undefined) fields.dependsOn = input.depends_on
+
+      // `attributes` is a whole-object replace, so writing the body alone has to
+      // merge onto the row's CURRENT bag — otherwise a one-line description edit
+      // silently drops the priority / icon / sprint keys beside it.
+      if (input.description !== undefined) {
+        const gate = workspaceGate(context.workspaceId)
+        if (gate) return gate
+        let base = input.attributes
+        if (base === undefined) {
+          const current = await store.getById(
+            ctxFor({
+              userId: context.userId,
+              assistantId: context.assistantId,
+              workspaceId: context.workspaceId!,
+              assistantKind: context.assistantKind,
+              clearance: context.clearance,
+              compartments: context.compartments,
+            }),
+            input.id,
+          )
+          if (!current || current.workspaceId !== context.workspaceId) {
+            return { data: taskNotFoundMessage(input.id), isError: true }
+          }
+          base = current.attributes
+        }
+        fields.attributes = mergeDescription(base, input.description)
+      }
 
       const hasFieldChange = Object.keys(fields).length > 0
       const hasLinkChange = (input.links?.length ?? 0) > 0

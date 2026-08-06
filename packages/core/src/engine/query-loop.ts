@@ -13,6 +13,13 @@ import {
   hasWebVerificationTool,
   type GroundingGateOptions,
 } from './grounding-gate.js'
+import {
+  formatMidTurnInput,
+  resolveDrainMode,
+  shouldInterruptStreamForSteer,
+  type PendingTurnInput,
+  type TurnInboxPort,
+} from './turn-inbox.js'
 import { compactConversation } from '../compaction/compact.js'
 import { isContextOverflowError } from '../providers/context-budget.js'
 
@@ -166,6 +173,17 @@ export type QueryEvent =
         backedByToolName?: string
       }>
     }
+  /**
+   * The loop took one or more messages the user sent WHILE this turn was
+   * running (`options.turnInbox`). Fires immediately before those messages are
+   * handed to the model, so a consumer can persist them as user rows and tell
+   * the client its queued bubble is now part of the conversation.
+   *
+   * `mode` is the resolved mode for the whole drain — `steer` if any single
+   * input asked to be expedited. See
+   * docs/architecture/engine/mid-turn-input.md.
+   */
+  | { type: 'turn_input'; inputs: PendingTurnInput[]; mode: 'queued' | 'steer' }
   | { type: 'turn_complete'; response: AssistantResponse; totalUsage: TokenUsage }
   | { type: 'status'; message: string }
   | { type: 'error'; error: Error }
@@ -320,6 +338,18 @@ export type QueryLoopOptions = {
    * See docs/architecture/engine/askquestion-suspend-resume.md.
    */
   questionResumeEnabled?: boolean
+  /**
+   * Mid-turn input. When wired, the loop picks up messages the user sent while
+   * this turn was running instead of making them wait for a fresh turn.
+   *
+   * The loop peeks at three points — the Phase 5 turn boundary, the terminal
+   * boundary (where draining CONTINUES the loop rather than exiting), and,
+   * for a `steer`, between stream chunks. Absent → nothing changes for the
+   * caller; every drain point short-circuits on the missing port.
+   *
+   * See docs/architecture/engine/mid-turn-input.md.
+   */
+  turnInbox?: TurnInboxPort
 }
 
 // ── Query loop ─────────────────────────────────────────────────
@@ -501,6 +531,32 @@ export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<Quer
   // of this queryLoop call (one user message) but reset on the next message.
   const deniedTools = new Set<string>()
 
+  // ── Mid-turn input state ───────────────────────────────────────
+  // Set when a `steer` drain lands, consumed by the next terminal-branch
+  // evaluation: the user redirected the work, so spending budget forcing the
+  // model to finish the plan it just abandoned is waste. Deliberately scoped
+  // to the PLAN gate only — the grounding gate is an anti-fabrication guard,
+  // not a continuation, and a steer is no reason to ship unbacked figures.
+  let steerSuppressesPlanGate = false
+
+  /**
+   * Take everything waiting in the inbox and turn it into a user-role text
+   * block. Yields `turn_input` FIRST so the consumer persists the rows (and
+   * tells the client its queued bubble landed) before the model is handed the
+   * text. Returns null when nothing is waiting — every drain point is a cheap
+   * `peek()` in the common case.
+   */
+  function* drainTurnInbox(): Generator<QueryEvent, ContentBlock | null, undefined> {
+    const inbox = options.turnInbox
+    if (!inbox || !inbox.peek().pending) return null
+    const inputs = inbox.drain()
+    if (inputs.length === 0) return null
+    const mode = resolveDrainMode(inputs)
+    if (mode === 'steer') steerSuppressesPlanGate = true
+    yield { type: 'turn_input', inputs, mode }
+    return { type: 'text', text: formatMidTurnInput(inputs) }
+  }
+
   if (options.resumeContext) {
     const rc = options.resumeContext
     yield {
@@ -575,7 +631,12 @@ export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<Quer
     // Tracks whether anything user-visible has been yielded for this turn.
     // Gates the transient-error retry below: once a chunk has streamed to
     // the consumer, retrying the upstream call would duplicate that output.
+    // Also gates the mid-stream steer interrupt, for the same reason.
     let hasYieldedUserVisibleOutput = false
+
+    // Set when a `steer` arrives mid-stream and the gate above allows us to
+    // drop this response on the floor and re-enter with the new instruction.
+    let steerInterrupted = false
 
     try {
       // Stateless: send full history via provider.stream() (no rawHistory accumulation).
@@ -710,6 +771,26 @@ export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<Quer
             yield { type: 'citation', sources: citations }
           }
         }
+
+        // ── Mid-turn steer interrupt ─────────────────────────────
+        // The user redirected while the model was mid-response. Bail out of
+        // this response ONLY while nothing user-visible has streamed — see
+        // `shouldInterruptStreamForSteer` for why that is a rule and not a
+        // preference. Two properties fall out of that gate and both are
+        // load-bearing: `tool_start` sets the flag, so no tool can be in
+        // flight here (nothing to abort or stub), and the provider commits
+        // session history only on a completed response, so breaking leaves
+        // no trace and the re-entry below re-sends the same payload.
+        if (
+          options.turnInbox
+          && shouldInterruptStreamForSteer({
+            peek: options.turnInbox.peek(),
+            hasYieldedUserVisibleOutput,
+          })
+        ) {
+          steerInterrupted = true
+          break
+        }
       }
     } catch (err) {
       // Layer 4: reactive compact on context overflow — compact and retry once
@@ -775,6 +856,26 @@ export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<Quer
     // double-stall guard still holds: two consecutive stalls on one logical
     // step never reach this line between them (the second throws first).
     transientRetries = 0
+
+    // ── Mid-turn steer re-entry ────────────────────────────────
+    // We broke out of the stream above. Discard the partial response
+    // (nothing user-visible reached the consumer, and the provider never
+    // committed it) and re-send the SAME `nextMessages` with the steer block
+    // appended — the transient-retry contract, one instruction richer.
+    if (steerInterrupted) {
+      const steerBlock = yield* drainTurnInbox()
+      if (steerBlock) {
+        nextMessages = appendUserBlock(nextMessages, steerBlock)
+        if (options.stateless) {
+          statelessHistory = appendUserBlock(statelessHistory, steerBlock)
+        }
+        console.log(`[query-loop] turn ${turn} interrupted mid-stream by a steer`)
+        continue
+      }
+      // The inbox emptied between the peek and the drain (another drain point
+      // won the race). Nothing to inject — fall through and finish the turn
+      // with whatever the partial response holds.
+    }
 
     const response = accumulator.finish()
     totalUsage.inputTokens += response.usage.inputTokens
@@ -1234,6 +1335,15 @@ export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<Quer
         }
       }
 
+      // A steer landed since the last terminal evaluation: the user has
+      // redirected the work, so this one pass skips the "keep working the
+      // plan" continuation. Consumed here, not left latched — the plan is
+      // still the plan on subsequent turns. The grounding gate below is
+      // deliberately NOT covered: it is an anti-fabrication guard, and a
+      // steer is no reason to ship unbacked figures.
+      const skipPlanGate = steerSuppressesPlanGate
+      steerSuppressesPlanGate = false
+
       // ── Completeness gate (execution-plan tier) ────────────────
       // A tool-less message would normally end the turn. If the session has
       // an active plan with open steps and budget remains, keep working it
@@ -1241,7 +1351,7 @@ export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<Quer
       // model-generated resumable handoff. Deterministic — one cheap read,
       // no LLM call. Workers take priority (handled above). See
       // docs/architecture/context-engine/execution-plan.md.
-      if (options.planGate) {
+      if (options.planGate && !skipPlanGate) {
         const planSt = await options.planGate
           .status(context.sessionId)
           .catch(() => null)
@@ -1361,6 +1471,51 @@ export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<Quer
         }
       }
 
+      // ── Mid-turn input (terminal boundary) ─────────────────────
+      // Last look before the loop exits. This is what makes the feature
+      // reliable rather than best-effort: inbox delivery can land after the
+      // final Phase 5, and without this drain the common "sent it just as the
+      // answer arrived" case would fall back to a whole fresh turn. Runs
+      // AFTER the worker drain / plan gate / grounding gate so the answer the
+      // user is already reading is finalised — claim ledger and all — before
+      // the new input is taken.
+      {
+        const terminalBlock = yield* drainTurnInbox()
+        if (terminalBlock) {
+          nextMessages = [{ role: 'user', content: [terminalBlock] }]
+          if (options.stateless) {
+            statelessHistory.push({ role: 'assistant', content: response.content })
+            statelessHistory.push(...nextMessages)
+          }
+          suppressText = false
+          continue
+        }
+      }
+
+      // Terminal-turn rescue. We got here because `stopReason` said this turn
+      // is terminal — but `stopReason` and turn CONTENT can disagree: a
+      // stream wrapper that truncates mid-turn closes the message with
+      // `stopReason: 'end_turn'` even though a `tool_use` block was already
+      // emitted (`wrapTextLoopPrevention` after `emittedText`, and the
+      // fallback wrapper's synthetic close). The result is a "terminal" turn
+      // carrying a tool call, which every delivery path discards wholesale —
+      // so the consult assembled nothing and failed `empty_response` while
+      // the tool had in fact run (prod 2026-08-05, run 86d1c152).
+      //
+      // Terminality is decided by stopReason; DELIVERABILITY is decided by
+      // content. When they disagree, synthesize a real closing turn from what
+      // the tools returned rather than emitting a turn nobody can use.
+      if (!hasDeliverableText(response) && allToolResults.length > 0 && session) {
+        const fallbackResponse = yield* forceTextResponse(
+          session, allToolResults, totalUsage,
+        )
+        if (fallbackResponse) {
+          yield { type: 'assistant_turn', response: fallbackResponse, toolResults: [] }
+          yield { type: 'turn_complete', response: fallbackResponse, totalUsage }
+          return
+        }
+      }
+
       yield { type: 'turn_complete', response, totalUsage }
       return
     }
@@ -1377,6 +1532,22 @@ export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<Quer
       nextMessages = [{ role: 'user', content: nudgeBlock ? [...allToolResults, nudgeBlock] : allToolResults }]
     } else {
       nextMessages = nudgeBlock ? [{ role: 'user', content: [nudgeBlock] }] : []
+    }
+
+    // ── Mid-turn input (turn boundary) ─────────────────────────
+    // The natural point: the model has just seen what its tools returned and
+    // has not yet decided what to do next. The input rides in the SAME
+    // user-role message as those results, so it costs no extra round trip.
+    // Placed before the stateless push below so the block lands in that
+    // history too. See docs/architecture/engine/mid-turn-input.md.
+    {
+      const midTurnBlock = yield* drainTurnInbox()
+      if (midTurnBlock) {
+        nextMessages = appendUserBlock(nextMessages, midTurnBlock)
+        // A queued message is the user speaking — never swallow the reply to
+        // it as coordinator chatter.
+        suppressText = false
+      }
     }
 
     // Stateless mode: accumulate full history for next provider.stream() call.
@@ -1399,13 +1570,12 @@ export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<Quer
     if (loopDetector.totalToolCalls >= maxToolCalls) {
       yield { type: 'status', message: 'Reached tool execution limit' }
 
-      // If the last turn was only tool calls (all blocked), the user would
-      // see nothing. Do one final no-tools LLM call so the model can
-      // synthesize a text response from whatever it gathered.
-      const hasText = response.content.some(
-        (b) => b.type === 'text' && 'text' in b && (b as { text: string }).text.trim().length > 0,
-      )
-      if (!hasText && allToolResults.length > 0 && session) {
+      // If the last turn carries no DELIVERABLE text, the user would see
+      // nothing. Do one final no-tools LLM call so the model can synthesize a
+      // text response from whatever it gathered. Gated structurally — a turn
+      // shaped `[narration, tool_use]` has text but no deliverable text, and
+      // gating this lexically let that narration suppress its own rescue.
+      if (!hasDeliverableText(response) && allToolResults.length > 0 && session) {
         const fallbackResponse = yield* forceTextResponse(
           session, allToolResults, totalUsage,
         )
@@ -1421,13 +1591,11 @@ export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<Quer
     }
   }
 
-  // Hit max turns — if the last turn was all tool_use with no text, do one
-  // final no-tools call so the model synthesizes from what it gathered.
+  // Hit max turns — if the last turn carries no deliverable text, do one final
+  // no-tools call so the model synthesizes from what it gathered. Structural
+  // gate for the same reason as the tool-cap exit above.
   {
-    const hasText = lastResponse?.content.some(
-      (b) => b.type === 'text' && 'text' in b && (b as { text: string }).text.trim().length > 0,
-    )
-    if (!hasText && lastToolResults.length > 0 && session) {
+    if (!hasDeliverableText(lastResponse) && lastToolResults.length > 0 && session) {
       const fallbackResponse = yield* forceTextResponse(
         session, lastToolResults, totalUsage,
       )
@@ -1448,6 +1616,27 @@ export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<Quer
 }
 
 // ── Helpers ────────────────────────────────────────────────────
+
+/**
+ * Append a block to the trailing user-role message, or start a new user
+ * message when the tail isn't one. Used to fold a mid-turn input into whatever
+ * the next turn was already going to send — the turn's tool results (the
+ * `nudgeBlock` precedent), or, on a turn-0 steer, the user's own message.
+ *
+ * Returns new objects rather than mutating: `nextMessages` starts life as a
+ * shallow copy of the caller's `options.messages`, so mutating an element
+ * would reach back into the caller's array.
+ */
+function appendUserBlock(messages: Message[], block: ContentBlock): Message[] {
+  const last = messages[messages.length - 1]
+  if (last?.role === 'user') {
+    const blocks: ContentBlock[] = typeof last.content === 'string'
+      ? [{ type: 'text', text: last.content }]
+      : last.content
+    return [...messages.slice(0, -1), { ...last, content: [...blocks, block] }]
+  }
+  return [...messages, { role: 'user', content: [block] }]
+}
 
 /**
  * Detect transient stream errors worth retrying once. Covers:
@@ -1627,6 +1816,33 @@ export function stripInstructionLeakPrefix(text: string): string {
  *      downstream session persistence stores the fallback, not the
  *      leak. The user never sees the leak in chat history either.
  */
+/**
+ * Does this turn carry text a delivery path may actually use?
+ *
+ * Deliverable text is TERMINAL text. A turn that also carries a `tool_use`
+ * block is mid-reasoning by the provider contract, so every delivery-path
+ * consumer drops that turn WHOLESALE — see the turn-text-assembly invariant
+ * (`packages/repo-checks/src/checks/turn-text-assembly.ts`) and
+ * docs/architecture/channels/inter-assistant.md → "Final-text assembly".
+ * Narration riding alongside a call is not an answer, however long it is.
+ *
+ * The loop's terminal fallbacks MUST gate on this and not on a bare "is there
+ * any text" test. A final turn shaped `[narration, tool_use]` passes a lexical
+ * check and fails the consumer's structural one — which is precisely the case
+ * the synthesis fallback exists to rescue. Gating it lexically meant the
+ * narration SUPPRESSED the rescue it should have triggered, and the consult
+ * assembled zero text and failed `empty_response` (prod 2026-08-05, run
+ * 86d1c152 step `save_cursor`; 16 of 17 sampled `empty_response` workflow
+ * failures had this exact terminal-turn shape).
+ */
+function hasDeliverableText(response: AssistantResponse | undefined): boolean {
+  if (!response) return false
+  if (response.content.some((b) => b.type === 'tool_use')) return false
+  return response.content.some(
+    (b) => b.type === 'text' && 'text' in b && (b as { text: string }).text.trim().length > 0,
+  )
+}
+
 async function* forceTextResponse(
   session: ProviderSession,
   toolResults: ContentBlock[],

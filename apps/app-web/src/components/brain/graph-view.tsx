@@ -70,6 +70,20 @@
  *   (mixed endpoints stay neutral so bridges don't blend muddy) and
  *   carry a slow ambient particle (≤ AMBIENT_PARTICLE_EDGE_CAP edges);
  *   the hovered node runs a `pulsePhase` expanding ring.
+ * - Group-overview (bubble map) regime: a projection containing GROUP
+ *   nodes renders as a topic bubble map, not an entry constellation.
+ *   Group containers get radius-aware spring lengths
+ *   (`radiusAwareLinkDistance`) + bigger collide padding
+ *   (`GROUP_COLLIDE_PADDING`) so bubbles spread instead of huddling,
+ *   are exempt from community gravity (which squeezed the whole
+ *   overview into one mass), always draw a TWO-LINE label (name +
+ *   muted count line — the one-line "name · N entries" composition
+ *   overlapped every neighbour), and the initial fit uses the group
+ *   screen-radius ceiling so the camera frames the map instead of
+ *   shrinking it into empty canvas. Community halos + cluster
+ *   headings are skipped while groups are present — each bubble IS a
+ *   group and labels itself. Aggregate group↔group edges scale their
+ *   rest width with `edge.count` (`aggregateEdgeWidth`).
  */
 
 import {
@@ -96,8 +110,15 @@ import {
   CLUSTER_LABEL_FONT_PX,
   CLUSTER_LABEL_MAX_CHARS,
   CLUSTER_MIN_SIZE,
+  COLLIDE_PADDING,
+  GROUP_COLLIDE_PADDING,
+  GROUP_COUNT_FONT_PX,
+  GROUP_NAME_MAX_CHARS,
+  INITIAL_FIT_MAX_GROUP_RADIUS_PX,
   LABEL_FONT_PX,
   LABEL_FONT_PX_EMPHASIZED,
+  NODE_RADIUS_MAX,
+  aggregateEdgeWidth,
   boundedViewportFit,
   clusterLabelAlpha,
   communityHalos,
@@ -114,6 +135,7 @@ import {
   nodeRadius,
   pulsePhase,
   radialSeedPositions,
+  radiusAwareLinkDistance,
   shadeHex,
   stepToward,
   truncateLabel,
@@ -515,24 +537,23 @@ export function BrainGraphView({
   );
 
   const activeProjection = scopedGraph ?? sourceGraph;
+  // Group nodes keep their RAW names — the canvas draws a two-line label
+  // (name + muted count line) and the hover tooltip composes the one-line
+  // "name · N entries" form on demand. Composing into `name` here made
+  // every overview label a ~150px one-liner that overlapped its
+  // neighbours.
+  const graph = activeProjection;
   const groupLabel = t.brainPage.graphView.density.groupLabel;
-  // Group names are source anchors. The count-bearing canvas label is local.
-  const graph = useMemo(
-    () => ({
-      ...activeProjection,
-      nodes: activeProjection.nodes.map((node) =>
-        isBrainGraphGroupNode(node)
-          ? {
-              ...node,
-              name: format(groupLabel, {
-                name: node.name,
-                count: node.memberCount,
-              }),
-            }
-          : node,
-      ),
-    }),
-    [activeProjection, groupLabel],
+  const groupCountLabel = t.brainPage.graphView.density.groupCount;
+
+  // Whether the current projection carries group (container) nodes — the
+  // switch into the bubble-map regime: radius-aware springs, group collide
+  // padding, no community gravity on containers, group fit ceiling, and
+  // no community halos/headings (each bubble IS a group and labels
+  // itself).
+  const hasGroupNodes = useMemo(
+    () => graph.nodes.some(isBrainGraphGroupNode),
+    [graph],
   );
 
   const openGroup = useCallback(
@@ -787,10 +808,10 @@ export function BrainGraphView({
   // group mode — the heading annotates the colored groups.
   const communityLabelText = useMemo(
     () =>
-      colorMode === "group"
+      colorMode === "group" && !hasGroupNodes
         ? communityLabels(graph.nodes, (id) => communities.byId.get(id))
         : new Map<number, string>(),
-    [colorMode, graph, communities],
+    [colorMode, graph, communities, hasGroupNodes],
   );
 
   // Rest-state edge tint — an edge whose endpoints resolve to the SAME
@@ -1091,8 +1112,14 @@ export function BrainGraphView({
 
   /** Soft community washes behind the clusters — graph space,
    *  recomputed from the live (sim-mutated) node positions each frame
-   *  so the wash tracks the layout as it settles. */
+   *  so the wash tracks the layout as it settles. Skipped while the
+   *  projection carries group nodes: each bubble is already a group,
+   *  so one mega-wash over the bubble map reads as fog, not structure. */
   const paintHalos = (ctx: CanvasRenderingContext2D) => {
+    if (hasGroupNodes) {
+      lastHalosRef.current = [];
+      return;
+    }
     const byId = communitiesRef.current.byId;
     const halos = communityHalos(graphData.nodes, (id) => byId.get(id));
     // Reused by the cluster-heading pass (onRenderFramePost) this frame.
@@ -1198,6 +1225,12 @@ export function BrainGraphView({
         (max, node) => Math.max(max, displayRadius(node)),
         0,
       ),
+      // Group bubbles are containers — the entry-hub 18px screen-radius
+      // ceiling strangled the overview to ~1.6× and left the bubble map
+      // tiny in an empty canvas. Let the geometric fit frame it.
+      maxNodeRadiusPx: graphData.nodes.some(isBrainGraphGroupNode)
+        ? INITIAL_FIT_MAX_GROUP_RADIUS_PX
+        : undefined,
     });
     fitScaleRef.current = fit.scale;
     instance.centerAt(fit.center.x, fit.center.y, 360);
@@ -1220,26 +1253,58 @@ export function BrainGraphView({
       const a = byId.get(l.__sourceId);
       return a != null && a === byId.get(l.__targetId);
     };
-    instance.d3Force("link")?.distance?.((link: unknown) =>
-      sameCommunity(link) ? LINK_DISTANCE_INTRA : LINK_DISTANCE_INTER,
-    );
+    // Spring lengths are radius-aware: entry↔entry edges keep the tuned
+    // 28/160 split; an edge touching a group container stretches to clear
+    // both discs plus label room (bubble-map spacing). Endpoints resolve
+    // through lastNodesRef — always populated by the graphData memo
+    // before the sim ticks.
+    const endpointNode = (id: string): GraphNodeWithPos | undefined =>
+      lastNodesRef.current.get(id);
+    instance.d3Force("link")?.distance?.((link: unknown) => {
+      const l = link as GraphEdgeWithRefs;
+      const base = sameCommunity(l)
+        ? LINK_DISTANCE_INTRA
+        : LINK_DISTANCE_INTER;
+      const s = endpointNode(l.__sourceId);
+      const t = endpointNode(l.__targetId);
+      return radiusAwareLinkDistance(
+        base,
+        s ? displayRadius(s) : NODE_RADIUS_MAX,
+        t ? displayRadius(t) : NODE_RADIUS_MAX,
+        Boolean(
+          (s && isBrainGraphGroupNode(s)) || (t && isBrainGraphGroupNode(t)),
+        ),
+      );
+    });
     instance.d3Force("link")?.strength?.(((link: unknown) =>
       sameCommunity(link)
         ? LINK_STRENGTH_INTRA
         : LINK_STRENGTH_INTER) as never);
     instance.d3Force(
       "collide",
-      makeCollideForce((n) => displayRadius(n as GraphNodeWithPos)),
+      makeCollideForce((n) => displayRadius(n as GraphNodeWithPos), {
+        // Group containers carry the two-line overview label — they rest
+        // farther apart than entry discs.
+        padding: (n) =>
+          isBrainGraphGroupNode(n as GraphNodeWithPos)
+            ? GROUP_COLLIDE_PADDING
+            : COLLIDE_PADDING,
+      }),
     );
     // Weak pull-to-origin so isolated nodes / disconnected fragments stop
     // drifting off and ballooning the initial-fit bounding box.
     instance.d3Force("anchor", makeAnchorForce());
     // Community gravity — members pull toward their cluster's centroid.
+    // Group containers are exempt: at the overview they usually detect as
+    // ONE community, and gravity squeezed all bubbles into a huddle. The
+    // radius-aware springs + collide own container spacing instead.
     instance.d3Force(
       "cluster",
-      makeClusterForce((n) =>
-        communitiesRef.current.byId.get((n as GraphNodeWithPos).id),
-      ),
+      makeClusterForce((n) => {
+        const node = n as GraphNodeWithPos;
+        if (isBrainGraphGroupNode(node)) return undefined;
+        return communitiesRef.current.byId.get(node.id);
+      }),
     );
   };
 
@@ -1393,14 +1458,21 @@ export function BrainGraphView({
             paintHalos(ctx);
           }}
           // Group headings ABOVE the discs (post pass), group mode only —
-          // fade out as the user zooms into individual nodes.
+          // fade out as the user zooms into individual nodes. Skipped in
+          // the bubble-map regime: every group bubble labels itself, and
+          // the derived heading duplicated one bubble's name across the
+          // overview.
           onRenderFramePost={
-            colorMode === "group"
+            colorMode === "group" && !hasGroupNodes
               ? (ctx: CanvasRenderingContext2D, globalScale: number) =>
                   paintClusterLabels(ctx, globalScale)
               : undefined
           }
-          nodeLabel={(n: GraphNodeWithPos) => n.name}
+          nodeLabel={(n: GraphNodeWithPos) =>
+            isBrainGraphGroupNode(n)
+              ? format(groupLabel, { name: n.name, count: n.memberCount })
+              : n.name
+          }
           // Custom node renderer — orb-shaded disc + zoom-tiered haloed
           // label + eased dim + glow on emphasis + hover pulse ring.
           // Per-frame math lives in lib/graph-canvas.ts.
@@ -1518,23 +1590,34 @@ export function BrainGraphView({
 
             // Zoom-tiered label: hubs near fit zoom, everyone by reading
             // zoom, emphasized always. Halo in the background color keeps
-            // the text legible over edges and neighbouring discs.
+            // the text legible over edges and neighbouring discs. Group
+            // containers are always labelled (the labels ARE the overview's
+            // content) and draw TWO lines — the name, then a muted count —
+            // instead of the wide one-line composition.
+            const isGroup = isBrainGraphGroupNode(n);
             const la =
               labelAlpha({
                 zoomRel: globalScale / (fitScaleRef.current || 1),
                 degree: n.degree,
                 hubThreshold,
                 emphasized:
-                  isHovered || isHoverNeighbor || isMatch || isFocusNeighbor,
+                  isHovered ||
+                  isHoverNeighbor ||
+                  isMatch ||
+                  isFocusNeighbor ||
+                  isGroup,
               }) * alpha;
             if (la > 0.03) {
               const px = emphasize ? LABEL_FONT_PX_EMPHASIZED : LABEL_FONT_PX;
               const fontSize = px / globalScale;
-              ctx.font = `${emphasize ? 600 : 500} ${fontSize}px ui-sans-serif, system-ui, sans-serif`;
+              ctx.font = `${emphasize || isGroup ? 600 : 500} ${fontSize}px ui-sans-serif, system-ui, sans-serif`;
               ctx.textAlign = "center";
               ctx.textBaseline = "top";
               ctx.globalAlpha = la;
-              const label = truncateLabel(n.name);
+              const label = truncateLabel(
+                n.name,
+                isGroup ? GROUP_NAME_MAX_CHARS : undefined,
+              );
               const ly = (n.y ?? 0) + r + 3 / globalScale;
               ctx.lineJoin = "round";
               ctx.lineWidth = 3.5 / globalScale;
@@ -1542,6 +1625,16 @@ export function BrainGraphView({
               ctx.strokeText(label, n.x ?? 0, ly);
               ctx.fillStyle = colors.foreground;
               ctx.fillText(label, n.x ?? 0, ly);
+              if (isGroup) {
+                const countLabel = format(groupCountLabel, {
+                  count: n.memberCount,
+                });
+                const cy = ly + (px + 2.5) / globalScale;
+                ctx.font = `500 ${GROUP_COUNT_FONT_PX / globalScale}px ui-sans-serif, system-ui, sans-serif`;
+                ctx.strokeText(countLabel, n.x ?? 0, cy);
+                ctx.fillStyle = colors.muted;
+                ctx.fillText(countLabel, n.x ?? 0, cy);
+              }
             }
             ctx.globalAlpha = 1;
           }}
@@ -1612,17 +1705,21 @@ export function BrainGraphView({
           }}
           linkWidth={(link: GraphEdgeWithRefs) => {
             const l = link;
-            let target = 0.6;
+            // Rest width scales with the aggregate weight (`edge.count` —
+            // the number of source relationships a projected group edge
+            // represents), so overview threads encode connection strength.
+            const rest = aggregateEdgeWidth(l.count);
+            let target = rest;
             if (hoverId !== null) {
               target =
                 l.__sourceId === hoverId || l.__targetId === hoverId
-                  ? 1.2
+                  ? Math.max(1.2, rest)
                   : 0.4;
             } else if (focusMatchIds) {
               target =
                 focusMatchIds.has(l.__sourceId) ||
                 focusMatchIds.has(l.__targetId)
-                  ? 1.1
+                  ? Math.max(1.1, rest)
                   : 0.35;
             }
             if (

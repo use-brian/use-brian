@@ -10,7 +10,10 @@
  *   - the `project:` tag facet (tasks-operator-surface §5 — projects are a
  *     tag namespace, not a primitive);
  *   - group-by + sort;
- *   - saved views (named filter sets, per-workspace localStorage).
+ *   - saved views (named filter sets, per-workspace localStorage);
+ *   - `multiParam`, the multi-value search-param codec — defined here
+ *     because tasks.md carries its spec, imported by the CRM twin
+ *     (`crm-view.ts`) so the two surfaces can't drift on URL shape.
  *
  * Spec: docs/architecture/features/tasks.md → "Operator surface".
  * [COMP:app-web/tasks-view]
@@ -150,23 +153,32 @@ export type GroupKey = (typeof GROUP_KEYS)[number];
 export const SORT_KEYS = ["updated", "due", "priority", "created"] as const;
 export type SortKey = (typeof SORT_KEYS)[number];
 
-const VIEW_MODES = ["table", "board"] as const;
+const VIEW_MODES = ["table", "board", "suggestions"] as const;
 type ViewMode = (typeof VIEW_MODES)[number];
 
 type DueFilter = "overdue" | "week" | "month" | "none";
 
+/**
+ * Every property filter is a SET of values, matched as OR within the
+ * property and AND across properties ("Alice or Bob, and status Todo").
+ * Empty = the property is unfiltered. The `"none"` sentinel (unassigned /
+ * no project / no priority) is an ordinary member of its set, so
+ * "unassigned or Alice" is expressible; it can't collide with a real value
+ * because no member id or project name is the literal string `none`.
+ * Spec: docs/architecture/features/tasks.md → "Every filter is multi-select".
+ */
 export type TasksViewState = {
   /** Active cleanup quick-filter, or null. */
   quick: QuickFilter | null;
   /** Status filter (empty = all). */
   statuses: TaskStatus[];
-  /** `null` = any assignee; `"none"` = unassigned; else a member id. */
-  assignee: string | "none" | null;
-  /** `null` = any; `"none"` = no priority; else a priority. */
-  priority: TaskPriority | "none" | null;
-  /** `null` = any; `"none"` = no project; else a project name. */
-  project: string | "none" | null;
-  due: DueFilter | null;
+  /** Assignee filter: member ids and/or `"none"` (unassigned). */
+  assignee: string[];
+  /** Priority filter: priorities and/or `"none"` (no priority). */
+  priority: (TaskPriority | "none")[];
+  /** Project filter: project names and/or `"none"` (no project). */
+  project: string[];
+  due: DueFilter[];
   /** Free-text needle over the title. */
   q: string;
   group: GroupKey;
@@ -179,10 +191,10 @@ export type TasksViewState = {
 export const DEFAULT_VIEW_STATE: TasksViewState = {
   quick: null,
   statuses: [],
-  assignee: null,
-  priority: null,
-  project: null,
-  due: null,
+  assignee: [],
+  priority: [],
+  project: [],
+  due: [],
   q: "",
   group: "status",
   sort: "updated",
@@ -199,6 +211,37 @@ function oneOf<T extends string>(
     : null;
 }
 
+/**
+ * Read a multi-value param. Closed vocabularies and opaque ids comma-join
+ * into ONE param (`?assignee=m1,m2`); user-authored text REPEATS the param
+ * (`?project=Q3&project=Ops,Fun`) because a name may itself contain a comma
+ * and splitting it would silently produce two filters that match nothing.
+ * Both shapes parse for every key, so the pre-multi single-value deep links
+ * (`?assignee=m1`) still work. Order is preserved (it drives the pill's
+ * lead label); duplicates are dropped.
+ */
+export function multiParam(
+  params: URLSearchParams,
+  key: string,
+  { splitCommas }: { splitCommas: boolean },
+): string[] {
+  const out: string[] = [];
+  for (const raw of params.getAll(key)) {
+    for (const piece of splitCommas ? raw.split(",") : [raw]) {
+      const value = piece.trim();
+      if (value.length > 0 && !out.includes(value)) out.push(value);
+    }
+  }
+  return out;
+}
+
+/** Keep only the values in a closed vocabulary (unknown → dropped). */
+function allOf<T extends string>(values: string[], allowed: readonly T[]): T[] {
+  return values.filter((v): v is T =>
+    (allowed as readonly string[]).includes(v),
+  );
+}
+
 const STATUS_KEYS: readonly TaskStatus[] = [
   "todo",
   "in_progress",
@@ -213,6 +256,10 @@ const PRIORITY_KEYS: readonly TaskPriority[] = [
   "high",
   "urgent",
 ];
+const PRIORITY_FILTER_KEYS: readonly (TaskPriority | "none")[] = [
+  ...PRIORITY_KEYS,
+  "none",
+];
 const DUE_KEYS: readonly DueFilter[] = ["overdue", "week", "month", "none"];
 
 /** Parse the surface's search params into a view state (unknown → default).
@@ -223,24 +270,21 @@ export function viewStateFromSearch(
   const params =
     typeof search === "string" ? new URLSearchParams(search) : search;
   if (!params) return { ...DEFAULT_VIEW_STATE };
-  const statuses = (params.get("status") ?? "")
-    .split(",")
-    .filter((s): s is TaskStatus =>
-      (STATUS_KEYS as readonly string[]).includes(s),
-    );
-  const assigneeRaw = params.get("assignee");
-  const priorityRaw = params.get("priority");
-  const projectRaw = params.get("project");
   return {
     quick: oneOf(params.get("filter"), QUICK_FILTERS),
-    statuses,
-    assignee: assigneeRaw === null || assigneeRaw === "" ? null : assigneeRaw,
-    priority:
-      priorityRaw === "none"
-        ? "none"
-        : oneOf(priorityRaw, PRIORITY_KEYS),
-    project: projectRaw === null || projectRaw === "" ? null : projectRaw,
-    due: oneOf(params.get("due"), DUE_KEYS),
+    statuses: allOf(
+      multiParam(params, "status", { splitCommas: true }),
+      STATUS_KEYS,
+    ),
+    // Member ids are opaque and comma-free, so they comma-join.
+    assignee: multiParam(params, "assignee", { splitCommas: true }),
+    priority: allOf(
+      multiParam(params, "priority", { splitCommas: true }),
+      PRIORITY_FILTER_KEYS,
+    ),
+    // Project names are user text — repeated params only (see `multiParam`).
+    project: multiParam(params, "project", { splitCommas: false }),
+    due: allOf(multiParam(params, "due", { splitCommas: true }), DUE_KEYS),
     q: params.get("q") ?? "",
     group: oneOf(params.get("group"), GROUP_KEYS) ?? DEFAULT_VIEW_STATE.group,
     sort: oneOf(params.get("sort"), SORT_KEYS) ?? DEFAULT_VIEW_STATE.sort,
@@ -255,10 +299,11 @@ export function searchFromViewState(state: TasksViewState): string {
   const params = new URLSearchParams();
   if (state.quick) params.set("filter", state.quick);
   if (state.statuses.length > 0) params.set("status", state.statuses.join(","));
-  if (state.assignee !== null) params.set("assignee", state.assignee);
-  if (state.priority !== null) params.set("priority", state.priority);
-  if (state.project !== null) params.set("project", state.project);
-  if (state.due !== null) params.set("due", state.due);
+  if (state.assignee.length > 0) params.set("assignee", state.assignee.join(","));
+  if (state.priority.length > 0) params.set("priority", state.priority.join(","));
+  // Repeated, never joined — a project name may contain a comma.
+  for (const project of state.project) params.append("project", project);
+  if (state.due.length > 0) params.set("due", state.due.join(","));
   if (state.q.length > 0) params.set("q", state.q);
   if (state.group !== DEFAULT_VIEW_STATE.group) params.set("group", state.group);
   if (state.sort !== DEFAULT_VIEW_STATE.sort) params.set("sort", state.sort);
@@ -303,22 +348,28 @@ export function applyFilters(
     } else if (!state.completed && !isOpenStatus(row.status)) {
       return false;
     }
-    if (state.assignee !== null) {
-      if (state.assignee === "none") {
-        if (row.assigneeId !== null) return false;
-      } else if (row.assigneeId !== state.assignee) return false;
+    // Within a property the values are an OR; across properties, an AND.
+    if (state.assignee.length > 0) {
+      const hit = state.assignee.some((a) =>
+        a === "none" ? row.assigneeId === null : row.assigneeId === a,
+      );
+      if (!hit) return false;
     }
-    if (state.priority !== null) {
+    if (state.priority.length > 0) {
       const p = taskPriority(row);
-      if (state.priority === "none" ? p !== null : p !== state.priority)
+      if (!state.priority.some((x) => (x === "none" ? p === null : p === x)))
         return false;
     }
-    if (state.project !== null) {
+    if (state.project.length > 0) {
       const p = taskProject(row);
-      if (state.project === "none" ? p !== null : p !== state.project)
+      if (!state.project.some((x) => (x === "none" ? p === null : p === x)))
         return false;
     }
-    if (state.due !== null && !matchesDue(row, state.due, now)) return false;
+    if (
+      state.due.length > 0 &&
+      !state.due.some((d) => matchesDue(row, d, now))
+    )
+      return false;
     if (needle && !row.title.toLowerCase().includes(needle)) return false;
     return true;
   });

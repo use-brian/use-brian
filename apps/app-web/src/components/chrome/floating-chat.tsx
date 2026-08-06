@@ -136,6 +136,11 @@ import {
   type PendingConfirmation,
   type ToolUsed,
 } from "@use-brian/chat-ui";
+import {
+  useMidTurnQueue,
+  joinQueuedInputs,
+} from "@/lib/use-mid-turn-queue";
+import { QueuedInputs } from "@/components/ui/queued-inputs";
 import remarkGfm from "remark-gfm";
 import { ChatFileAttachments } from "@/components/chrome/chat-file-attachment";
 import { ChatCodeBlock } from "@/components/chrome/chat-code-block";
@@ -730,6 +735,23 @@ export function FloatingChat({
     sessionIdRef.current = session.state.sessionId;
   }, [session.state.sessionId]);
 
+  // ── Mid-turn input (queue + steer) ─────────────────────────────────────
+  // Messages sent while a turn streams. They live in the hook rather than in
+  // `session.state.messages` until the running turn takes them, because the
+  // streaming assistant bubble renders below every committed message — a
+  // queued message parked in `messages` would appear ABOVE the reply that was
+  // written before it was sent. They render under the live bubble, which is
+  // where they actually belong in time.
+  // See docs/architecture/engine/mid-turn-input.md.
+  const midTurn = useMidTurnQueue({
+    stream,
+    getSessionId: () => sessionIdRef.current,
+    workspaceId,
+    getAssistantId: () => selectedAssistantId,
+    appOrigin: origin,
+    ...(CLIENT_TIMEZONE ? { timezone: CLIENT_TIMEZONE } : {}),
+  });
+
   // ── Thread reset ─────────────────────────────────────────────────────────
   // Abort any in-flight stream and wipe the bound session immediately. The
   // ref is set synchronously (the effect mirror lags a render) so a send
@@ -742,6 +764,11 @@ export function FloatingChat({
   const resetThread = useCallback(() => {
     threadEpochRef.current += 1;
     stream.abort();
+    // The aborted turn's queued messages belong to the thread we are leaving.
+    // Hand them back to the composer instead of letting the end-of-stream
+    // flush post them into whatever session comes next.
+    const abandoned = midTurn.drain();
+    if (abandoned.length > 0) setInput(joinQueuedInputs(abandoned));
     sessionIdRef.current = null;
     session.setSession(null);
     session.loadMessages([]);
@@ -750,7 +777,7 @@ export function FloatingChat({
     setResumePolling(false);
     setError(null);
     setNotice(null);
-  }, [stream, session]);
+  }, [stream, session, midTurn]);
 
   // ── Assistant switch ─────────────────────────────────────────────────────
   // A session is assistant-bound server-side: the backend rejects a turn when
@@ -1048,6 +1075,32 @@ export function FloatingChat({
   // the user send a doomed message first.
   const turnAskedQuestionRef = useRef(false);
 
+  // `sendMessage` is defined below but called from inside its own `onDone`
+  // (the flush) — the ref is the only way to reach the current one from
+  // there without a stale closure.
+  const sendMessageRef = useRef<
+    ((text: string) => Promise<boolean>) | null
+  >(null);
+
+  /**
+   * The stream ended with messages still queued: the running turn never took
+   * them (it finished first, the user hit Stop, the connection dropped, or
+   * the delivery was lost). Send them as one ordinary turn — which is what
+   * the user asked for in the first place, and why nothing needed to be
+   * persisted server-side at queue time.
+   *
+   * Deferred a tick: `onDone` runs while the stream's abort registration is
+   * still live, and `sendMessage` refuses to start while one is.
+   */
+  const flushQueuedInputs = useCallback(() => {
+    const stillWaiting = midTurn.drain();
+    if (stillWaiting.length === 0) return;
+    const joined = joinQueuedInputs(stillWaiting);
+    setTimeout(() => {
+      void sendMessageRef.current?.(joined);
+    }, 0);
+  }, [midTurn]);
+
   // ── Live activity mirror to parent + collapsed pill ────────────────────
   const isStreaming = session.state.isStreaming;
   const streamingText = session.state.streamingText;
@@ -1323,6 +1376,72 @@ export function FloatingChat({
     setTurnStartedAt(turnStartedAtRef.current);
     setResearchPhase(null);
   }, []);
+
+  /**
+   * Freeze what the turn has streamed so far into a message. Returns null
+   * when the segment carried nothing worth a bubble (a tool-only prelude, or
+   * a turn that produced nothing at all).
+   *
+   * Two callers: the end of the turn, and the mid-turn split below — a
+   * queued message the running turn takes has to land BETWEEN the text
+   * written before it and the text written after.
+   */
+  const buildStreamedTurnMessage = useCallback((): MessageWithViews | null => {
+    const finalText = stripFollowUps(turnTextRef.current);
+    const views = turnViewsRef.current;
+    const tools = turnToolsRef.current;
+    const citations = turnCitationsRef.current;
+    const fileAttachments = turnFileAttachmentsRef.current;
+    if (
+      finalText.length === 0 &&
+      views.length === 0 &&
+      tools.length === 0 &&
+      fileAttachments.length === 0
+    ) {
+      return null;
+    }
+    // Total wall-clock for the "Worked for Ns · k steps" receipt — only
+    // meaningful when the segment actually ran tools.
+    const activityDurationMs =
+      tools.length > 0 && turnStartedAtRef.current != null
+        ? Math.max(0, Date.now() - turnStartedAtRef.current)
+        : undefined;
+    return {
+      id: assistantIdRef.current ?? `assistant-${Date.now()}`,
+      role: "assistant",
+      text: finalText,
+      timestamp: new Date(),
+      ...(views.length > 0 ? { views } : {}),
+      ...(tools.length > 0 ? { toolsUsed: tools } : {}),
+      ...(activityDurationMs != null ? { activityDurationMs } : {}),
+      ...(citations.length > 0 ? { citations } : {}),
+      ...(fileAttachments.length > 0 ? { fileAttachments } : {}),
+    };
+  }, []);
+
+  /**
+   * The running turn took one of our queued messages. Close the segment the
+   * assistant wrote BEFORE it arrived, drop the user's bubble in, and start a
+   * fresh segment — otherwise text written earlier renders below the message
+   * and reads as its answer.
+   */
+  const applyQueuedInput = useCallback(
+    (inputId: string, messageId: string) => {
+      const entry = midTurn.take(inputId);
+      if (!entry) return;
+      const segment = buildStreamedTurnMessage();
+      if (segment) session.dispatch({ type: "message/append", message: segment });
+      session.dispatch({ type: "stream/reset" });
+      resetTurnBuffers();
+      session.appendMessage({
+        id: messageId,
+        role: "user",
+        text: entry.text,
+        timestamp: new Date(),
+      });
+    },
+    [buildStreamedTurnMessage, midTurn, resetTurnBuffers, session],
+  );
 
   const sendMessage = useCallback(
     async (
@@ -2023,6 +2142,20 @@ export function FloatingChat({
               });
               break;
             }
+            // The running turn took a message we queued mid-stream: it is now
+            // a real row in the transcript, so it moves out of the queued tray
+            // and into the thread. See mid-turn-input.md.
+            case "input_applied": {
+              const inputId =
+                typeof payload.inputId === "string" ? payload.inputId : null;
+              if (!inputId) break;
+              const messageId =
+                typeof payload.messageId === "string"
+                  ? payload.messageId
+                  : `queued-${inputId}`;
+              applyQueuedInput(inputId, messageId);
+              break;
+            }
             case "error": {
               // askQuestion suspend-resume: the chat route rejects a new
               // message while the session is suspended on a question.
@@ -2145,38 +2278,13 @@ export function FloatingChat({
         },
         onDone: () => {
           const askedQuestion = turnAskedQuestionRef.current;
-          // Doc is an `app` surface with no chip affordance: strip any
-          // `<followup>[...]</followup>` tag the model volunteered so it never
-          // shows as literal text. The server also strips before persist
-          // (see chat.ts) — this guards the live turn + pre-fix history.
-          const finalText = stripFollowUps(turnTextRef.current);
-          const views = turnViewsRef.current;
-          const tools = turnToolsRef.current;
-          const citations = turnCitationsRef.current;
-          const fileAttachments = turnFileAttachmentsRef.current;
-          // Total wall-clock for the "Worked for Ns · k steps" receipt —
-          // only meaningful when the turn actually ran tools.
-          const activityDurationMs =
-            tools.length > 0 && turnStartedAtRef.current != null
-              ? Math.max(0, Date.now() - turnStartedAtRef.current)
-              : undefined;
-          const finalMessage: MessageWithViews = {
-            id: assistantIdRef.current ?? `assistant-${Date.now()}`,
-            role: "assistant",
-            text: finalText,
-            timestamp: new Date(),
-            ...(views.length > 0 ? { views } : {}),
-            ...(tools.length > 0 ? { toolsUsed: tools } : {}),
-            ...(activityDurationMs != null ? { activityDurationMs } : {}),
-            ...(citations.length > 0 ? { citations } : {}),
-            ...(fileAttachments.length > 0 ? { fileAttachments } : {}),
-          };
-          if (
-            finalText.length === 0 &&
-            views.length === 0 &&
-            tools.length === 0 &&
-            fileAttachments.length === 0
-          ) {
+          // Doc is an `app` surface with no chip affordance: the builder
+          // strips any `<followup>[...]</followup>` tag the model volunteered
+          // so it never shows as literal text. The server also strips before
+          // persist (see chat.ts) — this guards the live turn + pre-fix
+          // history.
+          const finalMessage = buildStreamedTurnMessage();
+          if (!finalMessage) {
             session.dispatch({ type: "stream/abort" });
           } else {
             session.dispatch({
@@ -2185,6 +2293,9 @@ export function FloatingChat({
             });
           }
           resetTurnBuffers();
+          // Anything still queued was never taken by this turn — send it as
+          // an ordinary one. See mid-turn-input.md → "the client is the holder".
+          flushQueuedInputs();
           // Surface docks: a general chat turn may have written to the brain
           // (the assistant saves memories / entities while researching) —
           // nudge the brain page to re-pull so new rows appear without a
@@ -2228,12 +2339,31 @@ export function FloatingChat({
           );
           session.dispatch({ type: "stream/abort" });
           resetTurnBuffers();
+          flushQueuedInputs();
         },
       });
       // Indicate to the caller (e.g. seed effect) that a stream actually started.
       return true;
     },
-    [selectedAssistantId, workspaceId, origin, isDocOrigin, model, metered, researchMode, session, stream, t, resetTurnBuffers, pendingQuestion, pendingRecordings, rec.status, att],
+    [selectedAssistantId, workspaceId, origin, isDocOrigin, model, metered, researchMode, session, stream, t, resetTurnBuffers, pendingQuestion, pendingRecordings, rec.status, att, applyQueuedInput, buildStreamedTurnMessage, flushQueuedInputs],
+  );
+
+  useEffect(() => {
+    sendMessageRef.current = sendMessage;
+  }, [sendMessage]);
+
+  /**
+   * Hand a message to the turn that is already running (mid-turn input), and
+   * clear the composer as an ordinary send would.
+   */
+  const queueMessage = useCallback(
+    (text: string, steer: boolean): boolean => {
+      if (!midTurn.queue(text, steer)) return false;
+      setInput("");
+      setError(null);
+      return true;
+    },
+    [midTurn],
   );
 
   // ── Dock live recording (docs/architecture/media/live-capture.md) ──────
@@ -2396,7 +2526,13 @@ export function FloatingChat({
   const handleAbort = useCallback(() => {
     stream.abort();
     session.dispatch({ type: "stream/abort" });
-  }, [stream, session]);
+    // An aborted stream never reaches `onDone`, so the flush has to happen
+    // here too. Stopping the current work and still wanting the message you
+    // just queued answered is the normal reading of "stop, and here's the
+    // thing I actually want" — the queued text is why the user reached for
+    // Stop in the first place.
+    flushQueuedInputs();
+  }, [stream, session, flushQueuedInputs]);
 
   const handleConfirmation = useCallback(
     async (
@@ -2777,6 +2913,14 @@ export function FloatingChat({
             </div>
           ) : null}
 
+          {/* Messages handed to the running turn, not yet taken by it.
+              See docs/architecture/engine/mid-turn-input.md. */}
+          <QueuedInputs
+            inputs={midTurn.queued}
+            dict={t.queue}
+            onSteer={midTurn.steer}
+          />
+
           {/* Resolved confirmation rows (approved/denied/failed) render ABOVE
               the pending cards — they happened earlier, and the actionable
               Approve/Deny card must sit nearest the auto-scrolled bottom. A
@@ -2885,14 +3029,27 @@ export function FloatingChat({
           <ChatComposer
             value={input}
             onChange={setInput}
-            onSend={() => void sendMessage(input)}
+            // While a turn streams, Send QUEUES: the message is handed to the
+            // running turn, which takes it at its next safe boundary.
+            // Cmd/Ctrl+Enter steers instead — take it as soon as possible.
+            // See docs/architecture/engine/mid-turn-input.md.
+            onSend={() =>
+              isStreaming ? queueMessage(input, false) : void sendMessage(input)
+            }
+            onSteer={
+              isStreaming ? () => void queueMessage(input, true) : undefined
+            }
             // Hard-disable only for states where composing makes no sense
-            // (suspended on a clarifying question, offline). While a reply
-            // STREAMS the box stays typeable — `sendDisabled` blocks
-            // Enter/Send so the user drafts their next message during the
-            // assistant's turn instead of staring at a locked input.
+            // (suspended on a clarifying question, offline).
             disabled={!!pendingQuestion || offline}
-            sendDisabled={isStreaming || rec.status === "uploading"}
+            // Mid-turn sends are text-only: an attachment needs the full
+            // pre-turn pipeline (cache read, PDF distillation, transcription),
+            // which belongs to a turn of its own. Staged chips stay visible
+            // and ride the next turn.
+            sendDisabled={
+              rec.status === "uploading" ||
+              (isStreaming && (att.hasReady || pendingRecordings.length > 0))
+            }
             allowEmptySend={att.hasReady || pendingRecordings.length > 0}
             // Paste a screenshot / copied image straight into the chat — it
             // stages as an attachment chip exactly like the paperclip or a
@@ -2912,7 +3069,7 @@ export function FloatingChat({
                 ? t.pendingQuestion.composerDisabled
                 : idlePlaceholder
             }
-            sendLabel={t.send}
+            sendLabel={isStreaming ? t.queue.send : t.send}
             slotAttachments={
               <>
                 {/* Live-recording chrome (expanded mode) — same shared
@@ -2992,12 +3149,15 @@ export function FloatingChat({
                 <DockRecorderButton rec={recorder} disabled={!!pendingQuestion} />
               </>
             }
-            // Hide the built-in Send button while streaming so the
-            // adjacent Stop button takes its place visually.
+            // Send stays visible while streaming — it queues into the running
+            // turn — and Stop sits beside it. The muted treatment marks the
+            // difference: this send joins a turn rather than starting one.
             sendButtonClassName={cn(
-              "shrink-0 rounded-md bg-action px-3 py-2 text-xs font-medium text-action-foreground",
-              "transition-colors hover:bg-action/90 disabled:opacity-50 disabled:pointer-events-none",
-              isStreaming && "hidden",
+              "shrink-0 rounded-md px-3 py-2 text-xs font-medium transition-colors",
+              "disabled:opacity-50 disabled:pointer-events-none",
+              isStreaming
+                ? "bg-muted text-foreground/80 hover:bg-muted/80"
+                : "bg-action text-action-foreground hover:bg-action/90",
             )}
             slotPostInput={
               isStreaming ? (

@@ -103,6 +103,11 @@ import {
   X,
 } from "lucide-react";
 import { createSSEBuffer, parseSSEStream } from "@use-brian/chat-ui";
+import {
+  useMidTurnQueue,
+  joinQueuedInputs,
+} from "@/lib/use-mid-turn-queue";
+import { QueuedInputs } from "@/components/ui/queued-inputs";
 import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { AssistantAvatar } from "@/components/assistant-avatar";
 import { ComposerControls } from "@/components/doc/composer-controls";
@@ -309,6 +314,20 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
 
   const chat = useChatSession();
   const stream = useMessageStream();
+  /**
+   * Mid-turn input (queue + steer). Personal-view only: a ROOM message is a
+   * durable post every member must see the instant it is sent, whether or not
+   * the assistant takes it, so rooms keep their own follow-up-turn path.
+   * See docs/architecture/engine/mid-turn-input.md.
+   */
+  const midTurn = useMidTurnQueue({
+    stream,
+    getSessionId: () => sessionIdRef.current,
+    workspaceId,
+    getAssistantId: () => activeAssistantIdRef.current,
+  });
+  /** `send` is called from inside its own `onDone` (the mid-turn flush). */
+  const sendRef = useRef<((text: string) => void) | null>(null);
   /** The room whose original POST stream this mounted surface is painting.
    *  Cleared as soon as that ownership ends so the persistent room-follow
    *  stream can take over, including for turns started by this same user. */
@@ -381,6 +400,91 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     setCitations([]);
     setTurnStartedAt(null);
   }, []);
+
+  /**
+   * Freeze what the turn has streamed so far into a message. Returns null when
+   * the segment carried nothing worth a bubble.
+   *
+   * Two callers: the end of the turn, and the mid-turn split below — a queued
+   * message the running turn takes has to land BETWEEN the text written before
+   * it and the text written after, or the earlier reply reads as its answer.
+   */
+  const buildStreamedTurnMessage = useCallback(
+    (assistantId: string | null): SurfaceMessage | null => {
+      const finalText = turnTextRef.current.trim();
+      const finalDocuments = turnDocumentsRef.current;
+      const finalCitations = turnCitationsRef.current;
+      const finalFileAttachments = turnFileAttachmentsRef.current;
+      // Close any step the server never resolved, so the receipt shows a
+      // finished turn rather than a spinner frozen mid-flight.
+      const tools = turnToolsRef.current.map((tool) =>
+        tool.status === "running" ? { ...tool, status: "done" as const } : tool,
+      );
+      if (
+        !finalText &&
+        tools.length === 0 &&
+        finalDocuments.length === 0 &&
+        finalFileAttachments.length === 0
+      ) {
+        return null;
+      }
+      const activityDurationMs =
+        turnStartedAtRef.current != null
+          ? Date.now() - turnStartedAtRef.current
+          : undefined;
+      return {
+        id: `assistant-${Date.now()}`,
+        role: "assistant",
+        text: finalText,
+        timestamp: new Date(),
+        ...(assistantId ? { senderAssistantId: assistantId } : {}),
+        ...(tools.length > 0 ? { toolsUsed: tools } : {}),
+        ...(finalDocuments.length > 0 ? { documents: finalDocuments } : {}),
+        ...(activityDurationMs != null ? { activityDurationMs } : {}),
+        ...(finalCitations.length > 0 ? { citations: finalCitations } : {}),
+        ...(finalFileAttachments.length > 0
+          ? { fileAttachments: finalFileAttachments }
+          : {}),
+      };
+    },
+    [],
+  );
+
+  /**
+   * The running turn took one of our queued messages: close the segment
+   * written before it arrived, drop the user's bubble in, start a fresh one.
+   */
+  const applyQueuedInput = useCallback(
+    (inputId: string, messageId: string) => {
+      const entry = midTurn.take(inputId);
+      if (!entry) return;
+      const segment = buildStreamedTurnMessage(turnAssistantRef.current);
+      if (segment) chat.dispatch({ type: "message/append", message: segment });
+      chat.dispatch({ type: "stream/reset" });
+      turnTextRef.current = "";
+      resetTurnActivity();
+      chat.appendMessage({
+        id: messageId,
+        role: "user",
+        text: entry.text,
+        timestamp: new Date(),
+      });
+    },
+    [buildStreamedTurnMessage, chat, midTurn, resetTurnActivity],
+  );
+
+  /**
+   * The stream ended with messages still queued — the running turn never took
+   * them. Send them as one ordinary turn, which is what the user wanted.
+   * Deferred a tick: `sendRef` refuses to start while the stream's abort
+   * registration is still live inside `onDone`.
+   */
+  const flushQueuedInputs = useCallback(() => {
+    const stillWaiting = midTurn.drain();
+    if (stillWaiting.length === 0) return;
+    const joined = joinQueuedInputs(stillWaiting);
+    setTimeout(() => sendRef.current?.(joined), 0);
+  }, [midTurn]);
 
   const buildHref = useCallback(
     (id: string | null, nextView: "personal" | "workspace") => {
@@ -460,6 +564,20 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     }
     return primaryAssistant;
   }, [activeSessionId, activeShared, personalSessions, assistants, pickedAssistantId, primaryAssistant]);
+  // Read by the mid-turn queue at post time — the pane's assistant can change
+  // between mounting the hook and sending.
+  const activeAssistantIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    activeAssistantIdRef.current = activeAssistant?.id ?? null;
+  }, [activeAssistant]);
+
+  /** Same predicate `send` computes per call — hoisted for the composer. */
+  const isRoomView = activeSessionId ? !!activeShared : view === "workspace";
+  /**
+   * May a send right now be handed to the running turn instead of starting
+   * one? Rooms are excluded on purpose (see the `midTurn` comment above).
+   */
+  const canQueueMidTurn = chat.state.isStreaming && !isRoomView;
 
   // The full-page surface uses the SAME attachment lanes as the dock:
   // transient cache upload for ordinary files and storage-only recording
@@ -1003,8 +1121,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     chat.dispatch({ type: "stream/abort" });
     turnTextRef.current = "";
     resetTurnActivity();
+    // An aborted stream never reaches `onDone`, so the flush happens here
+    // too — the queued text is usually WHY the user reached for Stop.
+    flushQueuedInputs();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stream, resetTurnActivity]);
+  }, [stream, resetTurnActivity, flushQueuedInputs]);
 
   const copyResetRef = useRef<number | null>(null);
   const handleCopy = useCallback((messageId: string, text: string) => {
@@ -1246,6 +1367,20 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 id,
               });
             }
+            break;
+          }
+          // The running turn took a message we queued mid-stream: it is a
+          // real row now, so it moves out of the queued tray into the thread.
+          // See docs/architecture/engine/mid-turn-input.md.
+          case "input_applied": {
+            const inputId =
+              typeof payload.inputId === "string" ? payload.inputId : null;
+            if (!inputId) break;
+            const messageId =
+              typeof payload.messageId === "string"
+                ? payload.messageId
+                : `queued-${inputId}`;
+            applyQueuedInput(inputId, messageId);
             break;
           }
           case "text_delta": {
@@ -1576,49 +1711,17 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             working: false,
           });
         }
-        const finalText = turnTextRef.current.trim();
-        const finalDocuments = turnDocumentsRef.current;
-        const finalCitations = turnCitationsRef.current;
-        const finalFileAttachments = turnFileAttachmentsRef.current;
-        // Close any step the server never resolved, so the receipt shows a
-        // finished turn rather than a spinner frozen mid-flight.
-        const tools = turnToolsRef.current.map((tool) =>
-          tool.status === "running" ? { ...tool, status: "done" as const } : tool,
-        );
-        const activityDurationMs =
-          turnStartedAtRef.current != null
-            ? Date.now() - turnStartedAtRef.current
-            : undefined;
-        if (
-          finalText ||
-          tools.length > 0 ||
-          finalDocuments.length > 0 ||
-          finalFileAttachments.length > 0
-        ) {
-          const finalMessage: SurfaceMessage = {
-            id: `assistant-${Date.now()}`,
-            role: "assistant",
-            text: finalText,
-            timestamp: new Date(),
-            senderAssistantId: target.id,
-            ...(tools.length > 0 ? { toolsUsed: tools } : {}),
-            ...(finalDocuments.length > 0
-              ? { documents: finalDocuments }
-              : {}),
-            ...(activityDurationMs != null ? { activityDurationMs } : {}),
-            ...(finalCitations.length > 0
-              ? { citations: finalCitations }
-              : {}),
-            ...(finalFileAttachments.length > 0
-              ? { fileAttachments: finalFileAttachments }
-              : {}),
-          };
+        const finalMessage = buildStreamedTurnMessage(target.id);
+        if (finalMessage) {
           chat.dispatch({ type: "stream/finalize", finalMessage });
         } else {
           chat.dispatch({ type: "stream/abort" });
         }
         turnTextRef.current = "";
         resetTurnActivity();
+        // Anything still queued was never taken by this turn — send it as an
+        // ordinary one. See mid-turn-input.md → "the client is the holder".
+        flushQueuedInputs();
         setQueuedNotice(false);
         chat.dispatch({ type: "confirmation/clear" });
         // Suspended on a question this turn — fetch the pending row so the
@@ -1638,6 +1741,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         directTurnSessionRef.current = null;
         chat.dispatch({ type: "stream/abort" });
         resetTurnActivity();
+        flushQueuedInputs();
         setQueuedNotice(false);
         setError(t.errorGeneric);
         // The room backend may still be running after a transport failure.
@@ -1663,7 +1767,17 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       await loadTranscript(sessionIdRef.current);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [input, activeAssistant, activeSessionId, activeShared, askArmed, model, researchMode, view, workspaceId, chat.state.isStreaming, refreshPendingQuestion, reloadShared, resetTurnActivity, selectSession, startingShared, stream, t, tChat.toolNarration, att.attachments, att.uploading, att.fileIds, att.detach, pendingQuestion, pendingRecordings, recordingUpload.status, assistants]);
+  }, [input, activeAssistant, activeSessionId, activeShared, askArmed, model, researchMode, view, workspaceId, chat.state.isStreaming, refreshPendingQuestion, reloadShared, resetTurnActivity, selectSession, startingShared, stream, t, tChat.toolNarration, att.attachments, att.uploading, att.fileIds, att.detach, pendingQuestion, pendingRecordings, recordingUpload.status, assistants, applyQueuedInput, buildStreamedTurnMessage, flushQueuedInputs]);
+
+  // The mid-turn flush runs inside `send`'s own `onDone`; the ref is the only
+  // way to reach the current `send` from there without a stale closure. The
+  // drained text rides the `text` override rather than the composer state,
+  // which the user may already be typing into again.
+  useEffect(() => {
+    sendRef.current = (text: string) => {
+      void send({ text });
+    };
+  }, [send]);
 
   const retryUserMessage = useCallback(
     (messageId: string) => {
@@ -2101,10 +2215,29 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         value={input}
         onChange={setInput}
         onKeyDown={handleMentionKeyDown}
-        onSend={() => void send()}
+        // While a turn streams, Send QUEUES into the running turn and
+        // Cmd/Ctrl+Enter steers. Rooms keep the ordinary path — a room message
+        // is a durable post, not a queued one.
+        // See docs/architecture/engine/mid-turn-input.md.
+        onSend={() =>
+          canQueueMidTurn && midTurn.queue(input, false)
+            ? setInput("")
+            : void send()
+        }
+        onSteer={
+          canQueueMidTurn
+            ? () => {
+                if (midTurn.queue(input, true)) setInput("");
+              }
+            : undefined
+        }
         disabled={!!pendingQuestion}
+        // Mid-turn sends are text-only: an attachment needs the full pre-turn
+        // pipeline, which belongs to a turn of its own. Staged chips stay
+        // visible and ride the next turn.
         sendDisabled={
-          chat.state.isStreaming ||
+          (chat.state.isStreaming && !canQueueMidTurn) ||
+          (canQueueMidTurn && (att.hasReady || pendingRecordings.length > 0)) ||
           !activeAssistant ||
           att.uploading ||
           recordingUpload.status === "uploading"
@@ -2251,11 +2384,17 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             )}
           </div>
         }
+        // Send stays visible while a turn streams IF this send can join it —
+        // muted, because it queues into a turn rather than starting one. In a
+        // room (no queueing) it still gives way to Stop.
         sendButtonClassName={cn(
           "order-3 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg",
-          "bg-action text-action-foreground transition-colors hover:bg-action/90",
-          "focus-visible:shadow-none disabled:opacity-40 disabled:pointer-events-none",
-          chat.state.isStreaming && "hidden",
+          "transition-colors focus-visible:shadow-none",
+          "disabled:opacity-40 disabled:pointer-events-none",
+          canQueueMidTurn
+            ? "bg-muted text-foreground/80 hover:bg-muted/80"
+            : "bg-action text-action-foreground hover:bg-action/90",
+          chat.state.isStreaming && !canQueueMidTurn && "hidden",
         )}
         slotPostInput={
           chat.state.isStreaming ? (
@@ -2501,6 +2640,13 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 </div>
               </div>
             )}
+            {/* Messages handed to the running turn, not yet taken by it.
+                See docs/architecture/engine/mid-turn-input.md. */}
+            <QueuedInputs
+              inputs={midTurn.queued}
+              dict={tChat.queue}
+              onSteer={midTurn.steer}
+            />
             {/* A teammate's turn, relayed off the per-session event bus
                 through the SAME feed pipeline the sender uses (T13): the
                 shimmer feed (reasoning + tool steps) above the live snapshot

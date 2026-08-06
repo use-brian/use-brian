@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { appAssistantForbidsResearch, appAssistantForbidsCoordinator, isAdaptiveResearchEligible, isUserBlocked, sanitizeTitle, buildActivePageInstruction, buildViewingSkillBlock, createUpdateViewedSkillTool, workspaceSkillRevision, resolveStickyChannelId, isDocSurface, isAppSurface, attachUserVisibleContext, settleInlineToolApproval, buildAttachedRecordingContext, buildUnscopedFileAttachmentInstruction, mayOfferWorkspaceChatHandoff } from '../chat.js'
+import { appAssistantForbidsResearch, appAssistantForbidsCoordinator, isAdaptiveResearchEligible, isUserBlocked, sanitizeTitle, buildActivePageInstruction, buildViewingSkillBlock, createUpdateViewedSkillTool, workspaceSkillRevision, resolveStickyChannelId, isDocSurface, isAppSurface, attachUserVisibleContext, settleInlineToolApproval, buildAttachedRecordingContext, buildUnscopedFileAttachmentInstruction, mayOfferWorkspaceChatHandoff, turnInputAdmission } from '../chat.js'
 import type { ConfirmationResolver, Message, ToolContext } from '@use-brian/core'
 import type { PendingApproval, PendingApprovalsStore } from '../../db/pending-approvals-store.js'
 
@@ -718,5 +718,41 @@ describe('[COMP:api/chat-route] attachUserVisibleContext — provenance boundary
     expect(userRolePayload).not.toContain('# Open commitments')
     expect(userRolePayload).not.toContain('# User Context')
     expect(blocks.at(-1)?.text).toBe(actualQuestion)
+  })
+})
+
+describe('[COMP:api/chat-route] mid-turn input admission', () => {
+  const ordinary = { clientMidTurn: false, isRoom: false, mode: null }
+  const midTurn = { clientMidTurn: true, isRoom: false, mode: null }
+
+  it('runs an ordinary send', () => {
+    expect(turnInputAdmission(ordinary)).toBe('run')
+  })
+
+  it('queues a send the client marked mid-turn, instead of starting a second turn', () => {
+    // Two loops over one history interleave, and the second reads the first
+    // one's half-written state.
+    expect(turnInputAdmission(midTurn)).toBe('queue')
+  })
+
+  it('never queues a send the client did not mark', () => {
+    // The client is the only party that knows whether ITS stream is live, and
+    // that is deliberately the whole condition: keying off `sessions.status`
+    // instead would make a session left `running` by a crashed turn swallow
+    // every later send into an inbox nothing will ever drain.
+    expect(turnInputAdmission(ordinary)).toBe('run')
+  })
+
+  it('leaves rooms on their own follow-up-turn path', () => {
+    // A room message is a durable post every member must see immediately,
+    // whether or not the assistant takes it — the opposite of the
+    // persist-on-drain contract the inbox is built on.
+    expect(turnInputAdmission({ ...midTurn, isRoom: true })).toBe('run')
+  })
+
+  it('keeps the draft rejection', () => {
+    expect(turnInputAdmission({ ...midTurn, mode: 'draft' })).toBe('reject')
+    // ...but an ordinary send into a draft is unaffected.
+    expect(turnInputAdmission({ ...ordinary, mode: 'draft' })).toBe('run')
   })
 })

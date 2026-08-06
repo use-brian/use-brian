@@ -52,8 +52,28 @@ export {
   verifyGithubSignature,
 }
 export { extractWritesFromGithubEvent } from './extract-writes.js'
-export { githubTaskIntent, parseCloseRefs } from './task-lifecycle.js'
-export type { GithubTaskIntent, GithubTaskRef } from './task-lifecycle.js'
+export {
+  GITHUB_TASK_STATUS_RANK,
+  githubTaskIntent,
+  githubTaskIntents,
+  parseBranchIssueNumber,
+  parseCloseRefs,
+  parseIssueRefs,
+} from './task-lifecycle.js'
+export type {
+  GithubTaskIntent,
+  GithubTaskIntentOptions,
+  GithubTaskRef,
+  GithubTaskStatus,
+} from './task-lifecycle.js'
+export {
+  buildGithubTaskMatchPrompt,
+  GITHUB_TASK_MATCH_RESPONSE_SCHEMA,
+  GITHUB_TASK_MATCH_SYSTEM_PROMPT,
+  githubPrRef,
+  parseGithubTaskMatch,
+} from './task-match.js'
+export type { GithubPrRef, GithubTaskMatchCandidate, GithubTaskMatchResult } from './task-match.js'
 export type {
   GithubConnectorAdapter,
   GithubDefaultRule,

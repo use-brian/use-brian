@@ -39,6 +39,7 @@ import type { Sensitivity } from '../../security/sensitivity.js'
 
 import {
   processEpisode,
+  judgeTaskReadinessBatch,
   sourceKindCreatesTasks,
   splitContentByTokenLimit,
   mergeExtractionOutputs,
@@ -2591,7 +2592,46 @@ describe('[COMP:tasks/admission] Pipeline B — extraction lane gate', () => {
     expect(recorded[0].reasonCode).toBe('tombstoned')
   })
 
-  it('holds a near-duplicate in the tray while letting the rest of the batch through', async () => {
+  it('holds every clean extracted candidate as a suggestion by default (suggestion-first)', async () => {
+    const { rows, tasks } = taskCollector()
+    const recorded: any[] = []
+    const provider = sequencedProvider([
+      extractionWith(['Book the venue']),
+      readinessWith(['Book the venue']),
+      classification,
+    ])
+    await processEpisode(
+      baseEpisode(),
+      'chatter',
+      makeDeps({
+        ...baseDepsFor(provider, tasks),
+        taskAdmission: admissionPort({
+          recordCandidate: async (input) => {
+            recorded.push(input)
+          },
+        }),
+      }),
+    )
+
+    expect(rows).toHaveLength(0)
+    expect(recorded).toHaveLength(1)
+    expect(recorded[0].status).toBe('pending')
+    expect(recorded[0].reasonCode).toBe('suggested')
+  })
+
+  const allowEverythingExtracted = {
+    id: 'rule-allow',
+    workspaceId: 'ws-1',
+    status: 'active' as const,
+    effect: 'allow' as const,
+    predicate: { lanes: ['extracted' as const] },
+    nlClause: 'Automatically create ready task suggestions.',
+    reason: null,
+    origin: 'user' as const,
+    createdAt: new Date(),
+  }
+
+  it('holds a near-duplicate in the tray while an allow rule lets the rest of the batch through', async () => {
     const { rows, tasks } = taskCollector()
     const recorded: any[] = []
     const provider = sequencedProvider([
@@ -2605,6 +2645,7 @@ describe('[COMP:tasks/admission] Pipeline B — extraction lane gate', () => {
       makeDeps({
         ...baseDepsFor(provider, tasks),
         taskAdmission: admissionPort({
+          listActiveRules: async () => [allowEverythingExtracted],
           findSimilarTasks: async (_ws: string, titleNorm: string) =>
             titleNorm.includes('github')
               ? [{ id: 'task-existing', title: 'Resolve GitHub 401', similarity: 0.7 }]
@@ -2617,9 +2658,13 @@ describe('[COMP:tasks/admission] Pipeline B — extraction lane gate', () => {
     )
 
     expect(rows.map((r) => r.title)).toEqual(['Book the venue'])
-    expect(recorded).toHaveLength(1)
-    expect(recorded[0].status).toBe('pending')
-    expect(recorded[0].reasonCode).toBe('near_duplicate')
+    // Two audit rows: the held near-duplicate, and the allow-rule auto-accept.
+    const held = recorded.find((r) => r.status === 'pending')
+    const auto = recorded.find((r) => r.status === 'auto_accepted')
+    expect(held?.reasonCode).toBe('near_duplicate')
+    expect(auto?.reasonCode).toBe('auto_rule')
+    expect(auto?.matchedRuleId).toBe('rule-allow')
+    expect(auto?.createdTaskId).toBe('task-1')
   })
 
   it('injects the workspace policy into the extraction prompt', async () => {
@@ -2703,7 +2748,8 @@ describe('[COMP:tasks/admission] Pipeline B — extraction lane gate', () => {
 
   it('extracts normally when the policy lookup fails', async () => {
     // A policy read that throws must not fail the extraction — the gate is
-    // still there as the backstop.
+    // still there as the backstop. An allow rule proves the write path stays
+    // live end to end despite the prompt-policy failure.
     const { rows, tasks } = taskCollector()
     const provider = sequencedProvider([
       extractionWith(['Book the venue']),
@@ -2717,6 +2763,7 @@ describe('[COMP:tasks/admission] Pipeline B — extraction lane gate', () => {
       makeDeps({
         ...baseDepsFor(provider, tasks),
         taskAdmission: admissionPort({
+          listActiveRules: async () => [allowEverythingExtracted],
           loadPolicyForPrompt: async () => {
             throw new Error('db down')
           },
@@ -2766,14 +2813,32 @@ describe('[COMP:tasks/task-readiness] Pipeline B — grounded automatic task qua
     })
   }
 
-  function admissionPort(recorded: any[]) {
+  function admissionPort(
+    recorded: any[],
+    rules: Awaited<ReturnType<NonNullable<PipelineBDeps['taskAdmission']>['listActiveRules']>> = [],
+  ) {
     return {
-      listActiveRules: async () => [],
+      listActiveRules: async () => rules,
       findSimilarTombstones: async () => [],
       findSimilarTasks: async () => [],
       recordCandidate: async (input: unknown) => { recorded.push(input) },
     } as NonNullable<PipelineBDeps['taskAdmission']>
   }
+
+  /** Suggestion-first: creation tests opt back in through an allow rule. */
+  const allowExtracted = [
+    {
+      id: 'rule-allow',
+      workspaceId: 'ws-1',
+      status: 'active' as const,
+      effect: 'allow' as const,
+      predicate: { lanes: ['extracted' as const] },
+      nlClause: null,
+      reason: null,
+      origin: 'user' as const,
+      createdAt: new Date(),
+    },
+  ]
 
   function taskStore(rows: Array<{ title: string; attributes?: Record<string, unknown> }>) {
     return {
@@ -2842,7 +2907,144 @@ describe('[COMP:tasks/task-readiness] Pipeline B — grounded automatic task qua
     })
   })
 
-  it('creates a grounded agent-ready task with the judged description', async () => {
+  // ── Slicing ───────────────────────────────────────────────────────
+  //
+  // `mergeExtractionOutputs` concatenates each window's tasks, so an episode
+  // can carry far more candidates than one judge call may hold. Judging them
+  // all at once made the schema unsatisfiable (index capped at 9) and let a
+  // single parse failure fall every candidate back to `needs_spec` with a null
+  // description — the shape of the 2026-08-05 production regression.
+
+  const candidateTitle = (n: number) => `Ship pricing update ${n}`
+  const sourceLine = (n: number) => `Ashley: ${candidateTitle(n)} by Friday`
+  const sourceFor = (count: number) =>
+    Array.from({ length: count }, (_, n) => sourceLine(n)).join('\n')
+
+  const candidatesFor = (count: number) =>
+    Array.from({ length: count }, (_, n) => ({
+      text: candidateTitle(n),
+      due_iso: null,
+      assignee_ref: undefined,
+    }))
+
+  /** `count` ready assessments at LOCAL indices 0..count-1, from `firstTitle`. */
+  function readinessSlice(count: number, firstTitle: number): string {
+    return JSON.stringify({
+      assessments: Array.from({ length: count }, (_, i) => ({
+        index: i,
+        classification: 'ready',
+        evidence_quote: sourceLine(firstTitle + i),
+        commitment: 'explicit',
+        objective: candidateTitle(firstTitle + i),
+        target: 'Pricing page',
+        description: `${candidateTitle(firstTitle + i)}. Start from the existing pricing page. Done when the updated page is live.`,
+        starting_point_kind: 'discoverable',
+        starting_point: 'The existing pricing page implementation.',
+        completion_signal: 'The updated pricing page is live.',
+        missing: [],
+        explanation: 'Explicit commitment with enough execution context.',
+      })),
+    })
+  }
+
+  it('judges candidates in slices, sizing each call for its own slice', async () => {
+    const { provider, requests } = capturingProvider([
+      readinessSlice(10, 0),
+      readinessSlice(2, 10),
+    ])
+
+    const assessments = await judgeTaskReadinessBatch(
+      baseEpisode({ sourceKind: 'slack_thread' }),
+      sourceFor(12),
+      candidatesFor(12),
+      makeDeps({ provider }),
+    )
+
+    // Two calls — 10 then 2 — each with an output budget sized to its own
+    // slice, because thought tokens compete with the payload for it.
+    expect(requests).toHaveLength(2)
+    expect(requests[0]?.maxTokens).toBe(3_072 + 10 * 700)
+    expect(requests[1]?.maxTokens).toBe(3_072 + 2 * 700)
+    // The second slice addresses its candidates by LOCAL index 0-1…
+    expect(requests[1]?.messages[0]?.content).toContain(`0. ${candidateTitle(10)}`)
+    // …and the caller still gets one assessment per candidate, in order.
+    expect(assessments).toHaveLength(12)
+    expect(assessments[11]?.objective).toBe(candidateTitle(11))
+    expect(assessments.every((a) => a.classification === 'ready' && a.evidenceVerified)).toBe(true)
+    expect(assessments.every((a) => typeof a.description === 'string')).toBe(true)
+  })
+
+  it('confines a failed judge slice to its own candidates', async () => {
+    const { provider } = capturingProvider([readinessSlice(10, 0), 'not json at all'])
+
+    const assessments = await judgeTaskReadinessBatch(
+      baseEpisode({ sourceKind: 'slack_thread' }),
+      sourceFor(12),
+      candidatesFor(12),
+      makeDeps({ provider }),
+    )
+
+    // The first ten keep their judgment — a single unparseable response no
+    // longer costs the whole episode its descriptions.
+    expect(assessments.slice(0, 10).every((a) => a.classification === 'ready')).toBe(true)
+    expect(assessments.slice(10).every((a) => a.classification === 'needs_spec')).toBe(true)
+    expect(assessments.slice(10).every((a) => !a.evidenceVerified && a.description === null)).toBe(true)
+  })
+
+  it('keeps the judged description on a suggestion held for missing facts', async () => {
+    const rows: Array<{ title: string }> = []
+    const recorded: any[] = []
+    const provider = sequencedProvider([
+      extraction('Ship the pricing page update'),
+      readiness({
+        classification: 'needs_spec',
+        completion_signal: null,
+        missing: ['completion_signal'],
+        explanation: 'No observable completion signal was stated.',
+      }),
+      classification,
+    ])
+
+    await processEpisode(
+      baseEpisode({ sourceKind: 'slack_thread' }),
+      'Ashley: Ship the pricing page update by Friday',
+      makeDeps({ provider, tasks: taskStore(rows), taskAdmission: admissionPort(recorded) }),
+    )
+
+    // Held, not created — a missing completion signal is still below the floor.
+    expect(rows).toHaveLength(0)
+    expect(recorded[0]).toMatchObject({ status: 'pending', reasonCode: 'needs_spec' })
+    // …but the tray row, and the task the user accepts from it, keep the body.
+    expect(recorded[0].quality.description).toContain('Update the pricing page by Friday')
+  })
+
+  it('creates a grounded agent-ready task with the judged description when an allow rule opts in', async () => {
+    const rows: Array<{ title: string; attributes?: Record<string, unknown> }> = []
+    const recorded: any[] = []
+    const provider = sequencedProvider([
+      extraction('Ship the pricing page update'),
+      readiness({}),
+      classification,
+    ])
+
+    await processEpisode(
+      baseEpisode({ sourceKind: 'slack_thread' }),
+      'Ashley: Ship the pricing page update by Friday',
+      makeDeps({
+        provider,
+        tasks: taskStore(rows),
+        taskAdmission: admissionPort(recorded, allowExtracted),
+      }),
+    )
+
+    // One audit row — the allow-rule auto-accept case, not a held suggestion.
+    expect(recorded).toHaveLength(1)
+    expect(recorded[0]).toMatchObject({ status: 'auto_accepted', reasonCode: 'auto_rule' })
+    expect(rows).toHaveLength(1)
+    expect(rows[0].attributes?.description).toContain('Done when the updated page is live')
+  })
+
+  it('holds an agent-ready task as a suggestion when no allow rule exists (suggestion-first)', async () => {
     const rows: Array<{ title: string; attributes?: Record<string, unknown> }> = []
     const recorded: any[] = []
     const provider = sequencedProvider([
@@ -2857,8 +3059,8 @@ describe('[COMP:tasks/task-readiness] Pipeline B — grounded automatic task qua
       makeDeps({ provider, tasks: taskStore(rows), taskAdmission: admissionPort(recorded) }),
     )
 
-    expect(recorded).toHaveLength(0)
-    expect(rows).toHaveLength(1)
-    expect(rows[0].attributes?.description).toContain('Done when the updated page is live')
+    expect(rows).toHaveLength(0)
+    expect(recorded[0]).toMatchObject({ status: 'pending', reasonCode: 'suggested' })
+    expect(recorded[0].quality.description).toContain('Done when the updated page is live')
   })
 })

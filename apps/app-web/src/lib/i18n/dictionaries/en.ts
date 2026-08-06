@@ -165,8 +165,19 @@ export const en = {
     research: "Research",
     researchHint: "Toggle deep research — synthesizes across the web and your brain",
     researchHintExhausted: "Free research used up. Click to upgrade.",
-    // Composer abort — Send swaps to Stop while streaming.
+    // Composer abort. Stop sits beside Send while streaming.
     abort: "Stop generating",
+    // Mid-turn input: Send stays live during a turn and hands the message to
+    // the running turn. See docs/architecture/engine/mid-turn-input.md.
+    queue: {
+      send: "Queue",
+      hint: "Sends into the reply in progress. Cmd+Enter to steer.",
+      pending: "Queued",
+      steering: "Steering",
+      steer: "Steer",
+      steerHint: "Take this now instead of waiting for the current step",
+      attachmentsWait: "Attachments are sent with the next turn",
+    },
     // Context chip above the composer — names the page this chat will act
     // on. Edits land on the open page; with no page open the next message
     // mints a new draft. See docs/architecture/features/doc.md.
@@ -3215,6 +3226,7 @@ export const en = {
         "This view is based on the newest {count} entries. The workspace has more beyond the graph source limit.",
       density: {
         groupLabel: "{name} · {count} entries",
+        groupCount: "{count} entries",
         summary: "{loaded} loaded · {grouped} grouped for clarity",
         collapse: "Collapse expanded groups",
       },
@@ -4703,6 +4715,8 @@ export const en = {
     clearFilter: "Clear filter",
     view: "View",
     resize: "Resize panel",
+    /** Overflow count on a multi-value filter pill: "Assignee - Alice +2". */
+    more: "+{count}",
   },
   // ── Tasks operator surface ([COMP:app-web/tasks-surface]) ──
   tasksPage: {
@@ -4751,6 +4765,7 @@ export const en = {
     showCompleted: "Show completed",
     viewTable: "Table",
     viewBoard: "Board",
+    viewSuggestions: "Suggestions",
     dueBucketOverdue: "Overdue",
     dueBucketToday: "Today",
     dueBucketWeek: "This week",
@@ -4808,6 +4823,23 @@ export const en = {
       suggestionsTitle: "Suggestions",
       suggestionsSubtitle:
         "Held for review, not added to your list. Nothing here counts as a task yet.",
+      suggestionsViewSubtitle:
+        "Brian suggests tasks from your chats and channels instead of creating them. Approve, adjust, or dismiss - approving with Always turns the class into an auto-create rule.",
+      suggestionsLoading: "Loading suggestions...",
+      suggestionsEmpty: "No suggestions right now.",
+      suggestionsEmptyHint:
+        "When Brian spots a commitment in a chat, channel, or recording, it lands here for your review instead of becoming a task on its own.",
+      editTitleLabel: "Edit title before approving",
+      detailsToggle: "Details",
+      evidenceLabel: "From the source:",
+      acceptAlways: "Always",
+      acceptAlwaysHint:
+        "Approve, and automatically create ready suggestions like this one from the same source going forward",
+      reasonSuggested: "Suggested from your activity",
+      autoCreatedTitle: "Auto-created by your rules ({count})",
+      autoCreatedByRule: "Created by an allow rule",
+      bannerText: "{count} suggested tasks are waiting for review",
+      bannerReview: "Review",
       accept: "Add it",
       dismiss: "Not a task",
       dismissTitle: "Why isn't this a task?",
@@ -4851,6 +4883,7 @@ export const en = {
       ruleDelete: "Delete",
       ruleDeny: "Blocks",
       ruleRequire: "Requires",
+      ruleAllow: "Auto-creates",
       ruleGuidanceOnly: "Guidance only",
       ruleGuidanceHint:
         "This one has no machine-checkable condition, so it is shown to the extractor as guidance rather than enforced.",

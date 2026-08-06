@@ -15,6 +15,15 @@ export type ChatComposerProps = {
   /** Called with the current `value` when the user submits. */
   onSend: () => void
   /**
+   * Cmd/Ctrl+Enter — submit as a **steer**: the running turn should take this
+   * message at the earliest safe point instead of the next boundary. Hosts
+   * wire it only where a turn can be in flight; without it Cmd/Ctrl+Enter
+   * falls through to an ordinary send, which is the right no-op.
+   *
+   * See docs/architecture/engine/mid-turn-input.md.
+   */
+  onSteer?: () => void
+  /**
    * Hard-disable the whole composer — textarea included (e.g. offline, or the
    * turn is suspended on a clarifying question). NOT for streaming: while a
    * reply streams the user should keep typing their next message, so pass
@@ -78,6 +87,36 @@ export type ChatComposerProps = {
 }
 
 /**
+ * What an Enter keypress means, given the composer's state. Pure so the
+ * modifier matrix is testable without a DOM (chat-ui's vitest is node-only).
+ *
+ * - `newline` — Shift+Enter, or mid-IME composition. Never submits: an IME
+ *   Enter is committing a candidate, not sending a message.
+ * - `steer` — Cmd/Ctrl+Enter where the host wired `onSteer`.
+ * - `send` — everything else that is submittable.
+ * - `blocked` — Enter that would submit, but the composer says no.
+ */
+export type ComposerEnterIntent = 'send' | 'steer' | 'newline' | 'blocked'
+
+export function resolveEnterIntent(params: {
+  shiftKey: boolean
+  metaKey: boolean
+  ctrlKey: boolean
+  isComposing: boolean
+  disabled: boolean
+  sendDisabled: boolean
+  hasText: boolean
+  allowEmptySend: boolean
+  canSteer: boolean
+}): ComposerEnterIntent {
+  if (params.shiftKey || params.isComposing) return 'newline'
+  if (params.disabled || params.sendDisabled) return 'blocked'
+  if (!params.hasText && !params.allowEmptySend) return 'blocked'
+  if ((params.metaKey || params.ctrlKey) && params.canSteer) return 'steer'
+  return 'send'
+}
+
+/**
  * Headless composer. Owns no business logic — the host wires it to a state
  * value and an `onSend` callback that triggers `useMessageStream.start(...)`.
  */
@@ -135,17 +174,24 @@ export function ChatComposer(props: ChatComposerProps) {
       if (event.defaultPrevented) return
 
       // Enter alone sends; Shift+Enter inserts a newline. Matches every other
-      // chat UI; consumers can wrap and override if needed.
-      if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
-        event.preventDefault()
-        if (
-          !props.disabled &&
-          !props.sendDisabled &&
-          (props.value.trim().length > 0 || props.allowEmptySend)
-        ) {
-          props.onSend()
-        }
-      }
+      // chat UI; consumers can wrap and override if needed. Cmd/Ctrl+Enter
+      // sends as a steer where the host supports one.
+      if (event.key !== 'Enter') return
+      const intent = resolveEnterIntent({
+        shiftKey: event.shiftKey,
+        metaKey: event.metaKey,
+        ctrlKey: event.ctrlKey,
+        isComposing: event.nativeEvent.isComposing,
+        disabled: props.disabled === true,
+        sendDisabled: props.sendDisabled === true,
+        hasText: props.value.trim().length > 0,
+        allowEmptySend: props.allowEmptySend === true,
+        canSteer: typeof props.onSteer === 'function',
+      })
+      if (intent === 'newline') return
+      event.preventDefault()
+      if (intent === 'steer') props.onSteer?.()
+      else if (intent === 'send') props.onSend()
     },
     [props],
   )
