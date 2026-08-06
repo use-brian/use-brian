@@ -68,9 +68,11 @@ export type FileIngestWorkerDeps = {
   /** Persist the derived episode id onto `workspace_files.source_episode_id`. */
   stampSourceEpisode?: (fileId: string, workspaceId: string, episodeId: string) => Promise<void>
   /**
-   * Distill PDFs/images to text. Absent (v1) -> PDF/image stays store-only (the
-   * silent path does not chunk distilled PDFs; explicit /ingest does). See plan
-   * §"Explicitly NOT in v1".
+   * Distill PDFs/images to text. Spent ONLY on `mode: 'explicit'` jobs — the
+   * user asked for that file to be ingested. Silent artifact promotion (chat
+   * attachments, large pastes) keeps PDFs/images store-only however this port
+   * is wired: nobody asked for the distill, so the queue must not buy one. See
+   * plan §"Explicitly NOT in v1" and migration 402.
    */
   distill?: (input: { buffer: Buffer; mime: string }) => Promise<string>
   intervalMs?: number
@@ -137,11 +139,12 @@ export function createFileIngestWorker(deps: FileIngestWorkerDeps): FileIngestWo
     }
 
     // PDFs / images need model distillation to yield text. Without a `distill`
-    // port (v1 silent path) they stay store-only: no chunk, no decomposition.
+    // port, or on a silent promotion (nobody asked to interpret this file),
+    // they stay store-only: no chunk, no decomposition.
     const needsDistill = mime === 'application/pdf' || mime.startsWith('image/')
     let text: string
     if (needsDistill) {
-      if (!deps.distill) {
+      if (!deps.distill || job.mode !== 'explicit') {
         await setIndexing(job.fileId, {
           status: 'skipped',
           reason: 'store_only_needs_distill',

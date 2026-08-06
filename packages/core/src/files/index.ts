@@ -1,5 +1,6 @@
 export type { FileStore, CachedFile } from './types.js'
 export { parseFileContent, parseDocxToMarkdown, shouldInline } from './parsers.js'
+export { parseHtmlToMarkdown, isHtmlFile } from './html.js'
 export {
   DOCUMENT_FORMATS,
   STRUCTURED_DOCUMENT_MIME_TYPES,

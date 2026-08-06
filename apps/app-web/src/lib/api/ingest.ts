@@ -30,12 +30,25 @@ export type IngestCounts = {
   tasks: number;
 };
 
+/** Terminal + in-flight states of one queued `file_ingest_jobs` row. */
+export type IngestJobStatus = "pending" | "processing" | "done" | "failed";
+
 export type IngestFileResult = {
   fileName: string;
   ok: boolean;
   fileId?: string;
   path?: string;
   sizeBytes?: number;
+  /**
+   * `stored` = bytes filed, nothing interpreted (the /store lane).
+   * `queued` = bytes filed AND parse/chunk/Pipeline B handed to the worker
+   * (the /ingest lane). The upload response deliberately does not wait for
+   * that work, so poll `jobId` through `getIngestJobStatus` for the outcome.
+   */
+  status?: "queued" | "stored";
+  jobId?: string | null;
+  /** A job for this file was already in flight; the work is happening either way. */
+  alreadyQueued?: boolean;
   /** A model distillation produced the ingested text (PDF / image). */
   distilled?: boolean;
   /** Content was decomposed through Pipeline B (false = stored only). */
@@ -119,6 +132,24 @@ async function uploadMultipartFile(
     return authFetch(url, { method: "POST", body: formData });
   }
   return response;
+}
+
+/**
+ * Poll one queued ingest. `null` means the status could not be read (offline,
+ * a transient 5xx) — NOT that the ingest failed. The job is durable server-side,
+ * so a caller must keep showing "analyzing" rather than inventing a failure.
+ */
+export async function getIngestJobStatus(
+  jobId: string,
+): Promise<{ status: IngestJobStatus; error?: string } | null> {
+  try {
+    const res = await authFetch(`${API_URL}/api/files/ingest-jobs/${jobId}`);
+    if (!res.ok) return null;
+    const data = (await res.json()) as { status?: IngestJobStatus; error?: string };
+    return data.status ? { status: data.status, ...(data.error ? { error: data.error } : {}) } : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
