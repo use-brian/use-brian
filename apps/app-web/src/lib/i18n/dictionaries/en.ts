@@ -737,6 +737,9 @@ export const en = {
       ingestAdding: "Adding",
       ingestReady: "Ready",
       ingestStored: "Stored",
+      // The file is saved and its brain ingest is running on the worker queue.
+      ingestAnalyzing: "Analyzing",
+      ingestAddedToBrain: "Added to brain",
       ingestAdded: "added to brain",
       ingestFailed: "Failed",
       ingestRemove: "Remove",

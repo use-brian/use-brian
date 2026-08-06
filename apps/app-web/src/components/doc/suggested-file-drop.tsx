@@ -13,12 +13,13 @@
  * [COMP:app-web/home-file-drop]
  */
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertCircle, Check, FileUp, Loader2, X } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 import { useFileDrop } from "@/lib/use-file-drop";
 import {
+  getIngestJobStatus,
   ingestFiles,
   ingestLinkedInArchive,
   totalAdded,
@@ -28,7 +29,31 @@ import {
 /** Match the server's per-request cap (MAX_INGEST_FILES in routes/files.ts). */
 const MAX_FILES = 5;
 
-type ItemStatus = "pending" | "ingesting" | "done" | "error";
+/**
+ * `analyzing` = the bytes are filed and the brain ingest is on the worker queue.
+ * The upload request returns as soon as the file is stored (it must: knowledge
+ * extraction on a large document runs for minutes, far past the CDN's
+ * origin-response timeout), so the completion signal is a poll, not the reply.
+ */
+type ItemStatus = "pending" | "ingesting" | "analyzing" | "done" | "error";
+
+const POLL_INTERVAL_MS = 3_000;
+/** Give up watching (not the job — the job is durable) after this long. */
+const POLL_TIMEOUT_MS = 15 * 60_000;
+
+/**
+ * What one upload result means for the chip. Exported because this is the
+ * decision the 2026-08-05 incident got wrong in the other direction: a file
+ * that had been fully ingested was labelled "Failed". The rule is that only the
+ * server saying so makes a chip red.
+ */
+export function statusForIngestResult(result: IngestFileResult | undefined): ItemStatus {
+  if (!result || !result.ok) return "error";
+  // Stored, but the brain ingest is still on the queue — not done yet, and
+  // emphatically not failed.
+  if (result.status === "queued" && result.jobId) return "analyzing";
+  return "done";
+}
 
 type StagedItem = {
   localId: string;
@@ -43,6 +68,15 @@ export function SuggestedFileDrop({ workspaceId }: { workspaceId: string }) {
   const [items, setItems] = useState<StagedItem[]>([]);
   const [busy, setBusy] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  // Polls outlive no unmount: this block sits on the Home surface, which is torn
+  // down the moment the user navigates to Brain / Studio / anywhere else.
+  const unmounted = useRef(false);
+  useEffect(() => {
+    unmounted.current = false;
+    return () => {
+      unmounted.current = true;
+    };
+  }, []);
 
   const addFiles = useCallback((fileList: FileList | File[]) => {
     const incoming = Array.from(fileList);
@@ -75,6 +109,36 @@ export function SuggestedFileDrop({ workspaceId }: { workspaceId: string }) {
   const pendingCount = items.filter((i) => i.status === "pending").length;
   const hasResolved = items.some((i) => i.status === "done" || i.status === "error");
 
+  /**
+   * Watch one queued job to a terminal state. An unreadable poll is NOT a
+   * failure — the row is durable in `file_ingest_jobs` — so a null response
+   * keeps the chip on "analyzing" and tries again. Only the server saying
+   * `failed` turns the chip red.
+   */
+  const watchJob = useCallback(async (localId: string, jobId: string) => {
+    const deadline = Date.now() + POLL_TIMEOUT_MS;
+    while (!unmounted.current && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+      if (unmounted.current) return;
+      const state = await getIngestJobStatus(jobId);
+      if (!state) continue;
+      if (state.status === "done") {
+        setItems((prev) =>
+          prev.map((i) => (i.localId === localId ? { ...i, status: "done" } : i)),
+        );
+        return;
+      }
+      if (state.status === "failed") {
+        setItems((prev) =>
+          prev.map((i) =>
+            i.localId === localId ? { ...i, status: "error", error: state.error } : i,
+          ),
+        );
+        return;
+      }
+    }
+  }, []);
+
   const addToBrain = useCallback(async () => {
     const pending = items.filter((i) => i.status === "pending");
     if (pending.length === 0 || busy) return;
@@ -91,17 +155,27 @@ export function SuggestedFileDrop({ workspaceId }: { workspaceId: string }) {
       const results = zipItems.length === 1
         ? [await ingestLinkedInArchive(workspaceId, zipItems[0].file)]
         : await ingestFiles(workspaceId, pending.map((p) => p.file));
+      // `results` is positional over `pending`; pair them out here rather than
+      // inside the updater, which React may run twice.
+      const queued = pending.flatMap((p, idx) => {
+        const r = results[idx];
+        return r?.ok && r.status === "queued" && r.jobId
+          ? [{ localId: p.localId, jobId: r.jobId }]
+          : [];
+      });
       setItems((prev) => {
         let idx = 0;
         return prev.map((i) => {
           if (!pendingIds.has(i.localId)) return i;
           const r = results[idx++];
-          if (!r) return { ...i, status: "error", error: t.ingestFailed };
-          return r.ok
-            ? { ...i, status: "done", result: r }
-            : { ...i, status: "error", error: r.error ?? t.ingestFailed };
+          const status = statusForIngestResult(r);
+          if (status === "error") {
+            return { ...i, status, error: r?.error ?? t.ingestFailed };
+          }
+          return { ...i, status, result: r };
         });
       });
+      for (const job of queued) void watchJob(job.localId, job.jobId);
     } catch (err) {
       setItems((prev) =>
         prev.map((i) =>
@@ -113,7 +187,7 @@ export function SuggestedFileDrop({ workspaceId }: { workspaceId: string }) {
     } finally {
       setBusy(false);
     }
-  }, [items, busy, workspaceId, t.ingestFailed, t.linkedinArchiveAlone]);
+  }, [items, busy, workspaceId, watchJob, t.ingestFailed, t.linkedinArchiveAlone]);
 
   return (
     <section
@@ -211,7 +285,7 @@ export function SuggestedFileDrop({ workspaceId }: { workspaceId: string }) {
 }
 
 function StatusIcon({ status }: { status: ItemStatus }) {
-  if (status === "ingesting")
+  if (status === "ingesting" || status === "analyzing")
     return <Loader2 className="size-4 shrink-0 animate-spin text-muted-foreground" aria-hidden />;
   if (status === "done")
     return <Check className="size-4 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden />;
@@ -229,6 +303,7 @@ function StatusLabel({
 }) {
   if (item.status === "pending") return <>{t.ingestReady}</>;
   if (item.status === "ingesting") return <>{t.ingestAdding}</>;
+  if (item.status === "analyzing") return <>{t.ingestAnalyzing}</>;
   if (item.status === "error") return <span className="text-rose-600 dark:text-rose-400">{item.error ?? t.ingestFailed}</span>;
   if (item.result?.linkedinImport) {
     const imported = item.result.linkedinImport;
@@ -239,9 +314,13 @@ function StatusLabel({
     );
   }
   const n = totalAdded(item.result?.counts);
-  return n > 0 ? (
-    <span className="text-emerald-600 dark:text-emerald-400">{`${n} ${t.ingestAdded}`}</span>
-  ) : (
-    <span className="text-emerald-600 dark:text-emerald-400">{t.ingestStored}</span>
-  );
+  if (n > 0) {
+    return <span className="text-emerald-600 dark:text-emerald-400">{`${n} ${t.ingestAdded}`}</span>;
+  }
+  // A queued ingest carries no counts in its reply — the extraction happened on
+  // the worker, long after the upload answered.
+  if (item.result?.status === "queued") {
+    return <span className="text-emerald-600 dark:text-emerald-400">{t.ingestAddedToBrain}</span>;
+  }
+  return <span className="text-emerald-600 dark:text-emerald-400">{t.ingestStored}</span>;
 }

@@ -5433,6 +5433,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         markDone: markFileIngestJobDone,
         markFailed: markFileIngestJobFailed,
         filesApi,
+        // Spent only on `mode: 'explicit'` jobs — the queue now carries the
+        // explicit POST /ingest path, which distilled PDFs/images back when it
+        // ran inline. Silent promotion stays store-only (worker gates on mode).
+        distill: async ({ buffer, mime }) =>
+          (await distillFileToText({ buffer, mime }, { backend: mediaBackend })).text,
         ...(brainEpisodeIngestor ? { brainIngest: brainEpisodeIngestor } : {}),
       })
     : null

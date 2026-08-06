@@ -655,6 +655,8 @@ export const ja: Dictionary = {
       ingestAdding: "追加中",
       ingestReady: "準備完了",
       ingestStored: "保存済み",
+      ingestAnalyzing: "解析中",
+      ingestAddedToBrain: "ブレインに追加しました",
       ingestAdded: "件をブレインに追加",
       ingestFailed: "失敗",
       ingestRemove: "削除",

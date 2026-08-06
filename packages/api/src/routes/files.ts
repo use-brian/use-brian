@@ -3,7 +3,7 @@ import multer, { MulterError } from 'multer'
 import { z } from 'zod'
 import { getDefaultAssistant, findAssistantById, getWorkspacePrimaryAssistant } from '../db/users.js'
 import { getWorkspaceFileById } from '../db/workspace-files.js'
-import { enqueueFileIngestJob } from '../db/file-ingest-jobs-store.js'
+import { enqueueFileIngestJob, getFileIngestJob } from '../db/file-ingest-jobs-store.js'
 import { findOrCreateSession, findSessionById } from '../db/sessions.js'
 import { parseFileContent, shouldInline, probePdfPageCount, PDF_CONFIRM_PAGE_THRESHOLD, type FileStore } from '@use-brian/core'
 import { FileIngestError } from '../files/ingest-error.js'
@@ -335,8 +335,9 @@ export function fileRoutes(
       compartments: assistant.compartments,
     }
 
-    // Sequential keeps multipart writes bounded. On /ingest it also bounds the
-    // model distill + Pipeline B calls; /store exits after the byte write.
+    // Sequential keeps multipart writes bounded. Both lanes now exit after the
+    // byte write: /store stops there, /ingest hands parse/chunk/decompose to
+    // the file_ingest_jobs worker rather than running it on the request thread.
     const results = []
     for (const file of files) {
       // Recover a UTF-8 filename mojibaked by multer's latin1 decode (see /upload).
@@ -346,21 +347,50 @@ export function fileRoutes(
         continue
       }
       try {
+        // `process: false` on BOTH lanes. Semantic work is never inline here —
+        // see the route doc on POST /ingest for why the request may not wait.
         const r = await ingestor({
           fileName,
           mime: file.mimetype,
           bytes: file.buffer,
-          process: processFile,
+          process: false,
         }, ctx)
+        if (!processFile) {
+          results.push({
+            fileName,
+            ok: true,
+            fileId: r.fileId,
+            path: r.path,
+            sizeBytes: r.sizeBytes,
+            status: 'stored' as const,
+            distilled: r.distilled,
+            decomposed: r.decomposed,
+            counts: r.counts,
+          })
+          continue
+        }
+        // Explicit ingest: the user asked for this file to be interpreted, so
+        // the job carries `mode: 'explicit'` and the worker may distill a
+        // PDF/image for it (migration 402).
+        const { enqueued, jobId } = await enqueueFileIngestJob({
+          fileId: r.fileId,
+          workspaceId: ctx.workspaceId,
+          actingUserId: ctx.userId,
+          assistantId: ctx.assistantId,
+          sourceLabel: fileName,
+          mode: 'explicit',
+        })
         results.push({
           fileName,
           ok: true,
           fileId: r.fileId,
           path: r.path,
           sizeBytes: r.sizeBytes,
-          distilled: r.distilled,
-          decomposed: r.decomposed,
-          counts: r.counts,
+          // `enqueued: false` means a job for this file is already in flight —
+          // the work is happening either way, so this is not a failure.
+          status: 'queued' as const,
+          jobId,
+          ...(enqueued ? {} : { alreadyQueued: true }),
         })
       } catch (err) {
         const message =
@@ -511,14 +541,58 @@ export function fileRoutes(
   })
 
   /**
-   * POST /api/files/ingest — store raw bytes + decompose content into the brain.
+   * POST /api/files/ingest — store raw bytes, then QUEUE the brain ingest.
    *
    * Multipart field "files"; body field "workspaceId" (required). Deterministic
-   * (no chat turn): each file's bytes land in workspace_files AND its content is
-   * distilled/parsed to text and run through Pipeline B. Per-file results.
+   * (no chat turn): each file's bytes land in workspace_files synchronously and
+   * a `file_ingest_jobs` row carries parse -> chunk -> Pipeline B to the worker.
+   * Per-file results carry `status: 'queued'` + `jobId`; poll
+   * `GET /api/files/ingest-jobs/:jobId` for the outcome.
+   *
+   * WHY THIS IS NOT SYNCHRONOUS. It used to be, and the request took as long as
+   * decomposition did: a 4 MB HTML document billed 47 extraction windows and
+   * held the connection 185 s. `api.usebrian.ai` is fronted by Cloudflare, whose
+   * origin-response timeout is 100 s, so the browser got a 524 while Cloud Run
+   * ran happily to completion and logged 200. The user saw "Failed" for files
+   * that were fully ingested, retried, and hit the path-UNIQUE conflict — the
+   * worst available shape, because the recovery action was the one that could
+   * not work. Semantic work is unbounded by nature; an HTTP request behind a
+   * CDN is not. Keep the two apart: anything model-priced belongs on the queue.
    */
   router.post('/ingest', ingestUpload.array('files', MAX_FILES_PER_REQUEST), async (req, res) => {
     await handleDurableUpload(req, res, true)
+  })
+
+  /**
+   * GET /api/files/ingest-jobs/:jobId — poll one queued ingest.
+   *
+   * The completion signal for POST /ingest: the upload answers `queued`, the UI
+   * polls here until `done` / `failed` rather than guessing. Membership-gated
+   * through the job's own workspace (404 hides existence), so a bare job id from
+   * another workspace reveals nothing.
+   */
+  router.get('/ingest-jobs/:jobId', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) {
+      res.status(401).json({ error: 'Unauthorized' })
+      return
+    }
+    const job = await getFileIngestJob(req.params.jobId)
+    if (!job) {
+      res.status(404).json({ error: 'Not found' })
+      return
+    }
+    const assistant = await getWorkspacePrimaryAssistant(userId, job.workspaceId)
+    if (!assistant || !assistant.workspaceId) {
+      res.status(404).json({ error: 'Not found' })
+      return
+    }
+    res.json({
+      jobId: job.id,
+      fileId: job.fileId,
+      status: job.status,
+      ...(job.status === 'failed' && job.lastError ? { error: job.lastError } : {}),
+    })
   })
 
   /**
@@ -597,6 +671,9 @@ export function fileRoutes(
       actingUserId: userId,
       assistantId: assistant.id,
       sourceLabel: file.sourceEpisodeId ? 'reingest' : 'upload',
+      // User-initiated, so the worker may distill a PDF/image for it — the same
+      // coverage a fresh POST /ingest gets (migration 402).
+      mode: 'explicit',
     })
     if (!enqueued) {
       res.status(409).json({ error: 'ingest_in_flight', detail: 'An ingest for this file is already running.' })

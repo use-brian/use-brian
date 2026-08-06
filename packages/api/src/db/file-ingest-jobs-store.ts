@@ -20,6 +20,14 @@ import { query } from './client.js'
 
 export type FileIngestJobStatus = 'pending' | 'processing' | 'done' | 'failed'
 
+/**
+ * Which boundary enqueued the job (migration 402). `explicit` = the user asked
+ * for this file to be ingested, so the worker may spend a model distill on a
+ * PDF / image; `silent` = artifact promotion of a chat attachment or paste,
+ * which stays store-only for those types. See `file-ingest-worker.ts`.
+ */
+export type FileIngestJobMode = 'explicit' | 'silent'
+
 export type FileIngestJob = {
   id: string
   fileId: string
@@ -27,6 +35,7 @@ export type FileIngestJob = {
   actingUserId: string
   assistantId: string | null
   sourceLabel: string
+  mode: FileIngestJobMode
   status: FileIngestJobStatus
   attempts: number
   lastError: string | null
@@ -43,6 +52,7 @@ const RETURNING = `
   acting_user_id AS "actingUserId",
   assistant_id   AS "assistantId",
   source_label   AS "sourceLabel",
+  mode,
   status,
   attempts,
   last_error     AS "lastError"
@@ -59,10 +69,12 @@ export async function enqueueFileIngestJob(input: {
   actingUserId: string
   assistantId?: string | null
   sourceLabel?: string
+  /** Defaults to `silent` — the conservative, no-distill path (migration 402). */
+  mode?: FileIngestJobMode
 }): Promise<{ enqueued: boolean; jobId: string | null }> {
   const { rows } = await query<{ id: string }>(
-    `INSERT INTO file_ingest_jobs (file_id, workspace_id, acting_user_id, assistant_id, source_label)
-     VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO file_ingest_jobs (file_id, workspace_id, acting_user_id, assistant_id, source_label, mode)
+     VALUES ($1, $2, $3, $4, $5, $6)
      ON CONFLICT DO NOTHING
      RETURNING id`,
     [
@@ -71,6 +83,7 @@ export async function enqueueFileIngestJob(input: {
       input.actingUserId,
       input.assistantId ?? null,
       input.sourceLabel ?? 'upload',
+      input.mode ?? 'silent',
     ],
   )
   return rows[0] ? { enqueued: true, jobId: rows[0].id } : { enqueued: false, jobId: null }

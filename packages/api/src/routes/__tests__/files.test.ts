@@ -17,6 +17,7 @@ vi.mock('../../db/workspace-files.js', () => ({
 }))
 vi.mock('../../db/file-ingest-jobs-store.js', () => ({
   enqueueFileIngestJob: vi.fn(),
+  getFileIngestJob: vi.fn(),
 }))
 vi.mock('../../db/sessions.js', () => ({
   findOrCreateSession: vi.fn(),
@@ -35,7 +36,7 @@ import { fileRoutes } from '../files.js'
 import { findOrCreateUser, getDefaultAssistant, findUserById, findAssistantById, getWorkspacePrimaryAssistant } from '../../db/users.js'
 import { findOrCreateSession, findSessionById } from '../../db/sessions.js'
 import { getWorkspaceFileById } from '../../db/workspace-files.js'
-import { enqueueFileIngestJob } from '../../db/file-ingest-jobs-store.js'
+import { enqueueFileIngestJob, getFileIngestJob } from '../../db/file-ingest-jobs-store.js'
 import { parseFileContent, shouldInline } from '@use-brian/core'
 
 const mockFindOrCreateUser = vi.mocked(findOrCreateUser)
@@ -54,6 +55,9 @@ describe('[COMP:api/files-route] File routes', () => {
 
   beforeEach(() => {
     vi.resetAllMocks()
+    // /ingest hands the semantic work to the queue, so every ingest test needs
+    // a working enqueue unless it is specifically testing enqueue behavior.
+    vi.mocked(enqueueFileIngestJob).mockResolvedValue({ enqueued: true, jobId: 'job-1' })
   })
 
   // ── POST /upload ────────────────────────────────────────────
@@ -154,6 +158,92 @@ describe('[COMP:api/files-route] File routes', () => {
       expect.objectContaining({ workspaceId: 'ws-1', userId: 'u-1' }),
     )
     expect(ingestor.mock.calls[0][0].bytes).toHaveLength(bytes.length)
+  })
+
+  // ── POST /ingest is a QUEUE boundary ────────────────────────
+  //
+  // Regression cover for the 2026-08-05 false-failure: /ingest used to run
+  // parse + chunk + Pipeline B inline, so a 4 MB document held the request for
+  // 185 s and Cloudflare 524'd the browser at 100 s while the server finished
+  // the work. Every file in the batch showed "Failed" after being fully
+  // ingested, and the retry hit the path conflict. The invariant that keeps it
+  // from coming back: no model-priced work on the request thread.
+
+  const primaryAssistant = {
+    id: 'a-1',
+    kind: 'primary',
+    workspaceId: 'ws-1',
+    clearance: 'internal',
+    compartments: [],
+  }
+
+  function ingestorFor(over: Record<string, unknown> = {}) {
+    return vi.fn().mockResolvedValue({
+      fileName: 'report.html',
+      fileId: 'wf-1',
+      path: '/uploads/report.html',
+      sizeBytes: 31_203,
+      distilled: false,
+      decomposed: false,
+      counts: { entities: 0, edges: 0, memories: 0, tasks: 0 },
+      ...over,
+    })
+  }
+
+  async function postIngest(ingestor: ReturnType<typeof ingestorFor>) {
+    vi.mocked(getWorkspacePrimaryAssistant).mockResolvedValueOnce(primaryAssistant as never)
+    return request(createTestApp('/api/files', fileRoutes(fileStore as never, ingestor), { userId: 'u-1' }))
+      .post('/api/files/ingest')
+      .field('workspaceId', 'ws-1')
+      .attach('files', Buffer.from('<html><body>hi</body></html>'), {
+        filename: 'report.html',
+        contentType: 'text/html',
+      })
+  }
+
+  it('queues the brain ingest instead of running it on the request thread', async () => {
+    const ingestor = ingestorFor()
+    const res = await postIngest(ingestor)
+
+    expect(res.status).toBe(200)
+    expect(res.body.files[0]).toMatchObject({
+      ok: true,
+      fileId: 'wf-1',
+      status: 'queued',
+      jobId: 'job-1',
+    })
+    // The bytes are filed synchronously; nothing is interpreted inline.
+    expect(ingestor).toHaveBeenCalledWith(
+      expect.objectContaining({ fileName: 'report.html', process: false }),
+      expect.objectContaining({ workspaceId: 'ws-1', userId: 'u-1' }),
+    )
+    // No counts to report yet — claiming any would be a guess.
+    expect(res.body.files[0].counts).toBeUndefined()
+    expect(res.body.files[0].decomposed).toBeUndefined()
+  })
+
+  it('enqueues the job as `explicit` so the worker may distill a PDF or image', async () => {
+    await postIngest(ingestorFor())
+
+    expect(enqueueFileIngestJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        fileId: 'wf-1',
+        workspaceId: 'ws-1',
+        actingUserId: 'u-1',
+        assistantId: 'a-1',
+        mode: 'explicit',
+      }),
+    )
+  })
+
+  it('reports success when a job for the file is already in flight', async () => {
+    // Queue-level idempotency, not a failure: the work is happening either way,
+    // and telling the user it failed is what sends them into a retry loop.
+    vi.mocked(enqueueFileIngestJob).mockResolvedValue({ enqueued: false, jobId: null })
+    const res = await postIngest(ingestorFor())
+
+    expect(res.status).toBe(200)
+    expect(res.body.files[0]).toMatchObject({ ok: true, status: 'queued', alreadyQueued: true })
   })
 
   it('stores a durable Pins file without semantic processing', async () => {
@@ -670,5 +760,61 @@ describe('[COMP:api/files-reingest] POST /:fileId/ingest', () => {
 
     expect((await request(app(null)).post('/api/files/f-1/ingest').send({ workspaceId: 'ws-1' })).status).toBe(401)
     expect((await request(app()).post('/api/files/f-1/ingest').send({})).status).toBe(400)
+  })
+})
+
+// ── Ingest-job status poll ───────────────────────────────────────────────────
+//
+// The completion signal for the queued POST /ingest. Without it the UI can only
+// say "queued" and stop, which is how the false-failure incident felt from the
+// user's side even after the timeout itself was fixed: no way to tell a running
+// ingest from a lost one.
+describe('[COMP:api/files-route] GET /ingest-jobs/:jobId', () => {
+  const mockGetPrimary = vi.mocked(getWorkspacePrimaryAssistant)
+  const mockGetJob = vi.mocked(getFileIngestJob)
+  const ASSISTANT = { id: 'a-1', kind: 'primary', workspaceId: 'ws-1', clearance: 'internal', compartments: [] }
+  const JOB = {
+    id: 'job-1',
+    fileId: 'wf-1',
+    workspaceId: 'ws-1',
+    actingUserId: 'u-1',
+    assistantId: 'a-1',
+    sourceLabel: 'report.html',
+    mode: 'explicit' as const,
+    status: 'processing' as const,
+    attempts: 1,
+    lastError: null,
+  }
+
+  const app = (userId: string | null = 'u-1') =>
+    createTestApp('/api/files', fileRoutes({} as never, vi.fn()), userId ? { userId } : {})
+
+  beforeEach(() => {
+    vi.resetAllMocks()
+    mockGetPrimary.mockResolvedValue(ASSISTANT as never)
+    mockGetJob.mockResolvedValue(JOB as never)
+  })
+
+  it('reports the in-flight status', async () => {
+    const res = await request(app()).get('/api/files/ingest-jobs/job-1')
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ jobId: 'job-1', fileId: 'wf-1', status: 'processing' })
+  })
+
+  it('carries the failure reason on a failed job', async () => {
+    mockGetJob.mockResolvedValue({ ...JOB, status: 'failed', lastError: 'readBytes failed' } as never)
+    const res = await request(app()).get('/api/files/ingest-jobs/job-1')
+    expect(res.body).toMatchObject({ status: 'failed', error: 'readBytes failed' })
+  })
+
+  it('does not leak a job from a workspace the caller is not a member of', async () => {
+    mockGetPrimary.mockResolvedValue(null as never)
+    expect((await request(app()).get('/api/files/ingest-jobs/job-1')).status).toBe(404)
+  })
+
+  it('404 for an unknown job, 401 unauthenticated', async () => {
+    mockGetJob.mockResolvedValue(null as never)
+    expect((await request(app()).get('/api/files/ingest-jobs/job-1')).status).toBe(404)
+    expect((await request(app(null)).get('/api/files/ingest-jobs/job-1')).status).toBe(401)
   })
 })

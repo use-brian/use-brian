@@ -5,10 +5,12 @@ vi.mock("@/lib/auth-fetch", () => ({ authFetch: vi.fn() }));
 import { authFetch } from "@/lib/auth-fetch";
 import {
   MAX_INGEST_FILE_BYTES,
+  getIngestJobStatus,
   ingestFiles,
   ingestLinkedInArchive,
   storeFiles,
 } from "../ingest";
+import { statusForIngestResult } from "@/components/doc/suggested-file-drop";
 
 const mockAuthFetch = vi.mocked(authFetch);
 
@@ -178,5 +180,61 @@ describe("[COMP:api/linkedin-import-http] app-web LinkedIn import SDK", () => {
     }));
     const file = new File(["bad"], "linkedin.zip", { type: "application/zip" });
     await expect(ingestLinkedInArchive("ws-1", file)).rejects.toThrow("Unsafe ZIP member path");
+  });
+});
+
+// ── Queued-ingest completion signal ─────────────────────────────────────────
+//
+// POST /api/files/ingest answers as soon as the bytes are filed; the brain
+// ingest runs on the worker queue. These two contracts are what stop the UI
+// from reporting a failure it cannot actually observe — the shape of the
+// 2026-08-05 incident, where a CDN timeout on a 185 s request made every fully
+// ingested file render as "Failed".
+describe("[COMP:app-web/home-file-drop] queued-ingest status poll", () => {
+  it("reports the job's status", async () => {
+    mockAuthFetch.mockResolvedValueOnce(new Response(JSON.stringify({
+      jobId: "job-1", fileId: "wf-1", status: "processing",
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+    await expect(getIngestJobStatus("job-1")).resolves.toEqual({ status: "processing" });
+    expect(mockAuthFetch.mock.calls[0][0]).toMatch(/\/api\/files\/ingest-jobs\/job-1$/);
+  });
+
+  it("carries the reason through on a failed job", async () => {
+    mockAuthFetch.mockResolvedValueOnce(new Response(JSON.stringify({
+      status: "failed", error: "readBytes failed",
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+    await expect(getIngestJobStatus("job-1")).resolves.toEqual({
+      status: "failed",
+      error: "readBytes failed",
+    });
+  });
+
+  it("returns null — not a failure — when the status cannot be read", async () => {
+    // A 5xx or a dropped connection says nothing about the job, which is
+    // durable server-side. Inventing a failure here is the whole bug.
+    mockAuthFetch.mockResolvedValueOnce(new Response("nope", { status: 503 }));
+    await expect(getIngestJobStatus("job-1")).resolves.toBeNull();
+
+    mockAuthFetch.mockRejectedValueOnce(new Error("Load failed"));
+    await expect(getIngestJobStatus("job-1")).resolves.toBeNull();
+  });
+});
+
+describe("[COMP:app-web/home-file-drop] upload result → chip status", () => {
+  it("shows a queued ingest as still working, never as done or failed", () => {
+    expect(statusForIngestResult({
+      fileName: "report.html", ok: true, fileId: "wf-1", status: "queued", jobId: "job-1",
+    })).toBe("analyzing");
+  });
+
+  it("treats a store-only result as done", () => {
+    expect(statusForIngestResult({ fileName: "brief.pdf", ok: true, status: "stored" })).toBe("done");
+  });
+
+  it("only turns red when the server actually reported a failure", () => {
+    expect(statusForIngestResult({ fileName: "x", ok: false, error: "Unsupported file type" })).toBe("error");
+    expect(statusForIngestResult(undefined)).toBe("error");
   });
 });
