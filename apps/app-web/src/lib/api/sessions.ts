@@ -373,6 +373,56 @@ export async function postRoomMessage(
   return (await res.json()) as { id: string; sequenceNum: number; timestamp: string };
 }
 
+/**
+ * Rewrite one of your own room posts in place
+ * (`PATCH /api/sessions/:id/messages/:messageId`).
+ *
+ * The silent half of editing: a post nobody was asked to answer is repaired
+ * where it stands. An edit that ADDRESSES an assistant goes through
+ * `/api/chat` with `truncateFromMessageId` instead, because it needs a turn.
+ */
+export async function editRoomMessage(
+  sessionId: string,
+  messageId: string,
+  message: string,
+): Promise<void> {
+  const res = await authFetch(
+    `${API_URL}/api/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message }),
+    },
+  );
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `Edit failed: ${res.status}`);
+  }
+}
+
+/**
+ * Room typing beacon (`POST /api/sessions/:id/typing`). Fire-and-forget
+ * presence: errors are swallowed — a lost beacon only delays the indicator,
+ * and the server's staleness sweep clears any flag whose beacons stop.
+ */
+export async function postSessionTyping(
+  sessionId: string,
+  isTyping: boolean,
+): Promise<void> {
+  try {
+    await authFetch(
+      `${API_URL}/api/sessions/${encodeURIComponent(sessionId)}/typing`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ isTyping }),
+      },
+    );
+  } catch {
+    // Best-effort by design.
+  }
+}
+
 /** Rename a session (`PATCH /api/sessions/:id`). Throws on rejection so the
  *  rail can surface why (403 on someone else's private thread). */
 export async function renameSessionTitle(

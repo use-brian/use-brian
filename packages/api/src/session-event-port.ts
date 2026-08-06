@@ -125,8 +125,28 @@ export type SubscribeSessionEvents = (params: {
   cb: (event: SessionEvent) => void
 }) => () => void
 
+/**
+ * Update a viewer's typing state on a session's presence set (the room
+ * typing beacon — docs/architecture/features/chat-app.md → "Typing
+ * presence"). The bus broadcasts a `presence` event on transitions only.
+ */
+export type SetSessionTyping = (params: {
+  sessionId: string
+  userId: string
+  isTyping: boolean
+}) => void
+
+/** Snapshot of a session's viewer presence — the follow stream's hello. */
+export type GetSessionPresence = (sessionId: string) => ViewerPresence[]
+
 /** Default — no bus wired (e.g. unit tests); events go nowhere. */
 export const noopPublishSessionEvent: PublishSessionEvent = () => {}
 
 /** Default — nothing to subscribe to; the unsubscribe is a no-op. */
 export const noopSubscribeSessionEvents: SubscribeSessionEvents = () => () => {}
+
+/** Default — no presence tracked; typing beacons go nowhere. */
+export const noopSetSessionTyping: SetSessionTyping = () => {}
+
+/** Default — nobody present. */
+export const emptySessionPresence: GetSessionPresence = () => []

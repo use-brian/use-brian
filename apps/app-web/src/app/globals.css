@@ -2165,6 +2165,61 @@ html[data-vt-back="true"]::view-transition-new(root) {
   }
 }
 
+/* ChatComposer mention chips (the `highlightRanges` prop). A textarea cannot
+   style a run of its own text, so the composer paints a mirror layer UNDER a
+   transparent-background field: same box, same typography, same wrapping, so
+   every glyph lands on its own chip. The field keeps native selection, undo,
+   IME and a11y — the mirror is inert and hidden from screen readers.
+
+   UNLAYERED on purpose. Both layers are handed the SAME textarea class string
+   (that is what makes them align), so the mirror's overrides collide head-on
+   with the host's utilities — `overflow-y-auto` would give it a second
+   scrollbar, `max-h-*` would clip a box already sized by `inset`. A `@layer`
+   always loses to a utility; unlayered always wins. Positioning lives here
+   rather than in a Tailwind class for a different reason: the composer's
+   auto-grow owns the textarea's inline `style.height` and must stay the only
+   writer of it. */
+.composer-highlight-wrap {
+  position: relative;
+  display: flex;
+}
+.composer-highlight-backdrop {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  color: transparent;
+  max-height: none;
+  min-height: 0;
+  /* Scrolls like the field, not merely clipped like a backdrop. This app
+     styles `::-webkit-scrollbar`, which opts every scroll box OUT of macOS
+     overlay scrollbars, so a composer past its max-height loses 10px of
+     content width to the gutter. A clipped mirror would keep that 10px, wrap
+     one word earlier, and slide every chip off its word. Same overflow rule =
+     same gutter = same wrapping; the bar itself is painted away, and the
+     composer syncs `scrollTop` on every change and scroll event. */
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-color: transparent transparent;
+}
+.composer-highlight-backdrop::-webkit-scrollbar-thumb,
+.composer-highlight-backdrop::-webkit-scrollbar-thumb:hover,
+.composer-highlight-backdrop::-webkit-scrollbar-track {
+  background: transparent;
+}
+.composer-highlight-input {
+  position: relative;
+  background: transparent;
+}
+/* Painted with box-shadow rather than padding: a chip must not move the text
+   it sits behind by even a pixel, or it stops lining up with the field. */
+.composer-mention-chip {
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--primary) 15%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 15%, transparent);
+}
+
 /* Chat activity header — the "what the assistant is doing" status label
    (chat-activity.tsx). A brighter band sweeps left→right through muted
    text via background-clip, the pattern the current generation of AI chat

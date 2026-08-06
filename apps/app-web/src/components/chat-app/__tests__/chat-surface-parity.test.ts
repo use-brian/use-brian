@@ -63,7 +63,10 @@ describe("[COMP:app-web/chat-parity] Chat surface parity", () => {
 
   it("keeps the composer footer on one stable row without a dock overlay", () => {
     expect(source).toContain("grid-cols-[minmax(0,1fr)_auto]");
-    expect(source).toContain("order-1 col-span-2 w-full");
+    // The textarea's grid placement moved to the wrapper that carries the
+    // mention-chip mirror; the cell it occupies is unchanged.
+    expect(source).toContain('inputWrapClassName="order-1 col-span-2 min-w-0"');
+    expect(source).toContain("w-full max-h-[240px] min-w-0 resize-none");
     expect(source).not.toContain('rowClassName="flex flex-wrap');
     expect(workspaceChromeSource).toContain(
       'embeddedChatSuppressed || activeSurface === "chat"',

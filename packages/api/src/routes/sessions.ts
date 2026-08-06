@@ -1,15 +1,19 @@
 import { Router } from 'express'
 import { findOrCreateUser, getDefaultAssistant, getUserAssistant, getUserProfilesByIds, getWorkspacePrimaryAssistant } from '../db/users.js'
-import { addSessionMessage, createWorkspaceChatSession, findSessionByChannel, findSessionById, getSessionMessages, isSharedChatSession, renameSession } from '../db/sessions.js'
+import { addSessionMessage, createWorkspaceChatSession, findSessionByChannel, findSessionById, getSessionMessageById, getSessionMessages, isSharedChatSession, renameSession, updateSessionMessageText } from '../db/sessions.js'
 import { query } from '../db/client.js'
 import { resolveUser } from './route-helpers.js'
 import { getWorkspaceRoleSystem, getWorkspaceMembershipWithClearanceSystem } from '../db/workspace-store.js'
 import { canRead } from '@use-brian/core'
 import {
+  type GetSessionPresence,
   type PublishSessionEvent,
   type SessionEvent,
+  type SetSessionTyping,
   type SubscribeSessionEvents,
+  emptySessionPresence,
   noopPublishSessionEvent,
+  noopSetSessionTyping,
   noopSubscribeSessionEvents,
 } from '../session-event-port.js'
 import {
@@ -102,6 +106,18 @@ export type SessionRouteOptions = {
     text: string
     effectiveClearance: string | null
   }) => void
+  /**
+   * Room typing beacon (`POST /:id/typing`) — updates the viewer's presence
+   * entry on the bus; the follow stream relays the resulting `presence`
+   * events. No-op when unset (unit tests).
+   */
+  setSessionTyping?: SetSessionTyping
+  /**
+   * Presence snapshot for the follow stream's initial frame, so a viewer
+   * joining a room sees who is already typing without waiting for the next
+   * transition. Empty when unset.
+   */
+  getSessionPresence?: GetSessionPresence
 }
 
 /** Max characters accepted for one room post (text-only in P1 — T12). */
@@ -110,6 +126,8 @@ const ROOM_POST_MAX_CHARS = 32_000
 export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
   const subscribeSessionEvents = opts.subscribeSessionEvents ?? noopSubscribeSessionEvents
   const publishSessionEvent = opts.publishSessionEvent ?? noopPublishSessionEvent
+  const setSessionTyping = opts.setSessionTyping ?? noopSetSessionTyping
+  const getSessionPresence = opts.getSessionPresence ?? emptySessionPresence
   const router = Router()
 
   router.get('/', async (req, res) => {
@@ -764,6 +782,148 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
     }
   })
 
+  /**
+   * PATCH /api/sessions/:id/messages/:messageId — rewrite one of your own room
+   * posts in place. Body: `{ message: string }`.
+   *
+   * The silent half of editing (the other half is `/api/chat` with
+   * `truncateFromMessageId`, which destroys and regenerates because it needs a
+   * turn). A post nobody was asked to answer is repaired where it stands: no
+   * turn runs, the row keeps its id, its sequence and its attribution, and the
+   * `user_message_saved` emit fans the new text to every open viewer through
+   * the same refetch a new post triggers.
+   *
+   * Narrower than posting on purpose:
+   * - **Your own row only.** Read access lets a member post into the room; it
+   *   does not let them rewrite what a teammate said. `gateSessionRead` still
+   *   runs first, so a non-member gets the room's own 403/404 either way.
+   * - **Plain human text only.** A row carrying anything but text blocks (an
+   *   assistant turn's `tool_use` chain, a message with attachments) would be
+   *   FLATTENED by a text-block rewrite, so it is refused rather than
+   *   silently reshaped.
+   */
+  router.patch('/:id/messages/:messageId', async (req, res) => {
+    try {
+      const jwtUserId = (req as { userId?: string }).userId
+      const user = await resolveUser(jwtUserId)
+      if (!user) { res.status(401).json({ error: 'Unauthorized' }); return }
+
+      const raw = (req.body as { message?: unknown })?.message
+      const text = typeof raw === 'string' ? raw.trim() : ''
+      if (!text) {
+        res.status(400).json({ error: 'Missing message' })
+        return
+      }
+      if (text.length > ROOM_POST_MAX_CHARS) {
+        res.status(400).json({ error: 'Message too long' })
+        return
+      }
+
+      const session = await findSessionById(req.params.id)
+      if (!session) {
+        res.status(404).json({ error: 'Session not found' })
+        return
+      }
+      if (!isSharedChatSession(session)) {
+        res.status(403).json({ error: 'Editing is only available in workspace chats' })
+        return
+      }
+      const denied = await gateSessionRead(user.id, session)
+      if (denied) {
+        res.status(denied.status).json({ error: denied.error })
+        return
+      }
+
+      const existing = await getSessionMessageById(req.params.messageId)
+      if (!existing || existing.sessionId !== session.id) {
+        res.status(404).json({ error: 'Message not found' })
+        return
+      }
+      if (existing.role !== 'user' || existing.senderUserId !== user.id) {
+        res.status(403).json({ error: 'You can only edit your own messages' })
+        return
+      }
+      const blocks = Array.isArray(existing.content) ? existing.content : null
+      const isPlainText =
+        !!blocks &&
+        blocks.length > 0 &&
+        blocks.every(
+          (block) =>
+            !!block &&
+            typeof block === 'object' &&
+            (block as { type?: unknown }).type === 'text',
+        )
+      if (!isPlainText || (existing.attachments?.length ?? 0) > 0) {
+        res.status(409).json({ error: 'This message cannot be edited' })
+        return
+      }
+
+      const updated = await updateSessionMessageText({
+        messageId: existing.id,
+        sessionId: session.id,
+        text,
+      })
+      if (!updated) {
+        res.status(404).json({ error: 'Message not found' })
+        return
+      }
+      publishSessionEvent({
+        kind: 'user_message_saved',
+        sessionId: session.id,
+        payload: {
+          id: updated.id,
+          sequenceNum: updated.sequenceNum,
+          senderUserId: user.id,
+          content: updated.content,
+        },
+      })
+
+      res.json({
+        id: updated.id,
+        sequenceNum: updated.sequenceNum,
+        timestamp: updated.createdAt,
+      })
+    } catch (err) {
+      console.error('Room message edit error:', err)
+      res.status(500).json({ error: 'Failed to edit message' })
+    }
+  })
+
+  /**
+   * POST /api/sessions/:id/typing — the room typing beacon. Body:
+   * `{ isTyping: boolean }`.
+   *
+   * Presence is in-memory bus state, never a row: the beacon updates this
+   * viewer's entry and the bus broadcasts a `presence` event on transitions
+   * only (plus the staleness sweep), which the follow stream relays to every
+   * open viewer. A beacon from a viewer with no live follow subscription is
+   * a no-op by design. Rooms only — a personal chat has no second human to
+   * signal — and the gate matches posting: whoever can read can signal.
+   */
+  router.post('/:id/typing', async (req, res) => {
+    try {
+      const jwtUserId = (req as { userId?: string }).userId
+      if (!jwtUserId) { res.status(401).json({ error: 'Unauthorized' }); return }
+      const session = await findSessionById(req.params.id)
+      if (!session) { res.status(404).json({ error: 'Session not found' }); return }
+      if (!isSharedChatSession(session)) {
+        res.status(403).json({ error: 'Typing signals are only available in workspace chats' })
+        return
+      }
+      const denied = await gateSessionRead(jwtUserId, session)
+      if (denied) { res.status(denied.status).json({ error: denied.error }); return }
+      setSessionTyping({
+        sessionId: session.id,
+        userId: jwtUserId,
+        isTyping: (req.body as { isTyping?: unknown })?.isTyping === true,
+      })
+      res.status(204).end()
+    } catch (err) {
+      console.error('Room typing beacon error:', err)
+      res.status(500).json({ error: 'Failed to update typing state' })
+    }
+  })
+
   // ── Room pins (multiplayer chat P1b, T14/D10) ──────────────────────
   //
   // Pins are the room's working frame — references to brain primitives,
@@ -967,10 +1127,19 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
     // timeouts.
     if (isSharedChatSession(session)) {
       let closed = false
+      // The viewer joins the room's presence set under their display name —
+      // that name is what teammates' typing indicators render.
+      const viewerName = await getUserProfilesByIds([jwtUserId])
+        .then((profiles) => profiles.get(jwtUserId)?.name ?? null)
+        .catch(() => null)
+      // Who is already here (and possibly mid-typing) before the first
+      // transition arrives. Sent before subscribing; the join emit that
+      // follows updates every viewer, this one included.
+      send('presence', { viewers: getSessionPresence(req.params.id) })
       const unsubscribeRoom = subscribeSessionEvents({
         sessionId: req.params.id,
         userId: jwtUserId,
-        name: null,
+        name: viewerName,
         cb: (event: SessionEvent) => {
           switch (event.kind) {
             case 'user_message_saved':
@@ -993,6 +1162,9 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
               break
             case 'pins_changed':
               send('pins_changed', event.payload)
+              break
+            case 'presence':
+              send('presence', event.payload)
               break
             default:
               break

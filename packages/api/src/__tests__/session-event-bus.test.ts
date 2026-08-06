@@ -248,6 +248,37 @@ describe('[COMP:api/session-event-bus] typing transitions', () => {
     expect(presenceEvents.length).toBe(baseline + 2)
   })
 
+  it('decays a stale typing flag even while the connection stays open', () => {
+    // A lost off-beacon (sleeping tab, crashed client) must not pin
+    // "typing" on every viewer forever; repeat true-beacons keep it alive.
+    vi.useFakeTimers()
+    try {
+      const sessionId = 'sess_decay'
+      subscribeSessionEvents({
+        sessionId,
+        userId: 'alice',
+        name: 'Alice',
+        cb: () => {},
+      })
+      setSessionTyping({ sessionId, userId: 'alice', isTyping: true })
+      expect(getSessionPresence(sessionId)[0]?.isTyping).toBe(true)
+
+      // A fresh beacon inside the window keeps the flag across a sweep.
+      vi.advanceTimersByTime(10_000)
+      setSessionTyping({ sessionId, userId: 'alice', isTyping: true })
+      vi.advanceTimersByTime(10_000)
+      expect(getSessionPresence(sessionId)[0]?.isTyping).toBe(true)
+
+      // Beacons stop; the sweep clears the flag while the viewer stays
+      // present (connection open, entry not deleted).
+      vi.advanceTimersByTime(30_000)
+      expect(getSessionPresence(sessionId)).toHaveLength(1)
+      expect(getSessionPresence(sessionId)[0]?.isTyping).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('typing beacon for a user who never subscribed is a no-op', () => {
     const sessionId = 'sess_ghost'
     const presenceEvents: SessionEvent[] = []

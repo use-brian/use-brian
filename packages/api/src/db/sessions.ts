@@ -536,6 +536,58 @@ export async function getSessionMessages(
   return result.rows
 }
 
+/** One stored message, by id. */
+export async function getSessionMessageById(
+  messageId: string,
+): Promise<SessionMessage | null> {
+  const result = await query<SessionMessage>(
+    `SELECT id, session_id as "sessionId", role, content,
+            sequence_num as "sequenceNum", created_at as "createdAt",
+            reply_to_text as "replyToText",
+            topic_label as "topicLabel",
+            topic_confidence as "topicConfidence",
+            channel_message_id as "channelMessageId",
+            sender_user_id as "senderUserId",
+            sender_assistant_id as "senderAssistantId",
+            attachments
+     FROM session_messages WHERE id = $1`,
+    [messageId],
+  )
+  return result.rows[0] ?? null
+}
+
+/**
+ * Rewrite the text of one stored message, in place.
+ *
+ * Deliberately narrow: it replaces `content` wholesale with a single text
+ * block, which is the exact shape a room post is written in. The caller
+ * authorizes the edit AND verifies the row is that shape — an assistant turn's
+ * `tool_use` chain or a message carrying attachments must never be flattened
+ * into a text block by an edit.
+ */
+export async function updateSessionMessageText(params: {
+  messageId: string
+  sessionId: string
+  text: string
+}): Promise<SessionMessage | null> {
+  const result = await query<SessionMessage>(
+    `UPDATE session_messages
+        SET content = $3
+      WHERE id = $1 AND session_id = $2
+     RETURNING id, session_id as "sessionId", role, content,
+               sequence_num as "sequenceNum", created_at as "createdAt",
+               reply_to_text as "replyToText",
+               topic_label as "topicLabel",
+               topic_confidence as "topicConfidence",
+               channel_message_id as "channelMessageId",
+               sender_user_id as "senderUserId",
+               sender_assistant_id as "senderAssistantId",
+               attachments`,
+    [params.messageId, params.sessionId, JSON.stringify([{ type: 'text', text: params.text }])],
+  )
+  return result.rows[0] ?? null
+}
+
 /**
  * Map DB session messages to LLM Message format, prepending a compact
  * timestamp to user messages so the model always knows when each message
