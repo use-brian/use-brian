@@ -109,6 +109,63 @@ describe("[COMP:app-web/connector-tool-list] granted toggle + policy segments", 
     expect(html).toContain('aria-pressed');
   });
 
+  describe("registry-driven tool grouping", () => {
+    // renderToString escapes text nodes, so "&" in a label matches as "&amp;".
+    const esc = (s: string) => s.replace(/&/g, "&amp;");
+    const groupLabels = en.connectorToolList.toolGroups;
+
+    it("renders one card per registry group for shopify, in registry order, skipping empty groups", () => {
+      const tools: ConnectorToolListItem[] = [
+        { name: "shopifyListProducts", classification: "read", currentPolicy: "allow" },
+        { name: "shopifyGetInventoryLevels", classification: "read", currentPolicy: "allow" },
+        { name: "shopifyRefundOrder", classification: "destructive", currentPolicy: "ask" },
+      ];
+      const html = wrap(
+        <ConnectorToolList connectorId="shopify" tools={tools} onPolicyChange={() => {}} />,
+      );
+      const catalogIdx = html.indexOf(esc(groupLabels.catalog));
+      const inventoryIdx = html.indexOf(esc(groupLabels.inventory));
+      const ordersIdx = html.indexOf(esc(groupLabels.orders));
+      expect(catalogIdx).toBeGreaterThan(-1);
+      expect(inventoryIdx).toBeGreaterThan(catalogIdx);
+      expect(ordersIdx).toBeGreaterThan(inventoryIdx);
+      // Groups none of the fetched tools belong to render no card.
+      expect(html).not.toContain(esc(groupLabels.finance));
+      expect(html).not.toContain(esc(groupLabels.other));
+    });
+
+    it("routes tools the registry doesn't know to a trailing Other card", () => {
+      const tools: ConnectorToolListItem[] = [
+        { name: "shopifyListProducts", classification: "read", currentPolicy: "allow" },
+        { name: "shopifyMysteryTool", classification: "unknown", currentPolicy: "ask" },
+      ];
+      const html = wrap(
+        <ConnectorToolList connectorId="shopify" tools={tools} onPolicyChange={() => {}} />,
+      );
+      const otherIdx = html.indexOf(esc(groupLabels.other));
+      expect(otherIdx).toBeGreaterThan(html.indexOf(esc(groupLabels.catalog)));
+    });
+
+    it("groups gdrive per service from the registry and keeps ungrouped connectors flat", () => {
+      const gdriveTools: ConnectorToolListItem[] = [
+        { name: "googleDocsGetContent", classification: "read", currentPolicy: "allow" },
+        { name: "googleSheetsReadRange", classification: "read", currentPolicy: "allow" },
+      ];
+      const grouped = wrap(
+        <ConnectorToolList connectorId="gdrive" tools={gdriveTools} onPolicyChange={() => {}} />,
+      );
+      expect(grouped).toContain(esc(groupLabels.docs));
+      expect(grouped).toContain(esc(groupLabels.sheets));
+
+      const flat = wrap(
+        <ConnectorToolList connectorId="github" tools={githubTools} onPolicyChange={() => {}} />,
+      );
+      for (const label of Object.values(groupLabels)) {
+        expect(flat).not.toContain(`>${esc(label)}</span>`);
+      }
+    });
+  });
+
   it("renders one tool table for one independently governed mailbox card", () => {
     const imapTools: ConnectorToolListItem[] = [
       { name: "imapSearchMessages", description: "Search mailbox", classification: "read", currentPolicy: "allow" },

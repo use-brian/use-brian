@@ -70,6 +70,7 @@ import {
 } from '@use-brian/shared'
 import type { ConnectorStore, ConnectorCredentials } from '../db/connector-store.js'
 import type { ConnectorInstanceStore, ConnectorInstance, ConnectorHealthStatus } from '../db/connector-instance-store.js'
+import { effectiveReadClearance, getWorkspaceMembershipWithClearanceSystem } from '../db/workspace-store.js'
 import { buildConnectorAuthHeaders } from '../mcp/auth-headers.js'
 import { customConnectorRoutes } from './custom-connectors.js'
 import { validateGcsByoBinding } from '../files/gcs-byo-validate.js'
@@ -163,6 +164,8 @@ type ConnectorRouteOptions = {
     resolvePreset?: typeof resolveMailboxPreset
     probe?: typeof probeMailboxFolders
     countArchive?: typeof countEmailArchiveMessages
+    /** Clearance lookup for workspace-owned (transferred) mailboxes (test seam). */
+    getMembershipWithClearance?: typeof getWorkspaceMembershipWithClearanceSystem
   }
   localStorage?: {
     requireWorkspaceAdmin: (userId: string, workspaceId: string) => Promise<boolean>
@@ -947,9 +950,23 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
       // Key on the address: the SAME mailbox reconnects (update, so a rotated
       // app password refreshes in place), a NEW address adds another instance
       // (multi-account, D11 retired). Preserves the user's label if renamed.
+      // A workspace-owned (transferred) mailbox with the same address also
+      // reconnects in place for a cleared member — otherwise rotating the
+      // team mailbox's app password forks a duplicate personal archive.
       const wantedEmail = email.trim().toLowerCase()
-      const existing = (await connectorInstanceStore.listByUser(userId, userId))
-        .find((i) => i.provider === 'imap' && (i.connectedEmail ?? '').trim().toLowerCase() === wantedEmail)
+      const sameAddress = (await connectorInstanceStore.listForUser(userId))
+        .filter((i) => i.provider === 'imap' && (i.connectedEmail ?? '').trim().toLowerCase() === wantedEmail)
+      let existing = sameAddress.find((i) => i.scope === 'user')
+      if (!existing) {
+        const getMembership = opts.imapMailbox?.getMembershipWithClearance ?? getWorkspaceMembershipWithClearanceSystem
+        const RANK = { public: 0, internal: 1, confidential: 2 } as const
+        for (const candidate of sameAddress) {
+          if (candidate.scope !== 'workspace' || !candidate.workspaceId) continue
+          const membership = await getMembership(userId, candidate.workspaceId)
+          const ceiling = effectiveReadClearance(membership?.role ?? null, membership?.clearance ?? null, 'confidential')
+          if (RANK[ceiling] >= RANK[candidate.sensitivity]) { existing = candidate; break }
+        }
+      }
       if (existing) {
         const updated = await connectorInstanceStore.update(userId, existing.id, {
           connected: true,
@@ -983,20 +1000,32 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
 
   /**
    * Resolve one of the caller's connected imap instances + decrypted settings.
-   * `instanceId` targets a specific mailbox (ownership-checked via the
-   * user-scoped list); omitted resolves the primary (first-connected). Returns
-   * null when the caller has no such connected mailbox.
+   * Covers personal mailboxes AND workspace-owned ones — a transferred mailbox
+   * (scope='user' → 'workspace') must keep its archive/backfill panel, so the
+   * lookup is `listForUser` (own personal + member workspaces), with the
+   * clearance refinement (clearance >= sensitivity) on workspace rows, the
+   * same gate as reconnect/edit/delete in connector-instances.ts. `instanceId`
+   * targets a specific mailbox; omitted resolves the primary (first-connected
+   * personal, else first-connected workspace mailbox). Returns null when the
+   * caller has no such connected mailbox.
    */
   async function resolveImapInstance(userId: string, instanceId?: string): Promise<
     { instance: ConnectorInstance; settings: MailboxAccountSettings } | null
   > {
-    const connected = (await connectorInstanceStore.listByUser(userId, userId))
+    const connected = (await connectorInstanceStore.listForUser(userId))
       .filter((i) => i.provider === 'imap' && i.connected)
       .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
     const instance = instanceId
       ? connected.find((i) => i.id === instanceId)
-      : connected[0]
+      : connected.find((i) => i.scope === 'user') ?? connected[0]
     if (!instance) return null
+    if (instance.scope === 'workspace' && instance.workspaceId) {
+      const getMembership = opts.imapMailbox?.getMembershipWithClearance ?? getWorkspaceMembershipWithClearanceSystem
+      const membership = await getMembership(userId, instance.workspaceId)
+      const ceiling = effectiveReadClearance(membership?.role ?? null, membership?.clearance ?? null, 'confidential')
+      const RANK = { public: 0, internal: 1, confidential: 2 } as const
+      if (RANK[ceiling] < RANK[instance.sensitivity]) return null
+    }
     const creds = await connectorInstanceStore.getAuthCredentialsSystem(instance.id)
     if (!creds || creds.type !== 'imap') return null
     const { type: _t, ...settings } = creds

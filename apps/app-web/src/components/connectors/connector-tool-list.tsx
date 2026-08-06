@@ -24,8 +24,12 @@
  *                         when the viewer lacks clearance to edit a team-owned
  *                         connector's shared workspace policy.
  *
- * Gdrive tools (17 across Drive/Docs/Sheets/Slides) are auto-grouped into
- * per-service cards so the list isn't a wall.
+ * Multi-domain connectors (gdrive, shopify) are rendered as one card per
+ * tool group instead of a wall: the registry (`OFFICIAL_CONNECTOR_TOOLS`)
+ * tags each tool with an optional `group`, `connectorToolGrouping()` derives
+ * the display order, and labels come from `connectorToolList.toolGroups.*`.
+ * Tools the registry doesn't know land in a trailing "Other" card; connectors
+ * with no grouped tools render the flat list.
  *
  * [COMP:app-web/connector-tool-list]
  *
@@ -33,7 +37,10 @@
  * "Per-assistant capability grants".
  */
 
-import { GDRIVE_GROUPS, gdriveToolGroup, type GdriveGroupId } from "./gdrive-groups";
+import {
+  connectorToolGrouping,
+  type BuiltinToolGroupId,
+} from "@use-brian/shared/builtin-connectors";
 import { useT } from "@/lib/i18n/client";
 
 export type ToolPolicy = "allow" | "ask" | "block";
@@ -90,21 +97,25 @@ export function ConnectorToolList({
     );
   }
 
-  if (connectorId === "gdrive") {
-    const grouped: Record<GdriveGroupId, ConnectorToolListItem[]> = {
-      drive: [], docs: [], sheets: [], slides: [], other: [],
-    };
-    for (const tool of tools) grouped[gdriveToolGroup(tool.name)].push(tool);
+  const { order, byTool } = connectorToolGrouping(connectorId);
+  if (order.length > 0) {
+    const grouped = new Map<BuiltinToolGroupId | "other", ConnectorToolListItem[]>();
+    for (const tool of tools) {
+      const groupId = byTool[tool.name] ?? "other";
+      const bucket = grouped.get(groupId);
+      if (bucket) bucket.push(tool);
+      else grouped.set(groupId, [tool]);
+    }
 
     return (
       <div className="space-y-2">
-        {GDRIVE_GROUPS.map(({ id, label }) => {
-          const groupTools = grouped[id];
+        {([...order, "other"] as const).map((id) => {
+          const groupTools = grouped.get(id) ?? [];
           if (groupTools.length === 0) return null;
           return (
             <div key={id} className="rounded-lg border border-border overflow-hidden">
               <div className="flex items-center justify-between gap-2 bg-muted/40 px-4 py-1.5 border-b border-border">
-                <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">{label}</span>
+                <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">{t.connectorToolList.toolGroups[id]}</span>
                 <span className="text-[10px] text-muted-foreground/60">{groupTools.length}</span>
               </div>
               <div className="divide-y divide-border">
