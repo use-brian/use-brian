@@ -24,6 +24,7 @@
  */
 
 import { Router } from 'express'
+import { seedBuiltinPrimitiveCapabilities } from '../db/capability-seed.js'
 import { z } from 'zod'
 import {
   APP_TYPE_IDS,
@@ -1194,6 +1195,15 @@ export function workspaceRoutes({
           [assistantId, userId],
         )
       }
+      // Built-in primitives (office / computer) are seeded for EVERY kind —
+      // they were injected unconditionally before the off switch existed, so a
+      // new assistant must not start with less than its predecessors had.
+      await seedBuiltinPrimitiveCapabilities(
+        (sql, params) => query(sql, params as never[]),
+        assistantId,
+        userId,
+        'built-in primitive — default-on at assistant creation',
+      )
 
       // (Doc-app capability auto-grant lives at the `/api/assistants`
       // POST handler in apps/api/src/index.ts, not here. App-kind

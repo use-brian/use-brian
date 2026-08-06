@@ -87,6 +87,7 @@ export function createBuFallbackTool(opts: CreateBuFallbackToolOptions): { brows
 
   const browserExplore = buildTool({
     name: 'browserExplore',
+    requiresCapability: 'computer',
     description:
       'Explore a NOVEL browsing flow with the watched agentic fallback when no saved browser skill covers it (check listBrowserSkills first). Runs in the cloud browser — as a browser profile when one is enabled (signed-in flows), or identity-less otherwise; public sites need NO profile. Always distills the successful run into a draft browser skill for deterministic reuse. Terminal sends in the draft stay approval-gated. Prefer runBrowserSkill whenever a skill already exists. Use this for multi-step research on a site (finding exact prices, availability, listings) when plain web search cannot produce the exact data.',
     inputSchema: z.object({

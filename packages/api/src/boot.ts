@@ -24,6 +24,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto'
+import { seedBuiltinPrimitiveCapabilities } from './db/capability-seed.js'
 import type http from 'node:http'
 
 import express, { type Express } from 'express'
@@ -91,6 +92,7 @@ import {
   createBrandTools,
   createOfficeTools,
   type FileToolPolicy,
+  type OfficeToolPolicy,
   createFindPageTool,
   createIngestRuleTools,
   createEntityKindClassifier,
@@ -245,12 +247,13 @@ import { createChatConfirmationStore } from './db/chat-confirmation-store.js'
 import { createDeferredConfirmationStore } from './db/deferred-confirmation-store.js'
 import { createDbKnowledgeStore } from './db/knowledge-store.js'
 import { createKnowledgeRepoWriter } from './knowledge/repo-writer.js'
+import { createDbKbMaintenanceStore, kbMaintenanceRunGuard } from './knowledge/maintenance.js'
 import { knowledgeRoutes, workspaceKnowledgeRoutes } from './routes/knowledge.js'
 import { brandRoutes } from './routes/brand.js'
 import { getBranchHead, getRepoTree, getFileContents, compareCommits, getRepoPermissions } from './github/client.js'
 import { startBrainStreamFanout } from './brain-stream/sse-fanout.js'
 import { brainStreamRoutes } from './routes/brain-stream.js'
-import { publishSessionEvent, startSessionEventBus, subscribeSessionEvents } from './session-event-bus.js'
+import { getSessionPresence, publishSessionEvent, setSessionTyping, startSessionEventBus, subscribeSessionEvents } from './session-event-bus.js'
 import { createDbMcpSettingsStore } from './db/mcp-settings-store.js'
 import { createDbConnectorStore } from './db/connector-store.js'
 import { createConnectorInstanceStore } from './db/connector-instance-store.js'
@@ -1735,6 +1738,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const chatConfirmationStore = createChatConfirmationStore()
   const deferredConfirmationStore = createDeferredConfirmationStore()
   const knowledgeStore = createDbKnowledgeStore()
+  const kbMaintenanceStore = createDbKbMaintenanceStore()
 
   // ── Assistant KB repo writer ──
   // Direct-commit write-back for the KB write tools (updateKnowledgeEntry /
@@ -2008,9 +2012,40 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     latestJob: officeGenerationStore.latestForArtifact,
     wakeGeneration(userId) { wakeOfficeGeneration?.(userId) },
   })
+  // Effective allow/ask/block for an Office tool — the same L1 (app-level
+  // sentinel) + L2 (per-assistant) strictest-wins resolution the files and
+  // computer primitives use, over `mcp_tool_settings` with serverName='office'.
+  // The Studio / Assistant governance tables have always WRITTEN these rows;
+  // until this hook existed nothing read them, so a blocked Office tool still
+  // ran. Same defect the files resolver below was added to fix.
+  const OFFICE_CONNECTOR_ID = 'office'
+  const officeToolDefaults = new Map(
+    (OFFICIAL_CONNECTOR_TOOLS[OFFICE_CONNECTOR_ID] ?? []).map((t) => [t.name, t.defaultPolicy]),
+  )
+  const OFFICE_POLICY_STRICTNESS: Record<string, number> = { allow: 0, ask: 1, block: 2 }
+  const resolveOfficeToolPolicy = async (
+    toolName: string,
+    context: { userId: string; assistantId: string },
+  ): Promise<OfficeToolPolicy> => {
+    const fallback = (officeToolDefaults.get(toolName) ?? 'allow') as OfficeToolPolicy
+    const [l1, l2] = await Promise.all([
+      mcpSettingsStore.getPolicy({
+        assistantId: APP_LEVEL_ASSISTANT_ID, userId: context.userId,
+        serverName: OFFICE_CONNECTOR_ID, toolName,
+      }),
+      mcpSettingsStore.getPolicy({
+        assistantId: context.assistantId, userId: context.userId,
+        serverName: OFFICE_CONNECTOR_ID, toolName,
+      }),
+    ])
+    const a = (l1?.policy as OfficeToolPolicy) ?? fallback
+    const b = (l2?.policy as OfficeToolPolicy) ?? fallback
+    return (OFFICE_POLICY_STRICTNESS[a] ?? 0) >= (OFFICE_POLICY_STRICTNESS[b] ?? 0) ? a : b
+  }
   for (const tool of createOfficeTools({
     port: officeService,
     appOrigin: env.AUTHED_APP_URL ?? env.APP_URL,
+    resolvePolicy: resolveOfficeToolPolicy,
   })) {
     allTools.set(tool.name, tool)
   }
@@ -3852,6 +3887,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api/sessions', optionalAuth(env.JWT_SECRET), sessionRoutes({
     subscribeSessionEvents,
     publishSessionEvent,
+    setSessionTyping,
+    getSessionPresence,
     ...(roomIngestor
       ? {
           onRoomPost: (post) => {
@@ -4138,6 +4175,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         [assistantName, iconSeed, resolvedAppType, workspaceId, appClearance],
       )
       const assistantId = result.rows[0].id
+      // App specialists deliberately get no §17 primitives, but the built-in
+      // primitives (office / computer) were injected unconditionally before the
+      // off switch existed — seed them so an app assistant keeps what it had.
+      await seedBuiltinPrimitiveCapabilities(
+        (sql, params) => query(sql, params as never[]),
+        assistantId,
+        userId,
+        'built-in primitive — default-on at app-assistant creation',
+      )
       await connectionStore.seedWorkspacePrimaryFollows(workspaceId).catch((err) =>
         console.warn('[assistants] seedWorkspacePrimaryFollows failed:', err),
       )
@@ -5130,6 +5176,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     syncCredentials,
     knowledgeRepoWriter,
     triggerSync: async () => { if (syncWorkerRef) await syncWorkerRef.tick() },
+    // Self-maintain agents (mig 411): config store + the workflow store the
+    // materialized workflow writes through + schedule reconciliation deps.
+    kbMaintenanceStore,
+    workflowStore,
+    jobStore,
+    resolvePrimary: resolvePrimaryAssistantForWorkspace,
   }))
 
   // ════════════════════════════════════════════════════════════════
@@ -5204,6 +5256,19 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           `[workflow-event] storm guard paused workflow ${workflowId} (${recent} runs / ${RUN_STORM_WINDOW_SECONDS}s)`,
         )
         return
+      }
+      // KB self-maintain budget guard (mig 411): a knowledge-managed
+      // workflow over its weekly proposal budget (or whose agent is
+      // disabled) skips the run — the 7-day window slides, so it resumes
+      // by itself. One indexed read for every non-managed workflow.
+      try {
+        const guard = await kbMaintenanceRunGuard(kbMaintenanceStore, workflowId)
+        if (guard.skip) {
+          console.warn(`[workflow-event] kb-maintenance guard skipped workflow ${workflowId}: ${guard.reason}`)
+          return
+        }
+      } catch (err) {
+        console.warn('[workflow-event] kb-maintenance guard failed (run proceeds):', err)
       }
       const triggeredBy = await getWorkflowCreatorSystem(workflowId)
       await workflowRunStore.createRun({

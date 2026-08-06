@@ -45,9 +45,19 @@ describe('[COMP:api/workspace-store] createWorkspaceStore', () => {
 
       expect(team.name).toBe('Eng')
       expect(team.purpose).toBe('Backend platform team')
-      expect(mockClient.query).toHaveBeenCalledTimes(8)
+      // 9 = BEGIN + workspace + owner member + assistant + §17/files grants +
+      // built-in primitive grants (office/computer) + room + COMMIT. The
+      // primitive seed runs on the SAME transaction client, so a failed create
+      // rolls the grants back with the assistant rather than orphaning them.
+      // See docs/architecture/features/builtin-primitives.md.
+      expect(mockClient.query).toHaveBeenCalledTimes(9)
       expect(mockClient.query.mock.calls[0][0]).toBe('BEGIN')
-      expect(mockClient.query.mock.calls[7][0]).toBe('COMMIT')
+      expect(mockClient.query.mock.calls[8][0]).toBe('COMMIT')
+      const primitiveSeed = mockClient.query.mock.calls.find(
+        (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('assistant_capabilities') && (c[0] as string).includes('ON CONFLICT'),
+      )
+      expect(primitiveSeed, 'built-in primitives must be seeded in the create txn').toBeDefined()
+      expect(primitiveSeed![1]).toEqual(expect.arrayContaining(['office', 'computer']))
 
       // Workspace INSERT carries the purpose
       const wsInsert = mockClient.query.mock.calls[1]
@@ -88,8 +98,8 @@ describe('[COMP:api/workspace-store] createWorkspaceStore', () => {
       // Default "General" ROOM — a workspace-shared chat session seeded in
       // the same transaction (multiplayer chat T6/D4), title pinned against
       // the auto-titler, read floor = the primary assistant's clearance.
-      const roomInsertSql = mockClient.query.mock.calls[6][0] as string
-      const roomInsertArgs = mockClient.query.mock.calls[6][1] as unknown[]
+      const roomInsertSql = mockClient.query.mock.calls[7][0] as string
+      const roomInsertArgs = mockClient.query.mock.calls[7][1] as unknown[]
       expect(roomInsertSql).toContain('INSERT INTO sessions')
       expect(roomInsertSql).toContain("'workspace'")
       expect(roomInsertSql).toContain("'chat'")

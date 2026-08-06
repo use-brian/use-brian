@@ -386,6 +386,7 @@ export function createSkillRunnerTools(opts: CreateSkillRunnerToolsOptions): {
 
   const runBrowserSkill = buildTool({
     name: 'runBrowserSkill',
+    requiresCapability: 'computer',
     description:
       'Run a saved browser skill (a reviewed, deterministic browsing script) against a browser profile. The profile is chosen at call time: if several enabled profiles match you must name one. Terminal send/submit actions inside the skill require approval unless the user granted this skill on this profile; rehearsal:true replays the skill with sends stubbed ("would send", nothing fires). Use listBrowserSkills to see what exists.',
     inputSchema: z.object({
@@ -563,6 +564,7 @@ export function createSkillRunnerTools(opts: CreateSkillRunnerToolsOptions): {
 
   const listBrowserSkills = buildTool({
     name: 'listBrowserSkills',
+    requiresCapability: 'computer',
     description:
       'List the saved browser skills in this workspace: deterministic browsing scripts runBrowserSkill can execute against a browser profile. Shows each skill\'s site, parameters, and whether it performs terminal sends (which need approval or a grant).',
     inputSchema: z.object({
@@ -603,6 +605,7 @@ export function createSkillRunnerTools(opts: CreateSkillRunnerToolsOptions): {
 
   const listBrowserProfiles = buildTool({
     name: 'listBrowserProfiles',
+    requiresCapability: 'computer',
     description:
       'List this workspace\'s browser profiles (saved LOGIN identities for signed-in browsing) and which of them you can browse as. Pass a profile name to browserNavigate or runBrowserSkill when several match. Browsing public sites needs no profile at all — do not call this before an ordinary browse.',
     inputSchema: z.object({}),

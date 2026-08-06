@@ -455,12 +455,38 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
   // docs/architecture/features/tasks.md / crm.md "Primitive access control".
 
   const PRIMITIVE_CAPABILITIES = ['tasks', 'crm', 'goals'] as const
-  type PrimitiveCapability = (typeof PRIMITIVE_CAPABILITIES)[number]
   // Admin-gated named capabilities toggleable on this surface. `configure`
   // unlocks Tier-2 control-plane write tools for agents acting as this
   // assistant (CONFIGURE_CAPABILITY in @use-brian/core).
   const ADMIN_CAPABILITIES = ['configure'] as const
-  const TOGGLEABLE_CAPABILITIES = [...PRIMITIVE_CAPABILITIES, ...ADMIN_CAPABILITIES]
+  // Built-in workspace primitives (Workspace Files / Office / Computer Use).
+  // Same capability mechanism as the §17 primitives, but surfaced on the
+  // assistant's Tools tab beside the other connector rows rather than in the
+  // Settings capabilities panel — that is where their "Always on" pill used
+  // to sit, and where a user goes looking for a connector's off switch.
+  // DERIVED from the registry (`auth_type: 'none'`), never a hardcoded slug
+  // list — see the "all built-ins" drift anti-pattern in CLAUDE.md. The
+  // capability name IS the connector id, which is why one set serves both.
+  const BUILTIN_CAPABILITIES = [...BUILTIN_PRIMITIVE_CONNECTOR_IDS]
+  const TOGGLEABLE_CAPABILITIES: string[] = [
+    ...PRIMITIVE_CAPABILITIES,
+    ...ADMIN_CAPABILITIES,
+    ...BUILTIN_CAPABILITIES,
+  ]
+
+  // Which surface owns each row. Two clients read this one route and each
+  // renders only its own group — without the discriminator the Settings
+  // capabilities panel would render a second, duplicate control for every
+  // built-in primitive alongside the Tools tab's. A client must NOT re-derive
+  // the split from a local slug list (that is how `goals` ended up rendering
+  // under the `configure` label).
+  type CapabilityGroup = 'primitive' | 'admin' | 'builtin'
+  const groupOf = (cap: string): CapabilityGroup =>
+    BUILTIN_PRIMITIVE_CONNECTOR_IDS.has(cap)
+      ? 'builtin'
+      : (ADMIN_CAPABILITIES as readonly string[]).includes(cap)
+        ? 'admin'
+        : 'primitive'
 
   router.get<AssistantParams>('/:assistantId/primitive-grants', async (req, res) => {
     const member = await verifyMembership(req, res)
@@ -472,6 +498,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
         grants: TOGGLEABLE_CAPABILITIES.map((cap) => ({
           capability: cap,
           enabled: active.has(cap),
+          group: groupOf(cap),
         })),
       })
     } catch (err) {
@@ -484,7 +511,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
     const member = await verifyMembership(req as any, res)
     if (!member) return
     const { assistantId, capability } = req.params as { assistantId: string; capability: string }
-    if (!TOGGLEABLE_CAPABILITIES.includes(capability as PrimitiveCapability | 'configure')) {
+    if (!TOGGLEABLE_CAPABILITIES.includes(capability)) {
       res.status(400).json({ error: `capability must be one of: ${TOGGLEABLE_CAPABILITIES.join(', ')}` })
       return
     }
@@ -518,7 +545,9 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
             reason:
               capability === 'configure'
                 ? 'agent-surface configure capability toggled on by workspace admin'
-                : '§17 toggled on by workspace member',
+                : groupOf(capability) === 'builtin'
+                  ? `built-in primitive "${capability}" switched on by workspace member`
+                  : '§17 toggled on by workspace member',
           })
         } catch (err) {
           if (err instanceof Error && err.name === 'DuplicateGrantError') {
@@ -543,12 +572,14 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
             reason:
               capability === 'configure'
                 ? 'agent-surface configure capability toggled off by workspace admin'
-                : '§17 toggled off by workspace member',
+                : groupOf(capability) === 'builtin'
+                  ? `built-in primitive "${capability}" switched off by workspace member`
+                  : '§17 toggled off by workspace member',
           })
         }
       }
       const active = new Set(await options.capabilityStore.listActive(assistantId))
-      res.json({ capability, enabled: active.has(capability) })
+      res.json({ capability, enabled: active.has(capability), group: groupOf(capability) })
     } catch (err) {
       console.error('[assistants] primitive-grants patch failed:', err)
       res.status(500).json({ error: 'Failed to update primitive grant' })
@@ -821,16 +852,24 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
         })
       }
 
-      // Built-in workspace primitives (Workspace Files) have NO row in any
-      // of the three sources above — they are boot-injected capability
+      // Built-in workspace primitives (Workspace Files / Office / Computer
+      // Use) have NO row in any of the three sources above — they are
+      // boot-injected capability
       // primitives, not connector instances — so without this pass they can
       // never appear here and their per-assistant (L2) tool policy is
       // unreachable, contradicting the Studio Connectors page's
       // "Configure per-assistant tool permissions in the Assistant
-      // Connectors tab" pointer. Synthesize an always-on entry per registry
-      // built-in (derived — never hardcode the id list; see
+      // Connectors tab" pointer. Synthesize an entry per registry built-in
+      // (derived — never hardcode the id list; see
       // BUILTIN_PRIMITIVE_CONNECTOR_IDS). The /tools + /tools/policy
       // sub-routes below already handle OFFICIAL_CONNECTOR_TOOLS ids.
+      //
+      // `enabled` is the CAPABILITY grant, not `assistant_connector_settings`.
+      // A built-in has no connector instance, so nothing at runtime ever reads
+      // its connector-settings row — sourcing the toggle from there would give
+      // the user a switch that flips in the UI and changes nothing. The grant
+      // is what `filterToolsByCapabilities` actually reads on every path.
+      const builtinCapabilities = new Set(await options.capabilityStore.listActive(assistantId))
       for (const id of BUILTIN_PRIMITIVE_CONNECTOR_IDS) {
         if (byKey.has(id)) continue
         if ((OFFICIAL_CONNECTOR_TOOLS[id]?.length ?? 0) === 0) continue // no governable tools
@@ -841,8 +880,8 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
           id,
           name: official.name,
           custom: false,
-          connected: true, // always-on: no external account, no instance row
-          enabled: settingsMap.get(id) ?? true,
+          connected: true, // no external account, no instance row to connect
+          enabled: builtinCapabilities.has(id),
           icon_url: entry?.icon_url,
           category: 'official',
           scope: 'builtin',

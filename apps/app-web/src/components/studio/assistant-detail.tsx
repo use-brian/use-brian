@@ -1466,6 +1466,43 @@ function ConnectorsTab({ assistantId, workspaceId }: { assistantId: string; work
     }
   }
 
+  // Built-in primitives (Workspace Files / Office / Computer Use) have no
+  // connector instance, so the enable/disable route above has nothing to write
+  // that the runtime reads. Their on/off IS the capability grant — the same
+  // `assistant_capabilities` row `filterToolsByCapabilities` checks on every
+  // execution path. Different route, identical row semantics.
+  // See docs/architecture/features/builtin-primitives.md.
+  async function toggleBuiltinCapability(capability: string, enable: boolean) {
+    setToggling(capability);
+    setUserConnectors((prev) =>
+      prev.map((c) => (c.id === capability ? { ...c, enabled: enable } : c))
+    );
+    try {
+      const res = await authFetch(
+        `${API_URL}/api/assistants/${assistantId}/primitive-grants/${encodeURIComponent(capability)}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled: enable }),
+        }
+      );
+      if (!res.ok) throw new Error("toggle failed");
+      // Trust the server's post-write read rather than the optimistic guess —
+      // the grant is idempotent and a concurrent edit from another surface
+      // would otherwise leave this tab showing a state the DB disagrees with.
+      const data = (await res.json()) as { capability: string; enabled: boolean };
+      setUserConnectors((prev) =>
+        prev.map((c) => (c.id === data.capability ? { ...c, enabled: data.enabled } : c))
+      );
+    } catch {
+      setUserConnectors((prev) =>
+        prev.map((c) => (c.id === capability ? { ...c, enabled: !enable } : c))
+      );
+    } finally {
+      setToggling(null);
+    }
+  }
+
   async function loadTools(connectorId: string) {
     setToolsMap((prev) => ({ ...prev, [connectorId]: { tools: [], serverName: "", loading: true } }));
     try {
@@ -1692,23 +1729,22 @@ function ConnectorsTab({ assistantId, workspaceId }: { assistantId: string; work
                           <path d="M3 5l4 4 4-4" />
                         </svg>
                       )}
-                      {c.scope === "builtin" ? (
-                        // Built-in primitives are always available — there is no
-                        // per-assistant off switch to honor, so a toggle here
-                        // would be cosmetic. Per-tool policy below is the control.
-                        <span className="text-[11px] font-medium text-muted-foreground bg-muted px-2 py-0.5 rounded-full">
-                          {t.assistant.toolsTab.alwaysOn}
-                        </span>
-                      ) : (
+                      {/* Built-in primitives switch through the capability
+                          route (no connector instance to enable/disable), every
+                          other row through the connector route. Same control,
+                          because to the user it is the same question. */}
                       <button
                         type="button" role="switch" aria-checked={c.enabled}
                         disabled={toggling === c.id}
-                        onClick={(e) => { e.stopPropagation(); toggleAssistantEnabled(c.id, !c.enabled); }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (c.scope === "builtin") toggleBuiltinCapability(c.id, !c.enabled);
+                          else toggleAssistantEnabled(c.id, !c.enabled);
+                        }}
                         className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 ${c.enabled ? "bg-primary" : "bg-muted"}`}
                       >
                         <span className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-background shadow-sm transition-transform duration-200 ${c.enabled ? "translate-x-4" : "translate-x-0"}`} />
                       </button>
-                      )}
                     </>
                   )}
                 </div>
@@ -2482,14 +2518,21 @@ function SettingsTab({
 // acting as this assistant; its PATCH is OWNER/ADMIN-gated server-side
 // (403 for plain members). See docs/plans/company-brain.md §17.
 
-type PrimitiveGrantCapability = "tasks" | "crm" | "configure";
-type PrimitiveGrantState = { capability: PrimitiveGrantCapability; enabled: boolean };
+type PrimitiveGrantCapability = "tasks" | "crm" | "goals" | "configure";
+type PrimitiveGrantState = {
+  capability: string;
+  enabled: boolean;
+  /** Which surface owns the row. Built-in primitives render their switch on
+   *  the Tools tab beside the other connectors, so this panel skips them —
+   *  two controls for one grant is worse than none. */
+  group?: "primitive" | "admin" | "builtin";
+};
 
 function PrimitiveGrantsPanel({ assistantId }: { assistantId: string }) {
   const t = useT();
   const [grants, setGrants] = useState<PrimitiveGrantState[] | null>(null);
   const [pending, setPending] = useState<string | null>(null);
-  const [rowError, setRowError] = useState<{ capability: PrimitiveGrantCapability; message: string } | null>(null);
+  const [rowError, setRowError] = useState<{ capability: string; message: string } | null>(null);
 
   useEffect(() => {
     authFetch(`${API_URL}/api/assistants/${assistantId}/primitive-grants`)
@@ -2500,7 +2543,7 @@ function PrimitiveGrantsPanel({ assistantId }: { assistantId: string }) {
       .catch(() => {});
   }, [assistantId]);
 
-  async function toggle(capability: PrimitiveGrantCapability, enabled: boolean) {
+  async function toggle(capability: string, enabled: boolean) {
     setPending(capability);
     setRowError(null);
     try {
@@ -2530,18 +2573,28 @@ function PrimitiveGrantsPanel({ assistantId }: { assistantId: string }) {
 
   if (!grants) return null;
 
-  const labelFor = (cap: PrimitiveGrantCapability) =>
-    cap === "tasks"
-      ? t.assistant.settingsTab.capabilities.tasksLabel
-      : cap === "crm"
-        ? t.assistant.settingsTab.capabilities.crmLabel
-        : t.assistant.settingsTab.capabilities.configureLabel;
-  const descFor = (cap: PrimitiveGrantCapability) =>
-    cap === "tasks"
-      ? t.assistant.settingsTab.capabilities.tasksDesc
-      : cap === "crm"
-        ? t.assistant.settingsTab.capabilities.crmDesc
-        : t.assistant.settingsTab.capabilities.configureDesc;
+  // Explicit copy table, NOT a ternary chain ending in `configure`. The chain
+  // this replaces silently rendered every unlisted capability under the
+  // "Agent configuration" label and description, which is how `goals` shipped
+  // mislabelled as a second control-plane row. An unknown capability now
+  // renders nothing rather than something wrong.
+  const copyFor = (cap: string): { label: string; desc: string } | null => {
+    const c = t.assistant.settingsTab.capabilities;
+    switch (cap as PrimitiveGrantCapability) {
+      case "tasks": return { label: c.tasksLabel, desc: c.tasksDesc };
+      case "crm": return { label: c.crmLabel, desc: c.crmDesc };
+      case "goals": return { label: c.goalsLabel, desc: c.goalsDesc };
+      case "configure": return { label: c.configureLabel, desc: c.configureDesc };
+      default: return null;
+    }
+  };
+
+  // Built-in primitives own a switch on the Tools tab; rendering a second one
+  // here would give the same grant two controls. Keyed on the server's group
+  // discriminator rather than a local slug list so a new built-in cannot leak
+  // into this panel by default.
+  const rows = grants.filter((g) => g.group !== "builtin" && copyFor(g.capability));
+  if (rows.length === 0) return null;
 
   return (
     <section>
@@ -2554,10 +2607,11 @@ function PrimitiveGrantsPanel({ assistantId }: { assistantId: string }) {
         </p>
       </div>
       <div className="rounded-xl border border-border overflow-hidden divide-y divide-border">
-        {grants.map((g) => {
+        {rows.map((g) => {
           // The `configure` row is an agent/control-plane capability, not a
           // data primitive — give it a distinct tinted treatment.
           const isControlPlane = g.capability === "configure";
+          const copy = copyFor(g.capability)!;
           return (
             <div
               key={g.capability}
@@ -2566,8 +2620,8 @@ function PrimitiveGrantsPanel({ assistantId }: { assistantId: string }) {
               }`}
             >
               <div className="min-w-0">
-                <div className="text-[14px] font-medium text-foreground">{labelFor(g.capability)}</div>
-                <p className="text-[12px] text-muted-foreground mt-0.5">{descFor(g.capability)}</p>
+                <div className="text-[14px] font-medium text-foreground">{copy.label}</div>
+                <p className="text-[12px] text-muted-foreground mt-0.5">{copy.desc}</p>
                 {rowError?.capability === g.capability && (
                   <p className="text-[12px] text-destructive mt-1">{rowError.message}</p>
                 )}

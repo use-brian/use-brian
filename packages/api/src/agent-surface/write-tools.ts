@@ -32,6 +32,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { seedBuiltinPrimitiveCapabilities } from '../db/capability-seed.js'
 import { z } from 'zod'
 import {
   buildTool,
@@ -345,6 +346,14 @@ export function createAgentWriteTools(deps: AgentWriteToolDeps): Tool[] {
           [assistantId, ctx.userId],
         )
       }
+      // Built-in primitives (office / computer) — every kind, see
+      // docs/architecture/features/builtin-primitives.md.
+      await seedBuiltinPrimitiveCapabilities(
+        (sql, params) => query(sql, params as never[]),
+        assistantId,
+        ctx.userId,
+        'built-in primitive — default-on at assistant creation (agent surface)',
+      )
       return { data: `Assistant '${input.name}' created. id=${assistantId}, kind=${input.kind}, clearance=${clearance}` }
     },
   })
