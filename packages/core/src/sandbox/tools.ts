@@ -39,6 +39,7 @@ import {
   type SessionVault,
 } from './types.js'
 import type { LocalTraceStep } from './local-skill-runner.js'
+import { SEND_LIKE_LABEL_PATTERN } from './send-gate.js'
 
 // ── Policy hook (the files-tools pattern) ──────────────────────
 
@@ -94,8 +95,7 @@ export type ComputerToolEvent = {
  * confirmation/approval before executing (spec §3 browserClick). Keep this
  * list in sync with computer-use.md §3.
  */
-export const SEND_LIKE_LABEL_PATTERN =
-  /\b(send|submit|post|publish|share|buy|pay|purchase|order|confirm|delete|apply)\b/i
+export { SEND_LIKE_LABEL_PATTERN } from './send-gate.js'
 
 // ── Fuse (P1.8) ────────────────────────────────────────────────
 //

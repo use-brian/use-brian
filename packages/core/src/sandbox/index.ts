@@ -32,6 +32,7 @@ export { decideTerminalSend, type DecideTerminalSendParams } from './send-gate.j
 export {
   distillLocalTrace,
   runLocalSkill,
+  validateLocalRecording,
   type LocalTraceStep,
   type LocalSkillRunOptions,
 } from './local-skill-runner.js'

@@ -59,7 +59,7 @@ import {
 import type { BrowserProvider, SandboxProvider, SessionVault } from './types.js'
 import { decideTerminalSend, type SendGateOutcome } from './send-gate.js'
 import type { LocalTraceStep } from './local-skill-runner.js'
-import { distillLocalTrace, runLocalSkill } from './local-skill-runner.js'
+import { distillLocalTrace, runLocalSkill, validateLocalRecording } from './local-skill-runner.js'
 import { registrableSiteOf } from './orchestrator.js'
 
 export type SkillRunnerEvent = {
@@ -556,12 +556,30 @@ export function createSkillRunnerTools(opts: CreateSkillRunnerToolsOptions): {
       const firstUrl = trace.find((step) => step.action === 'open')?.url
       const site = input.site?.trim() || (firstUrl ? registrableSiteOf(firstUrl) : null)
       if (!site) return { data: 'ERROR: The recording has no navigated site. Provide the site explicitly.', isError: true }
+      const recordedSites = new Set(
+        trace
+          .filter((step) => step.action === 'open')
+          .map((step) => step.url ? registrableSiteOf(step.url) : null),
+      )
+      if (recordedSites.size !== 1 || !recordedSites.has(site)) {
+        return {
+          data: `ERROR: Every recorded navigation must stay on the declared site ${site}.`,
+          isError: true,
+        }
+      }
       if (await opts.skills.getByName({ workspaceId: context.workspaceId, name: input.name })) {
         return { data: `ERROR: A browser skill named "${input.name}" already exists. Choose another name.`, isError: true }
       }
 
       const distilled = distillLocalTrace({ trace, goal: input.description, parameters: input.parameters })
       const contract = extractEffectContract({ code: distilled.code, site })
+      const recordingError = validateLocalRecording({
+        site,
+        code: distilled.code,
+        recording: distilled.recording,
+        contract,
+      })
+      if (recordingError) return { data: `ERROR: ${recordingError}`, isError: true }
       const skill = await opts.skills.create({
         workspaceId: context.workspaceId,
         name: input.name,

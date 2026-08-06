@@ -17,7 +17,12 @@ def run(runner, params):
     runner.submit(runner.find("Send"), "Send the DM")
 `
 
-const RECORDING = [{ step: 1, action: 'open', url: 'https://www.instagram.com/' }]
+const RECORDING = [
+  { step: 1, action: 'open', url: 'https://www.instagram.com/' },
+  { step: 2, action: 'snapshot' },
+  { step: 3, action: 'fill', detail: 'Message', text: 'hello', param: 'message' },
+  { step: 4, action: 'submit', detail: 'Send', description: 'Send the DM' },
+]
 
 function textOf(result: { content: Array<{ type: string; text?: string }> }): string {
   return result.content.map((c) => c.text ?? '').join('\n')
@@ -53,6 +58,8 @@ describe('[COMP:mcp/write-browser-skill] writeBrowserSkill (brain MCP)', () => {
     expect(saved?.origin).toBe('external')
     expect(saved?.contract.terminalSends).toHaveLength(1)
     expect(saved?.recording).toEqual(RECORDING)
+    expect(saved?.recording[2]).toMatchObject({ text: 'hello', param: 'message' })
+    expect(saved?.recording[3]).toMatchObject({ description: 'Send the DM' })
   })
 
   it('REJECTS a declared-send mismatch - the contract is the review artifact', async () => {
@@ -85,6 +92,35 @@ describe('[COMP:mcp/write-browser-skill] writeBrowserSkill (brain MCP)', () => {
     expect(result.isError).toBe(true)
     expect(textOf(result)).toContain('governed runner')
     expect(await store.getByName({ workspaceId: 'ws-1', name: 'evil' })).toBeNull()
+  })
+
+  it('REJECTS recordings that do not match the code contract or declared site', async () => {
+    const store = createInMemoryBrowserSkillStore()
+    const tool = buildWriteBrowserSkillTool(store, 'ws-1')
+    const missingSend = await tool.handler({
+      name: 'missing-send',
+      site: 'instagram.com',
+      description: 'x',
+      code: GOOD_CODE,
+      recording: [{ step: 1, action: 'open', url: 'https://www.instagram.com/' }],
+      declaredSends: ['Send the DM'],
+    })
+    expect(missingSend.isError).toBe(true)
+    expect(textOf(missingSend)).toContain('do not match the reviewed code actions')
+
+    const crossSite = await tool.handler({
+      name: 'cross-site',
+      site: 'instagram.com',
+      description: 'x',
+      code: GOOD_CODE,
+      recording: [
+        ...RECORDING,
+        { step: 5, action: 'open', url: 'https://example.com/' },
+      ],
+      declaredSends: ['Send the DM'],
+    })
+    expect(crossSite.isError).toBe(true)
+    expect(textOf(crossSite)).toContain('outside the declared site')
   })
 
   it('same name updates in place and bumps the version', async () => {

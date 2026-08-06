@@ -11,6 +11,10 @@ import type {
 import type { BlockSendDecision, BlockSendRequest } from './runner-shim.js'
 import { checkVerbCeiling } from './verb-ceiling.js'
 
+/** Accessible labels that turn an ordinary click into a governed terminal send. */
+export const SEND_LIKE_LABEL_PATTERN =
+  /\b(send|submit|post|publish|share|buy|pay|purchase|order|confirm|delete|apply)\b/i
+
 export type SendGateOutcome =
   | { kind: 'stubbed' }
   | { kind: 'auto_approved'; grantId: string }

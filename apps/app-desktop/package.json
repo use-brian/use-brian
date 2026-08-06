@@ -9,8 +9,8 @@
   "main": "dist/bootstrap.js",
   "scripts": {
     "copy:assets": "node scripts/copy-static.mjs",
-    "build": "tsc && pnpm run copy:assets",
-    "dev": "tsc && pnpm run copy:assets && electron dist/bootstrap.js",
+    "build": "tsc -p ../firefox-companion/tsconfig.json && tsc && node scripts/copy-static.mjs",
+    "dev": "tsc -p ../firefox-companion/tsconfig.json && tsc && node scripts/copy-static.mjs && electron dist/bootstrap.js",
     "start": "electron dist/bootstrap.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

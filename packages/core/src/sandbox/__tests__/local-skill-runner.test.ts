@@ -3,6 +3,7 @@ import { createInMemoryBlockApprovals, createInMemoryBrowserSkillGrantStore, cre
 import { extractEffectContract } from '../effect-contract.js'
 import { createInMemoryBrowserProfileStore } from '../profiles.js'
 import { createSkillRunnerTools } from '../skill-runner.js'
+import { validateLocalRecording } from '../local-skill-runner.js'
 import type { BrowserProvider } from '../types.js'
 import type { Tool, ToolContext } from '../../tools/types.js'
 
@@ -143,9 +144,55 @@ describe('[COMP:sandbox/local-skill-runner] Local browser skill recording and re
       'navigate:https://www.google.com/',
       'snapshot',
       'type:@e1:repeatable search',
+      'snapshot',
       'click:@e2',
       'snapshot',
     ])
     expect([...approvals.rows.values()].some((row) => row.status === 'auto_approved')).toBe(true)
+  })
+
+  it('rejects recordings that leave their declared site', async () => {
+    const skills = createInMemoryBrowserSkillStore()
+    const tools = createSkillRunnerTools({
+      provider: null,
+      binding: null,
+      skills,
+      getSessionTrace: () => [
+        { action: 'open' as const, url: 'https://www.google.com/' },
+        { action: 'open' as const, url: 'https://example.com/' },
+      ],
+    })
+
+    const result = await run(tools.saveBrowserSkill, { name: 'cross-site' })
+    expect(result.isError).toBe(true)
+    expect(String(result.data)).toContain('Every recorded navigation must stay')
+    expect(await skills.getByName({ workspaceId: 'ws-1', name: 'cross-site' })).toBeNull()
+  })
+
+  it('rejects send-like clicks and unsupported actions when the recording diverges from code', () => {
+    const clickSendCode =
+      'def run(runner, params):\n    runner.open("https://example.com/")\n    runner.click(runner.find("Send"))\n'
+    const readOnlyContract = extractEffectContract({
+      code: clickSendCode,
+      site: 'example.com',
+    })
+    expect(validateLocalRecording({
+      site: 'example.com',
+      code: clickSendCode,
+      contract: readOnlyContract,
+      recording: [
+        { step: 1, action: 'open', url: 'https://example.com/' },
+        { step: 2, action: 'click', detail: 'Send' },
+      ],
+    })).toContain('recording contains 1 terminal send')
+    expect(validateLocalRecording({
+      site: 'example.com',
+      code: 'def run(runner, params):\n    runner.open("https://example.com/")\n    runner.scroll(800)\n',
+      contract: readOnlyContract,
+      recording: [
+        { step: 1, action: 'open', url: 'https://example.com/' },
+        { step: 2, action: 'scroll' },
+      ],
+    })).toContain('unsupported local action')
   })
 })

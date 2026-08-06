@@ -7,10 +7,53 @@ import type {
   BlockSendRequest,
 } from './runner-shim.js'
 import type { BrowserCallContext, BrowserProvider, BrowserSnapshot } from './types.js'
-import { decideTerminalSend, type SendGateOutcome } from './send-gate.js'
+import { decideTerminalSend, SEND_LIKE_LABEL_PATTERN, type SendGateOutcome } from './send-gate.js'
 import type { BrowserSkillGrantStore, BlockApprovalsPort } from './browser-skills.js'
+import { registrableSiteOf } from './orchestrator.js'
 
 const MAX_LOCAL_SKILL_STEPS = 100
+const LOCAL_RECORDING_ACTIONS = new Set(['open', 'snapshot', 'click', 'fill', 'submit'])
+
+function isTerminalStep(step: BrowserSkillRecordingStep): boolean {
+  return step.action === 'submit' || (
+    step.action === 'click' &&
+    SEND_LIKE_LABEL_PATTERN.test(`${step.detail ?? ''} ${step.description ?? ''}`)
+  )
+}
+
+/** Fail closed before replaying a storyboard that diverges from its reviewed code contract. */
+export function validateLocalRecording(
+  skill: Pick<BrowserSkill, 'site' | 'code' | 'recording' | 'contract'>,
+): string | null {
+  let opens = 0
+  let sends = 0
+  for (const step of skill.recording) {
+    if (!LOCAL_RECORDING_ACTIONS.has(step.action)) {
+      return `Recording step ${step.step} uses unsupported local action "${step.action}".`
+    }
+    if (step.action === 'open') {
+      opens += 1
+      const site = step.url ? registrableSiteOf(step.url) : null
+      if (!site) return `Recording step ${step.step} has no valid URL.`
+      if (site !== skill.site) {
+        return `Recording step ${step.step} opens ${site}, outside the declared site ${skill.site}.`
+      }
+    }
+    if (isTerminalStep(step)) sends += 1
+  }
+  if (opens === 0) return 'The local recording must contain an open step for its declared site.'
+  const codeActions = [...skill.code.matchAll(/runner\.(open|click|fill|submit)\s*\(/g)].map((match) => match[1])
+  const recordingActions = skill.recording
+    .filter((step) => step.action !== 'snapshot')
+    .map((step) => step.action)
+  if (codeActions.join(',') !== recordingActions.join(',')) {
+    return `The recording actions (${recordingActions.join(', ')}) do not match the reviewed code actions (${codeActions.join(', ')}).`
+  }
+  if (sends !== skill.contract.terminalSends.length) {
+    return `The recording contains ${sends} terminal send(s), but its reviewed code contract contains ${skill.contract.terminalSends.length}.`
+  }
+  return null
+}
 
 export type LocalTraceStep = {
   action: 'open' | 'click' | 'fill' | 'submit'
@@ -139,6 +182,10 @@ export async function runLocalSkill(params: LocalSkillRunOptions): Promise<{
 
   const refresh = async (): Promise<void> => {
     snapshot = await params.local.snapshot(ctx)
+    const actualSite = registrableSiteOf(snapshot.url)
+    if (actualSite !== params.skill.site) {
+      throw new Error(`Local replay left ${params.skill.site} and reached ${actualSite ?? snapshot.url}.`)
+    }
   }
   const fail = (message: string) => ({
     result: { ok: false, error: message, wouldSend },
@@ -149,6 +196,8 @@ export async function runLocalSkill(params: LocalSkillRunOptions): Promise<{
   if (recording.length > MAX_LOCAL_SKILL_STEPS) {
     return fail(`The skill has ${recording.length} steps, exceeding the local replay limit of ${MAX_LOCAL_SKILL_STEPS}.`)
   }
+  const invalidRecording = validateLocalRecording(params.skill)
+  if (invalidRecording) return fail(invalidRecording)
 
   try {
     for (const step of recording) {
@@ -168,7 +217,8 @@ export async function runLocalSkill(params: LocalSkillRunOptions): Promise<{
 
       if (!snapshot) await refresh()
       const ref = findRef(snapshot, label)
-      if (step.action === 'click' || step.action === 'fill') {
+      const terminal = isTerminalStep(step)
+      if ((step.action === 'click' && !terminal) || step.action === 'fill') {
         if (!ref) return fail(`Local replay drift at step ${step.step}: could not find "${label ?? '(unnamed)'}".`)
         if (step.action === 'click') {
           await params.local.click(ctx, ref)
@@ -180,12 +230,13 @@ export async function runLocalSkill(params: LocalSkillRunOptions): Promise<{
           }
           const text = step.param ? String(input[step.param]) : step.text ?? ''
           await params.local.type(ctx, ref, text)
+          await refresh()
           summary.push(`filled ${label}`)
         }
         continue
       }
 
-      if (step.action === 'submit') {
+      if (terminal) {
         sendNumber += 1
         const request: BlockSendRequest = {
           n: sendNumber,
