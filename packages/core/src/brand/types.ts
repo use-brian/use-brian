@@ -23,6 +23,7 @@
  */
 
 import type { BrandRecord } from '@use-brian/shared'
+import type { BrandWriteActor } from '../workflow/brand-event-trigger.js'
 
 export const BRAND_SENSITIVITIES = ['public', 'internal', 'confidential'] as const
 export type BrandSensitivity = (typeof BRAND_SENSITIVITIES)[number]
@@ -96,6 +97,8 @@ export type BrandCreateInput = {
   sensitivity?: BrandSensitivity
   /** Seed draft. Omitted → `emptyBrandRecord(name)`. */
   draft?: BrandRecord
+  /** Who authored the write. Becomes the lifecycle event's `isBot`. */
+  writtenBy?: BrandWriteActor
 }
 
 /**
@@ -129,6 +132,13 @@ export type BrandStore = {
     workspaceId: string,
     brandId: string,
     record: BrandRecord,
+    /**
+     * Who authored the write. `system` = an assistant (the chat tool, the
+     * brain-MCP bridge); `user` = a human in Studio. Becomes the lifecycle
+     * event's `isBot`, which is the self-loop guard for a workflow that
+     * itself proposes brand edits. Defaults to `user`.
+     */
+    writtenBy?: BrandWriteActor,
   ): Promise<BrandDetail | null>
 
   /**

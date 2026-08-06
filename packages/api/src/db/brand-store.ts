@@ -46,6 +46,7 @@ import type {
   BrandStatus,
 } from '@use-brian/core'
 import { getAppPool, queryWithRLS, rollbackAndRelease } from './client.js'
+import { publishBrandLifecycle } from '../brand-event-fanout.js'
 
 type BrandRow = {
   id: string
@@ -249,13 +250,24 @@ export function createBrandStore(): BrandStore {
           ],
         )
         await client.query('COMMIT')
-        return toDetail(inserted.rows[0])
+        const created = toDetail(inserted.rows[0])
+        publishBrandLifecycle({
+          workspaceId,
+          brandId: created.id,
+          action: 'created',
+          slug: created.slug,
+          name: created.name,
+          version: null,
+          actorId: userId,
+          writtenBy: input.writtenBy ?? 'user',
+        })
+        return created
       } finally {
         await rollbackAndRelease(client)
       }
     },
 
-    async saveDraft(userId, workspaceId, brandId, record) {
+    async saveDraft(userId, workspaceId, brandId, record, writtenBy) {
       const res = await queryWithRLS<BrandRow>(
         userId,
         `WITH updated AS (
@@ -269,7 +281,19 @@ export function createBrandStore(): BrandStore {
            LEFT JOIN workspace_brand_versions v ON v.id = b.active_version_id`,
         [brandId, workspaceId, JSON.stringify(record)],
       )
-      return res.rows.length > 0 ? toDetail(res.rows[0]) : null
+      if (res.rows.length === 0) return null
+      const saved = toDetail(res.rows[0])
+      publishBrandLifecycle({
+        workspaceId,
+        brandId: saved.id,
+        action: 'updated',
+        slug: saved.slug,
+        name: saved.name,
+        version: null,
+        actorId: userId,
+        writtenBy: writtenBy ?? 'user',
+      })
+      return saved
     },
 
     async approve(userId, workspaceId, brandId, approverUserId): Promise<BrandApproval | null> {
@@ -284,16 +308,19 @@ export function createBrandStore(): BrandStore {
         // two approvers cannot both read draft N and both insert version N+1
         // (the (brand_id, version) unique index would reject one, but with a
         // constraint error instead of the honest "nothing to approve").
-        const current = await client.query<{ draft: unknown }>(
-          `SELECT draft FROM workspace_brands
-            WHERE id = $1 AND workspace_id = $2
-            FOR UPDATE`,
+        const current = await client.query<{ draft: unknown; prior_version: number | null }>(
+          `SELECT b.draft, v.version AS prior_version
+             FROM workspace_brands b
+             LEFT JOIN workspace_brand_versions v ON v.id = b.active_version_id
+            WHERE b.id = $1 AND b.workspace_id = $2
+            FOR UPDATE OF b`,
           [brandId, workspaceId],
         )
         if (current.rows.length === 0) {
           await client.query('ROLLBACK')
           return null
         }
+        const priorVersion = current.rows[0].prior_version
         const draft = parseRecord(current.rows[0].draft)
         if (!draft) {
           // Nothing in flight (or an unparseable body). Approving is a no-op
@@ -340,8 +367,37 @@ export function createBrandStore(): BrandStore {
 
         await client.query('COMMIT')
         const record = parseRecord(versionRow.rows[0].record)
+        const approved = toDetail(brandRow.rows[0])
+        // `superseded` fires FIRST and only when a version was actually
+        // retired: on a brand's first approval nothing was superseded, and
+        // emitting it anyway would make "the brand's positioning changed"
+        // subscriptions fire on a brand that had no prior positioning.
+        if (priorVersion !== null) {
+          publishBrandLifecycle({
+            workspaceId,
+            brandId: approved.id,
+            action: 'superseded',
+            slug: approved.slug,
+            name: approved.name,
+            version: priorVersion,
+            actorId: approverUserId,
+            writtenBy: 'user',
+          })
+        }
+        publishBrandLifecycle({
+          workspaceId,
+          brandId: approved.id,
+          action: 'approved',
+          slug: approved.slug,
+          name: approved.name,
+          version: versionNumber,
+          actorId: approverUserId,
+          // Approval is always human: it is a Studio action gated on an
+          // owner/admin role, and no tool can reach it.
+          writtenBy: 'user',
+        })
         return {
-          brand: toDetail(brandRow.rows[0]),
+          brand: approved,
           version: { ...toVersionSummary(versionRow.rows[0]), record: record ?? draft },
         }
       } finally {

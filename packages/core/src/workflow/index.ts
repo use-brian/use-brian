@@ -128,6 +128,15 @@ export {
 } from './knowledge-event-trigger.js'
 
 export {
+  BRAND_LIFECYCLE_ACTIONS,
+  brandLifecycleToDispatchEvent,
+  createBrandLifecycleTrigger,
+  type BrandLifecycleAction,
+  type BrandLifecycleEvent,
+  type BrandWriteActor,
+} from './brand-event-trigger.js'
+
+export {
   createRunQueueWorker,
   type RunQueueWorker,
   type RunQueueWorkerDeps,

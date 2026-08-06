@@ -17,6 +17,8 @@
  *   - tasks      → `workflow/task-event-trigger.ts` (the task write path);
  *   - knowledge  → `workflow/knowledge-event-trigger.ts` (the KB store's
  *     write chokepoints — sync worker, assistant write-through, manual edits).
+ *   - brand      → `workflow/brand-event-trigger.ts` (the brand store's write
+ *     chokepoints — Studio routes, the updateBrandDraft tool, brain MCP).
  * Each producer normalizes its native event into a `DispatchEvent`; the
  * dispatcher never knows whether an event came from a poller, a webhook, or a
  * page write. Every source kind is equally first-class.
@@ -257,6 +259,12 @@ function sourceMatches(event: EventSourceRef, ref: EventSourceRef): boolean {
     // corpus even when several sources feed it.
     return true
   }
+  if (event.type === 'brand' && ref.type === 'brand') {
+    // Id-less source, same reasoning again: a workspace's brand system is one
+    // corpus; the slug rides `match.tags` when a subscription needs to narrow
+    // to a single brand.
+    return true
+  }
   return false
 }
 
@@ -351,13 +359,23 @@ function buildInput(event: DispatchEvent): WorkflowEventInput {
       channelId: event.channelId,
       actorId: event.actorId,
     }
-  } else {
+  } else if (src.type === 'knowledge') {
     trigger = {
       sourceType: 'knowledge',
       provider: 'knowledge',
       // For a knowledge source `channelId` is the lifecycle action; the
       // entry's id + path live in the payload (`input.event.entryId` /
       // `input.event.path`).
+      channelId: event.channelId,
+      actorId: event.actorId,
+    }
+  } else {
+    trigger = {
+      sourceType: 'brand',
+      provider: 'brand',
+      // For a brand source `channelId` is the lifecycle action; the brand's
+      // id + slug live in the payload (`input.event.brandId` /
+      // `input.event.slug`).
       channelId: event.channelId,
       actorId: event.actorId,
     }

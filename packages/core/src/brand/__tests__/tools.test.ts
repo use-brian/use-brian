@@ -74,6 +74,15 @@ const CONTEXT = {
   channelType: 'web',
 } as never
 
+/** Same context with no workspace bound — the gate every tool runs first. */
+const NO_WORKSPACE_CONTEXT = {
+  userId: 'u-1',
+  workspaceId: undefined,
+  assistantId: 'a-1',
+  sessionId: 's-1',
+  channelType: 'web',
+} as never
+
 beforeEach(() => vi.clearAllMocks())
 
 describe('[COMP:brand/tools] gating flags', () => {
@@ -137,7 +146,7 @@ describe('[COMP:brand/tools] getBrand', () => {
 
   it('errors honestly with no workspace', async () => {
     const { getBrand } = createBrandTools(fakeStore())
-    const res = await getBrand.execute({}, { ...CONTEXT, workspaceId: undefined } as never)
+    const res = await getBrand.execute({}, NO_WORKSPACE_CONTEXT)
     expect(res.isError).toBe(true)
   })
 })
@@ -233,12 +242,12 @@ describe('[COMP:brand/tools] updateBrandDraft writes the draft and only the draf
 describe('[COMP:brand/tools] confirmation preview', () => {
   it('names the groups being replaced and says it stays a draft', async () => {
     const { updateBrandDraft } = createBrandTools(fakeStore())
-    const lines = await updateBrandDraft.describeConfirmation!(
+    const lines = (await updateBrandDraft.describeConfirmation!(
       { changes: { messaging: { oneLine: 'x' }, colors: [] }, change_summary: 'Tighten the one-liner' },
       CONTEXT,
-    )
+    )) as string[] | null
     expect(lines).not.toBeNull()
-    const text = (lines as string[]).join('\n')
+    const text = lines!.join('\n')
     expect(text).toContain('Replaces in full: messaging, colors')
     expect(text).toContain('owner or admin approves it in Studio')
     expect(text).toContain('Tighten the one-liner')

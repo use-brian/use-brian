@@ -446,6 +446,7 @@ import { publishPageLifecycle, setPageEventDispatcher } from './page-event-fanou
 import { setMediaTokenSecret } from './media-token.js'
 import { setTaskEventDispatcher } from './task-event-fanout.js'
 import { setKnowledgeEventDispatcher } from './knowledge-event-fanout.js'
+import { setBrandEventDispatcher } from './brand-event-fanout.js'
 import { createRecordingSynthesizer, type RecordingSynthesizeFn } from './synthesis/recording-synthesizer.js'
 import { processOpenRecording } from './recordings/process-recording.js'
 import { createOpenRecordingProcessWorker } from './recordings/recording-process-worker.js'
@@ -3801,6 +3802,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     crmTools,
     retrievalTools: brainRetrievalTools,
     fileTools: brainFileTools ?? undefined,
+    // Brand primitive (D8): `getBrand` on both key scopes, `saveBrandDraft`
+    // on write keys. Draft-only — the supplier flow is that an agency session
+    // pushes a draft into the client's workspace and the CLIENT approves it in
+    // their own Studio, so no approve tool exists on this surface.
+    brandTools: { getBrand: brandTools.getBrand, updateBrandDraft: brandTools.updateBrandDraft },
     // Doc-page tools (readPage / editPage / deletePage) reuse the same RLS-gated
     // saved-views + doc-page stores the chat doc tools use, so a brain-key page
     // op runs the identical SQL (CAS + undo for edits, cascade delete) as an
@@ -5208,6 +5214,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // publishes into on every entry create / update / delete, covering the sync
   // worker, the assistant repo-writer's write-through, and manual edits.
   setKnowledgeEventDispatcher(workflowEventDispatcher)
+  // Brand lifecycle events likewise — the seam `db/brand-store.ts` publishes
+  // into on create / draft update / approve / supersede, covering the Studio
+  // routes, the `updateBrandDraft` chat tool, and the brain-MCP bridge.
+  setBrandEventDispatcher(workflowEventDispatcher)
 
   // ════════════════════════════════════════════════════════════════
   // Open background workers

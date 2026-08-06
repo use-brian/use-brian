@@ -248,7 +248,16 @@ export function createBrandTools(
         }
       }
 
-      const saved = await store.saveDraft(context.userId, context.workspaceId!, brand.id, parsed.data)
+      // `system` marks the lifecycle event bot-authored, which is the
+      // self-loop guard: a workflow that itself proposes brand edits would
+      // otherwise re-trigger on its own draft write and run forever.
+      const saved = await store.saveDraft(
+        context.userId,
+        context.workspaceId!,
+        brand.id,
+        parsed.data,
+        'system',
+      )
       if (!saved) {
         return { data: `Could not update the "${brand.slug}" brand draft.`, isError: true }
       }

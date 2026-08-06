@@ -19,6 +19,7 @@ import {
   effectiveBrainClearance,
   type BrainCrmTools,
   type BrainDocTools,
+  type BrainBrandTools,
   type BrainFileTools,
   type BrainMemoryTools,
   type BrainRetrievalTools,
@@ -120,12 +121,18 @@ const FILE_TOOLS_STUB: BrainFileTools = {
   saveFileBytes: stubCoreTool('saveFileBytes'),
 }
 
+const BRAND_TOOLS_STUB: BrainBrandTools = {
+  getBrand: stubCoreTool('getBrand', true),
+  updateBrandDraft: stubCoreTool('updateBrandDraft'),
+}
+
 const ALL_STUBS = {
   memoryTools: MEMORY_TOOLS_STUB,
   taskTools: TASK_TOOLS_STUB,
   crmTools: CRM_TOOLS_STUB,
   retrievalTools: RETRIEVAL_TOOLS_STUB,
   fileTools: FILE_TOOLS_STUB,
+  brandTools: BRAND_TOOLS_STUB,
 }
 
 /** A representative Pipeline B extraction result for the ingest spy. The
@@ -155,6 +162,7 @@ function textBody(result: { content: Array<{ type: string; text?: string }> }): 
 
 const READ_TOOL_NAMES = [
   'fileRead',
+  'getBrand',
   'fileSearch',
   'getCompany',
   'getContact',
@@ -187,6 +195,7 @@ const WRITE_TOOL_NAMES = [
   'saveCompany',
   'saveContact',
   'saveDeal',
+  'saveBrandDraft',
   'saveFileBytes',
   'saveFileToBrain',
   'saveMemory',
@@ -1331,5 +1340,52 @@ describe('[COMP:api/brain-mcp-page-tools] doc-page tools (readPage / listPages /
     const result = await tool.handler({ name: 'Empty', category: 'meeting', content: '   ' })
     expect(result.isError).toBe(true)
     expect(docTools.pageTemplateStore!.create).not.toHaveBeenCalled()
+  })
+})
+
+describe('[COMP:api/brain-mcp] brand surface', () => {
+  const build = (scope: 'read' | 'read_write') =>
+    buildBrainTools({ workspaceId: 'ws', scope, keyId: 'k', maxClearance: null, ...ALL_STUBS })
+
+  it('exposes getBrand on a read key and saveBrandDraft only on a write key', () => {
+    expect(build('read').map((t) => t.name)).toContain('getBrand')
+    expect(build('read').map((t) => t.name)).not.toContain('saveBrandDraft')
+    expect(build('read_write').map((t) => t.name)).toContain('saveBrandDraft')
+  })
+
+  it('renames the chat write tool rather than exposing a second one', () => {
+    const names = build('read_write').map((t) => t.name)
+    // `saveBrandDraft` matches the programmatic naming of its neighbours
+    // (saveTask / saveContact / saveFileBytes). It is a LABEL change: the
+    // underlying tool, and therefore the draft-only guarantee, is identical.
+    expect(names).not.toContain('updateBrandDraft')
+    expect(names.filter((n) => n === 'saveBrandDraft')).toHaveLength(1)
+  })
+
+  it('exposes no approve or activate tool on any scope', () => {
+    // The supplier flow is that an agency session pushes a draft into the
+    // client's workspace and the CLIENT approves it in their own Studio. A
+    // programmatic approve would hand governance to the supplier.
+    for (const scope of ['read', 'read_write'] as const) {
+      for (const name of build(scope).map((t) => t.name)) {
+        expect(name).not.toMatch(/approveBrand|activateBrand|publishBrand/i)
+      }
+    }
+  })
+
+  it('says in the write tool description that it cannot approve', () => {
+    const tool = build('read_write').find((t) => t.name === 'saveBrandDraft')!
+    expect(tool.description).toMatch(/cannot approve or activate/i)
+    expect(tool.description).toMatch(/DRAFT/)
+  })
+
+  it('omits the whole brand surface when the tools are not wired', () => {
+    const { brandTools: _omitted, ...withoutBrand } = ALL_STUBS
+    const names = buildBrainTools({
+      workspaceId: 'ws', scope: 'read_write', keyId: 'k', maxClearance: null,
+      ...withoutBrand,
+    }).map((t) => t.name)
+    expect(names).not.toContain('getBrand')
+    expect(names).not.toContain('saveBrandDraft')
   })
 })

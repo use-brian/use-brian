@@ -379,6 +379,31 @@ export type EventSourceRef =
        */
       type: 'knowledge'
     }
+  | {
+      /**
+       * The workspace's brand records — an *internal*, **id-less** source,
+       * for the same reason the task and knowledge sources are: a workspace's
+       * brand system is one corpus even when it holds several brands (D5
+       * keeps the schema multi-brand and the UX single-brand), so `match`
+       * does all the selection. Lifecycle actions (`created` | `updated` |
+       * `approved` | `superseded`) ride the `inChannels` axis; the brand SLUG
+       * rides `match.tags`, which is what lets a multi-brand workspace scope
+       * a subscription to one brand without a second source variant;
+       * `match.keywords` matches the brand NAME. Events reach the dispatcher
+       * from the brand store's write chokepoints
+       * (`brand-event-fanout.ts` → `brandLifecycleToDispatchEvent`), which
+       * every writer funnels through — Studio routes, the `updateBrandDraft`
+       * chat tool, and the brain-MCP `saveBrandDraft` bridge.
+       *
+       * `isBot` is true for an assistant-authored write, so a workflow that
+       * itself proposes brand edits does not re-trigger on its own draft.
+       *
+       * The event is a POINTER: id, slug, action, version — never the record
+       * body. A step reads the record under its own assistant's clearance.
+       * See docs/architecture/features/brand.md → "Brand lifecycle events".
+       */
+      type: 'brand'
+    }
 
 /**
  * Declarative selectivity on one event subscription. Every present field is
