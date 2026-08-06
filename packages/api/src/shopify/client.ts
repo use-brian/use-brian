@@ -901,6 +901,134 @@ export async function fetchOrdersRange(
   }
 }
 
+// ── Storefront analytics (ShopifyQL) ─────────────────────────
+
+/** Tabular result of a ShopifyQL query: column metadata plus positional rows. */
+export type ShopifyqlTable = {
+  columns: Array<{ name: string; dataType: string }>
+  rows: unknown[][]
+}
+
+/**
+ * Execute one ShopifyQL query via the `shopifyqlQuery` Admin field.
+ *
+ * Requires `read_reports`. ShopifyQL is aggregated reporting and cannot mutate,
+ * so this is read-only by construction — no confirmation gate needed.
+ *
+ * **`parseErrors` is a failure, not a result.** Shopify returns a malformed
+ * query as HTTP 200 with `tableData: null` and the reason in `parseErrors`, so
+ * a caller that only reads `tableData` sees "no data" and reports an empty
+ * store instead of a broken query. We throw the verbatim messages instead, and
+ * the tool layer surfaces them so the model can correct the query.
+ */
+export async function runShopifyqlQuery(auth: ShopifyAuth, query: string): Promise<ShopifyqlTable> {
+  const data = await shopifyGraphql<{
+    shopifyqlQuery?: {
+      parseErrors?: string[]
+      tableData?: {
+        columns?: Array<{ name?: string; dataType?: string }>
+        rows?: unknown[][]
+      } | null
+    } | null
+  }>(auth, `
+    query RunShopifyql($query: String!) {
+      shopifyqlQuery(query: $query) {
+        parseErrors
+        tableData { columns { name dataType } rows }
+      }
+    }
+  `, { query })
+
+  const result = data.shopifyqlQuery
+  const parseErrors = result?.parseErrors ?? []
+  if (parseErrors.length > 0) {
+    throw new Error(`ShopifyQL query was rejected: ${parseErrors.join('; ')}`)
+  }
+  const table = result?.tableData
+  if (!table) {
+    // No parse error and no table: the field resolved to nothing. Never
+    // silently degrade this to "zero sessions" - the merchant would read it
+    // as a fact about their store.
+    throw new Error('ShopifyQL returned neither table data nor a parse error.')
+  }
+  return {
+    columns: (table.columns ?? []).map((c) => ({ name: c?.name ?? '', dataType: c?.dataType ?? '' })),
+    rows: table.rows ?? [],
+  }
+}
+
+/**
+ * Dimensions the funnel query may group by. Deliberately a closed list of
+ * names taken verbatim from Shopify's own `sessions` schema documentation -
+ * an invented dimension is a parse error at the merchant's expense.
+ */
+export const SESSION_DIMENSIONS = [
+  'referrer_source',
+  'session_device_type',
+  'session_device_browser',
+  'session_device_os',
+  'session_country',
+  'session_region',
+] as const
+export type SessionDimension = (typeof SESSION_DIMENSIONS)[number]
+
+export const FUNNEL_METRICS = [
+  'sessions',
+  'online_store_visitors',
+  'sessions_with_cart_additions',
+  'sessions_that_reached_checkout',
+  'sessions_that_completed_checkout',
+  'conversion_rate',
+] as const
+
+export type StorefrontFunnelParams = {
+  /** ShopifyQL relative or absolute start, e.g. `-30d`, `2026-07-01`. */
+  since?: string
+  until?: string
+  groupBy?: SessionDimension
+  timeseries?: 'day' | 'week' | 'month'
+  compareToPreviousPeriod?: boolean
+  limit?: number
+}
+
+/**
+ * Build the storefront-funnel ShopifyQL from typed parameters.
+ *
+ * The model never writes ShopifyQL for this path: every clause here is
+ * assembled from a closed vocabulary, so the query cannot fail to parse. That
+ * is the whole point of having a narrow tool beside the general one.
+ *
+ * `human_or_bot_session = 'human'` is not optional - bot traffic inflates
+ * sessions without ever adding to a cart, which reads as a collapsing
+ * conversion rate and would send the merchant chasing a problem that is not
+ * hers.
+ */
+export function buildStorefrontFunnelQuery(params: StorefrontFunnelParams = {}): string {
+  const parts = [
+    `FROM sessions`,
+    `SHOW ${FUNNEL_METRICS.join(', ')}`,
+    `WHERE human_or_bot_session = 'human'`,
+  ]
+  if (params.groupBy) parts.push(`GROUP BY ${params.groupBy}`)
+  if (params.timeseries) parts.push(`TIMESERIES ${params.timeseries}`)
+  if (params.compareToPreviousPeriod) parts.push(`WITH PERCENT_CHANGE`)
+  parts.push(`SINCE ${params.since ?? '-30d'}`)
+  parts.push(`UNTIL ${params.until ?? 'today'}`)
+  if (params.compareToPreviousPeriod) parts.push(`COMPARE TO previous_period`)
+  if (params.groupBy) parts.push(`ORDER BY sessions DESC`)
+  if (params.limit) parts.push(`LIMIT ${Math.max(1, Math.min(params.limit, 100))}`)
+  return parts.join(' ')
+}
+
+export async function storefrontFunnel(
+  auth: ShopifyAuth,
+  params: StorefrontFunnelParams = {},
+): Promise<ShopifyqlTable & { shopifyql: string }> {
+  const shopifyql = buildStorefrontFunnelQuery(params)
+  const table = await runShopifyqlQuery(auth, shopifyql)
+  return { ...table, shopifyql }
+}
+
 // ── Mutations (P4 writes) ────────────────────────────────────
 
 export async function createProduct(auth: ShopifyAuth, params: {
