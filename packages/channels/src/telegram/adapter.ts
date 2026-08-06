@@ -22,7 +22,7 @@ type TelegramMessage = {
   audio?: { file_id: string; mime_type?: string; file_name?: string; duration?: number; performer?: string; title?: string; file_size?: number }
   video?: { file_id: string; mime_type?: string; duration?: number; file_size?: number }
   media_group_id?: string
-  reply_to_message?: { message_id: number; from?: { id: number; is_bot?: boolean }; text?: string }
+  reply_to_message?: { message_id: number; from?: { id: number; is_bot?: boolean; username?: string }; text?: string }
   message_thread_id?: number
   is_topic_message?: boolean
   forum_topic_created?: { name: string; icon_color?: number; icon_custom_emoji_id?: string }
@@ -30,6 +30,7 @@ type TelegramMessage = {
   new_chat_members?: unknown[]
   left_chat_member?: unknown
   entities?: Array<{ type: string; offset: number; length: number }>
+  caption_entities?: Array<{ type: string; offset: number; length: number }>
 }
 
 // ── Forum-topic encoding ───────────────────────────────────────
@@ -218,7 +219,7 @@ export type RequireMentionConfig =
     }
 
 export type TelegramAdapterConfig = {
-  requireMention?: RequireMentionConfig // default: true — only respond when @mentioned in groups
+  requireMention?: RequireMentionConfig // default: true — respond when @mentioned or replied to in groups
   ackReaction?: string                  // default: '' — no reaction
 }
 
@@ -315,6 +316,7 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
   const api = createTelegramApi({ token: options.token })
   const mediaGroups = new Map<string, BufferedGroup>()
   const textFragments = new Map<string, TextFragment>()
+  const botIdFromToken = options.token.match(/^(\d+):/)?.[1]
 
   async function downloadMediaImpl(
     fileId: string,
@@ -331,12 +333,42 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
   }
 
   function isBotMentioned(msg: TelegramMessage): boolean {
-    if (!options.botUsername || !msg.entities) return false
-    return msg.entities.some(
+    const content = msg.text ?? msg.caption
+    const entities = msg.text !== undefined ? msg.entities : msg.caption_entities
+    if (!options.botUsername || !content || !entities) return false
+    return entities.some(
       (e) =>
         e.type === 'mention' &&
-        msg.text?.slice(e.offset, e.offset + e.length).toLowerCase() === `@${options.botUsername!.toLowerCase()}`,
+        content.slice(e.offset, e.offset + e.length).toLowerCase() === `@${options.botUsername!.toLowerCase()}`,
     )
+  }
+
+  function isReplyToBot(msg: TelegramMessage): boolean {
+    const repliedFrom = msg.reply_to_message?.from
+    if (!repliedFrom?.is_bot) return false
+    if (botIdFromToken) return String(repliedFrom.id) === botIdFromToken
+    return Boolean(
+      options.botUsername &&
+      repliedFrom.username?.toLowerCase() === options.botUsername.toLowerCase(),
+    )
+  }
+
+  function parseAskCommand(msg: TelegramMessage): { length: number; rejected: boolean } | null {
+    const content = msg.text ?? msg.caption
+    const entities = msg.text !== undefined ? msg.entities : msg.caption_entities
+    if (!content || !entities) return null
+    const entity = entities.find((e) => e.type === 'bot_command' && e.offset === 0)
+    if (!entity) return null
+    const token = content.slice(0, entity.length)
+    const match = token.match(/^\/ask(?:@([a-z0-9_]+))?$/i)
+    if (!match) return null
+    const target = match[1]
+    return {
+      length: entity.length,
+      rejected: Boolean(
+        target && (!options.botUsername || target.toLowerCase() !== options.botUsername.toLowerCase()),
+      ),
+    }
   }
 
   function isGroupChat(msg: TelegramMessage): boolean {
@@ -374,20 +406,20 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
     const text = msg.text ?? msg.caption ?? ''
     const isGroup = isGroupChat(msg)
     const mentioned = isBotMentioned(msg)
+    const repliedToBot = isReplyToBot(msg)
+    const askCommand = parseAskCommand(msg)
+    if (askCommand?.rejected) return null
+    const invokedByAsk = askCommand !== null
 
-    // In groups, respond only when @mentioned (unless requireMention is
-    // explicitly set to false for this chat/topic via override). Replying to
-    // the bot's message is deliberately NOT an addressing trigger: in a
-    // multi-bot group (e.g. one BYO bot per forum topic, all receiving every
-    // message) reply-based triggering caused cross-bot replies — the Claw
-    // Center rotating-replies incident (2026-07-04). The requireMention rule
-    // alone decides.
+    // In groups, respond when @mentioned, replying to this bot, or explicitly
+    // invoked through /ask. Exact identity checks prevent co-resident bots
+    // from answering each other's commands or reply threads.
     const chatIdStr = String(msg.chat.id)
     const topicId = (msg.chat.is_forum === true && msg.message_thread_id != null)
       ? msg.message_thread_id
       : undefined
     const requireMention = resolveRequireMention(chatIdStr, topicId)
-    if (isGroup && requireMention && !mentioned) return null
+    if (isGroup && requireMention && !mentioned && !repliedToBot && !invokedByAsk) return null
 
     // Skip service messages
     if (msg.new_chat_members || msg.left_chat_member) return null
@@ -438,9 +470,11 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
     // Must have text or media
     if (!text && !mediaUrl) return null
 
-    // Strip bot mention from text
+    // Strip the addressing prefix from the model-facing text.
     let cleanText = text
-    if (options.botUsername) {
+    if (askCommand) {
+      cleanText = cleanText.slice(askCommand.length).trim() || '/ask'
+    } else if (options.botUsername) {
       cleanText = cleanText.replace(new RegExp(`@${options.botUsername}\\b`, 'gi'), '').trim()
     }
 
@@ -465,7 +499,7 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
       mediaSizeBytes,
       replyToMessageId: msg.reply_to_message ? String(msg.reply_to_message.message_id) : undefined,
       isGroupChat: isGroup,
-      isMentioned: mentioned,
+      isMentioned: mentioned || repliedToBot || invokedByAsk,
       timestamp: msg.date * 1000,
       raw: msg,
     }

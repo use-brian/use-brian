@@ -125,22 +125,35 @@ import { DISPLAY_API_URL } from "@/lib/display-api-url";
 // (next.config rewrite) and a relative URL would be invalid in the manifest.
 const PLACEHOLDER_SLACK_WEBHOOK_URL = `${DISPLAY_API_URL}/webhook/slack/REPLACE-AFTER-CONNECT`;
 
-// Glyphs for the channel types surfaced in the UI. WhatsApp was dropped from
-// the product UI; legacy rows still in the backend fall back to a generic
-// glyph (see the chip lookup below) rather than rendering blank. Discord has
-// no clean unicode glyph, so it renders the brand mark (`DiscordGlyph`) instead
-// of a text character — see the chip below.
+// Glyphs for channel types without a dedicated brand mark. WhatsApp was
+// dropped from the product UI; legacy rows still in the backend fall back to a
+// generic glyph rather than rendering blank.
 const PLATFORM_GLYPH: Partial<Record<Channel["channelType"], string>> = {
-  telegram: "✈",
   slack: "#",
   email: "@",
   msteams: "T",
   wechat: "微",
 };
 
+function TelegramGlyph() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      aria-hidden
+      className="h-[1.1rem] w-[1.1rem]"
+    >
+      <circle cx="12" cy="12" r="12" fill="#229ED9" />
+      <path
+        fill="#fff"
+        d="M18.07 5.51c.28-.11.54.07.47.42l-2.12 10c-.05.24-.2.3-.4.19l-3.22-2.38-1.55 1.49c-.17.17-.32.31-.65.31l.23-3.28 5.97-5.39c.26-.23-.06-.36-.4-.13l-7.38 4.65-3.18-.99c-.69-.22-.7-.69.14-1.02l12.09-4.66Z"
+      />
+    </svg>
+  );
+}
+
 // Official Discord mark, monochrome — `fill-current` inherits the chip's
-// `text-muted-foreground` so it sits alongside the `#` / `✈` text glyphs
-// without injecting brand colour. Sized to match the `text-base` glyphs.
+// `text-muted-foreground` without injecting brand colour. Sized to match the
+// `text-base` glyphs.
 function DiscordGlyph() {
   return (
     <svg
@@ -154,11 +167,12 @@ function DiscordGlyph() {
 }
 
 /**
- * Platform mark for a channel row — Discord gets the brand SVG, WhatsApp the
- * shared brand icon (`ConnectorIcon`, same as the Events rail), Telegram /
- * Slack their text glyphs. Legacy/unknown types fall back to a dot.
+ * Platform mark for a channel row — Telegram and Discord get brand SVGs,
+ * WhatsApp the shared brand icon (`ConnectorIcon`, same as the Events rail),
+ * and legacy/unknown types fall back to a dot.
  */
 function ChannelTypeIcon({ type }: { type: Channel["channelType"] }) {
+  if (type === "telegram") return <TelegramGlyph />;
   if (type === "discord") return <DiscordGlyph />;
   if (type === "whatsapp") return <ConnectorIcon connectorId="whatsapp" />;
   return <>{PLATFORM_GLYPH[type] ?? "•"}</>;

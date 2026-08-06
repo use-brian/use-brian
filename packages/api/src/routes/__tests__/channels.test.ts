@@ -30,6 +30,7 @@ vi.mock('@use-brian/channels', () => ({
   validateTelegramCredentials: vi.fn(),
   validateDiscordCredentials: vi.fn(),
   validateMsTeamsCredentials: vi.fn(),
+  TELEGRAM_BOT_COMMANDS: [{ command: 'ask', description: 'Ask Brian anything' }],
   createTelegramApi: vi.fn(),
   createSlackApi: vi.fn(),
   // The workspace channels route doesn't construct an adapter, but the
@@ -500,7 +501,8 @@ describe('[COMP:api/channels-route] workspace-driven connect', () => {
       reused: false,
     })
     const setWebhook = vi.fn().mockResolvedValue(undefined)
-    vi.mocked(createTelegramApi).mockReturnValue({ setWebhook } as never)
+    const upsertMyCommands = vi.fn().mockResolvedValue(undefined)
+    vi.mocked(createTelegramApi).mockReturnValue({ setWebhook, upsertMyCommands } as never)
     vi.mocked(getChannelForUser).mockResolvedValue(
       makeChannel({
         id: 'chan-tg',
@@ -531,6 +533,9 @@ describe('[COMP:api/channels-route] workspace-driven connect', () => {
       'https://api.example.com/webhook/telegram/chan-tg',
       expect.any(String),
     )
+    expect(upsertMyCommands).toHaveBeenCalledWith([
+      { command: 'ask', description: 'Ask Brian anything' },
+    ])
     expect(res.body.pairingCode).toBeNull()
   })
 
@@ -552,7 +557,10 @@ describe('[COMP:api/channels-route] workspace-driven connect', () => {
       modelAlias: 'standard',
       createdAt: new Date(),
     })
-    vi.mocked(createTelegramApi).mockReturnValue({ setWebhook: vi.fn() } as never)
+    vi.mocked(createTelegramApi).mockReturnValue({
+      setWebhook: vi.fn().mockResolvedValue(undefined),
+      upsertMyCommands: vi.fn().mockResolvedValue(undefined),
+    } as never)
     vi.mocked(getChannelForUser).mockResolvedValue(
       makeChannel({ id: 'chan-tg', channelType: 'telegram' }),
     )
@@ -592,7 +600,10 @@ describe('[COMP:api/channels-route] workspace-driven connect', () => {
       reused: false,
     })
     vi.mocked(resolveRoutingForSurface).mockResolvedValue(null)
-    vi.mocked(createTelegramApi).mockReturnValue({ setWebhook: vi.fn() } as never)
+    vi.mocked(createTelegramApi).mockReturnValue({
+      setWebhook: vi.fn().mockResolvedValue(undefined),
+      upsertMyCommands: vi.fn().mockResolvedValue(undefined),
+    } as never)
     vi.mocked(getChannelForUser).mockResolvedValue(
       makeChannel({ id: 'chan-tg', channelType: 'telegram' }),
     )
