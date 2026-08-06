@@ -38,6 +38,7 @@ import {
   type BrowserSnapshot,
   type SessionVault,
 } from './types.js'
+import type { LocalTraceStep } from './local-skill-runner.js'
 
 // ── Policy hook (the files-tools pattern) ──────────────────────
 
@@ -193,6 +194,8 @@ type SessionBrowseState = {
   lastCallAt: number
   /** Consecutive snapshots showing a human-verification challenge (§5). */
   captchaHits: number
+  /** Recent flat-tool actions available for saving as a deterministic skill. */
+  trace: LocalTraceStep[]
   /**
    * The proactive live-view link has been handed to the user for this
    * session (§5) — pushed once, on the first cloud browse, never repeated.
@@ -224,6 +227,10 @@ export type ComputerTools = {
    */
   setSessionBackendOverride: (sessionId: string, backend: BrowserBackendKind | null) => void
   getSessionBackend: (sessionId: string) => BrowserBackendKind | null
+  /** Return the current session's recorded flat-browser actions. */
+  getSessionTrace: (sessionId: string) => LocalTraceStep[]
+  /** Clear the recording after it has been saved as a skill. */
+  clearSessionTrace: (sessionId: string) => void
 }
 
 export function createComputerTools(opts: CreateComputerToolsOptions): ComputerTools {
@@ -250,6 +257,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
         firstCallAt: now(),
         lastCallAt: now(),
         captchaHits: 0,
+        trace: [],
         takeoverAnnounced: false,
       }
       sessions.set(context.sessionId, state)
@@ -395,6 +403,13 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     } catch {
       return null
     }
+  }
+
+  function record(state: SessionBrowseState, step: LocalTraceStep): void {
+    state.trace.push(step)
+    // Keep recording bounded even though watched local browsing is exempt from
+    // the cloud action fuse.
+    if (state.trace.length > 60) state.trace.splice(0, state.trace.length - 60)
   }
 
   /** Shared policy gates. Backend-specific resource fusing runs after routing. */
@@ -625,6 +640,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
       gate.state.refLabels.clear()
       try {
         const res = await providerFor(backend).navigate(callCtx(context, gate.state), input.url)
+        record(gate.state, { action: 'open', url: res.url })
         emit({ type: 'browser_action', op: 'navigate', backend, host: hostOf(res.url), ok: true }, context)
         // Proactive live-view hand-off (§5): the moment cloud browsing starts,
         // push the user the Take-Over link out-of-band, ONCE per session,
@@ -800,7 +816,10 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
       const fused = backendFuseGate(gate.state, backend)
       if (fused) return fused
       try {
+        const label = gate.state.refLabels.get(input.ref) ?? null
+        const isSubmit = input.intent === 'submit' || (label ? SEND_LIKE_LABEL_PATTERN.test(label) : false)
         await providerFor(backend).click(callCtx(context, gate.state), input.ref)
+        if (label) record(gate.state, { action: isSubmit ? 'submit' : 'click', detail: label, description: isSubmit ? label : null })
         emit({ type: 'browser_action', op: 'click', backend, host: null, ok: true }, context)
         const snap = await inlineSnapshot(context, gate.state, backend)
         const advice = snap ? pageAdvice(context, gate.state, snap.snapshot) : ''
@@ -854,6 +873,8 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
       try {
         await providerFor(backend).type(callCtx(context, gate.state), input.ref, input.text)
         gate.state.lastTyped = input.text
+        const label = gate.state.refLabels.get(input.ref)
+        if (label) record(gate.state, { action: 'fill', detail: label, text: input.text })
         // No inline snapshot here, so `type` is near-free next to navigate and
         // click. Recording the size is what makes that asymmetry visible.
         const data = `Typed ${input.text.length} characters into ${input.ref}.`
@@ -1107,12 +1128,20 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
           firstCallAt: now(),
           lastCallAt: now(),
           captchaHits: 0,
+          trace: [],
           takeoverAnnounced: false,
         })
       }
     },
     getSessionBackend(sessionId) {
       return sessions.get(sessionId)?.backend ?? null
+    },
+    getSessionTrace(sessionId) {
+      return [...(sessions.get(sessionId)?.trace ?? [])]
+    },
+    clearSessionTrace(sessionId) {
+      const state = sessions.get(sessionId)
+      if (state) state.trace = []
     },
   }
 }

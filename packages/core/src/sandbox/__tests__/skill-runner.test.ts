@@ -384,12 +384,12 @@ describe('[COMP:sandbox/skill-runner] Profile at call time (R2-10) + backends + 
     expect(sbx.skillRuns).toHaveLength(1)
   })
 
-  it('a local-default profile gets an honest mismatch error (blocks run in the cloud sandbox)', async () => {
+  it('a local-default profile reports a missing local provider honestly', async () => {
     const { tools, addSkill } = await build({ profiles: [{ name: 'LinkedIn me', backend: 'local' }] })
     await addSkill('collect-feed', READ_ONLY_CODE)
     const result = await run(tools.runBrowserSkill, { skill: 'collect-feed' })
     expect(result.isError).toBe(true)
-    expect(String(result.data)).toContain('cloud')
+    expect(String(result.data)).toContain('local browser backend')
   })
 
   it('refuses on autonomous paths unless unattended is enabled AND the plan is paid (R2-8)', async () => {

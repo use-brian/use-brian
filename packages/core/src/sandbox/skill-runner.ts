@@ -1,10 +1,10 @@
 /**
  * The governed logic-block runner + its tool surface (R2-5/R2-9/R2-10).
  *
- * `runBrowserSkill(skill, profile, params)` materializes a reviewed block
- * (code + governed shim + params) into the task's CLOUD sandbox and runs it
- * through the provider's privileged `runSkill` lane, while THIS host loop
- * answers the shim's terminal-send handshake:
+ * `runBrowserSkill(skill, profile, params)` runs a reviewed block against the
+ * selected profile backend. Cloud runs materialize code into the privileged
+ * sandbox lane; local runs interpret the stored recording through the local
+ * provider. Both paths use THIS host loop for terminal-send governance:
  *
  *   rehearsal        → every send is STUBBED ("would send", never fires)
  *   verb ceiling     → NEVER auto-approvable: queues for a human, grant or not
@@ -25,6 +25,7 @@ import type { Sensitivity } from '../security/sensitivity.js'
 import {
   contractAllowsRun,
   contractIsReadOnly,
+  extractEffectContract,
 } from './effect-contract.js'
 import {
   canUseProfile,
@@ -55,8 +56,11 @@ import {
   type BlockSendDecision,
   type BlockSendRequest,
 } from './runner-shim.js'
-import { checkVerbCeiling } from './verb-ceiling.js'
-import type { SandboxProvider, SessionVault } from './types.js'
+import type { BrowserProvider, SandboxProvider, SessionVault } from './types.js'
+import { decideTerminalSend, type SendGateOutcome } from './send-gate.js'
+import type { LocalTraceStep } from './local-skill-runner.js'
+import { distillLocalTrace, runLocalSkill } from './local-skill-runner.js'
+import { registrableSiteOf } from './orchestrator.js'
 
 export type SkillRunnerEvent = {
   type: 'skill_run'
@@ -71,14 +75,12 @@ export type SkillRunnerEvent = {
   denied: number
 }
 
-export type SendGateOutcome =
-  | { kind: 'stubbed' }
-  | { kind: 'auto_approved'; grantId: string }
-  | { kind: 'approved'; approvalId: string }
-  | { kind: 'denied'; reason: string; approvalId?: string }
+export type { SendGateOutcome } from './send-gate.js'
 
 export type CreateSkillRunnerToolsOptions = {
   provider: SandboxProvider | null
+  /** Local provider used when the selected profile defaults to My Browser. */
+  local?: BrowserProvider | null
   binding: SandboxTaskBinding | null
   /** The block artifacts (open store over `browser_skills`). */
   skills: BrowserSkillStore | null
@@ -103,6 +105,9 @@ export type CreateSkillRunnerToolsOptions = {
   /** Hard cap on one block run. */
   runTimeoutMs?: number
   now?: () => number
+  /** Flat browser recording owned by createComputerTools. */
+  getSessionTrace?: (sessionId: string) => LocalTraceStep[]
+  clearSessionTrace?: (sessionId: string) => void
 }
 
 const DEFAULT_APPROVAL_WAIT_MS = 120_000
@@ -116,6 +121,7 @@ function sleep(ms: number): Promise<void> {
 
 export function createSkillRunnerTools(opts: CreateSkillRunnerToolsOptions): {
   runBrowserSkill: Tool
+  saveBrowserSkill: Tool
   listBrowserSkills: Tool
   listBrowserProfiles: Tool
 } {
@@ -193,9 +199,6 @@ export function createSkillRunnerTools(opts: CreateSkillRunnerToolsOptions): {
     await opts.provider!.bridge.load(sandboxId, { path, bytes: new TextEncoder().encode(text) })
   }
 
-  /**
-   * The send-gate (R2-1/R2-2/R2-5) for ONE terminal send of a running block.
-   */
   async function decideSend(params: {
     context: ToolContext
     skill: BrowserSkill
@@ -203,114 +206,14 @@ export function createSkillRunnerTools(opts: CreateSkillRunnerToolsOptions): {
     request: BlockSendRequest
     rehearsal: boolean
   }): Promise<{ decision: BlockSendDecision; outcome: SendGateOutcome }> {
-    const { context, skill, profile, request, rehearsal } = params
-
-    // Rehearsal (R2-5): a reproducible fresh check — stub, never fire.
-    if (rehearsal) {
-      return { decision: { approved: false, stub: true }, outcome: { kind: 'stubbed' } }
-    }
-
-    const ceiling = checkVerbCeiling({
-      description: request.description,
-      label: request.label,
+    return decideTerminalSend({
+      ...params,
+      grants: opts.grants,
+      approvals: opts.approvals,
+      approvalWaitMs,
+      pollMs,
+      now,
     })
-
-    // Drift voids the grant for this block+profile (R2-2) — the reviewed
-    // shape no longer matches reality, so the review is stale.
-    if (request.drift && opts.grants) {
-      const grant = await opts.grants.findActive({
-        workspaceId: skill.workspaceId,
-        skillId: skill.id,
-        profileId: profile.id,
-      })
-      if (grant) await opts.grants.void(grant.id, request.drift)
-    }
-
-    // Grant path — never for ceiling verbs, never on drift.
-    if (!ceiling && !request.drift && opts.grants && opts.approvals) {
-      const grant = await opts.grants.findActive({
-        workspaceId: skill.workspaceId,
-        skillId: skill.id,
-        profileId: profile.id,
-      })
-      if (grant) {
-        const use = await opts.grants.recordUse(grant.id)
-        if (use.withinBudget && use.withinRate) {
-          // Auto-approve ≠ invisible: the audit row is the R2-2 contract.
-          await opts.approvals.recordAutoApproved({
-            workspaceId: skill.workspaceId,
-            approverUserId: context.userId,
-            sessionId: context.sessionId,
-            grantId: grant.id,
-            payload: {
-              skillId: skill.id,
-              skillName: skill.name,
-              profileId: profile.id,
-              profileName: profile.name,
-              site: skill.site,
-              ref: request.ref,
-              label: request.label,
-              description: request.description,
-            },
-          })
-          return {
-            decision: { approved: true },
-            outcome: { kind: 'auto_approved', grantId: grant.id },
-          }
-        }
-        // Over budget/rate: not voided, just not auto — fall through to queue.
-      }
-    }
-
-    // Async queue (R2-5: watched OR unattended, same path). No approvals
-    // surface wired → fail closed with an honest reason.
-    if (!opts.approvals) {
-      return {
-        decision: { approved: false, reason: 'No approvals surface is configured on this deployment, so terminal sends cannot be approved.' },
-        outcome: { kind: 'denied', reason: 'approvals_unavailable' },
-      }
-    }
-    const { id } = await opts.approvals.createSendApproval({
-      workspaceId: skill.workspaceId,
-      approverUserId: context.userId,
-      sessionId: context.sessionId,
-      payload: {
-        skillId: skill.id,
-        skillName: skill.name,
-        profileId: profile.id,
-        profileName: profile.name,
-        site: skill.site,
-        ref: request.ref,
-        label: request.label,
-        description: request.description,
-        ceiling: ceiling?.reason ?? null,
-        drift: request.drift ?? null,
-        contractSummary: `${skill.contract.terminalSends.length} terminal send(s); v${skill.version}`,
-      },
-      expiresAt: new Date(now() + approvalWaitMs).toISOString(),
-    })
-    const deadline = now() + approvalWaitMs
-    while (now() < deadline) {
-      const status = await opts.approvals.getStatus(id)
-      if (status === 'approved') {
-        return { decision: { approved: true }, outcome: { kind: 'approved', approvalId: id } }
-      }
-      if (status && status !== 'pending') {
-        return {
-          decision: { approved: false, reason: `send ${status}` },
-          outcome: { kind: 'denied', reason: status, approvalId: id },
-        }
-      }
-      await sleep(pollMs)
-    }
-    await opts.approvals.expire(id).catch(() => {})
-    return {
-      decision: {
-        approved: false,
-        reason: 'The send was not approved in time. It is parked in Approvals; approve it (or grant this skill) and run the skill again.',
-      },
-      outcome: { kind: 'denied', reason: 'timeout', approvalId: id },
-    }
   }
 
   /** Materialize + run one block, answering the send handshake as it runs. */
@@ -417,12 +320,6 @@ export function createSkillRunnerTools(opts: CreateSkillRunnerToolsOptions): {
       if (!opts.skills) {
         return { data: 'ERROR: Browser skills are not configured on this deployment.', isError: true }
       }
-      if (!opts.provider || !opts.binding) {
-        return {
-          data: 'ERROR: Browser skills run in the cloud sandbox, which is not configured on this deployment.',
-          isError: true,
-        }
-      }
       const skill = await opts.skills.getByName({
         workspaceId: context.workspaceId,
         name: input.skill,
@@ -464,16 +361,82 @@ export function createSkillRunnerTools(opts: CreateSkillRunnerToolsOptions): {
         return { data: `ERROR: ${describeProfileResolution(resolution)}`, isError: true }
       }
       const profile = resolution.profile
-      // Blocks execute in the cloud micro-VM (R2-9). A local-default profile
-      // is an honest mismatch, not a silent re-route to a datacenter IP.
+      const rehearsal = input.rehearsal === true
       if (profile.defaultBackend === 'local') {
-        return {
-          data: `ERROR: The profile "${profile.name}" browses in the user's own browser (local), but skills run in the cloud sandbox. Ask the user to flip the profile's default browser to cloud (or use a cloud profile) before running skills as it.`,
-          isError: true,
+        if (!opts.local) {
+          return { data: 'ERROR: The local browser backend is not configured on this deployment.', isError: true }
+        }
+        try {
+          const { result, outcomes } = await runLocalSkill({
+            local: opts.local,
+            context,
+            skill,
+            profile,
+            rehearsal,
+            input: input.params ?? {},
+            grants: opts.grants,
+            approvals: opts.approvals,
+            approvalWaitMs,
+            pollMs,
+            now,
+          })
+          const counts = {
+            autoApproved: outcomes.filter((o) => o.kind === 'auto_approved').length,
+            approved: outcomes.filter((o) => o.kind === 'approved').length,
+            stubbed: outcomes.filter((o) => o.kind === 'stubbed').length,
+            denied: outcomes.filter((o) => o.kind === 'denied').length,
+          }
+          try {
+            opts.onEvent?.(
+              {
+                type: 'skill_run',
+                skill: skill.name,
+                site: skill.site,
+                rehearsal,
+                ok: result.ok,
+                sends: outcomes.length,
+                autoApproved: counts.autoApproved,
+                queued: counts.approved + counts.denied,
+                stubbed: counts.stubbed,
+                denied: counts.denied,
+              },
+              context,
+            )
+          } catch {
+            /* audit must never break the tool */
+          }
+          const lines = [
+            result.ok
+              ? `Skill "${skill.name}" ${rehearsal ? 'rehearsed' : 'completed'} locally as profile "${profile.name}".`
+              : `Skill "${skill.name}" did not complete locally: ${result.error ?? 'unknown failure'}`,
+          ]
+          if (result.summary) lines.push(result.summary.slice(0, OUTPUT_CAP))
+          if (rehearsal && result.wouldSend?.length) {
+            lines.push(
+              `Would send (stubbed, nothing fired): ${result.wouldSend
+                .map((w) => w.description ?? w.ref ?? 'send')
+                .join(' | ')}`,
+            )
+          }
+          if (counts.autoApproved > 0) lines.push(`${counts.autoApproved} send(s) auto-approved by the user's standing grant (audited).`)
+          if (counts.approved > 0) lines.push(`${counts.approved} send(s) approved by the user.`)
+          if (counts.denied > 0) lines.push(`${counts.denied} send(s) were NOT approved - the skill stopped there.`)
+          return {
+            data: lines.join('\n'),
+            isError: !result.ok,
+            meta: { skill: skill.name, profile: profile.name, backend: 'local', rehearsal, sends: outcomes.length },
+          }
+        } catch (err) {
+          return { data: `ERROR: ${err instanceof Error ? err.message : String(err)}`, isError: true }
         }
       }
 
-      const rehearsal = input.rehearsal === true
+      if (!opts.provider || !opts.binding) {
+        return {
+          data: 'ERROR: Browser skills run in the cloud sandbox, which is not configured on this deployment.',
+          isError: true,
+        }
+      }
       try {
         const { sandboxId } = await opts.binding.resolve(
           {
@@ -555,6 +518,66 @@ export function createSkillRunnerTools(opts: CreateSkillRunnerToolsOptions): {
           data: `ERROR: ${err instanceof Error ? err.message : String(err)}`,
           isError: true,
         }
+      }
+    },
+  })
+
+  // ── saveBrowserSkill ─────────────────────────────────────────
+
+  const saveBrowserSkill = buildTool({
+    name: 'saveBrowserSkill',
+    description:
+      'Save the recent browser actions from this chat as a reusable deterministic browser skill. Use after completing a flow in My Browser; the saved skill can replay locally without asking the model to snapshot every step.',
+    inputSchema: z.object({
+      name: z.string().min(1).max(120).describe('Name for the reusable browser skill'),
+      description: z.string().max(500).optional().describe('What this skill accomplishes'),
+      site: z.string().max(253).optional().describe('Registrable site, inferred from the first recorded URL when omitted'),
+      parameters: z
+        .record(z.string(), z.string())
+        .optional()
+        .describe('Optional parameter name to recorded fill value mapping, e.g. {query: "the value typed during recording"}'),
+    }),
+    isReadOnly: false,
+    isConcurrencySafe: false,
+    requiresConfirmation: false,
+    resolveConfirmation: policyAsk('saveBrowserSkill'),
+    timeoutMs: 20_000,
+    async execute(input, context) {
+      const gate = (await autonomousGate(context)) ?? (await policyGate('saveBrowserSkill', context))
+      if (gate) return gate
+      if (!context.workspaceId) return { data: 'ERROR: Browser skills require a workspace-scoped chat.', isError: true }
+      if (!opts.skills) return { data: 'ERROR: Browser skills are not configured on this deployment.', isError: true }
+      if (!opts.getSessionTrace) return { data: 'ERROR: Browser recording is not configured on this deployment.', isError: true }
+
+      const trace = opts.getSessionTrace(context.sessionId)
+      if (trace.length === 0) {
+        return { data: 'ERROR: No browser actions are recorded in this chat yet. Complete a browser flow first.', isError: true }
+      }
+      const firstUrl = trace.find((step) => step.action === 'open')?.url
+      const site = input.site?.trim() || (firstUrl ? registrableSiteOf(firstUrl) : null)
+      if (!site) return { data: 'ERROR: The recording has no navigated site. Provide the site explicitly.', isError: true }
+      if (await opts.skills.getByName({ workspaceId: context.workspaceId, name: input.name })) {
+        return { data: `ERROR: A browser skill named "${input.name}" already exists. Choose another name.`, isError: true }
+      }
+
+      const distilled = distillLocalTrace({ trace, goal: input.description, parameters: input.parameters })
+      const contract = extractEffectContract({ code: distilled.code, site })
+      const skill = await opts.skills.create({
+        workspaceId: context.workspaceId,
+        name: input.name,
+        site,
+        description: input.description ?? distilled.description,
+        code: distilled.code,
+        paramsSchema: distilled.paramsSchema,
+        contract,
+        recording: distilled.recording,
+        origin: 'assistant',
+        createdBy: context.userId,
+      })
+      opts.clearSessionTrace?.(context.sessionId)
+      return {
+        data: `Saved browser skill "${skill.name}" for ${site}. It can now be replayed with runBrowserSkill; terminal submits remain approval-gated.`,
+        meta: { skill: skill.name, site, steps: skill.recording.length },
       }
     },
   })
@@ -656,5 +679,5 @@ export function createSkillRunnerTools(opts: CreateSkillRunnerToolsOptions): {
     },
   })
 
-  return { runBrowserSkill, listBrowserSkills, listBrowserProfiles }
+  return { runBrowserSkill, saveBrowserSkill, listBrowserSkills, listBrowserProfiles }
 }

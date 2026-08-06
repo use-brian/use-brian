@@ -69,7 +69,13 @@ export function distillTrace(params: {
               t.detail ?? `${t.label} (${params.goal.slice(0, 120)})`,
             )})`,
           )
-          recording.push({ step, action: 'submit', url: t.url ?? null, detail: t.label })
+          recording.push({
+            step,
+            action: 'submit',
+            url: t.url ?? null,
+            detail: t.label,
+            description: t.detail ?? `${t.label} (${params.goal.slice(0, 120)})`,
+          })
         } else {
           emit(`runner.click(runner.find(${pyString(t.label)}))`)
           emit('runner.snapshot()')
@@ -80,7 +86,7 @@ export function distillTrace(params: {
       case 'fill': {
         if (!t.label) break
         emit(`runner.fill(runner.find(${pyString(t.label)}), ${pyString(t.text ?? '')})`)
-        recording.push({ step, action: 'fill', url: t.url ?? null, detail: t.label })
+        recording.push({ step, action: 'fill', url: t.url ?? null, detail: t.label, text: t.text ?? '' })
         break
       }
       case 'scroll': {

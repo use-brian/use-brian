@@ -28,6 +28,13 @@ export {
   type SendGateOutcome,
   type SkillRunnerEvent,
 } from './skill-runner.js'
+export { decideTerminalSend, type DecideTerminalSendParams } from './send-gate.js'
+export {
+  distillLocalTrace,
+  runLocalSkill,
+  type LocalTraceStep,
+  type LocalSkillRunOptions,
+} from './local-skill-runner.js'
 export {
   createBuFallbackTool,
   type BuFallbackEvent,

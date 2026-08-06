@@ -81,6 +81,23 @@ async function profilesWith(
 }
 
 describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
+  it('records successful local flat actions with accessible labels for later replay', async () => {
+    const local = fakeProvider('local')
+    const tools = createComputerTools({ local, cloud: fakeProvider('cloud'), cloudAvailable: () => false })
+
+    await run(tools.browserNavigate, { url: 'https://www.google.com/' })
+    await run(tools.browserType, { ref: '@e1', text: 'use brian' })
+    await run(tools.browserClick, { ref: '@e2', intent: 'submit' })
+
+    expect(tools.getSessionTrace('sess-1')).toEqual([
+      { action: 'open', url: 'https://www.google.com/' },
+      { action: 'fill', detail: 'Write a message', text: 'use brian' },
+      { action: 'submit', detail: 'Send', description: 'Send' },
+    ])
+    tools.clearSessionTrace('sess-1')
+    expect(tools.getSessionTrace('sess-1')).toEqual([])
+  })
+
   it('backend seeds from the profile’s defaultBackend (R2-3): a local-default profile browses locally even with cloud available', async () => {
     const local = fakeProvider('local')
     const cloud = fakeProvider('cloud')
