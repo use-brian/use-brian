@@ -161,6 +161,8 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'shopifyListDisputes', description: 'List Shopify Payments disputes and chargebacks', classification: 'read', defaultPolicy: 'allow' },
     { name: 'shopifyListContent', description: 'List online store pages, blog posts, or blogs', classification: 'read', defaultPolicy: 'allow' },
     { name: 'shopifySalesReport', description: 'Aggregate sales over a date range (count, revenue, top items)', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'shopifyStorefrontFunnel', description: 'Storefront conversion funnel: sessions, cart additions, checkouts reached and completed', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'shopifyAnalyticsQuery', description: 'Run a read-only ShopifyQL query against store analytics', classification: 'read', defaultPolicy: 'allow' },
     { name: 'shopifyUpdateProduct', description: 'Update product title, description, tags, status, or SEO', classification: 'write', defaultPolicy: 'ask' },
     { name: 'shopifyCreateProduct', description: 'Create a new product', classification: 'write', defaultPolicy: 'ask' },
     { name: 'shopifyAddProductImage', description: 'Upload a workspace file to a product as a product image', classification: 'write', defaultPolicy: 'ask' },
@@ -465,6 +467,17 @@ export const OFFICIAL_OAUTH_SCOPES: Record<string, string[]> = {
     // through the connector can never reach the storefront.
     'read_publications',
     'write_publications',
+    // shopifyStorefrontFunnel + shopifyAnalyticsQuery (the `shopifyqlQuery`
+    // Admin field). Storefront session/traffic data has no other source - the
+    // rest of the connector reads entities, and no amount of order fetching
+    // reconstructs how many visitors added to cart and left.
+    //
+    // Shopify's denial ALSO names "Level 2 access to Customer data". For a
+    // custom-distribution app that is granted at install; a public app must be
+    // approved for it. If a merchant's install is denied with the scope
+    // present, that approval is what is missing - relay it rather than
+    // retrying.
+    'read_reports',
     // NOT listed, on purpose: `read_themes` / `write_themes`.
     //
     // The four theme-template tools need them, but theme access is the most

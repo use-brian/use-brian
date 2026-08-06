@@ -439,6 +439,16 @@
       "deprecations": []
     },
     {
+      "name": "RunShopifyql",
+      "kind": "query",
+      "hash": "9b8d7d899e045c28",
+      "valid": true,
+      "scopes": [
+        "read_reports"
+      ],
+      "deprecations": []
+    },
+    {
       "name": "SearchCustomers",
       "kind": "query",
       "hash": "d092d20f6af2c79a",
