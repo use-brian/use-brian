@@ -1,4 +1,4 @@
-/** Firefox My Browser background page: relay + consent + desktop companion. */
+/** Firefox My Browser background page: relay + consent + native companion. */
 import { RelayClient } from './relay-client.js'
 import { TaskGate, CONSENT_PROMPT_TIMEOUT_MS, type ConsentOutcome } from './task-gate.js'
 import { activeTabForConsent, eligibilityOf } from './tab-eligibility.js'
@@ -110,8 +110,8 @@ async function executeOp(op: string, args: Record<string, unknown>): Promise<unk
   if (!status.ready) {
     throw new FirefoxNativeError(
       status.reason === 'firefox_companion_missing'
-        ? 'Install or open the Use Brian desktop app to use My Browser in Firefox.'
-        : 'Quit Firefox, then choose Start Firefox for My Browser in the Use Brian desktop app.',
+        ? 'Install the Use Brian Firefox companion or open the desktop app to use My Browser in Firefox.'
+        : 'Quit Firefox, then run use-brian-firefox start or choose Start Firefox for My Browser in the desktop app.',
       status.reason ?? 'firefox_restart_required',
     )
   }

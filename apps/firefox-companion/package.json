@@ -1,0 +1,46 @@
+{
+  "name": "@use-brian/firefox-companion",
+  "version": "0.1.0",
+  "description": "Standalone Firefox native-messaging companion for Use Brian My Browser",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "use-brian-firefox": "./dist/cli.js"
+  },
+  "exports": {
+    ".": "./dist/index.js",
+    "./firefox-bidi": "./dist/firefox-bidi.js",
+    "./firefox-launcher": "./dist/firefox-launcher.js",
+    "./firefox-native-host": "./dist/firefox-native-host.js",
+    "./firefox-native-registration": "./dist/firefox-native-registration.js"
+  },
+  "files": [
+    "dist/*.js",
+    "dist/*.js.map",
+    "dist/*.d.ts",
+    "dist/*.d.ts.map",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "register": "node dist/cli.js install",
+    "start": "node dist/cli.js start",
+    "status": "node dist/cli.js status"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.39",
+    "@types/ws": "^8.5.13",
+    "typescript": "^5.7",
+    "vitest": "^3"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -5,7 +5,7 @@ import {
   encodeNativeMessage,
 } from "../firefox-native-host.js";
 
-describe("[COMP:app-desktop/firefox-native-host] native-message framing", () => {
+describe("[COMP:ext/firefox-companion] native-message framing", () => {
   it("decodes fragmented and coalesced little-endian frames", () => {
     const first = encodeNativeMessage({ id: "1", type: "status" });
     const second = encodeNativeMessage({ id: "2", type: "stop" });

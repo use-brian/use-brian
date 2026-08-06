@@ -54,12 +54,12 @@ importers:
 
   apps/app-desktop:
     dependencies:
+      '@use-brian/firefox-companion':
+        specifier: workspace:*
+        version: link:../firefox-companion
       electron-updater:
         specifier: ^6.8.9
         version: 6.8.9
-      ws:
-        specifier: ^8.18.0
-        version: 8.21.0
       zod:
         specifier: ^3.24
         version: 3.25.76
@@ -67,9 +67,6 @@ importers:
       '@types/node':
         specifier: ^20.19.39
         version: 20.19.43
-      '@types/ws':
-        specifier: ^8.5.13
-        version: 8.18.1
       electron:
         specifier: ^43.2.0
         version: 43.2.0
@@ -392,6 +389,25 @@ importers:
       tsx:
         specifier: ^4
         version: 4.22.4
+      typescript:
+        specifier: ^5.7
+        version: 5.9.3
+      vitest:
+        specifier: ^3
+        version: 3.2.6(@types/debug@4.1.13)(@types/node@20.19.43)(jiti@2.7.0)(jsdom@29.1.1(@noble/hashes@1.8.0))(lightningcss@1.32.0)(tsx@4.22.4)
+
+  apps/firefox-companion:
+    dependencies:
+      ws:
+        specifier: ^8.18.0
+        version: 8.21.0
+    devDependencies:
+      '@types/node':
+        specifier: ^20.19.39
+        version: 20.19.43
+      '@types/ws':
+        specifier: ^8.5.13
+        version: 8.18.1
       typescript:
         specifier: ^5.7
         version: 5.9.3
