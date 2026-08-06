@@ -377,7 +377,7 @@ export function fileRoutes(
         }
         // Explicit ingest: the user asked for this file to be interpreted, so
         // the job carries `mode: 'explicit'` and the worker may distill a
-        // PDF/image for it (migration 402).
+        // PDF/image for it (migration 404).
         const { enqueued, jobId } = await enqueueFileIngestJob({
           fileId: r.fileId,
           workspaceId: ctx.workspaceId,
@@ -678,7 +678,7 @@ export function fileRoutes(
       assistantId: assistant.id,
       sourceLabel: file.sourceEpisodeId ? 'reingest' : 'upload',
       // User-initiated, so the worker may distill a PDF/image for it — the same
-      // coverage a fresh POST /ingest gets (migration 402).
+      // coverage a fresh POST /ingest gets (migration 404).
       mode: 'explicit',
     })
     if (!enqueued) {

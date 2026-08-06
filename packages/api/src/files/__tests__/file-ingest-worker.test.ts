@@ -103,7 +103,7 @@ describe('[COMP:files/file-ingest-worker] file-ingest drain loop', () => {
     expect(deps.markDone).toHaveBeenCalledWith('job-1')
   })
 
-  // ── mode gating (migration 402) ───────────────────────────────────────────
+  // ── mode gating (migration 404) ───────────────────────────────────────────
   //
   // POST /ingest moved onto this queue, and it used to distill PDFs/images
   // inline. The port is therefore wired now — but a distill is a model charge,

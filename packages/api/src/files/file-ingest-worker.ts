@@ -72,7 +72,7 @@ export type FileIngestWorkerDeps = {
    * user asked for that file to be ingested. Silent artifact promotion (chat
    * attachments, large pastes) keeps PDFs/images store-only however this port
    * is wired: nobody asked for the distill, so the queue must not buy one. See
-   * plan §"Explicitly NOT in v1" and migration 402.
+   * plan §"Explicitly NOT in v1" and migration 404.
    */
   distill?: (input: { buffer: Buffer; mime: string }) => Promise<string>
   intervalMs?: number

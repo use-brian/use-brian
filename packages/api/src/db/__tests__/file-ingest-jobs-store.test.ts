@@ -35,7 +35,7 @@ describe('[COMP:files/file-ingest-jobs-store] file-ingest job queue', () => {
   })
 
   it('enqueue defaults source_label to "upload", assistant_id to NULL, mode to "silent"', async () => {
-    // `silent` is the conservative default on purpose (migration 402): it is the
+    // `silent` is the conservative default on purpose (migration 404): it is the
     // mode that never spends a model distill, so a caller that forgets to say
     // what it is cannot accidentally buy one.
     mockQuery.mockResolvedValueOnce({ rows: [{ id: 'job-1' }] } as never)
