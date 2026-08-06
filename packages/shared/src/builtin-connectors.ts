@@ -288,6 +288,7 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     // (grant / async approval / verb ceiling) — a static 'ask' would gate
     // read-only skills too.
     { name: 'runBrowserSkill', description: 'Run a saved browser skill against a browser profile (terminal sends gate via grants/approvals)', classification: 'write', defaultPolicy: 'allow' },
+    { name: 'saveBrowserSkill', description: 'Save recent browser actions as a reusable skill', classification: 'write', defaultPolicy: 'allow' },
     { name: 'listBrowserSkills', description: 'List the saved browser skills in this workspace', classification: 'read', defaultPolicy: 'allow' },
     { name: 'listBrowserProfiles', description: 'List the workspace browser profiles and which are usable', classification: 'read', defaultPolicy: 'allow' },
     { name: 'browserExplore', description: 'Explore a novel browsing flow with the watched agentic fallback (cloud only; distills into a skill)', classification: 'write', defaultPolicy: 'allow' },
@@ -524,6 +525,7 @@ export const BOOT_INJECTED_BUILTIN_TOOLS: Record<string, readonly string[]> = {
     'browserCurrentUrl',
     'browserReadPage',
     'runBrowserSkill',
+    'saveBrowserSkill',
     'listBrowserSkills',
     'listBrowserProfiles',
     'browserExplore',
