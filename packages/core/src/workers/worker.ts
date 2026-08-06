@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto'
 
 import type { LLMProvider, Message, TokenUsage } from '../providers/types.js'
 import type { Tool, ToolContext } from '../tools/types.js'
+import { filterToolsByCapabilities } from '../tools/capability-gate.js'
 import { queryLoop, type QueryEvent } from '../engine/query-loop.js'
 
 // ── Types ──────────────────────────────────────────────────────
@@ -432,8 +433,17 @@ export function createWorkerManager(options: WorkerOptions) {
     // (sends-forbidden by construction — see setResearchBrowseTools). Standard
     // preflight workers and non-research spawns never see them: a cheap
     // context-gathering pass must not be able to spin up a sandbox.
+    //
+    // This merge happens AFTER the caller's `filterToolsByCapabilities` pass,
+    // so it has to re-apply the gate itself — otherwise an assistant with the
+    // `computer` primitive switched off would still be offered browserReadPage
+    // here and only fail at the executor, which is the see-it-try-it-fail shape
+    // the capability gate exists to avoid.
     if (isResearch && researchBrowseTools && researchBrowseTools.size > 0) {
-      workerTools = new Map([...workerTools, ...researchBrowseTools])
+      workerTools = new Map([
+        ...workerTools,
+        ...filterToolsByCapabilities(researchBrowseTools, context.activeCapabilities ?? new Set()),
+      ])
     }
     const hasBrowse =
       isResearch && !!researchBrowseTools && [...researchBrowseTools.keys()].some((k) => workerTools.has(k))

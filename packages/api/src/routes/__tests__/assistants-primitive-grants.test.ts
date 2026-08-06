@@ -39,6 +39,12 @@ beforeEach(() => {
   for (const fn of Object.values(capabilityStore)) (fn as { mockReset?: () => void }).mockReset?.()
 })
 
+/** The §17 + admin rows — this suite's subject. Built-in primitives share the
+ *  route but belong to [COMP:connectors/builtin-primitive-switch]. */
+function nonBuiltin(grants: Array<{ group?: string }>) {
+  return grants.filter((g) => g.group !== 'builtin')
+}
+
 function makeApp(opts: { userId: string }) {
   const app = express()
   app.use(express.json())
@@ -60,11 +66,14 @@ describe('[COMP:routes/assistants-primitive-grants] GET /:assistantId/primitive-
       .get('/api/assistants/a-1/primitive-grants')
 
     expect(res.status).toBe(200)
-    expect(res.body.grants).toEqual([
-      { capability: 'tasks', enabled: true },
-      { capability: 'crm', enabled: true },
-      { capability: 'goals', enabled: false },
-      { capability: 'configure', enabled: false },
+    // Filtered to this suite's subject: the §17 primitives + `configure`.
+    // Built-in primitives (files/office/computer) ride the same route under
+    // group 'builtin' and are covered by [COMP:connectors/builtin-primitive-switch].
+    expect(nonBuiltin(res.body.grants)).toEqual([
+      { capability: 'tasks', enabled: true, group: 'primitive' },
+      { capability: 'crm', enabled: true, group: 'primitive' },
+      { capability: 'goals', enabled: false, group: 'primitive' },
+      { capability: 'configure', enabled: false, group: 'admin' },
     ])
   })
 
@@ -76,11 +85,11 @@ describe('[COMP:routes/assistants-primitive-grants] GET /:assistantId/primitive-
       .get('/api/assistants/a-1/primitive-grants')
 
     expect(res.status).toBe(200)
-    expect(res.body.grants).toEqual([
-      { capability: 'tasks', enabled: false },
-      { capability: 'crm', enabled: false },
-      { capability: 'goals', enabled: false },
-      { capability: 'configure', enabled: false },
+    expect(nonBuiltin(res.body.grants)).toEqual([
+      { capability: 'tasks', enabled: false, group: 'primitive' },
+      { capability: 'crm', enabled: false, group: 'primitive' },
+      { capability: 'goals', enabled: false, group: 'primitive' },
+      { capability: 'configure', enabled: false, group: 'admin' },
     ])
   })
 
@@ -106,7 +115,7 @@ describe('[COMP:routes/assistants-primitive-grants] PATCH /:assistantId/primitiv
       .send({ enabled: true })
 
     expect(res.status).toBe(200)
-    expect(res.body).toEqual({ capability: 'tasks', enabled: true })
+    expect(res.body).toEqual({ capability: 'tasks', enabled: true, group: 'primitive' })
     expect(capabilityStore.grant).toHaveBeenCalledWith({
       assistantId: 'a-1',
       capability: 'tasks',
@@ -125,7 +134,7 @@ describe('[COMP:routes/assistants-primitive-grants] PATCH /:assistantId/primitiv
       .send({ enabled: true })
 
     expect(res.status).toBe(200)
-    expect(res.body).toEqual({ capability: 'tasks', enabled: true })
+    expect(res.body).toEqual({ capability: 'tasks', enabled: true, group: 'primitive' })
   })
 
   it('revokes the active grant when enabled=false', async () => {
@@ -139,7 +148,7 @@ describe('[COMP:routes/assistants-primitive-grants] PATCH /:assistantId/primitiv
       .send({ enabled: false })
 
     expect(res.status).toBe(200)
-    expect(res.body).toEqual({ capability: 'crm', enabled: false })
+    expect(res.body).toEqual({ capability: 'crm', enabled: false, group: 'primitive' })
     expect(capabilityStore.revoke).toHaveBeenCalledWith({
       grantId: 'g-existing',
       revokedByUserId: 'u-1',
@@ -170,7 +179,7 @@ describe('[COMP:routes/assistants-primitive-grants] PATCH /:assistantId/primitiv
       .send({ enabled: true })
 
     expect(res.status).toBe(200)
-    expect(res.body).toEqual({ capability: 'goals', enabled: true })
+    expect(res.body).toEqual({ capability: 'goals', enabled: true, group: 'primitive' })
     expect(capabilityStore.grant).toHaveBeenCalledWith({
       assistantId: 'a-1',
       capability: 'goals',
@@ -237,7 +246,7 @@ describe('[COMP:routes/assistants-primitive-grants] configure capability (admin-
       .send({ enabled: true })
 
     expect(res.status).toBe(200)
-    expect(res.body).toEqual({ capability: 'configure', enabled: true })
+    expect(res.body).toEqual({ capability: 'configure', enabled: true, group: 'admin' })
     expect(capabilityStore.grant).toHaveBeenCalledWith({
       assistantId: 'a-1',
       capability: 'configure',
@@ -257,7 +266,7 @@ describe('[COMP:routes/assistants-primitive-grants] configure capability (admin-
       .send({ enabled: false })
 
     expect(res.status).toBe(200)
-    expect(res.body).toEqual({ capability: 'configure', enabled: false })
+    expect(res.body).toEqual({ capability: 'configure', enabled: false, group: 'admin' })
     expect(capabilityStore.revoke).toHaveBeenCalledWith({
       grantId: 'g-conf',
       revokedByUserId: 'u-owner',
@@ -273,6 +282,6 @@ describe('[COMP:routes/assistants-primitive-grants] configure capability (admin-
       .get('/api/assistants/a-1/primitive-grants')
 
     expect(res.status).toBe(200)
-    expect(res.body.grants).toContainEqual({ capability: 'configure', enabled: true })
+    expect(res.body.grants).toContainEqual({ capability: 'configure', enabled: true, group: 'admin' })
   })
 })

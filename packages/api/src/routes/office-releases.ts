@@ -7,6 +7,7 @@ import type { OfficeArtifactRow } from '../db/office-artifacts.js'
 import type { ResolvedOfficeAccess } from '../office/access.js'
 import type { OfficeArtifactSnapshot } from '@use-brian/office-model'
 import { type OfficeResourceResolver, type SpreadsheetPdfRequest } from '@use-brian/core'
+import type { BrandClaim } from '@use-brian/shared'
 
 type Context = {
   artifact: OfficeArtifactRow
@@ -14,6 +15,13 @@ type Context = {
   snapshot: OfficeArtifactSnapshot
   claims: Array<{ id: string; classification: string; confidence: number; severity: string; reasonCode: string; status: string }>
   media: Array<{ id: string; provenanceState: string; disclosureRequired: boolean }>
+  /**
+   * The workspace's ACTIVE APPROVED brand claims register, when it has one.
+   * Resolved by the loader so both the preflight and the release call see the
+   * same register — a preflight that passed against a different set than the
+   * release enforces would be worse than no check.
+   */
+  brandClaims?: readonly BrandClaim[]
 }
 
 export type OfficeReleaseRouteDeps = {
@@ -40,7 +48,7 @@ export function officeReleaseRoutes(deps: OfficeReleaseRouteDeps): Router {
     if (!body.success) return void res.status(400).json({ error: 'Invalid Office release review', issues: body.error.issues })
     const context = await load(userId, String(req.params.artifactId))
     if (!context) return void res.status(404).json({ error: 'Office artifact not found' })
-    const receipt = reviewOfficeRelease({ snapshot: context.snapshot, expectedVersion: body.data.expectedVersion, currentVersion: context.artifact.headVersion, headVersionId: context.artifact.headVersionId, lifecycleState: context.artifact.lifecycleState, canEdit: context.access.canEdit, artifactSensitivity: context.artifact.sensitivity, action: body.data.action, destination: body.data.destination, claims: context.claims, media: context.media, acknowledgement: body.data.acknowledgement, format: body.data.format, spreadsheetPdf: body.data.spreadsheetPdf as SpreadsheetPdfRequest | undefined })
+    const receipt = reviewOfficeRelease({ snapshot: context.snapshot, expectedVersion: body.data.expectedVersion, currentVersion: context.artifact.headVersion, headVersionId: context.artifact.headVersionId, lifecycleState: context.artifact.lifecycleState, canEdit: context.access.canEdit, artifactSensitivity: context.artifact.sensitivity, action: body.data.action, destination: body.data.destination, claims: context.claims, brandClaims: context.brandClaims, media: context.media, acknowledgement: body.data.acknowledgement, format: body.data.format, spreadsheetPdf: body.data.spreadsheetPdf as SpreadsheetPdfRequest | undefined })
     res.json({ receipt })
   })
   router.post('/artifacts/:artifactId/releases', async (req, res) => {
@@ -51,7 +59,7 @@ export function officeReleaseRoutes(deps: OfficeReleaseRouteDeps): Router {
     const artifactId = String(req.params.artifactId)
     const context = await load(userId, artifactId)
     if (!context) return void res.status(404).json({ error: 'Office artifact not found' })
-    const prepared = await prepareOfficeRelease({ snapshot: context.snapshot, expectedVersion: body.data.expectedVersion, currentVersion: context.artifact.headVersion, headVersionId: context.artifact.headVersionId, lifecycleState: context.artifact.lifecycleState, canEdit: context.access.canEdit, artifactSensitivity: context.artifact.sensitivity, action: body.data.action, destination: body.data.destination, claims: context.claims, media: context.media, acknowledgement: body.data.acknowledgement, format: body.data.format, spreadsheetPdf: body.data.spreadsheetPdf as SpreadsheetPdfRequest | undefined, resolveResource: deps.resolveResource(userId, context.artifact.workspaceId) })
+    const prepared = await prepareOfficeRelease({ snapshot: context.snapshot, expectedVersion: body.data.expectedVersion, currentVersion: context.artifact.headVersion, headVersionId: context.artifact.headVersionId, lifecycleState: context.artifact.lifecycleState, canEdit: context.access.canEdit, artifactSensitivity: context.artifact.sensitivity, action: body.data.action, destination: body.data.destination, claims: context.claims, brandClaims: context.brandClaims, media: context.media, acknowledgement: body.data.acknowledgement, format: body.data.format, spreadsheetPdf: body.data.spreadsheetPdf as SpreadsheetPdfRequest | undefined, resolveResource: deps.resolveResource(userId, context.artifact.workspaceId) })
     if (prepared.receipt.status !== 'ready' || !prepared.bytes || !prepared.extension || !prepared.mime) return void res.status(409).json({ receipt: prepared.receipt })
     const releasedFileId = await deps.saveReleasedFile({ userId, workspaceId: context.artifact.workspaceId, artifactId, version: context.artifact.headVersion, action: body.data.action, extension: prepared.extension, mime: prepared.mime, bytes: prepared.bytes })
     const record = await deps.createRecord({ userId, artifactId, versionId: context.artifact.headVersionId!, workspaceId: context.artifact.workspaceId, action: body.data.action, destination: body.data.destination, receipt: prepared.receipt, acknowledgement: body.data.acknowledgement, releasedFileId })

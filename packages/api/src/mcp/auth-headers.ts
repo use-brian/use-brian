@@ -191,6 +191,19 @@ export type ActorIdentity = {
   /** Stable Use Brian user UUID — the key that never changes across channels. */
   userId: string
   /**
+   * Consumer-asserted organisation/tenant the actor belongs to, from the
+   * public API's `claims.orgId`. Emitted as `X-UseBrian-Actor-Org` so a
+   * bridge can scope a lookup to the right tenant.
+   *
+   * Identity only, never authority: a bridge resolves what this actor may do
+   * from its OWN records keyed on the actor id. That is also why `roles` from
+   * the same claims object is deliberately NOT on this type — forwarding a
+   * role assertion invites a bridge to treat it as an access decision, and
+   * the claim is only as trustworthy as the key holder. See
+   * `docs/architecture/features/public-api.md` → "End-user identity".
+   */
+  org?: string | null
+  /**
    * Opaque, short-lived media capability token (minted by the closed platform,
    * HMAC-signed). When set, `injectMcpTools` emits it as `X-UseBrian-Media-Token` (+ legacy `X-Sidanclaw-Media-Token`)
    * to connectors that opted in via `sendMediaToken`, letting them fetch this
@@ -226,6 +239,10 @@ export function actorIdentityHeaders(actor: ActorIdentity): Record<string, strin
   if (actor.email) {
     headers['X-UseBrian-Actor-Email'] = actor.email
     headers['X-Sidanclaw-Actor-Email'] = actor.email
+  }
+  if (actor.org) {
+    headers['X-UseBrian-Actor-Org'] = actor.org
+    headers['X-Sidanclaw-Actor-Org'] = actor.org
   }
   return headers
 }

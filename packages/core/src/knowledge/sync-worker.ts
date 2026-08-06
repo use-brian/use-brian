@@ -36,6 +36,12 @@ export type SyncSource = {
    * by-workspace resolution.
    */
   connectorInstanceId: string | null
+  /**
+   * Tier stamped on entries whose frontmatter carries no explicit (valid)
+   * `sensitivity:` (migration 410). Explicit frontmatter always wins; this
+   * only replaces the parser's global 'internal' fallback per source.
+   */
+  defaultSensitivity: Sensitivity
 }
 
 export type SyncGitHubApi = {
@@ -55,6 +61,8 @@ export type SyncStore = {
     workspaceId: string; path: string; title: string
     summary?: string | null; content: string; tags?: string[]; relatedIds?: string[]
     sensitivity: Sensitivity
+    /** Whether `sensitivity` came from explicit frontmatter (mig 410 provenance). */
+    sensitivityExplicit?: boolean
     /** Compartment set (MLS category axis) to stamp on the row. Default '{}'. */
     compartments?: string[]
     metadata?: Record<string, unknown>; sourceId?: string | null; sourceSha?: string | null
@@ -221,7 +229,8 @@ export function createKnowledgeSyncWorker(options: {
           summary: parsed.summary,
           content: parsed.content,
           tags: parsed.tags,
-          sensitivity: parsed.sensitivity,
+          sensitivity: parsed.sensitivityExplicit ? parsed.sensitivity : source.defaultSensitivity,
+          sensitivityExplicit: parsed.sensitivityExplicit,
           metadata: { ...parsed.metadata, _rawRelated: parsed.related },
           sourceId: source.id,
           sourceSha: headSha,
@@ -269,7 +278,8 @@ export function createKnowledgeSyncWorker(options: {
           summary: parsed.summary,
           content: parsed.content,
           tags: parsed.tags,
-          sensitivity: parsed.sensitivity,
+          sensitivity: parsed.sensitivityExplicit ? parsed.sensitivity : source.defaultSensitivity,
+          sensitivityExplicit: parsed.sensitivityExplicit,
           metadata: { ...parsed.metadata, _rawRelated: parsed.related },
           sourceId: source.id,
           sourceSha: headSha,
@@ -342,7 +352,8 @@ export function createKnowledgeSyncWorker(options: {
         summary: parsed.summary,
         content: parsed.content,
         tags: parsed.tags,
-        sensitivity: parsed.sensitivity,
+        sensitivity: parsed.sensitivityExplicit ? parsed.sensitivity : source.defaultSensitivity,
+        sensitivityExplicit: parsed.sensitivityExplicit,
         metadata: { ...parsed.metadata, _rawRelated: parsed.related },
         sourceId: source.id,
         sourceSha: headSha,

@@ -40,6 +40,8 @@ export { ChatMarkdown, type ChatMarkdownProps } from './markdown.js'
 export {
   ChatComposer,
   resolveEnterIntent,
+  splitHighlightSegments,
   type ChatComposerProps,
   type ComposerEnterIntent,
+  type HighlightRange,
 } from './ChatComposer.js'

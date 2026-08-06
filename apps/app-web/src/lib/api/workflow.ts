@@ -261,6 +261,9 @@ export type WorkflowSummary = {
   lifecycleReason?: string | null;
   /** Mig 308 — the lifecycle-sweep veto flag. */
   pinned?: boolean;
+  /** Mig 411 — non-null = owned by a product feature (v1: 'knowledge'); the
+   *  builder rejects definition/trigger edits and the card badges it. */
+  managedBy?: string | null;
   updatedAt: string;
   lastRunAt?: string | null;
 };

@@ -43,6 +43,7 @@ const SOURCE = {
   rootPath: '',
   lastSyncedSha: null as string | null,
   connectorInstanceId: null as string | null,
+  defaultSensitivity: 'internal' as const,
 }
 
 describe('[COMP:knowledge/sync-worker] sensitivity round-trip', () => {
@@ -103,5 +104,59 @@ describe('[COMP:knowledge/sync-worker] sensitivity round-trip', () => {
 
     const secondUpsert = vi.mocked(mockStore.upsertByPath).mock.calls[1][0]
     expect(secondUpsert.sensitivity).toBe('internal')
+  })
+
+  // ── Per-source default sensitivity (mig 410) ────────────────
+  // Explicit frontmatter always wins; the source default replaces the
+  // parser's global 'internal' fallback for unstamped (or invalid-stamped)
+  // files, and the stamp provenance rides `sensitivityExplicit`.
+
+  it('stamps the source default on unstamped files; explicit frontmatter wins', async () => {
+    vi.mocked(mockStore.getSourcesDueForSync).mockResolvedValueOnce([
+      { ...SOURCE, defaultSensitivity: 'public' },
+    ])
+    vi.mocked(mockApi.getBranchHead).mockResolvedValueOnce('sha_head')
+    vi.mocked(mockApi.getRepoTree).mockResolvedValueOnce([
+      { path: 'unstamped.md', sha: 'a1' },
+      { path: 'stamped.md', sha: 'a2' },
+    ])
+    vi.mocked(mockApi.getFileContents)
+      .mockResolvedValueOnce({ content: '---\ntitle: Unstamped\n---\nBody' })
+      .mockResolvedValueOnce({ content: '---\ntitle: Stamped\nsensitivity: confidential\n---\nBody' })
+    vi.mocked(mockStore.upsertByPath).mockResolvedValue({ id: 'e', path: 'x' })
+
+    const worker = createKnowledgeSyncWorker({ store: mockStore, api: mockApi, credentials: mockCreds })
+    await worker.tick()
+
+    const calls = vi.mocked(mockStore.upsertByPath).mock.calls
+    expect(calls).toHaveLength(2)
+    expect(calls[0][0].sensitivity).toBe('public')
+    expect(calls[0][0].sensitivityExplicit).toBe(false)
+    expect(calls[1][0].sensitivity).toBe('confidential')
+    expect(calls[1][0].sensitivityExplicit).toBe(true)
+  })
+
+  it('treats an INVALID frontmatter stamp as unstamped (source default applies)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      vi.mocked(mockStore.getSourcesDueForSync).mockResolvedValueOnce([
+        { ...SOURCE, defaultSensitivity: 'confidential' },
+      ])
+      vi.mocked(mockApi.getBranchHead).mockResolvedValueOnce('sha_head')
+      vi.mocked(mockApi.getRepoTree).mockResolvedValueOnce([{ path: 'bad.md', sha: 'a1' }])
+      vi.mocked(mockApi.getFileContents).mockResolvedValueOnce({
+        content: '---\ntitle: Bad\nsensitivity: super-secret\n---\nBody',
+      })
+      vi.mocked(mockStore.upsertByPath).mockResolvedValue({ id: 'e', path: 'bad' })
+
+      const worker = createKnowledgeSyncWorker({ store: mockStore, api: mockApi, credentials: mockCreds })
+      await worker.tick()
+
+      const upsert = vi.mocked(mockStore.upsertByPath).mock.calls[0][0]
+      expect(upsert.sensitivity).toBe('confidential')
+      expect(upsert.sensitivityExplicit).toBe(false)
+    } finally {
+      warn.mockRestore()
+    }
   })
 })

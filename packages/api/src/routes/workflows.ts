@@ -373,6 +373,7 @@ function serializeWorkflow(w: import('@use-brian/core').WorkflowRecord) {
     lifecycleState: w.lifecycleState,
     lifecycleReason: w.lifecycleReason,
     pinned: w.pinned,
+    managedBy: w.managedBy,
     createdAt: w.createdAt.toISOString(),
     updatedAt: w.updatedAt.toISOString(),
   }
@@ -391,6 +392,7 @@ function serializeSummary(w: import('@use-brian/core').WorkflowRecord) {
     lifecycleState: w.lifecycleState,
     lifecycleReason: w.lifecycleReason,
     pinned: w.pinned,
+    managedBy: w.managedBy,
     updatedAt: w.updatedAt.toISOString(),
   }
 }
@@ -594,6 +596,21 @@ export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
 
     const existing = await opts.workflowStore.getById(userId, req.params.id)
     if (!existing) return notFound(res, 'Workflow not found')
+
+    // System-managed workflow (mig 411): its definition and trigger are
+    // materialized by the owning feature (e.g. the KB self-maintain config),
+    // so hand-edits of those fields through the builder are rejected —
+    // they'd be silently clobbered by the next re-materialization. Rename /
+    // enable / pin remain allowed (they don't fight the materializer).
+    if (
+      existing.managedBy &&
+      (parsed.data.definition !== undefined || parsed.data.trigger !== undefined)
+    ) {
+      return void res.status(409).json({
+        error: `This workflow is managed by the ${existing.managedBy} feature. Edit its configuration there instead of the builder.`,
+        managedBy: existing.managedBy,
+      })
+    }
 
     const fields: Parameters<WorkflowStore['update']>[2] = {}
     if (parsed.data.name !== undefined) {

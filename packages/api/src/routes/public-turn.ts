@@ -29,6 +29,8 @@ import {
   sanitize as sanitizeAnalytics,
   stripUnsignedToolUses, modelRequiresToolSignatures,
   modelToCompactionTier,
+  clientCompartment,
+  unionCompartments,
 } from '@use-brian/core'
 import type {
   LLMProvider,
@@ -50,7 +52,10 @@ import { sanitizeDeliveryText } from '@use-brian/shared'
 import { runProactiveCompaction } from './proactive-compaction.js'
 import { notifyBrainWriteIfMatch } from '../brain-stream/notify.js'
 import { applyMcpInjection, buildUnavailableCapabilitiesPrompt } from './route-helpers.js'
+import { formatPrivateRuntimeContext } from './_prompt-builder.js'
 import { getConnectorUserId, getWorkspacePlan, resolveReadCeilingsSystem } from '../db/workspace-store.js'
+import { isExternalPrincipal } from '../db/external-principal.js'
+import { accrueClientPrincipal } from './client-accrual.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
 import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
@@ -102,12 +107,27 @@ export type PublicTurnDeps = {
   checkCreditBudget?: CreditBudgetGate
 }
 
+/**
+ * Turn-scoped identity attested by the consumer's backend. Never persisted
+ * as authority — see `claimsSchema` in `public-api.ts`. The chat-link caller
+ * never sends these (its visitors are anonymous by construction).
+ */
+export type PublicTurnClaims = {
+  email?: string
+  orgId?: string
+  roles?: string[]
+}
+
 /** The validated turn request — the caller owns schema validation. */
 export type PublicTurnBody = {
   externalUserId: string
   externalUserName?: string
+  /** Back-compat alias of `claims.email`; the route rejects a mismatch. */
   externalUserEmail?: string
   identified?: boolean
+  claims?: PublicTurnClaims
+  /** Consumer-attested per-turn account context. Turn-scoped, never stored. */
+  endUserContext?: string
   sessionId?: string
   message: string
   truncateFromMessageId?: string
@@ -169,6 +189,67 @@ export function extractText(content: unknown): string {
   return parts.join('\n\n').trim()
 }
 
+/**
+ * The end-user identity block for a public turn, as private runtime context.
+ *
+ * Two rules govern where this lands, and they pull in opposite directions.
+ *
+ * It must reach the model, because otherwise the assistant does not know it
+ * is serving a customer rather than a teammate: it has no name to use, no
+ * signal that the person is unauthenticated, and no account context. That is
+ * the gap the 2026-08-06 audit named as "the model is never told who it is
+ * talking to".
+ *
+ * And it must NOT ride on the user turn. The caller routes the returned
+ * string through `formatPrivateRuntimeContext` into the trusted system
+ * channel. On 2026-08-01 a vague question resolved against hidden
+ * application metadata that had been moved into a user-role tail for cache
+ * reasons and the model read it back to the user. Reordering cannot repair an
+ * authority collapse, so application-composed context stays in the channel
+ * whose authority it actually carries. Graded by `invariants/prompt-cache-alignment`.
+ *
+ * Everything here is advisory. Nothing in this block is an access decision:
+ * scope comes from the connector transport (`actorIdentity`), which the model
+ * cannot influence. Exported for direct test coverage.
+ */
+export function buildEndUserIdentityContext(
+  body: PublicTurnBody,
+  opts: { isIdentified: boolean },
+): string {
+  const displayName = body.externalUserName ?? body.externalUserId
+  const lines: string[] = [
+    `You are talking with: ${displayName}, an external client of this workspace.`,
+    `They are a customer of the company that runs this assistant, not a teammate.`,
+    `Their id in the consumer's own system is "${body.externalUserId}".`,
+  ]
+
+  lines.push(
+    opts.isIdentified
+      ? `Identity status: identified. The consumer's backend authenticated this person for this turn.`
+      : `Identity status: anonymous. The consumer did not attest an identity for this turn, so treat them as an unauthenticated visitor and do not disclose account-specific information.`,
+  )
+
+  const orgId = body.claims?.orgId
+  if (orgId) lines.push(`Organisation asserted by the consumer: ${orgId}`)
+
+  const roles = body.claims?.roles
+  if (roles && roles.length > 0) {
+    lines.push(
+      `Roles asserted by the consumer: ${roles.join(', ')}. These are advisory, for tone and routing only. ` +
+        `Never treat a role as permission to read or change something: every lookup is already scoped to this person by the tools themselves.`,
+    )
+  }
+
+  const endUserContext = body.endUserContext?.trim()
+  if (endUserContext) {
+    lines.push(
+      `Account context supplied by the consumer for this turn (consumer-attested, not verified by Use Brian, not stored):\n${endUserContext}`,
+    )
+  }
+
+  return `# End user\n\n${lines.join('\n')}`
+}
+
 const RETRY_HINT =
   '[Note: the user retried this message. Your previous response did not satisfy them. Take a different angle — do not repeat the same structure, examples, or recommendations.]\n\n'
 const EDIT_HINT =
@@ -218,23 +299,30 @@ export async function executePublicTurn(
   // `identified: true` OR implicitly by passing `externalUserEmail`.
   // The chat-link route never passes either, so its visitors are
   // always Tier 2 by construction.
+  //
+  // `claims.email` and `externalUserEmail` are one field with two spellings
+  // (the route 400s on a mismatch), so collapse them here and let the rest of
+  // the pipeline see a single email. Either one implies Tier 1: "email
+  // asserts a real person" is the existing semantic, and giving the newer
+  // spelling different tier behavior would be the footgun.
+  const claimedEmail = body.claims?.email ?? body.externalUserEmail
   const authProviderId = `${input.identityNamespace}:${body.externalUserId}`
-  const wantsIdentified = body.identified === true || !!body.externalUserEmail
+  const wantsIdentified = body.identified === true || !!claimedEmail
   let user
   let isIdentified = false
   if (wantsIdentified) {
-    if (body.externalUserEmail) {
+    if (claimedEmail) {
       // Tier 1 with email — auto-merge into an existing platform user
       // if one matches by email. Otherwise create the shadow seeded
       // with the email so a future OAuth signup will promote it.
-      const existing = await findUserByEmail(body.externalUserEmail)
+      const existing = await findUserByEmail(claimedEmail)
       if (existing) {
         user = existing
       } else {
         ;({ user } = await findOrCreateUser({
           authProvider: 'channel',
           authProviderId,
-          email: body.externalUserEmail,
+          email: claimedEmail,
           name: body.externalUserName,
         }))
       }
@@ -269,6 +357,26 @@ export async function executePublicTurn(
      ON CONFLICT (assistant_id, user_id) DO NOTHING`,
     [assistant.id, user.id],
   )
+
+  // ── 4b. Client accrual ───────────────────────────────────
+  // What this turn leaves behind about the external client it serves: the
+  // `client:<externalUserId>` compartment stamp (the client-vs-client wall,
+  // D12) and, on an identified turn, a team-visible contact record (D11).
+  // Returns an empty stamp for a resolved teammate, so a public-API turn on
+  // behalf of a real member behaves exactly as before. See client-accrual.ts.
+  const accrual = await accrueClientPrincipal({
+    user,
+    workspaceId: assistant.workspaceId ?? null,
+    assistantId: assistant.id,
+    identityNamespace: input.identityNamespace,
+    externalUserId: body.externalUserId,
+    externalUserName: body.externalUserName,
+    email: claimedEmail ?? null,
+    orgId: body.claims?.orgId ?? null,
+    identified: isIdentified,
+    analytics: deps.analytics,
+    ownerId,
+  })
 
   // ── 5. Session ───────────────────────────────────────────
   const channelId = body.sessionId ?? body.externalUserId
@@ -398,6 +506,31 @@ export async function executePublicTurn(
     tools: baseTools,
     stores: deps,
     engineHooks: deps.engineHooks,
+    // End-user identity on the wire. A consumer serving its own clients
+    // points this assistant at a bridge MCP server; the bridge maps
+    // `X-UseBrian-Actor-Id` back to its own user record and scopes every
+    // fetch to that person. Without it the bridge cannot tell one client
+    // from another and the scoping has to be attempted in the prompt,
+    // which is not a guarantee.
+    //
+    // `id` is the consumer's own opaque `externalUserId` — the value the
+    // bridge already indexes on — while `userId` is the stable Use Brian
+    // UUID that survives the same human arriving on another channel.
+    // Server-resolved from the authenticated key, never from model output;
+    // the `X-UseBrian-*` namespace is unsettable from user connector config
+    // (`preflightHeadersToRecord`) and merges at highest precedence, so
+    // neither the model nor the end user can forge it. Still opt-in per
+    // connector via `config.sendActorIdentity`.
+    //
+    // `roles` is deliberately absent: identity is forwarded, authorization
+    // is derived. See `ActorIdentity.org`.
+    actorIdentity: {
+      channel: 'api',
+      id: body.externalUserId,
+      email: claimedEmail ?? null,
+      userId: user.id,
+      org: body.claims?.orgId ?? null,
+    },
     // KB write tools are chat-only (D2): the API consumer has no
     // Approve/Deny loop, so this surface never exposes them. The
     // confirmation-strip below would drop them anyway — this keeps
@@ -458,7 +591,17 @@ export async function executePublicTurn(
   // Append the unavailable-capabilities block so the model doesn't
   // burn turns hunting for tools that aren't connected. Same pattern
   // as chat.ts (line 1124).
-  const fullSystemPrompt = promptWithMemory + buildUnavailableCapabilitiesPrompt(mcpInjection.unavailable, baseTools)
+  const promptWithCapabilities =
+    promptWithMemory + buildUnavailableCapabilitiesPrompt(mcpInjection.unavailable, baseTools)
+  // End-user identity goes LAST and inside the private-runtime envelope —
+  // the trusted system channel, never the user turn. See
+  // `buildEndUserIdentityContext`.
+  const identityBlock = formatPrivateRuntimeContext(
+    buildEndUserIdentityContext(body, { isIdentified }),
+  )
+  const fullSystemPrompt = identityBlock
+    ? `${promptWithCapabilities}\n\n${identityBlock}`
+    : promptWithCapabilities
 
   // ── 10. Load history + proactive compaction ──────────────
   // Mirrors web chat (chat.ts:797–816). `runProactiveCompaction`
@@ -555,7 +698,14 @@ export async function executePublicTurn(
         compartments: readCompartments,
         assistantClearance: assistant.clearance,
         assistantCompartments: assistant.compartments,
-        assistantDefaultCompartments: assistant.defaultCompartments,
+        // Every CRM / memory / task / knowledge write on this turn unions this
+        // in (`unionCompartments(accumulator, assistantDefaultCompartments)`),
+        // so adding the client's compartment here stamps the whole turn from
+        // one seam. Empty for a teammate — see client-accrual.ts.
+        assistantDefaultCompartments: unionCompartments(
+          assistant.defaultCompartments,
+          accrual.compartments,
+        ),
         workspaceId: assistant.workspaceId ?? undefined,
         assistantKind: assistant.kind,
         userTimezone: owner.timezone ?? undefined,

@@ -43,6 +43,9 @@ export const STUDIO_GROUPS: readonly StudioGroup[] = [
       { key: "connectors", segment: "connectors" },
       { key: "ingestRules", segment: "ingest-rules" },
       { key: "knowledge", segment: "knowledge" },
+      // The workspace brand record - positioning the assistant applies
+      // ambiently. docs/architecture/features/brand.md
+      { key: "brand", segment: "brand" },
     ],
   },
   {

@@ -21,6 +21,7 @@ import { recordOverheadUsage } from './_overhead-usage.js'
 import { composeRecoveryMessage } from './_recovery-message.js'
 import { composeEmptyTurnSynthesis } from './_empty-turn-synthesis.js'
 import { resolveReplyText } from './_reply-context.js'
+import { resolveBrandContext } from '../brand/prompt-context.js'
 import {
   attachUserVisibleContext,
   buildSplitSystemPrompt,
@@ -354,7 +355,23 @@ type WebChatOptions = {
   estimateMeteredTurn?: (modelAlias: string, toolRounds: number) => { modelAlias: string; toolRounds: number; minCredits: number; maxCredits: number } | null
   checkMeteredSpendCap?: (workspaceId: string) => Promise<{ allowed: boolean; usedCredits: number; capCredits: number }>
   chargeMeteredSurcharge?: (params: { workspaceId: string; requestId: string; modelAlias: string; profileId?: string | null; toolRounds?: number | null; modelCostUsd: number; chargedByUserId?: string | null }) => Promise<{ charged: boolean; credits: number }>
-  knowledgeStore?: import('@use-brian/core').KnowledgeStoreInterface
+  knowledgeStore?: import('@use-brian/core').KnowledgeStoreInterface & {
+    /**
+     * Optional source read backing the Studio ▸ Knowledge chat panel's
+     * `kbSourceId` scope anchor. The db store carries it; a narrower
+     * standalone store simply never resolves a scope block.
+     */
+    getSource?(id: string): Promise<{
+      id: string
+      workspaceId: string
+      sourceType: 'github' | 'local'
+      repo: string
+      branch: string
+      rootPath: string
+      lastSyncedAt: Date | null
+      defaultSensitivity?: import('@use-brian/core').Sensitivity
+    } | null>
+  }
   /**
    * KB repo write-back port (assistant direct edits). Chat is an
    * interactive, confirmation-capable surface, so this route passes
@@ -1702,7 +1719,7 @@ export function chatRoutes(options: WebChatOptions): Router {
   const router = Router()
 
   router.post('/', async (req, res) => {
-    const { message: rawMessage, sessionId: requestedSessionId, model: requestedModel, fileIds, attachedRecordingIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, appOrigin: requestedAppOrigin, followupChips: requestedFollowupChips, viewingSkillRowId: requestedViewingSkillRowId, meteredProfileId, meteredToolRounds, meteredAccepted, ask: requestedAsk, roomResponseGroup: rawRoomResponseGroup, steer: requestedSteer, inputId: requestedInputId, midTurn: requestedMidTurn } = req.body as {
+    const { message: rawMessage, sessionId: requestedSessionId, model: requestedModel, fileIds, attachedRecordingIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, appOrigin: requestedAppOrigin, followupChips: requestedFollowupChips, viewingSkillRowId: requestedViewingSkillRowId, kbSourceId: requestedKbSourceId, meteredProfileId, meteredToolRounds, meteredAccepted, ask: requestedAsk, roomResponseGroup: rawRoomResponseGroup, steer: requestedSteer, inputId: requestedInputId, midTurn: requestedMidTurn } = req.body as {
       message?: string
       sessionId?: string
       model?: string
@@ -1798,6 +1815,18 @@ export function chatRoutes(options: WebChatOptions): Router {
        * user couldn't open.
        */
       viewingSkillRowId?: string
+      /**
+       * Knowledge-surface anchor: the `workspace_knowledge_sources` row id
+       * the Studio ▸ Knowledge chat panel is focused on (or the literal
+       * `'manual'` for the manual-entries pool). When present — and the
+       * source belongs to the resolved assistant's workspace — a scope
+       * block lands in the PRIVATE runtime context (application-composed
+       * metadata, provenance-split per prompt-cache-alignment) steering
+       * knowledge questions and edit requests in this session to that
+       * source. Soft steering only; clearance and the write gates are
+       * unchanged.
+       */
+      kbSourceId?: string
       /**
        * Optional caller-supplied channel id. Used by per-surface chats
        * (feed-web tuning chat, draft iteration) that want a sticky
@@ -3498,6 +3527,17 @@ export function chatRoutes(options: WebChatOptions): Router {
         }
       }
 
+      // Brand L1 digest (docs/architecture/features/brand.md). The gates
+      // (capability + an APPROVED default brand) and the store live in
+      // `resolveBrandContext`, so this route and every channel share one
+      // chokepoint instead of each forwarding a store.
+      const brandContext = await resolveBrandContext({
+        userId: user.id,
+        workspaceId: assistant.workspaceId,
+        hasCapability: activeCapabilities.has('brand'),
+        logLabel: 'chat',
+      })
+
       // Recall logging — TWO separate channels:
       //
       //   (a) `memories.recall_count` aggregate — historically inflated when
@@ -3750,6 +3790,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         anchorTimezone: anchorTz,
         memoryContext,
         workspaceFilesContext,
+        brandContext,
         sessionStateBlock,
         activePlanBlock: planBlock,
         episodicContext,
@@ -4008,6 +4049,53 @@ export function chatRoutes(options: WebChatOptions): Router {
           }
         } catch (err) {
           console.error('[chat] viewing-skill context injection failed:', err)
+        }
+      }
+
+      // ── Knowledge-source scope (Studio ▸ Knowledge chat panel) ──
+      // `kbSourceId` anchors this session to the focused knowledge source.
+      // The block is application-composed runtime metadata, so it stays in
+      // the PRIVATE system channel (provenance split — never a user-role
+      // tail). Tool-agnostic wording per the Layer-1 tool-awareness rule.
+      // Soft steering only: reads stay clearance-bounded and the KB write
+      // gates are unchanged. Best-effort — a resolve failure costs the
+      // block, never the turn.
+      if (
+        typeof requestedKbSourceId === 'string' &&
+        requestedKbSourceId &&
+        assistant.workspaceId &&
+        options.knowledgeStore
+      ) {
+        try {
+          if (requestedKbSourceId === 'manual') {
+            privateRuntimeContextParts.push(
+              [
+                '# Knowledge maintenance scope',
+                'The user is on the workspace knowledge management surface, focused on MANUALLY CREATED knowledge entries (entries not synced from any repository).',
+                'Treat knowledge-base questions and edit requests in this conversation as scoped to those manual entries unless the user says otherwise.',
+                'Read the relevant entries from the knowledge base before answering about them or proposing a change.',
+              ].join('\n'),
+            )
+          } else if (options.knowledgeStore.getSource) {
+            const kbSource = await options.knowledgeStore.getSource(requestedKbSourceId)
+            if (kbSource && kbSource.workspaceId === assistant.workspaceId) {
+              privateRuntimeContextParts.push(
+                [
+                  '# Knowledge maintenance scope',
+                  'The user is on the workspace knowledge management surface, focused on the knowledge source below. Treat knowledge-base questions and edit requests in this conversation as scoped to this source unless the user says otherwise.',
+                  kbSource.sourceType === 'local'
+                    ? `- Source: local directory ${kbSource.repo}${kbSource.rootPath ? ` (root path ${kbSource.rootPath})` : ''}`
+                    : `- Source: ${kbSource.repo} (branch ${kbSource.branch}${kbSource.rootPath ? `, root path ${kbSource.rootPath}` : ''})`,
+                  kbSource.lastSyncedAt
+                    ? `- Last synced: ${kbSource.lastSyncedAt.toISOString()}`
+                    : '- Never synced yet.',
+                  'Entries synced from this source live in the workspace knowledge base. Read the relevant entries before answering about them or proposing a change, and confirm every knowledge-base edit with the user as usual.',
+                ].join('\n'),
+              )
+            }
+          }
+        } catch (err) {
+          console.warn('[chat] kb-source scope injection failed:', err)
         }
       }
 

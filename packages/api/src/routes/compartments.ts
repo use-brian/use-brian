@@ -15,6 +15,7 @@
  */
 import { Router, type Request, type Response } from 'express'
 import { z } from 'zod'
+import { CLIENT_COMPARTMENT_PREFIX, isClientCompartment } from '@use-brian/core'
 import type { CompartmentStore } from '../db/compartment-store.js'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -60,6 +61,16 @@ export function compartmentRoutes(opts: Options): Router {
     defaults: string[],
   ): Promise<string | null> {
     const keys = new Set<string>([...(grant ?? []), ...defaults])
+    // `client:*` is machine-minted per external principal (D9): one key per
+    // client, never registered, never operator-assigned. The registry check
+    // below would already reject an unregistered key, but say why — a grant
+    // naming a client compartment is a category error, not a typo, and the
+    // honest message is what stops someone from "fixing" it by registering one.
+    for (const k of keys) {
+      if (isClientCompartment(k)) {
+        return `'${CLIENT_COMPARTMENT_PREFIX}*' is a reserved namespace minted per external client; it cannot be granted.`
+      }
+    }
     if (keys.size > 0) {
       const registered = await opts.compartmentStore.registeredKeysSystem(workspaceId)
       for (const k of keys) {
@@ -78,7 +89,16 @@ export function compartmentRoutes(opts: Options): Router {
   router.get('/', async (req, res) => {
     const ws = await gate(req, res, false)
     if (!ws) return
-    res.json({ compartments: await opts.compartmentStore.list(req.userId!, ws) })
+    // Filter the reserved client namespace out of the picker payload (D9).
+    // `KEY_RE` forbids a colon so the registry cannot hold one today, which
+    // makes this belt-and-braces — deliberately: the cardinality here is
+    // per-external-client, so if any future path ever did register one, a
+    // picker that grew to thousands of machine-minted rows is the failure,
+    // and filtering by rule survives that where filtering by list would not.
+    const compartments = (await opts.compartmentStore.list(req.userId!, ws)).filter(
+      (entry) => !isClientCompartment(entry.key),
+    )
+    res.json({ compartments })
   })
 
   const CreateBody = z.object({

@@ -729,3 +729,44 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
     expect(typed?.resultChars).toBeLessThan(Number(snapshot?.resultChars))
   })
 })
+
+/**
+ * Computer Use is an `auth_type: 'none'` built-in primitive: the `computer`
+ * capability grant is its off switch, so the whole tool surface must carry the
+ * tag. An untagged tool keeps running after the user switches the primitive
+ * off — the failure the switch exists to prevent.
+ * See docs/architecture/features/builtin-primitives.md.
+ */
+describe('[COMP:sandbox/browser-tools] capability tag', () => {
+  it('tags every browser tool with requiresCapability so the off switch can gate them', () => {
+    const tools = createComputerTools({
+      local: fakeProvider('local'),
+      cloud: fakeProvider('cloud'),
+      cloudAvailable: () => true,
+    })
+    const named = Object.values(tools).filter(
+      (t): t is Tool => !!t && typeof t === 'object' && 'name' in t,
+    )
+    expect(named.length).toBeGreaterThan(0)
+    for (const tool of named) {
+      expect(tool.requiresCapability, `${tool.name} must be capability-gated`).toBe('computer')
+    }
+  })
+
+  it('covers the whole governed surface via the graded invariant, not just this factory', async () => {
+    // The other 7 computer tools are built by factories with heavy option
+    // shapes (compute/skill-runner/bu-fallback). `pnpm check` ->
+    // invariants/builtin-primitive-capability greps every factory's source, so
+    // the runtime assertion here stays narrow on purpose. This guards the
+    // pairing: the governance list must not grow a tool this file silently
+    // stops covering without the invariant picking it up.
+    const { BOOT_INJECTED_BUILTIN_TOOLS } = await import('@use-brian/shared')
+    expect(BOOT_INJECTED_BUILTIN_TOOLS.computer.length).toBeGreaterThan(
+      Object.keys(createComputerTools({
+        local: fakeProvider('local'),
+        cloud: fakeProvider('cloud'),
+        cloudAvailable: () => true,
+      })).length,
+    )
+  })
+})

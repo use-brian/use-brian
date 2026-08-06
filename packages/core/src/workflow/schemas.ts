@@ -559,6 +559,13 @@ const eventSourceRefSchema = z.discriminatedUnion('type', [
     // `{{input.event.path}}`, not `match`.
     type: z.literal('knowledge'),
   }),
+  z.object({
+    // Id-less: the workspace's brand records. Lifecycle actions (created /
+    // updated / approved / superseded) are matched via `inChannels`; the
+    // brand slug via `tags` (the multi-brand scoping axis); its name via
+    // `keywords`.
+    type: z.literal('brand'),
+  }),
 ])
 
 const eventMatchSchema = z.object({
@@ -715,6 +722,7 @@ export const WORKFLOW_EVENT_SOURCE_TYPES = [
   'page',
   'task',
   'knowledge',
+  'brand',
 ] as const satisfies readonly z.infer<typeof EventSubscriptionSchema>['source']['type'][]
 
 // Compile-time exhaustiveness: `satisfies` (above) rejects a wrong/extra

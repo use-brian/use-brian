@@ -86,7 +86,7 @@ import type {
   ToolContext,
   Embedder,
 } from '@use-brian/core'
-import { query } from '../db/client.js'
+import { query, runWithAgentClearance } from '../db/client.js'
 import { searchRecording as searchRecordingFn, readRecordingRange, type RecordingSegmentHit } from '../db/retrieval-store.js'
 import { searchFileSegments as searchFileSegmentsFn, readFileSegmentRange, type FileSegmentHit } from '../db/retrieval-store.js'
 import type { BrainKeyScope } from '../db/brain-keys-store.js'
@@ -181,6 +181,20 @@ export type BrainRetrievalTools = {
  * (persists base64 bytes the caller supplies). Only `sendFile` is excluded
  * (no chat channel to deliver on).
  */
+/**
+ * Brand primitive tools for the programmatic surface (decision D8). `getBrand`
+ * rides both key scopes; `saveBrandDraft` is a write tool, exposed only on a
+ * `read_write` key — and, like the chat tool it bridges, it can only ever
+ * write the DRAFT. There is no approve tool here and there will not be one:
+ * the supplier flow is that an agency session pushes a draft into the client's
+ * workspace and the CLIENT approves it in their own Studio. A programmatic
+ * approve would hand governance to the supplier.
+ */
+export type BrainBrandTools = {
+  getBrand: Tool
+  updateBrandDraft: Tool
+}
+
 export type BrainFileTools = {
   fileWrite: Tool
   fileAppend: Tool
@@ -308,6 +322,13 @@ type BuildOpts = {
    */
   fileTools?: BrainFileTools
   /**
+   * Brand primitive tools (docs/architecture/features/brand.md). Optional so a
+   * build that omits them exposes no brand surface, mirroring `fileTools`.
+   * `saveBrandDraft` is the `updateBrandDraft` chat tool under its
+   * programmatic name — draft-only, never able to approve.
+   */
+  brandTools?: BrainBrandTools
+  /**
    * Programmatic ingest entry to Pipeline B. When wired, `ingestToBrain` in its
    * default (`decompose: true`) mode materializes an Episode and runs the brain
    * extraction pipeline — entities / edges / memories / tasks — instead of a flat
@@ -359,6 +380,8 @@ const READ_TOOL_NAMES = new Set<string>([
   // Workspace files (read) — present only when fileTools are wired
   'fileRead',
   'fileSearch',
+  // Brand record (read) — present only when brandTools are wired
+  'getBrand',
   // Doc pages (read) — present only when docTools are wired
   'readPage',
   'listPages',
@@ -1032,15 +1055,34 @@ function buildDocPageTools(
     },
   }
 
+  // Agent-principal wrap (teamspaces.md → "Agent access"): a brain-key call
+  // binds to (workspace owner, primary assistant), so without this wrap a
+  // page's teamspace visibility would hinge on the OWNER ACCOUNT's
+  // teamspace memberships — the 2026-08-07 incident. Each doc-page handler
+  // runs inside `runWithAgentClearance(ctx.clearance)` (the key's effective
+  // clearance: primary assistant capped by the key's maxClearance), so the
+  // saved_views agent leg resolves teamspace pages by clearance vs
+  // sensitivity. Only the doc-page tools get the wrap — nothing else on the
+  // brain surface reads saved_views.
+  const asAgentPrincipal = (tool: BrainTool): BrainTool => ({
+    ...tool,
+    handler: async (args) => {
+      const ctx = await resolveCtx()
+      if ('error' in ctx) return text(ctx.error, true)
+      // resolveCtx caches, so the handler's own resolveCtx() re-read is free.
+      return runWithAgentClearance(ctx.clearance, () => tool.handler(args))
+    },
+  })
+
   return {
-    readPage,
-    listPages,
-    editPage,
-    deletePage,
-    createPage,
-    listPageTemplates: listPageTemplatesTool,
-    createPageFromTemplate,
-    createPageTemplate,
+    readPage: asAgentPrincipal(readPage),
+    listPages: asAgentPrincipal(listPages),
+    editPage: asAgentPrincipal(editPage),
+    deletePage: asAgentPrincipal(deletePage),
+    createPage: asAgentPrincipal(createPage),
+    listPageTemplates: asAgentPrincipal(listPageTemplatesTool),
+    createPageFromTemplate: asAgentPrincipal(createPageFromTemplate),
+    createPageTemplate: asAgentPrincipal(createPageTemplate),
   }
 }
 
@@ -1413,6 +1455,43 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       ]
     : []
 
+  // ── Brand bridges (docs/architecture/features/brand.md). Present only when
+  // the brand tools are wired. `updateBrandDraft` is renamed `saveBrandDraft`
+  // on this surface to match the programmatic naming of its neighbours
+  // (`saveTask`, `saveContact`, `saveFileBytes`) — a label change only; the
+  // underlying tool, and therefore the draft-only guarantee, is identical.
+  //
+  // As with every brain-MCP write, the `read_write` scope IS the authorization
+  // and the bridge calls execute() directly, so the chat-side
+  // requiresConfirmation gate does not run. That is safe HERE and nowhere else
+  // in this feature precisely because the tool cannot approve: the worst a
+  // compromised key can do is leave a bad draft that a human must still
+  // approve in Studio before anything reads it.
+  const brandBridges: BrainTool[] = opts.brandTools
+    ? [
+        bridgeCoreTool(opts.brandTools.getBrand, resolveCtx, workspaceId, {
+          descriptionOverride:
+            "Read this workspace's brand record: naming and legal usage, strategy, messaging and " +
+            'voice, color tokens, typography, logo variants (bound by workspace file id), ' +
+            'applications, claims, rights, governance, and provenance sources. Returns the ' +
+            'APPROVED record by default; `include_draft: true` returns unapproved changes, which ' +
+            'are a proposal and must never be presented as settled. Omit `slug` for the workspace ' +
+            "default brand. Scoped to the key's workspace and clearance.",
+        }),
+        bridgeCoreTool(opts.brandTools.updateBrandDraft, resolveCtx, workspaceId, {
+          nameOverride: 'saveBrandDraft',
+          descriptionOverride:
+            "Propose a change to this workspace's brand record. The change lands in the DRAFT " +
+            'only. It does NOT take effect until a workspace owner or admin approves it in ' +
+            'Studio, which creates a new approved version. This tool cannot approve or activate, ' +
+            'and no such tool exists on this surface - do not report the brand as changed. ' +
+            'Each field group you pass REPLACES that group whole; call getBrand first and send ' +
+            'the complete group back when adding to a list. Bind assets by workspace file id ' +
+            '(upload them with saveFileBytes first), never by path or filename.',
+        }),
+      ]
+    : []
+
   // ── Doc-page tools (readPage / editPage / deletePage). Present only when the
   // doc stores are wired (opts.docTools set) — mirrors the file surface. The
   // same RLS-gated stores the chat doc tools use: `readPage` rides both scopes,
@@ -1449,6 +1528,7 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       t.name === 'getDeal' || t.name === 'listDeals',
     ),
     ...fileBridges.filter((t) => t.name === 'fileRead' || t.name === 'fileSearch'),
+    ...brandBridges.filter((t) => t.name === 'getBrand'),
     ...(docPageTools
       ? [docPageTools.readPage, docPageTools.listPages, docPageTools.listPageTemplates]
       : []),
@@ -1473,6 +1553,7 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       t.name === 'fileSetMeta' || t.name === 'fileDelete' ||
       t.name === 'saveFileBytes' || t.name === 'saveFileToBrain',
     ),
+    ...brandBridges.filter((t) => t.name === 'saveBrandDraft'),
     ...(docPageTools
       ? [
           docPageTools.editPage,

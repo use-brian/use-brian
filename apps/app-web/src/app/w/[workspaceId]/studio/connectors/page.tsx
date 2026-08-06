@@ -136,9 +136,11 @@ const OAUTH_SCOPES_WITH_EMAIL: Record<string, string[]> = Object.fromEntries(
 const DESKTOP_OAUTH_CONNECTORS = new Set(["gcal", "gmail", "gdrive", "notion"]);
 
 /**
- * First-party workspace primitives (Workspace Files). Always-on — no
- * connect/disconnect, no account, tools gated by assistant capabilities at
- * runtime. Rendered in the rail's Built-in group with an "Always on" pill.
+ * First-party workspace primitives (Workspace Files / Office / Computer Use).
+ * No connect/disconnect and no account: they are switched on or off per
+ * assistant by the capability grant, from that assistant's Tools tab. This
+ * page is workspace-scoped, so it shows a neutral "Built-in" pill rather than
+ * a state it cannot represent (one assistant may have it, another may not).
  * Derived from the registry (never a hardcoded slug list); the `custom`
  * guard keeps a slug-colliding custom MCP row out of the bucket.
  */
@@ -2761,9 +2763,14 @@ function ConnectorsList() {
                     </div>
                   )}
 
-                  {/* Actions — Reconnect (PAT), Edit details, Remove. */}
+                  {/* Actions — Reconnect (PAT), Edit details, Remove. The
+                      company mailbox (imap) is excluded from the single-secret
+                      form: its credential is a typed email+password+hosts
+                      blob, and posting a bare clientSecret would corrupt it.
+                      Rotation goes through the imap connect form instead
+                      (same address reconnects the team mailbox in place). */}
                   <div className="flex flex-wrap items-center gap-2">
-                    {!isOauth && (
+                    {!isOauth && sel.id !== "imap" && (
                       <button
                         type="button"
                         onClick={() => {
@@ -2813,7 +2820,7 @@ function ConnectorsList() {
                   )}
 
                   {/* Reconnect form — rotate the PAT / secret for the whole team. */}
-                  {wsReconnectId === iid && !isOauth && (
+                  {wsReconnectId === iid && !isOauth && sel.id !== "imap" && (
                     <div className="space-y-2">
                       <p className="text-xs text-muted-foreground">{tc.wsReconnectDesc}</p>
                       <input
@@ -2886,6 +2893,18 @@ function ConnectorsList() {
                         </button>
                       </div>
                     </div>
+                  )}
+
+                  {/* Company mailbox — archive sync status + backfill consent,
+                      the same panel as the personal card. The /imap/* status
+                      routes resolve workspace-owned instances for cleared
+                      members, so a transferred mailbox keeps its archive
+                      controls. */}
+                  {sel.id === "imap" && sel.connected && (
+                    <>
+                      <ImapSyncPanel instanceId={iid} />
+                      <p className="text-[11px] text-muted-foreground">{tc.wsImapRotateNote}</p>
+                    </>
                   )}
 
                   {/* Shared per-tool allow/ask/block — the WORKSPACE policy the
@@ -3079,7 +3098,7 @@ function ConnectorsList() {
                     )}
                   >
                     {builtin
-                      ? tc.alwaysOn
+                      ? tc.builtinPill
                       : sel.connected && sel.healthStatus === "auth_failed"
                         ? tc.reconnectNeeded
                         : sel.connected

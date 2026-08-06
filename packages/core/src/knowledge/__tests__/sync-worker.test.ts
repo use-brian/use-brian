@@ -38,6 +38,7 @@ const SOURCE = {
   rootPath: '',
   lastSyncedSha: null as string | null,
   connectorInstanceId: null as string | null,
+  defaultSensitivity: 'internal' as const,
 }
 
 describe('[COMP:knowledge/sync-worker] createKnowledgeSyncWorker', () => {

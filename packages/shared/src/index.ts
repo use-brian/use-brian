@@ -20,6 +20,7 @@ export * from './mini-apps.js'
 export * from './emoji-reactions.js'
 export * from './page-icon.js'
 export * from './doc-theme/index.js'
+export * from './brand/index.js'
 export * from './ingest-append-contract.js'
 export * from './graph-communities.js'
 

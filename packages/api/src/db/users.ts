@@ -1,4 +1,5 @@
 import { query, getPool } from './client.js'
+import { seedBuiltinPrimitiveCapabilities } from './capability-seed.js'
 import { generateHandle } from '@use-brian/core'
 
 export type User = {
@@ -243,15 +244,29 @@ export async function findOrCreateUser(params: {
     // 'tasks' / 'crm' and the per-turn filter hides them when no active
     // grant exists. Owner toggles via the assistant settings page.
     // See docs/plans/company-brain.md §17.
+    //
+    // 'files' / 'office' / 'computer' are the built-in workspace primitives.
+    // Default-ON — switching one off is a
+    // deliberate act, so a fresh assistant behaves exactly as before this
+    // switch existed. Their off switch lives on the assistant's Tools tab.
+    // See docs/architecture/features/builtin-primitives.md.
     await client.query(
       `INSERT INTO assistant_capabilities
          (assistant_id, capability, granted_by_user_id, reason)
-       VALUES ($1, 'tasks', $2, '§17 default-on at primary creation'),
-              ($1, 'crm',   $2, '§17 default-on at primary creation'),
-              ($1, 'goals', $2, 'goals default-on at primary creation'),
-              ($1, 'views', $2, 'doc-skill parity — default-on at primary creation'),
-              ($1, 'files', $2, 'doc-skill parity — default-on at primary creation')`,
+       VALUES ($1, 'tasks',    $2, '§17 default-on at primary creation'),
+              ($1, 'crm',      $2, '§17 default-on at primary creation'),
+              ($1, 'goals',    $2, 'goals default-on at primary creation'),
+              ($1, 'views',    $2, 'doc-skill parity — default-on at primary creation'),
+              ($1, 'files',    $2, 'built-in primitive — default-on at primary creation')`,
       [assistant.rows[0].id, user.id],
+    )
+    // office / computer — seeded for EVERY assistant kind, not just primaries
+    // (they were injected unconditionally before the off switch existed).
+    await seedBuiltinPrimitiveCapabilities(
+      (sql, params) => client.query(sql, params as never[]),
+      assistant.rows[0].id,
+      user.id,
+      'built-in primitive — default-on at primary creation',
     )
 
     // The default "General" room — same seeding as workspaceStore.create()

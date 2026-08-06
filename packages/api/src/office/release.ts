@@ -17,6 +17,8 @@ import {
   preflightOfficeCandidate,
   type OfficeArtifactSnapshot,
 } from '@use-brian/office-model'
+import type { BrandClaim } from '@use-brian/shared'
+import { reviewBrandClaims } from './brand-claims.js'
 
 export type OfficeReleaseAction = 'export' | 'share' | 'present' | 'send' | 'publish' | 'derivative'
 export type OfficeReleaseClaim = { id: string; classification: string; confidence: number; severity: string; reasonCode: string; status: string }
@@ -53,6 +55,15 @@ export function reviewOfficeRelease(params: {
   action: OfficeReleaseAction
   destination: OfficeReleaseDestination
   claims: readonly OfficeReleaseClaim[]
+  /**
+   * The ACTIVE APPROVED brand record's claims register, when the workspace has
+   * one. Distinct from `claims` above: those are provenance findings about
+   * statements this artifact makes, these are standing decisions about what
+   * the company may say at all. Absent (no brand, no `brand` capability, a
+   * draft-only brand) → the brand check contributes nothing, which is the
+   * state of every workspace that has not configured a brand.
+   */
+  brandClaims?: readonly BrandClaim[]
   media: readonly OfficeReleaseMedia[]
   acknowledgement?: OfficeReleaseAcknowledgement
   format?: 'native' | 'pdf'
@@ -76,6 +87,11 @@ export function reviewOfficeRelease(params: {
   for (const claim of params.claims) {
     if (claim.status === 'superseded' || claim.status === 'resolved') continue
     if (claim.classification === 'unsupported_conflicted' || claim.confidence < 0.7 || claim.severity === 'high') warnings.push({ code: `claim.${claim.id}.${claim.reasonCode}`, message: 'A weak, stale, unsupported, or conflicted claim needs review.', subjectId: claim.id })
+  }
+  if (params.brandClaims && params.brandClaims.length > 0) {
+    const brand = reviewBrandClaims({ snapshot: params.snapshot, claims: params.brandClaims })
+    blocks.push(...brand.blocks)
+    warnings.push(...brand.warnings)
   }
   for (const media of params.media) {
     // A caller-supplied destination flag is not proof that disclosure exists

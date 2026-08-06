@@ -268,6 +268,36 @@ describe('[COMP:api/actor-identity] actorIdentityHeaders', () => {
     })
   })
 
+  it('emits the org header (dual-namespaced) when the consumer claimed one', () => {
+    // The public API's `claims.orgId` rides here so a bridge can scope a
+    // lookup to the right tenant. Identity only: `claims.roles` is
+    // deliberately absent from ActorIdentity, so no role can ever become a
+    // header a bridge might mistake for an access decision.
+    expect(
+      actorIdentityHeaders({
+        channel: 'api', id: 'cust_8812', email: 'jane@client.example',
+        userId: 'u-shadow-1', org: 'acme-corp',
+      }),
+    ).toEqual({
+      'X-UseBrian-Actor-Channel': 'api',
+      'X-Sidanclaw-Actor-Channel': 'api',
+      'X-UseBrian-User-Id': 'u-shadow-1',
+      'X-Sidanclaw-User-Id': 'u-shadow-1',
+      'X-UseBrian-Actor-Id': 'cust_8812',
+      'X-Sidanclaw-Actor-Id': 'cust_8812',
+      'X-UseBrian-Actor-Email': 'jane@client.example',
+      'X-Sidanclaw-Actor-Email': 'jane@client.example',
+      'X-UseBrian-Actor-Org': 'acme-corp',
+      'X-Sidanclaw-Actor-Org': 'acme-corp',
+    })
+  })
+
+  it('omits the org header when no org was claimed', () => {
+    const headers = actorIdentityHeaders({ channel: 'api', id: 'cust_1', userId: 'u-5', org: null })
+    expect(headers).not.toHaveProperty('X-UseBrian-Actor-Org')
+    expect(headers).not.toHaveProperty('X-Sidanclaw-Actor-Org')
+  })
+
   it('actor headers win when merged over auth + (reserved-stripped) preflight', () => {
     const actor = actorIdentityHeaders({ channel: 'whatsapp', id: '15551234567', email: 'real@user.com', userId: 'u-4' })
     const merged = mergeValidatedHeaders({ Authorization: 'Bearer x' }, actor)

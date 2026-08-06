@@ -1,4 +1,11 @@
-/** First-party Office tool surface. [COMP:office/tools] */
+/**
+ * First-party Office tool surface. [COMP:office/tools]
+ *
+ * Capability: every tool carries `requiresCapability: 'office'` so the
+ * built-in primitive can be switched off per assistant — the grant is what
+ * `filterToolsByCapabilities` reads, and a revoked grant drops these tools
+ * before the model sees them. See docs/architecture/features/builtin-primitives.md.
+ */
 import { z } from 'zod'
 import { canEnableOfficeCreation } from './templates/compiler.js'
 import { buildTool, type Tool } from '../tools/types.js'
@@ -24,9 +31,57 @@ function link(origin: string | undefined, workspaceId: string, artifactId: strin
   return origin ? `${origin.replace(/\/$/, '')}/w/${workspaceId}/office/${artifactId}` : undefined
 }
 
-export function createOfficeTools(params: { port: OfficeToolPort; appOrigin?: string }): Tool[] {
+/**
+ * Effective allow/ask/block for an Office tool. Boot wires the same L1 (app
+ * sentinel) + L2 (per-assistant) strictest-wins resolution over
+ * `mcp_tool_settings` (serverName='office') that the files and computer
+ * primitives use, and that the Studio / Assistant governance tables already
+ * WRITE. Without this hook those writes went nowhere: the toggle persisted and
+ * no execution path ever read it, so a user who blocked `reviseOfficeArtifact`
+ * still had it run. Absent (tests, open default) the tools' static flags stand.
+ */
+export type OfficeToolPolicy = 'allow' | 'ask' | 'block'
+export type ResolveOfficeToolPolicy = (
+  toolName: string,
+  context: { userId: string; assistantId: string },
+) => Promise<OfficeToolPolicy>
+
+export function createOfficeTools(params: {
+  port: OfficeToolPort
+  appOrigin?: string
+  resolvePolicy?: ResolveOfficeToolPolicy
+}): Tool[] {
+  /** Execute-time block gate — mirrors workspace-files' `policyBlockGate`.
+   *  Fail-open on a resolver error: a policy-lookup outage must not take the
+   *  Office surface down. */
+  const blockGate = async (
+    toolName: string,
+    context: { userId: string; assistantId: string },
+  ): Promise<{ data: string; isError: true } | null> => {
+    if (!params.resolvePolicy) return null
+    try {
+      if ((await params.resolvePolicy(toolName, context)) === 'block') {
+        return {
+          data: `ERROR: "${toolName}" is blocked by tool policy for this assistant. A workspace member can change it under Studio > Connectors > Office.`,
+          isError: true,
+        }
+      }
+    } catch {
+      return null
+    }
+    return null
+  }
+  /** Dynamic confirmation — 'ask' overrides the static flag when wired. */
+  const askGate = (toolName: string) =>
+    params.resolvePolicy
+      ? async (context: { userId: string; assistantId: string }) =>
+          (await params.resolvePolicy!(toolName, context)) === 'ask'
+      : undefined
+
   const createOfficeArtifact = buildTool({
     name: 'createOfficeArtifact',
+    requiresCapability: 'office',
+    resolveConfirmation: askGate('createOfficeArtifact'),
     isConcurrencySafe: false,
     isReadOnly: false,
     description: 'Start a durable Brian-native Document, Presentation, or Spreadsheet only after an explicit user request to create/build/draft one. Returns an artifact shell and background job immediately. The worker requires an admitted template, permission-filtered brain grounding, and a canonical public website unless the user explicitly says the company has none. This tool creates inside the workspace; it does not export, share, send, publish, or bypass a missing-fact/template/permission gate.',
@@ -41,6 +96,8 @@ export function createOfficeTools(params: { port: OfficeToolPort; appOrigin?: st
       idempotencyKey: z.string().min(8).max(255),
     }),
     async execute(input, context) {
+      const blocked = await blockGate('createOfficeArtifact', context)
+      if (blocked) return blocked
       if (!context.workspaceId) return { data: 'Office artifacts require a workspace.', isError: true }
       if (!canEnableOfficeCreation(input.family)) return { data: 'Office creation is unavailable because the model/editor/render/export/reparse capability barrier is incomplete.', isError: true }
       const result = await params.port.create({ userId: context.userId, assistantId: context.assistantId, workspaceId: context.workspaceId, ...input })
@@ -50,11 +107,15 @@ export function createOfficeTools(params: { port: OfficeToolPort; appOrigin?: st
 
   const getOfficeArtifact = buildTool({
     name: 'getOfficeArtifact',
+    requiresCapability: 'office',
+    resolveConfirmation: askGate('getOfficeArtifact'),
     isConcurrencySafe: true,
     isReadOnly: true,
     description: 'Read the current permission-filtered metadata, collaboration role, version, lifecycle, and generation state for one Brian-native Office artifact. Returns no existence signal when the caller is ineligible.',
     inputSchema: z.object({ artifactId: z.string().uuid() }),
     async execute(input, context) {
+      const blocked = await blockGate('getOfficeArtifact', context)
+      if (blocked) return blocked
       const artifact = await params.port.get({ userId: context.userId, artifactId: input.artifactId })
       if (!artifact) return { data: 'Office artifact not found or unavailable.', isError: true }
       return { data: { ...artifact, editorUrl: context.workspaceId ? link(params.appOrigin, context.workspaceId, artifact.artifactId) : undefined } }
@@ -63,6 +124,8 @@ export function createOfficeTools(params: { port: OfficeToolPort; appOrigin?: st
 
   const reviseOfficeArtifact = buildTool({
     name: 'reviseOfficeArtifact',
+    requiresCapability: 'office',
+    resolveConfirmation: askGate('reviseOfficeArtifact'),
     isConcurrencySafe: false,
     isReadOnly: false,
     description: 'Start a fresh context-clean revision job against an explicit Office artifact version and stable target IDs. The job rebases non-overlapping changes; overlaps become a proposal. Comment-only callers always receive a proposal. Never use this as implicit authorization to create, export, share, send, publish, or overwrite intervening edits.',
@@ -74,6 +137,8 @@ export function createOfficeTools(params: { port: OfficeToolPort; appOrigin?: st
       idempotencyKey: z.string().min(8).max(255),
     }),
     async execute(input, context) {
+      const blocked = await blockGate('reviseOfficeArtifact', context)
+      if (blocked) return blocked
       const result = await params.port.revise({ userId: context.userId, assistantId: context.assistantId, ...input })
       if (result === 'version_conflict') return { data: { code: 'version_conflict', message: 'The artifact changed. Re-read the current version before revising.' }, isError: true }
       if (!result) return { data: 'Office artifact not found or unavailable for revision.', isError: true }

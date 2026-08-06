@@ -5,3 +5,4 @@ export type { SyncGitHubApi, SyncStore, SyncCredentials, SyncSource, SyncEvent }
 export { parseMarkdownFile, normalisePath } from './parser.js'
 export type { ParsedEntry } from './parser.js'
 export { buildPathIndex, resolveWikilink } from './wikilink-resolver.js'
+export { unifiedDiffLines } from './text-diff.js'

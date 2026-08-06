@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import type { ToolUsed } from "@use-brian/chat-ui";
 import {
   coalesceAssistantRunMessages,
+  computeTranscriptRowMeta,
+  formatTranscriptDayLabel,
+  formatTranscriptTime,
   type ChatSurfaceMessage,
 } from "../chat-transcript";
 
@@ -136,5 +139,106 @@ describe("[COMP:app-web/chat-transcript] assistant-run history grouping", () => 
 
     expect(messages).toHaveLength(1);
     expect(messages[0]).toMatchObject({ id: "a2", text: "Finished" });
+  });
+});
+
+describe("[COMP:app-web/chat-transcript] group-chat timeline metadata", () => {
+  const msg = (
+    over: Partial<ChatSurfaceMessage> & { timestamp: Date },
+  ): ChatSurfaceMessage => ({
+    id: "m",
+    role: "user",
+    text: "hi",
+    ...over,
+  });
+
+  it("opens a day separator on every local calendar day turnover", () => {
+    const meta = computeTranscriptRowMeta([
+      msg({ timestamp: new Date(2026, 7, 5, 22, 0) }),
+      msg({ timestamp: new Date(2026, 7, 5, 23, 59) }),
+      msg({ timestamp: new Date(2026, 7, 6, 0, 1) }),
+    ]);
+    expect(meta.map((m) => m.daySeparator !== null)).toEqual([
+      true,
+      false,
+      true,
+    ]);
+    // A new day always restarts the sender group.
+    expect(meta[2].startsGroup).toBe(true);
+  });
+
+  it("groups a same-sender burst and splits on sender change or a long gap", () => {
+    const base = new Date(2026, 7, 6, 10, 0);
+    const after = (minutes: number) =>
+      new Date(base.getTime() + minutes * 60_000);
+    const meta = computeTranscriptRowMeta([
+      msg({ timestamp: base, senderName: "Alice" }),
+      // Same sender, inside the 5-minute window: continuation.
+      msg({ timestamp: after(2), senderName: "Alice" }),
+      // Sender change splits even inside the window.
+      msg({ timestamp: after(3), senderName: "Bob" }),
+      // Same sender but past the window: a new burst.
+      msg({ timestamp: after(20), senderName: "Bob" }),
+      // The assistant's reply is its own group…
+      msg({
+        timestamp: after(21),
+        role: "assistant",
+        senderAssistantId: "a-1",
+      }),
+      // …and a different answering assistant splits again.
+      msg({
+        timestamp: after(22),
+        role: "assistant",
+        senderAssistantId: "a-2",
+      }),
+    ]);
+    expect(meta.map((m) => m.startsGroup)).toEqual([
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+    ]);
+  });
+
+  it("treats the viewer's own unattributed rows as one sender", () => {
+    const base = new Date(2026, 7, 6, 10, 0);
+    const meta = computeTranscriptRowMeta([
+      msg({ timestamp: base }),
+      msg({ timestamp: new Date(base.getTime() + 60_000) }),
+    ]);
+    expect(meta[1].startsGroup).toBe(false);
+  });
+
+  it("never draws a separator off an unparseable timestamp", () => {
+    const meta = computeTranscriptRowMeta([
+      msg({ timestamp: new Date(NaN) }),
+      msg({ timestamp: new Date(2026, 7, 6, 10, 0) }),
+    ]);
+    expect(meta[0].daySeparator).toBeNull();
+    expect(meta[1].daySeparator).not.toBeNull();
+  });
+
+  it("labels today, yesterday, and explicit dates (year only when it differs)", () => {
+    const labels = { today: "Today", yesterday: "Yesterday" };
+    const now = new Date(2026, 7, 6, 12, 0);
+    expect(
+      formatTranscriptDayLabel(new Date(2026, 7, 6, 1, 0), now, "en", labels),
+    ).toBe("Today");
+    expect(
+      formatTranscriptDayLabel(new Date(2026, 7, 5, 23, 0), now, "en", labels),
+    ).toBe("Yesterday");
+    expect(
+      formatTranscriptDayLabel(new Date(2026, 7, 1), now, "en", labels),
+    ).not.toContain("2026");
+    expect(
+      formatTranscriptDayLabel(new Date(2025, 7, 1), now, "en", labels),
+    ).toContain("2025");
+  });
+
+  it("formats the compact per-group time chip", () => {
+    const stamp = new Date(2026, 7, 6, 14, 5);
+    expect(formatTranscriptTime(stamp, "en")).toMatch(/2:05/);
   });
 });

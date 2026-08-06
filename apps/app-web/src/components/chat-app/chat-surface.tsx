@@ -67,12 +67,12 @@
  */
 
 import {
+  Fragment,
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
-  type KeyboardEvent,
 } from "react";
 import {
   ChatComposer,
@@ -94,6 +94,7 @@ import {
   ChevronDown,
   Copy,
   Paperclip,
+  Pencil,
   Plus,
   RotateCw,
   Sparkles,
@@ -136,7 +137,7 @@ import {
 } from "@/lib/build-events";
 import { describeToolFromInput } from "@/lib/tool-narration";
 import { authFetch } from "@/lib/auth-fetch";
-import { useT, format } from "@/lib/i18n/client";
+import { useT, useLocale, format } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 import {
   listWorkspaceAssistants,
@@ -159,6 +160,8 @@ import {
   parseMessageAttachments,
   parsePresentedDocumentPayload,
   postRoomMessage,
+  editRoomMessage,
+  postSessionTyping,
   type MessageAttachmentRef,
   type DocSession,
   type WorkspaceSession,
@@ -171,11 +174,17 @@ import { ChatConfirmationCard } from "@/components/chrome/chat-confirmation-card
 import { ChatContextPins } from "@/components/chat-app/chat-context-pins";
 import { resolveRequestedFreshAssistant } from "@/components/chat-app/assistant-deeplink";
 import {
-  completeTrailingAssistantMention,
-  nextMentionSelectionIndex,
   resolveMentionedAssistants,
   resolveWorkBenchAssistant,
 } from "@/components/chat-app/multi-assistant-response";
+import {
+  MentionAutocompleteList,
+  useAssistantMentions,
+} from "@/components/chat-app/mention-autocomplete";
+import {
+  canEditUserMessage,
+  resolveEditDispatch,
+} from "@/components/chat-app/message-edit";
 import {
   imageFilesFromClipboard,
   readyAttachments,
@@ -197,6 +206,9 @@ import {
 } from "@/components/chat-app/chat-document-viewer";
 import {
   coalesceAssistantRunMessages,
+  computeTranscriptRowMeta,
+  formatTranscriptDayLabel,
+  formatTranscriptTime,
   type ChatSurfaceMessage as SurfaceMessage,
 } from "@/components/chat-app/chat-transcript";
 
@@ -206,6 +218,13 @@ const CHAT_MARKDOWN_COMPONENTS = { pre: ChatCodeBlock };
 
 /** The surface tag stamped on sessions minted here (migration 255). */
 const APP_ORIGIN = "chat";
+
+/** Re-send the `true` typing beacon at this cadence while composing — well
+ *  inside the bus's 12s decay window, so a live typist never flickers off. */
+const TYPING_BEACON_REFRESH_MS = 4_000;
+
+/** No draft change for this long reads as "stopped typing". */
+const TYPING_IDLE_OFF_MS = 5_000;
 
 /** The dock's assistant-reply markdown wrapper, verbatim. */
 const MARKDOWN_CLS =
@@ -230,6 +249,7 @@ type RemoteConfirmation = {
 
 export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const t = useT().chatApp;
+  const locale = useLocale();
   // The dock's chat dictionary — tool narration, activity copy, copy/stop
   // labels. Reused verbatim so the two surfaces never phrase one thing twice.
   const tChat = useT().chat;
@@ -288,9 +308,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   /** Quiet "will reply after this" line (T5) — set by the server's `queued`
    *  SSE event, cleared when a turn settles. */
   const [queuedNotice, setQueuedNotice] = useState(false);
-  /** `@` autocomplete popover (T12 — assistants only). */
-  const [mentionOpen, setMentionOpen] = useState(false);
-  const [mentionSelectionIndex, setMentionSelectionIndex] = useState(0);
+  /** The user message open in the inline editor, and its working text. */
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [editingText, setEditingText] = useState("");
   /** A suspended askQuestion in the open room / thread (T11/D8). */
   const [pendingQuestion, setPendingQuestion] = useState<{
     approvalId: string;
@@ -311,6 +331,30 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     () => sharedSessions.find((r) => r.id === activeSessionId) ?? null,
     [sharedSessions, activeSessionId],
   );
+  /** Whether the CURRENT pane is a room — an open shared thread, or the
+   *  Workspace hero about to create one. Drives the post-vs-ask composer. */
+  const paneIsRoom = activeSessionId ? !!activeShared : view === "workspace";
+
+  /** `@` autocomplete (T12/T9 — assistants only, the WHOLE workspace
+   *  roster): typing `@` (or a partial after it) at the end of the input
+   *  offers every assistant that can answer here; picking one inserts the
+   *  full mention, and that assistant answers the turn. Escape or a click
+   *  outside collapses it, and a confirmed mention is painted as a chip
+   *  rather than left looking like prose. */
+  const mentions = useAssistantMentions({
+    enabled: paneIsRoom,
+    assistants,
+    value: input,
+    onChange: setInput,
+  });
+  /** The same autocomplete inside the inline message editor — one instance is
+   *  enough because only one message is editable at a time. */
+  const editMentions = useAssistantMentions({
+    enabled: paneIsRoom,
+    assistants,
+    value: editingText,
+    onChange: setEditingText,
+  });
 
   const chat = useChatSession();
   const stream = useMessageStream();
@@ -697,6 +741,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             ? { userAttachments: parsedUser.attachments }
             : {}),
           ...(r.senderName ? { senderName: r.senderName } : {}),
+          // Attribution the edit affordance reads: a teammate's post is not
+          // this viewer's to rewrite.
+          ...(r.senderUserId ? { senderUserId: r.senderUserId } : {}),
           ...(r.senderAssistantId ? { senderAssistantId: r.senderAssistantId } : {}),
         };
       })
@@ -767,6 +814,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const remoteToolsRef = useRef<ToolUsed[]>([]);
   const remoteSeqRef = useRef(0);
   const remoteNarratedRef = useRef<Set<string>>(new Set());
+  /** Teammates currently composing (typing indicators) — fed by the follow
+   *  stream's `presence` events; never includes this viewer. */
+  const [roomTypers, setRoomTypers] = useState<
+    Array<{ userId: string; name: string | null }>
+  >([]);
   /** Bumped to re-open the stream after a server close (deploy, restart). */
   const [subscribeEpoch, setSubscribeEpoch] = useState(0);
   /** Bumped by the room stream's `pins_changed` signal — Work Bench
@@ -812,12 +864,16 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     if (!activeSessionId || !isSharedOpen) {
       resetRemoteTurn();
       setRemoteConfirmation(null);
+      setRoomTypers([]);
       return;
     }
     let cancelled = false;
     const controller = new AbortController();
     const sessionId = activeSessionId;
     const mintRemoteId = () => `rev-${remoteSeqRef.current++}`;
+    // A fresh room starts with a clean typing set; the stream's initial
+    // presence frame repopulates it.
+    setRoomTypers([]);
 
     // Opening a room reads it — stamp the unread watermark (T7).
     markRoomSeen(workspaceId, sessionId);
@@ -984,6 +1040,26 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           setPinsEpoch((n) => n + 1);
           break;
         }
+        case "presence": {
+          // The bus's full viewer snapshot; the indicator shows only the
+          // OTHER members mid-composition (your own draft is not news).
+          const viewers = Array.isArray(payload.viewers) ? payload.viewers : [];
+          setRoomTypers(
+            viewers
+              .filter(
+                (v): v is { userId: string; name?: unknown; isTyping?: unknown } =>
+                  !!v &&
+                  typeof v === "object" &&
+                  typeof (v as { userId?: unknown }).userId === "string",
+              )
+              .filter((v) => v.isTyping === true && v.userId !== meId)
+              .map((v) => ({
+                userId: v.userId,
+                name: typeof v.name === "string" ? v.name : null,
+              })),
+          );
+          break;
+        }
         case "turn_completed": {
           dispatchChatSessionActivity({ workspaceId, sessionId, working: false });
           // The sender's POST stream owns its optimistic transcript. Refetching
@@ -1043,6 +1119,58 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSessionId, isSharedOpen, subscribeEpoch, meId, workspaceId, tChat.toolNarration]);
 
+  // ── Typing beacon (rooms) ───────────────────────────────────────────
+  // Tell the bus while this member composes: a throttled `true` beacon keeps
+  // the flag alive against the server's decay sweep, and the off-beacon fires
+  // when the draft empties (send included), goes idle, or the room closes.
+  const typingBeaconRef = useRef<{ active: boolean; sentAt: number }>({
+    active: false,
+    sentAt: 0,
+  });
+  const typingIdleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const sendTypingBeacon = useCallback(
+    (sessionId: string, isTyping: boolean) => {
+      typingBeaconRef.current = {
+        active: isTyping,
+        sentAt: isTyping ? Date.now() : 0,
+      };
+      void postSessionTyping(sessionId, isTyping);
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (!isSharedOpen || !activeSessionId) return;
+    const sessionId = activeSessionId;
+    if (input.trim().length === 0) {
+      if (typingIdleTimerRef.current) clearTimeout(typingIdleTimerRef.current);
+      if (typingBeaconRef.current.active) sendTypingBeacon(sessionId, false);
+      return;
+    }
+    if (
+      !typingBeaconRef.current.active ||
+      Date.now() - typingBeaconRef.current.sentAt > TYPING_BEACON_REFRESH_MS
+    ) {
+      sendTypingBeacon(sessionId, true);
+    }
+    if (typingIdleTimerRef.current) clearTimeout(typingIdleTimerRef.current);
+    typingIdleTimerRef.current = setTimeout(() => {
+      if (typingBeaconRef.current.active) sendTypingBeacon(sessionId, false);
+    }, TYPING_IDLE_OFF_MS);
+  }, [input, isSharedOpen, activeSessionId, sendTypingBeacon]);
+
+  // Leaving the room (thread switch, view change, unmount) clears the flag
+  // for teammates immediately rather than waiting for the server sweep.
+  useEffect(() => {
+    if (!isSharedOpen || !activeSessionId) return;
+    const sessionId = activeSessionId;
+    return () => {
+      if (typingIdleTimerRef.current) clearTimeout(typingIdleTimerRef.current);
+      if (typingBeaconRef.current.active) sendTypingBeacon(sessionId, false);
+    };
+  }, [isSharedOpen, activeSessionId, sendTypingBeacon]);
+
   // Keep the transcript pinned to the newest turn as it streams.
   useEffect(() => {
     const el = scrollRef.current;
@@ -1054,6 +1182,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     toolTimeline,
     remoteText,
     remoteEvents,
+    roomTypers,
   ]);
 
   const resetPane = useCallback(() => {
@@ -1144,6 +1273,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     fileIds?: string[];
     truncateFromMessageId?: string;
     forceAddress?: boolean;
+    /** An EDIT, not a replay: read the mentions out of the new text. A retry
+     *  replays a message that already chose its responders. */
+    resolveMentions?: boolean;
   }) => {
     const trimmed = (override?.text ?? input).trim();
     const usesComposerTray = override?.fileIds === undefined;
@@ -1171,11 +1303,15 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     // only picks the endpoint.
     const isRoom = activeSessionId ? !!activeShared : view === "workspace";
     // Multi-assistant rooms (T9b): every distinct `@Name` answers, in the
-    // order written. Retry/truncate remains a single-assistant operation — a
-    // replay must not duplicate a previously completed response group.
-    const mentioned = isRoom && !override?.truncateFromMessageId
-      ? resolveMentionedAssistants(trimmed, assistants)
-      : [];
+    // order written. A retry replays a message that already chose its
+    // responders, so it stays single-assistant — a replay must not duplicate a
+    // previously completed response group. An EDIT is the opposite case:
+    // adding the `@Name` that was forgotten is the whole reason to edit, so
+    // the new text is read fresh.
+    const mentioned =
+      isRoom && (!override?.truncateFromMessageId || override.resolveMentions)
+        ? resolveMentionedAssistants(trimmed, assistants)
+        : [];
     const targets = mentioned.length > 0 ? mentioned : [interlocutor];
     // Room posts are text-only. A file-bearing send must address the
     // assistant so the files reach `/api/chat` instead of being silently
@@ -1189,7 +1325,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       researchMode ||
       override?.forceAddress === true;
     setAskArmed(false);
-    setMentionOpen(false);
+    mentions.reset();
 
     // First send in a fresh Workspace pane: create the shared thread FIRST
     // (the explicit-create API — the thread is listable by teammates from
@@ -1318,7 +1454,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         ...(targetIndex === 0 && turnRecordingIds.length > 0
           ? { attachedRecordingIds: turnRecordingIds }
           : {}),
-        ...(override?.truncateFromMessageId
+        // First turn only. An edit may address several assistants, and a
+        // second truncate would delete the reply the first one just wrote.
+        ...(targetIndex === 0 && override?.truncateFromMessageId
           ? { truncateFromMessageId: override.truncateFromMessageId }
           : {}),
         // The Ask affordance marks address intent (T3) — the server decides.
@@ -1767,7 +1905,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       await loadTranscript(sessionIdRef.current);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [input, activeAssistant, activeSessionId, activeShared, askArmed, model, researchMode, view, workspaceId, chat.state.isStreaming, refreshPendingQuestion, reloadShared, resetTurnActivity, selectSession, startingShared, stream, t, tChat.toolNarration, att.attachments, att.uploading, att.fileIds, att.detach, pendingQuestion, pendingRecordings, recordingUpload.status, assistants, applyQueuedInput, buildStreamedTurnMessage, flushQueuedInputs]);
+  }, [input, activeAssistant, activeSessionId, activeShared, askArmed, model, researchMode, view, workspaceId, chat.state.isStreaming, refreshPendingQuestion, reloadShared, resetTurnActivity, selectSession, startingShared, stream, t, tChat.toolNarration, att.attachments, att.uploading, att.fileIds, att.detach, pendingQuestion, pendingRecordings, recordingUpload.status, assistants, applyQueuedInput, buildStreamedTurnMessage, flushQueuedInputs, mentions.reset]);
 
   // The mid-turn flush runs inside `send`'s own `onDone`; the ref is the only
   // way to reach the current `send` from there without a stale closure. The
@@ -1829,6 +1967,112 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     [chat, send, stream],
   );
 
+  // ── Editing a sent message ──────────────────────────────────────────
+  //
+  // The repair this exists for: a room message that reads correctly but
+  // addresses nobody. Adding `@Name` to it must not mean retyping it.
+
+  // The hook's own callback, not the hook object: `editMentions` is a fresh
+  // object every render, and these callbacks are effect dependencies.
+  const resetEditMentions = editMentions.reset;
+
+  const startEdit = useCallback(
+    (message: SurfaceMessage) => {
+      setEditingMessageId(message.id);
+      setEditingText(message.text);
+      // A message that already ends in a mention opens settled, not mid-query.
+      resetEditMentions(message.text);
+    },
+    [resetEditMentions],
+  );
+
+  const cancelEdit = useCallback(() => {
+    setEditingMessageId(null);
+    setEditingText("");
+    resetEditMentions();
+  }, [resetEditMentions]);
+
+  const saveEdit = useCallback(
+    async (messageId: string) => {
+      if (stream.inFlight()) return;
+      const messages = chat.state.messages as SurfaceMessage[];
+      const index = messages.findIndex((message) => message.id === messageId);
+      if (index < 0) return;
+      const original = messages[index];
+      const next = editingText.trim();
+      if (!next || next === original.text) {
+        cancelEdit();
+        return;
+      }
+      const isRoom = activeSessionId ? !!activeShared : view === "workspace";
+      const dispatch = resolveEditDispatch({
+        isRoom,
+        newText: next,
+        roster: assistants,
+        answered: messages[index + 1]?.role === "assistant",
+      });
+      cancelEdit();
+
+      if (dispatch === "turn") {
+        // Destroy-and-regenerate: drop this row and everything after locally,
+        // and let the server truncate from the same anchor and rebuild.
+        chat.loadMessages(messages.slice(0, index));
+        await send({
+          text: next,
+          truncateFromMessageId: messageId,
+          forceAddress: true,
+          resolveMentions: true,
+        });
+        return;
+      }
+
+      // A silent post that stays silent: rewrite the stored row, run no turn.
+      const sessionId = sessionIdRef.current;
+      if (!sessionId) return;
+      chat.loadMessages(
+        messages.map((message, position) =>
+          position === index ? { ...message, text: next } : message,
+        ),
+      );
+      try {
+        await editRoomMessage(sessionId, messageId, next);
+      } catch {
+        setError(t.editFailed);
+        // The optimistic rewrite has to go back — the room still holds the
+        // original text and every other member is still reading it.
+        await loadTranscript(sessionId);
+      }
+    },
+    [
+      activeSessionId,
+      activeShared,
+      assistants,
+      cancelEdit,
+      chat,
+      editingText,
+      loadTranscript,
+      send,
+      stream,
+      t,
+      view,
+    ],
+  );
+
+  // A moving transcript invalidates the row under the editor: a teammate's
+  // post, a landing reply, or switching threads all mean the anchor may be
+  // gone. Close rather than save into the wrong place.
+  useEffect(() => {
+    if (!editingMessageId) return;
+    const stillThere = (chat.state.messages as SurfaceMessage[]).some(
+      (message) => message.id === editingMessageId,
+    );
+    if (!stillThere) cancelEdit();
+  }, [chat.state.messages, editingMessageId, cancelEdit]);
+
+  useEffect(() => {
+    cancelEdit();
+  }, [activeSessionId, cancelEdit]);
+
   // The Personal/Workspace segmented control. Deliberately louder than a
   // typical tab pair (icons + roomier hit area): posting into a shared thread
   // versus a private one is a real audience change, so which mode is active
@@ -1880,6 +2124,36 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     waitingForInput: workBenchWaiting,
   });
 
+  /** Group-chat timeline metadata: day separators + sender-group headers
+   *  (docs/architecture/features/chat-app.md → "Transcript timestamps"). */
+  const transcriptMeta = useMemo(
+    () => computeTranscriptRowMeta(chat.state.messages as SurfaceMessage[]),
+    [chat.state.messages],
+  );
+
+  /** The typing indicator's line: one named typist, two named, or several. */
+  const typingLabel = useMemo(() => {
+    if (roomTypers.length === 0) return null;
+    const names = roomTypers
+      .map((v) => v.name)
+      .filter((n): n is string => !!n);
+    if (roomTypers.length === 1) {
+      return names[0]
+        ? format(t.typingOne, { name: names[0] })
+        : t.typingSomeone;
+    }
+    if (roomTypers.length === 2 && names.length === 2) {
+      return format(t.typingTwo, { a: names[0], b: names[1] });
+    }
+    return t.typingMany;
+  }, [roomTypers, t]);
+
+  /** The answering assistant's display name for a reply-group header. */
+  const assistantNameFor = (senderAssistantId?: string | null) =>
+    ((senderAssistantId
+      ? assistants.find((x) => x.id === senderAssistantId)
+      : undefined) ?? activeAssistant)?.name ?? null;
+
   /** The reply avatar for a given ANSWERING assistant (multi-assistant
    *  rooms, T9) — falls back to the thread's bound assistant. */
   const avatarFor = (senderAssistantId?: string | null) => {
@@ -1921,6 +2195,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     text: string,
     alignEnd: boolean,
     onRetry?: () => void,
+    onEdit?: () => void,
   ) => (
     <div
       className={cn(
@@ -1941,6 +2216,17 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           <Copy className="size-3.5" aria-hidden />
         )}
       </button>
+      {onEdit ? (
+        <button
+          type="button"
+          onClick={onEdit}
+          aria-label={t.editMessage}
+          title={t.editMessage}
+          className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        >
+          <Pencil className="size-3.5" aria-hidden />
+        </button>
+      ) : null}
       {onRetry ? (
         <button
           type="button"
@@ -1952,6 +2238,76 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           <RotateCw className="size-3.5" aria-hidden />
         </button>
       ) : null}
+    </div>
+  );
+
+  /** The inline editor that replaces a user bubble while it is being edited.
+   *  The same composite box, the same `@` autocomplete and the same mention
+   *  chips as the composer — adding the mention that was forgotten is the
+   *  reason this affordance exists, so it cannot be a plainer field. */
+  const messageEditor = (messageId: string) => (
+    <div
+      ref={editMentions.containerRef}
+      className="relative w-full max-w-[85%]"
+    >
+      <MentionAutocompleteList
+        mentions={editMentions}
+        className="bottom-full right-0 mb-1"
+      />
+      <div
+        className={cn(
+          "rounded-2xl rounded-br-md border border-border bg-background shadow-sm",
+          "focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/35",
+        )}
+      >
+        <ChatComposer
+          value={editingText}
+          onChange={setEditingText}
+          onKeyDown={(event) => {
+            editMentions.handleKeyDown(event);
+            if (event.defaultPrevented) return;
+            if (event.key === "Escape") {
+              event.preventDefault();
+              cancelEdit();
+            }
+          }}
+          onSend={() => void saveEdit(messageId)}
+          highlightRanges={editMentions.highlightRanges}
+          inputWrapClassName="order-1 col-span-2 min-w-0"
+          rowClassName="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-1 px-2 pb-2"
+          textareaClassName={cn(
+            "w-full max-h-[240px] min-w-0 resize-none overflow-y-auto",
+            "bg-transparent px-1.5 pt-2.5 pb-1 text-sm leading-relaxed outline-none",
+            "placeholder:text-muted-foreground focus-visible:shadow-none",
+          )}
+          placeholder={t.composerPlaceholder}
+          sendLabel={
+            <>
+              <Check className="size-4" aria-hidden />
+              <span className="sr-only">{t.editSave}</span>
+            </>
+          }
+          sendButtonClassName={cn(
+            "order-3 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg",
+            "bg-action text-action-foreground transition-colors hover:bg-action/90",
+            "focus-visible:shadow-none disabled:pointer-events-none disabled:opacity-40",
+          )}
+          slotPostInput={
+            <button
+              type="button"
+              onClick={cancelEdit}
+              aria-label={t.editCancel}
+              title={t.editCancel}
+              className="order-2 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:shadow-none"
+            >
+              <X className="size-4" aria-hidden />
+            </button>
+          }
+        />
+      </div>
+      <p className="mt-1 px-1 text-right text-[11px] text-muted-foreground">
+        {paneIsRoom ? t.editHintRoom : t.editHint}
+      </p>
     </div>
   );
 
@@ -2039,10 +2395,6 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       </div>
     ));
 
-  /** Whether the CURRENT pane is a room — an open shared thread, or the
-   *  Workspace hero about to create one. Drives the post-vs-ask composer. */
-  const paneIsRoom = activeSessionId ? !!activeShared : view === "workspace";
-
   /**
    * Resolve a pending write confirmation (`POST /api/chat/confirm`) — the
    * dock's recipe. In a room the SERVER gates who may act: the turn's
@@ -2093,74 +2445,6 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     [activeSessionId, chat.state.pendingConfirmations, remoteConfirmation, t],
   );
 
-  /** `@` autocomplete (T12/T9 — assistants only, the WHOLE workspace
-   *  roster): typing `@` (or a partial after it) at the end of the input
-   *  offers every assistant that can answer here; picking one inserts the
-   *  full mention, and that assistant answers the turn. */
-  useEffect(() => {
-    if (!paneIsRoom || assistants.length === 0) {
-      setMentionOpen(false);
-      return;
-    }
-    const shouldOpen = /(^|\s)@[^@]*$/.test(input);
-    setMentionOpen(shouldOpen);
-    if (shouldOpen) setMentionSelectionIndex(0);
-  }, [input, paneIsRoom, assistants.length]);
-
-  /** The typed partial after the trailing `@`, for roster filtering. */
-  const mentionPartial = useMemo(() => {
-    const m = input.match(/(^|\s)@([^@]*)$/);
-    return m ? m[2].toLowerCase() : "";
-  }, [input]);
-
-  const mentionCandidates = useMemo(
-    () =>
-      assistants.filter((a) =>
-        a.name.toLowerCase().startsWith(mentionPartial),
-      ),
-    [assistants, mentionPartial],
-  );
-
-  const insertMention = useCallback((name: string) => {
-    setInput((cur) => completeTrailingAssistantMention(cur, name));
-    setMentionOpen(false);
-  }, []);
-
-  const handleMentionKeyDown = useCallback(
-    (event: KeyboardEvent<HTMLTextAreaElement>) => {
-      if (
-        !mentionOpen ||
-        mentionCandidates.length === 0 ||
-        event.nativeEvent.isComposing
-      ) {
-        return;
-      }
-      if (event.key === "Tab") {
-        event.preventDefault();
-        setMentionSelectionIndex((current) =>
-          nextMentionSelectionIndex(
-            current,
-            mentionCandidates.length,
-            event.shiftKey ? -1 : 1,
-          ),
-        );
-        return;
-      }
-      if (event.key === "Enter" && !event.shiftKey) {
-        const selected = mentionCandidates[mentionSelectionIndex];
-        if (!selected) return;
-        event.preventDefault();
-        insertMention(selected.name);
-      }
-    },
-    [
-      insertMention,
-      mentionCandidates,
-      mentionOpen,
-      mentionSelectionIndex,
-    ],
-  );
-
   /** The composer, styled as the app's composite-control box (globals.css
    *  contract): ONE bordered box carrying the focus ring via `focus-within`,
    *  every inner focusable opting out of the global ring. Textarea on top;
@@ -2169,6 +2453,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    *  bottom bar — same node either way. */
   const composerBox = (
     <div
+      ref={mentions.containerRef}
       className={cn(
         "relative rounded-xl border border-border bg-background shadow-sm",
         "focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/35",
@@ -2177,44 +2462,16 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       {/* Mention autocomplete — the workspace assistant roster; human mentions
           are out of scope. Rendered above the box so it never shifts the
           composer. */}
-      {mentionOpen && mentionCandidates.length > 0 && (
-        <div
-          role="listbox"
-          className="absolute bottom-full left-2 z-20 mb-1 max-h-56 w-64 overflow-y-auto rounded-md border border-border bg-popover shadow-md"
-        >
-          {mentionCandidates.map((a, index) => (
-            <button
-              key={a.id}
-              type="button"
-              role="option"
-              aria-selected={index === mentionSelectionIndex}
-              onMouseDown={(e) => {
-                // mousedown, not click — keep the textarea focused.
-                e.preventDefault();
-                insertMention(a.name);
-              }}
-              onMouseEnter={() => setMentionSelectionIndex(index)}
-              aria-label={format(t.mentionInsertAria, { name: a.name })}
-              className={cn(
-                "flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-foreground hover:bg-accent",
-                index === mentionSelectionIndex && "bg-accent",
-              )}
-            >
-              <AssistantAvatar
-                id={a.id}
-                name={a.name}
-                iconSeed={a.iconSeed ?? undefined}
-                size="xs"
-              />
-              <span className="min-w-0 flex-1 truncate">@{a.name}</span>
-            </button>
-          ))}
-        </div>
-      )}
+      <MentionAutocompleteList
+        mentions={mentions}
+        className="bottom-full left-2 mb-1"
+      />
       <ChatComposer
         value={input}
         onChange={setInput}
-        onKeyDown={handleMentionKeyDown}
+        onKeyDown={mentions.handleKeyDown}
+        highlightRanges={mentions.highlightRanges}
+        inputWrapClassName="order-1 col-span-2 min-w-0"
         // While a turn streams, Send QUEUES into the running turn and
         // Cmd/Ctrl+Enter steers. Rooms keep the ordinary path — a room message
         // is a durable post, not a queued one.
@@ -2267,8 +2524,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         // third line when the assistant / Ask labels reached their min-content
         // widths.
         rowClassName="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-1 px-2 pb-2"
+        // Layout (grid placement) lives on `inputWrapClassName` above so the
+        // mention-chip mirror shares this box exactly; only the typography and
+        // padding the two layers must agree on stay here.
         textareaClassName={cn(
-          "order-1 col-span-2 w-full max-h-[240px] min-w-0 resize-none overflow-y-auto",
+          "w-full max-h-[240px] min-w-0 resize-none overflow-y-auto",
           "bg-transparent px-1.5 pt-2.5 pb-1 text-sm leading-relaxed outline-none",
           "placeholder:text-muted-foreground focus-visible:shadow-none",
         )}
@@ -2520,21 +2780,57 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                   {activeShared ? t.sharedTranscriptEmpty : t.transcriptEmpty}
                 </p>
               )}
-            {(chat.state.messages as SurfaceMessage[]).map((m, messageIndex) =>
-              m.role === "user" ? (
-                <div key={m.id} className="group flex flex-col items-end">
-                  {/* Attribution chip — only in a shared thread, and only for
-                      turns that are not the viewer's own (a bubble labelled
-                      with your own name is noise). */}
-                  {m.senderName && (
-                    <span className="mb-0.5 px-1 text-[11px] text-muted-foreground">
-                      {m.senderName}
+            {(chat.state.messages as SurfaceMessage[]).map((m, messageIndex) => {
+              const meta = transcriptMeta[messageIndex];
+              const timeKnown = !Number.isNaN(m.timestamp.getTime());
+              // Day separator — a centered chip whenever the local calendar
+              // day turns over, the group-chat timeline anchor.
+              const daySeparator =
+                meta?.daySeparator && timeKnown ? (
+                  <div className="flex items-center justify-center" role="separator">
+                    <span className="rounded-full bg-muted px-2.5 py-0.5 text-[11px] font-medium text-muted-foreground">
+                      {formatTranscriptDayLabel(meta.daySeparator, new Date(), locale, {
+                        today: t.dayToday,
+                        yesterday: t.dayYesterday,
+                      })}
+                    </span>
+                  </div>
+                ) : null;
+              const timeChip = timeKnown ? (
+                <time
+                  dateTime={m.timestamp.toISOString()}
+                  title={m.timestamp.toLocaleString(locale)}
+                >
+                  {formatTranscriptTime(m.timestamp, locale)}
+                </time>
+              ) : null;
+              return m.role === "user" ? (
+                <Fragment key={m.id}>
+                  {daySeparator}
+                <div
+                  className={cn(
+                    "group flex flex-col items-end",
+                    // A same-sender burst tightens under the group's one
+                    // header (the container's gap-5 pulled back to ~6px).
+                    !meta?.startsGroup && "-mt-3.5",
+                  )}
+                >
+                  {/* Group header — sender attribution (shared threads) and
+                      the message time, once per burst rather than per bubble. */}
+                  {meta?.startsGroup && (m.senderName || timeChip) && (
+                    <span className="mb-0.5 flex items-baseline gap-1.5 px-1 text-[11px] text-muted-foreground">
+                      {m.senderName && (
+                        <span className="font-medium">{m.senderName}</span>
+                      )}
+                      {timeChip}
                     </span>
                   )}
                   {/* Neutral Notion-style bubble — the dock's `--secondary`
                       surface, NOT a saturated primary fill (white-on-blue
                       missed WCAG AA; the brand blue stays on small accents). */}
-                  {m.text ? (
+                  {editingMessageId === m.id ? (
+                    messageEditor(m.id)
+                  ) : m.text ? (
                     <div className="max-w-[85%] rounded-2xl rounded-br-md bg-secondary px-3.5 py-2 text-[14px] leading-[1.5] break-words whitespace-pre-wrap text-secondary-foreground shadow-sm">
                       {m.text}
                     </div>
@@ -2544,7 +2840,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                       <MessageAttachments attachments={m.userAttachments} />
                     </div>
                   ) : null}
-                  {m.text
+                  {m.text && editingMessageId !== m.id
                     ? messageActions(
                         m.id,
                         m.text,
@@ -2552,13 +2848,41 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                         m.userAttachments?.length
                           ? undefined
                           : () => retryUserMessage(m.id),
+                        canEditUserMessage({
+                          messages: chat.state.messages as SurfaceMessage[],
+                          index: messageIndex,
+                          viewerUserId: meId,
+                          busy: chat.state.isStreaming || remoteActive,
+                        })
+                          ? () => startEdit(m)
+                          : undefined,
                       )
                     : null}
                 </div>
+                </Fragment>
               ) : (
-                <div key={m.id} className="group flex gap-2.5">
+                <Fragment key={m.id}>
+                  {daySeparator}
+                <div
+                  className={cn(
+                    "group flex gap-2.5",
+                    !meta?.startsGroup && "-mt-3.5",
+                  )}
+                >
                   {avatarFor(m.senderAssistantId)}
                   <div className="min-w-0 flex-1 space-y-2.5 pt-0.5">
+                    {/* Group header — the answering assistant's name (shared
+                        rooms, where several assistants may speak) + time. */}
+                    {meta?.startsGroup && timeChip && (
+                      <span className="flex items-baseline gap-1.5 text-[11px] text-muted-foreground">
+                        {isSharedOpen && assistantNameFor(m.senderAssistantId) && (
+                          <span className="font-medium">
+                            {assistantNameFor(m.senderAssistantId)}
+                          </span>
+                        )}
+                        {timeChip}
+                      </span>
+                    )}
                     {m.toolsUsed?.length ? (
                       <ChatActivitySummary
                         tools={m.toolsUsed}
@@ -2603,8 +2927,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                       : null}
                   </div>
                 </div>
-              ),
-            )}
+                </Fragment>
+              );
+            })}
             {/* Live turn — the dock's activity feed (shimmer status +
                 reasoning/tool steps) above the streaming reply + caret. */}
             {chat.state.isStreaming && (
@@ -2740,6 +3065,33 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 follow-up turn is armed. Never an error. */}
             {queuedNotice && (
               <p className="px-1 text-xs text-muted-foreground">{t.queuedNotice}</p>
+            )}
+            {/* Typing indicator — teammates mid-composition, off the follow
+                stream's presence events. The classic three-dot bubble; dots
+                hold still under reduced motion. */}
+            {typingLabel && (
+              <div
+                className="flex items-center gap-2"
+                role="status"
+                aria-live="polite"
+              >
+                <span className="flex items-center gap-1 rounded-2xl rounded-bl-md bg-secondary px-3 py-2.5 shadow-sm">
+                  {[0, 160, 320].map((delay) => (
+                    <span
+                      key={delay}
+                      aria-hidden
+                      className="size-1.5 rounded-full bg-muted-foreground/70 motion-safe:animate-bounce"
+                      style={{
+                        animationDelay: `${delay}ms`,
+                        animationDuration: "1.1s",
+                      }}
+                    />
+                  ))}
+                </span>
+                <span className="text-[11px] text-muted-foreground">
+                  {typingLabel}
+                </span>
+              </div>
             )}
             {error && (
               <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">

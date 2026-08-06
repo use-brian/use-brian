@@ -15,6 +15,7 @@ import type {
   GetEntityOpts,
 } from '@use-brian/core'
 import type { Sensitivity } from '@use-brian/core'
+import { clientCompartment } from '@use-brian/core'
 import { buildAccessPredicate } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
 import { getAppPool, query, queryWithRLS, rollbackAndRelease } from './client.js'
@@ -308,6 +309,93 @@ export async function getOrCreateSelfEntity(params: {
     `UPDATE users SET entity_id = $1 WHERE id = $2`,
     [newEntity.id, params.userId],
   )
+
+  return newEntity
+}
+
+/**
+ * The contact entity for an **external client principal** — a consumer's own
+ * customer talking to the workspace's assistant through the public API.
+ *
+ * A sibling of `getOrCreateSelfEntity`, not a parameterisation of it, because
+ * the row shape is the opposite one. `getOrCreateSelfEntity` writes `user_id`
+ * SET, which under the access predicate `(user_id IS NULL OR user_id =
+ * viewer)` hides the row from **everyone except that principal** — correct for
+ * a teammate's own self entity, and precisely wrong here: the deliverable is
+ * that the team can see what each client taught the brain. So a client contact
+ * is `user_id` NULL plus sensitivity `internal` (decision D11).
+ *
+ * That trade has a consequence worth stating where the row is minted: with
+ * `user_id` NULL the automatic partition no longer separates one client from
+ * another, so the **compartment is the wall** (decision D12). A client's
+ * effective read grant is the empty set — `effectiveReadCompartments` gives a
+ * non-member `[]`, and `[] ⊉ {client:x}` — so no client can read this row,
+ * including the client it describes. A team member on a universe grant reads
+ * it normally. Sensitivity blocks the same read independently (a client's
+ * ceiling is `public`); two gates, either one sufficient, which is the point
+ * of D12 — the compartment survives a write path stamping the wrong tier.
+ *
+ * `attributes.self` is deliberately absent: it stays the discriminator for a
+ * teammate's own self entity, and a client contact must never answer to it.
+ *
+ * Stamps `users.entity_id` like its sibling, so the shadow user has a durable
+ * anchor. Note that the assistant writes a row it cannot read back — write-only
+ * accrual by design. See `docs/plans/client-principal.md` §8.1.
+ *
+ * [COMP:brain/client-contact-entity]
+ */
+export async function getOrCreateClientContactEntity(params: {
+  userId: string
+  workspaceId: string
+  displayName: string
+  externalUserId: string
+  email?: string | null
+}): Promise<EntityRecord> {
+  // Fast path: users.entity_id already set + entity exists in this workspace.
+  const existing = await query<{ entityId: string | null }>(
+    `SELECT entity_id AS "entityId" FROM users WHERE id = $1`,
+    [params.userId],
+  )
+  const existingId = existing.rows[0]?.entityId
+  if (existingId) {
+    const row = await query<EntityRow>(
+      `SELECT ${FULL_SELECT} FROM entities
+       WHERE id = $1 AND workspace_id = $2 AND valid_to IS NULL`,
+      [existingId, params.workspaceId],
+    )
+    if (row.rows[0]) return toEntity(row.rows[0])
+    // Stale (cross-workspace, deleted, or wrong workspace) — fall through.
+  }
+
+  const attributes: Record<string, unknown> = {
+    client: true,
+    externalUserId: params.externalUserId,
+  }
+  if (params.email) attributes.email = params.email
+
+  const created = await query<EntityRow>(
+    `INSERT INTO entities (
+       kind, display_name, attributes, sensitivity,
+       workspace_id, user_id, assistant_id,
+       created_by_user_id, source, compartments
+     )
+     VALUES (
+       'person', $1, $2::jsonb, 'internal',
+       $3, NULL, NULL,
+       $4, 'user', $5::text[]
+     )
+     RETURNING ${FULL_SELECT}`,
+    [
+      params.displayName,
+      JSON.stringify(attributes),
+      params.workspaceId,
+      params.userId,
+      [clientCompartment(params.externalUserId)],
+    ],
+  )
+  const newEntity = toEntity(created.rows[0])
+
+  await query(`UPDATE users SET entity_id = $1 WHERE id = $2`, [newEntity.id, params.userId])
 
   return newEntity
 }

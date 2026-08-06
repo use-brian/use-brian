@@ -405,6 +405,14 @@ function WorkflowCard({
             {t.workflowPage.lifecycle.staleBadge}
           </span>
         )}
+        {workflow.managedBy && (
+          <span
+            title={t.workflowPage.list.card.managedTitle}
+            className="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary uppercase tracking-wide"
+          >
+            {t.workflowPage.list.card.managedBadge}
+          </span>
+        )}
         {!workflow.enabled && (
           <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground uppercase tracking-wide">
             {t.workflowPage.builder.disabledLabel}

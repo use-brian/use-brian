@@ -30,6 +30,7 @@ import {
   type BrainCrmTools,
   type BrainDocTools,
   type BrainFileTools,
+  type BrainBrandTools,
   type BrainMemoryTools,
   type BrainRetrievalTools,
   type BrainTaskTools,
@@ -60,6 +61,8 @@ type Options = {
    * surface. `saveFileToBrain` (byte upload) is not part of this set.
    */
   fileTools?: BrainFileTools
+  /** Brand primitive tools — `getBrand` (both scopes) + `saveBrandDraft` (write scope, draft-only). */
+  brandTools?: BrainBrandTools
   /**
    * Doc-page tools (`readPage` / `editPage` / `deletePage`). Optional — only
    * deployments that build the doc stores pass it; a doc-less deploy omits the
@@ -130,6 +133,7 @@ export function brainMcpRoutes(opts: Options): Router {
       crmTools: opts.crmTools,
       retrievalTools: opts.retrievalTools,
       fileTools: opts.fileTools,
+      brandTools: opts.brandTools,
       docTools: opts.docTools,
       ingest: opts.ingest,
       agentTools: opts.agentTools,

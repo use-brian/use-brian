@@ -27,6 +27,29 @@ export type BuiltinToolClassification = 'read' | 'write' | 'destructive'
 export type BuiltinToolDefaultPolicy = 'allow' | 'ask'
 
 /**
+ * Display grouping for a connector's tool list. Optional: connectors with a
+ * handful of tools stay flat; multi-domain connectors (gdrive, shopify) tag
+ * every tool so the tool UI renders one card per group instead of a wall.
+ * Group ids are shared across connectors. The localized labels live in the
+ * app-web dictionaries (`connectorToolList.toolGroups.<id>`, typed against
+ * this union plus the UI-owned `other` fallback bucket) — adding an id here
+ * fails app-web's compile until every locale carries a label for it.
+ */
+export type BuiltinToolGroupId =
+  | 'drive'
+  | 'docs'
+  | 'sheets'
+  | 'slides'
+  | 'catalog'
+  | 'inventory'
+  | 'orders'
+  | 'customers'
+  | 'finance'
+  | 'marketing'
+  | 'onlineStore'
+  | 'analytics'
+
+/**
  * Discriminators for a connector's encrypted credentials blob (also the
  * `connector_instance.credentials_type` column value).
  *
@@ -53,6 +76,8 @@ export type BuiltinConnectorTool = {
   description: string
   classification: BuiltinToolClassification
   defaultPolicy: BuiltinToolDefaultPolicy
+  /** Display group. All-or-nothing per connector: tag every tool or none. */
+  group?: BuiltinToolGroupId
 }
 
 /**
@@ -94,33 +119,33 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     // Drive tools are phase-gated (require drive.readonly / drive.file scopes
     // beyond the current Picker-only grant). Uncomment here + in inject.ts
     // when enabling. Keep list ordering stable across services.
-    // { name: 'googleDriveListFiles', description: 'Search files in Google Drive', classification: 'read', defaultPolicy: 'allow' },
-    // { name: 'googleDriveGetFile', description: 'Get file metadata', classification: 'read', defaultPolicy: 'allow' },
-    // { name: 'googleDriveGetFileContent', description: 'Read file content', classification: 'read', defaultPolicy: 'allow' },
-    // { name: 'googleDriveCreateFile', description: 'Create a file in Google Drive', classification: 'write', defaultPolicy: 'ask' },
-    // { name: 'googleDriveUpdateFile', description: 'Update a file in Google Drive', classification: 'write', defaultPolicy: 'ask' },
-    { name: 'googleDocsGetContent', description: 'Read a Google Doc', classification: 'read', defaultPolicy: 'allow' },
-    { name: 'googleDocsAppendText', description: 'Append text to a Google Doc', classification: 'write', defaultPolicy: 'ask' },
-    { name: 'googleDocsReplaceText', description: 'Find and replace text in a Google Doc', classification: 'write', defaultPolicy: 'ask' },
-    { name: 'googleDocsCreate', description: 'Create a new Google Doc', classification: 'write', defaultPolicy: 'ask' },
-    { name: 'googleSheetsGetInfo', description: 'Get spreadsheet metadata', classification: 'read', defaultPolicy: 'allow' },
-    { name: 'googleSheetsReadRange', description: 'Read a range of cells', classification: 'read', defaultPolicy: 'allow' },
-    { name: 'googleSheetsWriteRange', description: 'Write to a cell range', classification: 'write', defaultPolicy: 'ask' },
-    { name: 'googleSheetsAppendRows', description: 'Append rows to a spreadsheet', classification: 'write', defaultPolicy: 'ask' },
-    { name: 'googleSheetsCreate', description: 'Create a new Google Sheet', classification: 'write', defaultPolicy: 'ask' },
-    { name: 'googleSheetsFormat', description: 'Apply formatting to cells in a spreadsheet', classification: 'write', defaultPolicy: 'ask' },
-    { name: 'googleSheetsBatchUpdate', description: 'Submit raw Sheets API batchUpdate requests (escape hatch)', classification: 'write', defaultPolicy: 'ask' },
-    { name: 'googleSlidesGetPresentation', description: 'Get presentation metadata and slide list', classification: 'read', defaultPolicy: 'allow' },
-    { name: 'googleSlidesGetSlideContent', description: 'Read a slide as structured shapes, text, and layout', classification: 'read', defaultPolicy: 'allow' },
-    { name: 'googleSlidesGetThumbnail', description: 'Render a slide to a PNG thumbnail', classification: 'read', defaultPolicy: 'allow' },
-    { name: 'googleSlidesCreateSlide', description: 'Create a slide with a layout and fill placeholders atomically', classification: 'write', defaultPolicy: 'ask' },
-    { name: 'googleSlidesUpdateSlideContent', description: 'Replace text in a slide placeholder or shape', classification: 'write', defaultPolicy: 'ask' },
-    { name: 'googleSlidesInsertImage', description: 'Insert an image on a slide from Drive or a URL', classification: 'write', defaultPolicy: 'ask' },
-    { name: 'googleSlidesDeleteSlide', description: 'Delete a slide from a presentation', classification: 'write', defaultPolicy: 'ask' },
-    { name: 'googleSlidesReorderSlides', description: 'Move slides to a new position', classification: 'write', defaultPolicy: 'ask' },
-    { name: 'googleSlidesDuplicateSlide', description: 'Duplicate a slide with its content', classification: 'write', defaultPolicy: 'ask' },
-    { name: 'googleSlidesBatchUpdate', description: 'Submit raw Slides API batchUpdate requests (escape hatch)', classification: 'write', defaultPolicy: 'ask' },
-    { name: 'googleSlidesCreatePresentation', description: 'Create a new Google Slides presentation', classification: 'write', defaultPolicy: 'ask' },
+    // { name: 'googleDriveListFiles', description: 'Search files in Google Drive', classification: 'read', defaultPolicy: 'allow', group: 'drive' },
+    // { name: 'googleDriveGetFile', description: 'Get file metadata', classification: 'read', defaultPolicy: 'allow', group: 'drive' },
+    // { name: 'googleDriveGetFileContent', description: 'Read file content', classification: 'read', defaultPolicy: 'allow', group: 'drive' },
+    // { name: 'googleDriveCreateFile', description: 'Create a file in Google Drive', classification: 'write', defaultPolicy: 'ask', group: 'drive' },
+    // { name: 'googleDriveUpdateFile', description: 'Update a file in Google Drive', classification: 'write', defaultPolicy: 'ask', group: 'drive' },
+    { name: 'googleDocsGetContent', description: 'Read a Google Doc', classification: 'read', defaultPolicy: 'allow', group: 'docs' },
+    { name: 'googleDocsAppendText', description: 'Append text to a Google Doc', classification: 'write', defaultPolicy: 'ask', group: 'docs' },
+    { name: 'googleDocsReplaceText', description: 'Find and replace text in a Google Doc', classification: 'write', defaultPolicy: 'ask', group: 'docs' },
+    { name: 'googleDocsCreate', description: 'Create a new Google Doc', classification: 'write', defaultPolicy: 'ask', group: 'docs' },
+    { name: 'googleSheetsGetInfo', description: 'Get spreadsheet metadata', classification: 'read', defaultPolicy: 'allow', group: 'sheets' },
+    { name: 'googleSheetsReadRange', description: 'Read a range of cells', classification: 'read', defaultPolicy: 'allow', group: 'sheets' },
+    { name: 'googleSheetsWriteRange', description: 'Write to a cell range', classification: 'write', defaultPolicy: 'ask', group: 'sheets' },
+    { name: 'googleSheetsAppendRows', description: 'Append rows to a spreadsheet', classification: 'write', defaultPolicy: 'ask', group: 'sheets' },
+    { name: 'googleSheetsCreate', description: 'Create a new Google Sheet', classification: 'write', defaultPolicy: 'ask', group: 'sheets' },
+    { name: 'googleSheetsFormat', description: 'Apply formatting to cells in a spreadsheet', classification: 'write', defaultPolicy: 'ask', group: 'sheets' },
+    { name: 'googleSheetsBatchUpdate', description: 'Submit raw Sheets API batchUpdate requests (escape hatch)', classification: 'write', defaultPolicy: 'ask', group: 'sheets' },
+    { name: 'googleSlidesGetPresentation', description: 'Get presentation metadata and slide list', classification: 'read', defaultPolicy: 'allow', group: 'slides' },
+    { name: 'googleSlidesGetSlideContent', description: 'Read a slide as structured shapes, text, and layout', classification: 'read', defaultPolicy: 'allow', group: 'slides' },
+    { name: 'googleSlidesGetThumbnail', description: 'Render a slide to a PNG thumbnail', classification: 'read', defaultPolicy: 'allow', group: 'slides' },
+    { name: 'googleSlidesCreateSlide', description: 'Create a slide with a layout and fill placeholders atomically', classification: 'write', defaultPolicy: 'ask', group: 'slides' },
+    { name: 'googleSlidesUpdateSlideContent', description: 'Replace text in a slide placeholder or shape', classification: 'write', defaultPolicy: 'ask', group: 'slides' },
+    { name: 'googleSlidesInsertImage', description: 'Insert an image on a slide from Drive or a URL', classification: 'write', defaultPolicy: 'ask', group: 'slides' },
+    { name: 'googleSlidesDeleteSlide', description: 'Delete a slide from a presentation', classification: 'write', defaultPolicy: 'ask', group: 'slides' },
+    { name: 'googleSlidesReorderSlides', description: 'Move slides to a new position', classification: 'write', defaultPolicy: 'ask', group: 'slides' },
+    { name: 'googleSlidesDuplicateSlide', description: 'Duplicate a slide with its content', classification: 'write', defaultPolicy: 'ask', group: 'slides' },
+    { name: 'googleSlidesBatchUpdate', description: 'Submit raw Slides API batchUpdate requests (escape hatch)', classification: 'write', defaultPolicy: 'ask', group: 'slides' },
+    { name: 'googleSlidesCreatePresentation', description: 'Create a new Google Slides presentation', classification: 'write', defaultPolicy: 'ask', group: 'slides' },
   ],
   github: [
     { name: 'githubSearchRepositories', description: 'Search GitHub repositories', classification: 'read', defaultPolicy: 'allow' },
@@ -143,50 +168,52 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
   // Shopify — v1 slice (docs/architecture/integrations/shopify.md; full catalog
   // in docs/plans/shopify-connector.md §5). Classification is load-bearing:
   // `write` rows are auto-wrapped by gateToolsOnActionGrants — a write
-  // misclassified as `read` ships UNGATED.
+  // misclassified as `read` ships UNGATED. Rows are ordered in contiguous
+  // `group` blocks — registry order is display order, and the tool UI renders
+  // one card per group.
   shopify: [
-    { name: 'shopifyGetShop', description: 'Get store name, domain, plan, currency, and timezone', classification: 'read', defaultPolicy: 'allow' },
-    { name: 'shopifyListProducts', description: 'Search and list products in the store', classification: 'read', defaultPolicy: 'allow' },
-    { name: 'shopifyGetProduct', description: 'Get a product with variants and inventory', classification: 'read', defaultPolicy: 'allow' },
-    { name: 'shopifyListOrders', description: 'List orders with date, status, and payment filters', classification: 'read', defaultPolicy: 'allow' },
-    { name: 'shopifyGetOrder', description: 'Get an order with line items, fulfillment, and totals', classification: 'read', defaultPolicy: 'allow' },
-    { name: 'shopifySearchCustomers', description: 'Search customers by email, name, or tag', classification: 'read', defaultPolicy: 'allow' },
-    { name: 'shopifyGetCustomer', description: 'Get a customer with order count and total spent', classification: 'read', defaultPolicy: 'allow' },
-    { name: 'shopifyGetInventoryLevels', description: 'Get inventory quantities by product or SKU', classification: 'read', defaultPolicy: 'allow' },
-    { name: 'shopifyListCollections', description: 'List product collections in the store', classification: 'read', defaultPolicy: 'allow' },
-    { name: 'shopifyListDraftOrders', description: 'List draft orders (open quotes and invoices)', classification: 'read', defaultPolicy: 'allow' },
-    { name: 'shopifyListDiscounts', description: 'List discount and promo codes with status and usage counts', classification: 'read', defaultPolicy: 'allow' },
-    { name: 'shopifyListAbandonedCheckouts', description: 'List abandoned checkouts with cart value and customer', classification: 'read', defaultPolicy: 'allow' },
-    { name: 'shopifyGetPayoutsSummary', description: 'Get Shopify Payments balance and recent payouts', classification: 'read', defaultPolicy: 'allow' },
-    { name: 'shopifyListDisputes', description: 'List Shopify Payments disputes and chargebacks', classification: 'read', defaultPolicy: 'allow' },
-    { name: 'shopifyListContent', description: 'List online store pages, blog posts, or blogs', classification: 'read', defaultPolicy: 'allow' },
-    { name: 'shopifySalesReport', description: 'Aggregate sales over a date range (count, revenue, top items)', classification: 'read', defaultPolicy: 'allow' },
-    { name: 'shopifyStorefrontFunnel', description: 'Storefront conversion funnel: sessions, cart additions, checkouts reached and completed', classification: 'read', defaultPolicy: 'allow' },
-    { name: 'shopifyAnalyticsQuery', description: 'Run a read-only ShopifyQL query against store analytics', classification: 'read', defaultPolicy: 'allow' },
-    { name: 'shopifyUpdateProduct', description: 'Update product title, description, tags, status, or SEO', classification: 'write', defaultPolicy: 'ask' },
-    { name: 'shopifyCreateProduct', description: 'Create a new product', classification: 'write', defaultPolicy: 'ask' },
-    { name: 'shopifyAddProductImage', description: 'Upload a workspace file to a product as a product image', classification: 'write', defaultPolicy: 'ask' },
-    { name: 'shopifySetProductPrice', description: 'Set a product variant price, compare-at price, and SKU', classification: 'write', defaultPolicy: 'ask' },
-    { name: 'shopifyPublishProduct', description: 'Publish a product to the Online Store so customers can see it', classification: 'write', defaultPolicy: 'ask' },
-    { name: 'shopifySetProductMetafields', description: 'Set structured metafields on a product (theme must read them to display)', classification: 'write', defaultPolicy: 'ask' },
-    { name: 'shopifySetProductOptions', description: 'Rename a product option and its values (the storefront variant picker labels)', classification: 'write', defaultPolicy: 'ask' },
-    { name: 'shopifyListThemes', description: 'List online store themes and which one is live', classification: 'read', defaultPolicy: 'allow' },
-    { name: 'shopifyReadProductTemplate', description: 'Read a product page template from the theme', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'shopifyGetShop', description: 'Get store name, domain, plan, currency, and timezone', classification: 'read', defaultPolicy: 'allow', group: 'catalog' },
+    { name: 'shopifyListProducts', description: 'Search and list products in the store', classification: 'read', defaultPolicy: 'allow', group: 'catalog' },
+    { name: 'shopifyGetProduct', description: 'Get a product with variants and inventory', classification: 'read', defaultPolicy: 'allow', group: 'catalog' },
+    { name: 'shopifyListCollections', description: 'List product collections in the store', classification: 'read', defaultPolicy: 'allow', group: 'catalog' },
+    { name: 'shopifyUpdateProduct', description: 'Update product title, description, tags, status, or SEO', classification: 'write', defaultPolicy: 'ask', group: 'catalog' },
+    { name: 'shopifyCreateProduct', description: 'Create a new product', classification: 'write', defaultPolicy: 'ask', group: 'catalog' },
+    { name: 'shopifyAddProductImage', description: 'Upload a workspace file to a product as a product image', classification: 'write', defaultPolicy: 'ask', group: 'catalog' },
+    { name: 'shopifySetProductPrice', description: 'Set a product variant price, compare-at price, and SKU', classification: 'write', defaultPolicy: 'ask', group: 'catalog' },
+    { name: 'shopifyPublishProduct', description: 'Publish a product to the Online Store so customers can see it', classification: 'write', defaultPolicy: 'ask', group: 'catalog' },
+    { name: 'shopifySetProductMetafields', description: 'Set structured metafields on a product (theme must read them to display)', classification: 'write', defaultPolicy: 'ask', group: 'catalog' },
+    { name: 'shopifySetProductOptions', description: 'Rename a product option and its values (the storefront variant picker labels)', classification: 'write', defaultPolicy: 'ask', group: 'catalog' },
+    { name: 'shopifyGetInventoryLevels', description: 'Get inventory quantities by product or SKU', classification: 'read', defaultPolicy: 'allow', group: 'inventory' },
+    { name: 'shopifySetInventory', description: 'Set the available inventory quantity for a variant', classification: 'write', defaultPolicy: 'ask', group: 'inventory' },
+    { name: 'shopifyListOrders', description: 'List orders with date, status, and payment filters', classification: 'read', defaultPolicy: 'allow', group: 'orders' },
+    { name: 'shopifyGetOrder', description: 'Get an order with line items, fulfillment, and totals', classification: 'read', defaultPolicy: 'allow', group: 'orders' },
+    { name: 'shopifyListDraftOrders', description: 'List draft orders (open quotes and invoices)', classification: 'read', defaultPolicy: 'allow', group: 'orders' },
+    { name: 'shopifyListAbandonedCheckouts', description: 'List abandoned checkouts with cart value and customer', classification: 'read', defaultPolicy: 'allow', group: 'orders' },
+    { name: 'shopifyCreateDraftOrder', description: 'Create a draft order (quote or invoice, never a charge)', classification: 'write', defaultPolicy: 'ask', group: 'orders' },
+    { name: 'shopifySendDraftOrderInvoice', description: 'Email the invoice for a draft order', classification: 'write', defaultPolicy: 'ask', group: 'orders' },
+    { name: 'shopifyCreateFulfillment', description: 'Mark an order fulfilled with an optional tracking number', classification: 'write', defaultPolicy: 'ask', group: 'orders' },
+    { name: 'shopifyCompleteDraftOrder', description: 'Convert a draft order into a real order', classification: 'destructive', defaultPolicy: 'ask', group: 'orders' },
+    { name: 'shopifyCancelOrder', description: 'Cancel an order, optionally restocking and notifying the customer', classification: 'destructive', defaultPolicy: 'ask', group: 'orders' },
+    { name: 'shopifyRefundOrder', description: 'Refund an order in full or by line item', classification: 'destructive', defaultPolicy: 'ask', group: 'orders' },
+    { name: 'shopifySearchCustomers', description: 'Search customers by email, name, or tag', classification: 'read', defaultPolicy: 'allow', group: 'customers' },
+    { name: 'shopifyGetCustomer', description: 'Get a customer with order count and total spent', classification: 'read', defaultPolicy: 'allow', group: 'customers' },
+    { name: 'shopifyUpdateCustomer', description: 'Update a customer note or tags (never marketing consent)', classification: 'write', defaultPolicy: 'ask', group: 'customers' },
+    { name: 'shopifyGetPayoutsSummary', description: 'Get Shopify Payments balance and recent payouts', classification: 'read', defaultPolicy: 'allow', group: 'finance' },
+    { name: 'shopifyListDisputes', description: 'List Shopify Payments disputes and chargebacks', classification: 'read', defaultPolicy: 'allow', group: 'finance' },
+    { name: 'shopifyListDiscounts', description: 'List discount and promo codes with status and usage counts', classification: 'read', defaultPolicy: 'allow', group: 'marketing' },
+    { name: 'shopifyCreateDiscountCode', description: 'Create a discount or promo code', classification: 'write', defaultPolicy: 'ask', group: 'marketing' },
+    { name: 'shopifyAddTags', description: 'Add tags to an order, customer, or product', classification: 'write', defaultPolicy: 'ask', group: 'marketing' },
+    { name: 'shopifyListContent', description: 'List online store pages, blog posts, or blogs', classification: 'read', defaultPolicy: 'allow', group: 'onlineStore' },
+    { name: 'shopifyCreateContent', description: 'Create an online store page or blog post', classification: 'write', defaultPolicy: 'ask', group: 'onlineStore' },
+    { name: 'shopifyListThemes', description: 'List online store themes and which one is live', classification: 'read', defaultPolicy: 'allow', group: 'onlineStore' },
+    { name: 'shopifyReadProductTemplate', description: 'Read a product page template from the theme', classification: 'read', defaultPolicy: 'allow', group: 'onlineStore' },
     // Destructive, not write: this lands a file in the theme customers are
     // served from, and a broken page is invisible in the Shopify admin.
-    { name: 'shopifyCreateProductTemplate', description: 'Create a new product page template in the theme', classification: 'destructive', defaultPolicy: 'ask' },
-    { name: 'shopifySetProductTemplate', description: 'Change which page template a product uses', classification: 'write', defaultPolicy: 'ask' },
-    { name: 'shopifyCreateDraftOrder', description: 'Create a draft order (quote or invoice, never a charge)', classification: 'write', defaultPolicy: 'ask' },
-    { name: 'shopifySendDraftOrderInvoice', description: 'Email the invoice for a draft order', classification: 'write', defaultPolicy: 'ask' },
-    { name: 'shopifyAddTags', description: 'Add tags to an order, customer, or product', classification: 'write', defaultPolicy: 'ask' },
-    { name: 'shopifyUpdateCustomer', description: 'Update a customer note or tags (never marketing consent)', classification: 'write', defaultPolicy: 'ask' },
-    { name: 'shopifySetInventory', description: 'Set the available inventory quantity for a variant', classification: 'write', defaultPolicy: 'ask' },
-    { name: 'shopifyCreateFulfillment', description: 'Mark an order fulfilled with an optional tracking number', classification: 'write', defaultPolicy: 'ask' },
-    { name: 'shopifyCreateDiscountCode', description: 'Create a discount or promo code', classification: 'write', defaultPolicy: 'ask' },
-    { name: 'shopifyCreateContent', description: 'Create an online store page or blog post', classification: 'write', defaultPolicy: 'ask' },
-    { name: 'shopifyCancelOrder', description: 'Cancel an order, optionally restocking and notifying the customer', classification: 'destructive', defaultPolicy: 'ask' },
-    { name: 'shopifyRefundOrder', description: 'Refund an order in full or by line item', classification: 'destructive', defaultPolicy: 'ask' },
-    { name: 'shopifyCompleteDraftOrder', description: 'Convert a draft order into a real order', classification: 'destructive', defaultPolicy: 'ask' },
+    { name: 'shopifyCreateProductTemplate', description: 'Create a new product page template in the theme', classification: 'destructive', defaultPolicy: 'ask', group: 'onlineStore' },
+    { name: 'shopifySetProductTemplate', description: 'Change which page template a product uses', classification: 'write', defaultPolicy: 'ask', group: 'onlineStore' },
+    { name: 'shopifySalesReport', description: 'Aggregate sales over a date range (count, revenue, top items)', classification: 'read', defaultPolicy: 'allow', group: 'analytics' },
+    { name: 'shopifyStorefrontFunnel', description: 'Storefront conversion funnel: sessions, cart additions, checkouts reached and completed', classification: 'read', defaultPolicy: 'allow', group: 'analytics' },
+    { name: 'shopifyAnalyticsQuery', description: 'Run a read-only ShopifyQL query against store analytics', classification: 'read', defaultPolicy: 'allow', group: 'analytics' },
   ],
   // Microsoft Teams (Graph) — READ-ONLY, permanently (decision D1). Graph
   // publishes no application permission for sending, so every Graph write is
@@ -254,6 +281,15 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'sendFile',    description: 'Attach a workspace file to the reply as a downloadable document', classification: 'read',       defaultPolicy: 'allow' },
     { name: 'fileDelete',  description: 'Permanently delete a workspace file',                           classification: 'destructive', defaultPolicy: 'ask' },
   ],
+  // Brand — the positioning record (docs/architecture/features/brand.md).
+  // Boot-injected like `files` (see BOOT_INJECTED_BUILTIN_TOOLS below), NOT
+  // through mcp/inject.ts. `updateBrandDraft` is classified `write`, not
+  // `destructive`: it can only ever replace the mutable draft, and approval
+  // — the irreversible step — is a Studio action no tool can reach.
+  brand: [
+    { name: 'getBrand', description: 'Read the workspace brand record (tokens, voice, claims, rights, sources)', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'updateBrandDraft', description: 'Propose a change to the brand draft (an owner or admin approves it in Studio)', classification: 'write', defaultPolicy: 'ask' },
+  ],
   office: [
     { name: 'createOfficeArtifact', description: 'Start a durable Brian-native Document or Presentation job', classification: 'write', defaultPolicy: 'allow' },
     { name: 'getOfficeArtifact', description: 'Read an Office artifact and its current generation state', classification: 'read', defaultPolicy: 'allow' },
@@ -297,6 +333,26 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'loadFromWorkspace', description: 'Copy a workspace file into the sandbox scratch', classification: 'read', defaultPolicy: 'allow' },
     { name: 'saveToWorkspace', description: 'Save a sandbox scratch file into workspace files', classification: 'write', defaultPolicy: 'ask' },
   ],
+}
+
+/**
+ * Grouping view over a connector's tool table, for the tool-list UI
+ * (`connector-tool-list.tsx`): `order` is the group ids in first-appearance
+ * order (registry order is display order), `byTool` maps tool name → group.
+ * An empty `order` means the connector's list renders flat.
+ */
+export function connectorToolGrouping(connectorId: string): {
+  order: BuiltinToolGroupId[]
+  byTool: Record<string, BuiltinToolGroupId>
+} {
+  const order: BuiltinToolGroupId[] = []
+  const byTool: Record<string, BuiltinToolGroupId> = {}
+  for (const tool of OFFICIAL_CONNECTOR_TOOLS[connectorId] ?? []) {
+    if (!tool.group) continue
+    byTool[tool.name] = tool.group
+    if (!order.includes(tool.group)) order.push(tool.group)
+  }
+  return { order, byTool }
 }
 
 /**
@@ -525,6 +581,12 @@ export const BOOT_INJECTED_BUILTIN_TOOLS: Record<string, readonly string[]> = {
     'createOfficeArtifact',
     'getOfficeArtifact',
     'reviseOfficeArtifact',
+  ],
+  // Brand (docs/architecture/features/brand.md): wired at boot from
+  // packages/core/src/brand/tools.ts, gated on the `brand` capability.
+  brand: [
+    'getBrand',
+    'updateBrandDraft',
   ],
   // Computer use (docs/architecture/engine/computer-use.md): wired at boot
   // from packages/core/src/sandbox/tools.ts, always present (a missing

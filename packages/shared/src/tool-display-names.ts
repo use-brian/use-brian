@@ -182,6 +182,10 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   getOfficeArtifact: 'Read an Office artifact',
   reviseOfficeArtifact: 'Revise an Office artifact',
 
+  // Brand (docs/architecture/features/brand.md)
+  getBrand: 'Read the brand record',
+  updateBrandDraft: 'Propose a brand change',
+
   // Computer use (docs/architecture/engine/computer-use.md)
   browserNavigate: 'Open a page in the browser',
   browserSnapshot: 'Look at the browser page',

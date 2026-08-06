@@ -93,4 +93,24 @@ Body.`
     expect(entry.metadata).toEqual({ status: 'stable', owner: 'alice' })
     expect(entry.metadata.sensitivity).toBeUndefined()
   })
+
+  // ── Stamp provenance (mig 410) ──────────────────────────────
+  // `sensitivityExplicit` tells the sync worker whether to substitute the
+  // source's default: only a VALID frontmatter stamp counts as explicit.
+
+  it('marks a valid frontmatter stamp as explicit', () => {
+    const entry = parseMarkdownFile('a.md', '---\ntitle: A\nsensitivity: public\n---\nBody.')
+    expect(entry.sensitivityExplicit).toBe(true)
+  })
+
+  it('marks an absent stamp as not explicit', () => {
+    const entry = parseMarkdownFile('b.md', '---\ntitle: B\n---\nBody.')
+    expect(entry.sensitivityExplicit).toBe(false)
+  })
+
+  it('marks an INVALID stamp as not explicit (falls back to internal)', () => {
+    const entry = parseMarkdownFile('c.md', '---\ntitle: C\nsensitivity: nope\n---\nBody.')
+    expect(entry.sensitivity).toBe('internal')
+    expect(entry.sensitivityExplicit).toBe(false)
+  })
 })

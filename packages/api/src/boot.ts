@@ -24,6 +24,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto'
+import { seedBuiltinPrimitiveCapabilities } from './db/capability-seed.js'
 import type http from 'node:http'
 
 import express, { type Express } from 'express'
@@ -88,8 +89,10 @@ import {
   createRetrievalTools,
   createViewTools,
   createFileTools,
+  createBrandTools,
   createOfficeTools,
   type FileToolPolicy,
+  type OfficeToolPolicy,
   createFindPageTool,
   createIngestRuleTools,
   createEntityKindClassifier,
@@ -244,11 +247,13 @@ import { createChatConfirmationStore } from './db/chat-confirmation-store.js'
 import { createDeferredConfirmationStore } from './db/deferred-confirmation-store.js'
 import { createDbKnowledgeStore } from './db/knowledge-store.js'
 import { createKnowledgeRepoWriter } from './knowledge/repo-writer.js'
+import { createDbKbMaintenanceStore, kbMaintenanceRunGuard } from './knowledge/maintenance.js'
 import { knowledgeRoutes, workspaceKnowledgeRoutes } from './routes/knowledge.js'
+import { brandRoutes } from './routes/brand.js'
 import { getBranchHead, getRepoTree, getFileContents, compareCommits, getRepoPermissions } from './github/client.js'
 import { startBrainStreamFanout } from './brain-stream/sse-fanout.js'
 import { brainStreamRoutes } from './routes/brain-stream.js'
-import { publishSessionEvent, startSessionEventBus, subscribeSessionEvents } from './session-event-bus.js'
+import { getSessionPresence, publishSessionEvent, setSessionTyping, startSessionEventBus, subscribeSessionEvents } from './session-event-bus.js'
 import { createDbMcpSettingsStore } from './db/mcp-settings-store.js'
 import { createDbConnectorStore } from './db/connector-store.js'
 import { createConnectorInstanceStore } from './db/connector-instance-store.js'
@@ -402,6 +407,8 @@ import { viewsRoutes } from './routes/views.js'
 import { teamspacesRoutes } from './routes/teamspaces.js'
 import { createTeamspaceStore } from './db/teamspace-store.js'
 import { createOfficeArtifactStore } from './db/office-artifacts.js'
+import { getBrandStore } from './db/brand-store.js'
+import { buildBrandVoiceFragment } from '@use-brian/core'
 import { createOfficeTemplateStore } from './db/office-templates.js'
 import { createOfficeGenerationStore } from './db/office-generation.js'
 import { createOfficeCommentStore } from './db/office-comments.js'
@@ -444,6 +451,7 @@ import { publishPageLifecycle, setPageEventDispatcher } from './page-event-fanou
 import { setMediaTokenSecret } from './media-token.js'
 import { setTaskEventDispatcher } from './task-event-fanout.js'
 import { setKnowledgeEventDispatcher } from './knowledge-event-fanout.js'
+import { setBrandEventDispatcher } from './brand-event-fanout.js'
 import { createRecordingSynthesizer, type RecordingSynthesizeFn } from './synthesis/recording-synthesizer.js'
 import { processOpenRecording } from './recordings/process-recording.js'
 import { createOpenRecordingProcessWorker } from './recordings/recording-process-worker.js'
@@ -1730,6 +1738,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const chatConfirmationStore = createChatConfirmationStore()
   const deferredConfirmationStore = createDeferredConfirmationStore()
   const knowledgeStore = createDbKnowledgeStore()
+  const kbMaintenanceStore = createDbKbMaintenanceStore()
 
   // ── Assistant KB repo writer ──
   // Direct-commit write-back for the KB write tools (updateKnowledgeEntry /
@@ -2003,9 +2012,40 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     latestJob: officeGenerationStore.latestForArtifact,
     wakeGeneration(userId) { wakeOfficeGeneration?.(userId) },
   })
+  // Effective allow/ask/block for an Office tool — the same L1 (app-level
+  // sentinel) + L2 (per-assistant) strictest-wins resolution the files and
+  // computer primitives use, over `mcp_tool_settings` with serverName='office'.
+  // The Studio / Assistant governance tables have always WRITTEN these rows;
+  // until this hook existed nothing read them, so a blocked Office tool still
+  // ran. Same defect the files resolver below was added to fix.
+  const OFFICE_CONNECTOR_ID = 'office'
+  const officeToolDefaults = new Map(
+    (OFFICIAL_CONNECTOR_TOOLS[OFFICE_CONNECTOR_ID] ?? []).map((t) => [t.name, t.defaultPolicy]),
+  )
+  const OFFICE_POLICY_STRICTNESS: Record<string, number> = { allow: 0, ask: 1, block: 2 }
+  const resolveOfficeToolPolicy = async (
+    toolName: string,
+    context: { userId: string; assistantId: string },
+  ): Promise<OfficeToolPolicy> => {
+    const fallback = (officeToolDefaults.get(toolName) ?? 'allow') as OfficeToolPolicy
+    const [l1, l2] = await Promise.all([
+      mcpSettingsStore.getPolicy({
+        assistantId: APP_LEVEL_ASSISTANT_ID, userId: context.userId,
+        serverName: OFFICE_CONNECTOR_ID, toolName,
+      }),
+      mcpSettingsStore.getPolicy({
+        assistantId: context.assistantId, userId: context.userId,
+        serverName: OFFICE_CONNECTOR_ID, toolName,
+      }),
+    ])
+    const a = (l1?.policy as OfficeToolPolicy) ?? fallback
+    const b = (l2?.policy as OfficeToolPolicy) ?? fallback
+    return (OFFICE_POLICY_STRICTNESS[a] ?? 0) >= (OFFICE_POLICY_STRICTNESS[b] ?? 0) ? a : b
+  }
   for (const tool of createOfficeTools({
     port: officeService,
     appOrigin: env.AUTHED_APP_URL ?? env.APP_URL,
+    resolvePolicy: resolveOfficeToolPolicy,
   })) {
     allTools.set(tool.name, tool)
   }
@@ -2803,6 +2843,25 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // one instruction; tasks.md → "Bulk tools").
   allTools.set('bulkUpdateTasks', taskTools.bulkUpdateTasks)
   allTools.set('archiveTasks', taskTools.archiveTasks)
+
+  // ── Brand primitive ──
+  // Boot-built like the file tools (NOT through mcp/inject.ts): both carry
+  // `requiresCapability: 'brand'`, so the per-turn `filterToolsByCapabilities`
+  // call is what gates them and the Studio Built-in rail's toggle is the off
+  // switch. `updateBrandDraft` writes the draft only — approval is a Studio
+  // action no tool can reach. See docs/architecture/features/brand.md.
+  const brandTools = createBrandTools(getBrandStore(), {
+    onEvent: (evt, ctx) => {
+      const base = { userId: ctx.userId, assistantId: ctx.assistantId, sessionId: ctx.sessionId, channelType: ctx.channelType }
+      if (evt.type === 'brand_read') {
+        analytics.logEvent({ ...base, eventName: 'brand_read', metadata: { brand_id: sanitizeAnalytics(evt.brandId ?? ''), hit: evt.brandId !== null } })
+      } else if (evt.type === 'brand_draft_updated') {
+        analytics.logEvent({ ...base, eventName: 'brand_draft_updated', metadata: { brand_id: sanitizeAnalytics(evt.brandId), groups: sanitizeAnalytics(evt.groups.join(',')) } })
+      }
+    },
+  })
+  allTools.set('getBrand', brandTools.getBrand)
+  allTools.set('updateBrandDraft', brandTools.updateBrandDraft)
 
   // Guardrail tools — rejecting a task WITH a reason is what teaches the
   // workspace; archiveTasks above is routine cleanup and deliberately teaches
@@ -3780,6 +3839,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     crmTools,
     retrievalTools: brainRetrievalTools,
     fileTools: brainFileTools ?? undefined,
+    // Brand primitive (D8): `getBrand` on both key scopes, `saveBrandDraft`
+    // on write keys. Draft-only — the supplier flow is that an agency session
+    // pushes a draft into the client's workspace and the CLIENT approves it in
+    // their own Studio, so no approve tool exists on this surface.
+    brandTools: { getBrand: brandTools.getBrand, updateBrandDraft: brandTools.updateBrandDraft },
     // Doc-page tools (readPage / editPage / deletePage) reuse the same RLS-gated
     // saved-views + doc-page stores the chat doc tools use, so a brain-key page
     // op runs the identical SQL (CAS + undo for edits, cascade delete) as an
@@ -3823,6 +3887,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api/sessions', optionalAuth(env.JWT_SECRET), sessionRoutes({
     subscribeSessionEvents,
     publishSessionEvent,
+    setSessionTyping,
+    getSessionPresence,
     ...(roomIngestor
       ? {
           onRoomPost: (post) => {
@@ -4109,6 +4175,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         [assistantName, iconSeed, resolvedAppType, workspaceId, appClearance],
       )
       const assistantId = result.rows[0].id
+      // App specialists deliberately get no §17 primitives, but the built-in
+      // primitives (office / computer) were injected unconditionally before the
+      // off switch existed — seed them so an app assistant keeps what it had.
+      await seedBuiltinPrimitiveCapabilities(
+        (sql, params) => query(sql, params as never[]),
+        assistantId,
+        userId,
+        'built-in primitive — default-on at app-assistant creation',
+      )
       await connectionStore.seedWorkspacePrimaryFollows(workspaceId).catch((err) =>
         console.warn('[assistants] seedWorkspacePrimaryFollows failed:', err),
       )
@@ -4815,9 +4890,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           ].slice(0, 100)
         },
         async construct(brief, evidence, claims, template) {
-          if (brief.family === 'document') return generateDocumentFromTemplate({ provider, model: backgroundModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, template })
-          if (brief.family === 'presentation') return generatePresentationFromTemplate({ provider, model: backgroundModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, evidence, claims, template })
-          return generateSpreadsheetFromTemplate({ provider, model: backgroundModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, template })
+          const brandVoice = await resolveBrandVoice(job.initiatedByUserId, job.workspaceId)
+          if (brief.family === 'document') return generateDocumentFromTemplate({ provider, model: backgroundModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, template, brandVoice })
+          if (brief.family === 'presentation') return generatePresentationFromTemplate({ provider, model: backgroundModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, evidence, claims, template, brandVoice })
+          return generateSpreadsheetFromTemplate({ provider, model: backgroundModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, template, brandVoice })
         },
         async processMedia(snapshot) { return snapshot },
         async resolveResource(resourceId) {
@@ -4834,13 +4910,33 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       }
     },
   })
+  /**
+   * The brand voice fragment for an Office generation or revision.
+   *
+   * Office generation builds its own system prompts and never routes through
+   * `buildFullSystemPrompt`, so the `# Brand` L1 block never reached it: the
+   * assistant honoured the brand voice in chat and ignored it when generating
+   * the company's documents. Resolved per job, best-effort — a brand read
+   * failing must not fail a generation, and no approved brand adds nothing.
+   */
+  const resolveBrandVoice = async (userId: string, workspaceId: string): Promise<string | null> => {
+    try {
+      const record = (await getBrandStore().get(userId, workspaceId))?.activeRecord ?? null
+      return buildBrandVoiceFragment(record)
+    } catch (err) {
+      console.warn('[office] brand voice lookup failed:', err)
+      return null
+    }
+  }
+
   const officeRevisionWorker = filesApi ? createOfficeRevisionWorker({
     claim: officeGenerationStore.claim,
     getSnapshot: officeLiveStore.get,
-    async revise({ snapshot, targetIds, instruction }) {
-      if (snapshot.family === 'document') return reviseDocumentTargets({ provider, model: backgroundModel, snapshot, targetIds, instruction })
-      if (snapshot.family === 'presentation') return revisePresentationTargets({ provider, model: backgroundModel, snapshot, targetIds, instruction })
-      return reviseSpreadsheetTargets({ provider, model: backgroundModel, snapshot, targetIds, instruction })
+    async revise({ snapshot, targetIds, instruction, job }) {
+      const brandVoice = await resolveBrandVoice(job.initiatedByUserId, job.workspaceId)
+      if (snapshot.family === 'document') return reviseDocumentTargets({ provider, model: backgroundModel, snapshot, targetIds, instruction, brandVoice })
+      if (snapshot.family === 'presentation') return revisePresentationTargets({ provider, model: backgroundModel, snapshot, targetIds, instruction, brandVoice })
+      return reviseSpreadsheetTargets({ provider, model: backgroundModel, snapshot, targetIds, instruction, brandVoice })
     },
     async commit({ job, snapshot, expectedVersion }) {
       return (await commitGeneratedOfficeSnapshot({ job, snapshot, expectedVersion, kind: 'revision' })).version
@@ -4963,7 +5059,17 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     const [artifact, access, live, head] = await Promise.all([officeArtifactStore.get(userId, artifactId), resolveOfficeAccess(userId, artifactId), officeLiveStore.get(userId, artifactId), officeArtifactStore.getHeadVersion(userId, artifactId)])
     if (!artifact || !access || !live) return null
     const [claims, media] = artifact.headVersionId ? await Promise.all([officeReleaseStore.listClaims(userId, artifactId, artifact.headVersionId), officeReleaseStore.listMedia(userId, artifactId, artifact.headVersionId)]) : [[], []]
-    return { artifact: { ...artifact, headVersionId: head?.snapshotHash === live.canonicalHash ? artifact.headVersionId : null }, access, snapshot: live.snapshot, claims, media }
+    // The brand's APPROVED claims register (docs/architecture/features/brand.md
+    // → "Claims reach the release gate"). Best-effort: a brand read failing must
+    // not make a release impossible, and no brand simply contributes nothing.
+    let brandClaims: readonly import('@use-brian/shared').BrandClaim[] | undefined
+    try {
+      const brand = await getBrandStore().get(userId, artifact.workspaceId)
+      brandClaims = brand?.activeRecord?.claims
+    } catch (err) {
+      console.warn('[office-release] brand claims lookup failed:', err)
+    }
+    return { artifact: { ...artifact, headVersionId: head?.snapshotHash === live.canonicalHash ? artifact.headVersionId : null }, access, snapshot: live.snapshot, claims, brandClaims, media }
   }
   if (filesApi) app.use('/api/office', requireAuth(env.JWT_SECRET), officeReleaseRoutes({
     load: loadOfficeReleaseContext,
@@ -5058,6 +5164,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   // workspace-scoped knowledge route resolves edit-proposal PATs through the
   // same `syncCredentials` resolver the sync worker uses.
+  // Brand primitive — one open router mounted here so both editions serve it
+  // (never on the forked /api/connectors pair; see routes/brand.ts).
+  app.use('/api/workspaces/:workspaceId/brand', requireAuth(env.JWT_SECRET), brandRoutes())
+
   app.use('/api/workspaces/:workspaceId/knowledge', requireAuth(env.JWT_SECRET), workspaceKnowledgeRoutes({
     knowledgeStore,
     allowLocalSources: env.LOCAL_FILESYSTEM_SOURCES_ENABLED === true,
@@ -5066,6 +5176,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     syncCredentials,
     knowledgeRepoWriter,
     triggerSync: async () => { if (syncWorkerRef) await syncWorkerRef.tick() },
+    // Self-maintain agents (mig 411): config store + the workflow store the
+    // materialized workflow writes through + schedule reconciliation deps.
+    kbMaintenanceStore,
+    workflowStore,
+    jobStore,
+    resolvePrimary: resolvePrimaryAssistantForWorkspace,
   }))
 
   // ════════════════════════════════════════════════════════════════
@@ -5141,6 +5257,19 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         )
         return
       }
+      // KB self-maintain budget guard (mig 411): a knowledge-managed
+      // workflow over its weekly proposal budget (or whose agent is
+      // disabled) skips the run — the 7-day window slides, so it resumes
+      // by itself. One indexed read for every non-managed workflow.
+      try {
+        const guard = await kbMaintenanceRunGuard(kbMaintenanceStore, workflowId)
+        if (guard.skip) {
+          console.warn(`[workflow-event] kb-maintenance guard skipped workflow ${workflowId}: ${guard.reason}`)
+          return
+        }
+      } catch (err) {
+        console.warn('[workflow-event] kb-maintenance guard failed (run proceeds):', err)
+      }
       const triggeredBy = await getWorkflowCreatorSystem(workflowId)
       await workflowRunStore.createRun({
         workflowId,
@@ -5187,6 +5316,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // publishes into on every entry create / update / delete, covering the sync
   // worker, the assistant repo-writer's write-through, and manual edits.
   setKnowledgeEventDispatcher(workflowEventDispatcher)
+  // Brand lifecycle events likewise — the seam `db/brand-store.ts` publishes
+  // into on create / draft update / approve / supersede, covering the Studio
+  // routes, the `updateBrandDraft` chat tool, and the brain-MCP bridge.
+  setBrandEventDispatcher(workflowEventDispatcher)
 
   // ════════════════════════════════════════════════════════════════
   // Open background workers

@@ -154,6 +154,7 @@ export function createComputeTools(opts: CreateComputeToolsOptions): {
 
   const runPython = buildTool({
     name: 'runPython',
+    requiresCapability: 'computer',
     description:
       'Run a Python snippet in the task sandbox for computation: parse, transform, analyze, or build data artifacts over files already in the sandbox scratch (see loadFromWorkspace). Common data libraries are pre-installed. The interpreter has NO network access and cannot drive the browser or call tools — bring data in with loadFromWorkspace and persist results with saveToWorkspace.',
     inputSchema: z.object({
@@ -199,6 +200,7 @@ export function createComputeTools(opts: CreateComputeToolsOptions): {
 
   const loadFromWorkspace = buildTool({
     name: 'loadFromWorkspace',
+    requiresCapability: 'computer',
     description:
       'Copy a workspace file into the task sandbox scratch so runPython can read it. Pass the workspace file id or path; returns the scratch path to use in Python.',
     inputSchema: z.object({
@@ -247,6 +249,7 @@ export function createComputeTools(opts: CreateComputeToolsOptions): {
 
   const saveToWorkspace = buildTool({
     name: 'saveToWorkspace',
+    requiresCapability: 'computer',
     description:
       'Persist a file from the task sandbox scratch into the workspace files (the durable store — the sandbox is disposable). Pass the scratch path runPython wrote.',
     inputSchema: z.object({

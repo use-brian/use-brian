@@ -40,6 +40,7 @@ const connectorInstanceStore = {
 }
 const connectorGrantStore = { listForTargetSystem: vi.fn() }
 const mcpSettingsStore = { getPolicy: vi.fn(), setPolicy: vi.fn() }
+const capabilityStore = { listActive: vi.fn<(id: string) => Promise<string[]>>() }
 
 beforeEach(() => {
   mockQueryWithRLS.mockReset()
@@ -50,6 +51,7 @@ beforeEach(() => {
   connectorInstanceStore.getAuthCredentialsSystem.mockReset().mockResolvedValue(null)
   connectorGrantStore.listForTargetSystem.mockReset().mockResolvedValue([])
   mockDiscoverCli.mockReset().mockResolvedValue({ name: 'CLI', tools: [] })
+  capabilityStore.listActive.mockReset().mockResolvedValue([])
   mcpSettingsStore.getPolicy.mockReset().mockResolvedValue(null)
   mcpSettingsStore.setPolicy.mockReset().mockResolvedValue(undefined)
 })
@@ -69,7 +71,10 @@ function makeApp(userId: string) {
       connectorInstanceStore: connectorInstanceStore as never,
       connectorGrantStore: connectorGrantStore as never,
       mcpSettingsStore: mcpSettingsStore as never,
-      capabilityStore: {} as never,
+      // Built-in primitive rows report `enabled` from the capability grant
+      // (docs/architecture/features/builtin-primitives.md), so this handler
+      // reads the store — an empty stub object is no longer sufficient.
+      capabilityStore: capabilityStore as never,
     }),
   )
   return app
@@ -353,10 +358,13 @@ describe('[COMP:routes/assistants-connector-scoping] GET /:assistantId/connector
     expect((res.body.connectors as Array<{ providerId?: string }>).some((connector) => connector.providerId === 'imap')).toBe(false)
   })
 
-  it('synthesizes an always-on built-in row (Workspace Files) with no backing connector row', async () => {
+  it('synthesizes a built-in row (Workspace Files) with no backing connector row, reporting the capability grant', async () => {
     queueMembershipAndTeam('admin', 'ws-shared')
     // No instances, no grants, no personal connectors — the built-in must
     // still appear (it has no row in ANY source; the route synthesizes it).
+    // `enabled` is the `files` capability grant, which this assistant holds.
+    // See docs/architecture/features/builtin-primitives.md.
+    capabilityStore.listActive.mockResolvedValueOnce(['files'])
     const res = await request(makeApp('u-admin')).get('/api/assistants/a-1/connectors')
 
     expect(res.status).toBe(200)
@@ -368,6 +376,17 @@ describe('[COMP:routes/assistants-connector-scoping] GET /:assistantId/connector
     expect(files?.connected).toBe(true)
     expect(files?.enabled).toBe(true)
     expect(files?.custom).toBe(false)
+  })
+
+  it('reports a built-in row as OFF when the assistant lacks the capability', async () => {
+    queueMembershipAndTeam('admin', 'ws-shared')
+    capabilityStore.listActive.mockResolvedValueOnce([])
+    const res = await request(makeApp('u-admin')).get('/api/assistants/a-1/connectors')
+
+    const files = (res.body.connectors as Array<{ id: string; enabled: boolean }>).find((c) => c.id === 'files')
+    // Still listed (so its per-tool policy stays reachable), but off.
+    expect(files).toBeDefined()
+    expect(files?.enabled).toBe(false)
   })
 
   it('applies a stored per-assistant enabled=false to the synthesized built-in row', async () => {
