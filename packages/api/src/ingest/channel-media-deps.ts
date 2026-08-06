@@ -50,8 +50,14 @@ export function createOpenChannelMediaIntakeDeps(infra: {
               limitBytes: CHANNEL_DOCUMENT_PARSE_MAX_BYTES,
             }
           }
-          const { text, summary } = await parseFileContent(blob.bytes, mime, fileName ?? 'document')
+          const parsed = await parseFileContent(blob.bytes, mime, fileName ?? 'document')
+          const { text, summary } = parsed
           if (!text.trim()) return { status: 'empty' }
+          // A parser placeholder is our own note, not the document. Storing it
+          // is fine; chunking and decomposing it is not (same rule as the
+          // file-ingest path). `!text.trim()` never catches these — a
+          // placeholder is a full sentence.
+          if (parsed.placeholder) return { status: 'unsupported_type' }
 
           // `parseFileContent` returns BASE64 for inline media (a PDF or an
           // image), not text — that string is meant for an `image` ContentBlock,

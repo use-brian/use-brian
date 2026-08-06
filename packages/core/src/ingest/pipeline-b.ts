@@ -291,6 +291,21 @@ export type PipelineBResult = {
   extractionUsage: TokenUsage | null
   /** True iff extraction LLM returned a parseable payload (even if all arrays were empty). */
   extracted: boolean
+  /**
+   * Extraction windows the content was split into. Absent when extraction did
+   * not run (a branch that never windows, e.g. the digest path).
+   */
+  windowsTotal?: number
+  /**
+   * Windows that failed BOTH attempts and were skipped permanently.
+   *
+   * A skipped window is not an error anywhere: `extracted` stays true, the
+   * surviving windows merge, and the caller sees an ordinary success. On the
+   * 2026-08-05 incident 3 of 47 windows returned unparseable JSON and the run
+   * was indistinguishable from a complete one outside `analytics_events`.
+   * Carrying the count is what lets a caller say so.
+   */
+  windowsFailed?: number
 }
 
 // ── Extraction-output schema (Zod safeParse target) ──────────────────
@@ -1488,7 +1503,11 @@ export async function processEpisode(
       windowCount: windows.length,
     })
     await archiveWithEmptySummary(episode, deps, actorUserId)
-    return emptyResult(episode, extractionUsage, false)
+    return {
+      ...emptyResult(episode, extractionUsage, false),
+      windowsTotal: windows.length,
+      windowsFailed: windows.length,
+    }
   }
   const payload = mergeExtractionOutputs(windowPayloads)
 
@@ -1809,6 +1828,8 @@ export async function processEpisode(
     sensitivity,
     extractionUsage,
     extracted: true,
+    windowsTotal: windows.length,
+    windowsFailed: windows.length - windowPayloads.length,
   }
 }
 

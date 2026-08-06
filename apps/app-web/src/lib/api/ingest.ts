@@ -48,7 +48,18 @@ export type IngestFileResult = {
    */
   truncated?: boolean;
   /** Set when the file was stored but deliberately not interpreted. */
-  skipped?: "unsupported_type" | "empty" | "not_requested";
+  skipped?:
+    | "unsupported_type"
+    | "media_owned_by_recordings"
+    | "empty"
+    | "not_requested";
+  /**
+   * Extraction windows attempted, and how many were dropped after failing
+   * twice. A dropped window leaves `decomposed: true`, so without these a
+   * partial extraction is indistinguishable from a complete one.
+   */
+  windowsTotal?: number;
+  windowsFailed?: number;
   /** Dedicated, lossless LinkedIn archive queue result (ZIPs bypass Pipeline B). */
   linkedinImport?: {
     runId: string;

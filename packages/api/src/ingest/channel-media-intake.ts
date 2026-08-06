@@ -194,6 +194,13 @@ export type ChannelDocumentIngestResult =
    * brain silently ingested garbage. Reported instead of guessed.
    */
   | { status: 'store_only_needs_distill' }
+  /**
+   * `parseFileContent` returned its own note about why extraction did not
+   * happen (a legacy `.doc`, an `.rtf`, an unhandled type), not content.
+   * Chunking that sentence would answer future searches with our error text
+   * and decomposing it would spend a model call summarising it.
+   */
+  | { status: 'unsupported_type' }
 
 export type ChannelMediaIntakeResult =
   | { status: 'queued'; kind: 'audio_video'; recordingId: string; jobId: string | null }
@@ -223,7 +230,7 @@ export type ChannelMediaIntakeResult =
       // quiet without lying about an ingest that never happened.
       status: 'skipped'
       kind: 'document'
-      reason: 'no_assistant' | 'empty' | 'needs_distill'
+      reason: 'no_assistant' | 'empty' | 'needs_distill' | 'unsupported_type'
     }
   | {
       status: 'rejected'
@@ -412,6 +419,8 @@ export async function ingestChannelMedia(
       return { status: 'skipped', kind: 'document', reason: 'empty' }
     case 'store_only_needs_distill':
       return { status: 'skipped', kind: 'document', reason: 'needs_distill' }
+    case 'unsupported_type':
+      return { status: 'skipped', kind: 'document', reason: 'unsupported_type' }
   }
 }
 

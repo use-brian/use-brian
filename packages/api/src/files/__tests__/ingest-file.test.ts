@@ -1,7 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import type { FilesApi } from '@use-brian/core'
 import { createFileIngestor, FileIngestError, type FileIngestContext } from '../ingest-file.js'
-import { indexFileArtifact } from '../artifact-index.js'
+import { indexFileArtifact, setFileIndexing } from '../artifact-index.js'
 
 // Chunking talks to the pool; the contract under test here is what the
 // ingestor DOES with the chunker's answer, which used to be nothing at all.
@@ -12,9 +12,11 @@ vi.mock('../artifact-index.js', () => ({
     truncated: false,
     truncatedAtChar: null,
   })),
+  setFileIndexing: vi.fn(async () => {}),
 }))
 
 const indexMock = vi.mocked(indexFileArtifact)
+const stampMock = vi.mocked(setFileIndexing)
 
 function fakeWriteBytes(over?: { fail?: 'quota' | 'conflict' }) {
   const calls: Array<{ path: string; mime: string; bytes: Buffer }> = []
@@ -29,7 +31,10 @@ function fakeWriteBytes(over?: { fail?: 'quota' | 'conflict' }) {
   return { writeBytes, calls }
 }
 
-function fakeIngest(counts: { entities: number; edges: number; memories: number; tasks: number }) {
+function fakeIngest(
+  counts: { entities: number; edges: number; memories: number; tasks: number },
+  windows?: { windowsTotal: number; windowsFailed: number },
+) {
   const calls: Array<{ content: string; sourceLabel?: string; sourceKind?: string; sourceRef?: unknown }> = []
   const ingest = vi.fn(async (input: { content: string; sourceLabel?: string; sourceKind?: string; sourceRef?: unknown }) => {
     calls.push(input)
@@ -39,6 +44,7 @@ function fakeIngest(counts: { entities: number; edges: number; memories: number;
       edgesWritten: Array(counts.edges).fill({}),
       memoriesWritten: Array(counts.memories).fill({}),
       tasksWritten: Array(counts.tasks).fill({}),
+      ...(windows ?? {}),
     } as never
   })
   return { ingest, calls }
@@ -54,6 +60,7 @@ const ctx: FileIngestContext = {
 }
 
 beforeEach(() => {
+  stampMock.mockClear()
   indexMock.mockClear()
   indexMock.mockResolvedValue({
     segmentsInserted: 3,
@@ -302,6 +309,48 @@ describe('[COMP:files/ingest] createFileIngestor reports what the brain did not 
     expect(result.skipped).toBe('media_owned_by_recordings')
   })
 
+  it('carries dropped extraction windows up, so 44 of 47 cannot read as 47', async () => {
+    const fw = fakeWriteBytes()
+    const ing = fakeIngest({ entities: 1, edges: 0, memories: 0, tasks: 0 }, {
+      windowsTotal: 47,
+      windowsFailed: 3,
+    })
+    const ingestFile = createFileIngestor({
+      filesApi: { writeBytes: fw.writeBytes } as unknown as FilesApi,
+      ingest: ing.ingest as never,
+      distill: vi.fn(async () => 'SHOULD NOT BE CALLED'),
+      parse: (async () => ({ text: 'a long document', summary: '' })) as never,
+    })
+
+    const result = await ingestFile(
+      { fileName: 'report.html', mime: 'text/html', bytes: Buffer.from('x') },
+      ctx,
+    )
+
+    expect(result).toMatchObject({ decomposed: true, windowsTotal: 47, windowsFailed: 3 })
+  })
+
+  it('omits windowsFailed when every window survived', async () => {
+    const fw = fakeWriteBytes()
+    const ing = fakeIngest({ entities: 1, edges: 0, memories: 0, tasks: 0 }, {
+      windowsTotal: 2,
+      windowsFailed: 0,
+    })
+    const ingestFile = createFileIngestor({
+      filesApi: { writeBytes: fw.writeBytes } as unknown as FilesApi,
+      ingest: ing.ingest as never,
+      distill: vi.fn(async () => 'x'),
+      parse: (async () => ({ text: 'doc', summary: '' })) as never,
+    })
+
+    const result = await ingestFile(
+      { fileName: 'a.md', mime: 'text/markdown', bytes: Buffer.from('x') },
+      ctx,
+    )
+    expect(result.windowsTotal).toBe(2)
+    expect(result.windowsFailed).toBeUndefined()
+  })
+
   it('still decomposes when segment indexing itself fails', async () => {
     indexMock.mockRejectedValue(new Error('pool down'))
     const { ingestFile, ing } = ingestorWith(async () => ({ text: 'real content', summary: '' }))
@@ -314,5 +363,11 @@ describe('[COMP:files/ingest] createFileIngestor reports what the brain did not 
     expect(ing.ingest).toHaveBeenCalledOnce()
     expect(result.decomposed).toBe(true)
     expect(result.segments).toBeUndefined()
+    // Without this stamp the row carries no `metadata.indexing` at all, so a
+    // file that failed to index looks identical to one never queued.
+    expect(stampMock).toHaveBeenCalledWith(
+      'file_1',
+      expect.objectContaining({ status: 'failed', error: 'pool down' }),
+    )
   })
 })

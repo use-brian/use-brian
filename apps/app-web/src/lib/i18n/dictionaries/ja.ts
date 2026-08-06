@@ -659,6 +659,8 @@ export const ja: Dictionary = {
       ingestFailed: "失敗",
       ingestNotReadable: "保存済み、本文は読み取れません",
       ingestTruncated: "一部は未索引",
+      ingestPartialExtraction: "一部は未解析",
+      ingestNotAnalysed: "保存済み、解析できませんでした",
       ingestRemove: "削除",
       ingestClear: "クリア",
       linkedinArchiveAlone: "全行を照合するため、LinkedIn ZIP は単独で追加してください。",

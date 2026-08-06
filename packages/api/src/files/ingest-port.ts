@@ -83,6 +83,17 @@ export type FileIngestResult = {
   truncatedAtChar?: number
   /** Present when the file was stored but not decomposed. */
   skipped?: FileIngestSkipReason
+  /**
+   * Extraction windows the document's text was split into, and how many failed
+   * both attempts and were dropped.
+   *
+   * A dropped window is not an error anywhere upstream: `decomposed` stays
+   * true and the surviving windows merge, so 44-of-47 reads exactly like
+   * 47-of-47. Before this, the only record of the 2026-08-05 file's three lost
+   * windows was an `analytics_events` row.
+   */
+  windowsTotal?: number
+  windowsFailed?: number
 }
 
 export type FileIngestor = (

@@ -248,18 +248,32 @@ function StatusLabel({
       <span className="text-amber-600 dark:text-amber-400">{t.ingestNotReadable}</span>
     );
   }
+  // `decomposed: false` with no skip reason means extraction was attempted and
+  // produced nothing (every window failed, or the provider threw). That is a
+  // failure, not a storage-only success, and it used to render as the same
+  // green "Stored" a deliberate pin gets.
+  if (item.result?.decomposed === false && !skipped) {
+    return (
+      <span className="text-amber-600 dark:text-amber-400">{t.ingestNotAnalysed}</span>
+    );
+  }
   const n = totalAdded(item.result?.counts);
   const truncated = item.result?.truncated === true;
+  const partial = (item.result?.windowsFailed ?? 0) > 0;
+  const caveats = [
+    truncated ? t.ingestTruncated : null,
+    partial ? t.ingestPartialExtraction : null,
+  ].filter(Boolean);
   return (
     <span
       className={
-        truncated
+        caveats.length
           ? "text-amber-600 dark:text-amber-400"
           : "text-emerald-600 dark:text-emerald-400"
       }
     >
       {n > 0 ? `${n} ${t.ingestAdded}` : t.ingestStored}
-      {truncated ? ` (${t.ingestTruncated})` : ""}
+      {caveats.length ? ` (${caveats.join(", ")})` : ""}
     </span>
   );
 }

@@ -52,6 +52,28 @@ function extensionOf(fileName: string): string {
 const HTML_MIMES = new Set(['text/html', 'application/xhtml+xml', 'application/html'])
 const HTML_EXTS = new Set(['.html', '.htm', '.xhtml'])
 const RTF_MIMES = new Set(['text/rtf', 'application/rtf'])
+const TSV_MIME = 'text/tab-separated-values'
+
+/**
+ * OOXML shapes the OTHER parsers read as-is. The allowlist admits the whole
+ * `application/vnd.openxmlformats-officedocument` prefix, so these upload
+ * successfully and then used to land on the unsupported-type fallback —
+ * accepted at the door and refused at the parser. `.ppsx` in particular is an
+ * ordinary way to send a deck.
+ */
+const PPTX_EXTRA_MIMES = new Set([
+  'application/vnd.openxmlformats-officedocument.presentationml.slideshow', // .ppsx
+  'application/vnd.openxmlformats-officedocument.presentationml.template', // .potx
+])
+const PPTX_EXTS = new Set(['.pptx', '.ppsx', '.potx'])
+const XLSX_EXTRA_MIMES = new Set([
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.template', // .xltx
+])
+const XLSX_EXTS = new Set(['.xlsx', '.xltx'])
+const DOCX_EXTRA_MIMES = new Set([
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.template', // .dotx
+])
+const DOCX_EXTS = new Set(['.docx', '.dotx'])
 
 /** OpenDocument: the LibreOffice family, and Google Docs/Sheets/Slides' default export. */
 const ODF_MIME_PREFIX = 'application/vnd.oasis.opendocument'
@@ -146,9 +168,14 @@ export async function parseFileContent(
   // Checked before the `text/` branch too: a `.csv` almost always arrives as
   // `text/csv`, which that branch matches first — so the row-count summary
   // this branch exists to produce was unreachable for the common case.
-  if (ext === '.csv' || mimeType === 'text/csv') {
+  //
+  // `.tsv` rides the same branch because `tabular-profile.ts` already counts
+  // `text/tab-separated-values` and `.tsv` as tabular, so the downstream
+  // profile lane was expecting a label the parser never assigned.
+  if (ext === '.csv' || ext === '.tsv' || mimeType === 'text/csv' || mimeType === TSV_MIME) {
     const text = buffer.toString('utf-8')
-    return { text, summary: `CSV: ${fileName} (${text.split('\n').length} rows)` }
+    const label = ext === '.tsv' || mimeType === TSV_MIME ? 'TSV' : 'CSV'
+    return { text, summary: `${label}: ${fileName} (${text.split('\n').length} rows)` }
   }
 
   if (mimeType.startsWith('text/') || mimeType === 'application/json') {
@@ -190,7 +217,7 @@ export async function parseFileContent(
     }
   }
 
-  if (mimeType === XLSX_MIME || fileName.toLowerCase().endsWith('.xlsx')) {
+  if (mimeType === XLSX_MIME || XLSX_EXTRA_MIMES.has(mimeType) || XLSX_EXTS.has(ext)) {
     // Each worksheet → a Markdown table (computed values, not formulas).
     try {
       const { text, sheets, totalRows } = await parseXlsxToMarkdown(buffer)
@@ -294,7 +321,7 @@ export async function parseFileContent(
     }
   }
 
-  if (mimeType === 'application/vnd.ms-excel' || fileName.toLowerCase().endsWith('.xls')) {
+  if (mimeType === 'application/vnd.ms-excel' || ext === '.xls') {
     // Legacy binary .xls (BIFF) — ExcelJS reads only the XML .xlsx format.
     return placeholder(
       `[Spreadsheet: ${fileName}. The legacy .xls format is not supported; re-save as .xlsx to extract its cells.]`,
@@ -302,7 +329,7 @@ export async function parseFileContent(
     )
   }
 
-  if (mimeType === PPTX_MIME || fileName.toLowerCase().endsWith('.pptx')) {
+  if (mimeType === PPTX_MIME || PPTX_EXTRA_MIMES.has(mimeType) || PPTX_EXTS.has(ext)) {
     // Slide text + speaker notes → Markdown (the deterministic text track;
     // a deck's visuals are not captured — see pptx.ts).
     try {
@@ -323,7 +350,7 @@ export async function parseFileContent(
     }
   }
 
-  if (mimeType === 'application/vnd.ms-powerpoint' || fileName.toLowerCase().endsWith('.ppt')) {
+  if (mimeType === 'application/vnd.ms-powerpoint' || ext === '.ppt') {
     // Legacy binary .ppt predates Office Open XML and is not parsed here.
     return placeholder(
       `[Presentation: ${fileName}. The legacy .ppt format is not supported; re-save as .pptx to extract its text.]`,
@@ -331,7 +358,7 @@ export async function parseFileContent(
     )
   }
 
-  if (mimeType === DOCX_MIME || fileName.toLowerCase().endsWith('.docx')) {
+  if (mimeType === DOCX_MIME || DOCX_EXTRA_MIMES.has(mimeType) || DOCX_EXTS.has(ext)) {
     // Modern Word (.docx) is Office Open XML — a zip of structured XML.
     // Born-digital text is extracted deterministically here (no model call):
     // unzip to semantic HTML (mammoth), then convert that to Markdown
@@ -355,7 +382,7 @@ export async function parseFileContent(
     }
   }
 
-  if (mimeType === 'application/msword' || fileName.toLowerCase().endsWith('.doc')) {
+  if (mimeType === 'application/msword' || ext === '.doc') {
     // Legacy binary .doc predates Office Open XML; mammoth cannot read it.
     // Honest, actionable placeholder beats a silent failure.
     return placeholder(

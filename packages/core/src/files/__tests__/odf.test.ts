@@ -182,3 +182,39 @@ describe('[COMP:files/odf] parseFileContent routing', () => {
     expect(placeholder).toBe(true)
   })
 })
+
+describe('[COMP:files/parsers] OOXML variants and .tsv', () => {
+  /**
+   * `application/vnd.openxmlformats-officedocument` is a PREFIX in the upload
+   * allowlist, so these were accepted at the door and then refused by the
+   * parser's unsupported-type fallback. `.ppsx` is an ordinary way to send a
+   * deck, and `parsePptxToMarkdown` reads it unchanged.
+   */
+  it('routes .ppsx / .potx to the pptx parser', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { fileURLToPath } = await import('node:url')
+    const fixture = readFileSync(
+      fileURLToPath(new URL('./fixtures/sample.pptx', import.meta.url)),
+    )
+    for (const [mime, name] of [
+      ['application/vnd.openxmlformats-officedocument.presentationml.slideshow', 'deck.ppsx'],
+      ['application/octet-stream', 'deck.POTX'],
+    ] as const) {
+      const { text, placeholder } = await parseFileContent(fixture, mime, name)
+      expect(placeholder).toBeUndefined()
+      expect(text).toContain('## Slide 1')
+    }
+  })
+
+  it('labels a .tsv, which the tabular lane already treats as tabular', async () => {
+    const tsv = 'name\tqty\nwidget\t2\n'
+    const byExt = await parseFileContent(Buffer.from(tsv), 'application/octet-stream', 'rows.TSV')
+    expect(byExt.summary).toContain('TSV: rows.TSV')
+    const byMime = await parseFileContent(
+      Buffer.from(tsv),
+      'text/tab-separated-values',
+      'rows.txt',
+    )
+    expect(byMime.summary).toContain('TSV: rows.txt')
+  })
+})

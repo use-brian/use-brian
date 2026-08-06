@@ -5433,6 +5433,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         markDone: markFileIngestJobDone,
         markFailed: markFileIngestJobFailed,
         filesApi,
+        // Without this the worker short-circuits every PDF and image to
+        // `store_only_needs_distill` — bytes stored, no segments, no episode,
+        // unsearchable — which is the fate of every silently-promoted large
+        // upload and every `POST /api/files/:fileId/ingest` re-ingest, since
+        // that route enqueues rather than running inline. Same expression the
+        // synchronous ingestor is built with above; the port was simply never
+        // passed here.
+        distill: async ({ buffer, mime }) =>
+          (await distillFileToText({ buffer, mime }, { backend: mediaBackend })).text,
         ...(brainEpisodeIngestor ? { brainIngest: brainEpisodeIngestor } : {}),
       })
     : null

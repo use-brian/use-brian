@@ -24,7 +24,7 @@ import {
 } from '@use-brian/core'
 import { toEpisodeSensitivity } from '../episode-sensitivity.js'
 import type { BrainEpisodeIngestor } from '../ingest-port.js'
-import { indexFileArtifact } from './artifact-index.js'
+import { indexFileArtifact, setFileIndexing } from './artifact-index.js'
 import { FileIngestError } from './ingest-error.js'
 import type {
   FileIngestContext,
@@ -175,7 +175,19 @@ export function createFileIngestor(deps: FileIngestorDeps): FileIngestor {
       truncated = indexed.truncated
       truncatedAtChar = indexed.truncatedAtChar
     } catch (err) {
+      // Decomposition still runs — the episode is worth having — but the file
+      // is NOT searchable, and this used to be the one path where
+      // `metadata.indexing` was never written at all, so the row read as
+      // "never indexed" rather than "indexing failed". Stamping it is what
+      // lets an operator tell a queued file from a broken one.
       console.error('[files/ingest] segment indexing failed (continuing to decompose):', err)
+      await setFileIndexing(file.id, {
+        status: 'failed',
+        error: err instanceof Error ? err.message.slice(0, 300) : 'unknown error',
+        indexedAt: new Date().toISOString(),
+      }).catch((stampErr) => {
+        console.error('[files/ingest] could not stamp indexing failure:', stampErr)
+      })
     }
 
     const result = await deps.ingest({
@@ -203,6 +215,8 @@ export function createFileIngestor(deps: FileIngestorDeps): FileIngestor {
       },
       ...(segments === undefined ? {} : { segments }),
       ...(truncated ? { truncated, ...(truncatedAtChar === null ? {} : { truncatedAtChar }) } : {}),
+      ...(result.windowsTotal === undefined ? {} : { windowsTotal: result.windowsTotal }),
+      ...(result.windowsFailed ? { windowsFailed: result.windowsFailed } : {}),
     }
   }
 }

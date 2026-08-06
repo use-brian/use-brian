@@ -445,6 +445,8 @@ export function fileRoutes(
           segments: r.segments,
           truncated: r.truncated,
           skipped: r.skipped,
+          windowsTotal: r.windowsTotal,
+          windowsFailed: r.windowsFailed,
         })
       } catch (err) {
         const message =
