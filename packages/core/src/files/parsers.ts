@@ -7,6 +7,7 @@ import TurndownService from 'turndown'
 import { gfm } from 'turndown-plugin-gfm'
 import { parseXlsxToMarkdown } from './xlsx.js'
 import { parsePptxToMarkdown } from './pptx.js'
+import { htmlToMarkdown, isHtmlFile } from './html.js'
 import { estimateStringTokens } from '../compaction/compact.js'
 
 const DOCX_MIME =
@@ -47,6 +48,23 @@ export async function parseFileContent(
   mimeType: string,
   fileName: string,
 ): Promise<{ text: string; summary: string }> {
+  // HTML is checked BEFORE the generic text/* branch: `text/html` matches that
+  // prefix, and falling through it is what put raw markup (stylesheets, base64
+  // image payloads) into model context and into file_segments. See html.ts.
+  if (isHtmlFile(mimeType, fileName)) {
+    const { text, mode } = htmlToMarkdown(buffer.toString('utf-8'))
+    if (!text) {
+      return {
+        text: `[Document: ${fileName}. No extractable text (the page may render its content with scripts).]`,
+        summary: `HTML: ${fileName}`,
+      }
+    }
+    // A degraded extraction still carries every word, but the caller (and the
+    // model) should not be told it got structured Markdown when it did not.
+    const note = mode === 'stripped' ? ', structure dropped: document too large or deeply nested' : ''
+    return { text, summary: `HTML: ${fileName} (${text.length} chars${note})` }
+  }
+
   if (mimeType.startsWith('text/') || mimeType === 'application/json') {
     const text = buffer.toString('utf-8')
     return {

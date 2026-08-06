@@ -59,6 +59,10 @@ export const ALLOWED_MIME_PREFIXES = [
   'audio/',
   'application/pdf',
   'application/json',
+  // XHTML is HTML by another name; `parseFileContent` converts it through the
+  // same path as `text/html` (packages/core/src/files/html.ts). Without this
+  // prefix the mime is rejected at the gate and the parser branch is dead.
+  'application/xhtml+xml',
   'application/vnd.openxmlformats-officedocument',
   'application/msword',
   'application/vnd.ms-excel',
