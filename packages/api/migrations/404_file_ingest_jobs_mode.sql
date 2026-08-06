@@ -1,4 +1,4 @@
--- 402_file_ingest_jobs_mode.sql  (OPEN table -> use-brian/packages/api/migrations/)
+-- 404_file_ingest_jobs_mode.sql  (OPEN table -> use-brian/packages/api/migrations/)
 --
 -- Provenance flag on the async file-ingest queue: which boundary enqueued the
 -- job, and therefore whether the worker may spend a model distill on it.
@@ -18,8 +18,11 @@
 --
 -- See docs/architecture/brain/file-artifacts.md -> "Async ingest".
 --
--- Latest applied migration is 401 (chunked_file_uploads). Filenames are globally
--- unique across BOTH migration dirs (one shared _migrations table); next free is 403.
+-- Filenames are globally unique across BOTH migration dirs (one shared
+-- _migrations table). This landed as 402 and was renumbered to 404: the office
+-- work took 402 and 403 in parallel, and a duplicate prefix is exactly what the
+-- graded `migrations` check exists to catch. Never applied under the old name.
+-- Next free is 405.
 
 BEGIN;
 

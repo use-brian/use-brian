@@ -21,7 +21,7 @@ import { query } from './client.js'
 export type FileIngestJobStatus = 'pending' | 'processing' | 'done' | 'failed'
 
 /**
- * Which boundary enqueued the job (migration 402). `explicit` = the user asked
+ * Which boundary enqueued the job (migration 404). `explicit` = the user asked
  * for this file to be ingested, so the worker may spend a model distill on a
  * PDF / image; `silent` = artifact promotion of a chat attachment or paste,
  * which stays store-only for those types. See `file-ingest-worker.ts`.
@@ -69,7 +69,7 @@ export async function enqueueFileIngestJob(input: {
   actingUserId: string
   assistantId?: string | null
   sourceLabel?: string
-  /** Defaults to `silent` — the conservative, no-distill path (migration 402). */
+  /** Defaults to `silent` — the conservative, no-distill path (migration 404). */
   mode?: FileIngestJobMode
 }): Promise<{ enqueued: boolean; jobId: string | null }> {
   const { rows } = await query<{ id: string }>(
