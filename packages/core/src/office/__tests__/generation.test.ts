@@ -45,6 +45,29 @@ describe('[COMP:office/generation] Office generation pipeline', () => {
     expect(test.value.retrieveBrain).not.toHaveBeenCalled()
     expect(test.value.construct).not.toHaveBeenCalled()
   })
+
+  it('keeps sub-floor typography only when the same object was admitted by the template', async () => {
+    const test = deps()
+    const template = templateBundle()
+    if (template.snapshot.family !== 'document') throw new Error('Expected document template')
+    const admittedSnapshot = structuredClone(template.snapshot)
+    const admittedRun = admittedSnapshot.sections[0].nodes[0]
+    if (!('runs' in admittedRun)) throw new Error('Expected template text node')
+    admittedRun.runs[0].style.fontSizePt = 7.5
+    template.snapshot = admittedSnapshot
+    test.value.selectTemplate = vi.fn(async () => ({ template: { ...template, status: 'admitted' as const } }))
+    test.value.construct = vi.fn(async () => structuredClone(admittedSnapshot))
+
+    const admittedResult = await runOfficeGenerationPipeline(brief(), test.value)
+    expect(admittedResult, JSON.stringify(admittedResult)).toMatchObject({ status: 'completed' })
+
+    const changed = structuredClone(admittedSnapshot)
+    const changedRun = changed.sections[0].nodes[0]
+    if (!('runs' in changedRun)) throw new Error('Expected generated text node')
+    changedRun.runs[0].id = id(999)
+    test.value.construct = vi.fn(async () => changed)
+    await expect(runOfficeGenerationPipeline(brief(), test.value)).resolves.toMatchObject({ status: 'failed', code: 'fit_failed' })
+  })
 })
 
 describe('[COMP:office/generation] Explicit Office revision lane', () => {

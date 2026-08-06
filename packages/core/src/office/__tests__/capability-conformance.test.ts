@@ -15,7 +15,8 @@ import {
 import { layoutOfficeArtifact, renderOfficePreviewSvg } from '@use-brian/office-renderer'
 import { exportOfficeDocument, importOfficeDocument, reparseOfficeDocument } from '../docx/index.js'
 import { exportOfficePresentation, importOfficePresentation, reparseOfficePresentation } from '../pptx/index.js'
-import { completeDocumentSnapshot, completePresentationSnapshot, id, resolveFixtureResource } from './fixtures.js'
+import { exportOfficeSpreadsheet, importOfficeSpreadsheet, reparseOfficeSpreadsheet } from '../xlsx/index.js'
+import { completeDocumentSnapshot, completePresentationSnapshot, completeSpreadsheetSnapshot, id, resolveFixtureResource } from './fixtures.js'
 
 const actorId = id(98)
 const editable = officeCapabilityManifest.capabilities.filter((capability) => capability.disposition === 'editable')
@@ -53,7 +54,7 @@ function commandFor(capabilityId: EditableId, snapshot: OfficeArtifactSnapshot, 
     }
     const command = commands[capabilityId]
     if (command) return command
-  } else {
+  } else if (snapshot.family === 'presentation') {
     const slide = snapshot.slides[0]
     const commands: Partial<Record<EditableId, OfficeCommand>> = {
       richText: { ...base, kind: 'updateText', targetId: id(34), runs: [{ id: id(35), text: 'Updated pitch', style: { fontFamily: 'Arial', fontSizePt: 28, bold: true, italic: false, underline: false, strike: false, color: '#111111' } }] },
@@ -75,21 +76,39 @@ function commandFor(capabilityId: EditableId, snapshot: OfficeArtifactSnapshot, 
     }
     const command = commands[capabilityId]
     if (command) return command
+  } else if (snapshot.family === 'spreadsheet') {
+    const sheet = snapshot.worksheets[0]
+    const commands: Partial<Record<EditableId, OfficeCommand>> = {
+      worksheet: { ...base, kind: 'renameWorksheet', sheetId: sheet.id, name: 'Invoice updated' },
+      cellValue: { ...base, kind: 'setSpreadsheetCell', sheetId: sheet.id, cellId: id(74), address: 'A2', valueType: 'number', value: 4 },
+      cellFormula: { ...base, kind: 'setSpreadsheetCell', sheetId: sheet.id, cellId: id(76), address: 'C2', valueType: 'number', value: null, formula: 'ROUND(A2*B2,2)' },
+      cellStyle: { ...base, kind: 'setObjectProperty', targetId: id(74), path: ['style', 'fill'], value: '#ECFDF5' },
+      mergedCell: { ...base, kind: 'setObjectProperty', targetId: sheet.id, path: ['merges'], value: ['A1:C1'] },
+      rowColumnDimensions: { ...base, kind: 'setObjectProperty', targetId: sheet.id, path: ['columnDimensions'], value: [{ index: 1, widthChars: 26, hidden: false }] },
+      freezePane: { ...base, kind: 'setObjectProperty', targetId: sheet.id, path: ['freeze'], value: { rows: 1, columns: 1 } },
+      dataValidation: { ...base, kind: 'setObjectProperty', targetId: sheet.id, path: ['validations'], value: sheet.validations },
+      conditionalFormatting: { ...base, kind: 'setObjectProperty', targetId: sheet.id, path: ['conditionalFormats'], value: sheet.conditionalFormats },
+      worksheetImage: { ...base, kind: 'setObjectProperty', targetId: id(77), path: ['altText'], value: 'Updated company logo' },
+      spreadsheetPrintSetup: { ...base, kind: 'setObjectProperty', targetId: sheet.id, path: ['print', 'horizontalCentered'], value: false },
+      spreadsheetPdf: { ...base, kind: 'setObjectProperty', targetId: sheet.id, path: ['print', 'printArea'], value: 'A1:C20' },
+    }
+    const command = commands[capabilityId]
+    if (command) return command
   }
   throw new Error(`No conformance command for ${capabilityId} in ${snapshot.family}`)
 }
 
 describe('[COMP:office/capabilities] Matrix-driven Office capability conformance', () => {
   it('maps every editable manifest row to a concrete command fixture', () => {
-    expect(editable).toHaveLength(24)
+    expect(editable).toHaveLength(36)
     for (const [ordinal, capability] of editable.entries()) {
-      const snapshot = capability.family === 'presentation' ? completePresentationSnapshot() : completeDocumentSnapshot()
+      const snapshot = capability.family === 'presentation' ? completePresentationSnapshot() : capability.family === 'spreadsheet' ? completeSpreadsheetSnapshot() : completeDocumentSnapshot()
       expect(() => commandFor(capability.id, snapshot, ordinal)).not.toThrow()
     }
   })
 
   it.each(editable)('$id covers model, command, collaboration, render, accessibility, and offline replay', (capability) => {
-    const source = capability.family === 'presentation' ? completePresentationSnapshot() : completeDocumentSnapshot()
+    const source = capability.family === 'presentation' ? completePresentationSnapshot() : capability.family === 'spreadsheet' ? completeSpreadsheetSnapshot() : completeDocumentSnapshot()
     const snapshot = OfficeArtifactSnapshotSchema.parse(source)
     expect(preflightOfficeCandidate(snapshot).ok).toBe(true)
     if (!capability.implementation) throw new Error(`Editable capability ${capability.id} has no implementation map`)
@@ -112,7 +131,7 @@ describe('[COMP:office/capabilities] Matrix-driven Office capability conformance
     expect(renderOfficePreviewSvg(layout.pages[0])).toContain('role="img"')
   })
 
-  it('round-trips the complete Document and Presentation fixtures through export, import, and reparse', async () => {
+  it('round-trips the complete Document, Presentation, and Spreadsheet fixtures through export, import, and reparse', async () => {
     const document = completeDocumentSnapshot()
     const docx = await exportOfficeDocument(document, resolveFixtureResource)
     const importedDocument = await importOfficeDocument(docx.bytes, { artifactId: document.artifactId, workspaceId: document.workspaceId, templateVersionId: document.templateVersionId, locale: document.locale, defaultLanguage: document.defaultLanguage, title: document.title })
@@ -124,6 +143,12 @@ describe('[COMP:office/capabilities] Matrix-driven Office capability conformance
     const importedPresentation = await importOfficePresentation(pptx.bytes, { artifactId: presentation.artifactId, workspaceId: presentation.workspaceId, templateVersionId: presentation.templateVersionId, locale: presentation.locale, defaultLanguage: presentation.defaultLanguage, title: presentation.title })
     expect(importedPresentation.snapshot).toEqual(presentation)
     expect((await reparseOfficePresentation(pptx.bytes)).snapshot).toEqual(presentation)
+
+    const spreadsheet = completeSpreadsheetSnapshot()
+    const xlsx = await exportOfficeSpreadsheet(spreadsheet, resolveFixtureResource)
+    const importedSpreadsheet = await importOfficeSpreadsheet(xlsx.bytes, { artifactId: spreadsheet.artifactId, workspaceId: spreadsheet.workspaceId, templateVersionId: spreadsheet.templateVersionId, locale: spreadsheet.locale, defaultLanguage: spreadsheet.defaultLanguage, title: spreadsheet.title })
+    expect(importedSpreadsheet.snapshot).toEqual(spreadsheet)
+    expect((await reparseOfficeSpreadsheet(xlsx.bytes)).snapshot).toEqual(spreadsheet)
   })
 
   it('lays out 100-page and 100-slide fixtures within a bounded test budget', () => {

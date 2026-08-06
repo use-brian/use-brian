@@ -6,8 +6,11 @@ import {
   OfficeUuidSchema,
   PresentationObjectSchema,
   PresentationSlideSchema,
+  SpreadsheetCellValueSchema,
+  SpreadsheetWorksheetSchema,
   type OfficeArtifactSnapshot,
 } from './model.js'
+import { normalizeCellAddress, recalculateSpreadsheet } from './spreadsheet.js'
 
 const CommandBaseSchema = z.object({
   commandId: OfficeUuidSchema,
@@ -25,6 +28,19 @@ export const OfficeCommandSchema = z.discriminatedUnion('kind', [
   CommandBaseSchema.extend({ kind: z.literal('setObjectProperty'), targetId: OfficeUuidSchema, path: z.array(z.string().regex(/^[A-Za-z][A-Za-z0-9]*$/)).min(1).max(8), value: z.unknown() }).strict(),
   CommandBaseSchema.extend({ kind: z.literal('addSlide'), index: z.number().int().min(0), slide: PresentationSlideSchema }).strict(),
   CommandBaseSchema.extend({ kind: z.literal('reorderSlide'), slideId: OfficeUuidSchema, index: z.number().int().min(0) }).strict(),
+  CommandBaseSchema.extend({
+    kind: z.literal('setSpreadsheetCell'),
+    sheetId: OfficeUuidSchema,
+    cellId: OfficeUuidSchema,
+    address: z.string().min(2).max(10),
+    valueType: z.enum(['blank', 'string', 'number', 'boolean', 'date']),
+    value: SpreadsheetCellValueSchema,
+    formula: z.string().min(1).max(32_000).optional(),
+  }).strict(),
+  CommandBaseSchema.extend({ kind: z.literal('addWorksheet'), index: z.number().int().min(0), worksheet: SpreadsheetWorksheetSchema }).strict(),
+  CommandBaseSchema.extend({ kind: z.literal('renameWorksheet'), sheetId: OfficeUuidSchema, name: z.string().min(1).max(31) }).strict(),
+  CommandBaseSchema.extend({ kind: z.literal('reorderWorksheet'), sheetId: OfficeUuidSchema, index: z.number().int().min(0) }).strict(),
+  CommandBaseSchema.extend({ kind: z.literal('deleteWorksheet'), sheetId: OfficeUuidSchema }).strict(),
   CommandBaseSchema.extend({ kind: z.literal('batch'), commands: z.array(z.unknown()).min(1).max(1_000) }).strict(),
 ])
 export type OfficeCommand = z.infer<typeof OfficeCommandSchema>
@@ -109,9 +125,49 @@ function applySingle(snapshot: OfficeArtifactSnapshot, command: Exclude<OfficeCo
     if (from < 0) throw new Error(`Slide ${command.slideId} was not found`)
     const [slide] = next.slides.splice(from, 1)
     next.slides.splice(Math.min(command.index, next.slides.length), 0, slide)
+  } else if (command.kind === 'setSpreadsheetCell') {
+    if (next.family !== 'spreadsheet') throw new Error('setSpreadsheetCell requires a spreadsheet')
+    const sheet = next.worksheets.find((candidate) => candidate.id === command.sheetId)
+    if (!sheet) throw new Error(`Worksheet ${command.sheetId} was not found`)
+    const address = normalizeCellAddress(command.address)
+    if (!address) throw new Error(`Cell address ${command.address} is invalid`)
+    let cell = sheet.cells.find((candidate) => candidate.address === address)
+    if (!cell) {
+      cell = { id: command.cellId, address, valueType: command.valueType, value: command.value, style: {}, locked: false }
+      sheet.cells.push(cell)
+    }
+    if (cell.locked && command.origin !== 'import') throw new Error(`Cell ${address} is locked`)
+    cell.valueType = command.valueType
+    cell.value = command.formula ? null : command.value
+    if (command.formula) cell.formula = command.formula.replace(/^=/, '')
+    else delete cell.formula
+    delete cell.calculatedValue
+    delete cell.error
+  } else if (command.kind === 'addWorksheet') {
+    if (next.family !== 'spreadsheet') throw new Error('addWorksheet requires a spreadsheet')
+    next.worksheets.splice(Math.min(command.index, next.worksheets.length), 0, command.worksheet)
+  } else if (command.kind === 'renameWorksheet') {
+    if (next.family !== 'spreadsheet') throw new Error('renameWorksheet requires a spreadsheet')
+    const sheet = next.worksheets.find((candidate) => candidate.id === command.sheetId)
+    if (!sheet) throw new Error(`Worksheet ${command.sheetId} was not found`)
+    sheet.name = command.name
+  } else if (command.kind === 'reorderWorksheet') {
+    if (next.family !== 'spreadsheet') throw new Error('reorderWorksheet requires a spreadsheet')
+    const from = next.worksheets.findIndex((sheet) => sheet.id === command.sheetId)
+    if (from < 0) throw new Error(`Worksheet ${command.sheetId} was not found`)
+    const [sheet] = next.worksheets.splice(from, 1)
+    next.worksheets.splice(Math.min(command.index, next.worksheets.length), 0, sheet)
+  } else if (command.kind === 'deleteWorksheet') {
+    if (next.family !== 'spreadsheet') throw new Error('deleteWorksheet requires a spreadsheet')
+    if (next.worksheets.length === 1) throw new Error('A spreadsheet must contain at least one worksheet')
+    const index = next.worksheets.findIndex((sheet) => sheet.id === command.sheetId)
+    if (index < 0) throw new Error(`Worksheet ${command.sheetId} was not found`)
+    next.worksheets.splice(index, 1)
+    if (next.activeSheetId === command.sheetId) next.activeSheetId = next.worksheets[Math.min(index, next.worksheets.length - 1)].id
   }
 
-  return OfficeArtifactSnapshotSchema.parse(next)
+  const calculated = next.family === 'spreadsheet' ? recalculateSpreadsheet(next).snapshot : next
+  return OfficeArtifactSnapshotSchema.parse(calculated)
 }
 
 export function applyOfficeCommand(snapshot: OfficeArtifactSnapshot, input: OfficeCommand): OfficeArtifactSnapshot {

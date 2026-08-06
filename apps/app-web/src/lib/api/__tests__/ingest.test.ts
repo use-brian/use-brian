@@ -1,8 +1,14 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("@/lib/auth-fetch", () => ({ authFetch: vi.fn() }));
+vi.mock("@/lib/auth-fetch", () => ({
+  authFetch: vi.fn(),
+  getValidAccessToken: vi.fn(),
+}));
+vi.mock("@/lib/desktop-auth-source", () => ({
+  usesGatewayCredentials: vi.fn(() => false),
+}));
 
-import { authFetch } from "@/lib/auth-fetch";
+import { authFetch, getValidAccessToken } from "@/lib/auth-fetch";
 import {
   MAX_INGEST_FILE_BYTES,
   getIngestJobStatus,
@@ -13,8 +19,13 @@ import {
 import { statusForIngestResult } from "@/components/doc/suggested-file-drop";
 
 const mockAuthFetch = vi.mocked(authFetch);
+const mockGetValidAccessToken = vi.mocked(getValidAccessToken);
 
-beforeEach(() => vi.resetAllMocks());
+beforeEach(() => {
+  vi.resetAllMocks();
+  mockGetValidAccessToken.mockResolvedValue("access-token");
+});
+afterEach(() => vi.unstubAllGlobals());
 
 describe("[COMP:app-web/chat-context-pins] ordinary file ingest transport", () => {
   it("stages Pins files through the storage-only endpoint", async () => {
@@ -33,6 +44,74 @@ describe("[COMP:app-web/chat-context-pins] ordinary file ingest transport", () =
       { fileId: "file-staged", distilled: false, decomposed: false },
     ]);
     expect(mockAuthFetch.mock.calls[0][0]).toMatch(/\/api\/files\/store$/);
+  });
+
+  it("reports multipart upload bytes through the Work Bench progress callback", async () => {
+    const file = new File(["0123456789"], "brief.txt", { type: "text/plain" });
+    const progress = vi.fn();
+
+    class FakeXMLHttpRequest {
+      static instance: FakeXMLHttpRequest | null = null;
+      upload: { onprogress: ((event: ProgressEvent) => void) | null } = {
+        onprogress: null,
+      };
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onabort: (() => void) | null = null;
+      status = 200;
+      statusText = "OK";
+      responseText = JSON.stringify({
+        files: [{ fileName: "brief.txt", ok: true, fileId: "file-staged" }],
+      });
+      method = "";
+      url = "";
+      headers = new Map<string, string>();
+      body: Document | XMLHttpRequestBodyInit | null = null;
+      withCredentials = false;
+
+      constructor() {
+        FakeXMLHttpRequest.instance = this;
+      }
+
+      open(method: string, url: string) {
+        this.method = method;
+        this.url = url;
+      }
+
+      setRequestHeader(name: string, value: string) {
+        this.headers.set(name, value);
+      }
+
+      getResponseHeader(name: string) {
+        return name.toLowerCase() === "content-type" ? "application/json" : null;
+      }
+
+      send(body: Document | XMLHttpRequestBodyInit | null) {
+        this.body = body;
+        this.upload.onprogress?.({
+          lengthComputable: true,
+          loaded: 50,
+          total: 100,
+        } as ProgressEvent);
+        this.onload?.();
+      }
+    }
+
+    vi.stubGlobal("XMLHttpRequest", FakeXMLHttpRequest);
+
+    await expect(storeFiles("ws-1", [file], { onProgress: progress })).resolves.toMatchObject([
+      { ok: true, fileId: "file-staged" },
+    ]);
+
+    expect(progress).toHaveBeenNthCalledWith(1, file, 5, 10);
+    expect(progress).toHaveBeenLastCalledWith(file, 10, 10);
+    expect(FakeXMLHttpRequest.instance?.method).toBe("POST");
+    expect(FakeXMLHttpRequest.instance?.url).toMatch(/\/api\/files\/store$/);
+    expect(FakeXMLHttpRequest.instance?.headers.get("Authorization")).toBe(
+      "Bearer access-token",
+    );
+    expect(FakeXMLHttpRequest.instance?.body).toBeInstanceOf(FormData);
+    expect(mockAuthFetch).not.toHaveBeenCalled();
   });
 
   it("sends a selected batch as one multipart request per file", async () => {

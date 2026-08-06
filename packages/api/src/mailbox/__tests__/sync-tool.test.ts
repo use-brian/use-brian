@@ -70,7 +70,9 @@ describe('[COMP:tools/mailbox-sync-now] syncMailboxNow tool', () => {
     })
 
     expect((tool.inputSchema as unknown as { shape: Record<string, unknown> }).shape).not.toHaveProperty('account')
-    expect(tool.description).toContain('bound to ops@corp.example')
+    expect(tool.description).toMatch(/^Pull new email from the user's connected email account/)
+    expect(tool.description).toContain('bound to the email account ops@corp.example')
+    expect(tool.description).not.toMatch(/company mailbox/i)
     await tool.execute({}, CTX)
     expect(syncInstanceById).toHaveBeenCalledWith('inst-ops')
   })

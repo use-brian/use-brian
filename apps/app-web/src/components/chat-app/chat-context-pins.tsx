@@ -957,8 +957,26 @@ export function ChatContextPins({
                     </div>
                   )}
                   {upload.status === "uploading" && upload.progress !== undefined && (
-                    <div className="text-[10px] text-muted-foreground">
-                      {format(t.uploadingProgress, { percent: upload.progress })}
+                    <div className="mt-1.5 flex items-center gap-2">
+                      <div
+                        role="progressbar"
+                        aria-label={upload.fileName}
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                        aria-valuenow={upload.progress}
+                        aria-valuetext={format(t.uploadingProgress, {
+                          percent: upload.progress,
+                        })}
+                        className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-primary/10"
+                      >
+                        <div
+                          className="h-full rounded-full bg-primary transition-[width] duration-200 ease-out motion-reduce:transition-none"
+                          style={{ width: `${upload.progress}%` }}
+                        />
+                      </div>
+                      <span className="w-8 shrink-0 text-right text-[10px] tabular-nums text-muted-foreground">
+                        {upload.progress}%
+                      </span>
                     </div>
                   )}
                 </div>

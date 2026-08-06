@@ -1176,7 +1176,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     const ingest = params.ingestChannelMediaRef
     const workspaceId = assistant.workspaceId
     for (const file of incoming.files) {
-      if (classifyMedia(file.mimeType) === 'unsupported') continue
+      if (classifyMedia(file.mimeType, file.name) === 'unsupported') continue
       adapter.resolveFileUrl(file.url)
         .then((url) => ingest({
           source: { url },

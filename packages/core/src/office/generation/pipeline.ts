@@ -8,6 +8,7 @@ import {
 import { fitOfficeArtifact } from '@use-brian/office-renderer'
 import { exportOfficeDocument, reparseOfficeDocument } from '../docx/index.js'
 import { exportOfficePresentation, reparseOfficePresentation } from '../pptx/index.js'
+import { exportOfficeSpreadsheet, reparseOfficeSpreadsheet } from '../xlsx/index.js'
 import { officeSemanticHash, type OfficeResourceResolver } from '../package.js'
 import { OfficeGenerationBriefSchema, type OfficeAuthorityProjection, type OfficeClaimPlanEntry, type OfficeEvidencePacket, type OfficeGenerationBrief, type OfficeGenerationEvent, type OfficeGenerationOutcome, type OfficeGenerationStage } from './contracts.js'
 
@@ -34,6 +35,21 @@ export type OfficeGenerationPipelineDeps = {
   cancelled(): Promise<boolean>
   drainSteering(stage: OfficeGenerationStage): Promise<string[]>
   commit(snapshot: OfficeArtifactSnapshot, params: { authority: OfficeAuthorityProjection; templateVersionId: string; summary: string }): Promise<{ artifactId: string; version: number }>
+}
+
+function admittedReadabilityExemptObjectIds(template: OfficeTemplateBundle): string[] {
+  const ids = new Set<string>()
+  const visit = (value: unknown): void => {
+    if (!value || typeof value !== 'object') return
+    if (!Array.isArray(value)) {
+      const object = value as Record<string, unknown>
+      const style = object.style as Record<string, unknown> | undefined
+      if (typeof object.id === 'string' && style && typeof style.fontSizePt === 'number' && style.fontSizePt < 8) ids.add(object.id)
+    }
+    for (const child of Object.values(value)) visit(child)
+  }
+  visit(template.snapshot)
+  return [...ids]
 }
 
 async function stage(deps: OfficeGenerationPipelineDeps, checkpoint: OfficeGenerationCheckpoint, code: OfficeGenerationEvent['code'], params: OfficeGenerationEvent['params'] = {}): Promise<boolean> {
@@ -91,15 +107,17 @@ export async function runOfficeGenerationPipeline(input: unknown, deps: OfficeGe
 
     snapshot = assertOfficeArtifactSnapshot(await deps.processMedia(snapshot, authority))
     if (!await stage(deps, { stage: 'media', version: 6, templateVersionId: template.id, snapshot, evidence, claims }, 'office.job.media_processed', {})) return { status: 'cancelled' }
-    const fit = fitOfficeArtifact(snapshot)
+    const fit = fitOfficeArtifact(snapshot, {
+      readabilityExemptObjectIds: admittedReadabilityExemptObjectIds(template),
+    })
     if (!fit.ok) return { status: 'failed', code: 'fit_failed', message: fit.issues.map((issue) => `${issue.objectId}: ${issue.message}`).join('; ') }
     if (!await stage(deps, { stage: 'fit_render', version: 7, templateVersionId: template.id, snapshot, evidence, claims }, 'office.job.fit_validated', { pages: fit.result.pages.length })) return { status: 'cancelled' }
     const candidate = preflightOfficeCandidate(snapshot)
     if (!candidate.ok) return { status: 'failed', code: 'candidate_invalid', message: candidate.diagnostics.map((diagnostic) => `${diagnostic.path}: ${diagnostic.message}`).join('; ') }
     if (!await stage(deps, { stage: 'validate', version: 8, templateVersionId: template.id, snapshot, evidence, claims }, 'office.job.candidate_validated', {})) return { status: 'cancelled' }
 
-    const exported = snapshot.family === 'document' ? await exportOfficeDocument(snapshot, deps.resolveResource) : await exportOfficePresentation(snapshot, deps.resolveResource)
-    const reopened = snapshot.family === 'document' ? await reparseOfficeDocument(exported.bytes) : await reparseOfficePresentation(exported.bytes)
+    const exported = snapshot.family === 'document' ? await exportOfficeDocument(snapshot, deps.resolveResource) : snapshot.family === 'presentation' ? await exportOfficePresentation(snapshot, deps.resolveResource) : await exportOfficeSpreadsheet(snapshot, deps.resolveResource)
+    const reopened = snapshot.family === 'document' ? await reparseOfficeDocument(exported.bytes) : snapshot.family === 'presentation' ? await reparseOfficePresentation(exported.bytes) : await reparseOfficeSpreadsheet(exported.bytes)
     if (reopened.semanticHash !== officeSemanticHash(snapshot) || reopened.layoutSerialization !== fit.result.serialization) return { status: 'failed', code: 'export_reparse_mismatch', message: 'The generated Office file did not reopen to the validated semantic/layout identity.' }
     if (!await stage(deps, { stage: 'export_reparse', version: 9, templateVersionId: template.id, snapshot, evidence, claims }, 'office.job.export_reopened', { bytes: exported.bytes.byteLength })) return { status: 'cancelled' }
     const committed = await deps.commit(snapshot, { authority, templateVersionId: template.id, summary: brief.outcome })

@@ -100,6 +100,68 @@ describe('[COMP:api/files-route] File routes', () => {
     expect(res.body.files[0].error).toMatch(/Unsupported file type/)
   })
 
+  it('accepts a known document extension when the transport MIME is generic', async () => {
+    const app = createTestApp('/api/files', fileRoutes(fileStore as never))
+    mockFindOrCreateUser.mockResolvedValueOnce({ user: { id: 'u_guest' }, isNew: false } as never)
+    mockGetDefaultAssistant.mockResolvedValueOnce({ id: 'a_1' } as never)
+    mockFindOrCreateSession.mockResolvedValueOnce({ id: 's_staging' } as never)
+    mockParseFileContent.mockResolvedValueOnce({ text: 'parsed', summary: 'Document: brief.ODT' })
+    fileStore.cache.mockResolvedValueOnce({
+      id: 'f_odt',
+      fileName: 'brief.ODT',
+      mimeType: 'application/octet-stream',
+      sizeBytes: 6,
+    })
+
+    const res = await request(app)
+      .post('/api/files/upload')
+      .attach('files', Buffer.from('office'), {
+        filename: 'brief.ODT',
+        contentType: 'application/octet-stream',
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body.files[0].id).toBe('f_odt')
+    expect(mockParseFileContent).toHaveBeenCalledWith(
+      expect.any(Buffer),
+      'application/octet-stream',
+      'brief.ODT',
+    )
+  })
+
+  it('caches byte-detected PDF media with its effective MIME instead of transport text MIME', async () => {
+    const app = createTestApp('/api/files', fileRoutes(fileStore as never))
+    mockFindOrCreateUser.mockResolvedValueOnce({ user: { id: 'u_guest' }, isNew: false } as never)
+    mockGetDefaultAssistant.mockResolvedValueOnce({ id: 'a_1' } as never)
+    mockFindOrCreateSession.mockResolvedValueOnce({ id: 's_staging' } as never)
+    mockParseFileContent.mockResolvedValueOnce({
+      text: Buffer.from('%PDF').toString('base64'),
+      summary: 'PDF: download.txt',
+      mediaMimeType: 'application/pdf',
+    })
+    fileStore.cache.mockResolvedValueOnce({
+      id: 'f_pdf',
+      fileName: 'download.txt',
+      mimeType: 'application/pdf',
+      sizeBytes: 4,
+    })
+
+    const res = await request(app)
+      .post('/api/files/upload')
+      .attach('files', Buffer.from('%PDF'), {
+        filename: 'download.txt',
+        contentType: 'text/plain',
+      })
+
+    expect(res.status).toBe(200)
+    expect(fileStore.cache).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mimeType: 'application/pdf',
+        content: expect.stringMatching(/^data:application\/pdf;base64,/),
+      }),
+    )
+  })
+
   it('returns 400 when no files provided', async () => {
     const app = createTestApp('/api/files', fileRoutes(fileStore as never))
     const res = await request(app).post('/api/files/upload')

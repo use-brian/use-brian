@@ -89,7 +89,7 @@ describe('[COMP:doc/tools] importToPage', () => {
     expect(createDraft).not.toHaveBeenCalled()
   })
 
-  it('treats a .docx (already turndown Markdown in the cache) as importable', async () => {
+  it('treats a .docx (already parsed Markdown in the cache) as importable', async () => {
     const file = cachedFile({
       fileName: 'memo.docx',
       mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',

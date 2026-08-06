@@ -388,6 +388,78 @@ describe("[COMP:app-web/chat-context-pins] Work Bench section", () => {
     container.remove();
   });
 
+  it("shows byte progress as a determinate per-file progress bar", async () => {
+    let finishUpload!: () => void;
+    const uploadGate = new Promise<void>((resolve) => {
+      finishUpload = resolve;
+    });
+    storeFiles.mockImplementation(async (...args: unknown[]) => {
+      const files = args[1] as File[];
+      const options = args[2] as {
+        onProgress: (file: File, uploadedBytes: number, totalBytes: number) => void;
+      };
+      options.onProgress(files[0], 1, 4);
+      await uploadGate;
+      return [{ fileName: files[0].name, ok: true, fileId: "file-progress" }];
+    });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <I18nProvider locale="en" dict={dict}>
+          <ChatContextPins
+            sessionId="session-1"
+            workspaceId="workspace-1"
+            refreshKey={0}
+            startedByName="Ada"
+            expanded
+            onExpandedChange={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const file = new File(["data"], "launch-brief.txt", {
+      type: "text/plain",
+      lastModified: 1,
+    });
+    const pinsSection = container.querySelector<HTMLElement>(
+      'section[aria-label="Pinned context"]',
+    );
+    const drop = new Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, "dataTransfer", {
+      value: { files: [file], types: ["Files"] },
+    });
+
+    await act(async () => {
+      pinsSection!.dispatchEvent(drop);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    const progressBar = container.querySelector<HTMLElement>(
+      '[role="progressbar"][aria-label="launch-brief.txt"]',
+    );
+    expect(progressBar).toBeTruthy();
+    expect(progressBar?.getAttribute("aria-valuemin")).toBe("0");
+    expect(progressBar?.getAttribute("aria-valuemax")).toBe("100");
+    expect(progressBar?.getAttribute("aria-valuenow")).toBe("25");
+    expect(progressBar?.getAttribute("aria-valuetext")).toBe("Uploading 25%");
+    expect(progressBar?.firstElementChild?.getAttribute("style")).toContain(
+      "width: 25%",
+    );
+    expect(container.textContent).toContain("25%");
+
+    await act(async () => {
+      finishUpload();
+      await uploadGate;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    act(() => root.unmount());
+    container.remove();
+  });
+
   it("asks before starting a file upload above 100 MB and cancellation creates no upload", async () => {
     confirmDialog.mockResolvedValue(false);
     const container = document.createElement("div");

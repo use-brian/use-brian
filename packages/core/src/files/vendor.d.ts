@@ -1,30 +1,9 @@
-// Ambient type declarations for the doc-parsing libraries used by parsers.ts.
-// Neither ships its own types and neither has a DefinitelyTyped package, so we
-// declare just the surface we call. (turndown itself is typed via
-// @types/turndown.)
-
-declare module 'mammoth' {
-  interface MammothInput {
-    buffer?: Buffer
-    path?: string
-    arrayBuffer?: ArrayBuffer
-  }
-  interface MammothMessage {
-    type: string
-    message: string
-  }
-  interface MammothResult {
-    value: string
-    messages: MammothMessage[]
-  }
-  export function convertToHtml(input: MammothInput, options?: unknown): Promise<MammothResult>
-  export function extractRawText(input: MammothInput): Promise<MammothResult>
-  const mammoth: {
-    convertToHtml: typeof convertToHtml
-    extractRawText: typeof extractRawText
-  }
-  export default mammoth
-}
+// Ambient type declaration for `turndown-plugin-gfm`, used by html.ts. The
+// package ships no types and has no DefinitelyTyped entry, so we declare just
+// the surface we call. (turndown itself is typed via @types/turndown.)
+//
+// The Office formats moved to @firecrawl/anydoc and took mammoth's declaration
+// with them; HTML is not an AnyDoc format, so this one stays.
 
 declare module 'turndown-plugin-gfm' {
   import type TurndownService from 'turndown'

@@ -32,7 +32,7 @@ describe('[COMP:brain/open-channel-media-deps] open intake composition', () => {
     expect(deps.checkQuota).toBeTypeOf('function')
   })
 
-  it('never hands base64 inline media to Pipeline B on the no-filesApi path', async () => {
+  it('never hands byte-detected inline media to Pipeline B on the no-filesApi path', async () => {
     // `parseFileContent` returns BASE64 for a PDF or an image - that string is
     // meant for an `image` ContentBlock, not for decomposition. Without
     // `filesApi` there is no file-ingest worker to distill it properly, and
@@ -48,8 +48,9 @@ describe('[COMP:brain/open-channel-media-deps] open intake composition', () => {
 
     const result = await deps.ingestDocument!({
       gcsKey: 'k',
-      mime: 'application/pdf',
-      fileName: 'report.pdf',
+      // Exercise byte authority too: the transport label and extension lie.
+      mime: 'text/plain',
+      fileName: 'download.txt',
       workspaceId: 'ws-1',
       assistantId: 'a-1',
       actingUserId: 'u-1',

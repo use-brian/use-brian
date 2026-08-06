@@ -910,7 +910,25 @@ export async function buildFileContentBlocks(
         )
       }
     } else {
-      const { text } = await parseFileContent(file.buffer, file.mimeType, file.fileName)
+      const { text, mediaMimeType } = await parseFileContent(
+        file.buffer,
+        file.mimeType,
+        file.fileName,
+      )
+      if (mediaMimeType === 'application/pdf' || mediaMimeType?.startsWith('image/')) {
+        contentBlocks.push({
+          type: 'image',
+          mimeType: mediaMimeType,
+          data: file.buffer.toString('base64'),
+          name: file.fileName,
+        })
+        if (file.id) {
+          textParts.push(
+            `<attached_file id="${file.id}" name="${file.fileName}" type="${mediaMimeType}">[${mediaMimeType === 'application/pdf' ? 'pdf' : 'image'}]</attached_file>`,
+          )
+        }
+        continue
+      }
       const isSmall = shouldInline(text)
 
       // ── Tabular lane (issue #273) ──

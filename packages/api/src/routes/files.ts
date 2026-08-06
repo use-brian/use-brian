@@ -5,7 +5,15 @@ import { getDefaultAssistant, findAssistantById, getWorkspacePrimaryAssistant } 
 import { getWorkspaceFileById } from '../db/workspace-files.js'
 import { enqueueFileIngestJob, getFileIngestJob } from '../db/file-ingest-jobs-store.js'
 import { findOrCreateSession, findSessionById } from '../db/sessions.js'
-import { parseFileContent, shouldInline, probePdfPageCount, PDF_CONFIRM_PAGE_THRESHOLD, type FileStore } from '@use-brian/core'
+import {
+  isStructuredDocument,
+  documentMimeType,
+  parseFileContent,
+  shouldInline,
+  probePdfPageCount,
+  PDF_CONFIRM_PAGE_THRESHOLD,
+  type FileStore,
+} from '@use-brian/core'
 import { FileIngestError } from '../files/ingest-error.js'
 import type { FileIngestor } from '../files/ingest-port.js'
 import type { ArtifactPromoter } from '../files/artifact-promote.js'
@@ -57,16 +65,15 @@ export const ALLOWED_MIME_PREFIXES = [
   // Voice-note uploads from the web recorder. Transcription happens
   // just-in-time in `chat.ts` (see docs/architecture/media/transcription.md).
   'audio/',
-  'application/pdf',
   'application/json',
-  'application/vnd.openxmlformats-officedocument',
-  'application/msword',
-  'application/vnd.ms-excel',
-  'application/vnd.ms-powerpoint',
 ]
 
-export function isAllowedMime(mime: string): boolean {
-  return ALLOWED_MIME_PREFIXES.some((prefix) => mime.startsWith(prefix))
+export function isAllowedMime(mime: string, fileName?: string): boolean {
+  const normalized = mime.toLowerCase().split(';', 1)[0]!.trim()
+  return (
+    ALLOWED_MIME_PREFIXES.some((prefix) => normalized.startsWith(prefix)) ||
+    isStructuredDocument(normalized, fileName)
+  )
 }
 
 /**
@@ -172,7 +179,7 @@ export function fileRoutes(
         // latin1→UTF-8 to recover it; a no-op for pure-ASCII names.
         const fileName = Buffer.from(file.originalname, 'latin1').toString('utf8')
 
-        if (!isAllowedMime(file.mimetype)) {
+        if (!isAllowedMime(file.mimetype, fileName)) {
           results.push({
             error: `Unsupported file type: ${file.mimetype}`,
             fileName,
@@ -181,7 +188,7 @@ export function fileRoutes(
         }
 
         try {
-          const { text, summary } = await parseFileContent(
+          const { text, summary, mediaMimeType, detectedFormat } = await parseFileContent(
             file.buffer,
             file.mimetype,
             fileName,
@@ -191,18 +198,17 @@ export function fileRoutes(
           // are available later (images + PDFs → Gemini inline_data; audio →
           // decoded and transcribed in `chat.ts` before Gemini sees it).
           // Text-extractable files store the parsed text.
-          const isInlineMedia =
-            file.mimetype.startsWith('image/') ||
-            file.mimetype.startsWith('audio/') ||
-            file.mimetype === 'application/pdf'
+          const isInlineMedia = mediaMimeType !== undefined
+          const effectiveMimeType =
+            mediaMimeType ?? (detectedFormat ? documentMimeType(detectedFormat) : file.mimetype)
           const content = isInlineMedia
-            ? `data:${file.mimetype};base64,${file.buffer.toString('base64')}`
+            ? `data:${effectiveMimeType};base64,${file.buffer.toString('base64')}`
             : text
 
           const cached = await fileStore.cache({
             sessionId: session.id,
             fileName,
-            mimeType: file.mimetype,
+            mimeType: effectiveMimeType,
             content,
             summary,
             sizeBytes: file.size,
@@ -217,7 +223,7 @@ export function fileRoutes(
           // store-only (chunking a PDF needs a model distill — explicit-ingest
           // territory). Never fails the upload: null → cache-only fallback.
           let artifact: { fileId: string; path: string; indexing: string } | null = null
-          const isPdf = file.mimetype === 'application/pdf'
+          const isPdf = effectiveMimeType === 'application/pdf'
           const promotable =
             artifactPromoter &&
             fileWorkspaceId &&
@@ -342,7 +348,7 @@ export function fileRoutes(
     for (const file of files) {
       // Recover a UTF-8 filename mojibaked by multer's latin1 decode (see /upload).
       const fileName = Buffer.from(file.originalname, 'latin1').toString('utf8')
-      if (!isAllowedMime(file.mimetype)) {
+      if (!isAllowedMime(file.mimetype, fileName)) {
         results.push({ fileName, ok: false, error: `Unsupported file type: ${file.mimetype}` })
         continue
       }
@@ -476,7 +482,7 @@ export function fileRoutes(
       })
       return
     }
-    if (!isAllowedMime(parsed.data.mime)) {
+    if (!isAllowedMime(parsed.data.mime, parsed.data.fileName)) {
       res.status(400).json({ error: 'unsupported_file_type', detail: `Unsupported file type: ${parsed.data.mime}` })
       return
     }
