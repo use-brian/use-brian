@@ -171,6 +171,12 @@ export function publicChatRoutes(options: PublicChatRouteOptions): Router {
             message: body.message,
             truncateFromMessageId: body.truncateFromMessageId,
           },
+          // The owner is publishing THEIR assistant here, so the turn
+          // reconstructs the context that assistant would have in web chat and
+          // reads follow its own clearance. Memory stays read-only: visitors
+          // are Tier 2 by construction, so `saveMemory` is never granted.
+          // The keyed `sk_live_*` front door deliberately does NOT set this.
+          contextScope: 'assistant-full',
           analyticsMeta: { chat_link_id: link.linkId, surface: 'chat_link' },
         },
         req,

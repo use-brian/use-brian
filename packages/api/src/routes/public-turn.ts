@@ -32,6 +32,8 @@ import {
   modelToCompactionTier,
   clientCompartment,
   unionCompartments,
+  buildWorkspaceFilesContext,
+  buildSessionStateBlock,
 } from '@use-brian/core'
 import type {
   LLMProvider,
@@ -52,8 +54,14 @@ import type { ContentBlock, EngineHooks } from '@use-brian/core'
 import { sanitizeDeliveryText } from '@use-brian/shared'
 import { runProactiveCompaction } from './proactive-compaction.js'
 import { notifyBrainWriteIfMatch } from '../brain-stream/notify.js'
-import { applyMcpInjection, buildUnavailableCapabilitiesPrompt } from './route-helpers.js'
-import { formatPrivateRuntimeContext } from './_prompt-builder.js'
+import { applyMcpInjection, buildUnavailableCapabilitiesPrompt, injectSkills } from './route-helpers.js'
+import {
+  attachUserVisibleContext,
+  buildSplitSystemPrompt,
+  formatPrivateRuntimeContext,
+  formatUserVisibleContext,
+} from './_prompt-builder.js'
+import { resolveBrandContext } from '../brand/prompt-context.js'
 import { getConnectorUserId, getWorkspacePlan, resolveReadCeilingsSystem } from '../db/workspace-store.js'
 import { isExternalPrincipal } from '../db/external-principal.js'
 import { accrueClientPrincipal } from './client-accrual.js'
@@ -106,7 +114,39 @@ export type PublicTurnDeps = {
   engineHooks?: EngineHooks
   maxTurns?: number
   checkCreditBudget?: CreditBudgetGate
+  /**
+   * Ambient `# Workspace Files` index. Only read on an `assistant-full`
+   * turn (see `PublicTurnContextScope`); the keyed API never builds the
+   * block, so leaving this unset keeps that path byte-identical.
+   */
+  workspaceFilesStore?: import('@use-brian/core').WorkspaceFilesStore
+  /**
+   * Skills catalogue. Same gating as `workspaceFilesStore` — an
+   * `external-client` turn never injects skills.
+   */
+  skillStore?: import('../db/skill-store.js').SkillStore
 }
+
+/**
+ * How much of the assistant's own context a public turn reconstructs.
+ *
+ * `'external-client'` (default) is the keyed `sk_live_*` API: the caller is a
+ * consumer's backend serving its OWN end-customers, so the turn is deliberately
+ * thin. Reads floor to the visitor's membership (`public` for a stranger) and
+ * the ambient workspace blocks are omitted — the assistant is a service here,
+ * not a colleague, and the `client:*` compartment wall plus the `public` floor
+ * are the isolation contract (`docs/plans/client-principal.md`).
+ *
+ * `'assistant-full'` is the public chat link (`/c/<token>`): the owner is
+ * publishing THEIR assistant, so it reconstructs the context that assistant
+ * would have in web chat — memory, brand, files, skills, wall-clock time — and
+ * reads follow the assistant's own clearance instead of flooring to `public`.
+ *
+ * The two must not be collapsed. Giving the keyed API full scope would reopen
+ * the cross-client read the 2026-08-07 client-principal work closed; keeping
+ * the chat link thin is what made it a persona with an empty brain.
+ */
+export type PublicTurnContextScope = 'external-client' | 'assistant-full'
 
 /**
  * Turn-scoped identity attested by the consumer's backend. Never persisted
@@ -144,6 +184,12 @@ export type PublicTurnInput = {
    */
   identityNamespace: string
   body: PublicTurnBody
+  /**
+   * How much assistant context to reconstruct. Defaults to
+   * `'external-client'` so the keyed API keeps its existing behavior
+   * without naming the field. See `PublicTurnContextScope`.
+   */
+  contextScope?: PublicTurnContextScope
   /** Extra analytics metadata (api_key_id / chat_link_id …). */
   analyticsMeta?: Record<string, unknown>
 }
@@ -254,25 +300,31 @@ export function buildEndUserIdentityContext(
 /**
  * The context block appended after Layer 1 + Layer 2 on a public turn.
  *
- * Tier 1 (identified): the full memory context, which already carries
- * the `## Your Name` override via `buildMemoryContext`. Tier 2
- * (anonymous): no memory context exists for a shadow visitor - but the
- * assistant's display name is configuration, not memory, so the
- * override still applies. Without it the anonymous prompt was Layer 1 +
- * Layer 2 alone, and the model answered "who are you" with Layer 1's
- * "I'm Use Brian, the shared brain for this workspace" on exactly the
- * surfaces where strangers meet a named assistant (chat links, Tier-2
- * keyed-API turns) - the 2026-08-07 "SDR" report. Exported for direct
- * test coverage.
+ * When the turn built a memory context, that context already carries the
+ * `## Your Name` override via `buildMemoryContext`, so it passes through
+ * verbatim. When it did not, the assistant's display name is still
+ * configuration rather than memory, so the override is injected alone.
+ * Without it the anonymous prompt was Layer 1 + Layer 2 only, and the model
+ * answered "who are you" with Layer 1's "I'm Use Brian, the shared brain for
+ * this workspace" on exactly the surfaces where strangers meet a named
+ * assistant - the 2026-08-07 "SDR" report.
+ *
+ * The predicate is the presence of the memory context itself, NOT the Tier
+ * 1/Tier 2 flag it was originally written against. Those coincided while only
+ * identified turns built memory; an `assistant-full` chat-link turn is
+ * anonymous AND has memory context, and keying off the tier would have thrown
+ * that context away. Exported for direct test coverage.
  */
 export function resolvePublicContextBlock(params: {
-  isIdentified: boolean
   assistantName: string | null
   memoryContext: string
 }): string {
-  if (params.isIdentified) return params.memoryContext
+  if (params.memoryContext.trim().length > 0) return params.memoryContext
   return buildAssistantNameSection(params.assistantName) ?? ''
 }
+
+/** Per-turn ceiling on the `# Workspace Files` index. Mirrors chat.ts. */
+const PUBLIC_TURN_FILES_INDEX_CAP = 50
 
 const RETRY_HINT =
   '[Note: the user retried this message. Your previous response did not satisfy them. Take a different angle — do not repeat the same structure, examples, or recommendations.]\n\n'
@@ -476,12 +528,16 @@ export async function executePublicTurn(
       )
     }
   }
+  // Both public front doors bill the assistant's owner, so their tier is
+  // settable independently of the owner's own bot: `api_model_alias`
+  // (migration 416). Before that these turns rode `telegram_model_alias`,
+  // which meant capping a public chat link also downgraded Telegram.
   const model = deps.configuredProviders
     ? ensureServableModel(
-        resolveModel(assistant.telegramModelAlias, workspacePlan, budgetStatus),
+        resolveModel(assistant.apiModelAlias, workspacePlan, budgetStatus),
         deps.configuredProviders,
       )
-    : resolveModel(assistant.telegramModelAlias, workspacePlan, budgetStatus)
+    : resolveModel(assistant.apiModelAlias, workspacePlan, budgetStatus)
 
   // ── 7. Persist user message ──────────────────────────────
   const userContent: ContentBlock[] = [{ type: 'text', text: body.message }]
@@ -512,16 +568,29 @@ export async function executePublicTurn(
   // Read-side clearance (incident 2026-06-01): read ceiling =
   // min(member, assistant). The API key's principal is typically the
   // workspace owner (resolves to the assistant's clearance), but a
-  // lower-clearance principal is correctly bounded — an anonymous
-  // chat-link visitor floors to 'public'. Writes keep the assistant's
-  // clearance via `assistantClearance` on the context.
-  const { clearance: readClearance, compartments: readCompartments } =
-    await resolveReadCeilingsSystem(
-      user.id,
-      assistant.workspaceId ?? null,
-      assistant.clearance,
-      assistant.compartments,
-    )
+  // lower-clearance principal is correctly bounded. Writes keep the
+  // assistant's clearance via `assistantClearance` on the context.
+  //
+  // `assistant-full` deliberately skips the membership floor. A chat-link
+  // visitor is a non-member, so the floor resolved every read to `public` —
+  // and every brain table defaults to `sensitivity='internal'`, so the link
+  // matched almost nothing and shipped as a persona with an empty brain. The
+  // owner is publishing THEIR assistant, so the assistant's own clearance is
+  // the ceiling, exactly as it is on any channel the owner speaks through.
+  //
+  // This makes `assistants.clearance` the security control for the link: point
+  // one at a `confidential` assistant and that content is readable by anyone
+  // holding the URL. The Studio create-link flow states the inherited
+  // clearance for that reason — see docs/architecture/features/public-chat-link.md.
+  const fullScope = input.contextScope === 'assistant-full'
+  const { clearance: readClearance, compartments: readCompartments } = fullScope
+    ? { clearance: assistant.clearance, compartments: assistant.compartments }
+    : await resolveReadCeilingsSystem(
+        user.id,
+        assistant.workspaceId ?? null,
+        assistant.clearance,
+        assistant.compartments,
+      )
   const mcpInjection = await applyMcpInjection({
     scope: 'public-api',
     connectorUserId,
@@ -572,67 +641,215 @@ export async function executePublicTurn(
     }
   }
 
-  // Memory tools — only for Tier 1 (identified) users. Tier 2 shadows
-  // get session-only context and shouldn't write memory.
+  // Memory tools. `saveMemory` is Tier 1 only — an anonymous stranger must
+  // never write into the workspace brain, and on `assistant-full` that is the
+  // one capability deliberately withheld from an otherwise complete surface.
+  //
+  // The write bar is structural, not just this branch: `listMemoryUsers`
+  // applies `excludeExternalPrincipalsSql` and `chatlink:` is an
+  // external-principal namespace, so background consolidation cannot turn a
+  // visitor's session into memories either. Withholding the tool is therefore
+  // sufficient; there is no second write path to close.
+  const { saveMemory, getMemory } = createMemoryTools(deps.memoryStore)
   if (isIdentified) {
-    const { saveMemory, getMemory } = createMemoryTools(deps.memoryStore)
     baseTools.set('saveMemory', saveMemory)
+  }
+  if (isIdentified || fullScope) {
     baseTools.set('getMemory', getMemory)
   }
 
-  // ── 9. Memory context (Tier 1 only) ──────────────────────
+  // ── 9. Memory context ────────────────────────────────────
+  // Built for an identified caller, and for every `assistant-full` turn
+  // regardless of tier: the visitor's own shadow soul is empty, but the
+  // workspace/team memory is the assistant's knowledge of its own company and
+  // is the substance of what the link is meant to expose.
   let memoryContext = ''
-  if (isIdentified) {
-    const viewerCtx = {
-      workspaceId: assistant.workspaceId ?? '',
-      userId: user.id,
-      assistantId: assistant.id,
-      assistantKind: assistant.kind,
-      clearance: readClearance,
-      compartments: readCompartments,
-    }
-    const [soul, identityMemories, memoryIndex] = await Promise.all([
-      deps.memoryStore.getSoul(assistant.id, user.id, 'Use Brian'),
-      deps.memoryStore.getIdentity(viewerCtx),
-      deps.memoryStore.getIndex(viewerCtx),
-    ])
+  const viewerCtx = {
+    workspaceId: assistant.workspaceId ?? '',
+    userId: user.id,
+    assistantId: assistant.id,
+    assistantKind: assistant.kind,
+    clearance: readClearance,
+    compartments: readCompartments,
+  }
+  if (isIdentified || fullScope) {
+    const [soul, identityMemories, memoryIndex, workspaceIdentityMemories, teamMemoryIndex] =
+      await Promise.all([
+        deps.memoryStore.getSoul(assistant.id, user.id, 'Use Brian'),
+        deps.memoryStore.getIdentity(viewerCtx),
+        deps.memoryStore.getIndex(viewerCtx),
+        // Team memory is what makes a full-scope link useful; the keyed API
+        // stays on its existing per-user projection.
+        fullScope && assistant.workspaceId
+          ? deps.memoryStore.getWorkspaceIdentity(viewerCtx)
+          : Promise.resolve([]),
+        fullScope && assistant.workspaceId
+          ? deps.memoryStore.getWorkspaceIndex(viewerCtx)
+          : Promise.resolve([]),
+      ])
     memoryContext = buildMemoryContext({
       soul,
       identityMemories: identityMemories.map((m) => ({ id: m.id, summary: m.summary, detail: m.detail })),
       memoryIndex: memoryIndex.map((m) => ({ ...m, appId: null })),
-      workspaceIdentityMemories: [],
-      teamMemoryIndex: [],
+      workspaceIdentityMemories: workspaceIdentityMemories.map((m) => ({
+        id: m.id,
+        summary: m.summary,
+        detail: m.detail,
+      })),
+      teamMemoryIndex: teamMemoryIndex.map((m) => ({ ...m, appId: null })),
       assistantName: assistant.name,
     })
   }
 
-  const assistantSystemPrompt = assistant.systemPrompt
-    ? `${deps.systemPrompt}\n\n${assistant.systemPrompt}`
-    : deps.systemPrompt
-  // Tier-2 turns still get the assistant-name override even though they
-  // carry no memory context - see `resolvePublicContextBlock`.
+  // ── 9b. Ambient workspace context (assistant-full only) ──
+  // The blocks web chat carries and the thin public turn never had. Each is
+  // independently optional and failure-tolerant: a store that is not wired in
+  // (OSS, or a caller that never passes it) simply omits its block.
+  let workspaceFilesContext: string | null = null
+  let brandContext: string | null = null
+  let sessionStateBlock: string | null = null
+  let skillsFragment = ''
+  if (fullScope) {
+    if (deps.workspaceFilesStore && assistant.workspaceId && activeCapabilities.has('files')) {
+      try {
+        const rows = await deps.workspaceFilesStore.listIndexRanked(
+          {
+            workspaceId: assistant.workspaceId,
+            userId: user.id,
+            assistantId: assistant.id,
+            assistantKind: assistant.kind,
+            clearance: readClearance,
+            compartments: readCompartments,
+          },
+          PUBLIC_TURN_FILES_INDEX_CAP,
+        )
+        workspaceFilesContext = buildWorkspaceFilesContext(rows)
+      } catch (err) {
+        console.error('[public-turn] workspace-files index fetch failed:', err)
+      }
+    }
+
+    brandContext = await resolveBrandContext({
+      userId: ownerId,
+      workspaceId: assistant.workspaceId,
+      hasCapability: activeCapabilities.has('brand'),
+      logLabel: 'public-turn',
+    })
+
+    if (deps.sessionStateStore) {
+      try {
+        sessionStateBlock = await buildSessionStateBlock({
+          store: deps.sessionStateStore,
+          sessionId: session.id,
+        })
+      } catch (err) {
+        console.error('[public-turn] session-state block fetch failed:', err)
+      }
+    }
+
+    if (deps.skillStore) {
+      try {
+        const skillResult = await injectSkills({
+          skillStore: deps.skillStore,
+          connectorUserId,
+          assistantId: assistant.id,
+          // §5.5 governance gate — the assistant's clearance bounds which
+          // workspace skills are offered, same as every other channel.
+          assistantClearance: assistant.clearance,
+          tools: baseTools,
+          connectorStore: deps.connectorStore,
+          unavailableCapabilities: mcpInjection.unavailable,
+          channel: 'api',
+          assistantKind: assistant.kind,
+          workspaceId: assistant.workspaceId ?? undefined,
+        })
+        skillsFragment = skillResult.promptFragment
+      } catch (err) {
+        console.error('[public-turn] skill injection failed:', err)
+      }
+    }
+
+    // Skills inject their own tools, so re-run the confirmation strip: this
+    // surface still has no approval loop. Ordering matters — the earlier strip
+    // ran before injectSkills existed on this path.
+    for (const [, tool] of baseTools) {
+      if (tool.requiresConfirmation) {
+        baseTools.delete(tool.name)
+      }
+    }
+  }
+
+  // The assistant-name override rides the memory context when one was built,
+  // and is injected alone otherwise - see `resolvePublicContextBlock`.
   const contextBlock = resolvePublicContextBlock({
-    isIdentified,
     assistantName: assistant.name,
     memoryContext,
   })
-  const promptWithMemory = contextBlock
-    ? `${assistantSystemPrompt}\n\n${contextBlock}`
-    : assistantSystemPrompt
-  // Append the unavailable-capabilities block so the model doesn't
-  // burn turns hunting for tools that aren't connected. Same pattern
-  // as chat.ts (line 1124).
-  const promptWithCapabilities =
-    promptWithMemory + buildUnavailableCapabilitiesPrompt(mcpInjection.unavailable, baseTools)
-  // End-user identity goes LAST and inside the private-runtime envelope —
-  // the trusted system channel, never the user turn. See
-  // `buildEndUserIdentityContext`.
-  const identityBlock = formatPrivateRuntimeContext(
-    buildEndUserIdentityContext(body, { isIdentified }),
-  )
-  const fullSystemPrompt = identityBlock
-    ? `${promptWithCapabilities}\n\n${identityBlock}`
-    : promptWithCapabilities
+  // End-user identity is private runtime context in both scopes — the trusted
+  // system channel, never the user turn. See `buildEndUserIdentityContext`.
+  const endUserContext = buildEndUserIdentityContext(body, { isIdentified })
+
+  let fullSystemPrompt: string
+  // Representations of content the visitor can actually see. Empty on this
+  // surface today (no reply quotes, no open page), but the three-way split
+  // contract is wired rather than assumed: an authority collapse is not
+  // repairable by reordering, so the seam exists before it has a payload.
+  // See `invariants/prompt-cache-alignment`.
+  let userVisibleContext = ''
+  if (fullScope) {
+    // Route through the shared builder so the chat link inherits the same
+    // block order and the same provenance split as every other channel,
+    // rather than growing a second hand-rolled assembly that drifts.
+    //
+    // The timezone is the workspace owner's: the visitor's is unknown and the
+    // browser sends none on this surface. Naming the assistant's own zone is
+    // the honest answer, and it is strictly better than the previous state,
+    // where no date reached the model at all and it guessed.
+    const timezone = owner.timezone ?? 'UTC'
+    const split = buildSplitSystemPrompt({
+      basePrompt: deps.systemPrompt,
+      assistantInstructions: assistant.systemPrompt,
+      memoryContext: contextBlock,
+      workspaceFilesContext,
+      brandContext,
+      skillsFragment,
+      sessionStateBlock,
+      currentDateTime: new Date().toLocaleString('en-US', {
+        timeZone: timezone,
+        dateStyle: 'full',
+        timeStyle: 'short',
+      }),
+      timezone,
+      unavailableCapabilitiesPrompt: buildUnavailableCapabilitiesPrompt(
+        mcpInjection.unavailable,
+        baseTools,
+      ),
+      // Ordered last among the builder's private-runtime sections, so the
+      // end-user identity block stays at the end of the envelope as before.
+      preflightContext: endUserContext,
+    })
+    const privateBlock = formatPrivateRuntimeContext(split.privateRuntimeContext)
+    fullSystemPrompt = privateBlock
+      ? `${split.stablePrompt}\n\n${privateBlock}`
+      : split.stablePrompt
+    userVisibleContext = split.userVisibleContext
+  } else {
+    const assistantSystemPrompt = assistant.systemPrompt
+      ? `${deps.systemPrompt}\n\n${assistant.systemPrompt}`
+      : deps.systemPrompt
+    const promptWithMemory = contextBlock
+      ? `${assistantSystemPrompt}\n\n${contextBlock}`
+      : assistantSystemPrompt
+    // Append the unavailable-capabilities block so the model doesn't
+    // burn turns hunting for tools that aren't connected. Same pattern
+    // as chat.ts (line 1124).
+    const promptWithCapabilities =
+      promptWithMemory + buildUnavailableCapabilitiesPrompt(mcpInjection.unavailable, baseTools)
+    const identityBlock = formatPrivateRuntimeContext(endUserContext)
+    fullSystemPrompt = identityBlock
+      ? `${promptWithCapabilities}\n\n${identityBlock}`
+      : promptWithCapabilities
+  }
 
   // ── 10. Load history + proactive compaction ──────────────
   // Mirrors web chat (chat.ts:797–816). `runProactiveCompaction`
@@ -692,6 +909,20 @@ export async function executePublicTurn(
             : [{ type: 'text', text: retryHint }, ...last.content],
       }
       messages = [...messages.slice(0, lastIdx), cloned]
+    }
+  }
+
+  // User-visible context rides the newest USER turn, never the system channel
+  // — the third leg of the provenance split. `attachUserVisibleContext`
+  // returns null when no plain trailing user message can carry it (a
+  // tool_result carrier, an assistant-final resume shape); the documented
+  // fallback is in-prompt placement for that turn only.
+  if (userVisibleContext) {
+    const enveloped = attachUserVisibleContext(messages, userVisibleContext)
+    if (enveloped) {
+      messages = enveloped
+    } else {
+      fullSystemPrompt = `${fullSystemPrompt}\n\n${formatUserVisibleContext(userVisibleContext)}`
     }
   }
 

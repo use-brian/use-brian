@@ -72,6 +72,7 @@ import {
   createBrainHealingTools,
   createScheduleWorkflowTool,
   advanceWorkflowRun,
+  stepSuccessors,
   createWorkflowEventDispatcher,
   type WorkflowEventDispatcher,
   createRunQueueWorker,
@@ -4109,8 +4110,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           description: r.systemPrompt ? r.systemPrompt.slice(0, 120) : null,
           memoryCount: r.memoryCount, iconSeed: r.iconSeed ?? 0,
           workspaceId: r.workspaceId,
-          telegramModelAlias: r.telegramModelAlias,
-          slackModelAlias: r.slackModelAlias,
+          defaultModelAlias: r.defaultModelAlias,
           clearance: r.clearance, kind: r.kind, appType: r.appType,
         })),
       })
@@ -4405,6 +4405,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     engineHooks: ports.engineHooks,
     checkCreditBudget: ports.checkCreditBudget,
     chatLinkStore,
+    // Ambient-context stores for the `assistant-full` scope this route opts
+    // into (see public-chat.ts). The keyed public API above deliberately
+    // omits them — it runs the thin `external-client` scope.
+    workspaceFilesStore,
+    skillStore,
   }))
 
   // PUBLIC closed routes mount HERE — before the bare `/api` requireAuth guards
@@ -5350,14 +5355,20 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         })
         const run = await workflowRunStore.getRunSystem(runId)
         const wf = run ? await workflowStore.findByIdSystem(run.workflowId) : null
+        // Resume PAST the completed wait step via an explicit frontier —
+        // possibly several successors (fan-out array), possibly none (a
+        // terminal wait completes the run instead of re-entering at
+        // startStepId). The cursor stays on the wait step; the executor
+        // stamps currentStepId as each successor starts.
+        let startAt: string[] | undefined
         if (run && wf) {
           const waitStep = wf.definition.steps.find((s) => s.id === run.currentStepId)
-          const nextId = waitStep?.nextStepId === undefined
-            ? (wf.definition.steps[wf.definition.steps.indexOf(waitStep!) + 1]?.id ?? null)
-            : waitStep.nextStepId
-          await workflowRunStore.updateRun(runId, { status: 'running', currentStepId: nextId })
+          startAt = waitStep
+            ? stepSuccessors(waitStep, wf.definition.steps.map((s) => s.id))
+            : undefined
+          await workflowRunStore.updateRun(runId, { status: 'running' })
         }
-        const outcome = await advanceWorkflowRun(workflowExecutorDeps, runId)
+        const outcome = await advanceWorkflowRun(workflowExecutorDeps, runId, startAt ? { startAt } : undefined)
         await jobStore.update(job.id, { enabled: false })
         if (outcome.kind === 'failed') {
           throw new Error(

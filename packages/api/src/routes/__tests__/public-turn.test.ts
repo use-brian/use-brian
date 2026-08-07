@@ -70,9 +70,8 @@ describe('[COMP:api/public-turn] Shared public turn pipeline', () => {
   })
 
   describe('resolvePublicContextBlock', () => {
-    it('injects the assistant-name override on an anonymous (Tier-2) turn', () => {
+    it('injects the assistant-name override when no memory context was built', () => {
       const block = resolvePublicContextBlock({
-        isIdentified: false,
         assistantName: 'SDR',
         memoryContext: '',
       })
@@ -80,26 +79,35 @@ describe('[COMP:api/public-turn] Shared public turn pipeline', () => {
       expect(block).toContain('The user has named you "SDR"')
     })
 
-    it('stays empty on an anonymous turn when the assistant keeps the default name', () => {
+    it('stays empty with no memory context when the assistant keeps the default name', () => {
       expect(
         resolvePublicContextBlock({
-          isIdentified: false,
           assistantName: 'My Assistant',
           memoryContext: '',
         }),
       ).toBe('')
     })
 
-    it('passes the memory context through verbatim on an identified turn (no double injection)', () => {
-      // Tier 1 memory context already carries the override via
+    it('passes the memory context through verbatim (no double injection)', () => {
+      // A built memory context already carries the override via
       // buildMemoryContext - the block must not append a second copy.
       const memoryContext = '## Your Name\nThe user has named you "SDR". ...\n\n## Identity\n- fact'
       expect(
         resolvePublicContextBlock({
-          isIdentified: true,
           assistantName: 'SDR',
           memoryContext,
         }),
+      ).toBe(memoryContext)
+    })
+
+    it('keeps an anonymous full-scope memory context instead of discarding it', () => {
+      // Regression guard for the predicate swap. An `assistant-full` chat-link
+      // turn is anonymous AND has memory context; keying this off the Tier
+      // 1/Tier 2 flag (as it did while only identified turns built memory)
+      // would throw the whole block away and leave the link brain-empty.
+      const memoryContext = '## Your Name\nThe user has named you "SDR".\n\n## Team\n- ships on Fridays'
+      expect(
+        resolvePublicContextBlock({ assistantName: 'SDR', memoryContext }),
       ).toBe(memoryContext)
     })
   })

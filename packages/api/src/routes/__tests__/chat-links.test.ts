@@ -6,12 +6,14 @@ import { createTestApp } from './helpers.js'
 // (resolveAssistantAccess) — mock it at that seam.
 vi.mock('../../db/users.js', () => ({
   resolveAssistantAccess: vi.fn(),
+  findAssistantById: vi.fn(),
 }))
 
 import { chatLinkRoutes } from '../chat-links.js'
-import { resolveAssistantAccess } from '../../db/users.js'
+import { resolveAssistantAccess, findAssistantById } from '../../db/users.js'
 
 const mockAccess = vi.mocked(resolveAssistantAccess)
+const mockFindAssistant = vi.mocked(findAssistantById)
 
 function makeStore() {
   return {
@@ -26,6 +28,9 @@ function makeStore() {
 /** Effective role owner/admin passes the gate. */
 function mockGatePass(role: 'owner' | 'admin' = 'owner') {
   mockAccess.mockResolvedValueOnce({ assistant: { id: 'a_1' }, role } as never)
+  // The list route also resolves the assistant so it can return the clearance
+  // a link inherits (contextScope `assistant-full`).
+  mockFindAssistant.mockResolvedValue({ id: 'a_1', clearance: 'internal' } as never)
 }
 /** Gate fails: no access at all. */
 function mockGateFail() {
