@@ -210,7 +210,11 @@ import {
   syncHomeAppFromGitHub,
   type SyncDeps as HomeAppSyncDeps,
 } from './home-apps/sync.js'
-import { listHomeApps as listHomeAppRows } from './db/home-apps-store.js'
+import {
+  listHomeApps as listHomeAppRows,
+  getHomeApp,
+  consumeHomeAppBudget,
+} from './db/home-apps-store.js'
 import { browserExtensionRoutes } from './routes/browser-extension.js'
 import { computerRoutes, createInMemoryLocalComputerTaskStore } from './routes/computer.js'
 import {
@@ -527,6 +531,9 @@ import { workspaceLlmKeysRoutes } from './routes/workspace-llm-keys.js'
 import { createDbCompartmentStore } from './db/compartment-store.js'
 import { compartmentRoutes } from './routes/compartments.js'
 import { brainMcpRoutes } from './brain-mcp/server.js'
+import { createStoreToolResolver } from './home-apps/store-tools-resolver.js'
+import { agentAllowedToolsFor } from './brain-mcp/store-tools.js'
+import { resolveWriteTarget } from './brain-mcp/tools.js'
 import { createDbOAuthClientStore } from './db/oauth-client-store.js'
 import { createDbDesktopAuthStore } from './db/desktop-auth-store.js'
 import { createDbOAuthAuthorizationStore } from './db/oauth-authorization-store.js'
@@ -1151,6 +1158,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     jsonParser(req, res, next)
   })
 
+  /**
+   * Paths a sandboxed Home app frame may call cross-origin. Bearer-authed
+   * only — see the `Origin: null` branch below for why that is what makes it
+   * safe to answer an opaque origin at all.
+   */
+  function isHomeAppBridgePath(path: string): boolean {
+    return path === '/api/brain/mcp' || /^\/api\/home-apps\/[^/]+\/state$/.test(path)
+  }
+
   // ── CORS ──
   const allowedOrigins = new Set([env.APP_URL, env.FEED_URL, env.AUTHED_APP_URL].filter(Boolean) as string[])
   app.use((req, res, next) => {
@@ -1158,6 +1174,22 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     if (origin && allowedOrigins.has(origin)) {
       res.header('Access-Control-Allow-Origin', origin)
       res.header('Access-Control-Allow-Credentials', 'true')
+      res.header('Vary', 'Origin')
+    } else if (origin === 'null' && isHomeAppBridgePath(req.path)) {
+      // A custom Home app runs in a sandbox with no `allow-same-origin`, so
+      // its fetches carry `Origin: null`. Without this the bridge is
+      // unreachable from the only place it is ever called — the browser
+      // discards the response and the app shows "Failed to fetch".
+      //
+      // NEVER with `Allow-Credentials`. `null` is shared by every sandboxed
+      // frame on the internet, so crediting it would let any page's sandbox
+      // make cookie-authenticated calls to this API. Safe only because the
+      // bridge authenticates by BEARER TOKEN, which an attacker's frame does
+      // not have — the app's token is minted per app, per viewer, per grant.
+      //
+      // Scoped to the bridge paths for the same reason: everything else here
+      // is session-authed, and none of it should answer an opaque origin.
+      res.header('Access-Control-Allow-Origin', 'null')
       res.header('Vary', 'Origin')
     }
     res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Client-Timezone')
@@ -3838,6 +3870,36 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api/brain/mcp', brainMcpRoutes({
     brainKeyStore,
     authorizationStore: oauthAuthorizationStore,
+    // Custom Home app bridge. Without this the bridge-token path in
+    // `authenticateBrainRequest` is skipped and every custom app 401s — the
+    // documented `ub:token` → `POST /api/brain/mcp` sample simply could not
+    // work. `getApp` reads the live row so a revoked grant takes effect on the
+    // next call, and the budget charge matches the KV endpoints.
+    ...(env.JWT_SECRET
+      ? {
+          homeApps: {
+            secret: env.JWT_SECRET,
+            getApp: async (appId: string) => {
+              const row = await getHomeApp(appId)
+              if (!row) return null
+              return {
+                id: row.id,
+                workspaceId: row.workspaceId,
+                status: row.status,
+                grantedScopes: row.grantedScopes
+                  ? {
+                      data: row.grantedScopes.data,
+                      store: row.grantedScopes.store,
+                      agent: row.grantedScopes.agent,
+                    }
+                  : null,
+                maxClearance: row.maxClearance,
+              }
+            },
+            consumeBudget: async (appId: string) => consumeHomeAppBudget(appId),
+          },
+        }
+      : {}),
     memoryTools: brainMemoryTools,
     taskTools,
     crmTools,
@@ -3859,6 +3921,41 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     embedder: sharedEmbedder,
     // Computer-use R2: writeBrowserSkill — the OSS authoring skill's sync tool.
     browserSkills: browserSkillsStore,
+    // Commerce-store tools for a granted custom Home app. Bound to the
+    // workspace primary assistant, so its connector action grants apply
+    // before the app's own `scopes.store` tier narrows further.
+    storeTools: createStoreToolResolver({
+      connectorStore,
+      settingsStore: mcpSettingsStore,
+      assistantConnectorStore,
+      assistantConnectorGrantsStore,
+      // The three below are load-bearing together with the resolver's
+      // `assistantTeamId`. That field suppresses the owner-personal base load
+      // (the connector boundary); THESE are the overlays that put the
+      // workspace's own connectors back. Passing the boundary without the
+      // overlays fails closed but renders the feature permanently inert — an
+      // app granted `scopes.store` would see zero tools forever, with nothing
+      // in the UI explaining why.
+      connectorGrantStore,
+      connectorInstanceStore,
+      workspaceToolPolicyStore,
+    }),
+    // `scopes.agent: 'ask'` — the app hands a task to the workspace assistant.
+    // The consult is capped at the app's OWN tool ceiling via `allowedTools`,
+    // so the model can reason and chain calls but cannot reach anything the
+    // direct tool gate refused. Without that cap this would be a ladder around
+    // every rule in `store-tools.ts`, destructive tools included.
+    agentTask: async ({ workspaceId, storeScope, appId, task }) => {
+      const target = await resolveWriteTarget(workspaceId)
+      if (!target) throw new Error('This workspace has no assistant to ask.')
+      return calleeExecutor({
+        callerAssistantId: target.assistantId,
+        calleeAssistantId: target.assistantId,
+        question: task,
+        callerSessionId: `home-app:${appId}`,
+        allowedTools: agentAllowedToolsFor('shopify', storeScope),
+      })
+    },
   }))
 
   app.use(oauthMetadataRoutes({ apiUrl: env.API_URL, webUrl: env.APP_URL }))
@@ -4027,6 +4124,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       filesApi,
       signingSecret: env.JWT_SECRET,
       apiOrigin: env.API_URL ?? '',
+      // The frame lives in app-web, on a DIFFERENT origin from this API — so
+      // the bundle CSP has to name it explicitly or the browser blocks it.
+      // `AUTHED_APP_URL` first (the authenticated app is what frames a Home
+      // app; `APP_URL` is the marketing origin), the same resolution the
+      // agent-surface appOrigin uses above.
+      appOrigin: env.AUTHED_APP_URL ?? env.APP_URL ?? '',
       ...(homeAppSyncDeps
         ? { syncNow: (row) => syncHomeAppFromGitHub(homeAppSyncDeps, row) }
         : {}),

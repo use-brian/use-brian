@@ -24,6 +24,9 @@ import type { BrainKeyStore } from '../db/brain-keys-store.js'
 import type { OAuthAuthorizationStore } from '../db/oauth-authorization-store.js'
 import type { BrainEpisodeIngestor } from '../ingest-port.js'
 import { authenticateBrainRequest } from './auth.js'
+import type { AppStoreScope } from '@use-brian/brian-app'
+import type { Sensitivity } from '@use-brian/core'
+import type { BrainKeyScope } from '../db/brain-keys-store.js'
 import {
   buildBrainTools,
   resolveAgentGate,
@@ -97,6 +100,54 @@ type Options = {
    * OSS authoring skill's brain-sync tool. Optional; write-scope keys only.
    */
   browserSkills?: import('@use-brian/core').BrowserSkillStore
+  /**
+   * Resolve a custom Home app's commerce-store tools, bound to the workspace
+   * primary assistant — the same binding the agent capability toolset uses.
+   *
+   * A resolver rather than a prebuilt map because the tools are per-workspace:
+   * they carry that workspace's connector credentials and rotate tokens as a
+   * side effect. Boot owns the connector plumbing; this module stays ignorant
+   * of it. Returning `[]` (no store connected, no grant) is normal.
+   */
+  /**
+   * Custom Home app bridge. Without this, `authenticateBrainRequest` skips
+   * the bridge-token path entirely and every Home app gets a flat 401 — which
+   * is exactly what happened between the feature shipping and this wiring:
+   * the documented bridge sample could not work.
+   *
+   * `getApp` resolves the LIVE row so a revoked grant stops working on the
+   * next call. `consumeBudget` charges the app's daily allowance, the same
+   * way the KV endpoints do; a data call that costs nothing would leave the
+   * only unbounded path in the bridge.
+   */
+  homeApps?: {
+    secret: string
+    getApp: (appId: string) => Promise<{
+      id: string
+      workspaceId: string
+      status: string
+      grantedScopes: { data: BrainKeyScope; store?: AppStoreScope } | null
+      maxClearance: Sensitivity | null
+    } | null>
+    consumeBudget?: (appId: string) => Promise<{ allowed: boolean }>
+  }
+  storeTools?: (params: {
+    workspaceId: string
+    storeScope: AppStoreScope
+    actingUserId?: string
+  }) => Promise<Tool[]>
+  /**
+   * Hand a task to the workspace assistant on a Home app's behalf
+   * (`scopes.agent: 'ask'`). The consult is capped at the app's own tool
+   * ceiling by the caller, so it cannot reach past `scopes.store`.
+   */
+  agentTask?: (params: {
+    workspaceId: string
+    storeScope: AppStoreScope
+    appId: string
+    actingUserId?: string
+    task: string
+  }) => Promise<string>
 }
 
 export function brainMcpRoutes(opts: Options): Router {
@@ -106,6 +157,7 @@ export function brainMcpRoutes(opts: Options): Router {
     const auth = await authenticateBrainRequest(req, {
       brainKeyStore: opts.brainKeyStore,
       authorizationStore: opts.authorizationStore,
+      homeApps: opts.homeApps,
     })
     if (!auth) {
       // Uniform 401 — a probe cannot tell a bad key from a revoked one.
@@ -122,6 +174,45 @@ export function brainMcpRoutes(opts: Options): Router {
       opts.agentTools && auth.scope === 'read_write'
         ? await resolveAgentGate(auth.workspaceId)
         : false
+    // Every Home app bridge call spends one unit of its daily budget — this
+    // is a data path, and leaving it free would make it the one unbounded
+    // way into the workspace.
+    if (auth.authKind === 'home_app' && opts.homeApps?.consumeBudget) {
+      const budget = await opts.homeApps.consumeBudget(auth.keyId)
+      if (!budget.allowed) {
+        res.status(429).json({ error: 'This app has used its daily budget.' })
+        return
+      }
+    }
+
+    // Store tools reach a live merchant store, so they are resolved ONLY for a
+    // Home app that was granted a tier. No other principal kind gets them:
+    // an API key or OAuth token addresses the brain, and widening those to a
+    // storefront is a decision nobody has made.
+    let storeTools: Tool[] = []
+    if (opts.storeTools && auth.authKind === 'home_app' && auth.storeScope !== 'none') {
+      try {
+        storeTools = await opts.storeTools({
+          workspaceId: auth.workspaceId,
+          storeScope: auth.storeScope,
+          actingUserId: auth.actingUserId,
+        })
+      } catch (err) {
+        // A connector that cannot be reached must not take the whole brain
+        // surface down with it — the app's other tools still work, and the
+        // missing store tools surface as "not available" rather than a 500.
+        console.error('[brain-mcp] store tool resolution failed:', err)
+      }
+    }
+
+    // An assistant turn costs model time, not one cheap query — so it is
+    // exposed only on an explicit `agent` grant, and charged accordingly at
+    // the call site rather than riding the flat per-call unit.
+    const agentTask =
+      opts.agentTask && auth.authKind === 'home_app' && auth.agentScope === 'ask'
+        ? opts.agentTask
+        : undefined
+
     const server = new McpServer({ name: 'use-brian-brain', version: '1.0.0' })
     for (const tool of buildBrainTools({
       workspaceId: auth.workspaceId,
@@ -140,6 +231,19 @@ export function brainMcpRoutes(opts: Options): Router {
       agentWritesEnabled,
       embedder: opts.embedder,
       browserSkills: opts.browserSkills,
+      storeTools,
+      ...(agentTask
+        ? {
+            agentTask: (task: string) =>
+              agentTask({
+                workspaceId: auth.workspaceId,
+                storeScope: auth.storeScope,
+                appId: auth.keyId,
+                actingUserId: auth.actingUserId,
+                task,
+              }),
+          }
+        : {}),
     })) {
       server.registerTool(
         tool.name,

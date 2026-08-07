@@ -1,0 +1,887 @@
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Shopify</title>
+<style>
+  :root {
+    --bg: #fff; --fg: #0b0d12; --muted: #6b7280; --line: #e5e7eb;
+    --accent: #2563eb; --ok: #059669; --warn: #b45309; --card: #fff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0b0d12; --fg: #e8eaed; --muted: #9aa1ac; --line: #232833;
+      --accent: #6ea8fe; --ok: #34d399; --warn: #fbbf24; --card: #11141b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 940px; margin: 0 auto; padding: 20px 16px 48px; }
+  h1 { font-size: 18px; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
+  h2 { font-size: 13px; margin: 22px 0 8px; font-weight: 600; color: var(--muted);
+       text-transform: uppercase; letter-spacing: 0.05em; }
+  .sub { color: var(--muted); font-size: 12px; margin: 3px 0 0; }
+  .tabs { display: flex; gap: 4px; margin: 16px 0 4px; border-bottom: 1px solid var(--line); }
+  .tab { appearance: none; background: none; border: 0; border-bottom: 2px solid transparent;
+         color: var(--muted); font: inherit; font-weight: 550; padding: 8px 12px; cursor: pointer; }
+  .tab[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); }
+  .grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+  .card { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; background: var(--card); }
+  .kpi { font-size: 24px; font-weight: 650; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+  .kpi-l { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); }
+  th { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .scroll { overflow-x: auto; }
+  .note { border-left: 3px solid var(--warn); background: color-mix(in srgb, var(--warn) 8%, transparent);
+          padding: 9px 12px; border-radius: 0 8px 8px 0; font-size: 12.5px; margin: 10px 0; }
+  .err  { border-left: 3px solid #dc2626; background: color-mix(in srgb, #dc2626 8%, transparent);
+          padding: 9px 12px; border-radius: 0 8px 8px 0; font-size: 12.5px; margin: 10px 0; }
+  .muted { color: var(--muted); }
+  label { display: block; font-size: 12px; font-weight: 550; margin: 10px 0 3px; }
+  input, textarea, select {
+    width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: 7px;
+    background: var(--bg); color: var(--fg); font: inherit;
+  }
+  button.go {
+    appearance: none; border: 0; border-radius: 8px; background: var(--accent); color: #fff;
+    font: inherit; font-weight: 600; padding: 9px 16px; cursor: pointer; margin-top: 14px;
+  }
+  button.go:disabled { opacity: 0.5; cursor: default; }
+  .steps { list-style: none; padding: 0; margin: 12px 0 0; font-size: 13px; }
+  .steps li { padding: 5px 0; display: flex; gap: 8px; align-items: baseline; }
+  .row2 { display: grid; gap: 10px; grid-template-columns: 1fr 1fr; }
+  .range { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; margin: 14px 0 4px; }
+  .range .f { display: flex; flex-direction: column; gap: 3px; }
+  .range label { margin: 0; }
+  .range select, .range input { width: auto; min-width: 140px; }
+  .range .apply { margin-top: 0; padding: 7px 14px; }
+  .thumbs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .thumb { position: relative; width: 72px; height: 72px; border: 1px solid var(--line);
+           border-radius: 8px; overflow: hidden; background: var(--card); }
+  .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .thumb .rm { position: absolute; top: 2px; right: 2px; width: 18px; height: 18px; padding: 0;
+               border: 0; border-radius: 50%; background: rgba(0,0,0,.62); color: #fff;
+               font: 600 13px/1 ui-sans-serif, system-ui; cursor: pointer; }
+  input[type="file"] { padding: 6px; }
+  .cards { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); margin: 12px 0 4px; }
+  .pb { text-align: left; border: 1px solid var(--line); background: var(--card); color: var(--fg);
+        border-radius: 10px; padding: 10px 12px; cursor: pointer; font: inherit; display: flex;
+        flex-direction: column; gap: 3px; }
+  .pb.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .pb span { font-size: 11.5px; color: var(--muted); }
+  .answer { white-space: pre-wrap; border: 1px solid var(--line); border-radius: 10px;
+            padding: 12px 14px; margin-top: 14px; background: var(--card); font-size: 13.5px; }
+  @media (max-width: 560px) { .row2 { grid-template-columns: 1fr; } }
+</style>
+
+<div class="wrap">
+  <h1 id="shopName">Shopify</h1>
+  <p class="sub" id="shopSub">Connecting…</p>
+
+  <div class="tabs" role="tablist">
+    <button class="tab" role="tab" data-view="today" aria-selected="true">Today</button>
+    <button class="tab" role="tab" data-view="growth" aria-selected="false">Growth</button>
+    <button class="tab" role="tab" data-view="new" aria-selected="false">New product</button>
+  </div>
+
+  <div id="view"></div>
+</div>
+
+<script>
+// ── The bridge ───────────────────────────────────────────────────────────────
+// The frame runs at an OPAQUE origin: no cookies, no storage, no reach into the
+// host. Everything it can do arrives as a short-lived bridge token over
+// postMessage, and every call goes to the brain MCP server with it.
+let ctx = null;
+const waiters = [];
+
+window.addEventListener("message", (e) => {
+  // The host is the only window that can reach us here; it posts to our
+  // contentWindow directly. `origin` is "null" for an opaque frame, so it
+  // identifies nothing and is not worth checking.
+  if (e.data && e.data.type === "ub:token") {
+    ctx = e.data;
+    while (waiters.length) waiters.shift()(ctx);
+  }
+});
+parent.postMessage({ type: "ub:ready" }, "*");
+
+function ready() {
+  return ctx ? Promise.resolve(ctx) : new Promise((r) => waiters.push(r));
+}
+
+let rpcId = 0;
+
+/**
+ * Call one tool. Returns its parsed JSON result.
+ *
+ * Two shapes have to be handled and both are easy to get wrong:
+ *   - the transport may answer as SSE rather than plain JSON, and
+ *   - a tool's payload arrives as TEXT inside `content[0].text`, which is
+ *     usually JSON but is not required to be.
+ */
+// A store read answers in seconds; an assistant turn can chain tool calls and
+// legitimately take a minute. Neither may hang forever. Without a deadline a
+// stalled call leaves the tab spinning with no error, no retry and no way out
+// except reload - and the one call most likely to stall is the agent, which is
+// also the one whose spinner looks most normal.
+const TIMEOUT_MS = { tool: 45000, agent: 180000 };
+
+async function callTool(name, args) {
+  const c = await ready();
+  if (!c.token) throw new Error("This app has no access token. Ask an admin to approve it.");
+
+  const limit = name === "askStoreAssistant" ? TIMEOUT_MS.agent : TIMEOUT_MS.tool;
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), limit);
+
+  let res;
+  try {
+    res = await fetch(c.apiOrigin + "/api/brain/mcp", {
+      method: "POST",
+      signal: ctl.signal,
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+        Authorization: "Bearer " + c.token,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0", id: ++rpcId, method: "tools/call",
+        params: { name, arguments: args || {} },
+      }),
+    });
+  } catch (err) {
+    // Say which of the two it was. "Timed out" sends someone to look at the
+    // store; "could not reach" sends them to look at the connection.
+    if (err && err.name === "AbortError") {
+      throw new Error("Timed out after " + Math.round(limit / 1000) + "s. The store did not answer.");
+    }
+    throw new Error("Could not reach Use Brian. Check your connection and try again.");
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (res.status === 401) throw new Error("Access expired. Reload the page.");
+  if (res.status === 429) throw new Error("This app has used its daily budget.");
+  const text = await res.text();
+  if (!res.ok) throw new Error("Request failed (" + res.status + ").");
+
+  let env;
+  const line = text.startsWith("event:") || text.startsWith("data:")
+    ? (text.split("\n").find((l) => l.startsWith("data:")) || "").slice(5).trim()
+    : text;
+  try { env = JSON.parse(line); } catch { throw new Error("Could not read the response."); }
+
+  if (env.error) throw new Error(env.error.message || "The call was rejected.");
+  const body = env.result && env.result.content && env.result.content[0];
+  const raw = body && body.text ? body.text : "";
+  // `isError` is the tool saying no (missing grant, missing scope). Surface its
+  // own words: it knows why, and a generic message here would throw that away.
+  if (env.result && env.result.isError) throw new Error(raw || "The tool refused the call.");
+  try { return JSON.parse(raw); } catch { return raw; }
+}
+
+// Tokens are short-lived; ask for a fresh one well inside the window.
+setInterval(() => parent.postMessage({ type: "ub:token" }, "*"), 5 * 60 * 1000);
+
+// ── Rendering ────────────────────────────────────────────────────────────────
+const el = (h) => { const d = document.createElement("div"); d.innerHTML = h; return d; };
+const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const view = document.getElementById("view");
+const setHTML = (h) => { view.innerHTML = h; };
+const fail = (e) => `<div class="err">${esc(e.message || String(e))}</div>`;
+
+// ShopifyQL returns EVERY value as a string regardless of its declared type.
+const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+const money = (v, cur) => (cur ? cur + " " : "") + num(v).toLocaleString(undefined, {
+  minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+let shopCurrency = "";
+
+// ── Date range ───────────────────────────────────────────────────────────────
+// Shared by Today and Growth. Kept in memory: the frame runs at an opaque
+// origin, so there is no localStorage to persist it in - bridge KV is the only
+// durable option and it is not worth a call per tab switch.
+const PRESETS = [
+  { key: "1", label: "Today", days: 1 },
+  { key: "7", label: "Last 7 days", days: 7 },
+  { key: "30", label: "Last 30 days", days: 30 },
+  { key: "60", label: "Last 60 days", days: 60 },
+  { key: "custom", label: "Custom range" },
+];
+const iso = (d) => d.toISOString().slice(0, 10);
+const daysAgo = (n) => iso(new Date(Date.now() - (n - 1) * 864e5));
+
+let range = { preset: "7", since: daysAgo(7), until: iso(new Date()) };
+/** Order-number window, independent of the date window. Blank = unbounded. */
+let orderNo = { from: "", to: "" };
+
+/** Digits only — "#1042" and "1042" are the same order to Shopify. */
+const orderDigits = (v) => String(v || "").replace(/[^0-9]/g, "");
+
+/** Whole days from `since` to today - drives the 60-day ceiling warning. */
+function spanDays(r) {
+  return Math.round((Date.now() - new Date(r.since + "T00:00:00Z").getTime()) / 864e5) + 1;
+}
+
+function rangeControl(onApply, withOrderNo) {
+  const custom = range.preset === "custom";
+  return `
+    <div class="range">
+      <div class="f"><label for="r-preset">Period</label>
+        <select id="r-preset">${PRESETS.map((p) =>
+          `<option value="${p.key}"${p.key === range.preset ? " selected" : ""}>${p.label}</option>`).join("")}</select>
+      </div>
+      <div class="f" ${custom ? "" : 'style="display:none"'} id="r-custom-since">
+        <label for="r-since">From</label><input type="date" id="r-since" value="${esc(range.since)}" max="${iso(new Date())}" />
+      </div>
+      <div class="f" ${custom ? "" : 'style="display:none"'} id="r-custom-until">
+        <label for="r-until">To</label><input type="date" id="r-until" value="${esc(range.until)}" max="${iso(new Date())}" />
+      </div>
+      ${withOrderNo ? `
+      <div class="f"><label for="r-ofrom">Order # from</label>
+        <input id="r-ofrom" inputmode="numeric" placeholder="1001" value="${esc(orderNo.from)}" /></div>
+      <div class="f"><label for="r-oto">to</label>
+        <input id="r-oto" inputmode="numeric" placeholder="1099" value="${esc(orderNo.to)}" /></div>` : ""}
+      <button class="go apply" id="r-apply">Apply</button>
+    </div>`;
+}
+
+function wireRange(rerender, withOrderNo) {
+  const sel = document.getElementById("r-preset");
+  if (!sel) return;
+  sel.onchange = () => {
+    const showCustom = sel.value === "custom";
+    document.getElementById("r-custom-since").style.display = showCustom ? "" : "none";
+    document.getElementById("r-custom-until").style.display = showCustom ? "" : "none";
+    if (!showCustom) {
+      const p = PRESETS.find((x) => x.key === sel.value);
+      range = { preset: sel.value, since: daysAgo(p.days), until: iso(new Date()) };
+      rerender();
+    }
+  };
+  document.getElementById("r-apply").onclick = () => {
+    if (withOrderNo) {
+      const from = orderDigits(document.getElementById("r-ofrom").value);
+      const to = orderDigits(document.getElementById("r-oto").value);
+      // A reversed window silently matches nothing, which reads as "no orders"
+      // rather than "you typed it backwards".
+      if (from && to && Number(from) > Number(to)) {
+        alertInline("The first order number is higher than the last.");
+        return;
+      }
+      orderNo = { from, to };
+    }
+    if (sel.value === "custom") {
+      const since = document.getElementById("r-since").value;
+      const until = document.getElementById("r-until").value;
+      // A backwards range returns nothing and looks like "no orders". Say so.
+      if (!since || !until) { alertInline("Pick both dates."); return; }
+      if (since > until) { alertInline("The start date is after the end date."); return; }
+      range = { preset: "custom", since, until };
+    }
+    rerender();
+  };
+}
+
+function alertInline(msg) {
+  const host = document.querySelector(".range");
+  if (host) host.insertAdjacentHTML("afterend", `<div class="err">${esc(msg)}</div>`);
+}
+
+/** "12.50 USD" -> 12.5 . The tool projects money as a plain string. */
+const parseMoney = (v) => {
+  const m = /^\s*([0-9.]+)/.exec(String(v || ""));
+  return m ? Number(m[1]) : 0;
+};
+const moneyCurrency = (v) => {
+  const m = /([A-Z]{3})\s*$/.exec(String(v || ""));
+  return m ? m[1] : shopCurrency;
+};
+
+// ── Today ────────────────────────────────────────────────────────────────────
+async function renderToday() {
+  const head = `<h2>Orders</h2>${rangeControl(renderToday, true)}`;
+  setHTML(head + `<p class="muted">Loading…</p>`);
+  wireRange(renderToday, true);
+
+  try {
+    // Dates are filtered through Shopify SEARCH SYNTAX, not tool params - the
+    // tool takes { query, first, cursor }. `created_at:<=` is inclusive of the
+    // whole end day only if we push to the next midnight, so use the day after.
+    const endExclusive = iso(new Date(new Date(range.until + "T00:00:00Z").getTime() + 864e5));
+    const query = `created_at:>=${range.since} created_at:<${endExclusive}`;
+
+    // Page until the range is covered, bounded so a wide range cannot spin.
+    const MAX_PAGES = 6;
+    let items = [], cursor, truncated = false, pages = 0;
+    while (pages < MAX_PAGES) {
+      const page = await callTool("shopifyListOrders", { query, first: 50, ...(cursor ? { cursor } : {}) });
+      items = items.concat(page.items || []);
+      pages++;
+      if (page.truncated) truncated = true;
+      if (!page.has_next_page || !page.end_cursor) { cursor = null; break; }
+      cursor = page.end_cursor;
+    }
+    const morePages = Boolean(cursor);
+
+    // Order-number window, applied HERE and not in the query on purpose:
+    // Shopify's order search has no range filter for the customer-facing order
+    // number. `name:` is an exact match ("name:1001-A") and only the internal
+    // `id` supports `>=`/`<=`, which is not the number on the invoice. So this
+    // narrows what the DATE window returned — which is a real limitation, and
+    // the note below says so rather than letting the count look authoritative.
+    const fromN = orderNo.from ? Number(orderNo.from) : null;
+    const toN = orderNo.to ? Number(orderNo.to) : null;
+    const numbered = (o) => {
+      const d = orderDigits(o.name);
+      return d === "" ? null : Number(d);
+    };
+    if (fromN !== null || toN !== null) {
+      items = items.filter((o) => {
+        const n = numbered(o);
+        if (n === null) return false;
+        if (fromN !== null && n < fromN) return false;
+        if (toN !== null && n > toN) return false;
+        return true;
+      });
+    }
+    const orderFiltered = fromN !== null || toN !== null;
+
+    const cur = items.length ? moneyCurrency(items[0].total) : shopCurrency;
+    const total = items.reduce((s, o) => s + parseMoney(o.total), 0);
+    const unfulfilled = items.filter(
+      (o) => String(o.fulfillment_status || "").toUpperCase() !== "FULFILLED");
+
+    const label = range.preset === "1" ? "Today"
+      : range.preset === "custom" ? `${range.since} to ${range.until}`
+      : `Last ${PRESETS.find((p) => p.key === range.preset).days} days`;
+
+    setHTML(head + `
+      <p class="sub">${esc(label)}: ${esc(range.since)} to ${esc(range.until)}</p>
+      <div class="grid" style="margin-top:10px">
+        <div class="card"><div class="kpi-l">Orders</div><div class="kpi">${items.length}${morePages && !orderFiltered ? "+" : ""}</div></div>
+        <div class="card"><div class="kpi-l">Revenue</div><div class="kpi">${esc(cur)} ${total.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</div></div>
+        <div class="card"><div class="kpi-l">Unfulfilled</div><div class="kpi">${unfulfilled.length}</div></div>
+      </div>
+
+      ${(morePages || truncated) ? `<div class="note"><strong>This is a partial count.</strong>
+        The range holds more orders than were read back${morePages ? ` (stopped after ${MAX_PAGES} pages)` : ""}, so the
+        totals above cover only what was fetched. Narrow the range for an exact figure.
+        A truncated total presented as complete is the worst answer this screen could give.</div>` : ""}
+
+      ${orderFiltered ? `<div class="note"><strong>Order numbers are filtered inside the date range above.</strong>
+        Shopify's order search cannot filter by a range of order numbers - only an exact
+        one - so this narrows the orders the dates returned. An order in your number range
+        but outside the dates will not appear. Widen the dates if one is missing.</div>` : ""}
+
+      ${spanDays(range) > 60 ? `<div class="note"><strong>Order history reaches back about 60 days.</strong>
+        Your range starts ${spanDays(range)} days ago, so anything before the cutoff is
+        outside what this store can read - that is not the same as there being no orders.</div>` : ""}
+
+      ${items.length === 0 ? `<p class="muted" style="margin-top:14px">No orders in this range.</p>` : `
+      <div class="scroll" style="margin-top:14px"><table>
+        <thead><tr><th>Order</th><th>Date</th><th>Customer</th><th>Status</th><th class="num">Total</th></tr></thead>
+        <tbody>${items.map((o) => `<tr>
+          <td>${esc(o.name || "")}</td>
+          <td>${esc(String(o.created_at || "").slice(0, 10))}</td>
+          <td>${o.customer ? esc(o.customer) : '<span class="muted">Not available</span>'}</td>
+          <td>${esc(o.fulfillment_status || "")}</td>
+          <td class="num">${esc(o.total || "")}</td>
+        </tr>`).join("")}</tbody>
+      </table></div>`}
+    `);
+    wireRange(renderToday, true);
+  } catch (e) { setHTML(head + fail(e)); wireRange(renderToday, true); }
+}
+
+// ── Growth ───────────────────────────────────────────────────────────────────
+async function renderGrowth() {
+  const head = `<h2>Storefront funnel</h2>${rangeControl(renderGrowth)}`;
+  setHTML(head + `<p class="muted">Loading…</p>`);
+  wireRange(renderGrowth);
+  try {
+    // The funnel takes real dates (or relative offsets), unlike orders which
+    // filter through search syntax. Same picker, two different call shapes.
+    const f = await callTool("shopifyStorefrontFunnel", {
+      since: range.since, until: range.until, compareToPreviousPeriod: true,
+    });
+
+    // Zero human sessions is a FINDING, not a failure and not a zero: the
+    // funnel counts humans, and a store whose traffic is all bots has to be
+    // told that rather than shown an empty chart.
+    if (f && f.no_human_sessions) {
+      setHTML(head + `<div class="note"><strong>No human sessions in this period.</strong>
+        Every session Shopify recorded was classified as a bot, so the funnel has
+        nothing to measure. That is a real finding about your traffic, not an
+        error and not zero visitors.</div>`);
+      wireRange(renderGrowth);
+      return;
+    }
+
+    const rows = (f && f.rows) || [];
+    if (!rows.length) {
+      setHTML(head + `<p class="muted">No data for this period.</p>`);
+      wireRange(renderGrowth);
+      return;
+    }
+
+    const sum = (k) => rows.reduce((s, r) => s + num(r[k]), 0);
+    const sessions = sum("sessions");
+    const carts = sum("sessions_with_cart_additions");
+    const checkouts = sum("sessions_that_reached_checkout");
+    const done = sum("sessions_that_completed_checkout");
+    const pct = (a, b) => (b ? ((a / b) * 100).toFixed(1) + "%" : "n/a");
+    const lost = carts - checkouts;
+
+    setHTML(head + `
+      <p class="sub">${esc(range.since)} to ${esc(range.until)}</p>
+      <div class="grid" style="margin-top:10px">
+        <div class="card"><div class="kpi-l">Sessions</div><div class="kpi">${sessions.toLocaleString()}</div></div>
+        <div class="card"><div class="kpi-l">Added to cart</div><div class="kpi">${carts.toLocaleString()}</div>
+          <div class="kpi-l">${pct(carts, sessions)} of sessions</div></div>
+        <div class="card"><div class="kpi-l">Reached checkout</div><div class="kpi">${checkouts.toLocaleString()}</div>
+          <div class="kpi-l">${pct(checkouts, carts)} of carts</div></div>
+        <div class="card"><div class="kpi-l">Completed</div><div class="kpi">${done.toLocaleString()}</div>
+          <div class="kpi-l">${pct(done, sessions)} conversion</div></div>
+      </div>
+
+      ${lost > 0 ? `<div class="note">
+        <strong>${lost.toLocaleString()} sessions added to cart and never reached checkout.</strong>
+        You can count them but you cannot contact them - those sessions are
+        anonymous. The abandoned-checkout list is a different, smaller group who
+        got far enough to leave an email. Treat this number as something to fix
+        on the store (the cart page, shipping shown too late, payment options),
+        not as a list to email.</div>` : ""}
+
+      <h2>By traffic source</h2>
+      <div class="scroll"><table>
+        <thead><tr><th>Source</th><th class="num">Sessions</th><th class="num">Carts</th><th class="num">Completed</th></tr></thead>
+        <tbody>${rows.map((r) => `<tr>
+          <td>${esc(r.referrer_source || r.session_device_type || "All")}</td>
+          <td class="num">${num(r.sessions).toLocaleString()}</td>
+          <td class="num">${num(r.sessions_with_cart_additions).toLocaleString()}</td>
+          <td class="num">${num(r.sessions_that_completed_checkout).toLocaleString()}</td>
+        </tr>`).join("")}</tbody>
+      </table></div>
+    `);
+    wireRange(renderGrowth);
+  } catch (e) { setHTML(head + fail(e)); wireRange(renderGrowth); }
+}
+
+// ── New product ──────────────────────────────────────────────────────────────
+// Adding a product is FIVE steps, not one. Shopify leaves a new product
+// unpublished whatever its status says, so stopping early and reporting "done"
+// sends the owner looking for something that is not on their storefront.
+let picked = [];  // { file, dataUrl, name, mime }
+
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;  // saveFileBytes rejects ~10MB; stay under.
+
+function readAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result || ""));
+    r.onerror = () => reject(new Error("Could not read " + file.name));
+    r.readAsDataURL(file);
+  });
+}
+
+/** Unique-per-upload path: saveFileBytes returns `conflict` on an existing one. */
+function uploadPath(name) {
+  const safe = name.toLowerCase().replace(/[^a-z0-9.]+/g, "-").replace(/^-+|-+$/g, "") || "image.png";
+  return `/uploads/${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${safe}`;
+}
+
+function renderPicked() {
+  const host = document.getElementById("p-thumbs");
+  if (!host) return;
+  host.innerHTML = picked.map((p, i) => `
+    <div class="thumb">
+      <img src="${p.dataUrl}" alt="${esc(p.name)}" />
+      <button type="button" data-i="${i}" class="rm" aria-label="Remove ${esc(p.name)}">×</button>
+    </div>`).join("");
+  host.querySelectorAll(".rm").forEach((b) => {
+    b.onclick = () => { picked.splice(Number(b.dataset.i), 1); renderPicked(); };
+  });
+}
+
+function renderNew() {
+  setHTML(`
+    <h2>Add a product</h2>
+    <div class="row2">
+      <div><label for="p-title">Title</label><input id="p-title" placeholder="Immunity Booster" /></div>
+      <div><label for="p-price">Price</label><input id="p-price" inputmode="decimal" placeholder="24.00" /></div>
+    </div>
+    <label for="p-desc">Description</label>
+    <textarea id="p-desc" rows="4" placeholder="What it is, who it is for."></textarea>
+
+    <label for="p-images">Photos</label>
+    <input type="file" id="p-images" accept="image/*" multiple />
+    <div class="thumbs" id="p-thumbs"></div>
+
+    <div class="note">A photo gives you the name and the pack size. It does not give
+      you ingredients, nutrition, or dosage - type those in rather than guessing.
+      Invented nutrition facts on a live storefront is the worst outcome here.</div>
+    <button class="go" id="p-go">Create as draft</button>
+    <ul class="steps" id="p-steps"></ul>
+  `);
+  renderPicked();
+
+  document.getElementById("p-images").onchange = async (ev) => {
+    const files = [...(ev.target.files || [])];
+    ev.target.value = "";  // so re-picking the same file fires again
+    for (const f of files) {
+      if (f.size > MAX_IMAGE_BYTES) {
+        alertStep(`${f.name} is too large (over 8 MB). Resize it first.`);
+        continue;
+      }
+      try { picked.push({ file: f, dataUrl: await readAsDataUrl(f), name: f.name, mime: f.type || "image/jpeg" }); }
+      catch (e) { alertStep(e.message); }
+    }
+    renderPicked();
+  };
+
+  const steps = document.getElementById("p-steps");
+  const log = (icon, text) => {
+    const li = document.createElement("li");
+    li.innerHTML = `<span>${esc(icon)}</span><span>${esc(text)}</span>`;
+    steps.appendChild(li);
+    return li;
+  };
+  function alertStep(msg) { log("!", msg); }
+
+  document.getElementById("p-go").onclick = async (ev) => {
+    const title = document.getElementById("p-title").value.trim();
+    const price = document.getElementById("p-price").value.trim();
+    const desc = document.getElementById("p-desc").value.trim();
+    steps.innerHTML = "";
+    if (!title) { log("!", "Give the product a title first."); return; }
+
+    ev.target.disabled = true;
+    try {
+      const created = await callTool("shopifyCreateProduct", { title, descriptionHtml: desc || undefined });
+      const id = created.id || created.product_id || (created.product && created.product.id);
+      log("1.", `Created "${title}" as a draft.`);
+
+      if (price) {
+        await callTool("shopifySetProductPrice", { productId: id, price });
+        log("2.", `Price set to ${price}.`);
+      } else {
+        log("2.", "No price set - add one before publishing.");
+      }
+
+      if (picked.length === 0) {
+        log("3.", "No photo attached. A product with no image looks unfinished on the storefront.");
+      } else {
+        let ok = 0;
+        for (const p of picked) {
+          const line = log("3.", `Uploading ${p.name}…`);
+          try {
+            // TWO steps, and they cannot be collapsed: shopifyAddProductImage
+            // takes a WORKSPACE FILE, never raw bytes. Save first, then attach
+            // by path.
+            const path = uploadPath(p.name);
+            await callTool("saveFileBytes", {
+              path,
+              base64: p.dataUrl,          // the data: prefix is stripped server-side
+              mime: p.mime,
+              title: p.name,
+              summary: `Product photo for ${title}`,
+            });
+            await callTool("shopifyAddProductImage", { productId: id, file: path, alt: title });
+            ok++;
+            line.innerHTML = `<span>3.</span><span>${esc(p.name)} added. Shopify processes images asynchronously, so it may take a few seconds to appear.</span>`;
+          } catch (e) {
+            // Report the failure per image and keep going: one bad file must
+            // not lose the others, and a silent skip would leave the owner
+            // believing every photo landed.
+            line.innerHTML = `<span>x</span><span>${esc(p.name)} failed: ${esc(e.message || String(e))}</span>`;
+          }
+        }
+        if (ok > 0) picked = [];
+        renderPicked();
+      }
+
+      log("4.", "Not published. It is a draft, so nobody can see it yet.");
+      // Deliberately NOT auto-publishing. Publishing makes it public, and the
+      // owner should confirm the images actually landed first - Shopify
+      // processes them asynchronously, so "uploaded" is not yet "visible".
+    } catch (e) {
+      log("x", e.message || String(e));
+    } finally {
+      ev.target.disabled = false;
+    }
+  };
+}
+
+// ── Inventory vs orders ──────────────────────────────────────────────────────
+// A real view, not a prompt box. The app does the deterministic half itself -
+// pick the window, pull the orders, flatten the line items - and hands the
+// assistant only the part that needs judgement: deciding that a 5g sample and
+// a full-size pack are different variants, and cross-referencing stock.
+//
+// It asks for JSON so the answer can be a TABLE. The model may not comply;
+// that is handled rather than assumed - unparseable output renders as prose
+// instead of being dropped, because a wrong shape must never lose the answer.
+let invLocation = "";
+
+async function fetchOrdersInRange() {
+  const endExclusive = iso(new Date(new Date(range.until + "T00:00:00Z").getTime() + 864e5));
+  const query = `created_at:>=${range.since} created_at:<${endExclusive}`;
+  let items = [], cursor, pages = 0;
+  while (pages < 6) {
+    const page = await callTool("shopifyListOrders", { query, first: 50, ...(cursor ? { cursor } : {}) });
+    items = items.concat(page.items || []);
+    pages++;
+    if (!page.has_next_page || !page.end_cursor) { cursor = null; break; }
+    cursor = page.end_cursor;
+  }
+  const fromN = orderNo.from ? Number(orderNo.from) : null;
+  const toN = orderNo.to ? Number(orderNo.to) : null;
+  if (fromN !== null || toN !== null) {
+    items = items.filter((o) => {
+      const d = orderDigits(o.name);
+      if (d === "") return false;
+      const n = Number(d);
+      return (fromN === null || n >= fromN) && (toN === null || n <= toN);
+    });
+  }
+  return { items, more: Boolean(cursor) };
+}
+
+function renderInventory() {
+  const head = `<h2>Inventory vs orders</h2>${rangeControl(renderInventory, true)}
+    <div class="range" style="margin-top:0">
+      <div class="f" style="flex:1"><label for="inv-loc">Location to check</label>
+        <input id="inv-loc" placeholder="e.g. Tai Kok Tsui Warehouse" value="${esc(invLocation)}" /></div>
+      <button class="go apply" id="inv-go">Build breakdown</button>
+    </div>`;
+  setHTML(head + `<p class="muted">Pick a window and a location, then build the breakdown.</p>`);
+  wireRange(renderInventory, true);
+  document.getElementById("inv-loc").oninput = (e) => { invLocation = e.target.value; };
+  document.getElementById("inv-go").onclick = () => void runInventory(head);
+}
+
+async function runInventory(head) {
+  const out = (h) => { setHTML(head + h); wireRange(renderInventory, true);
+    const l = document.getElementById("inv-loc"); if (l) { l.value = invLocation;
+      l.oninput = (e) => { invLocation = e.target.value; }; }
+    const g = document.getElementById("inv-go"); if (g) g.onclick = () => void runInventory(head); };
+
+  out(`<p class="muted">Reading orders…</p>`);
+  try {
+    const { items, more } = await fetchOrdersInRange();
+    if (items.length === 0) { out(`<p class="muted">No orders in this window.</p>`); return; }
+
+    out(`<p class="muted">${items.length} order(s) read. Grouping variants and checking stock -
+      this runs an assistant turn and can take a minute.</p>`);
+
+    const lines = items.map((o) => `${o.name} [${o.fulfillment_status || "?"}]: ${(o.items || []).join("; ")}`).join("\n");
+    const task = `Build an inventory breakdown from these orders.
+
+${invLocation ? `Location to check: ${invLocation}` : "Use the store's primary location and say which one you used."}
+
+Orders (${items.length}${more ? ", TRUNCATED - more exist in this window" : ""}):
+${lines}
+
+Group the line items by exact product name AND variant size/packaging. Keep
+sample/trial sizes (e.g. 5g pouches) SEPARATE from full-size powders, and keep
+distinct flavours distinct. Aggregate total units per variant, then use your
+inventory tool to get available stock at the location and compare.
+
+Reply with ONLY a JSON object, no prose around it:
+{"location":"...","rows":[{"product":"...","variant":"...","demand":0,"onHand":0,"short":0}],
+ "ambiguous":["line items you could not confidently classify"],
+ "notes":"anything the numbers do not show, including truncation"}`;
+
+    const answer = await callTool("askStoreAssistant", { task });
+    const text = typeof answer === "string" ? answer : JSON.stringify(answer);
+
+    let data = null;
+    const m = text.match(/\{[\s\S]*\}/);
+    if (m) { try { data = JSON.parse(m[0]); } catch { data = null; } }
+
+    if (!data || !Array.isArray(data.rows)) {
+      // Not the shape asked for. Show what came back rather than an error -
+      // the analysis may be perfectly good, just not JSON.
+      out(`<div class="note">The assistant did not answer in the expected shape, so this is
+        its reply as written.</div><div class="answer">${esc(text)}</div>`);
+      return;
+    }
+
+    const short = data.rows.filter((r) => num(r.short) > 0);
+    out(`
+      <p class="sub">${esc(data.location || invLocation || "primary location")}:
+        ${items.length} order(s)${more ? ", partial window" : ""}</p>
+      <div class="grid" style="margin-top:10px">
+        <div class="card"><div class="kpi-l">Variants</div><div class="kpi">${data.rows.length}</div></div>
+        <div class="card"><div class="kpi-l">Units needed</div><div class="kpi">${data.rows.reduce((s,r)=>s+num(r.demand),0)}</div></div>
+        <div class="card"><div class="kpi-l">Short</div><div class="kpi">${short.length}</div></div>
+      </div>
+      ${more ? `<div class="note"><strong>Partial window.</strong> More orders exist in this
+        range than were read, so demand is understated. Narrow the range for an exact figure.</div>` : ""}
+      ${(data.ambiguous || []).length ? `<div class="note"><strong>Could not classify:</strong>
+        ${esc((data.ambiguous || []).join(" · "))}. These are NOT in the totals below.</div>` : ""}
+      <div class="scroll" style="margin-top:14px"><table>
+        <thead><tr><th>Product</th><th>Variant</th><th class="num">Needed</th><th class="num">On hand</th><th class="num">Short</th></tr></thead>
+        <tbody>${data.rows.map((r) => `<tr${num(r.short) > 0 ? ' style="color:var(--warn)"' : ""}>
+          <td>${esc(r.product)}</td><td>${esc(r.variant)}</td>
+          <td class="num">${num(r.demand)}</td><td class="num">${num(r.onHand)}</td>
+          <td class="num">${num(r.short) > 0 ? num(r.short) : "-"}</td>
+        </tr>`).join("")}</tbody>
+      </table></div>
+      ${data.notes ? `<div class="note">${esc(data.notes)}</div>` : ""}
+    `);
+  } catch (e) { out(fail(e)); }
+}
+
+// ── Assistant ────────────────────────────────────────────────────────────────
+// The one place a model is involved. Everything else on this screen is a
+// direct tool call with a deterministic answer; these are the jobs that need
+// judgement - grouping variants, deciding reuse-vs-create, ranking actions -
+// which a form cannot do.
+//
+// The turn runs with THIS APP's tools only (the `allowedTools` cap), so the
+// assistant cannot reach anything the app was refused. It can still decline.
+const PLAYBOOKS = [
+  {
+    key: "draft",
+    title: "Draft a product",
+    blurb: "Details and variants, then reuse or create the page template.",
+    hint: "Paste what you know: name, pack sizes, price, and anything printed on the label.",
+    build: (notes) => `Draft a new product for this store.
+
+Details I have:
+${notes || "(none yet - ask me for what you need)"}
+
+Work through these in order and tell me what you did at each step:
+1. Settle the title, description and pricing. Distinguish the VARIANTS carefully -
+   a 5g trial/sample pouch and a full-size powder pack are different variants, not
+   the same product. Match the existing catalogue's naming.
+2. Call shopifyListThemes and identify the live (MAIN) theme.
+3. Check which product template suffixes already exist.
+4. Prefer REUSE: if a fitting template suffix exists, link the product to it with
+   shopifySetProductTemplate. Only if a genuinely new layout is needed, read the
+   base template with shopifyReadProductTemplate, verify every section type exists
+   in the target theme, and say so - do not write a template without telling me.
+5. Report an acceptance check: variants, pricing, and which template suffix the
+   product ended on.
+
+Ask me for anything a photo or the catalogue cannot tell you - ingredients,
+nutrition, dosage. Do not invent them.`,
+  },
+  {
+    key: "inventory",
+    title: "Inventory vs orders",
+    blurb: "Aggregate demand per variant and flag shortages against a location.",
+    hint: "Order numbers or a date range, and the location to check (e.g. Tai Kok Tsui Warehouse).",
+    build: (notes) => `Produce an inventory breakdown across orders.
+
+Scope:
+${notes || "(tell me which orders and which location)"}
+
+Steps:
+1. Gather the orders in scope with their channel, status and line items.
+2. Group line items by exact product name AND variant size/packaging. Critical:
+   keep sample/trial sizes (e.g. 5g pouches) SEPARATE from full-size powders, and
+   distinguish specific flavours rather than merging them.
+3. Aggregate total units required per SKU/variant across all orders reviewed.
+4. Cross-reference against available inventory at the target location.
+5. Flag every shortage, and every line where the variant is ambiguous - say which
+   ones you could not resolve rather than guessing.
+6. Give me the structured breakdown.
+
+If the order list was truncated or the window cut anything off, say so in the
+same breath as the totals.`,
+  },
+  {
+    key: "act",
+    title: "Act on the numbers",
+    blurb: "Turn the funnel into a short ranked list of things to do.",
+    hint: "Optional: paste anything from the Growth tab you want it to start from.",
+    build: (notes) => `Look at the storefront funnel and tell me what to do about it.
+
+${notes ? `Starting from:\n${notes}\n` : ""}
+Rules:
+- Lead with what CHANGED, not what is. Compare against the previous period.
+- Three or four items, ranked. Not twelve.
+- Each item names the number it came from and the next step. If the step is
+  something you can do here, offer to do it.
+- If nothing meaningful moved, say so and stop. Do not manufacture an insight.
+- People who added to cart and never reached checkout are anonymous and cannot be
+  contacted - treat that as a fix to the store, not outreach.`,
+  },
+];
+
+let playbook = PLAYBOOKS[0];
+
+function renderAsk() {
+  setHTML(`
+    <h2>Ask the assistant</h2>
+    <p class="sub">For the parts that need judgement. It runs with this app's store
+      access only, so it cannot do anything the other tabs could not.</p>
+    <div class="cards" id="pb-cards">
+      ${PLAYBOOKS.map((p) => `
+        <button type="button" class="pb${p.key === playbook.key ? " on" : ""}" data-k="${p.key}">
+          <strong>${esc(p.title)}</strong><span>${esc(p.blurb)}</span>
+        </button>`).join("")}
+    </div>
+    <label for="pb-notes" id="pb-hint">${esc(playbook.hint)}</label>
+    <textarea id="pb-notes" rows="5"></textarea>
+    <button class="go" id="pb-go">Send to assistant</button>
+    <div id="pb-out"></div>
+  `);
+
+  document.querySelectorAll(".pb").forEach((b) => {
+    b.onclick = () => {
+      playbook = PLAYBOOKS.find((p) => p.key === b.dataset.k);
+      document.querySelectorAll(".pb").forEach((x) => x.classList.toggle("on", x === b));
+      document.getElementById("pb-hint").textContent = playbook.hint;
+    };
+  });
+
+  document.getElementById("pb-go").onclick = async (ev) => {
+    const out = document.getElementById("pb-out");
+    const notes = document.getElementById("pb-notes").value.trim();
+    ev.target.disabled = true;
+    // An assistant turn is slow by nature - it may make many tool calls. Say
+    // that plainly rather than showing a spinner that looks stuck.
+    out.innerHTML = `<p class="muted" style="margin-top:14px">Working. This runs a full
+      assistant turn and can take a minute - it may make several store calls.</p>`;
+    try {
+      const answer = await callTool("askStoreAssistant", { task: playbook.build(notes) });
+      out.innerHTML = `<div class="answer">${esc(typeof answer === "string" ? answer : JSON.stringify(answer, null, 2))}</div>`;
+    } catch (e) {
+      out.innerHTML = fail(e);
+    } finally {
+      ev.target.disabled = false;
+    }
+  };
+}
+
+// ── Shell ────────────────────────────────────────────────────────────────────
+const VIEWS = { today: renderToday, growth: renderGrowth, inventory: renderInventory, new: renderNew, ask: renderAsk };
+document.querySelectorAll(".tab").forEach((btn) => {
+  btn.onclick = () => {
+    document.querySelectorAll(".tab").forEach((b) => b.setAttribute("aria-selected", String(b === btn)));
+    VIEWS[btn.dataset.view]();
+  };
+});
+
+(async function boot() {
+  try {
+    const shop = await callTool("shopifyGetShop", {});
+    shopCurrency = shop.currency_code || shop.currencyCode || "";
+    document.getElementById("shopName").textContent = shop.name || "Shopify";
+    document.getElementById("shopSub").textContent =
+      [shop.myshopify_domain || shop.domain, shop.plan_name || shop.plan].filter(Boolean).join(" · ");
+  } catch (e) {
+    document.getElementById("shopSub").textContent = e.message || "Could not reach the store.";
+  }
+  renderToday();
+})();
+</script>

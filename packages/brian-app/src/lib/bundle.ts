@@ -207,6 +207,24 @@ export function lintBundle(params: {
       'requests read_write. Ask for read unless the app genuinely writes — a wider scope is a harder consent to get',
     )
   }
+  if (params.manifest.scopes.store === 'write') {
+    findings.push({
+      path: '',
+      severity: 'warning',
+      message:
+        'requests scopes.store=write — it can create products, change prices and publish to ' +
+        'the live storefront. It can never refund, cancel an order, or write a theme template',
+    })
+  }
+  if (params.manifest.scopes.agent === 'ask') {
+    findings.push({
+      path: '',
+      severity: 'warning',
+      message:
+        'requests scopes.agent=ask — it can spend model time and act through your assistant. ' +
+        'The turn is capped at this app\'s own tools, so it cannot exceed scopes.store',
+    })
+  }
   for (const origin of params.manifest.scopes.net ?? []) {
     warn(
       MANIFEST_FILENAME,

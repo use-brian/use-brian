@@ -63,13 +63,14 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { GripVertical, Home, type LucideIcon } from "lucide-react";
+import { GripVertical, Home, Puzzle, type LucideIcon } from "lucide-react";
 import { useT, format } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { Tooltip } from "@/components/ui/tooltip";
 import { APP_ICON } from "@/components/doc/operator-app-bar";
 import { CustomAppsSection } from "@/components/studio/custom-apps-section";
+import { listCustomHomeApps, type CustomHomeApp } from "@/lib/api/home-apps";
 import {
   HOME_APPS_MAX,
   isBuiltinHomeAppKey,
@@ -80,6 +81,7 @@ import {
   type HomeAppEntry,
   type OperatorAppKey,
 } from "@/lib/operator-apps";
+import { CUSTOM_HOME_APP_PREFIX, customHomeAppId } from "@use-brian/shared/home-apps";
 import { surfaceFromPathname } from "@/lib/doc-page-url";
 import { requestHomeAppsRefresh } from "@/lib/home-apps-events";
 import {
@@ -108,9 +110,15 @@ export default function StudioMiniAppsPage() {
    * derives it and the list is left alone.
    */
   const [drag, setDrag] = useState<{
-    active: OperatorAppKey;
-    over: OperatorAppKey;
+    active: HomeAppEntry;
+    over: HomeAppEntry;
   } | null>(null);
+  /**
+   * Custom apps, for their name + renderability. A `custom:<id>` row cannot be
+   * drawn from i18n the way a built-in can — its label is workspace data
+   * (the manifest), which is why this list has to be here to sort them.
+   */
+  const [customApps, setCustomApps] = useState<CustomHomeApp[]>([]);
 
   useEffect(() => {
     if (!workspaceId) return;
@@ -118,6 +126,13 @@ export default function StudioMiniAppsPage() {
     void getWorkspaceHomeApps(workspaceId).then((apps) => {
       if (!cancelled) setHomeApps(apps);
     });
+    void listCustomHomeApps(workspaceId)
+      .then((apps) => {
+        if (!cancelled) setCustomApps(apps);
+      })
+      // A custom-app fetch failure must not take the built-in strip down with
+      // it: the page still sorts what it can name.
+      .catch(() => {});
     void getWorkspaceRole(workspaceId).then((role) => {
       // A failed probe resolves to `null` → read-only. Never grant an
       // affordance the server would refuse.
@@ -128,26 +143,63 @@ export default function StudioMiniAppsPage() {
     };
   }, [workspaceId]);
 
-  /** The shown built-ins, in strip order — this is what the list sorts. */
+  /** Custom apps by id, for label + renderability lookups. */
+  const customById = useMemo(
+    () => new Map(customApps.map((a) => [a.id, a])),
+    [customApps],
+  );
+
+  /**
+   * Everything on the strip that this page can NAME and therefore sort —
+   * built-ins plus renderable custom apps. Custom entries used to be excluded
+   * here, which is what made them unsortable.
+   */
   const shown = useMemo(
-    () => (homeApps ?? []).filter(isOperatorAppKey),
-    [homeApps],
+    () =>
+      (homeApps ?? []).filter((entry) => {
+        if (isOperatorAppKey(entry)) return true;
+        const id = customHomeAppId(entry);
+        return Boolean(id && customById.get(id)?.renderable);
+      }),
+    [customById, homeApps],
   );
   /**
-   * Everything in the config array this page does not sort — `custom:<id>`
-   * entries, whose icon and label are workspace data owned by
-   * `CustomAppsSection` below. Carried through every write verbatim so a save
-   * from this tab can never drop one.
+   * What is left: `custom:<id>` entries pointing at an app that is missing,
+   * revoked, or dropped to `needs_consent`. They are NOT rendered and NOT
+   * sorted — there is no honest label for them — but they are carried through
+   * every write verbatim, so a save from this tab can never drop one and a
+   * re-granted app returns to the position it had.
    */
   const extras = useMemo(
-    () => (homeApps ?? []).filter((entry) => !isOperatorAppKey(entry)),
-    [homeApps],
+    () => (homeApps ?? []).filter((entry) => !shown.includes(entry)),
+    [homeApps, shown],
   );
-  const enabled = useMemo(() => new Set(shown), [shown]);
+  /** Built-in membership only — this drives the `hidden` list below. */
+  const enabled = useMemo(
+    () => new Set(shown.filter(isOperatorAppKey)),
+    [shown],
+  );
   /** Off the strip, listed in registry order — they have no position yet. */
   const hidden = useMemo(
     () => OPERATOR_APP_KEYS.filter((key) => !enabled.has(key)),
     [enabled],
+  );
+
+  /**
+   * Label + icon for any strip entry. A custom app's are WORKSPACE DATA (its
+   * manifest), not i18n, so they are taken verbatim — with `Puzzle` standing
+   * in, exactly as `OperatorAppBar` does, rather than a second icon-name
+   * resolver that could disagree with the strip the user actually sees.
+   */
+  const metaFor = useCallback(
+    (entry: HomeAppEntry): { label: string; Icon: LucideIcon } => {
+      if (isOperatorAppKey(entry)) {
+        return { label: appLabels[entry], Icon: APP_ICON[entry] };
+      }
+      const app = customById.get(customHomeAppId(entry) ?? "");
+      return { label: app?.name ?? entry, Icon: Puzzle };
+    },
+    [appLabels, customById],
   );
 
   /** The app the user is standing in right now, if any. */
@@ -235,6 +287,45 @@ export default function StudioMiniAppsPage() {
     ],
   );
 
+  /**
+   * Put a custom app on the strip, or take it off.
+   *
+   * The built-in `toggle` above sorts `shown`; this one owns `extras`, the
+   * `custom:<id>` half of the same array. Until this existed the framework
+   * could RENDER a custom app on Home and the sidebar knew how to draw one,
+   * but no screen could ever place it — the entry had to be written by hand.
+   */
+  const toggleCustom = useCallback(
+    async (appId: string) => {
+      if (!homeApps || !canEdit || saving) return;
+      const entry = `${CUSTOM_HOME_APP_PREFIX}${appId}` as HomeAppEntry;
+      const on = homeApps.includes(entry);
+
+      if (on) {
+        // Counts the WHOLE array, not just built-ins: a strip holding one
+        // custom app and nothing else is still a strip with one app on it.
+        if (homeApps.length <= 1) {
+          setError(copy.atLeastOne);
+          return;
+        }
+        await persist(
+          homeApps.filter((e) => e !== entry),
+          homeApps,
+        );
+        return;
+      }
+
+      if (homeApps.length >= HOME_APPS_MAX) {
+        setError(format(copy.atMost, { max: HOME_APPS_MAX }));
+        return;
+      }
+      // Append, for the same reason the built-in toggle appends: the order is
+      // the admin's, and slotting a new icon mid-strip moves ones they placed.
+      await persist([...shown, ...extras, entry], homeApps);
+    },
+    [canEdit, copy, extras, homeApps, persist, saving, shown],
+  );
+
   /** Where the strip would land if the drag ended now — the live preview. */
   const previewOrder = useMemo(
     () => (drag ? reorderHomeApps(shown, drag.active, drag.over) : shown),
@@ -242,7 +333,7 @@ export default function StudioMiniAppsPage() {
   );
 
   const onDragStart = useCallback((event: DragStartEvent) => {
-    const key = String(event.active.id) as OperatorAppKey;
+    const key = String(event.active.id) as HomeAppEntry;
     setDrag({ active: key, over: key });
   }, []);
 
@@ -250,7 +341,7 @@ export default function StudioMiniAppsPage() {
     const over = event.over?.id;
     if (over === undefined) return;
     setDrag((current) =>
-      current ? { ...current, over: String(over) as OperatorAppKey } : current,
+      current ? { ...current, over: String(over) as HomeAppEntry } : current,
     );
   }, []);
 
@@ -261,8 +352,8 @@ export default function StudioMiniAppsPage() {
       if (!homeApps || !over || active.id === over.id) return;
       const next = reorderHomeApps(
         shown,
-        String(active.id) as OperatorAppKey,
-        String(over.id) as OperatorAppKey,
+        String(active.id) as HomeAppEntry,
+        String(over.id) as HomeAppEntry,
       );
       await persist([...next, ...extras], homeApps);
     },
@@ -298,7 +389,7 @@ export default function StudioMiniAppsPage() {
         homeLabel={t.docPage.iconHome}
         order={previewOrder}
         moving={drag?.active ?? null}
-        labels={appLabels}
+        metaFor={metaFor}
       />
 
       {homeApps === null ? (
@@ -324,19 +415,25 @@ export default function StudioMiniAppsPage() {
           >
             <SortableContext items={shown} strategy={verticalListSortingStrategy}>
               <ul className="mt-2 flex flex-col gap-2">
-                {shown.map((key) => (
-                  <SortableAppRow
-                    key={key}
-                    appKey={key}
-                    label={appLabels[key]}
-                    dragLabel={format(copy.dragAria, { name: appLabels[key] })}
-                    toggleLabel={format(copy.toggleAria, {
-                      name: appLabels[key],
-                    })}
-                    disabled={busy}
-                    onToggle={() => void toggle(key)}
-                  />
-                ))}
+                {shown.map((entry) => {
+                  const { label, Icon } = metaFor(entry);
+                  return (
+                    <SortableAppRow
+                      key={entry}
+                      entry={entry}
+                      label={label}
+                      Icon={Icon}
+                      dragLabel={format(copy.dragAria, { name: label })}
+                      toggleLabel={format(copy.toggleAria, { name: label })}
+                      disabled={busy}
+                      onToggle={() =>
+                        isOperatorAppKey(entry)
+                          ? void toggle(entry)
+                          : void toggleCustom(customHomeAppId(entry) ?? "")
+                      }
+                    />
+                  );
+                })}
               </ul>
             </SortableContext>
           </DndContext>
@@ -367,7 +464,13 @@ export default function StudioMiniAppsPage() {
 
       <p className="mt-4 text-xs text-muted-foreground">{copy.routesStayNote}</p>
 
-      <CustomAppsSection workspaceId={workspaceId} canEdit={canEdit} />
+      <CustomAppsSection
+        workspaceId={workspaceId}
+        canEdit={canEdit}
+        homeApps={homeApps}
+        busy={saving}
+        onToggleHome={toggleCustom}
+      />
     </div>
   );
 }
@@ -389,13 +492,14 @@ function HomeStripPreview({
   homeLabel,
   order,
   moving,
-  labels,
+  metaFor,
 }: {
   title: string;
   homeLabel: string;
-  order: readonly OperatorAppKey[];
-  moving: OperatorAppKey | null;
-  labels: Record<OperatorAppKey, string>;
+  order: readonly HomeAppEntry[];
+  moving: HomeAppEntry | null;
+  /** Same resolver the list uses, so the preview cannot disagree with it. */
+  metaFor: (entry: HomeAppEntry) => { label: string; Icon: LucideIcon };
 }) {
   return (
     <div className="mt-4 overflow-hidden rounded-lg border border-border">
@@ -417,13 +521,13 @@ function HomeStripPreview({
           className="flex flex-row items-center gap-0.5 pl-4 pr-2"
         >
           {order.map((key) => {
-            const Icon: LucideIcon = APP_ICON[key];
+            const { label, Icon } = metaFor(key);
             const isMoving = key === moving;
             return (
-              <Tooltip key={key} label={labels[key]}>
+              <Tooltip key={key} label={label}>
                 <span
                   role="img"
-                  aria-label={labels[key]}
+                  aria-label={label}
                   className={cn(
                     "flex size-7 shrink-0 items-center justify-center rounded-md transition-colors",
                     isMoving && "doc-nav-active",
@@ -454,15 +558,19 @@ function HomeStripPreview({
  * card that both drags and toggles is a card that does the wrong one).
  */
 function SortableAppRow({
-  appKey,
+  entry,
   label,
+  Icon,
   dragLabel,
   toggleLabel,
   disabled,
   onToggle,
 }: {
-  appKey: OperatorAppKey;
+  /** A built-in key or a `custom:<id>` entry — both sort the same way. */
+  entry: HomeAppEntry;
   label: string;
+  /** Resolved by the caller: a custom app's icon is manifest data, not i18n. */
+  Icon: LucideIcon;
   dragLabel: string;
   toggleLabel: string;
   disabled: boolean;
@@ -476,8 +584,7 @@ function SortableAppRow({
     transform,
     transition,
     isDragging,
-  } = useSortable({ id: appKey, disabled });
-  const Icon: LucideIcon = APP_ICON[appKey];
+  } = useSortable({ id: entry, disabled });
 
   return (
     <li
@@ -488,7 +595,7 @@ function SortableAppRow({
         opacity: isDragging ? 0.5 : 1,
         zIndex: isDragging ? 1 : undefined,
       }}
-      data-app={appKey}
+      data-app={entry}
       className="flex items-center gap-2 rounded-lg border border-primary/40 bg-primary/5 px-2 py-2.5"
     >
       <button

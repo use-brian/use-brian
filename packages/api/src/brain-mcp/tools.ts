@@ -303,6 +303,19 @@ type BuildOpts = {
    * holds the `configure` grant — resolved by the server before build).
    */
   agentTools?: { reads: Map<string, Tool>; writes: Map<string, Tool> }
+  /**
+   * Commerce-store tools for a custom Home app, ALREADY filtered to the
+   * principal's `storeScope` by `filterStoreTools`. They arrive pre-filtered
+   * rather than pre-raw plus a tier here, so there is exactly one place that
+   * decides what a sandboxed bundle may reach and it is not this function.
+   */
+  storeTools?: Tool[]
+  /**
+   * Hand a task to the workspace assistant (`scopes.agent: 'ask'`). Present
+   * only when the grant allows it; the caller has already capped the consult
+   * at the app's own tool ceiling.
+   */
+  agentTask?: (task: string) => Promise<string>
   /** Pre-resolved configure gate for this request (see `resolveAgentGate`). */
   agentWritesEnabled?: boolean
   memoryTools: BrainMemoryTools
@@ -1514,7 +1527,46 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       : []
   const agentReadNames = new Set(agentReadBridges.map((t) => t.name))
 
+  // Store tools ride the same bridge as everything else. The gate already ran
+  // upstream; an empty list here is the normal case (every principal that is
+  // not a store-granted Home app).
+  const storeBridges: BrainTool[] = (opts.storeTools ?? []).map((t) =>
+    bridgeCoreTool(t, resolveCtx, workspaceId),
+  )
+  const storeNames = new Set(storeBridges.map((t) => t.name))
+
+  // The one tool that spends model time rather than answering from a store
+  // read. It is a plain string in / string out: the app describes a task, the
+  // workspace assistant does it with the app's OWN tools, and the answer comes
+  // back as prose. Deliberately not a structured-output contract — the whole
+  // reason to involve a model here is the parts a form could not decide.
+  const askStoreAssistant: BrainTool | null = opts.agentTask
+    ? {
+        name: 'askStoreAssistant',
+        description:
+          'Hand a task to this workspace\'s assistant and get its answer. Use for work that needs ' +
+          'judgement rather than a single lookup: reconciling order line items across variants, ' +
+          'deciding which product template to reuse, or turning funnel numbers into ranked actions. ' +
+          'The assistant runs with THIS app\'s tools only, so it cannot do anything the app could not. ' +
+          'Be specific and self-contained - it has no view of what is on screen.',
+        inputSchema: { task: z.string().min(1).max(4000).describe('What to do, in full.') },
+        handler: async (args: Record<string, unknown>) => {
+          try {
+            const text = await opts.agentTask!(String(args.task ?? ''))
+            return { content: [{ type: 'text' as const, text }] }
+          } catch (err) {
+            return {
+              content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+              isError: true,
+            }
+          }
+        },
+      }
+    : null
+
   const all: BrainTool[] = [
+    ...storeBridges,
+    ...(askStoreAssistant ? [askStoreAssistant] : []),
     // Reads
     searchBrain,
     searchRecordingTool,
@@ -1574,7 +1626,19 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     ...(opts.browserSkills ? [buildWriteBrowserSkillTool(opts.browserSkills, workspaceId)] : []),
   ]
   return opts.scope === 'read'
-    ? all.filter((t) => READ_TOOL_NAMES.has(t.name) || agentReadNames.has(t.name))
+    // `storeNames` rides alongside `agentReadNames`: the brain scope and the
+    // store scope are SEPARATE axes, so a `data: 'read'` app must still keep
+    // the store tools its `scopes.store` tier earned. Without this the read
+    // allowlist silently eats them and a granted app sees an empty store with
+    // nothing anywhere saying why. The store list was already narrowed by
+    // `filterStoreTools`, so nothing is being widened here.
+    ? all.filter(
+        (t) =>
+          READ_TOOL_NAMES.has(t.name) ||
+          agentReadNames.has(t.name) ||
+          storeNames.has(t.name) ||
+          t.name === 'askStoreAssistant',
+      )
     : all
 }
 
@@ -2015,7 +2079,10 @@ export type BrainWriteTarget = {
  * 193). System-level query: the request is API-key authed, not
  * user-session authed. Returns null when the workspace has no assistant.
  */
-async function resolveWriteTarget(workspaceId: string): Promise<BrainWriteTarget | null> {
+/** The workspace owner + its primary assistant — the principal a
+ *  workspace-scoped credential acts as. Exported for the Home-app store-tool
+ *  resolver, which binds to the same pair so connector grants apply. */
+export async function resolveWriteTarget(workspaceId: string): Promise<BrainWriteTarget | null> {
   const result = await query<{
     ownerUserId: string
     assistantId: string

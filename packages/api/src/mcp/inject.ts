@@ -1800,8 +1800,12 @@ function instanceToolSuffix(instanceId: string, label: string): string {
   return `${INSTANCE_TOOL_SEP}${slug}_${id8}`
 }
 
-/** Recover the canonical tool name from a (possibly) instance-suffixed name. */
-function baseToolName(name: string): string {
+/** Recover the canonical tool name from a (possibly) instance-suffixed name.
+ *
+ *  Exported because the Home-app store gate resolves classification by
+ *  canonical name too, and a second copy of the `__` convention there would
+ *  silently drop every multi-instance tool (fail-closed, but wrong). */
+export function baseToolName(name: string): string {
   const i = name.indexOf(INSTANCE_TOOL_SEP)
   return i === -1 ? name : name.slice(0, i)
 }
