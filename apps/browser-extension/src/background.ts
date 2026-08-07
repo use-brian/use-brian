@@ -14,29 +14,10 @@ import {
   RESTRICTED_TAB_MESSAGE,
 } from './tab-eligibility.js'
 import { credentialsForConfigure, isTrustedPairingOrigin, type PairRequest } from './pairing.js'
-import {
-  hasBrowserControl,
-  registerDebuggerDetachListener,
-} from './browser-control-permission.js'
+import { hasBrowserControl } from './browser-control-permission.js'
 import { readBuildStamp } from './build-info.js'
 
 const executor = new TabExecutor()
-
-/**
- * Open the browser-control permission window. The prompt itself cannot be
- * raised from here — `chrome.permissions.request()` needs a user gesture in an
- * extension context — so this opens the one page that has a button to do it.
- * Sized like the consent window so the two read as the same family.
- */
-async function openGrantWindow(): Promise<void> {
-  await chrome.windows.create({
-    url: chrome.runtime.getURL('grant.html'),
-    type: 'popup',
-    width: 400,
-    height: 250,
-    focused: true,
-  })
-}
 
 // ── Consent prompt: a small extension window with Allow / Deny ──
 
@@ -208,15 +189,11 @@ async function attachToEligibleTab(tabId: number): Promise<void> {
 }
 
 async function dispatch(op: string, args: Record<string, unknown>): Promise<unknown> {
-  // Browser control is an OPTIONAL permission now, so it can genuinely be
-  // absent here. Say so in the one word the assistant can act on; without this
-  // the first CDP call fails with Chrome's own "Cannot access" wording, which
-  // reads like the website blocked us rather than "you have not allowed this
-  // yet" — the same misdiagnosis the detach path exists to prevent.
+  // Required in the manifest. If it is absent, this install is malformed;
+  // report that honestly instead of blaming the website.
   if (!(await hasBrowserControl())) {
-    void openGrantWindow()
     throw new ExecutorError(
-      'Use Brian is not allowed to manage this browser yet. Allow it in the window that just opened, or from the extension popup.',
+      'Use Brian is missing its required browser-control permission. Reload or reinstall the extension.',
       'no_browser_permission',
     )
   }
@@ -249,31 +226,15 @@ async function dispatch(op: string, args: Record<string, unknown>): Promise<unkn
 
 // ── Chrome event wiring ────────────────────────────────────────
 
-/**
- * Chrome omits the debugger namespace until its optional permission is granted.
- * Register now when available, or when permissions.onAdded exposes it later.
- */
-let debuggerDetachListenerRegistered = false
-function registerDetachListener(): void {
-  if (debuggerDetachListenerRegistered) return
-  debuggerDetachListenerRegistered = registerDebuggerDetachListener(
-    chrome.debugger?.onDetach,
-    (source, reason) => {
-      const tabId = source.tabId
-      if (tabId == null || !executor.onDetached(tabId)) return
-      if (reason === 'canceled_by_user') {
-        // The user dismissed Chrome's own debugging banner. Treat it as a refusal:
-        // ask again through our Allow window instead of re-attaching behind them.
-        gate.revokeConsent()
-        client.sendEvent('detached')
-      }
-    },
-  )
-}
-
-registerDetachListener()
-chrome.permissions.onAdded.addListener((permissions) => {
-  if (permissions.permissions?.includes('debugger')) registerDetachListener()
+chrome.debugger.onDetach.addListener((source, reason) => {
+  const tabId = source.tabId
+  if (tabId == null || !executor.onDetached(tabId)) return
+  if (reason === 'canceled_by_user') {
+    // The user dismissed Chrome's own debugging banner. Treat it as a refusal:
+    // ask again through our per-task Allow window instead of re-attaching.
+    gate.revokeConsent()
+    client.sendEvent('detached')
+  }
 })
 
 chrome.tabs.onRemoved.addListener((tabId) => {
@@ -309,9 +270,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         state: client.getState(),
         controlledTab: gate.currentTab(),
         stopped: gate.isStopped(),
-        // Whether the user has granted browser control. The popup paints its
-        // Allow button off this, so a paired-but-not-allowed install stops
-        // claiming it is ready to work.
+        // False means a malformed install: debugger is a required permission.
         hasControl: await hasBrowserControl(),
         // Which build is loaded, and whether the relay thinks it is behind.
         // Answering this used to require deriving the extension id from a
@@ -368,21 +327,10 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
     })()
     return true // async sendResponse
   }
-  /**
-   * The web app cannot raise Chrome's permission prompt itself — the API is
-   * extension-only and needs a user gesture in an extension context. So the
-   * sidebar's "Allow browser control" asks us to open the window that can.
-   * This grants the sender nothing: it opens our own page and the user still
-   * has to click Allow and then accept Chrome's own dialog.
-   */
   if (msg.type === 'request-control') {
     void (async () => {
-      if (await hasBrowserControl()) {
-        sendResponse({ ok: true, hasControl: true })
-        return
-      }
-      await openGrantWindow()
-      sendResponse({ ok: true, hasControl: false, prompted: true })
+      const hasControl = await hasBrowserControl()
+      sendResponse({ ok: hasControl, hasControl })
     })()
     return true // async sendResponse
   }

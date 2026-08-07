@@ -34,14 +34,13 @@ describe('[COMP:ext/agent] Popup status line', () => {
     )
   })
 
-  it('outranks a healthy socket when browser control has not been granted', () => {
+  it('outranks a healthy socket when required browser control is missing', () => {
     // The exact lie this status line exists to stop telling: the relay is up so
     // the socket reads "Connected", while every task refuses.
     const line = statusLine({ state: 'ready', hasControl: false })
     expect(line).not.toContain('Connected.')
-    expect(line.toLowerCase()).toContain('not allowed to manage this browser')
-    // It outranks the stopped label too — a grant the user never gave is the
-    // thing they have to fix first.
+    expect(line.toLowerCase()).toContain('required browser-control permission')
+    // It outranks the stopped label too: repairing the install comes first.
     expect(statusLine({ state: 'ready', stopped: true, hasControl: false })).toBe(line)
   })
 
@@ -84,10 +83,10 @@ describe('[COMP:ext/build-stamp] Popup build status', () => {
     expect(buildWarning(status)).not.toBeNull()
   })
 
-  it('ranks a missing grant above staleness', () => {
-    // Staleness only might block work; a missing grant blocks it outright.
+  it('ranks a malformed permission state above staleness', () => {
+    // Staleness only might block work; a missing required permission does.
     expect(statusLine({ state: 'ready', hasControl: false, staleBuild: true })).toMatch(
-      /Not allowed to manage/,
+      /required browser-control permission/,
     )
   })
 

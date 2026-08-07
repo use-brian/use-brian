@@ -1,32 +1,22 @@
-import { describe, it, expect, vi } from 'vitest'
-import {
-  BROWSER_CONTROL_PERMISSIONS,
-  hasBrowserControl,
-  registerDebuggerDetachListener,
-  requestBrowserControl,
-} from '../browser-control-permission.js'
+import { describe, it, expect } from 'vitest'
+import { BROWSER_CONTROL_PERMISSIONS, hasBrowserControl } from '../browser-control-permission.js'
 
 /**
- * The grant check has to fail SAFE in both directions, and the two directions
- * are opposites: an unreadable state must not claim the user granted control
- * (we would then drive a browser we have no permission for and surface a raw
- * Chrome error), and a failed ask must not be mistaken for a grant.
+ * An unreadable required-permission state must not claim browser control is
+ * available and then surface an unrelated raw Chrome error on the first task.
  */
-describe('[COMP:ext/browser-control-permission] Optional debugger permission', () => {
-  it('asks Chrome for exactly the debugger permission, nothing bundled', async () => {
-    const request = vi.fn(async () => true)
-    await requestBrowserControl({ contains: async () => false, request })
-    expect(request).toHaveBeenCalledWith({ permissions: ['debugger'] })
+describe('[COMP:ext/browser-control-permission] Required debugger permission', () => {
+  it('checks exactly the browser-control permission', () => {
     expect([...BROWSER_CONTROL_PERMISSIONS]).toEqual(['debugger'])
   })
 
   it('reports a granted permission', async () => {
-    const granted = await hasBrowserControl({ contains: async () => true, request: async () => true })
+    const granted = await hasBrowserControl({ contains: async () => true })
     expect(granted).toBe(true)
   })
 
   it('reports a missing permission', async () => {
-    const granted = await hasBrowserControl({ contains: async () => false, request: async () => true })
+    const granted = await hasBrowserControl({ contains: async () => false })
     expect(granted).toBe(false)
   })
 
@@ -35,34 +25,7 @@ describe('[COMP:ext/browser-control-permission] Optional debugger permission', (
       contains: async () => {
         throw new Error('no permissions API')
       },
-      request: async () => true,
     })
     expect(granted).toBe(false)
-  })
-
-  it('treats a throwing request (no user gesture) as a refusal, never a grant', async () => {
-    const ok = await requestBrowserControl({
-      contains: async () => false,
-      request: async () => {
-        throw new Error('This function must be called during a user gesture')
-      },
-    })
-    expect(ok).toBe(false)
-  })
-
-  it('passes the user’s refusal straight through', async () => {
-    const ok = await requestBrowserControl({ contains: async () => false, request: async () => false })
-    expect(ok).toBe(false)
-  })
-
-  it('starts safely before Chrome exposes the optional debugger namespace', () => {
-    expect(registerDebuggerDetachListener(undefined, vi.fn())).toBe(false)
-  })
-
-  it('registers detach recovery after the debugger permission becomes available', () => {
-    const addListener = vi.fn()
-    const listener = vi.fn()
-    expect(registerDebuggerDetachListener({ addListener }, listener)).toBe(true)
-    expect(addListener).toHaveBeenCalledWith(listener)
   })
 })

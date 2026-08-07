@@ -25,7 +25,7 @@ browser-relay (`apps/browser-relay`); the app-web connect surface is
 The narrow surface **is** the feature. The extension:
 
 - drives ONLY via `chrome.debugger` (CDP) against one user-approved tab — no content scripts, no `cookies` / `scripting` / `webRequest`;
-- requests NO `host_permissions` (Chromium requires `tabs`/`storage` and offers `debugger` as the only optional permission);
+- requests NO `host_permissions` (Chromium requires `tabs`/`storage` plus `debugger`, which Chrome forbids declaring as optional);
 - gates every task on explicit per-tab consent (`task-gate.ts`), scopes to that tab, and honors a persistent Stop + close-to-kill.
 
 Firefox has no WebExtension debugger API. Its build therefore requests only
