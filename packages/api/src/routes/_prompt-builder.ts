@@ -17,7 +17,8 @@
  *
  *   STABLE SYSTEM PREFIX (cacheable across turns when unchanged)
  *     1. Layer 1 base prompt
- *     2. Layer 2 assistant custom instructions  (per-assistant persona)
+ *     2. Layer 2 `# Charter` (per-assistant identity: mission / audience /
+ *        what good looks like / instructions; legacy free-text fallback)
  *     3. Memory context (SOUL + identities + index + team)
  *     4. Skills fragment
  *
@@ -47,6 +48,7 @@
 
 import type { Message, TopicClassification } from '@use-brian/core'
 import { FOLLOW_UP_QUESTIONS_ADDENDUM } from '@use-brian/core'
+import { renderCharterBlock, type AssistantCharter } from '@use-brian/shared'
 import type { ResolveAppSoul } from '../tool-injection-port.js'
 
 /**
@@ -73,11 +75,30 @@ export type ReplyContextInput = {
 export type BuildPromptParams = {
   basePrompt: string
   /**
-   * Layer 2 — per-assistant custom instructions set by the owner in the
-   * assistant settings UI. Appended directly after `basePrompt` so
-   * Layer 1's behavioral guarantees stay intact while the owner's tone
-   * and persona apply on top. `null` / empty / whitespace-only skips
-   * the block entirely.
+   * Layer 2 — the assistant's charter (migration 418), resolved by the
+   * caller via `resolveCharter(assistant)` from `@use-brian/shared`.
+   * Rendered as the `# Charter` block (mission / audience / what good
+   * looks like / instructions) directly after `basePrompt`, so Layer 1's
+   * behavioral guarantees stay intact while the owner's identity and
+   * persona apply on top. Takes precedence over `assistantInstructions`
+   * when it has any content. See
+   * docs/architecture/context-engine/layer-1-system-prompt.md → "Layer 2".
+   */
+  charter?: AssistantCharter | null
+  /**
+   * Owner-admitted playbook rules (migration 419, growth loop Phase 3),
+   * newest-admitted first — rendered as the `## Playbook` section of the
+   * `# Charter` block under PLAYBOOK_BLOCK_CHAR_CAP. Callers fetch via
+   * `listActivePlaybookRules()`; empty/undefined omits the section. Rules
+   * only change on an owner decision, so the block stays in the cacheable
+   * stable prefix.
+   */
+  playbookRules?: string[]
+  /**
+   * Legacy Layer 2 — pre-charter free-text custom instructions. Kept for
+   * callers that have only a raw string (token-cost scenarios, older
+   * tests). Ignored whenever `charter` carries content. `null` / empty /
+   * whitespace-only skips the block entirely.
    */
   assistantInstructions?: string | null
   /**
@@ -196,6 +217,13 @@ export type BuildPromptParams = {
    * (tool-awareness rule) — the chat route gates it on the doc surface.
    */
   docSkillBlock?: string | null
+  /**
+   * Charter setup-interview addendum (growth loop Phase 2). Set only when
+   * the `saveCharter` tool is injected this turn — see
+   * `packages/api/src/intake/charter-intake.ts`. Stable prefix: constant
+   * text, present until the charter is saved.
+   */
+  intakeAddendum?: string | null
   unavailableCapabilitiesPrompt?: string
   pendingMessagesFragment?: string
   preflightContext?: string
@@ -296,10 +324,19 @@ function collectPromptSections(
   // 1. Layer 1 — global base prompt.
   sections.push(p.basePrompt)
 
-  // 2. Layer 2 — assistant-specific custom instructions.
-  const layer2 = p.assistantInstructions?.trim()
-  if (layer2 && layer2.length > 0) {
-    sections.push(`# Assistant instructions\n${layer2}`)
+  // 2. Layer 2 — the assistant's charter (mission / audience / success /
+  //    instructions + admitted playbook rules). Falls back to the legacy
+  //    free-text block for callers that predate the charter.
+  const charterBlock = p.charter
+    ? renderCharterBlock(p.charter, { playbookRules: p.playbookRules })
+    : null
+  if (charterBlock) {
+    sections.push(charterBlock)
+  } else {
+    const layer2 = p.assistantInstructions?.trim()
+    if (layer2 && layer2.length > 0) {
+      sections.push(`# Assistant instructions\n${layer2}`)
+    }
   }
 
   // 2.5. Workspace-level prompt-evolution snippet. Sits between the
@@ -357,6 +394,15 @@ function collectPromptSections(
   //      so this stays null there (no double-injection).
   if (p.docSkillBlock && p.docSkillBlock.trim().length > 0) {
     sections.push(p.docSkillBlock)
+  }
+
+  // 4.7. Charter intake interview (growth loop Phase 2). Set ONLY when the
+  //      `saveCharter` tool is injected this turn (tool-awareness rule) -
+  //      the chat route keys both off one condition: unconfigured standard
+  //      assistant + owner speaking. Self-terminating: a saved charter makes
+  //      the condition false, so the block disappears next turn.
+  if (p.intakeAddendum && p.intakeAddendum.trim().length > 0) {
+    sections.push(p.intakeAddendum)
   }
 
   // Everything pushed above is the stable system prefix. `splice(0)` drains

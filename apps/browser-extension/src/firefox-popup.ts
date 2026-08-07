@@ -38,8 +38,8 @@ const buildLineBox = el<HTMLParagraphElement>('build-line')
 function statusLine(status: Status): string {
   if (status.hasControl === false) {
     return status.controlReason === 'firefox_companion_missing'
-      ? 'Use Brian desktop is required. Open it below to finish Firefox setup.'
-      : 'Firefox must be started for My Browser. Open Use Brian below, then restart Firefox.'
+      ? 'The Firefox companion is required. Install it or open Use Brian desktop to finish setup.'
+      : 'Firefox must be started for My Browser. Use the setup below, then restart Firefox.'
   }
   if (status.stopped) return 'Task stopped. The next request will ask your permission again.'
   return `${STATE_LABELS[status.state ?? 'unpaired'] ?? status.state ?? 'unpaired'}${
@@ -71,7 +71,7 @@ el<HTMLButtonElement>('grant').addEventListener('click', () => {
     .sendMessage({ type: 'open-firefox-control' })
     .then(() => window.close())
     .catch(() => {
-      statusText.textContent = 'Open the Use Brian desktop app, then choose Start Firefox for My Browser.'
+      statusText.textContent = 'Quit Firefox, then run use-brian-firefox start or use the desktop app setup.'
     })
 })
 el<HTMLButtonElement>('connect').addEventListener('click', () => {

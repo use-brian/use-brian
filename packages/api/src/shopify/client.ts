@@ -903,10 +903,20 @@ export async function fetchOrdersRange(
 
 // ── Storefront analytics (ShopifyQL) ─────────────────────────
 
-/** Tabular result of a ShopifyQL query: column metadata plus positional rows. */
+/**
+ * Tabular result of a ShopifyQL query.
+ *
+ * `rows` are **objects keyed by column name**, not positional arrays, and every
+ * value arrives as a **string** (`"49"`, `"0.0"`) whatever `dataType` claims —
+ * both verified against a live store on 2026-08-07. The GraphQL schema types
+ * the field as opaque JSON, so nothing catches a wrong assumption here at
+ * compile time and a mocked test only re-asserts whatever shape the mock
+ * invented. The row type stays permissive because of that: consumers must
+ * normalize rather than index.
+ */
 export type ShopifyqlTable = {
   columns: Array<{ name: string; dataType: string }>
-  rows: unknown[][]
+  rows: Array<Record<string, unknown> | unknown[]>
 }
 
 /**
@@ -927,7 +937,7 @@ export async function runShopifyqlQuery(auth: ShopifyAuth, query: string): Promi
       parseErrors?: string[]
       tableData?: {
         columns?: Array<{ name?: string; dataType?: string }>
-        rows?: unknown[][]
+        rows?: Array<Record<string, unknown> | unknown[]>
       } | null
     } | null
   }>(auth, `

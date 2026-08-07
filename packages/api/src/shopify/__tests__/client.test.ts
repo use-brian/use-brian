@@ -1146,19 +1146,21 @@ describe('[COMP:api/shopify-client] Shopify GraphQL client', () => {
       .rejects.toThrow(/neither table data nor a parse error/)
   })
 
-  it('runShopifyqlQuery returns columns and rows on success', async () => {
+  it('runShopifyqlQuery passes through Shopify\'s real row shape untouched', async () => {
+    // Live shape (2026-08-07): rows keyed by column name, values as strings
+    // whatever dataType claims. The client must not reinterpret either.
     mockFetch.mockResolvedValue(jsonResponse({
       data: { shopifyqlQuery: {
         parseErrors: [],
         tableData: {
-          columns: [{ name: 'sessions', dataType: 'number' }],
-          rows: [[42]],
+          columns: [{ name: 'sessions', dataType: 'INTEGER' }],
+          rows: [{ sessions: '42' }],
         },
       } },
     }))
     const table = await runShopifyqlQuery(AUTH, 'FROM sessions SHOW sessions')
-    expect(table.columns).toEqual([{ name: 'sessions', dataType: 'number' }])
-    expect(table.rows).toEqual([[42]])
+    expect(table.columns).toEqual([{ name: 'sessions', dataType: 'INTEGER' }])
+    expect(table.rows).toEqual([{ sessions: '42' }])
   })
 
   it('storefrontFunnel sends the built query and echoes it back', async () => {

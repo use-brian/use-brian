@@ -45,7 +45,7 @@ import {
   type TaskRuleStatus,
   type TaskTombstoneRecord,
 } from '@use-brian/core'
-import { getAppPool, query, rollbackAndRelease } from './client.js'
+import { applyRLSGucs, getAppPool, query, rollbackAndRelease } from './client.js'
 import { abandonGoalsForHostTaskSystem } from './goals.js'
 
 // ── Row mappers ──────────────────────────────────────────────────────────────
@@ -416,6 +416,10 @@ export async function rejectTask(input: {
   let activeRuleId: string | null = null
   try {
     await client.query('BEGIN')
+    // App pool = RLS-enforced. Without the acting user's GUCs the member
+    // policies evaluate against the nil-UUID sentinel and this SELECT can
+    // never see the task (every reject 404'd in prod, 2026-08-07).
+    await applyRLSGucs(client, input.userId)
 
     const existing = await client.query<{
       id: string
@@ -432,10 +436,7 @@ export async function rejectTask(input: {
           AND t.valid_to IS NULL AND t.retracted_at IS NULL`,
       [input.taskId, input.workspaceId],
     )
-    if (existing.rows.length === 0) {
-      await client.query('ROLLBACK')
-      return null
-    }
+    if (existing.rows.length === 0) return null
     title = existing.rows[0].title
     sourceKind = existing.rows[0].source_kind
     const channelRef = existing.rows[0].channel_ref
@@ -507,11 +508,12 @@ export async function rejectTask(input: {
     }
 
     await client.query('COMMIT')
-  } catch (err) {
+  } finally {
+    // Releases on EVERY exit — including the not-found early return above,
+    // which used to leak the checked-out client and exhaust the app pool
+    // (PG_POOL_MAX=2 → two 404s took the whole API down, 2026-08-07).
     await rollbackAndRelease(client)
-    throw err
   }
-  client.release()
 
   // Proposal runs AFTER the commit, deliberately. The rejection is the thing
   // the user asked for; a failure while generalizing it must not roll that back

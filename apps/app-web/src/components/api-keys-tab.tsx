@@ -35,12 +35,16 @@ import { format } from "@/lib/i18n";
 import type { Dictionary } from "@/lib/i18n";
 import { DISPLAY_API_URL } from "@/lib/display-api-url";
 import { webAppUrl } from "@/lib/primary-auth";
+import { useWorkspaces } from "@/contexts/workspace-context";
+import { ModelTierRow, isModelAlias, type ModelAlias } from "@/components/studio/model-tier-row";
 
 const DOCS_HREF = `${webAppUrl()}/docs/api`;
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
 type ApiKeyScope = "chat" | "agent";
+type ApiKeyAudience = "external" | "internal";
+type ApiKeyAnonContext = "thin" | "full";
 
 type ApiKeyRow = {
   id: string;
@@ -49,6 +53,10 @@ type ApiKeyRow = {
   /** 'chat' = /messages only; 'agent' = also opens the assistant MCP endpoint.
    *  Optional to tolerate older cached responses — treat undefined as 'chat'. */
   scope?: ApiKeyScope;
+  /** Context posture (migration 417). Optional for pre-417 rows — treat
+   *  undefined as 'external'/'thin', the behavior those keys always had. */
+  audience?: ApiKeyAudience;
+  anonymousContext?: ApiKeyAnonContext;
   status: "active" | "revoked";
   createdAt: string;
   lastUsedAt: string | null;
@@ -87,7 +95,15 @@ function relative(iso: string | null, t: Dictionary): string {
   return formatDate(iso);
 }
 
-export function ApiKeysTab({ assistantId }: { assistantId: string }) {
+export function ApiKeysTab({
+  assistantId,
+  workspaceId,
+  role,
+}: {
+  assistantId: string;
+  workspaceId: string | null;
+  role: string;
+}) {
   const t = useT();
   const [keys, setKeys] = useState<ApiKeyRow[] | null>(null);
   const [mode, setMode] = useState<Mode>({ kind: "list" });
@@ -155,6 +171,13 @@ export function ApiKeysTab({ assistantId }: { assistantId: string }) {
           {t.apiKeys.newKey}
         </Button>
       </header>
+
+      <ApiModelTierPanel
+        assistantId={assistantId}
+        workspaceId={workspaceId}
+        isOwner={role === "owner"}
+        t={t}
+      />
 
       <PublicChatLinkPanel assistantId={assistantId} t={t} />
 
@@ -228,6 +251,93 @@ export function ApiKeysTab({ assistantId }: { assistantId: string }) {
 
 // ── Subcomponents ──────────────────────────────────────────────
 
+/**
+ * Model tier for owner-paid public traffic - the `sk_live_` API and the
+ * `/c/<token>` chat link, which both run through the same `public-turn`
+ * pipeline and bill the assistant's owner.
+ *
+ * It lives here rather than on the Settings tab because these two surfaces are
+ * the ones a workspace usually wants capped independently: they are reachable
+ * by people who are not paying for the turn. Before migration 416 they shared
+ * `telegram_model_alias`, so the only way to cap a public link was to
+ * downgrade the owner's own Telegram bot too.
+ */
+function ApiModelTierPanel({
+  assistantId,
+  workspaceId,
+  isOwner,
+  t,
+}: {
+  assistantId: string;
+  workspaceId: string | null;
+  isOwner: boolean;
+  t: Dictionary;
+}) {
+  const { workspaces } = useWorkspaces();
+  const plan = workspaces.find((w) => w.id === workspaceId)?.plan ?? "free";
+  const [tier, setTier] = useState<ModelAlias>("pro");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    authFetch(`${API_URL}/api/assistants/${assistantId}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { apiModelAlias?: string } | null) => {
+        if (!cancelled && isModelAlias(data?.apiModelAlias)) setTier(data.apiModelAlias);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [assistantId]);
+
+  async function save(next: ModelAlias) {
+    const prev = tier;
+    setTier(next);
+    setSaving(true);
+    setError(null);
+    try {
+      const r = await authFetch(`${API_URL}/api/assistants/${assistantId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiModelAlias: next }),
+      });
+      if (!r.ok) {
+        setTier(prev);
+        setError(t.apiKeys.modelTier.failed);
+      }
+    } catch {
+      setTier(prev);
+      setError(t.apiKeys.modelTier.failed);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="border border-border rounded-lg p-4 space-y-3">
+      <div>
+        <h3 className="text-[13px] font-semibold">{t.apiKeys.modelTier.title}</h3>
+        <p className="text-[12px] text-muted-foreground mt-0.5 max-w-prose">
+          {t.apiKeys.modelTier.description}
+        </p>
+      </div>
+      {error && <p className="text-[12px] text-red-500">{error}</p>}
+      <div className="rounded-md border border-border">
+        <ModelTierRow
+          label={t.apiKeys.modelTier.label}
+          value={tier}
+          onChange={save}
+          disabled={!isOwner}
+          saving={saving}
+          plan={plan}
+        />
+      </div>
+    </section>
+  );
+}
+
 type ChatLinkRow = {
   id: string;
   token: string;
@@ -244,10 +354,12 @@ type ChatLinkRow = {
  * assistant (`/c/<token>`, docs/architecture/features/public-chat-link.md).
  * Creation sits behind a confirmDialog per the pre-flight-confirmation
  * invariant: the owner pays for anonymous usage, so the cost posture is
- * stated before the link exists.
+ * stated before the link exists - and, since a link reads at the ASSISTANT's
+ * clearance rather than flooring to public, so is the clearance it inherits.
  */
 function PublicChatLinkPanel({ assistantId, t }: { assistantId: string; t: Dictionary }) {
   const [links, setLinks] = useState<ChatLinkRow[] | null>(null);
+  const [clearance, setClearance] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -256,8 +368,9 @@ function PublicChatLinkPanel({ assistantId, t }: { assistantId: string; t: Dicti
     try {
       const r = await authFetch(`${API_URL}/api/assistants/${assistantId}/chat-links`);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const data = (await r.json()) as { links: ChatLinkRow[] };
+      const data = (await r.json()) as { links: ChatLinkRow[]; clearance?: string | null };
       setLinks(data.links);
+      setClearance(data.clearance ?? null);
     } catch (err) {
       setError((err as Error).message);
       setLinks([]);
@@ -272,9 +385,19 @@ function PublicChatLinkPanel({ assistantId, t }: { assistantId: string; t: Dicti
     `${typeof window !== "undefined" ? window.location.origin : ""}/c/${token}`;
 
   async function create() {
+    // The clearance line is appended, not interpolated, so the warning still
+    // appears when the list fetch could not resolve a clearance.
+    const clearanceNote =
+      clearance === "confidential"
+        ? t.apiKeys.chatLink.confirmCreateClearanceConfidential
+        : clearance === "internal"
+          ? t.apiKeys.chatLink.confirmCreateClearanceInternal
+          : clearance === "public"
+            ? t.apiKeys.chatLink.confirmCreateClearancePublic
+            : t.apiKeys.chatLink.confirmCreateClearanceUnknown;
     const ok = await confirmDialog({
       title: t.apiKeys.chatLink.confirmCreateTitle,
-      description: t.apiKeys.chatLink.confirmCreateBody,
+      description: `${t.apiKeys.chatLink.confirmCreateBody}\n\n${clearanceNote}`,
       confirmLabel: t.apiKeys.chatLink.create,
     });
     if (!ok) return;
@@ -475,6 +598,16 @@ function KeyRow({
             {row.name}
           </span>
           <ScopeBadge scope={rowScope(row)} t={t} />
+          {row.audience === "internal" && (
+            <span className="text-[11px] uppercase tracking-wide text-muted-foreground border border-border rounded px-1.5 py-0.5">
+              {t.apiKeys.audienceBadgeInternal}
+            </span>
+          )}
+          {row.anonymousContext === "full" && (
+            <span className="text-[11px] uppercase tracking-wide text-muted-foreground border border-border rounded px-1.5 py-0.5">
+              {t.apiKeys.anonContextBadgeFull}
+            </span>
+          )}
           {isRevoked && (
             <span className="text-[11px] uppercase tracking-wide text-muted-foreground border border-border rounded px-1.5 py-0.5">
               {t.apiKeys.statusRevoked}
@@ -530,6 +663,8 @@ function CreateKeyForm({
   const t = useT();
   const [name, setName] = useState(defaultName);
   const [scope, setScope] = useState<ApiKeyScope>("chat");
+  const [audience, setAudience] = useState<ApiKeyAudience>("external");
+  const [anonContext, setAnonContext] = useState<ApiKeyAnonContext>("thin");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -542,7 +677,14 @@ function CreateKeyForm({
       const r = await authFetch(`${API_URL}/api/assistants/${assistantId}/integrations/api-keys`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: name.trim(), scope }),
+        body: JSON.stringify({
+          name: name.trim(),
+          scope,
+          audience,
+          // The anonymous lane only exists on external keys; the route 400s
+          // the contradictory internal+full pair, so normalize here.
+          anonymousContext: audience === "external" ? anonContext : "thin",
+        }),
       });
       if (!r.ok) {
         const body = await r.json().catch(() => ({}));
@@ -581,6 +723,49 @@ function CreateKeyForm({
           onSelect={() => setScope("agent")}
         />
       </div>
+
+      <div role="radiogroup" aria-label={t.apiKeys.audienceLabel} className="space-y-2">
+        <span className="text-[13px] text-muted-foreground">{t.apiKeys.audienceLabel}</span>
+        <ScopeCard
+          selected={audience === "external"}
+          label={t.apiKeys.audienceExternalLabel}
+          description={t.apiKeys.audienceExternalDesc}
+          disabled={submitting}
+          onSelect={() => setAudience("external")}
+        />
+        <ScopeCard
+          selected={audience === "internal"}
+          label={t.apiKeys.audienceInternalLabel}
+          description={t.apiKeys.audienceInternalDesc}
+          disabled={submitting}
+          onSelect={() => setAudience("internal")}
+        />
+      </div>
+
+      {audience === "external" && (
+        <div role="radiogroup" aria-label={t.apiKeys.anonContextLabel} className="space-y-2">
+          <span className="text-[13px] text-muted-foreground">{t.apiKeys.anonContextLabel}</span>
+          <ScopeCard
+            selected={anonContext === "thin"}
+            label={t.apiKeys.anonContextThinLabel}
+            description={t.apiKeys.anonContextThinDesc}
+            disabled={submitting}
+            onSelect={() => setAnonContext("thin")}
+          />
+          <ScopeCard
+            selected={anonContext === "full"}
+            label={t.apiKeys.anonContextFullLabel}
+            description={t.apiKeys.anonContextFullDesc}
+            disabled={submitting}
+            onSelect={() => setAnonContext("full")}
+          />
+          {anonContext === "full" && (
+            <p className="text-[12px] text-amber-600 dark:text-amber-500 border border-amber-500/30 rounded-lg px-3 py-2">
+              {t.apiKeys.anonContextFullWarning}
+            </p>
+          )}
+        </div>
+      )}
 
       <label className="block">
         <span className="text-[13px] text-muted-foreground">{t.apiKeys.create.nameLabel}</span>

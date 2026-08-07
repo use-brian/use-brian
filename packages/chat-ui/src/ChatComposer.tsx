@@ -72,6 +72,16 @@ export type ChatComposerProps = {
    */
   onSteer?: () => void
   /**
+   * Cmd/Ctrl+Enter — submit as an **ask**: this message addresses the
+   * assistant, where a plain Enter would only post it. Hosts wire it where a
+   * send is NOT automatically addressed (a workspace room, whose Enter is a
+   * durable post everyone sees and nobody answers); without it Cmd/Ctrl+Enter
+   * falls through to an ordinary send, which is the right no-op.
+   *
+   * See docs/architecture/features/chat-app.md → "Ask from the keyboard".
+   */
+  onAsk?: () => void
+  /**
    * Hard-disable the whole composer — textarea included (e.g. offline, or the
    * turn is suspended on a clarifying question). NOT for streaming: while a
    * reply streams the user should keep typing their next message, so pass
@@ -160,10 +170,15 @@ export type ChatComposerProps = {
  * - `newline` — Shift+Enter, or mid-IME composition. Never submits: an IME
  *   Enter is committing a candidate, not sending a message.
  * - `steer` — Cmd/Ctrl+Enter where the host wired `onSteer`.
+ * - `ask` — Cmd/Ctrl+Enter where the host wired `onAsk`.
  * - `send` — everything else that is submittable.
  * - `blocked` — Enter that would submit, but the composer says no.
+ *
+ * Steer and ask share the Accel+Enter chord because no host offers both: a
+ * steer only exists mid-turn outside a room, an ask only inside one. Steer
+ * takes precedence so wiring both can never silently drop a mid-turn steer.
  */
-export type ComposerEnterIntent = 'send' | 'steer' | 'newline' | 'blocked'
+export type ComposerEnterIntent = 'send' | 'steer' | 'ask' | 'newline' | 'blocked'
 
 export function resolveEnterIntent(params: {
   shiftKey: boolean
@@ -175,11 +190,15 @@ export function resolveEnterIntent(params: {
   hasText: boolean
   allowEmptySend: boolean
   canSteer: boolean
+  canAsk: boolean
 }): ComposerEnterIntent {
   if (params.shiftKey || params.isComposing) return 'newline'
   if (params.disabled || params.sendDisabled) return 'blocked'
   if (!params.hasText && !params.allowEmptySend) return 'blocked'
-  if ((params.metaKey || params.ctrlKey) && params.canSteer) return 'steer'
+  if (params.metaKey || params.ctrlKey) {
+    if (params.canSteer) return 'steer'
+    if (params.canAsk) return 'ask'
+  }
   return 'send'
 }
 
@@ -243,7 +262,7 @@ export function ChatComposer(props: ChatComposerProps) {
 
       // Enter alone sends; Shift+Enter inserts a newline. Matches every other
       // chat UI; consumers can wrap and override if needed. Cmd/Ctrl+Enter
-      // sends as a steer where the host supports one.
+      // sends as a steer, or as an ask, where the host supports one.
       if (event.key !== 'Enter') return
       const intent = resolveEnterIntent({
         shiftKey: event.shiftKey,
@@ -255,10 +274,12 @@ export function ChatComposer(props: ChatComposerProps) {
         hasText: props.value.trim().length > 0,
         allowEmptySend: props.allowEmptySend === true,
         canSteer: typeof props.onSteer === 'function',
+        canAsk: typeof props.onAsk === 'function',
       })
       if (intent === 'newline') return
       event.preventDefault()
       if (intent === 'steer') props.onSteer?.()
+      else if (intent === 'ask') props.onAsk?.()
       else if (intent === 'send') props.onSend()
     },
     [props],

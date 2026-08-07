@@ -63,6 +63,7 @@ export const OVERHEAD_SOURCES = [
   'overhead:distribution-safety',
   'overhead:distribution-draft',
   'overhead:skill-review',
+  'overhead:playbook-reflection',
   // Migration 305 additions (2026-07-07): async embedding-worker batches,
   // the GENERATE/blueprint synthesis engine, and the goal clarity gate +
   // completion verifier.

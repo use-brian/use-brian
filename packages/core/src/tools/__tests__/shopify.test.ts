@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { createShopifyTools, type ShopifyApi } from '../base/shopify.js'
+import { SHOPIFYQL_SCHEMAS } from '../base/shopify-analytics-catalog.js'
 
 function mockApi(overrides: Partial<ShopifyApi> = {}): ShopifyApi {
   const emptyConn = { edges: [], pageInfo: { hasNextPage: false } }
@@ -122,7 +123,7 @@ const DESTRUCTIVE_TOOLS = [
 ]
 
 describe('[COMP:tools/shopify] Shopify tools', () => {
-  it('creates the full 38-tool catalog', () => {
+  it('creates the full 40-tool catalog', () => {
     const tools = createShopifyTools(mockApi())
     expect(tools).toHaveLength(40)
     expect(tools.map((t) => t.name).sort()).toEqual(
@@ -392,16 +393,26 @@ describe('[COMP:tools/shopify] Shopify tools', () => {
     })
   })
 
-  it('shopifyStorefrontFunnel derives the cart drop-off and keys rows by column name', async () => {
+  const FUNNEL_COLUMNS = [
+    { name: 'sessions', dataType: 'INTEGER' },
+    { name: 'sessions_with_cart_additions', dataType: 'INTEGER' },
+    { name: 'sessions_that_reached_checkout', dataType: 'INTEGER' },
+    { name: 'sessions_that_completed_checkout', dataType: 'INTEGER' },
+  ]
+
+  it('shopifyStorefrontFunnel derives the cart drop-off from Shopify\'s real row shape', async () => {
+    // Rows come back keyed by column name with STRING values - verified live,
+    // and the opposite of what this test originally asserted. Positional
+    // indexing produced undefined for every column and failed silently.
     const api = mockApi({
       storefrontFunnel: vi.fn().mockResolvedValue({
-        columns: [
-          { name: 'sessions', dataType: 'number' },
-          { name: 'sessions_with_cart_additions', dataType: 'number' },
-          { name: 'sessions_that_reached_checkout', dataType: 'number' },
-          { name: 'sessions_that_completed_checkout', dataType: 'number' },
-        ],
-        rows: [[1000, 180, 60, 42]],
+        columns: FUNNEL_COLUMNS,
+        rows: [{
+          sessions: '1000',
+          sessions_with_cart_additions: '180',
+          sessions_that_reached_checkout: '60',
+          sessions_that_completed_checkout: '42',
+        }],
         shopifyql: 'FROM sessions SHOW ...',
       }),
     })
@@ -409,10 +420,44 @@ describe('[COMP:tools/shopify] Shopify tools', () => {
     const result = await tool.execute({ since: '-7d' }, {} as never)
     const data = result.data as Record<string, unknown>
     const rows = data.rows as Array<Record<string, unknown>>
-    expect(rows[0].sessions).toBe(1000)
+    expect(rows[0].sessions).toBe('1000')
     // 180 added to cart, only 60 ever reached checkout.
     expect(rows[0].added_to_cart_but_never_reached_checkout).toBe(120)
     expect(rows[0].reached_checkout_but_never_completed).toBe(18)
+    expect(data.no_human_sessions).toBeUndefined()
+  })
+
+  it('shopifyStorefrontFunnel still handles positional rows', async () => {
+    // Defensive: the GraphQL field is opaque JSON, so the shape is not a
+    // contract. Zipping against columns keeps an array form working.
+    const api = mockApi({
+      storefrontFunnel: vi.fn().mockResolvedValue({
+        columns: FUNNEL_COLUMNS,
+        rows: [[1000, 180, 60, 42]],
+        shopifyql: 'FROM sessions SHOW ...',
+      }),
+    })
+    const tool = createShopifyTools(api).find((t) => t.name === 'shopifyStorefrontFunnel')!
+    const result = await tool.execute({}, {} as never)
+    const rows = (result.data as Record<string, unknown>).rows as Array<Record<string, unknown>>
+    expect(rows[0].sessions).toBe(1000)
+    expect(rows[0].added_to_cart_but_never_reached_checkout).toBe(120)
+  })
+
+  it('shopifyStorefrontFunnel names an all-bot store rather than reporting a bare zero', async () => {
+    // A store whose every visit was a bot returns zero sessions once the bot
+    // filter applies - and Shopify drops the column list too when a filtered
+    // group matches nothing, so the result looks broken unless it is named.
+    const api = mockApi({
+      storefrontFunnel: vi.fn().mockResolvedValue({
+        columns: [{ name: 'sessions', dataType: 'INTEGER' }],
+        rows: [{ sessions: '0' }],
+        shopifyql: 'FROM sessions SHOW ...',
+      }),
+    })
+    const tool = createShopifyTools(api).find((t) => t.name === 'shopifyStorefrontFunnel')!
+    const result = await tool.execute({}, {} as never)
+    expect(String((result.data as Record<string, unknown>).no_human_sessions)).toMatch(/not a failed query/i)
   })
 
   it('shopifyStorefrontFunnel states that cart abandoners cannot be contacted', async () => {
@@ -436,6 +481,84 @@ describe('[COMP:tools/shopify] Shopify tools', () => {
     expect(String(result.data)).toMatch(/rejected/i)
     // The specific failure must survive to the model so it can fix the query.
     expect(String(result.data)).toMatch(/sesions/)
+  })
+
+  /** Shopify's real rejection wording for an unknown column. */
+  const columnNotFound = (col: string) =>
+    new Error(`ShopifyQL query was rejected: Column Not Found: Column '${col}' not found`)
+
+  it('shopifyAnalyticsQuery says WHERE a column lives when it belongs to another schema', async () => {
+    // The exact 20-minute loop: `new_customers` is a real metric, but of
+    // `sales`, not `customers`. Naming the right schema ends it in one step.
+    const api = mockApi({ runAnalyticsQuery: vi.fn().mockRejectedValue(columnNotFound('new_customers')) })
+    const tool = createShopifyTools(api).find((t) => t.name === 'shopifyAnalyticsQuery')!
+    const result = await tool.execute(
+      { query: 'FROM customers SHOW new_customers SINCE -6m UNTIL today' }, {} as never,
+    )
+    expect(result.isError).toBe(true)
+    expect(String(result.data)).toContain('"sales"')
+    expect(String(result.data)).toContain('new_customer_records')
+  })
+
+  it('shopifyAnalyticsQuery offers the nearest real names for an invented column', async () => {
+    // `customer_type` exists in no schema at all - the model made it up.
+    const api = mockApi({ runAnalyticsQuery: vi.fn().mockRejectedValue(columnNotFound('customer_type')) })
+    const tool = createShopifyTools(api).find((t) => t.name === 'shopifyAnalyticsQuery')!
+    const result = await tool.execute(
+      { query: 'FROM customers SHOW total_amount_spent GROUP BY customer_type SINCE -6m UNTIL today' }, {} as never,
+    )
+    const data = String(result.data)
+    expect(data).toMatch(/closest names/i)
+    // The full metric list is short enough to state outright, and is what SHOW needs.
+    expect(data).toContain('new_customer_records')
+    expect(data).toMatch(/cannot be guessed/i)
+  })
+
+  it('shopifyAnalyticsQuery stops after repeated rejections instead of looping', async () => {
+    // Each rejection reads as "almost right, try again", so nothing about a
+    // single failure tells the model to stop. The cap is what does.
+    const api = mockApi({ runAnalyticsQuery: vi.fn().mockRejectedValue(columnNotFound('nope')) })
+    const tool = createShopifyTools(api).find((t) => t.name === 'shopifyAnalyticsQuery')!
+    const q = { query: 'FROM customers SHOW nope SINCE -6m UNTIL today' }
+    for (let i = 0; i < 3; i++) await tool.execute(q, {} as never)
+    const result = await tool.execute(q, {} as never)
+    expect(result.isError).toBe(true)
+    expect(String(result.data)).toMatch(/stopping/i)
+    expect(String(result.data)).toMatch(/do not try another spelling/i)
+    // The cap must not spend another call on a query it has already refused.
+    expect(api.runAnalyticsQuery).toHaveBeenCalledTimes(3)
+  })
+
+  it('shopifyAnalyticsQuery resets the rejection count after a success', async () => {
+    const runAnalyticsQuery = vi.fn()
+      .mockRejectedValueOnce(columnNotFound('nope'))
+      .mockResolvedValueOnce({ columns: [{ name: 'sessions', dataType: 'INTEGER' }], rows: [{ sessions: '5' }] })
+      .mockRejectedValue(columnNotFound('nope'))
+    const tool = createShopifyTools(mockApi({ runAnalyticsQuery })).find((t) => t.name === 'shopifyAnalyticsQuery')!
+    await tool.execute({ query: 'FROM sessions SHOW nope SINCE -7d UNTIL today' }, {} as never)
+    await tool.execute({ query: 'FROM sessions SHOW sessions SINCE -7d UNTIL today' }, {} as never)
+    // Two more failures must not trip a limit that a success already cleared.
+    await tool.execute({ query: 'FROM sessions SHOW nope SINCE -7d UNTIL today' }, {} as never)
+    const result = await tool.execute({ query: 'FROM sessions SHOW nope SINCE -7d UNTIL today' }, {} as never)
+    expect(String(result.data)).not.toMatch(/stopping/i)
+  })
+
+  it('shopifyAnalyticsQuery refuses a non-existent schema without calling Shopify', async () => {
+    // "orders" and "products" read like obvious schemas and are not - the tool
+    // description used to claim both, which is how the model learned them.
+    const api = mockApi()
+    const tool = createShopifyTools(api).find((t) => t.name === 'shopifyAnalyticsQuery')!
+    const result = await tool.execute({ query: 'FROM orders SHOW orders SINCE -30d UNTIL today' }, {} as never)
+    expect(result.isError).toBe(true)
+    expect(String(result.data)).toContain('"sales"')
+    expect(api.runAnalyticsQuery).not.toHaveBeenCalled()
+  })
+
+  it('shopifyAnalyticsQuery advertises only schemas it can spell for', async () => {
+    const tool = createShopifyTools(mockApi()).find((t) => t.name === 'shopifyAnalyticsQuery')!
+    for (const schema of SHOPIFYQL_SCHEMAS) expect(tool.description).toContain(schema)
+    // The two that never existed must not reappear as advertised schemas.
+    expect(tool.description).toMatch(/no "orders" or "products" schema/i)
   })
 
   it('shopifyGetPayoutsSummary flags non-Shopify-Payments stores honestly', async () => {
@@ -536,4 +659,44 @@ describe('[COMP:tools/shopify] Shopify tools', () => {
     const result = await tool.execute({ orderId: '404' }, {} as never)
     expect(result.isError).toBe(true)
   })
+  it('shopifyAddProductImage turns a not-found reference into the saveFileToBrain step', async () => {
+    // The failure this replaces: a merchant's assistant was handed a chat
+    // attachment id, got a bare "not found", read that as a wrong reference,
+    // and retried with other references six times without ever promoting the
+    // file. The remedy has to travel with the error.
+    const addProductImage = vi.fn()
+    const readFileBytes = vi.fn().mockResolvedValue({
+      error: 'File f4e9383d-aa37-498b-92c2-3dc10b19ef77 not found in this workspace.',
+      notFound: true,
+    })
+    const tool = createShopifyTools(mockApi({ addProductImage }), { readFileBytes }).find(
+      (t) => t.name === 'shopifyAddProductImage',
+    )!
+    const result = await tool.execute(
+      { productId: '2', file: 'f4e9383d-aa37-498b-92c2-3dc10b19ef77' },
+      {} as never,
+    )
+    expect(result.isError).toBe(true)
+    const msg = String(result.data)
+    expect(msg).toContain('saveFileToBrain')
+    // The id must be echoed, so the next call needs no guessing.
+    expect(msg).toContain('f4e9383d-aa37-498b-92c2-3dc10b19ef77')
+    expect(msg).toMatch(/do not retry this tool with the same id/i)
+    expect(addProductImage).not.toHaveBeenCalled()
+  })
+
+  it('shopifyAddProductImage does not suggest saveFileToBrain for failures that are not a missing file', async () => {
+    // A quota or permission error has nothing to do with promotion; pointing
+    // at saveFileToBrain there would send the model down a dead end of its own.
+    const addProductImage = vi.fn()
+    const readFileBytes = vi.fn().mockResolvedValue({ error: 'Workspace storage quota exceeded.' })
+    const tool = createShopifyTools(mockApi({ addProductImage }), { readFileBytes }).find(
+      (t) => t.name === 'shopifyAddProductImage',
+    )!
+    const result = await tool.execute({ productId: '2', file: '/products/x.jpg' }, {} as never)
+    expect(result.isError).toBe(true)
+    expect(String(result.data)).toBe('Workspace storage quota exceeded.')
+    expect(String(result.data)).not.toContain('saveFileToBrain')
+  })
+
 })

@@ -70,7 +70,7 @@ class FakeSocket {
   }
 }
 
-describe("[COMP:app-desktop/firefox-native-host] Firefox BiDi executor", () => {
+describe("[COMP:ext/firefox-companion] Firefox BiDi executor", () => {
   it("binds the focused tab and executes the fixed operation vocabulary", async () => {
     const socket = new FakeSocket();
     const executor = new FirefoxBidiExecutor("ws://127.0.0.1:9222/session", () => socket);

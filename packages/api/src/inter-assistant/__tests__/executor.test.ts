@@ -91,6 +91,12 @@ import { billingPartyForAssistant } from '../../billing-party.js'
 import { runProactiveCompaction } from '../../routes/proactive-compaction.js'
 import { injectDocTools } from '../../doc/inject.js'
 import { injectMcpTools } from '../../mcp/inject.js'
+import {
+  encodeExternalCostMeta,
+  engineCostModel,
+  flatEngineCostUsd,
+  flatSearchCostUsd,
+} from '@use-brian/core'
 
 const mockInjectDoc = vi.mocked(injectDocTools)
 const mockInjectMcp = vi.mocked(injectMcpTools)
@@ -843,6 +849,98 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     await callee({ ...baseParams, callerChannelType: 'workflow' })
 
     expect(recordUsage.mock.calls[0][0].triggerKey).toBe('workflow_assistant_call')
+  })
+
+  // ── External tool cost on the callee lane ───────────────────────────
+  // Until the recording seam was extracted out of routes/chat.ts, ONLY the
+  // interactive chat lane billed external APIs: the same paid call made from
+  // a workflow step, a scheduled job, or an A2A consult wrote nothing.
+
+  function toolResultWithCostMeta(name: string, meta: Record<string, string | number>) {
+    return [
+      {
+        type: 'tool_result',
+        id: '',
+        results: [{ type: 'tool_result', toolUseId: 't1', name, content: 'ok', isError: false }],
+        metaByToolUseId: { t1: meta },
+      },
+      { type: 'assistant_turn', response: { content: [{ type: 'text', text: 'done' }] }, toolResults: [] },
+      { type: 'turn_complete', response: { content: [{ type: 'text', text: 'done' }] } },
+    ]
+  }
+
+  function calleeWithUsage(recordUsage: ReturnType<typeof vi.fn>) {
+    return createCalleeExecutor({
+      provider: {} as never,
+      tools: new Map(),
+      memoryStore: memoryStore() as never,
+      capabilityStore: { listActive: vi.fn().mockResolvedValue([]) } as never,
+      usageStore: { recordUsage } as never,
+    })
+  }
+
+  it('records an engine tool result as external cost on a workflow run', async () => {
+    yields(
+      toolResultWithCostMeta('askPerplexity', {
+        engine: 'perplexity',
+        engineUnits: 4,
+        ...encodeExternalCostMeta({
+          kind: 'flat',
+          model: engineCostModel('perplexity'),
+          flatCostUsd: flatEngineCostUsd('perplexity') * 4,
+        }),
+      }),
+    )
+    const recordUsage = vi.fn().mockResolvedValue(undefined)
+
+    await calleeWithUsage(recordUsage)({ ...baseParams, callerChannelType: 'workflow' })
+
+    const row = recordUsage.mock.calls.map((c) => c[0]).find((r) => r.model === 'engine:perplexity')
+    expect(row).toMatchObject({
+      userId: 'owner-1',
+      assistantId: 'callee-1',
+      sessionId: 'sess-1',
+      inputTokens: 0,
+      outputTokens: 0,
+      source: 'included',
+      triggerKey: 'workflow_external_tool',
+    })
+    expect(row.actualCostUsd).toBeCloseTo(flatEngineCostUsd('perplexity') * 4)
+    // COGS-only: a userMessageId would pull it into the credit derivation.
+    expect(row.userMessageId).toBeUndefined()
+  })
+
+  it('records a webSearch tool result too — the pre-existing gap this closed', async () => {
+    yields(
+      toolResultWithCostMeta('webSearch', {
+        searchProvider: 'brave',
+        ...encodeExternalCostMeta({
+          kind: 'flat',
+          model: 'brave',
+          flatCostUsd: flatSearchCostUsd('brave'),
+        }),
+      }),
+    )
+    const recordUsage = vi.fn().mockResolvedValue(undefined)
+
+    await calleeWithUsage(recordUsage)(baseParams)
+
+    const row = recordUsage.mock.calls.map((c) => c[0]).find((r) => r.model === 'brave')
+    expect(row).toBeDefined()
+    expect(row.actualCostUsd).toBeCloseTo(flatSearchCostUsd('brave'))
+    expect(row.triggerKey).toBe('a2a_external_tool')
+  })
+
+  it('writes no external row for a tool that spent nothing', async () => {
+    yields(toolResultWithCostMeta('saveMemory', { saved: 1 }))
+    const recordUsage = vi.fn().mockResolvedValue(undefined)
+
+    await calleeWithUsage(recordUsage)(baseParams)
+
+    const externalRows = recordUsage.mock.calls
+      .map((c) => c[0])
+      .filter((r) => r.triggerKey?.endsWith('_external_tool'))
+    expect(externalRows).toHaveLength(0)
   })
 
   it('does not record usage when no usageStore is wired (no crash)', async () => {

@@ -29,7 +29,8 @@ import {
 import type { FilesApi, OutboundAttachment } from '@use-brian/core'
 import { resolveBrandContext } from '../brand/prompt-context.js'
 import type { IncomingMessage, OutgoingDocument } from '@use-brian/channels'
-import { parseFollowUps } from '@use-brian/shared'
+import { parseFollowUps, resolveCharter } from '@use-brian/shared'
+import { listActivePlaybookRules } from '../db/playbook-store.js'
 import { runProactiveCompaction } from './proactive-compaction.js'
 import { notifyBrainWriteIfMatch } from '../brain-stream/notify.js'
 import { recordOverheadUsage } from './_overhead-usage.js'
@@ -425,6 +426,9 @@ export type ChannelPipelineParams = {
    *  `turn_complete` for document delivery. Absent (dev without a blob
    *  client) → `sendFile` errors honestly on its missing-collector gate. */
   filesApi?: FilesApi
+  /** Upload-cache reader, so a photo just attached to this turn can be
+   *  promoted on demand (Shopify product images). Chat/channel paths only. */
+  readCachedFile?: (id: string, ctx: import('@use-brian/core').AccessContext) => Promise<import('@use-brian/core').CachedFile | null>
   /**
    * Promotes an over-threshold paste to a durable workspace_files artifact
    * (large-content-artifacts §Phase 3.2, decision D6). Wired once at boot from
@@ -589,7 +593,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     provider, systemPrompt, tools, memoryStore, usageStore,
     analytics, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore, connectorInstanceStore, workspaceToolPolicyStore,
     knowledgeStore, gdriveFilesStore, skillStore, workerManager,
-    episodicStore, sessionStateStore, workspaceFilesStore, filesApi,
+    episodicStore, sessionStateStore, workspaceFilesStore, filesApi, readCachedFile,
     replyToMessageId, replyRaw, incomingChannelMessageId,
     voiceTranscriptionUsage,
     senderUserId,
@@ -1048,6 +1052,15 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     }
   }
 
+  // Owner-admitted playbook rules → `## Playbook` in the charter block
+  // (growth loop Phase 3). A fetch error omits the section, never blocks.
+  let playbookRules: string[] = []
+  try {
+    playbookRules = await listActivePlaybookRules(assistant.id)
+  } catch (err) {
+    console.error(`[${channelType}] playbook rules fetch failed:`, err)
+  }
+
   // Provenance split: hidden application metadata remains in the trusted
   // system channel. Only the replied-to quote — content the user can see in
   // the messaging client — may prefix the newest user turn. This deliberately
@@ -1055,7 +1068,8 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // it into a user-role envelope caused the 2026-08-01 referent leak.
   const splitPrompt = buildSplitSystemPrompt({
     basePrompt: systemPrompt,
-    assistantInstructions: assistant.systemPrompt,
+    charter: resolveCharter(assistant),
+    playbookRules,
     workspaceEvolutionSnippet,
     currentDateTime,
     timezone: userTimezone,
@@ -1170,6 +1184,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         // Workspace-files byte layer — `gmailSendMessage` attachments on
         // channel turns (docs/architecture/integrations/gmail.md).
         filesApi,
+        readCachedFile,
         // Actor identity for opted-in connectors. `actorChannelId` is the
         // channel-native id captured from the inbound webhook by the channel
         // route (Slack user id / Telegram @handle / WhatsApp phone); email +

@@ -44,7 +44,7 @@ describe('[COMP:ext/agent] Manifest — narrow permissions (my-browser.md §6)',
   })
 
   it('keeps only the narrow permission set', () => {
-    expect(new Set(manifest.permissions)).toEqual(new Set(['tabs', 'storage']))
+    expect(new Set(manifest.permissions)).toEqual(new Set(['tabs', 'storage', 'debugger']))
   })
 
   it('declares no content scripts', () => {
@@ -53,23 +53,17 @@ describe('[COMP:ext/agent] Manifest — narrow permissions (my-browser.md §6)',
 })
 
 /**
- * Browser control is asked for, not assumed. `debugger` is the capability that
- * actually drives the browser, so it is the one a user should grant
- * deliberately, be able to refuse while keeping the extension, and take back
- * from chrome://extensions without losing their pairing. At install it bought
- * them nothing to accept — nothing works until they pair anyway — while making
- * the scariest grant the price of entry.
- *
- * Locks both halves: `debugger` stays out of the install-time set, and the
- * optional list does not quietly become a second place grants accumulate.
+ * Chrome explicitly forbids declaring `debugger` as optional. It must be
+ * accepted with the extension install; TaskGate remains the user-facing,
+ * per-task browser-control boundary.
  */
-describe('[COMP:ext/browser-control-permission] Manifest — debugger is opt-in', () => {
-  it('does not take browser control at install time', () => {
-    expect(manifest.permissions ?? []).not.toContain('debugger')
+describe('[COMP:ext/browser-control-permission] Manifest — debugger is required', () => {
+  it('declares browser control at install time', () => {
+    expect(manifest.permissions ?? []).toContain('debugger')
   })
 
-  it('offers browser control as the only optional permission', () => {
-    expect(new Set(manifest.optional_permissions)).toEqual(new Set(['debugger']))
+  it('does not declare unsupported optional permissions', () => {
+    expect(manifest.optional_permissions ?? []).toEqual([])
   })
 })
 

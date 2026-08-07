@@ -56,15 +56,16 @@ vi.mock('../../db/session-pins-store.js', async (importOriginal) => {
   return {
     ...actual,
     listSessionPins: vi.fn(async () => []),
-    addSessionPin: vi.fn(async (p: { sessionId: string; kind: string; addedByUserId: string }) => ({
+    addSessionPin: vi.fn(async (p: { sessionId: string; kind: string; refId?: string | null; addedByUserId?: string | null; addedByAssistantId?: string | null }) => ({
       id: 'pin-1',
       sessionId: p.sessionId,
       kind: p.kind,
-      refId: null,
+      refId: p.refId ?? null,
       url: null,
       text: null,
       position: 1,
-      addedByUserId: p.addedByUserId,
+      addedByUserId: p.addedByUserId ?? null,
+      addedByAssistantId: p.addedByAssistantId ?? null,
       createdAt: new Date(),
     })),
     removeSessionPin: vi.fn(async () => true),
@@ -202,6 +203,7 @@ function pin(over: Partial<SessionPin>): SessionPin {
     text: null,
     position: 0,
     addedByUserId: 'u-2',
+    addedByAssistantId: null,
     createdAt: new Date('2026-07-31T10:00:00Z'),
     ...over,
   } as SessionPin
@@ -295,5 +297,161 @@ describe('[COMP:api/room-pins] assembly resolution is an index, not stuffing (T1
     expect(
       await buildPinnedContextBlock({ sessionId: 's-room', workspaceId: 'ws-1', clearance: 'internal' }),
     ).toBeNull()
+  })
+})
+
+// ── Assistant attribution on GET (migration 421) ────────────────
+
+import { resolveSessionPinLabels } from '../../resolve-session-pins.js'
+
+const mockLabels = vi.mocked(resolveSessionPinLabels)
+
+describe('[COMP:api/room-pins] GET resolves assistant attribution (migration 421)', () => {
+  it('an assistant-added pin lists with the assistant name as addedByName', async () => {
+    mockFindSession.mockResolvedValue(roomSession())
+    mockListPins.mockResolvedValue([
+      pin({
+        id: 'pin-a',
+        kind: 'task',
+        refId: 'aaaaaaaa-0000-0000-0000-000000000001',
+        addedByUserId: null,
+        addedByAssistantId: 'a-1',
+      }),
+    ])
+    mockLabels.mockResolvedValue(new Map([['pin-a', 'Ship the Q3 deck']]))
+    mockQuery.mockImplementation(async (sql: string) => {
+      if (sql.includes('ANY($1::uuid[])')) {
+        return { rows: [{ id: 'a-1', name: 'Brian' }], rowCount: 1 } as never
+      }
+      if (sql.includes('FROM assistants')) {
+        return { rows: [{ workspaceId: 'ws-1' }], rowCount: 1 } as never
+      }
+      return { rows: [], rowCount: 0 } as never
+    })
+    const res = await request(makeApp()).get('/api/sessions/s-room/pins')
+    expect(res.status).toBe(200)
+    expect(res.body[0]).toMatchObject({
+      id: 'pin-a',
+      label: 'Ship the Q3 deck',
+      addedByUserId: null,
+      addedByAssistantId: 'a-1',
+      addedByName: 'Brian',
+    })
+  })
+})
+
+// ── Tool-half: the assistant's write access (room pin tools) ────
+
+import { createSessionPinTools } from '../../session-pin-tools.js'
+import type { ToolContext } from '@use-brian/core'
+
+const toolCtx = {
+  userId: 'u-2',
+  assistantId: 'a-1',
+  sessionId: 's-room',
+  appId: 'Use Brian',
+  channelType: 'web',
+  channelId: 'chan-1',
+  abortSignal: new AbortController().signal,
+} as ToolContext
+
+describe('[COMP:api/room-pin-tools] assistant pin tools (room-only write access)', () => {
+  const REF = 'aaaaaaaa-0000-0000-0000-000000000001'
+
+  const makeTools = (published: SessionEvent[] = []) =>
+    createSessionPinTools({
+      sessionId: 's-room',
+      workspaceId: 'ws-1',
+      clearance: 'internal',
+      assistantId: 'a-1',
+      publishSessionEvent: (e) => published.push(e),
+    })
+
+  beforeEach(() => {
+    mockListPins.mockResolvedValue([])
+    mockLabels.mockResolvedValue(new Map())
+  })
+
+  it('addPin resolves the ref first, writes with assistant attribution, and signals byAssistantId', async () => {
+    mockLabels.mockResolvedValue(new Map([['candidate', 'Ship the Q3 deck']]))
+    const published: SessionEvent[] = []
+    const { addPin } = makeTools(published)
+    const result = await addPin.execute({ kind: 'task', refId: REF }, toolCtx)
+    expect(result.isError).toBeUndefined()
+    expect(String(result.data)).toContain('Ship the Q3 deck')
+    expect(mockAddPin).toHaveBeenCalledTimes(1)
+    expect(mockAddPin.mock.calls[0][0]).toMatchObject({
+      sessionId: 's-room',
+      kind: 'task',
+      refId: REF,
+      addedByAssistantId: 'a-1',
+    })
+    expect(mockAddPin.mock.calls[0][0]).not.toHaveProperty('addedByUserId', expect.any(String))
+    expect(published).toEqual([
+      { kind: 'pins_changed', sessionId: 's-room', payload: { byAssistantId: 'a-1' } },
+    ])
+  })
+
+  it('addPin rejects a ref that does not resolve (hallucinated / out-of-workspace id) — nothing written', async () => {
+    mockLabels.mockResolvedValue(new Map([['candidate', null]]))
+    const published: SessionEvent[] = []
+    const { addPin } = makeTools(published)
+    const result = await addPin.execute({ kind: 'task', refId: REF }, toolCtx)
+    expect(result.isError).toBe(true)
+    expect(mockAddPin).not.toHaveBeenCalled()
+    expect(published).toEqual([])
+  })
+
+  it('addPin validates payload like the route (shared validator)', async () => {
+    const { addPin } = makeTools()
+    expect((await addPin.execute({ kind: 'task', refId: 'nope' }, toolCtx)).isError).toBe(true)
+    expect((await addPin.execute({ kind: 'url', url: 'ftp://x' }, toolCtx)).isError).toBe(true)
+    expect(mockAddPin).not.toHaveBeenCalled()
+  })
+
+  it('addPin answers idempotently for an identical existing pin', async () => {
+    mockLabels.mockResolvedValue(new Map([['candidate', 'Ship the Q3 deck']]))
+    mockListPins.mockResolvedValue([
+      pin({ id: 'pin-exist', kind: 'task', refId: REF }),
+    ])
+    const published: SessionEvent[] = []
+    const { addPin } = makeTools(published)
+    const result = await addPin.execute({ kind: 'task', refId: REF }, toolCtx)
+    expect(result.isError).toBeUndefined()
+    expect(String(result.data)).toContain('Already pinned')
+    expect(String(result.data)).toContain('pin-exist')
+    expect(mockAddPin).not.toHaveBeenCalled()
+    expect(published).toEqual([])
+  })
+
+  it('removePin: unknown id errors without a signal; a removed pin signals byAssistantId', async () => {
+    const published: SessionEvent[] = []
+    const { removePin } = makeTools(published)
+
+    mockRemovePin.mockResolvedValueOnce(false)
+    const miss = await removePin.execute({ pinId: '99999999-9999-4999-8999-999999999999' }, toolCtx)
+    expect(miss.isError).toBe(true)
+    expect(published).toEqual([])
+
+    mockRemovePin.mockResolvedValueOnce(true)
+    const hit = await removePin.execute({ pinId: '99999999-9999-4999-8999-999999999999' }, toolCtx)
+    expect(hit.isError).toBeUndefined()
+    expect(published).toEqual([
+      { kind: 'pins_changed', sessionId: 's-room', payload: { byAssistantId: 'a-1' } },
+    ])
+  })
+
+  it('listPins returns pin ids for removal', async () => {
+    mockListPins.mockResolvedValue([
+      pin({ id: 'pin-a', kind: 'task', refId: REF }),
+      pin({ id: 'pin-b', kind: 'instruction', refId: null, text: 'Keep replies short.' }),
+    ])
+    mockLabels.mockResolvedValue(new Map([['pin-a', 'Ship the Q3 deck'], ['pin-b', 'Keep replies short.']]))
+    const { listPins } = makeTools()
+    const result = await listPins.execute({}, toolCtx)
+    expect(String(result.data)).toContain('pin id: pin-a')
+    expect(String(result.data)).toContain('Ship the Q3 deck')
+    expect(String(result.data)).toContain('pin id: pin-b')
+    expect(String(result.data)).toContain('Keep replies short.')
   })
 })

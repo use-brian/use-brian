@@ -21,7 +21,10 @@
  *     can open it); the label flips to "Link copied" briefly.
  *   - **Favorite star** — toggles saved/draft (a saved page is a Favorite).
  *   - **⋯ menu** — Duplicate / Full width / Delete, via the on-brand
- *     `DropdownMenu` + `confirmDialog` for the destructive delete.
+ *     `DropdownMenu` + `confirmDialog` for the destructive delete. Also the
+ *     entry point for "Link a recording" (`onLinkRecording`, present only when
+ *     the page carries no recording) — most pages never link one, so the
+ *     affordance lives here rather than as always-visible chrome in the body.
  *
  * The big editable title lives in the page *body* (`PageTitle`) — the bar is
  * chrome, the title is content. The **top "layer"** (tabs + back/forward +
@@ -86,6 +89,11 @@ type PageHeaderProps = {
   /** Snapshot this page's current content as a reusable custom template (the
    *  ⋯ menu "Save as template"). When absent the item is hidden. */
   onSaveAsTemplate?: (id: string) => void;
+  /** Open the "Link a recording" picker in the doc body (the ⋯ menu entry
+   *  point for the manual link, recordings.md → "Two ways a page gets a
+   *  recording"). Passed only when the page has NO recording — an anchor-
+   *  derived or already-linked page hides the item. */
+  onLinkRecording?: () => void;
   /** Current Notion-style page-width mode (false = constrained column). */
   fullWidth: boolean;
   /** Flip the page-width mode (per-page, persisted). Lives in the ⋯ menu. */
@@ -127,6 +135,7 @@ export function PageHeader({
   onRenameValue,
   onDuplicate,
   onSaveAsTemplate,
+  onLinkRecording,
   fullWidth,
   onToggleFullWidth,
   memberClearance,
@@ -134,7 +143,8 @@ export function PageHeader({
   assistantId,
   currentUser,
 }: PageHeaderProps) {
-  const t = useT().docPage;
+  const dict = useT();
+  const t = dict.docPage;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -453,6 +463,15 @@ export function PageHeader({
               <DropdownMenuItem onClick={() => importInputRef.current?.click()}>
                 {t.importFile}
               </DropdownMenuItem>
+              {/* "Link a recording" — the manual-link entry point (migration
+                  339), demoted from an always-visible body button: only shown
+                  when the page has no recording, and the picker itself mounts
+                  in the doc body on demand. */}
+              {onLinkRecording ? (
+                <DropdownMenuItem onClick={onLinkRecording}>
+                  {dict.recordings.linkTitle}
+                </DropdownMenuItem>
+              ) : null}
               <DropdownMenuSeparator />
               {/* Full width — a Notion-style switch ROW (label left, Switch
                   right), NOT a DropdownMenuItem: base-ui `Menu.Item` closes the

@@ -56,6 +56,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import {
   SensitivityAccumulator,
   extractEffectContract,
+  validateLocalRecording,
   isSensitivity,
   minSensitivity,
   applyOps,
@@ -1612,6 +1613,9 @@ export function buildWriteBrowserSkillTool(store: BrowserSkillStore, workspaceId
             action: z.string().max(60),
             url: z.string().max(2_000).nullish(),
             detail: z.string().max(500).nullish(),
+            text: z.string().max(10_000).nullish(),
+            param: z.string().max(120).nullish(),
+            description: z.string().max(500).nullish(),
           }),
         )
         .min(1)
@@ -1650,7 +1654,17 @@ export function buildWriteBrowserSkillTool(store: BrowserSkillStore, workspaceId
           true,
         )
       }
+      const recordingError = validateLocalRecording({
+        site: input.site,
+        code: input.code,
+        recording: input.recording,
+        contract,
+      })
+      if (recordingError) return text(`Rejected: ${recordingError}`, true)
       const existing = await store.getByName({ workspaceId, name: input.name })
+      if (existing && existing.site !== input.site) {
+        return text(`Rejected: an existing skill cannot change sites (${existing.site} -> ${input.site}).`, true)
+      }
       const skill = existing
         ? await store.update(existing.id, {
             description: input.description,
