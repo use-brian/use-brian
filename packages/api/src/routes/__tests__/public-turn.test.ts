@@ -22,7 +22,12 @@ vi.mock('../../db/sessions.js', () => ({
   truncateMessagesFrom: vi.fn(),
 }))
 
-import { buildEndUserIdentityContext, extractText, handlePublicHistory } from '../public-turn.js'
+import {
+  buildEndUserIdentityContext,
+  extractText,
+  handlePublicHistory,
+  resolvePublicContextBlock,
+} from '../public-turn.js'
 import { formatPrivateRuntimeContext } from '../_prompt-builder.js'
 import { findUserByAuthProvider } from '../../db/users.js'
 import { findSessionByChannel, getSessionMessages } from '../../db/sessions.js'
@@ -61,6 +66,41 @@ describe('[COMP:api/public-turn] Shared public turn pipeline', () => {
     it('returns empty for non-array garbage', () => {
       expect(extractText({ nope: true })).toBe('')
       expect(extractText(null)).toBe('')
+    })
+  })
+
+  describe('resolvePublicContextBlock', () => {
+    it('injects the assistant-name override on an anonymous (Tier-2) turn', () => {
+      const block = resolvePublicContextBlock({
+        isIdentified: false,
+        assistantName: 'SDR',
+        memoryContext: '',
+      })
+      expect(block).toContain('## Your Name')
+      expect(block).toContain('The user has named you "SDR"')
+    })
+
+    it('stays empty on an anonymous turn when the assistant keeps the default name', () => {
+      expect(
+        resolvePublicContextBlock({
+          isIdentified: false,
+          assistantName: 'My Assistant',
+          memoryContext: '',
+        }),
+      ).toBe('')
+    })
+
+    it('passes the memory context through verbatim on an identified turn (no double injection)', () => {
+      // Tier 1 memory context already carries the override via
+      // buildMemoryContext - the block must not append a second copy.
+      const memoryContext = '## Your Name\nThe user has named you "SDR". ...\n\n## Identity\n- fact'
+      expect(
+        resolvePublicContextBlock({
+          isIdentified: true,
+          assistantName: 'SDR',
+          memoryContext,
+        }),
+      ).toBe(memoryContext)
     })
   })
 

@@ -22,6 +22,7 @@
 import { randomUUID } from 'node:crypto'
 import {
   queryLoop,
+  buildAssistantNameSection,
   buildMemoryContext,
   createMemoryTools,
   calculateCost,
@@ -248,6 +249,29 @@ export function buildEndUserIdentityContext(
   }
 
   return `# End user\n\n${lines.join('\n')}`
+}
+
+/**
+ * The context block appended after Layer 1 + Layer 2 on a public turn.
+ *
+ * Tier 1 (identified): the full memory context, which already carries
+ * the `## Your Name` override via `buildMemoryContext`. Tier 2
+ * (anonymous): no memory context exists for a shadow visitor - but the
+ * assistant's display name is configuration, not memory, so the
+ * override still applies. Without it the anonymous prompt was Layer 1 +
+ * Layer 2 alone, and the model answered "who are you" with Layer 1's
+ * "I'm Use Brian, the shared brain for this workspace" on exactly the
+ * surfaces where strangers meet a named assistant (chat links, Tier-2
+ * keyed-API turns) - the 2026-08-07 "SDR" report. Exported for direct
+ * test coverage.
+ */
+export function resolvePublicContextBlock(params: {
+  isIdentified: boolean
+  assistantName: string | null
+  memoryContext: string
+}): string {
+  if (params.isIdentified) return params.memoryContext
+  return buildAssistantNameSection(params.assistantName) ?? ''
 }
 
 const RETRY_HINT =
@@ -585,8 +609,15 @@ export async function executePublicTurn(
   const assistantSystemPrompt = assistant.systemPrompt
     ? `${deps.systemPrompt}\n\n${assistant.systemPrompt}`
     : deps.systemPrompt
-  const promptWithMemory = memoryContext
-    ? `${assistantSystemPrompt}\n\n${memoryContext}`
+  // Tier-2 turns still get the assistant-name override even though they
+  // carry no memory context - see `resolvePublicContextBlock`.
+  const contextBlock = resolvePublicContextBlock({
+    isIdentified,
+    assistantName: assistant.name,
+    memoryContext,
+  })
+  const promptWithMemory = contextBlock
+    ? `${assistantSystemPrompt}\n\n${contextBlock}`
     : assistantSystemPrompt
   // Append the unavailable-capabilities block so the model doesn't
   // burn turns hunting for tools that aren't connected. Same pattern
