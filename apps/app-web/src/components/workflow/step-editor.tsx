@@ -478,10 +478,16 @@ function ExecutionFields({
   const [maxTurnsDraft, setMaxTurnsDraft] = useState<string>(
     step.maxTurns == null ? "" : String(step.maxTurns),
   );
-  // Keep the local draft in sync if the step changes externally (e.g. type
+  const [timeoutDraft, setTimeoutDraft] = useState<string>(
+    step.depth?.timeoutMs == null ? "" : String(Math.round(step.depth.timeoutMs / 1000)),
+  );
+  // Keep the local drafts in sync if the step changes externally (e.g. type
   // switch or workspace switch). Only resets on identity-changing edits.
   useEffect(() => {
     setMaxTurnsDraft(step.maxTurns == null ? "" : String(step.maxTurns));
+    setTimeoutDraft(
+      step.depth?.timeoutMs == null ? "" : String(Math.round(step.depth.timeoutMs / 1000)),
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step.id]);
 
@@ -499,6 +505,34 @@ function ExecutionFields({
     const clamped = Math.min(Math.max(parsed, 1), 60);
     if (clamped !== parsed) setMaxTurnsDraft(String(clamped));
     if (clamped !== step.maxTurns) onChange({ ...step, maxTurns: clamped });
+  }
+
+  // Timeout is authored in SECONDS and persisted as `depth.timeoutMs`
+  // (1s..900s, mirroring RESEARCH_BUDGET_FLOOR/CEILING). Empty = the
+  // executor default (90s; deep research 300s). Other `depth` fields are
+  // preserved untouched; an all-empty depth object is dropped entirely.
+  function commitTimeout() {
+    const trimmed = timeoutDraft.trim();
+    if (trimmed === "") {
+      if (step.depth?.timeoutMs != null) {
+        const { timeoutMs: _dropped, ...rest } = step.depth;
+        onChange({ ...step, depth: Object.keys(rest).length > 0 ? rest : undefined });
+      }
+      return;
+    }
+    const parsed = Number.parseInt(trimmed, 10);
+    if (!Number.isFinite(parsed)) {
+      setTimeoutDraft(
+        step.depth?.timeoutMs == null ? "" : String(Math.round(step.depth.timeoutMs / 1000)),
+      );
+      return;
+    }
+    const clampedSecs = Math.min(Math.max(parsed, 1), 900);
+    if (clampedSecs !== parsed) setTimeoutDraft(String(clampedSecs));
+    const timeoutMs = clampedSecs * 1000;
+    if (timeoutMs !== step.depth?.timeoutMs) {
+      onChange({ ...step, depth: { ...step.depth, timeoutMs } });
+    }
   }
 
   return (
@@ -558,6 +592,23 @@ function ExecutionFields({
           disabled={disabled}
           placeholder="-"
           aria-label={b.stepMaxTurnsLabel}
+          className={cn(RAIL_INPUT_CLS, "w-20 text-right")}
+        />
+      </div>
+
+      <div className="flex items-center justify-between gap-3">
+        <FieldLabel label={b.stepTimeoutLabel} hint={b.stepTimeoutHint} />
+        <input
+          type="number"
+          inputMode="numeric"
+          min={1}
+          max={900}
+          value={timeoutDraft}
+          onChange={(e) => setTimeoutDraft(e.target.value)}
+          onBlur={commitTimeout}
+          disabled={disabled}
+          placeholder="90"
+          aria-label={b.stepTimeoutLabel}
           className={cn(RAIL_INPUT_CLS, "w-20 text-right")}
         />
       </div>

@@ -37,7 +37,13 @@ import {
   useMessageStream,
   type Message,
 } from "@use-brian/chat-ui";
+import { cn } from "@/lib/utils";
 import { authFetch } from "@/lib/auth-fetch";
+import {
+  useMidTurnQueue,
+  joinQueuedInputs,
+} from "@/lib/use-mid-turn-queue";
+import { QueuedInputs } from "@/components/ui/queued-inputs";
 import { fetchFeedSessionIdByChannel } from "@/lib/api/feed";
 import { fetchSessionMessages, extractMessageText } from "@/lib/api/sessions";
 import { getUsage } from "@/lib/api/usage";
@@ -165,6 +171,7 @@ export const TuningChatPanel = forwardRef<
   } = props;
 
   const t = useT().feedPage.tuningChat;
+  const tQueue = useT().chat.queue;
   const session = useChatSession();
   const stream = useMessageStream();
   const [input, setInput] = useState("");
@@ -302,6 +309,62 @@ export const TuningChatPanel = forwardRef<
     el.scrollTop = el.scrollHeight;
   }, [session.state.messages, session.state.streamingText]);
 
+  /**
+   * Mid-turn input (queue + steer) — a message sent while a turn streams is
+   * handed to the RUNNING turn instead of being blocked.
+   * See docs/architecture/engine/mid-turn-input.md.
+   */
+  const midTurn = useMidTurnQueue({
+    stream,
+    getSessionId: () => fixedSessionId ?? sessionIdRef.current,
+    ...(workspaceId ? { workspaceId } : {}),
+    getAssistantId: () => assistantId,
+  });
+  /** `sendMessage` is called from inside its own `onDone` (the flush). */
+  const sendMessageRef = useRef<
+    ((text: string, fileIds: string[]) => Promise<boolean>) | null
+  >(null);
+
+  /**
+   * The running turn took a queued message: close the segment written before
+   * it arrived, drop the user bubble in, start a fresh segment. Without the
+   * split the text written earlier renders below the message and reads as its
+   * answer.
+   */
+  const applyQueuedInput = useCallback(
+    (inputId: string, messageId: string, streamedSoFar: string) => {
+      const entry = midTurn.take(inputId);
+      if (!entry) return;
+      if (streamedSoFar.trim().length > 0) {
+        session.dispatch({
+          type: "message/append",
+          message: {
+            id: `assistant-${Date.now()}`,
+            role: "assistant",
+            text: streamedSoFar,
+            timestamp: new Date(),
+          },
+        });
+      }
+      session.dispatch({ type: "stream/reset" });
+      session.appendMessage({
+        id: messageId,
+        role: "user",
+        text: entry.text,
+        timestamp: new Date(),
+      });
+    },
+    [midTurn, session],
+  );
+
+  /** Stream ended with messages still queued — send them as an ordinary turn. */
+  const flushQueuedInputs = useCallback(() => {
+    const stillWaiting = midTurn.drain();
+    if (stillWaiting.length === 0) return;
+    const joined = joinQueuedInputs(stillWaiting);
+    setTimeout(() => void sendMessageRef.current?.(joined, []), 0);
+  }, [midTurn]);
+
   const sendMessage = useCallback(
     async (text: string, fileIds: string[], truncateFromMessageId?: string) => {
       const trimmed = text.trim();
@@ -366,6 +429,22 @@ export const TuningChatPanel = forwardRef<
                 // First token — clear any transient status line.
                 if (finalText.length === (data.text as string).length) setStatusMessage(null);
               }
+              break;
+            }
+            // The running turn took a message we queued mid-stream: it is a
+            // real row now, so it moves out of the queued tray into the
+            // thread. See docs/architecture/engine/mid-turn-input.md.
+            case "input_applied": {
+              const data = payload as { inputId?: string; messageId?: string };
+              if (!data.inputId) break;
+              applyQueuedInput(
+                data.inputId,
+                data.messageId ?? `queued-${data.inputId}`,
+                finalText,
+              );
+              // The segment just became its own message; the next deltas
+              // belong to the reply that answers the queued one.
+              finalText = "";
               break;
             }
             case "research_quota": {
@@ -440,23 +519,36 @@ export const TuningChatPanel = forwardRef<
           } else {
             session.dispatch({ type: "stream/abort" });
           }
+          // Anything still queued was never taken by this turn — send it as an
+          // ordinary one. See mid-turn-input.md → "the client is the holder".
+          flushQueuedInputs();
           onTurnComplete?.();
         },
         onError: (err) => {
           setError(err instanceof Error ? err.message : t.streamFailed);
           session.dispatch({ type: "stream/abort" });
+          flushQueuedInputs();
         },
       });
       return true;
     },
-    [assistantId, session, stream, model, researchMode, workspaceId, t],
+    [assistantId, session, stream, model, researchMode, workspaceId, t, applyQueuedInput, flushQueuedInputs],
   );
 
-  const onSend = useCallback(async () => {
-    if (stream.inFlight()) return;
+  useEffect(() => {
+    sendMessageRef.current = sendMessage;
+  }, [sendMessage]);
+
+  const onSend = useCallback(async (steer = false) => {
     if (!input.trim()) return;
+    // A turn is already running: hand this to it rather than starting a
+    // second one. See docs/architecture/engine/mid-turn-input.md.
+    if (stream.inFlight()) {
+      if (midTurn.queue(input, steer)) setInput("");
+      return;
+    }
     await sendMessage(input, []);
-  }, [input, sendMessage, stream]);
+  }, [input, midTurn, sendMessage, stream]);
 
   // Feed hides the global chat chrome but keeps its recorder controller alive.
   // While this floating tuning panel owns the replacement dock, short captures
@@ -652,6 +744,13 @@ export const TuningChatPanel = forwardRef<
               </div>
             </div>
           )}
+          {/* Messages handed to the running turn, not yet taken by it.
+              See docs/architecture/engine/mid-turn-input.md. */}
+          <QueuedInputs
+            inputs={midTurn.queued}
+            dict={tQueue}
+            onSteer={midTurn.steer}
+          />
 
           {error && errorCode === "budget_exhausted" && renderPlanGate ? (
             renderPlanGate(error)
@@ -733,24 +832,34 @@ export const TuningChatPanel = forwardRef<
                 </SelectItem>
               </SelectContent>
             </Select>
-            {isStreaming ? (
+            {isStreaming && (
               <button
-                onClick={() => stream.abort()}
+                onClick={() => {
+                  stream.abort();
+                  flushQueuedInputs();
+                }}
                 className="p-2 rounded-xl text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors shrink-0"
                 title={t.stop}
               >
                 <StopIcon />
               </button>
-            ) : (
-              <button
-                onClick={() => void onSend()}
-                disabled={!input.trim()}
-                className="p-2 rounded-xl bg-action text-action-foreground hover:bg-action/90 disabled:opacity-30 disabled:cursor-not-allowed transition-colors shadow-sm shrink-0"
-                title={t.send}
-              >
-                <SendIcon />
-              </button>
             )}
+            {/* Send stays live during a turn — it QUEUES into the running one
+                (muted to mark the difference). See mid-turn-input.md. */}
+            <button
+              onClick={() => void onSend()}
+              disabled={!input.trim()}
+              className={cn(
+                "p-2 rounded-xl transition-colors shadow-sm shrink-0",
+                "disabled:opacity-30 disabled:cursor-not-allowed",
+                isStreaming
+                  ? "bg-muted text-foreground/80 hover:bg-muted/80"
+                  : "bg-action text-action-foreground hover:bg-action/90",
+              )}
+              title={isStreaming ? tQueue.send : t.send}
+            >
+              <SendIcon />
+            </button>
           </div>
         </div>
       </div>

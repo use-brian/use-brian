@@ -13,6 +13,15 @@
 import { z } from 'zod'
 import { buildTool, type Tool, type ToolContext } from '../types.js'
 import { type Json, asRows, str, num, bool, obj, projectList } from './_connector-result.js'
+import {
+  SHOPIFYQL_CATALOG,
+  SHOPIFYQL_SCHEMAS,
+  schemaOfQuery,
+  rejectedColumn,
+  schemasDefining,
+  closestFields,
+  type ShopifyqlSchemaName,
+} from './shopify-analytics-catalog.js'
 
 // ── Result projections ─────────────────────────────────────────
 // The GraphQL queries already select only the needed fields, but connection
@@ -181,6 +190,108 @@ const disputeRow = (d: Json) => ({
   order_id: str(obj(d, 'order'), 'id'),
 })
 
+// ── Storefront analytics ───────────────────────────────────────
+
+/** Tabular ShopifyQL result. See the client's `ShopifyqlTable` for the row-shape caveat. */
+type ShopifyqlTable = {
+  columns: Array<{ name: string; dataType: string }>
+  rows: Array<Record<string, unknown> | unknown[]>
+}
+
+/** Mirrors `SESSION_DIMENSIONS` in the API client - names from Shopify's `sessions` schema. */
+const SESSION_DIMENSIONS = [
+  'referrer_source',
+  'session_device_type',
+  'session_device_browser',
+  'session_device_os',
+  'session_country',
+  'session_region',
+] as const
+type SessionDimension = (typeof SESSION_DIMENSIONS)[number]
+
+/**
+ * Normalize ShopifyQL rows to objects keyed by column name.
+ *
+ * Shopify returns rows **already keyed by column name** — verified live on
+ * 2026-08-07, against an earlier assumption here that they were positional
+ * arrays. That assumption produced a row of `undefined` for every column and no
+ * error anywhere, because the GraphQL field is opaque JSON and the mocked tests
+ * asserted the same invented shape. Both forms are handled now: an array is
+ * zipped against `columns`, an object passes through.
+ *
+ * Values arrive as strings whatever `dataType` says (`"49"`, `"0.0"`), so
+ * anything doing arithmetic on them has to coerce — see `numberish`.
+ */
+function tableToObjects(table: ShopifyqlTable): Array<Record<string, unknown>> {
+  return table.rows.map((row) => {
+    if (!Array.isArray(row)) return row
+    const out: Record<string, unknown> = {}
+    table.columns.forEach((col, i) => { out[col.name] = row[i] })
+    return out
+  })
+}
+
+const numberish = (v: unknown): number | undefined => {
+  const n = typeof v === 'number' ? v : Number.parseFloat(String(v ?? ''))
+  return Number.isFinite(n) ? n : undefined
+}
+
+/**
+ * The funnel gap the merchant actually asks about: sessions that added
+ * something to a cart and never reached the checkout page.
+ *
+ * Returned as a COUNT and nothing else, deliberately. These sessions are
+ * anonymous - Shopify's `sessions` schema is aggregate, and the identified
+ * abandoned-checkout list only ever covers people who *reached* checkout. So
+ * this number can be reported and acted on in aggregate (fix the cart page,
+ * the shipping estimate, the payment options) but the people behind it cannot
+ * be named or emailed. `shopifyListAbandonedCheckouts` is a DIFFERENT, smaller
+ * population and answers a different question.
+ */
+function cartDropoff(row: Record<string, unknown>): Record<string, unknown> | undefined {
+  const added = numberish(row.sessions_with_cart_additions)
+  const reached = numberish(row.sessions_that_reached_checkout)
+  if (added === undefined || reached === undefined) return undefined
+  const completed = numberish(row.sessions_that_completed_checkout)
+  return {
+    added_to_cart_but_never_reached_checkout: Math.max(0, added - reached),
+    ...(completed !== undefined
+      ? { reached_checkout_but_never_completed: Math.max(0, reached - completed) }
+      : {}),
+  }
+}
+
+/**
+ * Turn "Column 'X' not found" into something a model can act on in one step.
+ *
+ * Shopify's rejection names only the column that was wrong. It never names one
+ * that would have been right, and ShopifyQL has no introspection to ask - so
+ * the model's only move is another guess, and guesses do not converge. This
+ * appends the answer: where the column actually lives if it exists in another
+ * schema (the single most common mistake, e.g. `new_customers` is real but
+ * belongs to `sales`, not `customers`), the nearest names in the schema that
+ * was queried, and the full metric list, which is short enough to state
+ * outright and is what SHOW needs.
+ *
+ * Returns '' for any error that is not a column-name problem - a syntax error
+ * or a throttle already says what to do.
+ */
+function fieldHelp(schema: string | null, message: string): string {
+  const column = rejectedColumn(message)
+  if (!column || !schema || !(SHOPIFYQL_SCHEMAS as string[]).includes(schema)) return ''
+  const known = schema as ShopifyqlSchemaName
+
+  const elsewhere = schemasDefining(column).filter((s) => s !== known)
+  if (elsewhere.length > 0) {
+    return ` "${column}" is not part of "${schema}" - it belongs to ${elsewhere.map((s) => `"${s}"`).join(' / ')}. ` +
+      `Re-run it against that schema, or pick a "${schema}" field below.` +
+      ` Metrics in "${schema}": ${SHOPIFYQL_CATALOG[known].metrics.join(', ')}.`
+  }
+  return ` Closest names in "${schema}": ${closestFields(known, column).join(', ')}.` +
+    ` All metrics in "${schema}": ${SHOPIFYQL_CATALOG[known].metrics.join(', ')}.` +
+    ` Use one of these verbatim - field names cannot be guessed and there is no way to list them from the API.`
+}
+
 // ── API port ───────────────────────────────────────────────────
 
 type ShopifyListParams = { query?: string; first?: number; cursor?: string }
@@ -202,6 +313,15 @@ export type ShopifyApi = {
   listDisputes(params: { first?: number }): Promise<unknown>
   listContent(params: { kind: 'pages' | 'articles' | 'blogs'; query?: string; first?: number; cursor?: string }): Promise<unknown>
   fetchOrdersRange(params: { query?: string; maxOrders?: number }): Promise<{ orders: unknown[]; truncated: boolean }>
+  storefrontFunnel(params: {
+    since?: string
+    until?: string
+    groupBy?: SessionDimension
+    timeseries?: 'day' | 'week' | 'month'
+    compareToPreviousPeriod?: boolean
+    limit?: number
+  }): Promise<ShopifyqlTable & { shopifyql: string }>
+  runAnalyticsQuery(query: string): Promise<ShopifyqlTable>
   updateProduct(params: {
     id: string
     title?: string
@@ -303,11 +423,23 @@ export type ShopifyApi = {
  *
  * Chat attachments are NOT a valid source — they live in `file_cache` and
  * expire after 7 days. The model saves the photo to the brain first.
+ *
+ * `notFound` is load-bearing, not decoration. The overwhelmingly common way to
+ * reach this error is handing the tool a chat-attachment id, because that is
+ * what the owner just supplied and the id is right there in the turn. The
+ * files layer answers that with a generic "not found", which reads as *wrong
+ * reference* rather than *missing step* — so the model retries with another
+ * reference and never reaches `saveFileToBrain`. On 2026-08-06 a merchant's
+ * assistant burned six calls that way and shipped a product with no image.
+ * The flag lets the tool name the remedy instead of relaying the dead end.
  */
 export type ShopifyFileBytesReader = (
   context: ToolContext,
   idOrPath: string,
-) => Promise<{ bytes: Uint8Array; fileName: string; mimeType: string } | { error: string }>
+) => Promise<
+  | { bytes: Uint8Array; fileName: string; mimeType: string }
+  | { error: string; notFound?: boolean }
+>
 
 export function createShopifyTools(
   api: ShopifyApi,
@@ -904,6 +1036,125 @@ export function createShopifyTools(
     },
   })
 
+  const storefrontFunnelTool = buildTool({
+    name: 'shopifyStorefrontFunnel',
+    description:
+      'Storefront conversion funnel from Shopify analytics: sessions, visitors, how many added to cart, ' +
+      'how many reached checkout, how many completed, and the conversion rate. Bot traffic is always excluded. ' +
+      'Use this to find WHERE shoppers drop out - it also reports how many sessions added to cart but never ' +
+      'reached checkout. Those sessions are anonymous and CANNOT be identified or emailed; ' +
+      'shopifyListAbandonedCheckouts is a different and smaller group (only people who reached checkout) ' +
+      'and is the only one you can contact. Group by traffic source or device to see which segment converts worst.',
+    inputSchema: z.object({
+      since: z.string().optional().describe('Start of the window: a relative offset like "-30d" / "-12m", or a date "YYYY-MM-DD". Default "-30d".'),
+      until: z.string().optional().describe('End of the window: "today" or "YYYY-MM-DD". Default "today".'),
+      groupBy: z.enum(SESSION_DIMENSIONS).optional().describe('Break the funnel down by one dimension.'),
+      timeseries: z.enum(['day', 'week', 'month']).optional().describe('Return one row per period instead of one total.'),
+      compareToPreviousPeriod: z.boolean().optional().describe('Add percent-change columns against the preceding window of equal length. Use this when asked what changed.'),
+      limit: z.number().optional().describe('Max rows when grouping (default unlimited, capped at 100).'),
+    }),
+    isConcurrencySafe: true,
+    isReadOnly: true,
+    timeoutMs: 60_000,
+    async execute(input) {
+      try {
+        const table = await api.storefrontFunnel({
+          since: input.since,
+          until: input.until,
+          groupBy: input.groupBy,
+          timeseries: input.timeseries,
+          compareToPreviousPeriod: input.compareToPreviousPeriod,
+          limit: input.limit,
+        })
+        const rows = tableToObjects(table).map((row) => {
+          const dropoff = cartDropoff(row)
+          return dropoff ? { ...row, ...dropoff } : row
+        })
+        // No rows, or rows with no sessions at all, after the bot filter. This
+        // is a real finding, not a broken query: the store had traffic that
+        // Shopify classified entirely as bots. Saying so is the difference
+        // between "your storefront got no real visitors" and the merchant
+        // reading a bare zero as a tooling failure. Shopify also drops the
+        // column list when a filtered group matches nothing, so an empty
+        // result genuinely looks malformed unless it is named.
+        const noHumanTraffic = rows.length === 0 || rows.every((r) => numberish(r.sessions) === 0)
+        return { data: {
+          period: `${input.since ?? '-30d'} to ${input.until ?? 'today'}`,
+          rows,
+          row_count: rows.length,
+          ...(noHumanTraffic
+            ? { no_human_sessions: 'No human sessions in this window. Bot traffic is excluded, so a store whose visits were all bots reports zero here - that is a real finding about the storefront, not a failed query.' }
+            : {}),
+          note:
+            'Sessions here are anonymous aggregates. A session that added to cart but never reached checkout ' +
+            'cannot be identified or contacted - report it as a count and act on it by fixing the cart or ' +
+            'checkout experience, not by reaching out to individuals.',
+          shopifyql: table.shopifyql,
+        } }
+      } catch (err) {
+        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+      }
+    },
+  })
+
+  // Consecutive rejections of shopifyAnalyticsQuery in this tool set's lifetime
+  // (one injection ~ one turn). ShopifyQL rejections are individually cheap and
+  // each one reads as "almost right, try again", so nothing about a single
+  // failure tells the model to stop - which is how a bad field name turned into
+  // a twenty-minute loop. Reset on any success.
+  let analyticsRejections = 0
+  const ANALYTICS_REJECTION_LIMIT = 3
+
+  const analyticsQueryTool = buildTool({
+    name: 'shopifyAnalyticsQuery',
+    description:
+      'Run a raw ShopifyQL query against the store analytics for questions the other tools do not cover ' +
+      '(traffic, marketing campaigns, site-search terms, customer acquisition and lifetime spend). Read-only. ' +
+      'Prefer shopifyStorefrontFunnel for anything about the conversion funnel - it cannot fail to parse. ' +
+      `Syntax is "FROM <schema> SHOW <metrics> [GROUP BY <dimensions>] [TIMESERIES <grain>] SINCE <start> UNTIL <end>", never SELECT. ` +
+      `Supported schemas: ${SHOPIFYQL_SCHEMAS.join(', ')}. There is no "orders" or "products" schema - order and ` +
+      'product reporting lives in "sales". Field names cannot be guessed and cannot be discovered at runtime; ' +
+      'a rejected query returns the valid field names for that schema, so read them and use one verbatim ' +
+      'rather than trying another spelling. Never report a rejected query as "no data".',
+    inputSchema: z.object({
+      query: z.string().describe('The ShopifyQL query, e.g. "FROM customers SHOW new_customer_records TIMESERIES month SINCE -6m UNTIL today".'),
+    }),
+    isConcurrencySafe: true,
+    isReadOnly: true,
+    timeoutMs: 60_000,
+    async execute(input) {
+      if (analyticsRejections >= ANALYTICS_REJECTION_LIMIT) {
+        return { data:
+          `Stopping: ${analyticsRejections} ShopifyQL queries in a row were rejected. Do not try another spelling. ` +
+          'Tell the user this question could not be expressed against their store analytics, and say which part ' +
+          'of it you could not express.', isError: true }
+      }
+      const schema = schemaOfQuery(input.query)
+      if (schema && !(SHOPIFYQL_SCHEMAS as string[]).includes(schema)) {
+        analyticsRejections++
+        const hint = schema === 'orders' || schema === 'products'
+          ? ` There is no "${schema}" schema - order and product reporting lives in "sales".`
+          : ''
+        return { data:
+          `Shopify error: "${schema}" is not a supported schema.${hint} Supported: ${SHOPIFYQL_SCHEMAS.join(', ')}.`,
+          isError: true }
+      }
+      try {
+        const table = await api.runAnalyticsQuery(input.query)
+        analyticsRejections = 0
+        return { data: {
+          rows: tableToObjects(table),
+          row_count: table.rows.length,
+          columns: table.columns.map((c) => c.name),
+        } }
+      } catch (err) {
+        analyticsRejections++
+        const message = err instanceof Error ? err.message : String(err)
+        return { data: `Shopify error: ${message}${fieldHelp(schema, message)}`, isError: true }
+      }
+    },
+  })
+
   const createProductTool = buildTool({
     name: 'shopifyCreateProduct',
     description:
@@ -947,15 +1198,14 @@ export function createShopifyTools(
   const addProductImageTool = buildTool({
     name: 'shopifyAddProductImage',
     description:
-      'Add an image to a Shopify product from a file already saved in the workspace brain. ' +
-      'The file must be a workspace file - pass its id or absolute workspace path. ' +
-      'If the user just attached a photo to this chat, save it with saveFileToBrain FIRST, then call this with the saved path: ' +
-      'chat attachments are temporary and cannot be uploaded. ' +
+      'Add an image to a Shopify product. ' +
+      'Pass a workspace file id or absolute workspace path, OR the id from an <attached_file> tag the user just sent - ' +
+      'an attachment is saved to the workspace automatically before it is uploaded, so you do not need to call saveFileToBrain first. ' +
       'Shopify processes the image asynchronously, so it may take a few seconds to appear on the product. ' +
       'Call this tool directly — the user will see an Approve/Deny prompt.',
     inputSchema: z.object({
       productId: z.string().describe('Product id (numeric or GID).'),
-      file: z.string().describe('Workspace file id (UUID) or absolute workspace path of the image.'),
+      file: z.string().describe('Workspace file id (UUID), absolute workspace path, or the id from an <attached_file> tag the user just sent.'),
       alt: z.string().optional().describe('Alt text for accessibility and SEO.'),
     }),
     isConcurrencySafe: false,
@@ -973,7 +1223,21 @@ export function createShopifyTools(
       }
       try {
         const file = await opts.readFileBytes(context, input.file)
-        if ('error' in file) return { data: file.error, isError: true }
+        if ('error' in file) {
+          // A bare "not found" sends the model hunting for a different
+          // reference. Nine times in ten the reference was fine and the step
+          // was missing, so say which step.
+          if (file.notFound) {
+            return {
+              data:
+                `${file.error} If ${input.file} is a file the user just attached, this surface could not read it from the upload cache ` +
+                `(it may have expired - uploads are kept ~7 days). Try saveFileToBrain with fileId "${input.file}"; if that also fails, ask the user to re-attach. ` +
+                'Do not retry this tool with the same id, and do not guess a different one.',
+              isError: true,
+            }
+          }
+          return { data: file.error, isError: true }
+        }
         if (!file.mimeType.startsWith('image/')) {
           return { data: `That file is ${file.mimeType}, not an image. Shopify product media must be an image file.`, isError: true }
         }
@@ -1561,6 +1825,8 @@ export function createShopifyTools(
     listDisputesTool,
     listContentTool,
     salesReportTool,
+    storefrontFunnelTool,
+    analyticsQueryTool,
     updateProductTool,
     createProductTool,
     addProductImageTool,

@@ -96,4 +96,79 @@ describe('[COMP:api/whatsapp-byon-route] internal routing', () => {
     expect(response.status).toBe(200)
     expect(response.body).toEqual({ ok: true })
   })
+
+  it('completes a streamed archive asset before dispatch and marks the inbound enqueued', async () => {
+    const captured: Array<Record<string, unknown>> = []
+    const archiveIncoming = vi.fn(async () => {})
+    const app = express()
+    app.use(express.json())
+    app.use('/internal/whatsapp', whatsappByonRoutes({
+      connectorSecret: 'secret',
+      integrationStore: {
+        getByChannelForWebhook: vi.fn(async () => ({ connectorInstanceId: 'instance-1' })),
+      } as never,
+      ingestor: { isIngestChannel: vi.fn(async () => false) } as never,
+      bot: {
+        resolveHandler: vi.fn(async (input) => {
+          captured.push(input as unknown as Record<string, unknown>)
+          return { kind: 'bot' as const, handle: vi.fn(async () => {}) }
+        }),
+      },
+      archiveMedia: {
+        resolveBinding: vi.fn(async () => 'instance-1'),
+        complete: vi.fn(async () => ({
+          id: '4a1e6bd8-0000-4000-8000-000000000001',
+          workspaceId: 'workspace-1',
+          instanceId: 'instance-1',
+          ownerUserId: 'owner-1',
+          messageId: null,
+          source: 'whatsapp',
+          providerMessageId: 'm1',
+          kind: 'video',
+          filename: 'clip.mp4',
+          mime: 'video/mp4',
+          sizeBytes: 123,
+          expectedSha256: null,
+          sha256: 'a'.repeat(64),
+          storageKey: 'workspace-1/chat-archive-asset',
+          storageUri: 'file://workspace-1/chat-archive-asset',
+          uploadStatus: 'stored',
+          extractionStatus: 'pending',
+          lastError: null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        })),
+      } as never,
+      archiveIncoming,
+      getChannel: vi.fn(async () => ({ workspaceId: 'workspace-1' })) as never,
+      getWorkspaceOwnerUserId: vi.fn(async () => 'owner-1'),
+    }))
+
+    const response = await request(app)
+      .post('/internal/whatsapp/inbound')
+      .set('X-Connector-Secret', 'secret')
+      .send({
+        ...payload,
+        text: '<media:video>',
+        mediaMimeType: 'video/mp4',
+        mediaRef: {
+          assetId: '4a1e6bd8-0000-4000-8000-000000000001',
+          gcsKey: 'workspace-1/chat-archive-asset',
+          mimeType: 'video/mp4',
+          fileName: 'clip.mp4',
+          sizeBytes: 123,
+        },
+      })
+
+    expect(response.status).toBe(200)
+    expect(archiveIncoming).toHaveBeenCalledOnce()
+    expect(captured[0]).toMatchObject({
+      archiveInboundPersisted: true,
+      archiveMediaType: 'video',
+      archiveMediaRef: {
+        assetId: '4a1e6bd8-0000-4000-8000-000000000001',
+        sha256: 'a'.repeat(64),
+      },
+    })
+  })
 })

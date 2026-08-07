@@ -55,3 +55,4 @@ export {
 } from './attachments.js'
 
 export { buildWorkspaceFilesContext } from './context-builder.js'
+export { promoteCachedFile, cachedFileBytes } from './promote.js'

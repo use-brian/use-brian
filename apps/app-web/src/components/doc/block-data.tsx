@@ -418,11 +418,12 @@ export function BlockData({
   const deletePeekTask = useCallback(
     async (reason: string): Promise<{ ok: boolean; error?: string }> => {
       if (!peekTaskId) return { ok: false };
+      // No reason = plain delete: no tombstone, no rule.
       const result = await deleteBrainRow(
         workspace.workspaceId,
         "task",
         peekTaskId,
-        { reason, createRule: true },
+        reason ? { reason, createRule: true } : undefined,
       );
       if (!result.ok) return result;
       setPeekTasks((prev) =>

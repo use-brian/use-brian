@@ -320,6 +320,9 @@ export type ChannelMcpStores = {
    * attachments (`docs/architecture/integrations/gmail.md` → "Attachments").
    */
   filesApi?: FilesApi
+  /** Upload-cache reader, so a photo just attached to this turn can be
+   *  promoted on demand (Shopify product images). Chat/channel paths only. */
+  readCachedFile?: (id: string, ctx: import('@use-brian/core').AccessContext) => Promise<import('@use-brian/core').CachedFile | null>
 }
 
 export type ApplyMcpInjectionParams = {
@@ -429,6 +432,7 @@ export async function applyMcpInjection(
       engineHooks: params.engineHooks,
       actorIdentity: params.actorIdentity,
       filesApi: stores.filesApi,
+      readCachedFile: stores.readCachedFile,
       introspectionTools: params.introspectionTools,
     })
   } catch (err) {
@@ -910,7 +914,25 @@ export async function buildFileContentBlocks(
         )
       }
     } else {
-      const { text } = await parseFileContent(file.buffer, file.mimeType, file.fileName)
+      const { text, mediaMimeType } = await parseFileContent(
+        file.buffer,
+        file.mimeType,
+        file.fileName,
+      )
+      if (mediaMimeType === 'application/pdf' || mediaMimeType?.startsWith('image/')) {
+        contentBlocks.push({
+          type: 'image',
+          mimeType: mediaMimeType,
+          data: file.buffer.toString('base64'),
+          name: file.fileName,
+        })
+        if (file.id) {
+          textParts.push(
+            `<attached_file id="${file.id}" name="${file.fileName}" type="${mediaMimeType}">[${mediaMimeType === 'application/pdf' ? 'pdf' : 'image'}]</attached_file>`,
+          )
+        }
+        continue
+      }
       const isSmall = shouldInline(text)
 
       // ── Tabular lane (issue #273) ──

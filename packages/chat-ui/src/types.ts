@@ -115,6 +115,21 @@ export type Message = {
   documents?: DocumentAttachment[]
   replyTo?: ReplyTo
   followUpQuestions?: string[]
+  /**
+   * Mid-turn input state for a user message the host sent WHILE a turn was
+   * streaming (docs/architecture/engine/mid-turn-input.md).
+   *
+   * - `pending` — handed to the running turn, waiting to be taken.
+   * - `steering` — the same, expedited: the user pressed Steer (or
+   *   Cmd/Ctrl+Enter) and the running turn will interrupt itself if it can.
+   *
+   * Absent on every ordinary message. The flag clears when the server reports
+   * `input_applied`, which is also when the message id is re-keyed from the
+   * client's `inputId` to the persisted row id. A message still carrying the
+   * flag when the stream ends was never taken, and the host sends it as an
+   * ordinary turn.
+   */
+  queued?: 'pending' | 'steering'
 }
 
 export type Session = {

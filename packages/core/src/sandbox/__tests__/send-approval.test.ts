@@ -53,6 +53,12 @@ const ctx: ToolContext = {
   channelId: 'c',
   workspaceId: 'w',
   abortSignal: new AbortController().signal,
+  // Computer Use is a capability-gated built-in primitive, and the executor's
+  // capability check is fail-CLOSED on an absent set — a context with no
+  // `activeCapabilities` refuses every browser tool before the send gate is
+  // ever reached. This suite is about the send gate, so grant the capability.
+  // See docs/architecture/features/builtin-primitives.md.
+  activeCapabilities: new Set(['computer']),
 }
 
 async function drain(executor: ReturnType<typeof createToolExecutor>): Promise<ContentBlock[]> {

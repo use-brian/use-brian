@@ -8,6 +8,7 @@
  * formula results, not formula text, which is what the user sees.
  */
 import ExcelJS from 'exceljs'
+import { assertSafeOfficeArchive } from './office-archive-safety.js'
 
 // NO ROW CAP. This function's output is what gets chunked into file_segments
 // and stored, so a row dropped here is lost permanently — no downstream tool
@@ -57,6 +58,7 @@ export type XlsxParseResult = {
 }
 
 export async function parseXlsxToMarkdown(buffer: Buffer): Promise<XlsxParseResult> {
+  await assertSafeOfficeArchive(buffer)
   const wb = new ExcelJS.Workbook()
   // ExcelJS's bundled types pin `load(buffer: Buffer)` against a different
   // Buffer specialization than @types/node's generic `Buffer<ArrayBufferLike>`;

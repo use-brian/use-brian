@@ -95,11 +95,13 @@ export type SessionEvent =
       /**
        * The room's pin set changed (multiplayer chat P1b, T14) — added or
        * removed. A SIGNAL: every viewer's chip row refetches through its own
-       * authed loader; the payload carries no pin data.
+       * authed loader; the payload carries no pin data. Exactly one author
+       * id is set: a member pinned (`byUserId`) or the room's assistant did
+       * through the room pin tools (`byAssistantId`, migration 421).
        */
       kind: 'pins_changed'
       sessionId: string
-      payload: { byUserId: string }
+      payload: { byUserId?: string; byAssistantId?: string }
     }
   | {
       kind: 'presence'
@@ -125,8 +127,28 @@ export type SubscribeSessionEvents = (params: {
   cb: (event: SessionEvent) => void
 }) => () => void
 
+/**
+ * Update a viewer's typing state on a session's presence set (the room
+ * typing beacon — docs/architecture/features/chat-app.md → "Typing
+ * presence"). The bus broadcasts a `presence` event on transitions only.
+ */
+export type SetSessionTyping = (params: {
+  sessionId: string
+  userId: string
+  isTyping: boolean
+}) => void
+
+/** Snapshot of a session's viewer presence — the follow stream's hello. */
+export type GetSessionPresence = (sessionId: string) => ViewerPresence[]
+
 /** Default — no bus wired (e.g. unit tests); events go nowhere. */
 export const noopPublishSessionEvent: PublishSessionEvent = () => {}
 
 /** Default — nothing to subscribe to; the unsubscribe is a no-op. */
 export const noopSubscribeSessionEvents: SubscribeSessionEvents = () => () => {}
+
+/** Default — no presence tracked; typing beacons go nowhere. */
+export const noopSetSessionTyping: SetSessionTyping = () => {}
+
+/** Default — nobody present. */
+export const emptySessionPresence: GetSessionPresence = () => []

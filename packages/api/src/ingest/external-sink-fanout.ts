@@ -24,7 +24,7 @@
  */
 
 import type pg from 'pg'
-import type { CanonicalIngestMessage } from '@use-brian/shared'
+import type { AnyCanonicalIngestMessage } from '@use-brian/shared'
 import { getPool } from '../db/client.js'
 import { appendBatchEvent } from '../db/pending-ingest-batches-store.js'
 import type { IngestOutboxRow, IngestOutboxStore } from '../db/ingest-outbox-store.js'
@@ -47,7 +47,7 @@ export type ExternalSinkEvent = {
   /** Compartment owner for person-scoped consumers (D3); omit when N/A. */
   ownerUserId?: string | null
   source: string
-  messages: CanonicalIngestMessage[]
+  messages: AnyCanonicalIngestMessage[]
   /** Opaque producer cursor, echoed back by the sink on ack. */
   sourceCursor?: unknown
   /**

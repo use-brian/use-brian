@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { OfficeGenerationFailure } from '../generation/contracts.js'
 import { runOfficeGenerationPipeline, type OfficeGenerationPipelineDeps } from '../generation/pipeline.js'
 import { runOfficeEdit } from '../generation/edit-runner.js'
 import { documentSnapshot, id, templateBundle } from './fixtures.js'
@@ -44,6 +45,41 @@ describe('[COMP:office/generation] Office generation pipeline', () => {
     expect(result).toMatchObject({ status: 'needs_input', code: 'website_required' })
     expect(test.value.retrieveBrain).not.toHaveBeenCalled()
     expect(test.value.construct).not.toHaveBeenCalled()
+  })
+
+  it('keeps sub-floor typography only when the same object was admitted by the template', async () => {
+    const test = deps()
+    const template = templateBundle()
+    if (template.snapshot.family !== 'document') throw new Error('Expected document template')
+    const admittedSnapshot = structuredClone(template.snapshot)
+    const admittedRun = admittedSnapshot.sections[0].nodes[0]
+    if (!('runs' in admittedRun)) throw new Error('Expected template text node')
+    admittedRun.runs[0].style.fontSizePt = 7.5
+    template.snapshot = admittedSnapshot
+    test.value.selectTemplate = vi.fn(async () => ({ template: { ...template, status: 'admitted' as const } }))
+    test.value.construct = vi.fn(async () => structuredClone(admittedSnapshot))
+
+    const admittedResult = await runOfficeGenerationPipeline(brief(), test.value)
+    expect(admittedResult, JSON.stringify(admittedResult)).toMatchObject({ status: 'completed' })
+
+    const changed = structuredClone(admittedSnapshot)
+    const changedRun = changed.sections[0].nodes[0]
+    if (!('runs' in changedRun)) throw new Error('Expected generated text node')
+    changedRun.runs[0].id = id(999)
+    test.value.construct = vi.fn(async () => changed)
+    await expect(runOfficeGenerationPipeline(brief(), test.value)).resolves.toMatchObject({ status: 'failed', code: 'fit_failed' })
+  })
+
+  it('preserves a typed safe failure code from a generation constructor', async () => {
+    const test = deps()
+    test.value.construct = vi.fn(async () => {
+      throw new OfficeGenerationFailure('presentation_fit_failed', 'Internal presentation fit diagnostics')
+    })
+
+    await expect(runOfficeGenerationPipeline(brief(), test.value)).resolves.toMatchObject({
+      status: 'failed',
+      code: 'presentation_fit_failed',
+    })
   })
 })
 

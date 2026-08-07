@@ -10,9 +10,17 @@
  * body reopens its option list; the funnel opens a two-step
  * property → value picker.
  *
+ * **Every property holds a SET of values** — OR within a property, AND
+ * across properties ("Alice or Bob, and status Todo"). That is why the
+ * value list toggles in place and stays open: picking a second assignee
+ * must not cost a second trip through the funnel. `onSet` always hands
+ * back the complete next selection (`[]` = cleared), so a surface never
+ * diffs. Spec: docs/architecture/features/tasks.md → "Every filter is
+ * multi-select".
+ *
  * Pure presentation over the surfaces' URL-codec view state — the bar
  * owns no state beyond popover/openness; every change lands in
- * `onSet(key, value | null)` and flows through the existing codecs
+ * `onSet(key, values)` and flows through the existing codecs
  * (`crm-view.ts` / `tasks-view.ts`), so deep links and the sidebar stay
  * the source of truth.
  *
@@ -20,9 +28,10 @@
  */
 
 import { useRef, useState } from "react";
-import { ChevronLeft, ListFilter, Search, SlidersHorizontal, X } from "lucide-react";
+import { Check, ChevronLeft, ListFilter, Search, SlidersHorizontal, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
+import { format } from "@/lib/i18n/format";
 import {
   Popover,
   PopoverContent,
@@ -34,6 +43,14 @@ type FilterOption = {
   label: string;
   /** Optional status-dot tint class rendered before the label. */
   dot?: string;
+  /**
+   * Optional leading art (avatar, glyph) rendered before the label. Takes the
+   * diameter in px so one option reads right at both sizes it appears at —
+   * 20 in the picker list, 14 inside the applied pill — which a fixed node
+   * cannot do (`UserAvatar` sizes itself with inline styles a class can't
+   * override).
+   */
+  icon?: (size: number) => React.ReactNode;
 };
 
 export type FilterDef = {
@@ -41,6 +58,15 @@ export type FilterDef = {
   label: string;
   options: FilterOption[];
 };
+
+/** key → applied values (absent / null / empty = inactive). */
+export type FilterActive = Record<string, readonly string[] | null | undefined>;
+
+/** The applied set for one property, always a fresh array. */
+function valuesOf(active: FilterActive, key: string): string[] {
+  const v = active[key];
+  return v ? [...v] : [];
+}
 
 // The Brain filter-strip's collapsed-Filter button language: bordered card
 // chrome, muted at rest, foreground on hover.
@@ -60,63 +86,113 @@ function OptionRow({
   return (
     <button
       type="button"
+      role="menuitemcheckbox"
+      aria-checked={selected}
       onClick={onPick}
       className={cn(
         "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] transition-colors hover:bg-muted",
         selected && "bg-muted/60",
       )}
     >
+      {option.icon?.(20)}
       {option.dot && (
         <span className={cn("size-2 shrink-0 rounded-full", option.dot)} aria-hidden />
       )}
       <span className="min-w-0 flex-1 truncate">{option.label}</span>
+      {selected && (
+        <Check className="size-3.5 shrink-0 text-foreground/70" aria-hidden />
+      )}
     </button>
   );
 }
 
-/** One applied filter as a removable pill; the body reopens the picker. */
-function FilterPill({
+/**
+ * One property's value list — a checklist, not a radio group. Toggling
+ * never closes the popover, so a multi-value set is built in one gesture.
+ */
+function OptionList({
   def,
-  value,
+  values,
   onSet,
 }: {
   def: FilterDef;
-  value: string;
-  onSet: (value: string | null) => void;
+  values: readonly string[];
+  onSet: (values: string[]) => void;
+}) {
+  return (
+    <>
+      {def.options.map((o) => {
+        const selected = values.includes(o.value);
+        return (
+          <OptionRow
+            key={o.value}
+            option={o}
+            selected={selected}
+            onPick={() =>
+              onSet(
+                selected
+                  ? values.filter((v) => v !== o.value)
+                  : [...values, o.value],
+              )
+            }
+          />
+        );
+      })}
+    </>
+  );
+}
+
+/**
+ * One applied filter as a removable pill; the body reopens the checklist.
+ * Multiple values read as `Assignee · Alice +2`, the full set in the
+ * trigger's title — a pill has to stay pill-sized however many are picked.
+ */
+function FilterPill({
+  def,
+  values,
+  onSet,
+}: {
+  def: FilterDef;
+  values: readonly string[];
+  onSet: (values: string[]) => void;
 }) {
   const t = useT().filterBar;
   const [open, setOpen] = useState(false);
-  const current = def.options.find((o) => o.value === value);
+  // Selection order (= URL order), so the lead label is stable across
+  // reloads. A value with no matching option (a since-renamed project)
+  // still renders, as itself.
+  const chosen = values.map(
+    (v) => def.options.find((o) => o.value === v) ?? { value: v, label: v },
+  );
+  const lead = chosen[0];
+  const extra = chosen.length - 1;
   return (
     <span className="inline-flex h-7 items-center overflow-hidden rounded-full border border-primary/30 bg-primary/10 text-xs transition-colors">
       <Popover open={open} onOpenChange={setOpen}>
-        <PopoverTrigger className="inline-flex h-full items-center gap-1 pl-2.5 pr-1">
+        <PopoverTrigger
+          className="inline-flex h-full items-center gap-1 pl-2.5 pr-1"
+          title={chosen.map((c) => c.label).join(", ")}
+        >
           <span className="text-muted-foreground">{def.label}</span>
-          {current?.dot && (
-            <span className={cn("size-2 rounded-full", current.dot)} aria-hidden />
+          {lead?.icon?.(14)}
+          {lead?.dot && (
+            <span className={cn("size-2 rounded-full", lead.dot)} aria-hidden />
           )}
-          <span className="font-medium text-foreground">
-            {current?.label ?? value}
-          </span>
+          <span className="font-medium text-foreground">{lead?.label}</span>
+          {extra > 0 && (
+            <span className="rounded-full bg-primary/20 px-1 text-[11px] font-medium tabular-nums text-foreground/80">
+              {format(t.more, { count: String(extra) })}
+            </span>
+          )}
         </PopoverTrigger>
         <PopoverContent align="start" className="max-h-72 w-56 overflow-y-auto p-1">
-          {def.options.map((o) => (
-            <OptionRow
-              key={o.value}
-              option={o}
-              selected={o.value === value}
-              onPick={() => {
-                setOpen(false);
-                onSet(o.value === value ? null : o.value);
-              }}
-            />
-          ))}
+          <OptionList def={def} values={values} onSet={onSet} />
         </PopoverContent>
       </Popover>
       <button
         type="button"
         aria-label={`${t.clearFilter}: ${def.label}`}
-        onClick={() => onSet(null)}
+        onClick={() => onSet([])}
         className="inline-flex h-full items-center pl-0.5 pr-2 text-muted-foreground/60 hover:text-foreground"
       >
         <X className="size-3" aria-hidden />
@@ -125,13 +201,21 @@ function FilterPill({
   );
 }
 
-/** The funnel — a two-step property → value picker in one popover. */
+/**
+ * The funnel — a two-step property → value picker in one popover. The
+ * property step lists EVERY def, applied ones carrying their count: the
+ * funnel is the full filter menu, not just the unused half. (It also can't
+ * be the unused half — dropping a property from the list the moment its
+ * first value lands would unmount the popover mid-selection.)
+ */
 function AddFilterButton({
   defs,
+  active,
   onSet,
 }: {
   defs: FilterDef[];
-  onSet: (key: string, value: string) => void;
+  active: FilterActive;
+  onSet: (key: string, values: string[]) => void;
 }) {
   const t = useT().filterBar;
   const [open, setOpen] = useState(false);
@@ -150,16 +234,24 @@ function AddFilterButton({
       </PopoverTrigger>
       <PopoverContent align="start" className="max-h-72 w-56 overflow-y-auto p-1">
         {picked === null ? (
-          defs.map((def) => (
-            <button
-              key={def.key}
-              type="button"
-              onClick={() => setPicked(def)}
-              className="flex w-full items-center rounded-md px-2 py-1.5 text-left text-[13px] transition-colors hover:bg-muted"
-            >
-              <span className="min-w-0 flex-1 truncate">{def.label}</span>
-            </button>
-          ))
+          defs.map((def) => {
+            const count = valuesOf(active, def.key).length;
+            return (
+              <button
+                key={def.key}
+                type="button"
+                onClick={() => setPicked(def)}
+                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] transition-colors hover:bg-muted"
+              >
+                <span className="min-w-0 flex-1 truncate">{def.label}</span>
+                {count > 0 && (
+                  <span className="shrink-0 rounded-full bg-primary/20 px-1.5 text-[11px] font-medium tabular-nums text-foreground/80">
+                    {count}
+                  </span>
+                )}
+              </button>
+            );
+          })
         ) : (
           <>
             <button
@@ -170,19 +262,11 @@ function AddFilterButton({
               <ChevronLeft className="size-3.5" aria-hidden />
               {picked.label}
             </button>
-            {picked.options.map((o) => (
-              <OptionRow
-                key={o.value}
-                option={o}
-                selected={false}
-                onPick={() => {
-                  setOpen(false);
-                  const key = picked.key;
-                  setPicked(null);
-                  onSet(key, o.value);
-                }}
-              />
-            ))}
+            <OptionList
+              def={picked}
+              values={valuesOf(active, picked.key)}
+              onSet={(values) => onSet(picked.key, values)}
+            />
           </>
         )}
       </PopoverContent>
@@ -320,33 +404,29 @@ export function FilterBar({
   viewOptions,
 }: {
   defs: FilterDef[];
-  /** key → applied value (absent / null = inactive). */
-  active: Record<string, string | null | undefined>;
-  onSet: (key: string, value: string | null) => void;
+  /** key → applied values (absent / null / empty = inactive). */
+  active: FilterActive;
+  /** The COMPLETE next selection for `key`; `[]` clears the property. */
+  onSet: (key: string, values: string[]) => void;
   search: string;
   onSearch: (value: string) => void;
   searchPlaceholder: string;
   /** Popover content for the View button; omit to hide the button. */
   viewOptions?: React.ReactNode;
 }) {
-  const applied = defs.filter(
-    (def) => active[def.key] !== null && active[def.key] !== undefined,
-  );
-  const addable = defs.filter(
-    (def) => active[def.key] === null || active[def.key] === undefined,
-  );
+  const applied = defs.filter((def) => valuesOf(active, def.key).length > 0);
   return (
     <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
       {applied.map((def) => (
         <FilterPill
           key={def.key}
           def={def}
-          value={active[def.key] as string}
-          onSet={(value) => onSet(def.key, value)}
+          values={valuesOf(active, def.key)}
+          onSet={(values) => onSet(def.key, values)}
         />
       ))}
-      {addable.length > 0 && (
-        <AddFilterButton defs={addable} onSet={onSet} />
+      {defs.length > 0 && (
+        <AddFilterButton defs={defs} active={active} onSet={onSet} />
       )}
       <span className="ml-auto flex items-center gap-1">
         {viewOptions !== undefined && (

@@ -232,6 +232,17 @@ export const OFFICIAL_CONNECTORS: ConnectorEntry[] = [
     tags: ['workspace', 'productivity', 'documents', 'presentations'],
   },
   {
+    id: 'brand',
+    name: 'Brand',
+    description:
+      'Let the assistant read your brand positioning - voice, vocabulary, color and type tokens, logo bindings, approved claims - and propose changes for your approval. First-party record; no external account required.',
+    category: 'official',
+    auth_type: 'none',
+    oauth_required: false,
+    enabled: true,
+    tags: ['workspace', 'brand', 'productivity'],
+  },
+  {
     id: 'computer',
     name: 'Computer Use',
     description: 'Let the assistant browse and act in a controlled browser: your own Chrome via the Use Brian extension for account-sensitive sites, or a cloud browser for public ones. Sends require your approval.',
@@ -306,13 +317,39 @@ export const OFFICIAL_CONNECTORS: ConnectorEntry[] = [
 // `assistant_capabilities` grants at runtime, not by a connector instance
 // (see docs/architecture/features/files.md → "Connector-style governance,
 // primitive-style runtime"). The Studio Connectors surface renders them in a
-// dedicated always-on "Built-in" group with no connect/disconnect affordance,
-// and the browse directory excludes them. Derived from the registry — never
+// dedicated "Built-in" group with no connect/disconnect affordance, and the
+// browse directory excludes them. Derived from the registry — never
 // hardcode a slug list for this (the "all built-ins" drift anti-pattern).
 
 export const BUILTIN_PRIMITIVE_CONNECTOR_IDS: ReadonlySet<string> = new Set(
   OFFICIAL_CONNECTORS.filter((c) => c.auth_type === 'none').map((c) => c.id),
 )
+
+// ── Built-in primitive OFF switch ─────────────────────────────
+//
+// A built-in primitive has no credential to revoke, so "turn it off" cannot
+// mean deleting an instance the way it does for an OAuth connector. It means
+// withholding the `assistant_capabilities` grant: every tool factory in the
+// group carries `requiresCapability: '<connector id>'`, so a missing grant
+// makes `filterToolsByCapabilities` drop the tools BEFORE injection (the
+// model never sees them, so it cannot try and fail), and the tool executor
+// rejects a stale call fail-closed.
+//
+// The capability name IS the connector id — deliberately, so the set above is
+// BOTH the connector-id set and the capability set, with no second list to
+// drift. Adding a 4th `auth_type: 'none'` connector therefore gets an off
+// switch for free, provided its tools carry `requiresCapability` (graded by
+// `pnpm check` → `invariants/builtin-primitive-capability`).
+//
+// Why the capability layer and not the per-tool allow/ask/block policy:
+// blocking every tool is not the same as off. Policy is an execute-time
+// refusal, so the tool definitions still occupy the model's context, and the
+// L1 prompt blocks that advertise the primitive (e.g. the `# Workspace Files`
+// index) are keyed on the CAPABILITY — leaving an assistant that is told it
+// has files, told to save uploads there, and then fails every call. Revoking
+// the grant removes the tools and that prompt text together.
+//
+// See docs/architecture/features/builtin-primitives.md.
 
 // ── Single-instance connectors ────────────────────────────────
 //

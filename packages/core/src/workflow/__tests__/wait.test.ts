@@ -53,6 +53,7 @@ function makeStores() {
         lifecycleTransitionedAt: null,
         lifecycleReason: null,
         pinned: false,
+        managedBy: null,
         createdAt: now, updatedAt: now,
       }
       workflows.set(r.id, r)

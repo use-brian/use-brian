@@ -20,8 +20,7 @@ import { RecordingUploadButton } from "@/components/recordings/recording-upload-
 import { useT } from "@/lib/i18n/client";
 import type { Dictionary } from "@/lib/i18n";
 import { format } from "@/lib/i18n";
-import { isHostedEdition } from "@/lib/edition";
-import { modelTierPlanGateApplies } from "@/lib/plan-gate";
+import { ModelTierRow, isModelAlias, type ModelAlias } from "@/components/studio/model-tier-row";
 
 /**
  * Assistant detail (app-web) — the tabbed editor for one assistant.
@@ -36,7 +35,7 @@ import { modelTierPlanGateApplies } from "@/lib/plan-gate";
  *   Brain     = memory + knowledge
  *   Tools     = connectors (MCP tool catalog) + skills
  *   Api       = programmatic API keys + public chat link
- *   Settings  = name, bio, prompt, team, cost, delete
+ *   Settings  = name, charter (mission / audience / success / instructions), team, cost, delete
  * (The Network tab was removed 2026-07-24 with the assistant_modes /
  * sharing teardown; deep links to `?tab=network` fall through to "brain".)
  *
@@ -311,7 +310,13 @@ export function AssistantDetail({
           <BrainTab assistantId={id} workspaceId={assistant.workspaceId ?? null} />
         )}
         {tab === "tools" && <ConnectorsTab assistantId={id} workspaceId={assistant.workspaceId ?? null} />}
-        {tab === "api" && <ApiKeysTab assistantId={id} />}
+        {tab === "api" && (
+          <ApiKeysTab
+            assistantId={id}
+            workspaceId={assistant.workspaceId ?? null}
+            role={assistant.role}
+          />
+        )}
         {tab === "settings" && (
           <SettingsTab
             assistantId={id}
@@ -1204,95 +1209,6 @@ function Section({
   );
 }
 
-// Per-platform model picker row used in SettingsTab → Channel Models.
-// Hosted plan access matches the backend resolver. OSS has no plans, so all
-// built-in tiers remain selectable.
-//
-// `plan` is the *workspace* plan (billing is per-workspace, migration 143);
-// the parent reads it from the workspace context. The legacy `users.plan`
-// cookie field is stale post-migration and would lock out members of a
-// paid workspace whose own user row is still 'free'.
-function ChannelModelRow({
-  label,
-  value,
-  onChange,
-  disabled,
-  saving,
-  plan,
-}: {
-  label: string;
-  value: ModelAlias;
-  onChange: (v: ModelAlias) => void;
-  disabled: boolean;
-  saving: boolean;
-  plan: string;
-}) {
-  const t = useT();
-  const edition = isHostedEdition() ? "hosted" : "oss";
-  const proDisabled = modelTierPlanGateApplies(edition, plan, "pro");
-  const maxDisabled = modelTierPlanGateApplies(edition, plan, "max");
-  return (
-    <div className="px-5 py-3 flex items-center justify-between gap-3">
-      <span className="text-[14px] font-medium text-foreground">{label}</span>
-      <div className="flex items-center gap-2">
-        {saving && (
-          <span className="text-[11px] text-muted-foreground animate-pulse">
-            {t.assistant.modelSelector.saving}
-          </span>
-        )}
-        <Select
-          value={value}
-          onValueChange={(v) => {
-            if (isModelAlias(v) && v !== value) onChange(v);
-          }}
-          disabled={disabled}
-        >
-          <SelectTrigger
-            size="sm"
-            className="text-xs gap-1.5 bg-muted/50 hover:bg-muted border-transparent h-7 w-auto min-w-24"
-          >
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent side="bottom" align="end" alignItemWithTrigger={false} className="w-auto min-w-52">
-            <SelectItem value="standard">
-              <div className="flex flex-col gap-0.5 py-0.5">
-                <span className="text-sm font-medium">{t.assistant.modelSelector.standard}</span>
-                <span className="text-[11px] text-muted-foreground">{t.assistant.modelSelector.standardDesc}</span>
-              </div>
-            </SelectItem>
-            <SelectItem value="pro" disabled={proDisabled}>
-              <div className="flex flex-col gap-0.5 py-0.5">
-                <div className="flex items-center gap-1.5">
-                  <span className="text-sm font-medium">{t.assistant.modelSelector.pro}</span>
-                  {proDisabled && (
-                    <span className="rounded-sm bg-muted px-1 py-px text-[9px] font-medium uppercase tracking-wide text-muted-foreground">
-                      {t.assistant.modelSelector.proPlanBadge}
-                    </span>
-                  )}
-                </div>
-                <span className="text-[11px] text-muted-foreground">{t.assistant.modelSelector.proDesc}</span>
-              </div>
-            </SelectItem>
-            <SelectItem value="max" disabled={maxDisabled}>
-              <div className="flex flex-col gap-0.5 py-0.5">
-                <div className="flex items-center gap-1.5">
-                  <span className="text-sm font-medium">{t.assistant.modelSelector.max}</span>
-                  {maxDisabled && (
-                    <span className="rounded-sm bg-muted px-1 py-px text-[9px] font-medium uppercase tracking-wide text-muted-foreground">
-                      {t.assistant.modelSelector.maxPlanBadge}
-                    </span>
-                  )}
-                </div>
-                <span className="text-[11px] text-muted-foreground">{t.assistant.modelSelector.maxDesc}</span>
-              </div>
-            </SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
-    </div>
-  );
-}
-
 // ─── Cost tab ───────────────────────────────────────────────────
 
 type CostResponse = {
@@ -1460,6 +1376,43 @@ function ConnectorsTab({ assistantId, workspaceId }: { assistantId: string; work
       // Revert on failure
       setUserConnectors((prev) =>
         prev.map((c) => (c.id === id ? { ...c, enabled: !enable } : c))
+      );
+    } finally {
+      setToggling(null);
+    }
+  }
+
+  // Built-in primitives (Workspace Files / Office / Computer Use) have no
+  // connector instance, so the enable/disable route above has nothing to write
+  // that the runtime reads. Their on/off IS the capability grant — the same
+  // `assistant_capabilities` row `filterToolsByCapabilities` checks on every
+  // execution path. Different route, identical row semantics.
+  // See docs/architecture/features/builtin-primitives.md.
+  async function toggleBuiltinCapability(capability: string, enable: boolean) {
+    setToggling(capability);
+    setUserConnectors((prev) =>
+      prev.map((c) => (c.id === capability ? { ...c, enabled: enable } : c))
+    );
+    try {
+      const res = await authFetch(
+        `${API_URL}/api/assistants/${assistantId}/primitive-grants/${encodeURIComponent(capability)}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled: enable }),
+        }
+      );
+      if (!res.ok) throw new Error("toggle failed");
+      // Trust the server's post-write read rather than the optimistic guess —
+      // the grant is idempotent and a concurrent edit from another surface
+      // would otherwise leave this tab showing a state the DB disagrees with.
+      const data = (await res.json()) as { capability: string; enabled: boolean };
+      setUserConnectors((prev) =>
+        prev.map((c) => (c.id === data.capability ? { ...c, enabled: data.enabled } : c))
+      );
+    } catch {
+      setUserConnectors((prev) =>
+        prev.map((c) => (c.id === capability ? { ...c, enabled: !enable } : c))
       );
     } finally {
       setToggling(null);
@@ -1692,23 +1645,22 @@ function ConnectorsTab({ assistantId, workspaceId }: { assistantId: string; work
                           <path d="M3 5l4 4 4-4" />
                         </svg>
                       )}
-                      {c.scope === "builtin" ? (
-                        // Built-in primitives are always available — there is no
-                        // per-assistant off switch to honor, so a toggle here
-                        // would be cosmetic. Per-tool policy below is the control.
-                        <span className="text-[11px] font-medium text-muted-foreground bg-muted px-2 py-0.5 rounded-full">
-                          {t.assistant.toolsTab.alwaysOn}
-                        </span>
-                      ) : (
+                      {/* Built-in primitives switch through the capability
+                          route (no connector instance to enable/disable), every
+                          other row through the connector route. Same control,
+                          because to the user it is the same question. */}
                       <button
                         type="button" role="switch" aria-checked={c.enabled}
                         disabled={toggling === c.id}
-                        onClick={(e) => { e.stopPropagation(); toggleAssistantEnabled(c.id, !c.enabled); }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (c.scope === "builtin") toggleBuiltinCapability(c.id, !c.enabled);
+                          else toggleAssistantEnabled(c.id, !c.enabled);
+                        }}
                         className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 ${c.enabled ? "bg-primary" : "bg-muted"}`}
                       >
                         <span className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-background shadow-sm transition-transform duration-200 ${c.enabled ? "translate-x-4" : "translate-x-0"}`} />
                       </button>
-                      )}
                     </>
                   )}
                 </div>
@@ -1904,13 +1856,6 @@ function CostTab({ assistantId }: { assistantId: string }) {
 
 // ─── Settings tab ────────────────────────────────────────────────
 
-type ModelAlias = "standard" | "pro" | "max";
-type ChannelModelKey = "slack" | "telegram";
-
-function isModelAlias(v: unknown): v is ModelAlias {
-  return v === "standard" || v === "pro" || v === "max";
-}
-
 function SettingsTab({
   assistantId,
   role,
@@ -1933,25 +1878,37 @@ function SettingsTab({
   const params = useParams<{ workspaceId: string }>();
   const routeWs = params?.workspaceId ?? "";
   const [name, setName] = useState(assistantName);
-  // Bio: shown on the public chat page (/c/<token>) and surfaced to sibling
-  // assistants as `purpose` in listConnectedAssistants. Lived on the Network
-  // tab until that tab was removed (2026-07-24).
-  const [bio, setBio] = useState("");
-  const [savedBio, setSavedBio] = useState("");
-  const [systemPrompt, setSystemPrompt] = useState("");
+  // Charter: the one identity item (migration 418) that replaced bio +
+  // custom instructions. `mission` is shown on the public chat page
+  // (/c/<token>) and surfaced to sibling assistants as `purpose` in
+  // listConnectedAssistants; `instructions` is the Layer 2 persona prose.
+  // Mission / audience / success are owner-only; instructions is editable
+  // by every member (mirrors the PATCH gate in
+  // packages/api/src/routes/assistants.ts).
+  const emptyCharter = { mission: "", audience: "", success: "", instructions: "" };
+  const [charter, setCharter] = useState<typeof emptyCharter>(emptyCharter);
+  const [savedCharter, setSavedCharter] = useState<typeof emptyCharter>(emptyCharter);
   const [loaded, setLoaded] = useState(false);
-  const [saving, setSaving] = useState<"name" | "bio" | "prompt" | null>(null);
+  const [saving, setSaving] = useState<"name" | "charter" | null>(null);
+  // Playbook (growth loop Phase 3): rules the weekly reflection learned
+  // from the team's feedback. Auto-admitted up to the active cap (badged
+  // "Auto"; decidedByUserId NULL marks auto-admission); overflow waits as
+  // suggestions. Deciding is owner-only, mirroring the API gate.
+  const [playbook, setPlaybook] = useState<
+    { id: string; rule: string; rationale: string | null; status: string; decidedByUserId: string | null }[]
+  >([]);
+  const [decidingRule, setDecidingRule] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState("");
   const [deleting, setDeleting] = useState(false);
 
-  // Channel-model aliases — backend stores per assistant in
-  // assistants.{slack,telegram}_model_alias. Read by the platform
-  // webhook routes (slack.ts / telegram*.ts) when picking the
-  // model for that channel's reply.
-  const [slackModel, setSlackModel] = useState<ModelAlias>("pro");
-  const [telegramModel, setTelegramModel] = useState<ModelAlias>("pro");
-  const [savingModel, setSavingModel] = useState<ChannelModelKey | null>(null);
+  // Default model tier (assistants.default_model_alias, migration 416). Read
+  // by the surfaces that have no channel routing row to carry a tier - the
+  // hosted official Telegram + WhatsApp bots - and used to seed a newly
+  // attached channel. Connected channels are re-tiered in Studio > Channels;
+  // the public API and chat link have their own tier on the API tab.
+  const [defaultModel, setDefaultModel] = useState<ModelAlias>("pro");
+  const [savingModel, setSavingModel] = useState(false);
 
   // Team state
   const [currentTeamId, setCurrentTeamId] = useState<string | null>(workspaceId);
@@ -1975,19 +1932,21 @@ function SettingsTab({
       .then((r) => (r.ok ? r.json() : null))
       .then((data: {
         name?: string;
-        bio?: string | null;
-        systemPrompt?: string | null;
+        charter?: { mission?: string; audience?: string; success?: string; instructions?: string } | null;
         workspaceId?: string | null;
-        slackModelAlias?: string;
-        telegramModelAlias?: string;
+        defaultModelAlias?: string;
       } | null) => {
         if (data) {
           setName(data.name ?? assistantName);
-          setBio(data.bio ?? "");
-          setSavedBio(data.bio ?? "");
-          setSystemPrompt(data.systemPrompt ?? "");
-          if (isModelAlias(data.slackModelAlias)) setSlackModel(data.slackModelAlias);
-          if (isModelAlias(data.telegramModelAlias)) setTelegramModel(data.telegramModelAlias);
+          const loadedCharter = {
+            mission: data.charter?.mission ?? "",
+            audience: data.charter?.audience ?? "",
+            success: data.charter?.success ?? "",
+            instructions: data.charter?.instructions ?? "",
+          };
+          setCharter(loadedCharter);
+          setSavedCharter(loadedCharter);
+          if (isModelAlias(data.defaultModelAlias)) setDefaultModel(data.defaultModelAlias);
           setLoaded(true);
           if (data.workspaceId) {
             setCurrentTeamId(data.workspaceId);
@@ -2001,9 +1960,40 @@ function SettingsTab({
       .catch(() => {});
   }, [assistantId, assistantName]);
 
+  useEffect(() => {
+    authFetch(`${API_URL}/api/assistants/${assistantId}/playbook`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { rules?: { id: string; rule: string; rationale: string | null; status: string; decidedByUserId: string | null }[] } | null) => {
+        if (data?.rules) setPlaybook(data.rules);
+      })
+      .catch(() => {});
+  }, [assistantId]);
+
   function showFeedback(type: "success" | "error", message: string) {
     setFeedback({ type, message });
     setTimeout(() => setFeedback(null), 3000);
+  }
+
+  async function decideRule(ruleId: string, decision: "approve" | "reject" | "retire") {
+    setDecidingRule(ruleId);
+    try {
+      const res = await authFetch(`${API_URL}/api/assistants/${assistantId}/playbook/${ruleId}/decision`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ decision }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setPlaybook((prev) => prev.map((r) => (r.id === ruleId ? { ...r, status: data.rule.status } : r)));
+      } else {
+        const err = await res.json().catch(() => ({}));
+        showFeedback("error", err.message ?? err.error ?? t.assistant.settings.playbookDecisionFailed);
+      }
+    } catch {
+      showFeedback("error", t.assistant.settingsTab.feedbackNetworkError);
+    } finally {
+      setDecidingRule(null);
+    }
   }
 
   async function saveName() {
@@ -2034,23 +2024,42 @@ function SettingsTab({
     }
   }
 
-  async function saveBio() {
-    if (bio.trim() === savedBio.trim()) return;
-    setSaving("bio");
+  const charterDirty = (Object.keys(charter) as (keyof typeof emptyCharter)[])
+    .some((f) => charter[f].trim() !== savedCharter[f].trim());
+
+  async function saveCharter() {
+    // Send only the fields that changed: the API rejects a whole request if
+    // it carries a field above the caller's rights (strictest-field rule),
+    // so a member editing instructions must not accidentally bundle the
+    // owner-only identity fields.
+    const patch: Record<string, string | null> = {};
+    for (const f of Object.keys(charter) as (keyof typeof emptyCharter)[]) {
+      if (charter[f].trim() !== savedCharter[f].trim()) {
+        patch[f] = charter[f].trim() || null;
+      }
+    }
+    if (Object.keys(patch).length === 0) return;
+    setSaving("charter");
     try {
       const res = await authFetch(`${API_URL}/api/assistants/${assistantId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ bio: bio.trim() || null }),
+        body: JSON.stringify({ charter: patch }),
       });
       if (res.ok) {
         const data = await res.json();
-        setBio(data.bio ?? "");
-        setSavedBio(data.bio ?? "");
-        showFeedback("success", t.assistant.settingsTab.feedbackBioUpdated);
+        const updated = {
+          mission: data.charter?.mission ?? "",
+          audience: data.charter?.audience ?? "",
+          success: data.charter?.success ?? "",
+          instructions: data.charter?.instructions ?? "",
+        };
+        setCharter(updated);
+        setSavedCharter(updated);
+        showFeedback("success", t.assistant.settingsTab.feedbackCharterUpdated);
       } else {
         const err = await res.json().catch(() => ({ error: t.assistant.settingsTab.feedbackFailedToUpdate }));
-        showFeedback("error", err.error ?? t.assistant.settingsTab.feedbackFailedToUpdate);
+        showFeedback("error", err.error ?? t.assistant.settingsTab.feedbackFailedToUpdateCharter);
       }
     } catch {
       showFeedback("error", t.assistant.settingsTab.feedbackNetworkError);
@@ -2059,50 +2068,27 @@ function SettingsTab({
     }
   }
 
-  async function savePrompt() {
-    setSaving("prompt");
+  async function saveDefaultModelAlias(value: ModelAlias) {
+    const prev = defaultModel;
+    setDefaultModel(value);
+    setSavingModel(true);
     try {
       const res = await authFetch(`${API_URL}/api/assistants/${assistantId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ systemPrompt: systemPrompt || null }),
+        body: JSON.stringify({ defaultModelAlias: value }),
       });
       if (res.ok) {
-        showFeedback("success", t.assistant.settingsTab.feedbackPromptUpdated);
+        showFeedback("success", t.assistant.settings.defaultModelSaved);
       } else {
-        const err = await res.json().catch(() => ({ error: t.assistant.settingsTab.feedbackFailedToUpdate }));
-        showFeedback("error", err.error ?? t.assistant.settingsTab.feedbackFailedToUpdatePrompt);
+        setDefaultModel(prev);
+        showFeedback("error", t.assistant.settings.defaultModelFailed);
       }
     } catch {
+      setDefaultModel(prev);
       showFeedback("error", t.assistant.settingsTab.feedbackNetworkError);
     } finally {
-      setSaving(null);
-    }
-  }
-
-  async function saveModelAlias(channel: ChannelModelKey, value: ModelAlias) {
-    const prev = channel === "slack" ? slackModel : telegramModel;
-    const setter = channel === "slack" ? setSlackModel : setTelegramModel;
-    const field = channel === "slack" ? "slackModelAlias" : "telegramModelAlias";
-    setter(value);
-    setSavingModel(channel);
-    try {
-      const res = await authFetch(`${API_URL}/api/assistants/${assistantId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ [field]: value }),
-      });
-      if (res.ok) {
-        showFeedback("success", t.assistant.settings.channelModelsSaved);
-      } else {
-        setter(prev);
-        showFeedback("error", t.assistant.settings.channelModelsFailed);
-      }
-    } catch {
-      setter(prev);
-      showFeedback("error", t.assistant.settingsTab.feedbackNetworkError);
-    } finally {
-      setSavingModel(null);
+      setSavingModel(false);
     }
   }
 
@@ -2245,60 +2231,89 @@ function SettingsTab({
               )}
             </div>
           </div>
-          <div>
-            <label className="text-[12px] font-medium text-muted-foreground block mb-1.5">
-              {t.assistant.settings.bio}
-            </label>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={bio}
-                onChange={(e) => setBio(e.target.value)}
-                maxLength={200}
-                placeholder={t.assistant.settings.bioPlaceholder}
-                className="flex-1 bg-muted/50 border border-border rounded-lg px-3 py-2 text-[14px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-              />
-              <button
-                onClick={saveBio}
-                disabled={saving === "bio" || bio.trim() === savedBio.trim()}
-                className="px-3 py-2 text-[13px] font-medium rounded-lg bg-action text-action-foreground hover:bg-action/80 disabled:opacity-50 disabled:pointer-events-none transition-colors"
-              >
-                {saving === "bio" ? t.assistant.settings.saving : t.assistant.settings.save}
-              </button>
-            </div>
-            <p className="text-[11px] text-muted-foreground mt-1.5">{t.assistant.settings.bioHint}</p>
-          </div>
         </div>
       </Section>
 
-      {/* Custom Instructions — the system prompt is a shared, collaboratively
-          editable persona, so it is open to any member who can access this
-          assistant (not owner-gated like the rest of this tab). Mirrors the
-          API rule in packages/api/src/routes/assistants.ts PATCH handler. */}
-      <Section title={t.assistant.settings.customInstructionsTitle} description={t.assistant.settings.customInstructionsDesc}>
+      {/* Charter — the one identity item (migration 418). Mission / audience /
+          what-good-looks-like are owner-only (they define what the assistant
+          IS); instructions stay open to any member who can access the
+          assistant (the pre-418 collaborative right). Mirrors the API rule in
+          packages/api/src/routes/assistants.ts PATCH handler. */}
+      <Section title={t.assistant.settings.charterTitle} description={t.assistant.settings.charterDesc}>
         <div className="px-5 py-4 space-y-3">
           {!loaded ? (
             <div className="text-[13px] text-muted-foreground">{t.settings.common.loading}</div>
           ) : (
             <>
-              <textarea
-                value={systemPrompt}
-                onChange={(e) => setSystemPrompt(e.target.value)}
-                maxLength={10000}
-                rows={6}
-                placeholder={t.assistant.settings.customInstructionsPlaceholder}
-                className="w-full bg-muted/50 border border-border rounded-lg px-3 py-2.5 text-[14px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50 resize-y min-h-[120px]"
-              />
+              <div>
+                <label className="text-[12px] font-medium text-muted-foreground block mb-1.5">
+                  {t.assistant.settings.charterMission}
+                </label>
+                <input
+                  type="text"
+                  value={charter.mission}
+                  onChange={(e) => setCharter({ ...charter, mission: e.target.value })}
+                  disabled={!isOwner}
+                  maxLength={300}
+                  placeholder={t.assistant.settings.charterMissionPlaceholder}
+                  className="w-full bg-muted/50 border border-border rounded-lg px-3 py-2 text-[14px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
+                />
+                <p className="text-[11px] text-muted-foreground mt-1.5">{t.assistant.settings.charterMissionHint}</p>
+              </div>
+              <div>
+                <label className="text-[12px] font-medium text-muted-foreground block mb-1.5">
+                  {t.assistant.settings.charterAudience}
+                </label>
+                <input
+                  type="text"
+                  value={charter.audience}
+                  onChange={(e) => setCharter({ ...charter, audience: e.target.value })}
+                  disabled={!isOwner}
+                  maxLength={500}
+                  placeholder={t.assistant.settings.charterAudiencePlaceholder}
+                  className="w-full bg-muted/50 border border-border rounded-lg px-3 py-2 text-[14px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
+                />
+              </div>
+              <div>
+                <label className="text-[12px] font-medium text-muted-foreground block mb-1.5">
+                  {t.assistant.settings.charterSuccess}
+                </label>
+                <textarea
+                  value={charter.success}
+                  onChange={(e) => setCharter({ ...charter, success: e.target.value })}
+                  disabled={!isOwner}
+                  maxLength={2000}
+                  rows={3}
+                  placeholder={t.assistant.settings.charterSuccessPlaceholder}
+                  className="w-full bg-muted/50 border border-border rounded-lg px-3 py-2.5 text-[14px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50 resize-y"
+                />
+              </div>
+              <div>
+                <label className="text-[12px] font-medium text-muted-foreground block mb-1.5">
+                  {t.assistant.settings.charterInstructions}
+                </label>
+                <textarea
+                  value={charter.instructions}
+                  onChange={(e) => setCharter({ ...charter, instructions: e.target.value })}
+                  maxLength={10000}
+                  rows={6}
+                  placeholder={t.assistant.settings.charterInstructionsPlaceholder}
+                  className="w-full bg-muted/50 border border-border rounded-lg px-3 py-2.5 text-[14px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50 resize-y min-h-[120px]"
+                />
+                <span className="text-[11px] text-muted-foreground">
+                  {charter.instructions.length.toLocaleString()} / 10,000
+                </span>
+              </div>
               <div className="flex items-center justify-between">
                 <span className="text-[11px] text-muted-foreground">
-                  {systemPrompt.length.toLocaleString()} / 10,000
+                  {t.assistant.settings.charterOwnerOnlyHint}
                 </span>
                 <button
-                  onClick={savePrompt}
-                  disabled={saving === "prompt"}
+                  onClick={saveCharter}
+                  disabled={saving === "charter" || !charterDirty}
                   className="px-3 py-2 text-[13px] font-medium rounded-lg bg-action text-action-foreground hover:bg-action/80 disabled:opacity-50 disabled:pointer-events-none transition-colors"
                 >
-                  {saving === "prompt" ? t.assistant.settings.saving : t.assistant.settings.save}
+                  {saving === "charter" ? t.assistant.settings.saving : t.assistant.settings.save}
                 </button>
               </div>
             </>
@@ -2306,31 +2321,104 @@ function SettingsTab({
         </div>
       </Section>
 
-      {/* Channel Models — per-platform model alias used when this assistant
-          replies via Slack / Telegram. The chat composer's
-          per-message override still wins on the web channel. */}
-      <Section
-        title={t.assistant.settings.channelModelsTitle}
-        description={t.assistant.settings.channelModelsDesc}
-      >
-        <div className="divide-y divide-border">
-          <ChannelModelRow
-            label={t.assistant.settings.channelModelsSlack}
-            value={slackModel}
-            onChange={(v) => saveModelAlias("slack", v)}
-            disabled={!isOwner}
-            saving={savingModel === "slack"}
-            plan={workspacePlan}
-          />
-          <ChannelModelRow
-            label={t.assistant.settings.channelModelsTelegram}
-            value={telegramModel}
-            onChange={(v) => saveModelAlias("telegram", v)}
-            disabled={!isOwner}
-            saving={savingModel === "telegram"}
-            plan={workspacePlan}
-          />
+      {/* Playbook — the growth loop's admission gate (suggestion-first, D8).
+          The weekly reflection proposes rules; only owner-approved ones reach
+          the assistant's prompt. Mirrors the API rule: view any member,
+          decide owner-only. */}
+      <Section title={t.assistant.settings.playbookTitle} description={t.assistant.settings.playbookDesc}>
+        <div className="px-5 py-4 space-y-4">
+          {playbook.filter((r) => r.status === "suggested").length === 0 &&
+          playbook.filter((r) => r.status === "active").length === 0 ? (
+            <p className="text-[13px] text-muted-foreground">{t.assistant.settings.playbookEmpty}</p>
+          ) : (
+            <>
+              {playbook.some((r) => r.status === "suggested") && (
+                <div className="space-y-2">
+                  <div className="text-[12px] font-medium text-muted-foreground">
+                    {t.assistant.settings.playbookSuggested}
+                  </div>
+                  {playbook.filter((r) => r.status === "suggested").map((r) => (
+                    <div key={r.id} className="border border-border rounded-lg px-3 py-2.5 space-y-1.5">
+                      <div className="text-[14px] text-foreground">{r.rule}</div>
+                      {r.rationale && (
+                        <div className="text-[12px] text-muted-foreground">{r.rationale}</div>
+                      )}
+                      {isOwner ? (
+                        <div className="flex gap-2 pt-1">
+                          <button
+                            onClick={() => void decideRule(r.id, "approve")}
+                            disabled={decidingRule === r.id}
+                            className="px-2.5 py-1.5 text-[12px] font-medium rounded-md bg-action text-action-foreground hover:bg-action/80 disabled:opacity-50 transition-colors"
+                          >
+                            {t.assistant.settings.playbookApprove}
+                          </button>
+                          <button
+                            onClick={() => void decideRule(r.id, "reject")}
+                            disabled={decidingRule === r.id}
+                            className="px-2.5 py-1.5 text-[12px] font-medium rounded-md border border-border text-muted-foreground hover:bg-muted disabled:opacity-50 transition-colors"
+                          >
+                            {t.assistant.settings.playbookReject}
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="text-[11px] text-muted-foreground">
+                          {t.assistant.settings.playbookOwnerOnly}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {playbook.some((r) => r.status === "active") && (
+                <div className="space-y-2">
+                  <div className="text-[12px] font-medium text-muted-foreground">
+                    {t.assistant.settings.playbookActive}
+                  </div>
+                  {playbook.filter((r) => r.status === "active").map((r) => (
+                    <div key={r.id} className="border border-border rounded-lg px-3 py-2.5 flex items-start justify-between gap-3">
+                      <div className="text-[14px] text-foreground">
+                        {r.rule}
+                        {!r.decidedByUserId && (
+                          <span className="ml-2 align-middle text-[10px] font-medium uppercase tracking-wide text-muted-foreground border border-border rounded px-1 py-0.5">
+                            {t.assistant.settings.playbookAutoBadge}
+                          </span>
+                        )}
+                      </div>
+                      {isOwner && (
+                        <button
+                          onClick={() => void decideRule(r.id, "retire")}
+                          disabled={decidingRule === r.id}
+                          className="shrink-0 px-2.5 py-1.5 text-[12px] font-medium rounded-md border border-border text-muted-foreground hover:bg-muted disabled:opacity-50 transition-colors"
+                        >
+                          {t.assistant.settings.playbookRetire}
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
         </div>
+      </Section>
+
+      {/* Default model tier — the tier for surfaces that carry no channel
+          routing row (the official Telegram / WhatsApp bots), and the seed for
+          a newly connected channel. A connected channel's tier is edited in
+          Studio > Channels; the public API + chat link have their own tier on
+          the API tab; the chat composer still overrides per message. */}
+      <Section
+        title={t.assistant.settings.defaultModelTitle}
+        description={t.assistant.settings.defaultModelDesc}
+      >
+        <ModelTierRow
+          label={t.assistant.settings.defaultModelLabel}
+          value={defaultModel}
+          onChange={(v) => saveDefaultModelAlias(v)}
+          disabled={!isOwner}
+          saving={savingModel}
+          plan={workspacePlan}
+        />
       </Section>
 
       {/* Team */}
@@ -2482,14 +2570,21 @@ function SettingsTab({
 // acting as this assistant; its PATCH is OWNER/ADMIN-gated server-side
 // (403 for plain members). See docs/plans/company-brain.md §17.
 
-type PrimitiveGrantCapability = "tasks" | "crm" | "configure";
-type PrimitiveGrantState = { capability: PrimitiveGrantCapability; enabled: boolean };
+type PrimitiveGrantCapability = "tasks" | "crm" | "goals" | "configure";
+type PrimitiveGrantState = {
+  capability: string;
+  enabled: boolean;
+  /** Which surface owns the row. Built-in primitives render their switch on
+   *  the Tools tab beside the other connectors, so this panel skips them —
+   *  two controls for one grant is worse than none. */
+  group?: "primitive" | "admin" | "builtin";
+};
 
 function PrimitiveGrantsPanel({ assistantId }: { assistantId: string }) {
   const t = useT();
   const [grants, setGrants] = useState<PrimitiveGrantState[] | null>(null);
   const [pending, setPending] = useState<string | null>(null);
-  const [rowError, setRowError] = useState<{ capability: PrimitiveGrantCapability; message: string } | null>(null);
+  const [rowError, setRowError] = useState<{ capability: string; message: string } | null>(null);
 
   useEffect(() => {
     authFetch(`${API_URL}/api/assistants/${assistantId}/primitive-grants`)
@@ -2500,7 +2595,7 @@ function PrimitiveGrantsPanel({ assistantId }: { assistantId: string }) {
       .catch(() => {});
   }, [assistantId]);
 
-  async function toggle(capability: PrimitiveGrantCapability, enabled: boolean) {
+  async function toggle(capability: string, enabled: boolean) {
     setPending(capability);
     setRowError(null);
     try {
@@ -2530,18 +2625,28 @@ function PrimitiveGrantsPanel({ assistantId }: { assistantId: string }) {
 
   if (!grants) return null;
 
-  const labelFor = (cap: PrimitiveGrantCapability) =>
-    cap === "tasks"
-      ? t.assistant.settingsTab.capabilities.tasksLabel
-      : cap === "crm"
-        ? t.assistant.settingsTab.capabilities.crmLabel
-        : t.assistant.settingsTab.capabilities.configureLabel;
-  const descFor = (cap: PrimitiveGrantCapability) =>
-    cap === "tasks"
-      ? t.assistant.settingsTab.capabilities.tasksDesc
-      : cap === "crm"
-        ? t.assistant.settingsTab.capabilities.crmDesc
-        : t.assistant.settingsTab.capabilities.configureDesc;
+  // Explicit copy table, NOT a ternary chain ending in `configure`. The chain
+  // this replaces silently rendered every unlisted capability under the
+  // "Agent configuration" label and description, which is how `goals` shipped
+  // mislabelled as a second control-plane row. An unknown capability now
+  // renders nothing rather than something wrong.
+  const copyFor = (cap: string): { label: string; desc: string } | null => {
+    const c = t.assistant.settingsTab.capabilities;
+    switch (cap as PrimitiveGrantCapability) {
+      case "tasks": return { label: c.tasksLabel, desc: c.tasksDesc };
+      case "crm": return { label: c.crmLabel, desc: c.crmDesc };
+      case "goals": return { label: c.goalsLabel, desc: c.goalsDesc };
+      case "configure": return { label: c.configureLabel, desc: c.configureDesc };
+      default: return null;
+    }
+  };
+
+  // Built-in primitives own a switch on the Tools tab; rendering a second one
+  // here would give the same grant two controls. Keyed on the server's group
+  // discriminator rather than a local slug list so a new built-in cannot leak
+  // into this panel by default.
+  const rows = grants.filter((g) => g.group !== "builtin" && copyFor(g.capability));
+  if (rows.length === 0) return null;
 
   return (
     <section>
@@ -2554,10 +2659,11 @@ function PrimitiveGrantsPanel({ assistantId }: { assistantId: string }) {
         </p>
       </div>
       <div className="rounded-xl border border-border overflow-hidden divide-y divide-border">
-        {grants.map((g) => {
+        {rows.map((g) => {
           // The `configure` row is an agent/control-plane capability, not a
           // data primitive — give it a distinct tinted treatment.
           const isControlPlane = g.capability === "configure";
+          const copy = copyFor(g.capability)!;
           return (
             <div
               key={g.capability}
@@ -2566,8 +2672,8 @@ function PrimitiveGrantsPanel({ assistantId }: { assistantId: string }) {
               }`}
             >
               <div className="min-w-0">
-                <div className="text-[14px] font-medium text-foreground">{labelFor(g.capability)}</div>
-                <p className="text-[12px] text-muted-foreground mt-0.5">{descFor(g.capability)}</p>
+                <div className="text-[14px] font-medium text-foreground">{copy.label}</div>
+                <p className="text-[12px] text-muted-foreground mt-0.5">{copy.desc}</p>
                 {rowError?.capability === g.capability && (
                   <p className="text-[12px] text-destructive mt-1">{rowError.message}</p>
                 )}

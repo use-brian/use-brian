@@ -64,6 +64,11 @@ export {
   type ScribeWord,
 } from './scribe.js'
 export {
+  qwenAsrTranscriber,
+  QWEN_ASR_USD_PER_AUDIO_HOUR,
+  type QwenAsrOptions,
+} from './qwen-asr.js'
+export {
   qwenFiletransTranscriber,
   QWEN_FILETRANS_USD_PER_AUDIO_HOUR,
   type QwenFiletransOptions,

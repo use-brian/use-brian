@@ -34,6 +34,13 @@ describe('[COMP:files/parsers] parseFileContent', () => {
     expect(result.summary).toContain('Image: photo.png')
   })
 
+  it('does not let an unrelated document filename override a truthful image MIME', async () => {
+    const buf = Buffer.from([0x89, 0x50, 0x4e, 0x47])
+    const result = await parseFileContent(buf, 'image/png', 'misnamed.docx')
+    expect(result.text).toBe(buf.toString('base64'))
+    expect(result.mediaMimeType).toBe('image/png')
+  })
+
   it('returns base64 and "PDF:" summary for PDFs (native inlineData path)', async () => {
     // PDFs ride the same inlineData path as images — Gemini reads them
     // natively. parseFileContent must return the raw base64, NOT extracted
@@ -45,6 +52,14 @@ describe('[COMP:files/parsers] parseFileContent', () => {
     // Must never emit the pre-extraction failure sentinel we used to ship.
     expect(result.text).not.toContain('Failed to parse')
     expect(result.text).not.toContain('pdfParse is not a function')
+    expect(result.mediaMimeType).toBe('application/pdf')
+  })
+
+  it('sniffs a PDF before trusting a wrong text MIME and filename', async () => {
+    const buf = Buffer.from('%PDF-1.4 mislabeled body')
+    const result = await parseFileContent(buf, 'text/plain', 'download.txt')
+    expect(result.text).toBe(buf.toString('base64'))
+    expect(result.mediaMimeType).toBe('application/pdf')
   })
 
   it('parses CSV files based on filename extension', async () => {
@@ -52,6 +67,25 @@ describe('[COMP:files/parsers] parseFileContent', () => {
     const result = await parseFileContent(buf, 'application/octet-stream', 'users.csv')
     expect(result.text).toBe('name,age\nAlice,30\nBob,25')
     expect(result.summary).toContain('CSV: users.csv')
+    expect(result.summary).toContain('3 rows')
+  })
+
+  it('routes a CSV extension case-insensitively', async () => {
+    const result = await parseFileContent(
+      Buffer.from('name,value\nAlpha,1'),
+      'application/octet-stream',
+      'EXPORT.CSV',
+    )
+    expect(result.text).toContain('Alpha,1')
+    expect(result.summary).toContain('2 rows')
+  })
+
+  it('counts CSV records without treating quoted newlines as new rows', async () => {
+    const result = await parseFileContent(
+      Buffer.from('name,notes\r\nAlpha,"first line\r\nsecond line"\r\nBeta,done\r\n'),
+      'text/csv',
+      'multiline.csv',
+    )
     expect(result.summary).toContain('3 rows')
   })
 
@@ -77,9 +111,9 @@ describe('[COMP:files/parsers] parseFileContent', () => {
     expect(result.summary).toContain('Spreadsheet: broken.xlsx')
   })
 
-  it('returns an actionable placeholder for legacy .xls files', async () => {
+  it('returns a stable placeholder when malformed legacy .xls cannot be parsed', async () => {
     const result = await parseFileContent(Buffer.from('biff'), 'application/vnd.ms-excel', 'old.xls')
-    expect(result.text).toContain('legacy .xls format is not supported')
+    expect(result.text).toContain('Could not parse')
     expect(result.summary).toContain('Spreadsheet: old.xls')
   })
 
@@ -96,9 +130,9 @@ describe('[COMP:files/parsers] parseFileContent', () => {
     expect(result.summary).toContain('Presentation: deck.pptx')
   })
 
-  it('returns an actionable placeholder for legacy .ppt files', async () => {
+  it('returns a stable placeholder when malformed legacy .ppt cannot be parsed', async () => {
     const result = await parseFileContent(Buffer.from('ppt'), 'application/vnd.ms-powerpoint', 'old.ppt')
-    expect(result.text).toContain('legacy .ppt format is not supported')
+    expect(result.text).toContain('Could not parse')
     expect(result.summary).toContain('Presentation: old.ppt')
   })
 
@@ -124,6 +158,12 @@ describe('[COMP:files/parsers] parseFileContent', () => {
     expect(result.text).toContain('Market Analysis for Discussion')
   })
 
+  it('extracts a .docx from bytes before a wrong text MIME can decode it', async () => {
+    const result = await parseFileContent(sampleDocx, 'text/plain', 'download.txt')
+    expect(result.text).toContain('Market Analysis for Discussion')
+    expect(result.text).not.toContain('\ufffd')
+  })
+
   it('returns an honest placeholder when a .docx cannot be parsed', async () => {
     const garbage = Buffer.from('this is not a real docx zip')
     const result = await parseFileContent(garbage, DOCX_MIME, 'broken.docx')
@@ -131,11 +171,18 @@ describe('[COMP:files/parsers] parseFileContent', () => {
     expect(result.summary).toContain('Document: broken.docx')
   })
 
-  it('returns an actionable placeholder for legacy .doc files', async () => {
+  it('returns a stable placeholder when malformed legacy .doc cannot be parsed', async () => {
     const buf = Buffer.from('fake legacy word content')
     const result = await parseFileContent(buf, 'application/msword', 'old.doc')
-    expect(result.text).toContain('legacy .doc format is not supported')
+    expect(result.text).toContain('Could not parse')
     expect(result.summary).toContain('Document: old.doc')
+  })
+
+  it('extracts an RTF document through AnyDoc', async () => {
+    const rtf = Buffer.from('{\\rtf1\\ansi Quarterly growth was 40 percent.}')
+    const result = await parseFileContent(rtf, 'application/octet-stream', 'quarterly.RTF')
+    expect(result.text).toContain('Quarterly growth was 40 percent.')
+    expect(result.summary).toContain('Document: quarterly.RTF')
   })
 
   it('returns a generic unsupported message for unknown types', async () => {

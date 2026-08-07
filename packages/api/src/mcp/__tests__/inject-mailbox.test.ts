@@ -9,6 +9,16 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+
+// Keep the Gmail OAuth connector available to the deployment but disconnected
+// in this fixture. That reproduces the home-linux prompt composition: Gmail's
+// unavailable notice sits beside a live IMAP/SMTP tool set.
+vi.mock('../../connector-config.js', () => ({
+  getConnectorConfig: (provider: string) => provider === 'google'
+    ? { clientId: 'gmail-client', clientSecret: 'gmail-secret' }
+    : undefined,
+}))
+
 import { OFFICIAL_CONNECTOR_TOOLS } from '@use-brian/shared'
 import { injectMcpTools } from '../inject.js'
 import type { ConnectorActionAudit, ConnectorActionPreflight } from '../../connector-action-port.js'
@@ -125,16 +135,32 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
     expect(rows).toBeDefined()
     const send = rows.find((t) => t.name === 'imapSendMessage')
     expect(send).toMatchObject({ classification: 'write', defaultPolicy: 'ask' })
-    expect(rows.find((t) => t.name === 'imapSearchMessages')).toMatchObject({ classification: 'read', defaultPolicy: 'allow' })
+    expect(send?.description).toMatch(/^Send email.*connected email account/i)
+    expect(send?.description).not.toMatch(/company mailbox/i)
+    const search = rows.find((t) => t.name === 'imapSearchMessages')
+    expect(search).toMatchObject({ classification: 'read', defaultPolicy: 'allow' })
+    expect(search?.description).toMatch(/^Summarize, check, or search email/i)
+    expect(search?.description).not.toMatch(/company mailbox/i)
     expect(rows.find((t) => t.name === 'imapGetMessage')).toMatchObject({ classification: 'read', defaultPolicy: 'allow' })
   })
 
   it('injects the three mailbox tools when a connected imap instance exists', async () => {
-    const { tools } = await injectImap()
+    const { tools, result } = await injectImap()
     expect(tools.has('imapSearchMessages')).toBe(true)
     expect(tools.has('imapGetMessage')).toBe(true)
     expect(tools.has('imapSendMessage')).toBe(true)
     expect(tools.get('imapSendMessage')?.requiresConfirmation).toBe(true)
+    expect(tools.get('imapSearchMessages')?.description).toMatch(/summarize email, check recent email/i)
+    expect(tools.get('imapSendMessage')?.description).toMatch(/ordinary email sending/i)
+
+    // Gmail OAuth is absent in this fixture, but email is available through
+    // the injected IMAP/SMTP mailbox. Its notice must not turn a missing
+    // service into a false claim that the broader capability is missing.
+    const gmailNotice = result.unavailable.find((line) => line.startsWith('Gmail: not connected'))
+    expect(gmailNotice).toBeDefined()
+    expect(gmailNotice).toMatch(/another available tool can fulfill/i)
+    expect(gmailNotice).toMatch(/do not mention this missing service/i)
+    expect(gmailNotice).not.toMatch(/so sending and reading email are unavailable/i)
   })
 
   it('announces the capability as unavailable when no mailbox is connected', async () => {

@@ -211,11 +211,70 @@ describe('[COMP:tasks/admission] grounded evidence', () => {
   })
 })
 
+/** The suggestion-first terminal: nothing above fired, so the extracted
+ *  candidate waits for review instead of auto-creating. */
+function expectSuggested(decision: ReturnType<typeof evaluateTaskAdmission>) {
+  expect(decision.outcome).toBe('hold')
+  if (decision.outcome === 'hold') expect(decision.reasonCode).toBe('suggested')
+}
+
 describe('[COMP:tasks/admission] evaluateTaskAdmission — decision table', () => {
-  it('allows a clean candidate', () => {
-    expect(evaluateTaskAdmission({ candidate: candidate(), rules: [], ...NO_MATCHES })).toEqual({
-      outcome: 'allow',
+  it('suggests a clean extracted candidate instead of auto-creating (suggestion-first default)', () => {
+    expectSuggested(
+      evaluateTaskAdmission({ candidate: candidate(), rules: [], ...NO_MATCHES }),
+    )
+  })
+
+  it('allows a clean assistant-lane candidate — the human asked', () => {
+    expect(
+      evaluateTaskAdmission({
+        candidate: candidate({ lane: 'assistant', sourceKind: null }),
+        rules: [],
+        ...NO_MATCHES,
+      }),
+    ).toEqual({ outcome: 'allow' })
+  })
+
+  it('auto-creates an agent-ready extracted candidate when an active allow rule matches', () => {
+    expect(
+      evaluateTaskAdmission({
+        candidate: candidate({ quality: quality() }),
+        rules: [rule({ effect: 'allow', predicate: { source_kinds: ['slack_thread'] } })],
+        ...NO_MATCHES,
+      }),
+    ).toEqual({ outcome: 'allow', autoRuleId: 'rule-1' })
+  })
+
+  it('keeps a NON-agent-ready candidate in Suggestions even when an allow rule matches — the floor outranks the rule', () => {
+    const decision = evaluateTaskAdmission({
+      candidate: candidate(), // no quality assessment at all
+      rules: [rule({ effect: 'allow', predicate: { source_kinds: ['slack_thread'] } })],
+      ...NO_MATCHES,
     })
+    expectSuggested(decision)
+  })
+
+  it('ignores a non-matching allow rule', () => {
+    expectSuggested(
+      evaluateTaskAdmission({
+        candidate: candidate({ quality: quality() }),
+        rules: [rule({ effect: 'allow', predicate: { source_kinds: ['email_message'] } })],
+        ...NO_MATCHES,
+      }),
+    )
+  })
+
+  it('lets a deny rule outrank an allow rule that also matches', () => {
+    const decision = evaluateTaskAdmission({
+      candidate: candidate({ quality: quality() }),
+      rules: [
+        rule({ id: 'rule-allow', effect: 'allow', predicate: { source_kinds: ['slack_thread'] } }),
+        rule({ id: 'rule-deny', effect: 'deny', predicate: { source_kinds: ['slack_thread'] } }),
+      ],
+      ...NO_MATCHES,
+    })
+    expect(decision.outcome).toBe('drop')
+    if (decision.outcome === 'drop') expect(decision.matchedRuleId).toBe('rule-deny')
   })
 
   it('drops the production slop shape "pull a group" when the grounded commitment is hedged', () => {
@@ -276,14 +335,14 @@ describe('[COMP:tasks/admission] evaluateTaskAdmission — decision table', () =
     if (decision.outcome === 'hold') expect(decision.reasonCode).toBe('quality_unverified')
   })
 
-  it('allows a grounded agent-ready automatic task', () => {
-    expect(
+  it('suggests a grounded agent-ready automatic task with no allow rule — ready is necessary, not sufficient', () => {
+    expectSuggested(
       evaluateTaskAdmission({
         candidate: candidate({ quality: quality() }),
         rules: [],
         ...NO_MATCHES,
       }),
-    ).toEqual({ outcome: 'allow' })
+    )
   })
 
   it('drops a tombstoned title and quotes the user\'s own reason back', () => {
@@ -301,14 +360,14 @@ describe('[COMP:tasks/admission] evaluateTaskAdmission — decision table', () =
     }
   })
 
-  it('ignores a tombstone below the match threshold', () => {
+  it('ignores a tombstone below the match threshold (falls through to the suggestion default)', () => {
     const decision = evaluateTaskAdmission({
       candidate: candidate(),
       rules: [],
       tombstoneMatches: [{ tombstone: tombstone(), similarity: 0.5 }],
       taskMatches: [],
     })
-    expect(decision.outcome).toBe('allow')
+    expectSuggested(decision)
   })
 
   it('drops on a matching deny rule and names the clause for relay', () => {
@@ -329,13 +388,13 @@ describe('[COMP:tasks/admission] evaluateTaskAdmission — decision table', () =
     }
   })
 
-  it('ignores a non-matching deny rule', () => {
+  it('ignores a non-matching deny rule (falls through to the suggestion default)', () => {
     const decision = evaluateTaskAdmission({
       candidate: candidate(),
       rules: [rule({ predicate: { source_kinds: ['github_sync'] } })],
       ...NO_MATCHES,
     })
-    expect(decision.outcome).toBe('allow')
+    expectSuggested(decision)
   })
 
   it('holds when a require rule is unsatisfied', () => {
@@ -348,13 +407,13 @@ describe('[COMP:tasks/admission] evaluateTaskAdmission — decision table', () =
     if (decision.outcome === 'hold') expect(decision.reasonCode).toBe('rule_requires')
   })
 
-  it('allows when the require rule is satisfied', () => {
+  it('passes a satisfied require rule (falls through to the suggestion default)', () => {
     const decision = evaluateTaskAdmission({
       candidate: candidate({ assigneeId: 'm-1' }),
       rules: [rule({ effect: 'require', predicate: { require: ['assignee'] } })],
       ...NO_MATCHES,
     })
-    expect(decision.outcome).toBe('allow')
+    expectSuggested(decision)
   })
 
   // ── Calibration against the real 2026-07-27 duplicates ────────────────────
@@ -405,10 +464,12 @@ describe('[COMP:tasks/admission] evaluateTaskAdmission — decision table', () =
     if (decision.outcome === 'hold') expect(decision.reasonCode).toBe('near_duplicate')
   })
 
-  it('ALLOWS two distinct tasks that share a sentence template (measured 0.59)', () => {
+  it('does NOT flag two distinct tasks that share a sentence template (measured 0.59)', () => {
     // The regression that matters: 'Start trial with Erwin (mostly Teams
     // integration)' and '…Ashley (mostly Shopify integration)' are different
-    // work. A single threshold low enough to catch 0.67 would eat this.
+    // work. A single threshold low enough to catch 0.67 would eat this. The
+    // candidate falls through to the ordinary suggestion default, never a
+    // duplicate hold/drop.
     const decision = evaluateTaskAdmission({
       candidate: candidate({ title: 'Start trial with Erwin (mostly Teams integration)' }),
       rules: [],
@@ -421,7 +482,7 @@ describe('[COMP:tasks/admission] evaluateTaskAdmission — decision table', () =
         },
       ],
     })
-    expect(decision.outcome).toBe('allow')
+    expectSuggested(decision)
   })
 
   it('checks tombstones before rules before duplicates', () => {
@@ -535,9 +596,45 @@ describe('[COMP:tasks/admission] admitTask — lane asymmetry', () => {
           rule({ status: 'proposed', predicate: { title_matches: ['standup'] } }),
         ],
       }),
-      candidate(),
+      candidate({ lane: 'assistant' }),
     )
     expect(result.admitted).toBe(true)
+  })
+
+  it('records the suggestion-first default hold with the held TTL and reason `suggested`', async () => {
+    const recordCandidate = vi.fn(async (_input: RecordCandidateInput) => {})
+    const now = new Date('2026-08-06T09:00:00Z')
+    const result = await admitTask(
+      port({ recordCandidate }),
+      candidate({ channelRef: 'C123' }),
+      now,
+    )
+    expect(result.admitted).toBe(false)
+    expect(result.outcome).toBe('hold')
+    const arg = recordCandidate.mock.calls[0][0]
+    expect(arg.status).toBe('pending')
+    expect(arg.reasonCode).toBe('suggested')
+    expect(arg.channelRef).toBe('C123')
+    expect(arg.expiresAt.getTime()).toBe(
+      now.getTime() + HELD_CANDIDATE_TTL_DAYS * 86_400_000,
+    )
+  })
+
+  it('admits through an active allow rule and reports the rule id for the audit case', async () => {
+    const recordCandidate = vi.fn(async (_input: RecordCandidateInput) => {})
+    const result = await admitTask(
+      port({
+        recordCandidate,
+        listActiveRules: async () => [
+          rule({ id: 'rule-allow', effect: 'allow', predicate: { source_kinds: ['slack_thread'] } }),
+        ],
+      }),
+      candidate({ quality: quality() }),
+    )
+    expect(result.admitted).toBe(true)
+    expect(result.outcome === 'allow' && result.autoRuleId).toBe('rule-allow')
+    // The audit case is the CALLER's job (it needs the created task id).
+    expect(recordCandidate).not.toHaveBeenCalled()
   })
 
   it('allows an empty title without touching the database', async () => {

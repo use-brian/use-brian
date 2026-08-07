@@ -32,6 +32,13 @@ export type ParsedEntry = {
   /** Raw related references (wikilinks + frontmatter `related` + md-links). Resolved to UUIDs in sync pass 2. */
   related: string[]
   sensitivity: Sensitivity
+  /**
+   * Whether `sensitivity` came from an explicit (valid) frontmatter stamp.
+   * False = the parser's fallback fired; the sync worker then substitutes the
+   * source's `default_sensitivity` and records the provenance on the row
+   * (migration 410). An invalid frontmatter value counts as NOT explicit.
+   */
+  sensitivityExplicit: boolean
   metadata: Record<string, unknown>
 }
 

@@ -59,6 +59,40 @@ describe('[COMP:api/chat-archive-live-capture] normalizer', () => {
     expect(JSON.stringify(result)).not.toContain('signed.example')
   })
 
+  it('preserves a durable video asset for the managed v2 sink', () => {
+    const result = normalizeInboundChatMessage({
+      source: 'whatsapp',
+      message: incoming({
+        mediaType: 'video',
+        mediaMime: 'video/mp4',
+        mediaName: 'walkthrough.mp4',
+        archiveMediaRef: {
+          assetId: '4a1e6bd8-0000-4000-8000-000000000004',
+          sha256: 'b'.repeat(64),
+          filename: 'walkthrough.mp4',
+          mime: 'video/mp4',
+          sizeBytes: 4096,
+        },
+      }),
+    })
+    expect(result.kind).toBe('video')
+    expect(result.media_ref).toMatchObject({ availability: 'stored', asset_id: expect.any(String) })
+  })
+
+  it('keeps an explicit failed media state instead of a placeholder-only success', () => {
+	const result = normalizeInboundChatMessage({
+		source: 'wechat',
+		message: incoming({
+			text: '', mediaType: 'voice', mediaMime: 'audio/silk', mediaName: 'voice.silk',
+			archiveMediaAvailability: 'failed',
+		}),
+	})
+	expect(result).toMatchObject({
+		kind: 'voice', body_text: null,
+		media_ref: { availability: 'failed', filename: 'voice.silk', mime: 'audio/silk' },
+	})
+  })
+
   it('normalizes final outbound text and document metadata', () => {
     const result = normalizeOutboundChatMessage({
       providerMessageId: 'slack-ts-1',

@@ -12,7 +12,11 @@
  *
  * v1 shape:
  *   - Synchronous JSON, no SSE.
- *   - Base + KB tools only — no MCP, no inter-assistant.
+ *   - Base + KB tools, PLUS the same MCP injection web chat gets
+ *     (`applyMcpInjection`, scope `public-api`): granted connectors and
+ *     `mcp_search`/`mcp_call`. Confirmation-required tools are stripped
+ *     after injection — this surface has no Approve/Deny loop — and KB
+ *     writes never enter it (`allowKnowledgeWrites: false`).
  *   - KB clearance inherits the assistant's `clearance` field — owners
  *     pick the right assistant for the right consumer tier.
  *   - Owner pays via existing usage budget (no per-key cap yet).
@@ -54,6 +58,8 @@ import {
   handlePublicHistory,
   fail,
 } from './public-turn.js'
+import { findAssistantById, findUserByEmail, findUserById } from '../db/users.js'
+import { getWorkspaceMembershipSystem } from '../db/workspace-store.js'
 
 export type PublicApiRouteOptions = {
   provider: LLMProvider
@@ -125,6 +131,8 @@ export type PublicApiRouteOptions = {
 
 const historyQuerySchema = z.object({
   externalUserId: z.string().min(1).max(256),
+  /** Internal-audience keys only — same attribution rules as the POST. */
+  actorEmail: z.string().email().max(256).optional(),
   sessionId: z.string().min(1).max(256).optional(),
   limit: z
     .string()
@@ -134,6 +142,33 @@ const historyQuerySchema = z.object({
       message: 'limit must be 1..500',
     }),
 })
+
+/**
+ * Turn-scoped auth power attested by the consumer's backend.
+ *
+ * Brian never authenticates end users. The `sk_live_` key holder — server
+ * side only — authenticates its own user and attests the identity on every
+ * request, the same shape as OAuth token exchange. A claim is therefore only
+ * as trustworthy as the key, which is the intended bar.
+ *
+ * Claims are NEVER persisted as authority. `externalUserId` is the durable
+ * index key; claims expire with the turn, so a customer who signed in once in
+ * March and browses logged-out in June has no auth power back-filled from the
+ * stored pairing. Absent claims = gates closed, even for a known user.
+ * See docs/architecture/features/public-api.md → "End-user identity".
+ */
+const claimsSchema = z.object({
+  /** Alias of the top-level `externalUserEmail`; both present and differing → 400. */
+  email: z.string().email().max(256).optional(),
+  /** Consumer's tenant id. Forwarded on the transport, semantically inert here. */
+  orgId: z.string().min(1).max(256).optional(),
+  /**
+   * Advisory only — prompt-visible for tone and routing, never forwarded as a
+   * header. Identity is forwarded, authorization is derived: a bridge must
+   * resolve authority from its own records keyed on the actor id.
+   */
+  roles: z.array(z.string().min(1).max(64)).max(16).optional(),
+}).strict()
 
 const messageSchema = z.object({
   externalUserId: z.string().min(1).max(256),
@@ -147,6 +182,21 @@ const messageSchema = z.object({
    * up via OAuth.
    */
   identified: z.boolean().optional(),
+  claims: claimsSchema.optional(),
+  /**
+   * Consumer-passed per-turn account context (plan tier, open orders, ticket
+   * state). Enters the prompt through the trusted system channel, labelled as
+   * consumer-attested. Turn-scoped: never persisted, never consolidated.
+   */
+  endUserContext: z.string().max(4000).optional(),
+  /**
+   * Internal-audience keys only (docs/plans/api-chat-modes.md §3 D4): the
+   * workspace member this turn acts as. Omitted → the key's creator. Must
+   * resolve to a member of the assistant's workspace (403 actor_not_member).
+   * On an external key this field is a 400 — attribution is an internal-lane
+   * concept, not a per-request escalation.
+   */
+  actorEmail: z.string().email().max(256).optional(),
   sessionId: z.string().min(1).max(256).optional(),
   message: z.string().min(1),
   /**
@@ -157,7 +207,25 @@ const messageSchema = z.object({
    * a different angle. Mirrors web chat's `truncateFromMessageId`.
    */
   truncateFromMessageId: z.string().uuid().optional(),
-}).strict()
+}).strict().superRefine((body, ctx) => {
+  // `externalUserEmail` is the back-compat alias of `claims.email` — one
+  // email semantic, not two. Two email fields with different tier behavior
+  // would be a footgun, so a consumer migrating to `claims` may send both
+  // only if they agree. Disagreement means the consumer's two code paths
+  // resolved different people for one turn; that is a bug on their side and
+  // guessing which one is right would silently mis-attribute the memory,
+  // the CRM link, and the connector headers. Reject at the wire.
+  const aliased = body.claims?.email
+  if (aliased && body.externalUserEmail && aliased !== body.externalUserEmail) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['claims', 'email'],
+      message:
+        'claims.email and externalUserEmail must match — externalUserEmail is the ' +
+        'back-compat alias of claims.email. Send one, or send both with the same value.',
+    })
+  }
+})
 
 export function publicApiRoutes(options: PublicApiRouteOptions): Router {
   const router = Router()
@@ -232,13 +300,64 @@ export function publicApiRoutes(options: PublicApiRouteOptions): Router {
       }
 
       // ── 3+. Shared turn pipeline (public-turn.ts) ────────────
+      // Lane derivation (docs/plans/api-chat-modes.md §3):
+      //
+      // Internal key (D4) → 'internal-member': the turn acts as an attributed
+      // workspace member (default: the key's creator). The external-lane tier
+      // machinery is a 400 here — claims/identified/externalUserEmail attest
+      // *customers*, and accepting them on an internal key would blur the one
+      // distinction the audience column exists to keep sharp.
+      //
+      // External key, anonymous turn, anonymous_context='full' (D2) →
+      // 'assistant-full': the owner opted into the chat-link trust posture at
+      // creation. Indexed (Tier-1) turns stay on the thin external-client
+      // scope regardless (D3), so the lane check mirrors public-turn's own
+      // `wantsIdentified` derivation. `actorEmail` on an external key is a
+      // 400 — attribution is not a per-request escalation.
+      if (keyRow.audience === 'internal') {
+        if (body.identified !== undefined || body.claims !== undefined || body.externalUserEmail !== undefined) {
+          return fail(
+            res,
+            400,
+            'invalid_input',
+            'identified/claims/externalUserEmail are external-lane fields and not valid with an internal-audience key',
+          )
+        }
+        await executePublicTurn(
+          options,
+          {
+            assistantId: req.params.assistantId,
+            identityNamespace: `api:${keyRow.id}`,
+            body,
+            contextScope: 'internal-member',
+            internalActor: { email: body.actorEmail ?? null, defaultUserId: keyRow.createdBy },
+            analyticsMeta: { api_key_id: keyRow.id, context_scope: 'internal-member' },
+          },
+          req,
+          res,
+        )
+        return
+      }
+      if (body.actorEmail !== undefined) {
+        return fail(
+          res,
+          400,
+          'invalid_input',
+          'actorEmail requires an internal-audience key',
+        )
+      }
+      const wantsIdentified =
+        body.identified === true || !!(body.claims?.email ?? body.externalUserEmail)
+      const fullAnonymousLane =
+        keyRow.anonymousContext === 'full' && !wantsIdentified
       await executePublicTurn(
         options,
         {
           assistantId: req.params.assistantId,
           identityNamespace: `api:${keyRow.id}`,
           body,
-          analyticsMeta: { api_key_id: keyRow.id },
+          contextScope: fullAnonymousLane ? 'assistant-full' : undefined,
+          analyticsMeta: { api_key_id: keyRow.id, context_scope: fullAnonymousLane ? 'assistant-full' : 'external-client' },
         },
         req,
         res,
@@ -269,6 +388,29 @@ export function publicApiRoutes(options: PublicApiRouteOptions): Router {
       }
       const q = queryParse.data
 
+      // Internal keys read a member's sessions, not a shadow's — resolve the
+      // actor with the same rules as the POST (attribution email, defaulting
+      // to the key's creator; membership validated, fails closed).
+      let resolvedUserId: string | undefined
+      if (keyRow.audience === 'internal') {
+        const actorUser = q.actorEmail
+          ? await findUserByEmail(q.actorEmail)
+          : keyRow.createdBy
+            ? await findUserById(keyRow.createdBy)
+            : null
+        const assistant = actorUser ? await findAssistantById(req.params.assistantId) : null
+        const membership =
+          actorUser && assistant?.workspaceId
+            ? await getWorkspaceMembershipSystem(actorUser.id, assistant.workspaceId)
+            : null
+        if (!actorUser || !membership) {
+          return fail(res, 403, 'actor_not_member')
+        }
+        resolvedUserId = actorUser.id
+      } else if (q.actorEmail !== undefined) {
+        return fail(res, 400, 'invalid_input', 'actorEmail requires an internal-audience key')
+      }
+
       await handlePublicHistory(
         {
           assistantId: req.params.assistantId,
@@ -276,6 +418,7 @@ export function publicApiRoutes(options: PublicApiRouteOptions): Router {
           externalUserId: q.externalUserId,
           sessionId: q.sessionId,
           limit: q.limit ?? 100,
+          resolvedUserId,
         },
         res,
       )

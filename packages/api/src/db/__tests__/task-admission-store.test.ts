@@ -10,6 +10,7 @@ const db = vi.hoisted(() => ({
   clientQuery: vi.fn(),
   release: vi.fn(),
   rollbackAndRelease: vi.fn(),
+  applyRLSGucs: vi.fn(),
 }))
 
 vi.mock('../client.js', () => ({
@@ -18,13 +19,20 @@ vi.mock('../client.js', () => ({
     connect: async () => ({ query: db.clientQuery, release: db.release }),
   }),
   rollbackAndRelease: db.rollbackAndRelease,
+  applyRLSGucs: db.applyRLSGucs,
 }))
 
 vi.mock('../goals.js', () => ({
   abandonGoalsForHostTaskSystem: vi.fn().mockResolvedValue(0),
 }))
 
-import { loadPolicyForPrompt, recordCandidate, rejectTask } from '../task-admission-store.js'
+import {
+  findOpenTasksForGithubMatch,
+  findOrCreateAllowRule,
+  loadPolicyForPrompt,
+  recordCandidate,
+  rejectTask,
+} from '../task-admission-store.js'
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -61,14 +69,15 @@ describe('[COMP:tasks/admission-store] task admission DB adapter', () => {
       expiresAt,
     })
 
-    expect(String(db.query.mock.calls[0]?.[0])).toContain('similarity, quality, expires_at')
+    expect(String(db.query.mock.calls[0]?.[0])).toContain('similarity, quality,')
+    expect(String(db.query.mock.calls[0]?.[0])).toContain('created_task_id, expires_at')
     const params = db.query.mock.calls[0]?.[1] as unknown[]
-    expect(JSON.parse(String(params[13]))).toMatchObject({
+    expect(JSON.parse(String(params[14]))).toMatchObject({
       classification: 'needs_spec',
       evidenceVerified: true,
       missing: ['target', 'description', 'starting_point', 'completion_signal'],
     })
-    expect(params[14]).toBe(expiresAt)
+    expect(params[16]).toBe(expiresAt)
   })
 
   it('loads only relevant live open tasks for pre-extraction context', async () => {
@@ -153,8 +162,78 @@ describe('[COMP:tasks/admission-store] task admission DB adapter', () => {
       channel_refs: ['C456'],
     })
     expect(db.clientQuery.mock.calls.map(([sql]) => sql)).toContain('COMMIT')
-    expect(db.release).toHaveBeenCalledOnce()
+    // The transaction runs RLS-scoped to the acting user (app pool policies
+    // hide every row from the unscoped sentinel).
+    expect(db.applyRLSGucs).toHaveBeenCalledWith(expect.anything(), 'user-1')
+    expect(db.rollbackAndRelease).toHaveBeenCalledOnce()
     // Explicit active-rule consent bypasses the separate post-commit proposal query.
     expect(db.query).not.toHaveBeenCalled()
+  })
+
+  it('releases the client on the not-found early return (2026-08-07 pool-exhaustion outage)', async () => {
+    db.clientQuery.mockImplementation(async (sql: string) => {
+      if (sql === 'BEGIN') return { rows: [] }
+      if (sql.includes('SELECT t.id, t.title')) return { rows: [] }
+      throw new Error(`Unexpected query: ${sql}`)
+    })
+
+    const result = await rejectTask({
+      workspaceId: 'workspace-1',
+      userId: 'user-1',
+      taskId: 'task-gone',
+      reason: 'stale suggestion',
+    })
+
+    expect(result).toBeNull()
+    expect(db.rollbackAndRelease).toHaveBeenCalledOnce()
+  })
+
+  it('creates a class-level allow rule once and re-activates the identical one after', async () => {
+    // First call: no existing rule → INSERT.
+    db.query.mockImplementationOnce(async () => ({ rows: [] }))
+    db.query.mockImplementationOnce(async () => ({ rows: [{ id: 'rule-allow-1' }] }))
+    const created = await findOrCreateAllowRule({
+      workspaceId: 'workspace-1',
+      userId: 'user-1',
+      sourceKind: 'slack_thread',
+      channelRef: 'C456',
+      nlClause: 'Automatically create ready task suggestions from slack_thread (channel C456).',
+    })
+    expect(created).toEqual({ id: 'rule-allow-1', created: true })
+    const insert = db.query.mock.calls.find(([sql]) => String(sql).includes('INSERT INTO task_rules'))
+    expect(JSON.parse(String(insert?.[1]?.[1]))).toEqual({
+      lanes: ['extracted'],
+      source_kinds: ['slack_thread'],
+      channel_refs: ['C456'],
+    })
+
+    // Second call: identical predicate exists → UPDATE to active, no INSERT.
+    db.query.mockReset()
+    db.query.mockImplementationOnce(async () => ({ rows: [{ id: 'rule-allow-1' }] }))
+    db.query.mockImplementationOnce(async () => ({ rows: [] }))
+    const reused = await findOrCreateAllowRule({
+      workspaceId: 'workspace-1',
+      userId: 'user-1',
+      sourceKind: 'slack_thread',
+      channelRef: 'C456',
+      nlClause: 'Automatically create ready task suggestions from slack_thread (channel C456).',
+    })
+    expect(reused).toEqual({ id: 'rule-allow-1', created: false })
+    expect(
+      db.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO task_rules')),
+    ).toBe(false)
+  })
+
+  it('excludes github-backlinked and closed tasks from the PR-match candidate pool', async () => {
+    db.query.mockResolvedValue({
+      rows: [{ id: 'task-1', title: 'Fix the login redirect bug', description: null, sim: 0.62 }],
+    })
+    const pool = await findOpenTasksForGithubMatch('workspace-1', 'Fix login redirect')
+    expect(pool).toEqual([
+      { id: 'task-1', title: 'Fix the login redirect bug', description: null },
+    ])
+    const sql = String(db.query.mock.calls[0]?.[0])
+    expect(sql).toContain(`NOT (external_ref @> '{"provider":"github"}'::jsonb)`)
+    expect(sql).toContain(`status NOT IN ('done', 'archived')`)
   })
 })

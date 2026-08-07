@@ -30,3 +30,77 @@ describe('[COMP:office/tools] Office tools', () => {
     expect(revised.data).toEqual({ jobId: id(91), mode: 'proposal' })
   })
 })
+
+/**
+ * Office is an `auth_type: 'none'` built-in primitive: the `office` capability
+ * grant is its on/off switch, and per-tool allow/ask/block governs whatever
+ * remains. See docs/architecture/features/builtin-primitives.md.
+ */
+describe('[COMP:office/tools] Office governance', () => {
+  const port = (): OfficeToolPort => ({
+    create: vi.fn(async () => ({ artifactId: id(1), jobId: id(90) })),
+    get: vi.fn(async () => ({ artifactId: id(1), family: 'document' as const, title: 'Report', version: 2, lifecycleState: 'active' as const, role: 'edit' as const })),
+    revise: vi.fn(async () => ({ jobId: id(91), mode: 'direct' as const })),
+  })
+
+  it('tags every tool with requiresCapability so the off switch can gate them', () => {
+    const tools = createOfficeTools({ port: port() })
+    expect(tools.length).toBeGreaterThan(0)
+    for (const tool of tools) {
+      expect(tool.requiresCapability, `${tool.name} must be capability-gated`).toBe('office')
+    }
+  })
+
+  it('refuses a blocked tool at execute time instead of running it', async () => {
+    const p = port()
+    const tools = new Map(
+      createOfficeTools({
+        port: p,
+        resolvePolicy: async (name) => (name === 'reviseOfficeArtifact' ? 'block' : 'allow'),
+      }).map((tool) => [tool.name, tool]),
+    )
+    const res = await tools.get('reviseOfficeArtifact')!.execute(
+      { artifactId: id(1), instruction: 'Tighten this', targetIds: [], expectedVersion: 2, idempotencyKey: 'revise-12345678' },
+      context,
+    )
+    expect(res.isError).toBe(true)
+    expect(String(res.data)).toContain('blocked by tool policy')
+    // The block must happen BEFORE the port is touched — a refusal that still
+    // queued the revision would be the write-only control this replaced.
+    expect(p.revise).not.toHaveBeenCalled()
+  })
+
+  it("resolves 'ask' into a per-call confirmation", async () => {
+    const tools = new Map(
+      createOfficeTools({
+        port: port(),
+        resolvePolicy: async (name) => (name === 'createOfficeArtifact' ? 'ask' : 'allow'),
+      }).map((tool) => [tool.name, tool]),
+    )
+    const create = tools.get('createOfficeArtifact')!
+    expect(await create.resolveConfirmation!(context as never)).toBe(true)
+    expect(await tools.get('getOfficeArtifact')!.resolveConfirmation!(context as never)).toBe(false)
+  })
+
+  it('fails OPEN when the policy resolver throws — a policy outage must not take Office down', async () => {
+    const p = port()
+    const tools = new Map(
+      createOfficeTools({
+        port: p,
+        resolvePolicy: async () => { throw new Error('policy store down') },
+      }).map((tool) => [tool.name, tool]),
+    )
+    const res = await tools.get('getOfficeArtifact')!.execute({ artifactId: id(1) }, context)
+    expect(res.isError).toBeFalsy()
+    expect(p.get).toHaveBeenCalled()
+  })
+
+  it('leaves the static flags alone when no resolver is wired (open default, tests)', async () => {
+    const p = port()
+    const tools = new Map(createOfficeTools({ port: p }).map((tool) => [tool.name, tool]))
+    expect(tools.get('createOfficeArtifact')!.resolveConfirmation).toBeUndefined()
+    const res = await tools.get('getOfficeArtifact')!.execute({ artifactId: id(1) }, context)
+    expect(res.isError).toBeFalsy()
+  })
+})
+

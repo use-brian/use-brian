@@ -19,14 +19,13 @@ import type {
   JobStore,
   Tool,
   ToolContext,
-  WorkflowDefinition,
   WorkflowRecord,
   WorkflowRunRecord,
   WorkflowRunStore,
   WorkflowStepRunRecord,
   WorkflowStore,
 } from '@use-brian/core'
-import { advanceWorkflowRun } from '@use-brian/core'
+import { advanceWorkflowRun, stepSuccessors } from '@use-brian/core'
 import type { WorkspaceAuditStore } from '../db/workspace-audit-store.js'
 import type { PendingApprovalsStore, PendingApproval } from '../db/pending-approvals-store.js'
 import type { SessionResumeStore } from '../db/session-resume-store.js'
@@ -267,9 +266,12 @@ export async function resumeFromApproval(
     finishedAt: new Date(),
   })
 
-  // Resolve next step from the definition.
+  // Resolve the steps that follow the gated step — possibly several, when
+  // the approved step fans out (`nextStepId` array).
   const stepDef = workflow.definition.steps.find((s) => s.id === run.currentStepId)
-  const nextId = nextStepIdFromDef(workflow.definition, stepDef?.id ?? '')
+  const nextIds = stepDef
+    ? stepSuccessors(stepDef, workflow.definition.steps.map((s) => s.id))
+    : []
 
   // Optionally store the tool output under storeOutputAs.
   let nextVars = run.vars
@@ -278,10 +280,10 @@ export async function resumeFromApproval(
   }
 
   // If this was the terminal step, mark the run completed directly. Calling
-  // `advanceWorkflowRun` with currentStepId=null would re-enter the run from
-  // the start (the executor falls back to `definition.startStepId`) and
-  // re-trigger the same approval — wrong.
-  if (nextId === null) {
+  // `advanceWorkflowRun` with an empty frontier and no explicit `startAt`
+  // would re-enter the run from `definition.startStepId` and re-trigger the
+  // same approval — wrong.
+  if (nextIds.length === 0) {
     const finishedAt = new Date()
     await deps.runStore.updateRun(run.id, {
       status: 'completed',
@@ -306,12 +308,14 @@ export async function resumeFromApproval(
 
   await deps.runStore.updateRun(run.id, {
     status: 'running',
-    currentStepId: nextId,
+    // The cursor stays on the gated step; the explicit `startAt` frontier
+    // below drives where execution resumes (fan-out safe — the executor
+    // stamps `currentStepId` as each successor starts).
     vars: nextVars,
   })
 
   // Continue the run.
-  const outcome = await advanceWorkflowRun(deps.executorDeps, run.id)
+  const outcome = await advanceWorkflowRun(deps.executorDeps, run.id, { startAt: nextIds })
   return { status: outcome.kind === 'paused' ? `paused_${outcome.reason}` : outcome.kind, runId: run.id }
 }
 
@@ -541,14 +545,6 @@ function wrapOutput(output: unknown): Record<string, unknown> {
   if (output === null || output === undefined) return { value: null }
   if (typeof output === 'object' && !Array.isArray(output)) return output as Record<string, unknown>
   return { value: output }
-}
-
-function nextStepIdFromDef(def: WorkflowDefinition, fromStepId: string): string | null {
-  const idx = def.steps.findIndex((s) => s.id === fromStepId)
-  if (idx === -1) return null
-  const step = def.steps[idx]
-  if (step.type !== 'branch' && step.nextStepId !== undefined) return step.nextStepId
-  return def.steps[idx + 1]?.id ?? null
 }
 
 async function getStepRunSystem(

@@ -4,14 +4,17 @@
  * LinkedIn ZIP archives use the dedicated lossless /api/imports/linkedin queue.
  *
  * Both paths preserve the original bytes. Only `/ingest` decomposes content
- * into entities / memories / tasks (Pipeline B). `/store` is the reversible
- * staging boundary used by Pins before the user has supplied a purpose.
+ * into entities / memories / tasks (Pipeline B). `/store` is the durable
+ * staging boundary Pins uses for the upload itself; a file dropped on Pins is
+ * then queued through `reingestStoredFile` (`POST /api/files/:fileId/ingest`)
+ * because pinning is consent to save it to the brain (2026-08-07).
  *
  * Specs: docs/architecture/features/files.md -> "Direct ingest" and
  * docs/architecture/brain/linkedin-import.md.
  */
 
-import { authFetch } from "@/lib/auth-fetch";
+import { authFetch, getValidAccessToken } from "@/lib/auth-fetch";
+import { usesGatewayCredentials } from "@/lib/desktop-auth-source";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -29,12 +32,25 @@ export type IngestCounts = {
   tasks: number;
 };
 
+/** Terminal + in-flight states of one queued `file_ingest_jobs` row. */
+export type IngestJobStatus = "pending" | "processing" | "done" | "failed";
+
 export type IngestFileResult = {
   fileName: string;
   ok: boolean;
   fileId?: string;
   path?: string;
   sizeBytes?: number;
+  /**
+   * `stored` = bytes filed, nothing interpreted (the /store lane).
+   * `queued` = bytes filed AND parse/chunk/Pipeline B handed to the worker
+   * (the /ingest lane). The upload response deliberately does not wait for
+   * that work, so poll `jobId` through `getIngestJobStatus` for the outcome.
+   */
+  status?: "queued" | "stored";
+  jobId?: string | null;
+  /** A job for this file was already in flight; the work is happening either way. */
+  alreadyQueued?: boolean;
   /** A model distillation produced the ingested text (PDF / image). */
   distilled?: boolean;
   /** Content was decomposed through Pipeline B (false = stored only). */
@@ -55,6 +71,89 @@ export function totalAdded(counts: IngestCounts | undefined): number {
   return counts.entities + counts.edges + counts.memories + counts.tasks;
 }
 
+export type StoreFilesOptions = {
+  onProgress?: (file: File, uploadedBytes: number, totalBytes: number) => void;
+};
+
+/**
+ * `fetch` does not expose request-body progress. Work Bench opts into this XHR
+ * transport for its small multipart lane so the same progress callback covers
+ * every accepted file, not only files large enough for signed parts.
+ */
+async function uploadMultipartFile(
+  url: string,
+  formData: FormData,
+  file: File,
+  options: StoreFilesOptions,
+): Promise<Response> {
+  if (!options.onProgress || typeof XMLHttpRequest === "undefined") {
+    return authFetch(url, { method: "POST", body: formData });
+  }
+
+  const token = await getValidAccessToken();
+  if (!token) {
+    return authFetch(url, { method: "POST", body: formData });
+  }
+
+  const response = await new Promise<Response>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+    xhr.withCredentials = usesGatewayCredentials();
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable || event.total <= 0) return;
+      const uploadedBytes = Math.min(
+        file.size,
+        Math.round((event.loaded / event.total) * file.size),
+      );
+      options.onProgress?.(file, uploadedBytes, file.size);
+    };
+    xhr.onload = () => {
+      if (xhr.status !== 401) {
+        options.onProgress?.(file, file.size, file.size);
+      }
+      const headers = new Headers();
+      const contentType = xhr.getResponseHeader("Content-Type");
+      if (contentType) headers.set("Content-Type", contentType);
+      resolve(new Response(xhr.responseText || null, {
+        status: xhr.status,
+        statusText: xhr.statusText,
+        headers,
+      }));
+    };
+    xhr.onerror = () => reject(new TypeError("Upload request failed"));
+    xhr.onabort = () => reject(new DOMException("Upload aborted", "AbortError"));
+    xhr.send(formData);
+  });
+
+  // A fresh token was acquired before the XHR. If the server still rejects it,
+  // hand the request to the standard refresh-and-retry path. This is rare, but
+  // preserves authFetch's session behavior rather than turning token rotation
+  // into a file error.
+  if (response.status === 401) {
+    return authFetch(url, { method: "POST", body: formData });
+  }
+  return response;
+}
+
+/**
+ * Poll one queued ingest. `null` means the status could not be read (offline,
+ * a transient 5xx) — NOT that the ingest failed. The job is durable server-side,
+ * so a caller must keep showing "analyzing" rather than inventing a failure.
+ */
+export async function getIngestJobStatus(
+  jobId: string,
+): Promise<{ status: IngestJobStatus; error?: string } | null> {
+  try {
+    const res = await authFetch(`${API_URL}/api/files/ingest-jobs/${jobId}`);
+    if (!res.ok) return null;
+    const data = (await res.json()) as { status?: IngestJobStatus; error?: string };
+    return data.status ? { status: data.status, ...(data.error ? { error: data.error } : {}) } : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Upload + ingest a UI batch. Each file travels in its own request so the
  * selected files' combined bytes cannot exceed Cloud Run's request ceiling.
@@ -65,6 +164,7 @@ async function uploadDurableFiles(
   workspaceId: string,
   files: File[],
   action: "store" | "ingest",
+  options: StoreFilesOptions = {},
 ): Promise<IngestFileResult[]> {
   const results: IngestFileResult[] = [];
   for (const file of files) {
@@ -74,10 +174,10 @@ async function uploadDurableFiles(
 
     try {
       // Don't set Content-Type — the browser adds the multipart boundary.
-      const res = await authFetch(`${API_URL}/api/files/${action}`, {
-        method: "POST",
-        body: formData,
-      });
+      const url = `${API_URL}/api/files/${action}`;
+      const res = action === "store"
+        ? await uploadMultipartFile(url, formData, file, options)
+        : await authFetch(url, { method: "POST", body: formData });
       const data = (await res.json().catch(() => null)) as
         | { files?: IngestFileResult[]; error?: string; detail?: string }
         | null;
@@ -115,10 +215,6 @@ type ChunkedUploadStart = {
     sizeBytes: number;
     url: string;
   }>;
-};
-
-export type StoreFilesOptions = {
-  onProgress?: (file: File, uploadedBytes: number, totalBytes: number) => void;
 };
 
 const waitForRetry = (ms: number) =>
@@ -222,7 +318,7 @@ export function storeFiles(
     const results: IngestFileResult[] = [];
     for (const file of files) {
       if (file.size <= MAX_INGEST_FILE_BYTES) {
-        results.push(...await uploadDurableFiles(workspaceId, [file], "store"));
+        results.push(...await uploadDurableFiles(workspaceId, [file], "store", options));
         continue;
       }
       try {

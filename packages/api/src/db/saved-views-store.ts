@@ -32,7 +32,7 @@ import type {
   ViewState,
   ViewType,
 } from '@use-brian/core'
-import { getAppPool, query, queryWithRLS, rollbackAndRelease } from './client.js'
+import { applyRLSGucs, getAppPool, query, queryWithRLS, rollbackAndRelease } from './client.js'
 
 // ── SQL projections ───────────────────────────────────────────────────
 
@@ -705,9 +705,10 @@ export function createDbSavedViewStore(
       const client = await getAppPool().connect()
       try {
         await client.query('BEGIN')
-        // App pool (app_user, RLS-enforced). SET LOCAL current_user_id reverts
-        // at COMMIT/ROLLBACK to the seeded sentinel.
-        await client.query(`SET LOCAL app.current_user_id = '${userId.replace(/'/g, "''")}'`)
+        // App pool (app_user, RLS-enforced). applyRLSGucs sets current_user_id
+        // (+ agent_clearance inside an assistant execution wrap); both are
+        // SET LOCAL, reverting at COMMIT/ROLLBACK to the seeded sentinel.
+        await applyRLSGucs(client, userId)
 
         // Confirm the row is visible to this user before moving it, and
         // capture its workspace so the sibling-set operations stay scoped
@@ -848,9 +849,10 @@ export function createDbSavedViewStore(
       const client = await getAppPool().connect()
       try {
         await client.query('BEGIN')
-        // App pool (app_user, RLS-enforced). SET LOCAL current_user_id reverts
-        // at COMMIT/ROLLBACK to the seeded sentinel.
-        await client.query(`SET LOCAL app.current_user_id = '${userId.replace(/'/g, "''")}'`)
+        // App pool (app_user, RLS-enforced). applyRLSGucs sets current_user_id
+        // (+ agent_clearance inside an assistant execution wrap); both are
+        // SET LOCAL, reverting at COMMIT/ROLLBACK to the seeded sentinel.
+        await applyRLSGucs(client, userId)
 
         // Set each id's position to its array index. Scope the write to
         // the sibling set (`nest_parent_id IS NOT DISTINCT FROM`) so a

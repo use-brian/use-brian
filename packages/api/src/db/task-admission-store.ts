@@ -31,6 +31,7 @@ import {
   normalizeTaskTitle,
   proposeRuleFromTombstones,
   significantTokens,
+  validateRulePredicate,
   type RecordCandidateInput,
   type ScoredTask,
   type ScoredTombstone,
@@ -44,7 +45,7 @@ import {
   type TaskRuleStatus,
   type TaskTombstoneRecord,
 } from '@use-brian/core'
-import { getAppPool, query, rollbackAndRelease } from './client.js'
+import { applyRLSGucs, getAppPool, query, rollbackAndRelease } from './client.js'
 import { abandonGoalsForHostTaskSystem } from './goals.js'
 
 // ── Row mappers ──────────────────────────────────────────────────────────────
@@ -181,15 +182,17 @@ export async function findSimilarTasks(
 export async function recordCandidate(input: RecordCandidateInput): Promise<void> {
   await query(
     `INSERT INTO task_candidates (
-       workspace_id, title, due, source_kind, lane, source_episode_id,
+       workspace_id, title, due, source_kind, channel_ref, lane, source_episode_id,
        created_by_assistant_id, status, reason_code, matched_task_id,
-       matched_rule_id, matched_tombstone_id, similarity, quality, expires_at
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+       matched_rule_id, matched_tombstone_id, similarity, quality,
+       created_task_id, expires_at
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
     [
       input.workspaceId,
       input.title,
       input.due,
       input.sourceKind,
+      input.channelRef ?? null,
       input.lane,
       input.sourceEpisodeId,
       input.createdByAssistantId,
@@ -200,6 +203,7 @@ export async function recordCandidate(input: RecordCandidateInput): Promise<void
       input.matchedTombstoneId ?? null,
       input.similarity ?? null,
       JSON.stringify(input.quality ?? {}),
+      input.createdTaskId ?? null,
       input.expiresAt,
     ],
   )
@@ -236,6 +240,46 @@ export async function loadPolicyForPrompt(workspaceId: string, content?: string)
       : Promise.resolve([] as ScoredTask[]),
   ])
   return { rules, tombstones, openTasks }
+}
+
+/**
+ * Candidate pool for the GitHub PR → task LLM matcher
+ * (`[COMP:brain/github-task-match]`): live open tasks whose titles have word
+ * overlap with the PR text. Tasks already backlinked to GitHub are excluded —
+ * the deterministic lifecycle owns those. The threshold is deliberately looser
+ * than the admission thresholds: recall lives here, precision lives in the
+ * judge.
+ */
+const GITHUB_MATCH_POOL_SIMILARITY = 0.3
+
+export type GithubMatchTaskRow = {
+  id: string
+  title: string
+  description: string | null
+}
+
+export async function findOpenTasksForGithubMatch(
+  workspaceId: string,
+  text: string,
+  limit = 8,
+): Promise<GithubMatchTaskRow[]> {
+  const trimmed = text.trim()
+  if (!trimmed) return []
+  const res = await query<GithubMatchTaskRow & { sim: number }>(
+    `SELECT id, title, attributes->>'description' AS description,
+            word_similarity(lower(title), lower($2)) AS sim
+       FROM tasks
+      WHERE workspace_id = $1
+        AND valid_to IS NULL
+        AND retracted_at IS NULL
+        AND status NOT IN ('done', 'archived')
+        AND NOT (external_ref @> '{"provider":"github"}'::jsonb)
+        AND word_similarity(lower(title), lower($2)) >= $3
+      ORDER BY sim DESC
+      LIMIT $4`,
+    [workspaceId, trimmed, GITHUB_MATCH_POOL_SIMILARITY, limit],
+  )
+  return res.rows.map(({ sim: _sim, ...row }) => row)
 }
 
 /** The port, ready to inject at boot. */
@@ -372,6 +416,10 @@ export async function rejectTask(input: {
   let activeRuleId: string | null = null
   try {
     await client.query('BEGIN')
+    // App pool = RLS-enforced. Without the acting user's GUCs the member
+    // policies evaluate against the nil-UUID sentinel and this SELECT can
+    // never see the task (every reject 404'd in prod, 2026-08-07).
+    await applyRLSGucs(client, input.userId)
 
     const existing = await client.query<{
       id: string
@@ -388,10 +436,7 @@ export async function rejectTask(input: {
           AND t.valid_to IS NULL AND t.retracted_at IS NULL`,
       [input.taskId, input.workspaceId],
     )
-    if (existing.rows.length === 0) {
-      await client.query('ROLLBACK')
-      return null
-    }
+    if (existing.rows.length === 0) return null
     title = existing.rows[0].title
     sourceKind = existing.rows[0].source_kind
     const channelRef = existing.rows[0].channel_ref
@@ -463,11 +508,12 @@ export async function rejectTask(input: {
     }
 
     await client.query('COMMIT')
-  } catch (err) {
+  } finally {
+    // Releases on EVERY exit — including the not-found early return above,
+    // which used to leak the checked-out client and exhaust the app pool
+    // (PG_POOL_MAX=2 → two 404s took the whole API down, 2026-08-07).
     await rollbackAndRelease(client)
-    throw err
   }
-  client.release()
 
   // Proposal runs AFTER the commit, deliberately. The rejection is the thing
   // the user asked for; a failure while generalizing it must not roll that back
@@ -567,25 +613,38 @@ export type TaskCandidateRow = {
   title: string
   due: Date | null
   sourceKind: string | null
+  channelRef: string | null
   lane: TaskLane
   sourceEpisodeId: string | null
   status: string
   reasonCode: string
   matchedTaskId: string | null
   matchedTaskTitle: string | null
+  matchedRuleId: string | null
+  matchedRuleClause: string | null
   similarity: number | null
   quality: TaskReadinessAssessment | null
+  createdTaskId: string | null
   createdAt: Date
   expiresAt: Date
 }
 
 const CANDIDATE_SELECT = `
   c.id, c.workspace_id AS "workspaceId", c.title, c.due,
-  c.source_kind AS "sourceKind", c.lane, c.source_episode_id AS "sourceEpisodeId",
+  c.source_kind AS "sourceKind", c.channel_ref AS "channelRef",
+  c.lane, c.source_episode_id AS "sourceEpisodeId",
   c.status, c.reason_code AS "reasonCode", c.matched_task_id AS "matchedTaskId",
-  m.title AS "matchedTaskTitle", c.similarity,
+  m.title AS "matchedTaskTitle",
+  c.matched_rule_id AS "matchedRuleId", r.nl_clause AS "matchedRuleClause",
+  c.similarity,
   NULLIF(c.quality, '{}'::jsonb) AS quality,
+  c.created_task_id AS "createdTaskId",
   c.created_at AS "createdAt", c.expires_at AS "expiresAt"
+`
+
+const CANDIDATE_JOINS = `
+       LEFT JOIN tasks m ON m.id = c.matched_task_id AND m.valid_to IS NULL
+       LEFT JOIN task_rules r ON r.id = c.matched_rule_id
 `
 
 /**
@@ -600,8 +659,29 @@ export async function listPendingCandidates(
   const res = await query<TaskCandidateRow>(
     `SELECT ${CANDIDATE_SELECT}
        FROM task_candidates c
-       LEFT JOIN tasks m ON m.id = c.matched_task_id AND m.valid_to IS NULL
+       ${CANDIDATE_JOINS}
       WHERE c.workspace_id = $1 AND c.status = 'pending' AND c.expires_at > now()
+      ORDER BY c.created_at DESC
+      LIMIT $2`,
+    [workspaceId, limit],
+  )
+  return res.rows
+}
+
+/**
+ * The auto-approval audit: candidates an active allow rule turned straight
+ * into tasks. Shown collapsed under the Suggestions view so a rule's work is
+ * reviewable after the fact — the whole point of recording the case.
+ */
+export async function listAutoAcceptedCandidates(
+  workspaceId: string,
+  limit = 50,
+): Promise<TaskCandidateRow[]> {
+  const res = await query<TaskCandidateRow>(
+    `SELECT ${CANDIDATE_SELECT}
+       FROM task_candidates c
+       ${CANDIDATE_JOINS}
+      WHERE c.workspace_id = $1 AND c.status = 'auto_accepted' AND c.expires_at > now()
       ORDER BY c.created_at DESC
       LIMIT $2`,
     [workspaceId, limit],
@@ -616,11 +696,61 @@ export async function getCandidate(
   const res = await query<TaskCandidateRow>(
     `SELECT ${CANDIDATE_SELECT}
        FROM task_candidates c
-       LEFT JOIN tasks m ON m.id = c.matched_task_id AND m.valid_to IS NULL
+       ${CANDIDATE_JOINS}
       WHERE c.workspace_id = $1 AND c.id = $2`,
     [workspaceId, id],
   )
   return res.rows[0] ?? null
+}
+
+/**
+ * Find-or-create the active `allow` rule the "Always create tasks like this"
+ * affordance activates. The predicate is deliberately class-level, not
+ * title-level: the same title next time would be a duplicate anyway, so the
+ * useful opt-in is "ready suggestions from this source/channel". An identical
+ * existing rule (any status) is re-activated instead of duplicated — the
+ * mirror of the reasoned-delete deny-rule reuse.
+ */
+export async function findOrCreateAllowRule(input: {
+  workspaceId: string
+  userId: string
+  sourceKind: string | null
+  channelRef: string | null
+  nlClause: string
+}): Promise<{ id: string; created: boolean }> {
+  const predicate: TaskRulePredicate = {
+    lanes: ['extracted'],
+    ...(input.sourceKind ? { source_kinds: [input.sourceKind] } : {}),
+    ...(input.channelRef ? { channel_refs: [input.channelRef] } : {}),
+  }
+  const invalid = validateRulePredicate('allow', predicate)
+  if (invalid) throw new Error(invalid)
+
+  const existing = await query<{ id: string }>(
+    `SELECT id FROM task_rules
+      WHERE workspace_id = $1 AND effect = 'allow' AND predicate = $2::jsonb
+      LIMIT 1`,
+    [input.workspaceId, JSON.stringify(predicate)],
+  )
+  if (existing.rows.length > 0) {
+    const id = existing.rows[0].id
+    await query(
+      `UPDATE task_rules
+          SET status = 'active', origin = 'user', created_by_user_id = $3
+        WHERE workspace_id = $1 AND id = $2`,
+      [input.workspaceId, id, input.userId],
+    )
+    return { id, created: false }
+  }
+
+  const inserted = await query<{ id: string }>(
+    `INSERT INTO task_rules
+       (workspace_id, status, effect, predicate, nl_clause, reason, origin, created_by_user_id)
+     VALUES ($1, 'active', 'allow', $2::jsonb, $3, $3, 'user', $4)
+     RETURNING id`,
+    [input.workspaceId, JSON.stringify(predicate), input.nlClause, input.userId],
+  )
+  return { id: inserted.rows[0].id, created: true }
 }
 
 export async function resolveCandidate(input: {
@@ -665,7 +795,8 @@ export async function sweepExpiredCandidates(): Promise<{
   )
   const purged = await query(
     `DELETE FROM task_candidates
-      WHERE status IN ('dropped', 'expired') AND expires_at <= now() - interval '7 days'`,
+      WHERE status IN ('dropped', 'expired', 'auto_accepted')
+        AND expires_at <= now() - interval '7 days'`,
   )
   return { expired: expired.rowCount ?? 0, purged: purged.rowCount ?? 0 }
 }

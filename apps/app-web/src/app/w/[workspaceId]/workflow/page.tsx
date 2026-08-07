@@ -135,15 +135,10 @@ export default function WorkflowPage() {
 
   return (
     <div className="h-full w-full px-8 py-6 flex flex-col gap-5 overflow-y-auto">
-      {/* max-md:pl-6 clears the chrome's fixed mobile hamburger (left-2
-          top-2, md:hidden) — without it the title sits underneath. */}
-      <header className="flex items-start justify-between gap-3 max-md:pl-6">
-        <div className="flex flex-col gap-1">
-          <h1 className="text-lg font-semibold">{t.workflowPage.title}</h1>
-          <p className="text-sm text-muted-foreground">
-            {t.workflowPage.description}
-          </p>
-        </div>
+      <header className="flex items-center justify-between gap-3">
+        <p className="text-sm text-muted-foreground">
+          {t.workflowPage.description}
+        </p>
         <div className="shrink-0 flex items-center gap-3">
           {(workflows?.length ?? 0) > 0 && (
             <button
@@ -408,6 +403,14 @@ function WorkflowCard({
             className="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-700 dark:text-amber-400 uppercase tracking-wide"
           >
             {t.workflowPage.lifecycle.staleBadge}
+          </span>
+        )}
+        {workflow.managedBy && (
+          <span
+            title={t.workflowPage.list.card.managedTitle}
+            className="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary uppercase tracking-wide"
+          >
+            {t.workflowPage.list.card.managedBadge}
           </span>
         )}
         {!workflow.enabled && (

@@ -12,6 +12,12 @@
  * `OFFICIAL_CONNECTOR_TOOLS.computer` + `BOOT_INJECTED_BUILTIN_TOOLS.computer`
  * (governance display) and `allTools.set(...)` in packages/api/src/boot.ts
  * (runtime injection). Layer 1 never names these tools.
+ *
+ * Capability: every tool here carries `requiresCapability: 'computer'` — the
+ * off switch for the built-in primitive. A revoked grant drops them before
+ * injection rather than failing them at call time. Per-tool allow/ask/block
+ * (`resolvePolicy`) still governs the tools that remain.
+ * See docs/architecture/features/builtin-primitives.md.
  */
 import { z } from 'zod'
 import { buildTool, type Tool, type ToolContext, type ToolResult } from '../tools/types.js'
@@ -38,6 +44,8 @@ import {
   type BrowserSnapshot,
   type SessionVault,
 } from './types.js'
+import type { LocalTraceStep } from './local-skill-runner.js'
+import { SEND_LIKE_LABEL_PATTERN } from './send-gate.js'
 
 // ── Policy hook (the files-tools pattern) ──────────────────────
 
@@ -93,8 +101,7 @@ export type ComputerToolEvent = {
  * confirmation/approval before executing (spec §3 browserClick). Keep this
  * list in sync with computer-use.md §3.
  */
-export const SEND_LIKE_LABEL_PATTERN =
-  /\b(send|submit|post|publish|share|buy|pay|purchase|order|confirm|delete|apply)\b/i
+export { SEND_LIKE_LABEL_PATTERN } from './send-gate.js'
 
 // ── Fuse (P1.8) ────────────────────────────────────────────────
 //
@@ -193,6 +200,8 @@ type SessionBrowseState = {
   lastCallAt: number
   /** Consecutive snapshots showing a human-verification challenge (§5). */
   captchaHits: number
+  /** Recent flat-tool actions available for saving as a deterministic skill. */
+  trace: LocalTraceStep[]
   /**
    * The proactive live-view link has been handed to the user for this
    * session (§5) — pushed once, on the first cloud browse, never repeated.
@@ -224,6 +233,10 @@ export type ComputerTools = {
    */
   setSessionBackendOverride: (sessionId: string, backend: BrowserBackendKind | null) => void
   getSessionBackend: (sessionId: string) => BrowserBackendKind | null
+  /** Return the current session's recorded flat-browser actions. */
+  getSessionTrace: (sessionId: string) => LocalTraceStep[]
+  /** Clear the recording after it has been saved as a skill. */
+  clearSessionTrace: (sessionId: string) => void
 }
 
 export function createComputerTools(opts: CreateComputerToolsOptions): ComputerTools {
@@ -250,6 +263,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
         firstCallAt: now(),
         lastCallAt: now(),
         captchaHits: 0,
+        trace: [],
         takeoverAnnounced: false,
       }
       sessions.set(context.sessionId, state)
@@ -395,6 +409,13 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     } catch {
       return null
     }
+  }
+
+  function record(state: SessionBrowseState, step: LocalTraceStep): void {
+    state.trace.push(step)
+    // Keep recording bounded even though watched local browsing is exempt from
+    // the cloud action fuse.
+    if (state.trace.length > 60) state.trace.splice(0, state.trace.length - 60)
   }
 
   /** Shared policy gates. Backend-specific resource fusing runs after routing. */
@@ -565,6 +586,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
 
   const browserNavigate = buildTool({
     name: 'browserNavigate',
+    requiresCapability: 'computer',
     description:
       'Open a URL in the controlled browser and get back the page\'s interactive elements as refs (@e1 button "Send") in the same call — no separate browserSnapshot needed after navigating. Public sites need NO browser profile; a profile (a saved login identity) is used automatically when one is enabled — pass "profile" to pick one by name when several match.',
     inputSchema: z.object({
@@ -625,6 +647,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
       gate.state.refLabels.clear()
       try {
         const res = await providerFor(backend).navigate(callCtx(context, gate.state), input.url)
+        record(gate.state, { action: 'open', url: res.url })
         emit({ type: 'browser_action', op: 'navigate', backend, host: hostOf(res.url), ok: true }, context)
         // Proactive live-view hand-off (§5): the moment cloud browsing starts,
         // push the user the Take-Over link out-of-band, ONCE per session,
@@ -699,6 +722,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
 
   const browserSnapshot = buildTool({
     name: 'browserSnapshot',
+    requiresCapability: 'computer',
     description:
       'Re-list the interactive elements of the current browser page as refs (@e1 button "Send"). browserNavigate and browserClick already return a fresh snapshot — use this only when the page changed on its own (slow load, redirect, dynamic content). Refs are valid until the next navigation or snapshot — act on the latest snapshot only.',
     inputSchema: z.object({}),
@@ -755,6 +779,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
 
   const browserClick = buildTool({
     name: 'browserClick',
+    requiresCapability: 'computer',
     description:
       'Click an element by its ref from the latest snapshot, and get back a fresh snapshot of the page after the click. Set intent:"submit" when the click sends, posts, buys, deletes, or otherwise commits an outward action — such clicks require user approval before they run. Ordinary clicks (opening a thread, focusing a field) need no approval.',
     inputSchema: z.object({
@@ -800,7 +825,10 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
       const fused = backendFuseGate(gate.state, backend)
       if (fused) return fused
       try {
+        const label = gate.state.refLabels.get(input.ref) ?? null
+        const isSubmit = input.intent === 'submit' || (label ? SEND_LIKE_LABEL_PATTERN.test(label) : false)
         await providerFor(backend).click(callCtx(context, gate.state), input.ref)
+        if (label) record(gate.state, { action: isSubmit ? 'submit' : 'click', detail: label, description: isSubmit ? label : null })
         emit({ type: 'browser_action', op: 'click', backend, host: null, ok: true }, context)
         const snap = await inlineSnapshot(context, gate.state, backend)
         const advice = snap ? pageAdvice(context, gate.state, snap.snapshot) : ''
@@ -834,6 +862,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
 
   const browserType = buildTool({
     name: 'browserType',
+    requiresCapability: 'computer',
     description:
       'Type text into an element by its ref from the latest browserSnapshot (composing — no approval needed; the send itself is what gets approved).',
     inputSchema: z.object({
@@ -854,6 +883,8 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
       try {
         await providerFor(backend).type(callCtx(context, gate.state), input.ref, input.text)
         gate.state.lastTyped = input.text
+        const label = gate.state.refLabels.get(input.ref)
+        if (label) record(gate.state, { action: 'fill', detail: label, text: input.text })
         // No inline snapshot here, so `type` is near-free next to navigate and
         // click. Recording the size is what makes that asymmetry visible.
         const data = `Typed ${input.text.length} characters into ${input.ref}.`
@@ -880,6 +911,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
 
   const browserCurrentUrl = buildTool({
     name: 'browserCurrentUrl',
+    requiresCapability: 'computer',
     description: 'Get the current URL and title of the controlled browser tab.',
     inputSchema: z.object({}),
     isReadOnly: true,
@@ -973,6 +1005,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
 
   const browserReadPage = buildTool({
     name: 'browserReadPage',
+    requiresCapability: 'computer',
     description:
       'Open a URL in the governed cloud browser and return the rendered page as a list of its elements. Read-only: no clicking, typing, signing in, or acting — for that the user must run a normal chat turn. Use when a page needs JavaScript to render or blocks plain HTTP readers. Reads on the same session run one at a time, so read the 1-2 URLs that matter, not every link.',
     inputSchema: z.object({
@@ -1107,12 +1140,20 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
           firstCallAt: now(),
           lastCallAt: now(),
           captchaHits: 0,
+          trace: [],
           takeoverAnnounced: false,
         })
       }
     },
     getSessionBackend(sessionId) {
       return sessions.get(sessionId)?.backend ?? null
+    },
+    getSessionTrace(sessionId) {
+      return [...(sessions.get(sessionId)?.trace ?? [])]
+    },
+    clearSessionTrace(sessionId) {
+      const state = sessions.get(sessionId)
+      if (state) state.trace = []
     },
   }
 }

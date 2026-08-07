@@ -1685,3 +1685,232 @@ describe('[COMP:channels/telegram] onChatSeen observation', () => {
     expect(events).toEqual([])
   })
 })
+
+// ── Unaddressed group media + album merge ──────────────────────
+//
+// Regression cover for the 2026-08-07 silent drop: four uncaptioned `.md`
+// files posted in a group vanished with no log and no reply, and the bot then
+// answered a follow-up mention from an empty context. Two defects stacked —
+// the mention gate returned `null` for media, and the album merge parsed only
+// its first member. See docs/architecture/channels/adapter-pattern.md →
+// "Unaddressed group media" and "Albums".
+
+describe('[COMP:channels/telegram] unaddressed group media', () => {
+  const build = () => {
+    const onMessage = vi.fn()
+    return {
+      onMessage,
+      adapter: createTelegramAdapter({ token: 'test-token', botUsername: 'testbot', onMessage }),
+    }
+  }
+
+  const groupDoc = (extra: Record<string, unknown> = {}) => ({
+    update_id: 900,
+    message: {
+      message_id: 700,
+      from: { id: 42, first_name: 'Alice' },
+      chat: { id: -100, type: 'supergroup' },
+      date: 1700000000,
+      document: { file_id: 'doc-1', mime_type: 'text/markdown', file_name: 'Cyberport CCMF HK Fund.md', file_size: 10_547 },
+      ...extra,
+    },
+  })
+
+  it('returns a capture-only message for an uncaptioned document in a group', () => {
+    const { adapter } = build()
+    const msg = adapter.parseIncoming(groupDoc())
+    expect(msg).not.toBeNull()
+    expect(msg!.captureOnly).toBe(true)
+    expect(msg!.mediaType).toBe('document')
+    expect(msg!.mediaName).toBe('Cyberport CCMF HK Fund.md')
+    expect(msg!.mediaSizeBytes).toBe(10_547)
+  })
+
+  it('still drops an unaddressed group message carrying no media', () => {
+    const { adapter } = build()
+    const msg = adapter.parseIncoming({
+      update_id: 901,
+      message: {
+        message_id: 701,
+        from: { id: 42, first_name: 'Alice' },
+        chat: { id: -100, type: 'supergroup' },
+        date: 1700000000,
+        text: 'lunch anyone?',
+      },
+    })
+    expect(msg).toBeNull()
+  })
+
+  it('does not mark an addressed group document capture-only', () => {
+    const { adapter } = build()
+    const msg = adapter.parseIncoming(groupDoc({
+      caption: '@testbot read this',
+      caption_entities: [{ type: 'mention', offset: 0, length: 8 }],
+    }))
+    expect(msg!.captureOnly).toBeUndefined()
+    expect(msg!.isMentioned).toBe(true)
+  })
+
+  it('does not mark a DM document capture-only', () => {
+    const { adapter } = build()
+    const msg = adapter.parseIncoming({
+      update_id: 902,
+      message: {
+        message_id: 702,
+        from: { id: 42, first_name: 'Alice' },
+        chat: { id: 42, type: 'private' },
+        date: 1700000000,
+        document: { file_id: 'doc-2', mime_type: 'text/markdown', file_name: 'notes.md' },
+      },
+    })
+    expect(msg!.captureOnly).toBeUndefined()
+  })
+
+  it('captures rather than drops media sent alongside a /ask aimed at another bot', () => {
+    const { adapter } = build()
+    const msg = adapter.parseIncoming(groupDoc({
+      caption: '/ask@otherbot summarize',
+      caption_entities: [{ type: 'bot_command', offset: 0, length: 14 }],
+    }))
+    expect(msg!.captureOnly).toBe(true)
+  })
+
+  it('drops a /ask aimed at another bot when it carries no media', () => {
+    const { adapter } = build()
+    expect(adapter.parseIncoming({
+      update_id: 903,
+      message: {
+        message_id: 703,
+        from: { id: 42, first_name: 'Alice' },
+        chat: { id: -100, type: 'supergroup' },
+        date: 1700000000,
+        text: '/ask@otherbot summarize',
+        entities: [{ type: 'bot_command', offset: 0, length: 14 }],
+      },
+    })).toBeNull()
+  })
+})
+
+describe('[COMP:channels/telegram] media group (album) merge', () => {
+  const ALBUM_FILES = [
+    { file_id: 'f1', mime_type: 'text/markdown', file_name: 'Cloud_Startup_Programs_Guide.md', file_size: 4_198 },
+    { file_id: 'f2', mime_type: 'text/markdown', file_name: 'Cyberport CCMF HK Fund.md', file_size: 10_547 },
+    { file_id: 'f3', mime_type: 'text/markdown', file_name: 'HKSTP Ideation.md', file_size: 12_390 },
+    { file_id: 'f4', mime_type: 'text/markdown', file_name: 'PolyU Micro Fund.md', file_size: 18_841 },
+  ]
+
+  const sendAlbum = (
+    adapter: ReturnType<typeof createTelegramAdapter>,
+    opts: { chatType?: string; captionOn?: number } = {},
+  ) => {
+    ALBUM_FILES.forEach((doc, i) => {
+      const captioned = opts.captionOn === i
+      adapter.handleWebhook({
+        update_id: 1000 + i,
+        message: {
+          message_id: 800 + i,
+          from: { id: 42, first_name: 'Alice' },
+          chat: { id: -100, type: opts.chatType ?? 'supergroup' },
+          date: 1700000000,
+          media_group_id: 'album-1',
+          document: doc,
+          ...(captioned
+            ? { caption: '@testbot read these', caption_entities: [{ type: 'mention', offset: 0, length: 8 }] }
+            : {}),
+        },
+      })
+    })
+  }
+
+  const build = () => {
+    const onMessage = vi.fn()
+    return {
+      onMessage,
+      adapter: createTelegramAdapter({ token: 'test-token', botUsername: 'testbot', onMessage }),
+    }
+  }
+
+  it('delivers every album member, not just the first', async () => {
+    vi.useFakeTimers()
+    try {
+      const { adapter, onMessage } = build()
+      sendAlbum(adapter, { captionOn: 0 })
+      expect(onMessage).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(600)
+
+      expect(onMessage).toHaveBeenCalledTimes(1)
+      const merged = onMessage.mock.calls[0][0]
+      expect(merged.files).toHaveLength(4)
+      expect(merged.files.map((f: { name: string }) => f.name)).toEqual(
+        ALBUM_FILES.map((f) => f.file_name),
+      )
+      expect(merged.files[3].sizeBytes).toBe(18_841)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('clears the single-media fields so one file cannot pass for the album', async () => {
+    vi.useFakeTimers()
+    try {
+      const { adapter, onMessage } = build()
+      sendAlbum(adapter, { captionOn: 0 })
+      await vi.advanceTimersByTimeAsync(600)
+
+      const merged = onMessage.mock.calls[0][0]
+      expect(merged.mediaUrl).toBeUndefined()
+      expect(merged.mediaType).toBeUndefined()
+      expect(merged.mediaName).toBeUndefined()
+      expect(merged.mediaSizeBytes).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('treats the album as addressed when the caption rides a later member', async () => {
+    vi.useFakeTimers()
+    try {
+      const { adapter, onMessage } = build()
+      sendAlbum(adapter, { captionOn: 2 })
+      await vi.advanceTimersByTimeAsync(600)
+
+      const merged = onMessage.mock.calls[0][0]
+      expect(merged.captureOnly).toBeUndefined()
+      expect(merged.isMentioned).toBe(true)
+      expect(merged.files).toHaveLength(4)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('delivers an uncaptioned group album as capture-only instead of dropping it', async () => {
+    vi.useFakeTimers()
+    try {
+      const { adapter, onMessage } = build()
+      sendAlbum(adapter)
+      await vi.advanceTimersByTimeAsync(600)
+
+      expect(onMessage).toHaveBeenCalledTimes(1)
+      const merged = onMessage.mock.calls[0][0]
+      expect(merged.captureOnly).toBe(true)
+      expect(merged.files).toHaveLength(4)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('merges a DM album without marking it capture-only', async () => {
+    vi.useFakeTimers()
+    try {
+      const { adapter, onMessage } = build()
+      sendAlbum(adapter, { chatType: 'private' })
+      await vi.advanceTimersByTimeAsync(600)
+
+      const merged = onMessage.mock.calls[0][0]
+      expect(merged.captureOnly).toBeUndefined()
+      expect(merged.files).toHaveLength(4)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})

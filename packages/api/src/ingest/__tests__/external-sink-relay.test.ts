@@ -18,9 +18,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import {
   INGEST_APPEND_CONTRACT_V1,
+  INGEST_APPEND_CONTRACT_V2,
   INGEST_APPEND_IDEMPOTENCY_HEADER,
   INGEST_APPEND_SIGNATURE_HEADER,
   ingestAppendRequestSchema,
+  ingestAppendRequestV2Schema,
 } from '@use-brian/shared'
 import { createExternalSinkRelay, buildAppendRequest } from '../external-sink-relay.js'
 import { signIngestAppendBody, verifyIngestAppendSignature } from '../append-signing.js'
@@ -318,6 +320,32 @@ describe('[COMP:api/ingest-external-relay] request shape + outbound auth', () =>
     expect(req.instance_id).toBe('4a1e6bd8-0000-4000-8000-000000000001')
     expect(req.owner_user_id).toBe('4a1e6bd8-0000-4000-8000-000000000003')
     expect(req.source).toBe('wechat')
+  })
+
+  it('emits v2 assets only for the managed local archive and downgrades video for v1 sinks', () => {
+	const row = makeRow({
+		messages: [{
+			...MESSAGES[1],
+			kind: 'video',
+			media_ref: {
+				asset_id: '4a1e6bd8-0000-4000-8000-000000000004',
+				sha256: 'a'.repeat(64),
+				availability: 'stored',
+				filename: 'clip.mp4', mime: 'video/mp4', size_bytes: 99,
+			},
+		}],
+	})
+	const managed = buildAppendRequest(row, true)
+	expect(managed.contract).toBe(INGEST_APPEND_CONTRACT_V2)
+	expect(ingestAppendRequestV2Schema.safeParse(managed).success).toBe(true)
+	expect(managed.messages[0]).toMatchObject({ kind: 'video', media_ref: { asset_id: expect.any(String) } })
+
+	const external = buildAppendRequest(row)
+	expect(ingestAppendRequestSchema.safeParse(external).success).toBe(true)
+	expect(external.messages[0]).toMatchObject({
+		kind: 'file', media_ref: { filename: 'clip.mp4', mime: 'video/mp4', size_bytes: 99 },
+	})
+	expect(JSON.stringify(external)).not.toContain('asset_id')
   })
 })
 

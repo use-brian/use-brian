@@ -22,7 +22,23 @@ vi.mock('../../db/api-key-store.js', async (io) => ({
   verifySecret: (...a: unknown[]) => mockVerifySecret(...a),
 }))
 
+// Mock only the turn/history executors — the auth-ladder tests below never
+// reach them, and the lane-derivation tests assert the delegation shape the
+// route hands to the shared pipeline. `fail` and friends stay real.
+vi.mock('../public-turn.js', async (io) => ({
+  ...(await io<typeof import('../public-turn.js')>()),
+  executePublicTurn: vi.fn(async (_deps, _input, _req, res) => {
+    res.json({ reply: 'ok' })
+  }),
+  handlePublicHistory: vi.fn(async (_input, res) => {
+    res.json({ sessionId: 's', messages: [] })
+  }),
+}))
+
 import { publicApiRoutes } from '../public-api.js'
+import { executePublicTurn } from '../public-turn.js'
+
+const mockTurn = vi.mocked(executePublicTurn)
 
 const apiKeyStore = {
   getByIdSystem: vi.fn(),
@@ -99,5 +115,136 @@ describe('[COMP:api/public-api-route] POST /assistants/:id/messages — auth', (
     const res = await post('a-1', { token: 'tok', body: {} })
     expect(res.status).toBe(400)
     expect(res.body.error).toBe('invalid_input')
+  })
+})
+
+/**
+ * `claims` is turn-scoped auth power attested by the key holder. These cases
+ * cover the wire contract only — the transport and prompt effects live in the
+ * shared pipeline (`[COMP:api/public-turn]`). Every request here authenticates
+ * successfully, so a 400 can only come from schema validation.
+ */
+describe('[COMP:api/public-api-route] POST /assistants/:id/messages — claims schema', () => {
+  function authed(body: Record<string, unknown>) {
+    mockParseToken.mockReturnValueOnce({ keyId: 'k-1', secret: 'ok' })
+    apiKeyStore.getByIdSystem.mockResolvedValueOnce(activeKey)
+    mockVerifySecret.mockResolvedValueOnce(true)
+    return post('a-1', { token: 'tok', body: { message: 'hi', externalUserId: 'ext-1', ...body } })
+  }
+
+  it('rejects claims.email disagreeing with the externalUserEmail alias (400 invalid_input)', async () => {
+    // The two spellings are one field. A disagreement means the consumer's own
+    // code paths resolved different people for one turn; picking either would
+    // silently mis-attribute memory, the CRM link, and the connector headers.
+    const res = await authed({
+      externalUserEmail: 'old@client.example',
+      claims: { email: 'new@client.example' },
+    })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('invalid_input')
+    expect(res.body.detail).toContain('externalUserEmail')
+  })
+
+  it('accepts both spellings when they agree (the migration path)', async () => {
+    const res = await authed({
+      externalUserEmail: 'jane@client.example',
+      claims: { email: 'jane@client.example' },
+    })
+    // Past validation — the turn then fails on the unwired pipeline, never 400.
+    expect(res.status).not.toBe(400)
+  })
+
+  it('accepts claims alone, and rejects an unknown claims field (strict)', async () => {
+    expect((await authed({ claims: { email: 'jane@client.example' } })).status).not.toBe(400)
+    expect((await authed({ claims: { orgId: 'acme', roles: ['admin'] } })).status).not.toBe(400)
+
+    const res = await authed({ claims: { email: 'jane@client.example', isAdmin: true } })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('invalid_input')
+  })
+
+  it('rejects a malformed claims.email and an over-long endUserContext', async () => {
+    expect((await authed({ claims: { email: 'not-an-email' } })).status).toBe(400)
+    expect((await authed({ endUserContext: 'x'.repeat(4001) })).status).toBe(400)
+    expect((await authed({ endUserContext: 'plan: pro' })).status).not.toBe(400)
+  })
+
+  it('caps the roles array so a consumer cannot inflate the prompt', async () => {
+    const res = await authed({ claims: { roles: Array.from({ length: 17 }, (_, i) => `r${i}`) } })
+    expect(res.status).toBe(400)
+  })
+})
+
+describe('[COMP:api/public-api-route] lane derivation (docs/plans/api-chat-modes.md)', () => {
+  function keyRow(overrides: Record<string, unknown> = {}) {
+    return {
+      ...activeKey,
+      audience: 'external',
+      anonymousContext: 'thin',
+      createdBy: 'u-owner',
+      ...overrides,
+    }
+  }
+  function authedPost(row: Record<string, unknown>, body: Record<string, unknown>) {
+    mockParseToken.mockReturnValueOnce({ keyId: 'k-1', secret: 'ok' })
+    apiKeyStore.getByIdSystem.mockResolvedValueOnce(row)
+    mockVerifySecret.mockResolvedValueOnce(true)
+    return post('a-1', { token: 'tok', body: { message: 'hi', externalUserId: 'ext-1', ...body } })
+  }
+
+  it('external thin key, anonymous turn → default external-client scope', async () => {
+    const res = await authedPost(keyRow(), {})
+    expect(res.status).toBe(200)
+    const input = mockTurn.mock.calls[0][1]
+    expect(input.contextScope).toBeUndefined()
+    expect(input.internalActor).toBeUndefined()
+  })
+
+  it("external full key, anonymous turn → 'assistant-full' (D2)", async () => {
+    const res = await authedPost(keyRow({ anonymousContext: 'full' }), {})
+    expect(res.status).toBe(200)
+    expect(mockTurn.mock.calls[0][1].contextScope).toBe('assistant-full')
+  })
+
+  it('external full key, IDENTIFIED turn → stays thin (indexed lane, D3)', async () => {
+    const res = await authedPost(keyRow({ anonymousContext: 'full' }), { identified: true })
+    expect(res.status).toBe(200)
+    expect(mockTurn.mock.calls[0][1].contextScope).toBeUndefined()
+  })
+
+  it("internal key → 'internal-member' with the creator as default actor (D4)", async () => {
+    const res = await authedPost(keyRow({ audience: 'internal' }), {})
+    expect(res.status).toBe(200)
+    const input = mockTurn.mock.calls[0][1]
+    expect(input.contextScope).toBe('internal-member')
+    expect(input.internalActor).toEqual({ email: null, defaultUserId: 'u-owner' })
+  })
+
+  it('internal key forwards a per-request actorEmail attribution', async () => {
+    await authedPost(keyRow({ audience: 'internal' }), { actorEmail: 'jo@team.example' })
+    expect(mockTurn.mock.calls[0][1].internalActor).toEqual({
+      email: 'jo@team.example',
+      defaultUserId: 'u-owner',
+    })
+  })
+
+  it('internal key rejects the external tier machinery with 400', async () => {
+    for (const body of [
+      { identified: true },
+      { claims: { email: 'x@client.example' } },
+      { externalUserEmail: 'x@client.example' },
+    ]) {
+      const res = await authedPost(keyRow({ audience: 'internal' }), body)
+      expect(res.status).toBe(400)
+      expect(res.body.error).toBe('invalid_input')
+    }
+    expect(mockTurn).not.toHaveBeenCalled()
+  })
+
+  it('external key rejects actorEmail with 400 (attribution is not an escalation)', async () => {
+    const res = await authedPost(keyRow(), { actorEmail: 'jo@team.example' })
+    expect(res.status).toBe(400)
+    expect(res.body.detail).toContain('internal-audience')
+    expect(mockTurn).not.toHaveBeenCalled()
   })
 })

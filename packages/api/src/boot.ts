@@ -24,6 +24,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto'
+import { seedBuiltinPrimitiveCapabilities } from './db/capability-seed.js'
 import type http from 'node:http'
 
 import express, { type Express } from 'express'
@@ -58,6 +59,7 @@ import {
   createReportBugTool,
   createConfirmRecordingProcessingTool,
   geminiTranscriber,
+  qwenAsrTranscriber,
   qwenFiletransTranscriber,
   withTranscriberFallback,
   type RecordingTranscriber,
@@ -70,6 +72,7 @@ import {
   createBrainHealingTools,
   createScheduleWorkflowTool,
   advanceWorkflowRun,
+  stepSuccessors,
   createWorkflowEventDispatcher,
   type WorkflowEventDispatcher,
   createRunQueueWorker,
@@ -87,8 +90,10 @@ import {
   createRetrievalTools,
   createViewTools,
   createFileTools,
+  createBrandTools,
   createOfficeTools,
   type FileToolPolicy,
+  type OfficeToolPolicy,
   createFindPageTool,
   createIngestRuleTools,
   createEntityKindClassifier,
@@ -106,6 +111,7 @@ import {
   type EntityRecord,
   type EngineHooks,
   createIntrospectionTools,
+  createWorkspaceChatHandoffTool,
   createComputerTools,
   createComputeTools,
   createLocalBrowserProvider,
@@ -140,6 +146,7 @@ import { findAssistantById, isUserBlockedForAssistant, listAccessibleAssistants 
 import { getTaskByIdSystem } from './db/tasks.js'
 import { createBrowserSkillsStore } from './db/browser-skills-store.js'
 import { createDbConnectorActionStore } from './db/connector-actions-store.js'
+import { createWorkspaceChatHandoffStore } from './db/workspace-chat-handoff-store.js'
 import { authRoutes } from './routes/auth.js'
 import { devAuthRoutes, isLocalDevEnv } from './routes/dev-auth.js'
 import { localSessionRoutes, isOssEdition, isSelfHostedOssEnv } from './routes/local-session.js'
@@ -159,7 +166,7 @@ import {
 } from './db/content-planning-store.js'
 import { createDbMagicLinkStore } from './db/magic-link-store.js'
 import { createSmtpClient, createWorkspaceSmtpTransport } from './email/smtp-client.js'
-import { chatRoutes, runSessionResume, tryResolveLiveToolApproval } from './routes/chat.js'
+import { chatRoutes, createUpdateViewedSkillTool, runSessionResume, tryResolveLiveToolApproval } from './routes/chat.js'
 import {
   menuForClass,
   MutableProviderAvailability,
@@ -241,11 +248,13 @@ import { createChatConfirmationStore } from './db/chat-confirmation-store.js'
 import { createDeferredConfirmationStore } from './db/deferred-confirmation-store.js'
 import { createDbKnowledgeStore } from './db/knowledge-store.js'
 import { createKnowledgeRepoWriter } from './knowledge/repo-writer.js'
+import { createDbKbMaintenanceStore, kbMaintenanceRunGuard } from './knowledge/maintenance.js'
 import { knowledgeRoutes, workspaceKnowledgeRoutes } from './routes/knowledge.js'
+import { brandRoutes } from './routes/brand.js'
 import { getBranchHead, getRepoTree, getFileContents, compareCommits, getRepoPermissions } from './github/client.js'
 import { startBrainStreamFanout } from './brain-stream/sse-fanout.js'
 import { brainStreamRoutes } from './routes/brain-stream.js'
-import { publishSessionEvent, startSessionEventBus, subscribeSessionEvents } from './session-event-bus.js'
+import { getSessionPresence, publishSessionEvent, setSessionTyping, startSessionEventBus, subscribeSessionEvents } from './session-event-bus.js'
 import { createDbMcpSettingsStore } from './db/mcp-settings-store.js'
 import { createDbConnectorStore } from './db/connector-store.js'
 import { createConnectorInstanceStore } from './db/connector-instance-store.js'
@@ -253,10 +262,18 @@ import { createConnectorAppCredentialStore } from './db/connector-app-credential
 import { createIngestSinkStore } from './db/ingest-sink-store.js'
 import { createIngestOutboxStore } from './db/ingest-outbox-store.js'
 import { createChatArchiveEnrichmentStore } from './db/chat-archive-enrichment-store.js'
+import { createChatArchiveMediaStore } from './db/chat-archive-media-store.js'
 import { createExternalSinkFanout } from './ingest/external-sink-fanout.js'
 import { createExternalSinkRelay } from './ingest/external-sink-relay.js'
-import { createLiveChatArchiveWriter, setGlobalLiveChatArchiveWriter } from './chat-archive/live-writer.js'
+import {
+  appendInboundChatArchive,
+  createLiveChatArchiveWriter,
+  setGlobalLiveChatArchiveWriter,
+} from './chat-archive/live-writer.js'
 import { createChatArchiveEnrichmentWorker } from './chat-archive/enrichment-worker.js'
+import { chatArchiveMediaRoutes } from './chat-archive/media-routes.js'
+import { createChatArchiveMediaService, type ChatArchiveMediaService } from './chat-archive/media-service.js'
+import { createChatArchiveMediaWorker, type ChatArchiveMediaWorker } from './chat-archive/media-worker.js'
 import { createWorkspaceToolPolicyStore } from './db/workspace-tool-policy-store.js'
 import { buildOpenSyncCredentials } from './build-sync-credentials.js'
 import { createDbAssistantConnectorStore } from './db/assistant-connector-store.js'
@@ -270,6 +287,7 @@ import { createDbSkillCuratorDigestStore } from './db/skill-curator-digest-store
 import { skillApprovalsRoutes } from './routes/skill-approvals.js'
 import { createSkillReviewWorker } from './workers/skill-review-worker.js'
 import { createGeminiSkillReviewLLM } from './workers/skill-review-llm.js'
+import { createPlaybookReflectionWorker } from './workers/playbook-reflection-worker.js'
 import { buildWorkspaceCuratorScope } from './workers/workspace-curator-scope.js'
 import { loadSkillRegistry } from './registry/load-skill-registry.js'
 import { handleRoutes } from './routes/handles.js'
@@ -391,6 +409,8 @@ import { viewsRoutes } from './routes/views.js'
 import { teamspacesRoutes } from './routes/teamspaces.js'
 import { createTeamspaceStore } from './db/teamspace-store.js'
 import { createOfficeArtifactStore } from './db/office-artifacts.js'
+import { getBrandStore } from './db/brand-store.js'
+import { buildBrandVoiceFragment } from '@use-brian/core'
 import { createOfficeTemplateStore } from './db/office-templates.js'
 import { createOfficeGenerationStore } from './db/office-generation.js'
 import { createOfficeCommentStore } from './db/office-comments.js'
@@ -407,11 +427,17 @@ import { officeCollaborationRoutes } from './routes/office-collaboration.js'
 import { officeImportRoutes } from './routes/office-imports.js'
 import { createOfficeImportWorker } from './office/import-worker.js'
 import { createOfficeTemplateCompileWorker } from './office/template-compile-worker.js'
+import { createOfficeGenerationWorker } from './office/generation-worker.js'
+import { createOfficeRevisionWorker } from './office/revision-worker.js'
+import { generateDocumentFromTemplate, reviseDocumentTargets } from './office/document-generation.js'
+import { generatePresentationFromTemplate, materializeOfficeTemplateBundleForGeneration, revisePresentationTargets } from './office/presentation-generation.js'
+import { generateSpreadsheetFromTemplate, reviseSpreadsheetTargets } from './office/spreadsheet-generation.js'
+import { replaceLiveOfficeSnapshot } from './office/live-sync.js'
 import { officeReleaseRoutes } from './routes/office-releases.js'
 import { officeLifecycleRoutes } from './routes/office-lifecycle.js'
 import { officeOfflineRoutes } from './routes/office-offline.js'
 import { internalOfficeCheckpointRoutes } from './routes/internal-office-checkpoint.js'
-import { officeStateVector, snapshotToYDoc } from '@use-brian/office-model'
+import { assertOfficeArtifactSnapshot, encodeOfficeState, officeStateVector, snapshotToYDoc, type OfficeArtifactSnapshot } from '@use-brian/office-model'
 import { publicShareRoutes } from './routes/public-share.js'
 import { publicSiteRoutes } from './routes/public-sites.js'
 import { createDomainProvisioner } from './domains/provisioner.js'
@@ -427,6 +453,7 @@ import { publishPageLifecycle, setPageEventDispatcher } from './page-event-fanou
 import { setMediaTokenSecret } from './media-token.js'
 import { setTaskEventDispatcher } from './task-event-fanout.js'
 import { setKnowledgeEventDispatcher } from './knowledge-event-fanout.js'
+import { setBrandEventDispatcher } from './brand-event-fanout.js'
 import { createRecordingSynthesizer, type RecordingSynthesizeFn } from './synthesis/recording-synthesizer.js'
 import { processOpenRecording } from './recordings/process-recording.js'
 import { createOpenRecordingProcessWorker } from './recordings/recording-process-worker.js'
@@ -502,6 +529,7 @@ import { workspaceLlmKeysRoutes } from './routes/workspace-llm-keys.js'
 import { createDbCompartmentStore } from './db/compartment-store.js'
 import { compartmentRoutes } from './routes/compartments.js'
 import { brainMcpRoutes } from './brain-mcp/server.js'
+import { enginesMcpRoutes, enginesMcpEnabled } from './engines-mcp/server.js'
 import { createDbOAuthClientStore } from './db/oauth-client-store.js'
 import { createDbDesktopAuthStore } from './db/desktop-auth-store.js'
 import { createDbOAuthAuthorizationStore } from './db/oauth-authorization-store.js'
@@ -1116,7 +1144,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use((req, res, next) => {
     // Signed local-file PUTs are raw byte streams. Let their route consume the
     // request directly even when the uploaded file itself is JSON.
-    if (req.path === '/api/local-files') {
+    if (
+      req.path === '/api/local-files'
+      || (req.method === 'PUT' && /^\/internal\/chat-archive\/media\/[^/]+\/content$/.test(req.path))
+    ) {
       next()
       return
     }
@@ -1710,6 +1741,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const chatConfirmationStore = createChatConfirmationStore()
   const deferredConfirmationStore = createDeferredConfirmationStore()
   const knowledgeStore = createDbKnowledgeStore()
+  const kbMaintenanceStore = createDbKbMaintenanceStore()
 
   // ── Assistant KB repo writer ──
   // Direct-commit write-back for the KB write tools (updateKnowledgeEntry /
@@ -1924,6 +1956,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }
 
   const allTools = buildAllTools()
+  // Hidden during ordinary turns; the skill-editor route replaces it with an
+  // RLS-scoped visible instance. Keeping the same implementation in the boot
+  // registry lets an approved call replay safely after a process restart.
+  allTools.set('updateViewedSkill', createUpdateViewedSkillTool({ workspaceSkillStore }))
   const officeArtifactStore = createOfficeArtifactStore()
   const officeTemplateStore = createOfficeTemplateStore()
   const officeGenerationStore = createOfficeGenerationStore()
@@ -1967,10 +2003,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   })
   if (runWorkers) officeLifecycleWorker.start()
-  const officeGenerationAvailable = () => false
+  let wakeOfficeGeneration: ((userId: string) => void) | null = null
+  const officeGenerationAvailable = (_family?: 'document' | 'presentation' | 'spreadsheet') => wakeOfficeGeneration !== null
   const officeService = createOfficeService({
-    // The route must not accept jobs until the durable generation runner and
-    // its pipeline dependencies are wired into this boot graph.
     generationAvailable: officeGenerationAvailable,
     createShell: officeArtifactStore.createShell,
     deleteEmptyShell: officeArtifactStore.deleteEmptyShell,
@@ -1978,10 +2013,42 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     resolveAccess: resolveOfficeAccess,
     createJob: officeGenerationStore.create,
     latestJob: officeGenerationStore.latestForArtifact,
+    wakeGeneration(userId) { wakeOfficeGeneration?.(userId) },
   })
+  // Effective allow/ask/block for an Office tool — the same L1 (app-level
+  // sentinel) + L2 (per-assistant) strictest-wins resolution the files and
+  // computer primitives use, over `mcp_tool_settings` with serverName='office'.
+  // The Studio / Assistant governance tables have always WRITTEN these rows;
+  // until this hook existed nothing read them, so a blocked Office tool still
+  // ran. Same defect the files resolver below was added to fix.
+  const OFFICE_CONNECTOR_ID = 'office'
+  const officeToolDefaults = new Map(
+    (OFFICIAL_CONNECTOR_TOOLS[OFFICE_CONNECTOR_ID] ?? []).map((t) => [t.name, t.defaultPolicy]),
+  )
+  const OFFICE_POLICY_STRICTNESS: Record<string, number> = { allow: 0, ask: 1, block: 2 }
+  const resolveOfficeToolPolicy = async (
+    toolName: string,
+    context: { userId: string; assistantId: string },
+  ): Promise<OfficeToolPolicy> => {
+    const fallback = (officeToolDefaults.get(toolName) ?? 'allow') as OfficeToolPolicy
+    const [l1, l2] = await Promise.all([
+      mcpSettingsStore.getPolicy({
+        assistantId: APP_LEVEL_ASSISTANT_ID, userId: context.userId,
+        serverName: OFFICE_CONNECTOR_ID, toolName,
+      }),
+      mcpSettingsStore.getPolicy({
+        assistantId: context.assistantId, userId: context.userId,
+        serverName: OFFICE_CONNECTOR_ID, toolName,
+      }),
+    ])
+    const a = (l1?.policy as OfficeToolPolicy) ?? fallback
+    const b = (l2?.policy as OfficeToolPolicy) ?? fallback
+    return (OFFICE_POLICY_STRICTNESS[a] ?? 0) >= (OFFICE_POLICY_STRICTNESS[b] ?? 0) ? a : b
+  }
   for (const tool of createOfficeTools({
     port: officeService,
     appOrigin: env.AUTHED_APP_URL ?? env.APP_URL,
+    resolvePolicy: resolveOfficeToolPolicy,
   })) {
     allTools.set(tool.name, tool)
   }
@@ -2106,6 +2173,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   let filesApi: ReturnType<typeof createFilesApi> | null = null
   let filesResolver: FilesClientResolver | null = null
   let chunkedFileUploads: ChunkedFileUploadService | null = null
+  let chatArchiveMediaService: ChatArchiveMediaService | null = null
+  let chatArchiveMediaWorker: ChatArchiveMediaWorker | null = null
 
   const calleeExecutor = createCalleeExecutor({
     provider,
@@ -2777,6 +2846,25 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // one instruction; tasks.md → "Bulk tools").
   allTools.set('bulkUpdateTasks', taskTools.bulkUpdateTasks)
   allTools.set('archiveTasks', taskTools.archiveTasks)
+
+  // ── Brand primitive ──
+  // Boot-built like the file tools (NOT through mcp/inject.ts): both carry
+  // `requiresCapability: 'brand'`, so the per-turn `filterToolsByCapabilities`
+  // call is what gates them and the Studio Built-in rail's toggle is the off
+  // switch. `updateBrandDraft` writes the draft only — approval is a Studio
+  // action no tool can reach. See docs/architecture/features/brand.md.
+  const brandTools = createBrandTools(getBrandStore(), {
+    onEvent: (evt, ctx) => {
+      const base = { userId: ctx.userId, assistantId: ctx.assistantId, sessionId: ctx.sessionId, channelType: ctx.channelType }
+      if (evt.type === 'brand_read') {
+        analytics.logEvent({ ...base, eventName: 'brand_read', metadata: { brand_id: sanitizeAnalytics(evt.brandId ?? ''), hit: evt.brandId !== null } })
+      } else if (evt.type === 'brand_draft_updated') {
+        analytics.logEvent({ ...base, eventName: 'brand_draft_updated', metadata: { brand_id: sanitizeAnalytics(evt.brandId), groups: sanitizeAnalytics(evt.groups.join(',')) } })
+      }
+    },
+  })
+  allTools.set('getBrand', brandTools.getBrand)
+  allTools.set('updateBrandDraft', brandTools.updateBrandDraft)
 
   // Guardrail tools — rejecting a task WITH a reason is what teaches the
   // workspace; archiveTasks above is routine cleanup and deliberately teaches
@@ -3507,6 +3595,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }
   const skillRunnerTools = createSkillRunnerTools({
     provider: sandboxProvider,
+    local: localBrowserProvider,
     binding: sandboxOrchestrator?.binding ?? null,
     skills: browserSkillsStore,
     grants: ports.browserSkillGrantStore ?? null,
@@ -3521,6 +3610,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     resolvePolicy: resolveComputerToolPolicy,
     unattendedEnabled: unattendedComputerUse,
     getWorkspacePlan,
+    getSessionTrace: computerTools.getSessionTrace,
+    clearSessionTrace: computerTools.clearSessionTrace,
     onEvent: (evt, ctx) => {
       analytics.logEvent({
         userId: ctx.userId,
@@ -3542,6 +3633,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   })
   allTools.set('runBrowserSkill', skillRunnerTools.runBrowserSkill)
+  allTools.set('saveBrowserSkill', skillRunnerTools.saveBrowserSkill)
   allTools.set('listBrowserSkills', skillRunnerTools.listBrowserSkills)
   allTools.set('listBrowserProfiles', skillRunnerTools.listBrowserProfiles)
 
@@ -3620,6 +3712,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const webChatSystemPrompt = LAYER_1_SYSTEM_PROMPT
   // Brain-inspection tools need the closed InspectionStore; open default = none.
   const brainInspectionTools = ports.inspectionTools
+  const workspaceChatHandoffTool = createWorkspaceChatHandoffTool(
+    createWorkspaceChatHandoffStore(),
+  )
 
   // ── Silent artifact promotion (large-content-artifacts §2.3/§3.1) ──
   // One promoter instance shared by /upload, the web-chat paste intercept,
@@ -3709,6 +3804,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     blueprintRecordTools,
     buildBlueprintPromptFragment,
     introspectionTools,
+    workspaceChatHandoffTool,
   }))
 
   app.use('/api/v1', publicApiRoutes({
@@ -3750,6 +3846,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     crmTools,
     retrievalTools: brainRetrievalTools,
     fileTools: brainFileTools ?? undefined,
+    // Brand primitive (D8): `getBrand` on both key scopes, `saveBrandDraft`
+    // on write keys. Draft-only — the supplier flow is that an agency session
+    // pushes a draft into the client's workspace and the CLIENT approves it in
+    // their own Studio, so no approve tool exists on this surface.
+    brandTools: { getBrand: brandTools.getBrand, updateBrandDraft: brandTools.updateBrandDraft },
     // Doc-page tools (readPage / editPage / deletePage) reuse the same RLS-gated
     // saved-views + doc-page stores the chat doc tools use, so a brain-key page
     // op runs the identical SQL (CAS + undo for edits, cascade delete) as an
@@ -3762,6 +3863,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // Computer-use R2: writeBrowserSkill — the OSS authoring skill's sync tool.
     browserSkills: browserSkillsStore,
   }))
+
+  // AI Engines MCP — read-only observation of external answer engines + GSC,
+  // registered in a workspace as a custom connector. Dark by default: the
+  // route exists only when ENGINES_MCP_SECRET plus at least one engine
+  // credential are set (docs/architecture/integrations/engines-mcp.md).
+  if (enginesMcpEnabled()) {
+    app.use('/api/engines/mcp', enginesMcpRoutes())
+  }
 
   app.use(oauthMetadataRoutes({ apiUrl: env.API_URL, webUrl: env.APP_URL }))
   app.use('/api/brain/oauth', oauthRoutes({
@@ -3793,6 +3902,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api/sessions', optionalAuth(env.JWT_SECRET), sessionRoutes({
     subscribeSessionEvents,
     publishSessionEvent,
+    setSessionTyping,
+    getSessionPresence,
     ...(roomIngestor
       ? {
           onRoomPost: (post) => {
@@ -4013,8 +4124,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           description: r.systemPrompt ? r.systemPrompt.slice(0, 120) : null,
           memoryCount: r.memoryCount, iconSeed: r.iconSeed ?? 0,
           workspaceId: r.workspaceId,
-          telegramModelAlias: r.telegramModelAlias,
-          slackModelAlias: r.slackModelAlias,
+          defaultModelAlias: r.defaultModelAlias,
           clearance: r.clearance, kind: r.kind, appType: r.appType,
         })),
       })
@@ -4079,6 +4189,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         [assistantName, iconSeed, resolvedAppType, workspaceId, appClearance],
       )
       const assistantId = result.rows[0].id
+      // App specialists deliberately get no §17 primitives, but the built-in
+      // primitives (office / computer) were injected unconditionally before the
+      // off switch existed — seed them so an app assistant keeps what it had.
+      await seedBuiltinPrimitiveCapabilities(
+        (sql, params) => query(sql, params as never[]),
+        assistantId,
+        userId,
+        'built-in primitive — default-on at app-assistant creation',
+      )
       await connectionStore.seedWorkspacePrimaryFollows(workspaceId).catch((err) =>
         console.warn('[assistants] seedWorkspacePrimaryFollows failed:', err),
       )
@@ -4300,6 +4419,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     engineHooks: ports.engineHooks,
     checkCreditBudget: ports.checkCreditBudget,
     chatLinkStore,
+    // Ambient-context stores for the `assistant-full` scope this route opts
+    // into (see public-chat.ts). The keyed public API above deliberately
+    // omits them — it runs the thin `external-client` scope.
+    workspaceFilesStore,
+    skillStore,
   }))
 
   // PUBLIC closed routes mount HERE — before the bare `/api` requireAuth guards
@@ -4571,11 +4695,28 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       const visible = await Promise.all(artifacts.map((artifact) => officeService.get({ userId, artifactId: artifact.id })))
       return visible.filter((artifact): artifact is NonNullable<typeof artifact> => artifact !== null)
     },
-    restoreVersion: officeArtifactStore.restoreVersion,
+    async restoreVersion(params) {
+      if (!filesApi) return null
+      const source = await officeArtifactStore.getVersionSource(params.userId, params.artifactId, params.targetVersionId)
+      if (!source) return null
+      const read = await filesApi.readBytes({ workspaceId: source.workspaceId, userId: params.userId, assistantKind: 'standard', clearance: 'confidential' }, source.snapshotFileId)
+      if (!read.ok) throw new Error(`Office restore snapshot unavailable: ${read.error.kind}`)
+      const actualHash = createHash('sha256').update(read.value.bytes).digest('hex')
+      if (actualHash !== source.snapshotHash) throw new Error('Office restore snapshot hash mismatch')
+      const snapshot = assertOfficeArtifactSnapshot(JSON.parse(new TextDecoder().decode(read.value.bytes)))
+      if (snapshot.artifactId !== params.artifactId) throw new Error('Office restore snapshot artifact mismatch')
+      const doc = snapshotToYDoc(snapshot)
+      return officeArtifactStore.restoreVersion({
+        ...params,
+        liveUpdate: encodeOfficeState(doc),
+        liveStateVector: officeStateVector(doc),
+        liveCanonicalHash: source.snapshotHash,
+      })
+    },
     getArtifact: officeArtifactStore.get,
     listVersions: officeArtifactStore.listVersions,
-    async canRestore(userId, artifactId) {
-      return (await resolveOfficeAccess(userId, artifactId))?.canRestore ?? false
+    async canRestoreVersion(userId, artifactId) {
+      return (await resolveOfficeAccess(userId, artifactId))?.canEdit ?? false
     },
   }))
   app.use('/api/office', requireAuth(env.JWT_SECRET), officeJobRoutes({
@@ -4608,6 +4749,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       return result.value.bytes
     },
     initialize: officeLiveStore.initialize,
+    getDraftRouting: officeTemplateStore.getDraftRouting,
+    saveDraftRouting: officeTemplateStore.saveDraftRouting,
     async saveImportedResource({ userId, workspaceId, resource }) {
       const path = `/office/resources/${resource.ref.hash}`
       const ctx = { workspaceId, userId, assistantKind: 'standard' as const, clearance: 'confidential' as const }
@@ -4627,6 +4770,27 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         licence: { name: 'Workspace-uploaded source file' }, embeddingRights: 'allowed',
       }
     },
+    async loadResourceAdmissions({ userId, workspaceId, resourceIds }) {
+      return Promise.all(resourceIds.map(async (resourceId) => {
+        const resource = await officeTemplateStore.getResource(userId, resourceId)
+        if (!resource || resource.workspaceId !== workspaceId || !resource.fileId) throw new Error(`Office template resource ${resourceId} is unavailable`)
+        const read = await filesApi!.readBytes({ workspaceId, userId, assistantKind: 'standard', clearance: 'confidential' }, resource.fileId)
+        if (!read.ok) throw new Error(`Office template resource ${resourceId} is unavailable: ${read.error.kind}`)
+        const name = typeof resource.licence?.name === 'string' && resource.licence.name.trim() ? resource.licence.name : 'Workspace resource'
+        return {
+          id: resource.id,
+          bytes: read.value.bytes,
+          hash: resource.hash,
+          mime: resource.mime,
+          licence: {
+            name,
+            ...(typeof resource.licence?.url === 'string' ? { url: resource.licence.url } : {}),
+            ...(typeof resource.licence?.attribution === 'string' ? { attribution: resource.licence.attribution } : {}),
+          },
+          embeddingRights: resource.embeddingRights,
+        }
+      }))
+    },
     async saveBundle({ userId, workspaceId, templateId, hash, bytes }) {
       const path = `/office/templates/${templateId}/${hash}.json`
       const ctx = { workspaceId, userId, assistantKind: 'standard' as const, clearance: 'confidential' as const }
@@ -4640,6 +4804,172 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     appendEvent: officeGenerationStore.appendEvent,
     finish: officeGenerationStore.finish,
   }) : null
+  const commitGeneratedOfficeSnapshot = async (params: { job: import('./db/office-generation.js').OfficeGenerationJobRow; snapshot: OfficeArtifactSnapshot; expectedVersion: number; kind: 'generation' | 'revision' }) => {
+    if (!filesApi) throw new Error('Office file storage is unavailable')
+    const bytes = new TextEncoder().encode(JSON.stringify(params.snapshot))
+    const hash = createHash('sha256').update(bytes).digest('hex')
+    const fileContext = { workspaceId: params.job.workspaceId, userId: params.job.initiatedByUserId, assistantKind: 'standard' as const, clearance: 'confidential' as const }
+    const saved = await filesApi.writeBytes(fileContext, {
+      path: `/office/artifacts/${params.job.artifactId}/versions/${params.expectedVersion + 1}-${hash}.json`,
+      bytes,
+      mime: 'application/json',
+      sensitivity: 'confidential',
+    })
+    if (!saved.ok) throw new Error(`Office snapshot save failed: ${saved.error.kind}`)
+    const committed = await officeArtifactStore.commitVersion({
+      userId: params.job.initiatedByUserId,
+      artifactId: params.job.artifactId,
+      expectedVersion: params.expectedVersion,
+      snapshotFileId: saved.value.id,
+      snapshotHash: hash,
+      operationClock: officeStateVector(snapshotToYDoc(params.snapshot)),
+      schemaVersion: params.snapshot.schemaVersion,
+      capabilityVersion: params.snapshot.capabilityVersion,
+      origin: params.kind === 'generation' ? 'generation' : 'ai',
+      authorType: params.job.assistantId ? 'assistant' : 'system',
+      authorAssistantId: params.job.assistantId ?? undefined,
+      summary: params.kind === 'generation' ? 'Office artifact generated' : 'Brian revision',
+      checkpointKind: params.kind,
+    })
+    if (!committed) {
+      await filesApi.delete(fileContext, saved.value.id).catch(() => undefined)
+      throw new Error('Office snapshot version conflict')
+    }
+    await officeLiveStore.initialize({ userId: params.job.initiatedByUserId, artifactId: params.job.artifactId, snapshot: params.snapshot })
+    await replaceLiveOfficeSnapshot(params.snapshot)
+    return committed
+  }
+  const readOfficeTemplateBundle = async (userId: string, workspaceId: string, versionId: string) => {
+    if (!filesApi) return null
+    const version = await officeTemplateStore.getVersion(userId, versionId)
+    if (!version || version.workspaceId !== workspaceId || version.status !== 'admitted') return null
+    const read = await filesApi.readBytes({ workspaceId, userId, assistantKind: 'standard', clearance: 'confidential' }, version.bundleFileId)
+    if (!read.ok) throw new Error(`Office template bundle unavailable: ${read.error.kind}`)
+    const stored = JSON.parse(new TextDecoder().decode(read.value.bytes))
+    return materializeOfficeTemplateBundleForGeneration(stored, { id: version.id, version: version.version, status: 'admitted' })
+  }
+  const createGenerationRunner = (userId: string) => createOfficeGenerationWorker({
+    store: officeGenerationStore,
+    workerUserId: userId,
+    buildPipelineDeps(job) {
+      return {
+        async resolveAuthority() {
+          const projection = job.authorityProjection as { sensitivity?: unknown; visibilityUserIds?: unknown; compartments?: unknown; sourceHandles?: unknown }
+          return {
+            sensitivity: projection.sensitivity === 'public' || projection.sensitivity === 'confidential' ? projection.sensitivity : 'internal',
+            visibilityUserIds: Array.isArray(projection.visibilityUserIds) ? projection.visibilityUserIds.filter((value): value is string => typeof value === 'string') : [],
+            compartments: Array.isArray(projection.compartments) ? projection.compartments.filter((value): value is string => typeof value === 'string') : [],
+            sourceHandles: Array.isArray(projection.sourceHandles) ? projection.sourceHandles.filter((value): value is string => typeof value === 'string') : [],
+          }
+        },
+        async selectTemplate(brief) {
+          if (!brief.templateId) return { ambiguous: [] }
+          const template = await readOfficeTemplateBundle(job.initiatedByUserId, job.workspaceId, brief.templateId)
+          return template ? { template } : { ambiguous: [] }
+        },
+        async retrieveBrain(brief, authority) {
+          const context = {
+            workspaceId: job.workspaceId,
+            userId: job.initiatedByUserId,
+            assistantId: brief.assistantId,
+            assistantKind: 'app' as const,
+            clearance: authority.sensitivity,
+            compartments: authority.compartments,
+          }
+          const explicitIds = brief.sourceHandles.flatMap((handle) => {
+            const match = handle.match(/^knowledge:([0-9a-f-]{36})$/i)
+            return match?.[1] ? [match[1]] : []
+          })
+          const stopwords = new Set(['about', 'after', 'again', 'also', 'and', 'audience', 'create', 'deck', 'for', 'from', 'generate', 'help', 'intro', 'introduction', 'into', 'make', 'presentation', 'public', 'slide', 'slides', 'that', 'the', 'this', 'to', 'with'])
+          const terms = [...new Set(`${brief.outcome} ${brief.audience}`.toLocaleLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? [])]
+            .filter((term) => !stopwords.has(term))
+            .slice(0, 8)
+          const [explicit, searched] = await Promise.all([
+            Promise.all(explicitIds.map((id) => knowledgeStore.getById(context, id).catch(() => null))),
+            Promise.all(terms.map((term) => knowledgeStore.search(context, term, 4).catch(() => []))),
+          ])
+          const entries = new Map([...explicit.filter((entry) => entry !== null), ...searched.flat()].map((entry) => [entry.id, entry]))
+          return [...entries.values()].slice(0, 12).map((entry) => ({
+            handle: `knowledge:${entry.id}`,
+            excerpt: [entry.title, entry.summary, entry.content].filter(Boolean).join('\n').slice(0, 4_000),
+            sensitivity: entry.sensitivity,
+          }))
+        },
+        async inspectWebsite(url) {
+          const response = await fetch(url, { signal: AbortSignal.timeout(10_000), headers: { 'User-Agent': 'UseBrian-Office/1.0' } })
+          if (!response.ok) throw new Error(`Canonical website returned ${response.status}`)
+          const excerpt = (await response.text()).replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 8_000)
+          return [{ url, excerpt }]
+        },
+        async planClaims(brief, evidence) {
+          return [
+            { objectHint: brief.family, text: brief.outcome, classification: 'user_attested' as const, confidence: 1, sourceHandles: brief.sourceHandles },
+            ...evidence.brain.map((entry) => ({ objectHint: brief.family, text: entry.excerpt.slice(0, 1_000), classification: 'evidence_supported' as const, confidence: 0.9, sourceHandles: [entry.handle] })),
+            ...evidence.website.map((entry) => ({ objectHint: brief.family, text: entry.excerpt.slice(0, 1_000), classification: 'evidence_supported' as const, confidence: 0.8, sourceHandles: [entry.url] })),
+          ].slice(0, 100)
+        },
+        async construct(brief, evidence, claims, template) {
+          const brandVoice = await resolveBrandVoice(job.initiatedByUserId, job.workspaceId)
+          if (brief.family === 'document') return generateDocumentFromTemplate({ provider, model: backgroundModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, template, brandVoice })
+          if (brief.family === 'presentation') return generatePresentationFromTemplate({ provider, model: backgroundModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, evidence, claims, template, brandVoice })
+          return generateSpreadsheetFromTemplate({ provider, model: backgroundModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, template, brandVoice })
+        },
+        async processMedia(snapshot) { return snapshot },
+        async resolveResource(resourceId) {
+          const resource = await officeTemplateStore.getResource(job.initiatedByUserId, resourceId)
+          if (!resource?.fileId || resource.workspaceId !== job.workspaceId) return null
+          const read = await filesApi!.readBytes({ workspaceId: job.workspaceId, userId: job.initiatedByUserId, assistantKind: 'standard', clearance: 'confidential' }, resource.fileId)
+          return read.ok ? { bytes: read.value.bytes, mime: resource.mime } : null
+        },
+        async cancelled() { return Boolean((await officeGenerationStore.get(job.initiatedByUserId, job.id))?.cancelRequestedAt) },
+        async commit(snapshot) {
+          const committed = await commitGeneratedOfficeSnapshot({ job, snapshot, expectedVersion: 0, kind: 'generation' })
+          return { artifactId: job.artifactId, version: committed.version }
+        },
+      }
+    },
+  })
+  /**
+   * The brand voice fragment for an Office generation or revision.
+   *
+   * Office generation builds its own system prompts and never routes through
+   * `buildFullSystemPrompt`, so the `# Brand` L1 block never reached it: the
+   * assistant honoured the brand voice in chat and ignored it when generating
+   * the company's documents. Resolved per job, best-effort — a brand read
+   * failing must not fail a generation, and no approved brand adds nothing.
+   */
+  const resolveBrandVoice = async (userId: string, workspaceId: string): Promise<string | null> => {
+    try {
+      const record = (await getBrandStore().get(userId, workspaceId))?.activeRecord ?? null
+      return buildBrandVoiceFragment(record)
+    } catch (err) {
+      console.warn('[office] brand voice lookup failed:', err)
+      return null
+    }
+  }
+
+  const officeRevisionWorker = filesApi ? createOfficeRevisionWorker({
+    claim: officeGenerationStore.claim,
+    getSnapshot: officeLiveStore.get,
+    async revise({ snapshot, targetIds, instruction, job }) {
+      const brandVoice = await resolveBrandVoice(job.initiatedByUserId, job.workspaceId)
+      if (snapshot.family === 'document') return reviseDocumentTargets({ provider, model: backgroundModel, snapshot, targetIds, instruction, brandVoice })
+      if (snapshot.family === 'presentation') return revisePresentationTargets({ provider, model: backgroundModel, snapshot, targetIds, instruction, brandVoice })
+      return reviseSpreadsheetTargets({ provider, model: backgroundModel, snapshot, targetIds, instruction, brandVoice })
+    },
+    async commit({ job, snapshot, expectedVersion }) {
+      return (await commitGeneratedOfficeSnapshot({ job, snapshot, expectedVersion, kind: 'revision' })).version
+    },
+    appendEvent: officeGenerationStore.appendEvent,
+    finish: officeGenerationStore.finish,
+  }) : null
+  if (filesApi) wakeOfficeGeneration = (userId: string) => {
+    void (async () => {
+      const generation = createGenerationRunner(userId)
+      while (await generation.runOnce() !== 'idle') { /* drain creation jobs for this member */ }
+      while (officeRevisionWorker && await officeRevisionWorker(userId)) { /* drain revision jobs for this member */ }
+    })().catch((error) => console.error('[office-generation-worker]', error))
+  }
   const wakeImport = (userId: string) => {
     if (officeImportWorker) void (async () => {
       while (await officeImportWorker(userId)) { /* drain eligible imports for this member */ }
@@ -4658,6 +4988,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     createDraft: officeTemplateStore.createDraft,
     createTemplateShell: officeArtifactStore.createShell,
     initializeDraft: officeLiveStore.initializeIfMissing,
+    getDraftRouting: officeTemplateStore.getDraftRouting,
+    saveDraftRouting: officeTemplateStore.saveDraftRouting,
     deleteEmptyDraft: officeTemplateStore.deleteEmptyDraft,
     deleteEmptyShell: officeArtifactStore.deleteEmptyShell,
     createCompileJob: officeGenerationStore.create,
@@ -4688,7 +5020,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     sharedSecret: process.env.DOC_SYNC_SECRET,
     async checkpoint(artifactId, expectedVersion, canonicalHash) {
       if (!filesApi) return 'not_found'
-      const raw = await query<{ id: string; workspaceId: string; ownerUserId: string; headVersion: number }>(`SELECT id,workspace_id AS "workspaceId",owner_user_id AS "ownerUserId",head_version::int AS "headVersion" FROM office_artifacts WHERE id=$1 AND lifecycle_state='active'`, [artifactId])
+      const raw = await query<{ id: string; workspaceId: string; ownerUserId: string; headVersion: number; headSnapshotHash: string | null }>(`
+        SELECT a.id,a.workspace_id AS "workspaceId",a.owner_user_id AS "ownerUserId",
+               a.head_version::int AS "headVersion",v.snapshot_hash AS "headSnapshotHash"
+          FROM office_artifacts a
+          LEFT JOIN office_artifact_versions v ON v.id=a.head_version_id
+         WHERE a.id=$1 AND a.lifecycle_state='active'
+      `, [artifactId])
       const artifact = raw.rows[0]
       if (!artifact) return 'not_found'
       const live = await officeLiveStore.getOfflineSource(artifact.ownerUserId, artifactId)
@@ -4696,6 +5034,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       const bytes = new TextEncoder().encode(JSON.stringify(live.snapshot))
       const actualHash = createHash('sha256').update(bytes).digest('hex')
       if (actualHash !== canonicalHash) return 'conflict'
+      // Replacing a connected Y.Doc after generation/revision dirties the
+      // in-memory document even though its materialized bytes already ARE the
+      // immutable head. Rebase the live row and acknowledge that settle
+      // without appending a duplicate manual checkpoint.
+      if (artifact.headSnapshotHash === canonicalHash) {
+        await query(`UPDATE office_collab_documents SET base_version=$2,updated_at=now() WHERE artifact_id=$1`, [artifactId, artifact.headVersion])
+        return { version: artifact.headVersion }
+      }
       // A prior settle may have advanced the immutable head while this newer
       // settle was already in flight. The API updates live.baseVersion after
       // every successful checkpoint, so rebasing is safe only when that live
@@ -4732,7 +5078,17 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     const [artifact, access, live, head] = await Promise.all([officeArtifactStore.get(userId, artifactId), resolveOfficeAccess(userId, artifactId), officeLiveStore.get(userId, artifactId), officeArtifactStore.getHeadVersion(userId, artifactId)])
     if (!artifact || !access || !live) return null
     const [claims, media] = artifact.headVersionId ? await Promise.all([officeReleaseStore.listClaims(userId, artifactId, artifact.headVersionId), officeReleaseStore.listMedia(userId, artifactId, artifact.headVersionId)]) : [[], []]
-    return { artifact: { ...artifact, headVersionId: head?.snapshotHash === live.canonicalHash ? artifact.headVersionId : null }, access, snapshot: live.snapshot, claims, media }
+    // The brand's APPROVED claims register (docs/architecture/features/brand.md
+    // → "Claims reach the release gate"). Best-effort: a brand read failing must
+    // not make a release impossible, and no brand simply contributes nothing.
+    let brandClaims: readonly import('@use-brian/shared').BrandClaim[] | undefined
+    try {
+      const brand = await getBrandStore().get(userId, artifact.workspaceId)
+      brandClaims = brand?.activeRecord?.claims
+    } catch (err) {
+      console.warn('[office-release] brand claims lookup failed:', err)
+    }
+    return { artifact: { ...artifact, headVersionId: head?.snapshotHash === live.canonicalHash ? artifact.headVersionId : null }, access, snapshot: live.snapshot, claims, brandClaims, media }
   }
   if (filesApi) app.use('/api/office', requireAuth(env.JWT_SECRET), officeReleaseRoutes({
     load: loadOfficeReleaseContext,
@@ -4827,6 +5183,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   // workspace-scoped knowledge route resolves edit-proposal PATs through the
   // same `syncCredentials` resolver the sync worker uses.
+  // Brand primitive — one open router mounted here so both editions serve it
+  // (never on the forked /api/connectors pair; see routes/brand.ts).
+  app.use('/api/workspaces/:workspaceId/brand', requireAuth(env.JWT_SECRET), brandRoutes())
+
   app.use('/api/workspaces/:workspaceId/knowledge', requireAuth(env.JWT_SECRET), workspaceKnowledgeRoutes({
     knowledgeStore,
     allowLocalSources: env.LOCAL_FILESYSTEM_SOURCES_ENABLED === true,
@@ -4835,6 +5195,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     syncCredentials,
     knowledgeRepoWriter,
     triggerSync: async () => { if (syncWorkerRef) await syncWorkerRef.tick() },
+    // Self-maintain agents (mig 411): config store + the workflow store the
+    // materialized workflow writes through + schedule reconciliation deps.
+    kbMaintenanceStore,
+    workflowStore,
+    jobStore,
+    resolvePrimary: resolvePrimaryAssistantForWorkspace,
   }))
 
   // ════════════════════════════════════════════════════════════════
@@ -4910,6 +5276,19 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         )
         return
       }
+      // KB self-maintain budget guard (mig 411): a knowledge-managed
+      // workflow over its weekly proposal budget (or whose agent is
+      // disabled) skips the run — the 7-day window slides, so it resumes
+      // by itself. One indexed read for every non-managed workflow.
+      try {
+        const guard = await kbMaintenanceRunGuard(kbMaintenanceStore, workflowId)
+        if (guard.skip) {
+          console.warn(`[workflow-event] kb-maintenance guard skipped workflow ${workflowId}: ${guard.reason}`)
+          return
+        }
+      } catch (err) {
+        console.warn('[workflow-event] kb-maintenance guard failed (run proceeds):', err)
+      }
       const triggeredBy = await getWorkflowCreatorSystem(workflowId)
       await workflowRunStore.createRun({
         workflowId,
@@ -4956,6 +5335,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // publishes into on every entry create / update / delete, covering the sync
   // worker, the assistant repo-writer's write-through, and manual edits.
   setKnowledgeEventDispatcher(workflowEventDispatcher)
+  // Brand lifecycle events likewise — the seam `db/brand-store.ts` publishes
+  // into on create / draft update / approve / supersede, covering the Studio
+  // routes, the `updateBrandDraft` chat tool, and the brain-MCP bridge.
+  setBrandEventDispatcher(workflowEventDispatcher)
 
   // ════════════════════════════════════════════════════════════════
   // Open background workers
@@ -4986,14 +5369,20 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         })
         const run = await workflowRunStore.getRunSystem(runId)
         const wf = run ? await workflowStore.findByIdSystem(run.workflowId) : null
+        // Resume PAST the completed wait step via an explicit frontier —
+        // possibly several successors (fan-out array), possibly none (a
+        // terminal wait completes the run instead of re-entering at
+        // startStepId). The cursor stays on the wait step; the executor
+        // stamps currentStepId as each successor starts.
+        let startAt: string[] | undefined
         if (run && wf) {
           const waitStep = wf.definition.steps.find((s) => s.id === run.currentStepId)
-          const nextId = waitStep?.nextStepId === undefined
-            ? (wf.definition.steps[wf.definition.steps.indexOf(waitStep!) + 1]?.id ?? null)
-            : waitStep.nextStepId
-          await workflowRunStore.updateRun(runId, { status: 'running', currentStepId: nextId })
+          startAt = waitStep
+            ? stepSuccessors(waitStep, wf.definition.steps.map((s) => s.id))
+            : undefined
+          await workflowRunStore.updateRun(runId, { status: 'running' })
         }
-        const outcome = await advanceWorkflowRun(workflowExecutorDeps, runId)
+        const outcome = await advanceWorkflowRun(workflowExecutorDeps, runId, startAt ? { startAt } : undefined)
         await jobStore.update(job.id, { enabled: false })
         if (outcome.kind === 'failed') {
           throw new Error(
@@ -5284,6 +5673,52 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   })
   if (runWorkers) skillReviewWorker.start()
 
+  // ── Playbook reflection worker (growth loop Phase 3) ──
+  // Weekly per-assistant reflection: grades recent work against
+  // `charter.success` and proposes playbook rules as suggestions the owner
+  // admits on the assistant detail page. Cost rides
+  // `overhead:playbook-reflection` (migration 420). See
+  // docs/architecture/context-engine/assistant-playbook.md.
+  const playbookReflectionWorker = createPlaybookReflectionWorker({
+    modelCall: async ({ systemPrompt, prompt, maxTokens, attribution }) => {
+      const response = await collectStream(provider.stream({
+        model: backgroundModel,
+        messages: [{ role: 'user', content: prompt }],
+        systemPrompt,
+        maxTokens,
+      }))
+      if (response.usage && usageStore) {
+        const cost = calculateCost(backgroundModel, response.usage)
+        usageStore.recordUsage({
+          userId: attribution.userId,
+          assistantId: attribution.assistantId,
+          sessionId: null,
+          model: backgroundModel,
+          inputTokens: response.usage.inputTokens,
+          outputTokens: response.usage.outputTokens,
+          cacheReadTokens: response.usage.cacheReadTokens,
+          cacheWriteTokens: response.usage.cacheWriteTokens,
+          actualCostUsd: cost,
+          source: 'overhead:playbook-reflection',
+        }).catch((err) => console.error('[playbook-reflection] usage tracking failed:', err))
+      }
+      return response.content
+        .filter((b) => b.type === 'text')
+        .map((b) => (b.type === 'text' ? b.text : ''))
+        .join('')
+    },
+    onEvent: (event) => {
+      if (event.type === 'assistant_processed' && event.activated + event.suggested > 0) {
+        console.log(`[playbook-reflection] auto-admitted ${event.activated} rule(s) (+${event.suggested} overflow) for assistant ${event.assistantId}`)
+      } else if (event.type === 'error') {
+        console.error(`[playbook-reflection] error for assistant ${event.assistantId ?? '<global>'}: ${event.error}`)
+      } else if (event.type === 'tick_complete') {
+        console.log(`[playbook-reflection] tick complete: processed=${event.processedCount} suggested=${event.suggestedCount} skipped=${event.skippedCount} errors=${event.errorCount}`)
+      }
+    },
+  })
+  if (runWorkers) playbookReflectionWorker.start()
+
   // ── Sandbox lifecycle reaper (computer-use.md §7) — kills tasks idle past
   //    the Take-Over abandonment window + runs the vault's per-plan purge.
   //    Only exists when a sandbox provider is configured. ──
@@ -5433,6 +5868,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         markDone: markFileIngestJobDone,
         markFailed: markFileIngestJobFailed,
         filesApi,
+        // Spent only on `mode: 'explicit'` jobs — the queue now carries the
+        // explicit POST /ingest path, which distilled PDFs/images back when it
+        // ran inline. Silent promotion stays store-only (worker gates on mode).
+        distill: async ({ buffer, mime }) =>
+          (await distillFileToText({ buffer, mime }, { backend: mediaBackend })).text,
         ...(brainEpisodeIngestor ? { brainIngest: brainEpisodeIngestor } : {}),
       })
     : null
@@ -5496,6 +5936,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     recordingTranscribers.push(geminiTranscriber({ apiKey: env.GEMINI_API_KEY }))
   }
   if (env.DASHSCOPE_API_KEY) {
+    recordingTranscribers.push(qwenAsrTranscriber({ apiKey: env.DASHSCOPE_API_KEY }))
     recordingTranscribers.push(qwenFiletransTranscriber({ apiKey: env.DASHSCOPE_API_KEY }))
   }
   const recordingTranscriber = recordingTranscribers.length === 0
@@ -5503,6 +5944,27 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     : recordingTranscribers.length === 1
       ? recordingTranscribers[0]
       : withTranscriberFallback(recordingTranscribers[0], ...recordingTranscribers.slice(1))
+
+  if (filesResolver && env.BRIAN_MESSAGE_STORE_HMAC_SECRET) {
+    const mediaStore = createChatArchiveMediaStore()
+    chatArchiveMediaService = createChatArchiveMediaService({ store: mediaStore, filesResolver })
+    chatArchiveMediaWorker = createChatArchiveMediaWorker({
+      store: mediaStore,
+      filesResolver,
+      transcriber: recordingTranscriber,
+      resolveTranscriptionLanguage: async (workspaceId) =>
+        (await getWorkspaceTranscriptionPrefs(workspaceId)).languageCode,
+      distill: async ({ buffer, mime, prompt }) =>
+        (await distillFileToText({ buffer, mime }, { backend: mediaBackend, prompt })).text,
+    })
+    app.use('/internal/chat-archive', chatArchiveMediaRoutes({
+      service: chatArchiveMediaService,
+      hmacSecret: env.BRIAN_MESSAGE_STORE_HMAC_SECRET,
+      baseUrl: `http://127.0.0.1:${port}`,
+    }))
+    if (runWorkers) chatArchiveMediaWorker.start()
+  }
+
   const recordingProcessWorker = filesResolver && filesBlobClient && filesApi
     ? createOpenRecordingProcessWorker({
         claim: claimNextRecordingJob,
@@ -5941,12 +6403,19 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
               userId: input.senderPnJid ?? input.senderJid,
               channelId: input.chatJid,
               messageId: input.messageId,
-              text: input.text,
+              text: /^<media:[^>]+>$/.test(input.text.trim()) ? '' : input.text,
+              mediaType: input.archiveMediaType,
+              mediaMime: input.archiveMediaMime,
+              mediaName: input.archiveMediaName,
+              mediaSizeBytes: input.archiveMediaSizeBytes,
+              archiveMediaRef: input.archiveMediaRef,
+              archiveMediaAvailability: input.archiveMediaAvailability,
               isGroupChat: input.isGroup,
               timestamp: input.timestamp,
               raw: null,
             },
             archiveConnectorInstanceId: channel.connectorInstanceId,
+            archiveInboundAlreadyPersisted: input.archiveInboundPersisted,
             modelAlias: undefined,
             adaptiveResearchEnabled: true,
             abortController,
@@ -5989,6 +6458,19 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         ingestor: whatsapp.ingestor,
         bot: whatsapp.bot,
         filesResolver: filesResolver ?? undefined,
+        archiveMedia: chatArchiveMediaService ?? undefined,
+        archiveMediaHmacSecret: env.BRIAN_MESSAGE_STORE_HMAC_SECRET,
+        archiveMediaBaseUrl: `http://127.0.0.1:${port}`,
+        archiveIncoming: (input) => appendInboundChatArchive({
+          source: 'whatsapp',
+          workspaceId: input.workspaceId,
+          ownerUserId: input.ownerUserId,
+          connectorInstanceId: input.connectorInstanceId,
+          assistantId: '',
+          assistantName: '',
+          conversationId: input.message.channelId,
+          message: input.message,
+        }),
         passUnknownToFallback: ports.whatsappOfficialFallback,
       }))
     }
@@ -6072,6 +6554,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
           connectorInstanceStore, knowledgeStore, gdriveFilesStore, workspaceFilesStore, analytics,
           skillStore, episodicStore, sessionStateStore,
+          archiveMedia: chatArchiveMediaService ?? undefined,
         }))
       }
     }
@@ -6112,6 +6595,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     mailboxSyncWorker.stop()
     externalSinkRelay.stop()
     chatArchiveEnrichmentWorker?.stop()
+    chatArchiveMediaWorker?.stop()
     stuckSessionSweeper.stop()
     fileIngestWorker?.stop()
     linkedinImportWorker?.stop()

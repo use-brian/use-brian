@@ -153,7 +153,7 @@ export function docFilesRoutes(deps: DocFilesDeps): Router {
       // re-decode latin1→UTF-8 to recover UTF-8 names (no-op for ASCII).
       const fileName = Buffer.from(file.originalname, 'latin1').toString('utf8')
 
-      if (!isAllowedMime(file.mimetype)) {
+      if (!isAllowedMime(file.mimetype, file.originalname)) {
         results.push({ error: `Unsupported file type: ${file.mimetype}`, name: fileName })
         continue
       }

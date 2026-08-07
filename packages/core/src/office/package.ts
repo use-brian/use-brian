@@ -22,6 +22,11 @@ const ACTIVE_PART_PATTERNS = [
   /(^|\/)signatures?\//i,
   /(^|\/)digital-signature/i,
   /encryptedpackage/i,
+  /(^|\/)xl\/externalLinks\//i,
+  /(^|\/)xl\/connections\.xml$/i,
+  /(^|\/)xl\/pivotCache\//i,
+  /(^|\/)xl\/pivotTables\//i,
+  /(^|\/)xl\/(?:queryTables|model)\//i,
 ]
 
 const XML_REJECTIONS: Array<{ pattern: RegExp; capabilityId: string; message: string }> = [
@@ -113,7 +118,7 @@ export async function preflightOfficePackage(
 
   const contentTypes = await zip.file('[Content_Types].xml')?.async('string')
   if (!contentTypes) diagnostics.push(error('package.missing_content_types', '[Content_Types].xml', 'OOXML content types are missing'))
-  const mainPart = family === 'document' ? 'word/document.xml' : 'ppt/presentation.xml'
+  const mainPart = family === 'document' ? 'word/document.xml' : family === 'presentation' ? 'ppt/presentation.xml' : 'xl/workbook.xml'
   if (!zip.file(mainPart)) diagnostics.push(error('package.missing_main_part', mainPart, `Missing ${family} main part`))
 
   for (const entry of entries) {

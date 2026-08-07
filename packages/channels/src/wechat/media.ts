@@ -66,8 +66,9 @@ export type WechatDownloadedMedia = {
 
 /**
  * Find the first downloadable media item on a message's item list (priority:
- * image > video > file > voice-without-STT, mirroring the reference plugin).
- * Voice items that already carry server STT `text` are handled as text.
+ * image > video > file > voice, mirroring the reference plugin). Voice items
+ * with server STT still return their media so the archive keeps durable bytes;
+ * the STT remains the sender-visible message text.
  */
 export function findWechatMediaItem(itemList: WeixinMessageItem[] | undefined): WeixinMessageItem | null {
   if (!itemList?.length) return null
@@ -76,9 +77,7 @@ export function findWechatMediaItem(itemList: WeixinMessageItem[] | undefined): 
     itemList.find((i) => i.type === WeixinItemType.IMAGE && downloadable(i.image_item?.media)) ??
     itemList.find((i) => i.type === WeixinItemType.VIDEO && downloadable(i.video_item?.media)) ??
     itemList.find((i) => i.type === WeixinItemType.FILE && downloadable(i.file_item?.media)) ??
-    itemList.find(
-      (i) => i.type === WeixinItemType.VOICE && downloadable(i.voice_item?.media) && !i.voice_item?.text,
-    ) ??
+    itemList.find((i) => i.type === WeixinItemType.VOICE && downloadable(i.voice_item?.media)) ??
     null
   )
 }
@@ -89,7 +88,7 @@ export function findWechatMediaItem(itemList: WeixinMessageItem[] | undefined): 
  */
 export async function downloadWechatMediaItem(
   item: WeixinMessageItem,
-  options?: { cdnBaseUrl?: string; fetchImpl?: typeof fetch },
+  options?: { cdnBaseUrl?: string; fetchImpl?: typeof fetch; maxBytes?: number },
 ): Promise<WechatDownloadedMedia | null> {
   const cdnBaseUrl = options?.cdnBaseUrl ?? ILINK_CDN_BASE_URL
   const doFetch = options?.fetchImpl ?? fetch
@@ -97,7 +96,31 @@ export async function downloadWechatMediaItem(
   async function fetchBytes(media: IlinkCdnMedia): Promise<Buffer> {
     const res = await doFetch(buildDownloadUrl(media, cdnBaseUrl))
     if (!res.ok) throw new Error(`iLink CDN download failed: ${res.status}`)
-    return Buffer.from(await res.arrayBuffer())
+    const maxBytes = options?.maxBytes ?? Number.POSITIVE_INFINITY
+    const declaredBytes = Number(res.headers.get('content-length'))
+    if (Number.isFinite(declaredBytes) && declaredBytes > maxBytes) {
+      throw new Error(`iLink CDN media exceeds ${maxBytes} bytes`)
+    }
+    if (!res.body) {
+      const data = Buffer.from(await res.arrayBuffer())
+      if (data.length > maxBytes) throw new Error(`iLink CDN media exceeds ${maxBytes} bytes`)
+      return data
+    }
+    const reader = res.body.getReader()
+    const chunks: Buffer[] = []
+    let total = 0
+    while (true) {
+      const part = await reader.read()
+      if (part.done) break
+      const chunk = Buffer.from(part.value)
+      total += chunk.length
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => {})
+        throw new Error(`iLink CDN media exceeds ${maxBytes} bytes`)
+      }
+      chunks.push(chunk)
+    }
+    return Buffer.concat(chunks, total)
   }
 
   async function fetchDecrypted(media: IlinkCdnMedia, aesKeyBase64: string): Promise<Buffer> {

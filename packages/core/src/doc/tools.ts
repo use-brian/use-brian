@@ -349,7 +349,7 @@ export type DocToolDeps = {
   /**
    * Optional cached-file store, for `importToPage` (the faithful AI import,
    * journey F). Reads a previously-uploaded `.docx`/`.md` file's parsed
-   * content (already Markdown for `.docx` — turndown at upload) and converts it
+   * content (already Markdown for `.docx` from deterministic upload parsing) and converts it
    * deterministically. Absent → `importToPage` reports it's unavailable. The
    * chat route threads `options.fileStore` here. See
    * docs/architecture/features/doc-conversion.md.
@@ -1559,7 +1559,7 @@ const importToPageInputSchema = z.object({
  * model-free path (the cached file's parsed Markdown → blocks → a new draft);
  * "transform" hands the text back so the model restructures it via renderPage
  * (the only model-routed import path, §2). Reuses the upload-time parse —
- * `.docx` is already turndown Markdown in the file cache — so no re-parse and
+ * `.docx` is already deterministic Markdown in the file cache, so no re-parse and
  * no new dependency.
  *
  * Spec: docs/architecture/features/doc-conversion.md.
@@ -1605,7 +1605,7 @@ export function createImportToPageTool(deps: DocToolDeps): Tool {
         }
       }
 
-      // The file cache holds the upload-time parse: turndown Markdown for
+      // The file cache holds the upload-time parse: deterministic Markdown for
       // `.docx`, verbatim text for `.md`/`.txt`. Both feed the importer.
       if (input.mode === 'transform') {
         return {

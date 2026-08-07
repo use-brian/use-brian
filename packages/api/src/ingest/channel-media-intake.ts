@@ -18,6 +18,7 @@
 import type { CreateEpisodeInput, EpisodeRecord, EpisodeSensitivity } from '../db/episodes-store.js'
 import type { Recording } from '../db/recordings-store.js'
 import { buildChannelSessionKey } from '../db/pending-recording-confirmations-store.js'
+import { isStructuredDocument } from '@use-brian/core'
 
 /** A normalized inbound attachment whose bytes are already in GCS. */
 export type ChannelMediaRef = {
@@ -64,17 +65,15 @@ export type ChannelMediaRef = {
 
 export type ChannelMediaKind = 'audio_video' | 'document' | 'unsupported'
 
-/** v1 document set — what `parseFileContent` / the distiller can turn into text. */
-const DOCUMENT_MIME_PREFIXES = ['application/pdf', 'text/', 'application/json']
-const DOCUMENT_MIME_EXACT = [
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  'application/msword',
-]
-
-export function classifyMedia(mime: string): ChannelMediaKind {
-  const m = mime.toLowerCase()
+/** What `parseFileContent` / the distiller can preserve or turn into text. */
+export function classifyMedia(mime: string, fileName?: string | null): ChannelMediaKind {
+  const m = mime.toLowerCase().split(';', 1)[0]!.trim()
   if (m.startsWith('audio/') || m.startsWith('video/')) return 'audio_video'
-  if (DOCUMENT_MIME_PREFIXES.some((p) => m.startsWith(p)) || DOCUMENT_MIME_EXACT.includes(m)) {
+  if (
+    m.startsWith('text/') ||
+    m === 'application/json' ||
+    isStructuredDocument(m, fileName ?? undefined)
+  ) {
     return 'document'
   }
   return 'unsupported'
@@ -251,7 +250,7 @@ export async function ingestChannelMedia(
     return { status: 'rejected', reason: 'too_large' }
   }
 
-  const kind = classifyMedia(ref.mime)
+  const kind = classifyMedia(ref.mime, ref.fileName)
   if (kind === 'unsupported') return { status: 'rejected', reason: 'unsupported' }
 
   if (deps.checkQuota) {
@@ -430,4 +429,90 @@ export function buildDocumentFiledReply(fileName: string | null): string {
   return fileName
     ? `Saved "${fileName}" to your workspace files and started indexing it. Give me a minute, then ask me anything about it.`
     : `Saved that document to your workspace files and started indexing it. Give me a minute, then ask me anything about it.`
+}
+
+export type AlbumIntakeSummary = {
+  /** Members successfully filed (including any whose name was unknown). */
+  filed: number
+  /** Names of the filed members, for the confirmation copy. */
+  filedNames: string[]
+  /** Members that neither filed nor deliberately stayed quiet. Always reported. */
+  failed: number
+  /** Per-member pre-flight confirmation prompts, sent verbatim and individually. */
+  confirmations: string[]
+  /** Members refused for size, each needing the web-upload handoff copy. */
+  oversize: Array<{ sizeMb: number; limitMb: number }>
+  /** Members that are silent by design (queued A/V, `skipped` document arms). */
+  quiet: number
+}
+
+/**
+ * Fold an album's per-member intake results into the pieces a route needs to
+ * reply exactly ONCE.
+ *
+ * Two failures motivate this. Replying per member turned a four-document drop
+ * into four messages. And a member that threw produced no message at all, so a
+ * partially-filed album was indistinguishable from a whole one — the same
+ * "success and discard share a code path" shape that makes a lost file
+ * unreportable. `failed` counts every arm that neither filed nor is
+ * deliberately quiet, so a partial album is always reportable.
+ */
+export function summarizeAlbumIntake(
+  results: Array<ChannelMediaIntakeResult | null>,
+): AlbumIntakeSummary {
+  const summary: AlbumIntakeSummary = {
+    filed: 0, filedNames: [], failed: 0, confirmations: [], oversize: [], quiet: 0,
+  }
+  for (const result of results) {
+    // `null` is a thrown/failed ingest, NOT a deliberate no-op. Counting it as
+    // quiet is exactly how a dropped file becomes invisible.
+    if (!result) { summary.failed++; continue }
+    switch (result.status) {
+      case 'ingested':
+        summary.filed++
+        if (result.fileName) summary.filedNames.push(result.fileName)
+        break
+      case 'pending_confirmation':
+        summary.confirmations.push(result.message)
+        break
+      case 'queued':
+        // A/V accepted; the recording pipeline reports on its own schedule.
+        summary.quiet++
+        break
+      case 'skipped':
+        // Arms a route must NOT reply to (§Phase 0.1) — replying would claim
+        // an ingest that never happened.
+        summary.quiet++
+        break
+      case 'rejected':
+        if (result.reason === 'doc_too_large') {
+          summary.oversize.push({ sizeMb: result.sizeMb ?? 0, limitMb: result.limitMb ?? 25 })
+        } else {
+          summary.failed++
+        }
+        break
+    }
+  }
+  return summary
+}
+
+/**
+ * One confirmation for a whole album. Names the files so the sender can see
+ * exactly what landed, and never rounds a partial result up to a whole one.
+ */
+export function buildAlbumFiledReply(filed: number, fileNames: string[], failed: number): string {
+  if (filed === 0) {
+    return failed === 1
+      ? `I couldn't save that file. Please try sending it again.`
+      : `I couldn't save those ${failed} files. Please try sending them again.`
+  }
+  const named = fileNames.filter((n) => n.trim().length > 0)
+  const list = named.length > 0 ? ` (${named.join(', ')})` : ''
+  const head = filed === 1
+    ? `Saved 1 file${list} to your workspace files and started indexing it.`
+    : `Saved ${filed} files${list} to your workspace files and started indexing them.`
+  const tail = failed > 0
+    ? ` ${failed} other ${failed === 1 ? 'file' : 'files'} didn't go through, so please send ${failed === 1 ? 'it' : 'them'} again.`
+    : ''
+  return `${head} Give me a minute, then ask me anything about ${filed === 1 ? 'it' : 'them'}.${tail}`
 }

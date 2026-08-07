@@ -25,6 +25,9 @@ import {
   readProductTemplate,
   createProductTemplate,
   setProductTemplate,
+  runShopifyqlQuery,
+  buildStorefrontFunnelQuery,
+  storefrontFunnel,
   verifyShopifyWebhookHmac,
   verifyShopifyOAuthQueryHmac,
   buildShopifyAuthorizeUrl,
@@ -1055,6 +1058,8 @@ describe('[COMP:api/shopify-client] Shopify GraphQL client', () => {
       listDisputes: nullApi,
       listContent: nullApi,
       fetchOrdersRange: async () => ({ orders: [], truncated: false }),
+      storefrontFunnel: async () => ({ columns: [], rows: [], shopifyql: '' }),
+      runAnalyticsQuery: async () => ({ columns: [], rows: [] }),
       updateProduct: nullApi,
       createProduct: nullApi,
       createDraftOrder: nullApi,
@@ -1089,5 +1094,82 @@ describe('[COMP:api/shopify-client] Shopify GraphQL client', () => {
     expect(mockFetch).toHaveBeenCalledWith(GRAPHQL_URL, expect.objectContaining({ method: 'POST' }))
     const sent = JSON.parse((mockFetch.mock.calls[0][1] as { body: string }).body)
     expect(sent.variables.first).toBe(5)
+  })
+
+  // ── Storefront analytics (ShopifyQL) ───────────────────────
+
+  it('buildStorefrontFunnelQuery always excludes bot traffic', () => {
+    // Bot sessions never add to a cart, so leaving them in deflates the
+    // conversion rate and invents a problem the merchant does not have.
+    expect(buildStorefrontFunnelQuery()).toContain("WHERE human_or_bot_session = 'human'")
+    expect(buildStorefrontFunnelQuery({ groupBy: 'referrer_source' }))
+      .toContain("WHERE human_or_bot_session = 'human'")
+  })
+
+  it('buildStorefrontFunnelQuery defaults the window and orders clauses validly', () => {
+    const q = buildStorefrontFunnelQuery()
+    expect(q).toMatch(/^FROM sessions SHOW /)
+    expect(q).toContain('sessions_with_cart_additions')
+    expect(q).toContain('SINCE -30d UNTIL today')
+    expect(q).not.toContain('COMPARE TO')
+
+    const grouped = buildStorefrontFunnelQuery({
+      since: '-7d', groupBy: 'session_device_type', compareToPreviousPeriod: true, limit: 5,
+    })
+    // SINCE/UNTIL must precede COMPARE TO, and WITH must precede both.
+    expect(grouped.indexOf('WITH PERCENT_CHANGE')).toBeLessThan(grouped.indexOf('SINCE'))
+    expect(grouped.indexOf('SINCE')).toBeLessThan(grouped.indexOf('COMPARE TO previous_period'))
+    expect(grouped).toContain('GROUP BY session_device_type')
+    expect(grouped).toContain('LIMIT 5')
+  })
+
+  it('buildStorefrontFunnelQuery caps the row limit', () => {
+    expect(buildStorefrontFunnelQuery({ groupBy: 'session_country', limit: 9999 })).toContain('LIMIT 100')
+    expect(buildStorefrontFunnelQuery({ groupBy: 'session_country', limit: 0 })).not.toContain('LIMIT')
+  })
+
+  it('runShopifyqlQuery throws the parse errors instead of returning empty data', async () => {
+    // Shopify answers a malformed query with HTTP 200 + tableData:null. Reading
+    // only tableData would report "no sessions" - a fact about the store that
+    // is not true - when the truth is that the query never ran.
+    mockFetch.mockResolvedValue(jsonResponse({
+      data: { shopifyqlQuery: { parseErrors: ["Unknown field 'sesions'"], tableData: null } },
+    }))
+    await expect(runShopifyqlQuery(AUTH, 'FROM sessions SHOW sesions')).rejects.toThrow(/sesions/)
+  })
+
+  it('runShopifyqlQuery refuses a null table with no parse error', async () => {
+    mockFetch.mockResolvedValue(jsonResponse({
+      data: { shopifyqlQuery: { parseErrors: [], tableData: null } },
+    }))
+    await expect(runShopifyqlQuery(AUTH, 'FROM sessions SHOW sessions'))
+      .rejects.toThrow(/neither table data nor a parse error/)
+  })
+
+  it('runShopifyqlQuery passes through Shopify\'s real row shape untouched', async () => {
+    // Live shape (2026-08-07): rows keyed by column name, values as strings
+    // whatever dataType claims. The client must not reinterpret either.
+    mockFetch.mockResolvedValue(jsonResponse({
+      data: { shopifyqlQuery: {
+        parseErrors: [],
+        tableData: {
+          columns: [{ name: 'sessions', dataType: 'INTEGER' }],
+          rows: [{ sessions: '42' }],
+        },
+      } },
+    }))
+    const table = await runShopifyqlQuery(AUTH, 'FROM sessions SHOW sessions')
+    expect(table.columns).toEqual([{ name: 'sessions', dataType: 'INTEGER' }])
+    expect(table.rows).toEqual([{ sessions: '42' }])
+  })
+
+  it('storefrontFunnel sends the built query and echoes it back', async () => {
+    mockFetch.mockResolvedValue(jsonResponse({
+      data: { shopifyqlQuery: { parseErrors: [], tableData: { columns: [], rows: [] } } },
+    }))
+    const result = await storefrontFunnel(AUTH, { since: '-7d' })
+    const sent = JSON.parse((mockFetch.mock.calls[0][1] as { body: string }).body)
+    expect(sent.variables.query).toBe(result.shopifyql)
+    expect(result.shopifyql).toContain('SINCE -7d')
   })
 })

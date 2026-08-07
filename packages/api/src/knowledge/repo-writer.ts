@@ -67,11 +67,15 @@ export type RepoWriterStore = {
     rootPath: string
     connectorInstanceId: string | null
     writeAccess: boolean | null
+    /** Tier for entries without explicit frontmatter (mig 410). */
+    defaultSensitivity: Sensitivity
   } | null>
   upsertByPath(params: {
     workspaceId: string; path: string; title: string
     summary?: string | null; content: string; tags?: string[]
     sensitivity: Sensitivity
+    /** Frontmatter-stamp provenance (mig 410). */
+    sensitivityExplicit?: boolean
     metadata?: Record<string, unknown>; sourceId?: string | null; sourceSha?: string | null
     /**
      * Lifecycle-event provenance for the `knowledge` workflow event source.
@@ -274,7 +278,7 @@ export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): Knowle
    * re-resolves wikilinks workspace-wide.
    */
   async function writeThrough(
-    source: { id: string; workspaceId: string; rootPath: string },
+    source: { id: string; workspaceId: string; rootPath: string; defaultSensitivity: Sensitivity },
     relativePath: string,
     fileContent: string,
     commitSha: string | null,
@@ -288,7 +292,10 @@ export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): Knowle
       summary: parsed.summary,
       content: parsed.content,
       tags: parsed.tags,
-      sensitivity: parsed.sensitivity,
+      // Same substitution the sync worker applies (mig 410): the mirror row
+      // must equal what the next tick would produce for this file.
+      sensitivity: parsed.sensitivityExplicit ? parsed.sensitivity : source.defaultSensitivity,
+      sensitivityExplicit: parsed.sensitivityExplicit,
       metadata: { ...parsed.metadata, _rawRelated: parsed.related },
       sourceId: source.id,
       sourceSha: commitSha,

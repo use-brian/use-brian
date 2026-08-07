@@ -329,10 +329,21 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
           userContentBlocks.push({ type: 'image', mimeType: dl.mimeType, data: dl.buffer.toString('base64') })
         } else {
           const parsedFile = await parseFileContent(dl.buffer, dl.mimeType, dl.name)
-          userContentBlocks.push({
-            type: 'text',
-            text: `<attached_file name="${dl.name}" type="${dl.mimeType}">\n${parsedFile.text}\n</attached_file>`,
-          })
+          if (
+            parsedFile.mediaMimeType === 'application/pdf' ||
+            parsedFile.mediaMimeType?.startsWith('image/')
+          ) {
+            userContentBlocks.push({
+              type: 'image',
+              mimeType: parsedFile.mediaMimeType,
+              data: dl.buffer.toString('base64'),
+            })
+          } else {
+            userContentBlocks.push({
+              type: 'text',
+              text: `<attached_file name="${dl.name}" type="${dl.mimeType}">\n${parsedFile.text}\n</attached_file>`,
+            })
+          }
         }
       }
     }

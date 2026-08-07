@@ -55,6 +55,56 @@ describe('[COMP:prompt/builder] Layer 2 — assistant custom instructions', () =
   })
 })
 
+describe('[COMP:prompt/builder] Layer 2 — charter block (migration 418)', () => {
+  it('renders the # Charter block in slot 2, replacing the legacy block', () => {
+    const out = buildFullSystemPrompt({
+      ...baseArgs,
+      charter: {
+        mission: 'Own customer support for Acme',
+        audience: 'Acme customers',
+        success: 'Resolved in one reply',
+        instructions: 'Always reply starting with "GM"',
+      },
+    })
+
+    const layer1Idx = out.indexOf('LAYER1_BASE')
+    const charterIdx = out.indexOf('# Charter')
+    const memoryIdx = out.indexOf('## Memory Index')
+
+    expect(charterIdx).toBeGreaterThan(layer1Idx)
+    expect(memoryIdx).toBeGreaterThan(charterIdx)
+    expect(out.slice(layer1Idx + 'LAYER1_BASE'.length, charterIdx)).toBe('\n\n')
+    expect(out).toContain('## Mission\nOwn customer support for Acme')
+    expect(out).toContain('## Audience\nAcme customers')
+    expect(out).toContain('## What good looks like\nResolved in one reply')
+    expect(out).toContain('## Instructions\nAlways reply starting with "GM"')
+    expect(out).not.toContain('# Assistant instructions')
+  })
+
+  it('a charter with content wins over the legacy assistantInstructions param', () => {
+    const out = buildFullSystemPrompt({
+      ...baseArgs,
+      charter: { instructions: 'CHARTER_BODY' },
+      assistantInstructions: 'LEGACY_BODY',
+    })
+    expect(out).toContain('# Charter\n## Instructions\nCHARTER_BODY')
+    expect(out).not.toContain('LEGACY_BODY')
+  })
+
+  it('an empty charter falls back to the legacy block, and both empty skips Layer 2', () => {
+    const fallback = buildFullSystemPrompt({
+      ...baseArgs,
+      charter: {},
+      assistantInstructions: 'LEGACY_BODY',
+    })
+    expect(fallback).toContain('# Assistant instructions\nLEGACY_BODY')
+
+    const neither = buildFullSystemPrompt({ ...baseArgs, charter: {}, assistantInstructions: null })
+    expect(neither).not.toContain('# Charter')
+    expect(neither).not.toContain('# Assistant instructions')
+  })
+})
+
 describe('[COMP:prompt/builder] Provenance-preserving block order', () => {
   it('places stable instructions before the private runtime suffix', () => {
     const out = buildFullSystemPrompt({
@@ -167,6 +217,58 @@ describe('[COMP:prompt/builder] User Context — presence vs anchor (travel)', (
     const hkIdx = out.indexOf('Asia/Hong_Kong')
     expect(tokyoIdx).toBeGreaterThan(0)
     expect(hkIdx).toBeGreaterThan(tokyoIdx)
+  })
+})
+
+describe('[COMP:prompt/builder] User Context — speaker identity', () => {
+  it('leads the block with the speaker line, before the datetime line', () => {
+    const out = buildFullSystemPrompt({
+      ...baseArgs,
+      speakerIdentity: { name: 'Hinson', email: 'hinson@example.com' },
+    })
+    expect(out).toContain(
+      '# User Context\nYou are talking with: Hinson (hinson@example.com), the authenticated sender of the newest message.\nCurrent date and time:',
+    )
+  })
+
+  it('renders name-only when no email is provided', () => {
+    const out = buildFullSystemPrompt({
+      ...baseArgs,
+      speakerIdentity: { name: 'Hinson' },
+    })
+    expect(out).toContain('You are talking with: Hinson, the authenticated sender')
+    expect(out).not.toContain('Hinson (')
+  })
+
+  it('skips the line when the identity is null, missing, or whitespace-named', () => {
+    for (const speakerIdentity of [null, undefined, { name: '   ' }]) {
+      const out = buildFullSystemPrompt({ ...baseArgs, speakerIdentity })
+      expect(out).not.toContain('You are talking with:')
+      expect(out).toContain('# User Context\nCurrent date and time:')
+    }
+  })
+
+  it('keeps the line in the travel (dual-line) form too', () => {
+    const out = buildFullSystemPrompt({
+      ...baseArgs,
+      timezone: 'Asia/Tokyo',
+      anchorTimezone: 'Asia/Hong_Kong',
+      speakerIdentity: { name: 'Hinson', email: 'hinson@example.com' },
+    })
+    expect(out).toContain(
+      '# User Context\nYou are talking with: Hinson (hinson@example.com), the authenticated sender of the newest message.\nCurrent local time (where the user is now):',
+    )
+  })
+
+  it('stays in private runtime context, never the stable prefix or user-visible prefix', () => {
+    const split = buildSplitSystemPrompt({
+      ...baseArgs,
+      speakerIdentity: { name: 'Hinson', email: 'hinson@example.com' },
+      replyContext: { text: 'quoted line', fromAssistant: true },
+    })
+    expect(split.privateRuntimeContext).toContain('You are talking with: Hinson')
+    expect(split.stablePrompt).not.toContain('You are talking with:')
+    expect(split.userVisibleContext).not.toContain('You are talking with:')
   })
 })
 

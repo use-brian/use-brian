@@ -90,15 +90,39 @@ vi.mock('../../db/sessions.js', async (importOriginal) => {
       senderUserId: params.senderUserId ?? null,
       attachments: [],
     })),
+    getSessionMessageById: vi.fn(),
+    updateSessionMessageText: vi.fn(async (params: { messageId: string; sessionId: string; text: string }) => ({
+      id: params.messageId,
+      sessionId: params.sessionId,
+      role: 'user',
+      content: [{ type: 'text', text: params.text }],
+      sequenceNum: 7,
+      createdAt: new Date('2026-07-31T10:00:00Z'),
+      replyToText: null,
+      topicLabel: null,
+      topicConfidence: null,
+      channelMessageId: null,
+      senderUserId: 'u-2',
+      senderAssistantId: null,
+      attachments: [],
+    })),
   }
 })
 
 import { sessionRoutes } from '../sessions.js'
-import { addSessionMessage, createWorkspaceChatSession, findSessionById } from '../../db/sessions.js'
+import {
+  addSessionMessage,
+  createWorkspaceChatSession,
+  findSessionById,
+  getSessionMessageById,
+  updateSessionMessageText,
+} from '../../db/sessions.js'
 import type { SessionEvent } from '../../session-event-port.js'
 
 const mockFindSession = vi.mocked(findSessionById)
 const mockAddMessage = vi.mocked(addSessionMessage)
+const mockGetMessage = vi.mocked(getSessionMessageById)
+const mockUpdateMessage = vi.mocked(updateSessionMessageText)
 
 function roomSession(over: Record<string, unknown> = {}) {
   return {
@@ -128,6 +152,7 @@ function roomSession(over: Record<string, unknown> = {}) {
 function makeApp(opts?: {
   published?: SessionEvent[]
   subscribers?: Array<(e: SessionEvent) => void>
+  typing?: Array<{ sessionId: string; userId: string; isTyping: boolean }>
 }) {
   const app = express()
   app.use(express.json())
@@ -146,6 +171,7 @@ function makeApp(opts?: {
           if (i >= 0) opts?.subscribers?.splice(i, 1)
         }
       },
+      setSessionTyping: (p) => opts?.typing?.push(p),
     }),
   )
   return app
@@ -154,7 +180,28 @@ function makeApp(opts?: {
 beforeEach(() => {
   mockFindSession.mockReset()
   mockAddMessage.mockClear()
+  mockGetMessage.mockReset()
+  mockUpdateMessage.mockClear()
 })
+
+function storedPost(over: Record<string, unknown> = {}) {
+  return {
+    id: 'msg-1',
+    sessionId: 's-room',
+    role: 'user',
+    content: [{ type: 'text', text: 'reconcile the orders' }],
+    sequenceNum: 7,
+    createdAt: new Date('2026-07-31T10:00:00Z'),
+    replyToText: null,
+    topicLabel: null,
+    topicConfidence: null,
+    channelMessageId: null,
+    senderUserId: 'u-2',
+    senderAssistantId: null,
+    attachments: [],
+    ...over,
+  } as Awaited<ReturnType<typeof getSessionMessageById>>
+}
 
 describe('[COMP:api/room-mechanics] POST /api/sessions/:id/messages (T2)', () => {
   it('persists one attributed user row, emits on the bus, and runs no turn', async () => {
@@ -220,6 +267,138 @@ describe('[COMP:api/room-mechanics] POST /api/sessions/:id/messages (T2)', () =>
       .send({ message: '   ' })
     expect(res.status).toBe(400)
     expect(mockAddMessage).not.toHaveBeenCalled()
+  })
+})
+
+describe('[COMP:api/room-mechanics] PATCH /api/sessions/:id/messages/:messageId', () => {
+  it('rewrites the row in place, keeps its identity, and fans the edit out', async () => {
+    const published: SessionEvent[] = []
+    mockFindSession.mockResolvedValue(roomSession())
+    mockGetMessage.mockResolvedValue(storedPost())
+
+    const res = await request(makeApp({ published }))
+      .patch('/api/sessions/s-room/messages/msg-1')
+      .send({ message: '@Blendit reconcile the orders' })
+
+    expect(res.status).toBe(200)
+    expect(mockUpdateMessage).toHaveBeenCalledWith({
+      messageId: 'msg-1',
+      sessionId: 's-room',
+      text: '@Blendit reconcile the orders',
+    })
+    // No second row: an in-place edit must never read as a repost.
+    expect(mockAddMessage).not.toHaveBeenCalled()
+    expect(res.body).toMatchObject({ id: 'msg-1', sequenceNum: 7 })
+    expect(published).toHaveLength(1)
+    expect(published[0]).toMatchObject({
+      kind: 'user_message_saved',
+      sessionId: 's-room',
+      payload: {
+        id: 'msg-1',
+        content: [{ type: 'text', text: '@Blendit reconcile the orders' }],
+      },
+    })
+  })
+
+  it("refuses a teammate's message — read access is not write access", async () => {
+    mockFindSession.mockResolvedValue(roomSession())
+    mockGetMessage.mockResolvedValue(storedPost({ senderUserId: 'u-someone-else' }))
+
+    const res = await request(makeApp())
+      .patch('/api/sessions/s-room/messages/msg-1')
+      .send({ message: 'putting words in their mouth' })
+
+    expect(res.status).toBe(403)
+    expect(mockUpdateMessage).not.toHaveBeenCalled()
+  })
+
+  it('refuses an assistant row', async () => {
+    mockFindSession.mockResolvedValue(roomSession())
+    mockGetMessage.mockResolvedValue(
+      storedPost({ role: 'assistant', senderUserId: null }),
+    )
+
+    const res = await request(makeApp())
+      .patch('/api/sessions/s-room/messages/msg-1')
+      .send({ message: 'rewriting the answer' })
+
+    expect(res.status).toBe(403)
+    expect(mockUpdateMessage).not.toHaveBeenCalled()
+  })
+
+  it('refuses a message whose content is not plain text', async () => {
+    mockFindSession.mockResolvedValue(roomSession())
+    mockGetMessage.mockResolvedValue(
+      storedPost({
+        content: [
+          { type: 'image', source: { type: 'base64', data: 'x' } },
+          { type: 'text', text: 'see attached' },
+        ],
+      }),
+    )
+
+    const res = await request(makeApp())
+      .patch('/api/sessions/s-room/messages/msg-1')
+      .send({ message: 'see attached (fixed)' })
+
+    // A text-block rewrite would silently drop the image.
+    expect(res.status).toBe(409)
+    expect(mockUpdateMessage).not.toHaveBeenCalled()
+  })
+
+  it('refuses a message from another session', async () => {
+    mockFindSession.mockResolvedValue(roomSession())
+    mockGetMessage.mockResolvedValue(storedPost({ sessionId: 's-other-room' }))
+
+    const res = await request(makeApp())
+      .patch('/api/sessions/s-room/messages/msg-1')
+      .send({ message: 'cross-room edit' })
+
+    expect(res.status).toBe(404)
+    expect(mockUpdateMessage).not.toHaveBeenCalled()
+  })
+
+  it('refuses a personal session (editing is a room primitive)', async () => {
+    mockFindSession.mockResolvedValue(
+      roomSession({ visibility: 'owner', effectiveClearance: null }),
+    )
+    const res = await request(makeApp())
+      .patch('/api/sessions/s-1/messages/msg-1')
+      .send({ message: 'hi' })
+    expect(res.status).toBe(403)
+    expect(mockUpdateMessage).not.toHaveBeenCalled()
+  })
+})
+
+describe('[COMP:api/room-mechanics] POST /api/sessions/:id/typing — the room typing beacon', () => {
+  it('updates the presence entry through the injected bus setter', async () => {
+    const typing: Array<{ sessionId: string; userId: string; isTyping: boolean }> = []
+    mockFindSession.mockResolvedValue(roomSession())
+    const res = await request(makeApp({ typing }))
+      .post('/api/sessions/s-room/typing')
+      .send({ isTyping: true })
+    expect(res.status).toBe(204)
+    expect(typing).toEqual([{ sessionId: 's-room', userId: 'u-2', isTyping: true }])
+  })
+
+  it('coerces a non-boolean body to false (the off-beacon default)', async () => {
+    const typing: Array<{ sessionId: string; userId: string; isTyping: boolean }> = []
+    mockFindSession.mockResolvedValue(roomSession())
+    const res = await request(makeApp({ typing }))
+      .post('/api/sessions/s-room/typing')
+      .send({ isTyping: 'yes' })
+    expect(res.status).toBe(204)
+    expect(typing[0]?.isTyping).toBe(false)
+  })
+
+  it('refuses a personal session (typing is a room primitive)', async () => {
+    const typing: Array<{ sessionId: string; userId: string; isTyping: boolean }> = []
+    mockFindSession.mockResolvedValue(roomSession({ visibility: 'owner', effectiveClearance: null }))
+    const res = await request(makeApp({ typing }))
+      .post('/api/sessions/s-1/typing')
+      .send({ isTyping: true })
+    expect(res.status).toBe(403)
+    expect(typing).toHaveLength(0)
   })
 })
 
@@ -307,6 +486,56 @@ describe('[COMP:api/room-mechanics] GET /api/sessions/:id/stream — follow mode
       // Turn end is an event, not a close.
       expect(received).toContain('event: turn_completed')
       expect(received).not.toContain('event: done')
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
+
+  it('sends an initial presence frame and relays presence transitions (typing indicators)', async () => {
+    const subscribers: Array<(e: SessionEvent) => void> = []
+    mockFindSession.mockResolvedValue(roomSession())
+    const app = makeApp({ subscribers })
+    const server = http.createServer(app)
+    await new Promise<void>((resolve) => server.listen(0, resolve))
+    const port = (server.address() as AddressInfo).port
+    try {
+      const done = new Promise<string>((resolve, reject) => {
+        const req = http.get(
+          `http://127.0.0.1:${port}/api/sessions/s-room/stream`,
+          (res) => {
+            let data = ''
+            res.on('data', (chunk: Buffer) => {
+              data += chunk.toString()
+              if (data.includes('"isTyping":true')) {
+                req.destroy()
+                resolve(data)
+              }
+            })
+          },
+        )
+        setTimeout(() => reject(new Error('no presence frames')), 5000)
+      })
+      await vi.waitFor(() => {
+        expect(subscribers.length).toBeGreaterThan(0)
+      })
+      subscribers.forEach((cb) =>
+        cb({
+          kind: 'presence',
+          sessionId: 's-room',
+          payload: {
+            viewers: [
+              { userId: 'u-3', name: 'Cara', isTyping: true, lastSeen: '2026-08-06T10:00:00.000Z' },
+            ],
+          },
+        }),
+      )
+      const received = await done
+      // The hello frame: who was already present before the first transition.
+      expect(received).toContain('event: presence')
+      expect(received).toContain('"viewers":[]')
+      // The relayed transition carries the typist's name for the indicator.
+      expect(received).toContain('"name":"Cara"')
+      expect(received).toContain('"isTyping":true')
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()))
     }

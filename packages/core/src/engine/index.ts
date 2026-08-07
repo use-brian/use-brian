@@ -4,6 +4,18 @@ export {
   matchesDisputedFigure,
   buildDisputeContextNote,
 } from './grounding-gate.js'
+export {
+  formatMidTurnInput,
+  resolveDrainMode,
+  shouldInterruptStreamForSteer,
+  MID_TURN_INPUT_MAX_CHARS,
+} from './turn-inbox.js'
+export type {
+  MidTurnInputMode,
+  PendingTurnInput,
+  TurnInboxPeek,
+  TurnInboxPort,
+} from './turn-inbox.js'
 export { createToolExecutor } from './tool-executor.js'
 export type { ToolExecutor, ToolExecutorOptions } from './tool-executor.js'
 export { createLoopDetector, DEFAULT_HARD_LIMIT } from './loop-detector.js'

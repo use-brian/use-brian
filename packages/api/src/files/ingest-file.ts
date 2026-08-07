@@ -11,6 +11,8 @@
  */
 
 import {
+  detectDocumentFormat,
+  documentMimeType,
   parseFileContent,
   type FilesApi,
   type FilesContext,
@@ -61,6 +63,13 @@ export function createFileIngestor(deps: FileIngestorDeps): FileIngestor {
   const parse = deps.parse ?? parseFileContent
 
   return async function ingestFile(input, ctx) {
+    // A store-only pin is reversible staging, not consent to interpret bytes.
+    // Content detection begins only on the explicit processing path.
+    const detectedFormat =
+      input.process === false
+        ? undefined
+        : await detectDocumentFormat(input.bytes, input.mime, input.fileName)
+    const effectiveMime = detectedFormat ? documentMimeType(detectedFormat) : input.mime
     const filesCtx: FilesContext = {
       workspaceId: ctx.workspaceId,
       userId: ctx.userId,
@@ -75,16 +84,18 @@ export function createFileIngestor(deps: FileIngestorDeps): FileIngestor {
     const stored = await deps.filesApi.writeBytes(filesCtx, {
       path,
       bytes: input.bytes,
-      mime: input.mime,
+      mime: effectiveMime,
       title: input.fileName,
       sensitivity,
     })
     if (!stored.ok) throw new FileIngestError(stored.error.kind, stored.error)
     const file = stored.value
 
-    // Upload is not consent to interpret. The Work Bench uses this branch to
-    // create a durable pin while keeping parse/distill/index/Pipeline B behind
-    // a later, explicit user decision.
+    // Upload alone is not consent to interpret — this branch only files bytes.
+    // The Work Bench stores through here to create a durable pin, then (since
+    // dropping a file on Pins IS consent to save it to the brain, 2026-08-07)
+    // separately queues the stored file through the explicit stored-file
+    // ingest lane (`POST /api/files/:fileId/ingest`).
     if (input.process === false) {
       return {
         fileName: input.fileName,
@@ -99,8 +110,8 @@ export function createFileIngestor(deps: FileIngestorDeps): FileIngestor {
 
     let text: string
     let distilled = false
-    if (needsDistill(input.mime)) {
-      text = (await deps.distill({ buffer: input.bytes, mime: input.mime, fileName: input.fileName })).trim()
+    if (needsDistill(effectiveMime)) {
+      text = (await deps.distill({ buffer: input.bytes, mime: effectiveMime, fileName: input.fileName })).trim()
       distilled = true
     } else {
       const parsed = await parse(input.bytes, input.mime, input.fileName)

@@ -5,7 +5,7 @@
 import { useEffect, useState } from "react";
 import { CheckCircle2, CircleDashed, Sparkles } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
-import { getOfficeJob, listOfficeJobEvents, steerOfficeJob, type OfficeJob, type OfficeJobEvent } from "@/lib/office/api";
+import { getOfficeJob, listOfficeJobEvents, officeJobFailureKind, steerOfficeJob, type OfficeJob, type OfficeJobEvent } from "@/lib/office/api";
 
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 
@@ -49,6 +49,10 @@ export function OfficeJobActivityView({ job, events, loading = false, instructio
   const t = useT().office;
   const active = Boolean(job && !TERMINAL.has(job.status));
   const ready = job?.status === "completed" || job === null;
+  const failed = job?.status === "failed";
+  const failureKind = officeJobFailureKind(job?.errorCode);
+  const failureTitle = failureKind === "presentation_fit" ? t.presentationFitFailed : failureKind === "fit" ? t.fitFailed : t.failed;
+  const failureBody = failureKind === "presentation_fit" ? t.presentationFitFailedBody : failureKind === "fit" ? t.fitFailedBody : t.generationFailedBody;
 
   const eventLabel = (code: string): string => ({
     "office.job.queued": t.eventQueued,
@@ -69,13 +73,13 @@ export function OfficeJobActivityView({ job, events, loading = false, instructio
     "office.job.steering_applied": t.eventSteering,
   })[code] ?? t.running;
 
-  const statusLabel = job?.status === "completed" ? t.completed : job?.status === "failed" ? t.failed : job?.status === "cancelled" ? t.cancelled : job?.status === "queued" ? t.queued : t.running;
+  const statusLabel = job?.status === "completed" ? t.completed : failed ? failureTitle : job?.status === "cancelled" ? t.cancelled : job?.status === "queued" ? t.queued : t.running;
 
   return <section className="flex min-h-0 flex-col" aria-label={t.iterateWithBrian}>
     <div className="p-3">
       <div className="flex items-start gap-2">
         <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-600"><Sparkles className="size-4" aria-hidden /></span>
-        <div><h2 className="text-sm font-semibold">{t.iterateWithBrian}</h2><p className="text-xs text-muted-foreground">{active || loading ? t.iterationActiveHint : t.revisionReadyHint}</p></div>
+        <div><h2 className="text-sm font-semibold">{t.iterateWithBrian}</h2><p role={failed ? "alert" : undefined} className={failed ? "text-xs text-destructive" : "text-xs text-muted-foreground"}>{failed ? failureBody : active || loading ? t.iterationActiveHint : t.revisionReadyHint}</p></div>
       </div>
       {active ? <form onSubmit={onSubmit} className="mt-3">
         <label className="sr-only" htmlFor="office-brian-instruction">{t.iterateWithBrian}</label>

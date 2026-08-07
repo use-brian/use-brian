@@ -2,7 +2,7 @@
 
 /** Recovery surface for an empty Office shell whose job was never admitted. [COMP:app-web/office-start-recovery] */
 import Link from "next/link";
-import { FileText, Presentation, TriangleAlert } from "lucide-react";
+import { FileSpreadsheet, FileText, Presentation, TriangleAlert } from "lucide-react";
 import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { useT } from "@/lib/i18n/client";
 import type { OfficeFamily } from "@/lib/office/api";
@@ -23,7 +23,7 @@ export function OfficeStartRecovery({
   onTrash(): void;
 }) {
   const t = useT().office;
-  const Icon = family === "document" ? FileText : Presentation;
+  const Icon = family === "document" ? FileText : family === "presentation" ? Presentation : FileSpreadsheet;
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <OperatorTopbar app="office" center={<div className="flex min-w-0 items-center gap-2 px-2"><Icon className="size-4 shrink-0" aria-hidden /><span className="truncate text-sm font-medium">{title}</span></div>} />

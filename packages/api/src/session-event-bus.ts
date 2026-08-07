@@ -62,6 +62,15 @@ const NOTIFY_PAYLOAD_BUDGET = 6_500
 /** Stale presence threshold; sweep emits leave when `lastSeen` exceeds this. */
 const PRESENCE_STALE_MS = 30_000
 
+/**
+ * Typing decay — a typing flag whose beacon stopped arriving is cleared by
+ * the sweep even while the connection stays open (a sleeping tab, a client
+ * that died mid-keystroke must not pin "typing" on every viewer forever).
+ * Clients re-beacon every few seconds while actively typing, so a live
+ * typist never crosses this.
+ */
+const TYPING_STALE_MS = 12_000
+
 /** Sweep interval. */
 const SWEEP_INTERVAL_MS = 10_000
 
@@ -80,6 +89,8 @@ type PresenceEntry = {
   name: string | null
   lastSeen: number  // epoch ms
   isTyping: boolean
+  /** When the last `isTyping: true` beacon arrived — the decay clock. */
+  typingAt: number
   /** count of local Subscriber rows for this user (multi-tab dedupe). */
   connections: number
 }
@@ -228,6 +239,13 @@ function startSweep(): void {
     for (const [sessionId, viewers] of presence) {
       let changed = false
       for (const [userId, entry] of viewers) {
+        // Typing decays for EVERY entry, live connections included — the
+        // off-beacon can be lost (a sleeping tab, a crashed client) and a
+        // stuck "typing" indicator is worse than a briefly late one.
+        if (entry.isTyping && now - entry.typingAt > TYPING_STALE_MS) {
+          entry.isTyping = false
+          changed = true
+        }
         // Skip entries with active local connections — those are kept fresh
         // by `subscribe`'s touch-on-event path. The sweep is just for
         // unclean disconnects where the connection map is already cleared.
@@ -304,6 +322,7 @@ export function subscribeSessionEvents(params: {
       name: params.name,
       lastSeen: Date.now(),
       isTyping: false,
+      typingAt: 0,
       connections: 1,
     })
     emitPresence(params.sessionId)
@@ -339,6 +358,9 @@ export function setSessionTyping(params: {
   const entry = map.get(params.userId)
   if (!entry) return
   entry.lastSeen = Date.now()
+  // A repeat `true` beacon refreshes the decay clock without re-emitting —
+  // the sweep only clears typists whose beacons stopped.
+  if (params.isTyping) entry.typingAt = Date.now()
   if (entry.isTyping === params.isTyping) return
   entry.isTyping = params.isTyping
   emitPresence(params.sessionId)

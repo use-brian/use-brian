@@ -11,10 +11,13 @@
 import { describe, it, expect } from 'vitest'
 import {
   INGEST_APPEND_CONTRACT_V1,
+  INGEST_APPEND_CONTRACT_V2,
   INGEST_APPEND_IDEMPOTENCY_HEADER,
   INGEST_APPEND_SIGNATURE_HEADER,
   canonicalIngestMessageSchema,
+  canonicalIngestMessageV2Schema,
   ingestAppendRequestSchema,
+  ingestAppendRequestV2Schema,
   ingestAppendResponseSchema,
 } from '../ingest-append-contract.js'
 
@@ -58,6 +61,44 @@ describe('[COMP:shared/ingest-append-contract] wire shape', () => {
     expect(
       ingestAppendRequestSchema.safeParse({ ...REQUEST, contract: 'ub.ingest.append.v2' }).success,
     ).toBe(false)
+  })
+
+  it('keeps v1 frozen while v2 admits video with a durable asset', () => {
+    const media = {
+      ...MESSAGE,
+      kind: 'video',
+      body_text: 'Launch walkthrough',
+      media_ref: {
+        asset_id: '4a1e6bd8-0000-4000-8000-000000000004',
+        sha256: 'a'.repeat(64),
+        availability: 'stored',
+        filename: 'walkthrough.mp4',
+        mime: 'video/mp4',
+        size_bytes: 2048,
+      },
+    }
+    expect(canonicalIngestMessageSchema.safeParse(media).success).toBe(false)
+    expect(canonicalIngestMessageV2Schema.safeParse(media).success).toBe(true)
+    expect(ingestAppendRequestV2Schema.safeParse({
+      ...REQUEST,
+      contract: INGEST_APPEND_CONTRACT_V2,
+      messages: [media],
+    }).success).toBe(true)
+  })
+
+  it('requires asset identity and fingerprint for stored v2 media', () => {
+    const media = {
+      ...MESSAGE,
+      kind: 'image',
+      media_ref: {
+        availability: 'stored', filename: 'photo.jpg', mime: 'image/jpeg', size_bytes: 1,
+      },
+    }
+    expect(canonicalIngestMessageV2Schema.safeParse(media).success).toBe(false)
+    expect(canonicalIngestMessageV2Schema.safeParse({
+      ...media,
+      media_ref: { ...media.media_ref, availability: 'missing' },
+    }).success).toBe(true)
   })
 
   it('rejects an empty batch and an unknown message kind', () => {

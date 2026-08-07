@@ -3,6 +3,7 @@ import { buildAccessPredicate } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
 import { getPool, query } from './client.js'
 import { emitMentionedEdges } from './edge-hooks.js'
+import { excludeExternalPrincipalsSql } from './external-principal.js'
 
 export type { AccessContext }
 
@@ -693,6 +694,11 @@ function systemAssistantScopeSql(a: string, w: string, idx: number): string {
                AND ${w} = (SELECT workspace_id FROM assistants WHERE id = $${idx})))`
 }
 
+// The external-principal exclusion below is shared with its runtime twin
+// `isExternalPrincipal` (which decides whether a turn accrues a client
+// contact) — both derive from one namespace list in `./external-principal.js`,
+// imported at the top of this file. See `docs/plans/client-principal.md` §6.1.
+
 /**
  * System-level memory index for the consolidation worker. Filters on
  * `(assistant_id, user_id)` only — no workspace partition, no
@@ -1344,6 +1350,15 @@ export async function logConsolidation(params: {
 /**
  * Enumerate the distinct (assistant_id, user_id) tuples with any memories.
  * Used by the consolidation worker to pick which users need a tick.
+ *
+ * External principals are excluded, so a company's clients get **no**
+ * background personal consolidation (Light / REM / Deep / soul). This is a
+ * cost gate, not an isolation one: every external client of an assistant
+ * would otherwise draw recurring LLM spend on the owner's budget, forever,
+ * scaling with the consumer's user base. Their live `saveMemory` /
+ * `getMemory` and per-turn memory context are untouched. Default-off is a
+ * product decision (`docs/plans/client-principal.md` D7); flipping it means
+ * editing only this exclusion.
  */
 export async function listMemoryUsers(): Promise<Array<{ assistantId: string; userId: string }>> {
   // A primary's memories are stored `workspace_shared` (assistant_id
@@ -1364,6 +1379,7 @@ export async function listMemoryUsers(): Promise<Array<{ assistantId: string; us
               m.user_id AS "userId"
          FROM memories m
         WHERE m.valid_to IS NULL
+          ${excludeExternalPrincipalsSql('m.user_id')}
      ) t
      WHERE "assistantId" IS NOT NULL`,
     [],
@@ -1609,6 +1625,11 @@ export async function getWorkspaceMemoryIndex(
  * System-level workspace memory index for the team consolidation
  * worker. Filters on `(assistant_id, workspace_id)` only — see
  * `permissions.md` § Privileged-service exception.
+ *
+ * External principals are excluded: the team pass compares every pair in
+ * this index and merges one row's `detail` into another's, so leaving two
+ * different clients' rows in the same index is a cross-client content
+ * merge. See `excludeExternalPrincipalsSql`.
  */
 export async function getWorkspaceMemoryIndexSystem(
   assistantId: string,
@@ -1624,6 +1645,7 @@ export async function getWorkspaceMemoryIndexSystem(
      WHERE ${systemAssistantScopeSql('assistant_id', 'workspace_id', 1)} AND workspace_id = $2
        AND valid_to IS NULL
        AND confidence > 0
+       ${excludeExternalPrincipalsSql('memories.user_id')}
      ORDER BY updated_at DESC`,
     [assistantId, workspaceId],
   )
@@ -1915,6 +1937,15 @@ export async function listWorkspaceMemoryGroups(): Promise<Array<{ assistantId: 
   return result.rows
 }
 
+/**
+ * Team-pass metrics scan, surfaced as the store's `listTeamWithMetrics`.
+ *
+ * External principals are excluded for the same reason as
+ * `getWorkspaceMemoryIndexSystem`, one step worse: `runTeamDeepConsolidation`
+ * hard-deletes every row it scores below the prune threshold, so an
+ * unfiltered scan lets one workspace's team pass delete another client's
+ * memories. See `excludeExternalPrincipalsSql`.
+ */
 export async function listWorkspaceMemoriesWithMetrics(
   assistantId: string,
   workspaceId: string,
@@ -1935,7 +1966,8 @@ export async function listWorkspaceMemoriesWithMetrics(
             GREATEST(EXTRACT(EPOCH FROM (now() - created_at)) / 86400, 0)::int as "ageDays",
             created_at as "createdAt"
      FROM memories
-     WHERE ${systemAssistantScopeSql('assistant_id', 'workspace_id', 1)} AND workspace_id = $2 AND valid_to IS NULL${pageSql}`,
+     WHERE ${systemAssistantScopeSql('assistant_id', 'workspace_id', 1)} AND workspace_id = $2 AND valid_to IS NULL
+       ${excludeExternalPrincipalsSql('memories.user_id')}${pageSql}`,
     params,
   )
   return result.rows

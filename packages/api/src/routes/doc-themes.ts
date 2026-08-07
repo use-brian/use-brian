@@ -34,7 +34,10 @@ import {
   generateCustomTheme,
   refineCustomTheme,
   ThemeGenerationError,
+  type GeneratedTheme,
 } from '../doc/theme-generator.js'
+import { brandThemeSeed, buildThemeTokens } from '@use-brian/shared'
+import { getBrandStore } from '../db/brand-store.js'
 
 export type DocThemesRouteOptions = {
   docThemesStore: DocThemeStore
@@ -45,7 +48,16 @@ export type DocThemesRouteOptions = {
   backgroundModel?: string
 }
 
-const createSchema = z.object({ prompt: z.string().trim().min(1).max(600) })
+/**
+ * Two ways to create a theme. `{ prompt }` asks a model to invent the anchor
+ * colours; `{ fromBrand: true }` takes them from the workspace's approved
+ * brand record — no model, no cost, exact brand values. A workspace that has
+ * decided its colours should not have them guessed at.
+ */
+const createSchema = z.union([
+  z.object({ prompt: z.string().trim().min(1).max(600) }).strict(),
+  z.object({ fromBrand: z.literal(true) }).strict(),
+])
 const renameSchema = z.object({ name: z.string().trim().min(1).max(40) })
 const refineSchema = z.object({ instruction: z.string().trim().min(1).max(600) })
 
@@ -102,23 +114,46 @@ export function docThemesRoutes(opts: DocThemesRouteOptions): Router {
     const role = await opts.workspaceStore.getRole(userId, workspaceId)
     if (!role) return notMember(res)
 
-    if (!opts.provider) {
-      return res.status(503).json({ error: 'Theme generation is not available' })
-    }
-
     const parsed = createSchema.safeParse(req.body)
     if (!parsed.success) {
       return badRequest(res, parsed.error.issues.map((i) => i.message).join('; '))
     }
+    const fromBrand = 'fromBrand' in parsed.data
 
-    let generated
-    try {
-      generated = await generateCustomTheme({ provider: opts.provider, prompt: parsed.data.prompt, model: opts.backgroundModel })
-    } catch (err) {
-      if (err instanceof ThemeGenerationError) {
-        return res.status(422).json({ error: err.message })
+    // The provider gate applies to the model path only — a brand-derived theme
+    // needs no provider, so a deployment without one can still theme its docs.
+    if (!fromBrand && !opts.provider) {
+      return res.status(503).json({ error: 'Theme generation is not available' })
+    }
+
+    // Only the four fields the store needs — a brand-derived theme has no
+    // model or token usage to report, and inventing zeros for them would put
+    // a fake model attribution on a theme no model produced.
+    let generated: Pick<GeneratedTheme, 'name' | 'description' | 'seed' | 'tokens'>
+    let prompt: string
+    if (fromBrand) {
+      const brand = await getBrandStore().get(userId, workspaceId)
+      const record = brand?.activeRecord
+      if (!record) {
+        return res.status(409).json({ error: 'This workspace has no approved brand to build a theme from.', code: 'no_approved_brand' })
       }
-      throw err
+      const seed = brandThemeSeed({ name: record.naming.name, colors: record.colors })
+      if (!seed) {
+        // A partial brand produces no theme rather than a misleading one.
+        return res.status(409).json({ error: 'The brand record has no usable hex colours to build a theme from.', code: 'no_brand_colors' })
+      }
+      generated = { name: seed.name, description: seed.description ?? null, seed, tokens: buildThemeTokens(seed) }
+      prompt = `Derived from the ${record.naming.name} brand record`
+    } else {
+      prompt = (parsed.data as { prompt: string }).prompt
+      try {
+        generated = await generateCustomTheme({ provider: opts.provider!, prompt, model: opts.backgroundModel })
+      } catch (err) {
+        if (err instanceof ThemeGenerationError) {
+          return res.status(422).json({ error: err.message })
+        }
+        throw err
+      }
     }
 
     try {
@@ -127,7 +162,7 @@ export function docThemesRoutes(opts: DocThemesRouteOptions): Router {
         workspaceId,
         name: generated.name,
         description: generated.description,
-        prompt: parsed.data.prompt,
+        prompt,
         seed: generated.seed,
         tokens: generated.tokens,
       })

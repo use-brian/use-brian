@@ -111,7 +111,7 @@ function openDb(): Promise<IDBDatabase> {
 /** Non-extractable HKDF root, structured-cloned by IndexedDB and never placed
  * in localStorage/cookies. A device/OS credential vault can replace this seam
  * in the bundled client without changing package ciphertext. */
-export async function getOrCreateOfficeDeviceKey(): Promise<CryptoKey> {
+async function getOrCreateOfficeDeviceKey(): Promise<CryptoKey> {
   const db = await openDb();
   const read = db.transaction(KEY_STORE, "readonly").objectStore(KEY_STORE).get("root");
   const existing = await new Promise<CryptoKey | undefined>((resolve, reject) => {
@@ -133,16 +133,6 @@ function transactionDone(transaction: IDBTransaction): Promise<void> {
     transaction.onerror = () => reject(transaction.error ?? new Error("office_offline_write_failed"));
     transaction.onabort = () => reject(transaction.error ?? new Error("office_offline_write_aborted"));
   });
-}
-
-/** Resolves only after IndexedDB commits, so the UI may safely say Saved. */
-export async function saveOfflinePackage(record: EncryptedOfficePackage): Promise<void> {
-  const db = await openDb();
-  const transaction = db.transaction(PACKAGE_STORE, "readwrite");
-  transaction.objectStore(PACKAGE_STORE).put(record);
-  await transactionDone(transaction);
-  db.close();
-  if (record.pinned) await navigator.storage?.persist?.();
 }
 
 export async function loadOfflinePackage(artifactId: string): Promise<LoadedOfficeOfflinePackage | null> {

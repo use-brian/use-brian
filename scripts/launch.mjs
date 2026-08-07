@@ -199,6 +199,7 @@ const env = {
   // auto-on-save brain ingest. 127.0.0.1 (not localhost) avoids the IPv6 ::1
   // resolution that the api's IPv4 listener refuses.
   DOC_SYNC_SECRET: docSyncSecret,
+  DOC_SYNC_URL: `ws://127.0.0.1:${PORTS.docSync}`,
   // Encrypts connector credentials at rest (see generation note above).
   CHANNEL_CREDENTIAL_KEY: channelCredentialKey,
   DISCORD_CONNECTOR_URL: process.env.DISCORD_CONNECTOR_URL || `http://127.0.0.1:${PORTS.discordConnector}`,

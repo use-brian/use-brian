@@ -35,6 +35,7 @@ import type {
   WorkflowStore,
 } from './types.js'
 import { evaluateBoolean, JsonLogicEvalError } from './condition.js'
+import { buildReachability, startStepIds } from './graph.js'
 import { interpolateString, interpolateValue, type InterpolationScope } from './interpolation.js'
 import type { ResearchDepthConfig } from '../engine/research-depth.js'
 import { sanitizeDeliveryText } from '@use-brian/shared'
@@ -399,13 +400,60 @@ export type ExecutorDeps = {
 // ── advanceWorkflowRun ──────────────────────────────────────────────────
 
 /**
- * Advance a run from its current step until it reaches a terminal state, a
- * `wait`, or a paused approval. Safe to call repeatedly — each call picks
- * up where the last one left off (Phase B's wait wake-up calls back here).
+ * Maximum steps executing concurrently within one advance pass. Fan-out
+ * width is schema-capped at `MAX_FAN_OUT_WIDTH` per step; nested fan-outs
+ * queue beyond this cap instead of stacking unbounded parallel consults.
+ */
+const MAX_CONCURRENT_STEPS = 5
+
+/**
+ * Hard cap on step executions in a single run — the runaway backstop for
+ * legacy definitions that predate the DAG authoring check (a cycle used to
+ * pass validation; it now fails typed instead of looping the run forever).
+ */
+const MAX_STEP_EXECUTIONS_PER_RUN = 100
+
+/**
+ * Reserved run-vars key holding the not-yet-completed frontier (queued +
+ * in-flight + parked step ids), persisted on every settlement so a crash
+ * mid-parallel resumes every live branch, not just one cursor. `[]` /
+ * absent = no live frontier (fresh run, or pass finished). Engine-only —
+ * `storeOutputAs` forbids the `__` prefix.
+ */
+const FRONTIER_VAR = '__frontier'
+
+export type AdvanceOptions = {
+  /**
+   * Explicit entry frontier — the steps to start this pass INSTEAD of
+   * `run.currentStepId` / the persisted frontier. Used by the wait wake-up
+   * and approval-resolution resume paths, which have just completed the
+   * paused step and hand its runtime successors here (possibly several, on
+   * a fan-out; possibly none, on a terminal step — an empty array completes
+   * the run instead of re-entering at `startStepId`).
+   */
+  startAt?: string[]
+}
+
+/**
+ * Advance a run until it reaches a terminal state, a `wait`, or a paused
+ * approval. Safe to call repeatedly — each call picks up where the last one
+ * left off (Phase B's wait wake-up calls back here).
+ *
+ * Steps execute as a frontier over the definition DAG: a scalar
+ * `nextStepId` advances one cursor exactly as before; an array fans out and
+ * runs every listed step concurrently (capped at `MAX_CONCURRENT_STEPS`).
+ * A step several live paths can reach is the implicit JOIN — it starts only
+ * once every path that can still reach it has settled, and executes once.
+ * A pause (`wait`, ask-policy approval) is honoured only when it holds the
+ * sole live cursor; pausing while sibling branches are still executing
+ * fails the step typed `pause_in_parallel` (the single-cursor resume model
+ * cannot represent a parked sibling — authoring rejects the static cases).
+ * See docs/architecture/features/workflow.md → "Parallel fan-out".
  */
 export async function advanceWorkflowRun(
   deps: ExecutorDeps,
   runId: string,
+  options?: AdvanceOptions,
 ): Promise<RunOutcome> {
   const now = deps.now ?? Date.now
 
@@ -474,7 +522,9 @@ export async function advanceWorkflowRun(
   // Was this the first call into the run? Emit the audit event + flip to running.
   const isFirstAdvance = run.status === 'pending'
   if (isFirstAdvance) {
-    await deps.runStore.updateRun(runId, { status: 'running', currentStepId: workflow.definition.startStepId })
+    // currentStepId is a scalar display column — a trigger fan-out records
+    // its first entry step; the frontier below seeds every entry.
+    await deps.runStore.updateRun(runId, { status: 'running', currentStepId: startStepIds(workflow.definition)[0] })
     fireAndForgetAudit(deps, {
       type: 'workflow.run_started',
       workspaceId: run.workspaceId,
@@ -488,9 +538,10 @@ export async function advanceWorkflowRun(
     await deps.runStore.updateRun(runId, { status: 'running' })
   }
 
-  // Step lookup map.
+  // Step lookup map + static reachability (the implicit-join substrate).
   const stepMap = new Map<string, WorkflowStep>(workflow.definition.steps.map((s) => [s.id, s]))
   const orderedIds = workflow.definition.steps.map((s) => s.id)
+  const reachability = buildReachability(workflow.definition)
 
   // Variables — start from persisted state (re-entry from wait) or empty.
   let vars: Record<string, unknown> = { ...run.vars }
@@ -512,33 +563,74 @@ export async function advanceWorkflowRun(
   // `outcome.logs` so the NEXT run can read what this one did.
   const runLog: WorkflowRunOutcome['logs'] = []
 
-  let currentStepId: string | null = run.currentStepId ?? workflow.definition.startStepId
+  // ── Frontier scheduler ──────────────────────────────────────────────
+  //
+  // The run advances as a set of concurrent cursors over the definition
+  // DAG. `pending` holds ready-to-start step ids, `inFlight` the executing
+  // ones, `parked` the arrived-but-waiting implicit joins. A parked step
+  // starts once no OTHER live cursor can still reach it (static
+  // reachability over the graph, evaluated against live positions) — which
+  // reduces to exactly the old sequential behavior when every step has a
+  // scalar `nextStepId`.
+
   let lastOutput: unknown = null
   let stepCount = 0
+  let executionsStarted = 0
 
-  while (currentStepId !== null) {
-    const step = stepMap.get(currentStepId)
-    if (!step) {
-      const err: ExecutorError = {
-        message: `Definition references unknown step "${currentStepId}".`,
-        reason: 'unknown_step',
+  const pending: string[] = []
+  const inFlight = new Map<string, Promise<SettledStep>>()
+  const parked = new Set<string>()
+  const executed = new Set<string>()
+  let firstFailure: { stepId: string; error: ExecutorError; isTimeout: boolean } | null = null
+  let pausedOutcome: RunOutcome | null = null
+
+  const enqueue = (id: string): void => {
+    if (executed.has(id) || inFlight.has(id) || pending.includes(id) || parked.has(id)) return
+    parked.add(id)
+  }
+
+  /** Can any live cursor OTHER than `id` itself still reach `id`? */
+  const otherCursorCanReach = (id: string): boolean => {
+    const positions = [...pending, ...inFlight.keys(), ...parked]
+    return positions.some((pos) => pos !== id && (reachability.get(pos)?.has(id) ?? false))
+  }
+
+  /** Promote quiescent parked steps into the ready queue. */
+  const releaseParked = (): void => {
+    for (const id of [...parked]) {
+      if (!otherCursorCanReach(id)) {
+        parked.delete(id)
+        pending.push(id)
       }
-      await markRunFailed(deps, run, currentStepId, err, 'failed', composeRunOutcome(vars, runLog, 'failed', new Date(now()), lastOutput, err))
-      return failOutcome(runId, currentStepId, err, stepCount)
     }
+  }
 
+  const frontierVars = (): Record<string, unknown> => {
+    const frontier = [...pending, ...inFlight.keys(), ...parked]
+    if (frontier.length === 0) {
+      const { [FRONTIER_VAR]: _dropped, ...rest } = vars
+      return rest
+    }
+    return { ...vars, [FRONTIER_VAR]: frontier }
+  }
+
+  /**
+   * Execute one step end-to-end: insert the step-run row, dispatch, and
+   * write the step-run's terminal state (row-local, safe concurrently).
+   * Shared-state mutation (vars, runLog, frontier) happens in the
+   * settlement handler below, on one settlement at a time. Never throws.
+   */
+  const executeStep = async (step: WorkflowStep): Promise<SettledStep> => {
     const interp: InterpolationScope = { vars, input, lastRun }
 
-    // Pre-flight: wait step in Phase A errors here before we insert a step run
-    // so we don't leave a stranded 'running' row. In Phase B, fall through to
-    // the dispatch below.
+    // Pre-flight: wait step in Phase A fails before dispatch. The step-run
+    // row is still recorded so getWorkflowRun shows what blew up.
     if (step.type === 'wait' && !deps.pauseRunForWait) {
       const err: ExecutorError = {
         message:
           'wait step requires the schedule extension (Phase B) to be deployed; not yet available.',
         reason: 'wait_requires_phase_b',
       }
-      // Record the failed step too, so getWorkflowRun shows what blew up.
       const stepRun = await deps.runStore.createStepRun({
         runId,
         stepId: step.id,
@@ -550,18 +642,14 @@ export async function advanceWorkflowRun(
         error: err as unknown as Record<string, unknown>,
         finishedAt: new Date(now()),
       })
-      runLog.push({ stepId: step.id, type: step.type, status: 'failed', summary: err.message })
-      await markRunFailed(deps, run, step.id, err, 'failed', composeRunOutcome(vars, runLog, 'failed', new Date(now()), lastOutput, err))
-      return failOutcome(runId, step.id, err, stepCount)
+      return { step, stepRunId: stepRun.id, result: { kind: 'failed', error: err, isTimeout: false } }
     }
 
-    // Insert a step-run row in 'running' state.
-    const stepRunInput = buildStepRunInput(step, interp)
     const stepRun = await deps.runStore.createStepRun({
       runId,
       stepId: step.id,
       stepType: step.type,
-      input: stepRunInput,
+      input: buildStepRunInput(step, interp),
     })
 
     let dispatchResult: StepDispatchResult
@@ -600,83 +688,28 @@ export async function advanceWorkflowRun(
           : {}),
         finishedAt: new Date(now()),
       })
-      const catchStatus = isTimeout ? 'timeout' : 'failed'
-      runLog.push({ stepId: step.id, type: step.type, status: 'failed', summary: error.message })
-      await markRunFailed(deps, run, step.id, error, catchStatus, composeRunOutcome(vars, runLog, catchStatus, new Date(now()), lastOutput, error))
-      await maybeDisableForDeadAnchor(deps, run, workflow, primaryAssistantId, error)
-      return failOutcome(runId, step.id, error, stepCount)
+      return { step, stepRunId: stepRun.id, result: { kind: 'failed', error, isTimeout } }
     }
 
-    // Pause-on-wait (Phase B). The dispatch result for `wait` is a paused
-    // sentinel; the scheduled_jobs row is written by `pauseRunForWait`.
-    if (dispatchResult.kind === 'paused_wait') {
-      await deps.pauseRunForWait!({
-        runId,
-        stepRunId: stepRun.id,
-        workspaceId: run.workspaceId,
-        triggeredBy: run.triggeredBy,
-        dueAt: dispatchResult.dueAt,
-      })
-      await deps.runStore.updateRun(runId, {
-        status: 'awaiting_wait',
-        currentStepId: step.id,
-      })
-      return { kind: 'paused', runId, stepId: step.id, reason: 'wait' }
+    if (dispatchResult.kind === 'paused_wait' || dispatchResult.kind === 'paused_approval') {
+      // Honor / reject decided by the settlement handler (it can see the
+      // whole frontier); the step-run row stays 'running' until then.
+      return { step, stepRunId: stepRun.id, result: dispatchResult }
     }
 
-    // Pause-on-approval (Phase C).
-    if (dispatchResult.kind === 'paused_approval') {
-      // `requestApproval` is responsible for writing pending_approvals +
-      // dispatching the delivery; we just flip the run state.
-      const expiresAt = dispatchResult.expiresAt
-      await deps.requestApproval!({
-        runId,
-        stepRunId: stepRun.id,
-        workspaceId: run.workspaceId,
-        approverUserId: dispatchResult.approverUserId,
-        toolName: dispatchResult.toolName,
-        arguments: dispatchResult.arguments,
-        deliveryChannel: dispatchResult.deliveryChannel,
-        expiresAt,
-      })
-      await deps.runStore.updateRun(runId, {
-        status: 'awaiting_input',
-        currentStepId: step.id,
-      })
-      return { kind: 'paused', runId, stepId: step.id, reason: 'approval' }
-    }
-
-    // Failure — terminal.
     if (dispatchResult.kind === 'failed') {
       await deps.runStore.updateStepRun(stepRun.id, {
         status: 'failed',
         error: dispatchResult.error as unknown as Record<string, unknown>,
         finishedAt: new Date(now()),
       })
-      runLog.push({ stepId: step.id, type: step.type, status: 'failed', summary: dispatchResult.error.message })
-      await markRunFailed(deps, run, step.id, dispatchResult.error, 'failed', composeRunOutcome(vars, runLog, 'failed', new Date(now()), lastOutput, dispatchResult.error))
-      await maybeDisableForDeadAnchor(deps, run, workflow, primaryAssistantId, dispatchResult.error)
-      return failOutcome(runId, step.id, dispatchResult.error, stepCount + 1)
+      return {
+        step,
+        stepRunId: stepRun.id,
+        result: { kind: 'failed', error: dispatchResult.error, isTimeout: false },
+      }
     }
 
-    // Success — capture output, advance vars + lastOutput, persist.
-    stepCount++
-    lastOutput = dispatchResult.output
-    runLog.push({
-      stepId: step.id,
-      type: step.type,
-      status: 'completed',
-      summary: summarizeOutput(dispatchResult.output),
-    })
-    // Dispatch-produced vars first (page-anchor `__pageAnchor_<stepId>`
-    // entries), then storeOutputAs — a user key can never be shadowed by a
-    // reserved one because storeOutputAs forbids the `__` prefix shape.
-    if (dispatchResult.varsPatch) {
-      vars = { ...vars, ...dispatchResult.varsPatch }
-    }
-    if (step.storeOutputAs && step.type !== 'branch' && step.type !== 'wait') {
-      vars = { ...vars, [step.storeOutputAs]: dispatchResult.output }
-    }
     await deps.runStore.updateStepRun(stepRun.id, {
       status: 'completed',
       // Record delivery outcome alongside the logical output (reserved
@@ -688,14 +721,230 @@ export async function advanceWorkflowRun(
         : wrapOutput(dispatchResult.output),
       finishedAt: new Date(now()),
     })
+    return { step, stepRunId: stepRun.id, result: { kind: 'completed', dispatch: dispatchResult } }
+  }
 
-    // Resolve next step.
-    const nextId = nextStepIdFor(step, dispatchResult, orderedIds)
-    currentStepId = nextId
+  const startStep = async (id: string): Promise<boolean> => {
+    const step = stepMap.get(id)
+    if (!step) {
+      firstFailure ??= {
+        stepId: id,
+        error: { message: `Definition references unknown step "${id}".`, reason: 'unknown_step' },
+        isTimeout: false,
+      }
+      return false
+    }
+    if (++executionsStarted > MAX_STEP_EXECUTIONS_PER_RUN) {
+      firstFailure ??= {
+        stepId: id,
+        error: {
+          message: `Run exceeded ${MAX_STEP_EXECUTIONS_PER_RUN} step executions — the definition likely contains a cycle.`,
+          reason: 'step_limit_exceeded',
+        },
+        isTimeout: false,
+      }
+      return false
+    }
+    executed.add(id)
+    inFlight.set(
+      id,
+      executeStep(step).catch((err): SettledStep => ({
+        // executeStep never throws by contract; this is the belt-and-braces
+        // path so one rejected promise cannot wedge the whole scheduler.
+        step,
+        stepRunId: '<unknown>',
+        result: {
+          kind: 'failed',
+          error: {
+            message: err instanceof Error ? err.message : String(err),
+            reason: 'dispatch_threw',
+          },
+          isTimeout: false,
+        },
+      })),
+    )
+    // Persist AFTER the inFlight insert so the crash-recovery frontier
+    // includes the step that is now executing.
     await deps.runStore.updateRun(runId, {
-      currentStepId,
-      vars,
+      currentStepId: id,
+      vars: frontierVars(),
     })
+    return true
+  }
+
+  /** Handle one settled step — the only place shared state mutates. */
+  const handleSettled = async (settled: SettledStep): Promise<void> => {
+    const { step, stepRunId, result } = settled
+
+    if (result.kind === 'completed') {
+      const dispatchResult = result.dispatch
+      stepCount++
+      lastOutput = dispatchResult.output
+      runLog.push({
+        stepId: step.id,
+        type: step.type,
+        status: 'completed',
+        summary: summarizeOutput(dispatchResult.output),
+      })
+      // Dispatch-produced vars first (page-anchor `__pageAnchor_<stepId>`
+      // entries), then storeOutputAs — a user key can never be shadowed by a
+      // reserved one because storeOutputAs forbids the `__` prefix shape.
+      if (dispatchResult.varsPatch) {
+        vars = { ...vars, ...dispatchResult.varsPatch }
+      }
+      if (step.storeOutputAs && step.type !== 'branch' && step.type !== 'wait') {
+        vars = { ...vars, [step.storeOutputAs]: dispatchResult.output }
+      }
+      // Seed successors (unless the run is already failing — no new work).
+      if (!firstFailure && !pausedOutcome) {
+        for (const nextId of runtimeSuccessors(step, dispatchResult, orderedIds)) {
+          enqueue(nextId)
+        }
+      }
+      await deps.runStore.updateRun(runId, { vars: frontierVars() })
+      return
+    }
+
+    if (result.kind === 'failed') {
+      runLog.push({ stepId: step.id, type: step.type, status: 'failed', summary: result.error.message })
+      firstFailure ??= { stepId: step.id, error: result.error, isTimeout: result.isTimeout }
+      return
+    }
+
+    // Pause request (wait / approval). Legal only as the sole live cursor —
+    // the single-cursor resume model cannot represent a parked sibling.
+    // Authoring rejects the statically-detectable shapes; this guard is the
+    // authoritative runtime backstop (a branch can route around a static
+    // convergence).
+    const othersLive = inFlight.size > 0 || pending.length > 0 || parked.size > 0
+    if (othersLive || firstFailure || pausedOutcome) {
+      const error: ExecutorError = {
+        message:
+          `step "${step.id}" tried to pause the run (${result.kind === 'paused_wait' ? 'wait' : 'approval'}) ` +
+          `while sibling parallel steps are still executing. A pause must hold the only live cursor — ` +
+          `move the pausing step before the fan-out or after the join.`,
+        reason: 'pause_in_parallel',
+      }
+      await deps.runStore.updateStepRun(stepRunId, {
+        status: 'failed',
+        error: error as unknown as Record<string, unknown>,
+        finishedAt: new Date(now()),
+      })
+      runLog.push({ stepId: step.id, type: step.type, status: 'failed', summary: error.message })
+      firstFailure ??= { stepId: step.id, error, isTimeout: false }
+      return
+    }
+
+    if (result.kind === 'paused_wait') {
+      // Phase B. The scheduled_jobs row is written by `pauseRunForWait`.
+      await deps.pauseRunForWait!({
+        runId,
+        stepRunId,
+        workspaceId: run.workspaceId,
+        triggeredBy: run.triggeredBy,
+        dueAt: result.dueAt,
+      })
+      await deps.runStore.updateRun(runId, {
+        status: 'awaiting_wait',
+        currentStepId: step.id,
+        // The pause holds the sole live cursor (guard above), so the
+        // crash-recovery frontier must clear — a resume re-enters via
+        // `startAt` (or the legacy currentStepId protocol), never here.
+        vars: frontierVars(),
+      })
+      pausedOutcome = { kind: 'paused', runId, stepId: step.id, reason: 'wait' }
+      return
+    }
+
+    // Phase C. `requestApproval` writes pending_approvals + dispatches the
+    // delivery; we just flip the run state.
+    await deps.requestApproval!({
+      runId,
+      stepRunId,
+      workspaceId: run.workspaceId,
+      approverUserId: result.approverUserId,
+      toolName: result.toolName,
+      arguments: result.arguments,
+      deliveryChannel: result.deliveryChannel,
+      expiresAt: result.expiresAt,
+    })
+    await deps.runStore.updateRun(runId, {
+      status: 'awaiting_input',
+      currentStepId: step.id,
+      // Same frontier-clearing rule as the wait pause above.
+      vars: frontierVars(),
+    })
+    pausedOutcome = { kind: 'paused', runId, stepId: step.id, reason: 'approval' }
+  }
+
+  // Seed the frontier: an explicit resume frontier wins; then a persisted
+  // crash-recovery frontier; then the single-cursor entry point.
+  const persistedFrontier = Array.isArray(vars[FRONTIER_VAR])
+    ? (vars[FRONTIER_VAR] as unknown[]).filter((v): v is string => typeof v === 'string')
+    : null
+  const seed =
+    options?.startAt ??
+    (persistedFrontier && persistedFrontier.length > 0
+      ? persistedFrontier
+      : run.currentStepId
+        ? [run.currentStepId]
+        : startStepIds(workflow.definition))
+  for (const id of seed) enqueue(id)
+
+  // Drain the frontier.
+  while (true) {
+    if (!firstFailure && !pausedOutcome) releaseParked()
+    while (
+      !firstFailure &&
+      !pausedOutcome &&
+      pending.length > 0 &&
+      inFlight.size < MAX_CONCURRENT_STEPS
+    ) {
+      const id = pending.shift()!
+      await startStep(id)
+    }
+    if (inFlight.size === 0) {
+      if (!firstFailure && !pausedOutcome && parked.size > 0) {
+        // Nothing runnable but cursors remain parked — with a DAG this is
+        // unreachable; fail typed rather than report a phantom completion.
+        firstFailure = {
+          stepId: [...parked][0],
+          error: {
+            message: `Run deadlocked with parked steps: ${[...parked].join(', ')}.`,
+            reason: 'join_deadlock',
+          },
+          isTimeout: false,
+        }
+      }
+      if (firstFailure || pausedOutcome || pending.length === 0) break
+      continue
+    }
+    const settled = await Promise.race(inFlight.values())
+    inFlight.delete(settled.step.id)
+    await handleSettled(settled)
+  }
+
+  if (pausedOutcome) return pausedOutcome
+
+  if (firstFailure) {
+    const status = firstFailure.isTimeout ? 'timeout' : 'failed'
+    await markRunFailed(
+      deps,
+      run,
+      firstFailure.stepId,
+      firstFailure.error,
+      status,
+      composeRunOutcome(vars, runLog, status, new Date(now()), lastOutput, firstFailure.error),
+    )
+    await maybeDisableForDeadAnchor(deps, run, workflow, primaryAssistantId, firstFailure.error)
+    return failOutcome(
+      runId,
+      firstFailure.stepId,
+      firstFailure.error,
+      // Count the failed step itself only when it actually started (an
+      // unknown-step / step-limit failure never executed anything).
+      stepCount + (executed.has(firstFailure.stepId) ? 1 : 0),
+    )
   }
 
   // Terminal completion.
@@ -765,6 +1014,21 @@ type DispatchContext = {
   scope: InterpolationScope
   /** Phase C — when present, ask-policy tool_calls pause instead of failing. */
   deps: ExecutorDeps
+}
+
+/**
+ * One step's fully-settled execution, as consumed by the frontier
+ * scheduler's settlement handler. `completed` / `failed` step-run rows are
+ * already written (row-local); pause requests keep the row 'running' until
+ * the handler decides honor vs `pause_in_parallel`.
+ */
+type SettledStep = {
+  step: WorkflowStep
+  stepRunId: string
+  result:
+    | { kind: 'completed'; dispatch: Extract<StepDispatchResult, { kind: 'success' }> }
+    | { kind: 'failed'; error: ExecutorError; isTimeout: boolean }
+    | Extract<StepDispatchResult, { kind: 'paused_wait' } | { kind: 'paused_approval' }>
 }
 
 async function dispatchStep(step: WorkflowStep, ctx: DispatchContext): Promise<StepDispatchResult> {
@@ -1435,20 +1699,30 @@ async function dispatchSendPage(
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
-function nextStepIdFor(
+/**
+ * The steps to start when `step` completes. Branch: the chosen arm only.
+ * Scalar `nextStepId`: one successor. Array: the fan-out set. Absent:
+ * sequential fall-through in `definition.steps[]` order. The static
+ * both-arms variant lives in `graph.ts` (`stepSuccessors`).
+ */
+export function runtimeSuccessors(
   step: WorkflowStep,
   dispatch: StepDispatchResult,
   orderedIds: string[],
-): string | null {
+): string[] {
   if (step.type === 'branch') {
-    if (dispatch.kind !== 'success') return null
-    return dispatch.branchTaken === 'true' ? step.nextStepIdIfTrue : step.nextStepIdIfFalse
+    if (dispatch.kind !== 'success') return []
+    const next = dispatch.branchTaken === 'true' ? step.nextStepIdIfTrue : step.nextStepIdIfFalse
+    return next ? [next] : []
   }
-  if (step.nextStepId !== undefined) return step.nextStepId
+  if (step.nextStepId !== undefined) {
+    if (step.nextStepId === null) return []
+    return Array.isArray(step.nextStepId) ? [...step.nextStepId] : [step.nextStepId]
+  }
   // Sequential fallthrough.
   const idx = orderedIds.indexOf(step.id)
-  if (idx === -1 || idx === orderedIds.length - 1) return null
-  return orderedIds[idx + 1]
+  if (idx === -1 || idx === orderedIds.length - 1) return []
+  return [orderedIds[idx + 1]]
 }
 
 function buildStepRunInput(

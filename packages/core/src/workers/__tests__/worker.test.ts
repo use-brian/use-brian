@@ -663,6 +663,55 @@ describe('[COMP:workers/manager] createWorkerManager', () => {
       expect(seen[0]).toContain('webSearch')
     })
 
+    it("drops the browse tools when the caller's `computer` primitive is switched off", async () => {
+      // The merge runs AFTER the caller's filterToolsByCapabilities pass, so it
+      // re-applies the gate itself. Without that, an assistant with Computer
+      // Use switched off would still be offered browserReadPage here and would
+      // only fail at the executor — the see-it-try-it-fail shape the capability
+      // gate exists to avoid.
+      // See docs/architecture/features/builtin-primitives.md.
+      const seen: string[][] = []
+      const manager = createWorkerManager({
+        provider: makeToolCapturingProvider(seen),
+        model: 'gemini-flash',
+        tools: new Map(),
+      })
+      const gated = readOnlyTool('browserReadPage')
+      manager.setResearchBrowseTools(
+        new Map([[gated[0], { ...(gated[1] as object), requiresCapability: 'computer' } as never]]),
+      )
+      manager.setResearchMode(true)
+      manager.spawn(
+        'dig into a gap',
+        { ...ctx, activeCapabilities: new Set<string>() },
+        new Map([readOnlyTool('webSearch')]),
+      )
+      await manager.waitAll()
+      expect(seen[0]).not.toContain('browserReadPage')
+      expect(seen[0]).toContain('webSearch')
+    })
+
+    it('keeps the browse tools when the caller holds the `computer` grant', async () => {
+      const seen: string[][] = []
+      const manager = createWorkerManager({
+        provider: makeToolCapturingProvider(seen),
+        model: 'gemini-flash',
+        tools: new Map(),
+      })
+      const gated = readOnlyTool('browserReadPage')
+      manager.setResearchBrowseTools(
+        new Map([[gated[0], { ...(gated[1] as object), requiresCapability: 'computer' } as never]]),
+      )
+      manager.setResearchMode(true)
+      manager.spawn(
+        'dig into a gap',
+        { ...ctx, activeCapabilities: new Set(['computer']) },
+        new Map([readOnlyTool('webSearch')]),
+      )
+      await manager.waitAll()
+      expect(seen[0]).toContain('browserReadPage')
+    })
+
     it('non-research workers never see the browse tools', async () => {
       const seen: string[][] = []
       const manager = createWorkerManager({

@@ -67,6 +67,8 @@ import { sendConfirmationPrompt } from '../scheduling/confirmation-prompt.js'
 import { findAssistantById, findUserById } from '../db/users.js'
 import { getConnectorUserId, resolveReadCeilingsSystem } from '../db/workspace-store.js'
 import { billingPartyForAssistant } from '../billing-party.js'
+import { recordExternalCostFromMeta } from '../billing-external.js'
+import { runWithAgentClearance } from '../db/client.js'
 import { injectMcpTools } from '../mcp/inject.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
@@ -368,16 +370,22 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       }
       // RLS-scoped read as the callee's acting user (billingPartyForAssistant
       // → the workspace owner for workspace-owned assistants). RLS hides
-      // pages in workspaces the actor is not a member of.
-      const anchoredPage = await options.savedViewStore.getById(
-        calleeActorUserId,
-        params.pageAnchorId,
+      // pages in workspaces the actor is not a member of. The read runs
+      // inside the agent-clearance wrap so a page in a teamspace opens on
+      // the ASSISTANT's clearance vs the teamspace's sensitivity — never on
+      // the acting human account's teamspace memberships (teamspaces.md →
+      // "Agent access"; the 2026-08-07 anchor incident).
+      const anchoredPage = await runWithAgentClearance(
+        calleeAssistant.clearance ?? 'internal',
+        () => options.savedViewStore!.getById(calleeActorUserId, params.pageAnchorId!),
       )
       if (!anchoredPage) {
         throw Object.assign(
           new Error(
-            `Page anchor ${params.pageAnchorId} not found: the page was deleted or is not visible to this assistant. ` +
-              `Re-pick the page in the workflow builder or remove the anchor.`,
+            `Page anchor ${params.pageAnchorId} not found: the page was deleted, ` +
+              `or it sits in a teamspace whose sensitivity is above this assistant's ` +
+              `clearance (${calleeAssistant.clearance ?? 'internal'}). ` +
+              `Re-pick the page in the workflow builder, raise the assistant's clearance, or remove the anchor.`,
           ),
           { reason: 'page_anchor_not_found' },
         )
@@ -413,10 +421,12 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       // fails the consult.
       if (anchoredPage.state === 'draft') {
         try {
-          await options.savedViewStore.setAutoPruneAt(
-            calleeActorUserId,
-            params.pageAnchorId,
-            new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+          await runWithAgentClearance(calleeAssistant.clearance ?? 'internal', () =>
+            options.savedViewStore!.setAutoPruneAt(
+              calleeActorUserId,
+              params.pageAnchorId!,
+              new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+            ),
           )
         } catch (err) {
           console.warn('[inter-assistant] draft anchor auto-prune bump failed:', err)
@@ -892,6 +902,29 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       } catch (err) {
         console.error('[inter-assistant] skill injection failed for callee:', err)
       }
+    }
+
+    // 4e. Agent-principal wrap: every tool the CALLEE executes — in the main
+    // query loop below, in the research fan-out's `runPreflight` workers, and
+    // the skill-injected `useSkill` — runs inside
+    // `runWithAgentClearance(<callee clearance>)`, so RLS-scoped page reads
+    // and writes (doc tools on the anchored page, findPage, renderPage)
+    // resolve teamspace pages by the ASSISTANT's clearance vs teamspace
+    // sensitivity instead of the acting human account's memberships
+    // (teamspaces.md → "Agent access"; the 2026-08-07 anchor incident).
+    // Decorates execution only — the model-visible tool surface is unchanged.
+    // MUST stay after the LAST `finalTools.set` (skill injection above), or a
+    // later set() reinstalls an unwrapped tool. Interactive chat never gets
+    // this wrap; its tools stay scoped to the chatting member.
+    const calleeAgentClearance = calleeAssistant.clearance ?? 'internal'
+    for (const [name, tool] of finalTools) {
+      if (typeof tool.execute !== 'function') continue
+      const innerExecute = tool.execute.bind(tool)
+      finalTools.set(name, {
+        ...tool,
+        execute: (input, context) =>
+          runWithAgentClearance(calleeAgentClearance, () => innerExecute(input, context)),
+      })
     }
 
     // 5. Build callee system prompt with memory context.
@@ -1519,12 +1552,14 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
                 extraMeta[k] = typeof v === 'string' ? sanitize(v) : v
               }
             }
+            const calleeChannelType =
+              params.callerChannelType === 'workflow' ? 'workflow' : 'assistant-call'
             options.analytics?.logEvent({
               userId: calleeActorUserId,
               assistantId: params.calleeAssistantId,
               sessionId: session.id,
               eventName: 'tool_executed',
-              channelType: params.callerChannelType === 'workflow' ? 'workflow' : 'assistant-call',
+              channelType: calleeChannelType,
               metadata: {
                 tool_name: sanitize(block.name),
                 success: !(block.isError ?? false),
@@ -1533,6 +1568,33 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
                   : {}),
                 ...extraMeta,
               },
+            })
+            // Bill the external API this tool spent on. Until this existed,
+            // the recording lived inside the chat route, so an identical
+            // `webSearch` (or engine ask) run from a workflow step, a
+            // scheduled job, or an A2A consult wrote NO usage_tracking row —
+            // real Brave/Serper/engine dollars invisible to the cost
+            // dashboard and to the workspace budget. Attributed like the
+            // callee turn itself: the callee assistant and its billing party.
+            //
+            // COGS-only by design, same as the `turn_complete` row below —
+            // a callee-lane triggerKey and no `userMessageId` keep it out of
+            // the user-facing credit derivation
+            // (docs/architecture/platform/cost-and-pricing.md → "derived
+            // ledger"). Fire-and-forget: a metering failure must never fail
+            // the consult.
+            void recordExternalCostFromMeta({
+              toolMeta,
+              usageStore: options.usageStore,
+              userId: calleeActorUserId,
+              assistantId: params.calleeAssistantId,
+              sessionId: session.id,
+              triggerKey:
+                params.callerChannelType === 'workflow'
+                  ? 'workflow_external_tool'
+                  : 'a2a_external_tool',
+              channelType: calleeChannelType,
+              analytics: options.analytics,
             })
           }
         } else if (event.type === 'tool_confirmation_required') {

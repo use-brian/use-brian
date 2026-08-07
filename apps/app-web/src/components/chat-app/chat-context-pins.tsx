@@ -14,12 +14,17 @@
  *
  * Data flows through `lib/api/session-pins.ts`; the parent bumps
  * `refreshKey` off the room stream's `pins_changed` signal so every viewer's
- * row updates live (signals, never data). Labels resolve server-side under
- * the SESSION's clearance; a `null` label renders the unavailable state
- * rather than hiding the pin. Files dropped on Pins (or chosen from Add) go
- * through the durable storage-only route before their returned file ids are
- * pinned; transient chat-upload ids are never used, and pinning never implies
- * consent to distill or extract.
+ * row updates live (signals, never data) — including changes the room's
+ * assistant makes through its room pin tools (those rows attribute to the
+ * assistant's name). Labels resolve server-side under the SESSION's
+ * clearance; a `null` label renders the unavailable state rather than hiding
+ * the pin. Files dropped on Pins (or chosen from Add) go through the durable
+ * storage-only route before their returned file ids are pinned; transient
+ * chat-upload ids are never used. Dropping a file on Pins IS consent to save
+ * it to the brain (2026-08-07): after the pin is created the stored file is
+ * queued through the deterministic stored-file ingest lane (audio/video is
+ * skipped — the recording pipeline owns media). The pin list is unbounded;
+ * a filter input appears once it grows past a handful of rows.
  *
  * Spec: docs/architecture/features/chat-app.md → "Pinned room context".
  * [COMP:app-web/chat-context-pins]
@@ -68,6 +73,7 @@ import { fetchWorkspaceCrm } from "@/lib/api/crm";
 import {
   LARGE_FILE_CONFIRM_BYTES,
   MAX_STORED_FILE_BYTES,
+  reingestStoredFile,
   storeFiles,
 } from "@/lib/api/ingest";
 import { useFileDrop } from "@/lib/use-file-drop";
@@ -123,6 +129,8 @@ type FileUpload = {
 const WORK_BENCH_ID = "chat-work-bench";
 const WORK_BENCH_CONTENT_ID = "chat-work-bench-content";
 const WORKER_POLL_MS = 2_000;
+/** The pin list is unbounded; past this many rows a filter input appears. */
+const PIN_FILTER_MIN_PINS = 8;
 
 type WorkBenchAssistant = {
   id: string;
@@ -166,6 +174,7 @@ export function ChatContextPins({
   const chatT = dictionary.chatApp;
   const t = chatT.pins;
   const [pins, setPins] = useState<SessionPinRow[]>([]);
+  const [pinFilter, setPinFilter] = useState("");
   const [addOpen, setAddOpen] = useState(false);
   const [pickKind, setPickKind] = useState<PickerKind>("file");
   const [search, setSearch] = useState("");
@@ -320,10 +329,6 @@ export function ChatContextPins({
       if (fileBusy) return;
       const files = Array.from(fileList);
       if (files.length === 0) return;
-      if (files.length > 5) {
-        setError(t.fileLimit);
-        return;
-      }
 
       let uploads: FileUpload[] = [];
       const updateUpload = (
@@ -422,14 +427,37 @@ export function ChatContextPins({
               refId: result.fileId,
             });
             anyPinned = true;
-            updateUpload(upload.id, null);
           } catch {
             anyFailed = true;
             updateUpload(upload.id, {
               status: "error",
               error: t.filePinFailed,
             });
+            continue;
           }
+          // Dropping a file on Pins is consent to save it to the brain
+          // (2026-08-07): queue the stored file through the deterministic
+          // stored-file ingest lane. Audio/video stays out — the recording
+          // pipeline owns media. `requires_confirmation` means the file is
+          // already in the brain and `in_flight` means the work is already
+          // running; both are the desired end state, not failures.
+          const sourceFile = confirmed[index];
+          const isMedia =
+            sourceFile.type.startsWith("audio/") ||
+            sourceFile.type.startsWith("video/");
+          if (!isMedia) {
+            try {
+              await reingestStoredFile(workspaceId, result.fileId);
+            } catch {
+              anyFailed = true;
+              updateUpload(upload.id, {
+                status: "error",
+                error: t.brainSaveFailed,
+              });
+              continue;
+            }
+          }
+          updateUpload(upload.id, null);
         }
         if (anyPinned) await refresh();
         if (!anyFailed) setAddOpen(false);
@@ -485,6 +513,27 @@ export function ChatContextPins({
 
   const chipLabel = (pin: SessionPinRow): string =>
     pin.label ?? (pin.kind === "url" ? (pin.url ?? "") : t.unavailable);
+
+  // The pin list is unbounded, so past a handful of rows a filter input keeps
+  // it navigable. Filtering only applies while the input is rendered (list at
+  // or above the threshold) so a shrunken list can never be hidden by a stale
+  // needle.
+  const pinNeedle = pinFilter.trim().toLowerCase();
+  const visiblePins =
+    !pinNeedle || pins.length < PIN_FILTER_MIN_PINS
+      ? pins
+      : pins.filter((pin) =>
+          [
+            chipLabel(pin),
+            kindLabel(pin.kind),
+            pin.text ?? "",
+            pin.url ?? "",
+            pin.addedByName ?? "",
+          ]
+            .join("\n")
+            .toLowerCase()
+            .includes(pinNeedle),
+        );
 
   const leadTools = tools.filter((tool) => !tool.workerId);
   const leadDone = leadTools.filter((tool) => tool.status === "done").length;
@@ -925,6 +974,17 @@ export function ChatContextPins({
             </div>
           )}
 
+          {pins.length >= PIN_FILTER_MIN_PINS && (
+            <input
+              type="search"
+              value={pinFilter}
+              onChange={(e) => setPinFilter(e.target.value)}
+              placeholder={t.filterPlaceholder}
+              aria-label={t.filterPlaceholder}
+              className="mt-3 w-full rounded-md border border-border bg-background px-2 py-1.5 text-xs outline-none focus:ring-2 focus:ring-ring/40"
+            />
+          )}
+
           <div className="mt-3 space-y-2">
             {fileUploads.map((upload) => (
               <div
@@ -957,8 +1017,26 @@ export function ChatContextPins({
                     </div>
                   )}
                   {upload.status === "uploading" && upload.progress !== undefined && (
-                    <div className="text-[10px] text-muted-foreground">
-                      {format(t.uploadingProgress, { percent: upload.progress })}
+                    <div className="mt-1.5 flex items-center gap-2">
+                      <div
+                        role="progressbar"
+                        aria-label={upload.fileName}
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                        aria-valuenow={upload.progress}
+                        aria-valuetext={format(t.uploadingProgress, {
+                          percent: upload.progress,
+                        })}
+                        className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-primary/10"
+                      >
+                        <div
+                          className="h-full rounded-full bg-primary transition-[width] duration-200 ease-out motion-reduce:transition-none"
+                          style={{ width: `${upload.progress}%` }}
+                        />
+                      </div>
+                      <span className="w-8 shrink-0 text-right text-[10px] tabular-nums text-muted-foreground">
+                        {upload.progress}%
+                      </span>
                     </div>
                   )}
                 </div>
@@ -999,7 +1077,12 @@ export function ChatContextPins({
                 </span>
               </button>
             )}
-            {pins.map((pin) => {
+            {pins.length > 0 && visiblePins.length === 0 && (
+              <p className="px-1 py-1.5 text-[11px] text-muted-foreground">
+                {t.noResults}
+              </p>
+            )}
+            {visiblePins.map((pin) => {
               const Icon = KIND_ICON[pin.kind] ?? Pin;
               return (
                 <article

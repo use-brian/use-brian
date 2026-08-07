@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildMemoryContext } from '../context-builder.js'
+import { buildAssistantNameSection, buildMemoryContext } from '../context-builder.js'
 
 // Pattern-extractor tests retired (Q9, 2026-05-28): the regex
 // `extractPatterns` matcher was deleted along with the file
@@ -339,5 +339,37 @@ describe('[COMP:memory/context-builder] Memory context builder', () => {
     })
     expect(ctx).toContain('[id:op222222]')
     expect(ctx).not.toContain('| 20')
+  })
+})
+
+describe('[COMP:memory/context-builder] Assistant name override', () => {
+  it('emits the ## Your Name override for a custom name', () => {
+    const section = buildAssistantNameSection('SDR')
+    expect(section).toContain('## Your Name')
+    expect(section).toContain('The user has named you "SDR"')
+    expect(section).toContain('answer as "SDR"')
+  })
+
+  it('returns null for the default name, blank, and unset', () => {
+    expect(buildAssistantNameSection('My Assistant')).toBeNull()
+    expect(buildAssistantNameSection('  ')).toBeNull()
+    expect(buildAssistantNameSection(null)).toBeNull()
+    expect(buildAssistantNameSection(undefined)).toBeNull()
+  })
+
+  it('buildMemoryContext carries the override for named assistants only', () => {
+    const named = buildMemoryContext({
+      identityMemories: [],
+      memoryIndex: [],
+      assistantName: 'SDR',
+    })
+    expect(named).toContain('The user has named you "SDR"')
+
+    const unnamed = buildMemoryContext({
+      identityMemories: [],
+      memoryIndex: [],
+      assistantName: 'My Assistant',
+    })
+    expect(unnamed).not.toContain('## Your Name')
   })
 })

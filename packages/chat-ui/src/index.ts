@@ -37,4 +37,11 @@ export {
 export { normalizeBullets } from './normalize-markdown.js'
 export { ChatMarkdown, type ChatMarkdownProps } from './markdown.js'
 
-export { ChatComposer, type ChatComposerProps } from './ChatComposer.js'
+export {
+  ChatComposer,
+  resolveEnterIntent,
+  splitHighlightSegments,
+  type ChatComposerProps,
+  type ComposerEnterIntent,
+  type HighlightRange,
+} from './ChatComposer.js'

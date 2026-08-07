@@ -66,6 +66,26 @@ optional. The exception is Vertex AI long-recording transcription: because
 Vertex has no Files API, set `GCS_FILES_BUCKET` so temporary audio can be passed
 to the model by `gs://` URI and deleted after the request.
 
+### Firefox My Browser On A Server
+
+Firefox does not require the Electron app. Install the standalone native
+companion as the same OS user that runs Firefox:
+
+```bash
+pnpm --filter @use-brian/firefox-companion build
+npm install -g ./apps/firefox-companion
+use-brian-firefox install
+# Quit every existing Firefox process first.
+use-brian-firefox start
+```
+
+The Firefox extension and browser-relay pairing are still required. A graphical
+session is also required because each new task keeps the explicit per-tab Allow
+prompt. The standalone host supports Linux and macOS; Windows keeps using the
+packaged desktop executable. See
+[`apps/firefox-companion/README.md`](./apps/firefox-companion/README.md) for
+custom Firefox/profile paths and server details.
+
 DashScope long-recording transcription fetches input by URL. To keep persistent
 storage local, expose only the signed transfer endpoint through a public HTTPS
 reverse proxy and set its origin separately:

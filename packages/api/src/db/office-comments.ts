@@ -46,8 +46,8 @@ export function createOfficeCommentStore(db: OfficeDbQuery = defaultOfficeDbQuer
             (thread_id, workspace_id, author_type, author_user_id, body,
              mentions, brian_trigger_key,
              brian_run_status)
-          SELECT id,$2,'user',$8,$9,$10::uuid[],$11,
-                 CASE WHEN $11 IS NULL THEN NULL ELSE 'queued' END
+          SELECT id,$2,'user',$8,$9,$10::uuid[],$11::text,
+                 CASE WHEN $11::text IS NULL THEN NULL ELSE 'queued' END
             FROM thread RETURNING id, thread_id
         )
         SELECT thread_id AS "threadId", id AS "messageId" FROM message
@@ -62,8 +62,8 @@ export function createOfficeCommentStore(db: OfficeDbQuery = defaultOfficeDbQuer
         INSERT INTO office_comment_messages
           (thread_id, workspace_id, author_type, author_user_id, body,
            mentions, brian_trigger_key, brian_run_status)
-        SELECT $1,$2,'user',$3,$4,$5::uuid[],$6,
-               CASE WHEN $6 IS NULL THEN NULL ELSE 'queued' END
+        SELECT $1,$2,'user',$3,$4,$5::uuid[],$6::text,
+               CASE WHEN $6::text IS NULL THEN NULL ELSE 'queued' END
          WHERE EXISTS (SELECT 1 FROM office_comment_threads WHERE id = $1 AND status <> 'detached')
         ON CONFLICT (thread_id, brian_trigger_key) DO NOTHING
         RETURNING id

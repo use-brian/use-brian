@@ -60,6 +60,8 @@ const knowledgeStore = {
   getSource: vi.fn(),
   createSource: vi.fn(),
   updateSourceWriteAccess: vi.fn(),
+  updateSourceDefaultSensitivity: vi.fn(),
+  countEntriesBySource: vi.fn(async () => []),
 }
 
 function app(userId?: string) {
@@ -472,5 +474,207 @@ describe('[COMP:api/knowledge-route] local filesystem sources', () => {
 
     expect(res.status).toBe(403)
     expect(knowledgeStore.createSource).not.toHaveBeenCalled()
+  })
+})
+
+// ── Per-source default sensitivity (mig 410) ─────────────────────
+
+const GH_SOURCE = {
+  id: 'src-1', workspaceId: 'ws-1', sourceType: 'github' as const,
+  repo: 'acme-corp/kb', branch: 'main', rootPath: '',
+  lastSyncedSha: 'sha1', lastSyncedAt: new Date(), syncError: null,
+  connectorInstanceId: 'ci1', writeAccess: true, writeAccessCheckedAt: new Date(),
+  defaultSensitivity: 'internal' as const, createdAt: new Date(),
+}
+
+describe('[COMP:api/knowledge-route] PATCH /sources/:id (default sensitivity)', () => {
+  it('rejects an invalid tier with 400', async () => {
+    const res = await request(appWs('u1'))
+      .patch('/api/workspaces/ws-1/knowledge/sources/src-1')
+      .send({ defaultSensitivity: 'super-secret' })
+    expect(res.status).toBe(400)
+    expect(knowledgeStore.updateSourceDefaultSensitivity).not.toHaveBeenCalled()
+  })
+
+  it('404s a source in another workspace', async () => {
+    knowledgeStore.getSource.mockResolvedValueOnce({ ...GH_SOURCE, workspaceId: 'ws-other' })
+    const res = await request(appWs('u1'))
+      .patch('/api/workspaces/ws-1/knowledge/sources/src-1')
+      .send({ defaultSensitivity: 'public' })
+    expect(res.status).toBe(404)
+  })
+
+  it('updates the tier, resets the sync cursor via the store, and kicks a re-sync', async () => {
+    const triggerSync = vi.fn(async () => {})
+    const appWithSync = createTestApp(
+      '/api/workspaces/:workspaceId/knowledge',
+      workspaceKnowledgeRoutes({ knowledgeStore: knowledgeStore as never, triggerSync }),
+      { userId: 'u1' },
+    )
+    knowledgeStore.getSource.mockResolvedValueOnce(GH_SOURCE)
+    knowledgeStore.updateSourceDefaultSensitivity.mockResolvedValueOnce({
+      ...GH_SOURCE, defaultSensitivity: 'public', lastSyncedSha: null,
+    })
+    const res = await request(appWithSync)
+      .patch('/api/workspaces/ws-1/knowledge/sources/src-1')
+      .send({ defaultSensitivity: 'public' })
+    expect(res.status).toBe(200)
+    expect(res.body.resyncScheduled).toBe(true)
+    expect(knowledgeStore.updateSourceDefaultSensitivity).toHaveBeenCalledWith('src-1', 'public')
+    expect(triggerSync).toHaveBeenCalledWith('src-1')
+  })
+
+  it('is a no-op when the tier is unchanged (no cursor reset)', async () => {
+    knowledgeStore.getSource.mockResolvedValueOnce(GH_SOURCE)
+    const res = await request(appWs('u1'))
+      .patch('/api/workspaces/ws-1/knowledge/sources/src-1')
+      .send({ defaultSensitivity: 'internal' })
+    expect(res.status).toBe(200)
+    expect(knowledgeStore.updateSourceDefaultSensitivity).not.toHaveBeenCalled()
+  })
+})
+
+// ── Self-maintain agent routes (mig 411) ─────────────────────────
+
+const kbMaintenanceStore = {
+  getBySource: vi.fn(),
+  listByWorkspace: vi.fn(),
+  upsert: vi.fn(),
+  setWorkflowId: vi.fn(),
+  deleteBySource: vi.fn(),
+  countRecentProposalAttempts: vi.fn(async () => 0),
+  getByWorkflowId: vi.fn(),
+}
+
+const workflowStore = {
+  create: vi.fn(),
+  getById: vi.fn(),
+  list: vi.fn(),
+  update: vi.fn(),
+}
+
+function appWsMaint(userId?: string) {
+  return createTestApp(
+    '/api/workspaces/:workspaceId/knowledge',
+    workspaceKnowledgeRoutes({
+      knowledgeStore: knowledgeStore as never,
+      kbMaintenanceStore: kbMaintenanceStore as never,
+      workflowStore: workflowStore as never,
+    }),
+    userId ? { userId } : undefined,
+  )
+}
+
+const MAINT_BODY = {
+  enabled: true,
+  charter: 'Product and API documentation for Acme. Out of scope: finances and HR.',
+  pathScope: ['products/'],
+  signals: { mode: 'events' },
+  similarityThreshold: 0.8,
+  styleContract: 'Short declarative sentences, headings over prose.',
+  sensitivityCeiling: 'internal',
+  weeklyProposalBudget: 5,
+}
+
+describe('[COMP:api/knowledge-route] self-maintain agent routes', () => {
+  it('answers 503 when the maintenance store is not wired', async () => {
+    const res = await request(appWs('u1'))
+      .get('/api/workspaces/ws-1/knowledge/sources/src-1/maintenance')
+    expect(res.status).toBe(503)
+  })
+
+  it('GET returns agent:null plus writability for an unconfigured source', async () => {
+    knowledgeStore.getSource.mockResolvedValueOnce(GH_SOURCE)
+    kbMaintenanceStore.getBySource.mockResolvedValueOnce(null)
+    const res = await request(appWsMaint('u1'))
+      .get('/api/workspaces/ws-1/knowledge/sources/src-1/maintenance')
+    expect(res.status).toBe(200)
+    expect(res.body.agent).toBeNull()
+    expect(res.body.writable).toBe(true)
+  })
+
+  it('PUT rejects a config missing the anti-slop mandatory fields', async () => {
+    const res = await request(appWsMaint('u1'))
+      .put('/api/workspaces/ws-1/knowledge/sources/src-1/maintenance')
+      .send({ ...MAINT_BODY, charter: 'too short' })
+    expect(res.status).toBe(400)
+    expect(workflowStore.create).not.toHaveBeenCalled()
+  })
+
+  it('PUT refuses a read-only source with 409', async () => {
+    knowledgeStore.getSource.mockResolvedValueOnce({ ...GH_SOURCE, writeAccess: false })
+    const res = await request(appWsMaint('u1'))
+      .put('/api/workspaces/ws-1/knowledge/sources/src-1/maintenance')
+      .send(MAINT_BODY)
+    expect(res.status).toBe(409)
+    expect(res.body.reason).toBe('not_writable')
+    expect(workflowStore.create).not.toHaveBeenCalled()
+  })
+
+  it('PUT materializes a knowledge-managed workflow and upserts the config', async () => {
+    knowledgeStore.getSource.mockResolvedValueOnce(GH_SOURCE)
+    kbMaintenanceStore.getBySource.mockResolvedValueOnce(null)
+    workflowStore.create.mockResolvedValueOnce({ id: 'wf-1' })
+    kbMaintenanceStore.upsert.mockResolvedValueOnce({ id: 'ag-1', workflowId: 'wf-1' })
+
+    const res = await request(appWsMaint('u1'))
+      .put('/api/workspaces/ws-1/knowledge/sources/src-1/maintenance')
+      .send(MAINT_BODY)
+
+    expect(res.status).toBe(200)
+    expect(workflowStore.create).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: 'ws-1',
+      managedBy: 'knowledge',
+      trigger: { kind: 'event', event: { sources: [{ source: { type: 'knowledge' } }] } },
+    }))
+    expect(kbMaintenanceStore.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      sourceId: 'src-1',
+      workflowId: 'wf-1',
+    }))
+  })
+
+  it('PUT re-materializes through the existing workflow on a config edit', async () => {
+    knowledgeStore.getSource.mockResolvedValueOnce(GH_SOURCE)
+    kbMaintenanceStore.getBySource.mockResolvedValueOnce({ id: 'ag-1', workflowId: 'wf-1' })
+    workflowStore.update.mockResolvedValueOnce({ id: 'wf-1' })
+    kbMaintenanceStore.upsert.mockResolvedValueOnce({ id: 'ag-1', workflowId: 'wf-1' })
+
+    const res = await request(appWsMaint('u1'))
+      .put('/api/workspaces/ws-1/knowledge/sources/src-1/maintenance')
+      .send(MAINT_BODY)
+
+    expect(res.status).toBe(200)
+    expect(workflowStore.update).toHaveBeenCalledWith('u1', 'wf-1', expect.objectContaining({
+      enabled: true,
+      definition: expect.anything(),
+    }))
+    expect(workflowStore.create).not.toHaveBeenCalled()
+  })
+
+  it('PUT rejects daily mode when schedule reconciliation is not wired (501)', async () => {
+    knowledgeStore.getSource.mockResolvedValueOnce(GH_SOURCE)
+    const res = await request(appWsMaint('u1'))
+      .put('/api/workspaces/ws-1/knowledge/sources/src-1/maintenance')
+      .send({ ...MAINT_BODY, signals: { mode: 'daily', time: '09:00' } })
+    expect(res.status).toBe(501)
+  })
+
+  it('DELETE tears down the config and the managed workflow', async () => {
+    knowledgeStore.getSource.mockResolvedValueOnce(GH_SOURCE)
+    kbMaintenanceStore.getBySource
+      .mockResolvedValueOnce({ id: 'ag-1', workflowId: 'wf-1' }) // route existence check
+      .mockResolvedValueOnce({ id: 'ag-1', workflowId: 'wf-1' }) // teardown re-read
+    mockQuery.mockResolvedValue({ rows: [], rowCount: 1 } as never)
+    kbMaintenanceStore.deleteBySource.mockResolvedValueOnce(true)
+
+    const res = await request(appWsMaint('u1'))
+      .delete('/api/workspaces/ws-1/knowledge/sources/src-1/maintenance')
+
+    expect(res.status).toBe(204)
+    expect(mockQuery).toHaveBeenCalledWith(
+      expect.stringContaining("managed_by = 'knowledge'"),
+      ['wf-1'],
+    )
+    expect(kbMaintenanceStore.deleteBySource).toHaveBeenCalledWith('src-1')
   })
 })

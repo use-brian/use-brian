@@ -190,9 +190,26 @@ describe("[COMP:app-web/crm-view] CRM view logic", () => {
       applyContactFilters(rows, {
         ...DEFAULT_CRM_VIEW,
         section: "contacts",
-        company: "none",
+        company: ["none"],
       }).map((r) => r.id),
     ).toEqual(["orphan"]);
+  });
+
+  it("ORs within a property: two companies show both, unlinked included", () => {
+    const rows = [
+      contact({ id: "a", companyId: "c1" }),
+      contact({ id: "b", companyId: "c2" }),
+      contact({ id: "c", companyId: "c3" }),
+      contact({ id: "orphan", companyId: null }),
+    ];
+    const withCompany = (company: string[]) =>
+      applyContactFilters(rows, {
+        ...DEFAULT_CRM_VIEW,
+        section: "contacts",
+        company,
+      }).map((r) => r.id);
+    expect(withCompany(["c1", "c2"])).toEqual(["a", "b"]);
+    expect(withCompany(["c1", "none"])).toEqual(["a", "orphan"]);
   });
 
   it("sortDeals: amount sinks unpriced, close sinks undated", () => {
@@ -236,6 +253,31 @@ describe("[COMP:app-web/crm-surface] CRM surface state contract", () => {
     expect(state.quick).toBe("orphaned");
     expect(state.q).toBe("sam");
     expect(crmViewFromSearch(searchFromCrmView(state))).toEqual(state);
+  });
+
+  it("round-trips MULTI-value filters; tags repeat, ids comma-join", () => {
+    const state = {
+      ...DEFAULT_CRM_VIEW,
+      stages: ["proposal", "negotiation"] as const,
+      company: ["co1", "co2"],
+      tag: ["vip", "asia, pacific"],
+    };
+    const search = searchFromCrmView({ ...state, stages: [...state.stages] });
+    const params = new URLSearchParams(search);
+    expect(params.getAll("company")).toEqual(["co1,co2"]);
+    // A tag containing a comma must stay one tag.
+    expect(params.getAll("tag")).toEqual(["vip", "asia, pacific"]);
+    expect(crmViewFromSearch(search)).toEqual({
+      ...state,
+      stages: [...state.stages],
+    });
+  });
+
+  it("parses both shapes, so pre-multi single-value links survive", () => {
+    expect(crmViewFromSearch("company=co1").company).toEqual(["co1"]);
+    expect(crmViewFromSearch("stage=lead,won").stages).toEqual(["lead", "won"]);
+    expect(crmViewFromSearch("stage=lead&stage=bogus").stages).toEqual(["lead"]);
+    expect(crmViewFromSearch("tag=vip").tag).toEqual(["vip"]);
   });
 
   it("a bare ?filter deep link resolves its home section (the dock card link)", () => {

@@ -18,7 +18,8 @@
  * See docs/architecture/integrations/mcp.md → "Runtime".
  */
 
-import { wrapMcpTools, buildToolIndex, createMcpSearchTools, createGoogleCalendarTools, createGmailTools, createGoogleTasksTools, createGoogleDriveTools, createGoogleDocsTools, createGoogleSheetsTools, createGoogleSlidesTools, createGDriveFilesTools, createGitHubTools, createNotionTools, createFathomTools, createShopifyTools, createMsGraphTools, createKnowledgeTools, createAgentmailTools, createMailboxTools, workspaceFilesCtxFor, workspaceFilesErrorMessage, workspaceFilesGate } from '@use-brian/core'
+import type { AccessContext, CachedFile } from '@use-brian/core'
+import { promoteCachedFile, wrapMcpTools, buildToolIndex, createMcpSearchTools, createGoogleCalendarTools, createGmailTools, createGoogleTasksTools, createGoogleDriveTools, createGoogleDocsTools, createGoogleSheetsTools, createGoogleSlidesTools, createGDriveFilesTools, createGitHubTools, createNotionTools, createFathomTools, createShopifyTools, createMsGraphTools, createKnowledgeTools, createAgentmailTools, createMailboxTools, workspaceFilesCtxFor, workspaceFilesErrorMessage, workspaceFilesGate } from '@use-brian/core'
 import type { Tool, McpSettingsStore, McpServerConfig, KnowledgeStoreInterface, KnowledgeRepoWriter, AuthorizedFile, GDriveFilesStore, GDriveFileKind, LocalSource, RemoteSource, EngineHooks, FilesApi, AgentmailToolApi, MailboxApi, MailboxAccountRouter } from '@use-brian/core'
 import { getGlobalEmailInboxProvider, type EmailInboxProvider } from '../agentmail/provider.js'
 import { renderEmailBody } from '@use-brian/channels'
@@ -89,6 +90,8 @@ import {
   listDisputes as listShopifyDisputes,
   listContent as listShopifyContent,
   fetchOrdersRange as fetchShopifyOrdersRange,
+  storefrontFunnel as shopifyStorefrontFunnelQuery,
+  runShopifyqlQuery,
   updateProduct as updateShopifyProduct,
   createProduct as createShopifyProduct,
   createDraftOrder as createShopifyDraftOrder,
@@ -287,6 +290,8 @@ export const INJECTED_BUILTIN_TOOLS_BY_CONNECTOR: Record<string, readonly string
     'shopifyListDisputes',
     'shopifyListContent',
     'shopifySalesReport',
+    'shopifyStorefrontFunnel',
+    'shopifyAnalyticsQuery',
     'shopifyUpdateProduct',
     'shopifyCreateProduct',
     'shopifyAddProductImage',
@@ -462,6 +467,18 @@ export async function injectMcpTools(params: {
    */
   filesApi?: FilesApi
   /**
+   * Reader for the transient upload cache (`file_cache`). Wire to
+   * `fileStore.get` at boot on the paths where a user can attach a file
+   * (chat + channels); workflow and inter-assistant sessions have no
+   * attachments and legitimately pass nothing.
+   *
+   * Without it, a photo the owner just attached cannot reach a Shopify
+   * product: `shopifyAddProductImage` reads workspace files only, and the
+   * model has to call `saveFileToBrain` first — a step it demonstrably skips
+   * (six failed calls in one merchant session on 2026-08-06).
+   */
+  readCachedFile?: (id: string, ctx: AccessContext) => Promise<CachedFile | null>
+  /**
    * The on-demand introspection lane (ability audit §6-c/d): operational-
    * visibility read tools (pending approvals, scheduled jobs, research runs,
    * session history, ...) registered as an `mcp_search` LOCAL SOURCE
@@ -489,7 +506,7 @@ export async function injectMcpTools(params: {
     gdriveFilesStore,
     connectorGrantStore, connectorInstanceStore, workspaceToolPolicyStore, assistantTeamId,
     connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain,
-    keepBuiltinsDirect = false, engineHooks, actorIdentity, filesApi,
+    keepBuiltinsDirect = false, engineHooks, actorIdentity, filesApi, readCachedFile,
     introspectionTools, emailInboxProvider,
   } = params
 
@@ -905,7 +922,7 @@ export async function injectMcpTools(params: {
   await injectGitHubTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, extrasByProvider.get('github'), resolveInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore)
   await injectNotionTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, extrasByProvider.get('notion'), resolveInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore)
   await injectFathomTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, undefined, extrasByProvider.get('fathom'), resolveInstanceCreds, persistInstanceCreds)
-  await injectShopifyTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, undefined, extrasByProvider.get('shopify'), resolveInstanceCreds, persistInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore, filesApi)
+  await injectShopifyTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, undefined, extrasByProvider.get('shopify'), resolveInstanceCreds, persistInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore, filesApi, readCachedFile)
   // No extras argument: `msgraph` is `single_instance` in OFFICIAL_CONNECTORS
   // (one Microsoft identity per user), so it is never in
   // MULTI_INSTANCE_CONNECTOR_IDS and `extrasByProvider` never holds it.
@@ -1924,8 +1941,10 @@ export function clearStaleNotConnectedNotices(
 
 function notConnectedNotice(displayName: string, capabilities: string): string {
   return (
-    `${displayName}: not connected for this assistant, so ${capabilities} are unavailable this turn. ` +
-    'If the user asks for one, say so plainly in your own words and point them to Studio then Connectors to connect it. ' +
+    `${displayName}: not connected for this assistant, so only this connector's ${capabilities} are unavailable this turn. ` +
+    'Another connected service may still provide the broader capability. Use an available tool that matches the requested account and identity; ' +
+    'do not mention this missing service when another available tool can fulfill the task. ' +
+    'If the task truly requires this service and no available tool can fulfill it, say so plainly in your own words and point the user to Studio then Connectors to connect it. ' +
     'Do not quote this notice back to them, and do not claim a tool call failed.'
   )
 }
@@ -3383,6 +3402,8 @@ async function injectShopifyTools(
   assistantConnectorGrantsStore?: import('../db/assistant-connector-grants-store.js').AssistantConnectorGrantsStore,
   /** Workspace-file reader for `shopifyAddProductImage`. Absent → the tool reports it honestly. */
   filesApi?: FilesApi,
+  /** Upload-cache reader, so a just-attached photo can be promoted on the fly. */
+  readCachedFile?: (id: string, ctx: AccessContext) => Promise<CachedFile | null>,
 ): Promise<void> {
   const shopify = connectors.find((c) => c.connectorId === 'shopify' && c.connected)
   const shopifyEnabled = shopify && (!assistantConnectorStore || await assistantConnectorStore.isEnabled(assistantId, 'shopify'))
@@ -3453,6 +3474,8 @@ async function injectShopifyTools(
       listDisputes: async (params) => listShopifyDisputes(await tm.getAuth(), params),
       listContent: async (params) => listShopifyContent(await tm.getAuth(), params),
       fetchOrdersRange: async (params) => fetchShopifyOrdersRange(await tm.getAuth(), params),
+      storefrontFunnel: async (params) => shopifyStorefrontFunnelQuery(await tm.getAuth(), params),
+      runAnalyticsQuery: async (q) => runShopifyqlQuery(await tm.getAuth(), q),
       updateProduct: async (params) => updateShopifyProduct(await tm.getAuth(), params),
       createProduct: async (params) => createShopifyProduct(await tm.getAuth(), params),
       createDraftOrder: async (params) => createShopifyDraftOrder(await tm.getAuth(), params),
@@ -3480,8 +3503,41 @@ async function injectShopifyTools(
         ? async (context, idOrPath) => {
             const gate = workspaceFilesGate(context.workspaceId)
             if (gate) return { error: gate.data }
-            const res = await filesApi.readBytes(workspaceFilesCtxFor(context), idOrPath)
-            if (!res.ok) return { error: workspaceFilesErrorMessage(res.error) }
+            const ctx = workspaceFilesCtxFor(context)
+            let res = await filesApi.readBytes(ctx, idOrPath)
+
+            // A miss here is almost always a chat-attachment id: the owner
+            // attached the photo and the model passed that id straight through,
+            // because that is the id in front of it. Promote it rather than
+            // bouncing the request back for a bookkeeping step nobody asked
+            // for. `readCachedFile` gates on the same access predicate, so this
+            // cannot reach another workspace's upload.
+            if (!res.ok && res.error.kind === 'not_found' && readCachedFile) {
+              // AccessContext, not FilesContext: the cache read is gated by
+              // the universal access predicate, which requires a concrete
+              // assistant rather than the optional one FilesContext carries.
+              const cached = await readCachedFile(idOrPath, {
+                workspaceId: context.workspaceId!,
+                userId: context.userId,
+                assistantId: context.assistantId,
+                assistantKind: context.assistantKind ?? 'standard',
+                clearance: context.clearance,
+                compartments: context.compartments,
+              })
+              if (cached) {
+                const promoted = await promoteCachedFile(filesApi, ctx, cached)
+                // A failed promotion (quota, most likely) is reported, not
+                // skipped: uploading to Shopify anyway would leave the brain
+                // silently missing a file the owner believes was kept.
+                if (!promoted.ok) return { error: workspaceFilesErrorMessage(promoted.error) }
+                res = await filesApi.readBytes(ctx, promoted.value.id)
+              }
+            }
+
+            // Still missing: say which step is absent rather than relaying a
+            // bare "not found", which reads as a wrong reference and sends the
+            // model hunting for another id.
+            if (!res.ok) return { error: workspaceFilesErrorMessage(res.error), notFound: res.error.kind === 'not_found' }
             return {
               bytes: res.value.bytes,
               fileName: res.value.file.name,

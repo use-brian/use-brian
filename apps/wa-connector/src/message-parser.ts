@@ -434,6 +434,8 @@ export type WhatsAppIncomingMessage = {
    * routes this through the channel-media intake.
    */
   mediaRef?: {
+    /** Local chat-archive staging asset, completed by the API on inbound. */
+    assetId?: string
     gcsKey: string
     /** BYO storage URI (bytes live in the workspace's own bucket); echoed from the mint. */
     storageUri?: string

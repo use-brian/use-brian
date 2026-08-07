@@ -123,10 +123,10 @@ describe("[COMP:app-web/tasks-surface] URL codec", () => {
     expect(searchFromViewState(state())).toBe("");
     const s = state({
       quick: "stale",
-      assignee: "none",
-      priority: "high",
-      project: "launch",
-      due: "overdue",
+      assignee: ["none"],
+      priority: ["high"],
+      project: ["launch"],
+      due: ["overdue"],
       q: "deck",
       group: "assignee",
       sort: "due",
@@ -135,6 +135,50 @@ describe("[COMP:app-web/tasks-surface] URL codec", () => {
     });
     const decoded = viewStateFromSearch(searchFromViewState(s));
     expect(decoded).toEqual(s);
+  });
+
+  it("round-trips MULTI-value filters (the whole set survives a link)", () => {
+    const s = state({
+      statuses: ["todo", "in_progress"],
+      assignee: ["m1", "m2", "none"],
+      priority: ["high", "urgent"],
+      project: ["launch", "ops"],
+      due: ["overdue", "week"],
+    });
+    expect(viewStateFromSearch(searchFromViewState(s))).toEqual(s);
+  });
+
+  it("comma-joins closed vocabularies + ids, but repeats free text", () => {
+    const search = searchFromViewState(
+      state({ assignee: ["m1", "m2"], project: ["launch", "ops"] }),
+    );
+    const params = new URLSearchParams(search);
+    expect(params.getAll("assignee")).toEqual(["m1,m2"]);
+    expect(params.getAll("project")).toEqual(["launch", "ops"]);
+  });
+
+  it("a project name containing a comma stays ONE filter", () => {
+    // The reason project can't comma-join: joining would split this name
+    // into two filters, and neither would match anything.
+    const s = state({ project: ["Q3: launch, phase 2"] });
+    expect(viewStateFromSearch(searchFromViewState(s)).project).toEqual([
+      "Q3: launch, phase 2",
+    ]);
+  });
+
+  it("parses both shapes, so pre-multi single-value deep links survive", () => {
+    expect(viewStateFromSearch("assignee=m1").assignee).toEqual(["m1"]);
+    expect(viewStateFromSearch("assignee=m1,m2").assignee).toEqual(["m1", "m2"]);
+    expect(viewStateFromSearch("assignee=m1&assignee=m2").assignee).toEqual([
+      "m1",
+      "m2",
+    ]);
+    expect(viewStateFromSearch("status=todo,done").statuses).toEqual([
+      "todo",
+      "done",
+    ]);
+    // Duplicates collapse; the pill's lead label must be deterministic.
+    expect(viewStateFromSearch("assignee=m1,m1").assignee).toEqual(["m1"]);
   });
 
   it("seeds the dock card's deep link (?filter=stale)", () => {
@@ -147,6 +191,18 @@ describe("[COMP:app-web/tasks-surface] URL codec", () => {
     expect(decoded.group).toBe("status");
     expect(decoded.sort).toBe("updated");
     expect(decoded.view).toBe("table");
+  });
+
+  it("drops unknown members of a multi-value closed vocabulary", () => {
+    expect(viewStateFromSearch("status=todo,bogus,done").statuses).toEqual([
+      "todo",
+      "done",
+    ]);
+    expect(viewStateFromSearch("priority=high,bogus,none").priority).toEqual([
+      "high",
+      "none",
+    ]);
+    expect(viewStateFromSearch("due=week,bogus").due).toEqual(["week"]);
   });
 });
 
@@ -179,13 +235,90 @@ describe("[COMP:app-web/tasks-view] filtering, sorting, grouping", () => {
       }),
       task({ title: "Other" }),
     ];
-    expect(applyFilters(rows, state({ assignee: "m1" }), NOW)).toHaveLength(1);
-    expect(applyFilters(rows, state({ assignee: "none" }), NOW)).toHaveLength(1);
-    expect(applyFilters(rows, state({ priority: "high" }), NOW)).toHaveLength(1);
-    expect(applyFilters(rows, state({ priority: "none" }), NOW)).toHaveLength(1);
-    expect(applyFilters(rows, state({ project: "launch" }), NOW)).toHaveLength(1);
-    expect(applyFilters(rows, state({ due: "overdue" }), NOW)).toHaveLength(1);
+    expect(applyFilters(rows, state({ assignee: ["m1"] }), NOW)).toHaveLength(1);
+    expect(applyFilters(rows, state({ assignee: ["none"] }), NOW)).toHaveLength(1);
+    expect(applyFilters(rows, state({ priority: ["high"] }), NOW)).toHaveLength(1);
+    expect(applyFilters(rows, state({ priority: ["none"] }), NOW)).toHaveLength(1);
+    expect(applyFilters(rows, state({ project: ["launch"] }), NOW)).toHaveLength(1);
+    expect(applyFilters(rows, state({ due: ["overdue"] }), NOW)).toHaveLength(1);
     expect(applyFilters(rows, state({ q: "pricing" }), NOW)).toHaveLength(1);
+  });
+
+  it("ORs within a property: two assignees show BOTH people's tasks", () => {
+    const rows = [
+      task({ id: "a", assigneeId: "m1" }),
+      task({ id: "b", assigneeId: "m2" }),
+      task({ id: "c", assigneeId: "m3" }),
+      task({ id: "d", assigneeId: null }),
+    ];
+    expect(
+      applyFilters(rows, state({ assignee: ["m1", "m2"] }), NOW).map((r) => r.id),
+    ).toEqual(["a", "b"]);
+    // "none" is an ordinary member of the set — unassigned OR Alice.
+    expect(
+      applyFilters(rows, state({ assignee: ["m1", "none"] }), NOW).map((r) => r.id),
+    ).toEqual(["a", "d"]);
+  });
+
+  it("ORs within status / priority / project / due too", () => {
+    const rows = [
+      task({ id: "todo", status: "todo" }),
+      task({ id: "prog", status: "in_progress" }),
+      task({ id: "block", status: "blocked" }),
+    ];
+    expect(
+      applyFilters(rows, state({ statuses: ["todo", "blocked"] }), NOW).map(
+        (r) => r.id,
+      ),
+    ).toEqual(["todo", "block"]);
+
+    const priced = [
+      task({ id: "hi", attributes: { priority: "high" } }),
+      task({ id: "ur", attributes: { priority: "urgent" } }),
+      task({ id: "lo", attributes: { priority: "low" } }),
+    ];
+    expect(
+      applyFilters(priced, state({ priority: ["high", "urgent"] }), NOW).map(
+        (r) => r.id,
+      ),
+    ).toEqual(["hi", "ur"]);
+
+    const tagged = [
+      task({ id: "l", tags: ["project:launch"] }),
+      task({ id: "o", tags: ["project:ops"] }),
+      task({ id: "x", tags: ["project:other"] }),
+    ];
+    expect(
+      applyFilters(tagged, state({ project: ["launch", "ops"] }), NOW).map(
+        (r) => r.id,
+      ),
+    ).toEqual(["l", "o"]);
+
+    const dated = [
+      task({ id: "over", due: "2026-07-01T00:00:00Z" }),
+      task({ id: "soon", due: "2026-07-24T00:00:00Z" }),
+      task({ id: "far", due: "2026-12-01T00:00:00Z" }),
+    ];
+    expect(
+      applyFilters(dated, state({ due: ["overdue", "week"] }), NOW).map(
+        (r) => r.id,
+      ),
+    ).toEqual(["over", "soon"]);
+  });
+
+  it("ANDs across properties (Alice or Bob, AND high priority)", () => {
+    const rows = [
+      task({ id: "hit", assigneeId: "m1", attributes: { priority: "high" } }),
+      task({ id: "wrongPri", assigneeId: "m2", attributes: { priority: "low" } }),
+      task({ id: "wrongOwner", assigneeId: "m3", attributes: { priority: "high" } }),
+    ];
+    expect(
+      applyFilters(
+        rows,
+        state({ assignee: ["m1", "m2"], priority: ["high"] }),
+        NOW,
+      ).map((r) => r.id),
+    ).toEqual(["hit"]);
   });
 
   it("sorts by due with undated rows last, and by priority rank", () => {

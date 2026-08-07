@@ -1,7 +1,45 @@
 import pg from 'pg'
+import { AsyncLocalStorage } from 'node:async_hooks'
 
 let systemPool: pg.Pool | null = null
 let appPool: pg.Pool | null = null
+
+/**
+ * Agent-principal clearance context (teamspaces — assistant access).
+ *
+ * When an ASSISTANT EXECUTION (workflow / scheduled / A2A callee run, or a
+ * brain-MCP key call) performs RLS-scoped page reads and writes, the acting
+ * `app.current_user_id` is an incidental human account (the workspace owner
+ * via `billingPartyForAssistant` / `resolveWriteTarget`) — its per-user
+ * teamspace memberships must not decide what the assistant can reach. Wrapping
+ * the execution in `runWithAgentClearance(<assistant clearance>)` carries the
+ * assistant's clearance into every `queryWithRLS` (and `applyRLSGucs`
+ * transaction) it performs, where it is set as the `app.agent_clearance` GUC.
+ * The `saved_views` policy (migration 415) opens teamspace pages to that
+ * clearance: agent access is clearance-vs-sensitivity, never membership.
+ *
+ * Fail-closed: no wrap → GUC unset → the policy's agent leg is inert and the
+ * human membership model applies unchanged. Only assistant execution paths may
+ * wrap; interactive chat stays scoped to the chatting member's own visibility.
+ * Spec: docs/architecture/features/teamspaces.md → "Agent access".
+ */
+const AGENT_CLEARANCES = ['public', 'internal', 'confidential'] as const
+export type AgentClearance = (typeof AGENT_CLEARANCES)[number]
+
+const agentClearanceStorage = new AsyncLocalStorage<AgentClearance>()
+
+export function runWithAgentClearance<T>(clearance: string | null | undefined, fn: () => T): T {
+  const validated = AGENT_CLEARANCES.find((c) => c === clearance)
+  // Unknown/absent clearance runs WITHOUT the agent context rather than
+  // guessing a tier — the membership model then applies (fail-closed).
+  if (!validated) return fn()
+  return agentClearanceStorage.run(validated, fn)
+}
+
+/** The active agent clearance, if this code runs inside an assistant execution wrap. */
+export function currentAgentClearance(): AgentClearance | undefined {
+  return agentClearanceStorage.getStore()
+}
 
 /**
  * The nil UUID. Seeded as the SESSION value of `app.current_user_id` on every
@@ -279,12 +317,32 @@ export async function queryWithRLS<T extends pg.QueryResultRow>(
   const client = await getAppPool().connect()
   try {
     await client.query('BEGIN')
-    await client.query(`SET LOCAL app.current_user_id = '${userId.replace(/'/g, "''")}'`)
+    await applyRLSGucs(client, userId)
     const result = await client.query<T>(text, values)
     await client.query('COMMIT')
     return result
   } finally {
     await rollbackAndRelease(client)
+  }
+}
+
+/**
+ * Set the RLS GUCs on an open transaction: `app.current_user_id` always, and
+ * `app.agent_clearance` when the call runs inside an assistant execution wrap
+ * (`runWithAgentClearance`). Stores that manage their own `BEGIN`/`COMMIT`
+ * must call this instead of hand-writing the `SET LOCAL`, or the agent leg of
+ * the `saved_views` policy silently never applies on their path. Both are
+ * `SET LOCAL`, so they revert at transaction end.
+ */
+export async function applyRLSGucs(
+  client: pg.PoolClient,
+  userId: string,
+): Promise<void> {
+  await client.query(`SET LOCAL app.current_user_id = '${userId.replace(/'/g, "''")}'`)
+  const agentClearance = currentAgentClearance()
+  if (agentClearance) {
+    // Values come from the AGENT_CLEARANCES whitelist — no injection surface.
+    await client.query(`SET LOCAL app.agent_clearance = '${agentClearance}'`)
   }
 }
 

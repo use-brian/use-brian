@@ -8,9 +8,12 @@
  * [COMP:api/assistants-route]
  *
  *   GET    /:assistantId          — single assistant detail
- *   PATCH  /:assistantId          — update settings: system_prompt (any member),
- *                                   clearance (owner / workspace admin), everything
- *                                   else (name, bio, model aliases) owner-only
+ *   PATCH  /:assistantId          — update settings: charter.instructions (any
+ *                                   member), clearance (owner / workspace admin),
+ *                                   everything else (name, charter.mission /
+ *                                   .audience / .success, model aliases)
+ *                                   owner-only. Legacy `systemPrompt` / `bio`
+ *                                   keys fold into the charter (migration 418).
  *   DELETE /:assistantId          — delete assistant (owner only, solo-owned)
  */
 
@@ -39,6 +42,19 @@ import {
 } from '@use-brian/shared'
 import { classifyTool, defaultPolicy, loadBuiltinSkills } from '@use-brian/core'
 import type { SkillContent } from '@use-brian/core'
+import {
+  CHARTER_FIELDS,
+  CHARTER_FIELD_LIMITS,
+  resolveCharter,
+  type AssistantCharter,
+  type CharterField,
+} from '@use-brian/shared'
+import {
+  decidePlaybookRule,
+  listPlaybookRules,
+  MAX_ACTIVE_PLAYBOOK_RULES,
+  type PlaybookDecision,
+} from '../db/playbook-store.js'
 import type { SkillStore } from '../db/skill-store.js'
 
 type AssistantParams = { assistantId: string }
@@ -114,10 +130,10 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
         name: string
         system_prompt: string | null
         bio: string | null
+        charter: unknown
         created_at: string
-        slack_model_alias: string
-        telegram_model_alias: string
-        whatsapp_model_alias: string
+        default_model_alias: string
+        api_model_alias: string
         icon_seed: number | null
         workspace_id: string | null
         clearance: string
@@ -125,8 +141,8 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
         app_type: string | null
       }>(
         member.userId,
-        `SELECT id, name, system_prompt, bio, created_at,
-                slack_model_alias, telegram_model_alias, whatsapp_model_alias, icon_seed, workspace_id, clearance, kind, app_type
+        `SELECT id, name, system_prompt, bio, charter, created_at,
+                default_model_alias, api_model_alias, icon_seed, workspace_id, clearance, kind, app_type
          FROM assistants WHERE id = $1`,
         [assistantId],
       )
@@ -135,18 +151,26 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
         return
       }
       const row = result.rows[0]
+      // Charter is the identity item (migration 418). The legacy keys are
+      // mirrored FROM it so pre-charter clients (Telegram Mini App manage
+      // page, scripts) keep displaying current data.
+      const charter = resolveCharter({
+        charter: row.charter,
+        systemPrompt: row.system_prompt,
+        bio: row.bio,
+      })
       res.json({
         id: row.id,
         name: row.name,
         role: member.role,
-        systemPrompt: row.system_prompt,
+        charter,
+        systemPrompt: charter.instructions ?? null,
         createdAt: row.created_at,
-        slackModelAlias: row.slack_model_alias,
-        telegramModelAlias: row.telegram_model_alias,
-        whatsappModelAlias: row.whatsapp_model_alias,
+        defaultModelAlias: row.default_model_alias,
+        apiModelAlias: row.api_model_alias,
         iconSeed: row.icon_seed ?? 0,
         workspaceId: row.workspace_id,
-        bio: row.bio,
+        bio: charter.mission ?? null,
         clearance: row.clearance,
         kind: row.kind,
         appType: row.app_type,
@@ -164,23 +188,82 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
     if (!member) return
 
     const { assistantId } = req.params
-    const { name, systemPrompt, slackModelAlias, telegramModelAlias, whatsappModelAlias, bio, clearance } = req.body as {
+    const body = req.body as {
       name?: string
+      /** @deprecated migration 418 — folds into `charter.instructions`. */
       systemPrompt?: string | null
-      slackModelAlias?: string
-      telegramModelAlias?: string
-      whatsappModelAlias?: string
+      /** @deprecated migration 418 — folds into `charter.mission`. */
       bio?: string | null
+      /** Partial charter patch: key present = write, `null` = clear,
+       *  absent = keep. See docs/plans/assistant-growth-loop.md §2. */
+      charter?: Record<string, unknown> | null
+      defaultModelAlias?: string
+      apiModelAlias?: string
+      /** @deprecated migration 416 — folded into `defaultModelAlias`. */
+      slackModelAlias?: string
+      /** @deprecated migration 416 — folded into `defaultModelAlias`. */
+      telegramModelAlias?: string
+      /** @deprecated migration 416 — folded into `defaultModelAlias`. */
+      whatsappModelAlias?: string
       clearance?: string
     }
+    const { name, apiModelAlias, clearance } = body
+
+    // ── Charter patch assembly ─────────────────────────────────────
+    // The charter is the one identity item (migration 418). Pre-charter
+    // clients still send `systemPrompt` / `bio`; those fold onto
+    // `instructions` / `mission` so an old Mini App manage page keeps
+    // editing the same truth the new UI does.
+    if (
+      body.charter !== undefined &&
+      body.charter !== null &&
+      (typeof body.charter !== 'object' || Array.isArray(body.charter))
+    ) {
+      res.status(400).json({ error: 'charter must be an object' })
+      return
+    }
+    const charterPatch: Partial<Record<CharterField, string | null>> = {}
+    if (body.charter && typeof body.charter === 'object') {
+      for (const field of CHARTER_FIELDS) {
+        if (!(field in body.charter)) continue
+        const raw = (body.charter as Record<string, unknown>)[field]
+        if (raw !== null && typeof raw !== 'string') {
+          res.status(400).json({ error: `charter.${field} must be a string or null` })
+          return
+        }
+        charterPatch[field] = raw as string | null
+      }
+    }
+    if (body.systemPrompt !== undefined && charterPatch.instructions === undefined) {
+      charterPatch.instructions = body.systemPrompt
+    }
+    if (body.bio !== undefined && charterPatch.mission === undefined) {
+      charterPatch.mission = body.bio
+    }
+    const charterFieldsPresent = Object.keys(charterPatch) as CharterField[]
+
+    // Legacy per-platform keys (pre-416 clients: the Telegram Mini App manage
+    // page, third-party scripts) fold onto the one default tier. First key
+    // present wins; they were never meaningfully independent, since Slack's
+    // was inert and Telegram's already drove the official bot.
+    const defaultModelAlias =
+      body.defaultModelAlias ??
+      body.telegramModelAlias ??
+      body.slackModelAlias ??
+      body.whatsappModelAlias
 
     // Authorization model (verifyMembership already confirmed the caller can
     // access this assistant):
-    //   - `system_prompt`: any member who can access the assistant. The system
-    //     prompt is a shared, collaboratively-editable persona — released from
-    //     owner-only so teammates can tune the assistant they work with. See
+    //   - `charter.instructions`: any member who can access the assistant.
+    //     The instructions are a shared, collaboratively-editable persona —
+    //     released from owner-only so teammates can tune the assistant they
+    //     work with (the pre-418 `system_prompt` right, preserved). See
     //     docs/architecture/features/assistant-detail-page.md →
-    //     "Settings tab — system prompt (shared editing right)".
+    //     "Charter — per-field editing rights".
+    //   - `charter.mission` / `.audience` / `.success`: owner only. These
+    //     define what the assistant IS (they feed peer routing, the public
+    //     chat-link header, and the reflection rubric), inheriting the old
+    //     `bio` gate.
     //   - `name` (rename): the assistant owner, or an `admin` (a workspace
     //     admin manages the shared assistant roster, so renaming is a team
     //     right, not an owner-only one). 'owner'/'admin' are the privileged
@@ -190,13 +273,16 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
     //   - `clearance`: the assistant owner, or a team admin/owner of the
     //     assistant's workspace (policy is a team-wide concern — see
     //     docs/architecture/platform/sensitivity.md).
-    //   - everything else (bio, model aliases): owner only.
+    //   - everything else (model aliases): owner only.
     // A non-owner request that bundles an owner-only field is rejected whole
     // (the strictest field in the request governs).
+    const identityFieldPresent =
+      charterPatch.mission !== undefined ||
+      charterPatch.audience !== undefined ||
+      charterPatch.success !== undefined
     const ownerOnlyFieldPresent =
-      bio !== undefined ||
-      slackModelAlias !== undefined || telegramModelAlias !== undefined ||
-      whatsappModelAlias !== undefined
+      identityFieldPresent ||
+      defaultModelAlias !== undefined || apiModelAlias !== undefined
 
     if (member.role !== 'owner') {
       if (ownerOnlyFieldPresent) {
@@ -209,9 +295,10 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
         res.status(403).json({ error: 'Only the owner or a workspace admin can rename this assistant' })
         return
       }
-      // The request now touches only systemPrompt, name (admin, allowed above)
-      // and/or clearance. A clearance change still requires team admin/owner;
-      // systemPrompt is open to any member who reached this far.
+      // The request now touches only charter.instructions, name (admin,
+      // allowed above) and/or clearance. A clearance change still requires
+      // team admin/owner; instructions are open to any member who reached
+      // this far.
       if (clearance !== undefined) {
         const teamRole = await queryWithRLS<{ role: string }>(
           member.userId,
@@ -240,26 +327,21 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
         return
       }
     }
-    if (systemPrompt !== undefined && systemPrompt !== null) {
-      if (typeof systemPrompt !== 'string') {
-        res.status(400).json({ error: 'System prompt must be a string' })
+    for (const field of charterFieldsPresent) {
+      const value = charterPatch[field]
+      if (typeof value === 'string' && value.length > CHARTER_FIELD_LIMITS[field]) {
+        res.status(400).json({
+          error: `charter.${field} must be ${CHARTER_FIELD_LIMITS[field].toLocaleString('en-US')} characters or less`,
+        })
         return
       }
-      if (systemPrompt.length > 10000) {
-        res.status(400).json({ error: 'System prompt must be 10,000 characters or less' })
-        return
-      }
     }
-    if (slackModelAlias !== undefined && !VALID_MODEL_ALIASES.has(slackModelAlias)) {
-      res.status(400).json({ error: 'slackModelAlias must be standard, pro, or max' })
+    if (defaultModelAlias !== undefined && !VALID_MODEL_ALIASES.has(defaultModelAlias)) {
+      res.status(400).json({ error: 'defaultModelAlias must be standard, pro, or max' })
       return
     }
-    if (telegramModelAlias !== undefined && !VALID_MODEL_ALIASES.has(telegramModelAlias)) {
-      res.status(400).json({ error: 'telegramModelAlias must be standard, pro, or max' })
-      return
-    }
-    if (whatsappModelAlias !== undefined && !VALID_MODEL_ALIASES.has(whatsappModelAlias)) {
-      res.status(400).json({ error: 'whatsappModelAlias must be standard, pro, or max' })
+    if (apiModelAlias !== undefined && !VALID_MODEL_ALIASES.has(apiModelAlias)) {
+      res.status(400).json({ error: 'apiModelAlias must be standard, pro, or max' })
       return
     }
 
@@ -272,25 +354,45 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
       sets.push(`name = $${idx++}`)
       values.push(name.trim())
     }
-    if (systemPrompt !== undefined) {
-      sets.push(`system_prompt = $${idx++}`)
-      values.push(systemPrompt === null ? null : systemPrompt)
+    if (charterFieldsPresent.length > 0) {
+      // Merge the patch onto the CURRENT effective charter (which resolves
+      // legacy `system_prompt` / `bio` for pre-backfill rows), then write the
+      // whole object. From the first PATCH on, `charter` is authoritative -
+      // clearing a field can never resurrect stale legacy column text.
+      const current = await queryWithRLS<{
+        charter: unknown
+        system_prompt: string | null
+        bio: string | null
+      }>(
+        member.userId,
+        `SELECT charter, system_prompt, bio FROM assistants WHERE id = $1`,
+        [assistantId],
+      )
+      if (current.rows.length === 0) {
+        res.status(404).json({ error: 'Assistant not found' })
+        return
+      }
+      const merged: AssistantCharter = resolveCharter({
+        charter: current.rows[0].charter,
+        systemPrompt: current.rows[0].system_prompt,
+        bio: current.rows[0].bio,
+      })
+      for (const field of charterFieldsPresent) {
+        const value = charterPatch[field]
+        const trimmed = typeof value === 'string' ? value.trim() : null
+        if (trimmed) merged[field] = trimmed
+        else delete merged[field]
+      }
+      sets.push(`charter = $${idx++}::jsonb`)
+      values.push(JSON.stringify(merged))
     }
-    if (slackModelAlias !== undefined) {
-      sets.push(`slack_model_alias = $${idx++}`)
-      values.push(slackModelAlias)
+    if (defaultModelAlias !== undefined) {
+      sets.push(`default_model_alias = $${idx++}`)
+      values.push(defaultModelAlias)
     }
-    if (telegramModelAlias !== undefined) {
-      sets.push(`telegram_model_alias = $${idx++}`)
-      values.push(telegramModelAlias)
-    }
-    if (whatsappModelAlias !== undefined) {
-      sets.push(`whatsapp_model_alias = $${idx++}`)
-      values.push(whatsappModelAlias)
-    }
-    if (bio !== undefined) {
-      sets.push(`bio = $${idx++}`)
-      values.push(bio === null ? null : (bio.slice(0, 200)))
+    if (apiModelAlias !== undefined) {
+      sets.push(`api_model_alias = $${idx++}`)
+      values.push(apiModelAlias)
     }
     if (clearance !== undefined && ['public', 'internal', 'confidential'].includes(clearance)) {
       sets.push(`clearance = $${idx++}`)
@@ -308,12 +410,13 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
     try {
       const result = await queryWithRLS<{
         id: string; name: string; system_prompt: string | null
-        slack_model_alias: string; telegram_model_alias: string; whatsapp_model_alias: string
+        bio: string | null; charter: unknown
+        default_model_alias: string; api_model_alias: string
         clearance: string
       }>(
         member.userId,
         `UPDATE assistants SET ${sets.join(', ')} WHERE id = $${idx}
-         RETURNING id, name, system_prompt, slack_model_alias, telegram_model_alias, whatsapp_model_alias, clearance`,
+         RETURNING id, name, system_prompt, bio, charter, default_model_alias, api_model_alias, clearance`,
         values,
       )
       if (result.rows.length === 0) {
@@ -343,13 +446,19 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
         )
       }
 
+      const updatedCharter = resolveCharter({
+        charter: row.charter,
+        systemPrompt: row.system_prompt,
+        bio: row.bio,
+      })
       res.json({
         id: row.id,
         name: row.name,
-        systemPrompt: row.system_prompt,
-        slackModelAlias: row.slack_model_alias,
-        telegramModelAlias: row.telegram_model_alias,
-        whatsappModelAlias: row.whatsapp_model_alias,
+        charter: updatedCharter,
+        systemPrompt: updatedCharter.instructions ?? null,
+        bio: updatedCharter.mission ?? null,
+        defaultModelAlias: row.default_model_alias,
+        apiModelAlias: row.api_model_alias,
         clearance: row.clearance,
       })
     } catch (err) {
@@ -357,6 +466,65 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
       res.status(500).json({ error: 'Failed to update assistant' })
     }
   })
+
+  // ── Playbook (growth loop Phase 3) ─────────────────────────────
+  // The reflection worker proposes rules as 'suggested'; the owner admits,
+  // rejects, or retires them here. Viewing is any-member (the playbook is
+  // standing behavior every member works with); deciding is owner-only,
+  // matching the charter identity fields. Spec:
+  // docs/architecture/context-engine/assistant-playbook.md.
+
+  router.get<AssistantParams>('/:assistantId/playbook', async (req, res) => {
+    const member = await verifyMembership(req, res)
+    if (!member) return
+    try {
+      const rules = await listPlaybookRules(req.params.assistantId)
+      res.json({ rules, maxActive: MAX_ACTIVE_PLAYBOOK_RULES })
+    } catch (err) {
+      console.error('[assistants] playbook list failed:', err)
+      res.status(500).json({ error: 'Failed to list playbook rules' })
+    }
+  })
+
+  router.post<AssistantParams & { ruleId: string }>(
+    '/:assistantId/playbook/:ruleId/decision',
+    async (req, res) => {
+      const member = await verifyMembership(req, res)
+      if (!member) return
+      if (member.role !== 'owner') {
+        res.status(403).json({ error: 'Only the owner can decide playbook rules' })
+        return
+      }
+      const { decision } = req.body as { decision?: string }
+      if (decision !== 'approve' && decision !== 'reject' && decision !== 'retire') {
+        res.status(400).json({ error: "decision must be 'approve', 'reject', or 'retire'" })
+        return
+      }
+      try {
+        const result = await decidePlaybookRule({
+          assistantId: req.params.assistantId,
+          ruleId: req.params.ruleId,
+          decision: decision as PlaybookDecision,
+          userId: member.userId,
+        })
+        if (result === 'cap') {
+          res.status(409).json({
+            error: 'active_rule_cap',
+            message: `An assistant can hold at most ${MAX_ACTIVE_PLAYBOOK_RULES} active rules. Retire one first.`,
+          })
+          return
+        }
+        if (!result) {
+          res.status(404).json({ error: 'Rule not found or not in a decidable state' })
+          return
+        }
+        res.json({ rule: result })
+      } catch (err) {
+        console.error('[assistants] playbook decision failed:', err)
+        res.status(500).json({ error: 'Failed to apply playbook decision' })
+      }
+    },
+  )
 
   // ── DELETE /:assistantId — delete assistant ────────────────────
 
@@ -455,12 +623,38 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
   // docs/architecture/features/tasks.md / crm.md "Primitive access control".
 
   const PRIMITIVE_CAPABILITIES = ['tasks', 'crm', 'goals'] as const
-  type PrimitiveCapability = (typeof PRIMITIVE_CAPABILITIES)[number]
   // Admin-gated named capabilities toggleable on this surface. `configure`
   // unlocks Tier-2 control-plane write tools for agents acting as this
   // assistant (CONFIGURE_CAPABILITY in @use-brian/core).
   const ADMIN_CAPABILITIES = ['configure'] as const
-  const TOGGLEABLE_CAPABILITIES = [...PRIMITIVE_CAPABILITIES, ...ADMIN_CAPABILITIES]
+  // Built-in workspace primitives (Workspace Files / Office / Computer Use).
+  // Same capability mechanism as the §17 primitives, but surfaced on the
+  // assistant's Tools tab beside the other connector rows rather than in the
+  // Settings capabilities panel — that is where their "Always on" pill used
+  // to sit, and where a user goes looking for a connector's off switch.
+  // DERIVED from the registry (`auth_type: 'none'`), never a hardcoded slug
+  // list — see the "all built-ins" drift anti-pattern in CLAUDE.md. The
+  // capability name IS the connector id, which is why one set serves both.
+  const BUILTIN_CAPABILITIES = [...BUILTIN_PRIMITIVE_CONNECTOR_IDS]
+  const TOGGLEABLE_CAPABILITIES: string[] = [
+    ...PRIMITIVE_CAPABILITIES,
+    ...ADMIN_CAPABILITIES,
+    ...BUILTIN_CAPABILITIES,
+  ]
+
+  // Which surface owns each row. Two clients read this one route and each
+  // renders only its own group — without the discriminator the Settings
+  // capabilities panel would render a second, duplicate control for every
+  // built-in primitive alongside the Tools tab's. A client must NOT re-derive
+  // the split from a local slug list (that is how `goals` ended up rendering
+  // under the `configure` label).
+  type CapabilityGroup = 'primitive' | 'admin' | 'builtin'
+  const groupOf = (cap: string): CapabilityGroup =>
+    BUILTIN_PRIMITIVE_CONNECTOR_IDS.has(cap)
+      ? 'builtin'
+      : (ADMIN_CAPABILITIES as readonly string[]).includes(cap)
+        ? 'admin'
+        : 'primitive'
 
   router.get<AssistantParams>('/:assistantId/primitive-grants', async (req, res) => {
     const member = await verifyMembership(req, res)
@@ -472,6 +666,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
         grants: TOGGLEABLE_CAPABILITIES.map((cap) => ({
           capability: cap,
           enabled: active.has(cap),
+          group: groupOf(cap),
         })),
       })
     } catch (err) {
@@ -484,7 +679,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
     const member = await verifyMembership(req as any, res)
     if (!member) return
     const { assistantId, capability } = req.params as { assistantId: string; capability: string }
-    if (!TOGGLEABLE_CAPABILITIES.includes(capability as PrimitiveCapability | 'configure')) {
+    if (!TOGGLEABLE_CAPABILITIES.includes(capability)) {
       res.status(400).json({ error: `capability must be one of: ${TOGGLEABLE_CAPABILITIES.join(', ')}` })
       return
     }
@@ -518,7 +713,9 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
             reason:
               capability === 'configure'
                 ? 'agent-surface configure capability toggled on by workspace admin'
-                : '§17 toggled on by workspace member',
+                : groupOf(capability) === 'builtin'
+                  ? `built-in primitive "${capability}" switched on by workspace member`
+                  : '§17 toggled on by workspace member',
           })
         } catch (err) {
           if (err instanceof Error && err.name === 'DuplicateGrantError') {
@@ -543,12 +740,14 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
             reason:
               capability === 'configure'
                 ? 'agent-surface configure capability toggled off by workspace admin'
-                : '§17 toggled off by workspace member',
+                : groupOf(capability) === 'builtin'
+                  ? `built-in primitive "${capability}" switched off by workspace member`
+                  : '§17 toggled off by workspace member',
           })
         }
       }
       const active = new Set(await options.capabilityStore.listActive(assistantId))
-      res.json({ capability, enabled: active.has(capability) })
+      res.json({ capability, enabled: active.has(capability), group: groupOf(capability) })
     } catch (err) {
       console.error('[assistants] primitive-grants patch failed:', err)
       res.status(500).json({ error: 'Failed to update primitive grant' })
@@ -821,16 +1020,24 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
         })
       }
 
-      // Built-in workspace primitives (Workspace Files) have NO row in any
-      // of the three sources above — they are boot-injected capability
+      // Built-in workspace primitives (Workspace Files / Office / Computer
+      // Use) have NO row in any of the three sources above — they are
+      // boot-injected capability
       // primitives, not connector instances — so without this pass they can
       // never appear here and their per-assistant (L2) tool policy is
       // unreachable, contradicting the Studio Connectors page's
       // "Configure per-assistant tool permissions in the Assistant
-      // Connectors tab" pointer. Synthesize an always-on entry per registry
-      // built-in (derived — never hardcode the id list; see
+      // Connectors tab" pointer. Synthesize an entry per registry built-in
+      // (derived — never hardcode the id list; see
       // BUILTIN_PRIMITIVE_CONNECTOR_IDS). The /tools + /tools/policy
       // sub-routes below already handle OFFICIAL_CONNECTOR_TOOLS ids.
+      //
+      // `enabled` is the CAPABILITY grant, not `assistant_connector_settings`.
+      // A built-in has no connector instance, so nothing at runtime ever reads
+      // its connector-settings row — sourcing the toggle from there would give
+      // the user a switch that flips in the UI and changes nothing. The grant
+      // is what `filterToolsByCapabilities` actually reads on every path.
+      const builtinCapabilities = new Set(await options.capabilityStore.listActive(assistantId))
       for (const id of BUILTIN_PRIMITIVE_CONNECTOR_IDS) {
         if (byKey.has(id)) continue
         if ((OFFICIAL_CONNECTOR_TOOLS[id]?.length ?? 0) === 0) continue // no governable tools
@@ -841,8 +1048,8 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
           id,
           name: official.name,
           custom: false,
-          connected: true, // always-on: no external account, no instance row
-          enabled: settingsMap.get(id) ?? true,
+          connected: true, // no external account, no instance row to connect
+          enabled: builtinCapabilities.has(id),
           icon_url: entry?.icon_url,
           category: 'official',
           scope: 'builtin',

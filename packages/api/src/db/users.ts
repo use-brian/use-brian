@@ -1,4 +1,5 @@
 import { query, getPool } from './client.js'
+import { seedBuiltinPrimitiveCapabilities } from './capability-seed.js'
 import { generateHandle } from '@use-brian/core'
 
 export type User = {
@@ -243,15 +244,29 @@ export async function findOrCreateUser(params: {
     // 'tasks' / 'crm' and the per-turn filter hides them when no active
     // grant exists. Owner toggles via the assistant settings page.
     // See docs/plans/company-brain.md §17.
+    //
+    // 'files' / 'office' / 'computer' are the built-in workspace primitives.
+    // Default-ON — switching one off is a
+    // deliberate act, so a fresh assistant behaves exactly as before this
+    // switch existed. Their off switch lives on the assistant's Tools tab.
+    // See docs/architecture/features/builtin-primitives.md.
     await client.query(
       `INSERT INTO assistant_capabilities
          (assistant_id, capability, granted_by_user_id, reason)
-       VALUES ($1, 'tasks', $2, '§17 default-on at primary creation'),
-              ($1, 'crm',   $2, '§17 default-on at primary creation'),
-              ($1, 'goals', $2, 'goals default-on at primary creation'),
-              ($1, 'views', $2, 'doc-skill parity — default-on at primary creation'),
-              ($1, 'files', $2, 'doc-skill parity — default-on at primary creation')`,
+       VALUES ($1, 'tasks',    $2, '§17 default-on at primary creation'),
+              ($1, 'crm',      $2, '§17 default-on at primary creation'),
+              ($1, 'goals',    $2, 'goals default-on at primary creation'),
+              ($1, 'views',    $2, 'doc-skill parity — default-on at primary creation'),
+              ($1, 'files',    $2, 'built-in primitive — default-on at primary creation')`,
       [assistant.rows[0].id, user.id],
+    )
+    // office / computer — seeded for EVERY assistant kind, not just primaries
+    // (they were injected unconditionally before the off switch existed).
+    await seedBuiltinPrimitiveCapabilities(
+      (sql, params) => client.query(sql, params as never[]),
+      assistant.rows[0].id,
+      user.id,
+      'built-in primitive — default-on at primary creation',
     )
 
     // The default "General" room — same seeding as workspaceStore.create()
@@ -604,9 +619,14 @@ export async function setUserStripeCustomerId(
 export type UserAssistantView = {
   id: string
   name: string
-  telegramModelAlias: string
   workspaceId: string | null
   systemPrompt: string | null
+  /** Legacy one-liner; superseded by `charter.mission` (migration 418). */
+  bio: string | null
+  /** JSONB charter column, authoritative-if-present. Resolve via
+   *  `resolveCharter({ charter, systemPrompt, bio })` from
+   *  `@use-brian/shared` - never read raw at a call site. */
+  charter: unknown
   kind: AssistantKind
   appType: AssistantAppType | null
   blockedUserIds: string[]
@@ -620,9 +640,11 @@ export type UserAssistantView = {
 export async function getDefaultAssistant(userId: string): Promise<UserAssistantView | null> {
   // Preferred path: the primary assistant of the user's Personal workspace.
   const primary = await query<UserAssistantView>(
-    `SELECT a.id, a.name, a.telegram_model_alias as "telegramModelAlias",
+    `SELECT a.id, a.name,
             a.workspace_id as "workspaceId",
             a.system_prompt as "systemPrompt",
+            a.bio,
+            a.charter,
             a.kind,
             a.app_type as "appType",
             a.blocked_user_ids as "blockedUserIds",
@@ -640,9 +662,11 @@ export async function getDefaultAssistant(userId: string): Promise<UserAssistant
   // Defensive fallback (should not fire post-migration-110): the oldest
   // assistant the user owns. Kept so a misconfigured user can still chat.
   const result = await query<UserAssistantView>(
-    `SELECT a.id, a.name, a.telegram_model_alias as "telegramModelAlias",
+    `SELECT a.id, a.name,
             a.workspace_id as "workspaceId",
             a.system_prompt as "systemPrompt",
+            a.bio,
+            a.charter,
             a.kind,
             a.app_type as "appType",
             a.blocked_user_ids as "blockedUserIds",
@@ -672,9 +696,11 @@ export async function getWorkspacePrimaryAssistant(
   workspaceId: string,
 ): Promise<UserAssistantView | null> {
   const result = await query<UserAssistantView>(
-    `SELECT a.id, a.name, a.telegram_model_alias as "telegramModelAlias",
+    `SELECT a.id, a.name,
             a.workspace_id as "workspaceId",
             a.system_prompt as "systemPrompt",
+            a.bio,
+            a.charter,
             a.kind,
             a.app_type as "appType",
             a.blocked_user_ids as "blockedUserIds",
@@ -741,9 +767,11 @@ export async function resolveAssistantAccess(
   assistantId: string,
 ): Promise<AssistantAccess | null> {
   const result = await query<UserAssistantView & { role: AssistantRole }>(
-    `SELECT a.id, a.name, a.telegram_model_alias as "telegramModelAlias",
+    `SELECT a.id, a.name,
             a.workspace_id as "workspaceId",
             a.system_prompt as "systemPrompt",
+            a.bio,
+            a.charter,
             a.kind,
             a.app_type as "appType",
             a.blocked_user_ids as "blockedUserIds",
@@ -801,8 +829,9 @@ export type AccessibleAssistant = {
   memoryCount: number
   iconSeed: number | null
   workspaceId: string | null
-  telegramModelAlias: string
-  slackModelAlias: string
+  /** Tier for routing-row-less surfaces + the seed for new attachments.
+   *  Migration 416 collapsed the three per-platform columns into this one. */
+  defaultModelAlias: string
   clearance: 'public' | 'internal' | 'confidential'
   kind: AssistantKind
   appType: AssistantAppType | null
@@ -851,8 +880,7 @@ export async function listAccessibleAssistants(
             a.system_prompt        AS "systemPrompt",
             a.icon_seed            AS "iconSeed",
             a.workspace_id         AS "workspaceId",
-            a.telegram_model_alias AS "telegramModelAlias",
-            a.slack_model_alias    AS "slackModelAlias",
+            a.default_model_alias  AS "defaultModelAlias",
             a.clearance,
             a.kind,
             a.app_type             AS "appType",
@@ -894,11 +922,24 @@ export type AssistantRow = {
   id: string
   name: string
   ownerUserId: string
-  slackModelAlias: string
-  telegramModelAlias: string
-  whatsappModelAlias: string
+  /**
+   * Tier for surfaces with no `channel_assistants` routing row: the hosted
+   * official Telegram + WhatsApp bots. Channel webhooks that DO have a routing
+   * row overwrite this field with `routing.modelAlias` before use, so reading
+   * it downstream is correct on every path. Migration 416.
+   */
+  defaultModelAlias: string
+  /** Tier for owner-paid public surfaces: the `sk_live_` API and the
+   *  `/c/<token>` chat link. Never overwritten by a routing row. Migration 416. */
+  apiModelAlias: string
   workspaceId: string | null
   systemPrompt: string | null
+  /** Legacy one-liner; superseded by `charter.mission` (migration 418). */
+  bio: string | null
+  /** JSONB charter column, authoritative-if-present. Resolve via
+   *  `resolveCharter({ charter, systemPrompt, bio })` from
+   *  `@use-brian/shared` - never read raw at a call site. */
+  charter: unknown
   clearance: 'public' | 'internal' | 'confidential'
   compartments: string[] | null
   defaultCompartments: string[]
@@ -911,11 +952,12 @@ export async function findAssistantById(
 ): Promise<AssistantRow | null> {
   const result = await query<AssistantRow>(
     `SELECT id, name, owner_user_id as "ownerUserId",
-            slack_model_alias as "slackModelAlias",
-            telegram_model_alias as "telegramModelAlias",
-            whatsapp_model_alias as "whatsappModelAlias",
+            default_model_alias as "defaultModelAlias",
+            api_model_alias as "apiModelAlias",
             workspace_id as "workspaceId",
             system_prompt as "systemPrompt",
+            bio,
+            charter,
             clearance,
             compartments,
             default_compartments as "defaultCompartments",

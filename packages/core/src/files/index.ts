@@ -1,11 +1,19 @@
 export type { FileStore, CachedFile } from './types.js'
 export { parseFileContent, parseDocxToMarkdown, shouldInline } from './parsers.js'
+export { parseHtmlToMarkdown, isHtmlFile } from './html.js'
 export {
-  htmlToMarkdown,
-  isHtmlFile,
-  type HtmlExtraction,
-  type HtmlExtractionMode,
-} from './html.js'
+  DOCUMENT_FORMATS,
+  STRUCTURED_DOCUMENT_MIME_TYPES,
+  detectDocumentFormat,
+  documentFamily,
+  documentFormatFromMetadata,
+  documentMimeType,
+  fileExtension,
+  isStructuredDocument,
+  isTabularDocument,
+  type DocumentFamily,
+  type DocumentFormat,
+} from './document-formats.js'
 export { distillFileToText, type DistillOptions, type DistillResult } from './distill.js'
 export { extractPdfText } from './pdf-text.js'
 export { renderPdfPages, probePdfPageCount, type RenderedPdfPage, type RenderPdfPagesResult } from './pdf-pages.js'

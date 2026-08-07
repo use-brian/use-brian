@@ -15,7 +15,16 @@ describe("[COMP:app-web/office-presentation-editor] Presentation editor", () => 
     expect(html).toContain('data-office-editor="presentation"');
     expect(html).toContain('data-properties-open="false"');
     expect(html).toContain('data-slide-thumbnail="true"');
+    expect(html).toContain('data-presentation-slide-visual="true"');
+    expect(html).toContain('viewBox="0 0 960 540"');
     expect(html).toContain('aspect-ratio:960 / 540');
+    expect(html).toContain('container-type:inline-size');
+    expect(html).toContain('data-presentation-object-visual="text"');
+    expect(html).toContain('data-presentation-chart="bar"');
+    expect(html).toContain('data-office-resource-image="loading"');
+    expect(html.match(/font-family:&quot;Arial&quot;/g)?.length).toBeGreaterThan(1);
+    expect(html).toContain('font-size:12px');
+    expect(html).toContain("sans-serif");
     expect(html).not.toContain(`>${en.office.properties}<`);
   });
 

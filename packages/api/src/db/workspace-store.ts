@@ -22,6 +22,7 @@
  */
 
 import type { PoolClient } from 'pg'
+import { seedBuiltinPrimitiveCapabilities } from './capability-seed.js'
 import { minSensitivity, parseTranscriptionPrefs } from '@use-brian/core'
 import {
   normalizeHomeApps,
@@ -1191,17 +1192,25 @@ export function createWorkspaceStore(cascades: WorkspaceStoreCascades = {}): Wor
         )
 
         // §17 — primary assistants default-on for Tasks (Q1) and CRM
-        // (Q2) primitive grants. Matches findOrCreateUser's defaults so
-        // a workspace primary behaves identically to the Personal one.
+        // (Q2) primitive grants, plus the built-in workspace primitives
+        // (files / office / computer). Matches findOrCreateUser's defaults so
+        // a workspace primary behaves identically to the Personal one — keep
+        // the two lists in step.
         await client.query(
           `INSERT INTO assistant_capabilities
              (assistant_id, capability, granted_by_user_id, reason)
-           VALUES ($1, 'tasks', $2, '§17 default-on at primary creation'),
-                  ($1, 'crm',   $2, '§17 default-on at primary creation'),
-                  ($1, 'goals', $2, 'goals default-on at primary creation'),
-                  ($1, 'views', $2, 'doc-skill parity — default-on at primary creation'),
-                  ($1, 'files', $2, 'doc-skill parity — default-on at primary creation')`,
+           VALUES ($1, 'tasks',    $2, '§17 default-on at primary creation'),
+                  ($1, 'crm',      $2, '§17 default-on at primary creation'),
+                  ($1, 'goals',    $2, 'goals default-on at primary creation'),
+                  ($1, 'views',    $2, 'doc-skill parity — default-on at primary creation'),
+                  ($1, 'files',    $2, 'built-in primitive — default-on at primary creation')`,
           [assistantResult.rows[0].id, userId],
+        )
+        await seedBuiltinPrimitiveCapabilities(
+          (sql, params) => client.query(sql, params as never[]),
+          assistantResult.rows[0].id,
+          userId,
+          'built-in primitive — default-on at primary creation',
         )
 
         // Every workspace gets its default "General" ROOM in the same

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import * as Y from 'yjs'
 import type { DocumentSnapshot } from '@use-brian/office-model'
 import { parseSyncDocumentName } from '../document-router.js'
-import { loadOfficeUpdate, officeSnapshotUpdate, storeOfficeSnapshot } from '../office-collab.js'
+import { loadOfficeUpdate, officeSnapshotUpdate, replaceLiveOfficeSnapshot, storeOfficeSnapshot } from '../office-collab.js'
 import type { SysQuery } from '../persistence.js'
 
 const id = (suffix: number): string => `00000000-0000-4000-8000-${suffix.toString().padStart(12, '0')}`
@@ -60,5 +60,13 @@ describe('[COMP:doc-sync/office-collab] Generic Office collaboration routing', (
     Y.applyUpdate(doc, officeSnapshotUpdate(snapshot))
     const query: SysQuery = async () => [] as never[]
     await expect(storeOfficeSnapshot({ artifactId: id(99), ydoc: doc, query })).rejects.toThrow(/artifact mismatch/)
+  })
+
+  it('replaces the authoritative live document without merging stale base content', () => {
+    const doc = new Y.Doc()
+    Y.applyUpdate(doc, officeSnapshotUpdate(snapshot))
+    const revised = { ...snapshot, title: 'Revised live title' }
+    expect(replaceLiveOfficeSnapshot(doc, revised)).toEqual(revised)
+    expect(replaceLiveOfficeSnapshot(doc, revised)).toEqual(revised)
   })
 })

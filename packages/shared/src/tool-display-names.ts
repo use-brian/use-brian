@@ -118,6 +118,8 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   shopifyListDisputes: 'List disputes',
   shopifyListContent: 'List store content',
   shopifySalesReport: 'Run sales report',
+  shopifyStorefrontFunnel: 'Check storefront funnel',
+  shopifyAnalyticsQuery: 'Query store analytics',
   shopifyUpdateProduct: 'Update product',
   shopifyCreateProduct: 'Create product',
   shopifyAddProductImage: 'Add product image',
@@ -180,6 +182,10 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   getOfficeArtifact: 'Read an Office artifact',
   reviseOfficeArtifact: 'Revise an Office artifact',
 
+  // Brand (docs/architecture/features/brand.md)
+  getBrand: 'Read the brand record',
+  updateBrandDraft: 'Propose a brand change',
+
   // Computer use (docs/architecture/engine/computer-use.md)
   browserNavigate: 'Open a page in the browser',
   browserSnapshot: 'Look at the browser page',
@@ -188,6 +194,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   browserCurrentUrl: 'Check the browser address',
   browserReadPage: 'Read a page in the browser',
   runBrowserSkill: 'Run a browser skill',
+  saveBrowserSkill: 'Save a browser skill',
   listBrowserSkills: 'List browser skills',
   listBrowserProfiles: 'List browser profiles',
   browserExplore: 'Explore a browsing flow',
@@ -210,12 +217,18 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   askAssistant: 'Ask another assistant',
   listConnectedAssistants: 'List connected assistants',
 
+  // Chat handoff
+  shareCurrentWorkToWorkspace: 'Share current work to workspace',
+
   // Q5 Views (§16)
   renderView: 'Render a view',
   saveView: 'Save view',
 
   // Doc pages
   findPage: 'Find a doc page',
+
+  // Workspace skills
+  updateViewedSkill: 'Update workspace skill',
 }
 
 /**
@@ -242,6 +255,7 @@ export function getToolDisplayName(toolName: string): string {
  */
 const TOOL_STATUS_NAMES: Record<string, string> = {
   saveMemory: 'Saving to memory',
+  updateViewedSkill: 'Updating workspace skill',
   getMemory: 'Recalling memories',
   webSearch: 'Searching the web',
   urlReader: 'Reading a page',
@@ -255,6 +269,7 @@ const TOOL_STATUS_NAMES: Record<string, string> = {
   notionSearch: 'Searching Notion',
   notionCreatePage: 'Creating a Notion page',
   useSkill: 'Using a skill',
+  shareCurrentWorkToWorkspace: 'Creating a workspace chat',
   // Browser / computer-use. These are fallbacks before the input arrives;
   // `describeToolInput` overrides the URL-carrying ones with the page host
   // ("Browsing news.ycombinator.com") so the timeline says WHERE, not just WHAT.
@@ -265,6 +280,7 @@ const TOOL_STATUS_NAMES: Record<string, string> = {
   browserSnapshot: 'Reading the page',
   browserCurrentUrl: 'Checking the page',
   runBrowserSkill: 'Running a browser task',
+  saveBrowserSkill: 'Saving a browser skill',
   browserExplore: 'Exploring the web',
 }
 

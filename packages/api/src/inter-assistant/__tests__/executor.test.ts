@@ -91,6 +91,12 @@ import { billingPartyForAssistant } from '../../billing-party.js'
 import { runProactiveCompaction } from '../../routes/proactive-compaction.js'
 import { injectDocTools } from '../../doc/inject.js'
 import { injectMcpTools } from '../../mcp/inject.js'
+import {
+  encodeExternalCostMeta,
+  engineCostModel,
+  flatEngineCostUsd,
+  flatSearchCostUsd,
+} from '@use-brian/core'
 
 const mockInjectDoc = vi.mocked(injectDocTools)
 const mockInjectMcp = vi.mocked(injectMcpTools)
@@ -845,6 +851,98 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     expect(recordUsage.mock.calls[0][0].triggerKey).toBe('workflow_assistant_call')
   })
 
+  // ── External tool cost on the callee lane ───────────────────────────
+  // Until the recording seam was extracted out of routes/chat.ts, ONLY the
+  // interactive chat lane billed external APIs: the same paid call made from
+  // a workflow step, a scheduled job, or an A2A consult wrote nothing.
+
+  function toolResultWithCostMeta(name: string, meta: Record<string, string | number>) {
+    return [
+      {
+        type: 'tool_result',
+        id: '',
+        results: [{ type: 'tool_result', toolUseId: 't1', name, content: 'ok', isError: false }],
+        metaByToolUseId: { t1: meta },
+      },
+      { type: 'assistant_turn', response: { content: [{ type: 'text', text: 'done' }] }, toolResults: [] },
+      { type: 'turn_complete', response: { content: [{ type: 'text', text: 'done' }] } },
+    ]
+  }
+
+  function calleeWithUsage(recordUsage: ReturnType<typeof vi.fn>) {
+    return createCalleeExecutor({
+      provider: {} as never,
+      tools: new Map(),
+      memoryStore: memoryStore() as never,
+      capabilityStore: { listActive: vi.fn().mockResolvedValue([]) } as never,
+      usageStore: { recordUsage } as never,
+    })
+  }
+
+  it('records an engine tool result as external cost on a workflow run', async () => {
+    yields(
+      toolResultWithCostMeta('askPerplexity', {
+        engine: 'perplexity',
+        engineUnits: 4,
+        ...encodeExternalCostMeta({
+          kind: 'flat',
+          model: engineCostModel('perplexity'),
+          flatCostUsd: flatEngineCostUsd('perplexity') * 4,
+        }),
+      }),
+    )
+    const recordUsage = vi.fn().mockResolvedValue(undefined)
+
+    await calleeWithUsage(recordUsage)({ ...baseParams, callerChannelType: 'workflow' })
+
+    const row = recordUsage.mock.calls.map((c) => c[0]).find((r) => r.model === 'engine:perplexity')
+    expect(row).toMatchObject({
+      userId: 'owner-1',
+      assistantId: 'callee-1',
+      sessionId: 'sess-1',
+      inputTokens: 0,
+      outputTokens: 0,
+      source: 'included',
+      triggerKey: 'workflow_external_tool',
+    })
+    expect(row.actualCostUsd).toBeCloseTo(flatEngineCostUsd('perplexity') * 4)
+    // COGS-only: a userMessageId would pull it into the credit derivation.
+    expect(row.userMessageId).toBeUndefined()
+  })
+
+  it('records a webSearch tool result too — the pre-existing gap this closed', async () => {
+    yields(
+      toolResultWithCostMeta('webSearch', {
+        searchProvider: 'brave',
+        ...encodeExternalCostMeta({
+          kind: 'flat',
+          model: 'brave',
+          flatCostUsd: flatSearchCostUsd('brave'),
+        }),
+      }),
+    )
+    const recordUsage = vi.fn().mockResolvedValue(undefined)
+
+    await calleeWithUsage(recordUsage)(baseParams)
+
+    const row = recordUsage.mock.calls.map((c) => c[0]).find((r) => r.model === 'brave')
+    expect(row).toBeDefined()
+    expect(row.actualCostUsd).toBeCloseTo(flatSearchCostUsd('brave'))
+    expect(row.triggerKey).toBe('a2a_external_tool')
+  })
+
+  it('writes no external row for a tool that spent nothing', async () => {
+    yields(toolResultWithCostMeta('saveMemory', { saved: 1 }))
+    const recordUsage = vi.fn().mockResolvedValue(undefined)
+
+    await calleeWithUsage(recordUsage)(baseParams)
+
+    const externalRows = recordUsage.mock.calls
+      .map((c) => c[0])
+      .filter((r) => r.triggerKey?.endsWith('_external_tool'))
+    expect(externalRows).toHaveLength(0)
+  })
+
   it('does not record usage when no usageStore is wired (no crash)', async () => {
     // The store is optional; absent it, metering silently no-ops.
     yields([
@@ -1151,6 +1249,30 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
       const systemPrompt = mockQueryLoop.mock.calls[0][0].systemPrompt as string
       expect(systemPrompt).toContain('## Anchored page')
       expect(systemPrompt).toContain(PAGE_ID)
+    })
+
+    it('reads the anchor inside the agent-clearance wrap (teamspace agent access)', async () => {
+      // The RLS-scoped getById must observe `app.agent_clearance` context =
+      // the CALLEE assistant's clearance ('internal' in the fixture), so a
+      // page in a teamspace resolves by clearance vs sensitivity — never by
+      // the acting owner account's teamspace memberships (the 2026-08-07
+      // page_anchor_not_found incident).
+      const { currentAgentClearance } = await import('../../db/client.js')
+      asWorkspaceCallee()
+      yieldsText('edited')
+      const seen: Array<string | undefined> = []
+      const store = {
+        getById: vi.fn().mockImplementation(async () => {
+          seen.push(currentAgentClearance())
+          return { id: PAGE_ID, workspaceId: 'ws-1', clearance: 'internal' }
+        }),
+        setAutoPruneAt: vi.fn().mockResolvedValue(true),
+      } as never
+      const callee = anchoredExecutor(store)
+      await callee({ ...baseParams, pageAnchorId: PAGE_ID })
+      expect(seen).toEqual(['internal'])
+      // No agent context leaks outside the execution (fail-closed).
+      expect(currentAgentClearance()).toBeUndefined()
     })
 
     it('throws page_anchor_not_found before any session or LLM spend', async () => {
@@ -1788,6 +1910,23 @@ describe('[COMP:sandbox/browser-tools] browser surface on the goal path (workflo
       provider: {} as never,
       tools: baseTools as never,
       memoryStore: memoryStore() as never,
+      // Computer Use is an `auth_type: 'none'` built-in primitive, so the
+      // callee must hold the `computer` capability for the browser surface to
+      // reach it at all — the goal path runs through the same
+      // `filterToolsByCapabilities` gate as an interactive turn. Default-on in
+      // production (seeded at creation, backfilled by migration 412); the
+      // withheld case is covered below.
+      // See docs/architecture/features/builtin-primitives.md.
+      capabilityStore: { listActive: vi.fn().mockResolvedValue(['computer']) } as never,
+    })
+  }
+
+  /** The same executor with the `computer` primitive switched OFF. */
+  function browserExecutorWithComputerOff(baseTools: Map<string, unknown>) {
+    return createCalleeExecutor({
+      provider: {} as never,
+      tools: baseTools as never,
+      memoryStore: memoryStore() as never,
       capabilityStore: { listActive: vi.fn().mockResolvedValue([]) } as never,
     })
   }
@@ -1889,6 +2028,28 @@ describe('[COMP:sandbox/browser-tools] browser surface on the goal path (workflo
     expect(passed.has('browserClick')).toBe(false)
     // The drop note names the tool so the callee steers to the governed paths.
     expect(call.systemPrompt as string).toContain('browserClick')
+  })
+
+  it('the Computer Use off switch holds on the autonomous path — no browser tool survives a withheld grant', async () => {
+    // The switch has to bind here, not just in interactive chat: a goal
+    // iteration or workflow consult is exactly where an assistant the user
+    // switched browsing off for would otherwise still browse, unattended.
+    yieldsText()
+    const { tools } = await realBrowserTools({ unattended: true })
+    await browserExecutorWithComputerOff(tools)({ ...baseParams, callerChannelType: 'workflow' })
+    const passed = mockQueryLoop.mock.calls[0][0].tools as Map<string, unknown>
+    for (const name of [
+      'browserNavigate',
+      'browserSnapshot',
+      'browserType',
+      'browserCurrentUrl',
+      'runBrowserSkill',
+      'listBrowserSkills',
+      'listBrowserProfiles',
+      'browserExplore',
+    ]) {
+      expect(passed.has(name), `${name} must be gone when 'computer' is off`).toBe(false)
+    }
   })
 
   it('a goal iteration executes a read-only browser skill end-to-end (unattended + paid)', async () => {

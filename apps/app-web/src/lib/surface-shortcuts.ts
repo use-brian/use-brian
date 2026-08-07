@@ -1,8 +1,10 @@
 /**
- * Surface-shortcut keybinding — which modifier the ⌘/Ctrl+1–4 surface jumps
- * (Home / Brain / Studio / Workflow, wired in `workspace-chrome.tsx`) listen
- * for, per browser. Spec: docs/architecture/features/doc.md → "Surface
- * shortcuts".
+ * Keyboard-shortcut bindings and their labels, per browser.
+ *
+ * Mostly the surface-shortcut keybinding — which modifier the ⌘/Ctrl+1–4
+ * surface jumps (Home / Brain / Studio / Workflow, wired in
+ * `workspace-chrome.tsx`) listen for. Spec: docs/architecture/features/doc.md
+ * → "Surface shortcuts".
  *
  * Chrome/Chromium, Safari, and the Electron desktop shell deliver Accel+digit
  * to the page and honor `preventDefault()`, so they keep the native Accel
@@ -57,4 +59,16 @@ export function surfaceShortcutLabel(
 ): string {
   if (!isMacUa(ua)) return `Ctrl+${digit}`;
   return isFirefoxUa(ua) ? `⌃${digit}` : `⌘${digit}`;
+}
+
+/**
+ * Tooltip label for the Accel+Enter chord — "⌘Enter" (mac, including mac
+ * Firefox: unlike Accel+digit, Accel+Enter is reserved nowhere) or
+ * "Ctrl+Enter" (everything else, and the SSR fallback). Used by the room
+ * composer's Ask affordance, whose chord sends the draft AS a question to the
+ * assistant instead of posting it. Lives here because this module is the app's
+ * one place that reads the platform off the UA.
+ */
+export function accelEnterLabel(ua: string = runtimeUa): string {
+  return isMacUa(ua) ? "⌘Enter" : "Ctrl+Enter";
 }

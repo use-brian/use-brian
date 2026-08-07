@@ -24,6 +24,12 @@ export type BrowserSkillRecordingStep = {
   action: string
   url?: string | null
   detail?: string | null
+  /** Text captured for a deterministic fill step. */
+  text?: string | null
+  /** Optional parameter name substituted into the fill at replay time. */
+  param?: string | null
+  /** Human-readable terminal action description. */
+  description?: string | null
 }
 
 export type BrowserSkill = {

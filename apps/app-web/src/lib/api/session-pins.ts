@@ -28,6 +28,9 @@ export type SessionPinRow = {
   label: string | null;
   position: number;
   addedByUserId: string | null;
+  /** Set when the room's assistant pinned this through the room pin tools. */
+  addedByAssistantId: string | null;
+  /** Display attribution: the member's or the assistant's name. */
   addedByName: string | null;
   createdAt: string;
 };

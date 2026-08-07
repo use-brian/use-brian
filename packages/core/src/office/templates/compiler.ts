@@ -13,7 +13,10 @@ import {
 import { fitOfficeArtifact, officeGoldenSerialization, type OfficeFitBudget } from '@use-brian/office-renderer'
 import { exportOfficeDocument, reparseOfficeDocument } from '../docx/index.js'
 import { exportOfficePresentation, reparseOfficePresentation } from '../pptx/index.js'
+import { exportOfficeSpreadsheet, reparseOfficeSpreadsheet } from '../xlsx/index.js'
 import { officeSemanticHash, type OfficeResourcePayload, type OfficeResourceResolver } from '../package.js'
+import { officeTemplateRoutingDiagnostics } from './routing.js'
+import { reviewBrandTypography, type BrandTypographyContext } from './brand-typography.js'
 
 export type OfficeTemplateAuthoringPath = 'upload' | 'scratch' | 'promote_version'
 
@@ -70,7 +73,7 @@ function collectIds(value: unknown, target = new Set<string>()): Set<string> {
   return target
 }
 
-function fitBudget(bundle: OfficeTemplateBundle): OfficeFitBudget {
+function fitBudget(bundle: OfficeTemplateBundle, authoringPath: OfficeTemplateAuthoringPath): OfficeFitBudget {
   const maxTextCharsByObject: Record<string, number> = {}
   for (const field of bundle.fields) {
     if (field.maxLength === undefined) continue
@@ -78,7 +81,7 @@ function fitBudget(bundle: OfficeTemplateBundle): OfficeFitBudget {
   }
   return {
     maxTextCharsByObject,
-    minimumFontSizePt: 8,
+    minimumFontSizePt: authoringPath === 'upload' ? 1 : 8,
   }
 }
 
@@ -104,6 +107,15 @@ export async function compileOfficeTemplate(params: {
   authoringPath: OfficeTemplateAuthoringPath
   draft: unknown
   resources: readonly OfficeTemplateResourceAdmission[]
+  /**
+   * The workspace's ACTIVE APPROVED brand typography + rights registers, when
+   * it has one. Contributes WARNINGS only (a font family the brand does not
+   * account for, or one with no recorded licence) — the compiler's own font
+   * checks stay errors, because those are about a file being legally
+   * embeddable rather than about what the company is licensed for. Absent →
+   * contributes nothing.
+   */
+  brand?: BrandTypographyContext
 }): Promise<CompiledOfficeTemplate> {
   const parsed = OfficeTemplateBundleSchema.safeParse(params.draft)
   if (!parsed.success) {
@@ -115,6 +127,8 @@ export async function compileOfficeTemplate(params: {
   diagnostics.push(...officeAdmissionBarrierDiagnostics(draft.family))
   diagnostics.push(...preflightOfficeCandidate(draft.snapshot).diagnostics)
   diagnostics.push(...resourceDiagnostics(draft, params.resources))
+  diagnostics.push(...officeTemplateRoutingDiagnostics(draft.snapshot, { fields: draft.fields, slideRecipes: draft.slideRecipes }).map((message) => ({ severity: 'error' as const, code: 'template.routing_invalid', path: 'slideRecipes', message })))
+  if (params.brand) diagnostics.push(...reviewBrandTypography({ snapshot: draft.snapshot, brand: params.brand }))
 
   const ids = collectIds(draft.snapshot)
   for (const [index, field] of draft.fields.entries()) {
@@ -122,22 +136,25 @@ export async function compileOfficeTemplate(params: {
   }
   for (const targetId of [...draft.lockedObjectIds, ...draft.allowedRepeatTargetIds]) if (!ids.has(targetId)) diagnostics.push({ severity: 'error', code: 'template.rule_target_missing', path: targetId, message: `Template rule targets missing object ${targetId}` })
 
-  const fit = fitOfficeArtifact(draft.snapshot, fitBudget(draft))
+  const fit = fitOfficeArtifact(draft.snapshot, fitBudget(draft, params.authoringPath))
   diagnostics.push(...fit.issues.map((issue) => ({ severity: 'error' as const, code: `layout.${issue.code}`, path: issue.objectId, message: issue.message })))
   if (diagnostics.some((diagnostic) => diagnostic.severity === 'error')) return { receipt: { ok: false, authoringPath: params.authoringPath, capabilityVersion: officeCapabilityManifest.version, diagnostics } }
 
   const resources = new Map(params.resources.map((resource) => [resource.id, resource]))
   const resolveResource: OfficeResourceResolver = async (resourceId) => resources.get(resourceId) ?? null
   try {
-    let exported: Awaited<ReturnType<typeof exportOfficeDocument>>
-    let reparsed: Awaited<ReturnType<typeof reparseOfficeDocument>> | Awaited<ReturnType<typeof reparseOfficePresentation>>
+    let exported: Awaited<ReturnType<typeof exportOfficeDocument>> | Awaited<ReturnType<typeof exportOfficePresentation>> | Awaited<ReturnType<typeof exportOfficeSpreadsheet>>
+    let reparsed: Awaited<ReturnType<typeof reparseOfficeDocument>> | Awaited<ReturnType<typeof reparseOfficePresentation>> | Awaited<ReturnType<typeof reparseOfficeSpreadsheet>>
     const snapshot = draft.snapshot
     if (snapshot.family === 'document') {
       exported = await exportOfficeDocument(snapshot, resolveResource)
       reparsed = await reparseOfficeDocument(exported.bytes)
-    } else {
+    } else if (snapshot.family === 'presentation') {
       exported = await exportOfficePresentation(snapshot, resolveResource)
       reparsed = await reparseOfficePresentation(exported.bytes)
+    } else {
+      exported = await exportOfficeSpreadsheet(snapshot, resolveResource)
+      reparsed = await reparseOfficeSpreadsheet(exported.bytes)
     }
     if (reparsed.semanticHash !== officeSemanticHash(draft.snapshot)) diagnostics.push({ severity: 'error', code: 'template.reparse_mismatch', path: 'snapshot', message: 'Exported template does not reopen to the admitted canonical snapshot' })
     if (reparsed.layoutSerialization !== fit.result.serialization) diagnostics.push({ severity: 'error', code: 'template.layout_mismatch', path: 'snapshot', message: 'Reopened template layout does not match the admitted display list' })

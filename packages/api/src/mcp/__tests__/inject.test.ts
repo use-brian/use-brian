@@ -571,6 +571,52 @@ describe('[COMP:api/mcp-inject] custom connector auth threading', () => {
     })
   })
 
+  // The api channel: an external client of the workspace, served through a
+  // consumer-hosted bridge MCP server. The bridge resolves Actor-Id back to
+  // its own user record and scopes every fetch to that person, so these
+  // headers are what makes "one client can never read another" structural
+  // rather than a prompt instruction. Actor-Id is the consumer's own opaque
+  // externalUserId; User-Id is the stable Use Brian shadow UUID.
+  it('injects the api-channel actor headers (id / email / org) for a bridge connector', async () => {
+    discoverMcpServer.mockResolvedValueOnce({
+      name: 'Bridge MCP', url: 'http://localhost:9202/mcp',
+      tools: [{ name: 'getMyOrders', description: 'self-scoped', inputSchema: { type: 'object', properties: {} } }],
+    })
+    const tools = new Map()
+    await injectMcpTools({
+      userId: 'u-owner-1', assistantId: 'a-1', tools,
+      connectorStore: {
+        list: vi.fn().mockResolvedValue([
+          {
+            id: 'ci-bridge-1', connectorId: 'cx-bridge-1', name: 'Bridge MCP', connected: true,
+            url: 'http://localhost:9202/mcp', custom: true,
+            config: { sendActorIdentity: true },
+            createdAt: new Date('2026-01-01T00:00:00Z'), updatedAt: new Date('2026-08-06T00:00:00Z'),
+          },
+        ]),
+      } as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorInstanceStore: {
+        getAuthCredentialsSystem: vi.fn().mockResolvedValue({ type: 'bearer', token: 'bridge-tok' }),
+        getCredentialsSystem: vi.fn(), updateCredentialsSystem: vi.fn(),
+      } as never,
+      actorIdentity: {
+        channel: 'api',
+        id: 'cust_8812',
+        email: 'jane@client.example',
+        userId: 'u-shadow-jane',
+        org: 'acme-corp',
+      },
+    })
+    const headers = discoverMcpServer.mock.calls.at(-1)![2] as Record<string, string>
+    expect(headers['X-UseBrian-Actor-Channel']).toBe('api')
+    expect(headers['X-UseBrian-Actor-Id']).toBe('cust_8812')
+    expect(headers['X-UseBrian-Actor-Email']).toBe('jane@client.example')
+    expect(headers['X-UseBrian-Actor-Org']).toBe('acme-corp')
+    expect(headers['X-UseBrian-User-Id']).toBe('u-shadow-jane')
+    expect(headers.Authorization).toBe('Bearer bridge-tok')
+  })
+
   it('does NOT inject actor headers for a connector that did not opt in (no PII leak)', async () => {
     discoverMcpServer.mockResolvedValueOnce({ name: 'No-Actor MCP', url: 'http://localhost:9201/mcp', tools: [] })
     const tools = new Map()

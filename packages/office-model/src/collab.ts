@@ -28,6 +28,22 @@ export function appendOfficeCommand(doc: Y.Doc, input: OfficeCommand): void {
   }, command.origin)
 }
 
+/** Replace the materialized base inside the existing shared Y.Doc.
+ *
+ * Brian revisions advance the immutable artifact head outside the WebSocket
+ * process, but connected editors still hold this exact Y.Doc in memory. A
+ * revision therefore has to replace the base and compact the old command log
+ * in place so Hocuspocus broadcasts the new head instead of later persisting a
+ * stale pre-revision document over it.
+ */
+export function replaceOfficeSnapshot(doc: Y.Doc, snapshot: OfficeArtifactSnapshot): void {
+  const parsed = OfficeArtifactSnapshotSchema.parse(snapshot)
+  doc.transact(() => {
+    doc.getMap<string>(ROOT).set(BASE, JSON.stringify(parsed))
+    doc.getMap<string>(COMMANDS).clear()
+  }, 'ai')
+}
+
 export function yDocToSnapshot(doc: Y.Doc): OfficeArtifactSnapshot {
   const baseJson = doc.getMap<string>(ROOT).get(BASE)
   if (!baseJson) throw new Error('Office Y.Doc has no base snapshot')

@@ -86,6 +86,7 @@ export function TaskRecordDetail({
     changes: AdjustMemoryChanges,
     patch: Partial<TaskRow>,
   ) => Promise<{ ok: boolean; error?: string }>;
+  /** `reason` is "" when the user deleted without teaching a rule. */
   onDelete: (reason: string) => Promise<{ ok: boolean; error?: string }>;
   onClose: () => void;
 }) {
@@ -150,11 +151,15 @@ export function TaskRecordDetail({
       description: tp.deleteTaskDescription,
       placeholder: tp.deleteReasonPlaceholder,
       confirmLabel: tp.deleteAndAddRule,
+      emptyConfirmLabel: tp.deleteTaskOnly,
       cancelLabel: t.common.cancel,
+      multiline: true,
+      // An empty reason still deletes; it just teaches nothing.
+      allowEmpty: true,
     });
     if (answer === null) return;
     const reason = answer.trim();
-    if (reason.length < 3) {
+    if (reason.length > 0 && reason.length < 3) {
       setDeleteError(tp.deleteReasonTooShort);
       return;
     }

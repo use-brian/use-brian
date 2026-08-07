@@ -1,96 +1,90 @@
 "use client";
 
 /**
- * Studio → Knowledge management (app-web).
+ * Studio → Knowledge — the master-detail knowledge-base surface (app-web).
  *
- * Ported from `apps/web/src/app/(app)/studio/knowledge/page.tsx` for the app
- * consolidation (docs/architecture/features/doc.md §9 #5, CHUNK 4).
- * Rendered inside the Studio full-page layout, NOT the doc three-column
- * page shell.
+ * Revamp of the flat sources list (docs/plans/knowledge-ux-revamp.md):
+ * a left rail lists every connected source plus a "Manual entries"
+ * pseudo-row for the `source_id IS NULL` pool; the focused row's management
+ * panel renders beside it. Mirrors Studio → Connectors / Events' layout.
  *
- * Lists the active workspace's connected knowledge sources and lets the user
- * connect either GitHub repositories or OSS-local server directories.
+ * Focused-source features:
+ *   - Overview + Sync: provenance, last sync, write badge, Sync now,
+ *     Disconnect (D2)
+ *   - Clearance: per-source default sensitivity for unstamped entries,
+ *     mig 410 (D3)
+ *   - Ask & update: embedded chat panel scoped to the source (D4 —
+ *     `KbChatPanel`)
+ *   - Self-maintain: the mandatory-field maintenance agent (D5/D6 —
+ *     `KbMaintenanceForm`)
  *
- * Sources are workspace-scoped — every assistant in the workspace shares the
- * same source set. The per-assistant Knowledge tab (on the assistant detail
- * page) is the entry browser; this page owns source CRUD.
+ * Connecting a source happens in `AddSourceModal` (D1), not an inline card.
  *
- * app-web deltas vs apps/web:
- *   - `activeId` comes from the app-web `useWorkspaces()` adapter.
- *   - Cross-links to Connectors are workspace-scoped
- *     (`/w/[workspaceId]/studio/connectors`).
- *   - `window.confirm` is replaced with `confirmDialog()` (themed,
- *     Promise-returning) per the root CLAUDE.md ban on native dialogs.
+ * Sources are workspace-scoped — every assistant shares the set; the
+ * per-assistant Knowledge tab keeps the viewer + enable/disable toggle.
  *
- * Backend: /api/workspaces/:workspaceId/knowledge (packages/api/src/routes/knowledge.ts → workspaceKnowledgeRoutes).
+ * Backend: /api/workspaces/:workspaceId/knowledge
+ * (packages/api/src/routes/knowledge.ts → workspaceKnowledgeRoutes).
  *
  * [COMP:app-web/studio-knowledge]
  */
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import Link from "next/link";
 import { authFetch } from "@/lib/auth-fetch";
 import { useWorkspaces } from "@/contexts/workspace-context";
-import { SearchableSelect } from "@/components/ui/searchable-select";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { StudioTopbarActions } from "@/components/studio/studio-topbar";
+import { AddSourceModal, type ConnectorInstanceOption } from "@/components/knowledge/add-source-modal";
+import { KbChatPanel } from "@/components/knowledge/kb-chat-panel";
+import { KbMaintenanceForm } from "@/components/knowledge/kb-maintenance-form";
+import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n";
+import { BookOpen, FolderGit2, HardDrive, NotebookPen } from "lucide-react";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
-type ConnectorInstance = {
-  id: string;
-  label: string;
-  connectedEmail: string | null;
-  sensitivity: string | null;
-};
+type Sensitivity = "public" | "internal" | "confidential";
 
 type KnowledgeSource = {
   id: string;
   workspaceId: string;
-  sourceType: string;
+  sourceType: "github" | "local";
   repo: string;
   branch: string;
   rootPath: string;
   lastSyncedSha: string | null;
   lastSyncedAt: string | null;
   syncError: string | null;
+  writeAccess: boolean | null;
+  defaultSensitivity: Sensitivity;
+  entryCount: number;
 };
 
-type RepoOption = {
-  fullName: string;
-  private: boolean;
-  description: string | null;
-};
+/** Rail selection: a source id, or the manual-entries pseudo-row. */
+type Selection = { kind: "source"; id: string } | { kind: "manual" };
+
+const TIERS: Sensitivity[] = ["public", "internal", "confidential"];
 
 export default function StudioKnowledgePage() {
   const t = useT();
   const copy = t.studioPage.knowledgePage;
   const { activeId } = useWorkspaces();
+
   const [sources, setSources] = useState<KnowledgeSource[] | null>(null);
-  const [instances, setInstances] = useState<ConnectorInstance[]>([]);
+  const [manualCount, setManualCount] = useState(0);
+  const [instances, setInstances] = useState<ConnectorInstanceOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
-
-  // Picker state
-  const [showPicker, setShowPicker] = useState(false);
-  const [sourceType, setSourceType] = useState<"github" | "local">("github");
-  const [localPath, setLocalPath] = useState("");
-  const [selectedInstance, setSelectedInstance] = useState("");
-  const [repos, setRepos] = useState<RepoOption[]>([]);
-  const [loadingRepos, setLoadingRepos] = useState(false);
-  const [selectedRepo, setSelectedRepo] = useState("");
-  const [branches, setBranches] = useState<string[]>([]);
-  const [loadingBranches, setLoadingBranches] = useState(false);
-  const [selectedBranch, setSelectedBranch] = useState("");
-  const [rootPath, setRootPath] = useState("");
-  const [connecting, setConnecting] = useState(false);
-  const [connectError, setConnectError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Selection | null>(null);
+  const [showModal, setShowModal] = useState(false);
   const [connectWarning, setConnectWarning] = useState<string | null>(null);
 
-  // Per-source sync state
+  // Per-source action state
   const [syncingId, setSyncingId] = useState<string | null>(null);
+  const [savingTierId, setSavingTierId] = useState<string | null>(null);
+  const [resyncPendingId, setResyncPendingId] = useState<string | null>(null);
 
   const fetchSources = useCallback(async () => {
     if (!activeId) return;
@@ -99,8 +93,12 @@ export default function StudioKnowledgePage() {
         `${API_URL}/api/workspaces/${activeId}/knowledge/sources`,
       );
       if (res.ok) {
-        const data = (await res.json()) as { sources: KnowledgeSource[] };
+        const data = (await res.json()) as {
+          sources: KnowledgeSource[];
+          manualCount?: number;
+        };
         setSources(data.sources ?? []);
+        setManualCount(data.manualCount ?? 0);
       } else {
         setLoadError(true);
       }
@@ -116,11 +114,11 @@ export default function StudioKnowledgePage() {
         `${API_URL}/api/workspaces/${activeId}/knowledge/github/instances`,
       );
       if (res.ok) {
-        const data = (await res.json()) as { instances: ConnectorInstance[] };
+        const data = (await res.json()) as { instances: ConnectorInstanceOption[] };
         setInstances(data.instances ?? []);
       }
     } catch {
-      // non-fatal — picker will surface no-connector empty state
+      // non-fatal — the modal surfaces its no-connector empty state
     }
   }, [activeId]);
 
@@ -131,128 +129,32 @@ export default function StudioKnowledgePage() {
     }
     setLoading(true);
     setLoadError(false);
+    setSelected(null);
     Promise.all([fetchSources(), fetchInstances()]).finally(() => setLoading(false));
   }, [activeId, fetchSources, fetchInstances]);
 
-  // When the user picks an instance, refresh the repo dropdown.
+  // Default focus: first source, else the manual pseudo-row. Repair-only —
+  // never yank an existing valid selection when the list refreshes.
   useEffect(() => {
-    if (!activeId || !selectedInstance) {
-      setRepos([]);
-      return;
-    }
-    setLoadingRepos(true);
-    setConnectError(null);
-    authFetch(
-      `${API_URL}/api/workspaces/${activeId}/knowledge/github/repos?connectorInstanceId=${encodeURIComponent(selectedInstance)}`,
-    )
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error())))
-      .then((data: { repos: RepoOption[]; error?: string }) => {
-        setRepos(data.repos ?? []);
-        if (data.error) setConnectError(data.error);
-      })
-      .catch(() => setConnectError(copy.networkError))
-      .finally(() => setLoadingRepos(false));
-  }, [activeId, selectedInstance, copy.networkError]);
+    if (sources === null) return;
+    setSelected((prev) => {
+      if (prev?.kind === "manual") return prev;
+      if (prev?.kind === "source" && sources.some((s) => s.id === prev.id)) return prev;
+      return sources.length > 0 ? { kind: "source", id: sources[0].id } : { kind: "manual" };
+    });
+  }, [sources]);
 
-  // When the user picks a repo, refresh the branch dropdown.
-  useEffect(() => {
-    if (!activeId || !selectedInstance || !selectedRepo) {
-      setBranches([]);
-      return;
-    }
-    const [owner, repo] = selectedRepo.split("/");
-    if (!owner || !repo) return;
-    setLoadingBranches(true);
-    authFetch(
-      `${API_URL}/api/workspaces/${activeId}/knowledge/github/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/branches?connectorInstanceId=${encodeURIComponent(selectedInstance)}`,
-    )
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error())))
-      .then((data: { branches: string[] }) => {
-        const list = data.branches ?? [];
-        setBranches(list);
-        if (list.includes("main")) setSelectedBranch("main");
-        else if (list.includes("master")) setSelectedBranch("master");
-        else if (list.length > 0) setSelectedBranch(list[0]);
-        else setSelectedBranch("");
-      })
-      .catch(() => {
-        setBranches([]);
-      })
-      .finally(() => setLoadingBranches(false));
-  }, [activeId, selectedInstance, selectedRepo]);
-
-  function openPicker() {
-    setShowPicker(true);
-    setConnectError(null);
-    setConnectWarning(null);
-    // Auto-select the only connector if there's just one.
-    if (instances.length === 1 && !selectedInstance) {
-      setSelectedInstance(instances[0].id);
-    }
-  }
-
-  function closePicker() {
-    setShowPicker(false);
-    setSourceType("github");
-    setLocalPath("");
-    setSelectedInstance("");
-    setSelectedRepo("");
-    setSelectedBranch("");
-    setRootPath("");
-    setRepos([]);
-    setBranches([]);
-    setConnectError(null);
-  }
-
-  async function handleConnect() {
-    if (!activeId) return;
-    if (sourceType === "github" && (!selectedInstance || !selectedRepo || !selectedBranch)) return;
-    if (sourceType === "local" && !localPath.trim()) return;
-    setConnecting(true);
-    setConnectError(null);
-    setConnectWarning(null);
-    try {
-      const body = sourceType === "local"
-        ? { sourceType: "local", localPath: localPath.trim(), rootPath: rootPath.trim() }
-        : {
-            connectorInstanceId: selectedInstance,
-            repo: selectedRepo,
-            branch: selectedBranch,
-            rootPath: rootPath.trim(),
-          };
-      const res = await authFetch(
-        `${API_URL}/api/workspaces/${activeId}/knowledge/sources`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        },
-      );
-      if (res.ok) {
-        const data = (await res.json()) as { validation?: { warning: string | null } };
-        if (data.validation?.warning) setConnectWarning(data.validation.warning);
-        closePicker();
-        fetchSources();
-      } else {
-        const err = (await res.json().catch(() => ({}))) as { error?: string };
-        setConnectError(
-          err.error
-            ? format(copy.connectError, { message: err.error })
-            : copy.defaultConnectError,
-        );
-      }
-    } catch {
-      setConnectError(copy.networkError);
-    } finally {
-      setConnecting(false);
-    }
-  }
+  const sel = useMemo(() => {
+    if (!selected || sources === null) return null;
+    if (selected.kind === "manual") return { kind: "manual" as const };
+    const source = sources.find((s) => s.id === selected.id);
+    return source ? { kind: "source" as const, source } : null;
+  }, [selected, sources]);
 
   async function handleDisconnect(source: KnowledgeSource) {
     if (!activeId) return;
-    const confirmMsg = format(copy.sourceDisconnectConfirm, { repo: source.repo });
     const ok = await confirmDialog({
-      description: confirmMsg,
+      description: format(copy.sourceDisconnectConfirm, { repo: source.repo }),
       confirmLabel: copy.sourceDisconnect,
       cancelLabel: copy.addRepoCancel,
       variant: "destructive",
@@ -263,9 +165,12 @@ export default function StudioKnowledgePage() {
         `${API_URL}/api/workspaces/${activeId}/knowledge/sources/${source.id}`,
         { method: "DELETE" },
       );
-      if (res.ok) fetchSources();
+      if (res.ok) {
+        setSelected(null);
+        void fetchSources();
+      }
     } catch {
-      // ignore — surface via reload
+      // surface via reload
     }
   }
 
@@ -279,11 +184,35 @@ export default function StudioKnowledgePage() {
       );
       // Give the worker a moment, then refresh.
       setTimeout(() => {
-        fetchSources();
+        void fetchSources();
         setSyncingId(null);
       }, 2000);
     } catch {
       setSyncingId(null);
+    }
+  }
+
+  async function handleTierChange(source: KnowledgeSource, tier: Sensitivity) {
+    if (!activeId || tier === source.defaultSensitivity) return;
+    setSavingTierId(source.id);
+    try {
+      const res = await authFetch(
+        `${API_URL}/api/workspaces/${activeId}/knowledge/sources/${source.id}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ defaultSensitivity: tier }),
+        },
+      );
+      if (res.ok) {
+        const data = (await res.json()) as { resyncScheduled?: boolean };
+        if (data.resyncScheduled) setResyncPendingId(source.id);
+        void fetchSources();
+      }
+    } catch {
+      // surfaced by the unchanged control on refresh
+    } finally {
+      setSavingTierId(null);
     }
   }
 
@@ -295,248 +224,315 @@ export default function StudioKnowledgePage() {
     );
   }
 
+  // ── Rail row ──────────────────────────────────────────────────
+
+  function railRow(row: Selection, label: string, subtitle: string | null, icon: React.ReactNode, dot: "ok" | "attention" | null, count: number) {
+    const isSel =
+      selected !== null &&
+      ((row.kind === "manual" && selected.kind === "manual") ||
+        (row.kind === "source" && selected.kind === "source" && selected.id === row.id));
+    return (
+      <li key={row.kind === "source" ? row.id : "manual"}>
+        <button
+          type="button"
+          onClick={() => setSelected(row)}
+          aria-current={isSel ? "true" : undefined}
+          className={cn(
+            "flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
+            isSel
+              ? "bg-muted font-medium text-foreground"
+              : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+          )}
+        >
+          <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted">
+            {icon}
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block truncate">{label}</span>
+            {subtitle && (
+              <span className="block truncate text-[11px] font-normal text-muted-foreground">
+                {subtitle}
+              </span>
+            )}
+          </span>
+          <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground/60">
+            {count}
+          </span>
+          {dot && (
+            <span
+              aria-hidden
+              className={cn(
+                "h-1.5 w-1.5 shrink-0 rounded-full",
+                dot === "attention" ? "bg-amber-500" : "bg-primary",
+              )}
+            />
+          )}
+        </button>
+      </li>
+    );
+  }
+
+  // ── Detail panels ─────────────────────────────────────────────
+
+  function renderSourceDetail(s: KnowledgeSource) {
+    const writeBadge =
+      s.sourceType === "local"
+        ? copy.writeBadgeLocal
+        : s.writeAccess === true
+          ? copy.writeBadgeWritable
+          : s.writeAccess === false
+            ? copy.writeBadgeReadOnly
+            : copy.writeBadgeUnprobed;
+    return (
+      <div key={s.id} className="space-y-4">
+        {/* Header */}
+        <div className="flex items-start gap-3">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-muted">
+            {s.sourceType === "local" ? (
+              <HardDrive className="size-4.5 text-muted-foreground" aria-hidden />
+            ) : (
+              <FolderGit2 className="size-4.5 text-muted-foreground" aria-hidden />
+            )}
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <h2 className="truncate text-[15px] font-semibold tracking-tight">{s.repo}</h2>
+              <span className="rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">
+                {s.branch}
+              </span>
+              {s.rootPath && (
+                <span className="font-mono text-[11px] text-muted-foreground">/{s.rootPath}</span>
+              )}
+            </div>
+            <p className="truncate text-[12px] text-muted-foreground">
+              {format(copy.entryCountLine, { count: String(s.entryCount) })}
+              {" · "}
+              {writeBadge}
+            </p>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              onClick={() => void handleSync(s)}
+              disabled={syncingId === s.id}
+              className="rounded-lg border border-border px-2.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted disabled:opacity-50"
+            >
+              {syncingId === s.id ? copy.sourceSyncing : copy.sourceSync}
+            </button>
+            <button
+              onClick={() => void handleDisconnect(s)}
+              className="rounded-lg border border-border px-2.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:border-destructive/30 hover:text-destructive"
+            >
+              {copy.sourceDisconnect}
+            </button>
+          </div>
+        </div>
+
+        {/* Sync status */}
+        <div className="rounded-lg border border-border px-4 py-3">
+          <div className="text-[11px] text-muted-foreground space-x-3">
+            {s.lastSyncedAt ? (
+              <span>
+                {format(copy.sourceLastSynced, {
+                  time: new Date(s.lastSyncedAt).toLocaleString(),
+                })}
+              </span>
+            ) : (
+              <span className="text-amber-600 dark:text-amber-400">{copy.sourceNeverSynced}</span>
+            )}
+            {s.lastSyncedSha && <span className="font-mono">{s.lastSyncedSha.slice(0, 7)}</span>}
+          </div>
+          {s.syncError && (
+            <div className="mt-1 text-[11px] text-destructive">
+              {format(copy.sourceSyncFailed, { message: s.syncError })}
+            </div>
+          )}
+          {resyncPendingId === s.id && !s.lastSyncedSha && (
+            <div className="mt-1 text-[11px] text-muted-foreground">{copy.resyncPending}</div>
+          )}
+        </div>
+
+        {/* Clearance — per-source default sensitivity (mig 410) */}
+        <section className="space-y-2">
+          <h3 className="text-[13px] font-medium">{copy.clearanceTitle}</h3>
+          <div className="rounded-lg border border-border px-4 py-3 space-y-2">
+            <div className="flex items-center gap-2">
+              {TIERS.map((tier) => (
+                <button
+                  key={tier}
+                  type="button"
+                  disabled={savingTierId === s.id}
+                  onClick={() => void handleTierChange(s, tier)}
+                  className={cn(
+                    "rounded-lg px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-50",
+                    s.defaultSensitivity === tier
+                      ? "bg-action text-action-foreground"
+                      : "border border-border text-muted-foreground hover:bg-muted",
+                  )}
+                >
+                  {copy.tiers[tier]}
+                </button>
+              ))}
+            </div>
+            <p className="text-[11px] leading-relaxed text-muted-foreground">
+              {copy.clearanceHelp}
+            </p>
+          </div>
+        </section>
+
+        {/* Ask & update — embedded scoped chat */}
+        <section className="space-y-2">
+          <h3 className="text-[13px] font-medium">{copy.chat.title}</h3>
+          <KbChatPanel workspaceId={activeId!} scope={{ kind: "source", sourceId: s.id }} />
+        </section>
+
+        {/* Self-maintain agent */}
+        <section className="space-y-2">
+          <h3 className="text-[13px] font-medium">{copy.maintenance.title}</h3>
+          <div className="rounded-lg border border-border px-4 py-3">
+            <KbMaintenanceForm workspaceId={activeId!} sourceId={s.id} />
+          </div>
+        </section>
+      </div>
+    );
+  }
+
+  function renderManualDetail() {
+    return (
+      <div key="manual" className="space-y-4">
+        <div className="flex items-start gap-3">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-muted">
+            <NotebookPen className="size-4.5 text-muted-foreground" aria-hidden />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h2 className="truncate text-[15px] font-semibold tracking-tight">
+              {copy.manualTitle}
+            </h2>
+            <p className="truncate text-[12px] text-muted-foreground">
+              {format(copy.entryCountLine, { count: String(manualCount) })}
+            </p>
+          </div>
+        </div>
+        <div className="rounded-lg border border-border px-4 py-3 space-y-1.5">
+          <p className="text-[12px] leading-relaxed text-muted-foreground">{copy.manualBody}</p>
+          <Link
+            href={`/w/${activeId}/brain?kinds=knowledge`}
+            className="inline-block text-xs font-medium text-foreground underline underline-offset-2"
+          >
+            {copy.manualBrainLink}
+          </Link>
+        </div>
+        <section className="space-y-2">
+          <h3 className="text-[13px] font-medium">{copy.chat.title}</h3>
+          <KbChatPanel workspaceId={activeId!} scope={{ kind: "manual" }} />
+        </section>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-6">
       <StudioTopbarActions>
-        {!showPicker && (
-          <button
-            onClick={openPicker}
-            className="text-xs font-medium bg-action text-action-foreground px-3 py-1.5 rounded-lg hover:bg-action/90 transition-colors"
-          >
-            {copy.addRepo}
-          </button>
-        )}
+        <button
+          onClick={() => {
+            setConnectWarning(null);
+            setShowModal(true);
+          }}
+          className="text-xs font-medium bg-action text-action-foreground px-3 py-1.5 rounded-lg hover:bg-action/90 transition-colors"
+        >
+          {copy.addRepo}
+        </button>
       </StudioTopbarActions>
 
+      <AddSourceModal
+        workspaceId={activeId}
+        open={showModal}
+        instances={instances}
+        onClose={() => setShowModal(false)}
+        onConnected={(sourceId, warning) => {
+          setShowModal(false);
+          setConnectWarning(warning);
+          if (sourceId) setSelected({ kind: "source", id: sourceId });
+          void fetchSources();
+        }}
+      />
+
       {connectWarning && (
-        <div className="text-[13px] text-amber-600 dark:text-amber-400 bg-amber-500/10 border border-amber-500/30 rounded-lg px-4 py-3">
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-[13px] text-amber-600 dark:text-amber-400">
           {format(copy.validationWarning, { message: connectWarning })}
         </div>
       )}
 
-      <section className="flex flex-col gap-3">
-        <div className="flex items-center">
-          <h2 className="text-[13px] font-semibold tracking-tight uppercase text-muted-foreground">
-            {copy.sources}
-          </h2>
+      {loading ? (
+        <div className="py-10 text-center text-sm text-muted-foreground">{copy.loading}</div>
+      ) : loadError ? (
+        <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-3 text-center text-sm text-destructive">
+          {copy.loadError}
         </div>
-
-        {showPicker && (
-          <div className="rounded-xl border border-border bg-card p-5 flex flex-col gap-3">
-            <div className="flex gap-1 rounded-lg border border-border p-0.5">
-              <button
-                onClick={() => setSourceType("github")}
-                className={`flex-1 text-xs font-medium px-3 py-1.5 rounded-md transition-colors ${sourceType === "github" ? "bg-action text-action-foreground" : "text-muted-foreground hover:bg-muted"}`}
-              >
-                {copy.sourceTypeGithub}
-              </button>
-              <button
-                onClick={() => setSourceType("local")}
-                className={`flex-1 text-xs font-medium px-3 py-1.5 rounded-md transition-colors ${sourceType === "local" ? "bg-action text-action-foreground" : "text-muted-foreground hover:bg-muted"}`}
-              >
-                {copy.sourceTypeLocal}
-              </button>
-            </div>
-
-            {sourceType === "github" ? (
-              <>
-                <PickerField label={copy.connectorLabel}>
-                  <SearchableSelect
-                    value={selectedInstance}
-                    onValueChange={(next) => {
-                      setSelectedInstance(next);
-                      setSelectedRepo("");
-                      setSelectedBranch("");
-                    }}
-                    items={instances.map((i) => ({
-                      value: i.id,
-                      label: i.label,
-                      hint: i.connectedEmail ?? undefined,
-                    }))}
-                    placeholder={copy.connectorPlaceholder}
-                    searchPlaceholder={copy.connectorSearchPlaceholder}
-                    emptyMessage={copy.connectorNoMatch}
-                  />
-                </PickerField>
-                {instances.length === 0 && (
-                  <div className="text-xs text-muted-foreground">
-                    {copy.noGithubConnector}{" "}
-                    <Link
-                      href={`/w/${activeId}/studio/connectors`}
-                      className="font-medium text-foreground underline underline-offset-2"
-                    >
-                      {copy.goToConnectors}
-                    </Link>
-                  </div>
-                )}
-
-                <PickerField label={copy.repoLabel}>
-                  <SearchableSelect
-                    value={selectedRepo}
-                    onValueChange={(next) => {
-                      setSelectedRepo(next);
-                      setSelectedBranch("");
-                    }}
-                    items={repos.map((r) => ({
-                      value: r.fullName,
-                      label: r.fullName,
-                      hint: r.private ? "private" : undefined,
-                    }))}
-                    disabled={!selectedInstance || loadingRepos}
-                    placeholder={loadingRepos ? copy.repoLoading : copy.repoPlaceholder}
-                    searchPlaceholder={copy.repoSearchPlaceholder}
-                    emptyMessage={copy.repoNoMatch}
-                  />
-                </PickerField>
-
-                <PickerField label={copy.branchLabel}>
-                  <SearchableSelect
-                    value={selectedBranch}
-                    onValueChange={setSelectedBranch}
-                    items={branches.map((b) => ({ value: b, label: b }))}
-                    disabled={!selectedRepo || loadingBranches}
-                    placeholder={loadingBranches ? copy.branchLoading : copy.branchPlaceholder}
-                    searchPlaceholder={copy.branchSearchPlaceholder}
-                    emptyMessage={copy.branchNoMatch}
-                  />
-                </PickerField>
-              </>
-            ) : (
-              <PickerField label={copy.localPathLabel} help={copy.localPathHelp}>
-                <input
-                  type="text"
-                  value={localPath}
-                  onChange={(e) => setLocalPath(e.target.value)}
-                  placeholder={copy.localPathPlaceholder}
-                  className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30 font-mono"
-                />
-              </PickerField>
-            )}
-
-            <PickerField label={copy.rootPathLabel} help={copy.rootPathHelp}>
-              <input
-                type="text"
-                value={rootPath}
-                onChange={(e) => setRootPath(e.target.value)}
-                placeholder={copy.rootPathPlaceholder}
-                className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30 font-mono"
-              />
-            </PickerField>
-
-            {connectError && (
-              <div className="text-[12px] text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2">
-                {connectError}
-              </div>
-            )}
-
-            <div className="flex gap-2 justify-end pt-1">
-              <button
-                onClick={closePicker}
-                disabled={connecting}
-                className="text-xs font-medium border border-border px-3 py-1.5 rounded-lg text-muted-foreground hover:bg-muted transition-colors disabled:opacity-50"
-              >
-                {copy.addRepoCancel}
-              </button>
-              <button
-                onClick={handleConnect}
-                disabled={connecting || (sourceType === "github" ? !selectedInstance || !selectedRepo || !selectedBranch : !localPath.trim())}
-                className="text-xs font-medium bg-action text-action-foreground px-3 py-1.5 rounded-lg hover:bg-action/90 transition-colors disabled:opacity-50"
-              >
-                {connecting ? copy.addRepoSubmitting : copy.addRepoSubmit}
-              </button>
-            </div>
-          </div>
-        )}
-
-        {loading ? (
-          <div className="text-sm text-muted-foreground">{copy.loading}</div>
-        ) : loadError ? (
-          <div className="text-sm text-destructive">{copy.loadError}</div>
-        ) : sources && sources.length === 0 ? (
-          <div className="rounded-xl border border-dashed border-border px-5 py-6 text-sm text-muted-foreground">
-            {copy.empty}
-          </div>
-        ) : (
-          <ul className="flex flex-col gap-2">
-            {(sources ?? []).map((s) => (
-              <li
-                key={s.id}
-                className="border border-border rounded-xl bg-card px-5 py-4"
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-sm font-medium">{s.repo}</span>
-                      <span className="text-[11px] text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
-                        {s.branch}
-                      </span>
-                      {s.rootPath && (
-                        <span className="text-[11px] text-muted-foreground font-mono">
-                          /{s.rootPath}
-                        </span>
-                      )}
-                    </div>
-                    <div className="text-[11px] text-muted-foreground mt-1 space-x-3">
-                      {s.lastSyncedAt ? (
-                        <span>
-                          {format(copy.sourceLastSynced, {
-                            time: new Date(s.lastSyncedAt).toLocaleString(),
-                          })}
-                        </span>
-                      ) : (
-                        <span className="text-amber-600 dark:text-amber-400">{copy.sourceNeverSynced}</span>
-                      )}
-                      {s.lastSyncedSha && (
-                        <span className="font-mono">{s.lastSyncedSha.slice(0, 7)}</span>
-                      )}
-                    </div>
-                    {s.syncError && (
-                      <div className="text-[11px] text-destructive mt-1">
-                        {format(copy.sourceSyncFailed, { message: s.syncError })}
-                      </div>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    <button
-                      onClick={() => handleSync(s)}
-                      disabled={syncingId === s.id}
-                      className="text-xs font-medium border border-border px-2.5 py-1 rounded-lg text-muted-foreground hover:bg-muted transition-colors disabled:opacity-50"
-                    >
-                      {syncingId === s.id ? copy.sourceSyncing : copy.sourceSync}
-                    </button>
-                    <button
-                      onClick={() => handleDisconnect(s)}
-                      className="text-xs font-medium border border-border px-2.5 py-1 rounded-lg text-muted-foreground hover:text-destructive hover:border-destructive/30 transition-colors"
-                    >
-                      {copy.sourceDisconnect}
-                    </button>
-                  </div>
+      ) : sources !== null && sources.length === 0 && manualCount === 0 ? (
+        <section className="flex flex-col items-center gap-2 rounded-xl border border-border bg-card/50 p-8 text-center">
+          <BookOpen className="size-5 text-muted-foreground" aria-hidden />
+          <div className="text-sm font-medium">{copy.emptyTitle}</div>
+          <p className="max-w-sm text-sm text-muted-foreground">{copy.empty}</p>
+          <button
+            onClick={() => setShowModal(true)}
+            className="mt-2 rounded-lg bg-action px-4 py-2 text-sm font-medium text-action-foreground transition-colors hover:bg-action/90"
+          >
+            {copy.addRepo}
+          </button>
+        </section>
+      ) : (
+        /* ── Master-detail: source rail + focused panel ── */
+        <div className="flex flex-col gap-6 md:flex-row">
+          <aside className="w-full shrink-0 self-start md:w-64">
+            <nav aria-label={copy.railAriaLabel} className="flex flex-col gap-3">
+              <div>
+                <div className="flex items-center gap-1.5 px-2 pb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  {copy.sources}
+                  <span className="font-normal text-muted-foreground/50">
+                    {sources?.length ?? 0}
+                  </span>
                 </div>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-    </div>
-  );
-}
+                <ul className="flex flex-col gap-0.5">
+                  {(sources ?? []).map((s) =>
+                    railRow(
+                      { kind: "source", id: s.id },
+                      s.repo,
+                      s.rootPath ? `/${s.rootPath}` : s.branch,
+                      s.sourceType === "local" ? (
+                        <HardDrive className="size-3.5 text-muted-foreground" aria-hidden />
+                      ) : (
+                        <FolderGit2 className="size-3.5 text-muted-foreground" aria-hidden />
+                      ),
+                      s.syncError || !s.lastSyncedAt ? "attention" : "ok",
+                      s.entryCount,
+                    ),
+                  )}
+                  {railRow(
+                    { kind: "manual" },
+                    copy.manualTitle,
+                    null,
+                    <NotebookPen className="size-3.5 text-muted-foreground" aria-hidden />,
+                    null,
+                    manualCount,
+                  )}
+                </ul>
+              </div>
+            </nav>
+          </aside>
 
-function PickerField({
-  label,
-  help,
-  children,
-}: {
-  label: string;
-  help?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <label className="flex flex-col gap-1">
-      <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-        {label}
-      </span>
-      {children}
-      {help && <span className="text-[11px] text-muted-foreground">{help}</span>}
-    </label>
+          <div className="min-w-0 flex-1">
+            {!sel ? (
+              <div className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
+                {copy.selectPrompt}
+              </div>
+            ) : sel.kind === "source" ? (
+              renderSourceDetail(sel.source)
+            ) : (
+              renderManualDetail()
+            )}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }

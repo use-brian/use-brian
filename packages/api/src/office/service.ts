@@ -4,8 +4,8 @@ import type { OfficeGenerationJobRow } from '../db/office-generation.js'
 import type { ResolvedOfficeAccess } from './access.js'
 
 export type OfficeServiceDeps = {
-  generationAvailable(): boolean
-  createShell(params: { userId: string; workspaceId: string; family: 'document' | 'presentation'; title: string; templateVersionId: string | null; capabilityVersion: number; sensitivity: 'public' | 'internal' | 'confidential'; visibilityUserIds?: string[]; requiredCompartments?: string[] }): Promise<OfficeArtifactRow>
+  generationAvailable(family?: 'document' | 'presentation' | 'spreadsheet'): boolean
+  createShell(params: { userId: string; workspaceId: string; family: 'document' | 'presentation' | 'spreadsheet'; title: string; templateVersionId: string | null; capabilityVersion: number; sensitivity: 'public' | 'internal' | 'confidential'; visibilityUserIds?: string[]; requiredCompartments?: string[] }): Promise<OfficeArtifactRow>
   deleteEmptyShell(userId: string, artifactId: string): Promise<boolean>
   getArtifact(userId: string, artifactId: string): Promise<OfficeArtifactRow | null>
   resolveAccess(userId: string, artifactId: string): Promise<ResolvedOfficeAccess | null>
@@ -22,15 +22,15 @@ export class OfficeGenerationUnavailableError extends Error {
   }
 }
 
-function titleFromOutcome(outcome: string, family: 'document' | 'presentation'): string {
+function titleFromOutcome(outcome: string, family: 'document' | 'presentation' | 'spreadsheet'): string {
   const line = outcome.trim().split(/[\n.!?]/)[0]?.trim()
-  return (line || (family === 'document' ? 'Untitled document' : 'Untitled presentation')).slice(0, 1_000)
+  return (line || (family === 'document' ? 'Untitled document' : family === 'presentation' ? 'Untitled presentation' : 'Untitled spreadsheet')).slice(0, 1_000)
 }
 
 export function createOfficeService(deps: OfficeServiceDeps): OfficeToolPort {
   return {
     async create(params) {
-      if (!deps.generationAvailable()) throw new OfficeGenerationUnavailableError()
+      if (!deps.generationAvailable(params.family)) throw new OfficeGenerationUnavailableError()
       const artifact = await deps.createShell({ userId: params.userId, workspaceId: params.workspaceId, family: params.family, title: titleFromOutcome(params.outcome, params.family), templateVersionId: params.templateId ?? null, capabilityVersion: 1, sensitivity: 'internal' })
       const brief = {
         workspaceId: params.workspaceId,
@@ -62,7 +62,7 @@ export function createOfficeService(deps: OfficeServiceDeps): OfficeToolPort {
       const [artifact, access] = await Promise.all([deps.getArtifact(params.userId, params.artifactId), deps.resolveAccess(params.userId, params.artifactId)])
       if (!artifact || !access) return null
       const job = await deps.latestJob(params.userId, params.artifactId)
-      return { artifactId: artifact.id, family: artifact.family, mode: artifact.mode, title: artifact.title, version: artifact.headVersion, lifecycleState: artifact.lifecycleState === 'purged' ? 'retained' : artifact.lifecycleState, role: access.role, job: job ? { id: job.id, status: job.status, stage: job.stage } : undefined }
+      return { artifactId: artifact.id, family: artifact.family, mode: artifact.mode, title: artifact.title, version: artifact.headVersion, lifecycleState: artifact.lifecycleState === 'purged' ? 'retained' : artifact.lifecycleState, role: access.role, job: job ? { id: job.id, status: job.status, stage: job.stage, errorCode: job.errorCode } : undefined }
     },
 
     async revise(params) {
@@ -70,6 +70,7 @@ export function createOfficeService(deps: OfficeServiceDeps): OfficeToolPort {
       if (!artifact || !access || !access.canComment) return null
       if (artifact.headVersion !== params.expectedVersion) return 'version_conflict'
       const job = await deps.createJob({ userId: params.userId, workspaceId: artifact.workspaceId, artifactId: artifact.id, assistantId: params.assistantId, jobKind: 'revise', brief: { instruction: params.instruction, targetIds: params.targetIds, expectedVersion: params.expectedVersion }, authorityProjection: { role: access.role }, baseArtifactVersion: artifact.headVersion, idempotencyKey: params.idempotencyKey })
+      deps.wakeGeneration?.(params.userId)
       return { jobId: job.id, mode: access.canEdit ? 'direct' : 'proposal' }
     },
   }

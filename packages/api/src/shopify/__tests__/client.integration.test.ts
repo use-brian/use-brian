@@ -24,6 +24,8 @@ import {
   readProductTemplate,
   createProductTemplate,
   setProductTemplate,
+  runShopifyqlQuery,
+  storefrontFunnel,
   type ShopifyAuth,
 } from '../client.js'
 
@@ -238,4 +240,63 @@ describeIf('[COMP:api/shopify-client] Shopify live dev-store', () => {
       `, { themeId: main!.id, files: [`templates/product.${suffix}.json`] }).catch(() => {})
     }
   })
+
+  // ── Storefront analytics (ShopifyQL) ───────────────────────
+  //
+  // These need `read_reports` on the app AND the two-step propagation (release
+  // a version, then open the app in the store admin). Without it Shopify
+  // answers with an ACCESS_DENIED naming the scope - which is the honest
+  // failure, so the assertion below reports it rather than skipping quietly.
+
+  it('runs the storefront funnel query against the live store', async () => {
+    const result = await storefrontFunnel(AUTH, { since: '-30d' })
+    // Column names are the contract - if Shopify renames a metric the funnel
+    // silently loses a column, and the derived drop-off stops being computed.
+    const names = result.columns.map((c) => c.name)
+    expect(names).toContain('sessions')
+    expect(names).toContain('sessions_with_cart_additions')
+    expect(names).toContain('sessions_that_reached_checkout')
+    expect(result.shopifyql).toContain("human_or_bot_session = 'human'")
+    // A quiet dev store legitimately returns one all-zero row; what must hold
+    // is that the query PARSED, which reaching here already proves.
+    expect(Array.isArray(result.rows)).toBe(true)
+  }, 60_000)
+
+  it('accepts every groupBy dimension the tool offers', async () => {
+    // The enum is a promise to the model that any of these parses; an invented
+    // dimension name would only ever surface here.
+    //
+    // Asserted WITHOUT the bot filter on purpose. A store whose traffic is all
+    // bots has no rows once the filter applies, and Shopify then returns an
+    // empty `columns` list as well - so asserting through storefrontFunnel
+    // would test the store's traffic mix rather than the dimension name. The
+    // funnel is still called, to prove it does not throw.
+    for (const groupBy of ['referrer_source', 'session_device_type', 'session_country'] as const) {
+      const raw = await runShopifyqlQuery(
+        AUTH,
+        `FROM sessions SHOW sessions GROUP BY ${groupBy} SINCE -30d UNTIL today`,
+      )
+      expect(raw.columns.map((c) => c.name)).toContain(groupBy)
+      await expect(storefrontFunnel(AUTH, { since: '-7d', groupBy, limit: 5 })).resolves.toBeDefined()
+    }
+  }, 180_000)
+
+  it('returns rows keyed by column name, not positional arrays', async () => {
+    // The shape this client originally assumed was positional, which silently
+    // produced undefined for every column. Nothing but a live call catches it:
+    // the GraphQL field is opaque JSON and a mock only re-asserts its own
+    // invention. Values also arrive as strings whatever dataType claims.
+    const table = await runShopifyqlQuery(AUTH, 'FROM sessions SHOW sessions SINCE -30d UNTIL today')
+    expect(table.rows.length).toBeGreaterThan(0)
+    const row = table.rows[0]
+    expect(Array.isArray(row)).toBe(false)
+    expect(row).toHaveProperty('sessions')
+  }, 60_000)
+
+  it('surfaces a bad field name as a parse error rather than an empty table', async () => {
+    // The silent-failure guard, proven against Shopify rather than a mock:
+    // a typo must not come back as "no sessions".
+    await expect(runShopifyqlQuery(AUTH, 'FROM sessions SHOW sesions SINCE -7d'))
+      .rejects.toThrow(/rejected/i)
+  }, 60_000)
 })

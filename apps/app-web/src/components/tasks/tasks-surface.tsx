@@ -28,17 +28,24 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   ChevronRight,
+  CircleUserRound,
   Kanban,
   ListChecks,
   Rows3,
   ShieldCheck,
+  Sparkles,
 } from "lucide-react";
+import { UserAvatar } from "@/components/ui/user-avatar";
 import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { cn } from "@/lib/utils";
 import { mutateSurfaceCache, useCachedResource } from "@/lib/surface-cache";
 import { surfaceDataKey } from "@/lib/surface-prefetch";
 import { useT } from "@/lib/i18n/client";
-import { TaskSuggestions } from "@/components/tasks/task-suggestions";
+import {
+  TaskSuggestionsBanner,
+  TaskSuggestionsView,
+} from "@/components/tasks/task-suggestions";
+import { loadTaskCandidates } from "@/lib/api/task-guardrails";
 import { TaskRulesPanel } from "@/components/tasks/task-rules-panel";
 import { format } from "@/lib/i18n/format";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -159,6 +166,23 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
     loadWorkspaceRoster(workspaceId)
       .then(setRoster)
       .catch(() => setRoster([]));
+  }, [workspaceId]);
+
+  // Pending-suggestion count for the tab badge + banner. The Suggestions view
+  // keeps it current through `onCountChange`; this seed fetch covers the
+  // table/board first paint. A count that cannot load is just 0 - the tasks
+  // themselves are the page.
+  const [suggestionCount, setSuggestionCount] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    loadTaskCandidates(workspaceId)
+      .then((candidates) => {
+        if (!cancelled) setSuggestionCount(candidates.length);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
   }, [workspaceId]);
 
   // ── View state (URL is the source of truth) ───────────────────────────
@@ -318,6 +342,7 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
             /** Uniform change for the server lane, or null = client-loop only. */
             serverSet: BulkTaskSet | null;
           }
+        /** `reason` is "" for a plain delete (no tombstone, no rule). */
         | { kind: "delete"; reason: string },
     ) => {
       const ids = selectedVisible;
@@ -341,12 +366,14 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
             const batchIds = ids.slice(offset, offset + SERVER_BULK_BATCH_SIZE);
             const body =
               apply.kind === "delete"
-                ? ({
-                    action: "delete",
-                    ids: batchIds,
-                    reason: apply.reason,
-                    create_rule: true,
-                  } as const)
+                ? apply.reason
+                  ? ({
+                      action: "delete",
+                      ids: batchIds,
+                      reason: apply.reason,
+                      create_rule: true,
+                    } as const)
+                  : ({ action: "delete", ids: batchIds } as const)
                 : ({
                     action: "update",
                     ids: batchIds,
@@ -382,10 +409,14 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
           const row = (rows ?? []).find((r) => r.id === id);
           if (!row) continue;
           if (apply.kind === "delete") {
-            const result = await deleteBrainRow(workspaceId, "task", id, {
-              reason: apply.reason,
-              createRule: true,
-            });
+            const result = await deleteBrainRow(
+              workspaceId,
+              "task",
+              id,
+              apply.reason
+                ? { reason: apply.reason, createRule: true }
+                : undefined,
+            );
             if (result.ok) {
               setRows((prev) => prev.filter((r) => r.id !== id));
               setSelected((prev) => {
@@ -433,11 +464,16 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
       description: format(t.bulkDeleteConfirm, { count: String(count) }),
       placeholder: t.deleteReasonPlaceholder,
       confirmLabel: t.bulkDeleteAndAddRules,
+      emptyConfirmLabel: format(t.bulkDeleteOnly, { count: String(count) }),
       cancelLabel: t.cancel,
+      multiline: true,
+      // Teaching a rule is the better outcome, not a toll: an empty box
+      // still deletes, it just teaches nothing.
+      allowEmpty: true,
     });
     if (answer === null) return;
     const reason = answer.trim();
-    if (reason.length < 3) {
+    if (reason.length > 0 && reason.length < 3) {
       setBulkError(t.deleteReasonTooShort);
       return;
     }
@@ -493,11 +529,31 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
     {
       key: "assignee",
       label: t.filterAssignee,
+      // People read as faces, not strings — the same avatars the assignee
+      // cell and board chips use, so one member looks identical everywhere.
       options: [
-        { value: "none", label: t.unassignedOption },
+        {
+          value: "none",
+          label: t.unassignedOption,
+          icon: (size: number) => (
+            <CircleUserRound
+              size={size}
+              className="shrink-0 text-muted-foreground/50"
+              aria-hidden
+            />
+          ),
+        },
         ...(roster ?? []).map((m) => ({
           value: m.id,
           label: memberDisplayName(m) ?? t.memberUnknown,
+          icon: (size: number) => (
+            <UserAvatar
+              name={memberDisplayName(m) ?? undefined}
+              email={m.email ?? undefined}
+              avatarUrl={m.avatarUrl}
+              size={size}
+            />
+          ),
         })),
       ],
     },
@@ -609,15 +665,40 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
               <Kanban className="size-3.5" aria-hidden />
               {t.viewBoard}
             </button>
+            <button
+              type="button"
+              aria-pressed={view.view === "suggestions"}
+              aria-label={t.viewSuggestions}
+              onClick={() => setView({ view: "suggestions" })}
+              className={cn(
+                "inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12.5px]",
+                view.view === "suggestions"
+                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                  : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60",
+              )}
+            >
+              <Sparkles className="size-3.5" aria-hidden />
+              {t.viewSuggestions}
+              {suggestionCount > 0 && (
+                <span className="rounded-full bg-primary/15 px-1.5 text-[11px] tabular-nums text-primary">
+                  {suggestionCount}
+                </span>
+              )}
+            </button>
           </>
         }
       />
 
-      {/* Suggestions the admission gate held rather than created. Renders
-          nothing at zero, so a healthy workspace never sees the strip
+      {/* Suggestion-first: extracted candidates wait in the Suggestions view.
+          The table/board show a one-line banner while any are pending
           ([COMP:app-web/task-suggestions],
           docs/architecture/features/task-guardrails.md). */}
-      <TaskSuggestions workspaceId={workspaceId} onAccepted={reload} />
+      {view.view !== "suggestions" && (
+        <TaskSuggestionsBanner
+          count={suggestionCount}
+          onReview={() => setView({ view: "suggestions" })}
+        />
+      )}
 
       {/* `relative`: the task peek panel floats over THIS box — it never
           reflows the table/board underneath, and never covers the bar. */}
@@ -626,8 +707,9 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
       {/* Toolbar — cleanup presets + filters + search in ONE quiet strip
           (swaps for the bulk bar while rows are checked). The presets stay
           the two-click cleanup driver: tap → select-all → one bulk action;
-          zero-count presets render disabled, never hidden (stable layout). */}
-      {hasSelection ? (
+          zero-count presets render disabled, never hidden (stable layout).
+          The Suggestions view has its own chrome, so the toolbar hides there. */}
+      {view.view === "suggestions" ? null : hasSelection ? (
         <div className="flex flex-wrap items-center gap-2 border-b border-border bg-accent/30 px-4 py-2">
           <span className="text-[12.5px] font-medium">
             {format(t.selectedCount, { count: String(selectedVisible.length) })}
@@ -814,19 +896,20 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
             defs={filterDefs}
             active={{
               assignee: view.assignee,
-              status: view.quick ? null : (view.statuses[0] ?? null),
+              // A quick-filter owns the status slice; its pill would lie.
+              status: view.quick ? [] : view.statuses,
               priority: view.priority,
               project: view.project,
               due: view.due,
             }}
-            onSet={(key, value) => {
-              if (key === "assignee") setView({ assignee: value });
+            onSet={(key, values) => {
+              if (key === "assignee") setView({ assignee: values });
               else if (key === "status")
-                setView({ quick: null, statuses: value ? [value as TaskStatus] : [] });
+                setView({ quick: null, statuses: values as TaskStatus[] });
               else if (key === "priority")
-                setView({ priority: value as TasksViewState["priority"] });
-              else if (key === "project") setView({ project: value });
-              else if (key === "due") setView({ due: value as TasksViewState["due"] });
+                setView({ priority: values as TasksViewState["priority"] });
+              else if (key === "project") setView({ project: values });
+              else if (key === "due") setView({ due: values as TasksViewState["due"] });
             }}
             search={view.q}
             onSearch={(q) => setView({ q })}
@@ -874,7 +957,14 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
         </div>
       )}
 
-      {/* Body — table or board. */}
+      {/* Body — table, board, or the suggestions review view. */}
+      {view.view === "suggestions" ? (
+        <TaskSuggestionsView
+          workspaceId={workspaceId}
+          onAccepted={reload}
+          onCountChange={setSuggestionCount}
+        />
+      ) : (
       <div className="min-h-0 flex-1 overflow-auto">
         {rows === null ? (
           <div className="p-6 text-sm text-muted-foreground">
@@ -969,6 +1059,7 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
           </div>
         )}
       </div>
+      )}
 
         {/* Task peek panel — floats over the surface; Brain stays one click
             away via its header link. */}
@@ -980,11 +1071,12 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
             projects={projects}
             commitField={commitField}
             onDelete={async (reason) => {
+              // No reason = plain delete: no tombstone, no rule.
               const result = await deleteBrainRow(
                 workspaceId,
                 "task",
                 openTask.id,
-                { reason, createRule: true },
+                reason ? { reason, createRule: true } : undefined,
               );
               if (!result.ok) return result;
               setRows((prev) => prev.filter((row) => row.id !== openTask.id));

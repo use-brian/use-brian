@@ -6,7 +6,7 @@ import {
   MULTI_INSTANCE_CONNECTOR_IDS,
   OFFICIAL_CONNECTORS,
 } from '../connector-registry.js'
-import { OFFICIAL_CONNECTOR_TOOLS, OFFICIAL_OAUTH_SCOPES } from '../builtin-connectors.js'
+import { connectorToolGrouping, OFFICIAL_CONNECTOR_TOOLS, OFFICIAL_OAUTH_SCOPES } from '../builtin-connectors.js'
 import { TOOL_DISPLAY_NAMES } from '../tool-display-names.js'
 
 /**
@@ -152,6 +152,41 @@ describe('[COMP:shared/connector-registry] Official connector registry', () => {
         .map((c) => c.id)
         .filter((id) => !(id in OFFICIAL_CONNECTOR_TOOLS) && !KNOWN_GAPS.has(id))
       expect(missing).toEqual([])
+    })
+
+    it('tool display grouping is all-or-nothing per connector', () => {
+      // `group` drives the card-per-group tool UI. A half-tagged connector
+      // would shove the untagged half into the "Other" bucket — tag every
+      // tool or none.
+      for (const [id, tools] of Object.entries(OFFICIAL_CONNECTOR_TOOLS)) {
+        const grouped = tools.filter((tool) => tool.group).length
+        expect(grouped === 0 || grouped === tools.length, `${id}: ${grouped}/${tools.length} tools grouped`).toBe(true)
+      }
+    })
+
+    it('shopify rows sit in contiguous group blocks — registry order is display order', () => {
+      const groups = (OFFICIAL_CONNECTOR_TOOLS.shopify ?? []).map((tool) => tool.group)
+      // Dedupe only adjacent repeats: a group re-appearing later would
+      // surface as a duplicate here and fail the exact-order assertion.
+      const blocks = groups.filter((group, i) => group !== groups[i - 1])
+      expect(blocks).toEqual([
+        'catalog',
+        'inventory',
+        'orders',
+        'customers',
+        'finance',
+        'marketing',
+        'onlineStore',
+        'analytics',
+      ])
+      expect(connectorToolGrouping('shopify').order).toEqual(blocks)
+    })
+
+    it('connectorToolGrouping maps every grouped tool and stays empty for flat connectors', () => {
+      const shopify = connectorToolGrouping('shopify')
+      expect(Object.keys(shopify.byTool)).toHaveLength(OFFICIAL_CONNECTOR_TOOLS.shopify?.length ?? 0)
+      expect(connectorToolGrouping('gdrive').order).toEqual(['docs', 'sheets', 'slides'])
+      expect(connectorToolGrouping('gmail')).toEqual({ order: [], byTool: {} })
     })
 
     it('every OAuth scope list belongs to a connector that actually uses OAuth', () => {

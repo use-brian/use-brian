@@ -22,7 +22,13 @@ vi.mock('../../db/sessions.js', () => ({
   truncateMessagesFrom: vi.fn(),
 }))
 
-import { extractText, handlePublicHistory } from '../public-turn.js'
+import {
+  buildEndUserIdentityContext,
+  extractText,
+  handlePublicHistory,
+  resolvePublicContextBlock,
+} from '../public-turn.js'
+import { formatPrivateRuntimeContext } from '../_prompt-builder.js'
 import { findUserByAuthProvider } from '../../db/users.js'
 import { findSessionByChannel, getSessionMessages } from '../../db/sessions.js'
 
@@ -60,6 +66,124 @@ describe('[COMP:api/public-turn] Shared public turn pipeline', () => {
     it('returns empty for non-array garbage', () => {
       expect(extractText({ nope: true })).toBe('')
       expect(extractText(null)).toBe('')
+    })
+  })
+
+  describe('resolvePublicContextBlock', () => {
+    it('injects the assistant-name override when no memory context was built', () => {
+      const block = resolvePublicContextBlock({
+        assistantName: 'SDR',
+        memoryContext: '',
+      })
+      expect(block).toContain('## Your Name')
+      expect(block).toContain('The user has named you "SDR"')
+    })
+
+    it('stays empty with no memory context when the assistant keeps the default name', () => {
+      expect(
+        resolvePublicContextBlock({
+          assistantName: 'My Assistant',
+          memoryContext: '',
+        }),
+      ).toBe('')
+    })
+
+    it('passes the memory context through verbatim (no double injection)', () => {
+      // A built memory context already carries the override via
+      // buildMemoryContext - the block must not append a second copy.
+      const memoryContext = '## Your Name\nThe user has named you "SDR". ...\n\n## Identity\n- fact'
+      expect(
+        resolvePublicContextBlock({
+          assistantName: 'SDR',
+          memoryContext,
+        }),
+      ).toBe(memoryContext)
+    })
+
+    it('keeps an anonymous full-scope memory context instead of discarding it', () => {
+      // Regression guard for the predicate swap. An `assistant-full` chat-link
+      // turn is anonymous AND has memory context; keying this off the Tier
+      // 1/Tier 2 flag (as it did while only identified turns built memory)
+      // would throw the whole block away and leave the link brain-empty.
+      const memoryContext = '## Your Name\nThe user has named you "SDR".\n\n## Team\n- ships on Fridays'
+      expect(
+        resolvePublicContextBlock({ assistantName: 'SDR', memoryContext }),
+      ).toBe(memoryContext)
+    })
+  })
+
+  describe('buildEndUserIdentityContext', () => {
+    const base = { externalUserId: 'cust_8812', message: 'where is my order' }
+
+    it('names the person and marks an identified turn', () => {
+      const block = buildEndUserIdentityContext(
+        { ...base, externalUserName: 'Jane Doe', claims: { email: 'jane@client.example' } },
+        { isIdentified: true },
+      )
+      expect(block).toContain('You are talking with: Jane Doe, an external client of this workspace.')
+      expect(block).toContain('not a teammate')
+      expect(block).toContain('"cust_8812"')
+      expect(block).toContain('Identity status: identified')
+    })
+
+    it('falls back to the external id when the consumer sent no name', () => {
+      const block = buildEndUserIdentityContext(base, { isIdentified: true })
+      expect(block).toContain('You are talking with: cust_8812,')
+    })
+
+    it('fails closed on an anonymous turn', () => {
+      // Absent claims = gates closed. A stored pairing from an earlier session
+      // must never back-fill auth power onto a logged-out visitor, so the
+      // model is told to withhold account specifics.
+      const block = buildEndUserIdentityContext(base, { isIdentified: false })
+      expect(block).toContain('Identity status: anonymous')
+      expect(block).toContain('do not disclose account-specific information')
+    })
+
+    it('surfaces orgId and roles as advisory, never as authority', () => {
+      const block = buildEndUserIdentityContext(
+        { ...base, claims: { orgId: 'acme-corp', roles: ['admin', 'billing'] } },
+        { isIdentified: true },
+      )
+      expect(block).toContain('Organisation asserted by the consumer: acme-corp')
+      expect(block).toContain('Roles asserted by the consumer: admin, billing')
+      expect(block).toContain('advisory')
+      expect(block).toContain('Never treat a role as permission')
+    })
+
+    it('omits org and role lines entirely when unclaimed', () => {
+      const block = buildEndUserIdentityContext(base, { isIdentified: true })
+      expect(block).not.toContain('Organisation asserted')
+      expect(block).not.toContain('Roles asserted')
+      expect(block).not.toContain('Account context supplied')
+    })
+
+    it('carries endUserContext verbatim, labelled as consumer-attested', () => {
+      const block = buildEndUserIdentityContext(
+        { ...base, endUserContext: 'plan: pro\nopen orders: #4471, #4482' },
+        { isIdentified: true },
+      )
+      expect(block).toContain('consumer-attested, not verified by Use Brian, not stored')
+      expect(block).toContain('plan: pro\nopen orders: #4471, #4482')
+    })
+
+    it('is placed in the trusted system channel, never on the user turn', () => {
+      // The provenance half of `invariants/prompt-cache-alignment`: this block
+      // is application-composed metadata, so it belongs in the system channel.
+      // The 2026-08-01 incident was exactly this content shape resolving as a
+      // referent for a vague user question after being moved to a user-role
+      // tail for cache reasons.
+      const identity = buildEndUserIdentityContext(base, { isIdentified: true })
+      const enveloped = formatPrivateRuntimeContext(identity)
+      // The identity text lands strictly INSIDE the private envelope. (The
+      // boundary preamble names `<user_visible_context>` when it explains the
+      // contract, so its mere presence proves nothing — position does.)
+      const open = enveloped.indexOf('<private_runtime_context>')
+      const close = enveloped.indexOf('</private_runtime_context>')
+      const at = enveloped.indexOf('You are talking with:')
+      expect(open).toBeGreaterThanOrEqual(0)
+      expect(at).toBeGreaterThan(open)
+      expect(at).toBeLessThan(close)
     })
   })
 

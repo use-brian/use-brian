@@ -16,6 +16,9 @@ export {
   CompartmentAccumulator,
   unionCompartments,
   subsetCompartments,
+  CLIENT_COMPARTMENT_PREFIX,
+  clientCompartment,
+  isClientCompartment,
 } from './compartments.js'
 export { EvidenceAccumulator, extractFigureClaims, extractFigureKeys } from './evidence.js'
 export type {

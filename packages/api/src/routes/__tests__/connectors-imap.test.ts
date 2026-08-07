@@ -22,26 +22,41 @@ function makeApp(over: {
   verifyOk?: boolean
   verifyCode?: 'auth_failed' | 'access_disabled' | 'unreachable'
   preset?: MailboxPreset | null
-  existing?: { id: string; provider: string; connectedEmail?: string } | null
+  existing?: { id: string; provider: string; scope?: string; connectedEmail?: string } | null
+  /** Full listForUser rows (workspace-owned scenarios); wins over `existing`. */
+  instances?: Array<Record<string, unknown>>
+  /** Caller's membership in the instance's workspace (clearance gate). */
+  membership?: { role: 'owner' | 'admin' | 'member'; clearance: 'public' | 'internal' | 'confidential' } | null
+  /** Decrypted credentials for the resolved instance (sync-status path). */
+  creds?: Record<string, unknown> | null
 } = {}) {
   const createUserInstance = vi.fn(async () => ({ id: 'inst_new' }))
   const update = vi.fn(async () => ({ id: 'inst_existing' }))
-  const listByUser = vi.fn(async () => (over.existing ? [over.existing] : []))
+  const listForUser = vi.fn(async () =>
+    over.instances ?? (over.existing ? [over.existing] : []))
+  const getAuthCredentialsSystem = vi.fn(async () => over.creds ?? null)
+  const getMembershipWithClearance = vi.fn(async () => over.membership ?? null)
   const verify = vi.fn(async () =>
     over.verifyOk === false
       ? { ok: false as const, code: over.verifyCode ?? 'auth_failed' as const, message: 'nope' }
       : { ok: true as const },
   )
   const resolvePreset = vi.fn(async () => (over.preset === undefined ? ALIMAIL : over.preset))
+  const countArchive = vi.fn(async () => ({ total: 3, byFolder: { INBOX: 3 } }))
   const router = connectorRoutes({
     connectorStore: {} as ConnectorStore,
     connectorInstanceStore: {
-      createUserInstance, update, listByUser,
+      createUserInstance, update, listForUser, getAuthCredentialsSystem,
     } as unknown as ConnectorInstanceStore,
-    imapMailbox: { verify: verify as never, resolvePreset: resolvePreset as never },
+    imapMailbox: {
+      verify: verify as never,
+      resolvePreset: resolvePreset as never,
+      countArchive: countArchive as never,
+      getMembershipWithClearance: getMembershipWithClearance as never,
+    },
   })
   const app = createTestApp('/api/connectors', router, { userId: USER })
-  return { app, createUserInstance, update, listByUser, verify, resolvePreset }
+  return { app, createUserInstance, update, listForUser, verify, resolvePreset, getMembershipWithClearance }
 }
 
 describe('[COMP:api/mailbox-connect-routes] POST /imap/resolve', () => {
@@ -124,7 +139,7 @@ describe('[COMP:api/mailbox-connect-routes] POST /imap/connect', () => {
 
   it('reconnecting the SAME address updates that instance in place (rotated app password)', async () => {
     const { app, createUserInstance, update } = makeApp({
-      existing: { id: 'inst_existing', provider: 'imap', connectedEmail: 'maya@harborlane.example' },
+      existing: { id: 'inst_existing', provider: 'imap', scope: 'user', connectedEmail: 'maya@harborlane.example' },
     })
     const res = await request(app).post('/api/connectors/imap/connect').send({
       email: 'maya@harborlane.example', appPassword: 'rotated-pw',
@@ -136,7 +151,7 @@ describe('[COMP:api/mailbox-connect-routes] POST /imap/connect', () => {
 
   it('connecting a DIFFERENT address adds another mailbox (multi-account, D11 retired)', async () => {
     const { app, createUserInstance, update } = makeApp({
-      existing: { id: 'inst_existing', provider: 'imap', connectedEmail: 'ops@other.example' },
+      existing: { id: 'inst_existing', provider: 'imap', scope: 'user', connectedEmail: 'ops@other.example' },
     })
     const res = await request(app).post('/api/connectors/imap/connect').send({
       email: 'maya@harborlane.example', appPassword: 'pw',
@@ -152,6 +167,78 @@ describe('[COMP:api/mailbox-connect-routes] POST /imap/connect', () => {
     const { app } = makeApp()
     expect((await request(app).post('/api/connectors/imap/connect').send({ email: 'a@b.c' })).status).toBe(400)
     expect((await request(app).post('/api/connectors/imap/connect').send({ email: 'nope', appPassword: 'x' })).status).toBe(400)
+  })
+})
+
+describe('[COMP:api/mailbox-connect-routes] transferred (workspace-owned) mailbox', () => {
+  const WS_MAILBOX = {
+    id: 'inst_ws',
+    provider: 'imap',
+    scope: 'workspace',
+    workspaceId: 'ws_1',
+    sensitivity: 'internal',
+    connected: true,
+    connectedEmail: 'maya@harborlane.example',
+    createdAt: new Date('2026-01-01T00:00:00Z'),
+    config: {},
+    ingestionEnabled: false,
+  }
+  const IMAP_CREDS = {
+    type: 'imap',
+    email: 'maya@harborlane.example',
+    appPassword: 'pw',
+    imapHost: 'imap.qiye.aliyun.com',
+    imapPort: 993,
+    smtpHost: 'smtp.qiye.aliyun.com',
+    smtpPort: 465,
+  }
+
+  it('sync-status resolves a workspace-owned mailbox for a cleared member', async () => {
+    const { app } = makeApp({
+      instances: [WS_MAILBOX],
+      membership: { role: 'member', clearance: 'internal' },
+      creds: IMAP_CREDS,
+    })
+    const res = await request(app).get('/api/connectors/imap/sync-status')
+    expect(res.status).toBe(200)
+    expect(res.body.instanceId).toBe('inst_ws')
+    expect(res.body.email).toBe('maya@harborlane.example')
+  })
+
+  it('sync-status 404s for an under-cleared member (clearance below sensitivity)', async () => {
+    const { app } = makeApp({
+      instances: [{ ...WS_MAILBOX, sensitivity: 'confidential' }],
+      membership: { role: 'member', clearance: 'internal' },
+      creds: IMAP_CREDS,
+    })
+    const res = await request(app).get('/api/connectors/imap/sync-status')
+    expect(res.status).toBe(404)
+  })
+
+  it('connecting the SAME address rotates the workspace mailbox in place for a cleared member', async () => {
+    const { app, createUserInstance, update } = makeApp({
+      instances: [WS_MAILBOX],
+      membership: { role: 'member', clearance: 'internal' },
+    })
+    const res = await request(app).post('/api/connectors/imap/connect').send({
+      email: 'maya@harborlane.example', appPassword: 'rotated-pw',
+    })
+    expect(res.status).toBe(200)
+    expect(update).toHaveBeenCalledWith(USER, 'inst_ws', expect.objectContaining({ connected: true }))
+    expect(createUserInstance).not.toHaveBeenCalled()
+  })
+
+  it('an under-cleared member connecting the same address gets their own personal instance instead', async () => {
+    const { app, createUserInstance, update } = makeApp({
+      instances: [{ ...WS_MAILBOX, sensitivity: 'confidential' }],
+      membership: { role: 'member', clearance: 'internal' },
+    })
+    const res = await request(app).post('/api/connectors/imap/connect').send({
+      email: 'maya@harborlane.example', appPassword: 'pw',
+    })
+    expect(res.status).toBe(200)
+    expect(createUserInstance).toHaveBeenCalled()
+    expect(update).not.toHaveBeenCalled()
   })
 })
 
@@ -172,7 +259,7 @@ describe('[COMP:api/mailbox-connect-routes] sync-on-connect', () => {
   it('triggers a sync for the reconnected (existing) instance', async () => {
     const syncInstanceById = vi.fn(async () => ({ synced: true as const, newMessages: 0 }))
     setGlobalMailboxSyncDeps({ syncInstanceById })
-    const { app } = makeApp({ existing: { id: 'inst_existing', provider: 'imap', connectedEmail: 'maya@harborlane.example' } })
+    const { app } = makeApp({ existing: { id: 'inst_existing', provider: 'imap', scope: 'user', connectedEmail: 'maya@harborlane.example' } })
     const res = await request(app).post('/api/connectors/imap/connect').send({
       email: 'maya@harborlane.example', appPassword: 'pw',
     })

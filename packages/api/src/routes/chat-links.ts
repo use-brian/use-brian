@@ -20,7 +20,7 @@
 
 import { Router } from 'express'
 import { z } from 'zod'
-import { resolveAssistantAccess } from '../db/users.js'
+import { findAssistantById, resolveAssistantAccess } from '../db/users.js'
 import type { ChatLinkStore } from '../db/chat-link-store.js'
 
 export type ChatLinkRouteOptions = {
@@ -63,8 +63,16 @@ export function chatLinkRoutes({ chatLinkStore }: ChatLinkRouteOptions): Router 
     if (!(await requireOwnerOrAdmin(userId, assistantId, res))) return
 
     try {
-      const links = await chatLinkStore.listForAssistant(assistantId)
-      res.json({ links })
+      // `clearance` rides along because a chat-link turn reads at the
+      // ASSISTANT's clearance (contextScope `assistant-full`), so the create
+      // dialog has to state what the link will inherit before the owner
+      // publishes a URL. See docs/architecture/features/public-chat-link.md
+      // → "Context scope".
+      const [links, assistant] = await Promise.all([
+        chatLinkStore.listForAssistant(assistantId),
+        findAssistantById(assistantId),
+      ])
+      res.json({ links, clearance: assistant?.clearance ?? null })
     } catch (err) {
       console.error('[chat-links] list failed:', err)
       res.status(500).json({ error: 'Failed to list chat links' })

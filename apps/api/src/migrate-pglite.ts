@@ -7,6 +7,17 @@ import { toPgliteMigrationSql } from '@use-brian/api/migrations/pglite-sql.js'
 const migrationRuns = new WeakMap<PGlite, Promise<void>>()
 const OSS_CHANNELS_330 = '330_oss_channels.sql'
 const OSS_CHANNELS_330_SHA256 = '64aeddde4c05bd186b638be0b0c02f477dd16afb20358c00446b2e9d0d739c1e'
+// The chat archive migrations were exercised locally before their feature
+// branch was rebased onto newer develop migrations. The rebase changed only
+// their sequence prefixes. Preserve those existing local brains by recording
+// the final filename when the exact pre-rebase filename is already applied.
+const LEGACY_MIGRATION_ALIASES: Readonly<Record<string, readonly string[]>> = {
+  '405_chat_message_archive.sql': ['395_chat_message_archive.sql', '393_chat_message_archive.sql'],
+  '406_local_chat_archive_sink.sql': ['396_local_chat_archive_sink.sql', '394_local_chat_archive_sink.sql'],
+  '407_chat_archive_enrichment.sql': ['397_chat_archive_enrichment.sql', '395_chat_archive_enrichment.sql'],
+  '408_chat_archive_owner_cascade.sql': ['398_chat_archive_owner_cascade.sql', '396_chat_archive_owner_cascade.sql'],
+  '409_chat_archive_media.sql': ['402_chat_archive_media.sql'],
+}
 
 function concurrentIndexStatements(sql: string): string[] | null {
   if (!/concurrently/i.test(sql) || /^\s*BEGIN/im.test(sql)) return null
@@ -55,6 +66,25 @@ async function migratePgliteExclusive(db: PGlite, migrationsDir: string): Promis
 
   let count = 0
   for (const file of files) {
+    const legacyNames = LEGACY_MIGRATION_ALIASES[file]
+    if (legacyNames) {
+      const aliasState = await db.transaction(async (tx) => {
+        const existing = await tx.query<{ name: string }>(
+          'SELECT name FROM public._migrations WHERE name = ANY($1::text[])',
+          [[file, ...legacyNames]],
+        )
+        if (existing.rows.some((row) => row.name === file)) return 'current'
+        if (!existing.rows.some((row) => legacyNames.includes(row.name))) return 'missing'
+
+        await tx.query('INSERT INTO public._migrations (name) VALUES ($1)', [file])
+        return 'aliased'
+      })
+      if (aliasState !== 'missing') {
+        if (aliasState === 'aliased') count++
+        continue
+      }
+    }
+
     const sql = await readFile(join(migrationsDir, file), 'utf8')
 
     // Migration 326 already creates every OSS channel table. Released migration

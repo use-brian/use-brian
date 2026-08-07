@@ -9,11 +9,78 @@ import {
   type ReactNode,
 } from 'react'
 
+/** Keeps the mirror's last line from collapsing where the textarea keeps one. */
+const ZERO_WIDTH_SPACE = '\u200b'
+
+/** A half-open `[start, end)` range over the composer value. */
+export type HighlightRange = { start: number; end: number }
+
+/**
+ * Split `value` into alternating plain / highlighted runs.
+ *
+ * Ranges are clamped to the value and merged where they overlap, so a stale
+ * range from a previous keystroke can never drop or duplicate a character —
+ * the concatenated segments always reproduce `value` exactly, which is what
+ * keeps the mirror layer aligned with the textarea glyph for glyph.
+ */
+export function splitHighlightSegments(
+  value: string,
+  ranges: HighlightRange[],
+): Array<{ text: string; highlighted: boolean }> {
+  const sorted = ranges
+    .map((range) => ({
+      start: Math.max(0, Math.min(range.start, value.length)),
+      end: Math.max(0, Math.min(range.end, value.length)),
+    }))
+    .filter((range) => range.end > range.start)
+    .sort((a, b) => a.start - b.start)
+
+  const segments: Array<{ text: string; highlighted: boolean }> = []
+  let cursor = 0
+  for (const range of sorted) {
+    if (range.start < cursor) {
+      // Overlapping ranges merge rather than double-paint.
+      if (range.end <= cursor) continue
+      segments.push({ text: value.slice(cursor, range.end), highlighted: true })
+      cursor = range.end
+      continue
+    }
+    if (range.start > cursor) {
+      segments.push({ text: value.slice(cursor, range.start), highlighted: false })
+    }
+    segments.push({ text: value.slice(range.start, range.end), highlighted: true })
+    cursor = range.end
+  }
+  if (cursor < value.length) {
+    segments.push({ text: value.slice(cursor), highlighted: false })
+  }
+  return segments
+}
+
 export type ChatComposerProps = {
   value: string
   onChange: (next: string) => void
   /** Called with the current `value` when the user submits. */
   onSend: () => void
+  /**
+   * Cmd/Ctrl+Enter — submit as a **steer**: the running turn should take this
+   * message at the earliest safe point instead of the next boundary. Hosts
+   * wire it only where a turn can be in flight; without it Cmd/Ctrl+Enter
+   * falls through to an ordinary send, which is the right no-op.
+   *
+   * See docs/architecture/engine/mid-turn-input.md.
+   */
+  onSteer?: () => void
+  /**
+   * Cmd/Ctrl+Enter — submit as an **ask**: this message addresses the
+   * assistant, where a plain Enter would only post it. Hosts wire it where a
+   * send is NOT automatically addressed (a workspace room, whose Enter is a
+   * durable post everyone sees and nobody answers); without it Cmd/Ctrl+Enter
+   * falls through to an ordinary send, which is the right no-op.
+   *
+   * See docs/architecture/features/chat-app.md → "Ask from the keyboard".
+   */
+  onAsk?: () => void
   /**
    * Hard-disable the whole composer — textarea included (e.g. offline, or the
    * turn is suspended on a clarifying question). NOT for streaming: while a
@@ -52,6 +119,25 @@ export type ChatComposerProps = {
    * or reply-to banners.
    */
   slotAttachments?: ReactNode
+  /**
+   * Ranges of `value` to paint as a chip BEHIND the text — the composer's way
+   * of showing that a run of characters is a resolved token (an `@assistant`
+   * mention) rather than prose the user happens to have typed.
+   *
+   * Implemented as a mirror layer under a transparent-background textarea, so
+   * the field keeps native selection, undo, IME and accessibility. Passing the
+   * prop at all (even empty) opts into the wrapper element, so pass it
+   * consistently rather than conditionally — flipping it remounts the field.
+   *
+   * The host owns the three classes this layer needs
+   * (`composer-highlight-wrap` / `-backdrop` / `-input`, defined in the app's
+   * global stylesheet) the same way it owns `composer-row`.
+   */
+  highlightRanges?: HighlightRange[]
+  /** Layout classes for the wrapper that positions the highlight backdrop over
+   *  the textarea. Only used when `highlightRanges` is passed: move the
+   *  textarea's own layout classes (grid/flex placement) here. */
+  inputWrapClassName?: string
   /** Optional CSS classes for layout customization. */
   className?: string
   textareaClassName?: string
@@ -78,11 +164,51 @@ export type ChatComposerProps = {
 }
 
 /**
+ * What an Enter keypress means, given the composer's state. Pure so the
+ * modifier matrix is testable without a DOM (chat-ui's vitest is node-only).
+ *
+ * - `newline` — Shift+Enter, or mid-IME composition. Never submits: an IME
+ *   Enter is committing a candidate, not sending a message.
+ * - `steer` — Cmd/Ctrl+Enter where the host wired `onSteer`.
+ * - `ask` — Cmd/Ctrl+Enter where the host wired `onAsk`.
+ * - `send` — everything else that is submittable.
+ * - `blocked` — Enter that would submit, but the composer says no.
+ *
+ * Steer and ask share the Accel+Enter chord because no host offers both: a
+ * steer only exists mid-turn outside a room, an ask only inside one. Steer
+ * takes precedence so wiring both can never silently drop a mid-turn steer.
+ */
+export type ComposerEnterIntent = 'send' | 'steer' | 'ask' | 'newline' | 'blocked'
+
+export function resolveEnterIntent(params: {
+  shiftKey: boolean
+  metaKey: boolean
+  ctrlKey: boolean
+  isComposing: boolean
+  disabled: boolean
+  sendDisabled: boolean
+  hasText: boolean
+  allowEmptySend: boolean
+  canSteer: boolean
+  canAsk: boolean
+}): ComposerEnterIntent {
+  if (params.shiftKey || params.isComposing) return 'newline'
+  if (params.disabled || params.sendDisabled) return 'blocked'
+  if (!params.hasText && !params.allowEmptySend) return 'blocked'
+  if (params.metaKey || params.ctrlKey) {
+    if (params.canSteer) return 'steer'
+    if (params.canAsk) return 'ask'
+  }
+  return 'send'
+}
+
+/**
  * Headless composer. Owns no business logic — the host wires it to a state
  * value and an `onSend` callback that triggers `useMessageStream.start(...)`.
  */
 export function ChatComposer(props: ChatComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const backdropRef = useRef<HTMLDivElement>(null)
 
   // Auto-grow the textarea to fit its content (the Notion composer feel): the
   // box expands line-by-line as the user types — Shift+Enter for a newline —
@@ -135,20 +261,41 @@ export function ChatComposer(props: ChatComposerProps) {
       if (event.defaultPrevented) return
 
       // Enter alone sends; Shift+Enter inserts a newline. Matches every other
-      // chat UI; consumers can wrap and override if needed.
-      if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
-        event.preventDefault()
-        if (
-          !props.disabled &&
-          !props.sendDisabled &&
-          (props.value.trim().length > 0 || props.allowEmptySend)
-        ) {
-          props.onSend()
-        }
-      }
+      // chat UI; consumers can wrap and override if needed. Cmd/Ctrl+Enter
+      // sends as a steer, or as an ask, where the host supports one.
+      if (event.key !== 'Enter') return
+      const intent = resolveEnterIntent({
+        shiftKey: event.shiftKey,
+        metaKey: event.metaKey,
+        ctrlKey: event.ctrlKey,
+        isComposing: event.nativeEvent.isComposing,
+        disabled: props.disabled === true,
+        sendDisabled: props.sendDisabled === true,
+        hasText: props.value.trim().length > 0,
+        allowEmptySend: props.allowEmptySend === true,
+        canSteer: typeof props.onSteer === 'function',
+        canAsk: typeof props.onAsk === 'function',
+      })
+      if (intent === 'newline') return
+      event.preventDefault()
+      if (intent === 'steer') props.onSteer?.()
+      else if (intent === 'ask') props.onAsk?.()
+      else if (intent === 'send') props.onSend()
     },
     [props],
   )
+
+  // The mirror is a separate scroll box: past the textarea's max-height the
+  // two must move together or the chips drift off their words.
+  const syncBackdropScroll = useCallback(() => {
+    const el = textareaRef.current
+    const backdrop = backdropRef.current
+    if (!el || !backdrop) return
+    backdrop.scrollTop = el.scrollTop
+    backdrop.scrollLeft = el.scrollLeft
+  }, [])
+
+  useLayoutEffect(syncBackdropScroll, [props.value, syncBackdropScroll])
 
   const handleSendClick = useCallback(() => {
     if (
@@ -160,23 +307,68 @@ export function ChatComposer(props: ChatComposerProps) {
     props.onSend()
   }, [props])
 
+  const highlightRanges = props.highlightRanges
+  const input = (
+    <textarea
+      ref={textareaRef}
+      value={props.value}
+      onChange={handleChange}
+      onKeyDown={handleKeyDown}
+      onPaste={props.onPaste}
+      onScroll={highlightRanges ? syncBackdropScroll : undefined}
+      placeholder={props.placeholder ?? 'Send a message…'}
+      disabled={props.disabled}
+      className={
+        highlightRanges
+          ? [props.textareaClassName, 'composer-highlight-input']
+              .filter(Boolean)
+              .join(' ')
+          : props.textareaClassName
+      }
+      rows={1}
+      data-testid="chat-composer-input"
+    />
+  )
+
   return (
     <div className={props.className} data-composer>
       {props.slotAttachments}
       <div className={props.rowClassName ?? 'composer-row'} data-composer-row>
         {props.slotPreInput}
-        <textarea
-          ref={textareaRef}
-          value={props.value}
-          onChange={handleChange}
-          onKeyDown={handleKeyDown}
-          onPaste={props.onPaste}
-          placeholder={props.placeholder ?? 'Send a message…'}
-          disabled={props.disabled}
-          className={props.textareaClassName}
-          rows={1}
-          data-testid="chat-composer-input"
-        />
+        {highlightRanges ? (
+          <div
+            className={['composer-highlight-wrap', props.inputWrapClassName]
+              .filter(Boolean)
+              .join(' ')}
+            data-composer-input-wrap
+          >
+            <div
+              ref={backdropRef}
+              aria-hidden
+              data-testid="chat-composer-highlight"
+              className={[props.textareaClassName, 'composer-highlight-backdrop']
+                .filter(Boolean)
+                .join(' ')}
+            >
+              {splitHighlightSegments(props.value, highlightRanges).map(
+                (segment, index) =>
+                  segment.highlighted ? (
+                    <span key={index} className="composer-mention-chip">
+                      {segment.text}
+                    </span>
+                  ) : (
+                    <span key={index}>{segment.text}</span>
+                  ),
+              )}
+              {/* A textarea renders a trailing newline as an empty last line;
+                  a block box collapses it. Keep the mirror the same height. */}
+              {props.value.endsWith('\n') ? ZERO_WIDTH_SPACE : null}
+            </div>
+            {input}
+          </div>
+        ) : (
+          input
+        )}
         <button
           type="button"
           onClick={handleSendClick}

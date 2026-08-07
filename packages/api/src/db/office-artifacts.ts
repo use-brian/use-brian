@@ -12,7 +12,7 @@ export const defaultOfficeDbQuery: OfficeDbQuery = async <T>(userId: string, sql
 export type OfficeArtifactRow = {
   id: string
   workspaceId: string
-  family: 'document' | 'presentation'
+  family: 'document' | 'presentation' | 'spreadsheet'
   mode: 'artifact' | 'template'
   title: string
   creatorUserId: string
@@ -47,7 +47,7 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
     async createShell(params: {
       userId: string
       workspaceId: string
-      family: 'document' | 'presentation'
+      family: 'document' | 'presentation' | 'spreadsheet'
       title: string
       templateVersionId: string | null
       capabilityVersion: number
@@ -123,6 +123,17 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
       return result.rows[0] ?? null
     },
 
+    async getVersionSource(userId: string, artifactId: string, versionId: string): Promise<{ snapshotFileId: string; snapshotHash: string; workspaceId: string } | null> {
+      const result = await db<{ snapshotFileId: string; snapshotHash: string; workspaceId: string }>(userId, `
+        SELECT v.snapshot_file_id AS "snapshotFileId", v.snapshot_hash AS "snapshotHash",
+               v.workspace_id AS "workspaceId"
+          FROM office_artifact_versions v
+          JOIN office_artifacts a ON a.id=v.artifact_id
+         WHERE v.artifact_id=$1 AND v.id=$2 AND a.lifecycle_state='active'
+      `, [artifactId, versionId])
+      return result.rows[0] ?? null
+    },
+
     async commitVersion(params: {
       userId: string
       artifactId: string
@@ -171,6 +182,9 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
       targetVersionId: string
       expectedVersion: number
       summary: string
+      liveUpdate: Uint8Array
+      liveStateVector: Uint8Array
+      liveCanonicalHash: string
     }): Promise<{ id: string; version: number } | null> {
       const result = await db<{ id: string; version: number }>(params.userId, `
         WITH current_head AS (
@@ -192,15 +206,25 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
                  t.schema_version, t.capability_version, 'user', $4, 'restore',
                  $5, 'restore'
             FROM current_head h CROSS JOIN target t
-          RETURNING id, artifact_id, version
+          RETURNING id, artifact_id, workspace_id, version
+        ), live AS (
+          INSERT INTO office_collab_documents
+            (artifact_id,workspace_id,ydoc,state_vector,canonical_hash,base_version,seq)
+          SELECT i.artifact_id,i.workspace_id,$6,$7,$8,i.version,1 FROM inserted i
+          ON CONFLICT (artifact_id) DO UPDATE SET
+            ydoc=EXCLUDED.ydoc,state_vector=EXCLUDED.state_vector,
+            canonical_hash=EXCLUDED.canonical_hash,base_version=EXCLUDED.base_version,
+            seq=office_collab_documents.seq+1,updated_at=now()
+          RETURNING artifact_id
         ), advanced AS (
           UPDATE office_artifacts a
              SET head_version_id = i.id, head_version = i.version, updated_at = now()
             FROM inserted i WHERE a.id = i.artifact_id
           RETURNING i.id, i.version
         )
-        SELECT id, version::int AS version FROM advanced
-      `, [params.artifactId, params.targetVersionId, params.expectedVersion, params.userId, params.summary])
+        SELECT a.id, a.version::int AS version FROM advanced a
+        JOIN live l ON l.artifact_id=$1
+      `, [params.artifactId, params.targetVersionId, params.expectedVersion, params.userId, params.summary, Buffer.from(params.liveUpdate), Buffer.from(params.liveStateVector), params.liveCanonicalHash])
       return result.rows[0] ?? null
     },
 

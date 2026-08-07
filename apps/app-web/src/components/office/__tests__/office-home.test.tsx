@@ -18,26 +18,27 @@ describe("[COMP:app-web/office-home] Office home", () => {
     navigation.search = "";
   });
 
-  it("does not duplicate sidebar filters in the content pane", () => {
+  it("keeps file-type filters and template-first New in the top bar", () => {
     const html = renderToStaticMarkup(<I18nProvider locale="en" dict={en as unknown as Dictionary}><OfficeHome workspaceId="11111111-1111-4111-8111-111111111111" initialArtifacts={[]} /></I18nProvider>);
     expect(html).not.toContain("data-office-filter-bar");
     expect(html).not.toContain('role="tablist"');
     expect(html).not.toContain(">Active<");
-    expect(html).not.toContain(">All<");
-    expect(html).toContain(">Overview<");
-    expect(html).toContain("Start with your first templates");
-    expect(html).toContain("General presentation");
-    expect(html).toContain("Letterhead");
-    expect(html).toContain("/office/templates?starter=general-presentation");
-    expect(html).toContain("/office/templates?starter=letterhead");
+    expect(html).toContain(">All<");
+    expect(html).toContain(">Files<");
+    expect(html).toContain("Choose a template to create your first file");
+    expect(html).toContain('href="/w/11111111-1111-4111-8111-111111111111/office/new"');
+    expect(html).not.toContain("templates?intent=use");
+    expect(html).not.toContain("General presentation");
+    expect(html).not.toContain("Letterhead");
+    expect(html).not.toContain(">Import<");
   });
 
   it("keeps lifecycle-specific empty collections compact", () => {
     navigation.search = "view=trash";
     const html = renderToStaticMarkup(<I18nProvider locale="en" dict={en as unknown as Dictionary}><OfficeHome workspaceId="11111111-1111-4111-8111-111111111111" initialArtifacts={[]} /></I18nProvider>);
     expect(html).toContain("No Office artifacts yet");
-    expect(html).not.toContain("Start with your first templates");
-    expect(html).not.toContain("starter=general-presentation");
+    expect(html).not.toContain("Choose a template to create your first file");
+    expect(html).not.toContain("starter=");
   });
 
   it("reflects sidebar-selected lifecycle and family in the top bar breadcrumb", () => {
@@ -57,6 +58,9 @@ describe("[COMP:app-web/office-home] Office home", () => {
     expect(html).toContain("Pitch");
     expect(html).toContain("/office/22222222-2222-4222-8222-222222222222");
     expect(html).toContain("/office/33333333-3333-4333-8333-333333333333");
+    expect(html).toContain('data-office-file-grid="true"');
+    expect(html).toContain('grid-cols-[repeat(auto-fill,minmax(15rem,1fr))]');
+    expect(html.match(/data-office-file-card-footer="true"/g)).toHaveLength(2);
   });
 
   it("marks a version-zero artifact with no job as a failed start", () => {
@@ -73,5 +77,13 @@ describe("[COMP:app-web/office-home] Office home", () => {
     ]} /></I18nProvider>);
     expect(html).toContain("Start failed");
     expect(html).not.toContain(">Working<");
+  });
+
+  it("shows a typed presentation-fit reason instead of only Failed", () => {
+    const html = renderToStaticMarkup(<I18nProvider locale="en" dict={en as unknown as Dictionary}><OfficeHome workspaceId="11111111-1111-4111-8111-111111111111" initialArtifacts={[
+      { artifactId: "66666666-6666-4666-8666-666666666666", family: "presentation", mode: "artifact", title: "Company introduction", version: 0, lifecycleState: "active", role: "edit", job: { id: "77777777-7777-4777-8777-777777777777", status: "failed", stage: "failed", errorCode: "presentation_fit_failed" } },
+    ]} /></I18nProvider>);
+    expect(html).toContain(en.office.presentationFitFailed);
+    expect(html).not.toContain(">Failed<");
   });
 });

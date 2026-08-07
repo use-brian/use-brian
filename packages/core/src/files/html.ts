@@ -1,61 +1,49 @@
 /**
- * HTML → Markdown extraction for uploaded files.
+ * HTML → Markdown extraction for file ingest.
  *
- * An uploaded `.html` used to fall through `parseFileContent`'s generic
- * `text/*` branch, which returns the bytes verbatim. That put raw markup into
- * the model's context, into `file_segments`, and into Pipeline B's extraction
- * windows: on the reference upload (a 4.1 MB self-contained client report) the
- * "text" the brain indexed was 96% base64 image payload and 12 KB of CSS, the
- * segment cap truncated it mid-document, and extraction produced zero entities
- * and zero memories.
+ * [COMP:files/html-extract]
  *
- * Markdown is the right target because it is already the representation the
- * chunker was built for (`chunkFileText`: ATX headings build `headingPath`,
- * fenced blocks are atomic) and the one `.docx`/`.xlsx`/`.pptx` already emit.
- * A converted document therefore arrives with the same affordances as an
- * Office upload rather than as an undifferentiated wall.
+ * WHY THIS EXISTS. `parseFileContent` used to route `text/html` through its
+ * generic `text/*` branch, which returns `buffer.toString('utf-8')` — the raw
+ * markup. Everything downstream then treated stylesheets and script bodies as
+ * knowledge: on 2026-08-05 a 4.1 MB HTML report ingested into a workspace brain
+ * as 2,000 segments whose first two entries were `<!doctype html><html lang=…>`
+ * and a block of CSS custom properties. The segment cap truncated it at 2.95 M
+ * of 4.15 M chars, extraction windows repeatedly failed to parse, and the run
+ * wrote zero entities, zero memories and zero tasks. The document was
+ * unreadable to the model for the same reason it is unreadable to a person:
+ * almost none of those bytes were the document.
  *
- * Three things make this more than "call turndown":
+ * WHY NOT READABILITY. `tools/base/fetch-readability.ts` runs Mozilla
+ * Readability over fetched pages, and it is right there — but it is right for a
+ * *web page*, where the job is separating an article from navigation, ads and
+ * boilerplate. A file a user hands to their brain is a document: an export, a
+ * report, a saved dashboard. Readability's whole method is discarding content it
+ * scores as peripheral, which on a multi-section report silently drops sections.
+ * Ingest wants every word the document actually says, minus the machinery that
+ * renders it. So: keep all text, drop only what is unambiguously presentation.
  *
- *  1. **Non-content elements are removed, not flattened.** Turndown keeps the
- *     text of any element it has no rule for, so `<style>`/`<script>` bodies
- *     leak into the output as prose. They are dropped explicitly.
- *  2. **Inline payloads are dropped from URLs.** A self-contained export
- *     inlines its images as `data:` URIs; turndown faithfully preserves them
- *     inside `![](…)`, which is how a 4.1 MB file stays 4.1 MB after
- *     conversion. Alt text is real content and is kept; the payload is not.
- *  3. **Shape guards with an honest fallback.** Turndown is superlinear in
- *     node count and recurses per element: ~40k tags costs ~2s and ~2,000
- *     levels of nesting overflows the stack after minutes of CPU. Both are
- *     reachable from a user upload, so pathological input degrades to a
- *     linear tag-strip (complete text, no structure) instead of pinning a
- *     request. Degrade, never throw: the caller's alternative is a failed
- *     ingest.
- *
- * Deliberately NOT Readability. On the reference report it bought 1% output
- * size and dropped the document's own headline, its date line, and two section
- * headings — its article heuristics prune document chrome that, in a file a
- * user chose to put in the brain, is content. Completeness wins here; the
- * article-extraction path stays where it belongs, on URL fetch
- * (`tools/base/fetch-readability.ts`).
- *
- * Spec: docs/architecture/engine/file-handling.md → "Parser matrix".
- * [COMP:files/html]
+ * Markdown rather than plain text, for the same reason `parseDocxToMarkdown`
+ * chose it — headings, lists and tables survive at a fraction of the tokens of
+ * raw HTML, and the structure is what makes a long document extractable.
  */
 
 import TurndownService from 'turndown'
 import { gfm } from 'turndown-plugin-gfm'
 
 /**
- * Elements whose text is presentation or behavior, never reading content.
- * Turndown has no rule for these, and its default is to emit a node's text —
- * so leaving them in means shipping stylesheets and scripts as prose.
- *
- * `title`/`meta`/`link`/`base` are here because turndown parses its input as a
- * body fragment, which leaves head-only elements in the tree. The title is not
- * lost: it is re-attached as an H1 by `htmlToMarkdown`.
+ * Elements removed outright (tag AND contents). Turndown's default for an
+ * element it has no rule for is to emit its *text content* — which is why the
+ * incident indexed CSS: `<style>` is an unrecognized element whose text content
+ * is a stylesheet. This list is the authoritative filter; the regex pre-pass
+ * below is only a size optimization.
  */
-const NON_CONTENT_TAGS = [
+const DROPPED_ELEMENTS = [
+  // `head` and `title` are dropped as a pair with the lift below: their text is
+  // hoisted to the top of the output deliberately, and leaving the elements in
+  // place makes Turndown emit the title a second time as a bare line.
+  'head',
+  'title',
   'script',
   'style',
   'noscript',
@@ -65,280 +53,180 @@ const NON_CONTENT_TAGS = [
   'iframe',
   'object',
   'embed',
-  'title',
-  'meta',
+  'map',
+  'audio',
+  'video',
+  'source',
+  'track',
   'link',
+  'meta',
   'base',
-  'form',
-  'input',
-  'select',
-  'textarea',
-  'button',
 ]
 
 /**
- * A URL longer than this is a payload, not a locator. Real links are far
- * shorter; `data:`/`blob:` are matched by scheme regardless of length.
+ * Above this many characters (after the pre-pass) the DOM path is skipped for a
+ * flat tag strip. A DOM is roughly an order of magnitude larger than its source
+ * in memory, and the ingest worker shares a 524 MB heap with everything else on
+ * `brian-api-workers`. Markdown structure is worth a lot; an OOM is worth less.
  */
-const MAX_URL_CHARS = 500
+const DOM_MAX_CHARS = 8_000_000
 
-/**
- * `<` occurrences above which turndown's cost stops being worth it. Measured:
- * 20k → ~0.5s, 40k → ~2s, 80k → ~11s. The reference 4.1 MB report has 2,139.
- */
-const MAX_HTML_TAGS = 40_000
+let converter: TurndownService | undefined
 
-/**
- * Element nesting above which turndown's per-element recursion risks
- * `Maximum call stack size exceeded`. Measured: 1,000 converts in ~60ms,
- * 2,000 overflows. Kept well under the observed cliff.
- */
-const MAX_HTML_NESTING_DEPTH = 1_000
-
-/** Elements that never open a nesting level. */
-const VOID_TAGS = new Set([
-  'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
-  'link', 'meta', 'param', 'source', 'track', 'wbr',
-])
-
-export type HtmlExtractionMode = 'markdown' | 'stripped'
-
-export type HtmlExtraction = {
-  /** The extracted text. Markdown unless a shape guard forced `stripped`. */
-  text: string
-  /** Which path produced it — surfaced so callers can report degradation. */
-  mode: HtmlExtractionMode
-  /** Document `<title>`, when the source had one. */
-  title?: string
-}
-
-/**
- * The only thing the rules below need off a turndown node. Declared
- * structurally because this package compiles without the DOM lib — turndown
- * runs on its own bundled parser here, not on a browser `HTMLElement`.
- */
-type AttributedNode = { getAttribute(name: string): string | null }
-
-function isPayloadUrl(url: string): boolean {
-  if (!url) return true
-  const scheme = url.slice(0, 5).toLowerCase()
-  if (scheme === 'data:' || scheme === 'blob:') return true
-  return url.length > MAX_URL_CHARS
-}
-
-/**
- * One converter per call rather than a module singleton: turndown accumulates
- * per-instance rule state, and this runs on user-supplied input.
- */
-function buildConverter(): TurndownService {
-  const converter = new TurndownService({
-    headingStyle: 'atx',
-    codeBlockStyle: 'fenced',
-    bulletListMarker: '-',
-  })
-  converter.use(gfm)
-  converter.remove(NON_CONTENT_TAGS)
-
-  // Keep the alt text (content), drop the src when it is an inline payload.
-  converter.addRule('imageWithoutInlinePayload', {
-    filter: 'img',
-    replacement: (_content, node) => {
-      const el = node as unknown as AttributedNode
-      const alt = (el.getAttribute('alt') ?? '').trim()
-      const src = el.getAttribute('src') ?? ''
-      if (isPayloadUrl(src)) return alt ? `![${alt}]` : ''
-      return `![${alt}](${src})`
-    },
-  })
-
-  // Same for links: the anchor text is content, a base64 href is not.
-  converter.addRule('linkWithoutInlinePayload', {
-    filter: (node) => node.nodeName === 'A' && node.getAttribute('href') !== null,
-    replacement: (content, node) => {
-      const href = (node as unknown as AttributedNode).getAttribute('href') ?? ''
-      if (isPayloadUrl(href)) return content
-      return content ? `[${content}](${href})` : ''
-    },
-  })
-
+function getConverter(): TurndownService {
+  if (!converter) {
+    converter = new TurndownService({
+      headingStyle: 'atx',
+      codeBlockStyle: 'fenced',
+      bulletListMarker: '-',
+    })
+    converter.use(gfm)
+    converter.remove(DROPPED_ELEMENTS)
+  }
   return converter
 }
 
 /**
- * Single cheap pass over the source to decide whether turndown is safe to run.
- * Bails at the first breach, so pathological input costs a partial scan rather
- * than a full one. Not an HTML parser — an estimator, deliberately.
+ * Decode a short HTML fragment to plain text. Runs it back through Turndown so
+ * entity handling is the DOM's, not a hand-rolled table — `&mdash;` and friends
+ * are otherwise left as literal `&mdash;` in the brain. Always cheap: the
+ * inputs here are a title and a meta description, never a document.
  */
-function exceedsShapeLimits(html: string): boolean {
-  let tags = 0
-  let depth = 0
-  const len = html.length
-
-  for (let i = 0; i < len; i++) {
-    if (html.charCodeAt(i) !== 60) continue // '<'
-    tags += 1
-    if (tags > MAX_HTML_TAGS) return true
-
-    const next = html.charCodeAt(i + 1)
-    if (next === 33 || next === 63) continue // <!-- … --> / <!doctype> / <?…?>
-
-    let j = i + 1
-    let closing = false
-    if (html.charCodeAt(j) === 47) {
-      closing = true
-      j += 1
-    }
-    while (j < len && html.charCodeAt(j) <= 32) j += 1
-
-    const nameStart = j
-    while (j < len) {
-      const c = html.charCodeAt(j)
-      const isNameChar =
-        (c >= 65 && c <= 90) ||
-        (c >= 97 && c <= 122) ||
-        (c >= 48 && c <= 57) ||
-        c === 58 ||
-        c === 45
-      if (!isNameChar) break
-      j += 1
-    }
-    const tagName = html.slice(nameStart, j).toLowerCase()
-    if (!tagName) continue
-
-    if (closing) {
-      depth = depth > 0 ? depth - 1 : 0
-      continue
-    }
-    if (VOID_TAGS.has(tagName)) continue
-
-    // Self-closing detection: scan a short window for "/>".
-    let selfClosing = false
-    for (let k = j; k < len && k < j + 200; k++) {
-      const c = html.charCodeAt(k)
-      if (c === 62) {
-        if (html.charCodeAt(k - 1) === 47) selfClosing = true
-        break
-      }
-    }
-    if (selfClosing) continue
-
-    depth += 1
-    if (depth > MAX_HTML_NESTING_DEPTH) return true
+function fragmentToText(fragment: string): string {
+  try {
+    return getConverter().turndown(fragment).replace(/\s+/g, ' ').trim()
+  } catch {
+    return fragment.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim()
   }
-
-  return false
 }
 
-const NAMED_ENTITIES: Record<string, string> = {
+/** Contents of the first matching tag, tags stripped. */
+function firstTagText(html: string, tag: string): string | null {
+  const match = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`, 'i').exec(html)
+  if (!match?.[1]) return null
+  return fragmentToText(match[1]) || null
+}
+
+/** `<meta name="description" content="…">`, in either attribute order. */
+function metaDescription(html: string): string | null {
+  const head = html.slice(0, 200_000)
+  const match =
+    /<meta[^>]+name=["']description["'][^>]*content=["']([^"']*)["']/i.exec(head) ??
+    /<meta[^>]+content=["']([^"']*)["'][^>]*name=["']description["']/i.exec(head)
+  return match?.[1] ? fragmentToText(match[1]) || null : null
+}
+
+/**
+ * Strip the parts of a document that carry no text a reader would read. Purely
+ * a size reduction ahead of the DOM parse — on the incident's 4.1 MB report the
+ * inline stylesheet alone was the majority of the file. Correctness does not
+ * depend on this pass: `DROPPED_ELEMENTS` runs again inside Turndown.
+ */
+function stripNonContent(html: string): string {
+  let out = html.replace(/<!--[\s\S]*?-->/g, '')
+  // `head` first — one match usually takes the stylesheet with it. Documents
+  // that omit the tag (or never close it) simply fall through to the per-tag
+  // passes, and Turndown's own filter is the backstop either way.
+  for (const tag of ['head', 'script', 'style', 'noscript', 'template', 'svg', 'canvas']) {
+    out = out.replace(new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?</${tag}\\s*>`, 'gi'), '')
+  }
+  // Inline base64 payloads, keeping the MIME as the surviving `src`. A saved
+  // page embeds its screenshots this way, and Turndown faithfully copies the
+  // whole payload into `![alt](…)`: on the incident's report, 43 inline JPEGs
+  // were 2.82 M of the 2.87 M characters that came out — 98% of the "document"
+  // was image bytes. The alt text is the part that carries meaning, and it
+  // survives; the bytes are not knowledge and are never worth a segment.
+  out = out.replace(/data:([a-z0-9/+.-]+);base64,[A-Za-z0-9+/=]+/gi, 'data:$1')
+  return out
+}
+
+const ENTITIES: Record<string, string> = {
   amp: '&',
   lt: '<',
   gt: '>',
   quot: '"',
   apos: "'",
   nbsp: ' ',
-  mdash: '—',
-  ndash: '–',
-  hellip: '…',
-  lsquo: '‘',
-  rsquo: '’',
-  ldquo: '“',
-  rdquo: '”',
-  eacute: 'é',
-  copy: '©',
-  reg: '®',
-  trade: '™',
-  middot: '·',
-  bull: '•',
+  '#39': "'",
 }
 
 function decodeEntities(text: string): string {
-  return text
-    .replace(/&#x([0-9a-f]+);/gi, (_m, hex: string) =>
-      String.fromCodePoint(Number.parseInt(hex, 16)),
-    )
-    .replace(/&#(\d+);/g, (_m, dec: string) => String.fromCodePoint(Number(dec)))
-    .replace(/&([a-z]+);/gi, (m, name: string) => NAMED_ENTITIES[name.toLowerCase()] ?? m)
+  return text.replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (whole, name: string) => {
+    const key = name.toLowerCase()
+    if (ENTITIES[key] !== undefined) return ENTITIES[key]
+    if (key.startsWith('#x')) {
+      const code = Number.parseInt(key.slice(2), 16)
+      return Number.isFinite(code) ? String.fromCodePoint(code) : whole
+    }
+    if (key.startsWith('#')) {
+      const code = Number.parseInt(key.slice(1), 10)
+      return Number.isFinite(code) ? String.fromCodePoint(code) : whole
+    }
+    return whole
+  })
 }
 
-/**
- * Linear tag-strip: the fallback for input turndown cannot afford. Loses
- * structure but keeps every word, which is the property that matters — the
- * alternative on this path is an ingest that fails or one that stores markup.
- * Headings survive as headings so `chunkFileText` still gets breadcrumbs.
- */
-function stripHtmlToText(html: string): string {
+/** Degraded path for documents too large to hand a DOM: flat tag strip. */
+function flattenToText(html: string): string {
   return decodeEntities(
-    html
-      .replace(/<(script|style|noscript|template|svg|head)[^>]*>[\s\S]*?<\/\1\s*>/gi, ' ')
-      .replace(/<!--[\s\S]*?-->/g, ' ')
-      .replace(/<h([1-6])[^>]*>/gi, (_m, level: string) => `\n\n${'#'.repeat(Number(level))} `)
-      .replace(/<\/h[1-6]\s*>/gi, '\n\n')
-      .replace(/<br[^>]*>/gi, '\n')
-      .replace(/<\/(p|div|li|tr|blockquote|section|article|td|th)\s*>/gi, '\n')
-      .replace(/<[^>]*>/g, ''),
+    stripNonContent(html)
+      .replace(/<(br|\/p|\/div|\/li|\/h[1-6]|\/tr)\s*\/?>/gi, '\n')
+      .replace(/<[^>]+>/g, ' '),
   )
-    .replace(/\r\n/g, '\n')
-    .replace(/[ \t]+/g, ' ')
-    .replace(/[ \t]+\n/g, '\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim()
 }
 
-function extractTitle(html: string): string | undefined {
-  const match = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)
-  if (!match) return undefined
-  return decodeEntities(match[1].replace(/<[^>]*>/g, '')).replace(/\s+/g, ' ').trim() || undefined
-}
-
-function normalize(markdown: string): string {
-  return markdown
-    .replace(/\r\n/g, '\n')
-    .replace(/[ \t]+\n/g, '\n')
+function collapseBlankLines(text: string): string {
+  return text
+    .replace(/\r/g, '')
+    .replace(/[ \t]+$/gm, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
 }
 
 /**
- * Convert an HTML document to Markdown for model context and brain indexing.
+ * Convert an HTML document to Markdown for ingest.
  *
- * Never throws: every failure path degrades to `mode: 'stripped'`. Returns an
- * empty `text` only when the source genuinely has no reading content — callers
- * decide whether that is a placeholder or a store-only outcome.
+ * The `<title>` and `<meta name="description">` are lifted to the top because
+ * they are frequently the only place a saved page states what it is (the head
+ * itself is dropped), and a leading H1 gives the extraction windows an anchor.
+ * Never throws: a document that cannot be converted degrades to flattened text,
+ * because the alternative — an empty parse — reads downstream as an empty file.
  */
-export function htmlToMarkdown(html: string): HtmlExtraction {
-  const title = extractTitle(html)
+export function parseHtmlToMarkdown(html: string): string {
+  const title = firstTagText(html, 'title')
+  const description = metaDescription(html)
+  const stripped = stripNonContent(html)
 
-  const withTitle = (text: string, mode: HtmlExtractionMode): HtmlExtraction => {
-    const body = normalize(text)
-    if (!title) return { text: body, mode }
-    // Don't restate a heading the document already leads with.
-    const leadsWithTitle = body.startsWith(`# ${title}`)
-    const text_ = leadsWithTitle || !body ? body || `# ${title}` : `# ${title}\n\n${body}`
-    return { text: text_, mode, title }
+  let body: string
+  if (stripped.length > DOM_MAX_CHARS) {
+    body = collapseBlankLines(flattenToText(stripped))
+  } else {
+    try {
+      body = collapseBlankLines(getConverter().turndown(stripped))
+    } catch {
+      // Malformed markup, or a DOM the converter refused. Text still beats none.
+      body = collapseBlankLines(flattenToText(stripped))
+    }
   }
 
-  if (exceedsShapeLimits(html)) {
-    return withTitle(stripHtmlToText(html), 'stripped')
+  const header: string[] = []
+  // Skip the title when the body already opens with it — a well-formed document
+  // usually repeats it as its first heading, and a duplicate reads as two.
+  if (title && !new RegExp(`^#{1,6}\\s*${escapeRegExp(title)}\\s*$`, 'im').test(body.slice(0, 500))) {
+    header.push(`# ${title}`)
   }
+  if (description) header.push(description)
 
-  try {
-    return withTitle(buildConverter().turndown(html), 'markdown')
-  } catch {
-    // Turndown parses and recurses over attacker-shaped input; a throw here is
-    // a reason to degrade, never to fail the upload.
-    return withTitle(stripHtmlToText(html), 'stripped')
-  }
+  return collapseBlankLines([...header, body].filter(Boolean).join('\n\n'))
 }
 
-/**
- * Does this upload hold HTML? MIME first (what the browser declared), then
- * extension — a `.html` handed over as `text/plain` or `application/xhtml+xml`
- * is still HTML, and getting this wrong reinstates the raw-markup bug.
- */
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/** True for the MIME types / extensions `parseHtmlToMarkdown` should handle. */
 export function isHtmlFile(mimeType: string, fileName: string): boolean {
   const mime = mimeType.toLowerCase()
-  if (mime === 'text/html' || mime === 'application/xhtml+xml') return true
-  if (mime === 'text/htm') return true
-  const name = fileName.toLowerCase()
-  return name.endsWith('.html') || name.endsWith('.htm') || name.endsWith('.xhtml')
+  if (mime.startsWith('text/html') || mime.startsWith('application/xhtml')) return true
+  return /\.x?html?$/i.test(fileName)
 }

@@ -2,7 +2,7 @@
 """Generate the minimal sample.docx fixture used by parsers.test.ts.
 
 A .docx is a ZIP of Office Open XML parts. We hand-author the three parts
-mammoth needs (content types, package rels, the document body) so the fixture
+the document reader needs (content types, package rels, the document body) so the fixture
 is a real, parseable .docx without depending on Word or python-docx.
 
 The body deliberately exercises the structures the convergence pattern must

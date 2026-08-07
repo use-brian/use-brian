@@ -48,6 +48,55 @@ export type GroupableConnector = {
   readonly?: boolean;
 };
 
+/**
+ * The four first-connect choices kept in the default Available rail.
+ *
+ * This is intentionally a narrow merchandising list, not a second copy of
+ * the official connector registry. Everything else remains reachable through
+ * the directory marketplace.
+ */
+export const FEATURED_AVAILABLE_CONNECTOR_IDS = [
+  "gcal",
+  "imap",
+  "github",
+  "gdrive",
+] as const;
+
+const FEATURED_AVAILABLE_ORDER = new Map<string, number>(
+  FEATURED_AVAILABLE_CONNECTOR_IDS.map((id, index) => [id, index]),
+);
+
+/**
+ * Split the Available bucket into the ordered default shortlist and the rows
+ * represented by the marketplace button's count.
+ *
+ * Custom MCP rows stay in the hidden set even if their id collides with a
+ * featured official provider slug.
+ */
+export function curateAvailableConnectors<C extends GroupableConnector>(
+  connectors: readonly C[],
+): { featured: C[]; hidden: C[] } {
+  const featured = connectors
+    .filter(
+      (connector) =>
+        !connector.custom &&
+        connector.id !== undefined &&
+        FEATURED_AVAILABLE_ORDER.has(connector.id),
+    )
+    .sort(
+      (left, right) =>
+        FEATURED_AVAILABLE_ORDER.get(left.id ?? "")! -
+        FEATURED_AVAILABLE_ORDER.get(right.id ?? "")!,
+    );
+  const hidden = connectors.filter(
+    (connector) =>
+      connector.custom ||
+      connector.id === undefined ||
+      !FEATURED_AVAILABLE_ORDER.has(connector.id),
+  );
+  return { featured, hidden };
+}
+
 export function groupConnectors<C extends GroupableConnector>(
   connectors: readonly C[],
   opts: {

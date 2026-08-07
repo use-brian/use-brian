@@ -8,7 +8,8 @@ export const CHAT_ARCHIVE_SEARCH_TOOL = {
     'For a personal identity question such as "Who is X?", search the exact name before using public ' +
     'web search or CRM/contact tools; chat evidence is personal context, not a public biography. ' +
     'Filters can narrow the source, conversation, sender, direction, message kind, or time range. ' +
-    'Keyword recall covers every archived message; the result states when semantic indexing is partial.',
+	'Image OCR/descriptions, document passages, audio transcripts, and sampled video content are searched ' +
+	'alongside captions and message text. Results report both semantic-index and media-processing coverage.',
   classification: 'read',
   defaultPolicy: 'allow',
 } as const

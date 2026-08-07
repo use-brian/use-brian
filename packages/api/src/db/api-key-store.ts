@@ -62,12 +62,34 @@ const DISPLAY_PREFIX_LEN = 12 // `sk_live_<first 4 of keyId>` — enough to disa
  */
 export type ApiKeyScope = 'chat' | 'agent'
 
+/**
+ * Per-key context posture (migration 417). Orthogonal to `scope`: scope
+ * picks the surface (/messages vs assistant-MCP), audience picks how much
+ * assistant context a turn reconstructs. `external` = consumer-facing
+ * (thin or full anonymous lane per `anonymousContext`, indexed lane via
+ * Tier 1). `internal` = acts as an attributed workspace member - not
+ * creatable until the internal lane ships (docs/plans/api-chat-modes.md
+ * §3 D5). Immutable post-issue, same rationale as `scope`: a leaked
+ * external key must never be escalatable in place.
+ */
+export type ApiKeyAudience = 'external' | 'internal'
+
+/**
+ * Context for the EXTERNAL anonymous lane (migration 417). `thin` =
+ * today's behavior (reads floored to the visitor's membership). `full` =
+ * the chat-link `assistant-full` scope: reads at the assistant's own
+ * clearance, memory read-only. Meaningless on internal keys.
+ */
+export type ApiKeyAnonymousContext = 'thin' | 'full'
+
 export type ApiKeyRow = {
   id: string
   assistantId: string
   name: string
   prefix: string
   scope: ApiKeyScope
+  audience: ApiKeyAudience
+  anonymousContext: ApiKeyAnonymousContext
   status: 'active' | 'revoked'
   createdBy: string | null
   createdAt: Date
@@ -168,6 +190,12 @@ export type ApiKeyStore = {
     actingUserId: string
     /** Omitted = 'chat' (the least-privilege external default). */
     scope?: ApiKeyScope
+    /** Omitted = 'external'. 'internal' is rejected at the route until the
+     *  internal lane ships - the store stays permissive so tests and the
+     *  future lane don't need a second migration. */
+    audience?: ApiKeyAudience
+    /** Omitted = 'thin' (the least-exposure default). */
+    anonymousContext?: ApiKeyAnonymousContext
   }): Promise<CreatedApiKey>
 
   /** List keys for an assistant. RLS-gated. Plaintext never returned. */
@@ -193,6 +221,8 @@ const COLS_PUBLIC = `
   name,
   key_prefix   as "prefix",
   scope,
+  audience,
+  anonymous_context as "anonymousContext",
   status,
   created_by   as "createdBy",
   created_at   as "createdAt",
@@ -214,10 +244,20 @@ export function createDbApiKeyStore(): ApiKeyStore {
 
       const result = await queryWithRLS<ApiKeyRowWithHash>(
         params.actingUserId,
-        `INSERT INTO api_keys (id, assistant_id, name, key_hash, key_prefix, scope, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
+        `INSERT INTO api_keys (id, assistant_id, name, key_hash, key_prefix, scope, audience, anonymous_context, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          RETURNING ${COLS_PUBLIC}, key_hash as "keyHash"`,
-        [id, params.assistantId, params.name, keyHash, prefix, params.scope ?? 'chat', params.actingUserId],
+        [
+          id,
+          params.assistantId,
+          params.name,
+          keyHash,
+          prefix,
+          params.scope ?? 'chat',
+          params.audience ?? 'external',
+          params.anonymousContext ?? 'thin',
+          params.actingUserId,
+        ],
       )
       if (result.rows.length === 0) {
         throw new Error('Not authorized to create API key for this assistant')
