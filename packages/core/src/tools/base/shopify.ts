@@ -183,10 +183,10 @@ const disputeRow = (d: Json) => ({
 
 // ── Storefront analytics ───────────────────────────────────────
 
-/** Tabular ShopifyQL result: column metadata plus positional rows. */
+/** Tabular ShopifyQL result. See the client's `ShopifyqlTable` for the row-shape caveat. */
 type ShopifyqlTable = {
   columns: Array<{ name: string; dataType: string }>
-  rows: unknown[][]
+  rows: Array<Record<string, unknown> | unknown[]>
 }
 
 /** Mirrors `SESSION_DIMENSIONS` in the API client - names from Shopify's `sessions` schema. */
@@ -200,9 +200,22 @@ const SESSION_DIMENSIONS = [
 ] as const
 type SessionDimension = (typeof SESSION_DIMENSIONS)[number]
 
-/** Positional ShopifyQL rows → objects keyed by column name, which a model reads far better. */
+/**
+ * Normalize ShopifyQL rows to objects keyed by column name.
+ *
+ * Shopify returns rows **already keyed by column name** — verified live on
+ * 2026-08-07, against an earlier assumption here that they were positional
+ * arrays. That assumption produced a row of `undefined` for every column and no
+ * error anywhere, because the GraphQL field is opaque JSON and the mocked tests
+ * asserted the same invented shape. Both forms are handled now: an array is
+ * zipped against `columns`, an object passes through.
+ *
+ * Values arrive as strings whatever `dataType` says (`"49"`, `"0.0"`), so
+ * anything doing arithmetic on them has to coerce — see `numberish`.
+ */
 function tableToObjects(table: ShopifyqlTable): Array<Record<string, unknown>> {
   return table.rows.map((row) => {
+    if (!Array.isArray(row)) return row
     const out: Record<string, unknown> = {}
     table.columns.forEach((col, i) => { out[col.name] = row[i] })
     return out
@@ -370,11 +383,23 @@ export type ShopifyApi = {
  *
  * Chat attachments are NOT a valid source — they live in `file_cache` and
  * expire after 7 days. The model saves the photo to the brain first.
+ *
+ * `notFound` is load-bearing, not decoration. The overwhelmingly common way to
+ * reach this error is handing the tool a chat-attachment id, because that is
+ * what the owner just supplied and the id is right there in the turn. The
+ * files layer answers that with a generic "not found", which reads as *wrong
+ * reference* rather than *missing step* — so the model retries with another
+ * reference and never reaches `saveFileToBrain`. On 2026-08-06 a merchant's
+ * assistant burned six calls that way and shipped a product with no image.
+ * The flag lets the tool name the remedy instead of relaying the dead end.
  */
 export type ShopifyFileBytesReader = (
   context: ToolContext,
   idOrPath: string,
-) => Promise<{ bytes: Uint8Array; fileName: string; mimeType: string } | { error: string }>
+) => Promise<
+  | { bytes: Uint8Array; fileName: string; mimeType: string }
+  | { error: string; notFound?: boolean }
+>
 
 export function createShopifyTools(
   api: ShopifyApi,
@@ -1005,10 +1030,21 @@ export function createShopifyTools(
           const dropoff = cartDropoff(row)
           return dropoff ? { ...row, ...dropoff } : row
         })
+        // No rows, or rows with no sessions at all, after the bot filter. This
+        // is a real finding, not a broken query: the store had traffic that
+        // Shopify classified entirely as bots. Saying so is the difference
+        // between "your storefront got no real visitors" and the merchant
+        // reading a bare zero as a tooling failure. Shopify also drops the
+        // column list when a filtered group matches nothing, so an empty
+        // result genuinely looks malformed unless it is named.
+        const noHumanTraffic = rows.length === 0 || rows.every((r) => numberish(r.sessions) === 0)
         return { data: {
           period: `${input.since ?? '-30d'} to ${input.until ?? 'today'}`,
           rows,
           row_count: rows.length,
+          ...(noHumanTraffic
+            ? { no_human_sessions: 'No human sessions in this window. Bot traffic is excluded, so a store whose visits were all bots reports zero here - that is a real finding about the storefront, not a failed query.' }
+            : {}),
           note:
             'Sessions here are anonymous aggregates. A session that added to cart but never reached checkout ' +
             'cannot be identified or contacted - report it as a count and act on it by fixing the cart or ' +
@@ -1093,15 +1129,14 @@ export function createShopifyTools(
   const addProductImageTool = buildTool({
     name: 'shopifyAddProductImage',
     description:
-      'Add an image to a Shopify product from a file already saved in the workspace brain. ' +
-      'The file must be a workspace file - pass its id or absolute workspace path. ' +
-      'If the user just attached a photo to this chat, save it with saveFileToBrain FIRST, then call this with the saved path: ' +
-      'chat attachments are temporary and cannot be uploaded. ' +
+      'Add an image to a Shopify product. ' +
+      'Pass a workspace file id or absolute workspace path, OR the id from an <attached_file> tag the user just sent - ' +
+      'an attachment is saved to the workspace automatically before it is uploaded, so you do not need to call saveFileToBrain first. ' +
       'Shopify processes the image asynchronously, so it may take a few seconds to appear on the product. ' +
       'Call this tool directly — the user will see an Approve/Deny prompt.',
     inputSchema: z.object({
       productId: z.string().describe('Product id (numeric or GID).'),
-      file: z.string().describe('Workspace file id (UUID) or absolute workspace path of the image.'),
+      file: z.string().describe('Workspace file id (UUID), absolute workspace path, or the id from an <attached_file> tag the user just sent.'),
       alt: z.string().optional().describe('Alt text for accessibility and SEO.'),
     }),
     isConcurrencySafe: false,
@@ -1119,7 +1154,21 @@ export function createShopifyTools(
       }
       try {
         const file = await opts.readFileBytes(context, input.file)
-        if ('error' in file) return { data: file.error, isError: true }
+        if ('error' in file) {
+          // A bare "not found" sends the model hunting for a different
+          // reference. Nine times in ten the reference was fine and the step
+          // was missing, so say which step.
+          if (file.notFound) {
+            return {
+              data:
+                `${file.error} If ${input.file} is a file the user just attached, this surface could not read it from the upload cache ` +
+                `(it may have expired - uploads are kept ~7 days). Try saveFileToBrain with fileId "${input.file}"; if that also fails, ask the user to re-attach. ` +
+                'Do not retry this tool with the same id, and do not guess a different one.',
+              isError: true,
+            }
+          }
+          return { data: file.error, isError: true }
+        }
         if (!file.mimeType.startsWith('image/')) {
           return { data: `That file is ${file.mimeType}, not an image. Shopify product media must be an image file.`, isError: true }
         }

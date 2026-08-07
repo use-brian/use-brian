@@ -263,13 +263,35 @@ describeIf('[COMP:api/shopify-client] Shopify live dev-store', () => {
   }, 60_000)
 
   it('accepts every groupBy dimension the tool offers', async () => {
-    // The enum is a promise to the model that any of these parses. An invented
+    // The enum is a promise to the model that any of these parses; an invented
     // dimension name would only ever surface here.
+    //
+    // Asserted WITHOUT the bot filter on purpose. A store whose traffic is all
+    // bots has no rows once the filter applies, and Shopify then returns an
+    // empty `columns` list as well - so asserting through storefrontFunnel
+    // would test the store's traffic mix rather than the dimension name. The
+    // funnel is still called, to prove it does not throw.
     for (const groupBy of ['referrer_source', 'session_device_type', 'session_country'] as const) {
-      const result = await storefrontFunnel(AUTH, { since: '-7d', groupBy, limit: 5 })
-      expect(result.columns.map((c) => c.name)).toContain(groupBy)
+      const raw = await runShopifyqlQuery(
+        AUTH,
+        `FROM sessions SHOW sessions GROUP BY ${groupBy} SINCE -30d UNTIL today`,
+      )
+      expect(raw.columns.map((c) => c.name)).toContain(groupBy)
+      await expect(storefrontFunnel(AUTH, { since: '-7d', groupBy, limit: 5 })).resolves.toBeDefined()
     }
-  }, 120_000)
+  }, 180_000)
+
+  it('returns rows keyed by column name, not positional arrays', async () => {
+    // The shape this client originally assumed was positional, which silently
+    // produced undefined for every column. Nothing but a live call catches it:
+    // the GraphQL field is opaque JSON and a mock only re-asserts its own
+    // invention. Values also arrive as strings whatever dataType claims.
+    const table = await runShopifyqlQuery(AUTH, 'FROM sessions SHOW sessions SINCE -30d UNTIL today')
+    expect(table.rows.length).toBeGreaterThan(0)
+    const row = table.rows[0]
+    expect(Array.isArray(row)).toBe(false)
+    expect(row).toHaveProperty('sessions')
+  }, 60_000)
 
   it('surfaces a bad field name as a parse error rather than an empty table', async () => {
     // The silent-failure guard, proven against Shopify rather than a mock:
