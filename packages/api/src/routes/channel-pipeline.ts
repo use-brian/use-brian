@@ -425,6 +425,9 @@ export type ChannelPipelineParams = {
    *  `turn_complete` for document delivery. Absent (dev without a blob
    *  client) → `sendFile` errors honestly on its missing-collector gate. */
   filesApi?: FilesApi
+  /** Upload-cache reader, so a photo just attached to this turn can be
+   *  promoted on demand (Shopify product images). Chat/channel paths only. */
+  readCachedFile?: (id: string, ctx: import('@use-brian/core').AccessContext) => Promise<import('@use-brian/core').CachedFile | null>
   /**
    * Promotes an over-threshold paste to a durable workspace_files artifact
    * (large-content-artifacts §Phase 3.2, decision D6). Wired once at boot from
@@ -589,7 +592,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     provider, systemPrompt, tools, memoryStore, usageStore,
     analytics, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore, connectorInstanceStore, workspaceToolPolicyStore,
     knowledgeStore, gdriveFilesStore, skillStore, workerManager,
-    episodicStore, sessionStateStore, workspaceFilesStore, filesApi,
+    episodicStore, sessionStateStore, workspaceFilesStore, filesApi, readCachedFile,
     replyToMessageId, replyRaw, incomingChannelMessageId,
     voiceTranscriptionUsage,
     senderUserId,
@@ -1170,6 +1173,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         // Workspace-files byte layer — `gmailSendMessage` attachments on
         // channel turns (docs/architecture/integrations/gmail.md).
         filesApi,
+        readCachedFile,
         // Actor identity for opted-in connectors. `actorChannelId` is the
         // channel-native id captured from the inbound webhook by the channel
         // route (Slack user id / Telegram @handle / WhatsApp phone); email +

@@ -320,6 +320,9 @@ export type ChannelMcpStores = {
    * attachments (`docs/architecture/integrations/gmail.md` → "Attachments").
    */
   filesApi?: FilesApi
+  /** Upload-cache reader, so a photo just attached to this turn can be
+   *  promoted on demand (Shopify product images). Chat/channel paths only. */
+  readCachedFile?: (id: string, ctx: import('@use-brian/core').AccessContext) => Promise<import('@use-brian/core').CachedFile | null>
 }
 
 export type ApplyMcpInjectionParams = {
@@ -429,6 +432,7 @@ export async function applyMcpInjection(
       engineHooks: params.engineHooks,
       actorIdentity: params.actorIdentity,
       filesApi: stores.filesApi,
+      readCachedFile: stores.readCachedFile,
       introspectionTools: params.introspectionTools,
     })
   } catch (err) {

@@ -21,6 +21,7 @@ import {
   type WorkspaceFileRowStatus,
 } from './types.js'
 import type { CachedFile } from '../files/types.js'
+import { promoteCachedFile } from './promote.js'
 import type { AccessContext } from '../security/access-context.js'
 import { createSendFileTool } from './send-file.js'
 import {
@@ -506,7 +507,6 @@ export function createFileTools(
   // original bytes from the upload cache (`file_cache`, via `readCachedFile`)
   // and persists them verbatim to `workspace_files` (GCS), so an image/PDF is
   // kept as the real file — not a text summary (that's the bug this fixes).
-  const DATA_URL_RE = /^data:[^;]+;base64,(.+)$/
 
   const saveFileToBrain = buildTool({
     name: 'saveFileToBrain',
@@ -564,18 +564,10 @@ export function createFileTools(
         }
       }
 
-      // Binary attachments (image/PDF/audio) are cached as a base64 data URL;
-      // text-like files are cached as plain UTF-8. Decode either to raw bytes.
-      const m = DATA_URL_RE.exec(cached.content)
-      const bytes = m ? Buffer.from(m[1], 'base64') : Buffer.from(cached.content, 'utf-8')
-      const path = input.path ?? `/uploads/${cached.fileName}`
-
-      const result = await api.writeBytes(ctxFor(context), {
-        path,
-        bytes,
-        mime: cached.mimeType,
-        title: input.title ?? cached.fileName,
-        summary: input.summary ?? cached.summary ?? null,
+      const result = await promoteCachedFile(api, ctxFor(context), cached, {
+        path: input.path,
+        title: input.title,
+        summary: input.summary,
         tags: input.tags,
         sensitivity: input.sensitivity,
       })
