@@ -22,7 +22,10 @@ describe('[COMP:tools/base] Base tools', () => {
   })
 
   it('createBaseTools returns all 6 tools when XAI_API_KEY is absent', () => {
-    const tools = createBaseTools()
+    // Empty engines env for the same reason XAI_API_KEY is stripped above:
+    // the engine tools are credential-gated, so the base set must be
+    // asserted against a known-empty one.
+    const tools = createBaseTools({})
     expect(tools.size).toBe(6)
     expect([...tools.keys()].sort()).toEqual([
       'askQuestion', 'createTask', 'getTime', 'updateTask',
@@ -33,7 +36,7 @@ describe('[COMP:tools/base] Base tools', () => {
   it('createBaseTools registers xSearch when XAI_API_KEY is set', () => {
     process.env.XAI_API_KEY = 'stub'
     try {
-      const tools = createBaseTools()
+      const tools = createBaseTools({})
       expect(tools.size).toBe(7)
       expect(tools.has('xSearch')).toBe(true)
     } finally {
