@@ -4562,7 +4562,14 @@ export function chatRoutes(options: WebChatOptions): Router {
         assistant,
         userTimezone: user.timezone,
         tools: allTools,
-        stores: options,
+        stores: {
+          ...options,
+          // Promote a just-attached photo on demand, so an image can reach a
+          // Shopify product without the model first calling saveFileToBrain.
+          readCachedFile: options.fileStore
+            ? (id, ctx) => options.fileStore!.get(id, ctx)
+            : undefined,
+        },
         engineHooks: options.engineHooks,
         // In-app actor identity: email is how the signed-in user is known on
         // the web/app surface. Channel turns (WA/TG/Slack) set their native id
