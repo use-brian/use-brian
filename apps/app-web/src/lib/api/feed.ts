@@ -17,6 +17,7 @@
  */
 
 import { authFetch } from "@/lib/auth-fetch";
+import type { PostMedia } from "@/lib/feed-media";
 import type { FeedPlatform } from "@/lib/feed-nav";
 import type {
   FeedIdea,
@@ -599,6 +600,8 @@ export type FeedDraftSessionSummary = {
  */
 export type FeedSavedDraft = {
   id: string;
+  /** Images bound to this draft (feed-revamp-depth D32). */
+  media?: PostMedia[];
   platform: FeedPlatform;
   platformReplyId: string | null;
   /** The model's original proposal — preserved for audit. */
@@ -742,6 +745,8 @@ export async function saveFeedSessionDraft(
     topicTag?: string;
     /** Written brief of the visual for image-first platforms (D9). */
     imageBrief?: string;
+    /** Images bound to this draft. Its own field, never inside formatData. */
+    media?: PostMedia[];
     postFormat?: FeedPostFormat;
     threadSegments?: string[];
     article?: FeedArticleFields;

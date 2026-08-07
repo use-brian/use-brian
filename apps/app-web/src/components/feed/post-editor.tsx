@@ -40,6 +40,8 @@ import { PlatformIcon } from "@/components/feed/platform-icon";
 import { StatusLabel } from "@/components/feed/feed-status";
 import { CaptionEditor } from "@/components/feed/caption-editor";
 import { BrandCheck } from "@/components/feed/brand-check";
+import { PostMediaTray } from "@/components/feed/post-media-tray";
+import type { PostMedia } from "@/lib/feed-media";
 import { TuningChatPanel } from "@/components/feed/tuning-chat-panel";
 import { Button } from "@/components/ui/button";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
@@ -124,7 +126,7 @@ export function replayProposals(
 
 type SavedComposition = Pick<
   FeedSavedDraft,
-  "draftText" | "postedText" | "postFormat" | "threadSegments" | "article"
+  "draftText" | "postedText" | "postFormat" | "threadSegments" | "article" | "media"
 >;
 
 /** Compare editor state with the persisted review version. Article fields are
@@ -421,6 +423,7 @@ function PostPane({
         savedDrafts.find((draft) => draft.status === "pending" || draft.status === "ready")
         ?? savedDrafts[0]
         ?? null;
+      setMedia(savedComposition?.media ?? []);
       const restoredFormat = savedComposition?.postFormat ?? seedIntent?.format ?? "post";
       const supported = postFormatsForPlatform(platform).includes(restoredFormat)
         ? restoredFormat
@@ -468,6 +471,10 @@ function PostPane({
   // A committed post is read-only: editing something already approved or
   // posted would let the copy drift away from what was actually reviewed.
   const readOnly = status === "ready" || status === "posted";
+  // D32. Media lives beside the caption, not inside formatData: saveDraft
+  // rewrites formatData wholesale from postFormat, so a Post<->Thread switch
+  // would silently erase it.
+  const [media, setMedia] = useState<PostMedia[]>([]);
 
   useEffect(() => {
     if (
@@ -486,6 +493,7 @@ function PostPane({
         text,
         platform,
         postFormat,
+        media,
         ...(postFormat === "thread" ? { threadSegments } : {}),
         ...(postFormat === "article" ? { article } : {}),
       });
@@ -497,7 +505,7 @@ function PostPane({
       setError(result.error ?? te.actionFailed);
       return false;
     },
-    [assistantId, sessionId, platform, postFormat, threadSegments, article, load, te.actionFailed],
+    [assistantId, sessionId, platform, postFormat, media, threadSegments, article, load, te.actionFailed],
   );
 
   async function commitVersion() {
@@ -819,16 +827,33 @@ function PostPane({
                   }
                 />
 
-                {selected?.imageBrief ? (
-                  <div className="space-y-1 rounded-xl border border-border/60 bg-muted/30 p-3">
-                    <div className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-                      {te.imageBriefLabel}
-                    </div>
-                    <p className="whitespace-pre-wrap text-xs text-muted-foreground">
-                      {selected.imageBrief}
-                    </p>
-                  </div>
-                ) : null}
+                <PostMediaTray
+                  workspaceId={workspaceId}
+                  platform={platform}
+                  media={media}
+                  imageBrief={selected?.imageBrief ?? null}
+                  readOnly={readOnly}
+                  onChange={(next) => {
+                    setMedia(next);
+                    // Media is a deliberate act, so it persists immediately
+                    // rather than waiting for the caption's idle autosave.
+                    void saveFeedSessionDraft(assistantId, sessionId, {
+                      text: selected?.text ?? "",
+                      platform,
+                      postFormat,
+                      media: next,
+                      ...(postFormat === "thread" ? { threadSegments } : {}),
+                      ...(postFormat === "article" ? { article } : {}),
+                    }).then((r) => {
+                      if (r.ok) {
+                        notifyFeedPostsChanged();
+                        void load();
+                      } else {
+                        setError(r.error ?? te.actionFailed);
+                      }
+                    });
+                  }}
+                />
 
                 <div className="flex flex-wrap items-center gap-2 border-t border-border/60 pt-4">
                   {status === "drafting" ? (
