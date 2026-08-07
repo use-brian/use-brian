@@ -69,7 +69,7 @@ export type BlockRunResult = {
  * rejected by the effect contract if it touches subprocess), JSON files for
  * the send handshake.
  */
-export function buildRunnerShimSource(opts: { sendTimeoutSeconds: number }): string {
+export function buildRunnerShimSource(opts: { sendTimeoutSeconds: number; allowedSite?: string }): string {
   return `"""Use Brian governed browser runner (R2-9).
 
 Blocks drive THESE verbs only. The terminal verb (submit) never fires without
@@ -80,9 +80,11 @@ import json
 import os
 import subprocess
 import time
+from urllib.parse import urlparse
 
 RUNNER_DIR = ${JSON.stringify(RUNNER_DIR)}
 SEND_TIMEOUT_SECONDS = ${Math.max(1, Math.floor(opts.sendTimeoutSeconds))}
+ALLOWED_SITE = ${JSON.stringify(opts.allowedSite ?? '')}
 _send_counter = 0
 _would_send = []
 _last_snapshot = {}
@@ -103,12 +105,25 @@ def _ab(*args):
     return proc.stdout
 
 
+def _assert_site(url=None):
+    if not ALLOWED_SITE:
+        return
+    current = url or _ab("get", "url").strip()
+    host = (urlparse(current).hostname or "").lower()
+    if host != ALLOWED_SITE and not host.endswith("." + ALLOWED_SITE):
+        raise RuntimeError("browser skill left declared site %s and reached %s" % (ALLOWED_SITE, host or current))
+
+
 def open(url):
-    return _ab("open", url)
+    _assert_site(url)
+    out = _ab("open", url)
+    _assert_site()
+    return out
 
 
 def snapshot():
     global _last_snapshot
+    _assert_site()
     out = _ab("snapshot", "-i")
     _last_snapshot = {}
     for line in out.splitlines():
@@ -128,19 +143,28 @@ def find(label):
 
 
 def click(ref):
-    return _ab("click", ref)
+    _assert_site()
+    out = _ab("click", ref)
+    _assert_site()
+    return out
 
 
 def fill(ref, text):
-    return _ab("fill", ref, text)
+    _assert_site()
+    out = _ab("fill", ref, text)
+    _assert_site()
+    return out
 
 
 def eval(js):
-    return _ab("eval", js)
+    _assert_site()
+    out = _ab("eval", js)
+    _assert_site()
+    return out
 
 
 def scroll(delta_y):
-    return _ab("eval", "window.scrollBy(0, %d)" % int(delta_y))
+    return eval("window.scrollBy(0, %d)" % int(delta_y))
 
 
 def wait(seconds):
@@ -148,7 +172,9 @@ def wait(seconds):
 
 
 def current_url():
-    return _ab("get", "url").strip()
+    url = _ab("get", "url").strip()
+    _assert_site(url)
+    return url
 
 
 def log(message):

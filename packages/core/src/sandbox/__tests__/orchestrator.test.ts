@@ -203,6 +203,8 @@ describe('[COMP:sandbox/session-vault] Session reuse — capture once, no second
   it('registrableSiteOf normalizes hosts to their registrable domain', () => {
     expect(registrableSiteOf('https://www.linkedin.com/feed')).toBe('linkedin.com')
     expect(registrableSiteOf('https://github.com/login')).toBe('github.com')
+    expect(registrableSiteOf('https://shop.alpha.co.uk/orders')).toBe('alpha.co.uk')
+    expect(registrableSiteOf('https://shop.beta.co.uk/orders')).toBe('beta.co.uk')
     expect(registrableSiteOf('not a url')).toBeNull()
   })
 })

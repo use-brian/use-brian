@@ -10,7 +10,7 @@ import {
   launchFirefoxForControl,
 } from "../firefox-launcher.js";
 
-describe("[COMP:app-desktop/firefox-native-host] Firefox launcher", () => {
+describe("[COMP:ext/firefox-companion] Firefox launcher", () => {
   it("resolves standard executable and profile locations", () => {
     expect(firefoxExecutableCandidates("darwin", {}, "/Users/a")[0]).toBe(
       "/Applications/Firefox.app/Contents/MacOS/firefox",

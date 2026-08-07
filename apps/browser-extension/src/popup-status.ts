@@ -13,9 +13,8 @@ export type PopupStatus = {
   controlledTab?: number | null
   stopped?: boolean
   /**
-   * Whether the user has granted the optional `debugger` permission. Undefined
-   * from an older background build; treated as granted there so an upgrade
-   * cannot invent a permission warning the user cannot act on.
+   * Whether this install has the required `debugger` permission. Undefined from
+   * an older background build and treated as present for upgrade compatibility.
    */
   hasControl?: boolean
   /** The relay's verdict on the build we reported. Undefined from a background that predates it. */
@@ -39,7 +38,7 @@ const STOPPED_LABEL =
   'Task stopped. The next request will ask your permission again — no need to reload the extension.'
 
 const NO_CONTROL_LABEL =
-  'Not allowed to manage this browser yet. Press Allow below — Chrome will ask you to confirm.'
+  'This extension is missing its required browser-control permission. Reload or reinstall it.'
 
 const STALE_BUILD_LABEL =
   'This extension is out of date. Rebuild it and press Reload on chrome://extensions, then reconnect.'

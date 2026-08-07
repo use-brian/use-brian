@@ -3595,6 +3595,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }
   const skillRunnerTools = createSkillRunnerTools({
     provider: sandboxProvider,
+    local: localBrowserProvider,
     binding: sandboxOrchestrator?.binding ?? null,
     skills: browserSkillsStore,
     grants: ports.browserSkillGrantStore ?? null,
@@ -3609,6 +3610,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     resolvePolicy: resolveComputerToolPolicy,
     unattendedEnabled: unattendedComputerUse,
     getWorkspacePlan,
+    getSessionTrace: computerTools.getSessionTrace,
+    clearSessionTrace: computerTools.clearSessionTrace,
     onEvent: (evt, ctx) => {
       analytics.logEvent({
         userId: ctx.userId,
@@ -3630,6 +3633,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   })
   allTools.set('runBrowserSkill', skillRunnerTools.runBrowserSkill)
+  allTools.set('saveBrowserSkill', skillRunnerTools.saveBrowserSkill)
   allTools.set('listBrowserSkills', skillRunnerTools.listBrowserSkills)
   allTools.set('listBrowserProfiles', skillRunnerTools.listBrowserProfiles)
 

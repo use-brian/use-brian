@@ -1543,6 +1543,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     gdriveFilesStore: params.gdriveFilesStore,
     workspaceFilesStore: params.workspaceFilesStore,
     filesApi: params.filesApi,
+    readCachedFile: params.fileStore ? (id, ctx) => params.fileStore!.get(id, ctx) : undefined,
     artifactPromoter: params.artifactPromoter ?? null,
     skillStore: params.skillStore,
     workerManager: params.workerManager,
