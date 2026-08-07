@@ -67,7 +67,7 @@ const WATCH_TIMEOUT_MS = 120_000;
  * drives is a dashed suggestion, and refusing to save a brief because someone
  * typed "3x" would be wildly out of proportion. The server re-validates.
  */
-export function parseCadenceInput(raw: string): number | null {
+function parseCadenceInput(raw: string): number | null {
   const n = Number(raw.trim());
   if (!Number.isInteger(n) || n < 1 || n > 21) return null;
   return n;

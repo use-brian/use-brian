@@ -502,7 +502,7 @@ export type FeedReplyTargetSummary = {
   permalink: string | null;
 };
 
-export type FeedSavedDraftStatus =
+type FeedSavedDraftStatus =
   | "pending"
   /** Approved for MANUAL posting — sits in the ready-to-post queue until
    *  the operator marks it posted (docs/plans/feed-create-split.md D2). */

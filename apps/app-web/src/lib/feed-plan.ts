@@ -11,6 +11,7 @@
  */
 
 import type { FeedPlatform } from "@/lib/feed-nav";
+import type { PostMedia } from "@/lib/feed-media";
 
 /** The status a slot chip renders. Mirrors `PlanSlotStatus` on the server. */
 export type PlanSlotStatus =
@@ -71,13 +72,6 @@ export type PlanBrief = {
   cadencePerWeek: number | null;
   updatedBy: string | null;
   updatedAt: string | null;
-};
-
-/** One image bound to a draft. `fileId` is a `workspace_files` row id. */
-export type PostMedia = {
-  fileId: string;
-  mimeType: string;
-  alt?: string;
 };
 
 /** Derived server-side from the links and `discarded_at`, never stored. */

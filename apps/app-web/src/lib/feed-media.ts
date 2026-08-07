@@ -20,7 +20,7 @@ export const ACCEPTED_MEDIA_MIME = [
   "image/gif",
 ] as const;
 
-export const MAX_POST_MEDIA = 10;
+const MAX_POST_MEDIA = 10;
 
 /**
  * Per-platform ceilings. These are the PLATFORM's limits, not ours, so a
