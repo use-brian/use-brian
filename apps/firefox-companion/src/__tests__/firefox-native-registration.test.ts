@@ -7,7 +7,7 @@ import {
   isFirefoxNativeHostArgv,
 } from "../firefox-native-registration.js";
 
-describe("[COMP:app-desktop/firefox-native-host] native-host registration", () => {
+describe("[COMP:ext/firefox-companion] native-host registration", () => {
   it("builds a Firefox-only manifest pointing at the desktop executable", () => {
     expect(buildFirefoxNativeHostManifest("/Applications/Use Brian.app/Contents/MacOS/Use Brian")).toEqual({
       name: FIREFOX_NATIVE_HOST_NAME,

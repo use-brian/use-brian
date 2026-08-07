@@ -7,6 +7,7 @@ import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import pg from 'pg'
 import { orderMigrationFiles } from './migration-order.js'
+import { findAppliedMigrationRenames } from './migration-renames.js'
 
 const DATABASE_URL = process.env.DATABASE_URL
 if (!DATABASE_URL) {
@@ -30,6 +31,20 @@ async function migrate() {
   // Get already-applied migrations
   const { rows: applied } = await client.query('SELECT name FROM public._migrations ORDER BY name')
   const appliedSet = new Set(applied.map((r) => r.name))
+
+  // A released migration was renamed to resolve sequence collisions. Preserve
+  // both ledger identities so upgraded databases do not rerun identical DDL,
+  // while an older release can still recognize the migration after rollback.
+  for (const { previousName, currentName } of findAppliedMigrationRenames(appliedSet)) {
+    await client.query(
+      `INSERT INTO public._migrations (name, applied_at)
+       SELECT $2, applied_at FROM public._migrations WHERE name = $1
+       ON CONFLICT (name) DO NOTHING`,
+      [previousName, currentName],
+    )
+    appliedSet.add(currentName)
+    console.log(`  alias: ${previousName} -> ${currentName}`)
+  }
 
   // Migration source dirs. The open submodule's own migrations dir is always
   // included; the platform injects its closed overlay dir(s) via

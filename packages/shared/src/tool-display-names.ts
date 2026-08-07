@@ -194,6 +194,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   browserCurrentUrl: 'Check the browser address',
   browserReadPage: 'Read a page in the browser',
   runBrowserSkill: 'Run a browser skill',
+  saveBrowserSkill: 'Save a browser skill',
   listBrowserSkills: 'List browser skills',
   listBrowserProfiles: 'List browser profiles',
   browserExplore: 'Explore a browsing flow',
@@ -279,6 +280,7 @@ const TOOL_STATUS_NAMES: Record<string, string> = {
   browserSnapshot: 'Reading the page',
   browserCurrentUrl: 'Checking the page',
   runBrowserSkill: 'Running a browser task',
+  saveBrowserSkill: 'Saving a browser skill',
   browserExplore: 'Exploring the web',
 }
 
