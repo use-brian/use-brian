@@ -14,7 +14,10 @@ import {
   RESTRICTED_TAB_MESSAGE,
 } from './tab-eligibility.js'
 import { credentialsForConfigure, isTrustedPairingOrigin, type PairRequest } from './pairing.js'
-import { hasBrowserControl } from './browser-control-permission.js'
+import {
+  hasBrowserControl,
+  registerDebuggerDetachListener,
+} from './browser-control-permission.js'
 import { readBuildStamp } from './build-info.js'
 
 const executor = new TabExecutor()
@@ -247,20 +250,30 @@ async function dispatch(op: string, args: Record<string, unknown>): Promise<unkn
 // ── Chrome event wiring ────────────────────────────────────────
 
 /**
- * Chrome ended the debugging session. Without this the executor keeps its
- * cached tab id, `attach()` short-circuits on it, and every later CDP op fails
- * with "Debugger is not attached" forever while `currentUrl` (no CDP) keeps
- * working — the exact half-dead state seen in prod on 2026-07-22.
+ * Chrome omits the debugger namespace until its optional permission is granted.
+ * Register now when available, or when permissions.onAdded exposes it later.
  */
-chrome.debugger.onDetach.addListener((source, reason) => {
-  const tabId = source.tabId
-  if (tabId == null || !executor.onDetached(tabId)) return
-  if (reason === 'canceled_by_user') {
-    // The user dismissed Chrome's own debugging banner. Treat it as a refusal:
-    // ask again through our Allow window instead of re-attaching behind them.
-    gate.revokeConsent()
-    client.sendEvent('detached')
-  }
+let debuggerDetachListenerRegistered = false
+function registerDetachListener(): void {
+  if (debuggerDetachListenerRegistered) return
+  debuggerDetachListenerRegistered = registerDebuggerDetachListener(
+    chrome.debugger?.onDetach,
+    (source, reason) => {
+      const tabId = source.tabId
+      if (tabId == null || !executor.onDetached(tabId)) return
+      if (reason === 'canceled_by_user') {
+        // The user dismissed Chrome's own debugging banner. Treat it as a refusal:
+        // ask again through our Allow window instead of re-attaching behind them.
+        gate.revokeConsent()
+        client.sendEvent('detached')
+      }
+    },
+  )
+}
+
+registerDetachListener()
+chrome.permissions.onAdded.addListener((permissions) => {
+  if (permissions.permissions?.includes('debugger')) registerDetachListener()
 })
 
 chrome.tabs.onRemoved.addListener((tabId) => {

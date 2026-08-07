@@ -26,6 +26,22 @@ export type PermissionsApi = {
   request(p: { permissions: string[] }): Promise<boolean>;
 };
 
+type DebuggerDetachListener = Parameters<typeof chrome.debugger.onDetach.addListener>[0];
+
+export type DebuggerDetachEvent = {
+  addListener(listener: DebuggerDetachListener): void;
+};
+
+/** Register only after Chrome exposes the API behind its optional permission. */
+export function registerDebuggerDetachListener(
+  event: DebuggerDetachEvent | undefined,
+  listener: DebuggerDetachListener,
+): boolean {
+  if (!event) return false;
+  event.addListener(listener);
+  return true;
+}
+
 /** The one capability that means "can drive this browser". */
 export const BROWSER_CONTROL_PERMISSIONS = ['debugger'] as const;
 

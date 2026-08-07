@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import {
   BROWSER_CONTROL_PERMISSIONS,
   hasBrowserControl,
+  registerDebuggerDetachListener,
   requestBrowserControl,
 } from '../browser-control-permission.js'
 
@@ -52,5 +53,16 @@ describe('[COMP:ext/browser-control-permission] Optional debugger permission', (
   it('passes the user’s refusal straight through', async () => {
     const ok = await requestBrowserControl({ contains: async () => false, request: async () => false })
     expect(ok).toBe(false)
+  })
+
+  it('starts safely before Chrome exposes the optional debugger namespace', () => {
+    expect(registerDebuggerDetachListener(undefined, vi.fn())).toBe(false)
+  })
+
+  it('registers detach recovery after the debugger permission becomes available', () => {
+    const addListener = vi.fn()
+    const listener = vi.fn()
+    expect(registerDebuggerDetachListener({ addListener }, listener)).toBe(true)
+    expect(addListener).toHaveBeenCalledWith(listener)
   })
 })
