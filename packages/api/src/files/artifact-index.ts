@@ -4,8 +4,15 @@
 // The one writer seam every trigger converges on: web /upload promotion and
 // the explicit /api/files/ingest route call it synchronously (parse already
 // in-request; keyword/range retrieval is live the moment it returns), and the
-// file_ingest_jobs worker calls it idempotently (insert is ON CONFLICT DO
-// NOTHING on (file_id, segment_index)).
+// file_ingest_jobs worker calls it too.
+//
+// A call is either a FIRST ingest or a RE-index, and this module decides which
+// from the parent's `metadata.indexing.status` rather than trusting a caller
+// flag. First ingest inserts ON CONFLICT (file_id, segment_index) DO NOTHING,
+// so a job that crashed mid-insert resumes by completing its partial set. A
+// re-index REPLACES the set inside one transaction — without that the stale
+// rows win every collision, and a parser fix can never reach a file that was
+// already ingested. See file-artifacts.md → "Ingest writers".
 //
 // Inheritance rule (file-artifacts.md): segments copy the parent
 // workspace_files row's visibility double / sensitivity / compartments /
@@ -33,6 +40,7 @@ type ParentRow = {
   compartments: string[]
   tags: string[] | null
   source: string
+  metadata: { indexing?: { status?: string } } | null
 }
 
 /**
@@ -63,7 +71,7 @@ export async function indexFileArtifact(input: {
   actingUserId: string
 }): Promise<IndexFileArtifactResult> {
   const parent = await getPool().query<ParentRow>(
-    `SELECT user_id, assistant_id, sensitivity, compartments, tags, source
+    `SELECT user_id, assistant_id, sensitivity, compartments, tags, source, metadata
        FROM workspace_files
       WHERE id = $1 AND workspace_id = $2 AND valid_to IS NULL`,
     [input.fileId, input.workspaceId],
@@ -73,8 +81,18 @@ export async function indexFileArtifact(input: {
   }
   const p = parent.rows[0]
 
+  // A file already carrying a `ready` stamp has a COMPLETE segment set from an
+  // earlier run, so this call is a RE-index and its whole purpose is to replace
+  // that set — an insert that skips on conflict would discard the new chunking
+  // and leave the old one serving retrieval (how a file ingested before a
+  // parser fix would stay broken forever). Insert-idempotency still covers the
+  // case it was built for: a first ingest that crashed mid-insert never wrote
+  // the stamp, so its retry completes the partial set instead.
+  const alreadyIndexed = p.metadata?.indexing?.status === 'ready'
+
   const { segments, truncatedAtChar } = chunkFileText(input.text)
   const segmentsInserted = await insertFileSegments({
+    replace: alreadyIndexed,
     fileId: input.fileId,
     workspaceId: input.workspaceId,
     createdByUserId: input.actingUserId,

@@ -110,11 +110,71 @@ describeIf('[COMP:files/artifact-index] indexFileArtifact + lifecycle propagatio
     }
   })
 
-  it('re-index is idempotent (0 new inserts)', async () => {
-    await indexMod.indexFileArtifact({ fileId, workspaceId, text: DOC, actingUserId: userId })
+  it('re-indexing the same text leaves exactly one copy of each segment', async () => {
+    // The invariant is the end state, not the insert count: re-indexing must
+    // never duplicate. (It used to be asserted as `segmentsInserted === 0`,
+    // which only held because the insert skipped on conflict — the same skip
+    // that made a re-index after a parser fix a silent no-op.)
+    const first = await indexMod.indexFileArtifact({ fileId, workspaceId, text: DOC, actingUserId: userId })
     const again = await indexMod.indexFileArtifact({ fileId, workspaceId, text: DOC, actingUserId: userId })
-    expect(again.segmentsInserted).toBe(0)
-    expect(again.segmentCount).toBeGreaterThan(0)
+    expect(again.segmentCount).toBe(first.segmentCount)
+
+    const client = await pool!.connect()
+    try {
+      const rows = await client.query(
+        `SELECT segment_index, count(*) AS n FROM file_segments WHERE file_id = $1 GROUP BY segment_index`,
+        [fileId],
+      )
+      expect(rows.rows.length).toBe(again.segmentCount)
+      for (const r of rows.rows) expect(Number(r.n)).toBe(1)
+    } finally {
+      client.release()
+    }
+  })
+
+  it('re-indexing REPLACES stale segments when the derived text changed', async () => {
+    // The recovery path for any file parsed by an older/broken parser — the
+    // 2026-08-06 HTML fix being the reason it exists. Without replacement the
+    // stale rows win every (file_id, segment_index) collision and keep serving
+    // retrieval, so the parser fix could never reach already-ingested files.
+    await indexMod.indexFileArtifact({ fileId, workspaceId, text: DOC, actingUserId: userId })
+
+    const REPARSED = ['# Handbook', 'Completely different body text about vacation policy and expense limits.'].join('\n\n')
+    const redone = await indexMod.indexFileArtifact({ fileId, workspaceId, text: REPARSED, actingUserId: userId })
+
+    const client = await pool!.connect()
+    try {
+      const segs = await client.query(
+        `SELECT content FROM file_segments WHERE file_id = $1 ORDER BY segment_index`,
+        [fileId],
+      )
+      expect(segs.rows.length).toBe(redone.segmentCount)
+      const all = segs.rows.map((r) => r.content).join('\n')
+      expect(all).toContain('vacation policy')
+      expect(all).not.toContain('Passwords rotate quarterly')
+      expect(all).not.toContain('onboarding and access')
+    } finally {
+      client.release()
+    }
+  })
+
+  it('completes a partial set rather than replacing it when no ready stamp was written', async () => {
+    // The case insert-idempotency was built for: a FIRST ingest that crashed
+    // mid-insert. The stamp is written after the insert, so its absence marks
+    // an incomplete set that must be finished, not thrown away and redone.
+    const first = await indexMod.indexFileArtifact({ fileId, workspaceId, text: DOC, actingUserId: userId })
+
+    const client = await pool!.connect()
+    try {
+      await client.query(`DELETE FROM file_segments WHERE file_id = $1 AND segment_index = 0`, [fileId])
+      await client.query(`UPDATE workspace_files SET metadata = metadata - 'indexing' WHERE id = $1`, [fileId])
+    } finally {
+      client.release()
+    }
+
+    const resumed = await indexMod.indexFileArtifact({ fileId, workspaceId, text: DOC, actingUserId: userId })
+    expect(resumed.segmentsInserted).toBe(1) // only the missing one
+    expect(resumed.segmentCount).toBe(first.segmentCount)
   })
 
   it('a sensitivity raise on the parent propagates to every segment', async () => {
