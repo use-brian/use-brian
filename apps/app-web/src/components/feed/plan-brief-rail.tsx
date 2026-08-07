@@ -61,6 +61,18 @@ const PLAN_CHANNEL_ID = "plan";
 const WATCH_INTERVAL_MS = 4_000;
 const WATCH_TIMEOUT_MS = 120_000;
 
+/**
+ * The cadence field is a free text input, so anything can arrive. Out-of-range
+ * or unparseable means "no cadence" rather than an error: the only thing it
+ * drives is a dashed suggestion, and refusing to save a brief because someone
+ * typed "3x" would be wildly out of proportion. The server re-validates.
+ */
+export function parseCadenceInput(raw: string): number | null {
+  const n = Number(raw.trim());
+  if (!Number.isInteger(n) || n < 1 || n > 21) return null;
+  return n;
+}
+
 export function PlanBriefRail({
   month,
   brief,
@@ -88,7 +100,11 @@ export function PlanBriefRail({
   ideas: readonly FeedIdea[];
   /** Bumped when the operator asks the assistant to plan; starts the watch. */
   watchToken: number;
-  onSave: (next: { brief: string; themes: string[] }) => void;
+  onSave: (next: {
+    brief: string;
+    themes: string[];
+    cadencePerWeek: number | null;
+  }) => void;
   onSlotsAccepted: () => void;
   /** Resolves true when the jot saved, so the input knows to clear. */
   onAddIdea: (text: string) => Promise<boolean>;
@@ -100,6 +116,9 @@ export function PlanBriefRail({
 
   const [body, setBody] = useState(brief?.brief ?? "");
   const [themes, setThemes] = useState((brief?.themes ?? []).join(", "));
+  const [cadence, setCadence] = useState(
+    brief?.cadencePerWeek ? String(brief.cadencePerWeek) : "",
+  );
   const [ideaText, setIdeaText] = useState("");
   const [savingIdea, setSavingIdea] = useState(false);
 
@@ -117,11 +136,13 @@ export function PlanBriefRail({
   useEffect(() => {
     setBody(brief?.brief ?? "");
     setThemes((brief?.themes ?? []).join(", "));
+    setCadence(brief?.cadencePerWeek ? String(brief.cadencePerWeek) : "");
   }, [brief]);
 
   const dirty =
     body !== (brief?.brief ?? "") ||
-    themes !== (brief?.themes ?? []).join(", ");
+    themes !== (brief?.themes ?? []).join(", ") ||
+    cadence !== (brief?.cadencePerWeek ? String(brief.cadencePerWeek) : "");
 
   // ── Proposal cardboard ────────────────────────────────────────────────
   const [proposed, setProposed] = useState<ProposedSlot[]>([]);
@@ -425,6 +446,34 @@ export function PlanBriefRail({
             placeholder={tp.themesPlaceholder}
             className="h-8 w-full rounded-lg border border-border/60 bg-background px-2.5 text-[12.5px] placeholder:text-muted-foreground/60 focus:border-primary/40 focus:outline-none disabled:opacity-70"
           />
+          <div className="flex items-center gap-2">
+            <label
+              htmlFor="plan-cadence"
+              className="text-[11px] font-medium uppercase tracking-[0.12em] text-muted-foreground"
+            >
+              {tp.cadenceLabel}
+            </label>
+            <input
+              id="plan-cadence"
+              type="number"
+              min={1}
+              max={21}
+              inputMode="numeric"
+              value={cadence}
+              disabled={!canEdit}
+              onChange={(e) => setCadence(e.target.value)}
+              className="h-7 w-14 rounded-md border border-border/60 bg-background px-2 text-[12.5px] tabular-nums focus:border-primary/40 focus:outline-none disabled:opacity-70"
+            />
+            <span className="text-[11px] text-muted-foreground">
+              {tp.cadenceUnit}
+            </span>
+          </div>
+          {/*
+            The ghosts this drives are suggestions, not schedule. Saying so
+            here is cheaper than an operator discovering it by clicking one.
+          */}
+          <p className="text-[11px] text-muted-foreground">{tp.cadenceHint}</p>
+
           {brief?.updatedAt ? (
             <p className="text-[11px] text-muted-foreground">
               {format(tp.briefUpdated, {
@@ -453,6 +502,7 @@ export function PlanBriefRail({
                   .split(",")
                   .map((s) => s.trim())
                   .filter(Boolean),
+                cadencePerWeek: parseCadenceInput(cadence),
               })
             }
             className="inline-flex h-8 w-full items-center justify-center rounded-lg bg-action px-3 text-[12.5px] font-medium text-action-foreground transition-colors hover:bg-action/90 disabled:opacity-50"

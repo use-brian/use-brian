@@ -22,7 +22,9 @@ import { Sparkles } from "lucide-react";
 import { useFeedWorkspace } from "@/contexts/feed-profiles-context";
 import { useConnectAccount } from "@/components/feed/connect-account-dialog";
 import { FeedOnboarding } from "@/components/feed/feed-onboarding";
+import { cn } from "@/lib/utils";
 import { PlanCalendar } from "@/components/feed/plan-calendar";
+import { PlanList } from "@/components/feed/plan-list";
 import {
   PlanSlotPeek,
   planSlotToDraft,
@@ -106,6 +108,14 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
       : monthKey(today),
   );
 
+  // D25. Two views, both over the same slots and the same chip. `?view=` is
+  // in the URL for the same reason `?month=` is: a linkable, reload-surviving
+  // reading of the month.
+  const viewParam = searchParams.get("view");
+  const [view, setView] = useState<"month" | "list">(
+    viewParam === "list" ? "list" : "month",
+  );
+
   const [slots, setSlots] = useState<PlanSlot[]>([]);
   const [brief, setBrief] = useState<PlanBrief | null>(null);
   const [ideas, setIdeas] = useState<FeedIdea[]>([]);
@@ -161,11 +171,12 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
       firstMonthSync.current = false;
       return;
     }
+    const suffix = view === "list" ? "&view=list" : "";
     router.replace(
-      `${feedPath(team.workspaceId)}?month=${month}`,
+      `${feedPath(team.workspaceId)}?month=${month}${suffix}`,
       { scroll: false },
     );
-  }, [month, router, team.workspaceId]);
+  }, [month, view, router, team.workspaceId]);
 
   const counts = useMemo(() => planCounts(slots), [slots]);
 
@@ -187,6 +198,7 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
       draft: {
         id: null,
         platform: defaultPlatform,
+        scheduledMinute: null,
         scheduledFor: iso,
         title: "",
         brief: "",
@@ -206,10 +218,12 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
         ? await updatePlanSlot(assistantId, draft.id, {
             title,
             brief: draft.brief.trim() || null,
+            scheduledMinute: draft.scheduledMinute,
           })
         : await createPlanSlot(assistantId, {
             platform: draft.platform,
             scheduledFor: draft.scheduledFor,
+            scheduledMinute: draft.scheduledMinute,
             title,
             ...(draft.brief.trim() ? { brief: draft.brief.trim() } : {}),
           });
@@ -277,6 +291,32 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
         return;
       }
       setSlots((prev) => prev.map((s) => (s.id === slot.id ? result.slot : s)));
+      setRail({ kind: "slot", draft: planSlotToDraft(result.slot) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /**
+   * D29. Duplicate lands on the SAME day, unbound and untitled-suffixed: the
+   * operator asked for another post like this one, not for a guess about when
+   * it should go out. Any draft the original started stays with the original.
+   */
+  async function duplicateSlot(slot: PlanSlot) {
+    setBusy(true);
+    try {
+      const result = await createPlanSlot(assistantId, {
+        platform: slot.platform,
+        scheduledFor: slot.scheduledFor,
+        scheduledMinute: slot.scheduledMinute,
+        title: slot.title,
+        ...(slot.brief ? { brief: slot.brief } : {}),
+      });
+      if (!result.ok) {
+        setError(result.error ?? tp.saveFailed);
+        return;
+      }
+      setSlots((prev) => [...prev, result.slot]);
       setRail({ kind: "slot", draft: planSlotToDraft(result.slot) });
     } finally {
       setBusy(false);
@@ -368,6 +408,7 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
       draft: {
         id: null,
         platform: idea.platformHint ?? defaultPlatform,
+        scheduledMinute: null,
         scheduledFor: isoDay(today),
         title,
         brief: briefText,
@@ -376,7 +417,11 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
     });
   }
 
-  async function saveBrief(next: { brief: string; themes: string[] }) {
+  async function saveBrief(next: {
+    brief: string;
+    themes: string[];
+    cadencePerWeek: number | null;
+  }) {
     setBusy(true);
     try {
       const result = await savePlanBrief(assistantId, { month, ...next });
@@ -439,17 +484,63 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
           {loading ? (
             <div className="h-[520px] animate-pulse rounded-xl border border-border/60 bg-muted/30" />
           ) : (
-            <PlanCalendar
-              month={month}
-              slots={slots}
-              today={today}
-              selectedSlotId={rail.kind === "slot" ? rail.draft.id : null}
-              canEdit={canEdit}
-              onMonthChange={setMonth}
-              onAddOnDay={openNewSlot}
-              onSelectSlot={openSlot}
-              onReschedule={(slot, iso) => void reschedule(slot, iso)}
-            />
+            <>
+              <div className="mb-2 flex items-center justify-end">
+                <div
+                  role="tablist"
+                  aria-label={tp.viewMonth}
+                  className="inline-flex items-center gap-0.5 rounded-md border border-border/60 p-0.5"
+                >
+                  {(["month", "list"] as const).map((key) => (
+                    <button
+                      key={key}
+                      type="button"
+                      role="tab"
+                      aria-selected={view === key}
+                      onClick={() => setView(key)}
+                      className={cn(
+                        "h-6 rounded px-2 text-[12.5px] font-medium transition-colors",
+                        view === key
+                          ? "bg-foreground text-background"
+                          : "text-muted-foreground hover:bg-accent hover:text-foreground",
+                      )}
+                    >
+                      {key === "month" ? tp.viewMonth : tp.viewList}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {view === "month" ? (
+                <PlanCalendar
+                  month={month}
+                  slots={slots}
+                  today={today}
+                  cadencePerWeek={brief?.cadencePerWeek ?? null}
+                  selectedSlotId={rail.kind === "slot" ? rail.draft.id : null}
+                  canEdit={canEdit}
+                  onMonthChange={setMonth}
+                  onAddOnDay={openNewSlot}
+                  onSelectSlot={openSlot}
+                  onReschedule={(slot, iso) => void reschedule(slot, iso)}
+                  onDuplicateSlot={(slot) => void duplicateSlot(slot)}
+                  onDeleteSlot={(slot) => void removeSlot(slot)}
+                />
+              ) : (
+                <PlanList
+                  month={month}
+                  slots={slots}
+                  cadencePerWeek={brief?.cadencePerWeek ?? null}
+                  today={today}
+                  selectedSlotId={rail.kind === "slot" ? rail.draft.id : null}
+                  canEdit={canEdit}
+                  onAddOnDay={openNewSlot}
+                  onSelectSlot={openSlot}
+                  onDuplicateSlot={(slot) => void duplicateSlot(slot)}
+                  onDeleteSlot={(slot) => void removeSlot(slot)}
+                />
+              )}
+            </>
           )}
         </div>
       </div>

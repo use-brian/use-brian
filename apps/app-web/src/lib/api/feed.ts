@@ -1276,6 +1276,8 @@ export async function createPlanSlot(
   input: {
     platform: FeedPlatform;
     scheduledFor: string;
+    /** Minutes past local midnight; omit or null for "that day, no time". */
+    scheduledMinute?: number | null;
     title: string;
     brief?: string;
   },
@@ -1305,6 +1307,7 @@ export async function updatePlanSlot(
   slotId: string,
   patch: {
     scheduledFor?: string;
+    scheduledMinute?: number | null;
     title?: string;
     brief?: string | null;
     status?: PlanSlotMark;
@@ -1380,7 +1383,13 @@ export async function fetchPlanBrief(
 
 export async function savePlanBrief(
   assistantId: string,
-  input: { month: string; brief: string; themes: string[] },
+  input: {
+    month: string;
+    brief: string;
+    themes: string[];
+    /** Posts per week, 1..21, or null to clear. Drives the gap ghosts only. */
+    cadencePerWeek?: number | null;
+  },
 ): Promise<{ ok: true; brief: PlanBrief } | { ok: false; error: string | null }> {
   const res = await authFetch(
     `${API_URL}/api/distribution/${assistantId}/plan-brief`,

@@ -27,7 +27,9 @@ import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { FEED_PLATFORMS, type FeedPlatform } from "@/lib/feed-nav";
 import {
   PLAN_RAIL_DOCK_CLEARANCE_CLASS,
+  formatSlotMinute,
   parseIsoDay,
+  parseSlotMinute,
   type PlanSlot,
 } from "@/lib/feed-plan";
 
@@ -35,6 +37,8 @@ export type PlanSlotDraft = {
   id: string | null;
   platform: FeedPlatform;
   scheduledFor: string;
+  /** Minutes past local midnight, or null for "that day, no time" (D26). */
+  scheduledMinute: number | null;
   title: string;
   brief: string;
   /** Set when this draft was opened from a backlog idea ("Plan it"); saving
@@ -47,6 +51,7 @@ export function planSlotToDraft(slot: PlanSlot): PlanSlotDraft {
     id: slot.id,
     platform: slot.platform,
     scheduledFor: slot.scheduledFor,
+    scheduledMinute: slot.scheduledMinute,
     title: slot.title,
     brief: slot.brief ?? "",
   };
@@ -170,6 +175,47 @@ export function PlanSlotPeek({
                 </button>
               );
             })}
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <div className="text-[11px] font-medium uppercase tracking-[0.12em] text-muted-foreground">
+            {tp.timeLabel}
+          </div>
+          <div className="flex items-center gap-1.5">
+            {/*
+              A typed wall-clock time, not a drag target: the minute is a label
+              on a day the calendar already owns (D26), and a slot with no time
+              is a normal state, so the field starts empty rather than at
+              midnight.
+            */}
+            <input
+              type="text"
+              inputMode="numeric"
+              disabled={!canEdit}
+              value={formatSlotMinute(draft.scheduledMinute) ?? ""}
+              placeholder={tp.timePlaceholder}
+              onChange={(e) => {
+                const raw = e.target.value;
+                const parsed = parseSlotMinute(raw);
+                // An unparseable string leaves the stored value alone rather
+                // than clearing it, so a half-typed "9:" does not wipe 09:30.
+                if (!raw.trim()) onChange({ ...draft, scheduledMinute: null });
+                else if (parsed !== null) {
+                  onChange({ ...draft, scheduledMinute: parsed });
+                }
+              }}
+              className="h-7 w-20 rounded-md border border-border bg-background px-2 text-[12.5px] tabular-nums outline-none focus-visible:border-foreground/40 disabled:opacity-60"
+            />
+            {draft.scheduledMinute !== null && canEdit ? (
+              <button
+                type="button"
+                onClick={() => onChange({ ...draft, scheduledMinute: null })}
+                className="h-7 rounded-md px-2 text-[12.5px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              >
+                {tp.clearTime}
+              </button>
+            ) : null}
           </div>
         </div>
 

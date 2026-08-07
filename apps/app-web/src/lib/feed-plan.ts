@@ -44,8 +44,16 @@ export type PlanSlot = {
   platform: FeedPlatform;
   /** `YYYY-MM-DD`. */
   scheduledFor: string;
+  /**
+   * Minutes past LOCAL midnight, or null for "that day, no time"
+   * (feed-revamp-depth D26). `scheduledFor` still owns which day; this is a
+   * label a human reads before posting by hand. Nothing schedules from it.
+   */
+  scheduledMinute: number | null;
   title: string;
   brief: string | null;
+  /** Media on the bound draft, for the chip thumbnail. */
+  media: PostMedia[];
   status: PlanSlotStatus;
   draftId: string | null;
   sessionId: string | null;
@@ -59,8 +67,17 @@ export type PlanBrief = {
   monthStart: string;
   brief: string;
   themes: string[];
+  /** Posts per week this month intends, or null. Drives the gap ghosts only. */
+  cadencePerWeek: number | null;
   updatedBy: string | null;
   updatedAt: string | null;
+};
+
+/** One image bound to a draft. `fileId` is a `workspace_files` row id. */
+export type PostMedia = {
+  fileId: string;
+  mimeType: string;
+  alt?: string;
 };
 
 /** Derived server-side from the links and `discarded_at`, never stored. */
@@ -245,4 +262,161 @@ export function planCounts(
   };
   for (const slot of slots) counts[slot.status] += 1;
   return counts;
+}
+
+// ── Wall-clock minutes (D26) ────────────────────────────────────────────────
+
+/**
+ * `570` -> `"09:00"`. Null renders as nothing, not as midnight: a slot with no
+ * time is a real and common state, and showing "00:00" would invent one.
+ */
+export function formatSlotMinute(minute: number | null): string | null {
+  if (minute === null || !Number.isInteger(minute)) return null;
+  if (minute < 0 || minute > 1439) return null;
+  const h = Math.floor(minute / 60);
+  const m = minute % 60;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+}
+
+/**
+ * `"09:00"` / `"9:00"` -> `570`. Returns null for empty (the operator clearing
+ * the field) and for anything outside a single day. The caller distinguishes
+ * "cleared" from "typed nonsense" by checking the raw string itself.
+ */
+export function parseSlotMinute(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const match = /^(\d{1,2}):(\d{2})$/.exec(trimmed);
+  if (!match) return null;
+  const h = Number(match[1]);
+  const m = Number(match[2]);
+  if (h > 23 || m > 59) return null;
+  return h * 60 + m;
+}
+
+/** Slots sort by time within a day; untimed slots sit after timed ones. */
+export function compareSlotsInDay(a: PlanSlot, b: PlanSlot): number {
+  const am = a.scheduledMinute;
+  const bm = b.scheduledMinute;
+  if (am === null && bm === null) return 0;
+  if (am === null) return 1;
+  if (bm === null) return -1;
+  return am - bm;
+}
+
+// ── Cadence gap ghosts (D28) ────────────────────────────────────────────────
+
+/**
+ * Days inside `month` the cadence wants and nothing occupies.
+ *
+ * Deliberately dumb and deliberately client-side: it spreads
+ * `cadencePerWeek` evenly across each calendar week, then drops any day that
+ * already carries a slot. It suggests and never writes - a ghost is a `+`
+ * with a dashed border, not a scheduled post, so being approximately right is
+ * the whole requirement. Weekends are skipped unless the cadence is high
+ * enough to need them.
+ */
+export function ghostDays(
+  month: string,
+  slots: readonly PlanSlot[],
+  cadencePerWeek: number | null,
+  today: Date,
+): string[] {
+  if (!cadencePerWeek || cadencePerWeek < 1) return [];
+  const grid = monthGridDays(month, today).filter((d) => d.inMonth);
+  if (grid.length === 0) return [];
+  const taken = new Set(slots.map((s) => s.scheduledFor));
+
+  // Weekday-first candidates, so a 3/week cadence lands Mon/Wed/Fri rather
+  // than proposing a Sunday nobody will post on.
+  const weekdays = grid.filter((d) => !d.isWeekend);
+  const pool = cadencePerWeek > weekdays.length / grid.length * 7 ? grid : weekdays;
+
+  const byWeek = new Map<number, typeof grid>();
+  pool.forEach((d, i) => {
+    const week = Math.floor(i / Math.max(1, Math.round(pool.length / 4.35)));
+    const bucket = byWeek.get(week);
+    if (bucket) bucket.push(d);
+    else byWeek.set(week, [d]);
+  });
+
+  const ghosts: string[] = [];
+  for (const week of byWeek.values()) {
+    if (week.length === 0) continue;
+    const step = week.length / cadencePerWeek;
+    for (let i = 0; i < cadencePerWeek; i += 1) {
+      const day = week[Math.min(week.length - 1, Math.floor(i * step))];
+      if (day && !taken.has(day.iso) && !ghosts.includes(day.iso)) {
+        ghosts.push(day.iso);
+      }
+    }
+  }
+  return ghosts.sort();
+}
+
+/** How many more posts this month would need to hit its cadence. */
+export function cadenceShortfall(
+  month: string,
+  slots: readonly PlanSlot[],
+  cadencePerWeek: number | null,
+  today: Date,
+): number {
+  return ghostDays(month, slots, cadencePerWeek, today).length;
+}
+
+// ── List view (D25) ─────────────────────────────────────────────────────────
+
+export type PlanAgendaGroup = {
+  /** `YYYY-MM-DD`. */
+  iso: string;
+  day: number;
+  isToday: boolean;
+  isWeekend: boolean;
+  slots: PlanSlot[];
+  /** True when the cadence wanted a post here and none exists. */
+  isGap: boolean;
+};
+
+/**
+ * The List view's day groups: every day of the month that carries a slot or a
+ * cadence gap, in order, with each day's slots sorted by time. Empty days are
+ * omitted - an agenda that lists 31 rows to show 6 posts is a calendar with
+ * extra steps.
+ */
+export function agendaGroups(
+  month: string,
+  slots: readonly PlanSlot[],
+  cadencePerWeek: number | null,
+  today: Date,
+): PlanAgendaGroup[] {
+  const byDay = slotsByDay(slots);
+  const gaps = new Set(ghostDays(month, slots, cadencePerWeek, today));
+  return monthGridDays(month, today)
+    .filter((d) => d.inMonth && (byDay.has(d.iso) || gaps.has(d.iso)))
+    .map((d) => ({
+      iso: d.iso,
+      day: d.day,
+      isToday: d.isToday,
+      isWeekend: d.isWeekend,
+      slots: [...(byDay.get(d.iso) ?? [])].sort(compareSlotsInDay),
+      isGap: gaps.has(d.iso),
+    }));
+}
+
+// ── Fill empty slots (D30) ──────────────────────────────────────────────────
+
+/**
+ * Slots the opt-in fill action may propose briefs for: planned, unbound, and
+ * not skipped. A slot the operator already drafted or deliberately skipped is
+ * not "empty", and rewriting either would be the surface making a decision the
+ * operator already made.
+ */
+export function emptySlots(slots: readonly PlanSlot[]): PlanSlot[] {
+  return slots.filter(
+    (s) =>
+      s.status === "planned" &&
+      !s.draftId &&
+      !s.sessionId &&
+      !(s.brief && s.brief.trim()),
+  );
 }
