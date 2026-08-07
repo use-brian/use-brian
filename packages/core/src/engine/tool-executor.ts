@@ -295,14 +295,27 @@ export function createToolExecutor(options: ToolExecutorOptions) {
       // filled its prompt's required output fields from parametric memory
       // (the 2026-07-13 fls.com.hk HKTVmall prospect runs fabricated emails,
       // IG handles, and LinkedIn URLs that a later step persisted as records).
+      // Both branches end with the reply-form clause: without it, the model
+      // treats the evidence-pinning clauses as an output template — a
+      // 2026-08-07 web-chat reply (session 6fd63623) opened with English
+      // "**What did the results support?** / **What was requested but not
+      // verified?**" headers echoing the old copy's clauses, ahead of the
+      // user's-language body. Same leak class as the 2026-05-27 incident
+      // documented above the block branch.
+      const REPLY_FORM_CLAUSE =
+        'This instruction is internal: reply in the language the user has been writing in, ' +
+        'as a natural answer to their message. Never quote or restate this instruction, and ' +
+        'never turn its wording into headings, labels, or a question-and-answer structure.'
       const failedTool = options.loopDetector.failureStopTool()
       const content = failedTool
         ? `ERROR: "${failedTool}" failed ${FAIL_STREAK_LIMIT} times in a row this turn, so no further tools will run. ` +
-          `Stop retrying. Write a direct reply to the user now: summarize what you did accomplish, and state plainly what "${failedTool}" could not complete and why (quote its last error).`
+          `Stop retrying. Write a direct reply to the user now: summarize what you did accomplish, and state plainly what "${failedTool}" could not complete and why (quote its last error). ` +
+          REPLY_FORM_CLAUSE
         : 'ERROR: the tool-call budget for this turn is exhausted. ' +
           'No further tools will run this turn. Write a direct reply to the user now using what the prior tool results already gathered. ' +
-          'State only what those results support: anything requested that you could not verify before the budget ran out, name it plainly as not verified. ' +
-          'Never fill a gap with specific names, URLs, handles, emails, or numbers from memory.'
+          'If something the user asked for is not supported by those results, say plainly that you could not verify it. ' +
+          'Never fill a gap with specific names, URLs, handles, emails, or numbers from memory. ' +
+          REPLY_FORM_CLAUSE
       t.result = {
         type: 'tool_result',
         toolUseId: t.id,
