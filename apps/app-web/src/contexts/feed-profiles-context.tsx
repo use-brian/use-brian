@@ -21,6 +21,8 @@
  * [COMP:app-web/feed-profiles-context]
  */
 
+import { fetchWorkspaceBrand } from "@/lib/api/brand";
+import type { BrandRecord } from "@use-brian/shared/brand";
 import {
   createContext,
   useCallback,
@@ -66,6 +68,14 @@ export type FeedWorkspaceValue = {
    * (docs/plans/feed-create-split.md D7).
    */
   assistants: Array<{ id: string; name: string }>;
+  /**
+   * The workspace's APPROVED brand record, or null (feed-revamp-depth D35).
+   * Fetched once here so the preview, the Voice page, and the composer brand
+   * check share one read. Never the draft: a draft is a proposal and an
+   * assistant can write one. Null means "render exactly what shipped before
+   * brand existed" -- no consumer may hard-depend on it.
+   */
+  brand: BrandRecord | null;
   /** Re-fetch profiles + membership (after an OAuth connect / disconnect). */
   refresh: () => Promise<void>;
 };
@@ -136,7 +146,7 @@ export function FeedProfilesProvider(props: {
   });
 
   const load = useCallback(async (): Promise<void> => {
-    const [team, profiles, assistants] = await Promise.all([
+    const [team, profiles, assistants, brand] = await Promise.all([
       loadWorkspace(workspaceId),
       // Profiles failure ≠ surface failure: connections are optional to
       // planning, so render the zero-profile onboarding state instead.
@@ -145,6 +155,10 @@ export function FeedProfilesProvider(props: {
       fetchFeedDistributionAssistants(workspaceId).catch(
         () => [] as Array<{ id: string; name: string }>,
       ),
+      // A brand read failing must never take down a composer, so this is the
+      // same degrade as profiles: null, and every consumer renders its
+      // pre-brand shape.
+      fetchWorkspaceBrand(workspaceId).catch(() => null),
     ]);
     setState({
       status: "ready",
@@ -156,6 +170,7 @@ export function FeedProfilesProvider(props: {
         me: { id: team.myUserId },
         profiles,
         assistants,
+        brand,
         refresh: async () => {
           await load();
         },

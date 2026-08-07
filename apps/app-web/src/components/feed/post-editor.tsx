@@ -34,9 +34,12 @@ import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 import { useFeedWorkspace } from "@/contexts/feed-profiles-context";
+import { brandPreviewIdentity } from "@/lib/feed-brand";
+import type { BrandRecord } from "@use-brian/shared/brand";
 import { PlatformIcon } from "@/components/feed/platform-icon";
 import { StatusLabel } from "@/components/feed/feed-status";
 import { CaptionEditor } from "@/components/feed/caption-editor";
+import { BrandCheck } from "@/components/feed/brand-check";
 import { TuningChatPanel } from "@/components/feed/tuning-chat-panel";
 import { Button } from "@/components/ui/button";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
@@ -365,6 +368,9 @@ function PostPane({
   workspaceId: string;
   connected: boolean;
 }) {
+  // PostPane always renders inside FeedSurfaceShell's provider, so the brand
+  // read is a context lookup rather than another prop threaded through.
+  const workspace = useFeedWorkspace();
   const t = useT().feedPage;
   const te = t.postEditor;
   const router = useRouter();
@@ -799,6 +805,20 @@ function PostPane({
                   </p>
                 ) : null}
 
+                {/*
+                  D38. Under the copy it describes, warn-only, and silent
+                  unless the workspace has an approved brand AND the text
+                  actually contains a flagged phrase.
+                */}
+                <BrandCheck
+                  brand={workspace.brand}
+                  text={
+                    postFormat === "thread"
+                      ? threadSegments.join("\n\n")
+                      : (selected?.text ?? "")
+                  }
+                />
+
                 {selected?.imageBrief ? (
                   <div className="space-y-1 rounded-xl border border-border/60 bg-muted/30 p-3">
                     <div className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
@@ -885,6 +905,7 @@ function PostPane({
                   threadSegments={threadSegments}
                   article={article}
                   accountName={assistantName || te.previewAccount}
+                  brand={workspace.brand}
                 />
               </aside>
             </div>
@@ -1106,6 +1127,7 @@ function PlatformPostPreview({
   threadSegments,
   article,
   accountName,
+  brand = null,
 }: {
   platform: FeedPlatform;
   postFormat: FeedPostFormat;
@@ -1113,14 +1135,22 @@ function PlatformPostPreview({
   threadSegments: string[];
   article: FeedArticleFields;
   accountName: string;
+  /** The workspace's APPROVED brand record, or null (D36). */
+  brand?: BrandRecord | null;
 }) {
   const t = useT().feedPage;
   const te = t.postEditor;
-  const displayName = accountName.trim() || te.previewAccount;
-  const handle = displayName
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "")
-    .slice(0, 18);
+  const identity = brandPreviewIdentity(brand);
+  const displayName =
+    identity.displayName || accountName.trim() || te.previewAccount;
+  /*
+    D36. This used to be `displayName.toLowerCase().replace(...)` -- a handle
+    invented from the assistant's name, shown confidently on the one surface
+    whose whole job is previewing how the post appears in public. A workspace
+    whose real handle differed saw a lie. Now it is the brand's actual handle
+    or nothing at all; no handle renders no handle.
+  */
+  const handle = identity.handle;
   const parts = postFormat === "thread" ? threadSegments : [text];
   let sourceHost = "";
   try {
