@@ -1,17 +1,18 @@
 import { createHash } from 'node:crypto'
 import { Router } from 'express'
 import { z } from 'zod'
-import { getDefaultAssistant, getUserAssistant, getWorkspacePrimaryAssistant, getUserProfilesByIds, updateUserLastSeenTz } from '../db/users.js'
+import { getDefaultAssistant, getUserAssistant, getWorkspacePrimaryAssistant, getUserProfilesByIds, updateUserLastSeenTz, resolveAssistantAccess } from '../db/users.js'
+import { charterNeedsIntake, createSaveCharterTool, CHARTER_INTAKE_ADDENDUM } from '../intake/charter-intake.js'
 import { resolvePresenceTimezone } from '../auth/client-timezone.js'
 import { findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels, isSharedChatSession, isMultiParticipantSession, coalesceConsecutiveUserMessages, type SessionMessage } from '../db/sessions.js'
 import { query } from '../db/client.js'
 import { buildPinnedContextBlock } from '../resolve-session-pins.js'
 import { getSelfEntityId } from '../db/memories.js'
 import { getRecording, type Recording } from '../db/recordings-store.js'
-import { queryLoop, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, decodeExternalCostMeta, buildWorkspaceFilesContext, SensitivityAccumulator, CompartmentAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSupervisorSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, parsePresentedDocumentInput, buildTool, type PresentedDocumentInput, type MediaBackend } from '@use-brian/core'
+import { queryLoop, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, buildWorkspaceFilesContext, SensitivityAccumulator, CompartmentAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSupervisorSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, parsePresentedDocumentInput, buildTool, type PresentedDocumentInput, type MediaBackend } from '@use-brian/core'
 import { deliverTurnInput, registerTurnInbox } from '../turn-inbox.js'
 import { insertClaimProvenance, getClaimsForLatestAssistantMessage } from '../db/claim-provenance-store.js'
-import type { ToolResultMeta, SessionStateStore, SessionStateRecord, PlanStore, AmbientSurface } from '@use-brian/core'
+import type { SessionStateStore, SessionStateRecord, PlanStore, AmbientSurface } from '@use-brian/core'
 import { runProactiveCompaction } from './proactive-compaction.js'
 import { gateSessionRead } from './sessions.js'
 import { renderArtifactManifest } from '../files/artifact-manifest.js'
@@ -34,6 +35,7 @@ import { type PublishSessionEvent, noopPublishSessionEvent } from '../session-ev
 import type { InjectExtraTools, ResolveAppSoul } from '../tool-injection-port.js'
 import type { BuildConnectorActionAudit } from '../connector-action-port.js'
 import { notifyBrainWriteIfMatch } from '../brain-stream/notify.js'
+import { recordExternalCostFromMeta } from '../billing-external.js'
 // Host-specific seams (the real session-event bus, the placeholder-title helpers,
 // the per-turn extra-tool injector) are NOT imported here — they are injected via
 // WebChatOptions so the chat route depends on no platform-specific code. The
@@ -44,7 +46,8 @@ import type { Message, LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogg
 import { resolveModel, ensureServableModel, backgroundLatencyBudgetMs, backgroundModelFor, isStandardTier, chatTierBudget, planNudgeCap } from '../model-resolution.js'
 import { registryRow } from '@use-brian/shared/model-registry'
 import type { ConnectorStore } from '../db/connector-store.js'
-import { getToolDisplayName, stripFollowUps, stripCommentThreadReplyTag } from '@use-brian/shared'
+import { getToolDisplayName, stripFollowUps, stripCommentThreadReplyTag, resolveCharter, charterMission } from '@use-brian/shared'
+import { listActivePlaybookRules } from '../db/playbook-store.js'
 import { resolveUser, buildBrowserEscalationPrompt, buildUnavailableCapabilitiesPrompt, injectSkills, isSkillOfferable, checkUsageBudget, applyMcpInjection, type CreditBudgetGate } from './route-helpers.js'
 import { createDocRunClient } from '../doc/run-presence-client.js'
 import type { AssistantRunChannel } from '@use-brian/doc-model'
@@ -1451,72 +1454,11 @@ async function generateTitle(provider: LLMProvider, messages: Message[], model: 
   }
 }
 
-/**
-/**
- * Write a `usage_tracking` row for an external-API cost attached to a
- * tool result. No-op when `toolMeta` carries no `externalCost_*` fields.
- *
- * See docs/architecture/platform/cost-and-pricing.md → "External API cost
- * tracking policy". This is the single site that turns
- * `ToolResult.meta.externalCost_*` into a billable row. Every integration
- * that spends money per call must flow through here.
- */
-async function recordExternalCostFromMeta(params: {
-  toolMeta: ToolResultMeta | undefined
-  usageStore: UsageStore | undefined
-  userId: string
-  assistantId: string
-  sessionId: string
-  userMessageId: string | null | undefined
-  userPlan: string
-  analytics: AnalyticsLogger | undefined
-}): Promise<void> {
-  if (!params.usageStore) return
-  const cost = decodeExternalCostMeta(params.toolMeta)
-  if (!cost) return
-
-  const actualCostUsd =
-    cost.kind === 'per-token'
-      ? calculateCost(cost.model, {
-          inputTokens: cost.inputTokens,
-          outputTokens: cost.outputTokens,
-          cacheReadTokens: cost.cacheReadTokens ?? 0,
-        })
-      : cost.flatCostUsd
-
-  const inputTokens = cost.kind === 'per-token' ? cost.inputTokens : 0
-  const outputTokens = cost.kind === 'per-token' ? cost.outputTokens : 0
-  const cacheReadTokens = cost.kind === 'per-token' ? cost.cacheReadTokens ?? 0 : 0
-
-  try {
-    await params.usageStore.recordUsage({
-      userId: params.userId,
-      assistantId: params.assistantId,
-      sessionId: params.sessionId,
-      model: cost.model,
-      inputTokens,
-      outputTokens,
-      cacheReadTokens,
-      cacheWriteTokens: 0,
-      actualCostUsd,
-      source: params.userPlan === 'free' ? 'free' : 'included',
-      userMessageId: params.userMessageId ?? undefined,
-    })
-  } catch (err) {
-    console.error('External cost tracking failed:', err)
-    params.analytics?.logEvent({
-      userId: params.userId,
-      assistantId: params.assistantId,
-      sessionId: params.sessionId,
-      eventName: 'usage_tracking_error',
-      channelType: 'web',
-      metadata: {
-        error_type: sanitize((err as Error)?.name ?? 'unknown'),
-        external_cost_model: sanitize(cost.model),
-      },
-    })
-  }
-}
+// `recordExternalCostFromMeta` used to be defined here. It now lives in
+// `../billing-external.js` so the callee executor can call the SAME function:
+// while it was local to this route, external tool spend was recorded on the
+// interactive chat lane only, and an identical `webSearch` inside a workflow
+// step or scheduled job wrote nothing. See that module's header.
 
 // ─────────────────────────────────────────────────────────────────────
 // Path B durable chat resume (Q22 RESOLVED). The poll worker invokes
@@ -3694,6 +3636,10 @@ export function chatRoutes(options: WebChatOptions): Router {
         team: workspaceIdentity
           ? { name: workspaceIdentity.name, purpose: workspaceIdentity.purpose }
           : null,
+        // The charter mission is the assistant's one-line purpose (successor
+        // of `bio`, migration 418) - the app-soul hook renders it as the
+        // voice + identity anchor.
+        assistantBio: charterMission(resolveCharter(assistant)),
         resolveAppSoul: options.resolveAppSoul,
       })
       // Follow-up chips are opt-in per client (see _prompt-builder.ts):
@@ -3729,6 +3675,32 @@ export function chatRoutes(options: WebChatOptions): Router {
           workspaceEvolutionSnippet = parts.length > 0 ? parts.join('\n\n') : null
         } catch (err) {
           console.error('[chat] workspace evolution snippet fetch failed:', err)
+        }
+      }
+
+      // Owner-admitted playbook rules → `## Playbook` in the charter block
+      // (growth loop Phase 3). Same failure posture as the evolution
+      // snippet: a fetch error omits the section, never blocks the turn.
+      let playbookRules: string[] = []
+      try {
+        playbookRules = await listActivePlaybookRules(assistant.id)
+      } catch (err) {
+        console.error('[chat] playbook rules fetch failed:', err)
+      }
+
+      // Charter intake mode (growth loop Phase 2): an unconfigured standard
+      // assistant being spoken to by its OWNER gets the setup interview -
+      // the `saveCharter` tool (injected at the tool site below) plus the
+      // interview addendum in the stable prefix, both keyed on this one
+      // boolean (tool-awareness rule). The role lookup only runs for
+      // unconfigured assistants, so configured ones pay nothing.
+      let charterIntakeMode = false
+      if (charterNeedsIntake(resolveCharter(assistant), assistant.kind)) {
+        try {
+          const access = await resolveAssistantAccess(user.id, assistant.id)
+          charterIntakeMode = access?.role === 'owner'
+        } catch (err) {
+          console.error('[chat] intake role resolution failed:', err)
         }
       }
 
@@ -3772,7 +3744,9 @@ export function chatRoutes(options: WebChatOptions): Router {
                 surface: session.appOrigin as AmbientSurface,
               }))
             : null,
-        assistantInstructions: assistant.systemPrompt,
+        charter: resolveCharter(assistant),
+        playbookRules,
+        intakeAddendum: charterIntakeMode ? CHARTER_INTAKE_ADDENDUM : null,
         workspaceEvolutionSnippet,
         // Who is speaking — the authenticated member behind this request.
         // Web sessions know this positively, so the model never has to ask
@@ -4350,6 +4324,16 @@ export function chatRoutes(options: WebChatOptions): Router {
       // they're always present on a doc turn. `patchPage` writes through the live Yjs doc when
       // DOC_SYNC_URL/SECRET are configured; otherwise it falls back to the
       // legacy CAS path. See `packages/api/src/doc/inject.ts`.
+      // Charter intake tool (growth loop Phase 2). Keyed on the same
+      // boolean as the interview addendum above, so the prompt never names
+      // a tool that is absent (tool-awareness rule). requiresConfirmation
+      // on the tool means the owner taps to approve the exact drafted
+      // charter before it lands.
+      if (charterIntakeMode) {
+        const saveCharterTool = createSaveCharterTool({ assistantId: assistant.id })
+        allTools.set(saveCharterTool.name, saveCharterTool)
+      }
+
       if (docToolsTurn) {
         try {
           const { injectDocTools } = await import('../doc/inject.js')
