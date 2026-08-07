@@ -820,3 +820,66 @@ describe('[COMP:workflow/schemas] WorkflowTriggerSchema', () => {
     expect(WorkflowTriggerSchema.safeParse({ kind: 'cron' }).success).toBe(false)
   })
 })
+
+describe('[COMP:workflow/schemas] trigger fan-out (array startStepId)', () => {
+  const step = (id: string, nextStepId: string | string[] | null) => ({
+    id,
+    type: 'assistant_call',
+    target: { assistantId: 'primary' },
+    prompt: `do ${id}`,
+    nextStepId,
+  })
+
+  it('accepts a distinct multi-entry start that rejoins', () => {
+    const def = {
+      startStepId: ['b', 'c'],
+      steps: [step('b', 'j'), step('c', 'j'), step('j', null)],
+    }
+    expect(WorkflowDefinitionSchema.safeParse(def).success).toBe(true)
+  })
+
+  it('rejects dangling and duplicate entries', () => {
+    expect(
+      WorkflowDefinitionSchema.safeParse({
+        startStepId: ['b', 'ghost'],
+        steps: [step('b', null)],
+      }).success,
+    ).toBe(false)
+    expect(
+      WorkflowDefinitionSchema.safeParse({
+        startStepId: ['b', 'b'],
+        steps: [step('b', null)],
+      }).success,
+    ).toBe(false)
+  })
+
+  it('rejects a width-cap-busting entry list', () => {
+    const ids = ['s1', 's2', 's3', 's4', 's5', 's6']
+    expect(
+      WorkflowDefinitionSchema.safeParse({
+        startStepId: ids,
+        steps: ids.map((id) => step(id, null)),
+      }).success,
+    ).toBe(false)
+  })
+
+  it('rejects a wait on a trigger-fan-out branch a sibling never rejoins', () => {
+    const def = {
+      startStepId: ['sleep', 'c'],
+      steps: [
+        {
+          id: 'sleep',
+          type: 'wait',
+          until: { duration: { hours: 1 } },
+          nextStepId: null,
+        },
+        step('c', null),
+      ],
+    }
+    const r = WorkflowDefinitionSchema.safeParse(def)
+    expect(r.success).toBe(false)
+    if (!r.success) {
+      expect(r.error.issues.some((i) => i.message.includes('parallel branch'))).toBe(true)
+    }
+  })
+})

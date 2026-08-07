@@ -308,6 +308,30 @@ describe('[COMP:workflow/executor] Parallel fan-out', () => {
     expect(finished.status).toBe('completed')
   })
 
+  it('a trigger fan-out (array startStepId) starts every entry step in parallel and joins', async () => {
+    const stores = makeFakeStores()
+    const latched = makeLatchedTransport()
+    const deps = makeDeps(stores, latched.transport)
+
+    const definition: WorkflowDefinition = {
+      startStepId: ['b', 'c'],
+      steps: [call('b', 'j'), call('c', 'j'), call('j', null)],
+    }
+    const { run } = await seed(deps, definition)
+    const outcome = await advanceWorkflowRun(deps, run.id)
+
+    expect(outcome.kind).toBe('completed')
+    // Both entry steps genuinely overlapped, and the join ran once, last.
+    expect(latched.maxParallel()).toBeGreaterThanOrEqual(2)
+    expect(latched.started.filter((p) => p === 'j')).toHaveLength(1)
+    expect(latched.started.indexOf('j')).toBeGreaterThan(
+      Math.max(latched.settledOrder.indexOf('b'), latched.settledOrder.indexOf('c')) - 1,
+    )
+    const stepRuns = stores.stepRuns.filter((s) => s.runId === run.id)
+    expect(stepRuns.map((s) => s.stepId).sort()).toEqual(['b', 'c', 'j'])
+    expect(stepRuns.every((s) => s.status === 'completed')).toBe(true)
+  })
+
   it('holds the join while one branch is still in flight', async () => {
     const stores = makeFakeStores()
     const latched = makeLatchedTransport()

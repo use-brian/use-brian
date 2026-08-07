@@ -253,7 +253,11 @@ export type WorkflowStep = AssistantCallStep | ToolCallStep | WaitStep | BranchS
 export type WorkflowNodePosition = { x: number; y: number };
 
 export type WorkflowDefinition = {
-  startStepId: string;
+  /**
+   * Scalar = one entry step; ARRAY = trigger fan-out — every listed step
+   * starts in parallel when the trigger fires (distinct, max 5).
+   */
+  startStepId: string | string[];
   steps: WorkflowStep[];
   /**
    * Builder-canvas layout: node positions keyed by step id plus the reserved

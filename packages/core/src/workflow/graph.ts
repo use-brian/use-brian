@@ -25,6 +25,16 @@
 import type { WorkflowDefinition, WorkflowStep } from './types.js'
 
 /**
+ * The definition's entry steps, normalized: scalar `startStepId` yields one
+ * id, an array (trigger fan-out) yields all of them in order. Every consumer
+ * of "where does a run enter" goes through this so the two shapes can never
+ * diverge.
+ */
+export function startStepIds(def: WorkflowDefinition): string[] {
+  return Array.isArray(def.startStepId) ? [...def.startStepId] : [def.startStepId]
+}
+
+/**
  * Static out-edges of one step, resolved exactly as the executor would.
  * Branch steps return both arms (either may fire); a fan-out array returns
  * every target. `null` entries (explicit terminal) contribute nothing.
@@ -152,16 +162,16 @@ export function buildReachability(def: WorkflowDefinition): Map<string, Set<stri
  *
  * Static approximation (a branch inside an arm can route around the
  * convergence at run time); the executor's pause-while-parallel guard stays
- * authoritative. Only steps with `nextStepId` arrays of length ≥ 2 fan out —
- * branch steps route down ONE arm and never parallelize.
+ * authoritative. Two fan-out sources exist: steps with `nextStepId` arrays
+ * of length ≥ 2, and a trigger fan-out (`startStepId` array of length ≥ 2 —
+ * the trigger is one more fan-out node). Branch steps route down ONE arm
+ * and never parallelize.
  */
 export function parallelRegionSteps(def: WorkflowDefinition): Set<string> {
   const reach = buildReachability(def)
   const unsafe = new Set<string>()
-  for (const step of def.steps) {
-    if (step.type === 'branch') continue
-    if (!Array.isArray(step.nextStepId) || step.nextStepId.length < 2) continue
-    const edgeReach = step.nextStepId.map((id) => reach.get(id) ?? new Set<string>([id]))
+  const markDiverging = (edges: string[]) => {
+    const edgeReach = edges.map((id) => reach.get(id) ?? new Set<string>([id]))
     for (let i = 0; i < edgeReach.length; i++) {
       for (const candidate of edgeReach[i]) {
         for (let j = 0; j < edgeReach.length; j++) {
@@ -172,6 +182,13 @@ export function parallelRegionSteps(def: WorkflowDefinition): Set<string> {
         }
       }
     }
+  }
+  const starts = startStepIds(def)
+  if (starts.length >= 2) markDiverging(starts)
+  for (const step of def.steps) {
+    if (step.type === 'branch') continue
+    if (!Array.isArray(step.nextStepId) || step.nextStepId.length < 2) continue
+    markDiverging(step.nextStepId)
   }
   return unsafe
 }

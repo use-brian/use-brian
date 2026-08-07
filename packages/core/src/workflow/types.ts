@@ -291,7 +291,12 @@ export const WORKFLOW_STEP_TYPES = [
 export type WorkflowNodePosition = { x: number; y: number }
 
 export type WorkflowDefinition = {
-  startStepId: string
+  /**
+   * Scalar = one entry step; ARRAY = trigger fan-out — every listed step
+   * starts in parallel when the trigger fires (distinct, max
+   * MAX_FAN_OUT_WIDTH, same join/pause semantics as an array nextStepId).
+   */
+  startStepId: string | string[]
   steps: WorkflowStep[]
   /**
    * Optional builder-canvas layout: node positions keyed by step id (plus

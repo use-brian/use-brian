@@ -5,6 +5,7 @@ import {
   buildReachability,
   findCycle,
   parallelRegionSteps,
+  startStepIds,
 } from '../graph.js'
 import type { WorkflowDefinition, WorkflowStep } from '../types.js'
 
@@ -155,5 +156,38 @@ describe('[COMP:workflow/graph] parallelRegionSteps', () => {
       call('y', { nextStepId: null }),
     ])
     expect(parallelRegionSteps(d).size).toBe(0)
+  })
+})
+
+describe('[COMP:workflow/graph] trigger fan-out (array startStepId)', () => {
+  it('startStepIds normalizes both shapes', () => {
+    expect(startStepIds(def([call('a', { nextStepId: null })]))).toEqual(['a'])
+    const d: WorkflowDefinition = {
+      startStepId: ['a', 'b'],
+      steps: [call('a', { nextStepId: null }), call('b', { nextStepId: null })],
+    }
+    expect(startStepIds(d)).toEqual(['a', 'b'])
+  })
+
+  it('parallelRegionSteps treats a multi-entry start as one more fan-out node', () => {
+    const joined: WorkflowDefinition = {
+      startStepId: ['b', 'c'],
+      steps: [
+        call('b', { nextStepId: 'j' }),
+        call('c', { nextStepId: 'j' }),
+        call('j', { nextStepId: null }),
+      ],
+    }
+    const unsafe = parallelRegionSteps(joined)
+    expect(unsafe.has('b')).toBe(true)
+    expect(unsafe.has('c')).toBe(true)
+    expect(unsafe.has('j')).toBe(false)
+
+    const neverRejoins: WorkflowDefinition = {
+      startStepId: ['b', 'c'],
+      steps: [call('b', { nextStepId: null }), call('c', { nextStepId: null })],
+    }
+    expect(parallelRegionSteps(neverRejoins).has('b')).toBe(true)
+    expect(parallelRegionSteps(neverRejoins).has('c')).toBe(true)
   })
 })

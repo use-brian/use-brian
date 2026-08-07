@@ -7,13 +7,19 @@
  *  - nodes drag freely; positions persist on `definition.layout` (keyed by
  *    step id + the reserved `__trigger` key), auto-layout seats any node
  *    without an entry;
+ *  - dropping a dragged node ONTO a wire rearranges the flow: the step is
+ *    spliced out of its current wiring and inserted between the wire's
+ *    endpoints (`insertStepIntoEdge`); the candidate wire highlights with a
+ *    "Release to insert here" chip while dragging;
  *  - every node carries an output port (branch: two, tone-coded true/false);
  *    dragging a wire from a port onto another node connects them — a second
  *    target on a normal step's port becomes a parallel fan-out array
  *    (`nextStepId: [...]`, implicit join downstream);
  *  - clicking an edge selects it and offers a remove control (removing the
  *    implicit sequential fall-through pins `nextStepId: null`); the trigger
- *    edge re-targets `startStepId` by wiring the trigger port instead;
+ *    port ADDS entry steps (`startStepId` array = trigger fan-out, every
+ *    entry starts in parallel), and a trigger edge is removable while
+ *    another remains — the last one re-targets by wiring the port instead;
  *  - illegal wires (self, duplicate, cycle, fan-out past the width cap) are
  *    refused with a transient notice — the graph edits live in
  *    `@/lib/workflow-canvas` (pure, unit-tested).
@@ -53,8 +59,13 @@ import {
   boardExtent,
   canvasEdges,
   connectEdge,
+  edgeCurveOffset,
+  edgeInsertionCandidate,
+  insertStepIntoEdge,
+  portAnchor,
   removeEdge,
   resolvePositions,
+  unreachableStepIds,
   type CanvasEdge,
   type EdgeTone,
   type PortRef,
@@ -323,19 +334,8 @@ const EDGE_STROKE: Record<EdgeTone, string> = {
   false: "#ef4444",
 };
 
-/** Source-port anchor for an edge (branch arms leave at 1/3 and 2/3 height). */
-function portAnchor(
-  pos: WorkflowNodePosition,
-  tone: EdgeTone,
-  isBranch: boolean,
-): { x: number; y: number } {
-  const x = pos.x + NODE_W;
-  if (!isBranch) return { x, y: pos.y + NODE_H / 2 };
-  return { x, y: pos.y + (tone === "false" ? (NODE_H * 2) / 3 : NODE_H / 3) };
-}
-
 function bezierPath(sx: number, sy: number, tx: number, ty: number): string {
-  const curve = Math.max(36, Math.abs(tx - sx) / 2);
+  const curve = edgeCurveOffset(sx, tx);
   return `M ${sx},${sy} C ${sx + curve},${sy} ${tx - curve},${ty} ${tx},${ty}`;
 }
 
@@ -346,7 +346,7 @@ function bezierMidpoint(
   tx: number,
   ty: number,
 ): { x: number; y: number } {
-  const curve = Math.max(36, Math.abs(tx - sx) / 2);
+  const curve = edgeCurveOffset(sx, tx);
   // t = 0.5 on the cubic: (P0 + 3P1 + 3P2 + P3) / 8.
   return {
     x: (sx + 3 * (sx + curve) + 3 * (tx - curve) + tx) / 8,
@@ -368,6 +368,8 @@ type NodeDrag = {
   y: number;
   /** Becomes true after the movement threshold — suppresses the click. */
   moved: boolean;
+  /** Wire the node currently hovers close enough to splice into on drop. */
+  insertEdgeKey: string | null;
 };
 
 type WireDrag = {
@@ -428,6 +430,10 @@ export function WorkflowBoard({
     () => new Map(definition.steps.map((s) => [s.id, s])),
     [definition],
   );
+  const unreachable = useMemo(
+    () => unreachableStepIds(definition),
+    [definition],
+  );
 
   const extent = boardExtent(displayPositions);
   const width = Math.max(
@@ -474,6 +480,7 @@ export function WorkflowBoard({
       x: pos.x,
       y: pos.y,
       moved: false,
+      insertEdgeKey: null,
     });
   };
 
@@ -486,20 +493,43 @@ export function WorkflowBoard({
       nodeDrag.moved ||
       Math.abs(x - nodeDrag.ox) > 3 ||
       Math.abs(y - nodeDrag.oy) > 3;
-    setNodeDrag({ ...nodeDrag, x, y, moved });
+    const insertEdgeKey = moved
+      ? (edgeInsertionCandidate(
+          definition,
+          positions,
+          nodeDrag.key,
+          x + NODE_W / 2,
+          y + NODE_H / 2,
+        )?.key ?? null)
+      : null;
+    setNodeDrag({ ...nodeDrag, x, y, moved, insertEdgeKey });
   };
 
   const onNodePointerUp = (key: string) => {
     if (!nodeDrag || nodeDrag.key !== key) return;
     const wasDrag = nodeDrag.moved;
     if (wasDrag && onDefinitionChange) {
-      onDefinitionChange({
-        ...definition,
-        layout: {
-          ...(definition.layout ?? {}),
-          [key]: { x: Math.round(nodeDrag.x), y: Math.round(nodeDrag.y) },
-        },
-      });
+      const layout = {
+        ...(definition.layout ?? {}),
+        [key]: { x: Math.round(nodeDrag.x), y: Math.round(nodeDrag.y) },
+      };
+      let next: WorkflowDefinition = { ...definition, layout };
+      const dropEdge = nodeDrag.insertEdgeKey
+        ? edges.find((e) => e.key === nodeDrag.insertEdgeKey)
+        : undefined;
+      if (dropEdge) {
+        const result = insertStepIntoEdge(definition, key, dropEdge);
+        if (result.ok) {
+          next = { ...result.definition, layout };
+        } else if (result.reason === "width") {
+          setNotice(
+            format(t.workflowPage.board.wireRefusedWidth, {
+              n: String(MAX_FAN_OUT_WIDTH),
+            }),
+          );
+        }
+      }
+      onDefinitionChange(next);
     }
     setNodeDrag(null);
     if (!wasDrag) {
@@ -657,13 +687,19 @@ export function WorkflowBoard({
             const doneEdge =
               targetState === "completed" || targetState === "waiting";
             const isSelected = selectedEdgeKey === edge.key;
-            const stroke = isSelected
+            const insertTarget =
+              !!nodeDrag?.moved && nodeDrag.insertEdgeKey === edge.key;
+            // A wire leaving an unreachable step is dead: it never fires.
+            const deadEdge = unreachable.has(edge.from);
+            const stroke = insertTarget
               ? "var(--primary)"
-              : activeEdge
+              : isSelected
                 ? "var(--primary)"
-                : doneEdge && edge.tone === "default"
-                  ? "#10b981"
-                  : EDGE_STROKE[edge.tone];
+                : activeEdge
+                  ? "var(--primary)"
+                  : doneEdge && edge.tone === "default"
+                    ? "#10b981"
+                    : EDGE_STROKE[edge.tone];
             const d = bezierPath(a.x, a.y, tx, ty);
             return (
               <g key={edge.key}>
@@ -671,17 +707,27 @@ export function WorkflowBoard({
                   d={d}
                   fill="none"
                   stroke={stroke}
-                  strokeWidth={isSelected ? 3 : activeEdge ? 2.5 : 2}
+                  strokeWidth={insertTarget ? 3.5 : isSelected ? 3 : activeEdge ? 2.5 : 2}
                   strokeOpacity={
-                    isSelected || activeEdge || doneEdge
+                    insertTarget || isSelected || activeEdge || doneEdge
                       ? 0.9
-                      : edge.tone === "default"
-                        ? edge.source === "fallthrough"
-                          ? 0.45
-                          : 0.5
-                        : 0.8
+                      : deadEdge
+                        ? 0.25
+                        : edge.tone === "default"
+                          ? edge.source === "fallthrough"
+                            ? 0.45
+                            : 0.5
+                          : 0.8
                   }
-                  strokeDasharray={activeEdge ? "7 7" : undefined}
+                  strokeDasharray={
+                    insertTarget
+                      ? "6 6"
+                      : activeEdge
+                        ? "7 7"
+                        : deadEdge
+                          ? "4 4"
+                          : undefined
+                  }
                 >
                   {activeEdge && (
                     <animate
@@ -753,10 +799,39 @@ export function WorkflowBoard({
             );
           })}
 
-        {/* Selected-edge remove control at the curve midpoint */}
+        {/* Drop-to-insert chip at the candidate wire's midpoint */}
+        {nodeDrag?.moved &&
+          nodeDrag.insertEdgeKey &&
+          (() => {
+            const edge = edges.find((e) => e.key === nodeDrag.insertEdgeKey);
+            if (!edge) return null;
+            const src = displayPositions[edge.from];
+            const tgt = displayPositions[edge.to];
+            if (!src || !tgt) return null;
+            const isBranch = stepById.get(edge.from)?.type === "branch";
+            const a = portAnchor(src, edge.tone, !!isBranch);
+            const mid = bezierMidpoint(a.x, a.y, tgt.x, tgt.y + NODE_H / 2);
+            return (
+              <span
+                className={cn(
+                  "pointer-events-none absolute z-30 -translate-x-1/2 -translate-y-1/2 whitespace-nowrap",
+                  "rounded-full border border-primary/50 bg-primary/10 px-2 py-0.5",
+                  "text-[10px] font-medium text-primary shadow-sm backdrop-blur",
+                )}
+                style={{ left: mid.x, top: mid.y }}
+              >
+                {t.workflowPage.board.dropToInsert}
+              </span>
+            );
+          })()}
+
+        {/* Selected-edge remove control at the curve midpoint. A trigger
+            edge is removable only while a sibling entry step remains. */}
         {selectedEdge &&
           canEdit &&
-          selectedEdge.source !== "trigger" &&
+          (selectedEdge.source !== "trigger" ||
+            (Array.isArray(definition.startStepId) &&
+              definition.startStepId.length > 1)) &&
           (() => {
             const src = displayPositions[selectedEdge.from];
             const tgt = displayPositions[selectedEdge.to];
@@ -819,6 +894,8 @@ export function WorkflowBoard({
           const isBranch = node.step?.type === "branch";
           const dropTarget =
             wireDrag?.overKey === node.key && node.kind !== "trigger";
+          const orphan =
+            node.kind !== "trigger" && unreachable.has(node.key);
           return (
             <div key={node.key}>
               <div
@@ -845,7 +922,8 @@ export function WorkflowBoard({
                   "absolute flex items-start gap-2.5 rounded-xl border bg-card p-3 text-left shadow-sm transition",
                   "hover:shadow-md hover:border-primary/50",
                   canEdit ? "cursor-grab active:cursor-grabbing" : "cursor-pointer",
-                  nodeDrag?.key === node.key && nodeDrag.moved && "z-30 shadow-lg",
+                  orphan && "border-dashed opacity-75 hover:opacity-100",
+                  nodeDrag?.key === node.key && nodeDrag.moved && "z-30 shadow-lg opacity-100",
                   dropTarget
                     ? "border-primary ring-2 ring-primary/40"
                     : selected
@@ -895,6 +973,21 @@ export function WorkflowBoard({
                   </span>
                 )}
               </div>
+
+              {/* Orphan nudge — this step is not on the trigger path. */}
+              {orphan && (
+                <span
+                  title={t.workflowPage.board.neverRunsHint}
+                  className={cn(
+                    "absolute z-10 whitespace-nowrap rounded-full border px-2 py-0.5",
+                    "border-amber-400/60 bg-amber-500/15 text-[10px] font-medium",
+                    "text-amber-700 dark:text-amber-300",
+                  )}
+                  style={{ left: pos.x + 8, top: pos.y + NODE_H + 6 }}
+                >
+                  {t.workflowPage.board.neverRuns}
+                </span>
+              )}
 
               {/* Output ports */}
               {canEdit &&

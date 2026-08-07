@@ -345,7 +345,14 @@ function pageAnchorSummary(page: NonNullable<Extract<WorkflowDefinition['steps']
 
 function summarize(def: WorkflowDefinition): string {
   const lines: string[] = []
-  lines.push(`Start at "${def.startStepId}". ${def.steps.length} step${def.steps.length === 1 ? '' : 's'}.`)
+  // A trigger fan-out's parallelism is the summary's most important fact —
+  // the user must see that several entry steps start at once.
+  const starts = Array.isArray(def.startStepId) ? def.startStepId : [def.startStepId]
+  const startLine =
+    starts.length > 1
+      ? `Start IN PARALLEL at ${starts.map((s) => `"${s}"`).join(', ')}`
+      : `Start at "${starts[0]}"`
+  lines.push(`${startLine}. ${def.steps.length} step${def.steps.length === 1 ? '' : 's'}.`)
   for (const step of def.steps) {
     let detail = ''
     switch (step.type) {
@@ -1267,7 +1274,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       `No database writes. After this returns, present the proposal to the user verbatim and ask for explicit confirmation ("yes / create it / go ahead") before calling \`createWorkflow\`. ` +
       `Step types (V1): assistant_call (free-mode A2A), tool_call (first-party + MCP allow-policy), wait (not yet available), branch (JSONLogic condition). ` +
       `There is no loop / for-each step: to process each item in a list, propose a recurring schedule trigger that handles one batch per run and carries a cursor across runs via storeOutputAs + {{lastRun.<var>}}, or a research fan-out step for a read-only gather; name these routes when you decline a loop request. ` +
-      `Parallel fan-out: set a step's nextStepId to an ARRAY of step ids (max 5, distinct) to start those steps IN PARALLEL when it completes. A downstream step that several branches point at is the implicit JOIN — it runs once, after every branch that can still reach it settles, and can read every branch's {{vars.<name>}}. The graph must stay acyclic, and a wait step may not sit on a parallel branch that some sibling branch never rejoins (pausing needs the only live cursor — put waits before the fan-out or after the join). ` +
+      `Parallel fan-out: set a step's nextStepId to an ARRAY of step ids (max 5, distinct) to start those steps IN PARALLEL when it completes. A downstream step that several branches point at is the implicit JOIN — it runs once, after every branch that can still reach it settles, and can read every branch's {{vars.<name>}}. The graph must stay acyclic, and a wait step may not sit on a parallel branch that some sibling branch never rejoins (pausing needs the only live cursor — put waits before the fan-out or after the join). startStepId accepts the same shape: an ARRAY of step ids (max 5, distinct) starts every listed step IN PARALLEL the moment the trigger fires — a trigger-level fan-out with the same join and wait rules. ` +
       `Use \`storeOutputAs\` on a step to make its output available as \`{{vars.<name>}}\` in later steps. Use \`{{input.<name>}}\` to reference the trigger payload. ` +
       `A later step's prompt must NEVER assert what an earlier step supposedly did (e.g. "...which was emailed to the reviewer") — the earlier step may have failed or refused, and the assertion would be recorded as fact. Thread the earlier step's REAL output via storeOutputAs + {{vars.<name>}} and phrase the prompt conditionally on it. ` +
       `\n\nPage editing: when a step should edit or produce a doc page, set the step's \`page\` field — NEVER just mention a page id in the prompt (the callee gets no page tools that way and the step fails on every run). ` +
@@ -1286,7 +1293,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       description: z.string().max(2000).optional(),
       definition: z
         .object({
-          startStepId: z.string(),
+          startStepId: z.union([z.string(), z.array(z.string())]),
           steps: z.array(z.unknown()),
         })
         .passthrough()
@@ -1396,7 +1403,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       description: z.string().max(2000).optional(),
       definition: z
         .object({
-          startStepId: z.string(),
+          startStepId: z.union([z.string(), z.array(z.string())]),
           steps: z.array(z.unknown()),
         })
         .passthrough(),
@@ -1557,7 +1564,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       description: z.string().max(2000).nullable().optional(),
       definition: z
         .object({
-          startStepId: z.string(),
+          startStepId: z.union([z.string(), z.array(z.string())]),
           steps: z.array(z.unknown()),
         })
         .passthrough()

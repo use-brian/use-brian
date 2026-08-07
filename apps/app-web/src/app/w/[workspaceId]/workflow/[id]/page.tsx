@@ -314,9 +314,18 @@ export default function WorkflowDetailPage({
     const steps = draft.definition.steps;
     if (steps.length <= 1) return;
     const newSteps = steps.filter((_, i) => i !== idx);
-    const startStepId = newSteps.some((s) => s.id === draft.definition.startStepId)
+    // Keep surviving entry steps (startStepId may be a trigger fan-out
+    // array); all gone → the first remaining step becomes the entry.
+    const oldStarts = Array.isArray(draft.definition.startStepId)
       ? draft.definition.startStepId
-      : newSteps[0].id;
+      : [draft.definition.startStepId];
+    const survivors = oldStarts.filter((id) => newSteps.some((s) => s.id === id));
+    const startStepId =
+      survivors.length === 0
+        ? newSteps[0].id
+        : survivors.length === 1
+          ? survivors[0]
+          : survivors;
     // Keep canvas positions for surviving nodes; the schema rejects layout
     // entries for steps that no longer exist.
     setDraft({

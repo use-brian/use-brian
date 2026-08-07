@@ -35,7 +35,7 @@ import type {
   WorkflowStore,
 } from './types.js'
 import { evaluateBoolean, JsonLogicEvalError } from './condition.js'
-import { buildReachability } from './graph.js'
+import { buildReachability, startStepIds } from './graph.js'
 import { interpolateString, interpolateValue, type InterpolationScope } from './interpolation.js'
 import type { ResearchDepthConfig } from '../engine/research-depth.js'
 import { sanitizeDeliveryText } from '@use-brian/shared'
@@ -522,7 +522,9 @@ export async function advanceWorkflowRun(
   // Was this the first call into the run? Emit the audit event + flip to running.
   const isFirstAdvance = run.status === 'pending'
   if (isFirstAdvance) {
-    await deps.runStore.updateRun(runId, { status: 'running', currentStepId: workflow.definition.startStepId })
+    // currentStepId is a scalar display column — a trigger fan-out records
+    // its first entry step; the frontier below seeds every entry.
+    await deps.runStore.updateRun(runId, { status: 'running', currentStepId: startStepIds(workflow.definition)[0] })
     fireAndForgetAudit(deps, {
       type: 'workflow.run_started',
       workspaceId: run.workspaceId,
@@ -884,7 +886,9 @@ export async function advanceWorkflowRun(
     options?.startAt ??
     (persistedFrontier && persistedFrontier.length > 0
       ? persistedFrontier
-      : [run.currentStepId ?? workflow.definition.startStepId])
+      : run.currentStepId
+        ? [run.currentStepId]
+        : startStepIds(workflow.definition))
   for (const id of seed) enqueue(id)
 
   // Drain the frontier.

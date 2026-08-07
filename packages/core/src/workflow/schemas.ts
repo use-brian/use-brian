@@ -360,7 +360,11 @@ const nodePositionSchema = z
 
 export const WorkflowDefinitionSchema = z
   .object({
-    startStepId: stepIdSchema,
+    // Scalar = one entry step; ARRAY = trigger fan-out (every listed step
+    // starts in parallel when the trigger fires) — same shape and width cap
+    // as a step's nextStepId array.
+    startStepId: z
+      .union([stepIdSchema, z.array(stepIdSchema).min(1).max(MAX_FAN_OUT_WIDTH)]),
     steps: z.array(tolerantStepSchema).min(1).max(50),
     layout: z.record(nodePositionSchema).optional(),
   })
@@ -378,11 +382,22 @@ export const WorkflowDefinitionSchema = z
       seen.add(step.id)
     }
 
-    // startStepId must reference an existing step.
-    if (!seen.has(def.startStepId)) {
+    // Every startStepId entry must reference an existing step; a trigger
+    // fan-out array must also list distinct entries.
+    const starts = Array.isArray(def.startStepId) ? def.startStepId : [def.startStepId]
+    for (const start of starts) {
+      if (!seen.has(start)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `startStepId "${start}" does not match any step.id`,
+          path: ['startStepId'],
+        })
+      }
+    }
+    for (const dupe of new Set(starts.filter((id, i) => starts.indexOf(id) !== i))) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: `startStepId "${def.startStepId}" does not match any step.id`,
+        message: `startStepId lists "${dupe}" more than once — trigger fan-out entries must be distinct.`,
         path: ['startStepId'],
       })
     }

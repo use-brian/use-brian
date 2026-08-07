@@ -32,6 +32,7 @@ import {
   resolveLayer1Prompt,
 } from './_prompt-builder.js'
 import { type PublishSessionEvent, noopPublishSessionEvent } from '../session-event-port.js'
+import { createSessionPinTools } from '../session-pin-tools.js'
 import type { InjectExtraTools, ResolveAppSoul } from '../tool-injection-port.js'
 import type { BuildConnectorActionAudit } from '../connector-action-port.js'
 import { notifyBrainWriteIfMatch } from '../brain-stream/notify.js'
@@ -4144,6 +4145,23 @@ export function chatRoutes(options: WebChatOptions): Router {
           options.workspaceChatHandoffTool.name,
           options.workspaceChatHandoffTool,
         )
+      }
+
+      // Room pin tools — the assistant's write access to the room's shared
+      // Pins panel ("pin all tasks in this project here"). Per-turn admission,
+      // ROOM sessions only: no other surface renders a pin, so personal chats,
+      // channels, workflows, and workers never discover these.
+      if (isRoomSession && assistant.workspaceId) {
+        const pinTools = createSessionPinTools({
+          sessionId: session.id,
+          workspaceId: assistant.workspaceId,
+          clearance: session.effectiveClearance,
+          assistantId: assistant.id,
+          publishSessionEvent,
+        })
+        allTools.set('addPin', pinTools.addPin)
+        allTools.set('removePin', pinTools.removePin)
+        allTools.set('listPins', pinTools.listPins)
       }
 
       // updateSelfProfile — Identity Phase 2 groundwork. Available

@@ -20,9 +20,7 @@ import {
   addSessionPin,
   listSessionPins,
   removeSessionPin,
-  PIN_KINDS,
-  PIN_INSTRUCTION_MAX_CHARS,
-  type PinKind,
+  validateSessionPinPayload,
 } from '../db/session-pins-store.js'
 import { resolveSessionPinLabels } from '../resolve-session-pins.js'
 
@@ -976,6 +974,18 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       const profiles = await getUserProfilesByIds(
         pins.map((p) => p.addedByUserId).filter((id): id is string => Boolean(id)),
       )
+      // Assistant-added pins (migration 421) attribute by assistant name.
+      const assistantIds = [...new Set(
+        pins.map((p) => p.addedByAssistantId).filter((id): id is string => Boolean(id)),
+      )]
+      const assistantNames = new Map<string, string>()
+      if (assistantIds.length > 0) {
+        const rows = await query<{ id: string; name: string }>(
+          `SELECT id, name FROM assistants WHERE id = ANY($1::uuid[])`,
+          [assistantIds],
+        )
+        for (const row of rows.rows) assistantNames.set(row.id, row.name)
+      }
       res.json(pins.map((p) => ({
         id: p.id,
         kind: p.kind,
@@ -985,7 +995,12 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         label: labels.get(p.id) ?? null,
         position: p.position,
         addedByUserId: p.addedByUserId,
-        addedByName: p.addedByUserId ? profiles.get(p.addedByUserId)?.name ?? null : null,
+        addedByAssistantId: p.addedByAssistantId,
+        addedByName: p.addedByUserId
+          ? profiles.get(p.addedByUserId)?.name ?? null
+          : p.addedByAssistantId
+            ? assistantNames.get(p.addedByAssistantId) ?? null
+            : null,
         createdAt: p.createdAt,
       })))
     } catch (err) {
@@ -1000,43 +1015,18 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       if (!gate.ok) { res.status(gate.status).json({ error: gate.error }); return }
 
       const body = req.body as { kind?: string; refId?: string; url?: string; text?: string }
-      const kind = body.kind as PinKind
-      if (!kind || !(PIN_KINDS as readonly string[]).includes(kind)) {
-        res.status(400).json({ error: 'Unknown pin kind' })
+      const payload = validateSessionPinPayload(body)
+      if (!payload.ok) {
+        res.status(400).json({ error: payload.error })
         return
-      }
-      const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-      let refId: string | null = null
-      let url: string | null = null
-      let text: string | null = null
-      if (kind === 'url') {
-        const raw = typeof body.url === 'string' ? body.url.trim() : ''
-        let parsed: URL | null = null
-        try { parsed = new URL(raw) } catch { parsed = null }
-        if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || raw.length > 2048) {
-          res.status(400).json({ error: 'Invalid URL' })
-          return
-        }
-        url = raw
-      } else if (kind === 'instruction') {
-        const raw = typeof body.text === 'string' ? body.text.trim() : ''
-        if (!raw) { res.status(400).json({ error: 'Missing instruction text' }); return }
-        text = raw.slice(0, PIN_INSTRUCTION_MAX_CHARS)
-      } else {
-        const raw = typeof body.refId === 'string' ? body.refId.trim() : ''
-        if (!UUID_RE.test(raw)) {
-          res.status(400).json({ error: 'Missing or invalid refId' })
-          return
-        }
-        refId = raw
       }
 
       const pin = await addSessionPin({
         sessionId: gate.sessionId,
-        kind,
-        refId,
-        url,
-        text,
+        kind: payload.kind,
+        refId: payload.refId,
+        url: payload.url,
+        text: payload.text,
         addedByUserId: gate.userId,
       })
       publishSessionEvent({
