@@ -1,4 +1,4 @@
-import type { ChannelAdapter, IncomingMessage, OutgoingAction, OutgoingMessage } from '../types.js'
+import type { ChannelAdapter, IncomingFile, IncomingMessage, OutgoingAction, OutgoingMessage } from '../types.js'
 import { chunkText } from '../chunking.js'
 import { createTelegramApi, isTelegramThreadNotFoundError, type TelegramApi } from './api.js'
 import { markdownToTelegramHTML, stripMarkdown } from './markdown.js'
@@ -408,22 +408,20 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
     const mentioned = isBotMentioned(msg)
     const repliedToBot = isReplyToBot(msg)
     const askCommand = parseAskCommand(msg)
-    if (askCommand?.rejected) return null
-    const invokedByAsk = askCommand !== null
+    const invokedByAsk = askCommand !== null && !askCommand.rejected
 
-    // In groups, respond when @mentioned, replying to this bot, or explicitly
-    // invoked through /ask. Exact identity checks prevent co-resident bots
-    // from answering each other's commands or reply threads.
     const chatIdStr = String(msg.chat.id)
     const topicId = (msg.chat.is_forum === true && msg.message_thread_id != null)
       ? msg.message_thread_id
       : undefined
     const requireMention = resolveRequireMention(chatIdStr, topicId)
-    if (isGroup && requireMention && !mentioned && !repliedToBot && !invokedByAsk) return null
 
     // Skip service messages
     if (msg.new_chat_members || msg.left_chat_member) return null
 
+    // Determine media BEFORE the addressing gate below. The gate's `return
+    // null` is indistinguishable downstream from "nothing to do", so it must
+    // not be reached without knowing whether this message carried a file.
     // Determine media
     let mediaUrl: string | undefined
     let mediaType: IncomingMessage['mediaType']
@@ -467,12 +465,37 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
       mediaSizeBytes = msg.video.file_size
     }
 
+    // ── Addressing gate ──
+    // In groups, answer when @mentioned, replying to this bot, or explicitly
+    // invoked through /ask. Exact identity checks prevent co-resident bots
+    // from answering each other's commands or reply threads.
+    //
+    // An unaddressed message that carried media is NOT dropped — it returns
+    // with `captureOnly` so routes file the attachment and skip the turn.
+    // Dropping it here is what made four uncaptioned .md files vanish without
+    // a trace on 2026-08-07: the bot then answered a follow-up mention from an
+    // empty context and invented upload instructions for a thing the user had
+    // already done. See docs/architecture/channels/adapter-pattern.md →
+    // "Unaddressed group media".
+    const addressedToAnotherBot = askCommand?.rejected === true
+    const unaddressed =
+      addressedToAnotherBot ||
+      (isGroup && requireMention && !mentioned && !repliedToBot && !invokedByAsk)
+    // Only media a route can actually persist earns the capture-only exit.
+    // Photos are outside the brain intake's scope (images are not filed), so a
+    // capture-only photo would run no turn AND file nothing — a no-op dressed
+    // up as a capture, which is the very failure this flag exists to end.
+    // Anything not capturable keeps the historical drop.
+    const capturable =
+      mediaType === 'document' || mediaType === 'audio' || mediaType === 'video'
+    if (unaddressed && !capturable) return null
+
     // Must have text or media
     if (!text && !mediaUrl) return null
 
     // Strip the addressing prefix from the model-facing text.
     let cleanText = text
-    if (askCommand) {
+    if (askCommand && !askCommand.rejected) {
       cleanText = cleanText.slice(askCommand.length).trim() || '/ask'
     } else if (options.botUsername) {
       cleanText = cleanText.replace(new RegExp(`@${options.botUsername}\\b`, 'gi'), '').trim()
@@ -500,6 +523,7 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
       replyToMessageId: msg.reply_to_message ? String(msg.reply_to_message.message_id) : undefined,
       isGroupChat: isGroup,
       isMentioned: mentioned || repliedToBot || invokedByAsk,
+      ...(unaddressed ? { captureOnly: true as const } : {}),
       timestamp: msg.date * 1000,
       raw: msg,
     }
@@ -519,13 +543,88 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
     const group = mediaGroups.get(groupId)!
     group.timer = setTimeout(() => {
       mediaGroups.delete(groupId)
-      // Merge: use first message's text, collect all media
-      const first = group.messages[0]
-      const parsed = parseMessage(first)
-      if (parsed && options.onMessage) {
-        options.onMessage(parsed)
+      const messages = group.messages
+      const onMessage = options.onMessage
+      if (!onMessage) return
+
+      // Addressing can ride ANY member's caption, not just the first —
+      // Telegram attaches the caption to whichever item the user typed it
+      // under. Prefer an addressed member as the base so one captioned file
+      // isn't demoted to capture-only by its uncaptioned neighbours.
+      const parsed = messages
+        .map((m) => parseMessage(m))
+        .filter((p): p is IncomingMessage => p !== null)
+      const base = parsed.find((p) => !p.captureOnly) ?? parsed[0]
+      if (!base) return
+
+      // EVERY member contributes a file. This used to parse `messages[0]` and
+      // drop the rest, so an album of four documents delivered one and
+      // discarded three with nothing logged — `messages.length === 4` and
+      // `=== 1` were indistinguishable downstream. See
+      // docs/architecture/channels/adapter-pattern.md → "Albums".
+      const files = messages
+        .map((m) => fileFromMessage(m))
+        .filter((f): f is IncomingFile => f !== null)
+      if (files.length === 0) {
+        onMessage(base)
+        return
       }
+      onMessage({
+        ...base,
+        // The multi-file shape supersedes the single-media fields so no
+        // consumer can read one file and believe it has seen the album.
+        mediaUrl: undefined,
+        mediaType: undefined,
+        mediaMime: undefined,
+        mediaName: undefined,
+        mediaSizeBytes: undefined,
+        files,
+      })
     }, MEDIA_GROUP_TIMEOUT_MS)
+  }
+
+  /**
+   * One album member → one `IncomingFile`. Returns null for a member carrying
+   * no supported media. Voice notes are excluded by design: their transcript
+   * is authoritative and the raw audio is never attached (see
+   * docs/architecture/media/transcription.md).
+   */
+  function fileFromMessage(m: TelegramMessage): IncomingFile | null {
+    if (m.photo?.length) {
+      // Telegram re-encodes photos to JPEG and strips the original filename;
+      // the payload carries no mime, name, or size for them.
+      return {
+        url: m.photo[m.photo.length - 1].file_id,
+        mimeType: 'image/jpeg',
+        name: `photo_${m.message_id}.jpg`,
+      }
+    }
+    if (m.document) {
+      return {
+        url: m.document.file_id,
+        mimeType: m.document.mime_type ?? 'application/octet-stream',
+        name: m.document.file_name ?? `document_${m.message_id}`,
+        ...(m.document.file_size ? { sizeBytes: m.document.file_size } : {}),
+      }
+    }
+    if (m.video) {
+      return {
+        url: m.video.file_id,
+        mimeType: m.video.mime_type ?? 'video/mp4',
+        name: `video_${m.message_id}.mp4`,
+        ...(m.video.file_size ? { sizeBytes: m.video.file_size } : {}),
+      }
+    }
+    if (m.audio) {
+      const tagName = [m.audio.performer, m.audio.title].filter(Boolean).join(' - ')
+      return {
+        url: m.audio.file_id,
+        mimeType: m.audio.mime_type ?? 'audio/mpeg',
+        name: m.audio.file_name ?? (tagName.length > 0 ? tagName : `audio_${m.message_id}`),
+        ...(m.audio.file_size ? { sizeBytes: m.audio.file_size } : {}),
+      }
+    }
+    return null
   }
 
   // Buffer key: partition by chat AND topic so fragments posted in different

@@ -179,4 +179,78 @@ describe("[COMP:app-web/tasks-surface] task peek creation audit", () => {
     );
     expect(onClose).toHaveBeenCalledOnce();
   });
+
+  it("deletes without teaching anything when the reason is left blank", async () => {
+    // "" is the empty-but-confirmed answer (null is still cancel).
+    dialogs.promptDialog.mockResolvedValue("");
+    const onDelete = vi.fn().mockResolvedValue({ ok: true });
+    const onClose = vi.fn();
+    await act(async () => {
+      root!.render(
+        <I18nProvider locale="en" dict={en}>
+          <TaskRecordDetail
+            workspaceId="workspace-1"
+            row={row}
+            roster={[]}
+            projects={[]}
+            commitField={vi.fn().mockResolvedValue({ ok: true })}
+            onDelete={onDelete}
+            onClose={onClose}
+          />
+        </I18nProvider>,
+      );
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      container!
+        .querySelector<HTMLButtonElement>('[aria-label="Delete task"]')!
+        .click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(dialogs.promptDialog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        allowEmpty: true,
+        multiline: true,
+        emptyConfirmLabel: "Delete task",
+      }),
+    );
+    expect(onDelete).toHaveBeenCalledWith("");
+    expect(container!.textContent).not.toContain("Enter at least 3 characters.");
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("still rejects a too-short reason", async () => {
+    dialogs.promptDialog.mockResolvedValue("no");
+    const onDelete = vi.fn().mockResolvedValue({ ok: true });
+    await act(async () => {
+      root!.render(
+        <I18nProvider locale="en" dict={en}>
+          <TaskRecordDetail
+            workspaceId="workspace-1"
+            row={row}
+            roster={[]}
+            projects={[]}
+            commitField={vi.fn().mockResolvedValue({ ok: true })}
+            onDelete={onDelete}
+            onClose={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      container!
+        .querySelector<HTMLButtonElement>('[aria-label="Delete task"]')!
+        .click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(onDelete).not.toHaveBeenCalled();
+    expect(container!.textContent).toContain("Enter at least 3 characters.");
+  });
 });

@@ -1,10 +1,13 @@
 "use client";
 
 /**
- * On-brand single-line text prompt — `promptDialog({ ... })` returns a
+ * On-brand text prompt — `promptDialog({ ... })` returns a
  * `Promise<string | null>` (the entered value, or `null` if cancelled).
  * The themed sibling of `confirmDialog`: used for Rename and any other
- * "ask the user for one short string" flow.
+ * "ask the user for one short string" flow. `multiline` swaps the input
+ * for a textarea in a wider popup (sentence-length answers), and
+ * `allowEmpty` makes a blank field resolve `""` instead of cancelling, so
+ * a flow can offer "do it without the extra step" from the same dialog.
  *
  * **Never use `window.prompt`** in this app (root CLAUDE.md
  * anti-pattern) — it ignores the theme + i18n cookie and breaks the
@@ -28,6 +31,23 @@ export type PromptOptions = {
   placeholder?: string;
   confirmLabel?: string;
   cancelLabel?: string;
+  /**
+   * Multi-line answer: a textarea in a wider popup instead of a one-line
+   * input. Enter inserts a newline; Cmd/Ctrl+Enter submits. Use it when
+   * the answer is a sentence (a delete reason), not a name.
+   */
+  multiline?: boolean;
+  /**
+   * Treat an empty field as a real answer (resolves `""`) instead of a
+   * cancel. Only for flows where "no text" is a valid choice - Tasks
+   * delete uses it for "delete without teaching a rule".
+   */
+  allowEmpty?: boolean;
+  /**
+   * Confirm label shown while the field is empty, so the button states
+   * the *actual* consequence of pressing it. Needs `allowEmpty`.
+   */
+  emptyConfirmLabel?: string;
 };
 
 type Pending = PromptOptions & { resolve: (value: string | null) => void };
@@ -45,7 +65,9 @@ export function promptDialog(opts: PromptOptions): Promise<string | null> {
 export function PromptDialogProvider() {
   const [active, setActive] = React.useState<Pending | null>(null);
   const [value, setValue] = React.useState("");
-  const inputRef = React.useRef<HTMLInputElement | null>(null);
+  // One ref for whichever field renders (input or textarea) - base-ui's
+  // `initialFocus` only needs an HTMLElement.
+  const inputRef = React.useRef<HTMLElement | null>(null);
 
   const drain = React.useCallback(() => {
     setActive((current) => {
@@ -74,8 +96,14 @@ export function PromptDialogProvider() {
 
   function submit() {
     const trimmed = value.trim();
-    // Empty input is treated as a cancel — never rename to "".
-    resolveWith(trimmed ? trimmed : null);
+    if (trimmed) {
+      resolveWith(trimmed);
+      return;
+    }
+    // Empty input is treated as a cancel — never rename to "" — unless the
+    // caller opted in, in which case "" is the answer and null still means
+    // cancel.
+    resolveWith(active?.allowEmpty ? "" : null);
   }
 
   return (
@@ -95,7 +123,8 @@ export function PromptDialogProvider() {
         <Dialog.Popup
           initialFocus={inputRef}
           className={cn(
-            "fixed left-1/2 top-1/2 z-50 w-[calc(100%-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2",
+            "fixed left-1/2 top-1/2 z-50 w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2",
+            active?.multiline ? "max-w-lg" : "max-w-md",
             "rounded-2xl border border-border bg-background p-6 shadow-xl ring-1 ring-foreground/5",
             "transition-all duration-150",
             "data-[starting-style]:opacity-0 data-[starting-style]:scale-95",
@@ -117,20 +146,42 @@ export function PromptDialogProvider() {
               {active.description}
             </Dialog.Description>
           ) : null}
-          <input
-            ref={inputRef}
-            type="text"
-            value={value}
-            placeholder={active?.placeholder}
-            onChange={(e) => setValue(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                submit();
-              }
-            }}
-            className="mt-4 h-9 w-full rounded-md border border-border bg-background px-3 text-sm text-foreground outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40"
-          />
+          {active?.multiline ? (
+            <textarea
+              ref={(el) => {
+                inputRef.current = el;
+              }}
+              value={value}
+              placeholder={active?.placeholder}
+              rows={3}
+              onChange={(e) => setValue(e.target.value)}
+              onKeyDown={(e) => {
+                // Enter is a newline here; the modifier submits.
+                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                  e.preventDefault();
+                  submit();
+                }
+              }}
+              className="mt-4 min-h-[88px] w-full resize-y rounded-md border border-border bg-background px-3 py-2 text-sm leading-relaxed text-foreground outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40"
+            />
+          ) : (
+            <input
+              ref={(el) => {
+                inputRef.current = el;
+              }}
+              type="text"
+              value={value}
+              placeholder={active?.placeholder}
+              onChange={(e) => setValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  submit();
+                }
+              }}
+              className="mt-4 h-9 w-full rounded-md border border-border bg-background px-3 text-sm text-foreground outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40"
+            />
+          )}
           <div className="mt-6 flex justify-end gap-2">
             <Button
               variant="outline"
@@ -140,7 +191,12 @@ export function PromptDialogProvider() {
               {active?.cancelLabel ?? "Cancel"}
             </Button>
             <Button variant="default" size="sm" onClick={submit}>
-              {active?.confirmLabel ?? "Save"}
+              {/* While the field is empty the button must name what it will
+                  actually do (plain delete, not delete + rule). */}
+              {(value.trim()
+                ? active?.confirmLabel
+                : (active?.emptyConfirmLabel ?? active?.confirmLabel)) ??
+                "Save"}
             </Button>
           </div>
         </Dialog.Popup>

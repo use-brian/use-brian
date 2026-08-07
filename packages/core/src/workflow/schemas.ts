@@ -10,6 +10,8 @@
 
 import { z } from 'zod'
 import { WORKFLOW_STEP_TYPES } from './types.js'
+import type { WorkflowDefinition } from './types.js'
+import { findCycle, parallelRegionSteps } from './graph.js'
 import { ResearchDepthConfigSchema } from '../engine/research-depth.js'
 
 // ── Step ID and common shape ────────────────────────────────────────────
@@ -20,10 +22,23 @@ const stepIdSchema = z
   .max(64)
   .regex(/^[a-zA-Z][a-zA-Z0-9_-]*$/, 'Step IDs must start with a letter and contain only letters, digits, _ or -.')
 
+/**
+ * Maximum fan-out width of one step. Each parallel branch is typically a
+ * full assistant consult, so the width cap is a spend/concurrency guard,
+ * not a parser limit.
+ */
+export const MAX_FAN_OUT_WIDTH = 5
+
 const commonSchema = {
   id: stepIdSchema,
   description: z.string().max(280).optional(),
-  nextStepId: stepIdSchema.nullable().optional(),
+  // Scalar = sequential; ARRAY = parallel fan-out (every listed step starts
+  // when this one completes; a downstream step reachable from several live
+  // paths is the implicit join). Null = terminal.
+  nextStepId: z
+    .union([stepIdSchema, z.array(stepIdSchema).min(1).max(MAX_FAN_OUT_WIDTH)])
+    .nullable()
+    .optional(),
   storeOutputAs: z
     .string()
     .min(1)
@@ -334,10 +349,20 @@ const tolerantStepSchema = z.preprocess((v) => {
   return v
 }, WorkflowStepSchema)
 
+/**
+ * Builder-canvas node position (board-space pixels). Keys of
+ * `definition.layout` are step ids plus the reserved `__trigger` node.
+ * Presentation only — the executor never reads it.
+ */
+const nodePositionSchema = z
+  .object({ x: z.number().finite(), y: z.number().finite() })
+  .strict()
+
 export const WorkflowDefinitionSchema = z
   .object({
     startStepId: stepIdSchema,
     steps: z.array(tolerantStepSchema).min(1).max(50),
+    layout: z.record(nodePositionSchema).optional(),
   })
   .superRefine((def, ctx) => {
     // Step IDs must be unique.
@@ -362,24 +387,95 @@ export const WorkflowDefinitionSchema = z
       })
     }
 
-    // Every nextStepId reference (or branch if/else) must point to an existing
-    // step or be null. Catches authoring typos before runtime.
+    // Every nextStepId reference (or branch if/else, or fan-out array entry)
+    // must point to an existing step or be null. Catches authoring typos
+    // before runtime.
     const refs: Array<{ from: string; to: string | null | undefined; field: string }> = []
     for (const step of def.steps) {
       if (step.type === 'branch') {
         refs.push({ from: step.id, to: step.nextStepIdIfTrue, field: 'nextStepIdIfTrue' })
         refs.push({ from: step.id, to: step.nextStepIdIfFalse, field: 'nextStepIdIfFalse' })
+      } else if (Array.isArray(step.nextStepId)) {
+        // Fan-out: every entry must exist and entries must be distinct.
+        const dupes = step.nextStepId.filter((id, i) => step.nextStepId!.indexOf(id) !== i)
+        for (const dupe of new Set(dupes)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `step "${step.id}".nextStepId lists "${dupe}" more than once — fan-out targets must be distinct.`,
+            path: ['steps'],
+          })
+        }
+        for (const [k, to] of step.nextStepId.entries()) {
+          refs.push({ from: step.id, to, field: `nextStepId[${k}]` })
+        }
       } else if (step.nextStepId !== undefined) {
         refs.push({ from: step.id, to: step.nextStepId, field: 'nextStepId' })
       }
     }
+    let hasDanglingRef = false
     for (const ref of refs) {
       if (ref.to !== null && ref.to !== undefined && !seen.has(ref.to)) {
+        hasDanglingRef = true
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: `step "${ref.from}".${ref.field} references unknown step "${ref.to}"`,
           path: ['steps'],
         })
+      }
+    }
+
+    // The execution graph must be a DAG. Cycles never worked — the linear
+    // executor would loop a run forever (bounded only by consult budgets) —
+    // and the parallel scheduler's join rule ("run when no live path can
+    // still reach me") requires acyclicity to guarantee progress. Skipped
+    // when a reference dangles: the graph walk drops unknown edges, so its
+    // verdict would be about a different graph than the author wrote.
+    if (!hasDanglingRef) {
+      const cycle = findCycle(def as WorkflowDefinition)
+      if (cycle) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            `workflow steps form a cycle (${cycle.join(' → ')}). Runs execute each step at most once — ` +
+            `for iteration, use a recurring trigger with {{lastRun.*}} instead.`,
+          path: ['steps'],
+        })
+      }
+
+      // Pause-capable steps cannot sit inside a parallel region (reachable
+      // from one fan-out edge but not a sibling edge): a `wait` pauses the
+      // WHOLE run while the sibling path is still executing, which the
+      // single-cursor resume model cannot represent. The executor's
+      // pause-while-parallel guard is the authoritative runtime backstop
+      // (a branch can route around a static convergence).
+      if (!cycle) {
+        const unsafe = parallelRegionSteps(def as WorkflowDefinition)
+        for (const [i, step] of def.steps.entries()) {
+          if (step.type === 'wait' && unsafe.has(step.id)) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message:
+                `wait step "${step.id}" sits on a parallel branch that a sibling branch never rejoins — ` +
+                `a wait cannot pause the run while sibling steps are still executing. ` +
+                `Move it before the fan-out or after the join.`,
+              path: ['steps', i],
+            })
+          }
+        }
+      }
+    }
+
+    // Layout keys must reference real steps (or the reserved __trigger node)
+    // so a renamed/removed step cannot leave phantom coordinates behind.
+    if (def.layout) {
+      for (const key of Object.keys(def.layout)) {
+        if (key !== '__trigger' && !seen.has(key)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `layout references unknown step "${key}"`,
+            path: ['layout', key],
+          })
+        }
       }
     }
 

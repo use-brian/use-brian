@@ -281,7 +281,7 @@ describe('[COMP:api/slack-route] Slack webhook route', () => {
         name: 'Test',
         ownerUserId: 'u_owner',
         workspaceId: 'w_1',
-        slackModelAlias: 'gemini-flash',
+        defaultModelAlias: 'gemini-flash',
         systemPrompt: null,
         clearance: 'internal',
       } as never)
@@ -378,7 +378,7 @@ describe('[COMP:api/slack-route] Slack webhook route', () => {
         name: 'Test',
         ownerUserId: 'u_owner',
         workspaceId: 'w_1',
-        slackModelAlias: 'gemini-flash',
+        defaultModelAlias: 'gemini-flash',
         systemPrompt: null,
         clearance: 'internal',
       } as never)

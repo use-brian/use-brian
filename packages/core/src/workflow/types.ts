@@ -32,8 +32,14 @@ type WorkflowStepCommon = {
    * Override for sequential fall-through. `null` = terminal (run completes
    * after this step). Omit = use the next step in `definition.steps[]`.
    * Branch steps ignore this (their if/else pair wins).
+   *
+   * An ARRAY fans out: every listed step starts in parallel when this step
+   * completes. Downstream, a step that several in-flight paths can reach is
+   * the implicit join — it executes once, after every path that can still
+   * reach it has settled. See docs/architecture/features/workflow.md →
+   * "Parallel fan-out".
    */
-  nextStepId?: string | null
+  nextStepId?: string | string[] | null
   /**
    * If set, the step's output is stashed into `vars[storeOutputAs]` so
    * subsequent steps can reference it via `{{vars.X}}` interpolation or in
@@ -278,9 +284,22 @@ export const WORKFLOW_STEP_TYPES = [
   'send_page',
 ] as const satisfies ReadonlyArray<WorkflowStepType>
 
+/**
+ * Canvas position of one node on the builder board, in board-space pixels.
+ * Pure presentation state — the executor never reads it.
+ */
+export type WorkflowNodePosition = { x: number; y: number }
+
 export type WorkflowDefinition = {
   startStepId: string
   steps: WorkflowStep[]
+  /**
+   * Optional builder-canvas layout: node positions keyed by step id (plus
+   * the reserved `__trigger` key for the trigger node). Written by the
+   * drag-to-wire board; steps without an entry are auto-laid-out. Ignored
+   * by the executor and by `summarize()` — presentation only.
+   */
+  layout?: Record<string, WorkflowNodePosition>
 }
 
 // ── Event trigger ───────────────────────────────────────────────────────

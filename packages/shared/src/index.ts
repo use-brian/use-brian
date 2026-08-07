@@ -23,6 +23,8 @@ export * from './doc-theme/index.js'
 export * from './brand/index.js'
 export * from './ingest-append-contract.js'
 export * from './graph-communities.js'
+export * from './assistant-charter.js'
+export * from './assistant-profiles.js'
 
 /**
  * Sentinel assistant ID used for app-level (L1) tool policies.

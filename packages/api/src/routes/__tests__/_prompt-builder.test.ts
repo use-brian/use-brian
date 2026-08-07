@@ -55,6 +55,56 @@ describe('[COMP:prompt/builder] Layer 2 — assistant custom instructions', () =
   })
 })
 
+describe('[COMP:prompt/builder] Layer 2 — charter block (migration 418)', () => {
+  it('renders the # Charter block in slot 2, replacing the legacy block', () => {
+    const out = buildFullSystemPrompt({
+      ...baseArgs,
+      charter: {
+        mission: 'Own customer support for Acme',
+        audience: 'Acme customers',
+        success: 'Resolved in one reply',
+        instructions: 'Always reply starting with "GM"',
+      },
+    })
+
+    const layer1Idx = out.indexOf('LAYER1_BASE')
+    const charterIdx = out.indexOf('# Charter')
+    const memoryIdx = out.indexOf('## Memory Index')
+
+    expect(charterIdx).toBeGreaterThan(layer1Idx)
+    expect(memoryIdx).toBeGreaterThan(charterIdx)
+    expect(out.slice(layer1Idx + 'LAYER1_BASE'.length, charterIdx)).toBe('\n\n')
+    expect(out).toContain('## Mission\nOwn customer support for Acme')
+    expect(out).toContain('## Audience\nAcme customers')
+    expect(out).toContain('## What good looks like\nResolved in one reply')
+    expect(out).toContain('## Instructions\nAlways reply starting with "GM"')
+    expect(out).not.toContain('# Assistant instructions')
+  })
+
+  it('a charter with content wins over the legacy assistantInstructions param', () => {
+    const out = buildFullSystemPrompt({
+      ...baseArgs,
+      charter: { instructions: 'CHARTER_BODY' },
+      assistantInstructions: 'LEGACY_BODY',
+    })
+    expect(out).toContain('# Charter\n## Instructions\nCHARTER_BODY')
+    expect(out).not.toContain('LEGACY_BODY')
+  })
+
+  it('an empty charter falls back to the legacy block, and both empty skips Layer 2', () => {
+    const fallback = buildFullSystemPrompt({
+      ...baseArgs,
+      charter: {},
+      assistantInstructions: 'LEGACY_BODY',
+    })
+    expect(fallback).toContain('# Assistant instructions\nLEGACY_BODY')
+
+    const neither = buildFullSystemPrompt({ ...baseArgs, charter: {}, assistantInstructions: null })
+    expect(neither).not.toContain('# Charter')
+    expect(neither).not.toContain('# Assistant instructions')
+  })
+})
+
 describe('[COMP:prompt/builder] Provenance-preserving block order', () => {
   it('places stable instructions before the private runtime suffix', () => {
     const out = buildFullSystemPrompt({

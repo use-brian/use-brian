@@ -37,6 +37,14 @@
     "./home-apps": {
       "types": "./dist/home-apps.d.ts",
       "default": "./dist/home-apps.js"
+    },
+    "./assistant-charter": {
+      "types": "./dist/assistant-charter.d.ts",
+      "default": "./dist/assistant-charter.js"
+    },
+    "./assistant-profiles": {
+      "types": "./dist/assistant-profiles.d.ts",
+      "default": "./dist/assistant-profiles.js"
     }
   },
   "scripts": {

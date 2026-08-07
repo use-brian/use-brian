@@ -39,11 +39,17 @@ export type ResearchBudget = {
 /**
  * Absolute ceilings — every resolved field is clamped here so a misconfigured
  * job or workflow step can never run unbounded (cost / runaway protection).
+ *
+ * Wall-clock ceiling raised 300s → 900s (2026-08-07, the builder's per-step
+ * timeout field): a heavy research/authoring step may legitimately need more
+ * than 5 minutes, and the value is only ever reached by an EXPLICIT
+ * `depth.timeoutMs` — every default and tier preset stays ≤ 300s, so nothing
+ * gets slower or costlier without an author asking for it.
  */
 export const RESEARCH_BUDGET_CEILING: ResearchBudget = {
   maxTurns: 60,
   maxToolCalls: 50,
-  timeoutMs: 300_000,
+  timeoutMs: 900_000,
 }
 
 /** Lower bounds — a depth of zero would make a step a no-op. */

@@ -94,13 +94,15 @@ function normalizeAssistant(
 export async function createAssistant(
   workspaceId: string,
   name: string,
+  charter?: { mission?: string; audience?: string; success?: string; instructions?: string },
 ): Promise<StudioAssistantSummary> {
+  const hasCharter = charter && Object.values(charter).some((v) => v && v.trim());
   const res = await authFetch(
     `${API_URL}/api/workspaces/${workspaceId}/assistants`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name }),
+      body: JSON.stringify(hasCharter ? { name, charter } : { name }),
     },
   );
   if (!res.ok) {

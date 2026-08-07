@@ -464,6 +464,132 @@ describe('[COMP:workflow/schemas] WorkflowDefinitionSchema', () => {
   })
 })
 
+describe('[COMP:workflow/schemas] Parallel fan-out + layout', () => {
+  const callStep = (id: string, nextStepId?: string | string[] | null) => ({
+    id,
+    type: 'assistant_call',
+    target: { assistantId: 'primary' },
+    prompt: `do ${id}`,
+    ...(nextStepId !== undefined ? { nextStepId } : {}),
+  })
+
+  it('accepts a fan-out array with an implicit join', () => {
+    const def = {
+      startStepId: 'a',
+      steps: [
+        callStep('a', ['b', 'c']),
+        callStep('b', 'j'),
+        callStep('c', 'j'),
+        callStep('j', null),
+      ],
+    }
+    expect(WorkflowDefinitionSchema.safeParse(def).success).toBe(true)
+  })
+
+  it('rejects a fan-out entry referencing an unknown step', () => {
+    const def = {
+      startStepId: 'a',
+      steps: [callStep('a', ['b', 'ghost']), callStep('b', null)],
+    }
+    const r = WorkflowDefinitionSchema.safeParse(def)
+    expect(r.success).toBe(false)
+    if (!r.success) {
+      expect(r.error.issues.some((i) => i.message.includes('unknown step "ghost"'))).toBe(true)
+    }
+  })
+
+  it('rejects duplicate fan-out targets', () => {
+    const def = {
+      startStepId: 'a',
+      steps: [callStep('a', ['b', 'b']), callStep('b', null)],
+    }
+    const r = WorkflowDefinitionSchema.safeParse(def)
+    expect(r.success).toBe(false)
+    if (!r.success) {
+      expect(r.error.issues.some((i) => i.message.includes('more than once'))).toBe(true)
+    }
+  })
+
+  it('rejects a fan-out wider than the width cap', () => {
+    const targets = ['b1', 'b2', 'b3', 'b4', 'b5', 'b6']
+    const def = {
+      startStepId: 'a',
+      steps: [callStep('a', targets), ...targets.map((t) => callStep(t, null))],
+    }
+    expect(WorkflowDefinitionSchema.safeParse(def).success).toBe(false)
+  })
+
+  it('rejects a cycle (explicit back-edge)', () => {
+    const def = {
+      startStepId: 'a',
+      steps: [callStep('a', 'b'), callStep('b', 'a')],
+    }
+    const r = WorkflowDefinitionSchema.safeParse(def)
+    expect(r.success).toBe(false)
+    if (!r.success) {
+      expect(r.error.issues.some((i) => i.message.includes('cycle'))).toBe(true)
+    }
+  })
+
+  it('rejects a wait step on a parallel branch a sibling never rejoins', () => {
+    const def = {
+      startStepId: 'a',
+      steps: [
+        callStep('a', ['w', 'c']),
+        { id: 'w', type: 'wait', until: { duration: { minutes: 5 } }, nextStepId: null },
+        callStep('c', null),
+      ],
+    }
+    const r = WorkflowDefinitionSchema.safeParse(def)
+    expect(r.success).toBe(false)
+    if (!r.success) {
+      expect(r.error.issues.some((i) => i.message.includes('parallel branch'))).toBe(true)
+    }
+  })
+
+  it('accepts a wait step after the join', () => {
+    const def = {
+      startStepId: 'a',
+      steps: [
+        callStep('a', ['b', 'c']),
+        callStep('b', 'w'),
+        callStep('c', 'w'),
+        { id: 'w', type: 'wait', until: { duration: { minutes: 5 } }, nextStepId: null },
+      ],
+    }
+    expect(WorkflowDefinitionSchema.safeParse(def).success).toBe(true)
+  })
+
+  it('accepts layout positions keyed by step id + __trigger', () => {
+    const def = {
+      startStepId: 'a',
+      steps: [callStep('a', null)],
+      layout: { a: { x: 120, y: 40 }, __trigger: { x: 0, y: 40 } },
+    }
+    const r = WorkflowDefinitionSchema.safeParse(def)
+    expect(r.success).toBe(true)
+    if (r.success) {
+      expect(r.data.layout).toEqual({ a: { x: 120, y: 40 }, __trigger: { x: 0, y: 40 } })
+    }
+  })
+
+  it('rejects layout entries for unknown steps and non-finite coordinates', () => {
+    const unknownKey = {
+      startStepId: 'a',
+      steps: [callStep('a', null)],
+      layout: { ghost: { x: 0, y: 0 } },
+    }
+    expect(WorkflowDefinitionSchema.safeParse(unknownKey).success).toBe(false)
+
+    const badCoord = {
+      startStepId: 'a',
+      steps: [callStep('a', null)],
+      layout: { a: { x: Number.NaN, y: 0 } },
+    }
+    expect(WorkflowDefinitionSchema.safeParse(badCoord).success).toBe(false)
+  })
+})
+
 describe('[COMP:workflow/schemas] WorkflowTriggerSchema', () => {
   it('accepts a manual trigger', () => {
     expect(WorkflowTriggerSchema.safeParse({ kind: 'manual' }).success).toBe(true)

@@ -155,7 +155,7 @@ vi.mock('../../db/users.js', () => ({
     name: 'Test Assistant',
     ownerUserId: 'owner_1',
     workspaceId: null,
-    telegramModelAlias: 'gemini-flash',
+    defaultModelAlias: 'gemini-flash',
     systemPrompt: null,
   })),
   findUserById: vi.fn(async () => ({
@@ -728,7 +728,7 @@ describe('[COMP:api/telegram-byo-route] media-group buffering', () => {
       name: 'Test Assistant',
       ownerUserId: 'owner_1',
       workspaceId: 'ws_1', // the cache gate requires a workspace
-      telegramModelAlias: 'gemini-flash',
+      defaultModelAlias: 'gemini-flash',
       systemPrompt: null,
     } as never)
     let cacheN = 0
@@ -983,7 +983,7 @@ describe('[COMP:api/telegram-byo-route] cross-assistant identity bleed', () => {
       name: 'Test Assistant',
       ownerUserId: 'owner_1',
       workspaceId: 'ws_1',
-      telegramModelAlias: 'gemini-flash',
+      defaultModelAlias: 'gemini-flash',
       systemPrompt: null,
     } as never)
     vi.mocked(users.findUserById).mockResolvedValueOnce({
@@ -1208,7 +1208,7 @@ describe('[COMP:api/telegram-byo-route] group add-protection', () => {
       name: 'Team Bot',
       ownerUserId: 'owner_1',
       workspaceId: 'team_1',
-      telegramModelAlias: 'gemini-flash',
+      defaultModelAlias: 'gemini-flash',
       systemPrompt: null,
     } as never)
 
@@ -1248,7 +1248,7 @@ describe('[COMP:api/telegram-byo-route] group add-protection', () => {
       name: 'Team Bot',
       ownerUserId: 'owner_1',
       workspaceId: 'team_1',
-      telegramModelAlias: 'gemini-flash',
+      defaultModelAlias: 'gemini-flash',
       systemPrompt: null,
     } as never)
 

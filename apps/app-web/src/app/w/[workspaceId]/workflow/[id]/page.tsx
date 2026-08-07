@@ -60,6 +60,7 @@ import {
 import type { CustomPageTemplateSummary } from "@use-brian/doc-model";
 import { listWorkspaceSkills, type WorkspaceSkillSummary } from "@/lib/api/skills";
 import { WorkflowBoard } from "@/components/workflow/workflow-board";
+import { pruneLayout } from "@/lib/workflow-canvas";
 import { StepEditor } from "@/components/workflow/step-editor";
 import { TriggerEditor } from "@/components/workflow/trigger-editor";
 import { ButtonBindingsList, TriggerJobsList } from "@/components/workflow/trigger-jobs-list";
@@ -292,6 +293,11 @@ export default function WorkflowDetailPage({
     });
   };
 
+  // Canvas edits (node drop, wire connect, edge removal) hand back a whole
+  // rewired definition — same draft, same dirty check, same Save path.
+  const updateDefinition = (definition: WorkflowFull["definition"]) =>
+    setDraft((d) => (d ? { ...d, definition } : d));
+
   const moveStep = (idx: number, dir: -1 | 1) => {
     setDraft((d) => {
       if (!d) return d;
@@ -311,7 +317,16 @@ export default function WorkflowDetailPage({
     const startStepId = newSteps.some((s) => s.id === draft.definition.startStepId)
       ? draft.definition.startStepId
       : newSteps[0].id;
-    setDraft({ ...draft, definition: { startStepId, steps: newSteps } });
+    // Keep canvas positions for surviving nodes; the schema rejects layout
+    // entries for steps that no longer exist.
+    setDraft({
+      ...draft,
+      definition: pruneLayout({
+        ...draft.definition,
+        startStepId,
+        steps: newSteps,
+      }),
+    });
     // Keep a surviving step focused so the editor panel doesn't go blank.
     setSelectedKey(newSteps[Math.min(idx, newSteps.length - 1)].id);
   };
@@ -740,6 +755,8 @@ export default function WorkflowDetailPage({
         live={liveView}
         onSelectStep={selectStep}
         onSelectTrigger={selectTrigger}
+        onDefinitionChange={updateDefinition}
+        editable={!draft.managedBy}
       />
 
       {/* Reality check — the ACTUAL scheduled-trigger rows firing this

@@ -423,6 +423,14 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
   // comment rail can dock beside it (Notion-style). See comment-rail.tsx.
   const [pageHasComments, setPageHasComments] = useState(false);
 
+  // Whether the "Link a recording" picker is showing for the CURRENT page.
+  // The entry point is the page ⋯ menu (page-header.tsx) — most pages never
+  // link a recording, so the picker mounts in the chrome slot on demand
+  // instead of an always-visible empty-state button under every title.
+  // Reset on navigation: the ask was for THAT page.
+  const [recordingLinkOpen, setRecordingLinkOpen] = useState(false);
+  useEffect(() => setRecordingLinkOpen(false), [urlViewId]);
+
   // ── Custom page templates (migration 281) ────────────────────────────
   // The save-as-template dialog target (page id + prefill), the landing
   // "Start from a template" gallery, its loaded custom rows, and the id of a
@@ -1284,6 +1292,12 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
                 onRenameValue={handleRenameValue}
                 onDuplicate={handleDuplicate}
                 onSaveAsTemplate={(id) => void handleSaveAsTemplate(id)}
+                // "Link a recording" lives in the ⋯ menu, only for a page
+                // with NO recording (anchor-derived or manual) to fall back to.
+                {...(!recordingIdFromAnchorKey(pageView.anchorKey) &&
+                !pageView.linkedRecordingId
+                  ? { onLinkRecording: () => setRecordingLinkOpen(true) }
+                  : {})}
                 fullWidth={pageView.fullWidth}
                 onToggleFullWidth={(next) =>
                   handleToggleFullWidth(pageView.id, next)
@@ -1407,17 +1421,23 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
                       as CHROME above the doc (never blocks — a block is content
                       the user can delete, orphaning the page's citations). See
                       recordings.md → "The brief page IS the recording surface".
-                      When the page has NO recording, offer to link one. */}
+                      When the page has NO recording, the ⋯ menu offers to link
+                      one; the picker mounts here only after that ask. */}
                   {workspaceId && pageView
                     ? (() => {
                         const anchorRec = recordingIdFromAnchorKey(pageView.anchorKey);
                         const recId = anchorRec ?? pageView.linkedRecordingId;
                         if (!recId) {
+                          if (!recordingLinkOpen) return null;
                           return (
                             <RecordingLinkControl
                               viewId={pageView.id}
                               workspaceId={workspaceId}
-                              onLinked={(meta) => setActiveView(meta)}
+                              onLinked={(meta) => {
+                                setRecordingLinkOpen(false);
+                                setActiveView(meta);
+                              }}
+                              onDismiss={() => setRecordingLinkOpen(false)}
                             />
                           );
                         }

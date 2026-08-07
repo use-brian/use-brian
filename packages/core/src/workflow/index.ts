@@ -11,6 +11,7 @@ export {
   type WorkflowStep,
   type WorkflowStepType,
   type WorkflowDefinition,
+  type WorkflowNodePosition,
   type WorkflowTrigger,
   type WorkflowTriggerKind,
   type EventSourceRef,
@@ -39,7 +40,16 @@ export {
   WorkflowTriggerSchema,
   EventSubscriptionSchema,
   STEP_TYPE_VALUES,
+  MAX_FAN_OUT_WIDTH,
 } from './schemas.js'
+
+export {
+  stepSuccessors,
+  buildSuccessorMap,
+  buildReachability,
+  findCycle,
+  parallelRegionSteps,
+} from './graph.js'
 
 export {
   evaluate as evaluateCondition,
@@ -56,6 +66,8 @@ export {
 
 export {
   advanceWorkflowRun,
+  runtimeSuccessors,
+  type AdvanceOptions,
   type RunOutcome,
   type ExecutorError,
   type ExecutorDeps,

@@ -34,6 +34,7 @@ import {
 } from './schemas.js'
 import { TASK_LIFECYCLE_ACTIONS } from './task-event-trigger.js'
 import { KNOWLEDGE_LIFECYCLE_ACTIONS } from './knowledge-event-trigger.js'
+import { parallelRegionSteps } from './graph.js'
 import { stepAdvisories } from './advisories.js'
 import { RESERVED_OUTCOME_VAR_NAMES } from './types.js'
 import type {
@@ -362,6 +363,11 @@ function summarize(def: WorkflowDefinition): string {
       case 'branch':
         detail = `branch (true → ${step.nextStepIdIfTrue ?? '∅'}, false → ${step.nextStepIdIfFalse ?? '∅'})`
         break
+    }
+    // A fan-out step's parallelism is the summary's most important fact —
+    // the user must see that these branches run at the same time.
+    if (step.type !== 'branch' && Array.isArray(step.nextStepId) && step.nextStepId.length > 1) {
+      detail += ` (then IN PARALLEL: ${step.nextStepId.join(', ')})`
     }
     lines.push(`  • ${step.id}: ${detail}`)
   }
@@ -751,6 +757,10 @@ async function dependencyIssues(
 
   // ── B. Connector preflight ───────────────────────────────────────────────
   if (deps.preflightConnectorTool) {
+    // Steps in a parallel region (reachable from one fan-out edge but not a
+    // sibling edge) can never pause the run — an ask-policy tool_call there
+    // is upgraded from warning to hard error below.
+    const parallelUnsafe = parallelRegionSteps(def)
     const refs: Array<{
       stepId: string
       toolName: string
@@ -813,9 +823,18 @@ async function dependencyIssues(
             } — every run would fail here. Unblock it in connector settings or drop the step.`,
           )
         } else if (ref.stepType === 'tool_call' && res.policy === 'ask') {
-          warnings.push(
-            `Step "${ref.stepId}" invokes the ask-policy tool "${ref.toolName}": each run will pause in the Approvals queue until the user approves that call. That is the designed contract for approval-gated actions — just make sure the user knows runs are not fully hands-free.`,
-          )
+          // Inside a parallel region the pause can never be honoured — the
+          // executor fails it typed `pause_in_parallel` (a pause must hold
+          // the only live cursor). Outside one it is the designed contract.
+          if (parallelUnsafe.has(ref.stepId)) {
+            errors.push(
+              `Step "${ref.stepId}" invokes the ask-policy tool "${ref.toolName}" on a parallel branch that a sibling branch never rejoins. An approval pauses the WHOLE run, which is impossible while sibling steps are still executing — every run would fail here (\`pause_in_parallel\`). Move this step before the fan-out or after the join, or set the tool's policy to allow.`,
+            )
+          } else {
+            warnings.push(
+              `Step "${ref.stepId}" invokes the ask-policy tool "${ref.toolName}": each run will pause in the Approvals queue until the user approves that call. That is the designed contract for approval-gated actions — just make sure the user knows runs are not fully hands-free.`,
+            )
+          }
         }
       } catch (err) {
         console.warn('[workflow/dependencyIssues] connector preflight threw:', err)
@@ -1248,6 +1267,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       `No database writes. After this returns, present the proposal to the user verbatim and ask for explicit confirmation ("yes / create it / go ahead") before calling \`createWorkflow\`. ` +
       `Step types (V1): assistant_call (free-mode A2A), tool_call (first-party + MCP allow-policy), wait (not yet available), branch (JSONLogic condition). ` +
       `There is no loop / for-each step: to process each item in a list, propose a recurring schedule trigger that handles one batch per run and carries a cursor across runs via storeOutputAs + {{lastRun.<var>}}, or a research fan-out step for a read-only gather; name these routes when you decline a loop request. ` +
+      `Parallel fan-out: set a step's nextStepId to an ARRAY of step ids (max 5, distinct) to start those steps IN PARALLEL when it completes. A downstream step that several branches point at is the implicit JOIN — it runs once, after every branch that can still reach it settles, and can read every branch's {{vars.<name>}}. The graph must stay acyclic, and a wait step may not sit on a parallel branch that some sibling branch never rejoins (pausing needs the only live cursor — put waits before the fan-out or after the join). ` +
       `Use \`storeOutputAs\` on a step to make its output available as \`{{vars.<name>}}\` in later steps. Use \`{{input.<name>}}\` to reference the trigger payload. ` +
       `A later step's prompt must NEVER assert what an earlier step supposedly did (e.g. "...which was emailed to the reviewer") — the earlier step may have failed or refused, and the assertion would be recorded as fact. Thread the earlier step's REAL output via storeOutputAs + {{vars.<name>}} and phrase the prompt conditionally on it. ` +
       `\n\nPage editing: when a step should edit or produce a doc page, set the step's \`page\` field — NEVER just mention a page id in the prompt (the callee gets no page tools that way and the step fails on every run). ` +

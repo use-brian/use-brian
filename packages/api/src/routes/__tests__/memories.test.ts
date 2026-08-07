@@ -97,7 +97,7 @@ const mockNotifyBrainInboxChange = vi.mocked(notifyBrainInboxChange)
 /** Grant access for the next gate call — one `resolveAssistantAccess` hit. */
 function setupAuth(workspaceId: string | null = 'w_1', role: 'owner' | 'admin' | 'member' = 'owner') {
   mockResolveAssistantAccess.mockResolvedValueOnce({
-    assistant: { id: 'a_1', name: 'A', workspaceId, telegramModelAlias: 'pro' },
+    assistant: { id: 'a_1', name: 'A', workspaceId },
     role,
   } as never)
 }

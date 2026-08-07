@@ -28,9 +28,13 @@ import { seedBuiltinPrimitiveCapabilities } from '../db/capability-seed.js'
 import { z } from 'zod'
 import {
   APP_TYPE_IDS,
+  CHARTER_FIELDS,
+  CHARTER_FIELD_LIMITS,
   defaultClearanceForAppType,
   isAppType,
+  parseCharter,
   type AppType,
+  type AssistantCharter,
 } from '@use-brian/shared'
 import { query, queryWithRLS } from '../db/client.js'
 import { findUserById } from '../db/users.js'
@@ -1096,13 +1100,34 @@ export function workspaceRoutes({
     const role = await requireWorkspaceRole(req as any, res, 'admin')
     if (!role) return
 
-    const { name, kind, appType, clearance } = req.body as {
+    const { name, kind, appType, clearance, charter } = req.body as {
       name?: string
       kind?: 'standard' | 'app' | 'primary'
       appType?: AppType | null
       clearance?: 'public' | 'internal' | 'confidential'
+      /** Optional charter at birth (docs/plans/assistant-growth-loop.md §2).
+       *  The creator is the owner, so no per-field gate applies here. */
+      charter?: Record<string, unknown> | null
     }
     const assistantName = (name && typeof name === 'string' && name.trim()) || 'Team Assistant'
+
+    let initialCharter: AssistantCharter | null = null
+    if (charter !== undefined && charter !== null) {
+      if (typeof charter !== 'object' || Array.isArray(charter)) {
+        res.status(400).json({ error: 'charter must be an object' })
+        return
+      }
+      initialCharter = parseCharter(charter)
+      for (const field of CHARTER_FIELDS) {
+        const value = initialCharter[field]
+        if (value && value.length > CHARTER_FIELD_LIMITS[field]) {
+          res.status(400).json({
+            error: `charter.${field} must be ${CHARTER_FIELD_LIMITS[field].toLocaleString('en-US')} characters or less`,
+          })
+          return
+        }
+      }
+    }
 
     if (kind !== undefined && kind !== 'standard' && kind !== 'app') {
       res.status(400).json({ error: "kind must be 'standard' or 'app'" })
@@ -1175,9 +1200,12 @@ export function workspaceRoutes({
       // docs/architecture/feed/assistant-kind-app.md.
       const iconSeed = Math.floor(Math.random() * 1000000)
       const result = await query<{ id: string }>(
-        `INSERT INTO assistants (name, owner_user_id, workspace_id, icon_seed, clearance, kind, app_type)
-         VALUES ($1, NULL, $2, $3, $4, $5, $6) RETURNING id`,
-        [assistantName, workspaceId, iconSeed, finalClearance, finalKind, finalAppType],
+        `INSERT INTO assistants (name, owner_user_id, workspace_id, icon_seed, clearance, kind, app_type, charter)
+         VALUES ($1, NULL, $2, $3, $4, $5, $6, $7::jsonb) RETURNING id`,
+        [
+          assistantName, workspaceId, iconSeed, finalClearance, finalKind, finalAppType,
+          initialCharter ? JSON.stringify(initialCharter) : null,
+        ],
       )
       const assistantId = result.rows[0].id
 

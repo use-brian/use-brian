@@ -157,7 +157,8 @@ export type AssistantCallStep = {
   id: string;
   type: "assistant_call";
   description?: string;
-  nextStepId?: string | null;
+  /** Scalar = sequential; ARRAY = parallel fan-out (implicit join downstream). */
+  nextStepId?: string | string[] | null;
   storeOutputAs?: string;
   target: { assistantId: string; capabilityId?: string };
   prompt: string;
@@ -197,13 +198,25 @@ export type AssistantCallStep = {
   researchMode?: boolean;
   /** Per-step hard turn cap (1..60). Null/undefined = executor default. */
   maxTurns?: number | null;
+  /**
+   * Research-depth override (mirrors core `ResearchDepthConfigSchema`).
+   * The builder writes only `timeoutMs` (the Execution card's Timeout
+   * field, 1s..900s); tier / numeric caps stay chat-authorable.
+   */
+  depth?: {
+    tier?: "standard" | "deep";
+    maxTurns?: number;
+    maxToolCalls?: number;
+    timeoutMs?: number;
+  };
 };
 
 export type ToolCallStep = {
   id: string;
   type: "tool_call";
   description?: string;
-  nextStepId?: string | null;
+  /** Scalar = sequential; ARRAY = parallel fan-out (implicit join downstream). */
+  nextStepId?: string | string[] | null;
   storeOutputAs?: string;
   toolName: string;
   arguments: Record<string, unknown>;
@@ -217,7 +230,8 @@ export type WaitStep = {
   id: string;
   type: "wait";
   description?: string;
-  nextStepId?: string | null;
+  /** Scalar = sequential; ARRAY = parallel fan-out (implicit join downstream). */
+  nextStepId?: string | string[] | null;
   storeOutputAs?: string;
   until?: { duration: { minutes?: number; hours?: number; days?: number } };
   at?: { datetime: string; timezone?: string };
@@ -235,9 +249,18 @@ export type BranchStep = {
 
 export type WorkflowStep = AssistantCallStep | ToolCallStep | WaitStep | BranchStep;
 
+/** Canvas position of one node on the builder board (board-space px). */
+export type WorkflowNodePosition = { x: number; y: number };
+
 export type WorkflowDefinition = {
   startStepId: string;
   steps: WorkflowStep[];
+  /**
+   * Builder-canvas layout: node positions keyed by step id plus the reserved
+   * `__trigger` key. Written by the drag-to-wire board; steps without an
+   * entry are auto-laid-out. Presentation only — the executor ignores it.
+   */
+  layout?: Record<string, WorkflowNodePosition>;
 };
 
 // ── Records ───────────────────────────────────────────────────────────────
@@ -311,6 +334,9 @@ export type WorkflowFull = {
   lifecycleReason?: string | null;
   /** Mig 308 — the lifecycle-sweep veto flag. */
   pinned?: boolean;
+  /** Mig 411 — non-null = owned by a product feature; definition/trigger
+   *  edits are rejected by the PATCH route, so the canvas goes read-only. */
+  managedBy?: string | null;
   /** Present on GET detail. The real firing rows; see WorkflowTriggerJob. */
   triggerJobs?: WorkflowTriggerJob[];
   /**

@@ -12,6 +12,13 @@ export type IncomingFile = {
   url: string
   mimeType: string
   name: string
+  /**
+   * File size in bytes when the webhook payload carries it. Album members
+   * carry their own size because the merged message clears the single-media
+   * `mediaSizeBytes` — without this, a route's over-limit guard cannot see an
+   * oversized file inside an album and would attempt a doomed download.
+   */
+  sizeBytes?: number
 }
 
 export type IncomingMessage = {
@@ -48,6 +55,21 @@ export type IncomingMessage = {
   isEdit?: boolean
   isGroupChat: boolean
   isMentioned?: boolean
+  /**
+   * The bot was NOT addressed in this group message, but the message carried
+   * media the brain can file (document / audio / video — photos are outside
+   * the intake's scope and keep the historical drop). Routes must capture that
+   * media and must NOT run a query-loop turn or answer conversationally.
+   *
+   * Why this exists: the group mention gate used to `return null` here, which
+   * made "someone else's chit-chat, ignore" and "a user handed me four files
+   * with no caption" the same outcome — a silent drop with no log, no counter,
+   * and no way for the user to tell a lost file from one never sent. Media
+   * presence is now resolved BEFORE the gate so the two cases can take
+   * different exits. See docs/architecture/channels/adapter-pattern.md →
+   * "Unaddressed group media".
+   */
+  captureOnly?: boolean
   timestamp: number
   raw: unknown
 }

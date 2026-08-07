@@ -29,7 +29,8 @@ import {
 import type { FilesApi, OutboundAttachment } from '@use-brian/core'
 import { resolveBrandContext } from '../brand/prompt-context.js'
 import type { IncomingMessage, OutgoingDocument } from '@use-brian/channels'
-import { parseFollowUps } from '@use-brian/shared'
+import { parseFollowUps, resolveCharter } from '@use-brian/shared'
+import { listActivePlaybookRules } from '../db/playbook-store.js'
 import { runProactiveCompaction } from './proactive-compaction.js'
 import { notifyBrainWriteIfMatch } from '../brain-stream/notify.js'
 import { recordOverheadUsage } from './_overhead-usage.js'
@@ -1048,6 +1049,15 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     }
   }
 
+  // Owner-admitted playbook rules → `## Playbook` in the charter block
+  // (growth loop Phase 3). A fetch error omits the section, never blocks.
+  let playbookRules: string[] = []
+  try {
+    playbookRules = await listActivePlaybookRules(assistant.id)
+  } catch (err) {
+    console.error(`[${channelType}] playbook rules fetch failed:`, err)
+  }
+
   // Provenance split: hidden application metadata remains in the trusted
   // system channel. Only the replied-to quote — content the user can see in
   // the messaging client — may prefix the newest user turn. This deliberately
@@ -1055,7 +1065,8 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // it into a user-role envelope caused the 2026-08-01 referent leak.
   const splitPrompt = buildSplitSystemPrompt({
     basePrompt: systemPrompt,
-    assistantInstructions: assistant.systemPrompt,
+    charter: resolveCharter(assistant),
+    playbookRules,
     workspaceEvolutionSnippet,
     currentDateTime,
     timezone: userTimezone,
