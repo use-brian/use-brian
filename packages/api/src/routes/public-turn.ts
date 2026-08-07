@@ -62,7 +62,12 @@ import {
   formatUserVisibleContext,
 } from './_prompt-builder.js'
 import { resolveBrandContext } from '../brand/prompt-context.js'
-import { getConnectorUserId, getWorkspacePlan, resolveReadCeilingsSystem } from '../db/workspace-store.js'
+import {
+  getConnectorUserId,
+  getWorkspaceMembershipSystem,
+  getWorkspacePlan,
+  resolveReadCeilingsSystem,
+} from '../db/workspace-store.js'
 import { isExternalPrincipal } from '../db/external-principal.js'
 import { accrueClientPrincipal } from './client-accrual.js'
 import type { ConnectorStore } from '../db/connector-store.js'
@@ -142,11 +147,20 @@ export type PublicTurnDeps = {
  * would have in web chat — memory, brand, files, skills, wall-clock time — and
  * reads follow the assistant's own clearance instead of flooring to `public`.
  *
- * The two must not be collapsed. Giving the keyed API full scope would reopen
- * the cross-client read the 2026-08-07 client-principal work closed; keeping
- * the chat link thin is what made it a persona with an empty brain.
+ * `'internal-member'` is the internal-audience key (docs/plans/api-chat-modes.md
+ * §3 D4): the turn runs as a real, attributed workspace member - no shadow
+ * user, no `client:*` stamp, no client accrual - with member-grade reads
+ * (min of member and assistant ceilings) and the member's own memory.
+ * Web chat over an API key.
+ *
+ * The scopes must not be collapsed, and the keyed default stays
+ * `'external-client'`: full scope is reachable only by a declared key mode
+ * (`api_keys.anonymous_context='full'`, an owner opt-in at creation with the
+ * chat-link trust posture). Handing it out by default would reopen the
+ * cross-client read the 2026-08-07 client-principal work closed; keeping the
+ * chat link thin is what made it a persona with an empty brain.
  */
-export type PublicTurnContextScope = 'external-client' | 'assistant-full'
+export type PublicTurnContextScope = 'external-client' | 'assistant-full' | 'internal-member'
 
 /**
  * Turn-scoped identity attested by the consumer's backend. Never persisted
@@ -190,6 +204,15 @@ export type PublicTurnInput = {
    * without naming the field. See `PublicTurnContextScope`.
    */
   contextScope?: PublicTurnContextScope
+  /**
+   * Internal-lane actor resolution. Set only by the keyed route for
+   * `audience='internal'` keys (docs/plans/api-chat-modes.md §3 D4):
+   * `email` is the per-request attribution; when null the turn runs as
+   * `defaultUserId` - the key's creator. Either way the resolved user
+   * must be a member of the assistant's workspace or the turn fails
+   * with 403 `actor_not_member`.
+   */
+  internalActor?: { email: string | null; defaultUserId: string | null }
   /** Extra analytics metadata (api_key_id / chat_link_id …). */
   analyticsMeta?: Record<string, unknown>
 }
@@ -201,6 +224,7 @@ export type PublicApiError =
   | 'link_not_found'
   | 'link_budget_exhausted'
   | 'assistant_not_found'
+  | 'actor_not_member'
   | 'message_not_found'
   | 'budget_exhausted'
   | 'upstream_failed'
@@ -384,9 +408,32 @@ export async function executePublicTurn(
   const claimedEmail = body.claims?.email ?? body.externalUserEmail
   const authProviderId = `${input.identityNamespace}:${body.externalUserId}`
   const wantsIdentified = body.identified === true || !!claimedEmail
+  const internalScope = input.contextScope === 'internal-member'
   let user
   let isIdentified = false
-  if (wantsIdentified) {
+  if (internalScope) {
+    // Internal lane (D4): the actor is a REAL workspace member, never a
+    // shadow. Per-request attribution by email, defaulting to the key's
+    // creator. Membership is validated against the assistant's workspace -
+    // an internal key must not be usable to act as an arbitrary platform
+    // user, and a departed member's key attribution fails closed.
+    const actor = input.internalActor
+    const resolved = actor?.email
+      ? await findUserByEmail(actor.email)
+      : actor?.defaultUserId
+        ? await findUserById(actor.defaultUserId)
+        : null
+    if (!resolved || !assistant.workspaceId) {
+      return fail(res, 403, 'actor_not_member')
+    }
+    const membership = await getWorkspaceMembershipSystem(resolved.id, assistant.workspaceId)
+    if (!membership) {
+      return fail(res, 403, 'actor_not_member')
+    }
+    user = resolved
+    // Member-grade turn: memory tools on, as this member (same as web chat).
+    isIdentified = true
+  } else if (wantsIdentified) {
     if (claimedEmail) {
       // Tier 1 with email — auto-merge into an existing platform user
       // if one matches by email. Otherwise create the shadow seeded
@@ -440,19 +487,25 @@ export async function executePublicTurn(
   // D12) and, on an identified turn, a team-visible contact record (D11).
   // Returns an empty stamp for a resolved teammate, so a public-API turn on
   // behalf of a real member behaves exactly as before. See client-accrual.ts.
-  const accrual = await accrueClientPrincipal({
-    user,
-    workspaceId: assistant.workspaceId ?? null,
-    assistantId: assistant.id,
-    identityNamespace: input.identityNamespace,
-    externalUserId: body.externalUserId,
-    externalUserName: body.externalUserName,
-    email: claimedEmail ?? null,
-    orgId: body.claims?.orgId ?? null,
-    identified: isIdentified,
-    analytics: deps.analytics,
-    ownerId,
-  })
+  //
+  // The internal lane skips the call outright rather than relying on the
+  // teammate no-op inside it: an attributed member is a principal, not a
+  // client, and the skip should be legible at the seam.
+  const accrual = internalScope
+    ? { compartments: [], contactEntityId: null }
+    : await accrueClientPrincipal({
+        user,
+        workspaceId: assistant.workspaceId ?? null,
+        assistantId: assistant.id,
+        identityNamespace: input.identityNamespace,
+        externalUserId: body.externalUserId,
+        externalUserName: body.externalUserName,
+        email: claimedEmail ?? null,
+        orgId: body.claims?.orgId ?? null,
+        identified: isIdentified,
+        analytics: deps.analytics,
+        ownerId,
+      })
 
   // ── 5. Session ───────────────────────────────────────────
   const channelId = body.sessionId ?? body.externalUserId
@@ -620,7 +673,10 @@ export async function executePublicTurn(
     actorIdentity: {
       channel: 'api',
       id: body.externalUserId,
-      email: claimedEmail ?? null,
+      // Internal lane: the actor is the resolved member, so the wire carries
+      // their real email (the tier fields that feed claimedEmail are rejected
+      // at the route for internal keys).
+      email: internalScope ? (user.email ?? null) : (claimedEmail ?? null),
       userId: user.id,
       org: body.claims?.orgId ?? null,
     },
@@ -678,12 +734,13 @@ export async function executePublicTurn(
         deps.memoryStore.getSoul(assistant.id, user.id, 'Use Brian'),
         deps.memoryStore.getIdentity(viewerCtx),
         deps.memoryStore.getIndex(viewerCtx),
-        // Team memory is what makes a full-scope link useful; the keyed API
-        // stays on its existing per-user projection.
-        fullScope && assistant.workspaceId
+        // Team memory is what makes a full-scope link useful, and what makes
+        // the internal lane a colleague rather than a stranger; the external
+        // keyed lanes stay on their per-user projection.
+        (fullScope || internalScope) && assistant.workspaceId
           ? deps.memoryStore.getWorkspaceIdentity(viewerCtx)
           : Promise.resolve([]),
-        fullScope && assistant.workspaceId
+        (fullScope || internalScope) && assistant.workspaceId
           ? deps.memoryStore.getWorkspaceIndex(viewerCtx)
           : Promise.resolve([]),
       ])
@@ -701,15 +758,18 @@ export async function executePublicTurn(
     })
   }
 
-  // ── 9b. Ambient workspace context (assistant-full only) ──
+  // ── 9b. Ambient workspace context (assistant-full + internal-member) ──
   // The blocks web chat carries and the thin public turn never had. Each is
   // independently optional and failure-tolerant: a store that is not wired in
-  // (OSS, or a caller that never passes it) simply omits its block.
+  // (OSS, or a caller that never passes it) simply omits its block. The
+  // internal lane gets them member-bounded: the files index reads through
+  // `readClearance`/`readCompartments`, which for a member is min(member,
+  // assistant) rather than the assistant override full scope uses.
   let workspaceFilesContext: string | null = null
   let brandContext: string | null = null
   let sessionStateBlock: string | null = null
   let skillsFragment = ''
-  if (fullScope) {
+  if (fullScope || internalScope) {
     if (deps.workspaceFilesStore && assistant.workspaceId && activeCapabilities.has('files')) {
       try {
         const rows = await deps.workspaceFilesStore.listIndexRanked(
@@ -785,9 +845,13 @@ export async function executePublicTurn(
     assistantName: assistant.name,
     memoryContext,
   })
-  // End-user identity is private runtime context in both scopes — the trusted
-  // system channel, never the user turn. See `buildEndUserIdentityContext`.
-  const endUserContext = buildEndUserIdentityContext(body, { isIdentified })
+  // End-user identity is private runtime context on the external lanes — the
+  // trusted system channel, never the user turn. See
+  // `buildEndUserIdentityContext`. The internal lane replaces it with the
+  // member speaker line: an attributed member is a teammate speaking, not "an
+  // external client of this workspace", and the wrong framing would make the
+  // model treat its own colleague as an unauthenticated stranger.
+  const endUserContext = internalScope ? '' : buildEndUserIdentityContext(body, { isIdentified })
 
   let fullSystemPrompt: string
   // Representations of content the visitor can actually see. Empty on this
@@ -796,16 +860,19 @@ export async function executePublicTurn(
   // repairable by reordering, so the seam exists before it has a payload.
   // See `invariants/prompt-cache-alignment`.
   let userVisibleContext = ''
-  if (fullScope) {
+  if (fullScope || internalScope) {
     // Route through the shared builder so the chat link inherits the same
     // block order and the same provenance split as every other channel,
     // rather than growing a second hand-rolled assembly that drifts.
     //
-    // The timezone is the workspace owner's: the visitor's is unknown and the
-    // browser sends none on this surface. Naming the assistant's own zone is
-    // the honest answer, and it is strictly better than the previous state,
-    // where no date reached the model at all and it guessed.
-    const timezone = owner.timezone ?? 'UTC'
+    // Timezone: the internal lane has a real member with a real timezone;
+    // the anonymous full-scope link falls back to the workspace owner's (the
+    // visitor's is unknown and the browser sends none on this surface).
+    // Naming the assistant's own zone is the honest answer, and it is
+    // strictly better than the previous state, where no date reached the
+    // model at all and it guessed.
+    const timezone =
+      (internalScope ? user.timezone : null) ?? owner.timezone ?? 'UTC'
     const split = buildSplitSystemPrompt({
       basePrompt: deps.systemPrompt,
       assistantInstructions: assistant.systemPrompt,
@@ -824,8 +891,14 @@ export async function executePublicTurn(
         mcpInjection.unavailable,
         baseTools,
       ),
+      // Internal lane: the same "You are talking with:" lead line web chat
+      // ships (web-chat speaker identity, 08-06) — the actor is a member.
+      speakerIdentity: internalScope
+        ? { name: user.name ?? user.email ?? 'Workspace member', email: user.email }
+        : undefined,
       // Ordered last among the builder's private-runtime sections, so the
       // end-user identity block stays at the end of the envelope as before.
+      // Empty (and omitted by the builder) on the internal lane.
       preflightContext: endUserContext,
     })
     const privateBlock = formatPrivateRuntimeContext(split.privateRuntimeContext)
@@ -970,7 +1043,8 @@ export async function executePublicTurn(
         ),
         workspaceId: assistant.workspaceId ?? undefined,
         assistantKind: assistant.kind,
-        userTimezone: owner.timezone ?? undefined,
+        userTimezone:
+          (internalScope ? user.timezone : null) ?? owner.timezone ?? undefined,
         abortSignal: abortController.signal,
         sessionStateStore: deps.sessionStateStore,
         activeCapabilities,
@@ -1095,6 +1169,12 @@ export type PublicHistoryInput = {
   externalUserId: string
   sessionId?: string
   limit: number
+  /**
+   * Internal-lane override: the sessions belong to a REAL member user, not
+   * a shadow, so the shadow lookup below would find nothing. The keyed GET
+   * resolves the actor (same rules as the POST) and passes the id here.
+   */
+  resolvedUserId?: string
 }
 
 /**
@@ -1107,7 +1187,9 @@ export async function handlePublicHistory(
   res: import('express').Response,
 ): Promise<void> {
   const authProviderId = `${input.identityNamespace}:${input.externalUserId}`
-  const user = await findUserByAuthProvider('channel', authProviderId)
+  const user = input.resolvedUserId
+    ? { id: input.resolvedUserId }
+    : await findUserByAuthProvider('channel', authProviderId)
   if (!user) {
     // No user yet → no history. Return empty rather than 404 so the
     // client can hydrate cleanly on first load.
