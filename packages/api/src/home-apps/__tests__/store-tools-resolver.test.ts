@@ -17,7 +17,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-const injectMcpTools = vi.fn(async () => ({
+const injectMcpTools = vi.fn(async (_opts: Record<string, unknown>) => ({
   enrichConfirmation: async (_t: unknown, i: unknown) => i,
   unavailable: [],
 }))
@@ -47,7 +47,7 @@ describe('[COMP:api/home-app-store-tools] whose connectors the app reaches', () 
     await resolver()({ workspaceId: WORKSPACE, storeScope: 'read' })
 
     expect(injectMcpTools).toHaveBeenCalledTimes(1)
-    const args = injectMcpTools.mock.calls[0][0] as Record<string, unknown>
+    const args = injectMcpTools.mock.calls[0][0]
 
     // The assertion that matters. `undefined`/`null` here is the defect:
     // inject.ts reads `loadOwnerPersonalConnectors = !assistantTeamId`, so a
@@ -59,7 +59,7 @@ describe('[COMP:api/home-app-store-tools] whose connectors the app reaches', () 
     for (const storeScope of ['read', 'write'] as const) {
       injectMcpTools.mockClear()
       await resolver()({ workspaceId: WORKSPACE, storeScope })
-      const args = injectMcpTools.mock.calls[0][0] as Record<string, unknown>
+      const args = injectMcpTools.mock.calls[0][0]
       expect(args.assistantTeamId).toBe(WORKSPACE)
     }
   })
@@ -69,7 +69,7 @@ describe('[COMP:api/home-app-store-tools] whose connectors the app reaches', () 
     // owner's action grants apply). It is also precisely what makes a missing
     // `assistantTeamId` dangerous rather than merely wrong.
     await resolver()({ workspaceId: WORKSPACE, storeScope: 'read' })
-    const args = injectMcpTools.mock.calls[0][0] as Record<string, unknown>
+    const args = injectMcpTools.mock.calls[0][0]
     expect(args.userId).toBe('owner-1')
     expect(args.assistantId).toBe('assistant-1')
   })
@@ -93,7 +93,7 @@ describe('[COMP:api/home-app-store-tools] whose connectors the app reaches', () 
     // and behind `mcp_call` there are none. Without this the filter drops
     // everything and a granted app silently sees no store.
     await resolver()({ workspaceId: WORKSPACE, storeScope: 'read' })
-    const args = injectMcpTools.mock.calls[0][0] as Record<string, unknown>
+    const args = injectMcpTools.mock.calls[0][0]
     expect(args.keepBuiltinsDirect).toBe(true)
   })
 })

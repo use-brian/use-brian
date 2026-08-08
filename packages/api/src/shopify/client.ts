@@ -509,7 +509,10 @@ export async function listOrders(auth: ShopifyAuth, params: ShopifyListParams = 
           displayFinancialStatus displayFulfillmentStatus
           totalPriceSet { shopMoney { amount currencyCode } }
           customer { id displayName email }
-          lineItems(first: 5) { edges { node { title quantity } } }
+          lineItems(first: 50) {
+            pageInfo { hasNextPage }
+            edges { node { title quantity sku variantTitle } }
+          }
         } }
       }
     }
@@ -1538,6 +1541,59 @@ export async function readProductTemplate(auth: ShopifyAuth, params: {
     throw new Error(`Shopify API error: ${filename} does not exist in theme "${theme.name}"`)
   }
   return { themeId: theme.id, themeName: theme.name, filename, suffix: params.suffix ?? null, content }
+}
+
+export type ShopifyProductTemplateSummary = {
+  /** null for the theme default (`templates/product.json`). */
+  suffix: string | null
+  filename: string
+  /** Ordered section TYPES, e.g. ["main-product","image-with-text","faq"]. */
+  sections: string[]
+}
+
+/**
+ * List every product page template in a theme, with each one's ordered section
+ * stack.
+ *
+ * This exists because nothing else could answer "which templates do I already
+ * have". `readProductTemplate` reads one file by name, `getProduct` does not
+ * project `templateSuffix`, and there is no list endpoint - so a caller
+ * wanting to REUSE a layout (which the tooling explicitly prefers over writing
+ * a new one) had no way to discover what there was to reuse. The wildcard
+ * filename query is the same mechanism `themeSectionTypes` already relies on.
+ *
+ * The section stack, not the file body, is what makes a template choosable: it
+ * is the difference between a page that has an ingredients panel and an FAQ
+ * and one that is bare, which is the actual question someone picking a layout
+ * is asking.
+ */
+export async function listProductTemplates(auth: ShopifyAuth, params: {
+  themeId?: string
+}): Promise<{ themeId: string; themeName: string; templates: ShopifyProductTemplateSummary[] }> {
+  const theme = await resolveTheme(auth, params.themeId)
+  const files = await readThemeFiles(auth, theme.id, ['templates/product.json', 'templates/product.*.json'])
+
+  const templates: ShopifyProductTemplateSummary[] = []
+  for (const [filename, content] of files) {
+    const m = /^templates\/product(?:\.(.+))?\.json$/.exec(filename)
+    if (!m) continue
+    let sections: string[] = []
+    try {
+      const parsed = parseThemeJson(content)
+      const order = Array.isArray(parsed.order) ? (parsed.order as string[]) : []
+      const bag = (parsed.sections ?? {}) as Record<string, { type?: string }>
+      // `order` is authoritative for sequence; `sections` holds the types. A
+      // template whose JSON we cannot parse still LISTS - it just lists with an
+      // empty stack, because dropping it would hide a real template that the
+      // create path would then refuse to overwrite for reasons nobody can see.
+      sections = order.map((k) => bag[k]?.type).filter((t): t is string => Boolean(t))
+    } catch {
+      sections = []
+    }
+    templates.push({ suffix: m[1] ?? null, filename, sections })
+  }
+  templates.sort((a, b) => (a.suffix ?? '').localeCompare(b.suffix ?? ''))
+  return { themeId: theme.id, themeName: theme.name, templates }
 }
 
 /** Section types the theme actually ships, from `sections/*.liquid`. */
