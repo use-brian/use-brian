@@ -18,7 +18,13 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Sparkles } from "lucide-react";
+import { ChevronDown, Sparkles } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { useFeedWorkspace } from "@/contexts/feed-profiles-context";
 import { useConnectAccount } from "@/components/feed/connect-account-dialog";
 import { FeedOnboarding } from "@/components/feed/feed-onboarding";
@@ -51,6 +57,7 @@ import {
   type FeedPlatform,
 } from "@/lib/feed-nav";
 import {
+  emptySlots,
   isoDay,
   monthKey,
   planCounts,
@@ -451,6 +458,35 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
     setWatchToken((n) => n + 1);
   }
 
+  /**
+   * D30, the opt-in half of the hybrid. It hands the assistant the month's
+   * EMPTY slots by id and asks for briefs, not copy: nothing generates a
+   * caption and nothing opens a session, so accepting a card is a PATCH of a
+   * slot the operator already created rather than N drafts appearing unasked.
+   */
+  function fillEmptySlots() {
+    const targets = emptySlots(slots);
+    if (targets.length === 0) {
+      setError(tp.fillEmptyNone);
+      return;
+    }
+    const lines = targets
+      .map(
+        (s) =>
+          `- ${s.scheduledFor} (${t.platformLabels[s.platform]}) slotId=${s.id}`,
+      )
+      .join("\n");
+    requestFeedChatSeed({
+      prefill: format(tp.fillEmptyPrompt, {
+        month,
+        brief: brief?.brief?.trim() || tp.noBriefYet,
+        cadence: brief?.cadencePerWeek ? String(brief.cadencePerWeek) : tp.noCadenceYet,
+        slots: lines,
+      }),
+    });
+    setWatchToken((n) => n + 1);
+  }
+
   return (
     <div className="flex h-full min-h-0">
       <div className="min-w-0 flex-1 overflow-y-auto px-4 py-5 md:px-6">
@@ -461,14 +497,34 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
               <p className="text-xs text-muted-foreground">{tp.subtitle}</p>
             </div>
             {canEdit ? (
-              <button
-                type="button"
-                onClick={planWithAssistant}
-                className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-border px-3 text-[12.5px] font-medium transition-colors hover:bg-accent"
-              >
-                <Sparkles className="size-3.5" aria-hidden />
-                {tp.planWithAssistant}
-              </button>
+              <div className="flex shrink-0 items-center">
+                <button
+                  type="button"
+                  onClick={planWithAssistant}
+                  className="inline-flex h-8 items-center gap-1.5 rounded-l-lg border border-border px-3 text-[12.5px] font-medium transition-colors hover:bg-accent"
+                >
+                  <Sparkles className="size-3.5" aria-hidden />
+                  {tp.planWithAssistant}
+                </button>
+                <DropdownMenu>
+                  <DropdownMenuTrigger
+                    render={
+                      <button
+                        type="button"
+                        aria-label={tp.planMonthActions}
+                        className="inline-flex h-8 items-center rounded-r-lg border border-l-0 border-border px-1.5 transition-colors hover:bg-accent"
+                      >
+                        <ChevronDown className="size-3.5" aria-hidden />
+                      </button>
+                    }
+                  />
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem onClick={fillEmptySlots}>
+                      {tp.fillEmptySlots}
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
             ) : null}
           </header>
 

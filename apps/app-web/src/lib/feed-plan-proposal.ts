@@ -19,6 +19,13 @@ const PROPOSE_PLAN_TOOL = "proposePlan";
 
 export type ProposedSlot = {
   index: number;
+  /**
+   * Set when this card fills an EXISTING empty slot (feed-revamp-depth D31).
+   * Accepting then PATCHes that slot instead of creating a second one beside
+   * it, which is the whole point of the opt-in fill: the operator already made
+   * those slots and asked for briefs, not for duplicates.
+   */
+  slotId?: string;
   date: string;
   platform: FeedPlatform;
   title: string;
@@ -67,8 +74,17 @@ export function parseProposePlanInput(raw: unknown): PlanProposal | null {
     const title = typeof item.title === "string" ? item.title.trim() : "";
     if (index === null || index < 1 || !date || !title) continue;
     if (!isFeedPlatformValue(item.platform)) continue;
+    // A malformed slotId is dropped rather than rejecting the card: the
+    // fallback (create a new slot) is safe, whereas discarding a good
+    // proposal because the model fumbled one field is not.
+    const slotId =
+      typeof item.slotId === "string"
+        && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(item.slotId)
+        ? item.slotId
+        : undefined;
     out.push({
       index,
+      ...(slotId ? { slotId } : {}),
       date,
       platform: item.platform,
       title,

@@ -4867,6 +4867,8 @@ export const ja: Dictionary = {
       refreshProposals: "提案を確認",
       planWithAssistant: "今月の計画を立てる",
       noBriefYet: "(方針はまだありません)",
+      noCadenceYet: "未設定",
+      fillEmptyPrompt: "{month} の既存の空きスロットを埋めてください。\n\n今月の目標:\n{brief}\n\n頻度: 週 {cadence} 件\n\n空きスロット (各 slotId をそのまま返してください。承認時に新規作成ではなくそのスロットを更新します):\n{slots}\n\nそれぞれにタイトルとブリーフを付けてください。本文は書かないでください - 下書きは自分で作成します。",
       nothingScheduledYet: "(まだ何も予定されていません)",
       planWithAssistantPrompt: "{month} の計画を手伝ってください。\n\n今月の目標:\n{brief}\n\n予定済み:\n{scheduled}\n\n空いているところを埋める投稿を提案してください。",
       discussSlotPrompt: "この予定投稿について相談させてください。\n\n日付: {date}\nプラットフォーム: {platform}\nタイトル: {title}\n方針: {brief}",

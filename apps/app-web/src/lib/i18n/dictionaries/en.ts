@@ -5079,6 +5079,8 @@ export const en = {
       refreshProposals: "Check for proposals",
       planWithAssistant: "Plan this month",
       noBriefYet: "(no brief written yet)",
+      noCadenceYet: "not set",
+      fillEmptyPrompt: "Fill the empty slots I already have for {month}.\n\nThis month's goal:\n{brief}\n\nCadence: {cadence} per week\n\nEmpty slots (carry each slotId back so accepting updates that slot instead of creating a new one):\n{slots}\n\nGive each one a title and a brief. Do not write the caption - I draft those myself.",
       nothingScheduledYet: "(nothing scheduled yet)",
       planWithAssistantPrompt: "Help me plan {month}.\n\nThis month's goal:\n{brief}\n\nAlready scheduled:\n{scheduled}\n\nPropose the posts that would fill the gaps.",
       discussSlotPrompt: "Let's talk about this planned post.\n\nDate: {date}\nPlatform: {platform}\nTitle: {title}\nBrief: {brief}",

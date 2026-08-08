@@ -31,6 +31,7 @@ import { StatusDot } from "@/components/feed/feed-status";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import {
   createPlanSlot,
+  updatePlanSlot,
   fetchFeedSessionIdByChannel,
 } from "@/lib/api/feed";
 import { fetchSessionMessages } from "@/lib/api/sessions";
@@ -203,12 +204,20 @@ export function PlanBriefRail({
   async function acceptProposal(slot: ProposedSlot) {
     setAccepting(slot.index);
     try {
-      const result = await createPlanSlot(assistantId, {
-        platform: slot.platform,
-        scheduledFor: slot.date,
-        title: slot.title,
-        ...(slot.brief ? { brief: slot.brief } : {}),
-      });
+      // D31. A card carrying a slotId fills a slot the operator already has;
+      // creating a second one beside it is exactly the duplicate the opt-in
+      // fill exists to avoid.
+      const result = slot.slotId
+        ? await updatePlanSlot(assistantId, slot.slotId, {
+            title: slot.title,
+            brief: slot.brief ?? null,
+          })
+        : await createPlanSlot(assistantId, {
+            platform: slot.platform,
+            scheduledFor: slot.date,
+            title: slot.title,
+            ...(slot.brief ? { brief: slot.brief } : {}),
+          });
       if (result.ok) {
         setDismissed((prev) => new Set(prev).add(slot.index));
         onSlotsAccepted();

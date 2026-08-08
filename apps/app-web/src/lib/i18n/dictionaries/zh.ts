@@ -4822,6 +4822,8 @@ export const zh: Dictionary = {
       refreshProposals: "查看建议",
       planWithAssistant: "规划本月",
       noBriefYet: "(还没有写方针)",
+      noCadenceYet: "未设置",
+      fillEmptyPrompt: "请填充 {month} 中已有的空档期。\n\n本月目标:\n{brief}\n\n频率: 每周 {cadence} 条\n\n空档期 (请原样带回每个 slotId,这样接受时会更新该档期而不是新建):\n{slots}\n\n为每个档期写出标题和简报。不要写正文 - 我自己来起草。",
       nothingScheduledYet: "(还没有任何安排)",
       planWithAssistantPrompt: "帮我规划 {month}。\n\n本月目标:\n{brief}\n\n已安排:\n{scheduled}\n\n请提出可以填补空档的帖子。",
       discussSlotPrompt: "我们聊聊这条计划中的帖子。\n\n日期: {date}\n平台: {platform}\n标题: {title}\n方针: {brief}",
