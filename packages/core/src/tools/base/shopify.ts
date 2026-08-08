@@ -93,9 +93,23 @@ const orderRow = (o: Json) => ({
   total: money(o, 'totalPriceSet'),
   customer: str(obj(o, 'customer'), 'displayName'),
   customer_email: str(obj(o, 'customer'), 'email'),
-  items: connRows((o.lineItems ?? {}) as Json).map(
-    (li) => `${num(li, 'quantity') ?? '?'}x ${str(li, 'title') ?? 'item'}`,
-  ),
+  // Structured, not `"2x Widget"` prose. The variant and SKU are the whole
+  // point: a 5g trial pouch and a 150g pack are DIFFERENT variants of the same
+  // product `title`, so a projection carrying only the title cannot tell them
+  // apart - and anything aggregating demand from it silently merges them.
+  // Fixed 2026-08-08; before that this row carried neither field and the query
+  // did not even fetch them.
+  items: connRows((o.lineItems ?? {}) as Json).map((li) => ({
+    title: str(li, 'title'),
+    variant: str(li, 'variantTitle'),
+    quantity: num(li, 'quantity'),
+    sku: str(li, 'sku'),
+  })),
+  // Orders project their first 50 lines. Say when that was not all of them:
+  // an understated demand figure that looks complete is worse than no figure,
+  // and the caller cannot tell the difference without this.
+  items_truncated: Boolean(obj(o, 'lineItems')?.pageInfo &&
+    (obj(o, 'lineItems')!.pageInfo as Json).hasNextPage),
 })
 
 const customerRow = (c: Json) => ({
@@ -411,6 +425,7 @@ export type ShopifyApi = {
   }): Promise<unknown>
   // ── Theme product templates ──
   listThemes(): Promise<Array<{ id: string; name: string; role: string }>>
+  listProductTemplates(params: { themeId?: string }): Promise<unknown>
   readProductTemplate(params: { themeId?: string; suffix?: string }): Promise<unknown>
   createProductTemplate(params: { themeId?: string; suffix: string; template: string }): Promise<unknown>
   setProductTemplate(params: { productId: string; templateSuffix: string | null }): Promise<unknown>
@@ -1430,6 +1445,33 @@ export function createShopifyTools(
     },
   })
 
+  const listProductTemplatesTool = buildTool({
+    name: 'shopifyListProductTemplates',
+    description:
+      'List the product page templates that already exist in a theme, each with its ordered section stack ' +
+      '(e.g. main-product, image-with-text, faq). Call this BEFORE creating a template: reusing an existing layout with ' +
+      'shopifySetProductTemplate is preferred over writing a new one, and this is the only way to see what there is to reuse. ' +
+      'The section stack is what distinguishes a rich page from a bare one. A suffix of null is the theme default.',
+    inputSchema: z.object({
+      themeId: z.string().optional().describe('Theme id. Defaults to the live (MAIN) theme.'),
+    }),
+    isConcurrencySafe: true,
+    isReadOnly: true,
+    timeoutMs: 20_000,
+    async execute(input) {
+      try {
+        const data = ((await api.listProductTemplates(input)) ?? {}) as Json
+        return { data: {
+          theme: str(data, 'themeName'),
+          theme_id: str(data, 'themeId'),
+          templates: data.templates ?? [],
+        } }
+      } catch (err) {
+        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+      }
+    },
+  })
+
   const readProductTemplateTool = buildTool({
     name: 'shopifyReadProductTemplate',
     description:
@@ -1835,6 +1877,7 @@ export function createShopifyTools(
     setProductMetafieldsTool,
     setProductOptionsTool,
     listThemesTool,
+    listProductTemplatesTool,
     readProductTemplateTool,
     createProductTemplateTool,
     setProductTemplateTool,

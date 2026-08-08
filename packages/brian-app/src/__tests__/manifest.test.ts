@@ -17,6 +17,7 @@ import {
   lintBundle,
   parseManifest,
   scopesExceedGrant,
+  storeScopeRank,
   validateBundle,
 } from '../index.js'
 
@@ -250,5 +251,71 @@ describe('[COMP:shared/brian-app-lint] lintBundle is advisory only', () => {
     expect(findings.every((f) => f.severity === 'warning')).toBe(true)
     expect(findings.some((f) => f.message.includes('read_write'))).toBe(true)
     expect(findings.some((f) => f.message.includes('api.example.com'))).toBe(true)
+  })
+})
+
+describe('[COMP:shared/brian-app-lint] scopes.store', () => {
+  function parse(store: unknown) {
+    return parseManifest({ ...VALID, scopes: { data: 'read', store } })
+  }
+
+  it('defaults to absent, so a pre-store manifest keeps its old meaning', () => {
+    const result = parseManifest(VALID)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.manifest.scopes.store).toBeUndefined()
+    expect(storeScopeRank(result.manifest.scopes.store)).toBe(0)
+  })
+
+  it("normalizes an explicit 'none' away rather than storing it", () => {
+    const result = parse('none')
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.manifest.scopes.store).toBeUndefined()
+  })
+
+  it('accepts read and write', () => {
+    for (const tier of ['read', 'write'] as const) {
+      const result = parse(tier)
+      expect(result.ok).toBe(true)
+      if (!result.ok) return
+      expect(result.manifest.scopes.store).toBe(tier)
+    }
+  })
+
+  it('rejects an unknown tier instead of coercing it', () => {
+    // A silent coercion to 'none' would let an app that MEANT to ask for
+    // access render as though it had been granted nothing, and a coercion the
+    // other way is worse. Fail the parse.
+    expect(issuePaths(parse('admin'))).toContain('scopes.store')
+    expect(issuePaths(parse(true))).toContain('scopes.store')
+    expect(issuePaths(parse('read_write'))).toContain('scopes.store')
+  })
+
+  it('is independent of scopes.data — neither tier implies the other', () => {
+    // The whole reason store is a separate axis. A store-only app must not be
+    // forced to request brain access, and brain read_write must not confer
+    // any store reach at all.
+    const storeOnly = parseManifest({ ...VALID, scopes: { data: 'read', store: 'write' } })
+    expect(storeOnly.ok).toBe(true)
+    if (!storeOnly.ok) return
+    expect(storeOnly.manifest.scopes.data).toBe('read')
+
+    expect(scopesExceedGrant({ data: 'read_write' }, { data: 'read_write', store: 'write' })).toBe(
+      false,
+    )
+    // brain read_write does NOT cover store read
+    expect(scopesExceedGrant({ data: 'read', store: 'read' }, { data: 'read_write' })).toBe(true)
+  })
+
+  it('voids a grant when the store tier widens', () => {
+    expect(scopesExceedGrant({ data: 'read', store: 'read' }, { data: 'read' })).toBe(true)
+    expect(scopesExceedGrant({ data: 'read', store: 'write' }, { data: 'read', store: 'read' })).toBe(
+      true,
+    )
+    // Narrowing is not a widening — a re-sync that drops to read keeps the grant.
+    expect(scopesExceedGrant({ data: 'read', store: 'read' }, { data: 'read', store: 'write' })).toBe(
+      false,
+    )
   })
 })

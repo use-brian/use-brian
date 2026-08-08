@@ -23,3 +23,8 @@ dist-firefox/
 
 # Behavioral-eval run artifacts (pnpm eval) — baselines are committed, runs are not
 packages/api/eval-results/
+
+# Home app bundles are BUILT from their directory (see each README).
+# A committed zip is a second copy of source that sits right beside it and
+# goes stale without a diff to show for it.
+home-apps/*.zip

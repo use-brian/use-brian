@@ -128,6 +128,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   shopifySetProductMetafields: 'Set product metafields',
   shopifySetProductOptions: 'Rename product options',
   shopifyListThemes: 'List themes',
+  shopifyListProductTemplates: 'List page templates',
   shopifyReadProductTemplate: 'Read page template',
   shopifyCreateProductTemplate: 'Create page template',
   shopifySetProductTemplate: 'Set page template',

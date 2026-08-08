@@ -58,7 +58,7 @@ export type HomeAppToolDeps = {
   /** Where bundle files live (injected so the route module stays the owner). */
   bundlePath: (appId: string, path: string) => string
   /** Wipe an app's stored bundle before a replace. */
-  clearBundle: (workspaceId: string, appId: string) => Promise<void>
+  clearBundle: (workspaceId: string, appId: string, actingUserId?: string) => Promise<void>
 }
 
 const fileSchema = z.object({
@@ -140,7 +140,7 @@ export async function writeHomeAppBundle(
 
   // Full replace. A patch would let a file from a previous version survive
   // that the current manifest never declared — and it would still be served.
-  await deps.clearBundle(deps.workspaceId, app.id)
+  await deps.clearBundle(deps.workspaceId, app.id, deps.actingUserId ?? undefined)
   const ctx = { workspaceId: deps.workspaceId, userId: deps.actingUserId ?? '', system: true } as never
   for (const file of input.files) {
     // Bytes ride `writeBytes` (byte-preserving — a png through a utf8 string
@@ -157,7 +157,10 @@ export async function writeHomeAppBundle(
             content: file.content,
           })
     if (!written.ok) {
-      return { ok: false, message: `Could not store ${file.path}.` }
+      // Name the REASON. Without it an import failure is unactionable — the
+      // caller cannot tell a quota trip from a bad path from a dead blob
+      // backend, and every sibling write site here already reports the kind.
+      return { ok: false, message: `Could not store ${file.path}: ${written.error.kind}.` }
     }
   }
 

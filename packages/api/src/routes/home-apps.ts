@@ -46,6 +46,7 @@ import {
   putHomeAppState,
   type HomeAppRow,
 } from '../db/home-apps-store.js'
+import { listWorkspaceFilesUnderReservedPrefix } from '../db/workspace-files.js'
 import {
   getWorkspaceMembershipWithClearanceSystem,
   getWorkspaceRoleSystem,
@@ -91,6 +92,8 @@ export type HomeAppRouteOptions = {
   signingSecret: string
   /** The API's own origin, folded into the bundle CSP's `connect-src`. */
   apiOrigin: string
+  /** The web origin allowed to FRAME a bundle (app-web). See `buildBundleCsp`. */
+  appOrigin?: string
   /**
    * Sync-now. Optional — when unset the GitHub import + manual sync routes are
    * not mounted at all, so a build with no GitHub reads (or no credentials
@@ -115,10 +118,19 @@ export async function deleteBundle(
   filesApi: FilesApi,
   workspaceId: string,
   appId: string,
+  actingUserId?: string,
 ): Promise<void> {
-  const ctx = { workspaceId, userId: '', system: true } as never
-  const prefix = `${APPS_PATH_PREFIX}${appId}/`
-  const existing = await filesApi.search(ctx, { parentPath: prefix, limit: 100 })
+  // NOT `filesApi.search`. That query hard-excludes `path NOT LIKE '/apps/%'`
+  // so bundle source never reaches brain retrieval — correct, and it also
+  // makes it structurally incapable of listing the very files this function
+  // exists to delete. Built on it, the "full bundle REPLACE" deleted nothing
+  // and the next write failed with `conflict`, so re-import and re-sync had
+  // never worked; only a first install did. Read the prefix directly instead.
+  const ctx = { workspaceId, userId: actingUserId ?? '', system: true } as never
+  const existing = await listWorkspaceFilesUnderReservedPrefix(
+    workspaceId,
+    `${APPS_PATH_PREFIX}${appId}/`,
+  )
   for (const file of existing) {
     await filesApi.delete(ctx, file.path)
   }
@@ -320,7 +332,8 @@ export function homeAppRoutes(opts: HomeAppRouteOptions): Router {
         workspaceId,
         actingUserId: userId,
         bundlePath: bundleStoragePath,
-        clearBundle: (ws, appId) => deleteBundle(opts.filesApi, ws, appId),
+        clearBundle: (ws, appId, actingUserId) =>
+          deleteBundle(opts.filesApi, ws, appId, actingUserId),
       },
       { files: extracted.files, kind: 'upload' },
     )
@@ -502,6 +515,12 @@ export function homeAppRoutes(opts: HomeAppRouteOptions): Router {
               workspaceId: app.workspaceId,
               userId,
               scope: (app.grantedScopes as AppScopes).data,
+              // The GRANTED store tier, not the manifest's request. A manifest
+              // that widened after consent sits at `needs_consent` and never
+              // reaches here, but reading the grant keeps that true by
+              // construction rather than by that invariant holding elsewhere.
+              store: (app.grantedScopes as AppScopes).store,
+              agent: (app.grantedScopes as AppScopes).agent,
               maxClearance: app.maxClearance,
               secret: opts.signingSecret,
             }),
@@ -571,7 +590,11 @@ export function homeAppRoutes(opts: HomeAppRouteOptions): Router {
     res.setHeader('Content-Type', contentType)
     res.setHeader(
       'Content-Security-Policy',
-      buildBundleCsp({ apiOrigin: opts.apiOrigin, netOrigins: manifest?.scopes.net }),
+      buildBundleCsp({
+        apiOrigin: opts.apiOrigin,
+        appOrigin: opts.appOrigin,
+        netOrigins: manifest?.scopes.net,
+      }),
     )
     // Belt-and-braces against the one thing the CSP cannot express: a browser
     // that ignores the pinned type and sniffs anyway.
