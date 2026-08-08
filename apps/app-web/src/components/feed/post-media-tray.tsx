@@ -26,9 +26,11 @@ import { usePostMedia } from "@/lib/use-post-media";
 import {
   ACCEPTED_MEDIA_MIME,
   canPublishMedia,
+  connectionPublishesMedia,
   mediaCapFor,
   type PostMedia,
 } from "@/lib/feed-media";
+import { useFeedWorkspace } from "@/contexts/feed-profiles-context";
 import type { FeedPlatform } from "@/lib/feed-nav";
 
 function Thumb({
@@ -95,7 +97,17 @@ export function PostMediaTray({
   onChange: (next: PostMedia[]) => void;
 }) {
   const tm = useT().feedPage.postEditor;
+  const workspace = useFeedWorkspace();
   const { upload, resolve, uploading } = usePostMedia(workspaceId);
+  // D34. The platform supporting media and THIS connection carrying the grant
+  // are different questions, and only X makes them diverge.
+  const connection = workspace.profiles.find((p) => p.platform === platform);
+  const willPublish = connectionPublishesMedia(
+    platform,
+    connection?.canPublishMedia,
+  );
+  const needsReconnect =
+    canPublishMedia(platform) && !!connection && !willPublish;
   const [errors, setErrors] = useState<string[]>([]);
   const cap = mediaCapFor(platform);
   const full = media.length >= cap;
@@ -175,9 +187,11 @@ export function PostMediaTray({
 
       {media.length > 0 ? (
         <p className="text-[11px] text-muted-foreground">
-          {canPublishMedia(platform)
-            ? tm.mediaConnectedDelivery
-            : tm.mediaManualDelivery}
+          {needsReconnect
+            ? tm.mediaReconnectNeeded
+            : willPublish
+              ? tm.mediaConnectedDelivery
+              : tm.mediaManualDelivery}
         </p>
       ) : null}
 

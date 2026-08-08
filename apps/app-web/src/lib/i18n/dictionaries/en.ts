@@ -5158,6 +5158,7 @@ export const en = {
       mediaFailed: "Could not add",
       mediaConnectedDelivery: "Published with the post.",
       mediaManualDelivery: "Attach this image yourself when you post. This platform cannot publish it for you.",
+      mediaReconnectNeeded: "This X account was connected before image publishing was supported. Reconnect it in Settings to publish images, or attach this one yourself.",
       replyingTo: "Replying to @{handle}",
       planGateTitle: "No active plan",
       planGateBody: "Drafting with the assistant is paused until this workspace has a plan. Your posts and copy are untouched.",

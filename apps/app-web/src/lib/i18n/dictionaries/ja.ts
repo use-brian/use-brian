@@ -4946,6 +4946,7 @@ export const ja: Dictionary = {
       mediaFailed: "追加できませんでした",
       mediaConnectedDelivery: "投稿と一緒に公開されます。",
       mediaManualDelivery: "投稿時にご自身で画像を添付してください。このプラットフォームでは自動公開できません。",
+      mediaReconnectNeeded: "この X アカウントは画像公開に対応する前に接続されました。設定から再接続すると画像を公開できます。または投稿時にご自身で添付してください。",
       replyingTo: "@{handle} への返信",
       planGateTitle: "有効なプランがありません",
       planGateBody: "このワークスペースにプランが設定されるまで、アシスタントとの下書きは停止しています。投稿と本文はそのまま残っています。",

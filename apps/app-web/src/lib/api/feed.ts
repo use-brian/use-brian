@@ -64,6 +64,13 @@ export type FeedProfile = {
    *  fall back to the letter-circle avatar. */
   profilePictureUrl: string | null;
   enabled: boolean;
+  /**
+   * Whether approving a post on THIS connection actually ships its images
+   * (feed-revamp-depth D34). Threads always can; X needs the `media.write`
+   * scope, which is not retroactive, so a connection made before it was
+   * requested reads false until the operator reconnects.
+   */
+  canPublishMedia?: boolean;
   assistant: {
     id: string;
     name: string;

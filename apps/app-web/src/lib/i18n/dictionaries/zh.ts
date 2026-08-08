@@ -4901,6 +4901,7 @@ export const zh: Dictionary = {
       mediaFailed: "无法添加",
       mediaConnectedDelivery: "将随帖子一起发布。",
       mediaManualDelivery: "发布时请自行附上此图片。该平台无法为你自动发布。",
+      mediaReconnectNeeded: "此 X 账号是在支持图片发布之前连接的。请在设置中重新连接以发布图片,或自行附上此图片。",
       replyingTo: "回复 @{handle}",
       planGateTitle: "没有生效的方案",
       planGateBody: "在这个工作区选定方案之前，与助手一起起草已暂停。你的帖子和文案都还在。",

@@ -39,14 +39,30 @@ export function mediaCapFor(platform: FeedPlatform): number {
 }
 
 /**
- * Whether approving a post on this platform actually ships its images.
+ * Whether approving a post on this platform CAN ship its images at all.
  *
- * Only Threads does today (D34): its client already speaks IMAGE/CAROUSEL. X
- * accepts `mediaIds` but nothing in the tree uploads media to mint one, so
- * claiming otherwise would be the worst available failure - the tool reports
- * success, the model says the image is attached, and the adapter drops it.
- * Everything else is manual delivery by design.
+ * Threads and X both can now (D34). Everything else is manual delivery by
+ * design, and saying so is the point: a surface that accepts an image the
+ * approve path will drop is the worst failure available here.
  */
 export function canPublishMedia(platform: FeedPlatform): boolean {
-  return platform === "threads";
+  return platform === "threads" || platform === "twitter";
+}
+
+/**
+ * Whether THIS connection will ship them.
+ *
+ * Separate from `canPublishMedia` because the two genuinely differ for X: the
+ * platform supports it, but a connection made before the `media.write` scope
+ * was requested does not carry the grant, and scopes are not retroactive. The
+ * honest answer there is "reconnect", which only a per-connection check can
+ * give. `undefined` means the server did not say, which is treated as the
+ * platform default rather than as a failure.
+ */
+export function connectionPublishesMedia(
+  platform: FeedPlatform,
+  connectionCanPublish: boolean | undefined,
+): boolean {
+  if (!canPublishMedia(platform)) return false;
+  return connectionCanPublish ?? true;
 }
