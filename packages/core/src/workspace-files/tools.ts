@@ -28,6 +28,7 @@ import {
   ctxFor,
   errorMessage,
   idOrPathShape,
+  isBinaryMime,
   policyBlockGate,
   policyConfirmation,
   workspaceGate,
@@ -337,6 +338,22 @@ export function createFileTools(
       if (!result.ok) {
         return { data: errorMessage(result.error), isError: true }
       }
+      // `api.read` is a UTF-8 decode. On a stored image / PDF / binary that
+      // returns mojibake with no error, and the model has no way to tell that
+      // from a genuinely garbled document — so it describes the noise. Refuse
+      // instead, and point at what CAN be done with the bytes. (The byte-safe
+      // reader `api.readBytes` exists but has no tool surface: bytes leave the
+      // brain only by being delivered, never by entering the transcript.)
+      if (isBinaryMime(result.value.file.mime)) {
+        return {
+          data:
+            `${result.value.file.path} is ${result.value.file.mime} — a binary file whose contents cannot be read as text. ` +
+            'Do not attempt to describe or quote its contents from this tool. ' +
+            'The file itself can still be delivered: send it to the user in this conversation, or attach it to an email, using its path. ' +
+            'Its title, summary, and tags are in the workspace files index if you need to describe it.',
+          isError: true,
+        }
+      }
       return {
         data: {
           file: fullFile(result.value.file),
@@ -523,7 +540,9 @@ export function createFileTools(
       'Save an UPLOADED FILE (a chat or comment attachment) to the workspace brain as a real file, preserving the original — the actual image / PDF / document, not a text summary. ' +
       'Use this — NOT saveMemory — whenever the user asks to save / keep / store / remember an attached file. saveMemory only records a text note and loses the file. ' +
       'Pass the `fileId` from the attachment\'s `<attached_file id="…">` tag. Uploaded files are cached for ~7 days, so a stale id may have expired — if so, ask the user to re-attach. ' +
-      'The saved file joins the workspace file index (searchable, shareable) and its path is the durable link.',
+      'The saved file joins the workspace file index (searchable, shareable) and its path is the durable link. ' +
+      'This is also the FIRST STEP whenever the user wants an attachment they sent to be forwarded somewhere — sending a file back in chat or attaching one to an email both take a saved workspace path, never an upload id, ' +
+      'so save it here and use the path this returns.',
     inputSchema: z.object({
       fileId: idShape.describe('The id from the uploaded attachment\'s <attached_file id="…"> tag.'),
       path: z

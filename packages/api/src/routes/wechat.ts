@@ -51,6 +51,7 @@ import { upsertWechatContextToken, getWechatContextToken } from '../db/wechat-co
 import type { ConnectorStore } from '../db/connector-store.js'
 import { getToolDisplayName, formatConfirmationInput } from '@use-brian/shared'
 import { processChannelMessage } from './channel-pipeline.js'
+import { cacheInboundImageTag } from './channel-file-cache.js'
 import { billingPartyForAssistant } from '../billing-party.js'
 import type { ChatArchiveMediaService } from '../chat-archive/media-service.js'
 import { archiveMediaRef } from '../chat-archive/media-service.js'
@@ -78,6 +79,11 @@ export type WechatRouteOptions = {
   knowledgeStore?: import('@use-brian/core').KnowledgeStoreInterface
   gdriveFilesStore?: import('@use-brian/core').GDriveFilesStore
   workspaceFilesStore?: import('@use-brian/core').WorkspaceFilesStore
+  /** Transient upload cache (`file_cache`). When present, inbound images are
+   *  cached so the turn carries a promotable `<attached_file id="…">` tag
+   *  (save-on-request — see routes/channel-file-cache.ts). Absent ⇒ images
+   *  ride content blocks with no reference, as before. */
+  fileStore?: import('@use-brian/core').FileStore
   artifactPromoter?: import('@use-brian/api/files/artifact-promote.js').ArtifactPromoter | null
   analytics?: AnalyticsLogger
   skillStore?: import('../db/skill-store.js').SkillStore
@@ -422,6 +428,23 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
           })
         } else if (media.kind === 'image') {
           userContentBlocks.push({ type: 'image', mimeType: media.mime, data: media.data.toString('base64') })
+          // Save-on-request seam — without the tag the model can SEE the
+          // image but holds no reference to it, so "keep this" dead-ends.
+          // `channelUserId` MUST match the session key the pipeline uses
+          // below. Empty string on any miss keeps the block-only turn.
+          // (WeChat cannot currently deliver an outbound document — see
+          // DOCUMENT_CAPABLE_CHANNELS — but saving and emailing both work.)
+          const tag = options.fileStore
+            ? await cacheInboundImageTag({
+                fileStore: options.fileStore,
+                channelType: 'wechat',
+                channelId: incoming.channelId,
+                userId: channelUserId,
+                assistant,
+                file: { buffer: media.data, mime: media.mime, fileName: media.name },
+              })
+            : ''
+          if (tag) userContentBlocks.push({ type: 'text', text: tag })
         } else if (media.kind === 'file') {
           if (media.mime === 'application/pdf') {
             userContentBlocks.push({ type: 'image', mimeType: media.mime, data: media.data.toString('base64') })

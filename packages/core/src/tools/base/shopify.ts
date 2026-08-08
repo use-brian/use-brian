@@ -13,6 +13,15 @@
 import { z } from 'zod'
 import { buildTool, type Tool, type ToolContext } from '../types.js'
 import { type Json, asRows, str, num, bool, obj, projectList } from './_connector-result.js'
+import {
+  SHOPIFYQL_CATALOG,
+  SHOPIFYQL_SCHEMAS,
+  schemaOfQuery,
+  rejectedColumn,
+  schemasDefining,
+  closestFields,
+  type ShopifyqlSchemaName,
+} from './shopify-analytics-catalog.js'
 
 // ── Result projections ─────────────────────────────────────────
 // The GraphQL queries already select only the needed fields, but connection
@@ -264,6 +273,37 @@ function cartDropoff(row: Record<string, unknown>): Record<string, unknown> | un
       ? { reached_checkout_but_never_completed: Math.max(0, reached - completed) }
       : {}),
   }
+}
+
+/**
+ * Turn "Column 'X' not found" into something a model can act on in one step.
+ *
+ * Shopify's rejection names only the column that was wrong. It never names one
+ * that would have been right, and ShopifyQL has no introspection to ask - so
+ * the model's only move is another guess, and guesses do not converge. This
+ * appends the answer: where the column actually lives if it exists in another
+ * schema (the single most common mistake, e.g. `new_customers` is real but
+ * belongs to `sales`, not `customers`), the nearest names in the schema that
+ * was queried, and the full metric list, which is short enough to state
+ * outright and is what SHOW needs.
+ *
+ * Returns '' for any error that is not a column-name problem - a syntax error
+ * or a throttle already says what to do.
+ */
+function fieldHelp(schema: string | null, message: string): string {
+  const column = rejectedColumn(message)
+  if (!column || !schema || !(SHOPIFYQL_SCHEMAS as string[]).includes(schema)) return ''
+  const known = schema as ShopifyqlSchemaName
+
+  const elsewhere = schemasDefining(column).filter((s) => s !== known)
+  if (elsewhere.length > 0) {
+    return ` "${column}" is not part of "${schema}" - it belongs to ${elsewhere.map((s) => `"${s}"`).join(' / ')}. ` +
+      `Re-run it against that schema, or pick a "${schema}" field below.` +
+      ` Metrics in "${schema}": ${SHOPIFYQL_CATALOG[known].metrics.join(', ')}.`
+  }
+  return ` Closest names in "${schema}": ${closestFields(known, column).join(', ')}.` +
+    ` All metrics in "${schema}": ${SHOPIFYQL_CATALOG[known].metrics.join(', ')}.` +
+    ` Use one of these verbatim - field names cannot be guessed and there is no way to list them from the API.`
 }
 
 // ── API port ───────────────────────────────────────────────────
@@ -1072,31 +1112,60 @@ export function createShopifyTools(
     },
   })
 
+  // Consecutive rejections of shopifyAnalyticsQuery in this tool set's lifetime
+  // (one injection ~ one turn). ShopifyQL rejections are individually cheap and
+  // each one reads as "almost right, try again", so nothing about a single
+  // failure tells the model to stop - which is how a bad field name turned into
+  // a twenty-minute loop. Reset on any success.
+  let analyticsRejections = 0
+  const ANALYTICS_REJECTION_LIMIT = 3
+
   const analyticsQueryTool = buildTool({
     name: 'shopifyAnalyticsQuery',
     description:
       'Run a raw ShopifyQL query against the store analytics for questions the other tools do not cover ' +
-      '(traffic, marketing campaigns, site-search terms, customer recency and lifetime spend). ' +
-      'Read-only. Prefer shopifyStorefrontFunnel for anything about the conversion funnel - it cannot fail to parse. ' +
-      'Syntax is "FROM <schema> SHOW <metrics> ...", never SELECT. Schemas include sessions, sales, orders, products, ' +
-      'customers, campaign_sessions, searches, search_queries. If the query is rejected, the error names the problem - ' +
-      'fix the field or schema name and retry; never report a rejected query as "no data".',
+      '(traffic, marketing campaigns, site-search terms, customer acquisition and lifetime spend). Read-only. ' +
+      'Prefer shopifyStorefrontFunnel for anything about the conversion funnel - it cannot fail to parse. ' +
+      `Syntax is "FROM <schema> SHOW <metrics> [GROUP BY <dimensions>] [TIMESERIES <grain>] SINCE <start> UNTIL <end>", never SELECT. ` +
+      `Supported schemas: ${SHOPIFYQL_SCHEMAS.join(', ')}. There is no "orders" or "products" schema - order and ` +
+      'product reporting lives in "sales". Field names cannot be guessed and cannot be discovered at runtime; ' +
+      'a rejected query returns the valid field names for that schema, so read them and use one verbatim ' +
+      'rather than trying another spelling. Never report a rejected query as "no data".',
     inputSchema: z.object({
-      query: z.string().describe('The ShopifyQL query, e.g. "FROM customers SHOW new_customer_records TIMESERIES month SINCE -6m".'),
+      query: z.string().describe('The ShopifyQL query, e.g. "FROM customers SHOW new_customer_records TIMESERIES month SINCE -6m UNTIL today".'),
     }),
     isConcurrencySafe: true,
     isReadOnly: true,
     timeoutMs: 60_000,
     async execute(input) {
+      if (analyticsRejections >= ANALYTICS_REJECTION_LIMIT) {
+        return { data:
+          `Stopping: ${analyticsRejections} ShopifyQL queries in a row were rejected. Do not try another spelling. ` +
+          'Tell the user this question could not be expressed against their store analytics, and say which part ' +
+          'of it you could not express.', isError: true }
+      }
+      const schema = schemaOfQuery(input.query)
+      if (schema && !(SHOPIFYQL_SCHEMAS as string[]).includes(schema)) {
+        analyticsRejections++
+        const hint = schema === 'orders' || schema === 'products'
+          ? ` There is no "${schema}" schema - order and product reporting lives in "sales".`
+          : ''
+        return { data:
+          `Shopify error: "${schema}" is not a supported schema.${hint} Supported: ${SHOPIFYQL_SCHEMAS.join(', ')}.`,
+          isError: true }
+      }
       try {
         const table = await api.runAnalyticsQuery(input.query)
+        analyticsRejections = 0
         return { data: {
           rows: tableToObjects(table),
           row_count: table.rows.length,
           columns: table.columns.map((c) => c.name),
         } }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        analyticsRejections++
+        const message = err instanceof Error ? err.message : String(err)
+        return { data: `Shopify error: ${message}${fieldHelp(schema, message)}`, isError: true }
       }
     },
   })

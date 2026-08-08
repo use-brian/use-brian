@@ -22,7 +22,23 @@ vi.mock('../../db/api-key-store.js', async (io) => ({
   verifySecret: (...a: unknown[]) => mockVerifySecret(...a),
 }))
 
+// Mock only the turn/history executors — the auth-ladder tests below never
+// reach them, and the lane-derivation tests assert the delegation shape the
+// route hands to the shared pipeline. `fail` and friends stay real.
+vi.mock('../public-turn.js', async (io) => ({
+  ...(await io<typeof import('../public-turn.js')>()),
+  executePublicTurn: vi.fn(async (_deps, _input, _req, res) => {
+    res.json({ reply: 'ok' })
+  }),
+  handlePublicHistory: vi.fn(async (_input, res) => {
+    res.json({ sessionId: 's', messages: [] })
+  }),
+}))
+
 import { publicApiRoutes } from '../public-api.js'
+import { executePublicTurn } from '../public-turn.js'
+
+const mockTurn = vi.mocked(executePublicTurn)
 
 const apiKeyStore = {
   getByIdSystem: vi.fn(),
@@ -156,5 +172,79 @@ describe('[COMP:api/public-api-route] POST /assistants/:id/messages — claims s
   it('caps the roles array so a consumer cannot inflate the prompt', async () => {
     const res = await authed({ claims: { roles: Array.from({ length: 17 }, (_, i) => `r${i}`) } })
     expect(res.status).toBe(400)
+  })
+})
+
+describe('[COMP:api/public-api-route] lane derivation (docs/plans/api-chat-modes.md)', () => {
+  function keyRow(overrides: Record<string, unknown> = {}) {
+    return {
+      ...activeKey,
+      audience: 'external',
+      anonymousContext: 'thin',
+      createdBy: 'u-owner',
+      ...overrides,
+    }
+  }
+  function authedPost(row: Record<string, unknown>, body: Record<string, unknown>) {
+    mockParseToken.mockReturnValueOnce({ keyId: 'k-1', secret: 'ok' })
+    apiKeyStore.getByIdSystem.mockResolvedValueOnce(row)
+    mockVerifySecret.mockResolvedValueOnce(true)
+    return post('a-1', { token: 'tok', body: { message: 'hi', externalUserId: 'ext-1', ...body } })
+  }
+
+  it('external thin key, anonymous turn → default external-client scope', async () => {
+    const res = await authedPost(keyRow(), {})
+    expect(res.status).toBe(200)
+    const input = mockTurn.mock.calls[0][1]
+    expect(input.contextScope).toBeUndefined()
+    expect(input.internalActor).toBeUndefined()
+  })
+
+  it("external full key, anonymous turn → 'assistant-full' (D2)", async () => {
+    const res = await authedPost(keyRow({ anonymousContext: 'full' }), {})
+    expect(res.status).toBe(200)
+    expect(mockTurn.mock.calls[0][1].contextScope).toBe('assistant-full')
+  })
+
+  it('external full key, IDENTIFIED turn → stays thin (indexed lane, D3)', async () => {
+    const res = await authedPost(keyRow({ anonymousContext: 'full' }), { identified: true })
+    expect(res.status).toBe(200)
+    expect(mockTurn.mock.calls[0][1].contextScope).toBeUndefined()
+  })
+
+  it("internal key → 'internal-member' with the creator as default actor (D4)", async () => {
+    const res = await authedPost(keyRow({ audience: 'internal' }), {})
+    expect(res.status).toBe(200)
+    const input = mockTurn.mock.calls[0][1]
+    expect(input.contextScope).toBe('internal-member')
+    expect(input.internalActor).toEqual({ email: null, defaultUserId: 'u-owner' })
+  })
+
+  it('internal key forwards a per-request actorEmail attribution', async () => {
+    await authedPost(keyRow({ audience: 'internal' }), { actorEmail: 'jo@team.example' })
+    expect(mockTurn.mock.calls[0][1].internalActor).toEqual({
+      email: 'jo@team.example',
+      defaultUserId: 'u-owner',
+    })
+  })
+
+  it('internal key rejects the external tier machinery with 400', async () => {
+    for (const body of [
+      { identified: true },
+      { claims: { email: 'x@client.example' } },
+      { externalUserEmail: 'x@client.example' },
+    ]) {
+      const res = await authedPost(keyRow({ audience: 'internal' }), body)
+      expect(res.status).toBe(400)
+      expect(res.body.error).toBe('invalid_input')
+    }
+    expect(mockTurn).not.toHaveBeenCalled()
+  })
+
+  it('external key rejects actorEmail with 400 (attribution is not an escalation)', async () => {
+    const res = await authedPost(keyRow(), { actorEmail: 'jo@team.example' })
+    expect(res.status).toBe(400)
+    expect(res.body.detail).toContain('internal-audience')
+    expect(mockTurn).not.toHaveBeenCalled()
   })
 })

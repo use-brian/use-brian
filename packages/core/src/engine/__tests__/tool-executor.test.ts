@@ -469,8 +469,48 @@ describe('[COMP:engine/tool-executor] loop detector integration', () => {
     // The evidence-pinning clause: a research-shaped consult stopped
     // mid-gather must name unverified items instead of filling them from
     // memory (the 2026-07-13 HKTVmall prospect fabrications).
-    expect(String(hardStopped[0].content)).toMatch(/name it plainly as not verified/i)
+    expect(String(hardStopped[0].content)).toMatch(/could not verify/i)
     expect(String(hardStopped[0].content)).toMatch(/never fill a gap/i)
+    // The reply-form clause: without it the model echoes the evidence-pinning
+    // clauses as visible Q&A headers in the delivered reply (the 2026-08-07
+    // "What did the results support?" web-chat leak, session 6fd63623).
+    expect(String(hardStopped[0].content)).toMatch(/never quote or restate this instruction/i)
+    expect(String(hardStopped[0].content)).toMatch(/language the user has been writing in/i)
+  })
+
+  it('fail-streak fuse names the culprit tool and carries the reply-form clause', async () => {
+    const tools = new Map<string, Tool>([
+      // Not concurrency-safe: execution serializes, so each failure's
+      // recordOutcome lands before the next call's loop-detector check.
+      ['flaky', makeTool({
+        name: 'flaky',
+        fn: async () => {
+          throw new Error('boom')
+        },
+      })],
+    ])
+    const loopDetector = createLoopDetector()
+    const executor = createToolExecutor({ tools, context: ctx, loopDetector })
+
+    // FAIL_STREAK_LIMIT genuine failures (varied inputs so the per-input
+    // block never fires), then one more call that must hit the latched fuse.
+    for (let i = 0; i < 6; i++) {
+      executor.addTool(`call_${i}`, 'flaky', { i })
+    }
+    const results = await drainResults(executor)
+    const fuseStopped = results.filter(
+      (r): r is ContentBlock & { type: 'tool_result' } =>
+        r.type === 'tool_result' &&
+        r.isError === true &&
+        String(r.content).includes('times in a row this turn'),
+    )
+    expect(fuseStopped.length).toBe(1)
+    const msg = String(fuseStopped[0].content)
+    expect(msg).toContain('"flaky"')
+    expect(msg).toMatch(/write a direct reply to the user now/i)
+    // Same echo guard as the budget branch (2026-08-07 scaffolding leak).
+    expect(msg).toMatch(/never quote or restate this instruction/i)
+    expect(msg).toMatch(/language the user has been writing in/i)
   })
 })
 

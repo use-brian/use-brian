@@ -91,9 +91,11 @@ export function createFileIngestor(deps: FileIngestorDeps): FileIngestor {
     if (!stored.ok) throw new FileIngestError(stored.error.kind, stored.error)
     const file = stored.value
 
-    // Upload is not consent to interpret. The Work Bench uses this branch to
-    // create a durable pin while keeping parse/distill/index/Pipeline B behind
-    // a later, explicit user decision.
+    // Upload alone is not consent to interpret — this branch only files bytes.
+    // The Work Bench stores through here to create a durable pin, then (since
+    // dropping a file on Pins IS consent to save it to the brain, 2026-08-07)
+    // separately queues the stored file through the explicit stored-file
+    // ingest lane (`POST /api/files/:fileId/ingest`).
     if (input.process === false) {
       return {
         fileName: input.fileName,

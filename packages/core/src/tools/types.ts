@@ -245,6 +245,25 @@ export type ToolContext = {
    */
   compartments?: string[] | null
   /**
+   * Threaded onto `AccessContext.systemRead` for this turn's brain READS.
+   * Set only where `userId` is a synthetic principal that holds no
+   * `workspace_members` row and would therefore be hidden by member RLS
+   * before the clearance ladder is ever consulted — today that is the
+   * `assistant-full` public lane (chat link, and a keyed API key whose
+   * `anonymous_context = 'full'`). See `routes/public-turn.ts`.
+   *
+   * READ paths only. Writes keep running through `queryWithRLS` under the
+   * synthetic principal, so member RLS still refuses them — that is what
+   * keeps "external chat has no write access" enforced by the database
+   * rather than by tool-list hygiene (`isReadOnly` is declared on only
+   * ~half of `buildTool` sites, so it cannot carry a security boundary).
+   *
+   * SAFETY: only ever set together with a pinned `clearance` — the
+   * predicate's clearance clause is the entire containment once RLS is out
+   * of the picture. See `AccessContext.systemRead`.
+   */
+  systemRead?: boolean
+  /**
    * The assistant's OWN clearance — the WRITE ceiling. The tool-executor
    * write gate rejects a write whose requested `sensitivity` exceeds this,
    * independent of the read ceiling above — so a member using a higher-

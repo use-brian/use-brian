@@ -342,6 +342,7 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
             /** Uniform change for the server lane, or null = client-loop only. */
             serverSet: BulkTaskSet | null;
           }
+        /** `reason` is "" for a plain delete (no tombstone, no rule). */
         | { kind: "delete"; reason: string },
     ) => {
       const ids = selectedVisible;
@@ -365,12 +366,14 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
             const batchIds = ids.slice(offset, offset + SERVER_BULK_BATCH_SIZE);
             const body =
               apply.kind === "delete"
-                ? ({
-                    action: "delete",
-                    ids: batchIds,
-                    reason: apply.reason,
-                    create_rule: true,
-                  } as const)
+                ? apply.reason
+                  ? ({
+                      action: "delete",
+                      ids: batchIds,
+                      reason: apply.reason,
+                      create_rule: true,
+                    } as const)
+                  : ({ action: "delete", ids: batchIds } as const)
                 : ({
                     action: "update",
                     ids: batchIds,
@@ -406,10 +409,14 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
           const row = (rows ?? []).find((r) => r.id === id);
           if (!row) continue;
           if (apply.kind === "delete") {
-            const result = await deleteBrainRow(workspaceId, "task", id, {
-              reason: apply.reason,
-              createRule: true,
-            });
+            const result = await deleteBrainRow(
+              workspaceId,
+              "task",
+              id,
+              apply.reason
+                ? { reason: apply.reason, createRule: true }
+                : undefined,
+            );
             if (result.ok) {
               setRows((prev) => prev.filter((r) => r.id !== id));
               setSelected((prev) => {
@@ -457,11 +464,16 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
       description: format(t.bulkDeleteConfirm, { count: String(count) }),
       placeholder: t.deleteReasonPlaceholder,
       confirmLabel: t.bulkDeleteAndAddRules,
+      emptyConfirmLabel: format(t.bulkDeleteOnly, { count: String(count) }),
       cancelLabel: t.cancel,
+      multiline: true,
+      // Teaching a rule is the better outcome, not a toll: an empty box
+      // still deletes, it just teaches nothing.
+      allowEmpty: true,
     });
     if (answer === null) return;
     const reason = answer.trim();
-    if (reason.length < 3) {
+    if (reason.length > 0 && reason.length < 3) {
       setBulkError(t.deleteReasonTooShort);
       return;
     }
@@ -1059,11 +1071,12 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
             projects={projects}
             commitField={commitField}
             onDelete={async (reason) => {
+              // No reason = plain delete: no tombstone, no rule.
               const result = await deleteBrainRow(
                 workspaceId,
                 "task",
                 openTask.id,
-                { reason, createRule: true },
+                reason ? { reason, createRule: true } : undefined,
               );
               if (!result.ok) return result;
               setRows((prev) => prev.filter((row) => row.id !== openTask.id));

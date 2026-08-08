@@ -22,6 +22,7 @@ import type { Dictionary } from "@/lib/i18n/dictionaries";
 const listSessionPins = vi.fn().mockResolvedValue([]);
 const addSessionPin = vi.fn().mockResolvedValue(undefined);
 const storeFiles = vi.fn().mockResolvedValue([]);
+const reingestStoredFile = vi.fn().mockResolvedValue({ status: "queued", jobId: "job-1" });
 const confirmDialog = vi.fn().mockResolvedValue(true);
 const fetchWorkerRunSummary = vi.fn().mockResolvedValue({
   total: 0,
@@ -41,6 +42,7 @@ vi.mock("@/lib/api/ingest", () => ({
   MAX_STORED_FILE_BYTES: 1024 * 1024 * 1024,
   LARGE_FILE_CONFIRM_BYTES: 100 * 1024 * 1024,
   storeFiles: (...args: unknown[]) => storeFiles(...args),
+  reingestStoredFile: (...args: unknown[]) => reingestStoredFile(...args),
 }));
 vi.mock("@/components/ui/confirm-dialog", () => ({
   confirmDialog: (...args: unknown[]) => confirmDialog(...args),
@@ -88,6 +90,7 @@ describe("[COMP:app-web/chat-context-pins] Work Bench section", () => {
     listSessionPins.mockReset().mockResolvedValue([]);
     addSessionPin.mockReset().mockResolvedValue(undefined);
     storeFiles.mockReset().mockResolvedValue([]);
+    reingestStoredFile.mockReset().mockResolvedValue({ status: "queued", jobId: "job-1" });
     confirmDialog.mockReset().mockResolvedValue(true);
     fetchWorkerRunSummary.mockReset().mockResolvedValue({
       total: 0,
@@ -331,7 +334,7 @@ describe("[COMP:app-web/chat-context-pins] Work Bench section", () => {
     container.remove();
   });
 
-  it("stores a dropped file without ingestion before pinning its returned file id", async () => {
+  it("stores a dropped file, pins its returned id, then queues the brain save", async () => {
     storeFiles.mockResolvedValue([
       { fileName: "launch-brief.txt", ok: true, fileId: "file-durable-1" },
     ]);
@@ -382,7 +385,263 @@ describe("[COMP:app-web/chat-context-pins] Work Bench section", () => {
       kind: "file",
       refId: "file-durable-1",
     });
+    // Dropping on Pins is consent to save to the brain: the stored file is
+    // queued through the stored-file ingest lane after the pin exists.
+    expect(reingestStoredFile).toHaveBeenCalledWith("workspace-1", "file-durable-1");
     expect(listSessionPins).toHaveBeenCalledTimes(2);
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it("accepts a batch beyond five files — there is no batch-count cap", async () => {
+    const files = Array.from({ length: 7 }, (_, i) =>
+      new File([`notes ${i}`], `brief-${i}.txt`, { type: "text/plain", lastModified: i + 1 }),
+    );
+    storeFiles.mockResolvedValue(
+      files.map((file, i) => ({ fileName: file.name, ok: true, fileId: `file-${i}` })),
+    );
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <I18nProvider locale="en" dict={dict}>
+          <ChatContextPins
+            sessionId="session-1"
+            workspaceId="workspace-1"
+            refreshKey={0}
+            startedByName="Ada"
+            expanded
+            onExpandedChange={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const pinsSection = container.querySelector<HTMLElement>(
+      'section[aria-label="Pinned context"]',
+    );
+    const drop = new Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, "dataTransfer", {
+      value: { files, types: ["Files"] },
+    });
+    await act(async () => {
+      pinsSection!.dispatchEvent(drop);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(storeFiles).toHaveBeenCalledWith(
+      "workspace-1",
+      files,
+      expect.objectContaining({ onProgress: expect.any(Function) }),
+    );
+    expect(addSessionPin).toHaveBeenCalledTimes(7);
+    expect(container.textContent).not.toContain("Choose up to 5 files.");
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it("skips the brain save for pinned audio — the recording pipeline owns media", async () => {
+    storeFiles.mockResolvedValue([
+      { fileName: "voice-note.mp3", ok: true, fileId: "file-audio-1" },
+    ]);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <I18nProvider locale="en" dict={dict}>
+          <ChatContextPins
+            sessionId="session-1"
+            workspaceId="workspace-1"
+            refreshKey={0}
+            startedByName="Ada"
+            expanded
+            onExpandedChange={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const file = new File(["audio"], "voice-note.mp3", {
+      type: "audio/mpeg",
+      lastModified: 3,
+    });
+    const pinsSection = container.querySelector<HTMLElement>(
+      'section[aria-label="Pinned context"]',
+    );
+    const drop = new Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, "dataTransfer", {
+      value: { files: [file], types: ["Files"] },
+    });
+    await act(async () => {
+      pinsSection!.dispatchEvent(drop);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(addSessionPin).toHaveBeenCalledWith("session-1", {
+      kind: "file",
+      refId: "file-audio-1",
+    });
+    expect(reingestStoredFile).not.toHaveBeenCalled();
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it("keeps the pin and shows an honest error row when the brain save fails", async () => {
+    storeFiles.mockResolvedValue([
+      { fileName: "launch-brief.txt", ok: true, fileId: "file-durable-1" },
+    ]);
+    reingestStoredFile.mockRejectedValue(new Error("ingest exploded"));
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <I18nProvider locale="en" dict={dict}>
+          <ChatContextPins
+            sessionId="session-1"
+            workspaceId="workspace-1"
+            refreshKey={0}
+            startedByName="Ada"
+            expanded
+            onExpandedChange={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const file = new File(["launch notes"], "launch-brief.txt", {
+      type: "text/plain",
+      lastModified: 1,
+    });
+    const pinsSection = container.querySelector<HTMLElement>(
+      'section[aria-label="Pinned context"]',
+    );
+    const drop = new Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, "dataTransfer", {
+      value: { files: [file], types: ["Files"] },
+    });
+    await act(async () => {
+      pinsSection!.dispatchEvent(drop);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(addSessionPin).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain(
+      "Pinned, but saving to the brain failed.",
+    );
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it("grows a filter input once the pin list reaches 8 rows, and filters by label", async () => {
+    const pinRow = (i: number, label: string) => ({
+      id: `pin-${i}`,
+      kind: "task" as const,
+      refId: `00000000-0000-4000-8000-00000000000${i}`,
+      url: null,
+      text: null,
+      label,
+      position: i,
+      addedByUserId: "u-1",
+      addedByAssistantId: null,
+      addedByName: "Ada",
+      createdAt: new Date().toISOString(),
+    });
+    const rows = [
+      ...Array.from({ length: 7 }, (_, i) => pinRow(i, `Launch step ${i}`)),
+      pinRow(7, "Quarterly pricing review"),
+    ];
+    listSessionPins.mockResolvedValue(rows);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <I18nProvider locale="en" dict={dict}>
+          <ChatContextPins
+            sessionId="session-1"
+            workspaceId="workspace-1"
+            refreshKey={0}
+            startedByName="Ada"
+            expanded
+            onExpandedChange={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const filter = container.querySelector<HTMLInputElement>(
+      'input[aria-label="Search pins"]',
+    );
+    expect(filter).toBeTruthy();
+    expect(container.textContent).toContain("Quarterly pricing review");
+    expect(container.textContent).toContain("Launch step 0");
+
+    const setValue = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      "value",
+    )!.set!;
+    await act(async () => {
+      setValue.call(filter!, "pricing");
+      filter!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    expect(container.textContent).toContain("Quarterly pricing review");
+    expect(container.textContent).not.toContain("Launch step 0");
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it("shows no filter input below 8 pins", async () => {
+    listSessionPins.mockResolvedValue([
+      {
+        id: "pin-1",
+        kind: "task",
+        refId: "00000000-0000-4000-8000-000000000001",
+        url: null,
+        text: null,
+        label: "Only pin",
+        position: 1,
+        addedByUserId: "u-1",
+        addedByAssistantId: null,
+        addedByName: "Ada",
+        createdAt: new Date().toISOString(),
+      },
+    ]);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <I18nProvider locale="en" dict={dict}>
+          <ChatContextPins
+            sessionId="session-1"
+            workspaceId="workspace-1"
+            refreshKey={0}
+            startedByName="Ada"
+            expanded
+            onExpandedChange={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(
+      container.querySelector('input[aria-label="Search pins"]'),
+    ).toBeNull();
+    expect(container.textContent).toContain("Only pin");
 
     act(() => root.unmount());
     container.remove();

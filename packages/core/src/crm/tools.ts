@@ -4,7 +4,7 @@ import type { EntityKind } from '../entities/types.js'
 import type { AccessContext } from '../security/access-context.js'
 import { researchWriteFloor } from '../security/sensitivity.js'
 import { unionCompartments } from '../security/compartments.js'
-import { buildTool, type Tool } from '../tools/types.js'
+import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
 import { tolerantInt } from '../tools/schema-tolerance.js'
 import {
   applyExplicitCloses,
@@ -232,6 +232,33 @@ function ctxFor(context: {
     assistantKind: context.assistantKind ?? 'standard',
     clearance: context.clearance,
     compartments: context.compartments,
+  }
+}
+
+/**
+ * Read-path access context. Identical to `ctxFor` plus `systemRead`, which
+ * lets a non-member synthetic principal (the `assistant-full` public lane)
+ * read system-side with `buildAccessPredicate` as the whole gate.
+ *
+ * Deliberately a SEPARATE function rather than a flag on `ctxFor`: the
+ * read/write split is the security boundary that keeps "external chat has no
+ * write access" true. Write paths (`update*`, `advanceDealStage`, and the
+ * pre-write dedupe lookups) must keep using `ctxFor`, so they stay on
+ * `queryWithRLS` under the synthetic principal and the database refuses them.
+ * Copying a read call site into a write one is then a visible mistake instead
+ * of an invisible one.
+ */
+function readCtxFor(context: ToolContext): AccessContext {
+  return {
+    ...ctxFor({
+      userId: context.userId,
+      assistantId: context.assistantId,
+      workspaceId: context.workspaceId!,
+      assistantKind: context.assistantKind,
+      clearance: context.clearance,
+      compartments: context.compartments,
+    }),
+    systemRead: context.systemRead,
   }
 }
 
@@ -619,14 +646,7 @@ export function createCrmTools(
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
       const contact = await store.getContactById(
-        ctxFor({
-          userId: context.userId,
-          assistantId: context.assistantId,
-          workspaceId: context.workspaceId!,
-          assistantKind: context.assistantKind,
-          clearance: context.clearance,
-          compartments: context.compartments,
-        }),
+        readCtxFor(context),
         input.id,
       )
       if (!contact || contact.workspaceId !== context.workspaceId) {
@@ -656,14 +676,7 @@ export function createCrmTools(
       if (gate) return gate
 
       const rows = await store.listContacts(
-        ctxFor({
-          userId: context.userId,
-          assistantId: context.assistantId,
-          workspaceId: context.workspaceId!,
-          assistantKind: context.assistantKind,
-          clearance: context.clearance,
-          compartments: context.compartments,
-        }),
+        readCtxFor(context),
         {
           query: input.query,
           tag: input.tag,
@@ -881,14 +894,7 @@ export function createCrmTools(
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
       const company = await store.getCompanyById(
-        ctxFor({
-          userId: context.userId,
-          assistantId: context.assistantId,
-          workspaceId: context.workspaceId!,
-          assistantKind: context.assistantKind,
-          clearance: context.clearance,
-          compartments: context.compartments,
-        }),
+        readCtxFor(context),
         input.id,
       )
       if (!company || company.workspaceId !== context.workspaceId) {
@@ -915,14 +921,7 @@ export function createCrmTools(
       if (gate) return gate
 
       const rows = await store.listCompanies(
-        ctxFor({
-          userId: context.userId,
-          assistantId: context.assistantId,
-          workspaceId: context.workspaceId!,
-          assistantKind: context.assistantKind,
-          clearance: context.clearance,
-          compartments: context.compartments,
-        }),
+        readCtxFor(context),
         {
           query: input.query,
           tag: input.tag,
@@ -1111,14 +1110,7 @@ export function createCrmTools(
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
       const deal = await store.getDealById(
-        ctxFor({
-          userId: context.userId,
-          assistantId: context.assistantId,
-          workspaceId: context.workspaceId!,
-          assistantKind: context.assistantKind,
-          clearance: context.clearance,
-          compartments: context.compartments,
-        }),
+        readCtxFor(context),
         input.id,
       )
       if (!deal || deal.workspaceId !== context.workspaceId) {
@@ -1147,14 +1139,7 @@ export function createCrmTools(
       if (gate) return gate
 
       const rows = await store.listDeals(
-        ctxFor({
-          userId: context.userId,
-          assistantId: context.assistantId,
-          workspaceId: context.workspaceId!,
-          assistantKind: context.assistantKind,
-          clearance: context.clearance,
-          compartments: context.compartments,
-        }),
+        readCtxFor(context),
         {
           stage: input.stage,
           contactId: input.contact_id,

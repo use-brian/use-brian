@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  accelEnterLabel,
   isFirefoxUa,
   isMacUa,
   surfaceShortcutLabel,
@@ -79,5 +80,16 @@ describe("[COMP:app-web/surface-shortcuts] Surface-shortcut modifier per browser
     // SSR fallback (navigator undefined → empty UA): never reaches paint —
     // the tooltip popup only mounts on hover — but must not throw.
     expect(surfaceShortcutLabel(1, "")).toBe("Ctrl+1");
+  });
+
+  it("labels Accel+Enter by platform only (no browser reserves that chord)", () => {
+    expect(accelEnterLabel(MAC_CHROME)).toBe("⌘Enter");
+    expect(accelEnterLabel(MAC_SAFARI)).toBe("⌘Enter");
+    expect(accelEnterLabel(MAC_ELECTRON)).toBe("⌘Enter");
+    // Unlike Accel+digit, mac Firefox does NOT reserve ⌘Enter, so it keeps ⌘.
+    expect(accelEnterLabel(MAC_FIREFOX)).toBe("⌘Enter");
+    expect(accelEnterLabel(WIN_CHROME)).toBe("Ctrl+Enter");
+    expect(accelEnterLabel(LINUX_FIREFOX)).toBe("Ctrl+Enter");
+    expect(accelEnterLabel("")).toBe("Ctrl+Enter");
   });
 });

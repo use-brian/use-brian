@@ -112,8 +112,10 @@ describeIf('[COMP:channels/store] findOrCreateChannelForConnect', () => {
     expect(await store.resolveAssistantForSurface(channelId, 'C-UNMAPPED')).toBe(assistantId)
 
     // The seeded routing row's model tier defaults to Pro (migration 234):
-    // the assistant's `slack_model_alias` seed column is 'pro' by default and
-    // `findOrCreateChannelForConnect` copies it onto the routing row.
+    // the assistant's `default_model_alias` seed column is 'pro' by default
+    // and `findOrCreateChannelForConnect` copies it onto the routing row.
+    // Migration 416 made that one column serve every channel type — Slack no
+    // longer has a per-platform seed of its own.
     const aliasCheck = await pool!.connect()
     try {
       const r = await aliasCheck.query<{ model_alias: string }>(

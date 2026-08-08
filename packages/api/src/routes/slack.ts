@@ -48,6 +48,7 @@ import { billingPartyForAssistant } from '../billing-party.js'
 import { tryResolveSchedulerConfirmation } from '../scheduling/confirmation-registry.js'
 import type { DeferredConfirmationStore } from '../db/deferred-confirmation-store.js'
 import { ensureSlackConnectorInstance } from '../ingest/slack-connector-instance.js'
+import { cacheInboundImageTag } from './channel-file-cache.js'
 import { classifyMedia, buildDocumentFiledReply, buildOversizeDocReply } from '../ingest/channel-media-intake.js'
 import { dispatchReactionFeedback } from '../feedback/reaction-dispatch.js'
 
@@ -133,6 +134,11 @@ type SlackRouteOptions = {
   /** Promotes an over-threshold text paste to a durable artifact
    *  (large-content-artifacts §Phase 3.2). Absent ⇒ pastes pass through. */
   artifactPromoter?: import('@use-brian/api/files/artifact-promote.js').ArtifactPromoter | null
+  /** Transient upload cache (`file_cache`). When present, inbound images are
+   *  cached so the turn carries a promotable `<attached_file id="…">` tag
+   *  (save-on-request — see routes/channel-file-cache.ts). Absent ⇒ images
+   *  ride content blocks with no reference, as before. */
+  fileStore?: import('@use-brian/core').FileStore
   /**
    * Route a pulled media reference (a download URL) through the channel-media
    * intake (audio/video → recording → brain). Boot wires this over
@@ -392,10 +398,10 @@ export function slackRoutes(options: SlackRouteOptions): Router {
       console.error(`[slack] assistant ${resolvedAssistantId} not found (integration orphaned?)`)
       return
     }
-    // Override the per-assistant default with the routing row's modelAlias.
+    // Override the assistant's default tier with the routing row's modelAlias.
     // Migration 197 made the routing row the source of truth; the Settings
     // tab value stays as the seed for fresh attachments only.
-    assistant.slackModelAlias = resolvedRouting.modelAlias
+    assistant.defaultModelAlias = resolvedRouting.modelAlias
     // Post-089 ownership XOR: team assistants have NULL owner_user_id and
     // team access flows through teams.owner_user_id. `billingPartyForAssistant`
     // is the single source of truth for "the authoritative user behind
@@ -982,7 +988,7 @@ type ProcessMessageParams = {
   backgroundModel?: string
   adapter: ReturnType<typeof createSlackAdapter>
   incoming: IncomingMessage
-  assistant: { id: string; name: string; ownerUserId: string; slackModelAlias: string; workspaceId: string | null; systemPrompt: string | null; clearance: 'public' | 'internal' | 'confidential'; kind: 'primary' | 'standard' | 'app' }
+  assistant: { id: string; name: string; ownerUserId: string; defaultModelAlias: string; workspaceId: string | null; systemPrompt: string | null; clearance: 'public' | 'internal' | 'confidential'; kind: 'primary' | 'standard' | 'app' }
   channelUserId: string
   ownerId: string
   isIdentified: boolean
@@ -1014,6 +1020,11 @@ type ProcessMessageParams = {
   /** Promotes an over-threshold text paste to a durable artifact
    *  (large-content-artifacts §Phase 3.2). Absent ⇒ pastes pass through. */
   artifactPromoter?: import('@use-brian/api/files/artifact-promote.js').ArtifactPromoter | null
+  /** Transient upload cache (`file_cache`). When present, inbound images are
+   *  cached so the turn carries a promotable `<attached_file id="…">` tag
+   *  (save-on-request — see routes/channel-file-cache.ts). Absent ⇒ images
+   *  ride content blocks with no reference, as before. */
+  fileStore?: import('@use-brian/core').FileStore
   analytics?: AnalyticsLogger
   skillStore?: import('../db/skill-store.js').SkillStore
   pendingSlackConfirmations: Map<string, { resolver: ConfirmationResolver; toolCallId: string }>
@@ -1129,6 +1140,24 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
       // Images + PDFs share the `inlineData` path — Gemini reads both natively.
       if (dl.mimeType.startsWith('image/') || dl.mimeType === 'application/pdf') {
         userContentBlocks.push({ type: 'image', mimeType: dl.mimeType, data: dl.buffer.toString('base64') })
+        // Save-on-request seam. Without the tag the model can SEE the image
+        // and hold no reference to it, so "keep this" / "attach this to the
+        // email" dead-ends. Empty string on any miss → unchanged behavior.
+        const tag = params.fileStore
+          ? await cacheInboundImageTag({
+              fileStore: params.fileStore,
+              channelType: 'slack',
+              channelId: incoming.channelId,
+              // MUST match what processChannelMessage below passes as
+              // `userId` — the cache row's session is an idempotent
+              // find of the turn's own session, and a mismatch would
+              // create a second session and an unreadable cache row.
+              userId: channelUserId,
+              assistant,
+              file: { buffer: dl.buffer, mime: dl.mimeType, fileName: dl.name },
+            })
+          : ''
+        if (tag) userContentBlocks.push({ type: 'text', text: tag })
       } else {
         const parsed = await parseFileContent(dl.buffer, dl.mimeType, dl.name)
         if (parsed.mediaMimeType === 'application/pdf' || parsed.mediaMimeType?.startsWith('image/')) {
@@ -1223,7 +1252,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     incomingChannelMessageId: incoming.messageId ?? null,
     archiveIncoming: incoming,
     archiveConnectorInstanceId: params.archiveConnectorInstanceId,
-    modelAlias: assistant.slackModelAlias,
+    modelAlias: assistant.defaultModelAlias,
     adaptiveResearchEnabled: true,
     abortController,
     provider: params.provider,

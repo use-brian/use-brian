@@ -72,6 +72,7 @@ import {
   createBrainHealingTools,
   createScheduleWorkflowTool,
   advanceWorkflowRun,
+  stepSuccessors,
   createWorkflowEventDispatcher,
   type WorkflowEventDispatcher,
   createRunQueueWorker,
@@ -290,6 +291,7 @@ import { createDbSkillCuratorDigestStore } from './db/skill-curator-digest-store
 import { skillApprovalsRoutes } from './routes/skill-approvals.js'
 import { createSkillReviewWorker } from './workers/skill-review-worker.js'
 import { createGeminiSkillReviewLLM } from './workers/skill-review-llm.js'
+import { createPlaybookReflectionWorker } from './workers/playbook-reflection-worker.js'
 import { buildWorkspaceCuratorScope } from './workers/workspace-curator-scope.js'
 import { loadSkillRegistry } from './registry/load-skill-registry.js'
 import { handleRoutes } from './routes/handles.js'
@@ -534,6 +536,7 @@ import { brainMcpRoutes } from './brain-mcp/server.js'
 import { createStoreToolResolver } from './home-apps/store-tools-resolver.js'
 import { agentAllowedToolsFor } from './brain-mcp/store-tools.js'
 import { resolveWriteTarget } from './brain-mcp/tools.js'
+import { enginesMcpRoutes, enginesMcpEnabled } from './engines-mcp/server.js'
 import { createDbOAuthClientStore } from './db/oauth-client-store.js'
 import { createDbDesktopAuthStore } from './db/desktop-auth-store.js'
 import { createDbOAuthAuthorizationStore } from './db/oauth-authorization-store.js'
@@ -3958,6 +3961,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   }))
 
+  // AI Engines MCP — read-only observation of external answer engines + GSC,
+  // registered in a workspace as a custom connector. Dark by default: the
+  // route exists only when ENGINES_MCP_SECRET plus at least one engine
+  // credential are set (docs/architecture/integrations/engines-mcp.md).
+  if (enginesMcpEnabled()) {
+    app.use('/api/engines/mcp', enginesMcpRoutes())
+  }
+
   app.use(oauthMetadataRoutes({ apiUrl: env.API_URL, webUrl: env.APP_URL }))
   app.use('/api/brain/oauth', oauthRoutes({
     clientStore: oauthClientStore,
@@ -4216,8 +4227,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           description: r.systemPrompt ? r.systemPrompt.slice(0, 120) : null,
           memoryCount: r.memoryCount, iconSeed: r.iconSeed ?? 0,
           workspaceId: r.workspaceId,
-          telegramModelAlias: r.telegramModelAlias,
-          slackModelAlias: r.slackModelAlias,
+          defaultModelAlias: r.defaultModelAlias,
           clearance: r.clearance, kind: r.kind, appType: r.appType,
         })),
       })
@@ -4512,6 +4522,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     engineHooks: ports.engineHooks,
     checkCreditBudget: ports.checkCreditBudget,
     chatLinkStore,
+    // Ambient-context stores for the `assistant-full` scope this route opts
+    // into (see public-chat.ts). The keyed public API above deliberately
+    // omits them — it runs the thin `external-client` scope.
+    workspaceFilesStore,
+    skillStore,
   }))
 
   // PUBLIC closed routes mount HERE — before the bare `/api` requireAuth guards
@@ -5457,14 +5472,20 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         })
         const run = await workflowRunStore.getRunSystem(runId)
         const wf = run ? await workflowStore.findByIdSystem(run.workflowId) : null
+        // Resume PAST the completed wait step via an explicit frontier —
+        // possibly several successors (fan-out array), possibly none (a
+        // terminal wait completes the run instead of re-entering at
+        // startStepId). The cursor stays on the wait step; the executor
+        // stamps currentStepId as each successor starts.
+        let startAt: string[] | undefined
         if (run && wf) {
           const waitStep = wf.definition.steps.find((s) => s.id === run.currentStepId)
-          const nextId = waitStep?.nextStepId === undefined
-            ? (wf.definition.steps[wf.definition.steps.indexOf(waitStep!) + 1]?.id ?? null)
-            : waitStep.nextStepId
-          await workflowRunStore.updateRun(runId, { status: 'running', currentStepId: nextId })
+          startAt = waitStep
+            ? stepSuccessors(waitStep, wf.definition.steps.map((s) => s.id))
+            : undefined
+          await workflowRunStore.updateRun(runId, { status: 'running' })
         }
-        const outcome = await advanceWorkflowRun(workflowExecutorDeps, runId)
+        const outcome = await advanceWorkflowRun(workflowExecutorDeps, runId, startAt ? { startAt } : undefined)
         await jobStore.update(job.id, { enabled: false })
         if (outcome.kind === 'failed') {
           throw new Error(
@@ -5754,6 +5775,52 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   })
   if (runWorkers) skillReviewWorker.start()
+
+  // ── Playbook reflection worker (growth loop Phase 3) ──
+  // Weekly per-assistant reflection: grades recent work against
+  // `charter.success` and proposes playbook rules as suggestions the owner
+  // admits on the assistant detail page. Cost rides
+  // `overhead:playbook-reflection` (migration 420). See
+  // docs/architecture/context-engine/assistant-playbook.md.
+  const playbookReflectionWorker = createPlaybookReflectionWorker({
+    modelCall: async ({ systemPrompt, prompt, maxTokens, attribution }) => {
+      const response = await collectStream(provider.stream({
+        model: backgroundModel,
+        messages: [{ role: 'user', content: prompt }],
+        systemPrompt,
+        maxTokens,
+      }))
+      if (response.usage && usageStore) {
+        const cost = calculateCost(backgroundModel, response.usage)
+        usageStore.recordUsage({
+          userId: attribution.userId,
+          assistantId: attribution.assistantId,
+          sessionId: null,
+          model: backgroundModel,
+          inputTokens: response.usage.inputTokens,
+          outputTokens: response.usage.outputTokens,
+          cacheReadTokens: response.usage.cacheReadTokens,
+          cacheWriteTokens: response.usage.cacheWriteTokens,
+          actualCostUsd: cost,
+          source: 'overhead:playbook-reflection',
+        }).catch((err) => console.error('[playbook-reflection] usage tracking failed:', err))
+      }
+      return response.content
+        .filter((b) => b.type === 'text')
+        .map((b) => (b.type === 'text' ? b.text : ''))
+        .join('')
+    },
+    onEvent: (event) => {
+      if (event.type === 'assistant_processed' && event.activated + event.suggested > 0) {
+        console.log(`[playbook-reflection] auto-admitted ${event.activated} rule(s) (+${event.suggested} overflow) for assistant ${event.assistantId}`)
+      } else if (event.type === 'error') {
+        console.error(`[playbook-reflection] error for assistant ${event.assistantId ?? '<global>'}: ${event.error}`)
+      } else if (event.type === 'tick_complete') {
+        console.log(`[playbook-reflection] tick complete: processed=${event.processedCount} suggested=${event.suggestedCount} skipped=${event.skippedCount} errors=${event.errorCount}`)
+      }
+    },
+  })
+  if (runWorkers) playbookReflectionWorker.start()
 
   // ── Sandbox lifecycle reaper (computer-use.md §7) — kills tasks idle past
   //    the Take-Over abandonment window + runs the vault's per-plan purge.
@@ -6552,6 +6619,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         deferredConfirmationStore, episodicStore, sessionStateStore, workflowEventDispatcher,
         slackWebhookIngestor: channelHosts.slackWebhookIngestor, connectorActionStore, episodesStore,
         buildConnectorActionAudit: ports.buildConnectorActionAudit,
+        fileStore,
       }))
       // Microsoft Teams — public Bot Framework messaging endpoint, per-channel
       // JWT-verified. No connector app (webhook transport). See
@@ -6566,6 +6634,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         analytics, skillStore,
         episodicStore, sessionStateStore, artifactPromoter,
         msteamsWebhookIngestor: channelHosts.msteamsWebhookIngestor,
+        fileStore,
       }))
       if (env.DISCORD_CONNECTOR_SECRET) {
         app.use('/internal/discord', discordRoutes({
@@ -6577,7 +6646,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           checkCreditBudget: ports.checkCreditBudget, integrationStore, channelUserStore,
           workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
           connectorInstanceStore, knowledgeStore, gdriveFilesStore, workspaceFilesStore, analytics,
-          skillStore, episodicStore, sessionStateStore,
+          skillStore, episodicStore, sessionStateStore, fileStore,
         }))
       }
       if (env.WECHAT_CONNECTOR_SECRET) {
@@ -6589,7 +6658,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           checkCreditBudget: ports.checkCreditBudget, integrationStore, channelUserStore,
           workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
           connectorInstanceStore, knowledgeStore, gdriveFilesStore, workspaceFilesStore, analytics,
-          skillStore, episodicStore, sessionStateStore,
+          skillStore, episodicStore, sessionStateStore, fileStore,
           archiveMedia: chatArchiveMediaService ?? undefined,
         }))
       }

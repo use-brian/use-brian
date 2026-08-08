@@ -67,6 +67,7 @@ import { sendConfirmationPrompt } from '../scheduling/confirmation-prompt.js'
 import { findAssistantById, findUserById } from '../db/users.js'
 import { getConnectorUserId, resolveReadCeilingsSystem } from '../db/workspace-store.js'
 import { billingPartyForAssistant } from '../billing-party.js'
+import { recordExternalCostFromMeta } from '../billing-external.js'
 import { runWithAgentClearance } from '../db/client.js'
 import { injectMcpTools } from '../mcp/inject.js'
 import type { ConnectorStore } from '../db/connector-store.js'
@@ -1551,12 +1552,14 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
                 extraMeta[k] = typeof v === 'string' ? sanitize(v) : v
               }
             }
+            const calleeChannelType =
+              params.callerChannelType === 'workflow' ? 'workflow' : 'assistant-call'
             options.analytics?.logEvent({
               userId: calleeActorUserId,
               assistantId: params.calleeAssistantId,
               sessionId: session.id,
               eventName: 'tool_executed',
-              channelType: params.callerChannelType === 'workflow' ? 'workflow' : 'assistant-call',
+              channelType: calleeChannelType,
               metadata: {
                 tool_name: sanitize(block.name),
                 success: !(block.isError ?? false),
@@ -1565,6 +1568,33 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
                   : {}),
                 ...extraMeta,
               },
+            })
+            // Bill the external API this tool spent on. Until this existed,
+            // the recording lived inside the chat route, so an identical
+            // `webSearch` (or engine ask) run from a workflow step, a
+            // scheduled job, or an A2A consult wrote NO usage_tracking row —
+            // real Brave/Serper/engine dollars invisible to the cost
+            // dashboard and to the workspace budget. Attributed like the
+            // callee turn itself: the callee assistant and its billing party.
+            //
+            // COGS-only by design, same as the `turn_complete` row below —
+            // a callee-lane triggerKey and no `userMessageId` keep it out of
+            // the user-facing credit derivation
+            // (docs/architecture/platform/cost-and-pricing.md → "derived
+            // ledger"). Fire-and-forget: a metering failure must never fail
+            // the consult.
+            void recordExternalCostFromMeta({
+              toolMeta,
+              usageStore: options.usageStore,
+              userId: calleeActorUserId,
+              assistantId: params.calleeAssistantId,
+              sessionId: session.id,
+              triggerKey:
+                params.callerChannelType === 'workflow'
+                  ? 'workflow_external_tool'
+                  : 'a2a_external_tool',
+              channelType: calleeChannelType,
+              analytics: options.analytics,
             })
           }
         } else if (event.type === 'tool_confirmation_required') {

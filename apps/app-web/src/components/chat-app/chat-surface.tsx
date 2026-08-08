@@ -168,6 +168,7 @@ import {
 } from "@/lib/api/sessions";
 import { getUserInfo } from "@/lib/user";
 import { markRoomSeen } from "@/lib/chat-seen";
+import { accelEnterLabel } from "@/lib/surface-shortcuts";
 import { fetchPendingQuestion } from "@/lib/api/pending-questions";
 import { PendingQuestionPanel } from "@/components/chrome/pending-question-panel";
 import { ChatConfirmationCard } from "@/components/chrome/chat-confirmation-card";
@@ -2488,6 +2489,16 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
               }
             : undefined
         }
+        // Cmd/Ctrl+Enter in a room = send AND ask, so addressing the assistant
+        // never costs a trip to the pointer. Rooms never queue mid-turn, so
+        // this chord is free here — see the composer's intent resolver for the
+        // steer-wins precedence. Personal chats leave it unwired: every send
+        // there is addressed already.
+        onAsk={
+          paneIsRoom && activeAssistant
+            ? () => void send({ forceAddress: true })
+            : undefined
+        }
         disabled={!!pendingQuestion}
         // Mid-turn sends are text-only: an attachment needs the full pre-turn
         // pipeline, which belongs to a turn of its own. Staged chips stay
@@ -2628,7 +2639,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 onClick={() => setAskArmed((v) => !v)}
                 aria-pressed={askArmed}
                 aria-label={format(t.askLabel, { name: activeAssistant.name })}
-                title={t.askArmedAria}
+                // The chord lives in the tooltip of the control it replaces —
+                // the toggle is where someone looks when they are tired of
+                // reaching for it.
+                title={`${t.askArmedAria} · ${format(t.askShortcutHint, {
+                  keys: accelEnterLabel(),
+                })}`}
                 className={cn(
                   "flex min-w-0 items-center gap-1 rounded-md px-1.5 py-1 text-xs font-medium transition-colors focus-visible:shadow-none",
                   askArmed

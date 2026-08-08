@@ -95,11 +95,13 @@ export type SessionEvent =
       /**
        * The room's pin set changed (multiplayer chat P1b, T14) — added or
        * removed. A SIGNAL: every viewer's chip row refetches through its own
-       * authed loader; the payload carries no pin data.
+       * authed loader; the payload carries no pin data. Exactly one author
+       * id is set: a member pinned (`byUserId`) or the room's assistant did
+       * through the room pin tools (`byAssistantId`, migration 421).
        */
       kind: 'pins_changed'
       sessionId: string
-      payload: { byUserId: string }
+      payload: { byUserId?: string; byAssistantId?: string }
     }
   | {
       kind: 'presence'

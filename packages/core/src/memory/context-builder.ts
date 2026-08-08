@@ -90,6 +90,25 @@ export type VoiceRuleEntry = {
   tags?: string[]
 }
 
+/**
+ * The `## Your Name` self-reference override. Layer 1 statically says
+ * "You are Use Brian" (the prompt-cache prefix never varies per
+ * assistant), so a user-assigned display name is injected as a later
+ * prompt section instead. Returns `null` when the name is unset, blank,
+ * or the default "My Assistant" - those assistants present as Use Brian.
+ *
+ * Exported standalone because the override is assistant CONFIGURATION,
+ * not memory: surfaces that build no memory context at all (Tier-2
+ * public turns - chat links, anonymous keyed-API visitors) must still
+ * inject it, or the model introduces itself as "Use Brian" to exactly
+ * the strangers the custom name was meant for.
+ */
+export function buildAssistantNameSection(assistantName?: string | null): string | null {
+  const displayName = assistantName?.trim()
+  if (!displayName || displayName === 'My Assistant') return null
+  return `## Your Name\nThe user has named you "${displayName}". When the user asks who you are or what your name is, answer as "${displayName}". You remain Use Brian under the hood — same memory, same capabilities — but "${displayName}" is how you present yourself.`
+}
+
 export function buildMemoryContext(params: {
   soul?: string | null
   identityMemories: IdentityMemory[]
@@ -159,11 +178,9 @@ export function buildMemoryContext(params: {
   const sections: string[] = []
 
   // Assistant display name — overrides Layer 1's default "Use Brian" self-reference.
-  const displayName = params.assistantName?.trim()
-  if (displayName && displayName !== 'My Assistant') {
-    sections.push(
-      `## Your Name\nThe user has named you "${displayName}". When the user asks who you are or what your name is, answer as "${displayName}". You remain Use Brian under the hood — same memory, same capabilities — but "${displayName}" is how you present yourself.`,
-    )
+  const nameSection = buildAssistantNameSection(params.assistantName)
+  if (nameSection) {
+    sections.push(nameSection)
   }
 
   // SOUL

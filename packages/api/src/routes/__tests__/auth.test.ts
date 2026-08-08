@@ -117,7 +117,7 @@ describe('[COMP:api/auth] POST /auth/telegram-link-update', () => {
       // getUserAssistant resolves via workspace_members; note owner_user_id is
       // not selected at all, and this row has no owner.
       .mockResolvedValueOnce({
-        rows: [{ id: ASSISTANT_B, name: 'DD', workspaceId: WORKSPACE_A, telegramModelAlias: 'pro' }],
+        rows: [{ id: ASSISTANT_B, name: 'DD', workspaceId: WORKSPACE_A }],
       })
       .mockResolvedValueOnce({
         rows: [{ provider_id: '880211324', provider_metadata: { chatId: '880211324' } }],

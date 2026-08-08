@@ -4,8 +4,10 @@
  * LinkedIn ZIP archives use the dedicated lossless /api/imports/linkedin queue.
  *
  * Both paths preserve the original bytes. Only `/ingest` decomposes content
- * into entities / memories / tasks (Pipeline B). `/store` is the reversible
- * staging boundary used by Pins before the user has supplied a purpose.
+ * into entities / memories / tasks (Pipeline B). `/store` is the durable
+ * staging boundary Pins uses for the upload itself; a file dropped on Pins is
+ * then queued through `reingestStoredFile` (`POST /api/files/:fileId/ingest`)
+ * because pinning is consent to save it to the brain (2026-08-07).
  *
  * Specs: docs/architecture/features/files.md -> "Direct ingest" and
  * docs/architecture/brain/linkedin-import.md.

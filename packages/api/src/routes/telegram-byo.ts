@@ -37,7 +37,7 @@ import { resolveAssistantForSurface, resolveRoutingForSurface, getChannelForWebh
 import { mergeShadowUser, type LinkedAccountStore } from '../db/linked-accounts.js'
 import type { LinkCodeStore } from '../db/link-codes.js'
 import { withChatLock } from '../db/chat-lock.js'
-import { buildDocumentFiledReply, buildOversizeDocReply, classifyMedia } from '../ingest/channel-media-intake.js'
+import { buildAlbumFiledReply, buildDocumentFiledReply, buildOversizeDocReply, classifyMedia, summarizeAlbumIntake } from '../ingest/channel-media-intake.js'
 import type { ConfirmationDecision, ConfirmationResolver, ContentBlock } from '@use-brian/core'
 import type { LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, McpSettingsStore, KnowledgeStoreInterface, GDriveFilesStore, TokenUsage } from '@use-brian/core'
 import { transcribeFirstAudio, describeTranscriptionFailure, composeVoiceTurnText, TRANSCRIPTION_DISABLED_REASON, sanitize as sanitizeAnalytics, type MediaBackend } from '@use-brian/core'
@@ -273,8 +273,8 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
     text?: string
     media_group_id?: string
     photo?: Array<{ file_id: string }>
-    document?: { file_id: string; mime_type?: string; file_name?: string }
-    video?: { file_id: string; mime_type?: string }
+    document?: { file_id: string; mime_type?: string; file_name?: string; file_size?: number }
+    video?: { file_id: string; mime_type?: string; file_size?: number }
   }
   type MediaGroupEntry = {
     rawMessages: RawTelegramGroupMessage[]
@@ -371,7 +371,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
     // Per-routing model alias overrides the per-assistant default
     // (migration 197). Re-resolved per-message below if a surface-specific
     // routing row matches.
-    assistant.telegramModelAlias = defaultRouting.modelAlias
+    assistant.defaultModelAlias = defaultRouting.modelAlias
     // Post-089 ownership XOR: team assistants have NULL owner_user_id and
     // team access flows through teams.owner_user_id. `billingPartyForAssistant`
     // is the single source of truth for "the authoritative user behind this
@@ -829,7 +829,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       // row — even when the routed assistant is the same as the bound one,
       // a per-surface row may override the channel-default tier.
       if (routedRouting) {
-        routedAssistant.telegramModelAlias = routedRouting.modelAlias
+        routedAssistant.defaultModelAlias = routedRouting.modelAlias
       }
       const routedAssistantId = routedAssistant.id
       const routedOwnerId = routedAssistant.id === boundAssistant.id
@@ -981,11 +981,27 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
         // Synthesize a merged IncomingMessage from the accumulated raw
         // messages. The first message carries the caption (Telegram
         // convention); every message contributes one media file.
-        const first = rawMessages[0]
-        const base = adapter.parseIncoming({ message: { ...first, media_group_id: undefined } })
-        if (!base) return
+        // Addressing can ride ANY member's caption, not just the first —
+        // Telegram attaches it to whichever item the user typed it under.
+        // Prefer an addressed member so one captioned file isn't demoted to
+        // capture-only by its uncaptioned neighbours.
+        const parsedMembers = rawMessages
+          .map((m) => adapter.parseIncoming({ message: { ...m, media_group_id: undefined } }))
+          .filter((p): p is IncomingMessage => p !== null)
+        const base = parsedMembers.find((p) => !p.captureOnly) ?? parsedMembers[0]
+        // Reachable only for an album with no parsable member at all, now that
+        // unaddressed media returns a capture-only message instead of null.
+        // This line silently swallowed every uncaptioned album posted in a
+        // group until 2026-08-07 — four .md files in, nothing out, nothing
+        // logged. Never return from here without saying so.
+        if (!base) {
+          console.warn(
+            `[telegram-byo] media group ${groupId} produced no parsable message from ${rawMessages.length} member(s); dropping`,
+          )
+          return
+        }
         const files = rawMessages
-          .map((m): { url: string; mimeType: string; name: string } | null => {
+          .map((m): { url: string; mimeType: string; name: string; sizeBytes?: number } | null => {
             if (m.photo?.length) {
               return {
                 url: m.photo[m.photo.length - 1].file_id,
@@ -998,6 +1014,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
                 url: m.document.file_id,
                 mimeType: m.document.mime_type ?? 'application/octet-stream',
                 name: m.document.file_name ?? `document_${m.message_id}`,
+                ...(m.document.file_size ? { sizeBytes: m.document.file_size } : {}),
               }
             }
             if (m.video) {
@@ -1005,19 +1022,24 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
                 url: m.video.file_id,
                 mimeType: m.video.mime_type ?? 'video/mp4',
                 name: `video_${m.message_id}.mp4`,
+                ...(m.video.file_size ? { sizeBytes: m.video.file_size } : {}),
               }
             }
             return null
           })
-          .filter((f): f is { url: string; mimeType: string; name: string } => f !== null)
+          .filter((f): f is { url: string; mimeType: string; name: string; sizeBytes?: number } => f !== null)
         const merged: IncomingMessage = {
           ...base,
           // Multi-file shape supersedes the single mediaUrl/mediaType — the
-          // processMessage media branch checks `files` first.
+          // processMessage media branch checks `files` first. Clearing
+          // mediaSizeBytes too keeps the over-limit guard from judging the
+          // whole album by whichever member happened to be parsed as base;
+          // per-file sizes ride on `files[].sizeBytes`.
           mediaUrl: undefined,
           mediaType: undefined,
           mediaMime: undefined,
           mediaName: undefined,
+          mediaSizeBytes: undefined,
           files,
         }
         handleIncoming(merged).catch((err) => {
@@ -1046,7 +1068,7 @@ type ProcessMessageParams = {
   backgroundModel?: string
   adapter: ReturnType<typeof createTelegramAdapter>
   incoming: IncomingMessage
-  assistant: { id: string; name: string; ownerUserId: string; telegramModelAlias: string; workspaceId: string | null; systemPrompt: string | null; clearance: 'public' | 'internal' | 'confidential'; kind: 'primary' | 'standard' | 'app' }
+  assistant: { id: string; name: string; ownerUserId: string; defaultModelAlias: string; workspaceId: string | null; systemPrompt: string | null; clearance: 'public' | 'internal' | 'confidential'; kind: 'primary' | 'standard' | 'app' }
   channelUserId: string
   ownerId: string
   isIdentified: boolean
@@ -1120,6 +1142,28 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     return
   }
 
+  // The album equivalent. A merged album clears `mediaSizeBytes` (its members
+  // have individual sizes), so the guard above cannot see an oversized member.
+  // Drop only the over-limit members, keep the rest of the album, and SAY which
+  // ones were skipped — an album that quietly loses its biggest file is the
+  // same unreportable shape as a file that never arrived.
+  if (incoming.files?.length) {
+    const overLimit = incoming.files.filter(
+      (f) => f.sizeBytes !== undefined && f.sizeBytes > TELEGRAM_BOT_DOWNLOAD_LIMIT_BYTES,
+    )
+    if (overLimit.length > 0) {
+      incoming.files = incoming.files.filter((f) => !overLimit.includes(f))
+      const limitMb = Math.floor(TELEGRAM_BOT_DOWNLOAD_LIMIT_BYTES / (1024 * 1024))
+      const names = overLimit.map((f) => f.name).join(', ')
+      const plural = overLimit.length > 1
+      await adapter.sendMessage(incoming.channelId, {
+        text: `${names} ${plural ? 'are' : 'is'} over the ${limitMb} MB limit I can pull through Telegram, so I skipped ${plural ? 'them' : 'it'}. Upload ${plural ? 'them' : 'it'} in the web app at ${params.appUrl ?? 'https://app.sidan.ai'} and I'll process the whole thing.`,
+      }).catch((err) => {
+        console.error('[telegram-byo] album over-limit notice failed:', err)
+      })
+    }
+  }
+
   // ── Channel-media intake (large-content-artifacts §Phase 0.3) ──
   // Route documents/video through universal intake. In OSS, where the hosted
   // billing-aware inline hook is absent, audio falls through here as well and
@@ -1143,6 +1187,31 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     }
   }
 
+  /**
+   * One reply for a whole album. Pre-flight confirmations and oversize
+   * handoffs still go out per member (each names its own numbers, and a
+   * confirmation is a question that cannot be merged), but the filed/failed
+   * tally collapses into a single message.
+   */
+  const replyForAlbum = async (
+    results: Array<Awaited<ReturnType<NonNullable<TelegramByoRouteOptions['ingestChannelMediaRef']>>>>,
+  ) => {
+    const summary = summarizeAlbumIntake(results)
+    for (const message of summary.confirmations) {
+      await adapter.sendMessage(incoming.channelId, { text: message })
+    }
+    for (const item of summary.oversize) {
+      await adapter.sendMessage(incoming.channelId, {
+        text: buildOversizeDocReply(params.appUrl ?? 'https://app.sidan.ai', item.limitMb, item.sizeMb),
+      })
+    }
+    if (summary.filed > 0 || summary.failed > 0) {
+      await adapter.sendMessage(incoming.channelId, {
+        text: buildAlbumFiledReply(summary.filed, summary.filedNames, summary.failed),
+      })
+    }
+  }
+
   if (
     incoming.mediaUrl &&
     shouldUseUniversalTelegramIntake(incoming.mediaType, Boolean(params.recordingIngest)) &&
@@ -1151,7 +1220,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
   ) {
     const ingest = params.ingestChannelMediaRef
     const workspaceId = assistant.workspaceId
-    adapter
+    const singleIngest = adapter
       .resolveFileUrl(incoming.mediaUrl)
       .then((url) =>
         ingest({
@@ -1168,30 +1237,66 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
       )
       .then(handleUniversalResult)
       .catch((err) => console.error('[telegram-byo] media→brain ingest failed:', err))
+    // Fire-and-forget is safe when a full turn follows, but a capture-only
+    // message returns immediately — await so the reply is sent before the
+    // request ends.
+    if (incoming.captureOnly) await singleIngest
   }
 
   // Albums use `incoming.files` rather than the single-media fields. Persist
   // every document/video there as well as supplying it to the immediate turn.
+  // Results are folded into ONE reply (`summarizeAlbumIntake`) rather than one
+  // per file, and a member that throws is counted as `failed` rather than
+  // vanishing — a partially-filed album must never read as a whole one.
   if (incoming.files?.length && params.ingestChannelMediaRef && assistant.workspaceId) {
     const ingest = params.ingestChannelMediaRef
     const workspaceId = assistant.workspaceId
-    for (const file of incoming.files) {
-      if (classifyMedia(file.mimeType, file.name) === 'unsupported') continue
-      adapter.resolveFileUrl(file.url)
-        .then((url) => ingest({
-          source: { url },
-          mime: file.mimeType,
-          fileName: file.name,
-          sizeBytes: null,
-          sender: { id: channelUserId, name: null },
-          conversationId: incoming.channelId,
-          workspaceId,
-          assistantId: assistant.id,
-          actingUserId: ownerId,
-        }))
-        .then(handleUniversalResult)
-        .catch((err) => console.error('[telegram-byo] album media→brain ingest failed:', err))
+    const ingestable = incoming.files.filter(
+      (f) => classifyMedia(f.mimeType, f.name) !== 'unsupported',
+    )
+    const albumIngest = Promise.all(
+      ingestable.map((file) =>
+        adapter.resolveFileUrl(file.url)
+          .then((url) => ingest({
+            source: { url },
+            mime: file.mimeType,
+            fileName: file.name,
+            sizeBytes: file.sizeBytes ?? null,
+            sender: { id: channelUserId, name: null },
+            conversationId: incoming.channelId,
+            workspaceId,
+            assistantId: assistant.id,
+            actingUserId: ownerId,
+          }))
+          .catch((err) => {
+            console.error('[telegram-byo] album media→brain ingest failed:', err)
+            return null
+          }),
+      ),
+    ).then((results) => replyForAlbum(results))
+      .catch((err) => console.error('[telegram-byo] album reply failed:', err))
+    // A capture-only turn returns immediately below, so its reply must be
+    // awaited here or the request ends before anything is sent.
+    if (incoming.captureOnly) await albumIngest
+  }
+
+  // ── Capture-only: media arrived in a group without addressing the bot ──
+  // The files are filed above; no turn runs and no conversational answer is
+  // produced. Returning here is what keeps an unaddressed drop from waking the
+  // model for every file shared between humans in a group.
+  // See docs/architecture/channels/adapter-pattern.md → "Unaddressed group media".
+  if (incoming.captureOnly) {
+    // If the intake seam is unwired there was nothing to file, and returning
+    // silently would recreate the exact drop this flag exists to end. Say so
+    // rather than letting an unconfigured deployment look like a working one.
+    if (!params.ingestChannelMediaRef || !assistant.workspaceId) {
+      console.warn(
+        `[telegram-byo] capture-only media in chat ${incoming.channelId} was not filed: ${
+          !params.ingestChannelMediaRef ? 'ingestChannelMediaRef is unwired' : 'assistant has no workspaceId'
+        }`,
+      )
     }
+    return
   }
 
   // Voice preflight — mirror the official telegram route. Transcribe the
@@ -1418,7 +1523,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     incomingChannelMessageId: incoming.messageId ?? null,
     archiveIncoming: incoming,
     archiveConnectorInstanceId: params.archiveConnectorInstanceId,
-    modelAlias: assistant.telegramModelAlias,
+    modelAlias: assistant.defaultModelAlias,
     adaptiveResearchEnabled: true,
     abortController: new AbortController(),
     provider: params.provider,

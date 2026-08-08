@@ -1,12 +1,14 @@
 // @vitest-environment jsdom
 /**
- * [COMP:app-web/recording-chrome] — the "Link a recording" control (migration
- * 339), the empty-state affordance on a page with no recording.
+ * [COMP:app-web/recording-chrome] — the "Link a recording" picker (migration
+ * 339), mounted ON DEMAND by the doc shell after the page ⋯ menu's
+ * "Link a recording" item is picked (no always-visible empty-state button —
+ * most doc pages are not recording pages).
  *
- * What matters: it fetches the workspace recordings LAZILY (most doc pages are
- * not recording pages, so an eager fetch on every page open is pure waste), and
- * a pick links via the SDK and hands the updated page metadata back so the doc
- * shell can mount the chrome.
+ * What matters: it fetches the workspace recordings on mount (lazy relative to
+ * a page open — the component only exists once the user asked), a pick links
+ * via the SDK and hands the updated page metadata back so the doc shell can
+ * mount the chrome, and Cancel dismisses without linking.
  */
 
 import { describe, expect, it, afterEach, beforeEach, vi } from "vitest";
@@ -65,9 +67,11 @@ import { RecordingLinkControl } from "../recording-link-control";
 let root: Root | null = null;
 let container: HTMLElement | null = null;
 let linked: unknown = null;
+let dismissed = false;
 
 async function mount() {
   linked = null;
+  dismissed = false;
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -78,6 +82,9 @@ async function mount() {
         workspaceId="ws-1"
         onLinked={(m) => {
           linked = m;
+        }}
+        onDismiss={() => {
+          dismissed = true;
         }}
       />,
     );
@@ -107,24 +114,14 @@ afterEach(() => {
 });
 
 describe("[COMP:app-web/recording-chrome] recording link control", () => {
-  it("does not fetch recordings until the control is expanded", async () => {
+  it("fetches the workspace recordings on mount (the shell mounts it on demand)", async () => {
     await mount();
-    // Most doc pages never touch this — an eager fetch on every page open would
-    // hit the recordings API for nothing.
-    expect(listRecordings).not.toHaveBeenCalled();
-    expect(container?.querySelector('[data-testid="picker"]')).toBeFalsy();
-  });
-
-  it("fetches the workspace recordings on expand", async () => {
-    await mount();
-    await act(async () => click("Link a recording")!.click());
     expect(listRecordings).toHaveBeenCalledWith("ws-1", { limit: 100 });
     expect(container?.querySelector('[data-testid="picker"]')).toBeTruthy();
   });
 
   it("links the picked recording and hands the updated metadata back", async () => {
     await mount();
-    await act(async () => click("Link a recording")!.click());
     const picker = container!.querySelector('[data-testid="picker"]') as HTMLSelectElement;
     await act(async () => {
       picker.value = "rec-1";
@@ -133,5 +130,12 @@ describe("[COMP:app-web/recording-chrome] recording link control", () => {
     expect(setPageLinkedRecording).toHaveBeenCalledWith("pg-1", "rec-1");
     // onLinked drives the chrome in — without it the user links and sees nothing.
     expect(linked).toEqual({ id: "pg-1", linkedRecordingId: "rec-1" });
+  });
+
+  it("Cancel dismisses without linking", async () => {
+    await mount();
+    await act(async () => click("Cancel")!.click());
+    expect(dismissed).toBe(true);
+    expect(setPageLinkedRecording).not.toHaveBeenCalled();
   });
 });

@@ -142,7 +142,7 @@ export function createChatLinkStore(): ChatLinkStore {
            a.workspace_id AS "workspaceId",
            a.name AS "assistantName",
            COALESCE(a.icon_seed, 0) AS "assistantIconSeed",
-           a.bio AS "assistantBio"
+           COALESCE(NULLIF(btrim(a.charter->>'mission'), ''), a.bio) AS "assistantBio"
          FROM assistant_chat_links l
          JOIN assistants a ON a.id = l.assistant_id
          LEFT JOIN workspaces w ON w.id = a.workspace_id

@@ -1,7 +1,7 @@
 export type { Tool, ToolContext, ToolResult, ToolResultMeta } from './types.js'
 export { buildTool } from './types.js'
 export { filterToolsByCapabilities, isAutonomousToolContext, INTERACTIVE_CHANNEL_TYPES } from './capability-gate.js'
-export { createBaseTools, urlReaderTool, webSearchTool, askQuestionTool, createTaskTool, updateTaskTool, getTimeTool, _getSessionTasksSize } from './base/index.js'
+export { createBaseTools, createEngineBaseTools, urlReaderTool, webSearchTool, askQuestionTool, createTaskTool, updateTaskTool, getTimeTool, _getSessionTasksSize } from './base/index.js'
 export { createGoogleCalendarTools } from './base/google-calendar.js'
 export type {
   GoogleCalendarApi,

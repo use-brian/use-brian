@@ -75,6 +75,7 @@ describe('[COMP:chat-ui/chat-composer] Enter intent', () => {
     hasText: true,
     allowEmptySend: false,
     canSteer: false,
+    canAsk: false,
   }
 
   it('plain Enter sends', () => {
@@ -96,6 +97,33 @@ describe('[COMP:chat-ui/chat-composer] Enter intent', () => {
 
   it('Cmd+Enter falls back to an ordinary send where steering is unsupported', () => {
     expect(resolveEnterIntent({ ...base, metaKey: true })).toBe('send')
+  })
+
+  it('Cmd/Ctrl+Enter asks where the host wired one (the room composer)', () => {
+    expect(resolveEnterIntent({ ...base, metaKey: true, canAsk: true })).toBe('ask')
+    expect(resolveEnterIntent({ ...base, ctrlKey: true, canAsk: true })).toBe('ask')
+    // Unmodified Enter in a room is still the durable post, never the ask.
+    expect(resolveEnterIntent({ ...base, canAsk: true })).toBe('send')
+  })
+
+  it('steer wins over ask when a host wires both', () => {
+    // No host does today (a steer is mid-turn outside a room, an ask is inside
+    // one) — but a dropped mid-turn steer is the worse failure of the two.
+    expect(
+      resolveEnterIntent({ ...base, metaKey: true, canSteer: true, canAsk: true }),
+    ).toBe('steer')
+  })
+
+  it('an ask obeys the same disable and empty-draft gates as a send', () => {
+    expect(
+      resolveEnterIntent({ ...base, metaKey: true, canAsk: true, sendDisabled: true }),
+    ).toBe('blocked')
+    expect(
+      resolveEnterIntent({ ...base, metaKey: true, canAsk: true, hasText: false }),
+    ).toBe('blocked')
+    expect(
+      resolveEnterIntent({ ...base, shiftKey: true, metaKey: true, canAsk: true }),
+    ).toBe('newline')
   })
 
   it('respects the disable gates for both modes', () => {

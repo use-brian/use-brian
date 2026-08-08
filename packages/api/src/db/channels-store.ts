@@ -30,6 +30,7 @@
  * Component tag: [COMP:channels/store].
  */
 
+import type { PoolClient } from 'pg'
 import { getPool, query, queryWithRLS } from './client.js'
 
 // ── Types ──────────────────────────────────────────────────────
@@ -59,10 +60,11 @@ export type ChannelAssistant = {
   /** Slack channel / Telegram chat / WhatsApp chat ID. NULL = channel default. */
   externalSurfaceId: string | null
   /**
-   * Per-routing model tier (migration 197). The webhook routes read this
-   * for the resolved routing row instead of the per-assistant
-   * `assistants.*_model_alias` column. Defaults to 'pro' for fresh rows
-   * (migration 234); backfilled from the assistant's platform-specific default.
+   * Per-routing model tier (migration 197) and the authoritative tier for
+   * every channel that has a routing row — the webhook routes overwrite the
+   * assistant's `default_model_alias` with this before the turn runs.
+   * Defaults to 'pro' for fresh rows (migration 234); seeded from the
+   * assistant's default tier at attach time (migration 416).
    */
   modelAlias: ChannelModelAlias
   createdAt: Date
@@ -97,27 +99,25 @@ export const CHANNEL_CAPABILITIES: Record<ChannelType, ChannelCapability[]> = {
 }
 
 /**
- * The `assistants` column holding a channel's default model tier, or null for
- * channels with no per-platform column (Discord — migration 258 added the
- * channel type but no `discord_model_alias`, so it seeds from the 'pro' default
- * like every other fresh routing row).
+ * Seed tier for a freshly attached routing row: the assistant's one
+ * `default_model_alias` (migration 416), which replaced the per-platform
+ * `{slack,telegram,whatsapp}_model_alias` trio. Every channel type now seeds
+ * the same way — Slack and Telegram stop being special-cased, matching what
+ * Discord/email/Teams/WeChat already did.
+ *
+ * Returns 'pro' (the column default, migration 234) when the assistant row has
+ * vanished mid-connect; the runtime resolver clamps it down for plans that
+ * don't allow Pro, so an over-generous seed is safe.
  */
-function modelAliasColumnFor(channelType: ChannelType): string | null {
-  switch (channelType) {
-    case 'slack':
-      return 'slack_model_alias'
-    case 'telegram':
-      return 'telegram_model_alias'
-    case 'whatsapp':
-      return 'whatsapp_model_alias'
-    case 'discord':
-    case 'email':
-    case 'msteams':
-    case 'wechat':
-      // No per-platform default column — fresh routing rows seed from 'pro'
-      // (migration 234), like Discord/email.
-      return null
-  }
+async function seedAliasForAssistant(
+  client: PoolClient,
+  assistantId: string,
+): Promise<ChannelModelAlias> {
+  const row = await client.query<{ alias: string | null }>(
+    `SELECT default_model_alias AS alias FROM assistants WHERE id = $1`,
+    [assistantId],
+  )
+  return (row.rows[0]?.alias as ChannelModelAlias | undefined) ?? 'pro'
 }
 
 // ── Column aliases ─────────────────────────────────────────────
@@ -501,21 +501,11 @@ export async function findOrCreateChannelForConnect(params: {
     )
     const channelId = created.rows[0].id
 
-    // Seed the routing row's model_alias from the assistant's
-    // platform-specific default (Settings tab → Channel Models) so the
-    // existing "set it once on the assistant" UX keeps working on first
-    // connect. The per-routing picker only kicks in when overridden later.
-    const aliasCol = modelAliasColumnFor(params.channelType)
-    const aliasRow = aliasCol
-      ? await client.query<{ alias: string | null }>(
-          `SELECT ${aliasCol} AS alias FROM assistants WHERE id = $1`,
-          [params.assistantId],
-        )
-      : null
-    // Default channel tier is Pro (migration 234); the runtime resolver
-    // clamps it down for plans that don't allow Pro, so this is safe.
-    const seeded: ChannelModelAlias =
-      (aliasRow?.rows[0]?.alias as ChannelModelAlias) ?? 'pro'
+    // Seed the routing row's model_alias from the assistant's default tier
+    // (Settings tab → Default model tier) so the "set it once on the
+    // assistant" UX keeps working on first connect. From here on the routing
+    // row is authoritative — Studio → Channels edits it per channel.
+    const seeded = await seedAliasForAssistant(client, params.assistantId)
 
     await client.query(
       `INSERT INTO channel_assistants (channel_id, assistant_id, external_surface_id, model_alias)
@@ -570,8 +560,8 @@ export async function findOrCreateChannelForWorkspaceConnect(params: {
    * If set, also create a default `channel_assistants` row pointing at this
    * assistant. Skipped for re-installs (existing routing wins). The trigger
    * rejects an assistant from a different workspace. The seeded row's
-   * `model_alias` is read off the assistant's platform-specific default
-   * (Settings tab → Channel Models) — migration 197.
+   * `model_alias` is seeded from the assistant's `default_model_alias`
+   * (Settings tab → Default model tier) — migrations 197 + 416.
    */
   defaultAssistantId?: string | null
   /**
@@ -629,22 +619,11 @@ export async function findOrCreateChannelForWorkspaceConnect(params: {
     const channelId = created.rows[0].id
 
     if (params.defaultAssistantId) {
-      // Seed the routing row's model_alias from the assistant's
-      // platform-specific default (Settings tab → Channel Models). Keeps
-      // the existing "set it once on the assistant" UX working for a fresh
-      // connect — the per-routing picker only kicks in when the operator
-      // overrides it later.
-      const aliasCol = modelAliasColumnFor(params.channelType)
-      const aliasRow = aliasCol
-        ? await client.query<{ alias: string | null }>(
-            `SELECT ${aliasCol} AS alias FROM assistants WHERE id = $1`,
-            [params.defaultAssistantId],
-          )
-        : null
-      // Default channel tier is Pro (migration 234); the runtime resolver
-      // clamps it down for plans that don't allow Pro, so this is safe.
-      const seeded: ChannelModelAlias =
-        (aliasRow?.rows[0]?.alias as ChannelModelAlias) ?? 'pro'
+      // Seed the routing row's model_alias from the assistant's default tier
+      // (Settings tab → Default model tier). Keeps the "set it once on the
+      // assistant" UX working for a fresh connect; the per-routing picker in
+      // Studio → Channels owns it from then on.
+      const seeded = await seedAliasForAssistant(client, params.defaultAssistantId)
       await client.query(
         `INSERT INTO channel_assistants (channel_id, assistant_id, external_surface_id, model_alias)
          VALUES ($1, $2, NULL, $3)`,

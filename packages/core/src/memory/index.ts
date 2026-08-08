@@ -9,6 +9,7 @@ export type {
   MemoryRecallSink,
 } from './recall-buffer.js'
 export {
+  buildAssistantNameSection,
   buildMemoryContext,
   voicePlatformFromDraftTitle,
   isVoicePlatformTag,

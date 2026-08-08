@@ -18,6 +18,7 @@ let container: HTMLElement | null = null;
 
 async function mount(props: {
   onSend: () => void;
+  onAsk?: () => void;
   onKeyDown?: (event: ReactKeyboardEvent<HTMLTextAreaElement>) => void;
 }) {
   container = document.createElement("div");
@@ -29,6 +30,7 @@ async function mount(props: {
         value="@Br"
         onChange={() => {}}
         onSend={props.onSend}
+        onAsk={props.onAsk}
         onKeyDown={props.onKeyDown}
       />,
     );
@@ -38,13 +40,17 @@ async function mount(props: {
   return textarea;
 }
 
-async function pressEnter(textarea: HTMLTextAreaElement) {
+async function pressEnter(
+  textarea: HTMLTextAreaElement,
+  modifiers: { metaKey?: boolean; ctrlKey?: boolean } = {},
+) {
   await act(async () => {
     textarea.dispatchEvent(
       new KeyboardEvent("keydown", {
         key: "Enter",
         bubbles: true,
         cancelable: true,
+        ...modifiers,
       }),
     );
   });
@@ -75,6 +81,34 @@ describe("[COMP:chat-ui/chat-composer] host keyboard interception", () => {
     const textarea = await mount({ onSend });
 
     await pressEnter(textarea);
+
+    expect(onSend).toHaveBeenCalledOnce();
+  });
+});
+
+describe("[COMP:chat-ui/chat-composer] Accel+Enter asks in a room", () => {
+  it.each([
+    ["Cmd", { metaKey: true }],
+    ["Ctrl", { ctrlKey: true }],
+  ] as const)("routes %s+Enter to onAsk, leaving plain Enter as the post", async (_name, modifier) => {
+    const onSend = vi.fn();
+    const onAsk = vi.fn();
+    const textarea = await mount({ onSend, onAsk });
+
+    await pressEnter(textarea, modifier);
+    expect(onAsk).toHaveBeenCalledOnce();
+    expect(onSend).not.toHaveBeenCalled();
+
+    await pressEnter(textarea);
+    expect(onSend).toHaveBeenCalledOnce();
+    expect(onAsk).toHaveBeenCalledOnce();
+  });
+
+  it("falls back to an ordinary send where the host wires no ask", async () => {
+    const onSend = vi.fn();
+    const textarea = await mount({ onSend });
+
+    await pressEnter(textarea, { metaKey: true });
 
     expect(onSend).toHaveBeenCalledOnce();
   });

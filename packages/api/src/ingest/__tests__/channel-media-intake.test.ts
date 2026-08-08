@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import {
   ingestChannelMedia,
   classifyMedia,
+  summarizeAlbumIntake,
+  buildAlbumFiledReply,
   type ChannelMediaRef,
   type ChannelMediaIntakeDeps,
 } from '../channel-media-intake.js'
@@ -272,5 +274,100 @@ describe('[COMP:brain/channel-media-intake] pre-flight confirm', () => {
     const res = await ingestChannelMedia(refWithConversation, deps)
     expect(res.status).toBe('queued')
     expect(deps.enqueueRecordingJob).toHaveBeenCalledOnce()
+  })
+})
+
+// ── Album folding ──────────────────────────────────────────────
+//
+// Cover for the 2026-08-07 album drop: four documents produced four separate
+// replies on the happy path, and a member that threw produced none at all, so
+// a partially-filed album was indistinguishable from a whole one.
+
+describe('[COMP:brain/channel-media-intake] summarizeAlbumIntake', () => {
+  const filed = (fileName: string) =>
+    ({ status: 'ingested', kind: 'document', episodeId: 'e1', fileName }) as const
+
+  it('folds an all-filed album into one tally with names', () => {
+    const s = summarizeAlbumIntake([filed('a.md'), filed('b.md'), filed('c.md'), filed('d.md')])
+    expect(s.filed).toBe(4)
+    expect(s.filedNames).toEqual(['a.md', 'b.md', 'c.md', 'd.md'])
+    expect(s.failed).toBe(0)
+  })
+
+  it('counts a thrown member as failed, never as quiet', () => {
+    const s = summarizeAlbumIntake([filed('a.md'), null, filed('c.md')])
+    expect(s.filed).toBe(2)
+    expect(s.failed).toBe(1)
+    expect(s.quiet).toBe(0)
+  })
+
+  it('keeps deliberately-silent arms out of the failure count', () => {
+    const s = summarizeAlbumIntake([
+      { status: 'skipped', kind: 'document', reason: 'empty' },
+      { status: 'queued', kind: 'audio_video', recordingId: 'r1', jobId: null },
+    ])
+    expect(s.quiet).toBe(2)
+    expect(s.failed).toBe(0)
+    expect(s.filed).toBe(0)
+  })
+
+  it('routes an oversized document to the handoff list rather than the failure count', () => {
+    const s = summarizeAlbumIntake([
+      { status: 'rejected', reason: 'doc_too_large', sizeMb: 40, limitMb: 25 },
+      { status: 'rejected', reason: 'quota' },
+    ])
+    expect(s.oversize).toEqual([{ sizeMb: 40, limitMb: 25 }])
+    expect(s.failed).toBe(1)
+  })
+
+  it('collects each pending confirmation verbatim', () => {
+    const s = summarizeAlbumIntake([
+      { status: 'pending_confirmation', kind: 'audio_video', recordingId: 'r1', durationSeconds: 6000, surchargeCredits: 12, message: 'Transcribe this 100-minute recording?' },
+    ])
+    expect(s.confirmations).toEqual(['Transcribe this 100-minute recording?'])
+  })
+
+  it('counts a filed member whose name is unknown', () => {
+    const s = summarizeAlbumIntake([
+      { status: 'ingested', kind: 'document', episodeId: 'e1', fileName: null },
+    ])
+    expect(s.filed).toBe(1)
+    expect(s.filedNames).toEqual([])
+  })
+})
+
+describe('[COMP:brain/channel-media-intake] buildAlbumFiledReply', () => {
+  it('names every file in a fully-filed album', () => {
+    const reply = buildAlbumFiledReply(4, ['a.md', 'b.md', 'c.md', 'd.md'], 0)
+    expect(reply).toContain('Saved 4 files')
+    expect(reply).toContain('a.md, b.md, c.md, d.md')
+    expect(reply).not.toContain("didn't go through")
+  })
+
+  it('reports a partial album instead of rounding it up to a whole one', () => {
+    const reply = buildAlbumFiledReply(3, ['a.md', 'b.md', 'c.md'], 1)
+    expect(reply).toContain('Saved 3 files')
+    expect(reply).toContain('1 other file')
+    expect(reply).toContain("didn't go through")
+  })
+
+  it('says nothing landed when every member failed', () => {
+    expect(buildAlbumFiledReply(0, [], 4)).toBe(
+      `I couldn't save those 4 files. Please try sending them again.`,
+    )
+    expect(buildAlbumFiledReply(0, [], 1)).toBe(
+      `I couldn't save that file. Please try sending it again.`,
+    )
+  })
+
+  it('uses singular phrasing for a one-file album', () => {
+    const reply = buildAlbumFiledReply(1, ['a.md'], 0)
+    expect(reply).toContain('Saved 1 file')
+    expect(reply).toContain('ask me anything about it')
+  })
+
+  it('never uses an em dash in user-facing copy', () => {
+    expect(buildAlbumFiledReply(3, ['a.md'], 2)).not.toContain('—')
+    expect(buildAlbumFiledReply(0, [], 2)).not.toContain('—')
   })
 })

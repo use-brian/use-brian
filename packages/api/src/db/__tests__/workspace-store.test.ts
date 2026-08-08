@@ -79,13 +79,13 @@ describe('[COMP:api/workspace-store] createWorkspaceStore', () => {
       expect(teamspaceInsertSql).toContain("'General'")
       expect(teamspaceInsertSql).toContain('INSERT INTO teamspace_members')
 
-      // Primary assistant — kind='primary', owner_user_id NULL, named "<workspace> Primary Assistant"
+      // Primary assistant — kind='primary', owner_user_id NULL, named after the workspace
       const assistantInsertSql = mockClient.query.mock.calls[4][0] as string
       const assistantInsertArgs = mockClient.query.mock.calls[4][1] as unknown[]
       expect(assistantInsertSql).toContain('INSERT INTO assistants')
       expect(assistantInsertSql).toContain("'primary'")
       expect(assistantInsertSql).toContain('NULL')
-      expect(assistantInsertArgs).toEqual(['Eng Primary Assistant', 't_1'])
+      expect(assistantInsertArgs).toEqual(['Eng', 't_1'])
 
       // §17 Tasks/CRM default-on capability grants
       const capsInsertSql = mockClient.query.mock.calls[5][0] as string

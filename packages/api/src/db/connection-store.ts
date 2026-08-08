@@ -56,7 +56,7 @@ const CONNECTION_COLUMNS_WITH_DETAILS = `
   ac.updated_at AS "updatedAt",
   following_a.name AS "followingAssistantName",
   following_u.handle AS "followingOwnerHandle",
-  following_a.bio AS "followingBio",
+  COALESCE(NULLIF(btrim(following_a.charter->>'mission'), ''), following_a.bio) AS "followingBio",
   following_a.icon_seed AS "followingIconSeed"
 ` as const
 

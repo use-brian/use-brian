@@ -338,11 +338,14 @@ describe("[COMP:app-web/tasks-surface] current-filter select all", () => {
     expect(dialogs.promptDialog).toHaveBeenCalledWith({
       title: "Delete tasks and teach Brian",
       description:
-        "Tell Brian why these 2 tasks should not exist. They will be deleted, and each task will add its own narrow active rule.",
+        "Tell Brian why these 2 tasks should not exist. They will be deleted, and each task will add its own narrow active rule. Leave it blank to just delete them.",
       placeholder:
         "Example: Discussion about an existing task is context, not a new commitment.",
       confirmLabel: "Delete and add rules",
+      emptyConfirmLabel: "Delete 2 tasks",
       cancelLabel: "Cancel",
+      multiline: true,
+      allowEmpty: true,
     });
     expect(brainApi.deleteBrainRow).toHaveBeenCalledTimes(2);
     for (const id of ["task-unassigned", "task-assigned"]) {
@@ -391,6 +394,64 @@ describe("[COMP:app-web/tasks-surface] current-filter select all", () => {
       create_rule: true,
     });
     expect(brainApi.deleteBrainRow).not.toHaveBeenCalled();
+  });
+
+  it("deletes without a tombstone or rule when the reason is left blank", async () => {
+    dialogs.promptDialog.mockResolvedValue("");
+    await renderSurface();
+
+    await act(async () => {
+      buttonNamed("Select all 2 matching").click();
+    });
+    await act(async () => {
+      buttonNamed("Delete").click();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(brainApi.deleteBrainRow).toHaveBeenCalledTimes(2);
+    for (const id of ["task-unassigned", "task-assigned"]) {
+      expect(brainApi.deleteBrainRow).toHaveBeenCalledWith(
+        "workspace-1",
+        "task",
+        id,
+        undefined,
+      );
+    }
+    expect(container!.textContent).not.toContain("Enter at least 3 characters.");
+  });
+
+  it("omits reason and create_rule on the server lane for a blank reason", async () => {
+    const manyRows = Array.from({ length: 51 }, (_, index) => ({
+      ...rows[0]!,
+      id: `task-${index}`,
+      title: `Task ${index}`,
+    }));
+    taskApi.fetchWorkspaceTasks.mockResolvedValue(manyRows);
+    taskApi.bulkTasks.mockImplementation(
+      async (_workspaceId: string, body: { ids: string[] }) => ({
+        ok: true,
+        results: body.ids.map((id) => ({ id, ok: true })),
+      }),
+    );
+    dialogs.promptDialog.mockResolvedValue("");
+    navigation.search = "view=board";
+    await renderSurface();
+
+    await act(async () => {
+      buttonNamed("Select all 51 matching").click();
+    });
+    await act(async () => {
+      buttonNamed("Delete").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(taskApi.bulkTasks).toHaveBeenCalledWith("workspace-1", {
+      action: "delete",
+      ids: manyRows.map((row) => row.id),
+    });
   });
 
   it("keeps the selection when a bulk-delete reason is too short", async () => {

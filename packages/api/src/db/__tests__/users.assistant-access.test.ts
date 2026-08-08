@@ -36,7 +36,6 @@ function row(over: Record<string, unknown> = {}) {
   return {
     id: ASSISTANT,
     name: 'DD',
-    telegramModelAlias: 'pro',
     workspaceId: 'w-1',
     systemPrompt: null,
     kind: 'primary',
