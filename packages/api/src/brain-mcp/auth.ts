@@ -47,6 +47,7 @@ import {
   type OAuthAuthorizationStore,
 } from '../db/oauth-authorization-store.js'
 import { parseBridgeToken } from '../home-apps/tokens.js'
+import { storeScopeRank, type AppStoreScope, type AppAgentScope } from '@use-brian/brian-app'
 
 export type BrainAuth = {
   /**
@@ -68,6 +69,16 @@ export type BrainAuth = {
   maxClearance: Sensitivity | null
   /** Which path resolved this principal. Useful for analytics + audit. */
   authKind: 'api_key' | 'oauth_token' | 'home_app'
+  /**
+   * Commerce-store reach for this principal (`authKind: 'home_app'` only).
+   * Absent/`'none'` everywhere else: API keys and OAuth tokens address the
+   * brain, and widening them to a merchant's live store is a separate
+   * decision nobody has made. Defaults to `'none'` so a caller that forgets
+   * to read it cannot accidentally hand out store tools.
+   */
+  storeScope: AppStoreScope
+  /** May this principal hand a task to the workspace assistant? Home apps only. */
+  agentScope: AppAgentScope
   /**
    * The viewer a custom Home app is acting for (`authKind: 'home_app'` only).
    * An app never acts as "the workspace" in the abstract — it acts inside a
@@ -96,7 +107,11 @@ export type BrainAuthOptions = {
       id: string
       workspaceId: string
       status: string
-      grantedScopes: { data: BrainKeyScope } | null
+      grantedScopes: {
+        data: BrainKeyScope
+        store?: AppStoreScope
+        agent?: AppAgentScope
+      } | null
       maxClearance: Sensitivity | null
     } | null>
   }
@@ -132,6 +147,8 @@ export async function authenticateBrainRequest(
       scope: row.scope,
       maxClearance: row.maxClearance,
       authKind: 'api_key',
+      storeScope: 'none',
+      agentScope: 'none',
     }
   }
 
@@ -157,6 +174,8 @@ export async function authenticateBrainRequest(
         // oauth_authorizations grows a per-grant override (follow-up).
         maxClearance: 'internal',
         authKind: 'oauth_token',
+        storeScope: 'none',
+        agentScope: 'none',
         actingUserId: row.userId,
       }
     }
@@ -179,12 +198,24 @@ export async function authenticateBrainRequest(
         app.grantedScopes.data === 'read_write' && parsed.payload.scope === 'read_write'
           ? 'read_write'
           : 'read'
+      // Same narrowing rule as `scope`, on its own axis. The grant row is the
+      // authority; the token's claim can only narrow it further, never widen.
+      // An older token with no claim resolves to 'none'.
+      const storeScope: AppStoreScope =
+        storeScopeRank(parsed.payload.store) < storeScopeRank(app.grantedScopes.store)
+          ? (parsed.payload.store ?? 'none')
+          : (app.grantedScopes.store ?? 'none')
       return {
         keyId: app.id,
         workspaceId: app.workspaceId,
         scope,
         maxClearance: app.maxClearance,
         authKind: 'home_app',
+        storeScope,
+        // Same narrowing shape as the others: the grant is the authority and
+        // an older token with no claim resolves to 'none'.
+        agentScope:
+          app.grantedScopes.agent === 'ask' && parsed.payload.agent === 'ask' ? 'ask' : 'none',
         actingUserId: parsed.payload.userId,
       }
     }

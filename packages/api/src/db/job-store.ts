@@ -233,26 +233,17 @@ export function createDbJobStore(): JobStore {
       return result.rows.map(rowToJob)
     },
 
-    async listTriggerJobsForWorkflowSystem(workflowId) {
-      // Scheduled-trigger rows only (the structural filter from
-      // scheduled-trigger.ts): wait wake-ups carry workflow_step_run_id,
-      // one-step reminders carry a delivery channel_type. System-level —
-      // callers authorize via the workspace-member-scoped workflow read.
-      const result = await query<JobRow>(
-        `SELECT ${JOB_SELECT} FROM scheduled_jobs
-           WHERE workflow_id = $1 AND channel_type = 'workflow' AND workflow_step_run_id IS NULL
-           ORDER BY created_at ASC`,
-        [workflowId],
-      )
-      return result.rows.map(rowToJob)
-    },
-
     async listFiringJobsForWorkflowSystem(workflowId) {
-      // EVERY firing row of the workflow, ANY channel — drops the
-      // `channel_type = 'workflow'` filter so a delivery-backed reminder's
-      // messaging/doc row is included. Still excludes wait wake-ups
-      // (workflow_step_run_id IS NULL). updateWorkflow uses this to reconcile a
-      // reminder reschedule to exactly one firing row.
+      // EVERY firing row of the workflow, ANY channel — no `channel_type`
+      // filter, so a delivery-backed reminder's messaging/doc row is included.
+      // Still excludes wait wake-ups (workflow_step_run_id IS NULL). Oldest
+      // first: reconcilers keep row [0], which is the originally-authored one
+      // holding the user's delivery target.
+      //
+      // Do NOT reintroduce a `channel_type = 'workflow'` variant. That filter
+      // is what let a rescheduled Telegram reminder mint a second firing row
+      // and deliver two identical daily summaries (2026-08-08); graded by
+      // `pnpm check` (invariants/workflow-firing-row-reconcile).
       const result = await query<JobRow>(
         `SELECT ${JOB_SELECT} FROM scheduled_jobs
            WHERE workflow_id = $1 AND workflow_step_run_id IS NULL

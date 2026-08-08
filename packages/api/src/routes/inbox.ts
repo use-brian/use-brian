@@ -5,10 +5,15 @@
  *
  *   GET  /workspaces/:workspaceId/inbox          — the merged payload:
  *        `pending` (derived: open threads you started whose latest comment is
- *        the assistant's) + `mentions` (recorded `doc_notifications` rows)
- *        + counts for the sidebar badge.
+ *        the assistant's) + `mentions` (UNREAD `doc_notifications` rows)
+ *        + counts for the sidebar badge. Both lanes are bounded by the
+ *        workspace retention window (migration 426).
  *   POST /workspaces/:workspaceId/inbox/read     — mark mentions read (all, or
- *        a given subset of ids). Body: `{ ids?: string[] }`.
+ *        a given subset of ids). Body: `{ ids?: string[] }`. Marking read is
+ *        what removes a mention from the Inbox.
+ *   POST /workspaces/:workspaceId/inbox/dismiss  — the pending-reply
+ *        equivalent: record that this reader opened a derived row, which has
+ *        no `read_at` of its own. Body: `{ threadId }`.
  *   POST /workspaces/:workspaceId/doc-mentions — the mention emit the
  *        client calls when an `@person` node is inserted in a page body
  *        (`threadId` omitted) or committed in a comment (`threadId` set). Body:
@@ -28,10 +33,17 @@
 import { Router } from 'express'
 import { z } from 'zod'
 import type { DocNotificationsStore, CommentThreadStore, InboxPayload } from '@use-brian/core'
+import { resolveInboxCutoff } from '@use-brian/core'
 
 export type InboxRouteOptions = {
   commentThreadStore: CommentThreadStore
   docNotificationsStore: DocNotificationsStore
+  /**
+   * The workspace's Inbox retention window in days, or `null` to never prune.
+   * Injected as a port (rather than imported) so the routes stay store-shaped
+   * and a test can drive the window without a workspaces table.
+   */
+  getInboxRetentionDays: (workspaceId: string) => Promise<number | null>
 }
 
 function unauthorized(res: import('express').Response): void {
@@ -54,25 +66,50 @@ const recordMentionSchema = z.object({
   preview: z.string().max(280).optional(),
 })
 
+const dismissSchema = z.object({
+  threadId: z.string().min(1),
+})
+
 export function inboxRoutes(opts: InboxRouteOptions): Router {
   const router = Router()
-  const { commentThreadStore, docNotificationsStore } = opts
+  const { commentThreadStore, docNotificationsStore, getInboxRetentionDays } = opts
 
   router.get('/workspaces/:workspaceId/inbox', async (req, res) => {
     const userId = (req as { userId?: string }).userId
     if (!userId) return unauthorized(res)
     const { workspaceId } = req.params
+    // One cutoff for both lanes, resolved once here rather than inside each
+    // store — otherwise a slow request could straddle a day boundary and prune
+    // the two halves against different instants.
+    const retentionDays = await getInboxRetentionDays(workspaceId)
+    const since = resolveInboxCutoff(retentionDays, new Date())
     const [pending, mentions] = await Promise.all([
-      commentThreadStore.listPendingRepliesForUser(userId, workspaceId),
-      docNotificationsStore.listForUser(userId, workspaceId),
+      commentThreadStore.listPendingRepliesForUser(userId, workspaceId, { since }),
+      docNotificationsStore.listForUser(userId, workspaceId, { since }),
     ])
     const payload: InboxPayload = {
       pending,
       mentions,
       pendingCount: pending.length,
+      // listForUser is unread-only now, so every returned mention is unread.
+      // Kept as a filter rather than `mentions.length` so the count stays
+      // honest if a caller ever passes read rows through this shape.
       unreadMentionCount: mentions.filter((m) => m.readAt === null).length,
     }
     res.json(payload)
+  })
+
+  router.post('/workspaces/:workspaceId/inbox/dismiss', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) return unauthorized(res)
+    const parsed = dismissSchema.safeParse(req.body ?? {})
+    if (!parsed.success) return badRequest(res, 'threadId is required')
+    // The store gates thread access through RLS and derives workspace_id from
+    // the thread itself, so an unreachable or cross-workspace threadId is a
+    // no-op rather than an error — there is nothing here worth telling a
+    // caller apart, and a dismiss is not worth failing a navigation over.
+    await commentThreadStore.dismissPendingReply(userId, req.params.workspaceId, parsed.data.threadId)
+    res.status(204).end()
   })
 
   router.post('/workspaces/:workspaceId/inbox/read', async (req, res) => {

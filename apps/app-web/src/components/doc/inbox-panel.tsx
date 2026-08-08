@@ -9,22 +9,35 @@
  * the sidebar, overlays the page (never tears down the editor), and dismisses
  * on outside-click or Escape. The user stays on whatever page they were on.
  *
- * Two sections for the current workspace member (same sources as before):
+ * Two sections for the current workspace member:
  *   1. **Replies from your assistant** — open comment threads you started
  *      whose latest comment is the AI's (derived server-side; clears when you
  *      reply or resolve). Each row opens the page so you can act on the thread.
  *   2. **Mentions** — when a teammate @-tagged you in a page body or a comment.
  *
- * Opening the panel marks all mentions read (the badge clears) and broadcasts
- * `doc:inbox-changed` so the sidebar badge refreshes. A row click hands the
- * page id back to the shell (`onOpenPage`) for a soft in-shell navigation and
- * closes the panel. Spec: `docs/architecture/features/doc-inbox.md`.
+ * **Opening a row clears it.** Clicking hands the page id back to the shell
+ * (`onOpenPage`) for a soft in-shell navigation, and in the same gesture files
+ * the read: a mention is marked read, a pending reply gets a dismissal (it has
+ * no `read_at` of its own — see migration 426). The row is removed from local
+ * state immediately so the panel doesn't flash stale content on its way out,
+ * then `doc:inbox-changed` refreshes the sidebar badge.
+ *
+ * Note what this component deliberately no longer does: mark EVERY mention
+ * read on open. That was fine when read rows still rendered in a muted state,
+ * but now that reading removes a row it would empty the whole list the instant
+ * the panel appeared. Clearing is per-row and user-initiated.
+ *
+ * Old items age out server-side via the workspace retention window; the panel
+ * needs no logic for it, it simply receives fewer rows.
+ *
+ * Spec: `docs/architecture/features/doc-inbox.md`.
  */
 
 import * as React from "react";
 import { AtSign, Bot, Inbox as InboxIcon, X } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import {
+  dismissInboxReply,
   fetchInbox,
   markInboxRead,
   type InboxMention,
@@ -58,8 +71,8 @@ export function InboxPanel({
   const [state, setState] = React.useState<"loading" | "ready" | "error">("loading");
 
   // Fetch each time the panel OPENS (not on mount — it stays mounted for the
-  // slide animation). Opening clears unread mentions, then nudges the sidebar
-  // badge to refresh. Mirrors the old full-page view's load effect.
+  // slide animation). Opening only READS now; clearing is per-row, so the badge
+  // nudge here just re-syncs it with what the server actually returned.
   React.useEffect(() => {
     if (!open) return;
     const controller = new AbortController();
@@ -70,13 +83,7 @@ export function InboxPanel({
         setPending(payload.pending);
         setMentions(payload.mentions);
         setState("ready");
-        if (payload.unreadMentionCount > 0) {
-          void markInboxRead(workspaceId).then(() => {
-            window.dispatchEvent(new Event(INBOX_CHANGED_EVENT));
-          });
-        } else {
-          window.dispatchEvent(new Event(INBOX_CHANGED_EVENT));
-        }
+        window.dispatchEvent(new Event(INBOX_CHANGED_EVENT));
       })
       .catch(() => {
         if (!controller.signal.aborted) setState("error");
@@ -98,6 +105,30 @@ export function InboxPanel({
     onOpenPage(pageId);
     onClose();
   };
+
+  // Opening a pending reply clears it. The optimistic local drop matters
+  // because the panel is closing: without it the row is still on screen for the
+  // slide-out, and it would be back on the next open if the request is slow.
+  // The write is fire-and-forget for the same reason — navigation must not wait
+  // on it, and a failure simply leaves the row for next time.
+  const openPendingReply = (row: InboxPendingReply) => {
+    setPending((rows) => rows.filter((r) => r.threadId !== row.threadId));
+    void dismissInboxReply(workspaceId, row.threadId).then(() => {
+      window.dispatchEvent(new Event(INBOX_CHANGED_EVENT));
+    });
+    openPage(row.pageId);
+  };
+
+  // Same gesture for a mention, except the read state already exists — marking
+  // it read IS the dismissal, and the list is unread-only.
+  const openMention = (m: InboxMention) => {
+    setMentions((rows) => rows.filter((r) => r.id !== m.id));
+    void markInboxRead(workspaceId, [m.id]).then(() => {
+      window.dispatchEvent(new Event(INBOX_CHANGED_EVENT));
+    });
+    openPage(m.pageId);
+  };
+
   const isEmpty = pending.length === 0 && mentions.length === 0;
 
   return (
@@ -170,7 +201,7 @@ export function InboxPanel({
                       <li key={row.threadId}>
                         <button
                           type="button"
-                          onClick={() => openPage(row.pageId)}
+                          onClick={() => openPendingReply(row)}
                           className="flex w-full items-start gap-3 rounded-lg border border-transparent px-2.5 py-2 text-left hover:border-border hover:bg-accent"
                         >
                           <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
@@ -203,11 +234,10 @@ export function InboxPanel({
                       <li key={m.id}>
                         <button
                           type="button"
-                          onClick={() => openPage(m.pageId)}
-                          className={
-                            "flex w-full items-start gap-3 rounded-lg border border-transparent px-2.5 py-2 text-left hover:border-border hover:bg-accent " +
-                            (m.readAt === null ? "bg-primary/[0.04]" : "")
-                          }
+                          onClick={() => openMention(m)}
+                          // No unread tint any more: the list is unread-only,
+                          // so tinting every row would say nothing.
+                          className="flex w-full items-start gap-3 rounded-lg border border-transparent px-2.5 py-2 text-left hover:border-border hover:bg-accent"
                         >
                           {m.actorName ? (
                             <span className="mt-0.5">

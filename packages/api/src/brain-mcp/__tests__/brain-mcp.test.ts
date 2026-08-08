@@ -363,6 +363,8 @@ describe('[COMP:api/brain-mcp] authenticateBrainRequest', () => {
       scope: 'read',
       maxClearance: null,
       authKind: 'api_key',
+      storeScope: 'none',
+      agentScope: 'none',
     })
   })
 
@@ -446,6 +448,8 @@ describe('[COMP:api/brain-mcp] authenticateBrainRequest', () => {
       scope: 'read_write',
       maxClearance: 'internal',
       authKind: 'oauth_token',
+      storeScope: 'none',
+      agentScope: 'none',
       actingUserId: 'user-1',
     })
   })

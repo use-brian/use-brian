@@ -23,7 +23,12 @@
 
 import type { PoolClient } from 'pg'
 import { seedBuiltinPrimitiveCapabilities } from './capability-seed.js'
-import { minSensitivity, parseTranscriptionPrefs } from '@use-brian/core'
+import {
+  minSensitivity,
+  parseTranscriptionPrefs,
+  MAX_INBOX_RETENTION_DAYS,
+  MIN_INBOX_RETENTION_DAYS,
+} from '@use-brian/core'
 import {
   normalizeHomeApps,
   validateHomeApps,
@@ -105,6 +110,15 @@ export type Workspace = {
    * See docs/architecture/features/home-apps.md.
    */
   homeApps: unknown
+  /**
+   * Doc Inbox retention window in days (migration 426) — how long an item
+   * keeps asking for attention before it ages out of the Inbox.
+   * `null` = never prune. Applied as a read-time filter, never a delete, so a
+   * change in either direction takes effect on the next fetch. Surfaced on the
+   * detail fetch so the settings modal can pre-select the picker. See
+   * docs/architecture/features/doc-inbox.md → "Retention".
+   */
+  inboxRetentionDays: number | null
   createdAt: Date
   updatedAt: Date
 }
@@ -174,6 +188,7 @@ const WORKSPACE_COLUMNS = `
   default_recording_blueprint_id AS "defaultRecordingBlueprintId",
   transcription_prefs AS "transcriptionPrefs",
   home_apps AS "homeApps",
+  inbox_retention_days AS "inboxRetentionDays",
   created_at AS "createdAt",
   updated_at AS "updatedAt"
 ` as const
@@ -770,6 +785,89 @@ export async function setWorkspaceTranscriptionPrefs(
     [workspaceId, JSON.stringify(next)],
   )
   return { ok: true, prefs: next }
+}
+
+// ── Doc Inbox retention (migration 426) ────────────────────────
+
+/**
+ * System-level lookup of a workspace's Inbox retention window (migration 426).
+ * Returns the number of days, or `null` for "never prune".
+ *
+ * Null-safe by design, but note what the safe direction is here: a lookup
+ * failure degrades to `null`, i.e. NO pruning. Showing a stale item is a
+ * cosmetic annoyance; hiding a live one because a `SELECT` blipped would look
+ * like data loss, so the failure mode shows too much rather than too little.
+ * See docs/architecture/features/doc-inbox.md → "Retention".
+ */
+export async function getWorkspaceInboxRetentionDays(
+  workspaceId: string | null | undefined,
+): Promise<number | null> {
+  if (!workspaceId) return null
+  try {
+    const row = await query<{ inbox_retention_days: number | null }>(
+      `SELECT inbox_retention_days FROM workspaces WHERE id = $1`,
+      [workspaceId],
+    )
+    if (row.rows.length === 0) return null
+    const days = row.rows[0].inbox_retention_days
+    return typeof days === 'number' && days > 0 ? days : null
+  } catch (err) {
+    console.error('[workspace-store] inbox retention lookup failed, not pruning:', err)
+    return null
+  }
+}
+
+export type SetInboxRetentionResult =
+  | { ok: true; inboxRetentionDays: number | null }
+  | { ok: false; reason: 'not_admin' | 'not_found' | 'out_of_range'; message: string }
+
+/**
+ * Set a workspace's Inbox retention window. `null` disables pruning.
+ *
+ * Admin/owner-gated HERE for the same reason as the transcription setter: the
+ * `workspaces` table carries no RLS, so the setter is the enforcement point
+ * rather than a policy. Returns a discriminated result so a plain member gets a
+ * reason instead of a bare throw.
+ */
+export async function setWorkspaceInboxRetentionDays(
+  userId: string,
+  workspaceId: string,
+  days: number | null,
+): Promise<SetInboxRetentionResult> {
+  if (
+    days !== null &&
+    (!Number.isInteger(days) ||
+      days < MIN_INBOX_RETENTION_DAYS ||
+      days > MAX_INBOX_RETENTION_DAYS)
+  ) {
+    return {
+      ok: false,
+      reason: 'out_of_range',
+      message: `Inbox retention must be a whole number of days between ${MIN_INBOX_RETENTION_DAYS} and ${MAX_INBOX_RETENTION_DAYS}, or null to never prune.`,
+    }
+  }
+
+  const membership = await query<{ role: string }>(
+    `SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2`,
+    [workspaceId, userId],
+  )
+  const role = membership.rows[0]?.role
+  if (role !== 'owner' && role !== 'admin') {
+    return {
+      ok: false,
+      reason: 'not_admin',
+      message: 'Only a workspace owner or admin can change the inbox retention window.',
+    }
+  }
+
+  const updated = await query(
+    `UPDATE workspaces SET inbox_retention_days = $2, updated_at = now() WHERE id = $1`,
+    [workspaceId, days],
+  )
+  if ((updated.rowCount ?? 0) === 0) {
+    return { ok: false, reason: 'not_found', message: 'Workspace not found.' }
+  }
+  return { ok: true, inboxRetentionDays: days }
 }
 
 // ── Home apps (migration 385) ──────────────────────────────────

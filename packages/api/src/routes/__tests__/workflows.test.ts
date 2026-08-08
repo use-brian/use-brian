@@ -39,7 +39,7 @@ const runStore = {
 const workspaceStore = { getRole: vi.fn() }
 const emitAudit = vi.fn()
 const jobStore = {
-  listTriggerJobsForWorkflowSystem: vi.fn().mockResolvedValue([]),
+  listFiringJobsForWorkflowSystem: vi.fn().mockResolvedValue([]),
   create: vi.fn().mockResolvedValue({ id: 'job-1' }),
   update: vi.fn().mockResolvedValue({ id: 'job-1' }),
   delete: vi.fn().mockResolvedValue(true),
@@ -220,7 +220,7 @@ describe('[COMP:api/workflows-route] DELETE /workflows (bulk)', () => {
     workspaceStore.getRole.mockResolvedValueOnce('admin')
     workflowStore.list.mockResolvedValueOnce([wf(), wf({ id: 'wf-2', name: 'Archived one' })])
     workflowStore.delete.mockResolvedValue(true)
-    jobStore.listTriggerJobsForWorkflowSystem.mockResolvedValue([{ id: 'job-1' }])
+    jobStore.listFiringJobsForWorkflowSystem.mockResolvedValue([{ id: 'job-1' }])
 
     const res = await request(app('u-1', { jobStore, resolvePrimary })).delete(
       '/api/workflows?workspaceId=' + WS,
@@ -250,7 +250,7 @@ describe('[COMP:api/workflows-route] schedule trigger → backing scheduled_jobs
     workflowStore.getById.mockResolvedValueOnce(wf())
     mockTriggerParse.mockReturnValueOnce({ success: true, data: scheduleTrigger })
     workflowStore.update.mockResolvedValueOnce(wf({ trigger: scheduleTrigger }))
-    jobStore.listTriggerJobsForWorkflowSystem.mockResolvedValueOnce([])
+    jobStore.listFiringJobsForWorkflowSystem.mockResolvedValueOnce([])
 
     const res = await request(app('u-1', { jobStore, resolvePrimary }))
       .patch('/api/workflows/wf-1')
@@ -268,7 +268,7 @@ describe('[COMP:api/workflows-route] schedule trigger → backing scheduled_jobs
     workflowStore.getById.mockResolvedValueOnce(wf({ trigger: scheduleTrigger }))
     mockTriggerParse.mockReturnValueOnce({ success: true, data: { kind: 'manual' } })
     workflowStore.update.mockResolvedValueOnce(wf({ trigger: { kind: 'manual' } }))
-    jobStore.listTriggerJobsForWorkflowSystem.mockResolvedValueOnce([{ id: 'job-1' }])
+    jobStore.listFiringJobsForWorkflowSystem.mockResolvedValueOnce([{ id: 'job-1' }])
 
     const res = await request(app('u-1', { jobStore, resolvePrimary }))
       .patch('/api/workflows/wf-1')
@@ -282,7 +282,7 @@ describe('[COMP:api/workflows-route] schedule trigger → backing scheduled_jobs
   it('DELETE clears any backing scheduled-trigger job', async () => {
     workflowStore.getById.mockResolvedValueOnce(wf({ trigger: scheduleTrigger }))
     workflowStore.delete.mockResolvedValueOnce(true)
-    jobStore.listTriggerJobsForWorkflowSystem.mockResolvedValueOnce([{ id: 'job-1' }])
+    jobStore.listFiringJobsForWorkflowSystem.mockResolvedValueOnce([{ id: 'job-1' }])
 
     const res = await request(app('u-1', { jobStore, resolvePrimary })).delete('/api/workflows/wf-1')
     expect(res.status).toBe(204)

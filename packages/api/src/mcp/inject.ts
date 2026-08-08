@@ -111,6 +111,7 @@ import {
   setProductMetafields as setShopifyProductMetafields,
   setProductOptions as setShopifyProductOptions,
   listThemes as listShopifyThemes,
+  listProductTemplates as listShopifyProductTemplates,
   readProductTemplate as readShopifyProductTemplate,
   createProductTemplate as createShopifyProductTemplate,
   setProductTemplate as setShopifyProductTemplate,
@@ -300,6 +301,7 @@ export const INJECTED_BUILTIN_TOOLS_BY_CONNECTOR: Record<string, readonly string
     'shopifySetProductMetafields',
     'shopifySetProductOptions',
     'shopifyListThemes',
+    'shopifyListProductTemplates',
     'shopifyReadProductTemplate',
     'shopifyCreateProductTemplate',
     'shopifySetProductTemplate',
@@ -1800,8 +1802,12 @@ function instanceToolSuffix(instanceId: string, label: string): string {
   return `${INSTANCE_TOOL_SEP}${slug}_${id8}`
 }
 
-/** Recover the canonical tool name from a (possibly) instance-suffixed name. */
-function baseToolName(name: string): string {
+/** Recover the canonical tool name from a (possibly) instance-suffixed name.
+ *
+ *  Exported because the Home-app store gate resolves classification by
+ *  canonical name too, and a second copy of the `__` convention there would
+ *  silently drop every multi-instance tool (fail-closed, but wrong). */
+export function baseToolName(name: string): string {
   const i = name.indexOf(INSTANCE_TOOL_SEP)
   return i === -1 ? name : name.slice(0, i)
 }
@@ -3495,6 +3501,7 @@ async function injectShopifyTools(
       setProductMetafields: async (params) => setShopifyProductMetafields(await tm.getAuth(), params),
       setProductOptions: async (params) => setShopifyProductOptions(await tm.getAuth(), params),
       listThemes: async () => listShopifyThemes(await tm.getAuth()),
+      listProductTemplates: async (params) => listShopifyProductTemplates(await tm.getAuth(), params),
       readProductTemplate: async (params) => readShopifyProductTemplate(await tm.getAuth(), params),
       createProductTemplate: async (params) => createShopifyProductTemplate(await tm.getAuth(), params),
       setProductTemplate: async (params) => setShopifyProductTemplate(await tm.getAuth(), params),

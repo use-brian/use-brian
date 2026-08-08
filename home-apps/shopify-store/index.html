@@ -1,0 +1,1069 @@
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Shopify</title>
+<style>
+  :root {
+    --bg: #fff; --fg: #0b0d12; --muted: #6b7280; --line: #e5e7eb;
+    --accent: #2563eb; --ok: #059669; --warn: #b45309; --card: #fff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0b0d12; --fg: #e8eaed; --muted: #9aa1ac; --line: #232833;
+      --accent: #6ea8fe; --ok: #34d399; --warn: #fbbf24; --card: #11141b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 940px; margin: 0 auto; padding: 20px 16px 48px; }
+  h1 { font-size: 18px; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
+  h2 { font-size: 13px; margin: 22px 0 8px; font-weight: 600; color: var(--muted);
+       text-transform: uppercase; letter-spacing: 0.05em; }
+  .sub { color: var(--muted); font-size: 12px; margin: 3px 0 0; }
+  .tabs { display: flex; gap: 4px; margin: 16px 0 4px; border-bottom: 1px solid var(--line); }
+  .tab { appearance: none; background: none; border: 0; border-bottom: 2px solid transparent;
+         color: var(--muted); font: inherit; font-weight: 550; padding: 8px 12px; cursor: pointer; }
+  .tab[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); }
+  .grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+  .card { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; background: var(--card); }
+  .kpi { font-size: 24px; font-weight: 650; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+  .kpi-l { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); }
+  th { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .scroll { overflow-x: auto; }
+  .note { border-left: 3px solid var(--warn); background: color-mix(in srgb, var(--warn) 8%, transparent);
+          padding: 9px 12px; border-radius: 0 8px 8px 0; font-size: 12.5px; margin: 10px 0; }
+  .err  { border-left: 3px solid #dc2626; background: color-mix(in srgb, #dc2626 8%, transparent);
+          padding: 9px 12px; border-radius: 0 8px 8px 0; font-size: 12.5px; margin: 10px 0; }
+  .muted { color: var(--muted); }
+  label { display: block; font-size: 12px; font-weight: 550; margin: 10px 0 3px; }
+  input, textarea, select {
+    width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: 7px;
+    background: var(--bg); color: var(--fg); font: inherit;
+  }
+  button.go {
+    appearance: none; border: 0; border-radius: 8px; background: var(--accent); color: #fff;
+    font: inherit; font-weight: 600; padding: 9px 16px; cursor: pointer; margin-top: 14px;
+  }
+  button.go:disabled { opacity: 0.5; cursor: default; }
+  button.ghost { appearance: none; border: 1px dashed var(--line); border-radius: 8px;
+    background: none; color: var(--muted); font: inherit; padding: 7px 12px; cursor: pointer; margin-top: 8px; }
+  button.ghost:hover { color: var(--fg); border-color: var(--accent); }
+  #v-body input, #v-body select { min-width: 90px; }
+  #v-body td { padding: 4px 4px; }
+  .v-rm { appearance: none; border: 0; background: none; color: var(--muted); cursor: pointer;
+    font: 600 15px/1 ui-sans-serif, system-ui; padding: 4px 6px; }
+  .v-rm:hover { color: #dc2626; }
+  .steps { list-style: none; padding: 0; margin: 12px 0 0; font-size: 13px; }
+  .steps li { padding: 5px 0; display: flex; gap: 8px; align-items: baseline; }
+  .row2 { display: grid; gap: 10px; grid-template-columns: 1fr 1fr; }
+  .range { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; margin: 14px 0 4px; }
+  .range .f { display: flex; flex-direction: column; gap: 3px; }
+  .range label { margin: 0; }
+  .range select, .range input { width: auto; min-width: 140px; }
+  .range .apply { margin-top: 0; padding: 7px 14px; }
+  .thumbs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .thumb { position: relative; width: 72px; height: 72px; border: 1px solid var(--line);
+           border-radius: 8px; overflow: hidden; background: var(--card); }
+  .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .thumb .rm { position: absolute; top: 2px; right: 2px; width: 18px; height: 18px; padding: 0;
+               border: 0; border-radius: 50%; background: rgba(0,0,0,.62); color: #fff;
+               font: 600 13px/1 ui-sans-serif, system-ui; cursor: pointer; }
+  input[type="file"] { padding: 6px; }
+  .cards { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); margin: 12px 0 4px; }
+  .pb { text-align: left; border: 1px solid var(--line); background: var(--card); color: var(--fg);
+        border-radius: 10px; padding: 10px 12px; cursor: pointer; font: inherit; display: flex;
+        flex-direction: column; gap: 3px; }
+  .pb.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .pb span { font-size: 11.5px; color: var(--muted); }
+  .tpls { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); margin-top: 10px; }
+  .tpl { text-align: left; border: 1px solid var(--line); background: var(--card); color: var(--fg);
+         border-radius: 10px; padding: 10px; cursor: pointer; font: inherit; }
+  .tpl.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 7%, transparent); }
+  .tpl-h { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+  .tpl-h strong { text-transform: capitalize; font-size: 13px; }
+  .tpl-h span { font-size: 11px; color: var(--muted); }
+  .tpl-stack { display: flex; flex-direction: column; gap: 3px; }
+  .tpl-sec { border: 1px solid var(--line); border-radius: 5px; padding: 5px 7px; background: var(--bg);
+             display: flex; flex-direction: column; gap: 1px; }
+  .tpl-sec.first { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+  .tpl-sec span { font-size: 11.5px; line-height: 1.25; }
+  .tpl-sec em { font-style: normal; font-size: 9.5px; color: var(--muted); font-family: ui-monospace, monospace; }
+  .tpl-sec.empty span { color: var(--muted); }
+  .answer { white-space: pre-wrap; border: 1px solid var(--line); border-radius: 10px;
+            padding: 12px 14px; margin-top: 14px; background: var(--card); font-size: 13.5px; }
+  @media (max-width: 560px) { .row2 { grid-template-columns: 1fr; } }
+</style>
+
+<div class="wrap">
+  <h1 id="shopName">Shopify</h1>
+  <p class="sub" id="shopSub">Connecting…</p>
+
+  <!-- Rendered from VIEWS below. Hand-written buttons drifted from the view
+       registry once already: `inventory` and `ask` were registered, had no
+       button, and shipped unreachable. -->
+  <div class="tabs" role="tablist" id="tabs"></div>
+
+  <div id="view"></div>
+</div>
+
+<script>
+// ── The bridge ───────────────────────────────────────────────────────────────
+// The frame runs at an OPAQUE origin: no cookies, no storage, no reach into the
+// host. Everything it can do arrives as a short-lived bridge token over
+// postMessage, and every call goes to the brain MCP server with it.
+let ctx = null;
+const waiters = [];
+
+window.addEventListener("message", (e) => {
+  // The host is the only window that can reach us here; it posts to our
+  // contentWindow directly. `origin` is "null" for an opaque frame, so it
+  // identifies nothing and is not worth checking.
+  if (e.data && e.data.type === "ub:token") {
+    ctx = e.data;
+    while (waiters.length) waiters.shift()(ctx);
+  }
+});
+parent.postMessage({ type: "ub:ready" }, "*");
+
+function ready() {
+  return ctx ? Promise.resolve(ctx) : new Promise((r) => waiters.push(r));
+}
+
+let rpcId = 0;
+
+/**
+ * Call one tool. Returns its parsed JSON result.
+ *
+ * Two shapes have to be handled and both are easy to get wrong:
+ *   - the transport may answer as SSE rather than plain JSON, and
+ *   - a tool's payload arrives as TEXT inside `content[0].text`, which is
+ *     usually JSON but is not required to be.
+ */
+// A store read answers in seconds; an assistant turn can chain tool calls and
+// legitimately take a minute. Neither may hang forever. Without a deadline a
+// stalled call leaves the tab spinning with no error, no retry and no way out
+// except reload - and the one call most likely to stall is the agent, which is
+// also the one whose spinner looks most normal.
+const TIMEOUT_MS = { tool: 45000, agent: 180000 };
+
+async function callTool(name, args) {
+  const c = await ready();
+  if (!c.token) throw new Error("This app has no access token. Ask an admin to approve it.");
+
+  const limit = name === "askStoreAssistant" ? TIMEOUT_MS.agent : TIMEOUT_MS.tool;
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), limit);
+
+  let res;
+  try {
+    res = await fetch(c.apiOrigin + "/api/brain/mcp", {
+      method: "POST",
+      signal: ctl.signal,
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+        Authorization: "Bearer " + c.token,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0", id: ++rpcId, method: "tools/call",
+        params: { name, arguments: args || {} },
+      }),
+    });
+  } catch (err) {
+    // Say which of the two it was. "Timed out" sends someone to look at the
+    // store; "could not reach" sends them to look at the connection.
+    if (err && err.name === "AbortError") {
+      throw new Error("Timed out after " + Math.round(limit / 1000) + "s. The store did not answer.");
+    }
+    throw new Error("Could not reach Use Brian. Check your connection and try again.");
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (res.status === 401) throw new Error("Access expired. Reload the page.");
+  if (res.status === 429) throw new Error("This app has used its daily budget.");
+  const text = await res.text();
+  if (!res.ok) throw new Error("Request failed (" + res.status + ").");
+
+  let env;
+  const line = text.startsWith("event:") || text.startsWith("data:")
+    ? (text.split("\n").find((l) => l.startsWith("data:")) || "").slice(5).trim()
+    : text;
+  try { env = JSON.parse(line); } catch { throw new Error("Could not read the response."); }
+
+  if (env.error) throw new Error(env.error.message || "The call was rejected.");
+  const body = env.result && env.result.content && env.result.content[0];
+  const raw = body && body.text ? body.text : "";
+  // `isError` is the tool saying no (missing grant, missing scope). Surface its
+  // own words: it knows why, and a generic message here would throw that away.
+  if (env.result && env.result.isError) throw new Error(raw || "The tool refused the call.");
+  try { return JSON.parse(raw); } catch { return raw; }
+}
+
+// Tokens are short-lived; ask for a fresh one well inside the window.
+setInterval(() => parent.postMessage({ type: "ub:token" }, "*"), 5 * 60 * 1000);
+
+// ── Rendering ────────────────────────────────────────────────────────────────
+const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const view = document.getElementById("view");
+const setHTML = (h) => { view.innerHTML = h; };
+const fail = (e) => `<div class="err">${esc(e.message || String(e))}</div>`;
+
+// ShopifyQL returns EVERY value as a string regardless of its declared type.
+const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+const money = (v, cur) => (cur ? cur + " " : "") + num(v).toLocaleString(undefined, {
+  minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+let shopCurrency = "";
+
+// ── Date range ───────────────────────────────────────────────────────────────
+// Shared by Today and Growth. Kept in memory: the frame runs at an opaque
+// origin, so there is no localStorage to persist it in - bridge KV is the only
+// durable option and it is not worth a call per tab switch.
+const PRESETS = [
+  { key: "1", label: "Today", days: 1 },
+  { key: "7", label: "Last 7 days", days: 7 },
+  { key: "30", label: "Last 30 days", days: 30 },
+  { key: "60", label: "Last 60 days", days: 60 },
+  { key: "custom", label: "Custom range" },
+];
+const iso = (d) => d.toISOString().slice(0, 10);
+const daysAgo = (n) => iso(new Date(Date.now() - (n - 1) * 864e5));
+
+let range = { preset: "7", since: daysAgo(7), until: iso(new Date()) };
+/** Order-number window, independent of the date window. Blank = unbounded. */
+let orderNo = { from: "", to: "" };
+
+/** Digits only — "#1042" and "1042" are the same order to Shopify. */
+const orderDigits = (v) => String(v || "").replace(/[^0-9]/g, "");
+
+function rangeControl(onApply, withOrderNo) {
+  const custom = range.preset === "custom";
+  return `
+    <div class="range">
+      <div class="f"><label for="r-preset">Period</label>
+        <select id="r-preset">${PRESETS.map((p) =>
+          `<option value="${p.key}"${p.key === range.preset ? " selected" : ""}>${p.label}</option>`).join("")}</select>
+      </div>
+      <div class="f" ${custom ? "" : 'style="display:none"'} id="r-custom-since">
+        <label for="r-since">From</label><input type="date" id="r-since" value="${esc(range.since)}" max="${iso(new Date())}" />
+      </div>
+      <div class="f" ${custom ? "" : 'style="display:none"'} id="r-custom-until">
+        <label for="r-until">To</label><input type="date" id="r-until" value="${esc(range.until)}" max="${iso(new Date())}" />
+      </div>
+      ${withOrderNo ? `
+      <div class="f"><label for="r-ofrom">Order # from</label>
+        <input id="r-ofrom" inputmode="numeric" placeholder="1001" value="${esc(orderNo.from)}" /></div>
+      <div class="f"><label for="r-oto">to</label>
+        <input id="r-oto" inputmode="numeric" placeholder="1099" value="${esc(orderNo.to)}" /></div>` : ""}
+      <button class="go apply" id="r-apply">Apply</button>
+    </div>`;
+}
+
+function wireRange(rerender, withOrderNo) {
+  const sel = document.getElementById("r-preset");
+  if (!sel) return;
+  sel.onchange = () => {
+    const showCustom = sel.value === "custom";
+    document.getElementById("r-custom-since").style.display = showCustom ? "" : "none";
+    document.getElementById("r-custom-until").style.display = showCustom ? "" : "none";
+    if (!showCustom) {
+      const p = PRESETS.find((x) => x.key === sel.value);
+      range = { preset: sel.value, since: daysAgo(p.days), until: iso(new Date()) };
+      rerender();
+    }
+  };
+  document.getElementById("r-apply").onclick = () => {
+    if (withOrderNo) {
+      const from = orderDigits(document.getElementById("r-ofrom").value);
+      const to = orderDigits(document.getElementById("r-oto").value);
+      // A reversed window silently matches nothing, which reads as "no orders"
+      // rather than "you typed it backwards".
+      if (from && to && Number(from) > Number(to)) {
+        alertInline("The first order number is higher than the last.");
+        return;
+      }
+      orderNo = { from, to };
+    }
+    if (sel.value === "custom") {
+      const since = document.getElementById("r-since").value;
+      const until = document.getElementById("r-until").value;
+      // A backwards range returns nothing and looks like "no orders". Say so.
+      if (!since || !until) { alertInline("Pick both dates."); return; }
+      if (since > until) { alertInline("The start date is after the end date."); return; }
+      range = { preset: "custom", since, until };
+    }
+    rerender();
+  };
+}
+
+function alertInline(msg) {
+  const host = document.querySelector(".range");
+  if (host) host.insertAdjacentHTML("afterend", `<div class="err">${esc(msg)}</div>`);
+}
+
+/** "12.50 USD" -> 12.5 . The tool projects money as a plain string. */
+const parseMoney = (v) => {
+  const m = /^\s*([0-9.]+)/.exec(String(v || ""));
+  return m ? Number(m[1]) : 0;
+};
+// ── Shared: assistant call with honest progress ───────────────────────────────
+// Every tab ends in an assistant turn, and every one of them is slow enough
+// that a bare spinner reads as broken. One helper so the wording, the timeout
+// message and the disabled-button handling cannot drift between tabs.
+async function runAssistant(task, out, working) {
+  out.innerHTML = `<p class="muted" style="margin-top:14px">${esc(working)}
+    This runs a full assistant turn and can take a minute.</p>`;
+  const answer = await callTool("askStoreAssistant", { task });
+  return typeof answer === "string" ? answer : JSON.stringify(answer, null, 2);
+}
+
+/** Pull the first JSON object out of a reply. Null when there isn't one. */
+function extractJson(text) {
+  const m = String(text || "").match(/\{[\s\S]*\}/);
+  if (!m) return null;
+  try { return JSON.parse(m[0]); } catch { return null; }
+}
+
+/**
+ * Render an assistant reply that was ASKED for JSON but may not be.
+ * Never drop the answer because the shape was wrong: an analysis that is
+ * good but unparseable is still the thing the owner asked for.
+ */
+function renderLoose(text) {
+  return `<div class="note">The assistant did not answer in the expected shape, so this
+    is its reply as written.</div><div class="answer">${esc(text)}</div>`;
+}
+
+// ── Store facts, fetched once ────────────────────────────────────────────────
+// Everything a form needs to offer REAL choices instead of a free-text box the
+// model then has to interpret. A typed location that does not exist returns
+// nothing and looks like "no stock"; a picked one cannot.
+const facts = { locations: null };
+
+async function loadLocations() {
+  if (facts.locations) return facts.locations;
+  const res = await callTool("shopifyGetInventoryLevels", { first: 50 });
+  const names = new Set();
+  for (const it of res.items || []) for (const l of it.locations || []) if (l.location) names.add(l.location);
+  facts.locations = [...names].sort();
+  return facts.locations;
+}
+
+/**
+ * Fill a <select> from a loader. Reports its own failure INTO the select, so a
+ * store that cannot answer shows why instead of an empty dropdown that looks
+ * like "you have no locations".
+ */
+async function fillSelect(id, loader, toOption, leading) {
+  const sel = document.getElementById(id);
+  if (!sel) return;
+  sel.innerHTML = `<option value="">Loading…</option>`;
+  sel.disabled = true;
+  try {
+    const rows = await loader();
+    const opts = rows.map(toOption).join("");
+    sel.innerHTML = (leading || "") + opts;
+    sel.disabled = false;
+    if (rows.length === 0) sel.innerHTML = `<option value="">(none found)</option>`;
+  } catch (e) {
+    sel.innerHTML = `<option value="">Could not load: ${esc(e.message || String(e))}</option>`;
+  }
+}
+
+// ── Tab 1: Draft a product ───────────────────────────────────────────────────
+// Ask for what only the owner has: the name, the price, the photos. Copy,
+// variant naming and structure are the assistant's job.
+//
+// The exception is deliberate and never widens: ingredients, nutrition and
+// dosage are FACTS, not copy. The assistant is told to ask for them and to
+// leave them out otherwise, because invented nutrition on a live storefront is
+// the worst thing this app could produce. "Most of it can be designed" applies
+// to writing, not to claims.
+let picked = [];  // { file, dataUrl, name, mime }
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;  // saveFileBytes rejects ~10MB; stay under.
+let chosenTemplate = null;  // suffix string, "" for theme default, null = not chosen yet
+
+function readAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result || ""));
+    r.onerror = () => reject(new Error("Could not read " + file.name));
+    r.readAsDataURL(file);
+  });
+}
+
+/** Unique-per-upload path: saveFileBytes returns `conflict` on an existing one. */
+function uploadPath(name) {
+  const safe = name.toLowerCase().replace(/[^a-z0-9.]+/g, "-").replace(/^-+|-+$/g, "") || "image.png";
+  return `/uploads/${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${safe}`;
+}
+
+function renderPicked() {
+  const host = document.getElementById("p-thumbs");
+  if (!host) return;
+  host.innerHTML = picked.map((p, i) => `
+    <div class="thumb">
+      <img src="${p.dataUrl}" alt="${esc(p.name)}" />
+      <button type="button" data-i="${i}" class="rm" aria-label="Remove ${esc(p.name)}">×</button>
+    </div>`).join("");
+  host.querySelectorAll(".rm").forEach((b) => {
+    b.onclick = () => { picked.splice(Number(b.dataset.i), 1); renderPicked(); };
+  });
+}
+
+// A theme's section TYPE is a developer string. The owner is choosing a page
+// layout, so show them the layout in their own words - and keep the raw type
+// visible underneath, because a wrong guess here would be silent.
+const SECTION_LABEL = {
+  "main-product": "Product, price and buy button",
+  "related-products": "Related products",
+  "rich-text": "Text block",
+  "multicolumn": "Feature columns",
+  "collapsible-content": "FAQ / accordion",
+  "image-with-text": "Image beside text",
+  "slideshow": "Slideshow",
+  "video": "Video",
+  "newsletter": "Email signup",
+  "product-recommendations": "Recommendations",
+  "apps": "App block",
+};
+const sectionLabel = (t) => SECTION_LABEL[t] || t.replace(/[-_]/g, " ").replace(/^./, (c) => c.toUpperCase());
+
+/**
+ * A template rendered as the page it produces: its sections stacked in order.
+ * That IS the choice being made - the difference between a layout with an
+ * ingredients panel and an FAQ and one that is just a buy button.
+ */
+function templateCard(t) {
+  const key = t.suffix == null ? "" : t.suffix;
+  const name = t.suffix == null ? "Theme default" : t.suffix.replace(/-/g, " ");
+  const sections = t.sections || [];
+  return `
+    <button type="button" class="tpl${chosenTemplate === key ? " on" : ""}" data-suffix="${esc(key)}">
+      <div class="tpl-h">
+        <strong>${esc(name)}</strong>
+        <span>${sections.length} section${sections.length === 1 ? "" : "s"}</span>
+      </div>
+      <div class="tpl-stack">
+        ${sections.length
+          ? sections.map((s, i) => `<div class="tpl-sec${i === 0 ? " first" : ""}" title="${esc(s)}">
+              <span>${esc(sectionLabel(s))}</span><em>${esc(s)}</em></div>`).join("")
+          : `<div class="tpl-sec empty"><span>Could not read this template's layout</span></div>`}
+      </div>
+    </button>`;
+}
+
+async function renderTemplatePicker() {
+  const host = document.getElementById("p-templates");
+  if (!host) return;
+  host.innerHTML = `<p class="muted">Reading the theme…</p>`;
+  try {
+    const res = await callTool("shopifyListProductTemplates", {});
+    const list = res.templates || [];
+    if (!list.length) { host.innerHTML = `<p class="muted">This theme has no product templates.</p>`; return; }
+    if (chosenTemplate === null) chosenTemplate = "";  // default to the theme default
+    host.innerHTML = `<p class="sub">From the live theme "${esc(res.theme || "")}". Each block is a
+      section of the page, top to bottom.</p><div class="tpls">${list.map(templateCard).join("")}</div>`;
+    host.querySelectorAll(".tpl").forEach((b) => {
+      b.onclick = () => {
+        chosenTemplate = b.dataset.suffix;
+        host.querySelectorAll(".tpl").forEach((x) => x.classList.toggle("on", x === b));
+      };
+    });
+  } catch (e) {
+    // Theme access is a grant the owner turns on, not something to work around.
+    host.innerHTML = `<div class="note">Could not read the theme's templates:
+      ${esc(e.message || String(e))}<br />The product can still be created; it will use the
+      theme default layout.</div>`;
+  }
+}
+
+function renderDraft() {
+  setHTML(`
+    <h2>The product</h2>
+    <p class="sub">Only what the assistant cannot know. It writes the description, names the
+      variants and structures the page; it will ask before stating anything factual.</p>
+    <div class="row2">
+      <div><label for="p-title">Product name</label><input id="p-title" placeholder="Immunity Boost" /></div>
+      <div><label for="p-price">Price</label><input id="p-price" inputmode="decimal" placeholder="24.00" /></div>
+    </div>
+
+    <label for="p-images">Photos</label>
+    <input type="file" id="p-images" accept="image/*" multiple />
+    <div class="thumbs" id="p-thumbs"></div>
+
+    <label for="p-notes">Anything else <span class="muted">(optional)</span></label>
+    <textarea id="p-notes" rows="3" placeholder="Pack sizes and variants, and anything printed on the label - ingredients, nutrition, how to use it. Leave blank and the assistant will ask rather than invent."></textarea>
+
+    <h2>Page layout</h2>
+    <div id="p-templates"></div>
+
+    <button class="go" id="p-go">Create draft</button>
+    <ul class="steps" id="p-steps"></ul>
+    <div id="p-out"></div>
+  `);
+
+  renderPicked();
+  void renderTemplatePicker();
+
+  document.getElementById("p-images").onchange = async (ev) => {
+    const files = [...(ev.target.files || [])];
+    ev.target.value = "";  // so re-picking the same file fires again
+    for (const f of files) {
+      if (f.size > MAX_IMAGE_BYTES) { logStep("!", `${f.name} is too large (over 8 MB). Resize it first.`); continue; }
+      try { picked.push({ file: f, dataUrl: await readAsDataUrl(f), name: f.name, mime: f.type || "image/jpeg" }); }
+      catch (e) { logStep("!", e.message); }
+    }
+    renderPicked();
+  };
+
+  document.getElementById("p-go").onclick = (ev) => void createDraft(ev.target);
+}
+
+function logStep(icon, text) {
+  const steps = document.getElementById("p-steps");
+  if (!steps) return null;
+  const li = document.createElement("li");
+  li.innerHTML = `<span>${esc(icon)}</span><span>${esc(text)}</span>`;
+  steps.appendChild(li);
+  return li;
+}
+
+async function createDraft(btn) {
+  const val = (id) => (document.getElementById(id).value || "").trim();
+  const title = val("p-title");
+  const price = val("p-price");
+  const notes = val("p-notes");
+  const steps = document.getElementById("p-steps");
+  const out = document.getElementById("p-out");
+  steps.innerHTML = ""; out.innerHTML = "";
+  if (!title) { logStep("!", "Give the product a name first."); return; }
+
+  btn.disabled = true;
+  try {
+    // The deterministic half runs HERE. Create, price, images - no judgement in
+    // any of it, so none of it is worth a model turn or a chance to go wrong.
+    // Field names are the schema's: the tool takes `description`, and an unknown
+    // key is silently ignored rather than rejected.
+    const created = await callTool("shopifyCreateProduct", { title });
+    const id = created.id || created.product_id || (created.product && created.product.id);
+    logStep("1.", `Created "${title}" as a draft.`);
+
+    if (price) {
+      await callTool("shopifySetProductPrice", { productId: id, price });
+      logStep("2.", `Price set to ${price}.`);
+    } else {
+      logStep("2.", "No price given - it needs one before it can be published.");
+    }
+
+    if (!picked.length) {
+      logStep("3.", "No photo attached. A product with no image looks unfinished on the storefront.");
+    } else {
+      let ok = 0;
+      for (const p of picked) {
+        const line = logStep("3.", `Uploading ${p.name}…`);
+        try {
+          // TWO steps, and they cannot be collapsed: shopifyAddProductImage
+          // takes a WORKSPACE FILE, never raw bytes. Save first, attach by path.
+          const path = uploadPath(p.name);
+          await callTool("saveFileBytes", {
+            path, base64: p.dataUrl, mime: p.mime, title: p.name,
+            summary: `Product photo for ${title}`,
+          });
+          await callTool("shopifyAddProductImage", { productId: id, file: path, alt: title });
+          ok++;
+          line.innerHTML = `<span>3.</span><span>${esc(p.name)} added. Shopify processes images asynchronously, so it may take a few seconds to appear.</span>`;
+        } catch (e) {
+          // Per-image reporting: one bad file must not lose the others, and a
+          // silent skip would leave the owner believing every photo landed.
+          line.innerHTML = `<span>x</span><span>${esc(p.name)} failed: ${esc(e.message || String(e))}</span>`;
+        }
+      }
+      if (ok > 0) picked = [];
+      renderPicked();
+    }
+
+    logStep("4.", "Writing the description and setting up the page…");
+    const task = `Finish this DRAFT product. It already exists - do not create it again, and do
+not change its price or images.
+
+Product id: ${id}
+Name: ${title}
+${price ? `Price already set: ${price}` : "No price set yet."}
+Photos already attached: ${picked.length ? "yes" : "none"}
+
+What the owner told me, verbatim. This may be empty:
+${notes || "(nothing)"}
+
+Page layout the owner picked: ${chosenTemplate ? `the "${chosenTemplate}" template` : "the theme default"}
+
+Do this:
+1. Write the product description and set it with shopifyUpdateProduct. Write real
+   selling copy - benefits, who it is for, how it feels to use. That part is yours.
+2. NEVER state ingredients, nutrition, dosage, or any health or origin claim that
+   was not given to you above. Do not infer them from the name or the photo. If the
+   description would be better with them, list exactly what you need and ask.
+3. Variants: if pack sizes were mentioned, set them up with shopifySetProductOptions.
+   A trial or sample size is a SEPARATE variant from a full-size pack, never the same
+   one. Rename the default "Title / Default Title" option, which looks unfinished.
+4. Page layout: ${chosenTemplate
+    ? `point it at the existing "${chosenTemplate}" template with shopifySetProductTemplate. Do not create a new template.`
+    : "leave it on the theme default."}
+5. Leave it a DRAFT and unpublished. Do not publish.
+
+Then tell me, briefly: what you wrote, what variants it now has, which template it is
+on, and every fact you still need before this could go live.`;
+
+    out.innerHTML = "";
+    const text = await runAssistant(task, out, "Writing copy and setting up the page.");
+    out.innerHTML = `<div class="answer">${esc(text)}</div>
+      <div class="note">Still a draft. Nobody can see it until you publish, and publishing
+        is deliberately not done here.</div>`;
+  } catch (e) {
+    logStep("x", e.message || String(e));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+
+// -- Tab 2: Inventory vs orders ----------------------------------------------
+// Demand is ARITHMETIC, so it is done here, exactly, from structured line
+// items (title + variant + sku + quantity). It used to be prose - the order
+// list projected "2x Widget" with no variant and no sku - so the one
+// distinction this tab exists for, a 5g trial pouch against a full-size pack,
+// was not in the data at all, and a model was asked first to infer it and then
+// to add up the numbers. Both halves were wrong: the inference was impossible,
+// and the arithmetic was never a model's job.
+//
+// The assistant is now asked for the one thing that IS judgement: reading
+// stock at the location and matching it to these variants.
+let invLocation = "";
+
+async function fetchOrdersInRange() {
+  const endExclusive = iso(new Date(new Date(range.until + "T00:00:00Z").getTime() + 864e5));
+  const query = `created_at:>=${range.since} created_at:<${endExclusive}`;
+  let items = [], cursor, pages = 0;
+  while (pages < 6) {
+    const page = await callTool("shopifyListOrders", { query, first: 50, ...(cursor ? { cursor } : {}) });
+    items = items.concat(page.items || []);
+    pages++;
+    if (!page.has_next_page || !page.end_cursor) { cursor = null; break; }
+    cursor = page.end_cursor;
+  }
+  // Shopify has no order-NUMBER range filter, so this half is applied here and
+  // said out loud in the UI rather than looking like a store-side filter.
+  const fromN = orderNo.from ? Number(orderNo.from) : null;
+  const toN = orderNo.to ? Number(orderNo.to) : null;
+  if (fromN !== null || toN !== null) {
+    items = items.filter((o) => {
+      const d = orderDigits(o.name);
+      if (d === "") return false;
+      const n = Number(d);
+      return (fromN === null || n >= fromN) && (toN === null || n <= toN);
+    });
+  }
+  return { items, more: Boolean(cursor) };
+}
+
+/**
+ * Exact demand per variant.
+ *
+ * Keyed on SKU when there is one, because that is the identity the store
+ * itself uses; falls back to title+variant when a line has no SKU. Those two
+ * keyspaces stay apart deliberately - folding a SKU-less line into a SKU'd row
+ * would be a guess presented as a total.
+ */
+function aggregateDemand(orders) {
+  const rows = new Map();
+  let linesTruncated = 0, noSku = 0;
+  for (const o of orders) {
+    if (o.items_truncated) linesTruncated++;
+    for (const li of o.items || []) {
+      const title = li.title || "(untitled)";
+      const variant = li.variant || "";
+      const sku = li.sku || "";
+      if (!sku) noSku++;
+      const key = sku ? `sku:${sku}` : `nm:${title} ${variant}`;
+      const row = rows.get(key) || { title, variant, sku, demand: 0, orders: 0 };
+      row.demand += Number(li.quantity) || 0;
+      row.orders += 1;
+      rows.set(key, row);
+    }
+  }
+  return {
+    rows: [...rows.values()].sort((a, b) => b.demand - a.demand),
+    linesTruncated, noSku,
+  };
+}
+
+function inventoryHead() {
+  return `<h2>Which orders</h2>${rangeControl(renderInventory, true)}
+    <div class="range" style="margin-top:0">
+      <div class="f" style="flex:1;min-width:220px"><label for="inv-loc">Stock location to check</label>
+        <select id="inv-loc"></select></div>
+      <button class="go apply" id="inv-go">Build breakdown</button>
+    </div>`;
+}
+
+function wireInventory(rerun) {
+  wireRange(renderInventory, true);
+  fillSelect("inv-loc", loadLocations, (n) =>
+    `<option value="${esc(n)}"${n === invLocation ? " selected" : ""}>${esc(n)}</option>`,
+    `<option value="">Primary location</option>`);
+  const sel = document.getElementById("inv-loc");
+  if (sel) sel.onchange = () => { invLocation = sel.value; };
+  const go = document.getElementById("inv-go");
+  if (go) go.onclick = rerun;
+}
+
+function renderInventory() {
+  setHTML(inventoryHead() + `<p class="muted">Pick a window and a location, then build the breakdown.</p>`);
+  wireInventory(() => void runInventory());
+}
+
+function demandTable(rows, stockBy) {
+  return `<div class="scroll" style="margin-top:14px"><table>
+    <thead><tr><th>Product</th><th>Variant</th><th>SKU</th><th class="num">Ordered</th>
+      <th class="num">On hand</th><th class="num">Short</th></tr></thead>
+    <tbody>${rows.map((r) => {
+      const st = stockBy ? stockBy(r) : null;
+      const onHand = st && st.onHand != null ? num(st.onHand) : null;
+      const short = onHand == null ? null : Math.max(0, r.demand - onHand);
+      return `<tr${short ? ' style="color:var(--warn)"' : ""}>
+        <td>${esc(r.title)}</td>
+        <td>${esc(r.variant || "-")}</td>
+        <td class="muted">${esc(r.sku || "-")}</td>
+        <td class="num">${r.demand}</td>
+        <td class="num">${onHand == null ? "?" : onHand}</td>
+        <td class="num">${short == null ? "?" : (short || "-")}</td>
+      </tr>`;
+    }).join("")}</tbody></table></div>`;
+}
+
+async function runInventory() {
+  const out = (h) => { setHTML(inventoryHead() + h); wireInventory(() => void runInventory()); };
+
+  out(`<p class="muted">Reading orders...</p>`);
+  try {
+    const { items, more } = await fetchOrdersInRange();
+    if (items.length === 0) { out(`<p class="muted">No orders in this window.</p>`); return; }
+
+    const agg = aggregateDemand(items);
+    if (!agg.rows.length) { out(`<p class="muted">${items.length} order(s), but no line items came back.</p>`); return; }
+
+    // Every caveat that makes a total less than complete, stated WITH the
+    // total rather than after it.
+    const caveats = [
+      more ? `<div class="note"><strong>Partial window.</strong> More orders exist in this range
+        than were read (300 max), so demand is understated. Narrow the range for an exact figure.</div>` : "",
+      agg.linesTruncated ? `<div class="note"><strong>${agg.linesTruncated} order(s) had more than 50
+        line items.</strong> Only the first 50 of each were counted, so demand is understated.</div>` : "",
+      agg.noSku ? `<div class="note">${agg.noSku} line(s) had no SKU and are grouped by name instead.
+        Stock matching for those is by name and can be wrong.</div>` : "",
+    ].join("");
+
+    const totalUnits = agg.rows.reduce((s, r) => s + r.demand, 0);
+    const kpis = `<div class="grid" style="margin-top:10px">
+        <div class="card"><div class="kpi-l">Orders</div><div class="kpi">${items.length}</div></div>
+        <div class="card"><div class="kpi-l">Variants</div><div class="kpi">${agg.rows.length}</div></div>
+        <div class="card"><div class="kpi-l">Units ordered</div><div class="kpi">${totalUnits}</div></div>
+      </div>${caveats}`;
+
+    // Exact demand is on screen BEFORE the assistant is involved. If the stock
+    // step fails or is slow, the owner still has the half that is arithmetic.
+    out(kpis + demandTable(agg.rows, null) +
+      `<p class="muted" style="margin-top:12px">Checking stock at
+       ${esc(invLocation || "the primary location")} - this runs an assistant turn and can take a minute.</p>`);
+
+    const task = `Look up current stock for these exact variants and return it. Do NOT recount
+demand - it is already computed from the order data and is authoritative.
+
+Location: ${invLocation || "the store's primary location (say which one you used)"}
+
+Variants (identify by SKU where present):
+${agg.rows.map((r) => `- sku=${r.sku || "(none)"} | product=${r.title} | variant=${r.variant || "(none)"} | ordered=${r.demand}`).join("\n")}
+
+Use your inventory tool to get AVAILABLE stock at that location for each one.
+If you cannot find a variant, say so for that variant rather than guessing a number.
+
+Reply with ONLY a JSON object, no prose:
+{"location":"...","stock":[{"sku":"","product":"","variant":"","onHand":0}],
+ "unmatched":["variants you could not find"],
+ "notes":"anything the numbers do not show"}`;
+
+    const text = await callTool("askStoreAssistant", { task })
+      .then((a) => (typeof a === "string" ? a : JSON.stringify(a)));
+    const data = extractJson(text);
+
+    if (!data || !Array.isArray(data.stock)) {
+      // The demand half is real and already correct - keep it on screen and
+      // show the reply beside it rather than replacing the whole view.
+      out(kpis + demandTable(agg.rows, null) + renderLoose(text));
+      return;
+    }
+
+    const bySku = new Map(), byName = new Map();
+    for (const s of data.stock) {
+      if (s.sku) bySku.set(String(s.sku), s);
+      byName.set(`${s.product || ""} ${s.variant || ""}`, s);
+    }
+    const stockBy = (r) => (r.sku && bySku.get(r.sku)) || byName.get(`${r.title} ${r.variant}`) || null;
+
+    const shortCount = agg.rows.filter((r) => {
+      const st = stockBy(r); return st && st.onHand != null && r.demand > num(st.onHand);
+    }).length;
+
+    out(`
+      <p class="sub">${esc(data.location || invLocation || "primary location")}:
+        ${items.length} order(s)${more ? ", partial window" : ""}</p>
+      <div class="grid" style="margin-top:10px">
+        <div class="card"><div class="kpi-l">Variants</div><div class="kpi">${agg.rows.length}</div></div>
+        <div class="card"><div class="kpi-l">Units ordered</div><div class="kpi">${totalUnits}</div></div>
+        <div class="card"><div class="kpi-l">Short</div><div class="kpi">${shortCount}</div></div>
+      </div>
+      ${caveats}
+      ${(data.unmatched || []).length ? `<div class="note"><strong>No stock found for:</strong>
+        ${esc((data.unmatched || []).join(", "))}. Those rows show "?" rather than zero.</div>` : ""}
+      ${demandTable(agg.rows, stockBy)}
+      ${data.notes ? `<div class="note">${esc(data.notes)}</div>` : ""}
+    `);
+  } catch (e) { out(fail(e)); }
+}
+
+
+// ── Tab 3: Act on the numbers ────────────────────────────────────────────────
+// The owner does not know which question to ask - that is the actual problem
+// this tab solves. So it offers real questions, and each one is a REAL query
+// run here in code. The table is the store's own numbers; the assistant only
+// reads them back. That ordering matters: a model asked "how is my store
+// doing" invents an agenda, a model handed six rows and a question does not.
+const ANALYSES = [
+  {
+    key: "dropout",
+    title: "Where am I losing shoppers?",
+    blurb: "Every stage from landing to paid, and which step loses the most.",
+    args: () => ({}),
+    brief: "Name the single worst drop-off step and what specifically to change about it.",
+  },
+  {
+    key: "changed",
+    title: "What changed since last time?",
+    blurb: "This period against the one before it, so you see movement not levels.",
+    args: () => ({ compareToPreviousPeriod: true }),
+    brief: "Lead with what MOVED and by how much. If nothing moved meaningfully, say so and stop.",
+  },
+  {
+    key: "source",
+    title: "Which traffic is actually worth it?",
+    blurb: "Broken down by where visitors came from.",
+    args: () => ({ groupBy: "referrer_source" }),
+    brief: "Say which source converts best and worst, and whether the worst is worth keeping.",
+  },
+  {
+    key: "device",
+    title: "Is mobile the problem?",
+    blurb: "Phone against desktop against tablet.",
+    args: () => ({ groupBy: "session_device_type" }),
+    brief: "Say whether one device is dragging the store down, and what to check on it first.",
+  },
+  {
+    key: "country",
+    title: "Where are my visitors?",
+    blurb: "By country, so shipping and currency decisions have a number behind them.",
+    args: () => ({ groupBy: "session_country" }),
+    brief: "Say which markets are real and whether any deserve different shipping or currency.",
+  },
+  {
+    key: "sells",
+    title: "What actually sells?",
+    blurb: "Orders, revenue and the top items - from order data, not analytics.",
+    tool: "sales",
+    brief: "Say which items carry the store and which are dead weight.",
+  },
+];
+
+let analysis = ANALYSES[0];
+/** The owner's own question, if they had one. Runs WITH the picked numbers. */
+let freeAsk = "";
+
+const COL_LABEL = {
+  sessions: "Sessions",
+  online_store_visitors: "Visitors",
+  sessions_with_cart_additions: "Added to cart",
+  sessions_that_reached_checkout: "Reached checkout",
+  sessions_that_completed_checkout: "Bought",
+  conversion_rate: "Conversion",
+};
+const prettyCol = (k) => COL_LABEL[k] || k.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
+
+/**
+ * Render rows without assuming a column list.
+ * A GROUPED ShopifyQL query drops the `columns` list entirely, and the
+ * percent-change variant adds columns that are not in any fixed list - so the
+ * shape is taken from the rows themselves. Zipping against a hardcoded header
+ * is how these tables silently mislabel their own numbers.
+ */
+function autoTable(rows) {
+  if (!rows.length) return "";
+  const cols = [...new Set(rows.flatMap((r) => Object.keys(r)))];
+  const isNum = (v) => v !== "" && v != null && Number.isFinite(Number(v));
+  return `<div class="scroll" style="margin-top:14px"><table>
+    <thead><tr>${cols.map((c) => `<th${isNum(rows[0][c]) ? ' class="num"' : ""}>${esc(prettyCol(c))}</th>`).join("")}</tr></thead>
+    <tbody>${rows.map((r) => `<tr>${cols.map((c) =>
+      `<td${isNum(r[c]) ? ' class="num"' : ""}>${esc(r[c] == null || r[c] === "" ? "-" : r[c])}</td>`).join("")}</tr>`).join("")}</tbody>
+  </table></div>`;
+}
+
+function analysisHead() {
+  return `<h2>What do you want to know?</h2>
+    <p class="sub">Pick a question. The store is queried directly and you see the real
+      numbers first; the assistant then reads them back and says what to do.</p>
+    <div class="cards" id="an-cards">
+      ${ANALYSES.map((a) => `
+        <button type="button" class="pb${a.key === analysis.key ? " on" : ""}" data-k="${a.key}">
+          <strong>${esc(a.title)}</strong><span>${esc(a.blurb)}</span>
+        </button>`).join("")}
+    </div>
+    ${rangeControl(renderAnalyse, false)}
+    <label for="an-ask">Or ask your own question <span class="muted">(optional)</span></label>
+    <textarea id="an-ask" rows="2" placeholder="e.g. Is it worth running a discount this month?">${esc(freeAsk)}</textarea>
+    <p class="sub">Asked alongside the numbers above, so the answer is grounded in them
+      rather than in guesses about your store.</p>
+    <button class="go" id="an-go">Run it</button>`;
+}
+
+function wireAnalysis() {
+  document.querySelectorAll("#an-cards .pb").forEach((b) => {
+    b.onclick = () => {
+      analysis = ANALYSES.find((a) => a.key === b.dataset.k);
+      document.querySelectorAll("#an-cards .pb").forEach((x) => x.classList.toggle("on", x === b));
+    };
+  });
+  wireRange(renderAnalyse, false);
+  const ask = document.getElementById("an-ask");
+  // Held in module state, not read once on submit: every run re-renders the
+  // whole view, and a question that vanished when the results arrived would
+  // look like the app had ignored it.
+  if (ask) ask.oninput = () => { freeAsk = ask.value; };
+  const go = document.getElementById("an-go");
+  if (go) go.onclick = () => void runAnalysis();
+}
+
+function renderAnalyse() {
+  setHTML(analysisHead() + `<div id="an-out"></div>`);
+  wireAnalysis();
+}
+
+async function runAnalysis() {
+  const out = (h) => { setHTML(analysisHead() + `<div id="an-out">${h}</div>`); wireAnalysis(); };
+  out(`<p class="muted" style="margin-top:14px">Querying the store…</p>`);
+
+  try {
+    let table = "", payload = "", caveat = "";
+
+    if (analysis.tool === "sales") {
+      const r = await callTool("shopifySalesReport", { since: range.since, until: range.until });
+      const items = r.top_items || [];
+      table = `<div class="grid" style="margin-top:14px">
+          <div class="card"><div class="kpi-l">Orders</div><div class="kpi">${num(r.orders_count)}</div></div>
+          <div class="card"><div class="kpi-l">Revenue</div><div class="kpi">${esc(money(parseMoney(r.revenue), shopCurrency))}</div></div>
+          <div class="card"><div class="kpi-l">Top items</div><div class="kpi">${items.length}</div></div>
+        </div>${autoTable(items)}`;
+      payload = JSON.stringify(r, null, 1);
+      // Truncation is stated in the same breath as the number, never after it.
+      if (r.truncated) caveat = `<div class="note"><strong>Truncated.</strong> This range holds
+        more than 500 orders, so these totals are incomplete. Narrow the dates for an exact figure.</div>`;
+      if (!num(r.orders_count)) caveat += `<div class="note">No orders in this window. That is a
+        real answer, not a failed query.</div>`;
+    } else {
+      const r = await callTool("shopifyStorefrontFunnel", {
+        since: range.since, until: range.until, ...analysis.args(),
+      });
+      const rows = r.rows || [];
+      table = autoTable(rows);
+      payload = JSON.stringify(r, null, 1);
+      // The documented trap: an all-bot store reports zero, and zero here is a
+      // FINDING about the storefront, not an empty result to shrug at.
+      if (r.no_human_sessions) {
+        caveat = `<div class="note"><strong>No human sessions in this window.</strong>
+          ${esc(r.no_human_sessions)}</div>`;
+      } else if (!rows.length) {
+        caveat = `<div class="note">The store returned no rows for this window.</div>`;
+      }
+    }
+
+    out(table + caveat + `<div id="an-answer"></div>`);
+    const answerHost = document.getElementById("an-answer");
+
+    const task = `Read these storefront numbers for this store and tell the owner what to do.
+
+Question asked: ${analysis.title}
+Window: ${range.since} to ${range.until}
+
+These are the actual numbers, already queried. Do NOT re-query to get them again,
+and do not contradict them:
+${payload}
+
+${analysis.brief}
+
+${freeAsk ? `The owner also asked this, in their own words. Answer it FIRST, from the numbers
+above, and say plainly if the numbers cannot answer it:
+"${freeAsk}"
+` : ""}
+Rules:
+- Three or four items at most, ranked. A list of twelve is a report nobody acts on.
+- Each item names the number it came from and the concrete next step.
+- If the numbers are all zero or too thin to support a conclusion, say exactly that
+  and stop. Do not manufacture an insight to fill the space.
+- Shoppers who added to cart and never reached checkout are anonymous and cannot be
+  contacted. Treat that as a fix to the store, never as outreach.`;
+
+    const text = await runAssistant(task, answerHost, "Reading the numbers.");
+    answerHost.innerHTML = `<div class="answer">${esc(text)}</div>`;
+  } catch (e) { out(fail(e)); }
+}
+
+// ── Shell ────────────────────────────────────────────────────────────────────
+// ONE ordered list: label and renderer together. Two parallel lists is how the
+// Inventory and Assistant tabs shipped unreachable - both were registered as
+// views, neither had a button, and nothing failed. A view that cannot be
+// reached looks identical to a view that does not exist.
+const VIEWS = [
+  { key: "draft", label: "Draft a product", render: renderDraft },
+  { key: "inventory", label: "Inventory vs orders", render: renderInventory },
+  { key: "analyse", label: "Act on the numbers", render: renderAnalyse },
+];
+
+const tabBar = document.getElementById("tabs");
+tabBar.innerHTML = VIEWS.map((v, i) =>
+  `<button class="tab" role="tab" data-view="${v.key}" aria-selected="${i === 0}">${esc(v.label)}</button>`
+).join("");
+
+tabBar.querySelectorAll(".tab").forEach((btn) => {
+  btn.onclick = () => {
+    tabBar.querySelectorAll(".tab").forEach((b) => b.setAttribute("aria-selected", String(b === btn)));
+    VIEWS.find((v) => v.key === btn.dataset.view).render();
+  };
+});
+
+(async function boot() {
+  try {
+    const shop = await callTool("shopifyGetShop", {});
+    shopCurrency = shop.currency_code || shop.currencyCode || "";
+    document.getElementById("shopName").textContent = shop.name || "Shopify";
+    document.getElementById("shopSub").textContent =
+      [shop.myshopify_domain || shop.domain, shop.plan_name || shop.plan].filter(Boolean).join(" · ");
+  } catch (e) {
+    document.getElementById("shopSub").textContent = e.message || "Could not reach the store.";
+  }
+  VIEWS[0].render();
+})();
+</script>

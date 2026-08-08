@@ -239,25 +239,21 @@ export type JobStore = {
   }): Promise<{ jobs: ScheduledJob[]; nextCursor: string | null }>
 
   /**
-   * Every scheduled-trigger row of one workflow, any creator — the
-   * structural filter above, ordered oldest first. System-level: callers
-   * authorize via the workflow read (workspace-member-scoped
-   * `workflowStore.getById`) before calling. Backs `scheduleWorkflow`'s
-   * cross-member idempotent-replace dedup and the trigger-row surfacing on
-   * `getWorkflow` / the builder.
-   */
-  listTriggerJobsForWorkflowSystem(workflowId: string): Promise<ScheduledJob[]>
-
-  /**
-   * EVERY firing row of one workflow regardless of channel — both the
-   * `channel_type='workflow'` trigger rows AND the messaging/doc-channel
-   * REMINDER rows (`workflow_step_run_id IS NULL`, any channel). Unlike
-   * `listTriggerJobsForWorkflowSystem` (which filters to `channel_type='workflow'`),
-   * this sees the reminder row a delivery-backed scheduled workflow fires from.
-   * System-level (same authorization model as the sibling). Used by
-   * `updateWorkflow` to reconcile a reminder reschedule to exactly one firing
-   * row — scheduling is a workflow trigger, so editing the workflow must own
-   * the reminder row too. See docs/architecture/features/workflow.md §3.
+   * EVERY firing row of one workflow regardless of channel, any creator —
+   * both the `channel_type='workflow'` trigger rows AND the messaging/doc-
+   * channel REMINDER rows a delivery-backed scheduled workflow fires from.
+   * `workflow_step_run_id IS NULL` excludes wait wake-ups. Ordered oldest
+   * first, so callers that keep one row keep the originally-authored target.
+   * System-level: callers authorize via the workflow read (workspace-member-
+   * scoped `workflowStore.getById`) before calling.
+   *
+   * This is the ONLY firing-row lookup, deliberately. Its narrow sibling
+   * (`channel_type='workflow'` only) was deleted on 2026-08-08: reconciling
+   * through it could not see a delivery-backed row, so rescheduling a Telegram
+   * reminder created a second firing row instead of updating the first, and
+   * the workflow fired twice a day. Reconciliation, clearing, and the builder's
+   * trigger surfacing all read through here. See
+   * docs/architecture/features/workflow.md §3.
    */
   listFiringJobsForWorkflowSystem(workflowId: string): Promise<ScheduledJob[]>
 

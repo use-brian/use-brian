@@ -1079,6 +1079,7 @@ describe('[COMP:api/shopify-client] Shopify GraphQL client', () => {
       setProductMetafields: nullApi,
       setProductOptions: nullApi,
       listThemes: async () => [],
+      listProductTemplates: async () => ({ themeId: 't', themeName: 'Test Theme', templates: [] }),
       readProductTemplate: nullApi,
       createProductTemplate: nullApi,
       setProductTemplate: nullApi,

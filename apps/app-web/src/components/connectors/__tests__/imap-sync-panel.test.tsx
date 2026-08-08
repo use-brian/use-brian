@@ -47,6 +47,19 @@ describe("[COMP:web/imap-sync-panel] sync line", () => {
       tm.upToDate.replace("{n}", "0"),
     );
   });
+
+  it("reports a parked backfill instead of claiming progress it is not making", () => {
+    // Regression for 2026-08-08: a wedged backfill kept `status: "running"`, so
+    // this line read "Syncing 72,497 of 155,363..." for twelve days while the
+    // count never moved. A progress string with no progress is worse than an
+    // error, because it reads as the system working.
+    const line = formatImapSyncLine(
+      { archived: 72497, backfill: { scope: "all", status: "stalled", totalEstimate: 155363 } },
+      tm,
+    );
+    expect(line).toBe(tm.backfillStalled.replace("{n}", "72497"));
+    expect(line).not.toContain("155363");
+  });
 });
 
 describe("[COMP:web/imap-sync-panel] render posture", () => {

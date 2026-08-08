@@ -31,6 +31,7 @@ import {
   Download,
   GitBranch,
   Plus,
+  Home,
   RefreshCw,
   Puzzle,
   Trash2,
@@ -57,6 +58,7 @@ import {
   type SkillImportGithubRepo,
 } from "@/lib/api/skills";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import { CUSTOM_HOME_APP_PREFIX, type HomeAppEntry } from "@use-brian/shared/home-apps";
 
 /**
  * Requested scopes as sentences an admin can act on. Deliberately verbose:
@@ -71,10 +73,22 @@ export function describeScopes(
     scopeIdentity: string;
     scopeNet: string;
     scopeNone: string;
+    scopeStoreRead: string;
+    scopeStoreWrite: string;
+    scopeAgent: string;
   },
 ): string[] {
   if (!scopes) return [copy.scopeNone];
   const lines = [scopes.data === "read_write" ? copy.scopeReadWrite : copy.scopeRead];
+  // The store is its own line, never folded into the brain one. Reading a
+  // store and changing one are different decisions, and an admin should not
+  // have to infer that an app can set prices from a sentence about memories.
+  if (scopes.store === "write") lines.push(copy.scopeStoreWrite);
+  else if (scopes.store === "read") lines.push(copy.scopeStoreRead);
+  // Its own line, and last of the power lines: this one spends model time and
+  // acts on the viewer's behalf, which is a different question from "what may
+  // it read".
+  if (scopes.agent === "ask") lines.push(copy.scopeAgent);
   if (scopes.identity) lines.push(copy.scopeIdentity);
   for (const origin of scopes.net ?? []) {
     lines.push(format(copy.scopeNet, { origin }));
@@ -87,6 +101,12 @@ export function scopeDelta(requested: AppScopes | null, granted: AppScopes | nul
   if (!requested || !granted) return [];
   const added: string[] = [];
   if (requested.data === "read_write" && granted.data !== "read_write") added.push("data");
+  // Rank-compared, not equality-compared: none < read < write. A re-sync that
+  // widens read -> write is a delta the admin has to see, and one that narrows
+  // is not.
+  const rank = (v: string | undefined) => (v === "write" ? 2 : v === "read" ? 1 : 0);
+  if (rank(requested.store) > rank(granted.store)) added.push("store");
+  if (requested.agent === "ask" && granted.agent !== "ask") added.push("agent");
   if (requested.identity && !granted.identity) added.push("identity");
   const known = new Set(granted.net ?? []);
   for (const origin of requested.net ?? []) if (!known.has(origin)) added.push(origin);
@@ -96,9 +116,18 @@ export function scopeDelta(requested: AppScopes | null, granted: AppScopes | nul
 export function CustomAppsSection({
   workspaceId,
   canEdit,
+  homeApps,
+  busy: stripBusy,
+  onToggleHome,
 }: {
   workspaceId: string;
   canEdit: boolean;
+  /** The workspace strip, so a card can show whether it is on it. `null` while loading. */
+  homeApps: HomeAppEntry[] | null;
+  /** A strip write is in flight — the parent owns it, so the toggle waits on it. */
+  busy: boolean;
+  /** Place this app on Home, or take it off. Guards (max, at-least-one) live in the parent. */
+  onToggleHome: (appId: string) => Promise<void>;
 }) {
   const t = useT().studioPage.customApps;
   const [apps, setApps] = useState<CustomHomeApp[] | null>(null);
@@ -204,6 +233,9 @@ export function CustomAppsSection({
           const delta = scopeDelta(app.requestedScopes, app.grantedScopes);
           const needsFirstConsent = app.status === "needs_consent" && !app.grantedScopes;
           const needsReconsent = app.status === "needs_consent" && Boolean(app.grantedScopes);
+          const onHome = (homeApps ?? []).includes(
+            `${CUSTOM_HOME_APP_PREFIX}${app.id}` as HomeAppEntry,
+          );
           return (
             <div
               key={app.id}
@@ -272,6 +304,27 @@ export function CustomAppsSection({
                   )}
                   {app.status === "active" && (
                     <>
+                      {/*
+                        Only an ACTIVE app gets this. `normalizeHomeApps`
+                        filters unrenderable entries on read, so placing a
+                        needs-consent app would silently do nothing and read
+                        as a broken toggle.
+                      */}
+                      <button
+                        type="button"
+                        disabled={busy === app.id || stripBusy || homeApps === null}
+                        aria-pressed={onHome}
+                        onClick={() => void onToggleHome(app.id)}
+                        className={cn(
+                          "inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium disabled:opacity-50",
+                          onHome
+                            ? "bg-primary/10 text-primary"
+                            : "border border-border hover:bg-accent",
+                        )}
+                      >
+                        <Home className="size-3" aria-hidden />
+                        {onHome ? t.removeFromHomeAction : t.addToHomeAction}
+                      </button>
                       <button
                         type="button"
                         disabled={busy === app.id}

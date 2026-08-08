@@ -70,8 +70,10 @@ export type WorkflowScheduleSyncDeps = {
 }
 
 /**
- * Create or idempotently update the single scheduled-trigger `scheduled_jobs`
- * row that fires a workflow on a schedule, reaping any duplicate trigger rows.
+ * Create or idempotently update the single `scheduled_jobs` row that fires a
+ * workflow on a schedule, reaping every duplicate FIRING row regardless of the
+ * channel it fires from (workflow-trigger rows and delivery-backed reminder
+ * rows alike — see the lookup below).
  *
  * Shared by `scheduleWorkflow` (chat) and the workflows REST route (web
  * builder) so BOTH paths keep `scheduled_jobs` ⇄ `workflows.trigger` in exact
@@ -116,15 +118,35 @@ export async function syncWorkflowScheduleTrigger(
     input: params.input ?? {},
   })
 
-  const existing = await deps.jobStore.listTriggerJobsForWorkflowSystem(params.workflowId)
+  // EVERY firing row of this workflow, on ANY channel — not just the
+  // `channel_type='workflow'` ones. A delivery-backed reminder fires from a
+  // messaging row (`channel_type='telegram'` carrying the chat id), so the old
+  // trigger-only lookup could not see it, fell through to the create branch,
+  // and minted a SECOND firing row. That is the 2026-08-08 double-summary: a
+  // workflow authored as a Telegram reminder on 08-03 was rescheduled on 08-06,
+  // gained a second 09:00 row, and delivered two identical summaries every
+  // morning after. "One firing row per workflow" is the invariant; the channel
+  // it fires from is not part of it.
+  const existing = await deps.jobStore.listFiringJobsForWorkflowSystem(params.workflowId)
   let job: ScheduledJob
   if (existing.length > 0) {
+    // Oldest first (the store orders by created_at ASC), so the survivor is the
+    // row the user originally authored — the one holding the delivery target.
     const [keep, ...duplicates] = existing
+    // A delivery-backed row's `instructions` is human-readable prose: the job
+    // listing shows it and `searchScheduledJobs` text-matches on it. Execution
+    // reads only `input` back out (see `runWorkflowFromJob` — an unparseable
+    // value is the documented legacy path and yields `{}`), so overwriting the
+    // prose with trigger JSON would cost the user that text for nothing.
+    // Overwrite only when the row IS a workflow-channel trigger (its
+    // instructions are the payload) or when we actually carry an input.
+    const carriesInput = Object.keys(params.input ?? {}).length > 0
+    const overwriteInstructions = keep.channelType === 'workflow' || carriesInput
     job =
       (await deps.jobStore.update(keep.id, {
         schedule: params.schedule,
         timezone: params.timezone,
-        instructions,
+        ...(overwriteInstructions ? { instructions } : {}),
         nextRunAt,
         enabled: true,
         // Policy is additive — only patch a field the caller actually passed,
@@ -161,15 +183,21 @@ export async function syncWorkflowScheduleTrigger(
 }
 
 /**
- * Delete every scheduled-trigger row for a workflow. Called when a workflow's
- * trigger changes AWAY from `schedule` (so it stops firing) or the workflow is
- * deleted. Best-effort per row; returns the count removed.
+ * Delete every FIRING row for a workflow, on any channel. Called when a
+ * workflow's trigger changes AWAY from `schedule` (so it stops firing) or the
+ * workflow is deleted. Best-effort per row; returns the count removed.
+ *
+ * Same widening as `syncWorkflowScheduleTrigger`, and the same reason: with the
+ * trigger-only lookup, switching a delivery-backed workflow to manual (or
+ * deleting it outright) left its messaging row firing on schedule — against a
+ * workflow that might no longer exist — with no surface left to stop it from.
+ * A workflow that is not scheduled must have no firing rows at all.
  */
 export async function clearWorkflowScheduleTriggers(
   deps: { jobStore: JobStore },
   workflowId: string,
 ): Promise<number> {
-  const existing = await deps.jobStore.listTriggerJobsForWorkflowSystem(workflowId)
+  const existing = await deps.jobStore.listFiringJobsForWorkflowSystem(workflowId)
   let removed = 0
   for (const job of existing) {
     if (await deps.jobStore.delete(job.id).catch(() => false)) removed++

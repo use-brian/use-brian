@@ -345,7 +345,16 @@ export async function findSessionById(id: string): Promise<Session | null> {
     [id],
   )
   if (result.rows.length === 0) return null
-  // Touch last_active_at
+  // Touch last_active_at.
+  //
+  // NOTE: this is a *read* that writes the recency column, and that is
+  // deliberate — `last_active_at` orders the session rail, where "someone
+  // looked at it" counts as activity. It is also exactly why turn liveness
+  // must NOT live here: a client polling an open room refreshes this column
+  // forever, which is how the 2026-08-08 stuck room defeated the 6-minute
+  // sweeper for ~31 minutes. Liveness has its own column that only the
+  // running turn writes (`turn_heartbeat_at`, migration 424). Never move the
+  // sweep predicate back onto `last_active_at`.
   await query(`UPDATE sessions SET last_active_at = now() WHERE id = $1`, [id])
   return result.rows[0]
 }
@@ -392,26 +401,217 @@ export async function updateSessionStatus(sessionId: string, status: string): Pr
   )
 }
 
+// ── Turn lease (migration 424) ────────────────────────────────────────────
+//
+// `sessions.status='running'` is a lock. Before migration 424 it had no owner
+// and no lease: the chat route released it on the happy path and in the catch,
+// and any exit reaching neither pinned the session forever. The sweeper that
+// was supposed to rescue it keyed staleness off `last_active_at`, which
+// `findSessionById` refreshes on every READ, so a client watching the session
+// held the backstop off indefinitely (2026-08-08: ~31 minutes).
+//
+// The lease fixes both halves. `turn_heartbeat_at` is written only by the
+// running turn, so no read can refresh it; `turn_lease_token` says who holds
+// the lock, so an orphan cannot disturb its successor.
+//
+// Spec: docs/architecture/context-engine/session-messages.md
+//       → "Turn lease and recovery".
+
+/** How often a running turn refreshes its lease. */
+export const TURN_HEARTBEAT_INTERVAL_MS = 20_000
+
 /**
- * Reset every session whose `status='running'` AND `last_active_at` is older
- * than the supplied staleness threshold to `status='timeout'`. Returns the
- * rows that were touched so callers can emit per-session telemetry / bus
- * events. See `packages/api/src/scheduling/stuck-session-sweeper.ts` and
+ * How long a lease survives without a heartbeat before it may be reclaimed.
+ * 4.5x the heartbeat, so a live turn under load or GC pause is never stolen.
+ * Unlike the old `last_active_at` threshold this need NOT clear Cloud Run's
+ * 300s request cap: a turn running past the cap keeps heartbeating (the
+ * interval is independent of the request), and one that stopped heartbeating
+ * is dead regardless of how long its request was allowed to be.
+ */
+export const TURN_LEASE_STALE_AFTER_MS = 90_000
+
+/** Why a turn's lock was released. Persisted so a heal can explain itself. */
+export type TurnEndReason =
+  | 'completed'
+  | 'stopped_by_user'
+  | 'stalled_reclaimed'
+  | 'timeout'
+
+/**
+ * Take the lease for a turn that has just claimed `status='running'`. Returns
+ * the token every later lease operation must present. Clears any stale cancel
+ * request and end reason left by the previous turn.
+ */
+export async function startTurnLease(sessionId: string): Promise<string> {
+  const result = await query<{ turn_lease_token: string }>(
+    `UPDATE sessions
+        SET turn_lease_token = gen_random_uuid(),
+            turn_heartbeat_at = now(),
+            cancel_requested_at = NULL,
+            turn_end_reason = NULL
+      WHERE id = $1
+      RETURNING turn_lease_token`,
+    [sessionId],
+  )
+  const token = result.rows[0]?.turn_lease_token
+  if (!token) throw new Error(`startTurnLease: session ${sessionId} not found`)
+  return token
+}
+
+/**
+ * One heartbeat tick. Refreshes the lease AND reports whether a stop was
+ * requested, in a single statement — that is how a stop reaches a turn running
+ * in another process without a bus round-trip.
+ *
+ * `held: false` means the lease is no longer ours (reclaimed as stale, or
+ * released). The caller must abort: continuing would let an orphan turn write
+ * a reply into a session another turn now owns.
+ */
+export async function touchTurnLease(
+  sessionId: string,
+  token: string,
+): Promise<{ held: boolean; cancelRequested: boolean }> {
+  const result = await query<{ cancel_requested_at: Date | null }>(
+    `UPDATE sessions
+        SET turn_heartbeat_at = now()
+      WHERE id = $1 AND turn_lease_token = $2 AND status = 'running'
+      RETURNING cancel_requested_at`,
+    [sessionId, token],
+  )
+  const row = result.rows[0]
+  if (!row) return { held: false, cancelRequested: false }
+  return { held: true, cancelRequested: row.cancel_requested_at !== null }
+}
+
+/**
+ * Ask the turn holding this session's lock to stop. Picked up by the holder's
+ * next heartbeat tick (<= `TURN_HEARTBEAT_INTERVAL_MS`) when it runs in another
+ * process; the same-process path aborts its `AbortController` directly and does
+ * not wait for this. No-op when nothing is running.
+ */
+export async function requestTurnCancel(sessionId: string): Promise<boolean> {
+  const result = await query(
+    `UPDATE sessions
+        SET cancel_requested_at = now()
+      WHERE id = $1 AND status = 'running'`,
+    [sessionId],
+  )
+  return (result.rowCount ?? 0) > 0
+}
+
+/**
+ * Resting status for a released lock. A clean end (finished, or a human who
+ * chose to stop it) rests at `idle`; an abnormal end rests at `timeout`, which
+ * blocks nothing but preserves the debugging signal that this turn did not end
+ * the way it was supposed to.
+ */
+function restingStatusFor(reason: TurnEndReason): 'idle' | 'timeout' {
+  return reason === 'completed' || reason === 'stopped_by_user' ? 'idle' : 'timeout'
+}
+
+/**
+ * Release the lock, recording why. Token-guarded: a turn whose lease was
+ * already reclaimed must not flip a SUCCESSOR turn back to idle. Pass
+ * `token: null` for an administrative release (the stop route), which releases
+ * whoever holds it.
+ */
+export async function releaseTurnLease(
+  sessionId: string,
+  reason: TurnEndReason,
+  token: string | null,
+): Promise<boolean> {
+  const result = await query(
+    `UPDATE sessions
+        SET status = $1,
+            turn_lease_token = NULL,
+            turn_heartbeat_at = NULL,
+            cancel_requested_at = NULL,
+            turn_end_reason = $2,
+            last_active_at = now()
+      WHERE id = $3
+        AND status = 'running'
+        ${token === null ? '' : 'AND turn_lease_token = $4'}`,
+    token === null
+      ? [restingStatusFor(reason), reason, sessionId]
+      : [restingStatusFor(reason), reason, sessionId, token],
+  )
+  return (result.rowCount ?? 0) > 0
+}
+
+/**
+ * On-demand heal: reclaim this session's lock if, and only if, its lease has
+ * gone stale. Returns true when the caller now owns nothing (the lock is free)
+ * — the caller re-claims normally afterwards.
+ *
+ * This is the fastest of the three recovery paths: a user's own next message
+ * repairs the session instead of queueing behind a lock nobody holds. The
+ * sweeper (<= `TURN_LEASE_STALE_AFTER_MS` + its tick) covers the case where
+ * nobody sends anything, and the stop route covers the impatient case.
+ *
+ * A NULL heartbeat is a pre-migration-424 row: fall back to `last_active_at`
+ * so those still recover, accepting that reads refresh it.
+ */
+export async function reclaimStaleTurn(
+  sessionId: string,
+  staleAfterMs: number = TURN_LEASE_STALE_AFTER_MS,
+): Promise<boolean> {
+  const result = await query(
+    `UPDATE sessions
+        SET status = 'timeout',
+            turn_lease_token = NULL,
+            turn_heartbeat_at = NULL,
+            cancel_requested_at = NULL,
+            turn_end_reason = 'stalled_reclaimed'
+      WHERE id = $1
+        AND status = 'running'
+        AND COALESCE(turn_heartbeat_at, last_active_at)
+              < now() - ($2 || ' milliseconds')::interval`,
+    [sessionId, String(staleAfterMs)],
+  )
+  return (result.rowCount ?? 0) > 0
+}
+
+/**
+ * Reset every session whose `status='running'` lease has gone stale to
+ * `status='timeout'`. Returns the rows that were touched so callers can emit
+ * per-session telemetry / bus events.
+ *
+ * Staleness is the LEASE (`turn_heartbeat_at`), never `last_active_at` — see
+ * the block comment above and `findSessionById`. `COALESCE` keeps
+ * pre-migration-424 rows sweepable.
+ *
+ * See `packages/api/src/scheduling/stuck-session-sweeper.ts` and
  * `docs/architecture/context-engine/session-messages.md` →
- * "Stuck-running recovery".
+ * "Turn lease and recovery".
  */
 export async function sweepStuckSessions(
   staleAfterMs: number,
-): Promise<Array<{ id: string; mode: string | null; userId: string }>> {
-  const result = await query<{ id: string; mode: string | null; user_id: string }>(
+): Promise<Array<{ id: string; mode: string | null; userId: string; visibility: string }>> {
+  const result = await query<{
+    id: string
+    mode: string | null
+    user_id: string
+    visibility: string
+  }>(
     `UPDATE sessions
-        SET status = 'timeout', last_active_at = now()
+        SET status = 'timeout',
+            turn_lease_token = NULL,
+            turn_heartbeat_at = NULL,
+            cancel_requested_at = NULL,
+            turn_end_reason = 'stalled_reclaimed',
+            last_active_at = now()
       WHERE status = 'running'
-        AND last_active_at < now() - ($1 || ' milliseconds')::interval
-      RETURNING id, mode, user_id`,
+        AND COALESCE(turn_heartbeat_at, last_active_at)
+              < now() - ($1 || ' milliseconds')::interval
+      RETURNING id, mode, user_id, visibility`,
     [String(staleAfterMs)],
   )
-  return result.rows.map((r) => ({ id: r.id, mode: r.mode, userId: r.user_id }))
+  return result.rows.map((r) => ({
+    id: r.id,
+    mode: r.mode,
+    userId: r.user_id,
+    visibility: r.visibility,
+  }))
 }
 
 /**

@@ -22,6 +22,30 @@ export const MANIFEST_VERSION = 1
 /** What an app may reach in the workspace brain. */
 export type AppDataScope = 'read' | 'read_write'
 
+/**
+ * What an app may reach in a connected commerce store (currently Shopify).
+ *
+ * Deliberately a SEPARATE axis from `data`. Brain access and store access are
+ * different decisions about different systems: a dashboard that reads a store
+ * needs no brain at all, and store `write` reaches money and a public
+ * storefront in a way no brain scope does. Folding the two into one tier is
+ * how an admin approves more than the screen showed them.
+ */
+export type AppStoreScope = 'none' | 'read' | 'write'
+
+/**
+ * May the app hand a TASK to the workspace assistant?
+ *
+ * Separate from `data` and `store` because it is a different kind of power:
+ * not "read this" or "write that" but "spend model time and act on my behalf".
+ * The agent's tools are intersected with what the app itself may reach, so
+ * this can never be a ladder to something the other two scopes denied.
+ */
+export type AppAgentScope = 'none' | 'ask'
+
+/** Ordered so a drift check is a comparison, not a lookup table. */
+const STORE_SCOPE_RANK: Record<AppStoreScope, number> = { none: 0, read: 1, write: 2 }
+
 export type AppScopes = {
   /**
    * Brain access, gating the bridge's tool list exactly like a brain key's
@@ -29,6 +53,25 @@ export type AppScopes = {
    * write.
    */
   data: AppDataScope
+  /**
+   * Commerce-store access, gating the bridge's store tool list. Default
+   * `'none'` — omitted entirely from a normalized manifest, so every manifest
+   * written before this scope existed keeps meaning exactly what it meant.
+   *
+   * `write` never reaches a DESTRUCTIVE tool. Refunds, cancellations,
+   * completing a draft order and writing a theme template are excluded from
+   * the bridge by construction, not by policy default; see
+   * docs/architecture/features/home-apps.md → "Store scope".
+   */
+  store?: AppStoreScope
+  /**
+   * Hand a task to the workspace assistant. Default `'none'`.
+   *
+   * The turn runs with the app's OWN ceiling (`allowedTools` intersected with
+   * `scopes.store`), never the assistant's full tool set — so an app cannot
+   * ask the model to do what it was refused directly.
+   */
+  agent?: AppAgentScope
   /**
    * Release the viewer's display name to the app. A stable, opaque `userId`
    * claim is ALWAYS present (an app needs to tell viewers apart to key its own
@@ -186,12 +229,29 @@ export function parseManifest(raw: unknown): ParseManifestResult {
   } else {
     const s = scopesRaw as Record<string, unknown>
     for (const key of Object.keys(s)) {
-      if (key !== 'data' && key !== 'identity' && key !== 'net') {
+      if (
+        key !== 'data' &&
+        key !== 'store' &&
+        key !== 'agent' &&
+        key !== 'identity' &&
+        key !== 'net'
+      ) {
         push(`scopes.${key}`, 'is not a scope this version understands')
       }
     }
     if (s.data !== 'read' && s.data !== 'read_write') {
       push('scopes.data', "must be 'read' or 'read_write'")
+    }
+    if (
+      s.store !== undefined &&
+      s.store !== 'none' &&
+      s.store !== 'read' &&
+      s.store !== 'write'
+    ) {
+      push('scopes.store', "must be 'none', 'read' or 'write'")
+    }
+    if (s.agent !== undefined && s.agent !== 'none' && s.agent !== 'ask') {
+      push('scopes.agent', "must be 'none' or 'ask'")
     }
     if (s.identity !== undefined && typeof s.identity !== 'boolean') {
       push('scopes.identity', 'must be a boolean')
@@ -215,6 +275,8 @@ export function parseManifest(raw: unknown): ParseManifestResult {
     }
     scopes = {
       data: s.data === 'read_write' ? 'read_write' : 'read',
+      ...(s.store === 'read' || s.store === 'write' ? { store: s.store } : {}),
+      ...(s.agent === 'ask' ? { agent: 'ask' as const } : {}),
       ...(s.identity === true ? { identity: true } : {}),
       ...(net.length > 0 ? { net } : {}),
     }
@@ -244,6 +306,17 @@ export function parseManifest(raw: unknown): ParseManifestResult {
 }
 
 /**
+ * Normalize a possibly-absent store scope to its tier rank.
+ *
+ * Exported because the bridge's tool gate compares the same two values and a
+ * second copy of this ordering is how `write` quietly becomes reachable from a
+ * `read` grant.
+ */
+export function storeScopeRank(scope: AppStoreScope | undefined): number {
+  return STORE_SCOPE_RANK[scope ?? 'none']
+}
+
+/**
  * Does `requested` ask for anything `granted` does not already cover?
  *
  * This is the T3 drift rule in one function. A sync that widens scopes must
@@ -259,6 +332,8 @@ export function scopesExceedGrant(
 ): boolean {
   if (!granted) return true
   if (requested.data === 'read_write' && granted.data !== 'read_write') return true
+  if (storeScopeRank(requested.store) > storeScopeRank(granted.store)) return true
+  if (requested.agent === 'ask' && granted.agent !== 'ask') return true
   if (requested.identity === true && granted.identity !== true) return true
   const grantedNet = new Set(granted.net ?? [])
   return (requested.net ?? []).some((origin) => !grantedNet.has(origin))

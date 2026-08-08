@@ -114,13 +114,18 @@ export type WorkflowToolDeps = {
     workspaceId: string,
   ) => Promise<Array<{ slug: string; name: string }>>
   /**
-   * The workflow's ACTUAL scheduled-trigger rows (any creator) — backs the
+   * The workflow's ACTUAL firing rows (any creator, any channel) — backs the
    * `triggerJobs` field on `getWorkflow` so drift between the
    * `workflows.trigger` column and reality is visible (the 2026-06-10
    * incident: trigger said "manual" while two hourly cron jobs fired).
-   * Wired from `jobStore.listTriggerJobsForWorkflowSystem`; the tool
+   * Wired from `jobStore.listFiringJobsForWorkflowSystem`; the tool
    * authorizes via the workspace-scoped workflow read before calling.
    * Absent (tests, minimal boots) → `triggerJobs` is omitted.
+   *
+   * Channel-blind on purpose: a delivery-backed reminder fires from a row
+   * carrying its messaging channel, and surfacing only `channel_type='workflow'`
+   * rows here hid a duplicate 09:00 row on the one screen opened to find it
+   * (2026-08-08).
    */
   listTriggerJobs?: (workflowId: string) => Promise<
     Array<{
@@ -794,7 +799,7 @@ async function dependencyIssues(
     // assistants can legitimately resolve to different policies.
     const probed = new Set<string>()
     for (const ref of refs) {
-      const key = `${ref.toolName} ${ref.stepType} ${ref.assistantId ?? ''}`
+      const key = `${ref.toolName}\x00${ref.stepType}\x00${ref.assistantId ?? ''}`
       if (probed.has(key)) continue
       probed.add(key)
       try {

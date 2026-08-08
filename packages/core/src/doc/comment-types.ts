@@ -183,10 +183,33 @@ export type CommentThreadStore = {
    * (`created_by = userId`) across a workspace whose latest comment is the
    * assistant's. Derived at read time — it leaves the list the moment the user
    * replies (latest is no longer the AI) or resolves the thread. Newest first.
+   *
+   * Two filters narrow it further (both migration 426):
+   *   - `since` — the retention cutoff; threads whose latest comment predates
+   *     it are omitted. `null`/omitted = no age filter.
+   *   - a `doc_inbox_dismissals` row whose `dismissed_at` is at or after the
+   *     thread's latest comment. A LATER assistant reply out-dates the
+   *     dismissal and the thread returns.
+   *
    * See `docs/architecture/features/doc-inbox.md`.
    */
   listPendingRepliesForUser(
     userId: string,
     workspaceId: string,
+    opts?: { since?: Date | null },
   ): Promise<InboxPendingReply[]>
+
+  /**
+   * Dismiss one pending reply for this reader — the "I opened it" record the
+   * derived model has nowhere else to put. Idempotent (re-dismissing just
+   * refreshes `dismissed_at`). Scoped to the caller, so it can never clear a
+   * teammate's Inbox, and it never touches the thread itself: the conversation
+   * stays open and on its page, it just stops asking for attention until the
+   * assistant speaks again.
+   */
+  dismissPendingReply(
+    userId: string,
+    workspaceId: string,
+    threadId: string,
+  ): Promise<void>
 }

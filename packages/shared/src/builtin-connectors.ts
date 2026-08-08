@@ -206,6 +206,7 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'shopifyListContent', description: 'List online store pages, blog posts, or blogs', classification: 'read', defaultPolicy: 'allow', group: 'onlineStore' },
     { name: 'shopifyCreateContent', description: 'Create an online store page or blog post', classification: 'write', defaultPolicy: 'ask', group: 'onlineStore' },
     { name: 'shopifyListThemes', description: 'List online store themes and which one is live', classification: 'read', defaultPolicy: 'allow', group: 'onlineStore' },
+    { name: 'shopifyListProductTemplates', description: 'List the product page templates a theme already has, with their section stacks', classification: 'read', defaultPolicy: 'allow', group: 'onlineStore' },
     { name: 'shopifyReadProductTemplate', description: 'Read a product page template from the theme', classification: 'read', defaultPolicy: 'allow', group: 'onlineStore' },
     // Destructive, not write: this lands a file in the theme customers are
     // served from, and a broken page is invisible in the Shopify admin.

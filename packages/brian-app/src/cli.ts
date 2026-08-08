@@ -72,6 +72,13 @@ function main(): void {
   console.log(
     `✓ ${result.manifest.name} — ${result.files.length} file(s), ` +
       `${Math.round(result.totalBytes / 1024)} KB, scopes.data=${result.manifest.scopes.data}` +
+      // The store tier is the more consequential grant of the two — it reaches
+      // money and a public storefront — so a summary that named only the brain
+      // scope would understate what this bundle is asking for.
+      (result.manifest.scopes.store && result.manifest.scopes.store !== 'none'
+        ? `, scopes.store=${result.manifest.scopes.store}`
+        : '') +
+      (result.manifest.scopes.agent === 'ask' ? ', scopes.agent=ask' : '') +
       (findings.length > 0 ? ` (${findings.length} advisory)` : ''),
   )
 }

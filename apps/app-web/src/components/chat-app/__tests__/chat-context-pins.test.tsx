@@ -816,3 +816,90 @@ describe("[COMP:app-web/chat-context-pins] Work Bench section", () => {
     container.remove();
   });
 });
+
+/**
+ * The human half of turn recovery (2026-08-08). The automatic half is the
+ * server-side lease; this is the control a member reaches for when a room has
+ * been showing "Working" and they have no way to tell a live turn from a dead
+ * one. The card must therefore offer Stop whenever a turn is running, not only
+ * once some client-side heuristic has decided it looks stuck — the server is
+ * what distinguishes abort-a-live-turn from reclaim-a-dead-lease.
+ */
+describe("[COMP:app-web/work-bench-stop] Live card stop control", () => {
+  const baseProps = {
+    sessionId: "session-1",
+    workspaceId: "workspace-1",
+    refreshKey: 0,
+    startedByName: null,
+    expanded: true,
+    onExpandedChange: () => {},
+    assistant: { id: "a-1", name: "Brian" },
+  };
+
+  it("offers Stop as soon as a turn is active, without waiting for a stall", () => {
+    const html = wrap(
+      <ChatContextPins
+        {...baseProps}
+        turnActive
+        currentStep="Thinking..."
+        lastProgressAt={Date.now()}
+        onStopTurn={() => {}}
+      />,
+    );
+
+    expect(html).toContain("Stop");
+    expect(html).toContain("Working");
+  });
+
+  it("omits Stop when nothing is running — there is no turn to stop", () => {
+    const html = wrap(
+      <ChatContextPins {...baseProps} turnActive={false} onStopTurn={() => {}} />,
+    );
+
+    expect(html).toContain("Idle");
+    expect(html).not.toContain(">Stop<");
+  });
+
+  it("omits Stop when the surface passes no handler", () => {
+    const html = wrap(
+      <ChatContextPins
+        {...baseProps}
+        turnActive
+        currentStep="Thinking..."
+        lastProgressAt={Date.now()}
+      />,
+    );
+
+    expect(html).toContain("Working");
+    expect(html).not.toContain(">Stop<");
+  });
+
+  it("ages a turn that is running but showing nothing", () => {
+    const html = wrap(
+      <ChatContextPins
+        {...baseProps}
+        turnActive
+        currentStep="Thinking..."
+        lastProgressAt={Date.now() - 4 * 60_000}
+        onStopTurn={() => {}}
+      />,
+    );
+
+    // "Working" alone is what left a room guessing for half an hour.
+    expect(html).toContain("No progress for 4m");
+  });
+
+  it("stays quiet under a minute — a normal turn must not look broken", () => {
+    const html = wrap(
+      <ChatContextPins
+        {...baseProps}
+        turnActive
+        currentStep="Thinking..."
+        lastProgressAt={Date.now() - 20_000}
+        onStopTurn={() => {}}
+      />,
+    );
+
+    expect(html).not.toContain("No progress");
+  });
+});

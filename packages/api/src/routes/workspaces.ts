@@ -36,6 +36,7 @@ import {
   type AppType,
   type AssistantCharter,
 } from '@use-brian/shared'
+import { MAX_INBOX_RETENTION_DAYS, MIN_INBOX_RETENTION_DAYS } from '@use-brian/core'
 import { query, queryWithRLS } from '../db/client.js'
 import { findUserById } from '../db/users.js'
 import type { WorkspaceStore } from '../db/workspace-store.js'
@@ -45,6 +46,7 @@ import {
   InvalidRecordingBlueprintError,
   setWorkspaceTranscriptionPrefs,
   setWorkspaceHomeApps,
+  setWorkspaceInboxRetentionDays,
 } from '../db/workspace-store.js'
 import { flushWorkspaceData, WorkspaceFlushNotOwnerError } from '../db/workspace-flush.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
@@ -456,6 +458,20 @@ export function workspaceRoutes({
     homeApps: z.array(z.string()).optional(),
   })
 
+  // Doc Inbox retention window (migration 426). A positive whole number of days,
+  // or `null` for "never prune". Range-checked again inside
+  // `setWorkspaceInboxRetentionDays`, which is the enforcement point for the
+  // admin gate too (`workspaces` has no RLS).
+  const inboxRetentionFieldSchema = z.object({
+    inboxRetentionDays: z
+      .number()
+      .int()
+      .min(MIN_INBOX_RETENTION_DAYS)
+      .max(MAX_INBOX_RETENTION_DAYS)
+      .nullable()
+      .optional(),
+  })
+
   router.patch('/:workspaceId', async (req, res) => {
     const userId = req.userId
     if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
@@ -490,6 +506,15 @@ export function workspaceRoutes({
     }
     const hasHomeAppsUpdate = homeAppsField.data.homeApps !== undefined
 
+    const retentionField = inboxRetentionFieldSchema.safeParse(req.body)
+    if (!retentionField.success) {
+      res.status(400).json({
+        error: `inboxRetentionDays must be a whole number of days between ${MIN_INBOX_RETENTION_DAYS} and ${MAX_INBOX_RETENTION_DAYS}, or null`,
+      })
+      return
+    }
+    const hasRetentionUpdate = 'inboxRetentionDays' in (req.body ?? {})
+
     if (name !== undefined) {
       if (typeof name !== 'string' || name.trim().length === 0) {
         res.status(400).json({ error: 'Name must be a non-empty string' })
@@ -518,9 +543,10 @@ export function workspaceRoutes({
       Object.keys(updates).length === 0 &&
       !hasBlueprintUpdate &&
       !hasPrefsUpdate &&
-      !hasHomeAppsUpdate
+      !hasHomeAppsUpdate &&
+      !hasRetentionUpdate
     ) {
-      res.status(400).json({ error: 'At least one of name, purpose, defaultRecordingBlueprintId, transcriptionPrefs, or homeApps is required' })
+      res.status(400).json({ error: 'At least one of name, purpose, defaultRecordingBlueprintId, transcriptionPrefs, homeApps, or inboxRetentionDays is required' })
       return
     }
 
@@ -545,7 +571,12 @@ export function workspaceRoutes({
             })
           }
           // Nothing else to apply → return the blueprint-updated row.
-          if (Object.keys(updates).length === 0 && !hasPrefsUpdate && !hasHomeAppsUpdate) {
+          if (
+            Object.keys(updates).length === 0 &&
+            !hasPrefsUpdate &&
+            !hasHomeAppsUpdate &&
+            !hasRetentionUpdate
+          ) {
             res.json(updated)
             return
           }
@@ -580,7 +611,7 @@ export function workspaceRoutes({
         }
         // Nothing else to apply → return the fresh row (carries the updated
         // `transcriptionPrefs` via WORKSPACE_COLUMNS).
-        if (Object.keys(updates).length === 0 && !hasHomeAppsUpdate) {
+        if (Object.keys(updates).length === 0 && !hasHomeAppsUpdate && !hasRetentionUpdate) {
           const team = await workspaceStore.get(userId, req.params.workspaceId)
           if (!team) { res.status(404).json({ error: 'Workspace not found' }); return }
           res.json(team)
@@ -614,6 +645,34 @@ export function workspaceRoutes({
           })
         }
         notifyWorkspaceChange(req.params.workspaceId, 'workspace_config', 'update')
+        if (Object.keys(updates).length === 0 && !hasRetentionUpdate) {
+          const team = await workspaceStore.get(userId, req.params.workspaceId)
+          if (!team) { res.status(404).json({ error: 'Workspace not found' }); return }
+          res.json(team)
+          return
+        }
+      }
+
+      // Inbox retention window — own setter (admin/owner + range enforcement
+      // live there). No `notifyWorkspaceChange`: the Inbox panel refetches
+      // every time it opens, so the next open already sees the new window.
+      if (hasRetentionUpdate) {
+        const days = retentionField.data.inboxRetentionDays ?? null
+        const result = await setWorkspaceInboxRetentionDays(userId, req.params.workspaceId, days)
+        if (!result.ok) {
+          const status =
+            result.reason === 'not_found' ? 404 : result.reason === 'out_of_range' ? 400 : 403
+          res.status(status).json({ error: result.message })
+          return
+        }
+        if (auditStore) {
+          void auditStore.append({
+            workspaceId: req.params.workspaceId,
+            actorUserId: userId,
+            eventType: 'workspace.settings_changed',
+            details: { inboxRetentionDays: days },
+          })
+        }
         if (Object.keys(updates).length === 0) {
           const team = await workspaceStore.get(userId, req.params.workspaceId)
           if (!team) { res.status(404).json({ error: 'Workspace not found' }); return }

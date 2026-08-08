@@ -161,6 +161,7 @@ import {
   parsePresentedDocumentPayload,
   postRoomMessage,
   editRoomMessage,
+  stopTurn,
   postSessionTyping,
   type MessageAttachmentRef,
   type DocSession,
@@ -168,6 +169,13 @@ import {
 } from "@/lib/api/sessions";
 import { getUserInfo } from "@/lib/user";
 import { markRoomSeen } from "@/lib/chat-seen";
+import {
+  readChatLocation,
+  seedChatLocation,
+  writeChatLocation,
+  type ChatLocation,
+  type ChatView,
+} from "@/lib/chat-last-location";
 import { accelEnterLabel } from "@/lib/surface-shortcuts";
 import { fetchPendingQuestion } from "@/lib/api/pending-questions";
 import { PendingQuestionPanel } from "@/components/chrome/pending-question-panel";
@@ -309,6 +317,13 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   /** Quiet "will reply after this" line (T5) — set by the server's `queued`
    *  SSE event, cleared when a turn settles. */
   const [queuedNotice, setQueuedNotice] = useState(false);
+  /**
+   * Why the last turn ended, when it ended for a reason nobody in this tab
+   * asked for: it stalled and was reclaimed, or a member stopped it. An
+   * ordinary completion sets nothing. Cleared on the next send and on a
+   * session switch — it explains one event, it is not a status line.
+   */
+  const [turnEndNotice, setTurnEndNotice] = useState<string | null>(null);
   /** The user message open in the inline editor, and its working text. */
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
@@ -323,10 +338,24 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const [remoteConfirmation, setRemoteConfirmation] = useState<RemoteConfirmation | null>(null);
 
   /** The open thread — URL state, so it is linkable and survives navigation. */
-  const activeSessionId = searchParams?.get("s") ?? null;
+  const urlSessionId = searchParams?.get("s") ?? null;
   /** Which view is open. URL state too, so "the shared chats" is a link. */
-  const view: "personal" | "workspace" =
+  const urlView: ChatView =
     searchParams?.get("v") === "workspace" ? "workspace" : "personal";
+  /** Whether the URL names the location itself — a deep link, a rail row, an
+   *  in-surface navigation, the installer's fresh-chat hint. A BARE
+   *  `/w/<id>/chat` (how the nav rail, the Home app-bar and ⌘1 spell "the Chat
+   *  app") names nothing, which is when the remembered location speaks. */
+  const urlPinsLocation =
+    urlSessionId !== null ||
+    searchParams?.get("v") != null ||
+    searchParams?.get("assistant") != null;
+  /** The remembered location mid-restore, held until the URL catches up.
+   *  Rendering from it instead of waiting for `router.replace` to land is what
+   *  keeps re-entry from flashing the new-chat hero first. */
+  const [restoring, setRestoring] = useState<ChatLocation | null>(null);
+  const activeSessionId = restoring ? restoring.sessionId : urlSessionId;
+  const view: ChatView = restoring ? restoring.view : urlView;
   /** The open thread is shared when it is in the workspace list. */
   const activeShared = useMemo(
     () => sharedSessions.find((r) => r.id === activeSessionId) ?? null,
@@ -532,7 +561,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   }, [midTurn]);
 
   const buildHref = useCallback(
-    (id: string | null, nextView: "personal" | "workspace") => {
+    (id: string | null, nextView: ChatView) => {
       const params = new URLSearchParams();
       if (nextView === "workspace") params.set("v", "workspace");
       if (id) params.set("s", id);
@@ -542,12 +571,65 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     [pathname],
   );
 
+  /** A seed applied this mount, until the render it produced lands. Read by
+   *  the write effect below, which would otherwise commit the pre-restore
+   *  (bare) location over the memory it was just restored from. */
+  const seededRef = useRef<ChatLocation | null>(null);
+
   const selectSession = useCallback(
-    (id: string | null, nextView: "personal" | "workspace" = view) => {
+    (id: string | null, nextView: ChatView = view) => {
+      // A user-driven move always outranks a restore still catching up.
+      seededRef.current = null;
+      setRestoring(null);
       router.replace(buildHref(id, nextView), { scroll: false });
     },
     [buildHref, router, view],
   );
+
+  // ── Re-entry: the remembered location ───────────────────────────────
+  // The Chat app is entered from the nav rail / Home app-bar / ⌘1, all of
+  // which target the BARE `/w/<id>/chat` — so without this, every surface
+  // switch reset the audience to Personal and closed the open thread. Only a
+  // bare URL restores, and only once per mount: a deep link, a rail row and an
+  // in-surface navigation all state a location outright and win, exactly the
+  // rule `seedDocTabs` applies to the doc tab strip. Clicking New chat while
+  // the surface is already mounted is a live URL change that never routes
+  // through here, so it still opens a fresh pane.
+  const restoreAttemptedRef = useRef(false);
+  useEffect(() => {
+    if (restoreAttemptedRef.current || !workspaceId) return;
+    restoreAttemptedRef.current = true;
+    const seed = seedChatLocation(
+      readChatLocation(workspaceId),
+      urlPinsLocation,
+    );
+    if (!seed) return;
+    seededRef.current = seed;
+    setRestoring(seed);
+    router.replace(buildHref(seed.sessionId, seed.view), { scroll: false });
+  }, [buildHref, router, urlPinsLocation, workspaceId]);
+
+  // The rewrite landed — every restorable location produces a `?v=`/`?s=` URL
+  // — so the URL is authoritative again and the held seed is spent.
+  useEffect(() => {
+    if (restoring && urlPinsLocation) setRestoring(null);
+  }, [restoring, urlPinsLocation]);
+
+  // Remember where the user is, per workspace, for the next entry. Writing on
+  // every change (rather than on unmount) keeps the memory correct even when
+  // the tab is closed or the app is quit from inside a thread. The mount pass
+  // of this effect runs in the SAME commit as the restore above, still holding
+  // the bare location — writing it would erase the memory a tick before the
+  // restored render arrives, so a pending seed suppresses exactly that write.
+  useEffect(() => {
+    if (!workspaceId) return;
+    const seeded = seededRef.current;
+    if (seeded) {
+      if (seeded.view !== view || seeded.sessionId !== activeSessionId) return;
+      seededRef.current = null;
+    }
+    writeChatLocation(workspaceId, { view, sessionId: activeSessionId });
+  }, [activeSessionId, view, workspaceId]);
 
   // ── Assistant resolution ────────────────────────────────────────────
   // Sessions are assistant-bound (`/api/chat` rejects a send whose
@@ -861,6 +943,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     [],
   );
 
+  // A turn-end explanation belongs to the room it happened in; switching
+  // rooms must not carry it across.
+  useEffect(() => {
+    setTurnEndNotice(null);
+  }, [activeSessionId]);
+
   useEffect(() => {
     if (!activeSessionId || !isSharedOpen) {
       resetRemoteTurn();
@@ -1063,6 +1151,32 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         }
         case "turn_completed": {
           dispatchChatSessionActivity({ workspaceId, sessionId, working: false });
+          // A turn that ended because it stalled or was stopped has to say so.
+          // Silently clearing the card leaves the room wondering whether the
+          // answer is still coming — which is the state this whole recovery
+          // path exists to end. Read BEFORE the `acceptsMirror` gate: the
+          // sender of the stalled turn is exactly who most needs to be told.
+          const endReason =
+            typeof payload.reason === "string" ? payload.reason : null;
+          if (endReason === "stalled_reclaimed") {
+            setTurnEndNotice(t.turnReclaimed);
+          } else if (endReason === "stopped_by_user") {
+            const by =
+              typeof payload.stoppedByName === "string"
+                ? payload.stoppedByName
+                : null;
+            setTurnEndNotice(
+              by ? format(t.turnStoppedBy, { name: by }) : t.turnStoppedByYou,
+            );
+          }
+          if (endReason) {
+            // The stalled turn's own sender still owns a dead POST stream.
+            // Tear it down or the composer stays dimmed behind a turn that
+            // the server has already given up on.
+            chat.dispatch({ type: "stream/abort" });
+            resetTurnActivity();
+            setQueuedNotice(false);
+          }
           // The sender's POST stream owns its optimistic transcript. Refetching
           // the persisted reply here and then finalizing the same POST in
           // `onDone` paints two identical replies until the next refresh.
@@ -1405,6 +1519,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     if (usesComposerTray) setPendingRecordings([]);
     setError(null);
     setQueuedNotice(false);
+    // The previous turn's ending is explained; this send moves past it.
+    setTurnEndNotice(null);
     responseGroupAbortRef.current = false;
     let sourceMessageId: string | null = null;
     const responseAssistantIds = targets.map((assistant) => assistant.id);
@@ -2125,6 +2241,52 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     waitingForInput: workBenchWaiting,
   });
 
+  /**
+   * When this client last saw the running turn do anything — a tool step, a
+   * reasoning line, reply text — across BOTH the direct stream and the room
+   * mirror. Seeded when the turn goes active so a turn that emits nothing at
+   * all still ages visibly.
+   *
+   * Deliberately a different question from the server's lease: the lease says
+   * the turn's process is alive, this says the user can see it working. A turn
+   * suspended on a tool confirmation is alive with no progress, and conflating
+   * the two would either kill healthy turns or hide dead ones.
+   */
+  const [lastProgressAt, setLastProgressAt] = useState<number | null>(null);
+  useEffect(() => {
+    if (!workBenchTurnActive) {
+      setLastProgressAt(null);
+      return;
+    }
+    setLastProgressAt(Date.now());
+  }, [
+    workBenchTurnActive,
+    chat.state.streamingText,
+    toolTimeline.length,
+    remoteText,
+    remoteEvents.length,
+    remoteTools.length,
+  ]);
+
+  /**
+   * Stop the running turn (T5 recovery). The server decides whether this
+   * aborts a live turn or reclaims a stalled lease; either way the room ends
+   * up unblocked and every viewer gets a `turn_completed` carrying the reason.
+   */
+  const stopActiveTurn = useCallback(async () => {
+    const sessionId = activeSessionId;
+    if (!sessionId) return;
+    try {
+      await stopTurn(sessionId);
+      // Do not clear local turn state here. The authoritative signal is the
+      // `turn_completed` that follows on the room stream, which every viewer
+      // gets — clearing optimistically would make this tab disagree with the
+      // others if the stop lands on a turn in another process.
+    } catch {
+      setError(t.stopTurnFailed);
+    }
+  }, [activeSessionId, t.stopTurnFailed]);
+
   /** Group-chat timeline metadata: day separators + sender-group headers
    *  (docs/architecture/features/chat-app.md → "Transcript timestamps"). */
   const transcriptMeta = useMemo(
@@ -2638,10 +2800,19 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 type="button"
                 onClick={() => setAskArmed((v) => !v)}
                 aria-pressed={askArmed}
-                aria-label={format(t.askLabel, { name: activeAssistant.name })}
-                // The chord lives in the tooltip of the control it replaces —
-                // the toggle is where someone looks when they are tired of
-                // reaching for it.
+                // The chord rides the accessible name too: the printed chip is
+                // `aria-hidden` (it is a rendering of the same fact), so this
+                // is the only place a screen reader hears it.
+                aria-label={`${format(t.askLabel, {
+                  name: activeAssistant.name,
+                })} · ${format(t.askShortcutHint, {
+                  keys: accelEnterLabel(),
+                })}`}
+                // The chord lives ON the control it replaces — the toggle is
+                // where someone looks when they are tired of reaching for it.
+                // Printed beside the label rather than left to the tooltip: a
+                // hover-only hint is found by the pointer users who need it
+                // least. The tooltip keeps the fuller sentence.
                 title={`${t.askArmedAria} · ${format(t.askShortcutHint, {
                   keys: accelEnterLabel(),
                 })}`}
@@ -2656,6 +2827,19 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 <span className="truncate">
                   {format(t.askLabel, { name: activeAssistant.name })}
                 </span>
+                {/* `shrink-0` beside the label's `truncate` keeps the control
+                    row one line as the group narrows: the name gives way, the
+                    chord does not. Dropped below `sm`, where the row has no
+                    width to spare and the tooltip still carries it. */}
+                <kbd
+                  aria-hidden
+                  className={cn(
+                    "hidden shrink-0 font-sans text-[10px] font-normal sm:inline",
+                    askArmed ? "text-primary/70" : "text-muted-foreground/70",
+                  )}
+                >
+                  {accelEnterLabel()}
+                </kbd>
               </button>
             )}
           </div>
@@ -3082,6 +3266,17 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             {queuedNotice && (
               <p className="px-1 text-xs text-muted-foreground">{t.queuedNotice}</p>
             )}
+            {/* Why the last turn ended, when it ended for a reason nobody in
+                this tab asked for. Not an error: the room is unblocked and
+                nothing was lost, which is exactly what the line says. */}
+            {turnEndNotice && (
+              <p
+                role="status"
+                className="rounded-lg border border-border/70 bg-muted/30 px-3 py-2 text-xs text-muted-foreground"
+              >
+                {turnEndNotice}
+              </p>
+            )}
             {/* Typing indicator — teammates mid-composition, off the follow
                 stream's presence events. The classic three-dot bubble; dots
                 hold still under reduced motion. */}
@@ -3138,6 +3333,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           waitingForInput={workBenchWaiting}
           currentStep={workBenchCurrentStep}
           tools={workBenchTools}
+          lastProgressAt={workBenchTurnActive ? lastProgressAt : null}
+          onStopTurn={stopActiveTurn}
           expanded={workBenchExpanded}
           onExpandedChange={setWorkBenchExpanded}
         />

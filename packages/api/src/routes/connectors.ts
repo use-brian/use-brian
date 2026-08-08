@@ -1055,6 +1055,7 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
         backfill: state.backfill ?? null,
         lastSyncAt: state.lastSyncAt ?? null,
         lastError: state.lastError ?? null,
+        lastFailedSyncAt: state.lastFailedSyncAt ?? null,
         ingestionEnabled: resolved.instance.ingestionEnabled,
       })
     } catch (err) {

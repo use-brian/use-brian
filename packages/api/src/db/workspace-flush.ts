@@ -65,6 +65,7 @@ export const WORKSPACE_FLUSH_TABLES = [
   'blueprint_records',
   'entity_instances',
   'comment_threads',
+  'doc_inbox_dismissals', // cascade-covered by `comment_threads`; kept explicit for the classifier
   'doc_notifications',
   'page_actions', // cascade-covered by `saved_views`; kept explicit for the classifier
   'page_send_log',
