@@ -52,6 +52,10 @@ function mockApi(overrides: Partial<ShopifyApi> = {}): ShopifyApi {
     listThemes: vi.fn().mockResolvedValue([
       { id: 'gid://shopify/OnlineStoreTheme/1', name: 'Dawn', role: 'MAIN' },
     ]),
+    listProductTemplates: vi.fn().mockResolvedValue({
+      themeId: 'gid://shopify/OnlineStoreTheme/1', themeName: 'Test Theme',
+      templates: [{ suffix: null, filename: 'templates/product.json', sections: ['main-product'] }],
+    }),
     readProductTemplate: vi.fn().mockResolvedValue({
       themeId: 'gid://shopify/OnlineStoreTheme/1', themeName: 'Dawn',
       filename: 'templates/product.json', content: '{"sections":{},"order":[]}',
@@ -94,7 +98,7 @@ const READ_TOOLS = [
   'shopifySalesReport',
   'shopifyStorefrontFunnel',
   'shopifyAnalyticsQuery',
-  'shopifyListThemes',
+  'shopifyListThemes', 'shopifyListProductTemplates',
   'shopifyReadProductTemplate',
 ]
 const WRITE_TOOLS = [
@@ -123,9 +127,9 @@ const DESTRUCTIVE_TOOLS = [
 ]
 
 describe('[COMP:tools/shopify] Shopify tools', () => {
-  it('creates the full 40-tool catalog', () => {
+  it('creates the full 41-tool catalog', () => {
     const tools = createShopifyTools(mockApi())
-    expect(tools).toHaveLength(40)
+    expect(tools).toHaveLength(41)
     expect(tools.map((t) => t.name).sort()).toEqual(
       [...READ_TOOLS, ...WRITE_TOOLS, ...DESTRUCTIVE_TOOLS].sort(),
     )
@@ -587,7 +591,10 @@ describe('[COMP:tools/shopify] Shopify tools', () => {
             displayFulfillmentStatus: 'UNFULFILLED',
             totalPriceSet: { shopMoney: { amount: '42.50', currencyCode: 'USD' } },
             customer: { displayName: 'Jane Doe', email: 'jane@example.com' },
-            lineItems: { edges: [{ node: { title: 'Widget', quantity: 2 } }] },
+            lineItems: {
+              pageInfo: { hasNextPage: false },
+              edges: [{ node: { title: 'Widget', quantity: 2, sku: 'W-5G', variantTitle: '5g pouch' } }],
+            },
             extraneous: 'dropped',
           },
         }],
@@ -611,7 +618,10 @@ describe('[COMP:tools/shopify] Shopify tools', () => {
       fulfillment_status: 'UNFULFILLED',
       total: '42.50 USD',
       customer: 'Jane Doe',
-      items: ['2x Widget'],
+      // Structured: the variant and sku are what make a demand count correct.
+      // This row used to be `['2x Widget']` and the query fetched neither.
+      items: [{ title: 'Widget', variant: '5g pouch', quantity: 2, sku: 'W-5G' }],
+      items_truncated: false,
     })
     expect(data.items[0]).not.toHaveProperty('extraneous')
   })

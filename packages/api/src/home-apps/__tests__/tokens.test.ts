@@ -193,3 +193,40 @@ describe('[COMP:api/home-app-bundle-route] bundle CSP', () => {
     expect(csp.match(new RegExp(API.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'))).toHaveLength(1)
   })
 })
+
+describe('[COMP:api/home-app-bundle-route] frame-ancestors names the framer', () => {
+  const API = 'https://api.example.com'
+  const APP = 'https://app.example.com'
+
+  it('allows the app origin to frame the bundle', () => {
+    // The regression: the bundle is served from the API origin, so `'self'`
+    // alone means "only the API may frame this" — and the API frames nothing.
+    // Every custom Home app was blocked, which Chrome reports as "refused to
+    // connect", indistinguishable from a dead server.
+    const csp = buildBundleCsp({ apiOrigin: API, appOrigin: APP })
+    expect(csp).toContain(`frame-ancestors 'self' ${APP}`)
+  })
+
+  it('accepts an http localhost framer, because dev is split-origin too', () => {
+    const csp = buildBundleCsp({ apiOrigin: 'http://localhost:4000', appOrigin: 'http://localhost:3003' })
+    expect(csp).toContain("frame-ancestors 'self' http://localhost:3003")
+  })
+
+  it("falls back to 'self' when no framer is configured", () => {
+    expect(buildBundleCsp({ apiOrigin: API })).toContain("frame-ancestors 'self'")
+  })
+
+  it('refuses a framer that could terminate the directive or widen it', () => {
+    for (const bad of [
+      "https://app.example.com; script-src *",
+      'https://*.example.com',
+      'https://app.example.com/path',
+      'javascript:alert(1)',
+      'https://user:pw@app.example.com',
+    ]) {
+      const csp = buildBundleCsp({ apiOrigin: API, appOrigin: bad })
+      expect(csp).toContain("frame-ancestors 'self'")
+      expect(csp).not.toContain(bad)
+    }
+  })
+})

@@ -39,9 +39,52 @@ import { isSafeNetOrigin } from '@use-brian/brian-app'
  * that is not already reachable. Nonce-per-request would break the static-file
  * model entirely (the HTML is stored, not templated).
  */
+/**
+ * Is this a safe origin to put in `frame-ancestors`?
+ *
+ * Deliberately NOT `isSafeNetOrigin`, which requires https — correct for a
+ * `connect-src` origin an app asked for, wrong here, because the framer in
+ * local development is `http://localhost:3003` and rejecting it would leave the
+ * frame blocked on every developer's machine.
+ *
+ * The property that actually matters is the same either way: the string is
+ * concatenated into a response header, so it must be a bare origin with no
+ * path, no wildcard, and nothing that could terminate the directive.
+ */
+function isSafeFramerOrigin(value: string): boolean {
+  if (/[;,'"\s]/.test(value)) return false
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    return false
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return false
+  if (url.username || url.password) return false
+  if (url.hostname.includes('*')) return false
+  // `origin` drops any path/query, so an input carrying one round-trips
+  // unequal and is refused rather than silently truncated.
+  return url.origin === value
+}
+
 export function buildBundleCsp(params: {
   /** The API origin the bridge lives on. */
   apiOrigin: string
+  /**
+   * The web origin allowed to FRAME the bundle — app-web.
+   *
+   * This cannot be `'self'`. The bundle is served from the API origin, so
+   * `'self'` means "only the API may frame this", and the only thing that ever
+   * frames it is app-web on a DIFFERENT origin (`app.usebrian.ai` vs
+   * `api.usebrian.ai`; `:3003` vs `:4000` in dev). The browser blocked every
+   * custom Home app frame, which Chrome reports as "refused to connect" —
+   * indistinguishable from a dead server, which is why it read as one.
+   *
+   * Unset falls back to `'self'`: that is wrong for a split-origin deploy but
+   * it is the pre-existing behaviour, and a CSP that silently allowed ANY
+   * framer would be a far worse default than one that blocks.
+   */
+  appOrigin?: string
   /** Consented `scopes.net` origins. Anything unsafe is dropped, not trusted. */
   netOrigins?: readonly string[]
 }): string {
@@ -66,8 +109,13 @@ export function buildBundleCsp(params: {
     "frame-src 'none'",
     "child-src 'none'",
     "form-action 'none'",
-    // The bundle is already inside our frame; it must not be framed elsewhere.
-    "frame-ancestors 'self'",
+    // Only app-web may frame the bundle — see `appOrigin`. Never `'self'`
+    // alone: the bundle's own origin is the API, which never frames anything.
+    `frame-ancestors ${
+      params.appOrigin && isSafeFramerOrigin(params.appOrigin)
+        ? `'self' ${params.appOrigin}`
+        : "'self'"
+    }`,
     "base-uri 'none'",
   ].join('; ')
 }

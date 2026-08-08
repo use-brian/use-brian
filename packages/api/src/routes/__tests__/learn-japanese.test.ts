@@ -26,6 +26,8 @@ function oauthAuth(overrides: Partial<BrainAuth> = {}): BrainAuth {
     scope: 'read_write',
     maxClearance: 'internal',
     authKind: 'oauth_token',
+    storeScope: 'none',
+    agentScope: 'none',
     actingUserId: 'user-1',
     ...overrides,
   }

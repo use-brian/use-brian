@@ -436,6 +436,36 @@ export async function listWorkspaceFilesByPath(
   return result.rows.map(toIndexRow)
 }
 
+/**
+ * List files under a RESERVED path prefix (`/apps/`, `/doc/`).
+ *
+ * `searchWorkspaceFiles` deliberately excludes those prefixes so third-party
+ * bundle source never reaches brain retrieval — which means it can never be
+ * used to *manage* them either. Bundle replacement was written on top of that
+ * search and therefore always found nothing: the delete silently no-opped and
+ * the following write failed with `conflict`, so re-importing or re-syncing a
+ * custom Home app had never worked.
+ *
+ * System-scoped on purpose: this is storage housekeeping for a known prefix,
+ * not a user-facing read, and it must see exactly what the exclusion hides.
+ * Never expose it on a retrieval path.
+ */
+export async function listWorkspaceFilesUnderReservedPrefix(
+  workspaceId: string,
+  prefix: string,
+): Promise<Array<{ path: string }>> {
+  if (!prefix.startsWith('/doc/') && !prefix.startsWith('/apps/')) {
+    throw new Error(`Not a reserved prefix: ${prefix}`)
+  }
+  const result = await query<{ path: string }>(
+    `SELECT path FROM workspace_files
+      WHERE workspace_id = $1 AND valid_to IS NULL AND path LIKE $2
+      ORDER BY path`,
+    [workspaceId, `${prefix}%`],
+  )
+  return result.rows
+}
+
 export async function searchWorkspaceFiles(
   ctx: AccessContext,
   opts: { query?: string; tag?: string; parentPath?: string; limit?: number },

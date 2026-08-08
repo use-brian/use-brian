@@ -33,7 +33,12 @@ vi.mock('../../db/workspace-store.js', () => ({
 vi.mock('../../brain-stream/notify.js', () => ({ notifyWorkspaceChange: vi.fn() }))
 vi.mock('../../home-apps/tools.js', () => ({ writeHomeAppBundle: vi.fn() }))
 
-import { homeAppRoutes } from '../home-apps.js'
+import { homeAppRoutes, deleteBundle } from '../home-apps.js'
+import { listWorkspaceFilesUnderReservedPrefix } from '../../db/workspace-files.js'
+
+vi.mock('../../db/workspace-files.js', () => ({
+  listWorkspaceFilesUnderReservedPrefix: vi.fn(async () => []),
+}))
 import { getHomeApp } from '../../db/home-apps-store.js'
 import { mintBundleToken } from '../../home-apps/tokens.js'
 
@@ -121,5 +126,31 @@ describe('[COMP:api/home-app-bundle-route] Home app bundle route', () => {
     const res = await request(app).get(`/api/home-apps/${APP_ID}/bundle/index.html`)
     expect(res.status).toBe(401)
     expect(readPaths).toEqual([])
+  })
+})
+
+describe('[COMP:api/home-app-bundle-route] deleteBundle clears the previous version', () => {
+  it('does NOT go through fileSearch, which cannot see /apps/ at all', async () => {
+    // `searchWorkspaceFiles` hard-excludes `path NOT LIKE '/apps/%'` so bundle
+    // source never reaches brain retrieval. Building the replace on top of it
+    // meant the delete always found nothing and the next write hit `conflict`
+    // — re-import and re-sync had never worked, only a first install.
+    const filesApi = {
+      search: vi.fn(async () => []),
+      delete: vi.fn(async () => ({ ok: true as const })),
+    }
+    vi.mocked(listWorkspaceFilesUnderReservedPrefix).mockResolvedValue([
+      { path: '/apps/app-1/index.html' },
+      { path: '/apps/app-1/brian-app.json' },
+    ])
+
+    await deleteBundle(filesApi as never, 'ws-1', 'app-1', 'user-1')
+
+    expect(filesApi.search).not.toHaveBeenCalled()
+    expect(listWorkspaceFilesUnderReservedPrefix).toHaveBeenCalledWith('ws-1', '/apps/app-1/')
+    expect(filesApi.delete.mock.calls.map((c: unknown[]) => c[1])).toEqual([
+      '/apps/app-1/index.html',
+      '/apps/app-1/brian-app.json',
+    ])
   })
 })

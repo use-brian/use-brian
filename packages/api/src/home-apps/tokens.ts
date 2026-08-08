@@ -31,7 +31,7 @@
 
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import type { Sensitivity } from '@use-brian/core'
-import type { AppDataScope } from '@use-brian/brian-app'
+import type { AppDataScope, AppStoreScope, AppAgentScope } from '@use-brian/brian-app'
 
 export const BUNDLE_TOKEN_AUD = 'home-app-bundle' as const
 export const BRIDGE_TOKEN_AUD = 'home-app' as const
@@ -56,6 +56,14 @@ export type BridgeTokenPayload = {
   userId: string
   /** Brain access the admin consented to. */
   scope: AppDataScope
+  /**
+   * Commerce-store access the admin consented to. OPTIONAL, and absent means
+   * `'none'`: a bridge token minted before this claim existed must resolve to
+   * no store reach at all, never to a default that grants one.
+   */
+  store?: AppStoreScope
+  /** May hand a task to the workspace assistant. Absent means 'none'. */
+  agent?: AppAgentScope
   /** Per-app clearance ceiling; null = the primary assistant's clearance governs. */
   maxClearance: Sensitivity | null
   aud: typeof BRIDGE_TOKEN_AUD
@@ -95,6 +103,8 @@ export function mintBridgeToken(opts: {
   workspaceId: string
   userId: string
   scope: AppDataScope
+  store?: AppStoreScope
+  agent?: AppAgentScope
   maxClearance: Sensitivity | null
   secret: string
   ttlMs?: number
@@ -107,6 +117,8 @@ export function mintBridgeToken(opts: {
       workspaceId: opts.workspaceId,
       userId: opts.userId,
       scope: opts.scope,
+      ...(opts.store && opts.store !== 'none' ? { store: opts.store } : {}),
+      ...(opts.agent === 'ask' ? { agent: 'ask' as const } : {}),
       maxClearance: opts.maxClearance,
       aud: BRIDGE_TOKEN_AUD,
       exp: now + (opts.ttlMs ?? BRIDGE_TOKEN_TTL_MS),
