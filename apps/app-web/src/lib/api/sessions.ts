@@ -374,6 +374,33 @@ export async function postRoomMessage(
 }
 
 /**
+ * Stop the turn running in a session (`POST /api/chat/stop`).
+ *
+ * The caller does not need to know whether the turn is alive or already a
+ * phantom — the server aborts a live one and reclaims a dead one, and reports
+ * which it did in `via`. Any member who can read the room may call it: a stuck
+ * turn blocks everybody, so recovery must not wait for one specific person.
+ *
+ * Idempotent. A turn that already ended answers `{ stopped: false }` rather
+ * than erroring, so two members hitting Stop on the same card both get a calm
+ * result.
+ */
+export async function stopTurn(
+  sessionId: string,
+): Promise<{ stopped: boolean; via?: string; reason?: string }> {
+  const res = await authFetch(`${API_URL}/api/chat/stop`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sessionId }),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `Stop failed: ${res.status}`);
+  }
+  return (await res.json()) as { stopped: boolean; via?: string; reason?: string };
+}
+
+/**
  * Rewrite one of your own room posts in place
  * (`PATCH /api/sessions/:id/messages/:messageId`).
  *

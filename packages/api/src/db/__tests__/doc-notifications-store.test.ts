@@ -119,6 +119,41 @@ describe('[COMP:api/doc-notifications-store] createDbDocNotificationsStore', () 
     })
   })
 
+  // ── Dismiss on read + retention (migration 426) ──────────────
+
+  it('listForUser returns UNREAD mentions only — reading is what clears a row', async () => {
+    mockRlsQuery.mockResolvedValue({ rows: [] } as never)
+    const store = createDbDocNotificationsStore()
+    await store.listForUser(RECIP1, WS)
+    expect(mockRlsQuery.mock.calls[0][1]).toContain('n.read_at IS NULL')
+  })
+
+  it('listForUser passes the retention cutoff as a nullable bound', async () => {
+    mockRlsQuery.mockResolvedValue({ rows: [] } as never)
+    const store = createDbDocNotificationsStore()
+    const since = new Date('2026-02-01T00:00:00.000Z')
+
+    await store.listForUser(RECIP1, WS, { since })
+    // A NULL-tolerant bound, so "never prune" needs no second query shape.
+    expect(mockRlsQuery.mock.calls[0][1]).toContain('$2::timestamptz IS NULL OR')
+    expect(mockRlsQuery.mock.calls[0][2]).toEqual([WS, since])
+
+    await store.listForUser(RECIP1, WS)
+    expect(mockRlsQuery.mock.calls[1][2]).toEqual([WS, null])
+  })
+
+  it('unreadCount applies the same window as listForUser so the badge cannot over-count', async () => {
+    mockRlsQuery.mockResolvedValue({ rows: [{ count: 3 }] } as never)
+    const store = createDbDocNotificationsStore()
+    const since = new Date('2026-02-01T00:00:00.000Z')
+
+    const n = await store.unreadCount(RECIP1, WS, { since })
+    expect(n).toBe(3)
+    expect(mockRlsQuery.mock.calls[0][1]).toContain('read_at IS NULL')
+    expect(mockRlsQuery.mock.calls[0][1]).toContain('$2::timestamptz IS NULL OR')
+    expect(mockRlsQuery.mock.calls[0][2]).toEqual([WS, since])
+  })
+
   it('markRead marks a subset by id (RLS-scoped) or all when no ids given', async () => {
     mockRlsQuery.mockResolvedValue({ rows: [] } as never)
     const store = createDbDocNotificationsStore()

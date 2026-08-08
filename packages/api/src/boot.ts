@@ -228,7 +228,7 @@ import { skillRoutes } from './routes/skills.js'
 import { workspaceRoutes } from './routes/workspaces.js'
 import { invitationRoutes } from './routes/invitations.js'
 import { createWorkspaceInvitationStore } from './db/workspace-invitation-store.js'
-import { createWorkspaceStore, getWorkspaceMembershipWithClearanceSystem, getWorkspacePlan, getWorkspaceTranscriptionPrefs, setWorkspaceTranscriptionPrefs } from './db/workspace-store.js'
+import { createWorkspaceStore, getWorkspaceInboxRetentionDays, getWorkspaceMembershipWithClearanceSystem, getWorkspacePlan, getWorkspaceTranscriptionPrefs, setWorkspaceTranscriptionPrefs } from './db/workspace-store.js'
 import { createWorkspaceAuditStore } from './db/workspace-audit-store.js'
 import { createConnectionStore } from './db/connection-store.js'
 import {
@@ -2720,7 +2720,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       const skills = await workspaceSkillStore.listForWorkspace(workspaceId, { actingUserId: userId })
       return skills.filter((s) => s.state !== 'archived').map((s) => ({ slug: s.slug, name: s.name }))
     },
-    listTriggerJobs: (workflowId) => jobStore.listTriggerJobsForWorkflowSystem(workflowId),
+    listTriggerJobs: (workflowId) => jobStore.listFiringJobsForWorkflowSystem(workflowId),
     isKnownTool: (name) => allTools.has(name),
     jobStore,
     resolvePrimary: resolvePrimaryAssistantForWorkspace,
@@ -4531,7 +4531,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     workspaceStore,
     executorDeps: workflowExecutorDeps,
     savedViewStore,
-    listTriggerJobs: (workflowId) => jobStore.listTriggerJobsForWorkflowSystem(workflowId),
+    listTriggerJobs: (workflowId) => jobStore.listFiringJobsForWorkflowSystem(workflowId),
     jobStore,
     resolvePrimary: workflowExecutorDeps.resolvePrimary,
     validateDeliveryTarget: workflowDependencyPreflight.validateDeliveryTarget,
@@ -4686,7 +4686,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const commentThreadStore = createDbCommentThreadStore()
   const docNotificationsStore = createDbDocNotificationsStore()
   app.use('/api', requireAuth(env.JWT_SECRET), commentRoutes({ commentThreadStore }))
-  app.use('/api', requireAuth(env.JWT_SECRET), inboxRoutes({ commentThreadStore, docNotificationsStore }))
+  app.use(
+    '/api',
+    requireAuth(env.JWT_SECRET),
+    inboxRoutes({
+      commentThreadStore,
+      docNotificationsStore,
+      getInboxRetentionDays: getWorkspaceInboxRetentionDays,
+    }),
+  )
   app.use('/api/office', requireAuth(env.JWT_SECRET), officeArtifactRoutes({
     service: officeService,
     generationAvailable: officeGenerationAvailable,

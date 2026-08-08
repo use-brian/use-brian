@@ -1699,6 +1699,10 @@ export const zh: Dictionary = {
         upToDate: "已是最新。已封存 {n} 封郵件，可供搜尋。",
         syncing: "正在同步 {m} 封中的第 {n} 封...",
         syncError: "上次同步發生錯誤，將自動重試。",
+        syncErrorUnknown: "郵件伺服器拒絕了這次請求",
+        backfillStalled: "歷史郵件同步已暫停。目前已封存 {n} 封。新郵件仍在同步。",
+        backfillStalledDetail: "因連續發生錯誤，已停止同步歷史郵件：{err}",
+        backfillRetryBtn: "重試歷史同步",
         backfillProbeBtn: "同步郵件歷史",
         backfillProbing: "正在檢查信箱...",
         backfillCounts: "伺服器上共有 {n} 封郵件。",
@@ -1811,6 +1815,9 @@ export const zh: Dictionary = {
       reconnectScopeDesc: "我們現已採用 Google 的個別檔案共用流程。請重新連接，以挑選你希望助理讀取及編輯的特定文件。",
       reconnectNeeded: "需要重新連接",
       healthReconnectTitle: "此連接器已停止運作",
+      healthDegradedPill: "未在同步",
+      healthDegradedTitle: "此連接器未在同步",
+      healthDegradedDesc: "你的登入仍然有效，助理可以繼續使用。是其他環節出錯，因此最新資料可能未更新。開啟連接器以查看詳情。",
       healthReconnectDesc: "其憑證已過期或被撤銷，助理無法使用。請重新連接以恢復存取。",
       reconnectBtn: "重新連接",
       // Per-connector descriptions (keyed by connector id)
@@ -4339,6 +4346,7 @@ export const zh: Dictionary = {
     askShortcutHint: "{keys} 送出並詢問",
     queuedNotice: "助理會在目前回合結束後回覆。",
     postFailed: "無法發佈訊息，請再試一次。",
+    stopTurnFailed: "無法停止這個回合，請再試一次。",
     mentionInsertAria: "提及 {name}",
     editMessage: "編輯",
     editSave: "儲存",
@@ -4361,6 +4369,14 @@ export const zh: Dictionary = {
     liveWorkWaiting: "等待輸入",
     liveWorkAssistant: "支援助理 {number}",
     liveWorkSteps: "{done} 個已完成・{running} 個進行中",
+    liveWorkStop: "停止",
+    liveWorkStopping: "停止中",
+    liveWorkStopTitle: "停止這個回合",
+    liveWorkNoProgress: "已有 {minutes} 分鐘沒有進展",
+    turnStoppedBy: "{name} 停止了這個回合。",
+    turnStoppedByYou: "你已停止這個回合。",
+    turnReclaimed:
+      "上一個回合停止回應，系統已將它重設並解除聊天封鎖。訊息都還在，重新傳送即可繼續。",
     pinnedContext: "釘選",
     assistantClearanceBlocked: "該助理的權限層級高於此聊天室，無法在這裡回答。",
     documentViewer: {
@@ -6942,6 +6958,15 @@ export const zh: Dictionary = {
     traditional: "繁體中文",
     simplified: "簡體中文",
     saveFailed: "無法儲存設定。請重試。",
+  },
+  // 收件匣保留期限（migration 426）。
+  inboxRetention: {
+    heading: "收件匣保留期限",
+    description:
+      "項目在最後一次活動後，還會在收件匣顯示多久。超過期限的項目不再出現，但不會被刪除；改選較長的期限，它們就會回來。",
+    days: "{count} 天",
+    never: "全部保留",
+    saveFailed: "無法儲存保留期限。請重試。",
   },
   computer: {
     liveViewTitle: "即時瀏覽器",

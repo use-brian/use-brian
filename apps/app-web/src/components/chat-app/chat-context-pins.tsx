@@ -155,6 +155,8 @@ export function ChatContextPins({
   waitingForInput = false,
   currentStep = null,
   tools = [],
+  lastProgressAt = null,
+  onStopTurn,
   expanded,
   onExpandedChange,
 }: {
@@ -167,6 +169,16 @@ export function ChatContextPins({
   waitingForInput?: boolean;
   currentStep?: string | null;
   tools?: WorkBenchTool[];
+  /**
+   * When the running turn last showed a sign of life in THIS client (a tool
+   * step, a reasoning line, reply text). Distinct from the server's lease:
+   * the lease says the turn's process is alive, this says the user is seeing
+   * something happen. A turn suspended on a confirmation is alive but has no
+   * progress, and the card says so rather than spinning silently.
+   */
+  lastProgressAt?: number | null;
+  /** Absent when the surface cannot stop a turn (no session bound yet). */
+  onStopTurn?: () => Promise<void> | void;
   expanded: boolean;
   onExpandedChange: (expanded: boolean) => void;
 }) {
@@ -192,6 +204,42 @@ export function ChatContextPins({
   const { width, resizing, handleProps } = usePeekResize(
     "chat:work-bench-width",
   );
+  const [stopping, setStopping] = useState(false);
+  /**
+   * Re-render on a slow tick so the "no progress" line ages while the turn
+   * sits still. Only runs while a turn is active with a known progress mark —
+   * an idle Work Bench must not hold a timer.
+   */
+  const [progressTick, setProgressTick] = useState(0);
+  useEffect(() => {
+    if (!turnActive || lastProgressAt === null) return;
+    const timer = setInterval(() => setProgressTick((n) => n + 1), 15_000);
+    return () => clearInterval(timer);
+  }, [turnActive, lastProgressAt]);
+
+  // A fresh turn resets the control: the previous turn's "Stopping" state must
+  // not bleed onto its successor.
+  useEffect(() => {
+    setStopping(false);
+  }, [sessionId, turnActive]);
+
+  const stalledMinutes = useMemo(() => {
+    if (!turnActive || lastProgressAt === null) return 0;
+    void progressTick;
+    return Math.floor((Date.now() - lastProgressAt) / 60_000);
+  }, [turnActive, lastProgressAt, progressTick]);
+
+  const handleStop = useCallback(async () => {
+    if (!onStopTurn || stopping) return;
+    setStopping(true);
+    try {
+      await onStopTurn();
+    } finally {
+      // Left true on success too: the turn_completed that follows unmounts
+      // this card, and the effect above clears it if it does not.
+      setStopping(false);
+    }
+  }, [onStopTurn, stopping]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -701,10 +749,35 @@ export function ChatContextPins({
                             ? chatT.liveWorkWaiting
                             : chatT.liveWorkWorking}
                         </span>
+                        {/* The human half of turn recovery. Always offered
+                            while a turn runs, because "is it working or is it
+                            stuck?" is exactly the question the user cannot
+                            answer from here — the server decides whether this
+                            aborts a live turn or reclaims a dead one. */}
+                        {onStopTurn && (
+                          <button
+                            type="button"
+                            onClick={() => void handleStop()}
+                            disabled={stopping}
+                            title={chatT.liveWorkStopTitle}
+                            className="shrink-0 rounded-md border border-border/70 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground transition-colors hover:border-destructive/40 hover:text-destructive disabled:opacity-60"
+                          >
+                            {stopping
+                              ? chatT.liveWorkStopping
+                              : chatT.liveWorkStop}
+                          </button>
+                        )}
                       </div>
                       {currentStep && (
                         <p className="mt-1 line-clamp-2 text-[11px] leading-relaxed text-muted-foreground">
                           {currentStep}
+                        </p>
+                      )}
+                      {stalledMinutes >= 1 && (
+                        <p className="mt-1 text-[10px] font-medium text-amber-600 dark:text-amber-400">
+                          {format(chatT.liveWorkNoProgress, {
+                            minutes: stalledMinutes,
+                          })}
                         </p>
                       )}
                       {leadTools.length > 0 && (

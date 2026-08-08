@@ -29,6 +29,7 @@ import { WorkspaceLlmKeyBlock } from "./sections/llm-key-block";
 import { CodexProviderCard } from "./sections/codex-provider-card";
 import {
   setWorkspaceDefaultBlueprint,
+  setWorkspaceInboxRetention,
   setWorkspaceTranscriptionScript,
   WorkspaceApiError,
   type ChineseScriptPref,
@@ -69,6 +70,17 @@ const BLUEPRINT_INGEST_ONLY = "__ingest_only__";
 /** Sentinel for "Auto (provider default)" in the transcript Chinese-script
  *  picker — threaded to the backend as `null` (clears the preference). */
 const SCRIPT_AUTO = "__auto__";
+
+// Inbox retention (migration 426). Presets rather than a free-form number: the
+// setting answers "how long should this nag me", which nobody has a 47-day
+// opinion about. `__never__` maps to a null window (never prune).
+const RETENTION_NEVER = "__never__";
+const RETENTION_PRESETS = [7, 30, 90, 365] as const;
+// Mirrors DEFAULT_INBOX_RETENTION_DAYS in `packages/core/src/doc/inbox-types.ts`
+// (re-declared, not imported — the core barrel pulls in fs-using modules that
+// break the browser bundle, same constraint as the inbox SDK's wire types).
+// Only used to pre-select the picker; the server is authoritative.
+const DEFAULT_INBOX_RETENTION_DAYS = 30;
 
 type Member = {
   userId: string;
@@ -116,6 +128,11 @@ type WorkspaceDetail = {
    * the UI; the language hint stays assistant-only.
    */
   transcriptionPrefs?: { chineseScript?: "traditional" | "simplified" };
+  /**
+   * Doc Inbox retention window in days (migration 426), or `null` to never
+   * prune. Spread from the workspace row by the detail route.
+   */
+  inboxRetentionDays?: number | null;
   members: Member[];
 };
 
@@ -188,12 +205,26 @@ export function WorkspaceGeneralSection({ onWorkspaceDeleted }: { onWorkspaceDel
   const [scriptSaving, setScriptSaving] = useState(false);
   const [scriptError, setScriptError] = useState("");
 
+  // Inbox retention window (migration 426). The picker value is the day count
+  // as a string, or the Never sentinel.
+  const [retention, setRetention] = useState<string>(String(DEFAULT_INBOX_RETENTION_DAYS));
+  const [retentionSaving, setRetentionSaving] = useState(false);
+  const [retentionError, setRetentionError] = useState("");
+
   useEffect(() => {
     if (data) {
       setNameInput(data.name);
       setPurposeInput(data.purpose ?? "");
       setBlueprintId(data.defaultRecordingBlueprintId ?? BLUEPRINT_INGEST_ONLY);
       setScriptPref(data.transcriptionPrefs?.chineseScript ?? SCRIPT_AUTO);
+      // `undefined` (an older API that doesn't send the field) falls back to
+      // the default rather than to Never, so the picker matches what the
+      // server would actually do. Only an explicit `null` means Never.
+      setRetention(
+        data.inboxRetentionDays === null
+          ? RETENTION_NEVER
+          : String(data.inboxRetentionDays ?? DEFAULT_INBOX_RETENTION_DAYS),
+      );
     }
   }, [data]);
 
@@ -341,6 +372,37 @@ export function WorkspaceGeneralSection({ onWorkspaceDeleted }: { onWorkspaceDel
       );
     } finally {
       setScriptSaving(false);
+    }
+  }
+
+  // Persist the Inbox retention window. Same immediate-persist + roll-back
+  // pattern as the pickers above; the Never sentinel clears to `null`.
+  async function changeRetention(next: string) {
+    if (!data || retentionSaving) return;
+    const value = next || String(DEFAULT_INBOX_RETENTION_DAYS);
+    const prev = retention;
+    setRetention(value);
+    setRetentionError("");
+    const current =
+      data.inboxRetentionDays === null
+        ? RETENTION_NEVER
+        : String(data.inboxRetentionDays ?? DEFAULT_INBOX_RETENTION_DAYS);
+    if (value === current) return;
+    setRetentionSaving(true);
+    try {
+      await setWorkspaceInboxRetention(
+        data.id,
+        value === RETENTION_NEVER ? null : Number(value),
+      );
+      await refetch();
+    } catch (e) {
+      // Roll the selection back so the picker doesn't lie about persisted state.
+      setRetention(prev);
+      setRetentionError(
+        e instanceof WorkspaceApiError ? e.message : t.inboxRetention.saveFailed,
+      );
+    } finally {
+      setRetentionSaving(false);
     }
   }
 
@@ -644,6 +706,47 @@ export function WorkspaceGeneralSection({ onWorkspaceDeleted }: { onWorkspaceDel
           </div>
           {scriptError && (
             <div className="text-[12px] text-red-400">{scriptError}</div>
+          )}
+        </div>
+      )}
+
+      {/* Inbox retention (migration 426) — how long an item keeps asking for
+          attention before it ages out. A read-time filter, so widening it
+          brings older items back; nothing is deleted either way. */}
+      {isAdmin && (
+        <div className="border-t border-border pt-6 space-y-2">
+          <h3 className="text-sm font-medium">{t.inboxRetention.heading}</h3>
+          <p className="text-[12px] text-muted-foreground">
+            {t.inboxRetention.description}
+          </p>
+          <div className="pt-1">
+            <Select
+              value={retention}
+              onValueChange={(v) =>
+                void changeRetention(v ?? String(DEFAULT_INBOX_RETENTION_DAYS))
+              }
+              disabled={retentionSaving}
+            >
+              <SelectTrigger
+                className="bg-muted/50 w-56"
+                aria-label={t.inboxRetention.heading}
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {RETENTION_PRESETS.map((days) => (
+                  <SelectItem key={days} value={String(days)}>
+                    {t.inboxRetention.days.replace("{count}", String(days))}
+                  </SelectItem>
+                ))}
+                <SelectItem value={RETENTION_NEVER}>
+                  {t.inboxRetention.never}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          {retentionError && (
+            <div className="text-[12px] text-red-400">{retentionError}</div>
           )}
         </div>
       )}

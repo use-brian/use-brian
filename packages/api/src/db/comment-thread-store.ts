@@ -530,6 +530,7 @@ export function createDbCommentThreadStore(): CommentThreadStore {
     async listPendingRepliesForUser(
       userId: string,
       workspaceId: string,
+      opts?: { since?: Date | null },
     ): Promise<InboxPendingReply[]> {
       // Same two-step shape as listThreadSummariesForPage: an RLS thread query
       // (gated by comment_threads_workspace_member) establishes access, then a
@@ -539,18 +540,28 @@ export function createDbCommentThreadStore(): CommentThreadStore {
       // read keeps us robust to the owner-only session_messages policy either
       // way. Open threads only; the AI-pending state is "latest comment is the
       // assistant's".
+      //
+      // The dismissal LEFT JOIN rides along on this query rather than becoming
+      // a second round trip. It cannot be a WHERE clause: whether a dismissal
+      // still applies depends on the thread's latest comment time, which is not
+      // known until the system-side read below — so `dismissed_at` is carried
+      // out and compared there. Migration 426.
       const threadsRes = await queryWithRLS<{
         threadId: string
         pageId: string
         sessionId: string
         pageTitle: string
         quote: string | null
+        dismissedAt: Date | null
       }>(
         userId,
         `SELECT t.id as "threadId", t.page_id as "pageId",
-                t.session_id as "sessionId", sv.name as "pageTitle", t.quote
+                t.session_id as "sessionId", sv.name as "pageTitle", t.quote,
+                d.dismissed_at as "dismissedAt"
            FROM comment_threads t
            JOIN saved_views sv ON sv.id = t.page_id
+           LEFT JOIN doc_inbox_dismissals d
+             ON d.thread_id = t.id AND d.recipient_user_id = $1
           WHERE t.created_by = $1
             AND t.workspace_id = $2
             AND t.resolved_at IS NULL`,
@@ -576,10 +587,20 @@ export function createDbCommentThreadStore(): CommentThreadStore {
       )
       const latestBySession = new Map(latest.rows.map((r) => [r.sessionId, r]))
 
+      const since = opts?.since ?? null
       const pending: InboxPendingReply[] = []
       for (const t of threadsRes.rows) {
         const last = latestBySession.get(t.sessionId)
         if (!last || last.role !== 'assistant') continue
+        // Retention window (migration 426) — a thread whose last word is older
+        // than the workspace's window ages out of the Inbox. Nothing is
+        // deleted; widening the window brings it straight back.
+        if (since && last.createdAt < since) continue
+        // Dismiss-on-read (migration 426). The comparison is against the
+        // thread's LATEST comment, not a boolean: a dismissal only suppresses
+        // the reply it was made for, so a NEWER assistant reply out-dates it
+        // and the thread returns to the Inbox.
+        if (t.dismissedAt && t.dismissedAt >= last.createdAt) continue
         pending.push({
           threadId: t.threadId,
           pageId: t.pageId,
@@ -591,6 +612,36 @@ export function createDbCommentThreadStore(): CommentThreadStore {
       // Newest assistant reply first.
       pending.sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt))
       return pending
+    },
+
+    async dismissPendingReply(
+      userId: string,
+      workspaceId: string,
+      threadId: string,
+    ): Promise<void> {
+      // INSERT ... SELECT FROM comment_threads under RLS, so thread access is
+      // checked by the same policy that gates every other thread read — a
+      // thread the caller cannot see yields no source row and nothing is
+      // written. That is also where workspace_id comes from, so a mismatched
+      // (thread, workspace) pair is a silent no-op rather than a row filed
+      // under the wrong workspace.
+      //
+      // The recipient RLS policy doubles as the INSERT WITH CHECK, which is
+      // what stops $1 from ever being someone else's id.
+      //
+      // ON CONFLICT refreshes `dismissed_at` instead of erroring: dismissing an
+      // already-dismissed thread is idempotent, and bumping the timestamp is
+      // the correct read of "I have seen it as of now".
+      await queryWithRLS(
+        userId,
+        `INSERT INTO doc_inbox_dismissals (recipient_user_id, thread_id, workspace_id)
+         SELECT $1, t.id, t.workspace_id
+           FROM comment_threads t
+          WHERE t.id = $2 AND t.workspace_id = $3
+         ON CONFLICT (recipient_user_id, thread_id)
+         DO UPDATE SET dismissed_at = now()`,
+        [userId, threadId, workspaceId],
+      )
     },
   }
 }

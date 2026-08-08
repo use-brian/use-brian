@@ -251,11 +251,6 @@ function makeJobStore(overrides: Partial<JobStore> = {}): JobStore & { rows: Sch
     async search() {
       return { jobs: [], nextCursor: null }
     },
-    async listTriggerJobsForWorkflowSystem(workflowId) {
-      return rows.filter(
-        (r) => r.workflowId === workflowId && r.channelType === 'workflow' && r.workflowStepRunId === null,
-      )
-    },
     async listFiringJobsForWorkflowSystem(workflowId) {
       return rows.filter((r) => r.workflowId === workflowId && r.workflowStepRunId === null)
     },

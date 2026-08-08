@@ -405,4 +405,115 @@ describe('[COMP:api/comment-thread-store] createDbCommentThreadStore', () => {
     // No system-side latest-message read when there are no threads.
     expect(mockBareQuery).not.toHaveBeenCalled()
   })
+
+  // ── Dismiss on read + retention (migration 426) ──────────────
+
+  it('listPendingRepliesForUser drops a thread dismissed after its latest reply', async () => {
+    mockQuery.mockResolvedValue({
+      rows: [
+        {
+          threadId: 't-1',
+          pageId: PAGE,
+          sessionId: 'sess-1',
+          pageTitle: 'Weekly',
+          quote: null,
+          // Read the reply an hour after it landed.
+          dismissedAt: new Date('2026-01-02T01:00:00.000Z'),
+        },
+      ],
+    } as never)
+    mockBareQuery.mockResolvedValueOnce({
+      rows: [
+        { sessionId: 'sess-1', role: 'assistant', createdAt: new Date('2026-01-02T00:00:00.000Z') },
+      ],
+    } as never)
+
+    const store = createDbCommentThreadStore()
+    expect(await store.listPendingRepliesForUser(USER, WS)).toEqual([])
+  })
+
+  it('listPendingRepliesForUser RESURFACES a dismissed thread once the assistant replies again', async () => {
+    // The dismissal is the same one as above, but the assistant has since
+    // spoken again — the dismissal covered the OLD reply, not this one. This is
+    // why dismissed_at is compared against the latest comment rather than read
+    // as a boolean.
+    mockQuery.mockResolvedValue({
+      rows: [
+        {
+          threadId: 't-1',
+          pageId: PAGE,
+          sessionId: 'sess-1',
+          pageTitle: 'Weekly',
+          quote: null,
+          dismissedAt: new Date('2026-01-02T01:00:00.000Z'),
+        },
+      ],
+    } as never)
+    mockBareQuery.mockResolvedValueOnce({
+      rows: [
+        { sessionId: 'sess-1', role: 'assistant', createdAt: new Date('2026-01-05T00:00:00.000Z') },
+      ],
+    } as never)
+
+    const store = createDbCommentThreadStore()
+    const pending = await store.listPendingRepliesForUser(USER, WS)
+    expect(pending).toHaveLength(1)
+    expect(pending[0].lastActivityAt).toBe('2026-01-05T00:00:00.000Z')
+  })
+
+  it('listPendingRepliesForUser ages out a thread whose latest reply predates the retention cutoff', async () => {
+    mockQuery.mockResolvedValue({
+      rows: [
+        { threadId: 't-old', pageId: PAGE, sessionId: 'sess-1', pageTitle: 'Old', quote: null, dismissedAt: null },
+        { threadId: 't-new', pageId: PAGE, sessionId: 'sess-2', pageTitle: 'New', quote: null, dismissedAt: null },
+      ],
+    } as never)
+    mockBareQuery.mockResolvedValueOnce({
+      rows: [
+        { sessionId: 'sess-1', role: 'assistant', createdAt: new Date('2026-01-01T00:00:00.000Z') },
+        { sessionId: 'sess-2', role: 'assistant', createdAt: new Date('2026-03-01T00:00:00.000Z') },
+      ],
+    } as never)
+
+    const store = createDbCommentThreadStore()
+    const pending = await store.listPendingRepliesForUser(USER, WS, {
+      since: new Date('2026-02-01T00:00:00.000Z'),
+    })
+    expect(pending.map((p) => p.threadId)).toEqual(['t-new'])
+  })
+
+  it('listPendingRepliesForUser applies no age filter when since is null', async () => {
+    mockQuery.mockResolvedValue({
+      rows: [
+        { threadId: 't-ancient', pageId: PAGE, sessionId: 'sess-1', pageTitle: 'Ancient', quote: null, dismissedAt: null },
+      ],
+    } as never)
+    mockBareQuery.mockResolvedValueOnce({
+      rows: [
+        { sessionId: 'sess-1', role: 'assistant', createdAt: new Date('2019-01-01T00:00:00.000Z') },
+      ],
+    } as never)
+
+    const store = createDbCommentThreadStore()
+    const pending = await store.listPendingRepliesForUser(USER, WS, { since: null })
+    expect(pending).toHaveLength(1)
+  })
+
+  it('dismissPendingReply writes through an RLS-gated INSERT ... SELECT and upserts on repeat', async () => {
+    mockQuery.mockResolvedValue({ rows: [], rowCount: 1 } as never)
+
+    const store = createDbCommentThreadStore()
+    await store.dismissPendingReply(USER, WS, 't-1')
+
+    const [rlsUser, sql, params] = mockQuery.mock.calls[0] as [string, string, unknown[]]
+    expect(rlsUser).toBe(USER)
+    // Access is established by selecting the thread under RLS rather than by a
+    // separate check, and workspace_id comes from the thread itself.
+    expect(sql).toContain('INSERT INTO doc_inbox_dismissals')
+    expect(sql).toContain('FROM comment_threads t')
+    expect(sql).toContain('t.workspace_id')
+    expect(sql).toContain('ON CONFLICT')
+    expect(sql).toContain('DO UPDATE SET dismissed_at = now()')
+    expect(params).toEqual([USER, 't-1', WS])
+  })
 })

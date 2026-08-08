@@ -25,6 +25,7 @@ import {
   mayResolveRoomConfirmation,
   roomTurnAdmission,
   sharedTurnRejection,
+  turnStopOutcome,
 } from '../chat.js'
 import {
   COALESCE_MAX_MERGED_ROWS,
@@ -328,5 +329,50 @@ describe('[COMP:api/room-mechanics] multi-assistant rooms (T9)', () => {
     expect(text(2)).toBe('Pipeline says the deal closes Friday.')
     // Pre-390 rows (no stamp) are left untouched.
     expect(text(3)).toBe('An older reply with no voice stamp.')
+  })
+})
+
+/**
+ * [COMP:api/turn-stop] — what `POST /api/chat/stop` decides.
+ *
+ * The human half of turn recovery (2026-08-08). A member looking at a spinning
+ * Live card cannot tell a working turn from a dead one, so Stop is offered the
+ * whole time and the SERVER resolves which of four situations it is in. Getting
+ * that branch wrong is expensive in both directions: forcing the lock on a live
+ * turn lets a second turn claim a session the first is mid-reply on, and NOT
+ * releasing a phantom leaves the room exactly as stuck as before.
+ */
+describe('[COMP:api/turn-stop] turnStopOutcome', () => {
+  it('is a no-op when the turn already ended', () => {
+    // Idempotent: two members hitting Stop on the same stuck card both get a
+    // calm answer rather than one of them racing into an error.
+    expect(turnStopOutcome({ status: 'idle', abortedLocally: false, reclaimedStale: false }))
+      .toBe('not_running')
+    expect(turnStopOutcome({ status: 'timeout', abortedLocally: true, reclaimedStale: true }))
+      .toBe('not_running')
+  })
+
+  it('aborts a live turn running in this process', () => {
+    expect(turnStopOutcome({ status: 'running', abortedLocally: true, reclaimedStale: false }))
+      .toBe('aborted')
+  })
+
+  it('reclaims a phantom whose lease already expired', () => {
+    expect(turnStopOutcome({ status: 'running', abortedLocally: false, reclaimedStale: true }))
+      .toBe('reclaimed')
+  })
+
+  it('prefers reclaim over abort when a stale lease and a local handle disagree', () => {
+    // A handle we still hold for an expired lease belongs to a turn that is
+    // already gone. Reporting `aborted` would claim we stopped something live.
+    expect(turnStopOutcome({ status: 'running', abortedLocally: true, reclaimedStale: true }))
+      .toBe('reclaimed')
+  })
+
+  it('only requests a cancel for a live turn in another process', () => {
+    // Deliberately does NOT release the lock: that turn is still writing, and
+    // freeing the slot early would let a second turn claim the session.
+    expect(turnStopOutcome({ status: 'running', abortedLocally: false, reclaimedStale: false }))
+      .toBe('cancel_requested')
   })
 })

@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { createScheduleWorkflowTool, syncWorkflowScheduleTrigger } from '../scheduled-trigger.js'
+import {
+  createScheduleWorkflowTool,
+  syncWorkflowScheduleTrigger,
+  clearWorkflowScheduleTriggers,
+} from '../scheduled-trigger.js'
 import type { JobStore, ScheduledJob } from '../../scheduling/types.js'
 import type { WorkflowRecord, WorkflowStore } from '../types.js'
 import type { ToolContext } from '../../tools/types.js'
@@ -87,14 +91,9 @@ function makeJobStore(): JobStore & { rows: ScheduledJob[] } {
     async purgeDisabledOlderThan() { return 0 },
     async countEnabledRecurring() { return 0 },
     async search() { return { jobs: [], nextCursor: null } },
-    async listTriggerJobsForWorkflowSystem(workflowId) {
-      // Mirrors the SQL structural filter: scheduled triggers only.
-      return rows.filter(
-        (r) => r.workflowId === workflowId && r.channelType === 'workflow' && r.workflowStepRunId === null,
-      )
-    },
     async listFiringJobsForWorkflowSystem(workflowId) {
-      // All firing rows, any channel (includes messaging/doc reminder rows).
+      // All firing rows, any channel (includes messaging/doc reminder rows),
+      // oldest first — mirrors the store's `ORDER BY created_at ASC`.
       return rows.filter((r) => r.workflowId === workflowId && r.workflowStepRunId === null)
     },
   }
@@ -362,5 +361,109 @@ describe('[COMP:workflow/scheduled-trigger] syncWorkflowScheduleTrigger policy p
     expect(jobStore.rows[0].mode).toBe('user')
     expect(jobStore.rows[0].silentUntilFire).toBe(true)
     expect(jobStore.rows[0].schedule).toEqual({ type: 'daily', time: '09:00' })
+  })
+})
+
+describe('[COMP:workflow/scheduled-trigger] delivery-backed reminder rows', () => {
+  /**
+   * Regression: 2026-08-08 double daily summary.
+   *
+   * A workflow authored as a Telegram reminder fires from a row whose
+   * channel_type is the DELIVERY channel, not 'workflow'. Reconciling through
+   * a `channel_type='workflow'` lookup could not see it, so a reschedule took
+   * the create branch and left the workflow with two firing rows — two
+   * identical summaries every morning, from one schedule the builder showed.
+   */
+  function seedTelegramReminderRow(jobStore: JobStore & { rows: ScheduledJob[] }) {
+    jobStore.rows.push({
+      id: '00000000-0000-0000-0000-0000000000aa',
+      assistantId: PRIMARY_ASSISTANT_ID,
+      userId: USER_ID,
+      schedule: { type: 'daily', time: '09:00' },
+      timezone: 'Asia/Hong_Kong',
+      mode: 'local',
+      instructions: "Fetch today's schedule and email, then format a daily summary.",
+      channelType: 'telegram',
+      channelId: '880211324',
+      enabled: true,
+      nextRunAt: new Date('2026-08-09T01:00:00.000Z'),
+      lastRunAt: null,
+      lastStatus: null,
+      silentUntilFire: false,
+      nagIntervalMins: null,
+      nagUntilKeyword: null,
+      state: {},
+      workflowId: SAMPLE_WORKFLOW.id,
+      workflowStepRunId: null,
+      viewId: null,
+    })
+  }
+
+  it('reschedules the existing reminder row instead of minting a second firing row', async () => {
+    const jobStore = makeJobStore()
+    seedTelegramReminderRow(jobStore)
+
+    await syncWorkflowScheduleTrigger(
+      { jobStore, resolvePrimary: async () => PRIMARY_ASSISTANT_ID },
+      {
+        workflowId: SAMPLE_WORKFLOW.id,
+        workspaceId: WORKSPACE_ID,
+        userId: USER_ID,
+        schedule: { type: 'daily', time: '10:00' },
+        timezone: 'Asia/Hong_Kong',
+      },
+    )
+
+    // One firing row, still the original — not a second one beside it.
+    expect(jobStore.rows).toHaveLength(1)
+    expect(jobStore.rows[0].id).toBe('00000000-0000-0000-0000-0000000000aa')
+    expect(jobStore.rows[0].schedule).toEqual({ type: 'daily', time: '10:00' })
+    // Delivery target survives: losing it would silently stop the reminder.
+    expect(jobStore.rows[0].channelType).toBe('telegram')
+    expect(jobStore.rows[0].channelId).toBe('880211324')
+    // Prose instructions survive — the listing shows them and
+    // searchScheduledJobs text-matches on them. Execution reads only `input`.
+    expect(jobStore.rows[0].instructions).toContain('daily summary')
+  })
+
+  it('reaps a reminder row and a trigger row down to one when both already exist', async () => {
+    const jobStore = makeJobStore()
+    seedTelegramReminderRow(jobStore)
+    // The duplicate the old code created on 2026-08-06.
+    jobStore.rows.push({
+      ...jobStore.rows[0],
+      id: '00000000-0000-0000-0000-0000000000bb',
+      channelType: 'workflow',
+      channelId: SAMPLE_WORKFLOW.id,
+      instructions: JSON.stringify({ kind: 'workflow_trigger', workflowId: SAMPLE_WORKFLOW.id, input: {} }),
+    })
+
+    await syncWorkflowScheduleTrigger(
+      { jobStore, resolvePrimary: async () => PRIMARY_ASSISTANT_ID },
+      {
+        workflowId: SAMPLE_WORKFLOW.id,
+        workspaceId: WORKSPACE_ID,
+        userId: USER_ID,
+        schedule: { type: 'daily', time: '09:00' },
+        timezone: 'Asia/Hong_Kong',
+      },
+    )
+
+    // Oldest wins: the row holding the user's delivery target.
+    expect(jobStore.rows).toHaveLength(1)
+    expect(jobStore.rows[0].id).toBe('00000000-0000-0000-0000-0000000000aa')
+    expect(jobStore.rows[0].channelType).toBe('telegram')
+  })
+
+  it('clearing stops a delivery-backed row too, not just workflow-channel rows', async () => {
+    const jobStore = makeJobStore()
+    seedTelegramReminderRow(jobStore)
+
+    const removed = await clearWorkflowScheduleTriggers({ jobStore }, SAMPLE_WORKFLOW.id)
+
+    // Leaving it behind meant a workflow switched to manual (or deleted) kept
+    // firing daily with no surface left to stop it from.
+    expect(removed).toBe(1)
+    expect(jobStore.rows).toHaveLength(0)
   })
 })

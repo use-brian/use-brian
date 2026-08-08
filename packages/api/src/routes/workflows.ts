@@ -65,12 +65,19 @@ export type WorkflowsRouteOptions = {
    */
   savedViewStore?: SavedViewStore
   /**
-   * The workflow's ACTUAL scheduled-trigger rows for the GET detail route —
-   * drift surfacing for the builder (the `workflows.trigger` column can say
-   * "manual" while cron jobs fire; 2026-06-10 incident). Wired from
-   * `jobStore.listTriggerJobsForWorkflowSystem`; the route's RLS-scoped
+   * The workflow's ACTUAL firing rows for the GET detail route — drift
+   * surfacing for the builder (the `workflows.trigger` column can say "manual"
+   * while cron jobs fire; 2026-06-10 incident). Wired from
+   * `jobStore.listFiringJobsForWorkflowSystem`; the route's RLS-scoped
    * workflow read is the membership proof. Optional — absent omits
    * `triggerJobs` from the response.
+   *
+   * Deliberately EVERY firing row, not just `channel_type='workflow'` ones.
+   * This card is the surface people open to ask "why did this run twice", and
+   * with the narrow lookup it structurally could not show a delivery-backed
+   * reminder row — so on 2026-08-08 it displayed one 09:00 trigger while two
+   * were firing, and the duplicate was invisible exactly where it was looked
+   * for. Drift surfacing that shares the blind spot is not drift surfacing.
    */
   listTriggerJobs?: (workflowId: string) => Promise<
     Array<{

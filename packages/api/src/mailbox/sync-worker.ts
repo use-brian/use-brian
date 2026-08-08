@@ -69,6 +69,7 @@ import {
 import {
   createMailboxSessionCache,
   createSocketKeepWarm,
+  syncableFolders,
   type ImapClientLike,
   type ImapFetchedMessage,
   type MailboxSessionCache,
@@ -93,9 +94,22 @@ export type MailboxBackfillScope = '12m' | '2y' | 'all'
 export type MailboxBackfillState = {
   scope: MailboxBackfillScope
   requestedAt: string
-  status: 'running' | 'done'
+  /**
+   * `stalled` is a TERMINAL state, and the reason this type has three values
+   * instead of two. `status` only ever became `done` on the success path, so a
+   * backfill pass that threw reproducibly left it `running` forever: every tick
+   * re-entered the backfill branch, threw again, and the state that would end
+   * the loop was only writable by the path the loop prevented reaching. Three
+   * mailboxes sat that way for up to twelve days (2026-08-08). A stalled
+   * backfill is skipped, so delta sync resumes; re-arming clears it.
+   */
+  status: 'running' | 'done' | 'stalled'
   /** STATUS-count ceiling captured at arm time — drives "Syncing N of M". */
   totalEstimate?: number
+  /** Consecutive failed backfill passes; reset by any successful pass. */
+  consecutiveFailures?: number
+  /** Why the backfill stalled — surfaced to the user, not just the journal. */
+  lastError?: string | null
 }
 
 /** A message the backfill permanently quarantined (un-fetchable / un-insertable). */
@@ -112,6 +126,12 @@ export type MailboxSyncState = {
   backfill?: MailboxBackfillState
   lastSyncAt?: string
   lastError?: string | null
+  /**
+   * When the last FAILED pass ran. Paired with `lastSyncAt` this is what makes
+   * a stall legible: `lastError` alone cannot distinguish "failed once an hour
+   * ago and recovered" from "has failed every five minutes for twelve days".
+   */
+  lastFailedSyncAt?: string | null
   /** Total messages quarantined so one bad message can't wedge the walk. */
   skippedCount?: number
   /** Bounded tail of recent quarantines for diagnosis (last MAX_RECENT_SKIPS). */
@@ -125,6 +145,7 @@ export function readMailboxSyncState(config: Record<string, unknown> | null | un
     ...(raw.backfill ? { backfill: raw.backfill } : {}),
     ...(raw.lastSyncAt ? { lastSyncAt: raw.lastSyncAt } : {}),
     ...(raw.lastError !== undefined ? { lastError: raw.lastError } : {}),
+    ...(raw.lastFailedSyncAt !== undefined ? { lastFailedSyncAt: raw.lastFailedSyncAt } : {}),
     ...(raw.skippedCount !== undefined ? { skippedCount: raw.skippedCount } : {}),
     ...(raw.recentSkips ? { recentSkips: raw.recentSkips } : {}),
   }
@@ -133,8 +154,33 @@ export function readMailboxSyncState(config: Record<string, unknown> | null | un
 /** Bound on the diagnostic `recentSkips` tail — the count is unbounded, the list is not. */
 const MAX_RECENT_SKIPS = 25
 
+/**
+ * Consecutive failed backfill folder-passes before the backfill parks itself as
+ * `stalled`. Bounded on purpose: an unbounded retry is what turned one bad
+ * backfill into twelve days of five-minute failures. Delta sync is unaffected
+ * either way, so parking costs the user history, never new mail.
+ */
+const MAX_BACKFILL_FAILURES = 12
+
+/**
+ * ImapFlow puts the useful half of a failure on properties, not on `message`:
+ * a rejected command is the bare string `Command failed`, while the server's
+ * actual words live on `responseText` and the machine-readable reason on
+ * `serverResponseCode` / `code`. Keeping only `message` is why three wedged
+ * mailboxes produced twelve days of `Command failed` with nothing to diagnose
+ * from (2026-08-08). Append whatever detail is present, de-duplicated.
+ */
 function errText(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
+  const base = err instanceof Error ? err.message : String(err)
+  if (!err || typeof err !== 'object') return base
+  const e = err as { responseText?: unknown; serverResponseCode?: unknown; code?: unknown }
+  const parts = [base]
+  for (const extra of [e.responseText, e.serverResponseCode, e.code]) {
+    if (typeof extra !== 'string' || !extra.trim()) continue
+    if (parts.some((p) => p.includes(extra))) continue
+    parts.push(extra)
+  }
+  return parts.join(' — ')
 }
 
 /** Record one quarantined message on the sync state (count + bounded recent tail). */
@@ -153,8 +199,6 @@ export function backfillFloorDate(scope: MailboxBackfillScope, now: Date): Date 
   return d
 }
 
-/** Folders excluded from sync — junk/trash/drafts and virtual all-mail. */
-const SKIP_SPECIAL_USE = new Set(['\\Junk', '\\Trash', '\\Drafts', '\\All'])
 
 // ── Message parsing (fetched source → archive input + brain input) ──
 
@@ -720,8 +764,20 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
     }
 
     // ── Backfill: descending walk below backfillLow (archive-only, D6) ──
+    //
+    // The pass is deliberately NON-FATAL, and that is the whole point of the
+    // wrapper below. Backfill is archive-only catch-up; new mail arrives through
+    // the delta walk above, so a backfill that cannot run must never stop mail
+    // from syncing. Before 2026-08-08 it threw straight out of syncFolder: the
+    // tick aborted mid folder-loop (starving every later folder of even delta
+    // sync), and because `status` only cleared to `done` on the success path,
+    // the next tick re-ran the identical failing pass — forever, at full rate.
+    // Three mailboxes sat frozen that way, one for twelve days, while the UI
+    // read "Syncing 72,497 of 155,363". Same posture as the per-message
+    // quarantine above, one level up.
     const backfill = state.backfill
     if (backfill && backfill.status === 'running' && !cursor.backfillDone) {
+      const runBackfillPass = async (): Promise<void> => {
       const floor = backfillFloorDate(backfill.scope, now())
       const lock = await client.getMailboxLock(folder)
       let inScope: number[] | false = false
@@ -738,7 +794,7 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
       if (pending.length === 0) {
         cursor.backfillDone = true
         state.folders[folder] = cursor
-        return deltaInserted
+        return
       }
       const chunk = pending.slice(0, backfillChunk)
       const query = {
@@ -799,6 +855,32 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
         cursor.backfillDone = true
         state.folders[folder] = cursor
       }
+      }
+
+      try {
+        await runBackfillPass()
+        // Any successful pass clears the ledger: a stall must mean "failing
+        // now", not "failed once during a network blip three weeks ago".
+        backfill.consecutiveFailures = 0
+        backfill.lastError = null
+      } catch (err) {
+        // Counted per folder-pass, so a mailbox with four syncable folders
+        // burns the budget in ~3 ticks (~15 min) before parking the backfill.
+        const failures = (backfill.consecutiveFailures ?? 0) + 1
+        backfill.consecutiveFailures = failures
+        backfill.lastError = errText(err)
+        if (failures >= MAX_BACKFILL_FAILURES) {
+          backfill.status = 'stalled'
+          console.error(
+            `[mailbox-sync] backfill STALLED for instance ${inst.id} (folder ${folder}) after ${failures} consecutive failures: ${backfill.lastError}`,
+          )
+        } else {
+          console.warn(
+            `[mailbox-sync] backfill pass failed for instance ${inst.id} (folder ${folder}, ${failures}/${MAX_BACKFILL_FAILURES}): ${backfill.lastError}`,
+          )
+        }
+      }
+      state.backfill = backfill
     }
     return deltaInserted
   }
@@ -818,21 +900,40 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
     let newMessages = 0
     try {
       await sessions.withClient(`sync:${inst.id}`, settings, async (client) => {
-        const folders = await client.list()
-        const syncable = folders.filter((f) => {
-          const special = (f as { specialUse?: string }).specialUse
-          return !special || !SKIP_SPECIAL_USE.has(special)
-        })
+        const syncable = syncableFolders(await client.list())
+        // Per-folder isolation: a folder that throws must not deny every LATER
+        // folder its turn. Previously the first throw escaped this loop, so on a
+        // mailbox whose second folder failed, folders three and four were never
+        // synced again — indistinguishable from an empty mailbox. Collect and
+        // report at the end instead, so the instance is still marked failing
+        // (honest) but every folder got its pass (progress).
+        const folderErrors: string[] = []
         for (const f of syncable) {
-          newMessages += await syncFolder({
-            client,
-            inst,
-            settings,
-            folder: f.path,
-            state,
-            workspaceId,
-            assistantId,
-          })
+          try {
+            newMessages += await syncFolder({
+              client,
+              inst,
+              settings,
+              folder: f.path,
+              state,
+              workspaceId,
+              assistantId,
+            })
+          } catch (err) {
+            // A DEAD CREDENTIAL aborts the loop and is rethrown UNWRAPPED.
+            // Both halves matter: every remaining folder would fail the same
+            // way, and — the subtle one — the aggregate below is a fresh
+            // `Error`, which does not carry `authenticationFailed`. Wrapping an
+            // auth failure would therefore downgrade it to `degraded` and the
+            // user would never be told to reconnect. Preserve the original.
+            if ((err as { authenticationFailed?: boolean })?.authenticationFailed) throw err
+            folderErrors.push(`${f.path}: ${errText(err)}`)
+          }
+        }
+        if (folderErrors.length > 0) {
+          throw new Error(
+            `${folderErrors.length}/${syncable.length} folder(s) failed — ${folderErrors.join('; ')}`,
+          )
         }
       })
       if (state.backfill && state.backfill.status === 'running') {
@@ -841,15 +942,28 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
       }
       state.lastSyncAt = now().toISOString()
       state.lastError = null
+      state.lastFailedSyncAt = null
       await deps.connectorInstanceStore.setConfigSystem(inst.id, { mailboxSync: state })
       await deps.connectorInstanceStore.markHealth?.(inst.id, 'ok', null)
       return { newMessages }
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
+      const message = errText(err)
       state.lastError = message
+      state.lastFailedSyncAt = now().toISOString()
       await deps.connectorInstanceStore.setConfigSystem(inst.id, { mailboxSync: state }).catch(() => {})
+      // `auth_failed` stays reserved for a DEAD CREDENTIAL. inject.ts withholds
+      // every mailbox tool from an `auth_failed` instance, so marking it on an
+      // ordinary sync error would take away search/read/send from a mailbox
+      // whose password is perfectly fine — the same over-marking that lost
+      // GitHub for a whole workspace in the 2026-07-20 incident (see
+      // mcp/connector-health.ts). An ordinary failure is `degraded` (migration
+      // 425): the card shows it as failing, the tools keep working, and
+      // reconnecting is correctly NOT offered as the remedy. A success resets
+      // it to 'ok' on the path above.
       if ((err as { authenticationFailed?: boolean })?.authenticationFailed) {
         await deps.connectorInstanceStore.markHealth?.(inst.id, 'auth_failed', message).catch(() => {})
+      } else {
+        await deps.connectorInstanceStore.markHealth?.(inst.id, 'degraded', message).catch(() => {})
       }
       throw err
     }

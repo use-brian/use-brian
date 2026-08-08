@@ -18,18 +18,34 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 export type ImapSyncStatus = {
   email: string;
   archived: number;
-  backfill: { scope: string; status: "running" | "done"; totalEstimate?: number } | null;
+  backfill: {
+    scope: string;
+    status: "running" | "done" | "stalled";
+    totalEstimate?: number;
+    consecutiveFailures?: number;
+    lastError?: string | null;
+  } | null;
   lastSyncAt: string | null;
   lastError: string | null;
+  lastFailedSyncAt?: string | null;
   ingestionEnabled: boolean;
 };
 
-/** Pure status-line formatter — "Syncing N of M" while a backfill runs, else
- *  "Up to date" with the archived count. Exported for tests. */
+/** Pure status-line formatter — "Syncing N of M" while a backfill runs,
+ *  "History sync paused" once it has parked, else "Up to date" with the
+ *  archived count. Exported for tests.
+ *
+ *  The paused branch exists because the running branch used to be a lie: a
+ *  wedged backfill kept `status: "running"` forever, so this line read
+ *  "Syncing 72,497 of 155,363..." for twelve days while nothing moved. A
+ *  progress string with no progress behind it is worse than an error. */
 export function formatImapSyncLine(
   status: Pick<ImapSyncStatus, "archived" | "backfill">,
-  copy: { syncing: string; upToDate: string },
+  copy: { syncing: string; upToDate: string; backfillStalled: string },
 ): string {
+  if (status.backfill?.status === "stalled") {
+    return copy.backfillStalled.replace("{n}", String(status.archived));
+  }
   const backfillRunning = status.backfill?.status === "running";
   return backfillRunning
     ? copy.syncing
@@ -110,22 +126,34 @@ export function ImapSyncPanel({ instanceId }: { instanceId?: string } = {}) {
   if (!status) return null;
 
   const backfillRunning = status.backfill?.status === "running";
+  const backfillStalled = status.backfill?.status === "stalled";
   const syncLine = formatImapSyncLine(status, tm);
 
   return (
     <div className="space-y-2 border border-border rounded-lg p-3">
       <div className="text-[13px] font-medium">{tm.syncStatusTitle}</div>
       <p className="text-xs text-muted-foreground">{syncLine}</p>
-      {status.lastError && <p className="text-xs text-destructive">{tm.syncError}</p>}
+      {/* A parked backfill reports the server's own words. The generic
+          "it will retry automatically" line is reserved for the transient
+          case, because once parked it will NOT retry until re-armed - saying
+          otherwise is how this stayed invisible for twelve days. */}
+      {backfillStalled ? (
+        <p className="text-xs text-destructive">
+          {tm.backfillStalledDetail.replace("{err}", status.backfill?.lastError ?? tm.syncErrorUnknown)}
+        </p>
+      ) : (
+        status.lastError && <p className="text-xs text-destructive">{tm.syncError}</p>
+      )}
 
-      {/* Backfill consent — offered until a backfill has been armed. */}
-      {!status.backfill && !probe && (
+      {/* Backfill consent - offered when none has been armed, and again once one
+          has parked, otherwise a stalled mailbox has no way back. */}
+      {(!status.backfill || backfillStalled) && !probe && (
         <button
           onClick={() => void runPreflight()}
           disabled={probing}
           className="text-xs font-medium border border-border px-3 py-1 rounded-lg text-muted-foreground hover:bg-muted disabled:opacity-50 transition-colors"
         >
-          {probing ? tm.backfillProbing : tm.backfillProbeBtn}
+          {probing ? tm.backfillProbing : backfillStalled ? tm.backfillRetryBtn : tm.backfillProbeBtn}
         </button>
       )}
       {probe && !backfillRunning && (

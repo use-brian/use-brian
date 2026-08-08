@@ -1713,6 +1713,10 @@ export const ja: Dictionary = {
         upToDate: "最新の状態です。{n} 件のメールがアーカイブ済みで検索できます。",
         syncing: "{m} 件中 {n} 件を同期中...",
         syncError: "前回の同期でエラーが発生しました。自動的に再試行します。",
+        syncErrorUnknown: "メールサーバーがリクエストを拒否しました",
+        backfillStalled: "履歴の同期を一時停止しました。これまでに {n} 件を保存済みです。新着メールの同期は続いています。",
+        backfillStalledDetail: "エラーが繰り返し発生したため、履歴の同期を停止しました: {err}",
+        backfillRetryBtn: "履歴の同期を再試行",
         backfillProbeBtn: "メール履歴を同期",
         backfillProbing: "メールボックスを確認中...",
         backfillCounts: "サーバー上に {n} 件のメールがあります。",
@@ -1825,6 +1829,9 @@ export const ja: Dictionary = {
       reconnectScopeDesc: "Google のファイル単位共有フローに切り替えました。アシスタントに読み書きさせたい特定のドキュメントを選ぶには再接続してください。",
       reconnectNeeded: "再接続が必要",
       healthReconnectTitle: "このコネクタは動作を停止しました",
+      healthDegradedPill: "同期していません",
+      healthDegradedTitle: "このコネクタは同期していません",
+      healthDegradedDesc: "ログイン情報は有効で、アシスタントは引き続き利用できます。別の原因で失敗しているため、最新のデータが反映されていない可能性があります。詳細はコネクタを開いてください。",
       healthReconnectDesc: "認証情報の有効期限が切れたか失効したため、アシスタントが利用できません。再接続してアクセスを復元してください。",
       reconnectBtn: "再接続",
       cardDesc: {
@@ -4381,6 +4388,7 @@ export const ja: Dictionary = {
     askShortcutHint: "{keys} で送信して質問",
     queuedNotice: "現在のターンが終わり次第、アシスタントが返信します。",
     postFailed: "メッセージを投稿できませんでした。もう一度お試しください。",
+    stopTurnFailed: "ターンを停止できませんでした。もう一度お試しください。",
     mentionInsertAria: "{name} をメンション",
     editMessage: "編集",
     editSave: "保存",
@@ -4403,6 +4411,14 @@ export const ja: Dictionary = {
     liveWorkWaiting: "入力待ち",
     liveWorkAssistant: "サポートアシスタント {number}",
     liveWorkSteps: "{done} 件完了・{running} 件進行中",
+    liveWorkStop: "停止",
+    liveWorkStopping: "停止中",
+    liveWorkStopTitle: "このターンを停止します",
+    liveWorkNoProgress: "{minutes} 分間、進捗がありません",
+    turnStoppedBy: "{name} がこのターンを停止しました。",
+    turnStoppedByYou: "このターンを停止しました。",
+    turnReclaimed:
+      "前のターンが応答しなくなったためリセットし、チャットのブロックを解除しました。メッセージはすべて残っています。もう一度送信すると続けられます。",
     pinnedContext: "ピン",
     assistantClearanceBlocked: "このアシスタントの権限レベルはこのルームより高いため、ここでは回答できません。",
     documentViewer: {
@@ -7007,6 +7023,15 @@ export const ja: Dictionary = {
     traditional: "繁体字中国語",
     simplified: "簡体字中国語",
     saveFailed: "設定を保存できませんでした。もう一度お試しください。",
+  },
+  // 受信トレイの保持期間（マイグレーション 426）。
+  inboxRetention: {
+    heading: "受信トレイの保持期間",
+    description:
+      "最後のやり取りから何日間、項目を受信トレイに表示するかを設定します。期間を過ぎた項目は表示されなくなりますが、削除されるわけではありません。期間を長くすれば再び表示されます。",
+    days: "{count}日間",
+    never: "すべて保持する",
+    saveFailed: "保持期間を保存できませんでした。もう一度お試しください。",
   },
   computer: {
     liveViewTitle: "ライブブラウザ",

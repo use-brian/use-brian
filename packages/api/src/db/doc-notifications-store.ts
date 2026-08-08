@@ -103,10 +103,23 @@ export function createDbDocNotificationsStore(): DocNotificationsStore {
       return res.rowCount ?? 0
     },
 
-    async listForUser(userId: string, workspaceId: string): Promise<InboxMention[]> {
+    async listForUser(
+      userId: string,
+      workspaceId: string,
+      opts?: { since?: Date | null },
+    ): Promise<InboxMention[]> {
       // RLS-scoped to the recipient's own rows. Join page title + actor name
       // for the row label; LEFT JOIN so a deleted user/page doesn't drop the
       // notification.
+      //
+      // UNREAD ONLY (migration 426): reading a mention is what removes it from
+      // the Inbox, so `read_at IS NOT NULL` is the dismissal record here — the
+      // mentions lane needs no dismissals table because it already has rows.
+      //
+      // `since` is the retention window. It is a filter, not a delete: the rows
+      // stay, so widening the window restores them. The LIMIT stays as a
+      // backstop for a workspace with a huge window and a very loud teammate.
+      const since = opts?.since ?? null
       const res = await queryWithRLS<MentionRow>(
         userId,
         `SELECT ${MENTION_COLS}
@@ -114,9 +127,11 @@ export function createDbDocNotificationsStore(): DocNotificationsStore {
            LEFT JOIN saved_views sv ON sv.id = n.page_id
            LEFT JOIN users u ON u.id = n.actor_user_id
           WHERE n.workspace_id = $1
+            AND n.read_at IS NULL
+            AND ($2::timestamptz IS NULL OR n.created_at >= $2::timestamptz)
           ORDER BY n.created_at DESC
           LIMIT 100`,
-        [workspaceId],
+        [workspaceId, since],
       )
       return res.rows.map(mapMention)
     },
@@ -140,12 +155,20 @@ export function createDbDocNotificationsStore(): DocNotificationsStore {
       )
     },
 
-    async unreadCount(userId: string, workspaceId: string): Promise<number> {
+    async unreadCount(
+      userId: string,
+      workspaceId: string,
+      opts?: { since?: Date | null },
+    ): Promise<number> {
+      // Same retention window as listForUser, so the badge can never count a
+      // mention the panel will not show.
+      const since = opts?.since ?? null
       const res = await queryWithRLS<{ count: string }>(
         userId,
         `SELECT COUNT(*)::int as count FROM doc_notifications
-          WHERE workspace_id = $1 AND read_at IS NULL`,
-        [workspaceId],
+          WHERE workspace_id = $1 AND read_at IS NULL
+            AND ($2::timestamptz IS NULL OR created_at >= $2::timestamptz)`,
+        [workspaceId, since],
       )
       return Number(res.rows[0]?.count ?? 0)
     },

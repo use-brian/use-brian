@@ -1893,6 +1893,10 @@ export const en = {
         upToDate: "Up to date. {n} messages archived and searchable.",
         syncing: "Syncing {n} of {m} messages...",
         syncError: "The last sync hit an error. It will retry automatically.",
+        syncErrorUnknown: "the mail server rejected the request",
+        backfillStalled: "History sync is paused. {n} messages archived so far. New mail is still syncing.",
+        backfillStalledDetail: "History sync stopped after repeated errors: {err}",
+        backfillRetryBtn: "Retry history sync",
         backfillProbeBtn: "Sync mailbox history",
         backfillProbing: "Checking the mailbox...",
         backfillCounts: "{n} messages on the server.",
@@ -2005,6 +2009,9 @@ export const en = {
       reconnectScopeDesc: "We now use Google's per-file sharing flow. Reconnect to pick the specific documents you want the assistant to read and edit.",
       reconnectNeeded: "Reconnect needed",
       healthReconnectTitle: "This connector stopped working",
+      healthDegradedPill: "Not syncing",
+      healthDegradedTitle: "This connector is not syncing",
+      healthDegradedDesc: "Your sign-in is still valid and the assistant can keep using it. Something else is failing, so new data may be out of date. Open the connector for details.",
       healthReconnectDesc: "Its credentials expired or were revoked, so the assistant can't use it. Reconnect to restore access.",
       reconnectBtn: "Reconnect",
       // Per-connector descriptions (keyed by connector id)
@@ -4586,6 +4593,7 @@ export const en = {
     askShortcutHint: "{keys} sends and asks",
     queuedNotice: "The assistant will reply after the current turn finishes.",
     postFailed: "Could not post your message. Try again.",
+    stopTurnFailed: "Could not stop the turn. Try again.",
     mentionInsertAria: "Mention {name}",
     // Editing a sent message: the repair for a post that addresses nobody.
     editMessage: "Edit",
@@ -4609,6 +4617,14 @@ export const en = {
     liveWorkWaiting: "Waiting for input",
     liveWorkAssistant: "Supporting assistant {number}",
     liveWorkSteps: "{done} completed · {running} running",
+    liveWorkStop: "Stop",
+    liveWorkStopping: "Stopping",
+    liveWorkStopTitle: "Stop this turn",
+    liveWorkNoProgress: "No progress for {minutes}m",
+    turnStoppedBy: "{name} stopped this turn.",
+    turnStoppedByYou: "You stopped this turn.",
+    turnReclaimed:
+      "The previous turn stopped responding and was reset, so the chat is unblocked. Nothing was lost: your messages are still here. Send again to continue.",
     pinnedContext: "Pins",
     assistantClearanceBlocked: "That assistant is cleared above this room and cannot answer here.",
     documentViewer: {
@@ -7228,6 +7244,15 @@ export const en = {
     traditional: "Traditional Chinese",
     simplified: "Simplified Chinese",
     saveFailed: "Could not save the preference. Please try again.",
+  },
+  // Doc Inbox retention window (migration 426).
+  inboxRetention: {
+    heading: "Inbox retention",
+    description:
+      "How long an item keeps showing in the inbox after its last activity. Older items stop appearing, but nothing is deleted: choose a longer window and they come back.",
+    days: "{count} days",
+    never: "Keep everything",
+    saveFailed: "Could not save the retention window. Please try again.",
   },
   // Computer use: the Take-Over live view + Session Management
   // (docs/architecture/engine/computer-use.md).

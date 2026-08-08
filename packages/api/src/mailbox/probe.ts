@@ -7,10 +7,8 @@
  * [COMP:api/mailbox-connect-routes]
  */
 
-import { createImapClient, type ImapClientLike } from './imap-session.js'
+import { createImapClient, syncableFolders, type ImapClientLike } from './imap-session.js'
 import type { MailboxAccountSettings } from './types.js'
-
-const SKIP_SPECIAL_USE = new Set(['\\Junk', '\\Trash', '\\Drafts', '\\All'])
 
 export type MailboxProbeResult = {
   folders: Array<{ path: string; messages: number }>
@@ -24,11 +22,7 @@ export async function probeMailboxFolders(
   const client = createClient(settings)
   await client.connect()
   try {
-    const listed = await client.list()
-    const syncable = listed.filter((f) => {
-      const special = (f as { specialUse?: string }).specialUse
-      return !special || !SKIP_SPECIAL_USE.has(special)
-    })
+    const syncable = syncableFolders(await client.list())
     const folders: Array<{ path: string; messages: number }> = []
     for (const f of syncable) {
       try {

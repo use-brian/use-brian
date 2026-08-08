@@ -52,7 +52,14 @@ export type SensitivityTier = 'public' | 'internal' | 'confidential'
  *   auth_failed  a 401/403/invalid_grant at call time — needs reconnect
  *   unknown      reserved (never exercised)
  */
-export type ConnectorHealthStatus = 'ok' | 'auth_failed' | 'unknown'
+/**
+ * `degraded` (migration 425) means the credential is VALID but the connector is
+ * failing to do its job. It deliberately does NOT gate tool injection — only
+ * `auth_failed` does that, because only a dead credential is fixed by
+ * reconnecting. Keep any new consumer testing `=== 'auth_failed'` rather than
+ * `!== 'ok'`, or a degraded connector silently loses its tools.
+ */
+export type ConnectorHealthStatus = 'ok' | 'auth_failed' | 'degraded' | 'unknown'
 
 export type ConnectorInstance = {
   id: string

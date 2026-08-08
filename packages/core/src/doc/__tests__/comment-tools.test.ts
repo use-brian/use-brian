@@ -59,6 +59,7 @@ function fakeStore(over: Partial<CommentThreadStore> = {}): CommentThreadStore {
     listEmptyThreadIdsForPage: vi.fn().mockResolvedValue([]),
     setResolved: vi.fn().mockResolvedValue(fakeThread({ resolvedAt: '2026-01-02T00:00:00.000Z' })),
     listPendingRepliesForUser: vi.fn().mockResolvedValue([]),
+    dismissPendingReply: vi.fn().mockResolvedValue(undefined),
     ...over,
   }
 }

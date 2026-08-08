@@ -57,20 +57,32 @@ function makeFakeImap(
   folders: Record<string, FakeFolderState>,
   fault?: {
     /** The server errors on any FETCH whose range covers this UID. */
-    fetchUid: number
+    fetchUid?: number
     /** Also drop the session (usable=false) — a connection loss, not one poison message. */
     dead?: boolean
+    /**
+     * Every backfill SEARCH is rejected. This is the shape of the 2026-08-08
+     * production wedge: the pass died before archiving anything, so the count
+     * never moved and the failure repeated identically every five minutes.
+     */
+    searchFails?: boolean
   },
 ) {
   let openFolder = ''
   let noopCalls = 0
+  let searchCalls = 0
   const client = {
     usable: true,
     async connect() {},
     async logout() {},
     close() {},
     async list() {
-      return Object.keys(folders).map((path) => ({ path }))
+      return Object.keys(folders).map((path) => ({
+        path,
+        // Gmail's bare `[Gmail]` container is `\Noselect`: it cannot be
+        // SELECTed, so a sync pass must never try to open it.
+        ...(path === '[Gmail]' ? { flags: new Set(['\\Noselect', '\\HasChildren']) } : {}),
+      }))
     },
     async getMailboxLock(path: string) {
       openFolder = path
@@ -86,6 +98,8 @@ function makeFakeImap(
       }
     },
     async search(query: Record<string, unknown>) {
+      searchCalls++
+      if (fault?.searchFails) throw new Error('Command failed')
       const f = folders[openFolder]
       // The worker's backfill search is date-bounded or `all`; the fake
       // treats every message as in-scope (dates in fixtures are recent).
@@ -130,13 +144,16 @@ function makeFakeImap(
     },
     on() {},
   } as unknown as ImapClientLike
-  return Object.defineProperty(client, 'noopCalls', { get: () => noopCalls }) as ImapClientLike & {
+  Object.defineProperty(client, 'noopCalls', { get: () => noopCalls })
+  return Object.defineProperty(client, 'searchCalls', { get: () => searchCalls }) as ImapClientLike & {
     noopCalls: number
+    searchCalls: number
   }
 }
 
 function makeInstanceStore(instance: ConnectorInstance) {
   const configs = new Map<string, Record<string, unknown>>([[instance.id, { ...(instance.config ?? {}) }]])
+  const healthCalls: Array<{ id: string; status: string; error: string | null }> = []
   const store = {
     async listByProviderSystem() {
       return [{ ...instance, config: { ...configs.get(instance.id) } }]
@@ -147,9 +164,11 @@ function makeInstanceStore(instance: ConnectorInstance) {
     async setConfigSystem(id: string, config: Record<string, unknown>) {
       configs.set(id, { ...configs.get(id), ...config })
     },
-    async markHealth() {},
+    async markHealth(id: string, status: string, error?: string | null) {
+      healthCalls.push({ id, status, error: error ?? null })
+    },
   } as unknown as ConnectorInstanceStore
-  return { store, configs }
+  return { store, configs, healthCalls }
 }
 
 function instanceRow(over: Partial<ConnectorInstance> = {}): ConnectorInstance {
@@ -169,7 +188,7 @@ function instanceRow(over: Partial<ConnectorInstance> = {}): ConnectorInstance {
 
 function makeWorker(over: Partial<MailboxSyncWorkerDeps> & { client: ImapClientLike; instance?: ConnectorInstance }) {
   const instance = over.instance ?? instanceRow()
-  const { store, configs } = makeInstanceStore(instance)
+  const { store, configs, healthCalls } = makeInstanceStore(instance)
   const insertMessage = vi.fn(async (_input: EmailArchiveMessageInput) => ({ inserted: true, messageId: 'am-1', segmentCount: 1 }))
   const deleteFolder = vi.fn(async (_instanceId: string, _folder: string) => 0)
   const worker = createMailboxSyncWorker({
@@ -186,7 +205,7 @@ function makeWorker(over: Partial<MailboxSyncWorkerDeps> & { client: ImapClientL
     deltaChunk: over.deltaChunk,
     ...(over.keepWarm ? { keepWarm: over.keepWarm } : {}),
   })
-  return { worker, configs, insertMessage, deleteFolder, instanceId: instance.id }
+  return { worker, configs, insertMessage, deleteFolder, healthCalls, instanceId: instance.id }
 }
 
 // ── First sync + backfill preflight gate (D9) ───────────────────
@@ -422,7 +441,11 @@ describe('[COMP:api/mailbox-sync-worker] insert-phase socket keep-warm', () => {
     // next tick resumes below 4 instead of redoing them.
     const state = readMailboxSyncState(configs.get('inst-1'))
     expect(state.folders.INBOX.backfillLow).toBe(4)
-    expect(state.lastError).toContain('Socket is already closed')
+    // A backfill failure is recorded on the BACKFILL, not on the instance:
+    // `state.lastError` means "this mailbox is not syncing", and a stumble
+    // importing history is not that. Delta sync is unaffected.
+    expect(state.backfill?.lastError).toContain('Socket is already closed')
+    expect(state.backfill?.consecutiveFailures).toBe(1)
     expect(state.folders.INBOX.backfillDone).toBeUndefined()
   })
 })
@@ -506,10 +529,166 @@ describe('[COMP:api/mailbox-sync-worker] poison tolerance', () => {
     expect(state.skippedCount ?? 0).toBe(0)
     expect(state.recentSkips ?? []).toHaveLength(0)
     // Backfill stays running (resumes from the same checkpoint) and surfaces the
-    // error rather than silently discarding a whole good batch.
-    expect(state.lastError).toContain('FETCH failed')
+    // error on the backfill rather than silently discarding a whole good batch.
+    expect(state.backfill?.lastError).toContain('FETCH failed')
+    expect(state.backfill?.consecutiveFailures).toBe(1)
     expect(state.backfill?.status).toBe('running')
     expect(state.folders.INBOX.backfillDone).toBeFalsy()
+  })
+})
+
+// ── Backfill stall: a failing backfill must never wedge the mailbox ──
+
+describe('[COMP:api/mailbox-sync-worker] backfill stall guard', () => {
+  // Regression for 2026-08-08: three live mailboxes sat frozen (one for twelve
+  // days) because a backfill pass that always threw kept `status: 'running'`,
+  // so every tick re-entered it, threw again, and aborted the whole instance
+  // sync on the way out. The state that would have ended the loop was only
+  // writable by the path the loop prevented reaching.
+  function armed(lastUid: number) {
+    const sources = Object.fromEntries([1, 2, 3, 4, 5, 6].map((u) => [u, rfc822(u)]))
+    const folders: Record<string, FakeFolderState> = {
+      INBOX: { uidvalidity: '7', uids: [1, 2, 3, 4, 5, 6], sources },
+    }
+    const instance = instanceRow({
+      config: {
+        mailboxSync: {
+          folders: { INBOX: { uidvalidity: '7', lastUid } },
+          backfill: { scope: 'all', requestedAt: '2026-08-01T00:00:00Z', status: 'running', totalEstimate: 6 },
+        },
+      },
+    } as never)
+    return { folders, instance }
+  }
+
+  it('skips a \\Noselect container and still syncs every folder LISTED AFTER it', async () => {
+    // The 2026-08-08 root cause, end to end. Gmail LISTs a bare `[Gmail]`
+    // node that cannot be SELECTed; the worker opened it, the SELECT was
+    // refused as `Command failed`, and because the throw escaped the folder
+    // loop every folder after it was starved — 83,736 messages on one real
+    // account, silently, for twelve days. `[Gmail]` sorts between the two
+    // real folders here on purpose.
+    const sources = Object.fromEntries([1, 2].map((u) => [u, rfc822(u)]))
+    const folders: Record<string, FakeFolderState> = {
+      INBOX: { uidvalidity: '7', uids: [1, 2], sources },
+      '[Gmail]': { uidvalidity: '9', uids: [], sources: {} },
+      '[Gmail]/Important': { uidvalidity: '8', uids: [1, 2], sources },
+    }
+    // Selecting the container is a hard error, exactly as the server does it.
+    const client = makeFakeImap(folders)
+    const realLock = client.getMailboxLock.bind(client)
+    ;(client as { getMailboxLock: (p: string) => Promise<{ release(): void }> }).getMailboxLock = async (
+      path: string,
+    ) => {
+      if (path === '[Gmail]') throw new Error('Command failed')
+      return realLock(path)
+    }
+    const instance = instanceRow({
+      config: {
+        mailboxSync: {
+          folders: {},
+          backfill: { scope: 'all', requestedAt: '2026-08-01T00:00:00Z', status: 'running', totalEstimate: 4 },
+        },
+      },
+    } as never)
+    const { worker, insertMessage } = makeWorker({ client, instance, backfillChunk: 10 })
+    await worker.tick()
+
+    // Both real folders synced. Before the fix, `[Gmail]/Important` got zero.
+    const archivedFolders = insertMessage.mock.calls.map((c) =>
+      String((c[0] as { providerMessageId: string }).providerMessageId).split(':')[0],
+    )
+    expect(new Set(archivedFolders)).toEqual(new Set(['INBOX', '[Gmail]/Important']))
+    expect(insertMessage).toHaveBeenCalledTimes(4)
+  })
+
+  it('an ordinary sync failure marks the instance `degraded`, NEVER `auth_failed`', async () => {
+    // `auth_failed` makes inject.ts withhold every mailbox tool, so using it
+    // for a non-credential failure would strip search/read/send from a mailbox
+    // whose password is fine — the 2026-07-20 over-marking incident. Migration
+    // 425 added `degraded` precisely so this case has somewhere honest to go
+    // instead of staying silently 'ok', as it did for twelve days.
+    const folders: Record<string, FakeFolderState> = {
+      INBOX: { uidvalidity: '7', uids: [1], sources: { 1: rfc822(1) } },
+    }
+    const client = makeFakeImap(folders)
+    ;(client as unknown as { status: () => Promise<never> }).status = async () => {
+      throw new Error('Command failed')
+    }
+    const { worker, healthCalls } = makeWorker({ client })
+    await worker.tick()
+
+    expect(healthCalls.map((c) => c.status)).toEqual(['degraded'])
+    expect(healthCalls.some((c) => c.status === 'auth_failed')).toBe(false)
+    expect(healthCalls[0].error).toContain('Command failed')
+  })
+
+  it('a genuine credential failure is still `auth_failed` — degraded does not swallow it', async () => {
+    const folders: Record<string, FakeFolderState> = {
+      INBOX: { uidvalidity: '7', uids: [1], sources: { 1: rfc822(1) } },
+    }
+    const client = makeFakeImap(folders)
+    ;(client as unknown as { status: () => Promise<never> }).status = async () => {
+      throw Object.assign(new Error('Invalid credentials'), { authenticationFailed: true })
+    }
+    const { worker, healthCalls } = makeWorker({ client })
+    await worker.tick()
+
+    expect(healthCalls.map((c) => c.status)).toEqual(['auth_failed'])
+  })
+
+  it('a backfill that always fails still lets NEW mail through — delta sync is not collateral', async () => {
+    const { folders, instance } = armed(3)
+    const client = makeFakeImap(folders, { searchFails: true })
+    const { worker, insertMessage, configs } = makeWorker({ client, instance, backfillChunk: 10 })
+    await worker.tick()
+
+    // The whole point: history is broken, but 4/5/6 still arrived.
+    expect(insertMessage).toHaveBeenCalledTimes(3)
+    const state = readMailboxSyncState(configs.get('inst-1'))
+    expect(state.folders.INBOX.lastUid).toBe(6)
+    expect(state.backfill?.consecutiveFailures).toBe(1)
+    expect(state.backfill?.status).toBe('running')
+  })
+
+  it('parks the backfill as `stalled` after repeated failures and STOPS retrying it', async () => {
+    const { folders, instance } = armed(6) // cursor at the top: delta is a no-op
+    const client = makeFakeImap(folders, { searchFails: true }) as ImapClientLike & { searchCalls: number }
+    const { worker, configs } = makeWorker({ client, instance, backfillChunk: 10 })
+
+    for (let i = 0; i < 12; i++) await worker.tick()
+    const state = readMailboxSyncState(configs.get('inst-1'))
+    expect(state.backfill?.status).toBe('stalled')
+    expect(state.backfill?.consecutiveFailures).toBe(12)
+    // The server's own words survive to the user, not the bare "Command failed".
+    expect(state.backfill?.lastError).toContain('Command failed')
+
+    // Parked means parked: further ticks must not touch the backfill at all.
+    const searchesWhenStalled = client.searchCalls
+    await worker.tick()
+    await worker.tick()
+    expect(client.searchCalls).toBe(searchesWhenStalled)
+  })
+
+  it('a successful pass clears the failure ledger — a stall means failing NOW', async () => {
+    const { folders, instance } = armed(6)
+    const failing = makeFakeImap(folders, { searchFails: true })
+    const { worker, configs } = makeWorker({ client: failing, instance, backfillChunk: 10 })
+    await worker.tick()
+    const afterFailure = configs.get('inst-1')
+    expect(readMailboxSyncState(afterFailure).backfill?.consecutiveFailures).toBe(1)
+
+    // Same persisted state, healthy client: the next good pass resets the counter.
+    const healthy = makeFakeImap(folders)
+    const { worker: worker2, configs: configs2 } = makeWorker({
+      client: healthy,
+      instance: instanceRow({ config: afterFailure } as never),
+      backfillChunk: 10,
+    })
+    await worker2.tick()
+    const state = readMailboxSyncState(configs2.get('inst-1'))
+    expect(state.backfill?.consecutiveFailures).toBe(0)
+    expect(state.backfill?.lastError).toBeNull()
   })
 })
 

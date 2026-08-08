@@ -89,7 +89,19 @@ export type SessionEvent =
   | {
       kind: 'turn_completed'
       sessionId: string
-      payload: { senderUserId: string }
+      /**
+       * `reason` says HOW the turn ended, so a viewer can explain an ending
+       * nobody asked for rather than just silently clearing the "Working"
+       * card. Omitted for an ordinary completion (the overwhelmingly common
+       * case, and what every pre-migration-424 publisher sends). See
+       * `TurnEndReason` in `db/sessions.ts`.
+       */
+      payload: {
+        senderUserId: string
+        reason?: 'stopped_by_user' | 'stalled_reclaimed' | 'timeout'
+        /** Display name of whoever pressed stop, when `reason` is a stop. */
+        stoppedByName?: string | null
+      }
     }
   | {
       /**

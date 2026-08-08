@@ -20,20 +20,34 @@
  * fix's braces — any future hang we don't anticipate still gets recovered
  * automatically.
  *
+ * **The 2026-08-08 repair.** For rooms this sweeper was worse than absent, it
+ * was *inverted*: staleness keyed off `last_active_at`, which `findSessionById`
+ * rewrites on every read, so a member watching the stuck room refreshed the
+ * clock faster than the threshold could expire. The sweep fired only once
+ * everyone gave up looking — ~31 minutes late on a 6-minute threshold. It now
+ * keys off the turn LEASE (`turn_heartbeat_at`, migration 424), which only a
+ * running turn writes, and it broadcasts `turn_completed` for shared rooms as
+ * well as drafts so live viewers stop showing "Working" without a reload.
+ *
  * Component tag: [COMP:scheduling/stuck-session-sweeper].
  * Doc: docs/architecture/context-engine/session-messages.md
- *      → "Stuck-running recovery".
+ *      → "Turn lease and recovery".
  */
 
-import { sweepStuckSessions } from '../db/sessions.js'
+import { sweepStuckSessions, TURN_LEASE_STALE_AFTER_MS } from '../db/sessions.js'
 
 /**
- * Default staleness threshold. Comfortably past Cloud Run's 300s request cap
- * so a session whose chat turn is *still legitimately running* is never
- * reset. Increase this if you ever raise Cloud Run's `timeoutSeconds`
- * past 5 minutes.
+ * Default staleness threshold — the turn lease's, since that is now the column
+ * the sweep predicate reads.
+ *
+ * This deliberately no longer clears Cloud Run's 300s request cap the way the
+ * old 6-minute `last_active_at` threshold did. It does not need to: a turn
+ * still legitimately running past the cap keeps heart-beating (the heartbeat
+ * interval is independent of the HTTP request), while a turn that has stopped
+ * heart-beating is dead no matter how long its request was permitted to run.
+ * Trading that margin away is what buys sub-2-minute recovery.
  */
-export const DEFAULT_STALE_AFTER_MS = 6 * 60 * 1000
+export const DEFAULT_STALE_AFTER_MS = TURN_LEASE_STALE_AFTER_MS
 
 /**
  * Default tick cadence. Matches the cron poll worker (60s) — frequent
@@ -49,12 +63,17 @@ export type StuckSessionSweeperDeps = {
    * `'timeout'` and returns the affected rows. Production wires this to
    * `sweepStuckSessions` from `db/sessions.ts`. Tests inject a fake.
    */
-  sweep?: (staleAfterMs: number) => Promise<Array<{ id: string; mode: string | null; userId: string }>>
+  sweep?: (staleAfterMs: number) => Promise<Array<{ id: string; mode: string | null; userId: string; visibility: string }>>
   /**
-   * Publishes a `turn_completed` bus event for draft-mode rows so any
-   * SSE subscriber on the same Cloud Run instance immediately unblocks
-   * their UI's "another teammate is in a turn" indicator. No-op for
-   * non-draft rows. Production wires this to `publishSessionEvent`; tests
+   * Publishes a `turn_completed` bus event so any SSE subscriber immediately
+   * unblocks their UI's "working" indicator. The bus is in-process **and**
+   * cross-instance (LISTEN/NOTIFY), so this reaches viewers connected to the
+   * API service even though the sweeper runs on the workers service.
+   *
+   * Called for draft-mode rows AND workspace-shared rooms. Rooms were the
+   * omission behind the 2026-08-08 incident: the sweep healed the row, but
+   * every open Live card kept showing "Working" until a manual reload, because
+   * nothing told them. Production wires this to `publishSessionEvent`; tests
    * pass a spy.
    */
   publishDraftTurnCompleted?: (sessionId: string) => void
@@ -92,9 +111,12 @@ export function createStuckSessionSweeper(options: StuckSessionSweeperOptions = 
       if (swept.length === 0) return
       for (const row of swept) {
         console.warn(
-          `[stuck-session-sweeper] reset session ${row.id} (mode=${row.mode ?? 'web'}, user=${row.userId}) status='running' → 'timeout'`,
+          `[stuck-session-sweeper] reset session ${row.id} (mode=${row.mode ?? 'web'}, visibility=${row.visibility}, user=${row.userId}) status='running' → 'timeout'`,
         )
-        if (row.mode === 'draft') {
+        // Draft sessions AND workspace-shared rooms have live watchers whose
+        // UI is pinned on the turn lifecycle. Healing the row without telling
+        // them just moves the stuck state into the browser.
+        if (row.mode === 'draft' || row.visibility === 'workspace') {
           try {
             publish(row.id)
           } catch (err) {

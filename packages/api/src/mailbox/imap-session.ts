@@ -23,7 +23,7 @@ export type ImapClientLike = {
   connect(): Promise<void>
   logout(): Promise<void>
   close(): void
-  list(): Promise<Array<{ path: string; specialUse?: string }>>
+  list(): Promise<Array<{ path: string; specialUse?: string; flags?: Set<string> }>>
   getMailboxLock(path: string): Promise<{ release(): void }>
   search(query: unknown, opts: { uid: true }): Promise<number[] | false>
   fetch(
@@ -68,6 +68,48 @@ export type ImapClientLike = {
    */
   on(event: 'error', listener: (err: unknown) => void): unknown
   usable: boolean
+}
+
+/** Folders excluded from sync — junk/trash/drafts and virtual all-mail. */
+const SKIP_SPECIAL_USE = new Set(['\\Junk', '\\Trash', '\\Drafts', '\\All'])
+
+/**
+ * Attributes meaning "this LIST entry is a container, not a mailbox". `SELECT`
+ * / `EXAMINE` on one is refused by the server.
+ *
+ * This is the 2026-08-08 root cause. Gmail's LIST includes a bare `[Gmail]`
+ * node, flagged `\Noselect`, that exists only to parent `[Gmail]/Sent Mail`
+ * and friends. It has no special-use attribute, so the special-use filter let
+ * it through. `STATUS` on it happens to answer `0` — which is why the cheap
+ * preflight probe was perfectly happy and even counted it — but
+ * `getMailboxLock()` issues a `SELECT`, the server answers `NO`, and imapflow
+ * throws the bare string `Command failed`.
+ *
+ * It only ever bit once a backfill was armed: the delta walk locks a folder
+ * only when `uidNext - 1 > lastUid`, which for an always-empty container is
+ * never, while the backfill branch locks unconditionally before its `SEARCH`.
+ * That is why three mailboxes each froze within seconds of arming a backfill,
+ * and why every folder LISTED AFTER `[Gmail]` — 83,736 messages on one account
+ * — was never synced at all.
+ */
+const NON_SELECTABLE_FLAGS = ['\\Noselect', '\\NonExistent']
+
+/**
+ * The folders a sync pass may open, from a raw `list()`. Shared by the worker
+ * and the preflight probe so the two can never disagree about what is
+ * syncable — they had two hand-maintained copies of the special-use set, and a
+ * count the probe offered for a folder the worker then choked on is exactly
+ * the kind of drift that produced a 155,363-message estimate the backfill
+ * could never reach.
+ */
+export function syncableFolders<T extends { specialUse?: string; flags?: Set<string> }>(
+  listed: T[],
+): T[] {
+  return listed.filter((f) => {
+    if (f.specialUse && SKIP_SPECIAL_USE.has(f.specialUse)) return false
+    if (f.flags && NON_SELECTABLE_FLAGS.some((flag) => f.flags?.has(flag))) return false
+    return true
+  })
 }
 
 /**

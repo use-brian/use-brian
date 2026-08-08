@@ -4,7 +4,7 @@ import { z } from 'zod'
 import { getDefaultAssistant, getUserAssistant, getWorkspacePrimaryAssistant, getUserProfilesByIds, updateUserLastSeenTz, resolveAssistantAccess } from '../db/users.js'
 import { charterNeedsIntake, createSaveCharterTool, CHARTER_INTAKE_ADDENDUM } from '../intake/charter-intake.js'
 import { resolvePresenceTimezone } from '../auth/client-timezone.js'
-import { findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels, isSharedChatSession, isMultiParticipantSession, coalesceConsecutiveUserMessages, type SessionMessage } from '../db/sessions.js'
+import { findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels, isSharedChatSession, isMultiParticipantSession, coalesceConsecutiveUserMessages, startTurnLease, touchTurnLease, releaseTurnLease, requestTurnCancel, reclaimStaleTurn, TURN_HEARTBEAT_INTERVAL_MS, type SessionMessage } from '../db/sessions.js'
 import { query } from '../db/client.js'
 import { buildPinnedContextBlock } from '../resolve-session-pins.js'
 import { getSelfEntityId } from '../db/memories.js'
@@ -79,6 +79,16 @@ const activeResolvers = new Map<string, ConfirmationResolver>()
 export function _getActiveResolversSize(): number {
   return activeResolvers.size
 }
+
+/**
+ * In-flight turns' abort handles, keyed by sessionId — the same lifecycle as
+ * `activeResolvers` (registered beside it, evicted in the same identity-guarded
+ * `finally`). `POST /chat/stop` uses this for the common case where the turn
+ * runs in THIS process, so a stop is instant rather than waiting on a heartbeat
+ * tick. A turn in another process is reached through `sessions.cancel_requested_at`
+ * instead; the stop route does both and does not care which one lands.
+ */
+const activeTurnAborts = new Map<string, { token: string; abort: () => void }>()
 
 // WU-6.4 — Path B fast-path index. When a workspace-scoped tool call
 // suspends, the `awaiting_approval` event carries both the persisted
@@ -1294,6 +1304,39 @@ export function roomTurnAdmission(params: {
 }
 
 /**
+ * What `POST /stop` actually did. Pure so the branch is testable without a
+ * chat-router harness, the same way `roomTurnAdmission` and `detectRoomAddress`
+ * are.
+ *
+ *   - `not_running`  — nothing to stop. Idempotent by design: two members
+ *                      hitting Stop on the same stuck card both get a calm
+ *                      answer rather than one of them getting a race error.
+ *   - `aborted`      — the turn was running in THIS process and we aborted it.
+ *                      We own the release.
+ *   - `reclaimed`    — the lease was already stale, so no turn is coming back
+ *                      to honour a cancel. We release and must publish the
+ *                      completion ourselves; nobody else will.
+ *   - `cancel_requested` — a live turn in ANOTHER process. It reads the cancel
+ *                      on its next heartbeat tick and releases its own lease.
+ *                      We deliberately do NOT force the lock here: the turn is
+ *                      still writing, and freeing the slot early would let a
+ *                      second turn claim a session the first is mid-reply on.
+ */
+export type TurnStopOutcome = 'not_running' | 'aborted' | 'reclaimed' | 'cancel_requested'
+export function turnStopOutcome(params: {
+  status: string
+  abortedLocally: boolean
+  reclaimedStale: boolean
+}): TurnStopOutcome {
+  if (params.status !== 'running') return 'not_running'
+  // A stale lease outranks a local abort handle: if the lease expired, any
+  // handle we still hold belongs to a turn that is already gone.
+  if (params.reclaimedStale) return 'reclaimed'
+  if (params.abortedLocally) return 'aborted'
+  return 'cancel_requested'
+}
+
+/**
  * May this user resolve a live write confirmation in a workspace-shared chat?
  * (Multiplayer chat T11/D8.) The addresser — whoever pulled the assistant in
  * this turn — or a workspace admin/owner. The room STARTER holds no special
@@ -1347,17 +1390,28 @@ async function claimRoomTurn(sessionId: string): Promise<boolean> {
 }
 
 /**
+ * How long an addressed room message waits for the in-flight turn's slot.
+ *
+ * This MUST stay under the hosting request cap (Cloud Run `timeoutSeconds`,
+ * 300s). It used to be 15 minutes, which meant the wait could never actually
+ * expire in production: the platform truncated the response at exactly 301s
+ * and the sender got a severed stream with no reply and no error, rather than
+ * the `room_turn_wait_timeout` this code carefully produces. 2026-08-08's two
+ * silently-dead sends were both exactly that. Keep a margin so the error is
+ * ours to send, not the platform's to swallow.
+ */
+const ROOM_TURN_WAIT_TIMEOUT_MS = 240_000
+
+/**
  * Wait until the session's turn slot frees (status leaves 'running').
  * Status-only poll — deliberately NOT `findSessionById`, which touches
- * `last_active_at` and would keep the stuck-session sweeper (the 6-minute
- * backstop that rescues a crashed turn) from ever firing. Resolves `false`
- * on timeout.
+ * `last_active_at`. Resolves `false` on timeout.
  */
 async function waitForRoomTurnSlot(
   sessionId: string,
   opts?: { timeoutMs?: number; pollMs?: number },
 ): Promise<boolean> {
-  const timeoutMs = opts?.timeoutMs ?? 15 * 60_000
+  const timeoutMs = opts?.timeoutMs ?? ROOM_TURN_WAIT_TIMEOUT_MS
   const pollMs = opts?.pollMs ?? 2_000
   const deadline = Date.now() + timeoutMs
   for (;;) {
@@ -1875,6 +1929,22 @@ export function chatRoutes(options: WebChatOptions): Router {
     // Open while the query loop runs so a message sent mid-turn has somewhere
     // to land. Closed on every exit path.
     let turnInboxHandle: { close(): void } | null = null
+    // This turn's lease on the session's `status='running'` lock (migration
+    // 424), tracked outside the try so the outer `finally` can release it on
+    // EVERY exit path. Before the lease, `status` was released only on the
+    // happy path and in the catch, so any other exit pinned the session
+    // forever — the 2026-08-08 room that showed "Working" for 31 minutes with
+    // no turn in flight. The token makes the release ownership-guarded: a turn
+    // whose lease was already reclaimed must not unlock its successor.
+    let turnLeaseToken: string | null = null
+    let leaseSessionId: string | null = null
+    let leaseHeartbeat: ReturnType<typeof setInterval> | null = null
+    // The token this turn registered in `activeTurnAborts`, kept SEPARATE from
+    // `turnLeaseToken` because the success and catch paths null that one once
+    // they have released the lock — leaving the `finally` unable to identify
+    // its own entry, and the Map leaking one row per turn for the process's
+    // lifetime. Set once at registration, never cleared.
+    let abortRegistryToken: string | null = null
 
     try {
       const jwtUserId = (req as { userId?: string }).userId
@@ -2528,8 +2598,35 @@ export function chatRoutes(options: WebChatOptions): Router {
           return
         }
 
+        // Self-heal, cheapest path first (migration 424). `status='running'`
+        // only means "somebody claimed the slot"; whether anyone still HOLDS it
+        // is the lease's answer. A stale lease is reclaimed right here, so a
+        // user's own next message repairs the room instantly instead of
+        // queueing behind a lock nobody owns — which is what a member did three
+        // times on 2026-08-08 while the room stayed silent for half an hour.
+        // The sweeper still covers the case where nobody sends anything.
+        let liveStatus = session.status
+        if (liveStatus === 'running' && await reclaimStaleTurn(session.id)) {
+          liveStatus = 'timeout'
+          console.warn(
+            `[chat] reclaimed stale turn lease on room ${session.id} at admission; running this message now`,
+          )
+          options.analytics?.logEvent({
+            userId: user.id, assistantId: assistant.id, sessionId: session.id,
+            eventName: 'turn_lease_reclaimed', channelType: 'web',
+            metadata: { via: sanitize('admission') },
+          })
+          // Tell every viewer the phantom turn is over, so their Live card
+          // clears instead of showing "Working" beside a turn that is gone.
+          publishSessionEvent({
+            kind: 'turn_completed',
+            sessionId: session.id,
+            payload: { senderUserId: user.id, reason: 'stalled_reclaimed' },
+          })
+        }
+
         const admission = roomTurnAdmission({
-          status: session.status,
+          status: liveStatus,
           waiterArmed: roomQueueWaiters.has(session.id),
         })
         if (admission !== 'run') {
@@ -5236,6 +5333,12 @@ export function chatRoutes(options: WebChatOptions): Router {
       if (isRoomSession) {
         let claimed = await claimRoomTurn(session.id)
         while (!claimed) {
+          // A lease that went stale while we waited is reclaimed rather than
+          // waited out — the holder is gone, not slow.
+          if (await reclaimStaleTurn(session.id)) {
+            claimed = await claimRoomTurn(session.id)
+            if (claimed) break
+          }
           const freed = await waitForRoomTurnSlot(session.id)
           if (!freed) {
             sendEvent('error', {
@@ -5250,6 +5353,13 @@ export function chatRoutes(options: WebChatOptions): Router {
       } else {
         await updateSessionStatus(session.id, 'running')
       }
+
+      // The slot is ours — take the lease that proves we still hold it
+      // (migration 424). From here every exit path MUST release it, including
+      // the ones that reach neither the happy path nor the catch: that is what
+      // the `finally` below is for, and what its absence cost on 2026-08-08.
+      turnLeaseToken = await startTurnLease(session.id)
+      leaseSessionId = session.id
 
       // Open the mid-turn inbox now that the slot is ours. Everything sent
       // into this session from here until the outer `finally` lands in the
@@ -5602,6 +5712,48 @@ export function chatRoutes(options: WebChatOptions): Router {
       const confirmationResolver = createConfirmationResolver()
       activeResolvers.set(session.id, confirmationResolver)
       turnResolver = confirmationResolver
+
+      // ── Turn lease heartbeat (migration 424) ──
+      // Refreshes the lease so the sweeper and the admission-time heal can tell
+      // this turn apart from a dead one, and reads back any stop request in the
+      // SAME statement — that is how a stop reaches a turn running in another
+      // process without giving the turn a bus subscription (subscribing would
+      // join it to the room's presence set as a phantom viewer).
+      //
+      // Deliberately a wall-clock interval, not something driven by loop
+      // progress: a turn suspended on a tool confirmation is alive and must
+      // keep its lease. Liveness is not progress. Whether the user is seeing
+      // anything happen is a separate question, answered in the client.
+      if (turnLeaseToken) {
+        const heldToken = turnLeaseToken
+        abortRegistryToken = heldToken
+        activeTurnAborts.set(session.id, {
+          token: heldToken,
+          abort: () => abortController.abort(),
+        })
+        leaseHeartbeat = setInterval(() => {
+          void touchTurnLease(session.id, heldToken)
+            .then(({ held, cancelRequested }) => {
+              if (!held) {
+                // Our lease was reclaimed while we were away. We are an orphan:
+                // another turn may already own this session, so stop before we
+                // write a reply into a conversation we no longer hold.
+                console.warn(`[chat] turn lease lost for session ${session.id}; aborting orphaned turn`)
+                abortController.abort()
+                return
+              }
+              if (cancelRequested) {
+                console.log(`[chat] stop requested for session ${session.id}; aborting turn`)
+                abortController.abort()
+              }
+            })
+            .catch((err) => {
+              // A failed tick is not fatal — the next one retries, and the
+              // sweeper is the backstop if they all fail.
+              console.warn('[chat] turn lease heartbeat failed:', err)
+            })
+        }, TURN_HEARTBEAT_INTERVAL_MS)
+      }
       // Room turns record WHO addressed the assistant this turn — the only
       // member (besides a workspace admin) who may resolve this turn's write
       // confirmations (multiplayer chat T11/D8).
@@ -6691,8 +6843,18 @@ export function chatRoutes(options: WebChatOptions): Router {
       // SSE event is emitted inside the flush.
       void lastAssistantMessageId
 
-      await updateSessionStatus(session.id, 'idle')
+      // Release the lease we took at claim time, recording that this turn
+      // ended the way it was meant to. Token-guarded inside, so if our lease
+      // was reclaimed mid-turn this is a no-op rather than an unlock of
+      // whoever owns the session now. The `finally` is idempotent behind this.
+      if (turnLeaseToken) {
+        await releaseTurnLease(session.id, 'completed', turnLeaseToken)
+        turnLeaseToken = null
+      } else {
+        await updateSessionStatus(session.id, 'idle')
+      }
       activeResolvers.delete(session.id)
+      activeTurnAborts.delete(session.id)
       roomTurnAddressers.delete(session.id)
       // WU-6.4 — drop any fast-path index entries for this session. If an
       // approval is still genuinely pending at stream close (rare — the
@@ -7008,9 +7170,14 @@ export function chatRoutes(options: WebChatOptions): Router {
           })
         } catch { /* ignore */ }
         // Also flip status back to idle so subsequent turns aren't blocked
-        // by the concurrent-turn guard.
+        // by the concurrent-turn guard. Token-guarded when we hold a lease.
         try {
-          await updateSessionStatus(sessionIdForError, 'idle')
+          if (turnLeaseToken) {
+            await releaseTurnLease(sessionIdForError, 'completed', turnLeaseToken)
+            turnLeaseToken = null
+          } else {
+            await updateSessionStatus(sessionIdForError, 'idle')
+          }
         } catch { /* ignore */ }
       }
       // Only log if we have at least user context — earlier failures (e.g.
@@ -7034,6 +7201,31 @@ export function chatRoutes(options: WebChatOptions): Router {
       }
       res.end()
     } finally {
+      // Stop the lease heartbeat before anything else — a tick that fires
+      // after the release would resurrect nothing (it is token-guarded) but
+      // would keep a timer alive past the turn.
+      if (leaseHeartbeat) {
+        clearInterval(leaseHeartbeat)
+        leaseHeartbeat = null
+      }
+      // RELEASE THE LOCK. This is the exit path the pre-424 code did not have,
+      // and its absence is the whole 2026-08-08 incident: `status` was cleared
+      // only on the happy path and in the catch, so an exit reaching neither
+      // (process death, an abort that severs the handler, an escaping
+      // rejection) pinned the session at `running` permanently. Token-guarded,
+      // so a turn whose lease was already reclaimed cannot unlock the
+      // successor that now owns this session. Idempotent: the success and
+      // catch paths null the token after their own release.
+      if (leaseSessionId && turnLeaseToken) {
+        try {
+          await releaseTurnLease(leaseSessionId, 'completed', turnLeaseToken)
+        } catch (err) {
+          // Nothing left to fall back on but the sweeper, which is now
+          // reading the lease we just failed to clear — so it WILL fire.
+          console.error('[chat] failed to release turn lease on exit:', err)
+        }
+        turnLeaseToken = null
+      }
       // Evict this turn's confirmation state on error/abort exits — the
       // success path already cleared it before `done`. Identity-guarded:
       // the catch above flips the session back to idle, so a successor turn
@@ -7047,6 +7239,14 @@ export function chatRoutes(options: WebChatOptions): Router {
           if (entry.sessionId === sessionIdForError) approvalResolverIndex.delete(approvalId)
         }
       }
+      // Same identity guard for the abort handle, on `abortRegistryToken`
+      // rather than `turnLeaseToken` — the success and catch paths null the
+      // latter once they release, and guarding on it would silently skip this
+      // eviction on exactly the paths that reach here with work to do.
+      if (leaseSessionId && abortRegistryToken &&
+          activeTurnAborts.get(leaseSessionId)?.token === abortRegistryToken) {
+        activeTurnAborts.delete(leaseSessionId)
+      }
       // Close the assistant-run presence entry on every exit path (success,
       // error, client-disconnect abort). Best-effort + idempotent; the
       // doc-sync TTL sweeper is the backstop if this POST never lands.
@@ -7057,6 +7257,103 @@ export function chatRoutes(options: WebChatOptions): Router {
       // guarded inside, so a crashed turn's late close can't evict its
       // successor's inbox.
       turnInboxHandle?.close()
+    }
+  })
+
+  // ── POST /stop — stop the turn running in this session ──────
+  //
+  // The human half of turn recovery (the automatic half is the lease: the
+  // admission-time reclaim and the sweeper). Two situations reach here and the
+  // route deliberately does not make the user tell them apart:
+  //
+  //   - the turn is ALIVE and someone wants it to stop. We abort it. The
+  //     partial reply already streamed is persisted by the loop's own exit.
+  //   - the turn is a PHANTOM (lease stale, holder gone). We reclaim the lock.
+  //
+  // Both end with the room unblocked and a `turn_completed` carrying a reason,
+  // because a turn that ends without anyone asking has to explain itself.
+  //
+  // Authorization is `gateSessionRead`: any member who can read the room may
+  // stop its turn. A stuck lock is room-wide damage, so recovery must not
+  // depend on one particular person being online — the same reasoning that
+  // lets any reader answer a clarifying question (T11/D8), and deliberately
+  // wider than `mayResolveRoomConfirmation`, which guards a WRITE.
+  //
+  // Spec: docs/architecture/features/chat-app.md → "Stopping a turn".
+  router.post('/stop', async (req, res) => {
+    const { sessionId } = req.body as { sessionId?: string }
+    if (!sessionId) {
+      res.status(400).json({ error: 'Missing sessionId' })
+      return
+    }
+    const jwtUserId = (req as { userId?: string }).userId
+    if (!jwtUserId) { res.status(401).json({ error: 'Unauthorized' }); return }
+
+    try {
+      const session = await findSessionById(sessionId)
+      if (!session) { res.status(404).json({ error: 'Session not found' }); return }
+      const denied = await gateSessionRead(jwtUserId, session)
+      if (denied) { res.status(denied.status).json({ error: denied.error }); return }
+
+      if (session.status !== 'running') {
+        res.json({ stopped: false, via: turnStopOutcome({
+          status: session.status, abortedLocally: false, reclaimedStale: false,
+        }) })
+        return
+      }
+
+      const stopper = await resolveUser(jwtUserId)
+      const stoppedByName = stopper?.name ?? null
+
+      // 1. Same-process turn: abort immediately.
+      const local = activeTurnAborts.get(sessionId)
+      if (local) local.abort()
+
+      // 2. Any process: record the intent. The holder's next heartbeat tick
+      //    picks it up (<= TURN_HEARTBEAT_INTERVAL_MS) and aborts itself. Set
+      //    even when we aborted locally — belt and braces cost one UPDATE.
+      await requestTurnCancel(sessionId)
+
+      // 3. Phantom check. If the lease is already stale nobody is coming to
+      //    honour that cancel, so release the lock right now rather than
+      //    leaving the room blocked until the sweeper's next tick.
+      const reclaimedStale = await reclaimStaleTurn(sessionId)
+
+      const outcome = turnStopOutcome({
+        status: session.status,
+        abortedLocally: !!local,
+        reclaimedStale,
+      })
+
+      if (outcome === 'reclaimed') {
+        // No turn will ever publish a completion for this session, so publish
+        // it ourselves or every Live card keeps spinning.
+        publishSessionEvent({
+          kind: 'turn_completed',
+          sessionId,
+          payload: { senderUserId: jwtUserId, reason: 'stalled_reclaimed', stoppedByName },
+        })
+      } else if (outcome === 'aborted') {
+        await releaseTurnLease(sessionId, 'stopped_by_user', null)
+        publishSessionEvent({
+          kind: 'turn_completed',
+          sessionId,
+          payload: { senderUserId: jwtUserId, reason: 'stopped_by_user', stoppedByName },
+        })
+      }
+      // `cancel_requested`: the turn is alive in another process and is still
+      // writing. It releases its own lease and publishes its own completion —
+      // freeing the slot from here would let a second turn claim a session the
+      // first is mid-reply on.
+
+      options.analytics?.logEvent({
+        userId: jwtUserId, sessionId, eventName: 'turn_stopped', channelType: 'web',
+        metadata: { via: sanitize(outcome) },
+      })
+      res.json({ stopped: true, via: outcome, stoppedByName })
+    } catch (err) {
+      console.error('Turn stop error:', err)
+      res.status(500).json({ error: 'Failed to stop the turn' })
     }
   })
 

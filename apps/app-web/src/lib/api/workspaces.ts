@@ -115,6 +115,33 @@ export async function setWorkspaceTranscriptionScript(
   return body.transcriptionPrefs?.chineseScript ?? null;
 }
 
+// ── Doc Inbox retention (migration 426) ────────────────────────────────
+
+/**
+ * PATCH the workspace's Inbox retention window. `days` is a whole number of
+ * days, or `null` to never prune. Admin/owner only — the backend enforces and
+ * 403s otherwise, surfaced as a `WorkspaceApiError`.
+ *
+ * The window is a read-time filter, so widening it restores older items;
+ * nothing is deleted by narrowing it. Returns the persisted value.
+ */
+export async function setWorkspaceInboxRetention(
+  workspaceId: string,
+  days: number | null,
+): Promise<number | null> {
+  const res = await authFetch(`${API_URL}/api/workspaces/${workspaceId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ inboxRetentionDays: days }),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new WorkspaceApiError(body.error ?? "Could not update the workspace", res.status);
+  }
+  const body = (await res.json()) as { inboxRetentionDays?: number | null };
+  return body.inboxRetentionDays ?? null;
+}
+
 // ── Home apps (migration 385) ──────────────────────────────────────────
 
 /**

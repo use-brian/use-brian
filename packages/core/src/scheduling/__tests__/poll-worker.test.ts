@@ -62,7 +62,6 @@ function makeFakeJobStore(dueJobs: ScheduledJob[] = []): JobStore & {
     async purgeDisabledOlderThan(_cutoff) { return 0 },
     async countEnabledRecurring(_userId) { return 0 },
     async search() { return { jobs: [], nextCursor: null } },
-    async listTriggerJobsForWorkflowSystem() { return [] },
     async listFiringJobsForWorkflowSystem() { return [] },
   }
 }

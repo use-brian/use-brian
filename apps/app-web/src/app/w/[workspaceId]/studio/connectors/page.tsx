@@ -201,7 +201,7 @@ type Connector = {
    * working (a 401/403 at call time) and the connector needs reconnecting even
    * though `connected` is still true - drives the "Reconnect needed" state.
    */
-  healthStatus?: "ok" | "auth_failed" | "unknown";
+  healthStatus?: "ok" | "auth_failed" | "degraded" | "unknown";
   custom?: boolean;
   url?: string;
   oauthRequired?: boolean;
@@ -3090,7 +3090,8 @@ function ConnectorsList() {
                   <span
                     className={cn(
                       "shrink-0 rounded-full px-2 py-0.5 text-xs font-medium",
-                      sel.connected && sel.healthStatus === "auth_failed"
+                      sel.connected &&
+                        (sel.healthStatus === "auth_failed" || sel.healthStatus === "degraded")
                         ? "bg-amber-500/10 text-amber-600 dark:text-amber-400"
                         : builtin || sel.connected
                           ? "bg-primary/10 text-primary"
@@ -3101,7 +3102,9 @@ function ConnectorsList() {
                       ? tc.builtinPill
                       : sel.connected && sel.healthStatus === "auth_failed"
                         ? tc.reconnectNeeded
-                        : sel.connected
+                        : sel.connected && sel.healthStatus === "degraded"
+                          ? tc.healthDegradedPill
+                          : sel.connected
                           ? tc.connected
                           : tc.disconnected}
                   </span>
@@ -3137,6 +3140,25 @@ function ConnectorsList() {
                       >
                         {connecting === rid ? tc.connectingBtn : tc.reconnectBtn}
                       </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Connector-health DEGRADED banner (migration 425): the
+                    credential is valid and the tools still work - the connector
+                    is failing to do its job (e.g. mailbox sync erroring). It
+                    deliberately offers NO reconnect button, because
+                    reconnecting is not the remedy and pointing the user at it
+                    wastes their time on a password that is fine. */}
+                {sel.connected && sel.healthStatus === "degraded" && (
+                  <div className="flex items-start gap-2 text-[11px] bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2 text-amber-600 dark:text-amber-400">
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="shrink-0 mt-0.5">
+                      <path d="M8 5v3m0 2.5v.5" strokeLinecap="round" />
+                      <circle cx="8" cy="8" r="6.5" />
+                    </svg>
+                    <div className="min-w-0">
+                      <div className="font-medium">{tc.healthDegradedTitle}</div>
+                      <div className="mt-0.5 opacity-80">{tc.healthDegradedDesc}</div>
                     </div>
                   </div>
                 )}

@@ -72,13 +72,41 @@ export async function fetchInboxBadgeCount(workspaceId: string): Promise<number>
   }
 }
 
-/** Mark mentions read. Omit `ids` to mark all of the caller's mentions read. */
+/**
+ * Mark mentions read. Omit `ids` to mark all of the caller's mentions read.
+ * Reading is what removes a mention from the Inbox — the list is unread-only —
+ * so pass the single id of the row that was opened, not the whole set.
+ */
 export async function markInboxRead(workspaceId: string, ids?: string[]): Promise<void> {
   await authFetch(`${API_URL}/api/workspaces/${workspaceId}/inbox/read`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(ids ? { ids } : {}),
   });
+}
+
+/**
+ * Dismiss one pending assistant reply — the derived lane's equivalent of
+ * marking a mention read. The row stays gone until the assistant replies again
+ * on that thread; the thread itself is untouched and stays on its page.
+ *
+ * Best-effort: this fires as the user navigates to the page, and a failed
+ * dismiss must never block that navigation. The row reappears on the next
+ * fetch, which is the honest outcome of a write that did not land.
+ */
+export async function dismissInboxReply(
+  workspaceId: string,
+  threadId: string,
+): Promise<void> {
+  try {
+    await authFetch(`${API_URL}/api/workspaces/${workspaceId}/inbox/dismiss`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ threadId }),
+    });
+  } catch {
+    // Navigation already happened; the row returns on the next fetch.
+  }
 }
 
 /**

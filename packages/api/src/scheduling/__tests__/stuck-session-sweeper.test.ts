@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createStuckSessionSweeper, DEFAULT_STALE_AFTER_MS, DEFAULT_INTERVAL_MS } from '../stuck-session-sweeper.js'
+import { TURN_HEARTBEAT_INTERVAL_MS, TURN_LEASE_STALE_AFTER_MS } from '../../db/sessions.js'
 
 describe('[COMP:scheduling/stuck-session-sweeper] createStuckSessionSweeper', () => {
   beforeEach(() => {
@@ -24,11 +25,11 @@ describe('[COMP:scheduling/stuck-session-sweeper] createStuckSessionSweeper', ()
     expect(sweep).toHaveBeenCalledWith(90_000)
   })
 
-  it('publishes turn_completed only for draft-mode sessions, not regular web sessions', async () => {
+  it('publishes turn_completed for sessions with live watchers (drafts AND rooms), not private web sessions', async () => {
     const sweep = vi.fn().mockResolvedValue([
-      { id: 'draft-1', mode: 'draft', userId: 'user-a' },
-      { id: 'web-1', mode: null, userId: 'user-b' },
-      { id: 'draft-2', mode: 'draft', userId: 'user-c' },
+      { id: 'draft-1', mode: 'draft', userId: 'user-a', visibility: 'owner' },
+      { id: 'web-1', mode: null, userId: 'user-b', visibility: 'owner' },
+      { id: 'room-1', mode: null, userId: 'user-c', visibility: 'workspace' },
     ])
     const publish = vi.fn()
     const sweeper = createStuckSessionSweeper({
@@ -39,9 +40,11 @@ describe('[COMP:scheduling/stuck-session-sweeper] createStuckSessionSweeper', ()
 
     await sweeper.tick()
 
+    // Rooms were the 2026-08-08 omission: the sweep healed the row but every
+    // open Live card kept showing "Working" because nothing told them.
     expect(publish).toHaveBeenCalledTimes(2)
     expect(publish).toHaveBeenCalledWith('draft-1')
-    expect(publish).toHaveBeenCalledWith('draft-2')
+    expect(publish).toHaveBeenCalledWith('room-1')
     expect(publish).not.toHaveBeenCalledWith('web-1')
   })
 
@@ -142,8 +145,15 @@ describe('[COMP:scheduling/stuck-session-sweeper] createStuckSessionSweeper', ()
     expect(sweep).toHaveBeenCalledTimes(3) // no further ticks after stop
   })
 
-  it('exports defaults that match Cloud Run\'s 300s cap with safety margin', () => {
-    expect(DEFAULT_STALE_AFTER_MS).toBeGreaterThan(300_000)
+  it('keys its default staleness off the turn lease, not the request cap', () => {
+    // The threshold used to have to clear Cloud Run's 300s request cap,
+    // because staleness was measured on `last_active_at` and a turn running
+    // past the cap was indistinguishable from a dead one. The lease removed
+    // that coupling: a live turn heartbeats independently of its HTTP request,
+    // so the only thing the threshold must clear is the heartbeat interval.
+    // Trading the old margin away is what buys sub-2-minute recovery.
+    expect(DEFAULT_STALE_AFTER_MS).toBe(TURN_LEASE_STALE_AFTER_MS)
+    expect(DEFAULT_STALE_AFTER_MS).toBeGreaterThanOrEqual(TURN_HEARTBEAT_INTERVAL_MS * 3)
     expect(DEFAULT_INTERVAL_MS).toBe(60_000)
   })
 })
