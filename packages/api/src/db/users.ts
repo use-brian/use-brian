@@ -230,7 +230,7 @@ export async function findOrCreateUser(params: {
       `INSERT INTO assistants (name, owner_user_id, workspace_id, kind)
        VALUES ($1, $2, $3, 'primary')
        RETURNING id, clearance`,
-      [`${workspaceName} Primary Assistant`, user.id, workspaceId],
+      [workspaceName, user.id, workspaceId],
     )
 
     await client.query(
