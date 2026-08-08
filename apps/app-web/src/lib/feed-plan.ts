@@ -425,7 +425,7 @@ export function emptySlots(slots: readonly PlanSlot[]): PlanSlot[] {
 export const WEEK_PX_PER_HOUR = 44;
 
 /** Drag lands on a quarter hour. Minute-precision drag is a fight, not a feature. */
-export const WEEK_SNAP_MINUTES = 15;
+const WEEK_SNAP_MINUTES = 15;
 
 /** The Monday of the week containing `iso`. */
 export function weekStart(iso: string): string | null {
