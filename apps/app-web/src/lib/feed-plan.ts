@@ -414,3 +414,78 @@ export function emptySlots(slots: readonly PlanSlot[]): PlanSlot[] {
       !(s.brief && s.brief.trim()),
   );
 }
+
+// ── Week view geometry (D25, deferred at lock, built 2026-08-08) ────────────
+
+/**
+ * The week grid's vertical scale. Everything below is pure so the pixel math
+ * is unit-tested rather than eyeballed in a browser -- an off-by-one here
+ * silently reschedules a post by an hour.
+ */
+export const WEEK_PX_PER_HOUR = 44;
+
+/** Drag lands on a quarter hour. Minute-precision drag is a fight, not a feature. */
+export const WEEK_SNAP_MINUTES = 15;
+
+/** The Monday of the week containing `iso`. */
+export function weekStart(iso: string): string | null {
+  const d = parseIsoDay(iso);
+  if (!d) return null;
+  const shifted = new Date(d.getFullYear(), d.getMonth(), d.getDate() - mondayIndex(d));
+  return isoDay(shifted);
+}
+
+/** The seven days of the week containing `iso`, Monday first. */
+export function weekDays(iso: string, today: Date): PlanCalendarDay[] {
+  const start = weekStart(iso);
+  const first = start ? parseIsoDay(start) : null;
+  if (!first) return [];
+  const todayIso = isoDay(today);
+  return Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(first.getFullYear(), first.getMonth(), first.getDate() + i);
+    const weekday = d.getDay();
+    return {
+      iso: isoDay(d),
+      day: d.getDate(),
+      inMonth: true,
+      isToday: isoDay(d) === todayIso,
+      isWeekend: weekday === 0 || weekday === 6,
+    };
+  });
+}
+
+/** Vertical offset in px for a wall-clock minute. */
+export function offsetFromMinute(minute: number): number {
+  return (minute / 60) * WEEK_PX_PER_HOUR;
+}
+
+/**
+ * Vertical offset in px back to a wall-clock minute, snapped and CLAMPED to a
+ * single day. Clamping rather than wrapping is deliberate: dragging a chip
+ * past midnight must pin it to 23:45, never silently move it to the next day
+ * -- the day is owned by `scheduledFor` and a vertical drag has no business
+ * changing it.
+ */
+export function minuteFromOffset(offsetPx: number): number {
+  const raw = (offsetPx / WEEK_PX_PER_HOUR) * 60;
+  const snapped = Math.round(raw / WEEK_SNAP_MINUTES) * WEEK_SNAP_MINUTES;
+  return Math.max(0, Math.min(1440 - WEEK_SNAP_MINUTES, snapped));
+}
+
+/** Slots on one day that carry a time, for absolute positioning. */
+export function timedSlotsOn(
+  slots: readonly PlanSlot[],
+  iso: string,
+): PlanSlot[] {
+  return slots
+    .filter((s) => s.scheduledFor === iso && s.scheduledMinute !== null)
+    .sort(compareSlotsInDay);
+}
+
+/** Slots on one day with no time, shown in the all-day band above the grid. */
+export function untimedSlotsOn(
+  slots: readonly PlanSlot[],
+  iso: string,
+): PlanSlot[] {
+  return slots.filter((s) => s.scheduledFor === iso && s.scheduledMinute === null);
+}

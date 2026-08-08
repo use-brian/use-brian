@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  WEEK_PX_PER_HOUR,
   addMonths,
   agendaGroups,
   cadenceShortfall,
@@ -8,7 +9,13 @@ import {
   emptySlots,
   formatSlotMinute,
   ghostDays,
+  minuteFromOffset,
+  offsetFromMinute,
   parseSlotMinute,
+  timedSlotsOn,
+  untimedSlotsOn,
+  weekDays,
+  weekStart,
   isoDay,
   monthGridDays,
   monthKey,
@@ -261,5 +268,63 @@ describe("[COMP:app-web/feed-plan] Empty slots for the opt-in fill", () => {
       slot({ id: "posted", status: "posted" }),
     ];
     expect(emptySlots(candidates).map((s) => s.id)).toEqual(["empty"]);
+  });
+});
+
+describe("[COMP:app-web/plan-week] Week geometry", () => {
+  it("anchors the week to its Monday from any day inside it", () => {
+    // 2026-08-05 is a Wednesday.
+    expect(weekStart("2026-08-05")).toBe("2026-08-03");
+    expect(weekStart("2026-08-03")).toBe("2026-08-03");
+    expect(weekStart("2026-08-09")).toBe("2026-08-03"); // Sunday
+    expect(weekStart("garbage")).toBeNull();
+  });
+
+  it("lays out seven Monday-first days and marks the weekend", () => {
+    const days = weekDays("2026-08-05", TODAY);
+    expect(days).toHaveLength(7);
+    expect(days[0].iso).toBe("2026-08-03");
+    expect(days[6].iso).toBe("2026-08-09");
+    expect(days.filter((d) => d.isWeekend).map((d) => d.iso)).toEqual([
+      "2026-08-08",
+      "2026-08-09",
+    ]);
+  });
+
+  it("round-trips a minute through the pixel scale", () => {
+    expect(offsetFromMinute(0)).toBe(0);
+    expect(offsetFromMinute(60)).toBe(WEEK_PX_PER_HOUR);
+    expect(minuteFromOffset(offsetFromMinute(540))).toBe(540);
+  });
+
+  it("snaps a drop to a quarter hour", () => {
+    // Minute-precision drag is a fight, not a feature.
+    const nearlyNine = offsetFromMinute(538);
+    expect(minuteFromOffset(nearlyNine)).toBe(540);
+    expect(minuteFromOffset(offsetFromMinute(550))).toBe(555);
+    expect(minuteFromOffset(offsetFromMinute(547))).toBe(540); // 547.5 is the midpoint
+  });
+
+  it("CLAMPS to the day instead of wrapping past midnight", () => {
+    // A vertical drag must never change the DATE -- that belongs to
+    // scheduledFor. Wrapping here would silently reschedule to tomorrow.
+    expect(minuteFromOffset(-500)).toBe(0);
+    expect(minuteFromOffset(offsetFromMinute(2000))).toBe(1425); // 23:45
+    expect(minuteFromOffset(offsetFromMinute(1440))).toBe(1425);
+  });
+
+  it("splits a day's slots into timed and untimed", () => {
+    const all = [
+      slot({ id: "late", scheduledFor: "2026-08-04", scheduledMinute: 870 }),
+      slot({ id: "early", scheduledFor: "2026-08-04", scheduledMinute: 540 }),
+      slot({ id: "anytime", scheduledFor: "2026-08-04", scheduledMinute: null }),
+      slot({ id: "elsewhere", scheduledFor: "2026-08-05", scheduledMinute: 540 }),
+    ];
+    expect(timedSlotsOn(all, "2026-08-04").map((s) => s.id)).toEqual([
+      "early",
+      "late",
+    ]);
+    // Untimed is a real state, so it gets its own band rather than a fake midnight.
+    expect(untimedSlotsOn(all, "2026-08-04").map((s) => s.id)).toEqual(["anytime"]);
   });
 });

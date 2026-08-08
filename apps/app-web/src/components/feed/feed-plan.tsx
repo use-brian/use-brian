@@ -31,6 +31,7 @@ import { FeedOnboarding } from "@/components/feed/feed-onboarding";
 import { cn } from "@/lib/utils";
 import { PlanCalendar } from "@/components/feed/plan-calendar";
 import { PlanList } from "@/components/feed/plan-list";
+import { PlanWeek } from "@/components/feed/plan-week";
 import {
   PlanSlotPeek,
   planSlotToDraft,
@@ -119,9 +120,12 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
   // in the URL for the same reason `?month=` is: a linkable, reload-surviving
   // reading of the month.
   const viewParam = searchParams.get("view");
-  const [view, setView] = useState<"month" | "list">(
-    viewParam === "list" ? "list" : "month",
+  const [view, setView] = useState<"month" | "list" | "week">(
+    viewParam === "list" ? "list" : viewParam === "week" ? "week" : "month",
   );
+  // The week the Week view is showing. Seeded from the month so switching
+  // views lands where the operator was looking, not on today.
+  const [weekAnchor, setWeekAnchor] = useState(() => isoDay(today));
 
   const [slots, setSlots] = useState<PlanSlot[]>([]);
   const [brief, setBrief] = useState<PlanBrief | null>(null);
@@ -178,7 +182,7 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
       firstMonthSync.current = false;
       return;
     }
-    const suffix = view === "list" ? "&view=list" : "";
+    const suffix = view === "month" ? "" : `&view=${view}`;
     router.replace(
       `${feedPath(team.workspaceId)}?month=${month}${suffix}`,
       { scroll: false },
@@ -267,18 +271,37 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
    * Drag-drop reschedule. The chip moves first and snaps back on failure, so
    * the gesture feels direct on a slow connection.
    */
-  async function reschedule(slot: PlanSlot, iso: string) {
-    const previous = slot.scheduledFor;
+  /**
+   * One write for both axes. The Week view's drag can change the day and the
+   * wall-clock minute in a single gesture, so `minute` is threaded through
+   * rather than needing a second round-trip that could half-apply.
+   * `undefined` means "leave the time alone" (the Month grid's day-only drag);
+   * `null` clears it.
+   */
+  async function reschedule(
+    slot: PlanSlot,
+    iso: string,
+    minute?: number | null,
+  ) {
+    const previous = { day: slot.scheduledFor, minute: slot.scheduledMinute };
+    const nextMinute = minute === undefined ? slot.scheduledMinute : minute;
     setSlots((prev) =>
-      prev.map((s) => (s.id === slot.id ? { ...s, scheduledFor: iso } : s)),
+      prev.map((s) =>
+        s.id === slot.id
+          ? { ...s, scheduledFor: iso, scheduledMinute: nextMinute }
+          : s,
+      ),
     );
     const result = await updatePlanSlot(assistantId, slot.id, {
       scheduledFor: iso,
+      ...(minute === undefined ? {} : { scheduledMinute: minute }),
     });
     if (!result.ok) {
       setSlots((prev) =>
         prev.map((s) =>
-          s.id === slot.id ? { ...s, scheduledFor: previous } : s,
+          s.id === slot.id
+            ? { ...s, scheduledFor: previous.day, scheduledMinute: previous.minute }
+            : s,
         ),
       );
       setError(result.error ?? tp.saveFailed);
@@ -547,7 +570,7 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
                   aria-label={tp.viewMonth}
                   className="inline-flex items-center gap-0.5 rounded-md border border-border/60 p-0.5"
                 >
-                  {(["month", "list"] as const).map((key) => (
+                  {(["month", "week", "list"] as const).map((key) => (
                     <button
                       key={key}
                       type="button"
@@ -561,7 +584,11 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
                           : "text-muted-foreground hover:bg-accent hover:text-foreground",
                       )}
                     >
-                      {key === "month" ? tp.viewMonth : tp.viewList}
+                      {key === "month"
+                        ? tp.viewMonth
+                        : key === "week"
+                          ? tp.viewWeek
+                          : tp.viewList}
                     </button>
                   ))}
                 </div>
@@ -579,6 +606,21 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
                   onAddOnDay={openNewSlot}
                   onSelectSlot={openSlot}
                   onReschedule={(slot, iso) => void reschedule(slot, iso)}
+                  onDuplicateSlot={(slot) => void duplicateSlot(slot)}
+                  onDeleteSlot={(slot) => void removeSlot(slot)}
+                />
+              ) : view === "week" ? (
+                <PlanWeek
+                  anchorIso={weekAnchor}
+                  slots={slots}
+                  today={today}
+                  selectedSlotId={rail.kind === "slot" ? rail.draft.id : null}
+                  canEdit={canEdit}
+                  onAnchorChange={setWeekAnchor}
+                  onSelectSlot={openSlot}
+                  onMoveSlot={(slot, iso, minute) =>
+                    void reschedule(slot, iso, minute)
+                  }
                   onDuplicateSlot={(slot) => void duplicateSlot(slot)}
                   onDeleteSlot={(slot) => void removeSlot(slot)}
                 />
