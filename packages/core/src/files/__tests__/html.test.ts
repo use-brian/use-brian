@@ -117,6 +117,48 @@ describe('[COMP:files/html-extract] HTML → Markdown extraction', () => {
   it('returns empty for a document with no readable text', () => {
     expect(parseHtmlToMarkdown('<html><head><script>x=1</script></head><body></body></html>')).toBe('')
   })
+
+  it('drops form chrome but keeps the document around it', () => {
+    const md = parseHtmlToMarkdown(
+      '<body><form><input value="x"><select><option>All regions</option></select><button>Submit</button></form><p>Real text</p></body>',
+    )
+    expect(md).toContain('Real text')
+    expect(md).not.toContain('Submit')
+    expect(md).not.toContain('All regions')
+  })
+})
+
+describe('[COMP:files/html-extract] shape guards', () => {
+  // DOM_MAX_CHARS bounds memory; these bound CPU. Turndown recurses per element
+  // and is superlinear in node count, so both inputs below are far under the
+  // 8 MB character ceiling and still cost seconds-to-minutes without a guard
+  // (50k nesting levels measured at 273 s before overflowing the stack). The
+  // degraded path keeps every word — a ceiling may shape what reaches the model,
+  // never what reaches storage.
+
+  it('degrades deep nesting to flattened text instead of recursing into it', () => {
+    const deep = `${'<div>'.repeat(1_200)}buried treasure${'</div>'.repeat(1_200)}`
+    const md = parseHtmlToMarkdown(deep)
+    expect(md).toContain('buried treasure')
+  })
+
+  it('degrades a node-dense document without losing a single word', () => {
+    const wide = '<p>alpha</p>'.repeat(20_001) // 40,002 '<' occurrences
+    const md = parseHtmlToMarkdown(wide)
+    expect(md.split('alpha').length - 1).toBe(20_001)
+  })
+
+  it('still drops stylesheets on the degraded path', () => {
+    const wide = `<style>.x{color:red}</style><h2>Section</h2>${'<p>body</p>'.repeat(20_001)}`
+    const md = parseHtmlToMarkdown(wide)
+    expect(md).toContain('Section')
+    expect(md).not.toContain('color:red')
+  })
+
+  it('keeps an ordinary large document on the Markdown path', () => {
+    const big = `<body>${'<p>A sentence of perfectly normal prose.</p>'.repeat(500)}</body>`
+    expect(parseHtmlToMarkdown(big)).toContain('A sentence of perfectly normal prose.')
+  })
 })
 
 describe('[COMP:files/html-extract] HTML detection', () => {

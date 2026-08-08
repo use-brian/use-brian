@@ -270,6 +270,31 @@ describe('[COMP:tools/gmail-attachments] gmailSendMessage attachments', () => {
     expect(sent).toHaveLength(0)
   })
 
+  // The 2026-08-05 incident, as a regression test. The model passed the ids
+  // from two `<attached_file>` tags — the right instinct — and the flat "not
+  // found in this workspace" gave it nowhere to go, so it sent the booking
+  // email promising photos that were not attached.
+  it('routes an <attached_file> upload id to the save step instead of dead-ending', async () => {
+    const { api, sent } = gmailApi()
+    const tool = sendTool(api, filesApiFor([]))
+
+    const result = await tool.execute(
+      { ...SEND, attachments: ['f8079ca6-35e7-4403-80e4-0807890070bc'] },
+      makeContext(),
+    )
+
+    expect(result.isError).toBe(true)
+    const msg = String(result.data)
+    expect(msg).toContain('<attached_file')
+    expect(msg).toContain('UPLOADED attachment')
+    expect(msg).toContain('Capabilities')
+    expect(msg).toContain('never claim a file was attached when it was not')
+    // Tool-agnostic: an assistant without `files` has no promote tool.
+    expect(msg).not.toContain('saveFileToBrain')
+    // And critically: the email does NOT go out claiming an attachment.
+    expect(sent).toHaveLength(0)
+  })
+
   describe('describeConfirmation (Approve/Deny preview)', () => {
     it('resolves attachment ids to file names with size, alongside to/subject/body', async () => {
       const pdf = fakeFile({ sizeBytes: 1024 * 1024 + 200 * 1024 })

@@ -1209,17 +1209,26 @@ export function workspaceRoutes({
       )
       const assistantId = result.rows[0].id
 
-      // §17 — Tasks/CRM primitive grants. kind='standard' inherits primary's
-      // default-on policy (most workspace assistants are general-purpose);
-      // kind='app' specialists default-off (the distribution app gets its
-      // threads tools, not CRM). See docs/plans/company-brain.md §17.
+      // §17 primitive grants. kind='standard' inherits primary's default-on
+      // policy (most workspace assistants are general-purpose); kind='app'
+      // specialists default-off (the distribution app gets its threads tools,
+      // not CRM). See docs/plans/company-brain.md §17.
+      //
+      // `files` is seeded here too, which `builtin-primitives.md` originally
+      // called a primary-only default. A standard assistant is a
+      // general-purpose team assistant and users hand it photos and documents
+      // on every channel; starting it with no file tools reproduces the
+      // 2026-08-05 failure for every new assistant. `app` specialists stay
+      // off — that exclusion was always the deliberate one. See
+      // builtin-primitives.md → "Defaults and the backfill".
       if (finalKind === 'standard') {
         await query(
           `INSERT INTO assistant_capabilities
              (assistant_id, capability, granted_by_user_id, reason)
            VALUES ($1, 'tasks', $2, '§17 default-on at standard creation'),
                   ($1, 'crm',   $2, '§17 default-on at standard creation'),
-                  ($1, 'goals', $2, 'goals default-on at standard creation')`,
+                  ($1, 'goals', $2, 'goals default-on at standard creation'),
+                  ($1, 'files', $2, 'built-in primitive — default-on at standard creation')`,
           [assistantId, userId],
         )
       }

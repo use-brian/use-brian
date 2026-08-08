@@ -41,6 +41,7 @@ import type {
 import type { ConnectorStore } from '../db/connector-store.js'
 import { getToolDisplayName, humanizeToolName, describeToolInput, formatConfirmationInput } from '@use-brian/shared'
 import { processChannelMessage } from './channel-pipeline.js'
+import { cacheInboundImageTag } from './channel-file-cache.js'
 import { billingPartyForAssistant } from '../billing-party.js'
 
 /**
@@ -96,6 +97,11 @@ export type MsTeamsRouteOptions = {
   knowledgeStore?: import('@use-brian/core').KnowledgeStoreInterface
   gdriveFilesStore?: import('@use-brian/core').GDriveFilesStore
   workspaceFilesStore?: import('@use-brian/core').WorkspaceFilesStore
+  /** Transient upload cache (`file_cache`). When present, inbound images are
+   *  cached so the turn carries a promotable `<attached_file id="…">` tag
+   *  (save-on-request — see routes/channel-file-cache.ts). Absent ⇒ images
+   *  ride content blocks with no reference, as before. */
+  fileStore?: import('@use-brian/core').FileStore
   artifactPromoter?: import('@use-brian/api/files/artifact-promote.js').ArtifactPromoter | null
   analytics?: AnalyticsLogger
   skillStore?: import('../db/skill-store.js').SkillStore
@@ -327,6 +333,22 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
         if (!dl) continue
         if (dl.mimeType.startsWith('image/') || dl.mimeType === 'application/pdf') {
           userContentBlocks.push({ type: 'image', mimeType: dl.mimeType, data: dl.buffer.toString('base64') })
+          // Save-on-request seam — without the tag the model can SEE the
+          // image but holds no reference to it, so "keep this" / "attach
+          // this to the email" dead-ends. `channelUserId` MUST match the
+          // session key the pipeline uses below. Empty string on any miss
+          // keeps the pre-existing block-only turn.
+          const tag = options.fileStore
+            ? await cacheInboundImageTag({
+                fileStore: options.fileStore,
+                channelType: 'msteams',
+                channelId: incoming.channelId,
+                userId: channelUserId,
+                assistant,
+                file: { buffer: dl.buffer, mime: dl.mimeType, fileName: dl.name },
+              })
+            : ''
+          if (tag) userContentBlocks.push({ type: 'text', text: tag })
         } else {
           const parsedFile = await parseFileContent(dl.buffer, dl.mimeType, dl.name)
           if (
