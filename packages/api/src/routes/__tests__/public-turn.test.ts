@@ -26,6 +26,7 @@ import {
   buildEndUserIdentityContext,
   extractText,
   handlePublicHistory,
+  laneReadsSystemSide,
   resolvePublicContextBlock,
 } from '../public-turn.js'
 import { formatPrivateRuntimeContext } from '../_prompt-builder.js'
@@ -109,6 +110,33 @@ describe('[COMP:api/public-turn] Shared public turn pipeline', () => {
       expect(
         resolvePublicContextBlock({ assistantName: 'SDR', memoryContext }),
       ).toBe(memoryContext)
+    })
+  })
+
+  describe('laneReadsSystemSide', () => {
+    // Regression guard for the 2026-08-07 empty-brain finding. `assistant-full`
+    // runs as a synthetic non-member, so member RLS hid every brain row before
+    // the clearance ladder was consulted and the chat link answered "I couldn't
+    // find anyone named ..." about people who were sitting in the workspace.
+    it('lets only the assistant-full lane read system-side', () => {
+      expect(laneReadsSystemSide('assistant-full')).toBe(true)
+    })
+
+    it('keeps the keyed external-client lane on member RLS', () => {
+      // Its `public` floor + `client:*` compartment wall are the cross-client
+      // isolation contract. Opening this re-opens the cross-client read.
+      expect(laneReadsSystemSide('external-client')).toBe(false)
+    })
+
+    it('keeps the internal-member lane on member RLS', () => {
+      // The actor is a REAL member here, so RLS already passes. Bypassing it
+      // would widen them past their own min(member, assistant) ceiling.
+      expect(laneReadsSystemSide('internal-member')).toBe(false)
+    })
+
+    it('fails closed when no scope is declared', () => {
+      // Undefined means the keyed default (`external-client`).
+      expect(laneReadsSystemSide(undefined)).toBe(false)
     })
   })
 

@@ -18,7 +18,7 @@ import type { Sensitivity } from '@use-brian/core'
 import { clientCompartment } from '@use-brian/core'
 import { buildAccessPredicate } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
-import { getAppPool, query, queryWithRLS, rollbackAndRelease } from './client.js'
+import { getAppPool, query, queryGated, queryWithRLS, rollbackAndRelease } from './client.js'
 
 /**
  * `entities` store. Schema spec:
@@ -923,8 +923,12 @@ export async function listEntities(
     values.push(opts.kind)
     kindFilter = `AND kind = $${values.length}`
   }
-  const result = await queryWithRLS<EntityCompactRow>(
-    ctx.userId,
+  // `queryGated`, not `queryWithRLS`: a non-member synthetic principal (the
+  // `assistant-full` public lane) sets `ctx.systemRead` and reads system-side
+  // with `ap.sql` as the whole gate. Every other caller leaves it unset and
+  // keeps member RLS exactly as before. See AccessContext.systemRead.
+  const result = await queryGated<EntityCompactRow>(
+    ctx,
     `SELECT ${COMPACT_SELECT} FROM entities
      WHERE ${ap.sql}
        AND valid_from <= COALESCE($${asOfIdx}::timestamptz, now())

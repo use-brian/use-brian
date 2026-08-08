@@ -360,6 +360,32 @@ describe('[COMP:files/tools] fileRead', () => {
     const result = await fileRead.execute({ file: UUID_REF }, ctxNoWorkspace)
     expect(result.isError).toBe(true)
   })
+
+  // `api.read` is a UTF-8 decode. On a saved image it used to return mojibake
+  // with no error, which the model has no way to distinguish from a genuinely
+  // garbled document — so it described the noise as if it were content.
+  it('refuses a binary file instead of returning mojibake', async () => {
+    const api = buildFakeApi()
+    const { fileWrite, fileRead } = createFileTools(api)
+    await fileWrite.execute({ path: '/uploads/photo.png', content: 'PNG\r\n\n', mime: 'image/png' }, ctx)
+    const result = await fileRead.execute({ file: '/uploads/photo.png' }, ctx)
+    expect(result.isError).toBe(true)
+    const msg = String(result.data)
+    expect(msg).toContain('image/png')
+    expect(msg).toContain('cannot be read as text')
+    // Points at what CAN still be done with the bytes rather than dead-ending.
+    expect(msg).toMatch(/attach it to an email|send it to the user/)
+    expect(msg).toContain('Do not attempt to describe or quote its contents')
+  })
+
+  it('still reads text files whose mime carries a charset', async () => {
+    const api = buildFakeApi()
+    const { fileWrite, fileRead } = createFileTools(api)
+    await fileWrite.execute({ path: '/n.md', content: 'hello', mime: 'text/markdown; charset=utf-8' }, ctx)
+    const result = await fileRead.execute({ file: '/n.md' }, ctx)
+    expect(result.isError).toBeFalsy()
+    expect((result.data as { content: string }).content).toBe('hello')
+  })
 })
 
 describe('[COMP:files/tools] fileAppend', () => {

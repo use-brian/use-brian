@@ -56,3 +56,5 @@ export {
 
 export { buildWorkspaceFilesContext } from './context-builder.js'
 export { promoteCachedFile, cachedFileBytes } from './promote.js'
+
+export { buildUploadPolicyBlock } from './upload-policy-block.js'

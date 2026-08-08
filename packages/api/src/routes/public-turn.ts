@@ -164,6 +164,33 @@ export type PublicTurnDeps = {
 export type PublicTurnContextScope = 'external-client' | 'assistant-full' | 'internal-member'
 
 /**
+ * Does this lane read the brain system-side (`AccessContext.systemRead`),
+ * bypassing member RLS and leaning entirely on `buildAccessPredicate`?
+ *
+ * Exactly one lane may. `assistant-full` runs as a synthetic principal that
+ * holds no `workspace_members` row, so member RLS hid every row before the
+ * clearance ladder was consulted — the lane raised the application ceiling and
+ * left the database gate shut, which is why a chat link answered from an empty
+ * brain on 2026-08-07. The pinned assistant clearance is the containment.
+ *
+ * The other two must NOT, for opposite reasons:
+ *  • `external-client` — its `public` floor plus the `client:*` compartment
+ *    wall are the cross-client isolation contract. Opening it re-opens the
+ *    cross-client read that work closed.
+ *  • `internal-member` — the actor is a REAL member, so ordinary RLS already
+ *    passes. Bypassing it would silently widen a member past their own
+ *    `min(member, assistant)` ceiling.
+ *
+ * Extracted as a named predicate because collapsing these lanes is the
+ * recurring mistake this file keeps having to defend against. READ paths only:
+ * writes stay on `queryWithRLS` under the synthetic principal, which is what
+ * keeps "external chat has no write access" enforced by the database.
+ */
+export function laneReadsSystemSide(scope: PublicTurnContextScope | undefined): boolean {
+  return scope === 'assistant-full'
+}
+
+/**
  * Turn-scoped identity attested by the consumer's backend. Never persisted
  * as authority — see `claimsSchema` in `public-api.ts`. The chat-link caller
  * never sends these (its visitors are anonymous by construction).
@@ -728,6 +755,11 @@ export async function executePublicTurn(
     assistantKind: assistant.kind,
     clearance: readClearance,
     compartments: readCompartments,
+    // See the `systemRead` note on the queryLoop context below. The ambient
+    // blocks are reads, so they take the same treatment; the per-visitor soul
+    // (`getSoul`, and the identity/index pair) still keys off `user.id`, so a
+    // visitor never inherits the owner's personal projection.
+    systemRead: laneReadsSystemSide(input.contextScope) || undefined,
   }
   if (isIdentified || fullScope) {
     const [soul, identityMemories, memoryIndex, workspaceIdentityMemories, teamMemoryIndex] =
@@ -781,6 +813,7 @@ export async function executePublicTurn(
             assistantKind: assistant.kind,
             clearance: readClearance,
             compartments: readCompartments,
+            systemRead: laneReadsSystemSide(input.contextScope) || undefined,
           },
           PUBLIC_TURN_FILES_INDEX_CAP,
         )
@@ -1056,6 +1089,19 @@ export async function executePublicTurn(
         ),
         workspaceId: assistant.workspaceId ?? undefined,
         assistantKind: assistant.kind,
+        // `assistant-full` runs as a synthetic non-member principal, so member
+        // RLS hid every brain row before `clearance` was ever consulted — the
+        // lane raised the application ceiling and left the database gate shut,
+        // which is why a chat link read an empty brain (2026-08-07). Reads go
+        // system-side with `buildAccessPredicate` as the whole gate; the pinned
+        // `readClearance` above is the containment.
+        //
+        // Reads ONLY. Writes stay on `queryWithRLS` under this same synthetic
+        // principal and the database still refuses them, which is what keeps
+        // "external chat has no write access" enforced below the tool layer.
+        // Never set this for `external-client`: that lane's `public` floor and
+        // `client:*` compartment wall are the cross-client isolation contract.
+        systemRead: laneReadsSystemSide(input.contextScope) || undefined,
         userTimezone:
           (internalScope ? user.timezone : null) ?? owner.timezone ?? undefined,
         abortSignal: abortController.signal,

@@ -23,7 +23,7 @@ import {
   runMemoryNudge, sanitize as sanitizeAnalytics, createConfirmationResolver,
   classifyTopic, fetchEpisodicContext, filterToolsByCapabilities,
   modelToCompactionTier, SensitivityAccumulator, CompartmentAccumulator,
-  buildWorkspaceFilesContext, AttachmentCollector,
+  buildWorkspaceFilesContext, buildUploadPolicyBlock, AttachmentCollector,
   EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote,
 } from '@use-brian/core'
 import type { FilesApi, OutboundAttachment } from '@use-brian/core'
@@ -1091,6 +1091,13 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     ? [splitPrompt.privateRuntimeContext]
     : []
   const userVisibleContext = splitPrompt.userVisibleContext
+
+  // ── Uploaded-file save policy ──
+  // Shared with chat.ts. Channels are where this matters MOST — a photo sent
+  // to Telegram/WhatsApp is the common "forward this for me" case — yet the
+  // block was web-only until 2026-08-06. Tool-agnostic and capability-gated
+  // (returns '' without `files`), so appending is unconditional.
+  fullSystemPrompt += buildUploadPolicyBlock(activeCapabilities.has('files'))
 
   // ── Channel formatting hints ──
   if (channelType === 'whatsapp') {

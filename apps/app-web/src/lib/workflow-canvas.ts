@@ -524,6 +524,80 @@ export function insertStepIntoEdge(
   };
 }
 
+// ── Join legibility ─────────────────────────────────────────────────────
+
+/**
+ * Inbound wire count per step (trigger wires included). A step with ≥ 2 is
+ * a fan-in — the implicit join: it runs once, after every inbound path that
+ * can still reach it settles. The board chips these "Joins N paths".
+ */
+export function joinFanIn(def: WorkflowDefinition): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const edge of canvasEdges(def)) {
+    counts.set(edge.to, (counts.get(edge.to) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/**
+ * Join steps a live run has parked: the step has not started (no step-run
+ * row → absent from `stepStates`), at least one inbound path has settled
+ * (a trigger wire settles the moment the run starts; a step settles on
+ * `completed`), and at least one other inbound source is still pending.
+ * Rendered as the "Waiting for other paths to finish" badge — the live
+ * demonstration of the wait-for-all rule. Call only while a run is active.
+ */
+export function parkedJoinStepIds(
+  def: WorkflowDefinition,
+  stepStates: Record<string, string | undefined>,
+): Set<string> {
+  const inbound = new Map<string, CanvasEdge[]>();
+  for (const edge of canvasEdges(def)) {
+    const bucket = inbound.get(edge.to);
+    if (bucket) bucket.push(edge);
+    else inbound.set(edge.to, [edge]);
+  }
+  const out = new Set<string>();
+  for (const [stepId, edges] of inbound) {
+    if (edges.length < 2) continue;
+    if (stepStates[stepId] !== undefined) continue;
+    let settled = 0;
+    let pending = 0;
+    for (const edge of edges) {
+      if (edge.from === TRIGGER_KEY) {
+        settled++;
+        continue;
+      }
+      const state = stepStates[edge.from];
+      if (state === "completed") settled++;
+      else if (state === "failed" || state === "skipped") continue;
+      else pending++;
+    }
+    if (settled >= 1 && pending >= 1) out.add(stepId);
+  }
+  return out;
+}
+
+/**
+ * Trigger wires that change nothing: their entry step is also reachable
+ * from another entry step, so the join rule always defers it and execution
+ * is identical without the wire. Drawn with the dead-wire treatment; stays
+ * selectable and removable.
+ */
+export function redundantTriggerEdgeKeys(def: WorkflowDefinition): Set<string> {
+  const known = new Set(def.steps.map((s) => s.id));
+  const starts = startIds(def).filter((id) => known.has(id));
+  const out = new Set<string>();
+  if (starts.length < 2) return out;
+  for (const entry of starts) {
+    const covered = starts.some(
+      (other) => other !== entry && reaches(def, other, entry),
+    );
+    if (covered) out.add(`trigger->${entry}`);
+  }
+  return out;
+}
+
 // ── Layout ──────────────────────────────────────────────────────────────
 
 /**

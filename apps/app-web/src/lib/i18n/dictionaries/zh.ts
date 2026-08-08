@@ -2533,6 +2533,12 @@ export const zh: Dictionary = {
       neverRuns: "不會執行",
       neverRunsHint:
         "此步驟未連接到觸發路徑, 不會被任何執行到達。請從上游步驟連線至此步驟, 或將其設為開始步驟。",
+      joinsPaths: "合流 {n} 條路徑",
+      joinsPathsHint:
+        "會在所有仍可到達此步驟的路徑完成後執行一次, 並可讀取各路徑儲存的輸出。",
+      waitingOnPaths: "正在等待其他路徑完成",
+      triggerWireRedundant:
+        "此起始連線不影響執行: 此步驟已在等待來自觸發器的另一條路徑, 無論如何都會在該路徑之後執行。",
       removeConnection: "移除連接",
       wireRefusedCycle: "此連接會形成迴圈, 無法建立",
       wireRefusedDuplicate: "這些步驟已經連接",

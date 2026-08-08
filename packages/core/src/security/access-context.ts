@@ -60,7 +60,20 @@ export type AccessContext = {
    * SAFETY: only ever set together with a pinned `clearance` (e.g.
    * `'public'`). `systemRead: true` with `clearance: undefined` would
    * expose every sensitivity tier — the predicate's clearance clause is
-   * the containment. `buildPublicAccessContext` is the only producer.
+   * the containment.
+   *
+   * Two producers, both non-member principals by construction:
+   *  • `buildPublicAccessContext` — the anonymous public-share render,
+   *    pinned to `clearance: 'public'`.
+   *  • the `assistant-full` public lane (`routes/public-turn.ts`) — the
+   *    chat link and a keyed API key with `anonymous_context = 'full'`,
+   *    pinned to the ASSISTANT's own clearance. Before this existed the
+   *    lane read an empty brain: it raised the application clearance
+   *    ceiling but left member RLS in front of every row.
+   *
+   * READ paths only, and that is load-bearing rather than incidental —
+   * writes stay on `queryWithRLS` under the synthetic principal, so the
+   * database is what refuses them.
    */
   systemRead?: boolean
 }

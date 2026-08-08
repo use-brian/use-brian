@@ -1188,7 +1188,7 @@ export function createWorkspaceStore(cascades: WorkspaceStoreCascades = {}): Wor
           `INSERT INTO assistants (name, owner_user_id, workspace_id, kind)
            VALUES ($1, NULL, $2, 'primary')
            RETURNING id, clearance`,
-          [`${name} Primary Assistant`, workspace.id],
+          [name, workspace.id],
         )
 
         // §17 — primary assistants default-on for Tasks (Q1) and CRM

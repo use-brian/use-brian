@@ -62,7 +62,10 @@ import {
   edgeCurveOffset,
   edgeInsertionCandidate,
   insertStepIntoEdge,
+  joinFanIn,
+  parkedJoinStepIds,
   portAnchor,
+  redundantTriggerEdgeKeys,
   removeEdge,
   resolvePositions,
   unreachableStepIds,
@@ -434,6 +437,11 @@ export function WorkflowBoard({
     () => unreachableStepIds(definition),
     [definition],
   );
+  const fanIn = useMemo(() => joinFanIn(definition), [definition]);
+  const redundantTrigger = useMemo(
+    () => redundantTriggerEdgeKeys(definition),
+    [definition],
+  );
 
   const extent = boardExtent(displayPositions);
   const width = Math.max(
@@ -451,6 +459,16 @@ export function WorkflowBoard({
   const triggerPrimary = t.workflowPage.triggerShort[triggerKind];
   const liveStates = live?.stepStates;
   const runActive = live ? isActivelyExecuting(live.status) : false;
+  // Joins the active run has parked — one inbound path settled, another
+  // still pending. A parked step has no step-run row, so absence from
+  // stepStates is the signal.
+  const parkedJoins = useMemo(
+    () =>
+      runActive && liveStates
+        ? parkedJoinStepIds(definition, liveStates)
+        : new Set<string>(),
+    [definition, liveStates, runActive],
+  );
 
   const toBoard = (e: { clientX: number; clientY: number }) => {
     const rect = boardRef.current?.getBoundingClientRect();
@@ -689,8 +707,12 @@ export function WorkflowBoard({
             const isSelected = selectedEdgeKey === edge.key;
             const insertTarget =
               !!nodeDrag?.moved && nodeDrag.insertEdgeKey === edge.key;
-            // A wire leaving an unreachable step is dead: it never fires.
-            const deadEdge = unreachable.has(edge.from);
+            // A wire leaving an unreachable step is dead: it never fires. A
+            // redundant trigger wire (its entry step already waits on
+            // another path) gets the same faint treatment.
+            const redundantWire =
+              edge.source === "trigger" && redundantTrigger.has(edge.key);
+            const deadEdge = unreachable.has(edge.from) || redundantWire;
             const stroke = insertTarget
               ? "var(--primary)"
               : isSelected
@@ -739,7 +761,9 @@ export function WorkflowBoard({
                     />
                   )}
                 </path>
-                {/* Fat invisible twin — the click target for selection. */}
+                {/* Fat invisible twin — the click target for selection (and
+                    the only hoverable element: the svg layer itself is
+                    pointer-events none). */}
                 {canEdit && (
                   <path
                     d={d}
@@ -751,7 +775,11 @@ export function WorkflowBoard({
                       e.stopPropagation();
                       setSelectedEdgeKey(isSelected ? null : edge.key);
                     }}
-                  />
+                  >
+                    {redundantWire && (
+                      <title>{t.workflowPage.board.triggerWireRedundant}</title>
+                    )}
+                  </path>
                 )}
                 <circle cx={tx} cy={ty} r={3.5} fill={stroke} />
               </g>
@@ -896,6 +924,10 @@ export function WorkflowBoard({
             wireDrag?.overKey === node.key && node.kind !== "trigger";
           const orphan =
             node.kind !== "trigger" && unreachable.has(node.key);
+          const joinCount =
+            node.kind !== "trigger" ? (fanIn.get(node.key) ?? 0) : 0;
+          const isJoin = joinCount >= 2;
+          const parked = !liveState && parkedJoins.has(node.key);
           return (
             <div key={node.key}>
               <div
@@ -962,6 +994,27 @@ export function WorkflowBoard({
                   )}
                 </span>
                 {liveState && <LiveStateBadge state={liveState} t={t} />}
+                {parked && (
+                  <span
+                    title={t.workflowPage.board.waitingOnPaths}
+                    aria-label={t.workflowPage.board.waitingOnPaths}
+                    className="absolute -top-2 -right-2 flex h-5 w-5 items-center justify-center rounded-full border border-background bg-amber-500 text-white shadow-sm"
+                  >
+                    <svg
+                      width={11}
+                      height={11}
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth={2.5}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden
+                    >
+                      <path d="M7 3h10M7 21h10M8 3v3l4 4 4-4V3M8 21v-3l4-4 4 4v3" />
+                    </svg>
+                  </span>
+                )}
                 {node.kind === "trigger" && runActive && (
                   <span
                     className="absolute -top-1 -right-1 flex h-3 w-3"
@@ -974,18 +1027,38 @@ export function WorkflowBoard({
                 )}
               </div>
 
-              {/* Orphan nudge — this step is not on the trigger path. */}
-              {orphan && (
+              {/* Semantics chips under the node: orphan nudge + join contract. */}
+              {(orphan || isJoin) && (
                 <span
-                  title={t.workflowPage.board.neverRunsHint}
-                  className={cn(
-                    "absolute z-10 whitespace-nowrap rounded-full border px-2 py-0.5",
-                    "border-amber-400/60 bg-amber-500/15 text-[10px] font-medium",
-                    "text-amber-700 dark:text-amber-300",
-                  )}
+                  className="absolute z-10 flex items-center gap-1"
                   style={{ left: pos.x + 8, top: pos.y + NODE_H + 6 }}
                 >
-                  {t.workflowPage.board.neverRuns}
+                  {orphan && (
+                    <span
+                      title={t.workflowPage.board.neverRunsHint}
+                      className={cn(
+                        "whitespace-nowrap rounded-full border px-2 py-0.5",
+                        "border-amber-400/60 bg-amber-500/15 text-[10px] font-medium",
+                        "text-amber-700 dark:text-amber-300",
+                      )}
+                    >
+                      {t.workflowPage.board.neverRuns}
+                    </span>
+                  )}
+                  {isJoin && (
+                    <span
+                      title={t.workflowPage.board.joinsPathsHint}
+                      className={cn(
+                        "whitespace-nowrap rounded-full border px-2 py-0.5",
+                        "border-border bg-card text-[10px] font-medium",
+                        "text-muted-foreground",
+                      )}
+                    >
+                      {format(t.workflowPage.board.joinsPaths, {
+                        n: String(joinCount),
+                      })}
+                    </span>
+                  )}
                 </span>
               )}
 

@@ -76,7 +76,21 @@ export function createIngestStoredFileTool(deps: IngestStoredFileDeps) {
 
       const file = await deps.getFile(actor, input.fileId)
       if (!file) {
-        return { data: 'No stored file with that id is visible in this workspace.', isError: true }
+        // Same dead-end shape as the workspace-files `not_found` (see
+        // `workspace-files/tool-helpers.ts` → errorMessage). This tool is NOT
+        // capability-gated, so on an assistant without `files` it is the only
+        // file-shaped tool left in the list — which is exactly what a model
+        // reaches for when asked to attach a photo it can see. It must say
+        // where to go instead of just failing.
+        return {
+          data:
+            `No stored file with id ${input.fileId} is visible in this workspace. ` +
+            'If that id came from an <attached_file id="…"> tag it is an UPLOADED attachment, not a stored file — ' +
+            'this tool only re-ingests files already saved in the workspace. Save the upload into the workspace files first, ' +
+            'then ingest the id that save returns. If you have no tool to save uploaded files, tell the user plainly that ' +
+            'this assistant cannot keep files and that Workspace files must be turned on for it in Studio → the assistant → Capabilities.',
+          isError: true,
+        }
       }
       if (file.mime.startsWith('audio/') || file.mime.startsWith('video/')) {
         return {

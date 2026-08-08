@@ -38,6 +38,7 @@ import type { ChannelIntegrationStore, ChannelIntegrationConfig, DiscordCredenti
 import type { ConnectorStore } from '../db/connector-store.js'
 import { getToolDisplayName, humanizeToolName, describeToolInput, formatConfirmationInput } from '@use-brian/shared'
 import { processChannelMessage } from './channel-pipeline.js'
+import { cacheInboundImageTag } from './channel-file-cache.js'
 import { billingPartyForAssistant } from '../billing-party.js'
 import { classifyMedia, buildDocumentFiledReply, buildOversizeDocReply } from '../ingest/channel-media-intake.js'
 
@@ -64,6 +65,11 @@ export type DiscordRouteOptions = {
   knowledgeStore?: import('@use-brian/core').KnowledgeStoreInterface
   gdriveFilesStore?: import('@use-brian/core').GDriveFilesStore
   workspaceFilesStore?: import('@use-brian/core').WorkspaceFilesStore
+  /** Transient upload cache (`file_cache`). When present, inbound images are
+   *  cached so the turn carries a promotable `<attached_file id="…">` tag
+   *  (save-on-request — see routes/channel-file-cache.ts). Absent ⇒ images
+   *  ride content blocks with no reference, as before. */
+  fileStore?: import('@use-brian/core').FileStore
   /** Promotes an over-threshold text paste to a durable artifact
    *  (large-content-artifacts §Phase 3.2). Absent ⇒ pastes pass through. */
   artifactPromoter?: import('@use-brian/api/files/artifact-promote.js').ArtifactPromoter | null
@@ -442,6 +448,22 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
         if (!dl) continue
         if (dl.mimeType.startsWith('image/') || dl.mimeType === 'application/pdf') {
           userContentBlocks.push({ type: 'image', mimeType: dl.mimeType, data: dl.buffer.toString('base64') })
+          // Save-on-request seam — without the tag the model can SEE the
+          // image but holds no reference to it, so "keep this" / "attach
+          // this to the email" dead-ends. `channelUserId` MUST match the
+          // session key the pipeline uses below. Empty string on any miss
+          // keeps the pre-existing block-only turn.
+          const tag = options.fileStore
+            ? await cacheInboundImageTag({
+                fileStore: options.fileStore,
+                channelType: 'discord',
+                channelId: incoming.channelId,
+                userId: channelUserId,
+                assistant,
+                file: { buffer: dl.buffer, mime: dl.mimeType, fileName: dl.name },
+              })
+            : ''
+          if (tag) userContentBlocks.push({ type: 'text', text: tag })
         } else {
           const parsedFile = await parseFileContent(dl.buffer, dl.mimeType, dl.name)
           if (

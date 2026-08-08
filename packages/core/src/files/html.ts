@@ -61,6 +61,14 @@ const DROPPED_ELEMENTS = [
   'link',
   'meta',
   'base',
+  // Form chrome. A saved dashboard or an exported report carries filter widgets
+  // whose labels ("Submit", "All regions") are interface, not document — and a
+  // `<button>`'s text is emitted like any other unrecognized element's.
+  'form',
+  'input',
+  'select',
+  'textarea',
+  'button',
 ]
 
 /**
@@ -68,8 +76,105 @@ const DROPPED_ELEMENTS = [
  * flat tag strip. A DOM is roughly an order of magnitude larger than its source
  * in memory, and the ingest worker shares a 524 MB heap with everything else on
  * `brian-api-workers`. Markdown structure is worth a lot; an OOM is worth less.
+ *
+ * This bounds MEMORY only. See `MAX_ELEMENT_DEPTH` / `MAX_TAGS` below for the
+ * CPU bound, which a character count cannot express.
  */
 const DOM_MAX_CHARS = 8_000_000
+
+/**
+ * `DOM_MAX_CHARS` is a *heap* guard, and character count is a poor proxy for
+ * what Turndown actually costs: it recurses once per element and its running
+ * time grows superlinearly with node count, so a document can sit far under
+ * that ceiling and still be ruinous. Measured on the reference machine:
+ *
+ *   50,000 levels of nesting  →    250 KB input, **273 s** then a stack overflow
+ *   80,000 flat elements      →    1.4 MB input, 21 s
+ *   40,000 flat elements      →    720 KB input, 11 s
+ *   20,000 flat elements      →    360 KB input, 2 s
+ *   the 4.1 MB reference report →  2,139 tags,  ~110 ms
+ *
+ * Every one of those passes the 8 MB test. The `try/catch` below does return
+ * text in the overflow case, but only after the worker has blocked for minutes
+ * — and the flat-element case never throws at all, it is just slow. These two
+ * limits are the CPU guard the char ceiling cannot be. The scan that enforces
+ * them is a single pass with an early exit: ~15 ms on a 3 MB document, and it
+ * bails the moment either limit is breached.
+ *
+ * Both degrade to `flattenToText`, which keeps every word and drops only
+ * structure — the documented rule is that a ceiling may shape what reaches the
+ * model, never what reaches storage.
+ */
+const MAX_ELEMENT_DEPTH = 1_000
+const MAX_TAGS = 40_000
+
+/** Elements that never open a nesting level. */
+const VOID_ELEMENTS = new Set([
+  'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
+  'link', 'meta', 'param', 'source', 'track', 'wbr',
+])
+
+/**
+ * Estimate whether this document is too deep or too node-dense to hand to
+ * Turndown. Deliberately an estimator, not a parser: it reads tag names off the
+ * raw string and never builds anything, which is the entire point of running it
+ * before the DOM exists.
+ */
+function exceedsShapeLimits(html: string): boolean {
+  let tags = 0
+  let depth = 0
+  const len = html.length
+
+  for (let i = 0; i < len; i++) {
+    if (html.charCodeAt(i) !== 60) continue // '<'
+    tags += 1
+    if (tags > MAX_TAGS) return true
+
+    const next = html.charCodeAt(i + 1)
+    if (next === 33 || next === 63) continue // <!doctype>, <!-- -->, <?…?>
+
+    let j = i + 1
+    let closing = false
+    if (html.charCodeAt(j) === 47) {
+      closing = true
+      j += 1
+    }
+    while (j < len && html.charCodeAt(j) <= 32) j += 1
+
+    const nameStart = j
+    while (j < len) {
+      const c = html.charCodeAt(j)
+      const isNameChar =
+        (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c === 58 || c === 45
+      if (!isNameChar) break
+      j += 1
+    }
+    const tagName = html.slice(nameStart, j).toLowerCase()
+    if (!tagName) continue
+
+    if (closing) {
+      depth = depth > 0 ? depth - 1 : 0
+      continue
+    }
+    if (VOID_ELEMENTS.has(tagName)) continue
+
+    // Self-closing detection: scan a short window for "/>".
+    let selfClosing = false
+    for (let k = j; k < len && k < j + 200; k++) {
+      const c = html.charCodeAt(k)
+      if (c === 62) {
+        if (html.charCodeAt(k - 1) === 47) selfClosing = true
+        break
+      }
+    }
+    if (selfClosing) continue
+
+    depth += 1
+    if (depth > MAX_ELEMENT_DEPTH) return true
+  }
+
+  return false
+}
 
 let converter: TurndownService | undefined
 
@@ -198,7 +303,7 @@ export function parseHtmlToMarkdown(html: string): string {
   const stripped = stripNonContent(html)
 
   let body: string
-  if (stripped.length > DOM_MAX_CHARS) {
+  if (stripped.length > DOM_MAX_CHARS || exceedsShapeLimits(stripped)) {
     body = collapseBlankLines(flattenToText(stripped))
   } else {
     try {

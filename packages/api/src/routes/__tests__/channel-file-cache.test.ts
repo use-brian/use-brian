@@ -4,7 +4,7 @@ vi.mock('../../db/sessions.js', () => ({
   findOrCreateSession: vi.fn(),
 }))
 
-import { cacheInboundImage } from '../channel-file-cache.js'
+import { cacheInboundImage, cacheInboundImageTag } from '../channel-file-cache.js'
 import { findOrCreateSession } from '../../db/sessions.js'
 
 const mockSession = vi.mocked(findOrCreateSession)
@@ -88,5 +88,44 @@ describe('[COMP:api/channel-file-cache] cacheInboundImage', () => {
     const failingStore = { cache: vi.fn(async () => { throw new Error('cache write failed') }) }
     const id2 = await cacheInboundImage({ ...baseInput(store), fileStore: failingStore as never })
     expect(id2).toBeNull()
+  })
+})
+
+// The envelope has to match `buildFileContentBlocks` byte for byte: the model
+// pattern-matches the tag shape it already sees in web chat and on Telegram.
+// Slack / Discord / MS Teams / WeChat build content blocks by hand and pushed
+// a bare `image` block with NO tag, so a photo on those channels carried no
+// identifier in any form — this helper is what makes wiring them two lines.
+describe('[COMP:api/channel-file-cache] cacheInboundImageTag', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  it('renders the same <attached_file> envelope buildFileContentBlocks emits', async () => {
+    mockSession.mockResolvedValue({ id: 'sess-1' } as never)
+    const tag = await cacheInboundImageTag(baseInput(makeStore()))
+    expect(tag).toBe('<attached_file id="fc_9" name="photo.png" type="image/png">[image]</attached_file>')
+  })
+
+  it('returns an empty string on every miss, so callers can append unconditionally', async () => {
+    mockSession.mockResolvedValue({ id: 'sess-1' } as never)
+    const store = makeStore()
+
+    // non-image
+    expect(await cacheInboundImageTag({
+      ...baseInput(store),
+      file: { buffer: Buffer.from('x'), mime: 'application/pdf', fileName: 'a.pdf' },
+    })).toBe('')
+
+    // workspace-less assistant
+    expect(await cacheInboundImageTag({
+      ...baseInput(store),
+      assistant: { id: 'a_1', workspaceId: null },
+    })).toBe('')
+
+    // store failure
+    const failingStore = { cache: vi.fn(async () => { throw new Error('boom') }) }
+    expect(await cacheInboundImageTag({
+      ...baseInput(store),
+      fileStore: failingStore as never,
+    })).toBe('')
   })
 })

@@ -6516,6 +6516,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         deferredConfirmationStore, episodicStore, sessionStateStore, workflowEventDispatcher,
         slackWebhookIngestor: channelHosts.slackWebhookIngestor, connectorActionStore, episodesStore,
         buildConnectorActionAudit: ports.buildConnectorActionAudit,
+        fileStore,
       }))
       // Microsoft Teams — public Bot Framework messaging endpoint, per-channel
       // JWT-verified. No connector app (webhook transport). See
@@ -6530,6 +6531,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         analytics, skillStore,
         episodicStore, sessionStateStore, artifactPromoter,
         msteamsWebhookIngestor: channelHosts.msteamsWebhookIngestor,
+        fileStore,
       }))
       if (env.DISCORD_CONNECTOR_SECRET) {
         app.use('/internal/discord', discordRoutes({
@@ -6541,7 +6543,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           checkCreditBudget: ports.checkCreditBudget, integrationStore, channelUserStore,
           workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
           connectorInstanceStore, knowledgeStore, gdriveFilesStore, workspaceFilesStore, analytics,
-          skillStore, episodicStore, sessionStateStore,
+          skillStore, episodicStore, sessionStateStore, fileStore,
         }))
       }
       if (env.WECHAT_CONNECTOR_SECRET) {
@@ -6553,7 +6555,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           checkCreditBudget: ports.checkCreditBudget, integrationStore, channelUserStore,
           workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
           connectorInstanceStore, knowledgeStore, gdriveFilesStore, workspaceFilesStore, analytics,
-          skillStore, episodicStore, sessionStateStore,
+          skillStore, episodicStore, sessionStateStore, fileStore,
           archiveMedia: chatArchiveMediaService ?? undefined,
         }))
       }
