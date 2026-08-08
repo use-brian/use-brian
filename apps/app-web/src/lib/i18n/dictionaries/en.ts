@@ -2756,6 +2756,12 @@ export const en = {
       neverRuns: "Never runs",
       neverRunsHint:
         "This step isn't connected to the trigger path, so no run will reach it. Wire it from an upstream step or make it the start step.",
+      joinsPaths: "Joins {n} paths",
+      joinsPathsHint:
+        "Runs once, after every inbound path that can still reach it settles. It can read each path's stored output.",
+      waitingOnPaths: "Waiting for other paths to finish",
+      triggerWireRedundant:
+        "This entry wire changes nothing: the step already waits on another path from the trigger, so it runs after that path either way.",
       removeConnection: "Remove connection",
       wireRefusedCycle: "That connection would create a loop",
       wireRefusedDuplicate: "Those steps are already connected",

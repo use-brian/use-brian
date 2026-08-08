@@ -7,7 +7,10 @@ import {
   connectEdge,
   edgeInsertionCandidate,
   insertStepIntoEdge,
+  joinFanIn,
+  parkedJoinStepIds,
   pruneLayout,
+  redundantTriggerEdgeKeys,
   removeEdge,
   resolvePositions,
   unreachableStepIds,
@@ -430,6 +433,62 @@ describe("[COMP:app-web/workflow-canvas] edgeInsertionCandidate", () => {
     expect(
       edgeInsertionCandidate(withBranch, positions, "br", 305, 42),
     ).toBeNull();
+  });
+});
+
+describe("[COMP:app-web/workflow-canvas] join legibility", () => {
+  // The asked-about shape: start = [c, a] with a → c. Step c has two
+  // inbound wires; the trigger wire into it is redundant.
+  const fanInDef = def(
+    [call("c", { nextStepId: null }), call("a", { nextStepId: "c" })],
+    { startStepId: ["c", "a"] },
+  );
+
+  it("joinFanIn counts inbound wires (trigger, explicit, fall-through)", () => {
+    expect(joinFanIn(fanInDef).get("c")).toBe(2);
+    expect(joinFanIn(fanInDef).get("a")).toBe(1);
+
+    const chain = def([call("x"), call("y", { nextStepId: null })]);
+    expect(joinFanIn(chain).get("x")).toBe(1); // trigger wire
+    expect(joinFanIn(chain).get("y")).toBe(1); // fall-through wire
+  });
+
+  it("redundantTriggerEdgeKeys flags an entry step covered by another entry's path", () => {
+    expect(redundantTriggerEdgeKeys(fanInDef)).toEqual(new Set(["trigger->c"]));
+
+    const independent = def(
+      [call("b", { nextStepId: null }), call("c", { nextStepId: null })],
+      { startStepId: ["b", "c"] },
+    );
+    expect(redundantTriggerEdgeKeys(independent).size).toBe(0);
+  });
+
+  it("parkedJoinStepIds badges a join with one settled and one pending inbound path", () => {
+    // Run just started: trigger wire settled, a still pending → c parked.
+    expect(parkedJoinStepIds(fanInDef, {})).toEqual(new Set(["c"]));
+    expect(parkedJoinStepIds(fanInDef, { a: "running" })).toEqual(
+      new Set(["c"]),
+    );
+    // a done and c running: nothing parked any more.
+    expect(
+      parkedJoinStepIds(fanInDef, { a: "completed", c: "running" }).size,
+    ).toBe(0);
+
+    // Diamond: the join badges only once a sibling has settled.
+    const diamond = def([
+      call("s", { nextStepId: ["b", "c"] }),
+      call("b", { nextStepId: "j" }),
+      call("c", { nextStepId: "j" }),
+      call("j", { nextStepId: null }),
+    ]);
+    expect(parkedJoinStepIds(diamond, { s: "running" }).size).toBe(0);
+    expect(
+      parkedJoinStepIds(diamond, {
+        s: "completed",
+        b: "completed",
+        c: "running",
+      }),
+    ).toEqual(new Set(["j"]));
   });
 });
 

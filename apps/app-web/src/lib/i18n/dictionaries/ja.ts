@@ -2557,6 +2557,12 @@ export const ja: Dictionary = {
       neverRuns: "実行されません",
       neverRunsHint:
         "このステップはトリガー経路に接続されていないため、実行されることはありません。上流のステップから接続するか、開始ステップにしてください。",
+      joinsPaths: "{n} 本の経路を合流",
+      joinsPathsHint:
+        "到達し得るすべての経路が完了した後に 1 回だけ実行されます。各経路の保存済み出力を参照できます。",
+      waitingOnPaths: "他の経路の完了を待機中",
+      triggerWireRedundant:
+        "この開始ワイヤーは動作に影響しません。このステップはすでにトリガーからの別の経路を待つため、どちらにしてもその経路の後に実行されます。",
       removeConnection: "接続を削除",
       wireRefusedCycle: "この接続はループを作るため追加できません",
       wireRefusedDuplicate: "このステップ同士はすでに接続されています",
