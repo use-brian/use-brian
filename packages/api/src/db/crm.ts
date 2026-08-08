@@ -261,7 +261,7 @@ export async function createCompany(
     workspaceId: params.workspaceId,
     // Workspace-scoped: a company is a company-wide fact, not the property of
     // whoever happened to type it. Visibility must NOT copy authorship —
-    // `createdByUserId` below carries who wrote it. See migration 422.
+    // `createdByUserId` below carries who wrote it. See migration 423.
     userId: null,
     createdByUserId: userId,
     createdByAssistantId: params.createdByAssistantId ?? null,
@@ -472,7 +472,7 @@ export async function createContact(
     attributes: contactAttributes(params),
     sensitivity: params.sensitivity ?? 'internal',
     workspaceId: params.workspaceId,
-    // Workspace-scoped — see the note in `createCompany` and migration 422.
+    // Workspace-scoped — see the note in `createCompany` and migration 423.
     // This is the row whose per-principal scoping split one human into four
     // (`Ken`, `Ken Lau` ×2, `kenlau666`) because the dedupe below could only
     // see the writer's own copies.
@@ -690,7 +690,7 @@ export async function createDeal(
     attributes: dealAttributes(params),
     sensitivity: params.sensitivity ?? 'internal',
     workspaceId: params.workspaceId,
-    // Workspace-scoped — see the note in `createCompany` and migration 422.
+    // Workspace-scoped — see the note in `createCompany` and migration 423.
     userId: null,
     createdByUserId: userId,
     createdByAssistantId: params.createdByAssistantId ?? null,

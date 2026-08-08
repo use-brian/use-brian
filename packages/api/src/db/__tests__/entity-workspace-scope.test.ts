@@ -2,7 +2,7 @@
  * [COMP:brain/entity-visibility] — CRM writers create WORKSPACE-scoped
  * entities: `user_id` is NULL, authorship still stamps the actor.
  *
- * Regression for the 2026-08-07 finding (migration 422). Visibility used to be
+ * Regression for the 2026-08-07 finding (migration 423). Visibility used to be
  * a verbatim copy of authorship — `createContact` passed the acting principal
  * as both `userId` and `createdByUserId` — so every CRM row landed at
  * `workspace_shared` scope and was readable only by whoever wrote it. In prod
@@ -100,7 +100,7 @@ describe('[COMP:brain/entity-visibility] CRM writers scope entities to the works
     await createContact(ACTOR, { workspaceId: WORKSPACE, name: 'Fictional Person' })
 
     const args = vi.mocked(createEntity).mock.calls[0]![0]
-    // `(NULL, NULL)` is the workspace scope migration 422 opened up. A row
+    // `(NULL, NULL)` is the workspace scope migration 423 opened up. A row
     // partitioned on either axis is invisible to some member of the workspace,
     // which is the bug, not a narrower version of the fix.
     expect(args.assistantId ?? null).toBeNull()
