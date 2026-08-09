@@ -860,9 +860,17 @@ export function createGeminiProvider(keyOrTransport: string | GoogleTransport | 
 
           const sseStream = streamGeminiSSE(transport, modelId, geminiRequest, options.signal)
 
-          let stopReason: StopReason = 'end_turn'
+          // A finish reason arrives on Gemini's final SSE chunk. Until that
+          // chunk is observed the stream is incomplete, not a clean end_turn.
+          // This must match the stateless convertStreamChunks path above: an
+          // upstream EOF can otherwise persist a sentence fragment as a
+          // completed interactive-chat reply.
+          let stopReason: StopReason = 'incomplete'
+          let sawFinishReason = false
           let usage: TokenUsage = { inputTokens: 0, outputTokens: 0 }
           let hasToolCalls = false
+          let hasAnyContent = false
+          let chunkCount = 0
           let modelRole: string | undefined
           let firstTextSeen = false  // strip a leaked `model\n` role token from the turn's first text part
           // Accumulated model-turn parts in arrival order. Consecutive text and
@@ -871,6 +879,7 @@ export function createGeminiProvider(keyOrTransport: string | GoogleTransport | 
           const accumulatedParts: GeminiPart[] = []
 
           for await (const data of sseStream) {
+            chunkCount++
             const candidate = data.candidates?.[0]
             if (!candidate) {
               // Usage sometimes rides a final candidate-less chunk.
@@ -879,7 +888,10 @@ export function createGeminiProvider(keyOrTransport: string | GoogleTransport | 
             }
             modelRole = candidate.content?.role ?? modelRole
 
-            for (const part of candidate.content?.parts ?? []) {
+            const rawParts = candidate.content?.parts ?? []
+            if (rawParts.length > 0) hasAnyContent = true
+
+            for (const part of rawParts) {
               if (part.thought) {
                 // Verbatim reasoning — stream the body live for display; merge
                 // it into the trailing thought part (stubbed before the
@@ -945,10 +957,20 @@ export function createGeminiProvider(keyOrTransport: string | GoogleTransport | 
               }
             }
 
-            if (candidate.finishReason) stopReason = mapFinishReason(candidate.finishReason)
+            if (candidate.finishReason) {
+              stopReason = mapFinishReason(candidate.finishReason)
+              sawFinishReason = true
+            }
             if (data.usageMetadata) usage = extractUsage(data.usageMetadata)
           }
 
+          if (!sawFinishReason && !hasToolCalls) {
+            console.error(
+              `[gemini] Stateful stream ended with NO finishReason after ${chunkCount} chunk(s) ` +
+              `(model=${modelId}, hasContent=${hasAnyContent}) — reporting stopReason='incomplete'. ` +
+              `The turn may be cut mid-output; do not treat it as a completed answer.`,
+            )
+          }
           stopReason = resolveStopReason(stopReason, hasToolCalls)
           yield { type: 'message_end', stopReason, usage }
 

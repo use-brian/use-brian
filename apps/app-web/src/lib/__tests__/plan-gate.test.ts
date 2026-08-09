@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  PLAN_GATE_TRIAL_RETURN_PATH,
   modelTierPlanGateApplies,
   planGateApplies,
   planGateDismissKey,
+  planGateTrialCheckoutBody,
 } from "../plan-gate";
 
 describe("[COMP:app-web/plan-gate] Plan gate decision", () => {
@@ -44,5 +46,14 @@ describe("[COMP:app-web/plan-gate] Plan gate decision", () => {
   it("scopes the dismissal key per workspace", () => {
     expect(planGateDismissKey("ws_1")).not.toBe(planGateDismissKey("ws_2"));
     expect(planGateDismissKey("ws_1")).toContain("ws_1");
+  });
+
+  it("starts the eligible trial directly and returns to the workspace entry", () => {
+    expect(PLAN_GATE_TRIAL_RETURN_PATH).toBe("/home");
+    expect(planGateTrialCheckoutBody("ws_1")).toEqual({
+      workspace_id: "ws_1",
+      plan: "pro",
+      returnTo: "/home",
+    });
   });
 });

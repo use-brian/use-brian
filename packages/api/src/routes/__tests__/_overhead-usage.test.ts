@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { recordOverheadUsage } from '../_overhead-usage.js'
 
@@ -28,7 +29,7 @@ describe('[COMP:api/route-helpers] recordOverheadUsage', () => {
     expect(args.actorUserId).toBe('owner-id')
   })
 
-  it('passes actorUserId through when distinct from userId (API-shadow case)', async () => {
+  it('passes actorUserId through when distinct from userId (API/BYO shadow case)', async () => {
     // The bug this fixes: pre-fix, overhead rows for shadow-driven turns
     // were tagged actor_user_id = ownerId, so the admin per-user rollup
     // (filtered WHERE actor_user_id = shadow.id) missed them and reported
@@ -38,6 +39,22 @@ describe('[COMP:api/route-helpers] recordOverheadUsage', () => {
     const args = mockRecord.mock.calls[0][0]
     expect(args.userId).toBe('owner-id')          // billing party unchanged
     expect(args.actorUserId).toBe('shadow-visitor-id')
+  })
+
+  it('attributes classifier and voice overhead to the channel actor while billing the owner', () => {
+    const source = readFileSync(new URL('../channel-pipeline.ts', import.meta.url), 'utf8')
+
+    for (const usageSource of ['overhead:classifier', 'overhead:transcription']) {
+      const markerIndex = source.indexOf(`source: '${usageSource}'`)
+      expect(markerIndex).toBeGreaterThan(-1)
+
+      const callIndex = source.lastIndexOf('recordOverheadUsage({', markerIndex)
+      expect(callIndex).toBeGreaterThan(-1)
+
+      const call = source.slice(callIndex, markerIndex)
+      expect(call).toContain('userId: ownerId')
+      expect(call).toContain('actorUserId: userId')
+    }
   })
 
   it('refuses to record non-overhead sources (guard against billable contamination)', async () => {

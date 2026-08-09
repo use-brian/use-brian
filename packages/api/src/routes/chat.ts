@@ -1353,6 +1353,52 @@ export function mayResolveRoomConfirmation(params: {
 }
 
 /**
+ * Mirror one display-level activity event from a room turn onto the shared
+ * per-session bus. Keeping the room guard, sender attribution, and NOTIFY-size
+ * cap in one seam prevents delegated-worker / preflight streams from silently
+ * becoming sender-only while the main query-loop stream remains collaborative.
+ *
+ * Tool inputs are the only unbounded activity field. The initiating client
+ * still receives the complete input over its direct response; room viewers get
+ * an empty object when the JSON representation exceeds the bus budget, which
+ * makes their UI fall back to the tool's static narration.
+ */
+const ROOM_ACTIVITY_INPUT_CAP = 4_000
+export function publishRoomTurnActivity(params: {
+  isRoomSession: boolean
+  sessionId: string
+  senderUserId: string
+  event: string
+  data: Record<string, unknown>
+  publishSessionEvent: PublishSessionEvent
+}): void {
+  if (!params.isRoomSession) return
+
+  let data = params.data
+  if ('input' in data) {
+    let input: unknown = {}
+    try {
+      input = JSON.stringify(data.input).length > ROOM_ACTIVITY_INPUT_CAP
+        ? {}
+        : data.input
+    } catch {
+      input = {}
+    }
+    data = { ...data, input }
+  }
+
+  params.publishSessionEvent({
+    kind: 'turn_activity',
+    sessionId: params.sessionId,
+    payload: {
+      event: params.event,
+      senderUserId: params.senderUserId,
+      ...data,
+    },
+  })
+}
+
+/**
  * Turn addresser per live room turn (multiplayer chat T11/D8): the user whose
  * addressed message triggered the in-flight turn. Write confirmations in a
  * shared room may only be resolved by this user or a workspace admin — the
@@ -2114,6 +2160,60 @@ export function chatRoutes(options: WebChatOptions): Router {
         if (promoted) message = promoted.replaced
       }
 
+      // Adaptive research runs before normal session resolution so a denied
+      // research turn does not create an empty thread. Resolve an EXISTING
+      // thread read-only here only when the classifier will run, authorize it
+      // with the same session gate as the main path, and cache its transcript
+      // for the topic classifier below. New chats correctly have no history.
+      // This is what makes the classifier's "follow-ups are OFF" rule real
+      // (2026-08-09 Snapio valuation-multiple incident).
+      const adaptiveResearchEligible =
+        !researchMode &&
+        !!message &&
+        isAdaptiveResearchEligible({
+          requestedMode,
+          workspaceId: assistant.workspaceId,
+          userPlan,
+          assistantKind: assistant.kind,
+        })
+      let adaptiveSessionId: string | null = null
+      let adaptiveDbMessages: SessionMessage[] = []
+      let adaptiveRecentConversation: Array<{ role: 'user' | 'assistant'; text: string }> = []
+      if (adaptiveResearchEligible) {
+        let adaptiveSession = requestedSessionId
+          ? await findSessionById(requestedSessionId)
+          : undefined
+        const adaptiveStickyChannelId = resolveStickyChannelId(requestedChannelId, requestedSessionId)
+        if (!adaptiveSession && adaptiveStickyChannelId) {
+          adaptiveSession = await findSessionByChannel({
+            assistantId: assistant.id,
+            userId: user.id,
+            channelType: 'web',
+            channelId: adaptiveStickyChannelId,
+          })
+        }
+        if (
+          adaptiveSession?.assistantId === assistant.id &&
+          !(await gateSessionRead(user.id, adaptiveSession))
+        ) {
+          adaptiveSessionId = adaptiveSession.id
+          adaptiveDbMessages = await getSessionMessages(adaptiveSession.id)
+          adaptiveRecentConversation = adaptiveDbMessages
+            .filter((m) => m.role === 'user' || m.role === 'assistant')
+            .filter((m) => !(
+              m.role === 'assistant' &&
+              Array.isArray(m.content) &&
+              (m.content as Array<{ type?: string }>).some((block) => block.type === 'tool_use')
+            ))
+            .map((m) => ({
+              role: m.role as 'user' | 'assistant',
+              text: extractPlainText(m.content as Message['content']).trim(),
+            }))
+            .filter((turn) => turn.text.length > 0)
+            .slice(-6)
+        }
+      }
+
       // Adaptive research entry. When the request didn't pin a mode, run a
       // cheap Gemini-Flash-Lite classifier to decide whether this message
       // warrants research mode. If yes, flip `researchMode = true` so the
@@ -2147,20 +2247,15 @@ export function chatRoutes(options: WebChatOptions): Router {
         reason: string | null
       } | null = null
       if (
-        !researchMode &&
-        message &&
-        isAdaptiveResearchEligible({
-          requestedMode,
-          workspaceId: assistant.workspaceId,
-          userPlan,
-          assistantKind: assistant.kind,
-        })
+        adaptiveResearchEligible &&
+        message
       ) {
         const { classifyResearchIntent } = await import('@use-brian/core')
         const adaptive = await classifyResearchIntent({
           provider: options.provider,
           message,
           model: backgroundModelFor(options.configuredProviders),
+          recentConversation: adaptiveRecentConversation,
         }).catch(() => ({ research: false, operateSite: false, reason: null, usage: null, model: null }))
         adaptiveResearchOverhead = {
           model: adaptive.model,
@@ -2368,6 +2463,25 @@ export function chatRoutes(options: WebChatOptions): Router {
       sessionIdForError = session.id
 
       const isRoomSession = isSharedChatSession(session)
+      const publishRoomActivity = (
+        event: string,
+        data: Record<string, unknown>,
+      ) => publishRoomTurnActivity({
+        isRoomSession,
+        sessionId: session.id,
+        senderUserId: user.id,
+        event,
+        data,
+        publishSessionEvent,
+      })
+      const sendActivityEvent = (
+        event: string,
+        data: Record<string, unknown>,
+        roomData: Record<string, unknown> = data,
+      ) => {
+        sendEvent(event, data)
+        publishRoomActivity(event, roomData)
+      }
 
       // ── Mid-turn input (queue / steer) ────────────────────────────
       // This session already has a turn running: hand the message to THAT turn
@@ -3049,7 +3163,9 @@ export function chatRoutes(options: WebChatOptions): Router {
         clientSnippet: replyTo?.text,
       })
 
-      const preExistingDbMessages = await getSessionMessages(session.id)
+      const preExistingDbMessages = adaptiveSessionId === session.id
+        ? adaptiveDbMessages
+        : await getSessionMessages(session.id)
       const recentUserTurns: ClassifierRecentTurn[] = preExistingDbMessages
         .filter((m) => m.role === 'user' && Array.isArray(m.content))
         .slice(-8)
@@ -5023,7 +5139,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             coordinatorMode = true
             // `phase` lets the web client render a localized research banner;
             // `message` is the plain-text fallback for non-web consumers/logs.
-            sendEvent('status', {
+            sendActivityEvent('status', {
               phase: researchMode ? 'research_starting' : 'research_parallel',
               message: researchMode ? 'Starting deep research…' : 'Researching in parallel...',
             })
@@ -5034,26 +5150,32 @@ export function chatRoutes(options: WebChatOptions): Router {
               if (!seenWorkers.has(workerId)) {
                 seenWorkers.add(workerId)
                 const desc = options.workerManager?.getDescription(workerId)
-                sendEvent('worker_start', { workerId, description: desc })
+                sendActivityEvent('worker_start', { workerId, description: desc })
               }
               if (event.type === 'tool_start') {
-                sendEvent('tool_start', { id: event.id, name: event.name, workerId })
+                sendActivityEvent('tool_start', { id: event.id, name: event.name, workerId })
               }
               if (event.type === 'tool_input') {
-                sendEvent('tool_input', { id: event.id, name: event.name, input: event.input, workerId })
+                sendActivityEvent('tool_input', { id: event.id, name: event.name, input: event.input, workerId })
               }
               if (event.type === 'tool_dropped') {
-                sendEvent('tool_dropped', { id: event.id, workerId })
+                sendActivityEvent('tool_dropped', { id: event.id, workerId })
               }
               if (event.type === 'tool_result') {
                 for (const block of event.results) {
                   if (block.type === 'tool_result') {
-                    sendEvent('tool_result', {
+                    const resultEvent = {
                       id: block.toolUseId,
                       name: block.name,
                       isError: block.isError ?? false,
                       workerId,
                       errorMessage: block.isError ? toolErrorExcerpt(block.content) : undefined,
+                    }
+                    sendActivityEvent('tool_result', resultEvent, {
+                      id: resultEvent.id,
+                      name: resultEvent.name,
+                      isError: resultEvent.isError,
+                      workerId,
                     })
                     // Realtime brain stream — fire-and-forget NOTIFY so other
                     // surfaces (a /brain tab, Claude Code, another device)
@@ -5133,31 +5255,37 @@ export function chatRoutes(options: WebChatOptions): Router {
                 abortSignal: new AbortController().signal,
                 requestTools: allTools,
               },
-              onStatus: (msg) => sendEvent('status', { message: msg }),
+              onStatus: (msg) => sendActivityEvent('status', { message: msg }),
               onEvent: (() => {
                 const seenWorkers = new Set<string>()
                 const seenCitationUrls = new Set<string>()
                 return (event: import('@use-brian/core').QueryEvent, workerId: string, description?: string) => {
                   if (!seenWorkers.has(workerId)) {
                     seenWorkers.add(workerId)
-                    sendEvent('worker_start', { workerId, description })
+                    sendActivityEvent('worker_start', { workerId, description })
                   }
                   if (event.type === 'tool_start') {
-                    sendEvent('tool_start', { id: event.id, name: event.name, workerId })
+                    sendActivityEvent('tool_start', { id: event.id, name: event.name, workerId })
                   }
                   if (event.type === 'tool_input') {
-                    sendEvent('tool_input', { id: event.id, name: event.name, input: event.input, workerId })
+                    sendActivityEvent('tool_input', { id: event.id, name: event.name, input: event.input, workerId })
                   }
                   if (event.type === 'tool_result') {
                     for (const block of event.results) {
                       if (block.type === 'tool_result') {
-                        sendEvent('tool_result', {
-                      id: block.toolUseId,
-                      name: block.name,
-                      isError: block.isError ?? false,
-                      workerId,
-                      errorMessage: block.isError ? toolErrorExcerpt(block.content) : undefined,
-                    })
+                        const resultEvent = {
+                          id: block.toolUseId,
+                          name: block.name,
+                          isError: block.isError ?? false,
+                          workerId,
+                          errorMessage: block.isError ? toolErrorExcerpt(block.content) : undefined,
+                        }
+                        sendActivityEvent('tool_result', resultEvent, {
+                          id: resultEvent.id,
+                          name: resultEvent.name,
+                          isError: resultEvent.isError,
+                          workerId,
+                        })
                         notifyBrainWriteIfMatch(assistant.workspaceId, block.name, block.isError ?? false)
                         const toolMeta = event.metaByToolUseId?.[block.toolUseId]
                         const extraMeta: Record<string, string | number | boolean> = { in_worker: true }
@@ -5436,33 +5564,6 @@ export function chatRoutes(options: WebChatOptions): Router {
               : {}),
           },
         })
-      }
-
-      /**
-       * Mirror one discrete activity event onto the per-session bus so every
-       * cleared room viewer renders the same feed the sender sees
-       * (multiplayer chat T13). No-op outside rooms. Payloads are capped:
-       * an oversized tool input degrades to `{}` (the client falls back to
-       * its static label) so the NOTIFY budget holds.
-       */
-      const ROOM_ACTIVITY_INPUT_CAP = 4_000
-      const publishRoomActivity = (
-        event: string,
-        data: Record<string, unknown>,
-      ) => {
-        if (!isRoomSession) return
-        publishSessionEvent({
-          kind: 'turn_activity',
-          sessionId: session.id,
-          payload: { event, senderUserId: user.id, ...data },
-        })
-      }
-      const capToolInput = (input: unknown): unknown => {
-        try {
-          return JSON.stringify(input).length > ROOM_ACTIVITY_INPUT_CAP ? {} : input
-        } catch {
-          return {}
-        }
       }
 
       // ── Persistence buffer ────────────────────────────────────
@@ -6014,8 +6115,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             }
           }
           if (event.type === 'tool_start') {
-            sendEvent('tool_start', { id: event.id, name: event.name })
-            publishRoomActivity('tool_start', { id: event.id, name: event.name })
+            sendActivityEvent('tool_start', { id: event.id, name: event.name })
             // Surface the running tool to a reconnected client before any reply
             // text lands (the raw name; the client maps it to a friendly label).
             if (!liveStreamText) {
@@ -6031,12 +6131,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             // Send a description update so the frontend can show what
             // the tool is actually doing (e.g. "Searching for DRep tools"
             // instead of "Using mcp_search").
-            sendEvent('tool_input', { id: event.id, name: event.name, input: event.input })
-            publishRoomActivity('tool_input', {
-              id: event.id,
-              name: event.name,
-              input: capToolInput(event.input),
-            })
+            sendActivityEvent('tool_input', { id: event.id, name: event.name, input: event.input })
             // Mirror tool activity to the session-event bus so other watchers
             // of a live draft-mode session see the host's per-turn tool
             // upserts as they happen.
@@ -6052,8 +6147,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             // A streamed tool step (today: a stripped askQuestion no-op) was
             // dropped from the persisted turn — tell the client to retract
             // the phantom timeline entry. See query-loop.ts strip branch.
-            sendEvent('tool_dropped', { id: event.id })
-            publishRoomActivity('tool_dropped', { id: event.id })
+            sendActivityEvent('tool_dropped', { id: event.id })
           }
           if (event.type === 'grounding_nudge') {
             // The grounding gate fired: the figure-bearing draft carried
@@ -6086,12 +6180,18 @@ export function chatRoutes(options: WebChatOptions): Router {
                   const match = block.content.match(/Worker (worker_\d+)/)
                   if (match) spawnedWorkerId = match[1]
                 }
-                sendEvent('tool_result', {
+                const resultEvent = {
                   id: block.toolUseId,
                   name: block.name,
                   isError: block.isError ?? false,
                   spawnedWorkerId,
                   errorMessage: block.isError ? toolErrorExcerpt(block.content) : undefined,
+                }
+                sendActivityEvent('tool_result', resultEvent, {
+                  id: resultEvent.id,
+                  name: resultEvent.name,
+                  isError: resultEvent.isError,
+                  spawnedWorkerId,
                 })
                 // Raw document viewer — the full body lives once in the
                 // persisted tool_use input. On success, forward that validated
@@ -6110,11 +6210,6 @@ export function chatRoutes(options: WebChatOptions): Router {
                 // Step status only for room viewers — never the result body
                 // (T13: signals + small data; the transcript refetch at
                 // settle is authoritative).
-                publishRoomActivity('tool_result', {
-                  id: block.toolUseId,
-                  name: block.name,
-                  isError: block.isError ?? false,
-                })
                 notifyBrainWriteIfMatch(assistant.workspaceId, block.name, block.isError ?? false)
                 // Q5 (§16) — when renderView returns successfully, parse the
                 // serialized data and forward the A2UI ViewPayload as a
@@ -6243,7 +6338,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             sendEvent('citation', { sources: event.sources })
           }
           if (event.type === 'status') {
-            sendEvent('status', { message: event.message })
+            sendActivityEvent('status', { message: event.message })
           }
           if (event.type === 'turn_input') {
             // The loop took a message the user sent mid-turn. THIS is where it
@@ -6330,7 +6425,7 @@ export function chatRoutes(options: WebChatOptions): Router {
               toolCallId: event.request.toolCallId,
               toolName: event.request.toolName,
               displayName,
-              input: capToolInput(enrichedInput),
+              input: enrichedInput,
               description: event.request.description,
               displayLines: event.request.displayLines,
               addresserUserId: user.id,
@@ -6730,6 +6825,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                 provider: options.provider,
                 pendingAssistantTurns,
                 userText: userMessageText,
+                conversationHistory: messages.slice(0, -1),
                 channelType: 'web',
               })
               if (result) {

@@ -130,9 +130,9 @@ export function createE2bCloudProvider(
     const res = await handle.runCommand(command, {
       timeoutMs: COMMAND_TIMEOUT_MS,
       envs: {
-        // Fixed name (NOT per-sandbox): matches the daemon the template
-        // snapshot pre-warmed at build time, so the first command reuses
-        // the already-running Chromium instead of paying its cold launch.
+        // Fixed name (NOT per-sandbox): every command reconnects to the daemon
+        // the FIRST browser command lazily starts. Compute-only sandboxes never
+        // invoke this path and therefore never start Chromium.
         ...sessionEnv(SANDBOX_SESSION_NAME),
         // The daemon launches on the first command and loads auth state
         // from this file; pointing at a missing file fails the launch, so
@@ -164,9 +164,9 @@ export function createE2bCloudProvider(
         // hardened site made a non-datacenter egress the whole point.
         const open = proxy ? `${cli.open(url)} --proxy '${proxy.replace(/'/g, '')}'` : cli.open(url)
         // Viewport rides the same exec (chained = zero extra round trips) on
-        // every navigate: the snapshot's pre-warmed daemon and a
-        // vault-injected relaunch both come up at the CLI default size, and
-        // re-applying an unchanged viewport is a no-op.
+        // every navigate: both a lazy first launch and a vault-injected
+        // relaunch come up at the CLI default size, and re-applying an
+        // unchanged viewport is a no-op.
         const out = await runBrowserCommand(
           sandboxId,
           chainCommands(cli.setViewport(SANDBOX_VIEWPORT.width, SANDBOX_VIEWPORT.height), open, cli.getUrl()),
@@ -477,7 +477,7 @@ export function createE2bCloudProvider(
       }
       const handle = await handleFor(sandboxId)
       const m = meta(sandboxId)
-      // The CDP endpoint of the warm daemon (auto-starts on first use) —
+      // Resolve the CDP endpoint, lazily starting the daemon on first use —
       // same cache + invalidation discipline as the take-over input relay.
       if (!m.cdpUrl) {
         m.cdpUrl = (await runBrowserCommand(sandboxId, cli.getCdpUrl())).trim()

@@ -183,10 +183,14 @@ export async function findOrCreateUser(params: {
   // Personal workspace + a primary assistant inside it. Done in a single
   // transaction so a partial signup can't leave the user without a workspace
   // home.
-  const firstName = (user.name ?? '').split(' ')[0] || user.handle || 'My'
-  const workspaceName = `${firstName}'s personal workspace`
-  const workspacePurpose =
-    "Personal workspace — primary assistant + memories not bound to a shared workspace."
+  // These values are prefilled in the first onboarding form, so keep them
+  // human-facing. Internal primary-assistant / memory-scope terminology does
+  // not belong in a description the user is being asked to make their own.
+  // Keep the name identifiable for workspace lists and operational debugging;
+  // the generated handle is unique when the identity provider gives no name.
+  const ownerLabel = (user.name ?? '').trim().split(/\s+/)[0] || user.handle
+  const workspaceName = `${ownerLabel}'s workspace`
+  const workspacePurpose = 'Notes, projects, and conversations in one place.'
 
   const client = await getPool().connect()
   try {

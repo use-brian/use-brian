@@ -176,3 +176,76 @@ describe('[COMP:engine/query-loop] Terminal-turn rescue — stopReason says term
     expect(assembleDeliverable(events)).toBe('All set - cursor saved.')
   })
 })
+
+const invocationResourceTurn: StreamChunk[] = [
+  { type: 'message_start', model: 'mock-model' },
+  { type: 'tool_use_start', id: 'resource-1', name: 'reserve_resource' },
+  { type: 'tool_use_delta', id: 'resource-1', input: '{}' },
+  { type: 'tool_use_end', id: 'resource-1' },
+  { type: 'tool_use_start', id: 'resource-2', name: 'reserve_resource' },
+  { type: 'tool_use_delta', id: 'resource-2', input: '{}' },
+  { type: 'tool_use_end', id: 'resource-2' },
+  { type: 'message_end', stopReason: 'tool_use', usage: { inputTokens: 5, outputTokens: 3 } },
+]
+
+describe('[COMP:engine/query-loop] Invocation finalizers', () => {
+  it('runs a keyed finalizer once after a normal terminal turn', async () => {
+    let finalized = 0
+    const resourceTool = buildTool({
+      name: 'reserve_resource',
+      description: 'Reserve one test resource',
+      inputSchema: z.object({}),
+      isConcurrencySafe: true,
+      async execute(_input, context) {
+        context.registerInvocationFinalizer?.('test-resource', async () => {
+          finalized++
+        })
+        return { data: 'reserved' }
+      },
+    })
+    const events: QueryEvent[] = []
+
+    for await (const event of queryLoop({
+      provider: scriptedProvider([invocationResourceTurn, textChunks('Finished.')]),
+      model: 'mock-model',
+      systemPrompt: 'sys',
+      messages: [{ role: 'user', content: 'use the resource' }],
+      tools: new Map([['reserve_resource', resourceTool]]),
+      context: baseContext,
+    })) {
+      events.push(event)
+    }
+
+    expect(events.some((event) => event.type === 'turn_complete')).toBe(true)
+    expect(finalized).toBe(1)
+  })
+
+  it('runs finalizers when a consumer stops iterating before turn_complete', async () => {
+    let finalized = 0
+    const resourceTool = buildTool({
+      name: 'reserve_resource',
+      description: 'Reserve one test resource',
+      inputSchema: z.object({}),
+      isConcurrencySafe: true,
+      async execute(_input, context) {
+        context.registerInvocationFinalizer?.('test-resource', async () => {
+          finalized++
+        })
+        return { data: 'reserved' }
+      },
+    })
+
+    for await (const event of queryLoop({
+      provider: scriptedProvider([invocationResourceTurn, textChunks('Finished.')]),
+      model: 'mock-model',
+      systemPrompt: 'sys',
+      messages: [{ role: 'user', content: 'use the resource' }],
+      tools: new Map([['reserve_resource', resourceTool]]),
+      context: baseContext,
+    })) {
+      if (event.type === 'tool_result') break
+    }
+
+    expect(finalized).toBe(1)
+  })
+})

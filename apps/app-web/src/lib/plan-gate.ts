@@ -41,3 +41,24 @@ export function modelTierPlanGateApplies(
 export function planGateDismissKey(workspaceId: string): string {
   return `plan-gate-dismissed:${workspaceId}`;
 }
+
+/**
+ * The trial welcome returns through the legacy `/home` entry because the
+ * billing service owns the final URL and app-web itself is workspace-scoped.
+ * Both the marketing proxy and app-web's legacy resolver understand `/home`,
+ * so the Stripe round-trip lands back in the user's workspace instead of the
+ * billing modal.
+ */
+export const PLAN_GATE_TRIAL_RETURN_PATH = "/home";
+
+export function planGateTrialCheckoutBody(workspaceId: string): {
+  workspace_id: string;
+  plan: "pro";
+  returnTo: typeof PLAN_GATE_TRIAL_RETURN_PATH;
+} {
+  return {
+    workspace_id: workspaceId,
+    plan: "pro",
+    returnTo: PLAN_GATE_TRIAL_RETURN_PATH,
+  };
+}

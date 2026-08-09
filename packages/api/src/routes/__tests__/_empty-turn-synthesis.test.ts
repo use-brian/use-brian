@@ -3,7 +3,8 @@
  *
  * Covers the contract the chat route relies on:
  *   - empty buffer / no successful tool results → still calls Flash
- *     in no-evidence mode (caller only falls back to the canned
+ *     with recent visible dialogue when present, otherwise no-evidence mode
+ *     (caller only falls back to the canned
  *     banner when Flash itself fails)
  *   - all tool_results errored → no-evidence mode, Flash sees empty
  *     toolEvidence
@@ -19,7 +20,7 @@ import {
   composeEmptyTurnSynthesis,
   type EmptyTurnSynthesisInputTurn,
 } from '../_empty-turn-synthesis.js'
-import type { LLMProvider, ContentBlock } from '@use-brian/core'
+import type { LLMProvider, ContentBlock, Message } from '@use-brian/core'
 
 function makeFakeProvider(streamedText: string): LLMProvider {
   async function* fakeStream() {
@@ -80,6 +81,7 @@ describe('[COMP:api/empty-turn-synthesis] composeEmptyTurnSynthesis', () => {
       provider,
       pendingAssistantTurns: [],
       userText: 'give me a list of which developer contributed how much yesterday',
+      conversationHistory: [],
       channelType: 'web',
     })
     expect(result).not.toBeNull()
@@ -97,6 +99,7 @@ describe('[COMP:api/empty-turn-synthesis] composeEmptyTurnSynthesis', () => {
       provider,
       pendingAssistantTurns: [turn([{ type: 'text', text: 'thinking…' }], [])],
       userText: 'summarise the doc',
+      conversationHistory: [],
       channelType: 'web',
     })
     expect(result).not.toBeNull()
@@ -105,6 +108,51 @@ describe('[COMP:api/empty-turn-synthesis] composeEmptyTurnSynthesis', () => {
       (provider.stream as ReturnType<typeof vi.fn>).mock.calls[0][0].messages[0].content,
     )
     expect(payload.toolEvidence).toEqual([])
+  })
+
+  it('carries the preceding Snapio strategy into an empty-turn follow-up synthesis', async () => {
+    // Exact production failure, 2026-08-09 18:08 HKT. Research returned three
+    // clean STOP turns with zero visible blocks. The old fallback received
+    // only the final sentence and asked for project files, even though the
+    // immediately preceding assistant turn had already framed the multiples.
+    const provider = makeFakeProvider(
+      'Build the story around recurring revenue, margin expansion, and geographic scale so buyers underwrite a higher EV/EBITDA multiple.',
+    )
+    const conversationHistory: Message[] = [
+      {
+        role: 'user',
+        content: 'What is the potential exit strategy if we aim for 50M in two years?',
+      },
+      {
+        role: 'assistant',
+        content: [{
+          type: 'text',
+          text: 'Snapio should target strategic acquirers and build toward an 8x to 12x EV/EBITDA valuation story.',
+        }],
+      },
+    ]
+
+    const result = await composeEmptyTurnSynthesis({
+      provider,
+      pendingAssistantTurns: [turn([], [])],
+      userText: 'How can we strategize the story to add multiples for snapio?',
+      conversationHistory,
+      channelType: 'web',
+    })
+
+    expect(result?.text).toContain('recurring revenue')
+    const call = (provider.stream as ReturnType<typeof vi.fn>).mock.calls[0][0]
+    const payload = JSON.parse(call.messages[0].content)
+    expect(payload.toolEvidence).toEqual([])
+    expect(payload.recentConversation).toEqual([
+      { role: 'user', text: conversationHistory[0].content },
+      {
+        role: 'assistant',
+        text: 'Snapio should target strategic acquirers and build toward an 8x to 12x EV/EBITDA valuation story.',
+      },
+    ])
+    expect(call.systemPrompt).toContain('CONVERSATION MODE')
+    expect(call.systemPrompt).toContain('Do not claim a file, connector, or data source is missing')
   })
 
   it('calls Flash in no-evidence mode when every tool_result errored', async () => {
@@ -126,6 +174,7 @@ describe('[COMP:api/empty-turn-synthesis] composeEmptyTurnSynthesis', () => {
         ),
       ],
       userText: 'tell me about foo',
+      conversationHistory: [],
       channelType: 'web',
     })
     expect(result).not.toBeNull()
@@ -144,6 +193,7 @@ describe('[COMP:api/empty-turn-synthesis] composeEmptyTurnSynthesis', () => {
       provider,
       pendingAssistantTurns: [workerFindingsTurn],
       userText: 'give me the links of the video',
+      conversationHistory: [],
       channelType: 'web',
     })
     expect(result).not.toBeNull()
@@ -166,6 +216,7 @@ describe('[COMP:api/empty-turn-synthesis] composeEmptyTurnSynthesis', () => {
       provider: makeThrowingProvider(),
       pendingAssistantTurns: [workerFindingsTurn],
       userText: 'give me the links',
+      conversationHistory: [],
       channelType: 'web',
     })
     expect(result).toBeNull()
@@ -176,6 +227,7 @@ describe('[COMP:api/empty-turn-synthesis] composeEmptyTurnSynthesis', () => {
       provider: makeFakeProvider(''),
       pendingAssistantTurns: [workerFindingsTurn],
       userText: 'give me the links',
+      conversationHistory: [],
       channelType: 'web',
     })
     expect(result).toBeNull()
@@ -191,6 +243,7 @@ describe('[COMP:api/empty-turn-synthesis] composeEmptyTurnSynthesis', () => {
       provider,
       pendingAssistantTurns: [],
       userText: 'Help me build a profile of myself in this brain.',
+      conversationHistory: [],
       channelType: 'web',
     })
     const call = (provider.stream as ReturnType<typeof vi.fn>).mock.calls[0][0]
@@ -223,6 +276,7 @@ describe('[COMP:api/empty-turn-synthesis] composeEmptyTurnSynthesis', () => {
         ),
       ],
       userText: 'find stuff',
+      conversationHistory: [],
       channelType: 'web',
     })
     const payload = JSON.parse(

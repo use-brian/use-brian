@@ -1,0 +1,543 @@
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  padding: clamp(1rem, 4vw, 3rem);
+}
+
+.trialBackdrop {
+  background:
+    radial-gradient(circle at 18% 18%, color-mix(in srgb, #3eeaff 22%, transparent), transparent 32%),
+    radial-gradient(circle at 82% 22%, color-mix(in srgb, #7c8cff 18%, transparent), transparent 34%),
+    color-mix(in srgb, var(--background) 88%, #07141d 12%);
+  backdrop-filter: blur(24px) saturate(135%);
+  isolation: isolate;
+}
+
+.ambient {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.ambientBlob {
+  position: absolute;
+  width: 36rem;
+  height: 36rem;
+  border-radius: 999px;
+  filter: blur(64px);
+  opacity: 0.34;
+  animation: ambientDrift 12s ease-in-out infinite alternate;
+}
+
+.ambientBlobOne {
+  top: -20rem;
+  left: -10rem;
+  background: #24e5f6;
+}
+
+.ambientBlobTwo {
+  right: -16rem;
+  bottom: -21rem;
+  background: #806bff;
+  animation-delay: -4s;
+  animation-duration: 15s;
+}
+
+.ambientBlobThree {
+  width: 18rem;
+  height: 18rem;
+  top: 42%;
+  left: 54%;
+  background: #4aa7ff;
+  animation-delay: -7s;
+  animation-duration: 10s;
+}
+
+.grid {
+  position: absolute;
+  inset: -20%;
+  opacity: 0.12;
+  background-image:
+    linear-gradient(color-mix(in srgb, var(--foreground) 20%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in srgb, var(--foreground) 20%, transparent) 1px, transparent 1px);
+  background-size: 42px 42px;
+  transform: perspective(620px) rotateX(64deg) translateY(32%);
+  mask-image: linear-gradient(to bottom, transparent 8%, #000 55%, transparent 92%);
+  animation: gridGlide 12s linear infinite;
+}
+
+.trialCard {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(18rem, 0.9fr) minmax(23rem, 1.1fr);
+  width: min(61rem, 100%);
+  min-height: min(39rem, calc(100vh - 4rem));
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--primary) 27%, var(--border));
+  border-radius: 2rem;
+  background: color-mix(in srgb, var(--card) 90%, transparent);
+  box-shadow:
+    0 2px 0 color-mix(in srgb, #fff 44%, transparent) inset,
+    0 32px 100px -34px color-mix(in srgb, #00d9ed 56%, transparent),
+    0 40px 96px -48px color-mix(in srgb, #715bff 66%, transparent);
+  backdrop-filter: blur(30px);
+  animation: cardArrive 700ms cubic-bezier(.2, .9, .2, 1) both;
+}
+
+.mascotStage {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 25rem;
+  overflow: hidden;
+  border-right: 1px solid color-mix(in srgb, var(--primary) 18%, var(--border));
+  background:
+    linear-gradient(150deg, color-mix(in srgb, #4beaff 23%, transparent), transparent 54%),
+    linear-gradient(330deg, color-mix(in srgb, #796dff 16%, transparent), transparent 56%),
+    color-mix(in srgb, var(--muted) 64%, transparent);
+}
+
+.mascotStage::before,
+.mascotStage::after {
+  content: "";
+  position: absolute;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, #6defff 42%, transparent);
+  animation: ringPulse 3.6s ease-out infinite;
+}
+
+.mascotStage::before {
+  width: 19rem;
+  height: 19rem;
+}
+
+.mascotStage::after {
+  width: 24rem;
+  height: 24rem;
+  animation-delay: 1.8s;
+}
+
+.mascotWrap {
+  position: relative;
+  z-index: 2;
+  width: min(16rem, 72%);
+  aspect-ratio: 1;
+  display: grid;
+  place-items: center;
+}
+
+.mascotAura {
+  position: absolute;
+  inset: 8%;
+  border-radius: 50%;
+  background: conic-gradient(from 20deg, #42f5ff, #6e7aff, #56f0d5, #42f5ff);
+  filter: blur(24px);
+  opacity: 0.45;
+  animation: auraSpin 7s linear infinite;
+}
+
+.mascotOrbit {
+  position: absolute;
+  inset: 4%;
+  border: 1px dashed color-mix(in srgb, #82f6ff 70%, transparent);
+  border-radius: 50%;
+  animation: auraSpin 10s linear infinite reverse;
+}
+
+.mascotOrbit::before {
+  content: "";
+  position: absolute;
+  top: 13%;
+  left: 2%;
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 18px #5af3ff;
+}
+
+.mascot {
+  position: relative;
+  z-index: 2;
+  width: 88%;
+  height: 88%;
+  overflow: visible;
+  image-rendering: pixelated;
+  animation: mascotFloat 2.4s ease-in-out infinite;
+}
+
+.mascotBody {
+  transform-origin: 80px 104px;
+  animation: mascotSquash 2.4s ease-in-out infinite;
+}
+
+.mascotShadow {
+  transform-origin: 80px 143px;
+  animation: shadowBreathe 2.4s ease-in-out infinite;
+}
+
+.mascotEyes {
+  transform-origin: 80px 79px;
+  animation: mascotBlink 4.8s steps(1, end) infinite;
+}
+
+.mascotSmile {
+  stroke-dasharray: 34;
+  stroke-dashoffset: 34;
+  animation: drawSmile 650ms 500ms ease-out forwards;
+}
+
+.mascotCheek {
+  animation: cheekGlow 2s ease-in-out infinite alternate;
+}
+
+.mascotWave {
+  transform-origin: 138px 98px;
+  animation: mascotWave 1.05s ease-in-out infinite alternate;
+}
+
+.sparkle {
+  position: absolute;
+  z-index: 3;
+  width: 0.7rem;
+  height: 0.7rem;
+  background: #fff;
+  clip-path: polygon(50% 0, 61% 38%, 100% 50%, 61% 62%, 50% 100%, 39% 62%, 0 50%, 39% 38%);
+  filter: drop-shadow(0 0 8px #55edff);
+  animation: sparklePop 2.6s ease-in-out infinite;
+}
+
+.sparkleOne { top: 10%; left: 19%; }
+.sparkleTwo { top: 25%; right: 8%; animation-delay: -0.9s; transform: scale(.65); }
+.sparkleThree { bottom: 16%; left: 10%; animation-delay: -1.7s; transform: scale(.45); }
+
+.pixelTrail {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.pixelTrail span {
+  --pixel-angle: calc(var(--pixel-index) * 45deg);
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 0.45rem;
+  height: 0.45rem;
+  background: color-mix(in srgb, #50edff 62%, #fff);
+  box-shadow: 0 0 12px color-mix(in srgb, #50edff 74%, transparent);
+  animation: pixelBurst 3.2s ease-out infinite;
+  animation-delay: calc(var(--pixel-index) * -0.19s);
+}
+
+.greetingBubble {
+  position: relative;
+  z-index: 4;
+  margin-top: -0.25rem;
+  padding: 0.65rem 1rem;
+  border: 1px solid color-mix(in srgb, var(--primary) 26%, var(--border));
+  border-radius: 1rem 1rem 1rem 0.25rem;
+  background: color-mix(in srgb, var(--card) 89%, transparent);
+  color: var(--foreground);
+  font-size: 0.84rem;
+  font-weight: 650;
+  box-shadow: 0 12px 34px -20px color-mix(in srgb, #00cfe4 70%, transparent);
+  animation: greetingPop 520ms 460ms cubic-bezier(.2, 1.4, .35, 1) both;
+}
+
+.trialContent {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: clamp(2rem, 5vw, 4.25rem);
+}
+
+.eyebrow {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 0.45rem;
+  margin-bottom: 1rem;
+  padding: 0.42rem 0.7rem;
+  border: 1px solid color-mix(in srgb, var(--primary) 28%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--primary) 8%, var(--card));
+  color: color-mix(in srgb, var(--primary) 72%, var(--foreground));
+  font-size: 0.72rem;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  animation: contentRise 520ms 180ms ease-out both;
+}
+
+.eyebrow svg { width: 0.9rem; height: 0.9rem; }
+
+.trialTitle {
+  max-width: 12ch;
+  font-size: clamp(2.3rem, 5vw, 4.1rem);
+  font-weight: 760;
+  letter-spacing: -0.055em;
+  line-height: 0.98;
+  text-wrap: balance;
+  animation: contentRise 580ms 240ms ease-out both;
+}
+
+.trialBody {
+  max-width: 34rem;
+  margin-top: 1.15rem;
+  color: var(--muted-foreground);
+  font-size: clamp(0.98rem, 1.4vw, 1.08rem);
+  line-height: 1.62;
+  text-wrap: pretty;
+  animation: contentRise 580ms 300ms ease-out both;
+}
+
+.benefitGrid {
+  display: grid;
+  gap: 0.68rem;
+  margin-top: 1.65rem;
+  animation: contentRise 580ms 360ms ease-out both;
+}
+
+.benefit {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  color: var(--foreground);
+  font-size: 0.88rem;
+  font-weight: 570;
+}
+
+.benefitCheck {
+  display: grid;
+  width: 1.35rem;
+  height: 1.35rem;
+  place-items: center;
+  border-radius: 0.42rem;
+  background: color-mix(in srgb, #18dbe9 15%, var(--muted));
+  color: color-mix(in srgb, #00bace 78%, var(--foreground));
+}
+
+.benefitCheck svg { width: 0.78rem; height: 0.78rem; stroke-width: 3; }
+
+.trialCta {
+  position: relative;
+  display: flex;
+  width: 100%;
+  min-height: 3.45rem;
+  align-items: center;
+  justify-content: center;
+  gap: 0.65rem;
+  margin-top: 2rem;
+  overflow: hidden;
+  border: 0;
+  border-radius: 1rem;
+  background: linear-gradient(110deg, #04c9dc, #159be4 54%, #6d65f4);
+  color: #fff;
+  font-size: 0.96rem;
+  font-weight: 760;
+  box-shadow:
+    0 14px 32px -13px rgba(2, 195, 220, 0.9),
+    0 7px 22px -14px rgba(91, 89, 244, 0.9);
+  transition: transform 180ms ease, box-shadow 180ms ease, filter 180ms ease;
+  animation: contentRise 580ms 420ms ease-out both, ctaGlow 2.8s 1.2s ease-in-out infinite;
+}
+
+.trialCta::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(105deg, transparent 25%, rgba(255,255,255,.38) 48%, transparent 70%);
+  transform: translateX(-120%);
+  animation: ctaShine 3.4s 1.3s ease-in-out infinite;
+}
+
+.trialCta > * { position: relative; }
+.trialCta:hover:not(:disabled) { transform: translateY(-2px) scale(1.012); filter: saturate(1.1); }
+.trialCta:active:not(:disabled) { transform: translateY(0) scale(0.99); }
+.trialCta:focus-visible { outline: 3px solid color-mix(in srgb, #59e9ff 55%, transparent); outline-offset: 3px; }
+.trialCta:disabled { cursor: progress; opacity: 0.78; }
+.trialCta svg { width: 1rem; height: 1rem; }
+
+.spinner { animation: spin 800ms linear infinite; }
+
+.noCard {
+  margin-top: 0.75rem;
+  color: var(--muted-foreground);
+  font-size: 0.73rem;
+  text-align: center;
+  animation: contentRise 580ms 460ms ease-out both;
+}
+
+.checkoutError {
+  margin-top: 0.7rem;
+  color: var(--destructive);
+  font-size: 0.78rem;
+  text-align: center;
+}
+
+.exploreButton {
+  align-self: center;
+  margin-top: 0.9rem;
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 0.76rem;
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  text-underline-offset: 3px;
+  transition: color 160ms ease, text-decoration-color 160ms ease;
+  animation: contentRise 580ms 500ms ease-out both;
+}
+
+.exploreButton:hover { color: var(--foreground); text-decoration-color: currentColor; }
+.exploreButton:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; border-radius: 0.2rem; }
+
+@keyframes cardArrive {
+  from { opacity: 0; transform: translateY(26px) scale(.965); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes contentRise {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes ambientDrift {
+  from { transform: translate3d(-4%, -3%, 0) scale(.92); }
+  to { transform: translate3d(10%, 8%, 0) scale(1.12); }
+}
+
+@keyframes gridGlide {
+  to { background-position: 0 42px, 42px 0; }
+}
+
+@keyframes ringPulse {
+  0% { opacity: 0; transform: scale(.62); }
+  32% { opacity: .38; }
+  100% { opacity: 0; transform: scale(1.15); }
+}
+
+@keyframes auraSpin { to { transform: rotate(360deg); } }
+
+@keyframes mascotFloat {
+  0%, 100% { transform: translateY(2px) rotate(-1deg); }
+  50% { transform: translateY(-12px) rotate(1.5deg); }
+}
+
+@keyframes mascotSquash {
+  0%, 100% { transform: scale(1.02, .98); }
+  48% { transform: scale(.97, 1.04); }
+}
+
+@keyframes shadowBreathe {
+  0%, 100% { transform: scaleX(1.05); opacity: .75; }
+  50% { transform: scaleX(.72); opacity: .42; }
+}
+
+@keyframes mascotBlink {
+  0%, 43%, 47%, 100% { transform: scaleY(1); }
+  44%, 46% { transform: scaleY(.12); }
+}
+
+@keyframes drawSmile { to { stroke-dashoffset: 0; } }
+
+@keyframes cheekGlow {
+  from { opacity: .48; }
+  to { opacity: 1; }
+}
+
+@keyframes mascotWave {
+  from { transform: rotate(-8deg); }
+  to { transform: rotate(21deg); }
+}
+
+@keyframes sparklePop {
+  0%, 100% { opacity: .1; scale: .25; rotate: 0deg; }
+  45% { opacity: 1; scale: 1; rotate: 90deg; }
+}
+
+@keyframes pixelBurst {
+  0% { opacity: 0; transform: rotate(var(--pixel-angle)) translateX(3.2rem) scale(.35); }
+  28% { opacity: .8; }
+  100% { opacity: 0; transform: rotate(var(--pixel-angle)) translateX(10.5rem) scale(1); }
+}
+
+@keyframes greetingPop {
+  from { opacity: 0; transform: translateY(10px) scale(.75) rotate(-2deg); }
+  to { opacity: 1; transform: translateY(0) scale(1) rotate(0); }
+}
+
+@keyframes ctaGlow {
+  0%, 100% { box-shadow: 0 14px 32px -13px rgba(2,195,220,.82), 0 7px 22px -14px rgba(91,89,244,.8); }
+  50% { box-shadow: 0 19px 42px -11px rgba(2,195,220,.98), 0 10px 29px -12px rgba(91,89,244,.92); }
+}
+
+@keyframes ctaShine {
+  0%, 52% { transform: translateX(-120%); }
+  72%, 100% { transform: translateX(120%); }
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 760px) {
+  .backdrop { align-items: start; overflow-y: auto; padding: 0; }
+  .trialCard {
+    grid-template-columns: 1fr;
+    width: 100%;
+    min-height: 100dvh;
+    border: 0;
+    border-radius: 0;
+  }
+  .mascotStage {
+    min-height: 17.5rem;
+    border-right: 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--primary) 18%, var(--border));
+  }
+  .mascotWrap { width: 12rem; }
+  .mascotStage::before { width: 15rem; height: 15rem; }
+  .mascotStage::after { width: 19rem; height: 19rem; }
+  .greetingBubble { margin-top: -1.5rem; }
+  .trialContent { padding: 2.2rem 1.5rem 2rem; }
+  .trialTitle { max-width: 13ch; font-size: clamp(2.35rem, 12vw, 3.5rem); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .trialCard,
+  .ambientBlob,
+  .grid,
+  .mascotStage::before,
+  .mascotStage::after,
+  .mascotAura,
+  .mascotOrbit,
+  .mascot,
+  .mascotBody,
+  .mascotShadow,
+  .mascotEyes,
+  .mascotSmile,
+  .mascotCheek,
+  .mascotWave,
+  .sparkle,
+  .pixelTrail span,
+  .greetingBubble,
+  .eyebrow,
+  .trialTitle,
+  .trialBody,
+  .benefitGrid,
+  .trialCta,
+  .trialCta::before,
+  .noCard,
+  .exploreButton,
+  .spinner {
+    animation: none !important;
+  }
+}

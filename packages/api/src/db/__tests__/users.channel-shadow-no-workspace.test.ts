@@ -37,7 +37,7 @@ const mockedGetPool = vi.mocked(getPool)
 // id, INSERT capabilities, COMMIT. Returns a fresh id for the RETURNING rows.
 function makeMockClient() {
   const client = {
-    query: vi.fn(async (sql: string) => {
+    query: vi.fn(async (sql: string, _values?: unknown[]) => {
       if (/INSERT INTO workspaces/.test(sql)) return { rows: [{ id: 'ws_new' }], rowCount: 1 }
       if (/INSERT INTO assistants/.test(sql)) return { rows: [{ id: 'as_new' }], rowCount: 1 }
       return { rows: [], rowCount: 1 }
@@ -107,5 +107,42 @@ describe('[COMP:api/channel-shadow-workspace] Channel shadows get no personal wo
     )
     expect(insertedWorkspace).toBe(true)
     expect(insertedPrimary).toBe(true)
+  })
+
+  it('prefills platform workspaces with plain user-facing copy', async () => {
+    const client = makeMockClient()
+    mockedGetPool.mockReturnValue({ connect: vi.fn(async () => client) } as never)
+    primeNewUser('Ada Lovelace')
+
+    await findOrCreateUser({
+      authProvider: 'google',
+      authProviderId: 'g_42',
+      name: 'Ada Lovelace',
+    })
+
+    const workspaceInsert = client.query.mock.calls.find((call) =>
+      /INSERT INTO workspaces/.test(String(call[0])),
+    )
+    expect(workspaceInsert?.[1]).toEqual([
+      "Ada's workspace",
+      'Notes, projects, and conversations in one place.',
+      'u_new',
+    ])
+  })
+
+  it('uses the unique account handle when the provider supplies no name', async () => {
+    const client = makeMockClient()
+    mockedGetPool.mockReturnValue({ connect: vi.fn(async () => client) } as never)
+    primeNewUser('')
+
+    await findOrCreateUser({
+      authProvider: 'email',
+      authProviderId: 'email_42',
+    })
+
+    const workspaceInsert = client.query.mock.calls.find((call) =>
+      /INSERT INTO workspaces/.test(String(call[0])),
+    )
+    expect(workspaceInsert?.[1]?.[0]).toBe("shadow-1's workspace")
   })
 })

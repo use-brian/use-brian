@@ -448,8 +448,11 @@ export function createSkillRunnerTools(opts: CreateSkillRunnerToolsOptions): {
             workspaceId: context.workspaceId,
             sessionId: context.sessionId,
             profileId: profile.id,
+            ...(context.registerInvocationFinalizer
+              ? { registerInvocationFinalizer: context.registerInvocationFinalizer }
+              : {}),
           },
-          { url: `https://${skill.site}/` },
+          { url: `https://${skill.site}/`, browser: true },
         )
         const { run, result, outcomes } = await runGovernedBlock({
           context,

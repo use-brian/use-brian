@@ -248,6 +248,12 @@ export type ProactiveCompactionParams = {
    */
   workspaceId?: string
   chatEpisodeIngestor?: ChatEpisodeIngestor
+  /**
+   * False for conversation-only external guests. Compaction may still replace
+   * old turns with a session summary, but it must not extract memories, emit
+   * brain Episodes, or persist/promote episodic rows.
+   */
+  persistLongTermContext?: boolean
 }
 
 export type ProactiveCompactionResult = {
@@ -306,6 +312,7 @@ export async function runProactiveCompaction(
     usageStore, userMessageId,
     workspaceId, chatEpisodeIngestor,
   } = params
+  const persistLongTermContext = params.persistLongTermContext !== false
 
   const breaker = params.circuitBreaker ?? defaultCompactionBreaker
   const sessionId = session.id
@@ -418,51 +425,53 @@ export async function runProactiveCompaction(
     // 7. Pre-compaction memory extraction — safety net for facts not
     // yet saved via saveMemory. Runs regex + cheap LLM pass.
     // Fire-and-forget: extraction failure must not block compaction.
-    try {
-      // System-level read — pre-compaction extraction runs across the
-      // entire memory set for the (assistant, user) pair, so it uses
-      // the privileged-service-exception path (no per-viewer
-      // projection).
-      const existingIndex = await memoryStore.getIndexSystem(assistantId, userId)
-      const existingSummaries = existingIndex.map((m) => m.summary)
-      const extracted = await extractMemoriesBeforeCompaction({
-        provider,
-        model: 'gemini-flash',
-        messages: compactableForLLM,
-        existingMemories: existingSummaries,
-      })
-      for (const fact of extracted.facts) {
-        // Post-Phase-4 (retire-memory-type): no `type` field on the
-        // memory write. The fact's categorical signal (if any) can
-        // be moved to tags on a future extractor pass.
-        await memoryStore.create({
-          assistantId,
-          userId,
-          summary: fact.summary,
-          confidence: fact.confidence,
-          source: 'pre-compaction',
-          sourceSessionId: sessionId,
-          sensitivity: 'internal',
-          createdByUserId: userId,
-          createdByAssistantId: assistantId,
+    if (persistLongTermContext) {
+      try {
+        // System-level read — pre-compaction extraction runs across the
+        // entire memory set for the (assistant, user) pair, so it uses
+        // the privileged-service-exception path (no per-viewer
+        // projection).
+        const existingIndex = await memoryStore.getIndexSystem(assistantId, userId)
+        const existingSummaries = existingIndex.map((m) => m.summary)
+        const extracted = await extractMemoriesBeforeCompaction({
+          provider,
+          model: 'gemini-flash',
+          messages: compactableForLLM,
+          existingMemories: existingSummaries,
         })
-      }
-      if (extracted.facts.length > 0) {
-        analytics?.logEvent({
-          userId, assistantId, sessionId,
-          eventName: 'memory_pre_compaction_extracted', channelType,
-          metadata: { count: extracted.facts.length },
+        for (const fact of extracted.facts) {
+          // Post-Phase-4 (retire-memory-type): no `type` field on the
+          // memory write. The fact's categorical signal (if any) can
+          // be moved to tags on a future extractor pass.
+          await memoryStore.create({
+            assistantId,
+            userId,
+            summary: fact.summary,
+            confidence: fact.confidence,
+            source: 'pre-compaction',
+            sourceSessionId: sessionId,
+            sensitivity: 'internal',
+            createdByUserId: userId,
+            createdByAssistantId: assistantId,
+          })
+        }
+        if (extracted.facts.length > 0) {
+          analytics?.logEvent({
+            userId, assistantId, sessionId,
+            eventName: 'memory_pre_compaction_extracted', channelType,
+            metadata: { count: extracted.facts.length },
+          })
+        }
+        await recordOverheadUsage({
+          usageStore, userId: ownerId, actorUserId: userId,
+          assistantId, sessionId, userMessageId,
+          model: extracted.model, usage: extracted.usage,
+          source: 'overhead:extraction',
+          triggerKey: 'pattern_extractor',
         })
+      } catch (err) {
+        console.error('[pre-compaction extraction] Failed:', err)
       }
-      await recordOverheadUsage({
-        usageStore, userId: ownerId, actorUserId: userId,
-        assistantId, sessionId, userMessageId,
-        model: extracted.model, usage: extracted.usage,
-        source: 'overhead:extraction',
-        triggerKey: 'pattern_extractor',
-      })
-    } catch (err) {
-      console.error('[pre-compaction extraction] Failed:', err)
     }
 
     // 8. Summarize.
@@ -532,7 +541,7 @@ export async function runProactiveCompaction(
     // background and never blocks the turn; a failure is logged, not
     // surfaced. Mirrors the pre-compaction memory extraction's
     // best-effort discipline. Only runs for a workspace-scoped assistant.
-    if (chatEpisodeIngestor && workspaceId) {
+    if (persistLongTermContext && chatEpisodeIngestor && workspaceId) {
       const compactedRows = sessionMessages.filter((m) => m.sequenceNum < newCursor)
       if (compactedRows.length > 0) {
         const content = compactedRows
@@ -561,7 +570,7 @@ export async function runProactiveCompaction(
     // 10. Episodic lifecycle housekeeping — only runs after we claimed
     // the cursor, so at most one turn does this per compaction.
     let housekeepingStats = { promoted: 0, evicted: 0, kept: 0 }
-    if (episodicStore) {
+    if (persistLongTermContext && episodicStore) {
       try {
         housekeepingStats = await houseKeepEpisodic({
           episodicStore, memoryStore,
@@ -591,7 +600,7 @@ export async function runProactiveCompaction(
       }
     }
 
-    const episodes = compactResult.episodes ?? []
+    const episodes = persistLongTermContext ? (compactResult.episodes ?? []) : []
     if (episodes.length > 0 && episodicStore) {
       for (const ep of episodes) {
         try {
@@ -801,4 +810,3 @@ export async function houseKeepEpisodic(
 
   return { promoted, evicted, kept: toKeep.length }
 }
-

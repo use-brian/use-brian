@@ -122,9 +122,8 @@ describe('[COMP:sandbox/e2b-cloud] E2BCloudProvider', () => {
       { ref: '@e1', role: 'link', name: 'Front page' },
       { ref: '@e2', role: 'button', name: 'More' },
     ])
-    // Every browser command runs under the FIXED session name — the one the
-    // template snapshot pre-warmed a daemon for (a per-sandbox name would
-    // orphan the warm Chromium and relaunch cold).
+    // Every browser command runs under the FIXED session name, so all calls
+    // reconnect to the daemon the first browser command lazily starts.
     expect(commands.every((c) => c.envs?.AGENT_BROWSER_SESSION_NAME === SANDBOX_SESSION_NAME)).toBe(true)
   })
 

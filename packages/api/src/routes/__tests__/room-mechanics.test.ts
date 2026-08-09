@@ -17,12 +17,13 @@
  * Spec: docs/architecture/features/chat-app.md → "The room model".
  */
 
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import {
   buildRoomResponseCoordinationBlock,
   detectRoomAddress,
   mayAssistantAnswerInRoom,
   mayResolveRoomConfirmation,
+  publishRoomTurnActivity,
   roomTurnAdmission,
   sharedTurnRejection,
   turnStopOutcome,
@@ -33,6 +34,89 @@ import {
   toStampedMessages,
   type SessionMessage,
 } from '../../db/sessions.js'
+
+describe('[COMP:api/room-mechanics] shared live activity (T13)', () => {
+  it('attributes research and worker activity to the room turn sender', () => {
+    const publishSessionEvent = vi.fn()
+
+    publishRoomTurnActivity({
+      isRoomSession: true,
+      sessionId: 'room-1',
+      senderUserId: 'user-1',
+      event: 'status',
+      data: { phase: 'research_starting' },
+      publishSessionEvent,
+    })
+    publishRoomTurnActivity({
+      isRoomSession: true,
+      sessionId: 'room-1',
+      senderUserId: 'user-1',
+      event: 'worker_start',
+      data: { workerId: 'worker-2', description: 'Check valuation multiples' },
+      publishSessionEvent,
+    })
+
+    expect(publishSessionEvent).toHaveBeenNthCalledWith(1, {
+      kind: 'turn_activity',
+      sessionId: 'room-1',
+      payload: {
+        event: 'status',
+        senderUserId: 'user-1',
+        phase: 'research_starting',
+      },
+    })
+    expect(publishSessionEvent).toHaveBeenNthCalledWith(2, {
+      kind: 'turn_activity',
+      sessionId: 'room-1',
+      payload: {
+        event: 'worker_start',
+        senderUserId: 'user-1',
+        workerId: 'worker-2',
+        description: 'Check valuation multiples',
+      },
+    })
+  })
+
+  it('caps mirrored inputs without truncating the sender direct stream', () => {
+    const publishSessionEvent = vi.fn()
+
+    publishRoomTurnActivity({
+      isRoomSession: true,
+      sessionId: 'room-1',
+      senderUserId: 'user-1',
+      event: 'tool_input',
+      data: { id: 'tool-1', name: 'webSearch', input: { query: 'x'.repeat(5_000) } },
+      publishSessionEvent,
+    })
+
+    expect(publishSessionEvent).toHaveBeenCalledWith({
+      kind: 'turn_activity',
+      sessionId: 'room-1',
+      payload: {
+        event: 'tool_input',
+        senderUserId: 'user-1',
+        id: 'tool-1',
+        name: 'webSearch',
+        input: {},
+      },
+    })
+  })
+
+  it('does not put personal-chat activity on the shared bus', () => {
+    const publishSessionEvent = vi.fn()
+
+    publishRoomTurnActivity({
+      isRoomSession: false,
+      sessionId: 'private-1',
+      senderUserId: 'user-1',
+      event: 'status',
+      data: { phase: 'research_starting' },
+      publishSessionEvent,
+    })
+
+    expect(publishSessionEvent).not.toHaveBeenCalled()
+  })
+})
 
 describe('[COMP:api/room-mechanics] detectRoomAddress (T3)', () => {
   const name = 'Brian'

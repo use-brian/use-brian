@@ -12,14 +12,19 @@
  * — misleading copy that pointed at the wrong lever (the user's
  * tool budget was nowhere near exhausted).
  *
- * This helper is the better fallback. Flash runs in one of two modes:
+ * This helper is the better fallback. Flash runs in one of three modes:
  *
  *   1. Evidence mode — the buffer carries at least one successful
  *      tool result (worker findings, webSearch, urlReader, …). Flash
  *      composes the answer the coordinator skipped using that
  *      evidence as ground truth.
  *
- *   2. No-evidence mode — the model thought-burnt before calling any
+ *   2. Conversation mode — no tool ran, but recent visible dialogue
+ *      already contains the referent or facts needed for a follow-up.
+ *      Flash answers from that bounded transcript instead of pretending
+ *      the user needs to reconnect or re-upload data.
+ *
+ *   3. No-evidence mode — the model thought-burnt before calling any
  *      tool (or every tool errored). Flash writes a brief reply that
  *      names *the specific thing it would need* to answer (a missing
  *      connector, a data source, more context). This is the gap that
@@ -38,7 +43,7 @@
  * banner.
  */
 
-import type { ContentBlock, LLMProvider, TokenUsage } from '@use-brian/core'
+import type { ContentBlock, LLMProvider, Message, TokenUsage } from '@use-brian/core'
 import { collectStream } from '@use-brian/core'
 
 export type EmptyTurnSynthesisInputTurn = {
@@ -50,6 +55,8 @@ export type EmptyTurnSynthesisParams = {
   provider: LLMProvider
   pendingAssistantTurns: EmptyTurnSynthesisInputTurn[]
   userText: string
+  /** Provider-ready transcript before the current user turn. */
+  conversationHistory: Message[]
   channelType: string
 }
 
@@ -67,22 +74,33 @@ const MAX_RESULT_SNIPPET_CHARS = 1500
 /** Soft cap on the number of tool results we feed Flash. */
 const MAX_TOOL_BULLETS = 12
 
+/** The fallback needs the referent, not another full context window. */
+const MAX_CONVERSATION_TURNS = 6
+const MAX_CONVERSATION_CHARS = 6000
+const MAX_CONVERSATION_TURN_CHARS = 2000
+
 const SYSTEM_PROMPT = [
   'You are a synthesis assistant. The primary model thought-burnt and failed to produce a reply — write the answer the user was waiting for on its behalf.',
   '',
   'You will be given:',
   '  - The user\'s last message (in any language).',
+  '  - Recent visible conversation turns from before that message (may be empty).',
   '  - A list of tool calls that already ran and their results — your evidence (may be empty).',
   '',
-  'Pick the mode based on whether toolEvidence has entries.',
+  'Pick the first applicable mode: TOOL EVIDENCE, CONVERSATION, then NO EVIDENCE.',
   '',
-  'EVIDENCE MODE — toolEvidence has at least one entry:',
+  'TOOL EVIDENCE MODE — toolEvidence has at least one entry:',
   '  - Write the reply the user is waiting for, grounded in the evidence.',
   '  - Quote concrete details from the tool results (URLs, prices, names, times) — do not invent specifics that are not in the evidence.',
   '  - If the evidence does not contain a clean answer, say so honestly in one sentence and suggest one specific follow-up the user can ask.',
   '',
-  'NO-EVIDENCE MODE — toolEvidence is empty:',
-  '  - The model never gathered any data for this question.',
+  'CONVERSATION MODE — toolEvidence is empty and recentConversation has entries:',
+  '  - Resolve follow-up references from the recent conversation and answer using what was already discussed.',
+  '  - Do not claim a file, connector, or data source is missing when the conversation already contains enough to answer.',
+  '  - Do not invent new specific facts beyond the conversation; label any new recommendation as a recommendation.',
+  '',
+  'NO-EVIDENCE MODE — both toolEvidence and recentConversation are empty:',
+  '  - The model has neither gathered data nor prior dialogue for this question.',
   '  - Write a brief reply (1-2 sentences) that names the specific thing required to answer: a connected tool, a data source, a file, or a clarification.',
   '  - Be concrete. "I\'d need GitHub connected to pull yesterday\'s commits by author" beats "I can\'t answer that".',
   '  - Do NOT apologise generically. Do NOT tell the user to "try again" with the same wording.',
@@ -92,6 +110,45 @@ const SYSTEM_PROMPT = [
   '  - No headings, no markdown lists unless the user explicitly asked for a list.',
   '  - Keep it under 200 words.',
 ].join('\n')
+
+/**
+ * Keep only user-visible text. An assistant turn carrying tool_use is
+ * structurally mid-reasoning, so its accompanying narration is never valid
+ * fallback context (the same final-text assembly invariant used at delivery).
+ */
+function collectRecentConversation(
+  messages: Message[],
+): Array<{ role: 'user' | 'assistant'; text: string }> {
+  const turns: Array<{ role: 'user' | 'assistant'; text: string }> = []
+  let remainingChars = MAX_CONVERSATION_CHARS
+
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]
+    if (message.role !== 'user' && message.role !== 'assistant') continue
+    if (
+      message.role === 'assistant' &&
+      Array.isArray(message.content) &&
+      message.content.some((block) => block.type === 'tool_use')
+    ) continue
+
+    const text = (typeof message.content === 'string'
+      ? message.content
+      : message.content
+        .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
+        .map((block) => block.text)
+        .join(''))
+      .trim()
+    if (!text) continue
+
+    const charLimit = Math.min(MAX_CONVERSATION_TURN_CHARS, remainingChars)
+    if (charLimit <= 0) break
+    turns.unshift({ role: message.role, text: text.slice(0, charLimit) })
+    remainingChars -= Math.min(text.length, charLimit)
+    if (turns.length >= MAX_CONVERSATION_TURNS || remainingChars <= 0) break
+  }
+
+  return turns
+}
 
 /**
  * Pull every successful tool call + result snippet out of the buffer.
@@ -130,10 +187,12 @@ export async function composeEmptyTurnSynthesis(
   params: EmptyTurnSynthesisParams,
 ): Promise<EmptyTurnSynthesisResult | null> {
   const evidence = collectEvidence(params.pendingAssistantTurns)
+  const recentConversation = collectRecentConversation(params.conversationHistory)
 
   const payload = JSON.stringify(
     {
       userMessage: params.userText.slice(0, 1000),
+      recentConversation,
       toolEvidence: evidence.map((a) => ({
         tool: a.name,
         input: a.input,

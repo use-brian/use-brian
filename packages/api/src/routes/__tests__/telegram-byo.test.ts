@@ -122,6 +122,8 @@ vi.mock('../../db/chat-lock.js', () => ({
 const pipelineCalls: Array<{
   channelId: string
   userId: string
+  isIdentified: boolean
+  externalGuest: boolean
   isGroupChat: boolean
   messageText?: string
   userContentBlocks?: Array<{ type: string; mimeType?: string }>
@@ -130,6 +132,8 @@ vi.mock('../channel-pipeline.js', () => ({
   processChannelMessage: vi.fn(async (params: {
     channelId: string
     userId: string
+    isIdentified: boolean
+    externalGuest?: boolean
     isGroupChat: boolean
     messageText?: string
     userContentBlocks?: Array<{ type: string; mimeType?: string }>
@@ -141,6 +145,8 @@ vi.mock('../channel-pipeline.js', () => ({
     pipelineCalls.push({
       channelId: params.channelId,
       userId: params.userId,
+      isIdentified: params.isIdentified,
+      externalGuest: params.externalGuest === true,
       isGroupChat: params.isGroupChat,
       messageText: params.messageText,
       userContentBlocks: params.userContentBlocks,
@@ -236,7 +242,9 @@ const mockFindOrCreateSession = vi.mocked(findOrCreateSession)
 
 // ── Test setup ──────────────────────────────────────────────────
 
-function makeIntegrationStore() {
+function makeIntegrationStore(
+  config: Record<string, unknown> = { requireMention: true },
+) {
   return {
     getByChannelForWebhook: vi.fn(async () => ({
       id: 'integ_1',
@@ -244,7 +252,7 @@ function makeIntegrationStore() {
       channelType: 'telegram',
       botUsername: 'testbot',
       botUserId: '999999',
-      config: { requireMention: true },
+      config,
       credentials: {
         bot_token: 'fake-token',
         webhook_secret: 'webhook-secret',
@@ -1022,6 +1030,153 @@ describe('[COMP:api/telegram-byo-route] cross-assistant identity bleed', () => {
     expect(teamRoleCalls).toContainEqual({ userId: 'member_user', workspaceId: 'ws_1' })
     expect(pipelineCalls).toHaveLength(1)
     expect(pipelineCalls[0].userId).toBe('member_user')
+  })
+})
+
+describe('[COMP:api/telegram-byo-route] allowlisted private guests', () => {
+  function buildPrivateDm(
+    fromId: number,
+    text: string,
+    username?: string,
+  ): Record<string, unknown> {
+    return {
+      update_id: fromId * 10,
+      message: {
+        message_id: fromId,
+        from: {
+          id: fromId,
+          first_name: 'Guest',
+          ...(username ? { username } : {}),
+        },
+        chat: { id: fromId, type: 'private' },
+        date: Math.floor(Date.now() / 1000),
+        text,
+      },
+    }
+  }
+
+  function makeLinkedAccountStore(
+    row: { userId: string; assistantId: string | null } | null,
+  ) {
+    return {
+      findByProvider: vi.fn(async () => row
+        ? {
+            id: 'la_guest',
+            userId: row.userId,
+            assistantId: row.assistantId,
+            provider: 'telegram',
+            providerId: '42',
+            providerMetadata: null,
+            linkedAt: new Date(),
+          }
+        : null),
+      upsert: vi.fn(),
+      findByAssistant: vi.fn(),
+      listForUser: vi.fn(),
+      deleteForUser: vi.fn(),
+    }
+  }
+
+  const channelUserStoreStub = {
+    resolve: vi.fn(),
+    cache: vi.fn(),
+    invalidateForAssistant: vi.fn(),
+  }
+
+  function makeGuestApp(
+    allowedUserIds: string[],
+    linked: { userId: string; assistantId: string | null } | null = null,
+  ) {
+    return createTestApp(
+      '/webhook/telegram-byo',
+      telegramByoRoutes({
+        provider: {} as never,
+        systemPrompt: '',
+        tools: new Map(),
+        memoryStore: {} as never,
+        integrationStore: makeIntegrationStore({
+          requireMention: true,
+          userAccessMode: 'allowlist',
+          allowedUserIds,
+        }) as never,
+        linkedAccountStore: makeLinkedAccountStore(linked) as never,
+        channelUserStore: channelUserStoreStub as never,
+        capabilityStore: {} as never,
+        apiUrl: 'http://test',
+      }),
+    )
+  }
+
+  it('treats a case-insensitive @handle match as an isolated guest grant', async () => {
+    const { resolveChannelUser } = await import('../../db/channel-user-store.js')
+    vi.mocked(resolveChannelUser).mockResolvedValueOnce({
+      user: { id: 'shadow_friend' } as never,
+      isIdentified: false,
+    })
+
+    const app = makeGuestApp(['@FrIeNd'])
+    await postUpdate(app, buildPrivateDm(42, 'hello', 'friend'))
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    expect(pipelineCalls).toHaveLength(1)
+    expect(pipelineCalls[0]).toMatchObject({
+      channelId: '42',
+      userId: 'shadow_friend',
+      isIdentified: false,
+      externalGuest: true,
+      isGroupChat: false,
+    })
+    expect(adapterSendCalls.at(-1)?.text).toBe('ok')
+  })
+
+  it('accepts a stable numeric Telegram id when the sender has no username', async () => {
+    const { resolveChannelUser } = await import('../../db/channel-user-store.js')
+    vi.mocked(resolveChannelUser).mockResolvedValueOnce({
+      user: { id: 'shadow_numeric' } as never,
+      isIdentified: false,
+    })
+
+    const app = makeGuestApp(['42'])
+    await postUpdate(app, buildPrivateDm(42, 'hello'))
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    expect(pipelineCalls).toHaveLength(1)
+    expect(pipelineCalls[0]).toMatchObject({
+      userId: 'shadow_numeric',
+      externalGuest: true,
+    })
+  })
+
+  it('silently ignores an unlisted stranger, including when the list is empty', async () => {
+    for (const allowedUserIds of [['@friend'], []]) {
+      const app = makeGuestApp(allowedUserIds)
+      await postUpdate(app, buildPrivateDm(42, 'hello', 'stranger'))
+      await flushMicrotasks()
+      await flushMicrotasks()
+
+      expect(pipelineCalls).toEqual([])
+      expect(adapterSendCalls).toEqual([])
+    }
+  })
+
+  it('keeps the verified owner implicitly allowed when the list is empty', async () => {
+    const app = makeGuestApp([], {
+      userId: 'owner_1',
+      assistantId: 'other_assistant_owned_by_same_user',
+    })
+
+    await postUpdate(app, buildPrivateDm(42, 'owner message', 'ownerhandle'))
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    expect(pipelineCalls).toHaveLength(1)
+    expect(pipelineCalls[0]).toMatchObject({
+      userId: 'owner_1',
+      isIdentified: true,
+      externalGuest: false,
+    })
   })
 })
 

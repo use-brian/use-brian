@@ -308,6 +308,13 @@ export type ChannelPipelineParams = {
    * WhatsApp/Web always true; Telegram/Slack may be false for shadow users.
    */
   isIdentified: boolean
+  /**
+   * Explicitly allowlisted outside guest. This is narrower than
+   * `isIdentified=false`: anonymous group participants keep the existing
+   * channel behavior, while an external guest gets persona + isolated session
+   * chat only. Workspace context, tools, and persistence are withheld.
+   */
+  externalGuest?: boolean
   checkCreditBudget?: CreditBudgetGate
 
   // ── Channel context ──
@@ -600,6 +607,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     hooks,
     capabilityStore,
   } = params
+  const externalGuest = params.externalGuest === true
 
   // Every background call in this pipeline (session-state diff, memory nudge,
   // research classifier) runs on this one id. Boot resolves it against the
@@ -664,16 +672,44 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // Runs before the message is classified, persisted, or fed to the model, so
   // a giant paste never reaches the classifier or the query loop as a blob.
   // Failure keeps the original text. See `promoteChannelPaste` above.
-  ;({ messageText, userContentBlocks } = await promoteChannelPaste({
-    rawUserText: params.rawUserText,
-    messageText,
-    userContentBlocks,
-    workspaceId: assistant.workspaceId,
-    actingUserId: userId,
-    assistantId: assistant.id,
-    artifactPromoter: params.artifactPromoter,
-    channelType,
-  }))
+  if (!externalGuest) {
+    ;({ messageText, userContentBlocks } = await promoteChannelPaste({
+      rawUserText: params.rawUserText,
+      messageText,
+      userContentBlocks,
+      workspaceId: assistant.workspaceId,
+      actingUserId: userId,
+      assistantId: assistant.id,
+      artifactPromoter: params.artifactPromoter,
+      channelType,
+    }))
+  }
+
+  // Load the pre-turn transcript once and reuse it for adaptive research +
+  // topic classification. Follow-up detection needs actual dialogue, not an
+  // isolated current sentence (2026-08-09 Snapio incident on web; channels
+  // share the same classifier contract).
+  const preExistingDbMessages = await getSessionMessages(session.id)
+  const adaptiveRecentConversation = preExistingDbMessages
+    .filter((m) => m.role === 'user' || m.role === 'assistant')
+    .filter((m) => !(
+      m.role === 'assistant' &&
+      Array.isArray(m.content) &&
+      (m.content as Array<{ type?: string }>).some((block) => block.type === 'tool_use')
+    ))
+    .map((m) => {
+      const text = typeof m.content === 'string'
+        ? m.content
+        : Array.isArray(m.content)
+          ? (m.content as Array<{ type?: string; text?: string }>)
+            .filter((block) => block.type === 'text' && typeof block.text === 'string')
+            .map((block) => block.text as string)
+            .join(' ')
+          : ''
+      return { role: m.role as 'user' | 'assistant', text: text.trim() }
+    })
+    .filter((turn) => turn.text.length > 0)
+    .slice(-6)
 
   // Adaptive research entry — channels have no manual toggle, so when the
   // caller opts in we classify the message and upgrade the alias to
@@ -687,6 +723,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   let effectiveModelAlias = modelAlias
   let adaptiveResearchActive = false
   if (
+    !externalGuest &&
     adaptiveResearchEnabled &&
     messageText &&
     assistant.workspaceId &&
@@ -695,7 +732,12 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   ) {
     try {
       const { classifyResearchIntent } = await import('@use-brian/core')
-      const adaptive = await classifyResearchIntent({ provider, message: messageText, model: laneModel })
+      const adaptive = await classifyResearchIntent({
+        provider,
+        message: messageText,
+        model: laneModel,
+        recentConversation: adaptiveRecentConversation,
+      })
       if (adaptive.research) {
         effectiveModelAlias = 'research'
         adaptiveResearchActive = true
@@ -737,7 +779,6 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     raw: replyRaw,
   })
 
-  const preExistingDbMessages = await getSessionMessages(session.id)
   const recentUserTurns: ClassifierRecentTurn[] = preExistingDbMessages
     .filter((m) => m.role === 'user' && Array.isArray(m.content))
     .slice(-8)
@@ -818,6 +859,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   await recordOverheadUsage({
     usageStore,
     userId: ownerId,
+    actorUserId: userId,
     assistantId: assistant.id,
     sessionId: session.id,
     userMessageId: userMessageRow.id,
@@ -832,6 +874,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     await recordOverheadUsage({
       usageStore,
       userId: ownerId,
+      actorUserId: userId,
       assistantId: assistant.id,
       sessionId: session.id,
       userMessageId: userMessageRow.id,
@@ -878,6 +921,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     analytics,
     usageStore,
     userMessageId: userMessageRow.id,
+    persistLongTermContext: !externalGuest,
   })
   let messages: Message[] = compactionResult.messages
 
@@ -957,7 +1001,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
 
   // ── Episodic context (topic-scoped history for resume/cross-topic) ──
   let episodicContext: string | null = null
-  if (episodicStore && classification) {
+  if (!externalGuest && episodicStore && classification) {
     try {
       episodicContext = await fetchEpisodicContext({
         store: episodicStore,
@@ -983,7 +1027,9 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   }
 
   // ── Capability set (used twice — L1 files block + tool filter) ──
-  const activeCapabilities = new Set(await capabilityStore.listActive(assistant.id))
+  const activeCapabilities = externalGuest
+    ? new Set<string>()
+    : new Set(await capabilityStore.listActive(assistant.id))
 
   // ── Workspace files L1 block (Q3 / company-brain §10) ──
   // Built only when the store is wired AND the assistant has the `files`
@@ -1019,12 +1065,14 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // (capability + an APPROVED default brand) and the store live in
   // `resolveBrandContext`, so every channel shares one chokepoint instead of
   // each webhook factory forwarding a store.
-  const brandContext = await resolveBrandContext({
-    userId,
-    workspaceId: assistant.workspaceId,
-    hasCapability: activeCapabilities.has('brand'),
-    logLabel: channelType,
-  })
+  const brandContext = externalGuest
+    ? null
+    : await resolveBrandContext({
+        userId,
+        workspaceId: assistant.workspaceId,
+        hasCapability: activeCapabilities.has('brand'),
+        logLabel: channelType,
+      })
 
   // ── System prompt assembly (shared builder) ──
   const currentDateTime = new Date().toLocaleString('en-US', {
@@ -1036,7 +1084,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // see docs/architecture/brain/corrections.md → "Workspace-level
   // prompt evolution".
   let workspaceEvolutionSnippet: string | null = null
-  if (assistant.workspaceId) {
+  if (assistant.workspaceId && !externalGuest) {
     try {
       // Memory-side + brain-side evolution snippets join into one Layer 2 block.
       const [memoryEvo, brainEvo] = await Promise.all([
@@ -1055,10 +1103,12 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // Owner-admitted playbook rules → `## Playbook` in the charter block
   // (growth loop Phase 3). A fetch error omits the section, never blocks.
   let playbookRules: string[] = []
-  try {
-    playbookRules = await listActivePlaybookRules(assistant.id)
-  } catch (err) {
-    console.error(`[${channelType}] playbook rules fetch failed:`, err)
+  if (!externalGuest) {
+    try {
+      playbookRules = await listActivePlaybookRules(assistant.id)
+    } catch (err) {
+      console.error(`[${channelType}] playbook rules fetch failed:`, err)
+    }
   }
 
   // Provenance split: hidden application metadata remains in the trusted
@@ -1090,6 +1140,13 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   const privateRuntimeContextParts = splitPrompt.privateRuntimeContext
     ? [splitPrompt.privateRuntimeContext]
     : []
+  if (externalGuest) {
+    privateRuntimeContextParts.push(
+      '# External guest boundary\n\n' +
+      'You are talking with a Telegram guest explicitly allowed by the bot owner. ' +
+      'They are not a workspace member. Keep the conversation within the information they provide in this isolated chat, and do not claim access to workspace memory, files, connectors, or private company context.',
+    )
+  }
   const userVisibleContext = splitPrompt.userVisibleContext
 
   // ── Uploaded-file save policy ──
@@ -1119,17 +1176,21 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   })
   // activeCapabilities was lifted up above the L1 prompt build (used by both
   // the `# Workspace Files` block gating and the tool filter here).
-  const allTools = filterToolsByCapabilities(new Map(tools), activeCapabilities)
-  allTools.set('saveMemory', saveMemory)
-  allTools.set('getMemory', getMemory)
-  allTools.set('deleteMemory', deleteMemory)
+  const allTools = externalGuest
+    ? new Map<string, Tool>()
+    : filterToolsByCapabilities(new Map(tools), activeCapabilities)
+  if (!externalGuest) {
+    allTools.set('saveMemory', saveMemory)
+    allTools.set('getMemory', getMemory)
+    allTools.set('deleteMemory', deleteMemory)
+  }
 
   // Tasks (Q1) + CRM (Q2) are constructed at boot in apps/api/src/index.ts
   // and arrive via `tools`. Per-assistant visibility is gated by §17
   // capability grants ('tasks' / 'crm') applied above by
   // filterToolsByCapabilities — no per-turn injection here.
 
-  if (sessionStateStore) {
+  if (sessionStateStore && !externalGuest) {
     const { trackCommitment, resolveCommitment } = createSessionStateTools(
       sessionStateStore,
       {
@@ -1150,9 +1211,11 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   }
 
   // ── MCP tools ──
-  const connectorUserId = await getConnectorUserId(ownerId, assistant.workspaceId)
+  const connectorUserId = externalGuest
+    ? userId
+    : await getConnectorUserId(ownerId, assistant.workspaceId)
   let unavailableCapabilities: string[] = []
-  if (connectorStore && mcpSettingsStore) {
+  if (!externalGuest && connectorStore && mcpSettingsStore) {
     // Built every turn so local filesystem sources remain writable even when
     // GitHub credential stores are absent. GitHub targets fail closed without
     // the optional credential provider.
@@ -1221,7 +1284,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   }
 
   // ── Skills ──
-  if (skillStore) {
+  if (skillStore && !externalGuest) {
     const skillResult = await injectSkills({
       skillStore,
       connectorUserId,
@@ -1284,7 +1347,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // Only wired when filesApi is present — without it the pipeline could
   // collect intent it can never resolve to bytes, and `sendFile`'s
   // missing-collector gate gives the model an honest error instead.
-  const attachmentCollector = filesApi ? new AttachmentCollector() : undefined
+  const attachmentCollector = filesApi && !externalGuest ? new AttachmentCollector() : undefined
 
   // ── Tool-pairing buffer ──
   type PendingTurn = { content: ContentBlock[]; toolResults: ContentBlock[] }
@@ -1388,7 +1451,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
 
   // ── Preflight research ──
   let preflightContext = ''
-  if (messageText.length > 40) {
+  if (!externalGuest && messageText.length > 40) {
     try {
       const preflight = await runPreflight({
         provider, model, message: messageText, tools: allTools,

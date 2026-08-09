@@ -19,6 +19,15 @@ import { collectStream } from '../providers/accumulator.js'
 const CLASSIFIER_SYSTEM_PROMPT = `You decide if a user message warrants deep research mode.
 Return JSON only. No explanation.
 
+Input is JSON with:
+- currentMessage: the message to classify.
+- recentConversation: up to six earlier user/assistant text turns, oldest first.
+
+Use recentConversation to resolve whether currentMessage is a follow-up. A follow-up that asks
+to extend, explain, quantify, reframe, or strategize material already discussed is OFF even when
+the same words would look like a research brief in isolation. Research is ON only when the CURRENT
+message starts or explicitly requests a new deep investigation.
+
 Research mode is ON when the request needs DEEP INVESTIGATION — multi-source web synthesis,
 comparative analysis across products / papers / events, in-depth competitive scans, structured
 reports, anything where the user is asking the assistant to act like an analyst.
@@ -67,6 +76,12 @@ function effectiveLength(message: string): number {
 export type ResearchClassifyOptions = {
   provider: LLMProvider
   message: string
+  /**
+   * Recent visible dialogue, oldest first. This is what makes the prompt's
+   * "follow-ups are OFF" rule actionable instead of asking the classifier to
+   * infer conversation state from one isolated sentence.
+   */
+  recentConversation?: Array<{ role: 'user' | 'assistant'; text: string }>
   /** Override the short-message bypass; defaults to 40 chars. */
   minMessageLength?: number
   /**
@@ -165,10 +180,17 @@ export async function classifyResearchIntent(
   }
 
   try {
+    const recentConversation = (options.recentConversation ?? [])
+      .filter((turn) => turn.text.trim().length > 0)
+      .slice(-6)
+      .map((turn) => ({ role: turn.role, text: turn.text.trim().slice(0, 2000) }))
     const stream = provider.stream({
       model: model,
       systemPrompt: CLASSIFIER_SYSTEM_PROMPT,
-      messages: [{ role: 'user', content: message }],
+      messages: [{
+        role: 'user',
+        content: JSON.stringify({ currentMessage: message, recentConversation }),
+      }],
       maxTokens: 128,
       temperature: 0,
     })

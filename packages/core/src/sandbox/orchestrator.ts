@@ -20,6 +20,7 @@ import type {
   SandboxProvider,
   SessionVault,
 } from './types.js'
+import { BrowserBackendError } from './types.js'
 
 export type SandboxTaskStatus = 'running' | 'paused' | 'completed' | 'failed'
 
@@ -37,6 +38,11 @@ export type SandboxTaskRecord = {
   profileId: string | null
   /** Registrable domain whose vault bundle was injected at start (probe target). */
   injectedSite: string | null
+  /**
+   * First real browser-path resolution. Null means this shared sandbox has
+   * only served compute/file-bridge work and must not appear as a live browser.
+   */
+  browserStartedAt: number | null
   authorizedBudgetUsd: number
   createdAt: number
   lastActivityAt: number
@@ -44,7 +50,7 @@ export type SandboxTaskRecord = {
 
 export type SandboxTaskStore = {
   getActiveBySession(sessionId: string): Promise<SandboxTaskRecord | null>
-  /** Every running/paused task in the workspace — the discovery surface (§5). */
+  /** Running/paused tasks that have entered a browser path — the discovery surface (§5). */
   listActiveByWorkspace(workspaceId: string): Promise<SandboxTaskRecord[]>
   create(record: SandboxTaskRecord): Promise<void>
   update(taskId: string, patch: Partial<SandboxTaskRecord>): Promise<void>
@@ -74,7 +80,10 @@ export function createInMemorySandboxTaskStore(): SandboxTaskStore & {
     },
     async listActiveByWorkspace(workspaceId) {
       return [...tasks.values()].filter(
-        (t) => t.workspaceId === workspaceId && (t.status === 'running' || t.status === 'paused'),
+        (t) =>
+          t.workspaceId === workspaceId &&
+          t.browserStartedAt !== null &&
+          (t.status === 'running' || t.status === 'paused'),
       )
     },
     async create(record) {
@@ -262,18 +271,65 @@ export function createSandboxOrchestrator(deps: SandboxOrchestratorDeps): Sandbo
     }
   }
 
-  async function resolve(ctx: BrowserCallContext, hint?: { url?: string }): Promise<{ sandboxId: string }> {
+  function registerBrowserInvocationFinalizer(ctx: BrowserCallContext): void {
+    ctx.registerInvocationFinalizer?.(
+      `sandbox-browser:${ctx.sessionId}`,
+      async () => {
+        const task = await deps.taskStore.getActiveBySession(ctx.sessionId)
+        if (!task || task.browserStartedAt === null) return
+        // A paused task is waiting for an explicit human Take-Over (login or
+        // captcha). Killing it at the assistant turn boundary would make the
+        // live-view hand-off a dead link. Once resumed, the next invocation
+        // registers this finalizer again; explicit Stop and the reaper remain
+        // the closure paths if the user never resumes it.
+        if (task.status === 'paused') return
+        await completeTaskInternal(task, 'completed')
+      },
+    )
+  }
+
+  async function resolve(
+    ctx: BrowserCallContext,
+    hint?: { url?: string; browser?: boolean },
+  ): Promise<{ sandboxId: string }> {
     const existing = await deps.taskStore.getActiveBySession(ctx.sessionId)
     if (existing) {
+      if (hint?.browser && existing.browserStartedAt === null && !hint.url) {
+        throw new BrowserBackendError(
+          'No browser page is active for this session. Open a target URL with browserNavigate before reading or acting on the page.',
+          'no_active_browser',
+        )
+      }
+      if (hint?.browser) registerBrowserInvocationFinalizer(ctx)
       await meterTouch(existing, existing.status === 'running')
+      const touchedAt = now()
+      const browserStartedPatch =
+        hint?.browser && existing.browserStartedAt === null
+          ? { browserStartedAt: touchedAt }
+          : {}
       if (existing.status === 'paused') {
         await deps.provider.resume(existing.sandboxId)
-        await deps.taskStore.update(existing.taskId, { status: 'running', lastActivityAt: now() })
+        await deps.taskStore.update(existing.taskId, {
+          status: 'running',
+          lastActivityAt: touchedAt,
+          ...browserStartedPatch,
+        })
       } else {
-        await deps.taskStore.update(existing.taskId, { lastActivityAt: now() })
+        await deps.taskStore.update(existing.taskId, {
+          lastActivityAt: touchedAt,
+          ...browserStartedPatch,
+        })
       }
       return { sandboxId: existing.sandboxId }
     }
+
+    if (hint?.browser && !hint.url) {
+      throw new BrowserBackendError(
+        'No browser page is active for this session. Open a target URL with browserNavigate before reading or acting on the page.',
+        'no_active_browser',
+      )
+    }
+    if (hint?.browser) registerBrowserInvocationFinalizer(ctx)
 
     await deps.budget?.checkCreditBudget?.(ctx)
     const authorizedBudgetUsd =
@@ -303,6 +359,7 @@ export function createSandboxOrchestrator(deps: SandboxOrchestratorDeps): Sandbo
       // first navigation so the site is already signed in.
       const injectedSite = await injectVaultBundle(profileId, sandboxId, site)
 
+      const createdAt = now()
       await deps.taskStore.create({
         taskId,
         sandboxId,
@@ -312,9 +369,10 @@ export function createSandboxOrchestrator(deps: SandboxOrchestratorDeps): Sandbo
         status: 'running',
         profileId,
         injectedSite,
+        browserStartedAt: hint?.browser ? createdAt : null,
         authorizedBudgetUsd,
-        createdAt: now(),
-        lastActivityAt: now(),
+        createdAt,
+        lastActivityAt: createdAt,
       })
     } catch (err) {
       // Best-effort: a failed kill must not mask the original cause.

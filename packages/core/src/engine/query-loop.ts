@@ -454,6 +454,35 @@ function defaultWorkerDrainPrompt(notificationText: string): string {
 }
 
 export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<QueryEvent> {
+  // One invocation owns every resource a tool opens across all of its model
+  // turns. Tools register keyed finalizers through the context they receive;
+  // a Map deduplicates repeated calls to the same resource. Wrapping the core
+  // generator is deliberately broader than `turn_complete`: `finally` also
+  // runs when the consumer stops iterating early, the request is cancelled,
+  // or provider/tool code throws before a terminal event can be emitted.
+  const invocationFinalizers = new Map<string, () => void | Promise<void>>()
+  const toolContext: ToolContext = {
+    ...options.context,
+    registerInvocationFinalizer: (key, finalizer) => {
+      invocationFinalizers.set(key, finalizer)
+    },
+  }
+
+  try {
+    yield* queryLoopCore({ ...options, context: toolContext })
+  } finally {
+    const results = await Promise.allSettled(
+      [...invocationFinalizers.values()].map((finalize) => finalize()),
+    )
+    for (const result of results) {
+      if (result.status === 'rejected') {
+        console.warn('[query-loop] invocation finalizer failed:', result.reason)
+      }
+    }
+  }
+}
+
+async function* queryLoopCore(options: QueryLoopOptions): AsyncGenerator<QueryEvent> {
   const {
     provider,
     model,
@@ -471,7 +500,7 @@ export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<Quer
   // the loop at the right step. Bumped each time a tool_use_end is seen.
   let loopStepIndex = 0
   let hasAttemptedReactiveCompact = false
-  let maxTokensContinuations = 0
+  let truncationContinuations = 0
   let emptyResponseRetries = 0
   let transientRetries = 0
   const loopStartTime = Date.now()
@@ -1140,10 +1169,15 @@ export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<Quer
       }
     }
 
-    // Layer 5: max_tokens recovery — auto-continue once for web channel
-    if (response.stopReason === 'max_tokens' && !hasToolUse
-        && options.channelType === 'web' && maxTokensContinuations < 1) {
-      maxTokensContinuations++
+    // Layer 5: truncation recovery — auto-continue once for web. A provider
+    // output cap (`max_tokens`) and an SSE EOF without a finish marker
+    // (`incomplete`) are the same user-visible failure: a reply cut off in the
+    // middle. Share one bounded continuation budget across both reasons.
+    const responseWasTruncated = response.stopReason === 'max_tokens'
+      || response.stopReason === 'incomplete'
+    if (responseWasTruncated && !hasToolUse
+        && options.channelType === 'web' && truncationContinuations < 1) {
+      truncationContinuations++
       nextMessages = [{ role: 'user', content: 'Continue from where you left off.' }]
       if (options.stateless) {
         statelessHistory.push({ role: 'assistant', content: response.content })
@@ -2052,10 +2086,10 @@ function extractCitationsFromToolResults(
  * (the getMemory tool's `query` field).
  *
  * The marker text itself is never shown to the model (the whole field is
- * dropped), so it needs no human-readable prose — the ` ` prefix keeps it
+ * dropped), so it needs no human-readable prose — the `\x00` prefix keeps it
  * from ever colliding with a real description a tool author writes.
  */
-export const MODEL_HIDDEN_PARAM_MARKER = ' model-hidden '
+export const MODEL_HIDDEN_PARAM_MARKER = '\x00model-hidden\x00'
 
 /**
  * Convert a Zod schema to the JSON-Schema shape Gemini's tool definitions
