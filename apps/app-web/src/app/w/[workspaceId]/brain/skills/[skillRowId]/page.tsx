@@ -331,11 +331,14 @@ function SkillEditor({
             onContentChange={(value) => applyLocalEdit(setContent, value)}
           />
 
-          {/* The skill's bundle — reference / template / script files the
-              body reaches through {{kind:name}} pointers. Reads `content`
-              (the live draft) so a pointer the user just typed counts as
-              referenced without a save first. */}
-          <SkillFilesSection skillRowId={skill.rowId} content={content} />
+          {/* The skill's bundle — references, assets, templates, and scripts.
+              Native v2 uses relative Markdown links; v1 retains pointers.
+              Reads the live draft so a just-typed link counts immediately. */}
+          <SkillFilesSection
+            skillRowId={skill.rowId}
+            content={content}
+            bundleVersion={skill.bundleVersion ?? 1}
+          />
         </div>
 
         {/* ── Right rail — the properties: Suggested decision first, then

@@ -103,6 +103,8 @@ export type SkillImportPrefill = {
   };
   supportFiles: SkillImportSupportFile[];
   importSource: Record<string, unknown>;
+  bundleVersion?: 1 | 2;
+  sourceDigest?: string;
 };
 
 type Props = {
@@ -145,6 +147,18 @@ export function SkillCreator({ workspaceId, onBack, onCreated, initialImport }: 
   const [description, setDescription] = useState(initialImport?.draft.description ?? "");
   const [whenToUse, setWhenToUse] = useState(initialImport?.draft.whenToUse ?? "");
   const [content, setContent] = useState(initialImport?.draft.content ?? "");
+  const [supportFiles, setSupportFiles] = useState<SkillImportSupportFile[]>(
+    initialImport?.supportFiles ?? [],
+  );
+  const [bundleSource, setBundleSource] = useState<Record<string, unknown> | undefined>(
+    initialImport?.importSource,
+  );
+  const [bundleVersion, setBundleVersion] = useState<1 | 2 | undefined>(
+    initialImport?.bundleVersion,
+  );
+  const [sourceDigest, setSourceDigest] = useState<string | undefined>(
+    initialImport?.sourceDigest,
+  );
   const [sensitivity, setSensitivity] = useState<SkillSensitivity>("internal");
   /** The first chat turn the doc stage auto-sends (the intent path)... */
   const [firstMessage, setFirstMessage] = useState<string | null>(null);
@@ -200,6 +214,10 @@ export function SkillCreator({ workspaceId, onBack, onCreated, initialImport }: 
     setDescription(template.description);
     setWhenToUse(template.whenToUse ?? "");
     setContent(template.content);
+    setSupportFiles(template.supportFiles ?? []);
+    setBundleSource(template.bundleSource ?? undefined);
+    setBundleVersion(template.bundleVersion);
+    setSourceDigest(template.sourceDigest ?? undefined);
     // Typed intent (and its staged attachments) auto-send as the first
     // adaptation turn; files can't travel without a message.
     const trimmed = intent.trim();
@@ -250,6 +268,10 @@ export function SkillCreator({ workspaceId, onBack, onCreated, initialImport }: 
     setDescription("");
     setWhenToUse("");
     setContent("");
+    setSupportFiles([]);
+    setBundleSource(undefined);
+    setBundleVersion(undefined);
+    setSourceDigest(undefined);
     setSensitivity("internal");
     setTemplateSlug("");
     setTemplateName(null);
@@ -291,10 +313,10 @@ export function SkillCreator({ workspaceId, onBack, onCreated, initialImport }: 
       enabledAssistantIds: "all",
       // Imported drafts carry their folder support files + provenance through
       // the save; hand-authored drafts send neither.
-      supportFiles: initialImport?.supportFiles.length
-        ? initialImport.supportFiles
-        : undefined,
-      importSource: initialImport?.importSource,
+      supportFiles: supportFiles.length ? supportFiles : undefined,
+      importSource: bundleSource,
+      bundleVersion,
+      sourceDigest,
     });
     setSaving(false);
     if (!result.ok) {

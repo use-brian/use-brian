@@ -136,6 +136,7 @@ function makeApp(
   retrievalStore: Pick<RetrievalStore, 'search'> = makeRetrievalStore(),
   entityLinksStore: EntityLinksStore = makeEntityLinksStore(),
   knowledgeStore: ReturnType<typeof makeKnowledgeStore> = makeKnowledgeStore(),
+  extraDeps: Partial<Parameters<typeof brainRoutes>[0]> = {},
 ) {
   const app = express()
   app.use((req, _res, next) => {
@@ -149,6 +150,7 @@ function makeApp(
       entityLinksStore,
       retrievalStore,
       knowledgeStore: knowledgeStore as unknown as Parameters<typeof brainRoutes>[0]['knowledgeStore'],
+      ...extraDeps,
     }),
   )
   return app
@@ -897,6 +899,45 @@ describe('[COMP:brain/graph-http] GET /api/brain/graph — knowledge nodes + edg
       .expect(200)
     expect(res.body.edges).toEqual([])
     expect(res.body.nodes).toHaveLength(1)
+  })
+
+  it('projects native bundle resources only when skill_file is requested', async () => {
+    mockQuery.mockResolvedValueOnce(memberRow).mockResolvedValueOnce(assistantRow)
+    const links = makeEntityLinksStore()
+    links.listForWorkspace = vi.fn(async () => [{
+      id: 'edge-contains',
+      sourceKind: 'skill', sourceId: 'skill-1',
+      targetKind: 'skill_file', targetId: 'file-1',
+      edgeType: 'contains', sensitivity: 'internal',
+    }] as never)
+    const workspaceSkillStore = {
+      listForWorkspace: vi.fn(async () => [{
+        rowId: 'skill-1', name: 'Finance', state: 'active', sensitivity: 'internal',
+      }]),
+    }
+    const workspaceSkillFilesStore = {
+      listForSkills: vi.fn(async () => [{
+        id: 'file-1', workspaceSkillId: 'skill-1',
+        name: 'margins.md', path: 'references/margins.md',
+      }]),
+    }
+    const res = await request(makeApp(
+      makeEntityStoreWithList([]),
+      makeRetrievalStore(),
+      links,
+      makeKnowledgeStore(),
+      { workspaceSkillStore: workspaceSkillStore as never, workspaceSkillFilesStore: workspaceSkillFilesStore as never },
+    ))
+      .get('/api/brain/graph?workspaceId=ws-1&skillId=skill-1')
+      .expect(200)
+
+    expect(res.body.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'skill-1', kind: 'skill' }),
+      expect.objectContaining({ id: 'file-1', kind: 'skill_file', name: 'references/margins.md' }),
+    ]))
+    const contains = res.body.edges.find((edge: { type: string }) => edge.type === 'contains')
+    expect(contains).toBeDefined()
+    expect([contains.source, contains.target].sort()).toEqual(['file-1', 'skill-1'])
   })
 
   it('projects an oversized source into a bounded overview and keeps the truncation sentinel', async () => {

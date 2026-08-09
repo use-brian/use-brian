@@ -34,7 +34,7 @@ const skillStore = {
 
 const workspaceStore = { getRole: vi.fn() }
 const workspaceSkillStore = { create: vi.fn() }
-const workspaceSkillFilesStore = { upsert: vi.fn() }
+const workspaceSkillFilesStore = { upsert: vi.fn(), notifyChanged: vi.fn() }
 const fetchRawImport = vi.fn()
 
 function importApp(extra: Record<string, unknown> = {}) {
@@ -135,7 +135,10 @@ describe('[COMP:api/skill-import] POST /api/skills/import', () => {
     expect(res.status).toBe(200)
     expect(res.body.dialect).toBe('agent-skills')
     expect(res.body.draft.name).toBe('Release Notes')
-    expect(res.body.importSource).toEqual({ kind: 'paste' })
+    expect(res.body.importSource).toEqual({
+      kind: 'paste',
+      sourceDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+    })
     expect(res.body.supportFiles).toEqual([])
     expect(fetchRawImport).not.toHaveBeenCalled()
     expect(workspaceSkillStore.create).not.toHaveBeenCalled()
@@ -224,13 +227,16 @@ describe('[COMP:api/skill-import] POST /api/skills — supportFiles + importSour
         importSource: expect.objectContaining({ kind: 'github', owner: 'acme' }),
       }),
     )
-    expect(workspaceSkillFilesStore.upsert).toHaveBeenCalledWith('u-1', {
+    expect(workspaceSkillFilesStore.upsert).toHaveBeenCalledWith('u-1', expect.objectContaining({
       workspaceSkillId: 'ws-skill-1',
       kind: 'reference',
       name: 'style.md',
       content: 'House style.',
       description: null,
-    })
+      path: null,
+      contentHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+    }), { notify: false })
+    expect(workspaceSkillFilesStore.notifyChanged).toHaveBeenCalledWith('ws-skill-1')
   })
 
   it('rejects malformed support files and non-object importSource', async () => {

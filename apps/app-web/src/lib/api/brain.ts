@@ -280,6 +280,7 @@ export async function getEntity(
  *  node kinds the graph route projects: `'knowledge'` (a `knowledge_entries`
  *  document), `'skill'` (a `workspace_skills` row — procedural-brain primitive,
  *  see docs/architecture/engine/skill-system.md §6/§7.1),
+ *  `'skill_file'` (an opt-in native bundle resource),
  *  `'connector'` (a connector a skill requires), and `'memory'` (a `memories`
  *  row — only present when the caller opts in via `showMemory`; rendered for the
  *  entity it's linked to). None of these are entity rows, but all render as
@@ -288,6 +289,7 @@ export type BrainGraphNodeKind =
   | EntityKind
   | "knowledge"
   | "skill"
+  | "skill_file"
   | "connector"
   | "memory";
 
@@ -359,7 +361,7 @@ export type BrainGraph = {
  * selection, and a selection that matches nothing on the canvas leaves the
  * graph undimmed (the same no-anchor rule as a zero-match `focusQuery`).
  * Kinds with no chip (`project`, `product`, `repository`, `other`,
- * `skill`, `connector`) are never in the selected set, so they ghost
+ * `skill`, `skill_file`, `connector`) are never in the selected set, so they ghost
  * whenever any filter is active.
  */
 export const PRIMITIVE_GRAPH_KINDS: Partial<
@@ -691,6 +693,9 @@ export async function getBrainGraph(params: {
   limit?: number;
   scopeId?: string | null;
   focusQuery?: string | null;
+  /** Procedural ego graph. Includes native bundle resource nodes and their
+   * explicit references without expanding the workspace-wide file layer. */
+  skillId?: string | null;
   /** Opt into memory nodes (the Phase 3 `?include=memory` toggle). Only
    *  memories linked to a visible entity are returned. Default off. */
   showMemory?: boolean;
@@ -704,7 +709,11 @@ export async function getBrainGraph(params: {
   if (params.limit) q.set("limit", String(params.limit));
   if (params.scopeId) q.set("scope", params.scopeId);
   if (params.focusQuery?.trim()) q.set("focus", params.focusQuery.trim());
-  if (params.showMemory) q.set("include", "memory");
+  if (params.skillId) q.set("skillId", params.skillId);
+  const include = [params.showMemory ? "memory" : "", params.skillId ? "skill_file" : ""]
+    .filter(Boolean)
+    .join(",");
+  if (include) q.set("include", include);
   const res = await authFetch(`${API_URL}/api/brain/graph?${q.toString()}`, {
     signal: params.signal,
   });

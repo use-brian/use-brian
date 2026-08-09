@@ -22,9 +22,12 @@
  * storage-only route before their returned file ids are pinned; transient
  * chat-upload ids are never used. Dropping a file on Pins IS consent to save
  * it to the brain (2026-08-07): after the pin is created the stored file is
- * queued through the deterministic stored-file ingest lane (audio/video is
- * skipped — the recording pipeline owns media). The pin list is unbounded;
- * a filter input appears once it grows past a handful of rows.
+ * queued through the deterministic stored-file ingest lane (audio is skipped
+ * — the recording pipeline owns media). Video never reaches that lane at all:
+ * the store endpoints gate on `isAllowedMime`, whose allowlist has no
+ * `video/` prefix, so `partitionUpload` rejects it client-side with this
+ * surface's own copy rather than the chat composer's. The pin list is
+ * unbounded; a filter input appears once it grows past a handful of rows.
  *
  * Spec: docs/architecture/features/chat-app.md → "Pinned room context".
  * [COMP:app-web/chat-context-pins]
@@ -434,7 +437,12 @@ export function ChatContextPins({
             error:
               reason === "too_large"
                 ? t.fileTooLarge
-                : dictionary.attachments.videoUnsupported,
+                : // NOT the chat composer's copy: that string describes the
+                  // 20 MB transient-attachment allowlist, while this lane is
+                  // the 1 GB durable store. Both refuse video, for different
+                  // reasons, and quoting the wrong one sends the user hunting
+                  // for a size problem they do not have.
+                  t.fileVideoUnsupported,
           }),
         );
         setFileUploads((current) => [
@@ -520,7 +528,7 @@ export function ChatContextPins({
         setFileBusy(false);
       }
     },
-    [dictionary.attachments, fileBusy, refresh, sessionId, t, workspaceId],
+    [fileBusy, refresh, sessionId, t, workspaceId],
   );
 
   const { isDragging, dropProps } = useFileDrop(

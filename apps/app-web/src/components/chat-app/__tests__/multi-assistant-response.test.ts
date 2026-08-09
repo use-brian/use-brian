@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  acceptsMentionSelection,
   completeTrailingAssistantMention,
+  isAssistantPickerLive,
   mentionCandidatesFor,
   mentionNavigationDelta,
   nextMentionSelectionIndex,
@@ -51,16 +53,26 @@ describe("[COMP:app-web/multi-assistant-response] room response group", () => {
     expect(nextMentionSelectionIndex(0, 2, -1)).toBe(1);
   });
 
-  it("maps arrow keys and Tab / Shift+Tab to selection moves", () => {
-    expect(mentionNavigationDelta("ArrowDown", false)).toBe(1);
-    expect(mentionNavigationDelta("ArrowUp", false)).toBe(-1);
-    // Shift never changes the arrow direction.
-    expect(mentionNavigationDelta("ArrowDown", true)).toBe(1);
-    expect(mentionNavigationDelta("Tab", false)).toBe(1);
-    expect(mentionNavigationDelta("Tab", true)).toBe(-1);
+  it("maps only the arrow keys to selection moves", () => {
+    expect(mentionNavigationDelta("ArrowDown")).toBe(1);
+    expect(mentionNavigationDelta("ArrowUp")).toBe(-1);
+    // Tab confirms the highlighted option, it never advances it.
+    expect(mentionNavigationDelta("Tab")).toBeNull();
     // Non-navigation keys fall through to normal composer behavior.
-    expect(mentionNavigationDelta("Enter", false)).toBeNull();
-    expect(mentionNavigationDelta("a", false)).toBeNull();
+    expect(mentionNavigationDelta("Enter")).toBeNull();
+    expect(mentionNavigationDelta("a")).toBeNull();
+  });
+
+  it("accepts the highlighted option on Enter and on Tab", () => {
+    expect(acceptsMentionSelection("Enter", false)).toBe(true);
+    expect(acceptsMentionSelection("Tab", false)).toBe(true);
+    // Shift+Tab confirms too — falling through would strand an open popup
+    // behind a composer that lost focus.
+    expect(acceptsMentionSelection("Tab", true)).toBe(true);
+    // Shift+Enter is the newline, not a confirmation.
+    expect(acceptsMentionSelection("Enter", true)).toBe(false);
+    expect(acceptsMentionSelection("ArrowDown", false)).toBe(false);
+    expect(acceptsMentionSelection("a", false)).toBe(false);
   });
 
   it("completes only the trailing partial mention", () => {
@@ -183,6 +195,33 @@ describe("[COMP:app-web/multi-assistant-response] room response group", () => {
     // An empty query offers the whole roster.
     expect(mentionCandidatesFor({ at: 0, partial: "" }, roster)).toHaveLength(4);
     expect(mentionCandidatesFor(null, roster)).toHaveLength(0);
+  });
+
+  it("keeps the assistant chip pickable in an open ROOM, static in an open personal thread", () => {
+    const rosterSize = roster.length;
+    // A fresh pane picks what the new session/room will bind.
+    expect(
+      isAssistantPickerLive({ hasOpenSession: false, paneIsRoom: false, rosterSize }),
+    ).toBe(true);
+    // An open room keeps picking — the binding is its default voice, and any
+    // member who can post may move it.
+    expect(
+      isAssistantPickerLive({ hasOpenSession: true, paneIsRoom: true, rosterSize }),
+    ).toBe(true);
+    // An open PERSONAL thread does not: no mid-thread switch.
+    expect(
+      isAssistantPickerLive({ hasOpenSession: true, paneIsRoom: false, rosterSize }),
+    ).toBe(false);
+  });
+
+  it("degrades to a static label when there is nothing to pick between", () => {
+    for (const paneIsRoom of [true, false]) {
+      for (const hasOpenSession of [true, false]) {
+        expect(
+          isAssistantPickerLive({ hasOpenSession, paneIsRoom, rosterSize: 1 }),
+        ).toBe(false);
+      }
+    }
   });
 
   it("shows the local or followed responder instead of the room default", () => {

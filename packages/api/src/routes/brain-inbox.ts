@@ -1798,9 +1798,11 @@ export function brainInboxRoutes({
 
   // ── POST /:workspaceId/entity/:entityId/promote-to-crm ──────────
   //
-  // Atomic CRM promotion. Inserts the companion `contacts` /
-  // `companies` / `deals` row referencing the existing entity and
-  // flips `entities.kind` in one transaction. Required fields by kind:
+  // Atomic CRM promotion. Post CRM-entity unification there is no companion
+  // specialization row to insert (migration 296 dropped `contacts` /
+  // `companies` / `deals`): this writes the typed fields into
+  // `entities.attributes` and flips `entities.kind` in one transaction.
+  // Required fields by kind:
   //   - company: nothing extra (name defaults from display_name; domain optional)
   //   - person : nothing extra (email/phone/companyId optional)
   //   - deal   : stage REQUIRED ('lead'|'qualified'|'proposal'|'negotiation'|'won'|'lost')

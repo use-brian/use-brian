@@ -3283,6 +3283,7 @@ export const en = {
         knowledge: "Knowledge",
         memory: "Memories",
         skill: "Skills",
+        skill_file: "Skill resources",
         connector: "Connectors",
         other: "Other",
       },
@@ -3601,7 +3602,7 @@ export const en = {
     skillFiles: {
       heading: "Files",
       explainer:
-        "References, templates, and scripts this skill can pull in. Put the file's token in the body and the assistant reads the file when it runs the skill.",
+        "References, assets, templates, and scripts this skill can read when needed. Link each file from the skill body so the assistant knows when to load it.",
       add: "Add file",
       empty: "No files yet. The skill runs on its body alone.",
       edit: "Edit",
@@ -3609,12 +3610,13 @@ export const en = {
       delete: "Delete",
       deleteTitle: "Delete this file?",
       deleteBody:
-        "{name} will be removed from this skill. Any token pointing at it in the body stops resolving.",
-      copyPointer: "Copy token",
+        "{name} will be removed from this skill. Any link pointing at it in the body stops resolving.",
+      copyPointer: "Copy link",
       notReferenced: "The body does not point at this file yet.",
       kindLabel: "Kind",
       kinds: {
         reference: "Reference",
+        asset: "Asset",
         template: "Template",
         script: "Script",
       },
@@ -4304,6 +4306,8 @@ export const en = {
     failed: "Failed",
     presentationFitFailed: "Slide text did not fit",
     presentationFitFailedBody: "Brian could not fit the generated text into the selected slide layout after three attempts. Shorten the content or adjust the template text boxes, then try again.",
+    presentationPlanFailed: "Slide plan could not be generated",
+    presentationPlanFailedBody: "Brian could not produce a valid slide plan after three attempts. Try again, or simplify the presentation request.",
     fitFailed: "Content did not fit the template",
     fitFailedBody: "Brian could not fit the generated content into the selected template. Shorten the content or adjust the layout, then try again.",
     generationFailedBody: "Generation stopped because of an unexpected error. Try again.",
@@ -4576,6 +4580,7 @@ export const en = {
     viewWorkspace: "Workspace",
     newWorkspaceChat: "New workspace chat",
     newWorkspaceChatFailed: "Could not start a workspace chat.",
+    roomAssistantChangeFailed: "Could not change the assistant for this chat.",
     workspaceRailEmpty: "No shared chats yet",
     sharedBadge: "Shared with workspace",
     startedBy: "Started by {name}",
@@ -4602,6 +4607,13 @@ export const en = {
     editHint: "Enter to save, Esc to cancel",
     editHintRoom: "Enter to save. Mention with @ to get a reply.",
     editFailed: "Could not edit your message. Try again.",
+    // Replying to a message: the quote that makes the referent explicit.
+    reply: "Reply",
+    replyToSelection: "Reply to selection",
+    replyingTo: "Replying to {name}",
+    replyingToMessage: "Replying to a message",
+    replyCancel: "Cancel reply",
+    replyAuthorYou: "You",
     unreadDotAria: "New activity",
     workingAria: "{name} is working",
     confirmNotAllowed: "Only the member who asked this turn (or a workspace admin) can act on this.",
@@ -4655,6 +4667,8 @@ export const en = {
       browseFiles: "Browse",
       dropToPin: "Drop to pin",
       fileTooLarge: "That file is too large to pin (max 1 GB).",
+      fileVideoUnsupported:
+        "Video cannot be pinned. Send it in the chat instead, where recordings are processed.",
       largeFileTitle: "Upload a large file?",
       largeFileDescription:
         "{fileName} is {size}. This upload may take a while. Start the upload?",

@@ -18,6 +18,7 @@ import { gateSessionRead } from './sessions.js'
 import { renderArtifactManifest } from '../files/artifact-manifest.js'
 import { promotePastedText, shouldPromotePaste } from '../files/paste-promotion.js'
 import type { ArtifactPromoter } from '../files/artifact-promote.js'
+import { mayAssistantAnswerInRoom } from './_room-binding.js'
 import { recordOverheadUsage } from './_overhead-usage.js'
 import { composeRecoveryMessage } from './_recovery-message.js'
 import { composeEmptyTurnSynthesis } from './_empty-turn-synthesis.js'
@@ -1363,21 +1364,11 @@ const roomTurnAddressers = new Map<string, string>()
 /**
  * May this assistant ANSWER in this room? (Multiplayer chat T9.)
  *
- * `@AssistantName` picks which workspace assistant answers a turn, but the
- * room's `effective_clearance` is its members' read floor — an assistant
- * cleared ABOVE the room would draw on data the room's readers may not see,
- * so the answering assistant's clearance must not out-rank the room's.
- * (Equal or lower is fine: no widening.) A NULL room clearance is treated as
- * 'internal', matching the session-create default.
+ * Defined in `./_room-binding.js` and re-exported here: the room REBIND route
+ * (`PATCH /api/sessions/:id/assistant`) applies the identical predicate, and
+ * `sessions.ts` cannot import this module without closing an ESM cycle.
  */
-export function mayAssistantAnswerInRoom(params: {
-  assistantClearance: string | null
-  roomClearance: string | null
-}): boolean {
-  const rank = (c: string | null, fallback: number): number =>
-    c === 'public' ? 0 : c === 'internal' ? 1 : c === 'confidential' ? 2 : fallback
-  return rank(params.assistantClearance, 1) <= rank(params.roomClearance, 1)
-}
+export { mayAssistantAnswerInRoom }
 
 /** Atomically claim a room session's turn slot. True = we own the turn. */
 async function claimRoomTurn(sessionId: string): Promise<boolean> {

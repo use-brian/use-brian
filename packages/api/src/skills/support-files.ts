@@ -4,33 +4,40 @@
  * import (`POST /api/skills`) or were authored by hand in the editor
  * (`PUT /api/skills/:id/files`).
  *
- * A support file's `(kind, name)` pair is half of the `{{kind:name}}` pointer
- * the loader resolves at `useSkill` time, so the name rules here are not
- * cosmetic: a name carrying `/`, `:` or `{{ }}` produces a pointer that can
- * never match its own row.
+ * Bundle v2 addresses resources by a safe root-relative `path`; legacy v1
+ * addresses them by `(kind, name)` inside a `{{kind:name}}` pointer. The gate
+ * preserves both contracts during migration.
  *
- * Spec: docs/architecture/engine/skill-system.md → "Support files".
+ * Spec: docs/architecture/engine/skill-system.md → "Skill bundles and support files".
  *
  * [COMP:api/skill-support-files]
  */
 
+import {
+  normalizeSkillResourcePath,
+  sha256,
+  skillResourceKindFromPath,
+} from '@use-brian/core'
 import {
   IMPORT_MAX_SUPPORT_FILES,
   IMPORT_MAX_SUPPORT_FILE_BYTES,
   IMPORT_MAX_SUPPORT_TOTAL_BYTES,
 } from './import-service.js'
 
-export const SUPPORT_FILE_KINDS = ['reference', 'template', 'script'] as const
+export const SUPPORT_FILE_KINDS = ['reference', 'asset', 'template', 'script'] as const
 export type SupportFileKind = (typeof SUPPORT_FILE_KINDS)[number]
 
 export const SUPPORT_FILE_NAME_MAX = 200
 export const SUPPORT_FILE_DESCRIPTION_MAX = 500
+export const SUPPORT_FILE_PATH_MAX = 500
 
 export type SupportFile = {
   kind: SupportFileKind
   name: string
+  path?: string
   content: string
   description?: string
+  contentHash: string
 }
 
 export type SupportFileValidation<T> =
@@ -106,8 +113,27 @@ export function validateSupportFile(raw: unknown): SupportFileValidation<Support
     )
   }
 
-  const file: SupportFile = { kind: kind as SupportFileKind, name, content: input.content }
+  const file: SupportFile = {
+    kind: kind as SupportFileKind,
+    name,
+    content: input.content,
+    contentHash: sha256(input.content),
+  }
 
+  if (input.path !== undefined && input.path !== null) {
+    if (typeof input.path !== 'string') return fail(`Support file ${name} has a non-string path.`)
+    if (input.path.length > SUPPORT_FILE_PATH_MAX) {
+      return fail(`Support file ${name} path must be ${SUPPORT_FILE_PATH_MAX} characters or less.`)
+    }
+    const path = normalizeSkillResourcePath(input.path)
+    if (!path) return fail(`Support file ${name} has an invalid relative path.`)
+    const pathKind = skillResourceKindFromPath(path)
+    if (!pathKind) return fail(`Support file ${name} path must live under references/, assets/, templates/, or scripts/.`)
+    if (pathKind !== kind) {
+      return fail(`Support file ${name} kind ${kind} does not match its path ${path}.`)
+    }
+    file.path = path
+  }
   if (input.description !== undefined && input.description !== null) {
     if (typeof input.description !== 'string') {
       return fail(`Support file ${name} has a non-string description.`)
@@ -166,4 +192,12 @@ export function validateSupportFileSet(raw: unknown): SupportFileValidation<Supp
 /** The loader pointer that expands this file into the body at `useSkill` time. */
 export function supportFilePointer(file: Pick<SupportFile, 'kind' | 'name'>): string {
   return `{{${file.kind}:${file.name}}}`
+}
+
+/** Portable relative Markdown link for a bundle-v2 resource. */
+export function supportFileMarkdownLink(
+  file: Pick<SupportFile, 'name' | 'path'>,
+): string | null {
+  if (!file.path) return null
+  return `[${file.name}](${file.path})`
 }

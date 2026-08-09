@@ -80,6 +80,22 @@ function parseJsonObject(raw: string): unknown {
   return JSON.parse(match[0])
 }
 
+function planValidationDiagnostics(cause: unknown): Array<Record<string, unknown>> {
+  if (cause instanceof z.ZodError) {
+    return cause.issues.slice(0, 100).map((issue) => ({
+      code: issue.code,
+      path: issue.path.join('.'),
+      message: issue.message,
+    }))
+  }
+  return [{
+    code: cause instanceof SyntaxError ? 'invalid_json' : 'plan_invalid',
+    message: cause instanceof SyntaxError
+      ? 'The response was not valid JSON'
+      : cause instanceof Error ? cause.message : 'The response was not a valid presentation plan',
+  }]
+}
+
 function replaceRuns(runs: OfficeRichTextRun[], text: string): OfficeRichTextRun[] {
   const first = runs[0]
   if (!first) {
@@ -390,12 +406,15 @@ export async function generatePresentationFromTemplate(params: {
     claims: params.claims.slice(0, 100),
   }
   const requestContext = `Outcome:\n${params.outcome}\n\nAudience:\n${params.audience}\n\nTemplate guidance:\n${template.description}\n\nAdmitted slide catalogue:\n${JSON.stringify(catalogue)}\n\nGrounding:\n${JSON.stringify(evidence)}`
-  let rejectedPlan: PresentationPlan | undefined
+  let rejectedPlan: unknown
+  let rejectionKind: 'fit' | 'plan' | undefined
   let diagnostics: Array<Record<string, unknown>> = []
   for (let attempt = 1; attempt <= MAX_FIT_ATTEMPTS; attempt += 1) {
-    const repairContext = rejectedPlan
+    const repairContext = rejectionKind === 'fit'
       ? `\n\nThe previous plan was rejected by deterministic layout validation. Rewrite it more concisely or choose another admitted recipe without dropping required grounded meaning.\nRejected plan:\n${JSON.stringify(rejectedPlan)}\n\nFit diagnostics:\n${JSON.stringify(diagnostics)}`
-      : ''
+      : rejectionKind === 'plan'
+        ? `\n\nThe previous response failed strict presentation-plan validation. Return a corrected plan in the exact required JSON shape. Use only admitted recipeId and fieldId values, include every required field, respect repetition limits, and do not add keys.\nRejected response:\n${JSON.stringify(rejectedPlan)}\n\nValidation diagnostics:\n${JSON.stringify(diagnostics)}`
+        : ''
     const response = await collectStream(params.provider.stream({
       model: params.model,
       systemPrompt: withBrandVoice(PRESENTATION_SYSTEM_PROMPT, params.brandVoice),
@@ -404,25 +423,38 @@ export async function generatePresentationFromTemplate(params: {
       temperature: 0.2,
     }))
     let plan: PresentationPlan
+    const rawResponse = responseText(response)
+    let rawPlan: unknown
     try {
-      plan = validatePlan(template, parseJsonObject(responseText(response)))
+      rawPlan = parseJsonObject(rawResponse)
+      plan = validatePlan(template, rawPlan)
     } catch (cause) {
-      if (!(cause instanceof PresentationFieldLengthError)) throw cause
-      rejectedPlan = cause.plan
-      diagnostics = [{
-        code: 'max_length',
-        message: 'Text exceeds the admitted field character limit',
-        fieldId: cause.field.id,
-        fieldLabel: cause.field.label,
-        maxLength: cause.field.maxLength ?? 0,
-        actualLength: cause.actualLength,
-      }]
+      if (cause instanceof PresentationFieldLengthError) {
+        rejectedPlan = cause.plan
+        rejectionKind = 'fit'
+        diagnostics = [{
+          code: 'max_length',
+          message: 'Text exceeds the admitted field character limit',
+          fieldId: cause.field.id,
+          fieldLabel: cause.field.label,
+          maxLength: cause.field.maxLength ?? 0,
+          actualLength: cause.actualLength,
+        }]
+        continue
+      }
+      rejectedPlan = rawPlan ?? { raw: rawResponse.slice(0, 32_000) }
+      rejectionKind = 'plan'
+      diagnostics = planValidationDiagnostics(cause)
+      if (attempt === MAX_FIT_ATTEMPTS) {
+        throw new OfficeGenerationFailure('presentation_plan_failed', `Presentation generation could not produce a valid plan after ${MAX_FIT_ATTEMPTS} attempts: ${JSON.stringify(diagnostics)}`)
+      }
       continue
     }
     const materialized = materializePresentation({ ...params, template }, plan)
     diagnostics = fitDiagnostics(materialized)
     if (diagnostics.length === 0) return materialized.snapshot
     rejectedPlan = plan
+    rejectionKind = 'fit'
   }
   throw new OfficeGenerationFailure('presentation_fit_failed', `Presentation generation could not satisfy the admitted template fit constraints after ${MAX_FIT_ATTEMPTS} attempts: ${JSON.stringify(diagnostics)}`)
 }

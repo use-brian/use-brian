@@ -84,7 +84,7 @@ export type OfficeGenerationOutcome =
   | { status: 'failed'; code: string; message: string }
   | { status: 'cancelled' }
 
-export type OfficeGenerationFailureCode = 'presentation_fit_failed'
+export type OfficeGenerationFailureCode = 'presentation_fit_failed' | 'presentation_plan_failed'
 
 /** A typed pipeline failure whose code is safe to project to members. */
 export class OfficeGenerationFailure extends Error {

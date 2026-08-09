@@ -92,13 +92,18 @@ async function resolvePinLine(
       }
       case 'contact':
       case 'company': {
-        // Pins reference the CRM specialization rows (`contacts` /
-        // `companies`) — the ids the CRM surface and flat-read SDK expose.
-        const table = pin.kind === 'contact' ? 'contacts' : 'companies'
+        // A contact / company IS an `entities` row: migration 296 dropped the
+        // `contacts` / `companies` specialization tables once every reader and
+        // writer had been repointed. Resolve against the same table AND kind
+        // the CRM surface lists from (`db/crm.ts` → `listContacts` /
+        // `listCompanies` both `SELECT e.id … FROM entities e`), so the id the
+        // picker handed over is the id looked up here.
+        const entityKind = pin.kind === 'contact' ? 'person' : 'company'
         const r = await query<{ name: string; sensitivity: string }>(
-          `SELECT name, sensitivity FROM ${table}
-            WHERE id = $1 AND workspace_id = $2 AND retracted_at IS NULL`,
-          [pin.refId, workspaceId],
+          `SELECT display_name AS name, sensitivity FROM entities
+            WHERE id = $1 AND workspace_id = $2 AND kind = $3
+              AND valid_to IS NULL AND retracted_at IS NULL`,
+          [pin.refId, workspaceId, entityKind],
         )
         const row = r.rows[0]
         if (!row || !readable(clearance, row.sensitivity)) return unavailable
@@ -107,18 +112,26 @@ async function resolvePinLine(
         return { full: line, short: line, label: row.name }
       }
       case 'deal': {
+        // Same post-296 entity read as contact / company; stage, amount and
+        // close date moved into `attributes` (mirrors `DEAL_SELECT`).
+        // `close_date` is read as TEXT and formatted in JS on purpose: a
+        // malformed stored value must degrade this one pin, not throw a cast
+        // error that takes the whole resolution with it.
         const r = await query<{
+          name: string
           stage: string
           amount: string | null
-          closeDate: Date | null
+          closeDate: string | null
           sensitivity: string
-          name: string | null
         }>(
-          `SELECT d.stage, d.amount, d.close_date AS "closeDate", d.sensitivity,
-                  e.display_name AS "name"
-             FROM deals d
-             LEFT JOIN entities e ON e.id = d.entity_id
-            WHERE d.id = $1 AND d.workspace_id = $2 AND d.retracted_at IS NULL`,
+          `SELECT display_name AS name,
+                  COALESCE(attributes->>'stage', 'lead') AS stage,
+                  attributes->>'amount' AS amount,
+                  attributes->>'close_date' AS "closeDate",
+                  sensitivity
+             FROM entities
+            WHERE id = $1 AND workspace_id = $2 AND kind = 'deal'
+              AND valid_to IS NULL AND retracted_at IS NULL`,
           [pin.refId, workspaceId],
         )
         const row = r.rows[0]
@@ -127,11 +140,10 @@ async function resolvePinLine(
         const bits = [row.stage, row.amount ? `$${row.amount}` : null, close ? `close ${close}` : null]
           .filter(Boolean)
           .join(', ')
-        const label = row.name ? `Deal "${row.name}"` : 'Deal'
         return {
-          full: `- ${label} (${bits}) [deal id: ${pin.refId}]`,
-          short: `- ${label} [deal id: ${pin.refId}]`,
-          label: row.name ?? 'Deal',
+          full: `- Deal "${row.name}" (${bits}) [deal id: ${pin.refId}]`,
+          short: `- Deal "${row.name}" [deal id: ${pin.refId}]`,
+          label: row.name,
         }
       }
       case 'page': {
@@ -160,7 +172,18 @@ async function resolvePinLine(
       default:
         return unavailable
     }
-  } catch {
+  } catch (err) {
+    // Reaching here is NOT the ordinary "unavailable" case. A missing row or
+    // an above-clearance row returns `unavailable` without throwing, so a
+    // throw means the query itself failed: schema drift, a bad cast, a dead
+    // connection. Degrading stays correct (one bad pin must never fail the
+    // whole block) but degrading SILENTLY is what let contact / company / deal
+    // pins resolve against tables migration 296 had dropped, for months, with
+    // nothing in the logs and an "unavailable" chip as the only symptom.
+    console.error(
+      `[pins] resolution failed for ${pin.kind} pin ${pin.id} (ref ${pin.refId ?? 'none'}):`,
+      err,
+    )
     return unavailable
   }
 }

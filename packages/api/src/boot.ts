@@ -1607,16 +1607,27 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const assistantConnectorStore = createDbAssistantConnectorStore()
   const assistantConnectorGrantsStore = createDbAssistantConnectorGrantsStore()
   const skillStore = createDbSkillStore()
-  let recomputeSkillEdgesOnWrite: ((skill: WorkspaceSkill) => void) | undefined
+  let recomputeSkillEdgesOnWrite:
+    | ((skill: WorkspaceSkill, options?: { retiredResourceIds?: readonly string[] }) => void)
+    | undefined
   const workspaceSkillStore = createDbWorkspaceSkillStore({
     onWritten: (skill) => recomputeSkillEdgesOnWrite?.(skill),
+  })
+  const workspaceSkillFilesStore = createDbWorkspaceSkillFilesStore({
+    onChanged: (workspaceSkillId, retiredResourceIds) => {
+      void workspaceSkillStore.getByIdSystem(workspaceSkillId).then((skill) => {
+        if (skill) recomputeSkillEdgesOnWrite?.(skill, { retiredResourceIds })
+      }).catch((err) => {
+        console.error(`[skill-edge-service] resource-change lookup failed (skill=${workspaceSkillId}):`, err)
+      })
+    },
   })
   recomputeSkillEdgesOnWrite = makeSkillEdgeRecomputer({
     entityLinks: entityLinksStore,
     connectorInstanceStore,
     workspaceSkillStore,
+    workspaceSkillFilesStore,
   })
-  const workspaceSkillFilesStore = createDbWorkspaceSkillFilesStore()
   const workspaceSkillEnablementStore = createDbWorkspaceSkillEnablementStore()
   const skillCuratorDigestStore = createDbSkillCuratorDigestStore()
   const curatorEmbedder = sharedEmbedder
@@ -5246,7 +5257,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }))
   // (The public /api/brain/stream SSE mount lives ABOVE the bare `/api`
   // requireAuth guards — see the block next to workflowWebhookRoutes.)
-  app.use('/api/brain', requireAuth(env.JWT_SECRET), brainRoutes({ entitiesStore, entityLinksStore, retrievalStore, knowledgeStore, workspaceSkillStore, connectorInstanceStore }))
+  app.use('/api/brain', requireAuth(env.JWT_SECRET), brainRoutes({ entitiesStore, entityLinksStore, retrievalStore, knowledgeStore, workspaceSkillStore, workspaceSkillFilesStore, connectorInstanceStore }))
   // Brain inbox (verification surface). Open + hosted share this one mount: the
   // route's deps are all open (brain-inbox-store / entities-store / crm / sessions /
   // notify). `entityKindClassifier` is boot's own; `pendingClassificationStore` is

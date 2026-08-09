@@ -161,7 +161,7 @@ describe('[COMP:api/skill-store] WorkspaceSkillStore — workspace CRUD', () => 
   })
 
   it('delete is a bi-temporal close (UPDATE, not DELETE)', async () => {
-    mockRls.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
+    mockRls.mockResolvedValueOnce({ rows: [skillRow({ state: 'archived', valid_to: new Date() })], rowCount: 1 } as never)
     expect(await ws.delete('u-1', 'ws-1', 'sk-1')).toBe(true)
     const sql = mockRls.mock.calls[0][1] as string
     expect(sql).toContain('UPDATE workspace_skills')
@@ -202,12 +202,33 @@ describe('[COMP:api/skill-store] WorkspaceSkillStore — onWritten hook', () => 
     expect(onWritten.mock.calls[0][0]).toMatchObject({ rowId: 'sk-uuid-1', workspaceId: 'ws-1' })
   })
 
+  it('defers the create hook while a native bundle batch is incomplete', async () => {
+    const onWritten = vi.fn()
+    const ws = createDbWorkspaceSkillStore({ onWritten })
+    mockRls.mockResolvedValueOnce({ rows: [skillRow()], rowCount: 1 } as never)
+    await ws.create('u-1', 'ws-1', {
+      slug: 'my-skill', name: 'My Skill', description: 'd', content: 'c',
+      bundleVersion: 2, deferGraphRecompute: true,
+    })
+    expect(onWritten).not.toHaveBeenCalled()
+  })
+
   it('fires onWritten on update', async () => {
     const onWritten = vi.fn()
     const ws = createDbWorkspaceSkillStore({ onWritten })
     mockRls.mockResolvedValueOnce({ rows: [skillRow({ name: 'Renamed' })], rowCount: 1 } as never)
     await ws.update('u-1', 'ws-1', 'sk-uuid-1', { name: 'Renamed' })
     expect(onWritten).toHaveBeenCalledTimes(1)
+  })
+
+  it('fires onWritten with the archived row so graph edges close on delete', async () => {
+    const onWritten = vi.fn()
+    const ws = createDbWorkspaceSkillStore({ onWritten })
+    mockRls.mockResolvedValueOnce({
+      rows: [skillRow({ state: 'archived', valid_to: new Date() })], rowCount: 1,
+    } as never)
+    await ws.delete('u-1', 'ws-1', 'sk-uuid-1')
+    expect(onWritten).toHaveBeenCalledWith(expect.objectContaining({ state: 'archived' }))
   })
 
   it('does not fire onWritten when update matched no row', async () => {
@@ -244,7 +265,7 @@ describe('[COMP:api/skill-store] WorkspaceSkillStore — community catalog', () 
   })
 
   it('publish keys UPDATE on id + workspace_id', async () => {
-    mockRls.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
+    mockRls.mockResolvedValueOnce({ rows: [skillRow({ state: 'archived', valid_to: new Date() })], rowCount: 1 } as never)
     expect(await ws.publish('u-1', 'ws-1', 'sk-1')).toBe(true)
     expect(mockRls.mock.calls[0][2]).toEqual(['sk-1', 'ws-1'])
   })
@@ -280,6 +301,32 @@ describe('[COMP:api/skill-store] WorkspaceSkillStore — V2 lifecycle (S12 / S13
     const sql = mockRls.mock.calls[0][1] as string
     expect(sql).toContain('pinned = $1')
     expect(sql).toContain("WHEN $1 AND state = 'archived' THEN 'active'")
+  })
+
+  it('recomputes graph edges when lifecycle state changes', async () => {
+    const onWritten = vi.fn()
+    const hooked = createDbWorkspaceSkillStore({ onWritten })
+    mockQuery.mockResolvedValueOnce({
+      rows: [skillRow({ state: 'archived', valid_to: new Date() })],
+      rowCount: 1,
+    } as never)
+
+    await hooked.setState('sk-1', 'archived')
+
+    expect(onWritten).toHaveBeenCalledWith(expect.objectContaining({ rowId: 'sk-uuid-1', state: 'archived' }))
+  })
+
+  it('recomputes graph edges when pinning restores an archived skill', async () => {
+    const onWritten = vi.fn()
+    const hooked = createDbWorkspaceSkillStore({ onWritten })
+    mockRls.mockResolvedValueOnce({
+      rows: [skillRow({ state: 'active', pinned: true })],
+      rowCount: 1,
+    } as never)
+
+    await hooked.setPinned('u-1', 'ws-1', 'sk-1', true)
+
+    expect(onWritten).toHaveBeenCalledWith(expect.objectContaining({ rowId: 'sk-uuid-1', state: 'active' }))
   })
 
   it('markUserVerified flips write_origin to foreground', async () => {
@@ -510,7 +557,10 @@ describe('[COMP:api/skill-store] legacy SkillStore — userId resolution', () =>
 
   it('delete forwards to the bi-temporal close', async () => {
     mockWorkspaceLookup()
-    mockRls.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
+    mockRls.mockResolvedValueOnce({
+      rows: [skillRow({ state: 'archived', valid_to: new Date() })],
+      rowCount: 1,
+    } as never)
     expect(await store.delete('u-1', 'sk-1')).toBe(true)
     expect(mockRls.mock.calls[1][1]).toContain("state = 'archived'")
   })

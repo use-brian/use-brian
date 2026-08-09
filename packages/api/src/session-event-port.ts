@@ -116,6 +116,20 @@ export type SessionEvent =
       payload: { byUserId?: string; byAssistantId?: string }
     }
   | {
+      /**
+       * The room's bound (default) assistant changed — `PATCH
+       * /api/sessions/:id/assistant`. Unlike `pins_changed` this carries the
+       * new `assistantId` rather than being a bare refetch signal: every
+       * viewer's composer chip, Ask label and `@` default resolve from it
+       * off a roster the client already holds, so there is nothing to fetch
+       * and no clearance-sensitive data in the payload. `byUserId` is
+       * whoever moved it, so a viewer can skip its own echo.
+       */
+      kind: 'session_assistant_changed'
+      sessionId: string
+      payload: { assistantId: string; byUserId: string }
+    }
+  | {
       kind: 'presence'
       sessionId: string
       payload: { viewers: ViewerPresence[] }

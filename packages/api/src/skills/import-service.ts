@@ -11,7 +11,12 @@
  */
 
 import {
+  parseSkillBundle,
   parseImportedSkill,
+  sha256,
+  skillResourceKindFromPath,
+  type SkillBundleLink,
+  type SkillResourceKind,
   type ImportDialect,
   type ImportedSkillDraft,
   type ImportWarning,
@@ -34,15 +39,21 @@ export class SkillImportError extends Error {
 }
 
 export type SkillImportSupportFile = {
-  kind: 'reference' | 'template' | 'script'
+  kind: SkillResourceKind
   name: string
+  path: string
   content: string
+  description?: string
+  contentHash: string
 }
 
 export type SkillImportResult = {
   dialect: ImportDialect
   draft: ImportedSkillDraft
   supportFiles: SkillImportSupportFile[]
+  links: SkillBundleLink[]
+  bundleVersion: 2
+  sourceDigest: string
   warnings: ImportWarning[]
   /** Provenance blob stored on the row at save (`import_source`, mig 328). */
   importSource: Record<string, unknown>
@@ -75,12 +86,7 @@ export const IMPORT_MAX_SUPPORT_FILES = 20
 export const IMPORT_MAX_SUPPORT_FILE_BYTES = 65_536
 export const IMPORT_MAX_SUPPORT_TOTAL_BYTES = 262_144
 
-/** Agent Skills / Hermes support dirs → workspace_skill_files kinds. */
-const SUPPORT_DIR_KINDS: Record<string, SkillImportSupportFile['kind']> = {
-  references: 'reference',
-  templates: 'template',
-  scripts: 'script',
-}
+const SUPPORT_DIRS = new Set(['references', 'assets', 'templates', 'scripts'])
 
 // ── URL import ────────────────────────────────────────────────
 
@@ -112,8 +118,11 @@ export async function importSkillFromUrl(
     dialect: parsed.dialect,
     draft: parsed.draft,
     supportFiles: [],
+    links: [],
+    bundleVersion: 2,
+    sourceDigest: sha256(text),
     warnings: parsed.warnings,
-    importSource: { ...normalized.provenance },
+    importSource: { ...normalized.provenance, sourceDigest: sha256(text) },
   }
 }
 
@@ -153,8 +162,11 @@ export function importSkillFromPaste(content: string, fileName?: string): SkillI
     dialect: parsed.dialect,
     draft: parsed.draft,
     supportFiles: [],
+    links: [],
+    bundleVersion: 2,
+    sourceDigest: sha256(content),
     warnings: parsed.warnings,
-    importSource: { kind: 'paste' },
+    importSource: { kind: 'paste', sourceDigest: sha256(content) },
   }
 }
 
@@ -198,8 +210,14 @@ export async function importSkillFromGithub(
       dialect: parsed.dialect,
       draft: parsed.draft,
       supportFiles: [],
+      links: [],
+      bundleVersion: 2,
+      sourceDigest: sha256(entry.content),
       warnings: parsed.warnings,
-      importSource: { kind: 'github', owner, repo, path, ref: ref ?? null, sha: entry.sha },
+      importSource: {
+        kind: 'github', owner, repo, path, ref: ref ?? null, sha: entry.sha,
+        sourceDigest: sha256(entry.content),
+      },
     }
   }
 
@@ -223,7 +241,24 @@ export async function importSkillFromGithub(
   }
 
   const warnings: ImportWarning[] = [...parsed.warnings]
-  const { supportFiles, skipped } = await collectSupportFiles(github, target, entry)
+  const { files, skipped } = await collectSupportFiles(github, target, entry)
+  const bundle = parseSkillBundle({
+    skillMarkdown: skillContents.content,
+    files,
+    skillSource: 'community',
+    source: { kind: 'github', owner, repo, path, ref: ref ?? null, sha: skillContents.sha },
+  })
+  if (!bundle) {
+    throw new SkillImportError('The folder\'s SKILL.md has invalid Agent Skills frontmatter.')
+  }
+  const supportFiles: SkillImportSupportFile[] = bundle.resources.map((resource) => ({
+    kind: resource.kind,
+    name: resource.name,
+    path: resource.path,
+    content: resource.content,
+    description: resource.description,
+    contentHash: resource.contentHash,
+  }))
 
   if (skipped.length > 0) {
     warnings.push({
@@ -238,19 +273,17 @@ export async function importSkillFromGithub(
         'Scripts were imported as text for the assistant to read; they are never executed here.',
     })
   }
-
-  // Surface the support files to the model at useSkill time through the
-  // normal pointer machinery — an appendix of {{kind:name}} pointers.
-  let content = parsed.draft.content
-  if (supportFiles.length > 0) {
-    const pointerLines = supportFiles.map((f) => `- {{${f.kind}:${f.name}}}`)
-    content = `${content}\n\n## Imported support files\n\n${pointerLines.join('\n')}`
+  for (const issue of bundle.issues) {
+    warnings.push({ code: issue.code, detail: issue.detail })
   }
 
   return {
     dialect: parsed.dialect,
-    draft: { ...parsed.draft, content },
+    draft: parsed.draft,
     supportFiles,
+    links: bundle.links,
+    bundleVersion: 2,
+    sourceDigest: bundle.sourceDigest,
     warnings,
     importSource: {
       kind: 'github',
@@ -258,7 +291,9 @@ export async function importSkillFromGithub(
       repo,
       path,
       ref: ref ?? null,
-      sha: skillFile.sha,
+      sha: skillContents.sha,
+      sourceDigest: bundle.sourceDigest,
+      resourceHashes: Object.fromEntries(bundle.resources.map((resource) => [resource.path, resource.contentHash])),
     },
   }
 }
@@ -267,28 +302,24 @@ async function collectSupportFiles(
   github: GithubContentsReader,
   target: GithubImportTarget,
   folderListing: GithubContentEntry[],
-): Promise<{ supportFiles: SkillImportSupportFile[]; skipped: string[] }> {
-  const supportFiles: SkillImportSupportFile[] = []
+): Promise<{ files: Array<{ path: string; content: string }>; skipped: string[] }> {
+  const files: Array<{ path: string; content: string }> = []
   const skipped: string[] = []
   let totalBytes = 0
 
-  for (const dirEntry of folderListing) {
-    if (dirEntry.name.toLowerCase() === 'skill.md') continue
-
-    const kind = dirEntry.type === 'dir' ? SUPPORT_DIR_KINDS[dirEntry.name.toLowerCase()] : undefined
-    if (!kind) {
-      skipped.push(dirEntry.type === 'dir' ? `${dirEntry.name}/` : dirEntry.name)
-      continue
-    }
-
-    const listing = await github.getFileContents(target.owner, target.repo, dirEntry.path, target.ref)
-    const files = Array.isArray(listing) ? listing : [listing]
-    for (const file of files) {
-      if (file.type !== 'file') {
-        skipped.push(`${file.path}/`)
+  const collectDirectory = async (directoryPath: string): Promise<void> => {
+    const listing = await github.getFileContents(target.owner, target.repo, directoryPath, target.ref)
+    const entries = Array.isArray(listing) ? listing : [listing]
+    for (const file of entries) {
+      if (file.type === 'dir') {
+        await collectDirectory(file.path)
         continue
       }
-      if (supportFiles.length >= IMPORT_MAX_SUPPORT_FILES) {
+      if (file.type !== 'file') {
+        skipped.push(file.path)
+        continue
+      }
+      if (files.length >= IMPORT_MAX_SUPPORT_FILES) {
         throw new SkillImportError(
           `The folder has more than ${IMPORT_MAX_SUPPORT_FILES} support files; trim it before importing.`,
         )
@@ -309,11 +340,29 @@ async function collectSupportFiles(
         skipped.push(file.path)
         continue
       }
-      supportFiles.push({ kind, name: file.name, content: fetched.content })
+      const relativePath = file.path.startsWith(`${target.path}/`)
+        ? file.path.slice(target.path.length + 1)
+        : file.path
+      if (!skillResourceKindFromPath(relativePath)) {
+        skipped.push(file.path)
+        continue
+      }
+      files.push({ path: relativePath, content: fetched.content })
     }
   }
 
-  return { supportFiles, skipped }
+  for (const dirEntry of folderListing) {
+    if (dirEntry.name.toLowerCase() === 'skill.md') continue
+
+    const isSupportDir = dirEntry.type === 'dir' && SUPPORT_DIRS.has(dirEntry.name.toLowerCase())
+    if (!isSupportDir) {
+      skipped.push(dirEntry.type === 'dir' ? `${dirEntry.name}/` : dirEntry.name)
+      continue
+    }
+    await collectDirectory(dirEntry.path)
+  }
+
+  return { files, skipped }
 }
 
 // Re-exported so the route can share one cap constant with URL fetches.

@@ -298,6 +298,7 @@ const KIND_ORDER: BrainGraphNodeKind[] = [
   "knowledge",
   "memory",
   "skill",
+  "skill_file",
   "connector",
   "other",
 ];
@@ -366,6 +367,7 @@ export function readThemeColors(): ThemeColors {
       knowledge: kind("knowledge"),
       memory: kind("memory"),
       skill: kind("skill"),
+      skill_file: kind("skill_file"),
       connector: kind("connector"),
     },
   };
@@ -379,7 +381,7 @@ export function readThemeColors(): ThemeColors {
  */
 function nodeToRow(
   node: BrainGraphNode & {
-    kind: Exclude<BrainGraphNodeKind, "skill" | "connector" | "memory">;
+    kind: Exclude<BrainGraphNodeKind, "skill" | "skill_file" | "connector" | "memory">;
   },
 ): BrainRow {
   return {
@@ -1802,6 +1804,9 @@ export function BrainGraphView({
               onSelectSkillNode?.(n.id);
               return;
             }
+            // Resource nodes are context for a skill-scoped graph. The skill
+            // editor remains their canonical detail/read surface.
+            if (n.kind === "skill_file") return;
             if (n.kind === "connector") return;
             if (n.kind === "memory") {
               onSelect({
@@ -1817,7 +1822,7 @@ export function BrainGraphView({
                 n as GraphNodeWithPos & {
                   kind: Exclude<
                     BrainGraphNodeKind,
-                    "skill" | "connector" | "memory"
+                    "skill" | "skill_file" | "connector" | "memory"
                   >;
                 },
               ),

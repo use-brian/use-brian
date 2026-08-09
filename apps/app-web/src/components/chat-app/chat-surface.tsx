@@ -83,6 +83,7 @@ import {
   type CitationSource,
   type DocumentAttachment,
   type PendingConfirmation,
+  type ReplyTo,
   type ToolUsed,
 } from "@use-brian/chat-ui";
 import remarkGfm from "remark-gfm";
@@ -96,6 +97,7 @@ import {
   Paperclip,
   Pencil,
   Plus,
+  Reply,
   RotateCw,
   Sparkles,
   Square,
@@ -151,6 +153,7 @@ import {
 } from "@/lib/chat-session-events";
 import {
   createWorkspaceSession,
+  rebindWorkspaceSessionAssistant,
   extractMessageText,
   extractPresentedDocuments,
   extractToolUses,
@@ -183,6 +186,7 @@ import { ChatConfirmationCard } from "@/components/chrome/chat-confirmation-card
 import { ChatContextPins } from "@/components/chat-app/chat-context-pins";
 import { resolveRequestedFreshAssistant } from "@/components/chat-app/assistant-deeplink";
 import {
+  isAssistantPickerLive,
   resolveMentionedAssistants,
   resolveWorkBenchAssistant,
 } from "@/components/chat-app/multi-assistant-response";
@@ -194,6 +198,12 @@ import {
   canEditUserMessage,
   resolveEditDispatch,
 } from "@/components/chat-app/message-edit";
+import {
+  buildReplyTarget,
+  canReplyToMessage,
+  condenseQuote,
+  selectionTextWithin,
+} from "@/components/chat-app/message-reply";
 import {
   imageFilesFromClipboard,
   readyAttachments,
@@ -327,6 +337,21 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   /** The user message open in the inline editor, and its working text. */
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
+  /**
+   * The live text selection inside one transcript message, with the viewport
+   * rect to anchor the floating Reply pill to.
+   *
+   * Selecting first and replying second is the affordance: a reply that quotes
+   * a whole answer to ask about one figure in it is barely a reply, so the
+   * pill appears where the user's eyes already are rather than making them
+   * travel to the row's hover bar and lose the selection getting there.
+   */
+  const [selectionQuote, setSelectionQuote] = useState<{
+    messageId: string;
+    text: string;
+    top: number;
+    left: number;
+  } | null>(null);
   /** A suspended askQuestion in the open room / thread (T11/D8). */
   const [pendingQuestion, setPendingQuestion] = useState<{
     approvalId: string;
@@ -698,6 +723,53 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     activeAssistantIdRef.current = activeAssistant?.id ?? null;
   }, [activeAssistant]);
 
+  /**
+   * Pick the pane's interlocutor from the composer chip.
+   *
+   * A fresh pane just remembers the choice (the room/session binds it on
+   * create). An OPEN room persists it — the binding is the room's default
+   * voice for every member, so it has to survive a reload and reach the
+   * other people in it. The optimistic write must move the adoption REF as
+   * well as the row: the ref wins in `activeAssistant`, so updating only the
+   * row would leave a freshly-created room showing its old assistant.
+   *
+   * A refusal here is a real answer (the server admits exactly the
+   * assistants that could already answer by mention), so it surfaces as the
+   * server's own sentence and the chip snaps back.
+   */
+  const pickAssistant = useCallback(
+    async (assistantId: string) => {
+      const sessionId = activeSessionId;
+      if (!sessionId || !activeShared) {
+        setPickedAssistantId(assistantId);
+        return;
+      }
+      const previous =
+        sessionAssistantRef.current.get(sessionId) ?? activeShared.assistantId;
+      if (previous === assistantId) return;
+      sessionAssistantRef.current.set(sessionId, assistantId);
+      setSharedSessions((rows) =>
+        rows.map((row) => (row.id === sessionId ? { ...row, assistantId } : row)),
+      );
+      setError(null);
+      try {
+        await rebindWorkspaceSessionAssistant(sessionId, assistantId);
+        // The rail and the dock render the room's assistant too.
+        dispatchChatSessionsRefresh(workspaceId);
+      } catch (err) {
+        if (previous) sessionAssistantRef.current.set(sessionId, previous);
+        else sessionAssistantRef.current.delete(sessionId);
+        setSharedSessions((rows) =>
+          rows.map((row) =>
+            row.id === sessionId ? { ...row, assistantId: previous } : row,
+          ),
+        );
+        setError(err instanceof Error ? err.message : t.roomAssistantChangeFailed);
+      }
+    },
+    [activeSessionId, activeShared, t, workspaceId],
+  );
+
   /** Same predicate `send` computes per call — hoisted for the composer. */
   const isRoomView = activeSessionId ? !!activeShared : view === "workspace";
   /**
@@ -824,6 +896,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             ? { userAttachments: parsedUser.attachments }
             : {}),
           ...(r.senderName ? { senderName: r.senderName } : {}),
+          // The stored quote is a text snapshot, so a restored reply renders
+          // WHAT was quoted with no id, role or author to go with it.
+          ...(r.replyToText ? { replyTo: { text: r.replyToText } } : {}),
           // Attribution the edit affordance reads: a teammate's post is not
           // this viewer's to rewrite.
           ...(r.senderUserId ? { senderUserId: r.senderUserId } : {}),
@@ -857,6 +932,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     att.clear();
     setError(null);
     setOpenDocument(null);
+    // A quote points at a row in the thread being left. `session/set` only
+    // moves the id, so nothing else clears this.
+    setReplyTo(null);
+    setSelectionQuote(null);
     hydratedRef.current = activeSessionId;
     sessionIdRef.current = activeSessionId;
     if (!activeSessionId) {
@@ -1129,6 +1208,23 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           setPinsEpoch((n) => n + 1);
           break;
         }
+        case "assistant_changed": {
+          // The room's default voice is shared state — a teammate who moved
+          // it must not leave everyone else asking the assistant that is no
+          // longer there. Carries the id, so nothing is refetched: the
+          // roster is already loaded. Applied unconditionally, including our
+          // own echo, because the server's value is the authoritative one.
+          const nextId =
+            typeof payload.assistantId === "string" ? payload.assistantId : null;
+          if (!nextId) break;
+          sessionAssistantRef.current.set(sessionId, nextId);
+          setSharedSessions((rows) =>
+            rows.map((row) =>
+              row.id === sessionId ? { ...row, assistantId: nextId } : row,
+            ),
+          );
+          break;
+        }
         case "presence": {
           // The bus's full viewer snapshot; the indicator shows only the
           // OTHER members mid-composition (your own draft is not news).
@@ -1379,6 +1475,95 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     copyResetRef.current = window.setTimeout(() => setCopiedMessageId(null), 1500);
   }, []);
 
+  // ── Replying to a message ───────────────────────────────────────────
+  //
+  // The pending quote lives in the shared reducer's `replyTo` slot, so the
+  // composer chip and the optimistic bubble read one value. A ref mirrors it
+  // for `send`, which must not take the whole `chat` object as a dependency.
+
+  const pendingReply = chat.state.replyTo;
+  const setReplyTo = chat.setReplyTo;
+  const pendingReplyRef = useRef<ReplyTo | null>(null);
+  useEffect(() => {
+    pendingReplyRef.current = pendingReply ?? null;
+  }, [pendingReply]);
+
+  /** Focus the composer so the quote is followed by typing, not by a click.
+   *  The mention hook's container IS the composer box element. */
+  const composerBoxRef = mentions.containerRef;
+  const focusComposer = useCallback(() => {
+    composerBoxRef.current?.querySelector("textarea")?.focus();
+  }, [composerBoxRef]);
+
+  /**
+   * The user's selection, if it lies entirely inside this row. Read at click
+   * time rather than tracked: the hover bar's Reply must quote whatever is
+   * selected right now, and clicking the button does not disturb the
+   * selection (the pill and the bar both `preventDefault` their mousedown).
+   */
+  const selectionInMessage = useCallback((messageId: string): string | null => {
+    if (typeof window === "undefined") return null;
+    const row = scrollRef.current?.querySelector(
+      `[data-message-id="${CSS.escape(messageId)}"]`,
+    );
+    return selectionTextWithin(row, window.getSelection());
+  }, []);
+
+  /** `authorName` is resolved by the caller: the roster lookup lives in render
+   *  scope, next to the transcript that already needs it for group headers. */
+  const startReply = useCallback(
+    (
+      message: SurfaceMessage,
+      opts?: { selection?: string | null; authorName?: string | null },
+    ) => {
+      const target = buildReplyTarget({
+        message,
+        selection: opts?.selection ?? selectionInMessage(message.id),
+        authorName: opts?.authorName,
+      });
+      if (!target) return;
+      setReplyTo(target);
+      setSelectionQuote(null);
+      window.getSelection()?.removeAllRanges();
+      focusComposer();
+    },
+    [focusComposer, selectionInMessage, setReplyTo],
+  );
+
+  /**
+   * Offer the floating pill when a pointer-drag settles on a selection inside
+   * ONE message. Bound to mouseup rather than `selectionchange` because the
+   * latter fires per character while the drag is still moving, and a pill
+   * that jumps under a moving cursor is unusable.
+   */
+  const handleTranscriptMouseUp = useCallback(() => {
+    if (typeof window === "undefined") return;
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+      setSelectionQuote(null);
+      return;
+    }
+    const rows = scrollRef.current?.querySelectorAll("[data-message-id]");
+    if (!rows) return;
+    for (const row of Array.from(rows)) {
+      const text = selectionTextWithin(row, selection);
+      if (!text) continue;
+      const messageId = row.getAttribute("data-message-id");
+      if (!messageId) continue;
+      const rect = selection.getRangeAt(0).getBoundingClientRect();
+      // A degenerate rect means the range has no rendered box to anchor to.
+      if (rect.width === 0 && rect.height === 0) break;
+      setSelectionQuote({
+        messageId,
+        text,
+        top: rect.top,
+        left: rect.left + rect.width / 2,
+      });
+      return;
+    }
+    setSelectionQuote(null);
+  }, []);
+
   // ── Send ────────────────────────────────────────────────────────────
   /** Tracks whether the in-flight turn streamed an askQuestion step, so the
    *  settle can fetch the pending row and surface the answer panel. */
@@ -1401,6 +1586,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     // Snapshot the interlocutor at send time — the turn belongs to it even
     // if the resolution inputs shift while the reply streams.
     const interlocutor = activeAssistant;
+    // The pending quote, snapshotted the same way. A replay (retry / edit)
+    // re-sends a message that already chose its referent, so it never picks
+    // up whatever quote happens to be sitting in the composer now.
+    const reply = override?.truncateFromMessageId ? null : pendingReplyRef.current;
     if (
       (!trimmed && turnFileIds.length === 0 && turnRecordingIds.length === 0) ||
       !interlocutor ||
@@ -1427,14 +1616,30 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       isRoom && (!override?.truncateFromMessageId || override.resolveMentions)
         ? resolveMentionedAssistants(trimmed, assistants)
         : [];
-    const targets = mentioned.length > 0 ? mentioned : [interlocutor];
+    // Replying to an assistant asks THAT assistant, not the room's bound one.
+    // A room can hold several, and quoting B's answer to ask a follow-up
+    // question about it, only to have A answer, reads as the wrong assistant
+    // barging in. An explicit `@mention` still wins — it names its responder.
+    const repliedAssistant =
+      isRoom && reply?.role === "assistant" && reply.assistantId
+        ? assistants.find((a) => a.id === reply.assistantId)
+        : undefined;
+    const targets =
+      mentioned.length > 0 ? mentioned : [repliedAssistant ?? interlocutor];
     // Room posts are text-only. A file-bearing send must address the
     // assistant so the files reach `/api/chat` instead of being silently
     // discarded by the durable-post path.
+    //
+    // A reply to an ASSISTANT message is an address signal too, and it must be
+    // computed identically here and on the server (`detectRoomAddress` reads
+    // the quoted row's role): the client picks the ENDPOINT, so a client that
+    // thought this was a silent post would send it somewhere the server never
+    // gets to reconsider it, and the reply would go unanswered.
     const addressed =
       !isRoom ||
       askArmed ||
       mentioned.length > 0 ||
+      reply?.role === "assistant" ||
       turnFileIds.length > 0 ||
       turnRecordingIds.length > 0 ||
       researchMode ||
@@ -1479,13 +1684,19 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         role: "user",
         text: trimmed,
         timestamp: new Date(),
+        ...(reply ? { replyTo: reply } : {}),
       });
       setInput("");
+      setReplyTo(null);
       if (usesComposerTray) att.detach();
       setError(null);
       markRoomSeen(workspaceId, targetId);
       try {
-        await postRoomMessage(targetId, trimmed);
+        await postRoomMessage(
+          targetId,
+          trimmed,
+          reply ? { text: reply.text } : undefined,
+        );
       } catch {
         setError(t.postFailed);
       }
@@ -1513,8 +1724,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       text: trimmed,
       timestamp: new Date(),
       ...(userAttachments.length > 0 ? { userAttachments } : {}),
+      ...(reply ? { replyTo: reply } : {}),
     } satisfies SurfaceMessage);
     setInput("");
+    setReplyTo(null);
     if (usesComposerTray) att.detach();
     if (usesComposerTray) setPendingRecordings([]);
     setError(null);
@@ -1576,6 +1789,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         ...(targetIndex === 0 && override?.truncateFromMessageId
           ? { truncateFromMessageId: override.truncateFromMessageId }
           : {}),
+        // The quote rides EVERY turn of a response group, not just the first:
+        // the row is persisted once, but each assistant needs the same
+        // referent rendered into its own prompt. In a room this is also an
+        // address signal — replying to an assistant asks THAT assistant, the
+        // same way an `@mention` does (`detectRoomAddress`).
+        ...(reply?.id ? { replyTo: { id: reply.id, text: reply.text } } : {}),
         // The Ask affordance marks address intent (T3) — the server decides.
         ...(isRoom && addressed ? { ask: true } : {}),
         ...(isRoom && targets.length > 1
@@ -2022,7 +2241,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       await loadTranscript(sessionIdRef.current);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [input, activeAssistant, activeSessionId, activeShared, askArmed, model, researchMode, view, workspaceId, chat.state.isStreaming, refreshPendingQuestion, reloadShared, resetTurnActivity, selectSession, startingShared, stream, t, tChat.toolNarration, att.attachments, att.uploading, att.fileIds, att.detach, pendingQuestion, pendingRecordings, recordingUpload.status, assistants, applyQueuedInput, buildStreamedTurnMessage, flushQueuedInputs, mentions.reset]);
+  }, [input, activeAssistant, activeSessionId, activeShared, askArmed, model, researchMode, view, workspaceId, chat.state.isStreaming, refreshPendingQuestion, reloadShared, resetTurnActivity, selectSession, startingShared, stream, t, tChat.toolNarration, att.attachments, att.uploading, att.fileIds, att.detach, pendingQuestion, pendingRecordings, recordingUpload.status, assistants, applyQueuedInput, buildStreamedTurnMessage, flushQueuedInputs, mentions.reset, setReplyTo]);
 
   // The mid-turn flush runs inside `send`'s own `onDone`; the ref is the only
   // way to reach the current `send` from there without a stale closure. The
@@ -2353,12 +2572,40 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     </div>
   );
 
+  /** Display label for the author of a quoted row. */
+  const quoteAuthorFor = (message: SurfaceMessage): string | null =>
+    message.role === "user"
+      ? message.senderName ?? t.replyAuthorYou
+      : assistantNameFor(message.senderAssistantId);
+
+  /**
+   * The quote above a message that replied to something.
+   *
+   * Restored quotes carry text and nothing else (the stored field is a
+   * snapshot, not a link), so this renders no author line and no jump
+   * affordance — it says what was quoted, which is what the reader needs to
+   * follow the thread.
+   */
+  const quotedBlock = (reply: ReplyTo, alignEnd: boolean) => (
+    <div
+      className={cn(
+        "max-w-[85%] border-l-2 border-border/80 pl-2",
+        alignEnd && "self-end",
+      )}
+    >
+      <p className="line-clamp-2 text-[12px] leading-snug text-muted-foreground">
+        {condenseQuote(reply.text)}
+      </p>
+    </div>
+  );
+
   const messageActions = (
     messageId: string,
     text: string,
     alignEnd: boolean,
     onRetry?: () => void,
     onEdit?: () => void,
+    onReply?: () => void,
   ) => (
     <div
       className={cn(
@@ -2366,6 +2613,20 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         alignEnd ? "-mr-1" : "-ml-1",
       )}
     >
+      {onReply ? (
+        <button
+          type="button"
+          // Keep the selection alive: the mousedown that focuses a button
+          // would otherwise collapse it, and the selection IS the quote.
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={onReply}
+          aria-label={t.reply}
+          title={t.reply}
+          className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        >
+          <Reply className="size-3.5" aria-hidden />
+        </button>
+      ) : null}
       <button
         type="button"
         onClick={() => handleCopy(messageId, text)}
@@ -2486,13 +2747,19 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   /** Interlocutor control, rendered INSIDE the composer box (bottom-left):
    *  a NEW personal chat picks its assistant here and the session sticks to
    *  it (sessions are assistant-bound; the server rejects a mismatched
-   *  send). An open thread shows its bound assistant — never a mid-thread
-   *  switch. A fresh Workspace pane picks the assistant the new ROOM will
-   *  bind (per-room, for its lifetime). A single-assistant
-   *  workspace degrades to the static label. */
+   *  send). An open PERSONAL thread shows its bound assistant as a static
+   *  label — never a mid-thread switch. A fresh Workspace pane picks the
+   *  assistant the new ROOM will bind, and an OPEN room keeps the picker:
+   *  the binding is the room's default voice, not a fence, and every member
+   *  who can post may move it (`PATCH /api/sessions/:id/assistant`). A
+   *  single-assistant workspace degrades to the static label. */
   const interlocutorControl =
     activeAssistant &&
-    (!activeSessionId && assistants.length > 1 ? (
+    (isAssistantPickerLive({
+      hasOpenSession: !!activeSessionId,
+      paneIsRoom,
+      rosterSize: assistants.length,
+    }) ? (
       <Popover open={switcherOpen} onOpenChange={setSwitcherOpen}>
         <PopoverTrigger
           className="flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:shadow-none"
@@ -2522,7 +2789,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
               key={a.id}
               type="button"
               onClick={() => {
-                setPickedAssistantId(a.id);
+                void pickAssistant(a.id);
                 setSwitcherOpen(false);
               }}
               className={cn(
@@ -2632,7 +2899,16 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       <ChatComposer
         value={input}
         onChange={setInput}
-        onKeyDown={mentions.handleKeyDown}
+        onKeyDown={(event) => {
+          mentions.handleKeyDown(event);
+          if (event.defaultPrevented) return;
+          // Escape drops the quote before it drops anything else — the
+          // autocomplete above already consumed the key if it was open.
+          if (event.key === "Escape" && pendingReply) {
+            event.preventDefault();
+            setReplyTo(null);
+          }
+        }}
         highlightRanges={mentions.highlightRanges}
         inputWrapClassName="order-1 col-span-2 min-w-0"
         // While a turn streams, Send QUEUES into the running turn and
@@ -2707,6 +2983,32 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         )}
         slotAttachments={
           <>
+            {/* The pending quote, above the field it belongs to. Dismissible,
+                because arming a reply and then deciding to say something
+                unrelated must not cost a page of scrolling to undo. */}
+            {pendingReply ? (
+              <div className="flex items-start gap-2 px-3 pt-2.5">
+                <div className="min-w-0 flex-1 border-l-2 border-primary/60 pl-2">
+                  <p className="text-[11px] font-medium text-muted-foreground">
+                    {pendingReply.authorName
+                      ? t.replyingTo.replace("{name}", pendingReply.authorName)
+                      : t.replyingToMessage}
+                  </p>
+                  <p className="truncate text-xs text-muted-foreground">
+                    {condenseQuote(pendingReply.text)}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setReplyTo(null)}
+                  aria-label={t.replyCancel}
+                  title={t.replyCancel}
+                  className="mt-0.5 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                >
+                  <X className="size-3.5" aria-hidden />
+                </button>
+              </div>
+            ) : null}
             <AttachmentChips
               attachments={att.attachments}
               onRemove={att.remove}
@@ -2971,7 +3273,14 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       ) : (
       <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
       <section className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-6">
+        <div
+          ref={scrollRef}
+          onMouseUp={handleTranscriptMouseUp}
+          // The pill is anchored to a viewport rect, so scrolling would strand
+          // it over the wrong text. Dismiss rather than chase.
+          onScroll={selectionQuote ? () => setSelectionQuote(null) : undefined}
+          className="min-h-0 flex-1 overflow-y-auto px-4 py-6"
+        >
           <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
             {chat.state.messages.length === 0 &&
               !chat.state.isStreaming &&
@@ -3008,6 +3317,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 <Fragment key={m.id}>
                   {daySeparator}
                 <div
+                  data-message-id={m.id}
                   className={cn(
                     "group flex flex-col items-end",
                     // A same-sender burst tightens under the group's one
@@ -3025,6 +3335,13 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                       {timeChip}
                     </span>
                   )}
+                  {/* What this message replied to, above the bubble it
+                      belongs to — the quote is context for the sentence
+                      under it, so it reads top-down like every other
+                      messaging app. */}
+                  {m.replyTo && editingMessageId !== m.id
+                    ? quotedBlock(m.replyTo, true)
+                    : null}
                   {/* Neutral Notion-style bubble — the dock's `--secondary`
                       surface, NOT a saturated primary fill (white-on-blue
                       missed WCAG AA; the brand blue stays on small accents). */}
@@ -3056,6 +3373,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                         })
                           ? () => startEdit(m)
                           : undefined,
+                        canReplyToMessage(m)
+                          ? () =>
+                              startReply(m, { authorName: quoteAuthorFor(m) })
+                          : undefined,
                       )
                     : null}
                 </div>
@@ -3064,6 +3385,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 <Fragment key={m.id}>
                   {daySeparator}
                 <div
+                  data-message-id={m.id}
                   className={cn(
                     "group flex gap-2.5",
                     !meta?.startsGroup && "-mt-3.5",
@@ -3083,6 +3405,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                         {timeChip}
                       </span>
                     )}
+                    {m.replyTo ? quotedBlock(m.replyTo, false) : null}
                     {m.toolsUsed?.length ? (
                       <ChatActivitySummary
                         tools={m.toolsUsed}
@@ -3123,6 +3446,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                             ?.userAttachments?.length
                             ? undefined
                             : () => retryAssistantMessage(m.id),
+                          undefined,
+                          canReplyToMessage(m)
+                            ? () =>
+                                startReply(m, { authorName: quoteAuthorFor(m) })
+                            : undefined,
                         )
                       : null}
                   </div>
@@ -3311,6 +3639,45 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             )}
           </div>
         </div>
+
+        {/* Quote-this-selection pill. Anchored to the selection's viewport
+            rect (hence `fixed`), centered above it and nudged clear of the
+            text — the affordance appears where the user is looking rather
+            than in the row's hover bar, which is a pointer trip away and
+            costs the selection to reach. */}
+        {selectionQuote
+          ? (() => {
+              const quoted = (chat.state.messages as SurfaceMessage[]).find(
+                (message) => message.id === selectionQuote.messageId,
+              );
+              if (!quoted || !canReplyToMessage(quoted)) return null;
+              return (
+                <button
+                  type="button"
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() =>
+                    startReply(quoted, {
+                      selection: selectionQuote.text,
+                      authorName: quoteAuthorFor(quoted),
+                    })
+                  }
+                  style={{
+                    top: Math.max(8, selectionQuote.top - 40),
+                    left: selectionQuote.left,
+                  }}
+                  className={cn(
+                    "fixed z-50 -translate-x-1/2 inline-flex items-center gap-1.5",
+                    "rounded-lg border border-border bg-popover px-2.5 py-1.5",
+                    "text-xs font-medium text-popover-foreground shadow-md",
+                    "transition-colors hover:bg-muted",
+                  )}
+                >
+                  <Reply className="size-3.5" aria-hidden />
+                  {t.replyToSelection}
+                </button>
+              );
+            })()
+          : null}
 
         {/* Composer bar — the same composite box the hero centers, docked. */}
         <div className="shrink-0 px-4 pb-4 pt-1">

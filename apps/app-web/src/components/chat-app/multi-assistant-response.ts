@@ -11,6 +11,33 @@
 
 const MAX_ROOM_RESPONDERS = 8;
 
+/**
+ * Is the composer's assistant chip a live PICKER, or a static label?
+ *
+ * Three rules, and the middle one is the whole point:
+ *   - a fresh pane picks the assistant its new session/room will bind;
+ *   - an open ROOM keeps picking — the binding is the room's default voice,
+ *     movable by anyone who can post (`PATCH /api/sessions/:id/assistant`);
+ *   - an open PERSONAL thread does NOT — one person, one assistant, and
+ *     switching mid-thread would hand another assistant's soul and memory a
+ *     transcript written for someone else.
+ *
+ * A single-assistant workspace has nothing to pick between, so the chip
+ * degrades to the label in every case.
+ *
+ * Spec: docs/architecture/features/chat-app.md → "Choosing an assistant".
+ */
+export function isAssistantPickerLive(params: {
+  /** An open thread, vs. the fresh new-chat pane. */
+  hasOpenSession: boolean;
+  /** The pane is a room — an open shared thread, or the Workspace hero. */
+  paneIsRoom: boolean;
+  rosterSize: number;
+}): boolean {
+  if (params.rosterSize < 2) return false;
+  return !params.hasOpenSession || params.paneIsRoom;
+}
+
 type AssistantLike = {
   id: string;
   name: string;
@@ -115,17 +142,32 @@ export function nextMentionSelectionIndex(
 
 /**
  * Map a composer keydown to an autocomplete selection move. Arrow keys are
- * the messaging-app convention; Tab / Shift+Tab stay as the original
- * keyboard-first path. Anything else returns null (not a navigation key).
+ * the messaging-app convention and the only way to move the selection;
+ * anything else returns null (not a navigation key). Tab is deliberately
+ * absent — it accepts, see `acceptsMentionSelection`.
  */
-export function mentionNavigationDelta(
-  key: string,
-  shiftKey: boolean,
-): 1 | -1 | null {
+export function mentionNavigationDelta(key: string): 1 | -1 | null {
   if (key === "ArrowDown") return 1;
   if (key === "ArrowUp") return -1;
-  if (key === "Tab") return shiftKey ? -1 : 1;
   return null;
+}
+
+/**
+ * Does this keydown confirm the highlighted option? Enter is the messaging
+ * convention; Tab is the editor-autocomplete one, and every popup a user
+ * meets elsewhere (their editor, their shell) completes on it rather than
+ * advancing — advancing is what the arrows are for.
+ *
+ * Shift+Tab confirms too. It has no separate meaning while the popup is open,
+ * and letting it fall through would walk focus out of the composer and strand
+ * an open popup behind it.
+ */
+export function acceptsMentionSelection(
+  key: string,
+  shiftKey: boolean,
+): boolean {
+  if (key === "Tab") return true;
+  return key === "Enter" && !shiftKey;
 }
 
 /** Replace the trailing partial `@` query with a confirmed assistant name. */

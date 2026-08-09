@@ -24,6 +24,7 @@
  *   PUT    /:id/access          — set the enabled-assistant set for a skill
  *   GET    /catalog/:slug        — one template's full content (creator's
  *                                  instant template load)
+ *   POST   /catalog/:slug/install — materialize a brian-tools bundle into a workspace
  *   POST   /draft               — one conversational draft turn: transcript +
  *                                  live draft in, revised draft or reply out
  *                                  (brain-skill-management plan §3.2/D3 as
@@ -220,7 +221,19 @@ const draftBodySchema = z.object({
 })
 
 function toMeta(s: SkillContent) {
-  return { id: s.id, name: s.name, description: s.description, whenToUse: s.whenToUse, category: s.category, requiresConnectors: s.requiresConnectors, source: s.source, authorName: s.authorName }
+  return {
+    id: s.id,
+    name: s.name,
+    description: s.description,
+    whenToUse: s.whenToUse,
+    category: s.category,
+    requiresConnectors: s.requiresConnectors,
+    source: s.source,
+    authorName: s.authorName,
+    bundleVersion: s.bundleVersion ?? 1,
+    resourceCount: s.resources?.length ?? 0,
+    sourceDigest: s.sourceDigest ?? null,
+  }
 }
 
 export function skillRoutes({
@@ -290,6 +303,8 @@ export function skillRoutes({
       invocations: s.invocations,
       succeeded: s.succeeded,
       userCorrectedAfter: s.userCorrectedAfter,
+      bundleVersion: s.bundleVersion ?? 1,
+      sourceDigest: s.sourceDigest ?? null,
     }
   }
 
@@ -352,6 +367,10 @@ export function skillRoutes({
         requiresConnectors?: string[]
         source?: string
         authorName?: string
+        bundleVersion?: 1 | 2
+        resources?: SkillContent['resources']
+        sourceDigest?: string
+        bundleSource?: SkillContent['bundleSource']
       }
       res.json({
         skill: {
@@ -364,11 +383,111 @@ export function skillRoutes({
           requiresConnectors: s.requiresConnectors ?? [],
           source: s.source ?? 'community',
           authorName: s.authorName,
+          bundleVersion: s.bundleVersion ?? 1,
+          sourceDigest: s.sourceDigest ?? null,
+          bundleSource: s.bundleSource ?? null,
+          supportFiles: (s.resources ?? []).map((resource) => ({
+            kind: resource.kind,
+            name: resource.name,
+            path: resource.path,
+            content: resource.content,
+            description: resource.description ?? null,
+            contentHash: resource.contentHash,
+          })),
         },
       })
     } catch (err) {
       console.error('[skills] catalog detail failed:', err)
       res.status(500).json({ error: 'Failed to load template skill' })
+    }
+  })
+
+  // ── POST /catalog/:slug/install — native brian-tools install ─────
+  //
+  // Catalog entries are immutable templates. Installation copies the entire
+  // bundle into workspace-owned storage so runtime, graph, governance, and
+  // later user edits all use the same path as a GitHub folder import.
+  router.post('/catalog/:slug/install', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    if (!workspaceSkillStore || !workspaceStore || !workspaceSkillFilesStore) {
+      res.status(501).json({ error: 'Native skill bundle installation is not available' }); return
+    }
+    const body = z.object({
+      workspaceId: z.string().trim().min(1),
+      enabledAssistantIds: z.union([z.literal('all'), z.array(z.string().trim().min(1))]).optional(),
+      sensitivity: z.enum(['public', 'internal', 'confidential']).optional(),
+    }).safeParse(req.body)
+    if (!body.success) { res.status(400).json({ error: 'Invalid install request' }); return }
+    const { workspaceId } = body.data
+    const role = await workspaceStore.getRole(userId, workspaceId)
+    if (!role) { res.status(404).json({ error: 'Not found' }); return }
+
+    const template = communityRegistry.find((skill) => skill.id === req.params.slug)
+    if (!template) { res.status(404).json({ error: 'Catalog skill not found' }); return }
+
+    let installed: WorkspaceSkill | null = null
+    try {
+      installed = await workspaceSkillStore.create(userId, workspaceId, {
+        slug: template.id,
+        name: template.name,
+        description: template.description,
+        whenToUse: template.whenToUse,
+        content: template.content,
+        category: template.category,
+        requiresConnectors: template.requiresConnectors,
+        source: 'community',
+        inductionSource: 'authored',
+        sensitivity: body.data.sensitivity,
+        bundleVersion: 2,
+        sourceDigest: template.sourceDigest ?? null,
+        deferGraphRecompute: true,
+        importSource: {
+          ...(template.bundleSource ?? { kind: 'brian-tools', path: `skills/${template.id}` }),
+          sourceDigest: template.sourceDigest ?? null,
+          resourceHashes: Object.fromEntries(
+            (template.resources ?? []).map((resource) => [resource.path, resource.contentHash]),
+          ),
+        },
+      })
+
+      for (const resource of template.resources ?? []) {
+        await workspaceSkillFilesStore.upsert(userId, {
+          workspaceSkillId: installed.rowId,
+          kind: resource.kind,
+          name: resource.name,
+          path: resource.path,
+          content: resource.content,
+          description: resource.description ?? null,
+          contentHash: resource.contentHash,
+        }, { notify: false })
+      }
+
+      let enabledIds: string[] = []
+      if (workspaceSkillEnablementStore && listWorkspaceAssistants) {
+        const assistants = await listWorkspaceAssistants(userId, workspaceId)
+        const valid = new Set(assistants.map((assistant) => assistant.id))
+        const requested = body.data.enabledAssistantIds
+        enabledIds = requested === undefined || requested === 'all'
+          ? assistants.map((assistant) => assistant.id)
+          : requested.filter((id) => valid.has(id))
+        for (const assistantId of enabledIds) {
+          await workspaceSkillEnablementStore.enable(installed.rowId, assistantId, userId)
+        }
+      }
+
+      workspaceSkillFilesStore.notifyChanged(installed.rowId)
+
+      res.status(201).json(projectWorkspaceSkill(installed, enabledIds))
+    } catch (err: any) {
+      if (installed) {
+        await query('DELETE FROM workspace_skills WHERE id = $1', [installed.rowId]).catch(() => undefined)
+      }
+      if (err?.code === '23505') {
+        res.status(409).json({ error: 'This skill is already installed in the workspace' }); return
+      }
+      console.error('[skills] catalog install failed:', err)
+      res.status(500).json({ error: 'Failed to install the skill bundle' })
     }
   })
 
@@ -484,7 +603,7 @@ export function skillRoutes({
     const {
       name, description, whenToUse, content, category, requiresConnectors,
       workspaceId, enabledAssistantIds, sensitivity, extraction,
-      supportFiles, importSource,
+      supportFiles, importSource, bundleVersion, sourceDigest,
     } = req.body as {
       name?: string
       description?: string
@@ -505,9 +624,18 @@ export function skillRoutes({
       extraction?: unknown
       /** Skill import (skill-system.md → "Importing skills"): folder support
        *  files written to `workspace_skill_files` after the row insert. */
-      supportFiles?: Array<{ kind?: string; name?: string; content?: string; description?: string }>
+      supportFiles?: Array<{
+        kind?: string
+        name?: string
+        path?: string
+        content?: string
+        description?: string
+        contentHash?: string
+      }>
       /** Import provenance blob, stored verbatim on the row (mig 328). */
       importSource?: Record<string, unknown>
+      bundleVersion?: 1 | 2
+      sourceDigest?: string
     }
 
     if (!name || typeof name !== 'string' || !name.trim()) {
@@ -549,6 +677,15 @@ export function skillRoutes({
       && (typeof importSource !== 'object' || importSource === null || Array.isArray(importSource))) {
       res.status(400).json({ error: 'importSource must be an object' }); return
     }
+    if (bundleVersion !== undefined && bundleVersion !== 1 && bundleVersion !== 2) {
+      res.status(400).json({ error: 'bundleVersion must be 1 or 2' }); return
+    }
+    if (sourceDigest !== undefined && !/^[a-f0-9]{64}$/.test(sourceDigest)) {
+      res.status(400).json({ error: 'sourceDigest must be a SHA-256 hex digest' }); return
+    }
+    if (validSupportFiles.length > 0 && workspaceId && !workspaceSkillFilesStore) {
+      res.status(501).json({ error: 'Skill bundle resources are not available on this deployment.' }); return
+    }
 
     const input = {
       slug,
@@ -560,6 +697,9 @@ export function skillRoutes({
       requiresConnectors: requiresConnectors ?? [],
       sensitivity: sensitivity as 'public' | 'internal' | 'confidential' | undefined,
       importSource: importSource ?? null,
+      bundleVersion: bundleVersion ?? (validSupportFiles.length > 0 ? 2 : 1),
+      sourceDigest: sourceDigest ?? null,
+      deferGraphRecompute: validSupportFiles.length > 0,
     }
 
     try {
@@ -574,24 +714,26 @@ export function skillRoutes({
 
         const skill = await workspaceSkillStore.create(userId, workspaceId, input)
 
-        // Imported support files (folder skills): write each through the
-        // pointer-backed files store so the {{kind:name}} appendix in the body
-        // resolves at useSkill time. Failure-isolated like the blueprint mint —
-        // a file write error never fails the skill save (the pointer renders
-        // its "missing" comment instead).
+        // Imported resources are one logical bundle. If any row fails, remove
+        // the just-created root so a partial skill never becomes offerable.
         if (validSupportFiles.length > 0 && workspaceSkillFilesStore) {
-          for (const f of validSupportFiles) {
-            try {
+          try {
+            for (const f of validSupportFiles) {
               await workspaceSkillFilesStore.upsert(userId, {
                 workspaceSkillId: skill.rowId,
                 kind: f.kind,
                 name: f.name,
+                path: f.path ?? null,
                 content: f.content,
                 description: f.description ?? null,
-              })
-            } catch (err) {
-              console.error('[skills] support file write failed (skill kept):', err)
+                contentHash: f.contentHash,
+              }, { notify: false })
             }
+          } catch (err) {
+            await query('DELETE FROM workspace_skills WHERE id = $1', [skill.rowId]).catch(() => undefined)
+            console.error('[skills] bundle resource write failed (skill rolled back):', err)
+            res.status(500).json({ error: 'Failed to install the complete skill bundle' })
+            return
           }
         }
 
@@ -621,18 +763,26 @@ export function skillRoutes({
         }
 
         let enabledIds: string[] = []
-        if (workspaceSkillEnablementStore && listWorkspaceAssistants) {
-          const assistants = await listWorkspaceAssistants(userId, workspaceId)
-          const valid = new Set(assistants.map((a) => a.id))
-          const wanted =
-            enabledAssistantIds === undefined || enabledAssistantIds === 'all'
-              ? assistants.map((a) => a.id)
-              : enabledAssistantIds.filter((id) => valid.has(id))
-          for (const assistantId of wanted) {
-            await workspaceSkillEnablementStore.enable(skill.rowId, assistantId, userId)
+        try {
+          if (workspaceSkillEnablementStore && listWorkspaceAssistants) {
+            const assistants = await listWorkspaceAssistants(userId, workspaceId)
+            const valid = new Set(assistants.map((a) => a.id))
+            const wanted =
+              enabledAssistantIds === undefined || enabledAssistantIds === 'all'
+                ? assistants.map((a) => a.id)
+                : enabledAssistantIds.filter((id) => valid.has(id))
+            for (const assistantId of wanted) {
+              await workspaceSkillEnablementStore.enable(skill.rowId, assistantId, userId)
+            }
+            enabledIds = wanted
           }
-          enabledIds = wanted
+        } catch (err) {
+          if (validSupportFiles.length > 0) {
+            await query('DELETE FROM workspace_skills WHERE id = $1', [skill.rowId]).catch(() => undefined)
+          }
+          throw err
         }
+        if (validSupportFiles.length > 0) workspaceSkillFilesStore?.notifyChanged(skill.rowId)
         res.status(201).json(projectWorkspaceSkill(skill, enabledIds))
         return
       }
@@ -1418,15 +1568,19 @@ export function skillRoutes({
   function toSupportFileJson(row: {
     kind: string
     name: string
+    path: string | null
     content: string
     description: string | null
+    contentHash: string | null
     updatedAt: Date | string
   }) {
     return {
       kind: row.kind,
       name: row.name,
+      path: row.path,
       content: row.content,
       description: row.description,
+      contentHash: row.contentHash,
       updatedAt: row.updatedAt instanceof Date ? row.updatedAt.toISOString() : row.updatedAt,
     }
   }
@@ -1476,8 +1630,10 @@ export function skillRoutes({
         workspaceSkillId: req.params.id,
         kind: checked.value.kind,
         name: checked.value.name,
+        path: checked.value.path ?? null,
         content: checked.value.content,
         description: checked.value.description ?? null,
+        contentHash: checked.value.contentHash,
       })
       res.status(isNew ? 201 : 200).json({ file: toSupportFileJson(row) })
     } catch (err) {

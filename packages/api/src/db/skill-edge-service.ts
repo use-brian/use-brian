@@ -31,9 +31,10 @@
 
 import { query } from './client.js'
 import { recomputeSkillEdges, type SkillEdgeReferenceTarget } from './skill-edge-hooks.js'
-import type { EntityLinksStore, Sensitivity } from '@use-brian/core'
+import { extractSkillMarkdownLinks, type EntityLinksStore, type Sensitivity } from '@use-brian/core'
 import type { ConnectorInstanceStore } from './connector-instance-store.js'
 import type { WorkspaceSkillStore, WorkspaceSkill } from './skill-store.js'
+import type { WorkspaceSkillFilesStore } from './workspace-skill-files-store.js'
 
 export type SkillEdgeRecomputerDeps = {
   entityLinks: EntityLinksStore
@@ -42,7 +43,13 @@ export type SkillEdgeRecomputerDeps = {
    *  closing over it (the recomputer only reads the ref when `onWritten` fires,
    *  long after boot wiring is complete). */
   workspaceSkillStore: WorkspaceSkillStore
+  workspaceSkillFilesStore?: Pick<WorkspaceSkillFilesStore, 'list'>
 }
+
+export type SkillEdgeRecomputer = (
+  skill: WorkspaceSkill,
+  options?: { retiredResourceIds?: readonly string[]; cascadeDependents?: boolean },
+) => Promise<void>
 
 const VALID_SENSITIVITY = new Set<Sensitivity>(['public', 'internal', 'confidential'])
 
@@ -95,8 +102,8 @@ async function resolveActorUserId(skill: WorkspaceSkill): Promise<string | null>
 
 export function makeSkillEdgeRecomputer(
   deps: SkillEdgeRecomputerDeps,
-): (skill: WorkspaceSkill) => Promise<void> {
-  return async (skill: WorkspaceSkill): Promise<void> => {
+): SkillEdgeRecomputer {
+  const recompute: SkillEdgeRecomputer = async (skill, options): Promise<void> => {
     try {
       const actorUserId = await resolveActorUserId(skill)
       if (!actorUserId) {
@@ -107,6 +114,10 @@ export function makeSkillEdgeRecomputer(
         return
       }
 
+      const files = deps.workspaceSkillFilesStore
+        ? await deps.workspaceSkillFilesStore.list(skill.rowId)
+        : []
+      const active = skill.state !== 'archived' && !skill.validTo
       const result = await recomputeSkillEdges(
         {
           entityLinks: deps.entityLinks,
@@ -122,12 +133,30 @@ export function makeSkillEdgeRecomputer(
             ])
             return [...entities, ...memories, ...kbChunks]
           },
+          resolveSkillTargets: async (workspaceId, slugs) => {
+            const wanted = new Set(slugs)
+            const skills = await deps.workspaceSkillStore.listForWorkspace(workspaceId)
+            return skills
+              .filter((candidate) => candidate.state !== 'archived' && wanted.has(candidate.slug))
+              .map((candidate) => ({ id: candidate.rowId, slug: candidate.slug }))
+          },
         },
         {
           skillRowId: skill.rowId,
           workspaceId: skill.workspaceId,
-          content: skill.content,
-          requiresConnectors: skill.requiresConnectors,
+          content: active ? skill.content : '',
+          requiresConnectors: active ? skill.requiresConnectors : [],
+          resources: active
+            ? files.map((file) => ({
+                id: file.id,
+                path: file.path ?? file.name,
+                content: file.content,
+              }))
+            : [],
+          retiredResourceIds: [
+            ...(options?.retiredResourceIds ?? []),
+            ...(active ? [] : files.map((file) => file.id)),
+          ],
           actorUserId,
           // Provenance on the materialized edges. Author-derived edges are
           // 'user'; system/auto-induced writes (no author) are 'extracted'.
@@ -140,8 +169,27 @@ export function makeSkillEdgeRecomputer(
       // Apply edge-derived sensitivity inheritance. No-op when the author
       // overrode sensitivity (`setInheritedSensitivity` guards on the column).
       await deps.workspaceSkillStore.setInheritedSensitivity(skill.rowId, result.inheritedSensitivity)
+
+      // A dependency can be installed after the skill that links to it. The
+      // target write must therefore repair inbound `uses_skill` edges too;
+      // waiting for the source skill's next edit would leave install order as
+      // hidden graph state. Cascade one level only to avoid dependency cycles.
+      if (options?.cascadeDependents !== false) {
+        const dependencyTarget = `../${skill.slug}/SKILL.md`
+        const siblings = await deps.workspaceSkillStore.listForWorkspace(skill.workspaceId)
+        for (const candidate of siblings) {
+          if (
+            candidate.rowId !== skill.rowId &&
+            candidate.state !== 'archived' &&
+            extractSkillMarkdownLinks(candidate.content).includes(dependencyTarget)
+          ) {
+            await recompute(candidate, { cascadeDependents: false })
+          }
+        }
+      }
     } catch (err) {
       console.error(`[skill-edge-service] recompute failed (skill=${skill.rowId}):`, err)
     }
   }
+  return recompute
 }

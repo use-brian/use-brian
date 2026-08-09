@@ -677,6 +677,32 @@ export async function renameSession(sessionId: string, title: string): Promise<v
 }
 
 /**
+ * Repoint a workspace room at another assistant — its DEFAULT voice from the
+ * next turn on (`PATCH /api/sessions/:id/assistant`).
+ *
+ * Only `assistant_id` moves. `effective_clearance` is deliberately NOT
+ * recomputed: it is the room's read floor, fixed at creation, and the route
+ * only admits an assistant that already satisfies it
+ * (`mayAssistantAnswerInRoom`). Lowering it would retroactively widen the
+ * audience of a transcript written under a higher bar; raising it would evict
+ * members from a room they have already read. Neither is wanted, and neither
+ * is needed — see docs/architecture/features/chat-app.md → "Choosing an
+ * assistant".
+ *
+ * Authorization is the caller's (`gateSessionRead` + the workspace/clearance
+ * checks in the route); this is the dumb write.
+ */
+export async function rebindSessionAssistant(
+  sessionId: string,
+  assistantId: string,
+): Promise<void> {
+  await query(
+    `UPDATE sessions SET assistant_id = $1 WHERE id = $2`,
+    [assistantId, sessionId],
+  )
+}
+
+/**
  * Count user+assistant turns in a session (for auto-titling triggers).
  */
 export async function countSessionTurns(sessionId: string): Promise<number> {

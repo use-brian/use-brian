@@ -163,6 +163,25 @@ describe('[COMP:skills/tool] createUseSkillTool', () => {
     expect(expandContent).toHaveBeenCalledTimes(1)
   })
 
+  it('does not eagerly expand bundle-v2 resources', async () => {
+    const expandContent = vi.fn(async () => 'EAGER BODY')
+    const tool = createUseSkillTool({
+      getAvailableSkills: () => [skillContent({
+        bundleVersion: 2,
+        resources: [{
+          path: 'references/private.md', kind: 'reference', name: 'private.md',
+          content: 'PRIVATE RESOURCE BODY', contentHash: 'abc', description: 'Read when needed.',
+        }],
+      })],
+      expandContent,
+    })
+    const res = await tool.execute({ skill: 'research-helper' }, ctx)
+    const instructions = (res.data as { instructions: string }).instructions
+    expect(instructions).toContain('references/private.md')
+    expect(instructions).not.toContain('PRIVATE RESOURCE BODY')
+    expect(expandContent).not.toHaveBeenCalled()
+  })
+
   it('falls back to raw content when expandContent throws — never breaks the result', async () => {
     const expandContent = vi.fn(async () => {
       throw new Error('file store down')

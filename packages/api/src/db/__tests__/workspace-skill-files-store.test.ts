@@ -27,8 +27,10 @@ function fileRow(over: Record<string, unknown> = {}): Record<string, unknown> {
     workspaceSkillId: 'sk-1',
     kind: 'template',
     name: 'weekly-status.md',
+    path: 'templates/weekly-status.md',
     content: '# Weekly status',
     description: null,
+    contentHash: 'abc123',
     createdAt: new Date('2026-01-01'),
     updatedAt: new Date('2026-01-01'),
     ...over,
@@ -95,13 +97,13 @@ describe('[COMP:api/workspace-skill-files-store] upsert', () => {
       content: 'body',
     })
     const params = mockRls.mock.calls[0][2]
-    expect(params?.[4]).toBeNull()
+    expect(params?.[5]).toBeNull()
   })
 })
 
 describe('[COMP:api/workspace-skill-files-store] delete + listByKind', () => {
   it('delete reports whether a row was removed', async () => {
-    mockRls.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
+    mockRls.mockResolvedValueOnce({ rows: [{ id: 'f-1' }], rowCount: 1 } as never)
     expect(await store.delete('u-1', 'sk-1', 'template', 'weekly-status.md')).toBe(true)
     mockRls.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
     expect(await store.delete('u-1', 'sk-1', 'template', 'ghost.md')).toBe(false)

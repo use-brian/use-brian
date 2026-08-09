@@ -29,6 +29,8 @@ export function toSkillImportPrefill(
     },
     supportFiles: result.supportFiles,
     importSource: result.importSource,
+    bundleVersion: result.bundleVersion,
+    sourceDigest: result.sourceDigest,
   };
 }
 

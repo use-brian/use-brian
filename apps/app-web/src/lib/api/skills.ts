@@ -82,6 +82,8 @@ export type WorkspaceSkillSummary = {
   invocations: number;
   succeeded: number;
   userCorrectedAfter: number;
+  bundleVersion?: 1 | 2;
+  sourceDigest?: string | null;
   /** Origin-aware induction provenance: the workflow this skill was
    *  distilled from (`learned_from` edge, skill → workflow). Absent for
    *  interactive inductions. */
@@ -142,6 +144,8 @@ export type CreateSkillInput = {
   supportFiles?: SkillImportSupportFile[];
   /** Skill import: provenance blob stored verbatim on the row. */
   importSource?: Record<string, unknown>;
+  bundleVersion?: 1 | 2;
+  sourceDigest?: string;
 };
 
 /**
@@ -389,6 +393,10 @@ export type SkillTemplateDetail = {
   category: string;
   requiresConnectors: string[];
   source: "builtin" | "community" | "user";
+  bundleVersion: 1 | 2;
+  sourceDigest: string | null;
+  bundleSource: Record<string, unknown> | null;
+  supportFiles: SkillImportSupportFile[];
 };
 
 /**
@@ -419,6 +427,9 @@ export type SkillCatalogEntry = {
   source: "builtin" | "community" | "user";
   starred?: boolean;
   requiresConnectors: string[];
+  bundleVersion?: 1 | 2;
+  resourceCount?: number;
+  sourceDigest?: string | null;
 };
 
 /** The builtin + community + user-published template catalog backing the
@@ -439,9 +450,12 @@ export async function listSkillCatalog(): Promise<SkillCatalogEntry[]> {
 type SkillImportWarning = { code: string; detail: string };
 
 export type SkillImportSupportFile = {
-  kind: "reference" | "template" | "script";
+  kind: "reference" | "asset" | "template" | "script";
   name: string;
+  path?: string;
   content: string;
+  description?: string | null;
+  contentHash?: string;
 };
 
 export type SkillImportResult = {
@@ -456,6 +470,14 @@ export type SkillImportResult = {
     content: string;
   };
   supportFiles: SkillImportSupportFile[];
+  links?: Array<{
+    sourcePath: string;
+    targetPath: string;
+    relation: "contains" | "references" | "uses_skill";
+    targetSkillSlug?: string;
+  }>;
+  bundleVersion?: 2;
+  sourceDigest?: string;
   warnings: SkillImportWarning[];
   importSource: Record<string, unknown>;
 };
@@ -606,10 +628,11 @@ export async function listImportGithubContents(
 // `GET/PUT/DELETE /api/skills/:id/files`; spec:
 // docs/architecture/engine/skill-system.md → "Support files".
 
-export type SkillFileKind = "reference" | "template" | "script";
+export type SkillFileKind = "reference" | "asset" | "template" | "script";
 
 export const SKILL_FILE_KINDS: SkillFileKind[] = [
   "reference",
+  "asset",
   "template",
   "script",
 ];
@@ -617,8 +640,10 @@ export const SKILL_FILE_KINDS: SkillFileKind[] = [
 export type SkillFile = {
   kind: SkillFileKind;
   name: string;
+  path: string | null;
   content: string;
   description: string | null;
+  contentHash: string | null;
   /** ISO timestamp of the last write (the curator writes here too). */
   updatedAt: string;
 };
@@ -629,6 +654,14 @@ export function skillFilePointer(file: {
   name: string;
 }): string {
   return `{{${file.kind}:${file.name}}}`;
+}
+
+/** Portable relative link used by bundle-v2 SKILL.md bodies. */
+export function skillFileMarkdownLink(file: {
+  name: string;
+  path: string | null;
+}): string | null {
+  return file.path ? `[${file.name}](${file.path})` : null;
 }
 
 /**
@@ -655,6 +688,7 @@ export async function saveSkillFile(
   file: {
     kind: SkillFileKind;
     name: string;
+    path?: string | null;
     content: string;
     description?: string | null;
   },

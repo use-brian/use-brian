@@ -95,4 +95,44 @@ describe('[COMP:api/skill-edge-hooks] recomputeSkillEdges', () => {
     expect(res.created).toBe(0)
     expect(entityLinks.create).not.toHaveBeenCalled()
   })
+
+  it('materializes bundle containment, cross-skill use, and resource references', async () => {
+    const entityLinks = makeEntityLinks([])
+    const res = await recomputeSkillEdges(
+      {
+        entityLinks,
+        listConnectors: async () => [],
+        resolveReferenceTargets: async (_workspaceId, refs) =>
+          refs.entity.includes(E)
+            ? [{ kind: 'entity', id: E, sensitivity: 'confidential' }]
+            : [],
+        resolveSkillTargets: async () => [{ id: 'skill-sales', slug: 'consult-sales' }],
+      },
+      {
+        skillRowId: 'skill-finance',
+        workspaceId: 'ws-1',
+        content: 'Coordinate with [sales](../consult-sales/SKILL.md).',
+        requiresConnectors: [],
+        resources: [
+          {
+            id: 'file-statement',
+            path: 'references/statement-analysis.md',
+            content: `Use the account for [[entity:${E}]].`,
+          },
+        ],
+        actorUserId: 'user-1',
+        source: 'user',
+      },
+    )
+
+    expect(res.created).toBe(3)
+    expect(res.inheritedSensitivity).toBe('confidential')
+    expect(entityLinks.create.mock.calls.map((call: unknown[]) => call[0])).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ sourceKind: 'skill', targetKind: 'skill_file', edgeType: 'contains' }),
+        expect.objectContaining({ sourceKind: 'skill', targetId: 'skill-sales', edgeType: 'uses_skill' }),
+        expect.objectContaining({ sourceKind: 'skill_file', sourceId: 'file-statement', edgeType: 'references_resource' }),
+      ]),
+    )
+  })
 })

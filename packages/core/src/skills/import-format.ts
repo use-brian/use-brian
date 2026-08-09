@@ -31,6 +31,10 @@ export type ImportWarningCode =
   // every import warning shares one closed union the UI can localize.
   | 'scripts_not_executable'
   | 'unsupported_files'
+  | 'missing_resource'
+  | 'orphaned_resource'
+  | 'invalid_resource_path'
+  | 'binary_resource'
 
 export type ImportWarning = { code: ImportWarningCode; detail: string }
 

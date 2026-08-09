@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { findOrCreateUser, getDefaultAssistant, getUserAssistant, getUserProfilesByIds, getWorkspacePrimaryAssistant } from '../db/users.js'
-import { addSessionMessage, createWorkspaceChatSession, findSessionByChannel, findSessionById, getSessionMessageById, getSessionMessages, isSharedChatSession, renameSession, updateSessionMessageText } from '../db/sessions.js'
+import { addSessionMessage, createWorkspaceChatSession, findSessionByChannel, findSessionById, getSessionMessageById, getSessionMessages, isSharedChatSession, rebindSessionAssistant, renameSession, updateSessionMessageText } from '../db/sessions.js'
+import { mayAssistantAnswerInRoom } from './_room-binding.js'
 import { query } from '../db/client.js'
 import { resolveUser } from './route-helpers.js'
 import { getWorkspaceRoleSystem, getWorkspaceMembershipWithClearanceSystem } from '../db/workspace-store.js'
@@ -670,6 +671,10 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         // Outbound file attachments (sendFile, migration 273) — rendered
         // as file cards. Omitted when empty to keep the payload lean.
         attachments: m.attachments.length > 0 ? m.attachments : undefined,
+        // The quote this message replied to, if any. A text SNAPSHOT, not a
+        // link: it renders as the quoted block above the bubble, which is why
+        // a reply survives a reload. Null on every ordinary row.
+        replyToText: m.replyToText,
       })))
     } catch (err) {
       console.error('Messages load error:', err)
@@ -679,7 +684,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
 
   /**
    * POST /api/sessions/:id/messages — the room POST path (multiplayer chat
-   * T2). Body: { message: string }.
+   * T2). Body: `{ message: string, replyTo?: { text: string } }`.
    *
    * Persists ONE `role='user'` row with `sender_user_id`, emits
    * `user_message_saved` on the per-session bus so every open viewer fans the
@@ -710,6 +715,16 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         res.status(400).json({ error: 'Message too long' })
         return
       }
+      // The quote, when this post replies to something. A SNAPSHOT of the
+      // quoted text, capped like the post itself — `/api/chat` stores the same
+      // field on the addressed path, so a reply reads identically whether or
+      // not it happened to summon an assistant. No id is stored: see
+      // `_reply-context.ts`. A reply that quotes NOTHING is just a post.
+      const rawReply = (req.body as { replyTo?: { text?: unknown } })?.replyTo
+      const replyToText =
+        typeof rawReply?.text === 'string' && rawReply.text.trim()
+          ? rawReply.text.trim().slice(0, ROOM_POST_MAX_CHARS)
+          : null
 
       const session = await findSessionById(req.params.id)
       if (!session) {
@@ -730,6 +745,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         sessionId: session.id,
         role: 'user',
         content: [{ type: 'text', text }],
+        replyToText,
         senderUserId: user.id,
       })
       publishSessionEvent({
@@ -919,6 +935,100 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
     } catch (err) {
       console.error('Room typing beacon error:', err)
       res.status(500).json({ error: 'Failed to update typing state' })
+    }
+  })
+
+  /**
+   * PATCH /api/sessions/:id/assistant — move a ROOM's bound (default)
+   * assistant. Body: `{ assistantId }`.
+   *
+   * The binding is the room's default voice: what the Ask affordance asks,
+   * whose avatar fronts the chip, and who answers a message that mentions
+   * nobody. A rebind grants **no capability a mention did not already
+   * grant** — any member could have summoned this assistant into this room
+   * by typing its name — so the gates are exactly the `@` path's, and the
+   * room's `effective_clearance` never moves:
+   *
+   *   - post access, not ownership (`gateSessionRead` on a shared chat) —
+   *     the pin rule, deliberately NOT the starter-or-admin rename rule;
+   *   - same workspace as the currently-bound assistant, via
+   *     `getUserAssistant` (an unreachable assistant and a nonexistent one
+   *     are indistinguishable by design);
+   *   - `mayAssistantAnswerInRoom` — the shared predicate, so this can never
+   *     drift from the mention path's `assistant_clearance_exceeds_room`.
+   *
+   * NOT gated on `status='running'`: the live turn resolved its assistant at
+   * start and finishes as that one, and a room wedged behind a phantom lock
+   * must stay rebindable. Emits `session_assistant_changed` so every open
+   * viewer's chip follows — a stale label would have a teammate asking the
+   * assistant that is no longer there.
+   *
+   * See docs/architecture/features/chat-app.md → "Choosing an assistant".
+   */
+  router.patch('/:id/assistant', async (req, res) => {
+    try {
+      const jwtUserId = (req as { userId?: string }).userId
+      const user = await resolveUser(jwtUserId)
+      if (!user) { res.status(401).json({ error: 'Unauthorized' }); return }
+
+      const { assistantId } = req.body as { assistantId?: string }
+      if (!assistantId || typeof assistantId !== 'string') {
+        res.status(400).json({ error: 'Missing assistantId' })
+        return
+      }
+
+      const session = await findSessionById(req.params.id)
+      if (!session) { res.status(404).json({ error: 'Session not found' }); return }
+      if (!isSharedChatSession(session)) {
+        // Personal threads stay bound for their lifetime — one person, one
+        // assistant, no second participant to want the switch.
+        res.status(403).json({ error: 'Only a workspace chat can change assistant' })
+        return
+      }
+      const denied = await gateSessionRead(user.id, session)
+      if (denied) { res.status(denied.status).json({ error: denied.error }); return }
+
+      if (session.assistantId === assistantId) {
+        res.json({ ok: true, assistantId })
+        return
+      }
+
+      // The room's workspace is the CURRENTLY bound assistant's — the same
+      // resolution `gateSessionRead` uses, so a rebind can never walk a room
+      // out of the workspace whose members it just authorized.
+      const boundWs = await query<{ workspaceId: string | null }>(
+        `SELECT workspace_id AS "workspaceId" FROM assistants WHERE id = $1`,
+        [session.assistantId],
+      )
+      const roomWorkspaceId = boundWs.rows[0]?.workspaceId
+      const candidate = await getUserAssistant(user.id, assistantId)
+      if (!candidate || !roomWorkspaceId || candidate.workspaceId !== roomWorkspaceId) {
+        res.status(403).json({ error: 'Assistant not available in this workspace' })
+        return
+      }
+      if (
+        !mayAssistantAnswerInRoom({
+          assistantClearance: candidate.clearance ?? null,
+          roomClearance: session.effectiveClearance,
+        })
+      ) {
+        res.status(403).json({
+          code: 'assistant_clearance_exceeds_room',
+          error: 'That assistant is cleared above this room and cannot answer here.',
+        })
+        return
+      }
+
+      await rebindSessionAssistant(session.id, candidate.id)
+      publishSessionEvent({
+        kind: 'session_assistant_changed',
+        sessionId: session.id,
+        payload: { assistantId: candidate.id, byUserId: user.id },
+      })
+      res.json({ ok: true, assistantId: candidate.id })
+    } catch (err) {
+      console.error('Room assistant rebind error:', err)
+      res.status(500).json({ error: 'Failed to change the assistant' })
     }
   })
 
@@ -1152,6 +1262,9 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
               break
             case 'pins_changed':
               send('pins_changed', event.payload)
+              break
+            case 'session_assistant_changed':
+              send('assistant_changed', event.payload)
               break
             case 'presence':
               send('presence', event.payload)

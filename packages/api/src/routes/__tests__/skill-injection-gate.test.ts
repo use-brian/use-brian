@@ -142,4 +142,39 @@ describe('[COMP:api/skill-injection-gate] injectSkills restrictToSlugs', () => {
 
     expect(enforcedPromptFragment).toBe('')
   })
+
+  it('exposes v2 resources only after useSkill activates the governed root', async () => {
+    const nativeSkill = {
+      id: 'finance', name: 'Finance', description: 'Use for margin analysis.',
+      content: 'Read [margins](references/margins.md).', category: 'research' as const,
+      requiresConnectors: [], source: 'community' as const, bundleVersion: 2 as const,
+      resources: [{
+        path: 'references/margins.md', kind: 'reference' as const, name: 'margins.md',
+        content: 'Gross margin method.', contentHash: 'hash-1',
+      }],
+    }
+    const store = {
+      listOwned: async () => [],
+      listForAssistant: async () => [{ skillId: 'finance', enabled: true }],
+    } as unknown as SkillStore
+    const tools = new Map<string, Tool>()
+    await injectSkills({
+      skillStore: store,
+      connectorUserId: 'u1', assistantId: 'a1', tools,
+      unavailableCapabilities: [], channel: 'web', communitySkills: [nativeSkill],
+    })
+    const context = {
+      assistantId: 'a1', userId: 'u1', sessionId: 's1', appId: 'Use Brian',
+      channelType: 'web', channelId: 'c1', workspaceId: 'w1',
+      abortSignal: new AbortController().signal,
+    }
+    const read = tools.get('readSkillResource')!
+    const before = await read.execute({ skill: 'finance', path: 'references/margins.md' }, context)
+    expect(before.isError).toBe(true)
+
+    await tools.get('useSkill')!.execute({ skill: 'finance' }, context)
+    const after = await read.execute({ skill: 'finance', path: 'references/margins.md' }, context)
+    expect(after.isError).toBeFalsy()
+    expect(after.data).toMatchObject({ content: 'Gross margin method.' })
+  })
 })

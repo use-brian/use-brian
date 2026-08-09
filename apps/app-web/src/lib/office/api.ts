@@ -45,10 +45,11 @@ export type OfficeJob = {
   errorCode: string | null;
 };
 
-export type OfficeJobFailureKind = "presentation_fit" | "fit" | "unexpected";
+export type OfficeJobFailureKind = "presentation_fit" | "presentation_plan" | "fit" | "unexpected";
 
 export function officeJobFailureKind(errorCode: string | null | undefined): OfficeJobFailureKind {
   if (errorCode === "presentation_fit_failed") return "presentation_fit";
+  if (errorCode === "presentation_plan_failed") return "presentation_plan";
   if (errorCode === "fit_failed") return "fit";
   return "unexpected";
 }

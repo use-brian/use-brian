@@ -5,26 +5,26 @@
  *
  * A skill is a folder, not a lone body: `workspace_skill_files` holds its
  * reference / template / script files, and the body reaches them through
- * `{{kind:name}}` pointers `useSkill` expands at load time. This section is
+ * portable relative links in v2 and `{{kind:name}}` pointers in legacy v1. This section is
  * the HUMAN half of that surface. Before it existed the rows were write-once
  * at import, so the background curator's `add_support_file` could attach a
  * file the owning user could never see, edit, or delete.
  *
  * Shape follows the editor's document column: quiet full-width rows, no card
- * chrome, one inline editor open at a time. Each row shows the pointer token
+ * chrome, one inline editor open at a time. Each row shows the link or pointer
  * (click to copy) because a file the body never points at is inert — that
  * token is the whole contract between the bundle and the prompt.
  *
  * Deletes route through `confirmDialog` (never `window.confirm`), and every
  * string comes from `useT()`.
  *
- * Spec: docs/architecture/engine/skill-system.md → "Support files".
+ * Spec: docs/architecture/engine/skill-system.md → "Skill bundles and support files".
  *
  * [COMP:app-web/brain-skill-files]
  */
 
 import * as React from "react";
-import { Check, Copy, FileCode2, FileText, Plus, Trash2, X } from "lucide-react";
+import { Check, Copy, FileBox, FileCode2, FileText, Plus, Trash2, X } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { useT, format } from "@/lib/i18n/client";
@@ -35,6 +35,7 @@ import {
   deleteSkillFile,
   listSkillFiles,
   saveSkillFile,
+  skillFileMarkdownLink,
   skillFilePointer,
   SKILL_FILE_KINDS,
   type SkillFile,
@@ -45,6 +46,7 @@ type Props = {
   skillRowId: string;
   /** The skill body — used only to tell "pointed at" from "inert". */
   content: string;
+  bundleVersion?: 1 | 2;
 };
 
 type Draft = {
@@ -52,6 +54,9 @@ type Draft = {
   original: { kind: SkillFileKind; name: string } | null;
   kind: SkillFileKind;
   name: string;
+  /** Canonical bundle-relative path. Kept even though the compact editor only
+   * exposes the basename so editing a nested imported file never flattens it. */
+  path: string | null;
   content: string;
   /** Round-tripped, not just displayed: `PUT` replaces the whole row, so a
    *  draft that dropped this would wipe a curator-written description. */
@@ -60,15 +65,40 @@ type Draft = {
 
 const KIND_ICON: Record<SkillFileKind, typeof FileText> = {
   reference: FileText,
+  asset: FileBox,
   template: FileText,
   script: FileCode2,
 };
 
 function emptyDraft(): Draft {
-  return { original: null, kind: "reference", name: "", content: "", description: "" };
+  return { original: null, kind: "reference", name: "", path: null, content: "", description: "" };
 }
 
-export function SkillFilesSection({ skillRowId, content }: Props) {
+function defaultPath(kind: SkillFileKind, name: string): string {
+  const root =
+    kind === "reference"
+      ? "references"
+      : kind === "asset"
+        ? "assets"
+        : kind === "template"
+          ? "templates"
+          : "scripts";
+  return `${root}/${name}`;
+}
+
+export function skillFileDraftPath(
+  kind: SkillFileKind,
+  name: string,
+  currentPath: string | null,
+): string {
+  if (!currentPath) return defaultPath(kind, name);
+  const parts = currentPath.split("/").filter(Boolean);
+  const nested = parts.length > 2 ? parts.slice(1, -1) : [];
+  const root = defaultPath(kind, name).split("/")[0]!;
+  return [root, ...nested, name].join("/");
+}
+
+export function SkillFilesSection({ skillRowId, content, bundleVersion = 1 }: Props) {
   const t = useT();
   const copy = t.brainPage.skillFiles;
 
@@ -109,6 +139,7 @@ export function SkillFilesSection({ skillRowId, content }: Props) {
     const res = await saveSkillFile(skillRowId, {
       kind: draft.kind,
       name,
+      path: bundleVersion === 2 ? skillFileDraftPath(draft.kind, name, draft.path) : undefined,
       content: draft.content,
       description: draft.description.trim() || null,
     });
@@ -165,11 +196,13 @@ export function SkillFilesSection({ skillRowId, content }: Props) {
     await load();
   }
 
-  async function copyPointer(file: SkillFile) {
-    const pointer = skillFilePointer(file);
+  async function copyReference(file: SkillFile) {
+    const reference = bundleVersion === 2
+      ? (skillFileMarkdownLink(file) ?? skillFilePointer(file))
+      : skillFilePointer(file);
     try {
-      await navigator.clipboard.writeText(pointer);
-      setCopied(pointer);
+      await navigator.clipboard.writeText(reference);
+      setCopied(reference);
       window.setTimeout(() => setCopied(null), 1500);
     } catch {
       // Clipboard denied — the token is visible on the row regardless.
@@ -218,13 +251,15 @@ export function SkillFilesSection({ skillRowId, content }: Props) {
         <ul className="mt-4">
           {files.map((file) => {
             const pointer = skillFilePointer(file);
-            const referenced = content.includes(pointer);
+            const markdownLink = skillFileMarkdownLink(file);
+            const reference = bundleVersion === 2 && markdownLink ? markdownLink : pointer;
+            const referenced = content.includes(pointer) || Boolean(markdownLink && content.includes(markdownLink));
             const Icon = KIND_ICON[file.kind];
             const editing =
               draft?.original?.kind === file.kind && draft?.original?.name === file.name;
             return (
               <li
-                key={pointer}
+                key={`${file.kind}:${file.name}`}
                 className="border-b border-border last:border-b-0"
               >
                 <div className="flex items-center gap-3 py-2.5">
@@ -238,7 +273,7 @@ export function SkillFilesSection({ skillRowId, content }: Props) {
                     </div>
                     <button
                       type="button"
-                      onClick={() => void copyPointer(file)}
+                      onClick={() => void copyReference(file)}
                       title={copy.copyPointer}
                       className={cn(
                         "mt-0.5 inline-flex items-center gap-1 font-mono text-[11px] transition-colors",
@@ -247,12 +282,12 @@ export function SkillFilesSection({ skillRowId, content }: Props) {
                           : "text-amber-600 hover:text-amber-500 dark:text-amber-500",
                       )}
                     >
-                      {copied === pointer ? (
+                      {copied === reference ? (
                         <Check className="size-3" aria-hidden />
                       ) : (
                         <Copy className="size-3" aria-hidden />
                       )}
-                      {pointer}
+                      {reference}
                     </button>
                     {!referenced && (
                       <p className="mt-0.5 text-[11px] text-muted-foreground">
@@ -274,6 +309,7 @@ export function SkillFilesSection({ skillRowId, content }: Props) {
                                 original: { kind: file.kind, name: file.name },
                                 kind: file.kind,
                                 name: file.name,
+                                path: file.path,
                                 content: file.content,
                                 description: file.description ?? "",
                               },

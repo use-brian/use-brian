@@ -136,6 +136,67 @@ describe('[COMP:api/office-generation] presentation fit repair', () => {
     expect(generatedRuns.slice(0, -1).every((run, index) => !run.text || !generatedRuns[index + 1]?.text || /\s$/.test(run.text) || /^\s/.test(generatedRuns[index + 1]!.text))).toBe(true)
   })
 
+  it('repairs a plan that copies catalogue label metadata into a field', async () => {
+    const payloads = [
+      { title: 'Introduction', slides: [{ recipeId, title: 'Introduction', fields: [{ fieldId, label: 'Cover title', text: 'Meet Brian' }] }] },
+      { title: 'Introduction', slides: [{ recipeId, title: 'Introduction', fields: [{ fieldId, text: 'Meet Brian' }] }] },
+    ]
+    const requests: Array<{ messages?: Message[] }> = []
+    const provider = {
+      async *stream(request: { messages?: Message[] }) {
+        requests.push(request)
+        yield { type: 'message_start' as const, model: 'test' }
+        yield { type: 'text_delta' as const, text: JSON.stringify(payloads[requests.length - 1]) }
+        yield { type: 'message_end' as const, stopReason: 'end_turn' as const, usage: { inputTokens: 1, outputTokens: 1 } }
+      },
+    }
+
+    const generated = await generatePresentationFromTemplate({
+      provider: provider as never,
+      model: 'test',
+      artifactId: uid(61),
+      workspaceId: uid(2),
+      templateVersionId: uid(50),
+      outcome: 'Introduce Brian',
+      audience: 'Public',
+      evidence: { brain: [], website: [], conflicts: [] },
+      claims: [],
+      template,
+    })
+
+    expect(requests).toHaveLength(2)
+    expect(requests[1]?.messages?.[0]?.content).toContain('strict presentation-plan validation')
+    expect(requests[1]?.messages?.[0]?.content).toContain('slides.0.fields.0')
+    expect(requests[1]?.messages?.[0]?.content).toContain('label')
+    expect(generated.slides[0]?.objects[0]?.kind === 'text' ? generated.slides[0].objects[0].runs.map((run) => run.text).join('') : null).toBe('Meet Brian')
+  })
+
+  it('bounds invalid plan repair with a typed terminal failure', async () => {
+    let attempts = 0
+    const provider = {
+      async *stream() {
+        attempts += 1
+        yield { type: 'message_start' as const, model: 'test' }
+        yield { type: 'text_delta' as const, text: JSON.stringify({ title: 'Introduction', slides: [{ recipeId, title: 'Introduction', fields: [{ fieldId, label: 'Cover title', text: 'Meet Brian' }] }] }) }
+        yield { type: 'message_end' as const, stopReason: 'end_turn' as const, usage: { inputTokens: 1, outputTokens: 1 } }
+      },
+    }
+
+    await expect(generatePresentationFromTemplate({
+      provider: provider as never,
+      model: 'test',
+      artifactId: uid(62),
+      workspaceId: uid(2),
+      templateVersionId: uid(50),
+      outcome: 'Introduce Brian',
+      audience: 'Public',
+      evidence: { brain: [], website: [], conflicts: [] },
+      claims: [],
+      template,
+    })).rejects.toMatchObject({ code: 'presentation_plan_failed' })
+    expect(attempts).toBe(3)
+  })
+
   it('retries a targeted revision without changing its selection boundary', async () => {
     const payloads = [
       { replacements: [{ targetId, text: 'This replacement is much too long for the compact selected title region' }] },
