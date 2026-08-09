@@ -107,6 +107,53 @@ describe('[COMP:providers/gemini-session-stream] Gemini session streaming', () =
     })
   })
 
+  it("reports 'incomplete' when the stateful stream ends without a finish reason", async () => {
+    // Production repro 2026-08-09: the CFO reply stopped at "HKD 600," but
+    // interactive chat persisted it as stopReason=end_turn. The stateless
+    // Gemini path already guarded this shape; the stateful session path still
+    // defaulted to end_turn before observing the provider's final SSE chunk.
+    fetchMock.mockResolvedValueOnce(
+      sseResponse([
+        {
+          candidates: [{ content: { role: 'model', parts: [{ text: 'IT Staff Payroll: HKD 600,' }] } }],
+          usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 8 },
+        },
+      ]),
+    )
+    const session = createGeminiProvider('test-key').createSession({
+      model: 'gemini-3.6-flash',
+      systemPrompt: 'sys',
+    })
+
+    const chunks = await collect(
+      session.send([{ role: 'user', content: [{ type: 'text', text: 'List the IT costs' }] }]),
+    )
+
+    expect(chunks.at(-1)).toMatchObject({ type: 'message_end', stopReason: 'incomplete' })
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Stateful stream ended with NO finishReason'))
+  })
+
+  it("still reports 'end_turn' when the stateful provider sends STOP", async () => {
+    fetchMock.mockResolvedValueOnce(
+      sseResponse([
+        {
+          candidates: [{ content: { role: 'model', parts: [{ text: 'Complete.' }] }, finishReason: 'STOP' }],
+          usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 2 },
+        },
+      ]),
+    )
+    const session = createGeminiProvider('test-key').createSession({
+      model: 'gemini-3.6-flash',
+      systemPrompt: 'sys',
+    })
+
+    const chunks = await collect(
+      session.send([{ role: 'user', content: [{ type: 'text', text: 'Reply completely' }] }]),
+    )
+
+    expect(chunks.at(-1)).toMatchObject({ type: 'message_end', stopReason: 'end_turn' })
+  })
+
   it('replays thoughtSignature on the next request and drops thought parts entirely', async () => {
     fetchMock.mockResolvedValueOnce(sseResponse(TURN_CHUNKS))
     fetchMock.mockResolvedValueOnce(
