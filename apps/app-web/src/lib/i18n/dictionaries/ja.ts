@@ -6378,6 +6378,8 @@ export const ja: Dictionary = {
         accessAllowlistDescTelegram: "オーナー + リスト内のゲスト。ゲストチャットは分離されます。",
         accessBlocklistDesc: "下記のユーザーを除く全員がこのボットを使用できます。",
         accessBlocklistDescTelegram: "連携済みユーザーから指定 ID を除外します。",
+        guestConnectorTools: "ゲストの接続ツール",
+        guestConnectorToolsHint: "リスト内の Telegram ゲストが、このアシスタントで有効な接続ツールを使えるようにします。チャットとメモリはオーナーとは分離されたままです。",
         addUser: "追加",
         blockUser: "ブロック",
         removeUser: "ユーザーを削除",

@@ -983,6 +983,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
           ownerId: routedOwnerId,
           isIdentified,
           externalGuest,
+          externalGuestConnectorTools: externalGuest && integrationConfig.allowGuestConnectorTools === true,
           archiveConnectorInstanceId: boundIntegration.connectorInstanceId,
           ...options,
           pendingConfResolvers,
@@ -1103,6 +1104,8 @@ type ProcessMessageParams = {
   isIdentified: boolean
   /** Explicitly allowlisted, unlinked private sender: conversation-only lane. */
   externalGuest: boolean
+  /** Explicit per-integration opt-in for connector tools on that guest lane. */
+  externalGuestConnectorTools: boolean
   archiveConnectorInstanceId?: string | null
   provider: LLMProvider
   systemPrompt: string
@@ -1154,7 +1157,16 @@ type ProcessMessageParams = {
 }
 
 async function processMessage(params: ProcessMessageParams): Promise<void> {
-  const { adapter, incoming, assistant, channelUserId, ownerId, isIdentified, externalGuest } = params
+  const {
+    adapter,
+    incoming,
+    assistant,
+    channelUserId,
+    ownerId,
+    isIdentified,
+    externalGuest,
+    externalGuestConnectorTools,
+  } = params
 
   // Over-limit inbound media: a file above Telegram's 20MB bot download cap
   // (TELEGRAM_BOT_DOWNLOAD_LIMIT_BYTES) cannot be pulled via getFile, so a long
@@ -1548,6 +1560,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     assistant: { ...assistant, ownerUserId: ownerId },
     isIdentified,
     externalGuest,
+    externalGuestConnectorTools,
     channelType: 'telegram',
     channelId: incoming.channelId,
     actorChannelId: byoUsername ? `@${byoUsername}` : null,

@@ -73,6 +73,7 @@ export const channelConfigSchema = z.object({
   requireMentionOverrides: z.array(requireMentionOverrideSchema).max(500).optional(),
   userAccessMode: z.enum(['allow_all', 'allowlist', 'blocklist', 'group_members']).optional(),
   allowedUserIds: z.array(z.string().max(50)).max(100).optional(),
+  allowGuestConnectorTools: z.boolean().optional(),
   blockedUserIds: z.array(z.string().max(50)).max(100).optional(),
 }).strict()
 

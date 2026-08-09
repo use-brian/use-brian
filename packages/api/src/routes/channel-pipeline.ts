@@ -312,9 +312,16 @@ export type ChannelPipelineParams = {
    * Explicitly allowlisted outside guest. This is narrower than
    * `isIdentified=false`: anonymous group participants keep the existing
    * channel behavior, while an external guest gets persona + isolated session
-   * chat only. Workspace context, tools, and persistence are withheld.
+   * chat only. Workspace context, tools, and persistence are withheld unless
+   * the connector-only opt-in below is set.
    */
   externalGuest?: boolean
+  /**
+   * Explicit owner opt-in for an external guest to use the connected tools
+   * enabled for this assistant. Does not relax memory, workspace-file, skill,
+   * private-context, or long-term-persistence boundaries.
+   */
+  externalGuestConnectorTools?: boolean
   checkCreditBudget?: CreditBudgetGate
 
   // ── Channel context ──
@@ -590,6 +597,19 @@ export function assembleDeliverableText(turns: { content: ContentBlock[] }[]): s
     .trim()
 }
 
+/**
+ * Connector access for a channel turn. Normal channel users keep the existing
+ * connector path. An explicit external guest needs the integration owner's
+ * opt-in because the tools act through credentials granted to the routed
+ * assistant rather than credentials owned by the guest.
+ */
+export function connectorToolsAllowedForChannelTurn(
+  externalGuest: boolean,
+  externalGuestConnectorTools: boolean | undefined,
+): boolean {
+  return !externalGuest || externalGuestConnectorTools === true
+}
+
 // ── Pipeline ─────────────────────────────────────────────────────
 
 export async function processChannelMessage(params: ChannelPipelineParams): Promise<void> {
@@ -608,6 +628,11 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     capabilityStore,
   } = params
   const externalGuest = params.externalGuest === true
+  const externalGuestConnectorTools = externalGuest && params.externalGuestConnectorTools === true
+  const connectorToolsAllowed = connectorToolsAllowedForChannelTurn(
+    externalGuest,
+    params.externalGuestConnectorTools,
+  )
 
   // Every background call in this pipeline (session-state diff, memory nudge,
   // research classifier) runs on this one id. Boot resolves it against the
@@ -1144,7 +1169,10 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     privateRuntimeContextParts.push(
       '# External guest boundary\n\n' +
       'You are talking with a Telegram guest explicitly allowed by the bot owner. ' +
-      'They are not a workspace member. Keep the conversation within the information they provide in this isolated chat, and do not claim access to workspace memory, files, connectors, or private company context.',
+      'They are not a workspace member. Keep the conversation within the information they provide in this isolated chat, and do not claim access to workspace memory, files, or private company context.' +
+      (externalGuestConnectorTools
+        ? ' You may use the connected tools available in this turn.'
+        : ' Connected tools are not available in this turn.'),
     )
   }
   const userVisibleContext = splitPrompt.userVisibleContext
@@ -1211,11 +1239,11 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   }
 
   // ── MCP tools ──
-  const connectorUserId = externalGuest
-    ? userId
-    : await getConnectorUserId(ownerId, assistant.workspaceId)
+  const connectorUserId = connectorToolsAllowed
+    ? await getConnectorUserId(ownerId, assistant.workspaceId)
+    : userId
   let unavailableCapabilities: string[] = []
-  if (!externalGuest && connectorStore && mcpSettingsStore) {
+  if (connectorToolsAllowed && connectorStore && mcpSettingsStore) {
     // Built every turn so local filesystem sources remain writable even when
     // GitHub credential stores are absent. GitHub targets fail closed without
     // the optional credential provider.

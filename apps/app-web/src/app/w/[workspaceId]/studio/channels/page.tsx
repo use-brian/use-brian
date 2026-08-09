@@ -1383,6 +1383,15 @@ export function ChannelConfigSection({
               </span>
             </div>
             {accessControl}
+            {accessMode === "allowlist" && (
+              <ConfigToggle
+                label={cfg.guestConnectorTools}
+                hint={cfg.guestConnectorToolsHint}
+                checked={config.allowGuestConnectorTools ?? false}
+                disabled={saving}
+                onChange={(v) => void save({ allowGuestConnectorTools: v })}
+              />
+            )}
           </section>
 
           <section className="flex flex-col gap-3 rounded-lg border border-border bg-background p-3">

@@ -6321,6 +6321,8 @@ export const zh: Dictionary = {
         accessAllowlistDescTelegram: "擁有者 + 清單中的訪客。訪客對話會保持隔離。",
         accessBlocklistDesc: "除下列使用者外,所有人都能使用此 bot。",
         accessBlocklistDescTelegram: "已連結使用者,但排除封鎖的 ID。",
+        guestConnectorTools: "訪客連接工具",
+        guestConnectorToolsHint: "允許清單中的 Telegram 訪客使用此助理已啟用的連接工具。其聊天與記憶仍會與擁有者分開。",
         addUser: "新增",
         blockUser: "封鎖",
         removeUser: "移除使用者",

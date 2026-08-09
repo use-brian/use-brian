@@ -97,6 +97,7 @@ describe("[COMP:app-web/studio-channels] Telegram UX", () => {
       config: {
         userAccessMode: "allowlist",
         allowedUserIds: ["@friend"],
+        allowGuestConnectorTools: true,
         requireMention: true,
         ackReaction: "👀",
       },
@@ -121,6 +122,10 @@ describe("[COMP:app-web/studio-channels] Telegram UX", () => {
     expect(cards[0].textContent).toContain("Who can DM");
     expect(cards[0].textContent).toContain("Owner + allowlist");
     expect(cards[0].textContent).toContain("@friend");
+    expect(cards[0].textContent).toContain("Guest connected tools");
+    expect(
+      cards[0].querySelector<HTMLInputElement>('input[type="checkbox"]:checked'),
+    ).not.toBeNull();
     expect(cards[1].textContent).toContain("Groups only");
     expect(cards[1].textContent).toContain("Require @mention");
     expect(cards[2].textContent).toContain("DMs + groups");

@@ -6592,6 +6592,8 @@ export const en = {
         accessAllowlistDescTelegram: "Owner + listed guests. Guest chats stay isolated.",
         accessBlocklistDesc: "Everyone can use this bot except the users listed below.",
         accessBlocklistDescTelegram: "Linked users, except blocked IDs.",
+        guestConnectorTools: "Guest connected tools",
+        guestConnectorToolsHint: "Let listed Telegram guests use connected tools enabled for this assistant. Their chats and memory stay separate from yours.",
         addUser: "Add",
         blockUser: "Block",
         removeUser: "Remove user",
