@@ -71,8 +71,8 @@ wss.on('connection', (socket: WebSocket) => {
 
 const sweep = setInterval(() => relay.sweepDead(), 30_000)
 
-server.listen(env.PORT, () => {
-  console.log(`browser-relay listening on port ${env.PORT}`)
+server.listen(env.PORT, env.HOST, () => {
+  console.log(`browser-relay listening on ${env.HOST}:${env.PORT}`)
 })
 
 // ── Graceful shutdown ─────────────────────────────────────────
