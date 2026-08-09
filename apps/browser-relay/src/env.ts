@@ -1,6 +1,7 @@
 import { z } from 'zod'
 
 const envSchema = z.object({
+  HOST: z.string().min(1).default('0.0.0.0'),
   PORT: z.coerce.number().default(8080),
   /**
    * Shared secret the api presents on `/internal/browser/*` calls
@@ -17,11 +18,15 @@ const envSchema = z.object({
 
 export type Env = z.infer<typeof envSchema>
 
+export function parseEnv(input: NodeJS.ProcessEnv): Env {
+  return envSchema.parse(input)
+}
+
 let _env: Env | null = null
 
 export function getEnv(): Env {
   if (!_env) {
-    _env = envSchema.parse(process.env)
+    _env = parseEnv(process.env)
   }
   return _env
 }
