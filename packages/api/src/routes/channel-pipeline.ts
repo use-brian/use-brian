@@ -675,6 +675,32 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     channelType,
   }))
 
+  // Load the pre-turn transcript once and reuse it for adaptive research +
+  // topic classification. Follow-up detection needs actual dialogue, not an
+  // isolated current sentence (2026-08-09 Snapio incident on web; channels
+  // share the same classifier contract).
+  const preExistingDbMessages = await getSessionMessages(session.id)
+  const adaptiveRecentConversation = preExistingDbMessages
+    .filter((m) => m.role === 'user' || m.role === 'assistant')
+    .filter((m) => !(
+      m.role === 'assistant' &&
+      Array.isArray(m.content) &&
+      (m.content as Array<{ type?: string }>).some((block) => block.type === 'tool_use')
+    ))
+    .map((m) => {
+      const text = typeof m.content === 'string'
+        ? m.content
+        : Array.isArray(m.content)
+          ? (m.content as Array<{ type?: string; text?: string }>)
+            .filter((block) => block.type === 'text' && typeof block.text === 'string')
+            .map((block) => block.text as string)
+            .join(' ')
+          : ''
+      return { role: m.role as 'user' | 'assistant', text: text.trim() }
+    })
+    .filter((turn) => turn.text.length > 0)
+    .slice(-6)
+
   // Adaptive research entry — channels have no manual toggle, so when the
   // caller opts in we classify the message and upgrade the alias to
   // `research` (paid plans only). The downstream `resolveModel` honors plan
@@ -695,7 +721,12 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   ) {
     try {
       const { classifyResearchIntent } = await import('@use-brian/core')
-      const adaptive = await classifyResearchIntent({ provider, message: messageText, model: laneModel })
+      const adaptive = await classifyResearchIntent({
+        provider,
+        message: messageText,
+        model: laneModel,
+        recentConversation: adaptiveRecentConversation,
+      })
       if (adaptive.research) {
         effectiveModelAlias = 'research'
         adaptiveResearchActive = true
@@ -737,7 +768,6 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     raw: replyRaw,
   })
 
-  const preExistingDbMessages = await getSessionMessages(session.id)
   const recentUserTurns: ClassifierRecentTurn[] = preExistingDbMessages
     .filter((m) => m.role === 'user' && Array.isArray(m.content))
     .slice(-8)

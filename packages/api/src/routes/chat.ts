@@ -2114,6 +2114,60 @@ export function chatRoutes(options: WebChatOptions): Router {
         if (promoted) message = promoted.replaced
       }
 
+      // Adaptive research runs before normal session resolution so a denied
+      // research turn does not create an empty thread. Resolve an EXISTING
+      // thread read-only here only when the classifier will run, authorize it
+      // with the same session gate as the main path, and cache its transcript
+      // for the topic classifier below. New chats correctly have no history.
+      // This is what makes the classifier's "follow-ups are OFF" rule real
+      // (2026-08-09 Snapio valuation-multiple incident).
+      const adaptiveResearchEligible =
+        !researchMode &&
+        !!message &&
+        isAdaptiveResearchEligible({
+          requestedMode,
+          workspaceId: assistant.workspaceId,
+          userPlan,
+          assistantKind: assistant.kind,
+        })
+      let adaptiveSessionId: string | null = null
+      let adaptiveDbMessages: SessionMessage[] = []
+      let adaptiveRecentConversation: Array<{ role: 'user' | 'assistant'; text: string }> = []
+      if (adaptiveResearchEligible) {
+        let adaptiveSession = requestedSessionId
+          ? await findSessionById(requestedSessionId)
+          : undefined
+        const adaptiveStickyChannelId = resolveStickyChannelId(requestedChannelId, requestedSessionId)
+        if (!adaptiveSession && adaptiveStickyChannelId) {
+          adaptiveSession = await findSessionByChannel({
+            assistantId: assistant.id,
+            userId: user.id,
+            channelType: 'web',
+            channelId: adaptiveStickyChannelId,
+          })
+        }
+        if (
+          adaptiveSession?.assistantId === assistant.id &&
+          !(await gateSessionRead(user.id, adaptiveSession))
+        ) {
+          adaptiveSessionId = adaptiveSession.id
+          adaptiveDbMessages = await getSessionMessages(adaptiveSession.id)
+          adaptiveRecentConversation = adaptiveDbMessages
+            .filter((m) => m.role === 'user' || m.role === 'assistant')
+            .filter((m) => !(
+              m.role === 'assistant' &&
+              Array.isArray(m.content) &&
+              (m.content as Array<{ type?: string }>).some((block) => block.type === 'tool_use')
+            ))
+            .map((m) => ({
+              role: m.role as 'user' | 'assistant',
+              text: extractPlainText(m.content as Message['content']).trim(),
+            }))
+            .filter((turn) => turn.text.length > 0)
+            .slice(-6)
+        }
+      }
+
       // Adaptive research entry. When the request didn't pin a mode, run a
       // cheap Gemini-Flash-Lite classifier to decide whether this message
       // warrants research mode. If yes, flip `researchMode = true` so the
@@ -2147,20 +2201,15 @@ export function chatRoutes(options: WebChatOptions): Router {
         reason: string | null
       } | null = null
       if (
-        !researchMode &&
-        message &&
-        isAdaptiveResearchEligible({
-          requestedMode,
-          workspaceId: assistant.workspaceId,
-          userPlan,
-          assistantKind: assistant.kind,
-        })
+        adaptiveResearchEligible &&
+        message
       ) {
         const { classifyResearchIntent } = await import('@use-brian/core')
         const adaptive = await classifyResearchIntent({
           provider: options.provider,
           message,
           model: backgroundModelFor(options.configuredProviders),
+          recentConversation: adaptiveRecentConversation,
         }).catch(() => ({ research: false, operateSite: false, reason: null, usage: null, model: null }))
         adaptiveResearchOverhead = {
           model: adaptive.model,
@@ -3049,7 +3098,9 @@ export function chatRoutes(options: WebChatOptions): Router {
         clientSnippet: replyTo?.text,
       })
 
-      const preExistingDbMessages = await getSessionMessages(session.id)
+      const preExistingDbMessages = adaptiveSessionId === session.id
+        ? adaptiveDbMessages
+        : await getSessionMessages(session.id)
       const recentUserTurns: ClassifierRecentTurn[] = preExistingDbMessages
         .filter((m) => m.role === 'user' && Array.isArray(m.content))
         .slice(-8)
@@ -6730,6 +6781,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                 provider: options.provider,
                 pendingAssistantTurns,
                 userText: userMessageText,
+                conversationHistory: messages.slice(0, -1),
                 channelType: 'web',
               })
               if (result) {

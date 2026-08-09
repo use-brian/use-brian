@@ -159,6 +159,32 @@ describe('[COMP:workers/research-classifier] classifyResearchIntent', () => {
     expect(result.reason).toBe('multi-source competitive scan')
   })
 
+  it('sends recent dialogue so a Snapio strategy follow-up is not classified in isolation', async () => {
+    // Production regression 2026-08-09: the prompt already said follow-ups
+    // were OFF, but the classifier received only this final sentence and
+    // silently promoted it to Research. The coordinator then thought-burnt
+    // and the context-blind fallback asked for files already discussed.
+    const provider = makeProvider('{"research":false}')
+    const currentMessage = 'How can we strategize the story to add multiples for snapio?'
+    const recentConversation = [
+      {
+        role: 'user' as const,
+        text: 'What is the potential exit strategy if we aim for 50M in two years?',
+      },
+      {
+        role: 'assistant' as const,
+        text: 'Snapio should target strategic acquirers and build toward an 8x to 12x EV/EBITDA valuation story.',
+      },
+    ]
+
+    await classifyResearchIntent({ provider, message: currentMessage, recentConversation })
+
+    const call = (provider.stream as ReturnType<typeof vi.fn>).mock.calls[0][0]
+    const payload = JSON.parse(call.messages[0].content)
+    expect(payload).toEqual({ currentMessage, recentConversation })
+    expect(call.systemPrompt).toContain('Use recentConversation to resolve whether currentMessage is a follow-up')
+  })
+
   it('a research:true verdict wins over a stray operate_site flag', async () => {
     const provider = makeProvider('{"research":true,"operate_site":true,"reason":"x"}')
     const result = await classifyResearchIntent({
