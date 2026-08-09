@@ -3,6 +3,12 @@
   "name": "Use Brian Browser Agent",
   "version": "0.1.0",
   "description": "Lets your Use Brian assistant act in your own browser: consent-gated, approval-gated sends, always stoppable.",
+  "icons": {
+    "16": "icon-16.png",
+    "32": "icon-32.png",
+    "48": "icon-48.png",
+    "128": "icon-128.png"
+  },
   "permissions": ["tabs", "storage", "debugger"],
   "externally_connectable": {
     "matches": ["https://app.usebrian.ai/*", "http://localhost/*"]
@@ -12,6 +18,12 @@
     "type": "module"
   },
   "action": {
+    "default_icon": {
+      "16": "icon-16.png",
+      "32": "icon-32.png",
+      "48": "icon-48.png",
+      "128": "icon-128.png"
+    },
     "default_popup": "popup.html",
     "default_title": "Use Brian"
   }

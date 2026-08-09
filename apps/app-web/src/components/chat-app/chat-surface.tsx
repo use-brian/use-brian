@@ -972,10 +972,15 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const [remoteText, setRemoteText] = useState("");
   const [remoteEvents, setRemoteEvents] = useState<BuildEvent[]>([]);
   const [remoteTools, setRemoteTools] = useState<ToolUsed[]>([]);
+  const [remoteResearchPhase, setRemoteResearchPhase] =
+    useState<ResearchPhase | null>(null);
+  const [remoteStartedAt, setRemoteStartedAt] = useState<number | null>(null);
   const remoteLogRef = useRef<EventLog>(EMPTY_LOG);
   const remoteToolsRef = useRef<ToolUsed[]>([]);
   const remoteSeqRef = useRef(0);
   const remoteNarratedRef = useRef<Set<string>>(new Set());
+  const remoteToolStartTimesRef = useRef<Map<string, number>>(new Map());
+  const remoteWorkerDescriptionsRef = useRef<Map<string, string>>(new Map());
   /** Teammates currently composing (typing indicators) — fed by the follow
    *  stream's `presence` events; never includes this viewer. */
   const [roomTypers, setRoomTypers] = useState<
@@ -996,10 +1001,14 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     remoteLogRef.current = EMPTY_LOG;
     remoteToolsRef.current = [];
     remoteNarratedRef.current.clear();
+    remoteToolStartTimesRef.current.clear();
+    remoteWorkerDescriptionsRef.current.clear();
     setRemoteActive(false);
     setRemoteText("");
     setRemoteEvents([]);
     setRemoteTools([]);
+    setRemoteResearchPhase(null);
+    setRemoteStartedAt(null);
   }, []);
 
   const refreshPendingQuestion = useCallback(
@@ -1071,7 +1080,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           if (working || !ownsDirectStream) {
             dispatchChatSessionActivity({ workspaceId, sessionId, working });
           }
-          if (working && acceptsMirror) setRemoteActive(true);
+          if (working && acceptsMirror) {
+            setRemoteActive(true);
+            setRemoteStartedAt((current) => current ?? Date.now());
+          }
           break;
         }
         case "user_message_saved": {
@@ -1085,6 +1097,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           if (!acceptsMirror) break;
           resetRemoteTurn();
           setRemoteActive(true);
+          setRemoteStartedAt(Date.now());
           if (typeof payload.assistantId === "string") {
             setRemoteAssistantId(payload.assistantId);
           }
@@ -1093,6 +1106,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         case "snapshot": {
           if (!acceptsMirror) break;
           setRemoteActive(true);
+          setRemoteStartedAt((current) => current ?? Date.now());
           if (typeof payload.assistantId === "string") {
             setRemoteAssistantId(payload.assistantId);
           }
@@ -1111,16 +1125,40 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         case "activity": {
           if (!acceptsMirror) break;
           setRemoteActive(true);
+          setRemoteStartedAt((current) => current ?? Date.now());
           const kind = typeof payload.event === "string" ? payload.event : "";
           const id = typeof payload.id === "string" ? payload.id : "";
           const name = typeof payload.name === "string" ? payload.name : "";
-          if (kind === "tool_start" && id && name) {
+          if (kind === "status") {
+            const phase = typeof payload.phase === "string" ? payload.phase : "";
+            if (phase === "research_detected") setRemoteResearchPhase("detected");
+            else if (phase === "research_starting") setRemoteResearchPhase("starting");
+            else if (phase === "research_parallel") setRemoteResearchPhase("parallel");
+          } else if (kind === "worker_start") {
+            const workerId =
+              typeof payload.workerId === "string" ? payload.workerId : "";
+            const description =
+              typeof payload.description === "string" ? payload.description : "";
+            if (workerId && description) {
+              remoteWorkerDescriptionsRef.current.set(workerId, description);
+              remoteToolsRef.current = remoteToolsRef.current.map((tool) =>
+                tool.workerId === workerId
+                  ? { ...tool, workerDescription: description }
+                  : tool,
+              );
+              setRemoteTools(remoteToolsRef.current);
+            }
+          } else if (kind === "tool_start" && id && name) {
             if (remoteToolsRef.current.some((tool) => tool.id === id)) break;
             const seeded = describeToolFromInput(name, {}, tChat.toolNarration);
             const workerId =
               typeof payload.workerId === "string"
                 ? payload.workerId
                 : undefined;
+            const workerDescription = workerId
+              ? remoteWorkerDescriptionsRef.current.get(workerId)
+              : undefined;
+            remoteToolStartTimesRef.current.set(id, performance.now());
             remoteToolsRef.current = [
               ...remoteToolsRef.current,
               {
@@ -1129,6 +1167,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 status: "running",
                 description: seeded.description,
                 ...(workerId ? { workerId } : {}),
+                ...(workerDescription ? { workerDescription } : {}),
               },
             ];
             setRemoteTools(remoteToolsRef.current);
@@ -1168,14 +1207,25 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             }
           } else if (kind === "tool_result" && id) {
             const isError = payload.isError === true;
+            const startedAtMs = remoteToolStartTimesRef.current.get(id);
+            const durationMs =
+              startedAtMs != null
+                ? Math.max(0, Math.round(performance.now() - startedAtMs))
+                : undefined;
             remoteToolsRef.current = remoteToolsRef.current.map((tool) =>
               tool.id === id
-                ? { ...tool, status: isError ? ("retried" as const) : ("done" as const) }
+                ? {
+                    ...tool,
+                    status: isError ? ("retried" as const) : ("done" as const),
+                    ...(durationMs != null ? { durationMs } : {}),
+                  }
                 : tool,
             );
+            remoteToolStartTimesRef.current.delete(id);
             setRemoteTools(remoteToolsRef.current);
           } else if (kind === "tool_dropped" && id) {
             remoteToolsRef.current = remoteToolsRef.current.filter((tool) => tool.id !== id);
+            remoteToolStartTimesRef.current.delete(id);
             setRemoteTools(remoteToolsRef.current);
             remoteLogRef.current = removeToolSteps(remoteLogRef.current, id);
             setRemoteEvents(remoteLogRef.current.events);
@@ -1393,6 +1443,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     toolTimeline,
     remoteText,
     remoteEvents,
+    remoteResearchPhase,
     roomTypers,
   ]);
 
@@ -2440,6 +2491,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const workBenchRunningTool = workBenchTools.find(
     (tool) => !tool.workerId && tool.status === "running",
   );
+  const workBenchResearchPhase = chat.state.isStreaming
+    ? researchPhase
+    : remoteActive
+      ? remoteResearchPhase
+      : null;
   const workBenchCurrentStep = workBenchWaiting
     ? pendingQuestion?.question ?? tChat.thinking
     : workBenchRunningTool?.description ??
@@ -2447,8 +2503,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         ? tChat.activity.writing
         : remoteActive && remoteText
           ? tChat.activity.writing
-          : researchPhase
-            ? tChat.researchStatus[researchPhase]
+          : workBenchResearchPhase
+            ? tChat.researchStatus[workBenchResearchPhase]
             : tChat.thinking);
   const workBenchAssistant = resolveWorkBenchAssistant({
     roster: assistants,
@@ -2485,6 +2541,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     remoteText,
     remoteEvents.length,
     remoteTools.length,
+    remoteResearchPhase,
   ]);
 
   /**
@@ -3509,13 +3566,15 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
               <div className="flex gap-2.5">
                 {avatarFor(remoteAssistantId)}
                 <div className="min-w-0 flex-1 space-y-2 pt-0.5">
-                  {remoteEvents.length > 0 || remoteTools.length > 0 ? (
+                  {remoteEvents.length > 0 ||
+                  remoteTools.length > 0 ||
+                  remoteResearchPhase ? (
                     <ChatActivityFeed
                       events={remoteEvents}
                       tools={remoteTools}
                       replyStreaming={remoteText.length > 0}
-                      researchPhase={null}
-                      startedAt={null}
+                      researchPhase={remoteResearchPhase}
+                      startedAt={remoteStartedAt}
                     />
                   ) : remoteText ? null : (
                     <span

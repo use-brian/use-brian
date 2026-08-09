@@ -417,6 +417,42 @@ describe('[COMP:api/proactive-compaction] runProactiveCompaction — persistence
     expect(expectedCursor).toBeNull()
   })
 
+  it('compacts an external guest session without writing long-term context', async () => {
+    const sessionMessages: SessionMessage[] = [
+      makeSessionMessage({ sequenceNum: 100, role: 'user', content: [{ type: 'text', text: 'old question' }] }),
+      makeSessionMessage({ sequenceNum: 101, role: 'assistant', content: [{ type: 'text', text: 'old answer' }] }),
+      makeSessionMessage({ sequenceNum: 102, role: 'user', content: [{ type: 'text', text: 'current turn' }] }),
+    ]
+    const memoryStore = {
+      getIndexSystem: vi.fn(async () => []),
+      create: vi.fn(),
+    } as unknown as MemoryStore
+    const episodicStore = makeEpisodicStore([])
+    const chatEpisodeIngestor = vi.fn(async () => undefined)
+    mockSetCompactSummaryAndBoundary.mockResolvedValueOnce(true)
+
+    const result = await runProactiveCompaction({
+      ...baseParams({
+        sessionMessages,
+        session: makeSession({ compactBoundarySequence: null }),
+        unconditional: true,
+        memoryStore,
+      }),
+      episodicStore,
+      workspaceId: 'ws_1',
+      chatEpisodeIngestor,
+      persistLongTermContext: false,
+    })
+
+    expect(result.compacted).toBe(true)
+    expect(result.episodes).toEqual([])
+    expect(memoryStore.getIndexSystem).not.toHaveBeenCalled()
+    expect(memoryStore.create).not.toHaveBeenCalled()
+    expect(episodicStore.listBySession).not.toHaveBeenCalled()
+    expect(episodicStore.create).not.toHaveBeenCalled()
+    expect(chatEpisodeIngestor).not.toHaveBeenCalled()
+  })
+
   it('falls back to pass-through without persisting episodic rows when the concurrency guard fails', async () => {
     const sessionMessages: SessionMessage[] = [
       makeSessionMessage({ sequenceNum: 200, role: 'user', content: [{ type: 'text', text: 'a' }] }),

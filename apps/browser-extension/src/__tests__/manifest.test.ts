@@ -19,6 +19,15 @@ const manifest = JSON.parse(
   optional_host_permissions?: string[]
   externally_connectable?: { matches?: string[] }
   content_scripts?: unknown[]
+  icons?: Record<string, string>
+  action?: { default_icon?: Record<string, string> }
+}
+
+const BRIAN_ICONS = {
+  '16': 'icon-16.png',
+  '32': 'icon-32.png',
+  '48': 'icon-48.png',
+  '128': 'icon-128.png',
 }
 
 describe('[COMP:ext/agent] Manifest — narrow permissions (my-browser.md §6)', () => {
@@ -49,6 +58,25 @@ describe('[COMP:ext/agent] Manifest — narrow permissions (my-browser.md §6)',
 
   it('declares no content scripts', () => {
     expect(manifest.content_scripts ?? []).toEqual([])
+  })
+})
+
+describe('[COMP:ext/agent] Manifest — Brian identity artwork', () => {
+  it('uses the complete Brian icon map for the extension and toolbar action', () => {
+    expect(manifest.icons).toEqual(BRIAN_ICONS)
+    expect(manifest.action?.default_icon).toEqual(BRIAN_ICONS)
+  })
+
+  it('packages a square PNG at every declared size', () => {
+    for (const [size, filename] of Object.entries(BRIAN_ICONS)) {
+      const png = readFileSync(
+        fileURLToPath(new URL(`../../static/${filename}`, import.meta.url)),
+      )
+      // PNG IHDR stores width and height as big-endian uint32s at bytes 16/20.
+      expect(png.subarray(1, 4).toString('ascii')).toBe('PNG')
+      expect(png.readUInt32BE(16)).toBe(Number(size))
+      expect(png.readUInt32BE(20)).toBe(Number(size))
+    }
   })
 })
 

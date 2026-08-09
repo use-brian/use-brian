@@ -206,7 +206,8 @@ export type ChannelIntegrationConfig = {
    */
   seenChats?: SeenChat[]
   userAccessMode?: UserAccessMode // default: 'allow_all'
-  allowedUserIds?: string[]    // used when userAccessMode = 'allowlist' — @handle or numeric ID
+  // Slack sender filter; Telegram owner-plus-guest grants. @handle or numeric ID.
+  allowedUserIds?: string[]
   blockedUserIds?: string[]    // used when userAccessMode = 'blocklist' — @handle or numeric ID
   /**
    * WhatsApp BYON bot only — group chat JIDs the bot is allowed to reply in

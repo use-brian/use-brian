@@ -61,6 +61,14 @@ describe("[COMP:app-web/chat-parity] Chat surface parity", () => {
     expect(source).toContain("retryUserMessage");
   });
 
+  it("renders followed room research with the sender's activity chrome", () => {
+    expect(source).toContain('kind === "worker_start"');
+    expect(source).toContain('phase === "research_starting"');
+    expect(source).toContain("researchPhase={remoteResearchPhase}");
+    expect(source).toContain("startedAt={remoteStartedAt}");
+    expect(source).not.toContain("researchPhase={null}");
+  });
+
   it("keeps the composer footer on one stable row without a dock overlay", () => {
     expect(source).toContain("grid-cols-[minmax(0,1fr)_auto]");
     // The textarea's grid placement moved to the wrapper that carries the

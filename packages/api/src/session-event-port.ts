@@ -71,11 +71,12 @@ export type SessionEvent =
        * One discrete activity event of a live shared-session turn, mirrored
        * onto the bus so every cleared viewer renders the SAME feed the sender
        * sees (multiplayer chat T13): `event` is the SSE event name
-       * (`tool_start` | `tool_input` | `tool_result` | `tool_dropped` |
-       * `status` | `tool_confirmation_required`), and the rest of the payload
-       * is that event's (size-capped) data. Signals + small data only — a
-       * viewer refetches the persisted transcript at settle; oversized tool
-       * inputs degrade to `{}` so the client falls back to its static label.
+       * (`status` | `worker_start` | `tool_start` | `tool_input` |
+       * `tool_result` | `tool_dropped` | `tool_confirmation_required`), and
+       * the rest of the payload is that event's (size-capped) data. Signals +
+       * small data only — a viewer refetches the persisted transcript at
+       * settle; oversized tool inputs degrade to `{}` so the client falls
+       * back to its static label.
        */
       kind: 'turn_activity'
       sessionId: string

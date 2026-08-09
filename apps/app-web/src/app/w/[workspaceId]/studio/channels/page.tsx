@@ -115,6 +115,15 @@ import {
 } from "@/components/ui/searchable-select";
 import { StudioTopbarActions } from "@/components/studio/studio-topbar";
 import { DISPLAY_API_URL } from "@/lib/display-api-url";
+import {
+  Bot,
+  CheckCircle2,
+  ExternalLink,
+  KeyRound,
+  MessageCircle,
+  SmilePlus,
+  UsersRound,
+} from "lucide-react";
 
 // Slack manifest's `request_url` must be a syntactically valid URL — Slack
 // posts a verification challenge to it. Our slack route returns the challenge
@@ -145,6 +154,7 @@ function TelegramGlyph() {
       <circle cx="12" cy="12" r="12" fill="#229ED9" />
       <path
         fill="#fff"
+        transform="translate(0 1.5)"
         d="M18.07 5.51c.28-.11.54.07.47.42l-2.12 10c-.05.24-.2.3-.4.19l-3.22-2.38-1.55 1.49c-.17.17-.32.31-.65.31l.23-3.28 5.97-5.39c.26-.23-.06-.36-.4-.13l-7.38 4.65-3.18-.99c-.69-.22-.7-.69.14-1.02l12.09-4.66Z"
       />
     </svg>
@@ -1124,7 +1134,7 @@ function SurfaceInput({
  * `/workspaces/:id/channels/:id/config`; the server merges each patch into the
  * stored config. See docs/architecture/channels/adapter-pattern.md.
  */
-function ChannelConfigSection({
+export function ChannelConfigSection({
   workspaceId,
   channel,
   onUpdated,
@@ -1186,6 +1196,249 @@ function ChannelConfigSection({
     commitAccessIds([...accessIds, v]);
   }
 
+  const accessControl = (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-sm">
+          {isTelegram ? cfg.accessLabelTelegram : cfg.accessLabel}
+        </span>
+        <Select
+          value={accessMode}
+          items={{
+            allow_all: isTelegram
+              ? cfg.accessLinkedTelegram
+              : cfg.accessAllowAll,
+            allowlist: isTelegram
+              ? cfg.accessAllowlistTelegram
+              : cfg.accessAllowlist,
+            blocklist: cfg.accessBlocklist,
+          }}
+          disabled={saving}
+          onValueChange={(v) => {
+            if (v) void save({ userAccessMode: v as UserAccessMode });
+          }}
+        >
+          <SelectTrigger size="sm" className="text-sm">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="allow_all">
+              {isTelegram ? cfg.accessLinkedTelegram : cfg.accessAllowAll}
+            </SelectItem>
+            <SelectItem value="allowlist">
+              {isTelegram ? cfg.accessAllowlistTelegram : cfg.accessAllowlist}
+            </SelectItem>
+            <SelectItem value="blocklist">{cfg.accessBlocklist}</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        {accessMode === "allowlist"
+          ? isTelegram
+            ? cfg.accessAllowlistDescTelegram
+            : cfg.accessAllowlistDesc
+          : accessMode === "blocklist"
+            ? isTelegram
+              ? cfg.accessBlocklistDescTelegram
+              : cfg.accessBlocklistDesc
+            : isSlack
+              ? cfg.accessAllDescSlack
+              : isDiscord
+                ? cfg.accessAllDescDiscord
+                : cfg.accessAllDescTelegram}
+      </p>
+      {accessMode !== "allow_all" && (
+        <div className="flex flex-col gap-1.5 pt-1">
+          {accessIds.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {accessIds.map((uid, i) => (
+                <span
+                  key={`${uid}-${i}`}
+                  className="inline-flex items-center gap-1 rounded-full border border-border bg-muted px-2 py-1 text-xs font-mono"
+                >
+                  {uid}
+                  <button
+                    type="button"
+                    disabled={saving}
+                    aria-label={cfg.removeUser}
+                    onClick={() =>
+                      commitAccessIds(accessIds.filter((_, j) => j !== i))
+                    }
+                    className="text-muted-foreground hover:text-destructive disabled:opacity-50"
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              const input = e.currentTarget.elements.namedItem(
+                "accessUserId",
+              ) as HTMLInputElement;
+              addAccessId(input.value);
+              input.value = "";
+            }}
+            className="flex items-center gap-2"
+          >
+            <input
+              name="accessUserId"
+              type="text"
+              disabled={saving}
+              placeholder={
+                isSlack
+                  ? cfg.userIdPlaceholderSlack
+                  : isDiscord
+                    ? cfg.userIdPlaceholderDiscord
+                    : cfg.userIdPlaceholderTelegram
+              }
+              className="min-w-0 flex-1 rounded-md border border-border bg-background px-2 py-1.5 text-sm font-mono"
+            />
+            <button
+              type="submit"
+              disabled={saving}
+              className="rounded-md border border-border px-2.5 py-1.5 text-xs font-medium hover:bg-muted disabled:opacity-50"
+            >
+              {accessMode === "blocklist" ? cfg.blockUser : cfg.addUser}
+            </button>
+          </form>
+          <p className="text-xs text-muted-foreground">
+            {isSlack
+              ? cfg.userIdHintSlack
+              : isDiscord
+                ? cfg.userIdHintDiscord
+                : cfg.userIdHintTelegram}
+          </p>
+        </div>
+      )}
+    </div>
+  );
+
+  const ackReactionControl = (
+    <div className="flex flex-col gap-1">
+      {!isTelegram && <span className="text-sm">{cfg.ackLabel}</span>}
+      <p className="text-xs text-muted-foreground">
+        {isSlack ? cfg.ackHintSlack : cfg.ackHintTelegram}
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          type="text"
+          value={config.ackReaction ?? ""}
+          disabled={saving}
+          aria-label={cfg.ackLabel}
+          placeholder={isSlack ? "eyes" : "👀"}
+          onChange={(e) =>
+            setConfig((c) => ({ ...c, ackReaction: e.target.value }))
+          }
+          onBlur={() => void save({ ackReaction: config.ackReaction ?? "" })}
+          className="w-24 rounded-md border border-border bg-background px-2 py-1.5 text-sm font-mono"
+        />
+        {(isSlack ? ["eyes", "brain", "thumbsup"] : ["👀", "🧠", "👍"]).map(
+          (emoji) => (
+            <button
+              key={emoji}
+              type="button"
+              disabled={saving}
+              onClick={() => void save({ ackReaction: emoji })}
+              className="rounded-md border border-border px-2 py-1.5 text-xs hover:bg-muted disabled:opacity-50"
+            >
+              {isSlack ? `:${emoji}:` : emoji}
+            </button>
+          ),
+        )}
+        {config.ackReaction ? (
+          <button
+            type="button"
+            disabled={saving}
+            onClick={() => void save({ ackReaction: "" })}
+            className="text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+          >
+            {cfg.ackClear}
+          </button>
+        ) : null}
+      </div>
+    </div>
+  );
+
+  if (isTelegram) {
+    return (
+      <div className="flex flex-col gap-3 rounded-lg border border-border px-4 py-3">
+        <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          {cfg.title}
+        </div>
+
+        <div className="grid gap-3 xl:grid-cols-2">
+          <section className="flex flex-col gap-3 rounded-lg border border-border bg-background p-3">
+            <div className="flex items-center gap-2">
+              <span className="grid size-8 place-items-center rounded-full bg-sky-500/10 text-sky-600 dark:text-sky-400">
+                <MessageCircle className="size-4" aria-hidden />
+              </span>
+              <h3 className="text-sm font-semibold">
+                {cfg.telegramAccessTitle}
+              </h3>
+              <span className="ml-auto rounded-full bg-sky-500/10 px-2 py-0.5 text-[11px] font-medium text-sky-700 dark:text-sky-300">
+                {cfg.telegramAccessScope}
+              </span>
+            </div>
+            {accessControl}
+          </section>
+
+          <section className="flex flex-col gap-3 rounded-lg border border-border bg-background p-3">
+            <div className="flex items-center gap-2">
+              <span className="grid size-8 place-items-center rounded-full bg-violet-500/10 text-violet-600 dark:text-violet-400">
+                <UsersRound className="size-4" aria-hidden />
+              </span>
+              <h3 className="text-sm font-semibold">{cfg.telegramGroupTitle}</h3>
+              <span className="ml-auto rounded-full bg-violet-500/10 px-2 py-0.5 text-[11px] font-medium text-violet-700 dark:text-violet-300">
+                {cfg.telegramGroupScope}
+              </span>
+            </div>
+            <ConfigToggle
+              label={cfg.requireMention}
+              hint={cfg.requireMentionHintTelegram}
+              checked={config.requireMention ?? true}
+              disabled={saving}
+              onChange={(v) => void save({ requireMention: v })}
+            />
+            <TelegramMentionOverrides
+              config={config}
+              saving={saving}
+              onChange={(next) => void save({ requireMentionOverrides: next })}
+            />
+          </section>
+
+          <section className="flex flex-col gap-3 rounded-lg border border-border bg-background p-3 xl:col-span-2">
+            <div className="flex items-center gap-2">
+              <span className="grid size-8 place-items-center rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400">
+                <SmilePlus className="size-4" aria-hidden />
+              </span>
+              <h3 className="text-sm font-semibold">
+                {cfg.telegramReactionTitle}
+              </h3>
+              <span className="ml-auto rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+                {cfg.telegramAllChatsScope}
+              </span>
+            </div>
+            {ackReactionControl}
+          </section>
+        </div>
+
+        {saving && (
+          <span className="text-xs text-muted-foreground">
+            {t.studioPage.channels.saving}
+          </span>
+        )}
+        {saveError && (
+          <span className="text-xs text-destructive">
+            {t.studioPage.channels.saveError}
+          </span>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-border px-4 py-3">
       <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
@@ -1205,7 +1458,7 @@ function ChannelConfigSection({
       {!isDiscord && (
         <ConfigToggle
           label={cfg.requireMention}
-          hint={isSlack ? cfg.requireMentionHintSlack : cfg.requireMentionHintTelegram}
+          hint={cfg.requireMentionHintSlack}
           checked={config.requireMention ?? true}
           disabled={saving}
           onChange={(v) => void save({ requireMention: v })}
@@ -1213,159 +1466,9 @@ function ChannelConfigSection({
       )}
 
       {/* Acknowledgment reaction — not wired on the Discord inbound path. */}
-      {!isDiscord && (
-      <div className="flex flex-col gap-1">
-        <span className="text-sm">{cfg.ackLabel}</span>
-        <p className="text-xs text-muted-foreground">
-          {isSlack ? cfg.ackHintSlack : cfg.ackHintTelegram}
-        </p>
-        <div className="flex flex-wrap items-center gap-2">
-          <input
-            type="text"
-            value={config.ackReaction ?? ""}
-            disabled={saving}
-            placeholder={isSlack ? "eyes" : "👀"}
-            onChange={(e) =>
-              setConfig((c) => ({ ...c, ackReaction: e.target.value }))
-            }
-            onBlur={() => void save({ ackReaction: config.ackReaction ?? "" })}
-            className="w-32 text-sm rounded-md border border-border bg-background px-2 py-1 font-mono"
-          />
-          {(isSlack
-            ? ["eyes", "brain", "thumbsup"]
-            : ["👀", "🧠", "👍"]
-          ).map((emoji) => (
-            <button
-              key={emoji}
-              type="button"
-              disabled={saving}
-              onClick={() => void save({ ackReaction: emoji })}
-              className="text-xs rounded-md border border-border px-2 py-1 hover:bg-muted disabled:opacity-50"
-            >
-              {isSlack ? `:${emoji}:` : emoji}
-            </button>
-          ))}
-          {config.ackReaction ? (
-            <button
-              type="button"
-              disabled={saving}
-              onClick={() => void save({ ackReaction: "" })}
-              className="text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
-            >
-              {cfg.ackClear}
-            </button>
-          ) : null}
-        </div>
-      </div>
-      )}
+      {!isDiscord && ackReactionControl}
 
-      {/* Access control — allow all / allowlist / blocklist */}
-      <div className="flex flex-col gap-1.5">
-        <div className="flex items-center justify-between gap-3">
-          <span className="text-sm">{cfg.accessLabel}</span>
-          <Select
-            value={accessMode}
-            disabled={saving}
-            onValueChange={(v) => {
-              if (v) void save({ userAccessMode: v as UserAccessMode });
-            }}
-          >
-            <SelectTrigger size="sm" className="text-sm">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="allow_all">{cfg.accessAllowAll}</SelectItem>
-              <SelectItem value="allowlist">{cfg.accessAllowlist}</SelectItem>
-              <SelectItem value="blocklist">{cfg.accessBlocklist}</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-        <p className="text-xs italic text-muted-foreground">
-          {accessMode === "allowlist"
-            ? cfg.accessAllowlistDesc
-            : accessMode === "blocklist"
-              ? cfg.accessBlocklistDesc
-              : isSlack
-                ? cfg.accessAllDescSlack
-                : isDiscord
-                  ? cfg.accessAllDescDiscord
-                  : cfg.accessAllDescTelegram}
-        </p>
-        {accessMode !== "allow_all" && (
-          <div className="flex flex-col gap-1.5">
-            {accessIds.length > 0 && (
-              <div className="flex flex-wrap gap-1.5">
-                {accessIds.map((uid, i) => (
-                  <span
-                    key={`${uid}-${i}`}
-                    className="inline-flex items-center gap-1 text-xs font-mono px-2 py-1 rounded-md bg-muted border border-border"
-                  >
-                    {uid}
-                    <button
-                      type="button"
-                      disabled={saving}
-                      aria-label={cfg.ackClear}
-                      onClick={() =>
-                        commitAccessIds(accessIds.filter((_, j) => j !== i))
-                      }
-                      className="text-muted-foreground hover:text-destructive disabled:opacity-50"
-                    >
-                      ×
-                    </button>
-                  </span>
-                ))}
-              </div>
-            )}
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                const input = e.currentTarget.elements.namedItem(
-                  "accessUserId",
-                ) as HTMLInputElement;
-                addAccessId(input.value);
-                input.value = "";
-              }}
-              className="flex items-center gap-2"
-            >
-              <input
-                name="accessUserId"
-                type="text"
-                disabled={saving}
-                placeholder={
-                  isSlack
-                    ? cfg.userIdPlaceholderSlack
-                    : isDiscord
-                      ? cfg.userIdPlaceholderDiscord
-                      : cfg.userIdPlaceholderTelegram
-                }
-                className="w-44 text-sm rounded-md border border-border bg-background px-2 py-1 font-mono"
-              />
-              <button
-                type="submit"
-                disabled={saving}
-                className="text-xs font-medium rounded-md border border-border px-2.5 py-1 hover:bg-muted disabled:opacity-50"
-              >
-                {accessMode === "blocklist" ? cfg.blockUser : cfg.addUser}
-              </button>
-            </form>
-            <p className="text-xs text-muted-foreground">
-              {isSlack
-                ? cfg.userIdHintSlack
-                : isDiscord
-                  ? cfg.userIdHintDiscord
-                  : cfg.userIdHintTelegram}
-            </p>
-          </div>
-        )}
-      </div>
-
-      {isTelegram && (
-        <TelegramMentionOverrides
-          config={config}
-          saving={saving}
-          onChange={(next) => void save({ requireMentionOverrides: next })}
-        />
-      )}
+      {accessControl}
 
       {saving && (
         <span className="text-xs text-muted-foreground">
@@ -1454,8 +1557,7 @@ function TelegramMentionOverrides({
       <span className="text-sm">{cfg.overridesLabel}</span>
       <p className="text-xs text-muted-foreground">
         {cfg.overridesDescPrefix}{" "}
-        <span className="font-medium text-foreground">{effectLabel}</span>.{" "}
-        {cfg.overridesDescTopicNote}
+        <span className="font-medium text-foreground">{effectLabel}</span>.
       </p>
       {seenChats.length === 0 ? (
         <p className="text-xs italic text-muted-foreground">
@@ -1538,7 +1640,7 @@ function TelegramMentionOverrides({
  * shows the Slack webhook URL the user must register manually (Telegram
  * auto-registers).
  */
-function AddChannelForm({
+export function AddChannelForm({
   workspaceId,
   assistants,
   onCreated,
@@ -1791,7 +1893,8 @@ function AddChannelForm({
     }
   }
 
-  const TAB_BASE = "px-3 py-1.5 text-sm border-b-2 transition-colors -mb-px";
+  const TAB_BASE =
+    "-mb-px inline-flex items-center gap-1.5 border-b-2 px-3 py-1.5 text-sm transition-colors";
   const FIELD_INPUT =
     "text-sm rounded-md border border-border bg-background px-2 py-1.5 font-mono disabled:opacity-50";
 
@@ -1832,7 +1935,10 @@ function AddChannelForm({
                 : "border-transparent text-muted-foreground hover:text-foreground")
             }
           >
-            {add.platform[p]}
+            <span className="grid size-5 place-items-center text-muted-foreground">
+              <ChannelTypeIcon type={p} />
+            </span>
+            <span>{add.platform[p]}</span>
           </button>
         ))}
       </div>
@@ -1983,10 +2089,74 @@ function AddChannelForm({
           </div>
         </div>
       ) : platform === "telegram" ? (
-        <div className="flex flex-col gap-3">
-          <p className="text-xs text-muted-foreground">{add.telegramHint}</p>
+        <div className="flex flex-col gap-4">
+          <div className="flex items-center gap-3">
+            <span className="grid size-10 place-items-center">
+              <span className="scale-150">
+                <TelegramGlyph />
+              </span>
+            </span>
+            <div>
+              <h3 className="text-sm font-semibold">{add.telegramSetupTitle}</h3>
+              <p className="text-xs text-muted-foreground">
+                {add.telegramSetupSubtitle}
+              </p>
+            </div>
+          </div>
+
+          <ol className="grid gap-2 sm:grid-cols-3">
+            <li className="flex items-center gap-2 rounded-lg border border-border bg-background p-2.5">
+              <span className="grid size-8 shrink-0 place-items-center rounded-full bg-sky-500/10 text-sky-600 dark:text-sky-400">
+                <Bot className="size-4" aria-hidden />
+              </span>
+              <div className="min-w-0">
+                <span className="block text-[11px] font-medium text-muted-foreground">
+                  {format(add.telegramStep, { number: 1 })}
+                </span>
+                <a
+                  href="https://t.me/BotFather"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 text-xs font-semibold text-primary hover:underline"
+                >
+                  {add.telegramStepCreate}
+                  <ExternalLink className="size-3" aria-hidden />
+                </a>
+              </div>
+            </li>
+            <li className="flex items-center gap-2 rounded-lg border border-border bg-background p-2.5">
+              <span className="grid size-8 shrink-0 place-items-center rounded-full bg-violet-500/10 text-violet-600 dark:text-violet-400">
+                <KeyRound className="size-4" aria-hidden />
+              </span>
+              <div>
+                <span className="block text-[11px] font-medium text-muted-foreground">
+                  {format(add.telegramStep, { number: 2 })}
+                </span>
+                <span className="text-xs font-semibold">
+                  {add.telegramStepToken}
+                </span>
+              </div>
+            </li>
+            <li className="flex items-center gap-2 rounded-lg border border-border bg-background p-2.5">
+              <span className="grid size-8 shrink-0 place-items-center rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
+                <CheckCircle2 className="size-4" aria-hidden />
+              </span>
+              <div>
+                <span className="block text-[11px] font-medium text-muted-foreground">
+                  {format(add.telegramStep, { number: 3 })}
+                </span>
+                <span className="text-xs font-semibold">
+                  {add.telegramStepAssistant}
+                </span>
+              </div>
+            </li>
+          </ol>
+
           <label className="flex flex-col gap-1">
-            <span className="text-xs font-medium">{add.botTokenLabel}</span>
+            <span className="inline-flex items-center gap-1.5 text-xs font-medium">
+              <KeyRound className="size-3.5 text-muted-foreground" aria-hidden />
+              {add.botTokenLabel}
+            </span>
             <input
               type="password"
               value={tgBotToken}
@@ -1995,6 +2165,33 @@ function AddChannelForm({
               disabled={submitting || !!success}
               className={FIELD_INPUT}
             />
+          </label>
+
+          <label className="flex flex-col gap-1">
+            <span className="inline-flex items-center gap-1.5 text-xs font-medium">
+              <Bot className="size-3.5 text-muted-foreground" aria-hidden />
+              {add.defaultAssistantLabel}
+            </span>
+            <Select
+              value={defaultAssistantId || "__none__"}
+              onValueChange={(v) =>
+                setDefaultAssistantId(v && v !== "__none__" ? v : "")
+              }
+              items={defaultAssistantItems}
+              disabled={submitting || !!success}
+            >
+              <SelectTrigger size="sm" className="text-sm">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__none__">{add.defaultAssistantNone}</SelectItem>
+                {assistants.map((a) => (
+                  <SelectItem key={a.id} value={a.id}>
+                    {a.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </label>
         </div>
       ) : platform === "msteams" ? (
@@ -2074,7 +2271,7 @@ function AddChannelForm({
         </div>
       )}
 
-      {platform !== "whatsapp" && (
+      {platform !== "whatsapp" && platform !== "telegram" && (
         <label className="flex flex-col gap-1">
           <span className="text-xs font-medium">{add.defaultAssistantLabel}</span>
           <Select
@@ -2195,9 +2392,16 @@ function AddChannelForm({
       )}
       {success?.kind === "telegram" && (
         <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 flex flex-col gap-2">
-          <p className="text-sm font-medium text-emerald-600 dark:text-emerald-400">
-            {format(add.connectedTelegram, { username: success.botUsername })}
-          </p>
+          <div className="flex items-center gap-2">
+            <TelegramGlyph />
+            <CheckCircle2
+              className="size-4 text-emerald-600 dark:text-emerald-400"
+              aria-hidden
+            />
+            <p className="text-sm font-medium text-emerald-600 dark:text-emerald-400">
+              {format(add.connectedTelegram, { username: success.botUsername })}
+            </p>
+          </div>
           {success.pairingCode && (
             <>
               <p className="text-xs text-muted-foreground">

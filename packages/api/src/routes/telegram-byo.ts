@@ -672,29 +672,32 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
     // the bound aliases, `ownerId`, `channelId`, `credentials`,
     // `tgConfig`, and `adapter` from the enclosing request scope.
     async function handleIncoming(incoming: IncomingMessage): Promise<void> {
-      // 4b. Access control — silently ignore messages from unauthorized users.
-      //     Supports both @handle (matched against from.username) and numeric ID.
+      // 4b. Sender access. A blocklist match is a hard denial. An allowlist
+      //     match is carried through identity resolution because, on a private
+      //     DM, it is also an explicit conversation-only guest grant. The
+      //     linked owner remains implicit and is recognized below; deciding
+      //     the whole allowlist here would lock the owner out unless they
+      //     redundantly listed themself.
       const integrationConfig = boundIntegration.config ?? {}
       const accessMode = integrationConfig.userAccessMode ?? 'allow_all'
-      if (accessMode !== 'allow_all') {
-        const raw = incoming.raw as { from?: { id: number; username?: string } }
-        const fromId = String(raw.from?.id ?? incoming.userId)
-        const fromUsername = raw.from?.username?.toLowerCase()
-
-        const matchesEntry = (entry: string) => {
-          if (entry.startsWith('@')) {
-            return fromUsername === entry.slice(1).toLowerCase()
-          }
-          return fromId === entry
+      const rawSender = incoming.raw as { from?: { id: number; username?: string } }
+      const fromId = String(rawSender.from?.id ?? incoming.userId)
+      const fromUsername = rawSender.from?.username?.toLowerCase()
+      const matchesEntry = (rawEntry: string) => {
+        const entry = rawEntry.trim()
+        if (entry.startsWith('@')) {
+          return fromUsername === entry.slice(1).toLowerCase()
         }
+        return fromId === entry
+      }
 
-        if (accessMode === 'allowlist') {
-          const allowed = integrationConfig.allowedUserIds ?? []
-          if (allowed.length > 0 && !allowed.some(matchesEntry)) return
-        } else if (accessMode === 'blocklist') {
-          const blocked = integrationConfig.blockedUserIds ?? []
-          if (blocked.some(matchesEntry)) return
-        }
+      const explicitAllowlistGrant = accessMode === 'allowlist'
+        && (integrationConfig.allowedUserIds ?? []).some(matchesEntry)
+      if (
+        accessMode === 'blocklist'
+        && (integrationConfig.blockedUserIds ?? []).some(matchesEntry)
+      ) {
+        return
       }
 
       // BYO account pairing. The code is generated while connecting this bot
@@ -850,6 +853,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       //    6-char code from the web UI.
       let channelUserId = ownerId
       let isIdentified = true
+      let externalGuest = false
       let privateChatRedirect = false
       // Tracks whether Step 1 found a linked-account row. Cannot be inferred
       // from `channelUserId === ownerId` because an owner who linked their
@@ -857,6 +861,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       // cause Step 2 to re-run and (in a private chat) incorrectly redirect
       // the owner to the shared @use_brian_bot.
       let foundLinked = false
+      let foundLinkedOwner = false
       const telegramUserId = incoming.userId
 
       if (options.linkedAccountStore && options.channelUserStore) {
@@ -882,7 +887,16 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
               channelUserId = found.id
               isIdentified = true
               foundLinked = true
+              foundLinkedOwner = found.id === ownerId
             }
+          }
+
+          // `allowlist` is owner + explicit entries. Evaluate this only after
+          // the verified-link lookup so the owner never has to add their own
+          // handle/id. Everyone else must match exactly; an empty list is
+          // therefore owner-only rather than the old fail-open shape.
+          if (accessMode === 'allowlist' && !explicitAllowlistGrant && !foundLinkedOwner) {
+            return
           }
 
           // Step 2: Not linked → resolve via channel user store (creates shadow)
@@ -898,10 +912,13 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
               // Tier 1: email matched → use resolved user with full memory
               channelUserId = resolved.user.id
               isIdentified = true
-            } else if (incoming.isGroupChat) {
-              // Tier 2 in group chat: keep shadow user, no memory (can't assume identity)
+            } else if (incoming.isGroupChat || explicitAllowlistGrant) {
+              // Tier 2 in a group, or an explicitly allowlisted private DM:
+              // keep the sender's shadow identity. Private guests take the
+              // conversation-only pipeline lane and never inherit owner state.
               channelUserId = resolved.user.id
               isIdentified = false
+              externalGuest = !incoming.isGroupChat && explicitAllowlistGrant
             } else {
               // Tier 2 in private chat: redirect to the official shared bot.
               // Telegram never exposes email, so unlinked private-chat users
@@ -930,11 +947,22 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
         return
       }
 
+      // Fail closed if an allowlist was configured but identity services were
+      // unavailable: only an explicit raw sender match may proceed. The owner
+      // exception above requires a verified linked-identity lookup.
+      if (
+        accessMode === 'allowlist'
+        && !explicitAllowlistGrant
+        && !foundLinkedOwner
+      ) {
+        return
+      }
+
       // 5b. Audio FILE → recording-to-brain pipeline instead of normal chat.
       //     A deliberate recording (msg.audio), routed to transcription + brain
       //     ingest with the duration surcharge. Voice notes stay on the existing
       //     voice-transcription-to-chat path. See docs/architecture/media/transcription.md.
-      if (options.recordingIngest && incoming.mediaType === 'audio') {
+      if (options.recordingIngest && incoming.mediaType === 'audio' && !externalGuest) {
         await handleTelegramRecordingIntake(
           incoming,
           routedAssistant.id,
@@ -954,6 +982,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
           channelUserId,
           ownerId: routedOwnerId,
           isIdentified,
+          externalGuest,
           archiveConnectorInstanceId: boundIntegration.connectorInstanceId,
           ...options,
           pendingConfResolvers,
@@ -1072,6 +1101,8 @@ type ProcessMessageParams = {
   channelUserId: string
   ownerId: string
   isIdentified: boolean
+  /** Explicitly allowlisted, unlinked private sender: conversation-only lane. */
+  externalGuest: boolean
   archiveConnectorInstanceId?: string | null
   provider: LLMProvider
   systemPrompt: string
@@ -1123,7 +1154,7 @@ type ProcessMessageParams = {
 }
 
 async function processMessage(params: ProcessMessageParams): Promise<void> {
-  const { adapter, incoming, assistant, channelUserId, ownerId, isIdentified } = params
+  const { adapter, incoming, assistant, channelUserId, ownerId, isIdentified, externalGuest } = params
 
   // Over-limit inbound media: a file above Telegram's 20MB bot download cap
   // (TELEGRAM_BOT_DOWNLOAD_LIMIT_BYTES) cannot be pulled via getFile, so a long
@@ -1213,6 +1244,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
   }
 
   if (
+    !externalGuest &&
     incoming.mediaUrl &&
     shouldUseUniversalTelegramIntake(incoming.mediaType, Boolean(params.recordingIngest)) &&
     params.ingestChannelMediaRef &&
@@ -1248,7 +1280,12 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
   // Results are folded into ONE reply (`summarizeAlbumIntake`) rather than one
   // per file, and a member that throws is counted as `failed` rather than
   // vanishing — a partially-filed album must never read as a whole one.
-  if (incoming.files?.length && params.ingestChannelMediaRef && assistant.workspaceId) {
+  if (
+    !externalGuest
+    && incoming.files?.length
+    && params.ingestChannelMediaRef
+    && assistant.workspaceId
+  ) {
     const ingest = params.ingestChannelMediaRef
     const workspaceId = assistant.workspaceId
     const ingestable = incoming.files.filter(
@@ -1395,7 +1432,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
   // channelUserId). Null (non-image / no store / failure) keeps the
   // block-only turn. See docs/architecture/engine/file-handling.md.
   const cacheImage = (file: { buffer: Buffer; mime: string; fileName: string }) =>
-    params.fileStore
+    params.fileStore && !externalGuest
       ? cacheInboundImage({
           fileStore: params.fileStore,
           channelType: 'telegram',
@@ -1510,6 +1547,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     ownerId,
     assistant: { ...assistant, ownerUserId: ownerId },
     isIdentified,
+    externalGuest,
     channelType: 'telegram',
     channelId: incoming.channelId,
     actorChannelId: byoUsername ? `@${byoUsername}` : null,
