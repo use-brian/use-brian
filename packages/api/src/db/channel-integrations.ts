@@ -208,6 +208,12 @@ export type ChannelIntegrationConfig = {
   userAccessMode?: UserAccessMode // default: 'allow_all'
   // Slack sender filter; Telegram owner-plus-guest grants. @handle or numeric ID.
   allowedUserIds?: string[]
+  /**
+   * Telegram BYO only. When true, explicitly allowlisted private-DM guests
+   * may use connector tools enabled for the routed assistant. Their shadow
+   * identity/session and all non-connector external-guest boundaries remain.
+   */
+  allowGuestConnectorTools?: boolean // default: false
   blockedUserIds?: string[]    // used when userAccessMode = 'blocklist' — @handle or numeric ID
   /**
    * WhatsApp BYON bot only — group chat JIDs the bot is allowed to reply in

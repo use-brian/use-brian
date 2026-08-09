@@ -342,13 +342,17 @@ describe('[COMP:api/channels-route] channel config', () => {
     } as unknown as ChannelIntegrationStore
     const res = await request(buildApp({ integrationStore }))
       .patch('/api/workspaces/ws-1/channels/chan-1/config')
-      .send({ requireMention: false })
+      .send({ requireMention: false, allowGuestConnectorTools: true })
     expect(res.status).toBe(200)
-    // Existing `ackReaction` survives; the patch's `requireMention` is added.
+    // Existing config survives; both Telegram guest fields are accepted.
     expect(updateConfig).toHaveBeenCalledWith({
       actingUserId: 'user-1',
       id: 'int-1',
-      config: { ackReaction: 'eyes', requireMention: false },
+      config: {
+        ackReaction: 'eyes',
+        requireMention: false,
+        allowGuestConnectorTools: true,
+      },
     })
     expect(res.body.channel.config).toEqual({
       ackReaction: 'eyes',

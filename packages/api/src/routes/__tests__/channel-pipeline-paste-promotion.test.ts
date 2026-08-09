@@ -9,7 +9,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { ContentBlock } from '@use-brian/core'
 import type { ArtifactPromoter } from '../../files/artifact-promote.js'
-import { promoteChannelPaste } from '../channel-pipeline.js'
+import {
+  connectorToolsAllowedForChannelTurn,
+  promoteChannelPaste,
+} from '../channel-pipeline.js'
 
 // estimateStringTokens ≈ ceil(asciiChars / 4); the paste threshold is 8,000
 // tokens, so ~40K ASCII chars clears it comfortably. Distinctive head + tail
@@ -180,5 +183,20 @@ describe('[COMP:api/channel-paste-promotion] Channel paste promotion', () => {
     expect(promoter).toHaveBeenCalledTimes(1)
     expect(result.messageText).toBe(BLOB)
     expect(result.userContentBlocks).toBe(userContentBlocks)
+  })
+})
+
+describe('[COMP:api/telegram-byo-route] External guest connector access', () => {
+  it('keeps connectors available for ordinary channel turns', () => {
+    expect(connectorToolsAllowedForChannelTurn(false, undefined)).toBe(true)
+  })
+
+  it('keeps connectors disabled for an external guest by default', () => {
+    expect(connectorToolsAllowedForChannelTurn(true, undefined)).toBe(false)
+    expect(connectorToolsAllowedForChannelTurn(true, false)).toBe(false)
+  })
+
+  it('enables connectors only after the explicit guest opt-in', () => {
+    expect(connectorToolsAllowedForChannelTurn(true, true)).toBe(true)
   })
 })

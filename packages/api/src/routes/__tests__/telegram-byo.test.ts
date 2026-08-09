@@ -124,6 +124,7 @@ const pipelineCalls: Array<{
   userId: string
   isIdentified: boolean
   externalGuest: boolean
+  externalGuestConnectorTools: boolean
   isGroupChat: boolean
   messageText?: string
   userContentBlocks?: Array<{ type: string; mimeType?: string }>
@@ -134,6 +135,7 @@ vi.mock('../channel-pipeline.js', () => ({
     userId: string
     isIdentified: boolean
     externalGuest?: boolean
+    externalGuestConnectorTools?: boolean
     isGroupChat: boolean
     messageText?: string
     userContentBlocks?: Array<{ type: string; mimeType?: string }>
@@ -147,6 +149,7 @@ vi.mock('../channel-pipeline.js', () => ({
       userId: params.userId,
       isIdentified: params.isIdentified,
       externalGuest: params.externalGuest === true,
+      externalGuestConnectorTools: params.externalGuestConnectorTools === true,
       isGroupChat: params.isGroupChat,
       messageText: params.messageText,
       userContentBlocks: params.userContentBlocks,
@@ -1086,6 +1089,7 @@ describe('[COMP:api/telegram-byo-route] allowlisted private guests', () => {
   function makeGuestApp(
     allowedUserIds: string[],
     linked: { userId: string; assistantId: string | null } | null = null,
+    allowGuestConnectorTools = false,
   ) {
     return createTestApp(
       '/webhook/telegram-byo',
@@ -1098,6 +1102,7 @@ describe('[COMP:api/telegram-byo-route] allowlisted private guests', () => {
           requireMention: true,
           userAccessMode: 'allowlist',
           allowedUserIds,
+          allowGuestConnectorTools,
         }) as never,
         linkedAccountStore: makeLinkedAccountStore(linked) as never,
         channelUserStore: channelUserStoreStub as never,
@@ -1125,6 +1130,7 @@ describe('[COMP:api/telegram-byo-route] allowlisted private guests', () => {
       userId: 'shadow_friend',
       isIdentified: false,
       externalGuest: true,
+      externalGuestConnectorTools: false,
       isGroupChat: false,
     })
     expect(adapterSendCalls.at(-1)?.text).toBe('ok')
@@ -1146,6 +1152,26 @@ describe('[COMP:api/telegram-byo-route] allowlisted private guests', () => {
     expect(pipelineCalls[0]).toMatchObject({
       userId: 'shadow_numeric',
       externalGuest: true,
+    })
+  })
+
+  it('forwards the explicit connector opt-in without changing guest identity', async () => {
+    const { resolveChannelUser } = await import('../../db/channel-user-store.js')
+    vi.mocked(resolveChannelUser).mockResolvedValueOnce({
+      user: { id: 'shadow_with_tools' } as never,
+      isIdentified: false,
+    })
+
+    const app = makeGuestApp(['@friend'], null, true)
+    await postUpdate(app, buildPrivateDm(42, 'check my calendar', 'friend'))
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    expect(pipelineCalls).toHaveLength(1)
+    expect(pipelineCalls[0]).toMatchObject({
+      userId: 'shadow_with_tools',
+      externalGuest: true,
+      externalGuestConnectorTools: true,
     })
   })
 
