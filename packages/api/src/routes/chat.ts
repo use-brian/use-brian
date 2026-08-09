@@ -4283,7 +4283,6 @@ export function chatRoutes(options: WebChatOptions): Router {
 
       // Add memory tools (with analytics callbacks)
       const { saveMemory, getMemory, deleteMemory } = createMemoryTools(options.memoryStore, {
-        userPlan,
         entityStore: options.entitiesStore,
         entityLinksStore: options.entityLinksStore,
         recallBuffer,

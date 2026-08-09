@@ -1191,7 +1191,6 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
 
   // ── Tools: capability filter + memory ──
   const { saveMemory, getMemory, deleteMemory } = createMemoryTools(memoryStore, {
-    userPlan: workspacePlan,
     onEvent: (evt) => {
       if (evt.type === 'memory_deleted') {
         analytics?.logEvent({
