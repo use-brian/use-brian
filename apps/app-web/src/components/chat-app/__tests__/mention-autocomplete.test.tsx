@@ -1,12 +1,15 @@
 // @vitest-environment jsdom
 /**
- * [COMP:app-web/mention-autocomplete] Dismissal.
+ * [COMP:app-web/mention-autocomplete] Dismissal and keyboard confirmation.
  *
  * The pure open/close rules live in `multi-assistant-response`; what needs a
  * DOM is the part the user complained about — the popup felt stuck, because
  * nothing but a completed pick could close it. Escape and a pointer landing
  * outside the field must both collapse it, and neither may reopen it on the
  * next keystroke of the same `@`.
+ *
+ * The keyboard half is here for the same reason: Tab must confirm what is
+ * highlighted, so what the user sees selected is what lands in the text.
  */
 
 import { act, useState } from "react";
@@ -91,15 +94,26 @@ async function type(text: string) {
   });
 }
 
-async function press(key: string) {
+async function press(key: string, shiftKey = false) {
   const input = container!.querySelector<HTMLTextAreaElement>(
     '[data-testid="input"]',
   )!;
   await act(async () => {
     input.dispatchEvent(
-      new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }),
+      new KeyboardEvent("keydown", {
+        key,
+        shiftKey,
+        bubbles: true,
+        cancelable: true,
+      }),
     );
   });
+}
+
+function inputValue(): string {
+  return container!.querySelector<HTMLTextAreaElement>(
+    '[data-testid="input"]',
+  )!.value;
 }
 
 afterEach(() => {
@@ -173,5 +187,47 @@ describe("[COMP:app-web/mention-autocomplete] dismissing the popup", () => {
     expect(options()).toHaveLength(0);
     await type("@Blendit reconcile the orders");
     expect(options()).toHaveLength(0);
+  });
+});
+
+describe("[COMP:app-web/mention-autocomplete] confirming with the keyboard", () => {
+  it("takes the highlighted option on Tab", async () => {
+    await mount();
+    await type("@Blend");
+    await press("Tab");
+    expect(inputValue()).toBe("@Blendit ");
+    expect(options()).toHaveLength(0);
+  });
+
+  it("takes the highlighted option on Enter", async () => {
+    await mount();
+    await type("@Blend");
+    await press("Enter");
+    expect(inputValue()).toBe("@Blendit ");
+  });
+
+  it("takes what the arrows left highlighted, not the one after it", async () => {
+    // The reported bug: Tab advanced the selection, so the option under the
+    // highlight was never the one Tab landed on.
+    await mount();
+    await type("@Blend");
+    await press("ArrowDown");
+    await press("Tab");
+    expect(inputValue()).toBe("@Blendit Media ");
+  });
+
+  it("confirms on Shift+Tab too, rather than walking focus out", async () => {
+    await mount();
+    await type("@Blend");
+    await press("Tab", true);
+    expect(inputValue()).toBe("@Blendit ");
+  });
+
+  it("leaves Shift+Enter to the composer as a newline", async () => {
+    await mount();
+    await type("@Blend");
+    await press("Enter", true);
+    expect(inputValue()).toBe("@Blend");
+    expect(options()).toHaveLength(2);
   });
 });

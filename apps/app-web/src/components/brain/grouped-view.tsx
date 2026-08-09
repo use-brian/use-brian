@@ -308,6 +308,7 @@ function nodeGroup(kind: BrainGraphNodeKind): GroupKey {
     case "memory":
       return "memories";
     case "skill":
+    case "skill_file":
     case "connector":
     case "other":
       return "other";

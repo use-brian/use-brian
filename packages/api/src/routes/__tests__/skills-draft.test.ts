@@ -37,6 +37,10 @@ const skillStore = {
 }
 
 const workspaceStore = { getRole: vi.fn() }
+const workspaceSkillStore = { create: vi.fn() }
+const workspaceSkillFilesStore = { upsert: vi.fn(), notifyChanged: vi.fn() }
+const workspaceSkillEnablementStore = { enable: vi.fn() }
+const listWorkspaceAssistants = vi.fn()
 const getDraftContext = vi.fn()
 
 type Captured = { systemPrompt?: string; model?: string; messages?: Message[] }
@@ -84,6 +88,8 @@ type DraftAppOptions = {
   budgetStatus?: 'ok' | 'downgraded' | 'blocked'
   fileStore?: { get: (id: string, ctx?: unknown) => Promise<unknown> }
   voiceTranscription?: PreflightOptions
+  communityRegistry?: import('@use-brian/core').SkillContent[]
+  nativeInstall?: boolean
 }
 
 function draftApp(opts: DraftAppOptions = {}) {
@@ -100,6 +106,11 @@ function draftApp(opts: DraftAppOptions = {}) {
       checkUsageBudget: async () => ({ status: opts.budgetStatus ?? 'ok' }),
       fileStore: opts.fileStore as never,
       voiceTranscription: opts.voiceTranscription,
+      communityRegistry: opts.communityRegistry,
+      workspaceSkillStore: opts.nativeInstall ? workspaceSkillStore as never : undefined,
+      workspaceSkillFilesStore: opts.nativeInstall ? workspaceSkillFilesStore as never : undefined,
+      workspaceSkillEnablementStore: opts.nativeInstall ? workspaceSkillEnablementStore as never : undefined,
+      listWorkspaceAssistants: opts.nativeInstall ? listWorkspaceAssistants : undefined,
     }),
     { userId: 'u-1' },
   )
@@ -118,6 +129,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   getDraftContext.mockResolvedValue({ memories: [], entities: [], existingSkills: [] })
   workspaceStore.getRole.mockResolvedValue('member')
+  listWorkspaceAssistants.mockResolvedValue([{ id: 'a-1' }, { id: 'a-2' }])
 })
 
 describe('[COMP:api/skills-route] POST /draft', () => {
@@ -389,5 +401,64 @@ describe('[COMP:api/skills-route] GET /catalog/:slug', () => {
     skillStore.getBySlug.mockResolvedValueOnce(null)
     const missing = await request(draftApp()).get('/api/skills/catalog/no-such-skill')
     expect(missing.status).toBe(404)
+  })
+})
+
+describe('[COMP:api/skills-route] POST /catalog/:slug/install', () => {
+  it('materializes the complete native catalog bundle and enables it', async () => {
+    const resource = {
+      path: 'references/margins.md',
+      kind: 'reference' as const,
+      name: 'margins.md',
+      content: 'Gross margin method.',
+      contentHash: 'hash-1',
+    }
+    const template = {
+      id: 'consult-finance',
+      name: 'Finance Consult',
+      description: 'Analyze finances when the user asks about profit.',
+      content: 'Read [margins](references/margins.md).',
+      category: 'research' as const,
+      requiresConnectors: [],
+      source: 'community' as const,
+      bundleVersion: 2 as const,
+      sourceDigest: 'digest-1',
+      resources: [resource],
+    }
+    workspaceSkillStore.create.mockResolvedValue({
+      rowId: 'skill-row-1', slug: template.id, name: template.name,
+      description: template.description, content: template.content,
+      category: 'research', state: 'active', confidence: 1,
+      activatedAt: new Date('2026-08-09'), inductionSource: 'authored',
+      sensitivity: 'internal', sensitivityOverridden: false,
+      rederivationCount: 0, requiresConnectors: [], invocations: 0,
+      succeeded: 0, userCorrectedAfter: 0, bundleVersion: 2,
+      sourceDigest: 'digest-1',
+    })
+    workspaceSkillFilesStore.upsert.mockResolvedValue({})
+    workspaceSkillEnablementStore.enable.mockResolvedValue(undefined)
+
+    const res = await request(draftApp({ communityRegistry: [template], nativeInstall: true }))
+      .post('/api/skills/catalog/consult-finance/install')
+      .send({ workspaceId: 'w-1' })
+
+    expect(res.status).toBe(201)
+    expect(workspaceSkillStore.create).toHaveBeenCalledWith(
+      'u-1',
+      'w-1',
+      expect.objectContaining({ bundleVersion: 2, sourceDigest: 'digest-1' }),
+    )
+    expect(workspaceSkillFilesStore.upsert).toHaveBeenCalledWith(
+      'u-1',
+      expect.objectContaining({
+        workspaceSkillId: 'skill-row-1',
+        path: 'references/margins.md',
+        contentHash: 'hash-1',
+      }),
+      { notify: false },
+    )
+    expect(workspaceSkillEnablementStore.enable).toHaveBeenCalledTimes(2)
+    expect(workspaceSkillFilesStore.notifyChanged).toHaveBeenCalledWith('skill-row-1')
+    expect(res.body).toMatchObject({ rowId: 'skill-row-1', bundleVersion: 2 })
   })
 })

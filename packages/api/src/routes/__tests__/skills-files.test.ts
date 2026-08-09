@@ -130,13 +130,15 @@ describe('[COMP:api/skill-support-files] PUT /api/skills/:id/files', () => {
 
     expect(res.status).toBe(201)
     expect(res.body.file).toMatchObject({ kind: 'reference', name: 'tone.md' })
-    expect(workspaceSkillFilesStore.upsert).toHaveBeenCalledWith('u-1', {
+    expect(workspaceSkillFilesStore.upsert).toHaveBeenCalledWith('u-1', expect.objectContaining({
       workspaceSkillId: 's-1',
       kind: 'reference',
       name: 'tone.md',
       content: 'Write plainly.',
       description: null,
-    })
+      path: null,
+      contentHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+    }))
   })
 
   it('answers 200 when replacing an existing (kind, name)', async () => {
@@ -153,7 +155,7 @@ describe('[COMP:api/skill-support-files] PUT /api/skills/:id/files', () => {
   it('400s an invalid kind, a pointer-breaking name, and empty content', async () => {
     const app = filesApp()
     for (const body of [
-      { kind: 'asset', name: 'logo.png', content: 'x' },
+      { kind: 'binary', name: 'logo.png', content: 'x' },
       { kind: 'reference', name: 'to{ne}.md', content: 'x' },
       { kind: 'reference', name: 'tone.md', content: '' },
     ]) {
@@ -230,7 +232,7 @@ describe('[COMP:api/skill-support-files] DELETE /api/skills/:id/files', () => {
     const noSelector = await request(filesApp()).delete('/api/skills/s-1/files')
     expect(noSelector.status).toBe(400)
 
-    const badKind = await request(filesApp()).delete('/api/skills/s-1/files?kind=asset&name=a.png')
+    const badKind = await request(filesApp()).delete('/api/skills/s-1/files?kind=binary&name=a.png')
     expect(badKind.status).toBe(400)
   })
 

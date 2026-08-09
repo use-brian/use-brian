@@ -83,6 +83,7 @@ function makeConnectorStore(instances: Array<{ id: string; provider: string }>) 
 function makeSkillStore() {
   return {
     setInheritedSensitivity: vi.fn().mockResolvedValue(undefined),
+    listForWorkspace: vi.fn().mockResolvedValue([]),
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } as any
 }
@@ -181,5 +182,34 @@ describe('[COMP:api/skill-edge-service] makeSkillEdgeRecomputer', () => {
     expect(entityLinks.walkOutbound).not.toHaveBeenCalled()
     expect(entityLinks.create).not.toHaveBeenCalled()
     expect(workspaceSkillStore.setInheritedSensitivity).not.toHaveBeenCalled()
+  })
+
+  it('repairs an inbound uses_skill edge when the dependency is installed later', async () => {
+    mockQuery.mockResolvedValue({ rows: [], rowCount: 0 } as never)
+    const target = skill({ rowId: 'skill-finance', slug: 'consult-finance', id: 'consult-finance' })
+    const dependent = skill({
+      rowId: 'skill-checkup',
+      slug: 'business-checkup',
+      id: 'business-checkup',
+      content: 'Use [finance](../consult-finance/SKILL.md).',
+    })
+    const entityLinks = makeEntityLinks()
+    const workspaceSkillStore = makeSkillStore()
+    workspaceSkillStore.listForWorkspace.mockResolvedValue([target, dependent])
+    const recompute = makeSkillEdgeRecomputer({
+      entityLinks,
+      connectorInstanceStore: makeConnectorStore([]),
+      workspaceSkillStore,
+    })
+
+    await recompute(target)
+
+    expect(entityLinks.create).toHaveBeenCalledWith(expect.objectContaining({
+      sourceKind: 'skill',
+      sourceId: 'skill-checkup',
+      targetKind: 'skill',
+      targetId: 'skill-finance',
+      edgeType: 'uses_skill',
+    }))
   })
 })

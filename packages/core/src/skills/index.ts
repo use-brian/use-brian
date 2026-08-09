@@ -1,4 +1,24 @@
 export type { SkillMeta, SkillContent } from './types.js'
+export type {
+  SkillResourceKind,
+  SkillResource,
+  SkillBundleLink,
+  SkillBundleSource,
+  SkillBundleIssue,
+  SkillBundle,
+} from './types.js'
+export {
+  sha256,
+  normalizeSkillResourcePath,
+  skillResourceKindFromPath,
+  extractSkillMarkdownLinks,
+  parseSkillBundle,
+  formatSkillResourceIndex,
+  formatSkillInstructions,
+  findSkillResource,
+  searchSkillResourceContent,
+} from './bundle.js'
+export type { SkillBundleFileInput, ParseSkillBundleInput } from './bundle.js'
 export {
   parseSkillMarkdown,
   loadBuiltinSkills,
@@ -24,6 +44,11 @@ export type {
 export { formatSkillListing } from './listing.js'
 export { createUseSkillTool } from './tool.js'
 export type { UseSkillToolParams } from './tool.js'
+export {
+  createReadSkillResourceTool,
+  createSearchSkillResourcesTool,
+} from './resource-tool.js'
+export type { SkillResourceToolParams } from './resource-tool.js'
 export {
   createSkillInvocationBuffer,
   detectCorrection,

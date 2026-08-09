@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   supportFilePointer,
+  supportFileMarkdownLink,
   validateSupportFile,
   validateSupportFileSet,
   SUPPORT_FILE_NAME_MAX,
@@ -14,10 +15,10 @@ import {
 const ok = (kind: string, name: string, content = 'body') => ({ kind, name, content })
 
 describe('[COMP:api/skill-support-files] Single-file validation', () => {
-  it('accepts each of the three kinds and trims the name', () => {
-    for (const kind of ['reference', 'template', 'script']) {
+  it('accepts each bundle kind and trims the name', () => {
+    for (const kind of ['reference', 'asset', 'template', 'script']) {
       const result = validateSupportFile({ kind, name: '  notes.md  ', content: 'hi' })
-      expect(result).toEqual({
+      expect(result).toMatchObject({
         ok: true,
         value: { kind, name: 'notes.md', content: 'hi' },
       })
@@ -25,18 +26,18 @@ describe('[COMP:api/skill-support-files] Single-file validation', () => {
   })
 
   it('keeps an optional description and drops a blank one', () => {
-    expect(validateSupportFile({ ...ok('reference', 'a.md'), description: ' why ' })).toEqual({
+    expect(validateSupportFile({ ...ok('reference', 'a.md'), description: ' why ' })).toMatchObject({
       ok: true,
       value: { kind: 'reference', name: 'a.md', content: 'body', description: 'why' },
     })
-    expect(validateSupportFile({ ...ok('reference', 'a.md'), description: '   ' })).toEqual({
+    expect(validateSupportFile({ ...ok('reference', 'a.md'), description: '   ' })).toMatchObject({
       ok: true,
       value: { kind: 'reference', name: 'a.md', content: 'body' },
     })
   })
 
   it('rejects an unknown kind', () => {
-    expect(validateSupportFile(ok('asset', 'logo.png'))).toMatchObject({ ok: false })
+    expect(validateSupportFile(ok('binary', 'logo.png'))).toMatchObject({ ok: false })
     expect(validateSupportFile(ok('', 'a.md'))).toMatchObject({ ok: false })
   })
 
@@ -127,7 +128,7 @@ describe('[COMP:api/skill-support-files] Set validation', () => {
   })
 
   it('names the offending file in the error', () => {
-    const result = validateSupportFileSet([ok('reference', 'good.md'), ok('asset', 'bad.png')])
+    const result = validateSupportFileSet([ok('reference', 'good.md'), ok('binary', 'bad.png')])
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.error).toContain('bad.png')
   })
@@ -141,5 +142,12 @@ describe('[COMP:api/skill-support-files] Pointer rendering', () => {
     expect(supportFilePointer({ kind: 'reference', name: 'tone.md' })).toBe(
       '{{reference:tone.md}}',
     )
+  })
+
+  it('renders a portable relative Markdown link for bundle v2', () => {
+    expect(supportFileMarkdownLink({ name: 'tone.md', path: 'references/tone.md' })).toBe(
+      '[tone.md](references/tone.md)',
+    )
+    expect(supportFileMarkdownLink({ name: 'tone.md' })).toBeNull()
   })
 })

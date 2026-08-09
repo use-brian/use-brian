@@ -232,11 +232,11 @@ function edgePairKey(a: string, b: string): string {
 }
 
 /** A node in the force-directed brain graph. `kind` spans entity kinds
- *  plus the synthetic node kinds (`knowledge`, `skill`, `connector`, and
+ *  plus the synthetic node kinds (`knowledge`, `skill`, `skill_file`, `connector`, and
  *  `memory` — the last only when the caller opts in via `?include=memory`). */
 type GraphNode = {
   id: string
-  kind: EntityKind | 'knowledge' | 'skill' | 'connector' | 'memory'
+  kind: EntityKind | 'knowledge' | 'skill' | 'skill_file' | 'connector' | 'memory'
   name: string
   sensitivity: Sensitivity
   degree: number
@@ -470,6 +470,10 @@ export function brainRoutes(deps: {
   // the graph renders entities + knowledge exactly as before (no skill /
   // connector nodes, no crash). Existing tests + call sites omit them.
   workspaceSkillStore?: import('../db/skill-store.js').WorkspaceSkillStore
+  workspaceSkillFilesStore?: Pick<
+    import('../db/workspace-skill-files-store.js').WorkspaceSkillFilesStore,
+    'listForSkills'
+  >
   connectorInstanceStore?: Pick<
     import('../db/connector-instance-store.js').ConnectorInstanceStore,
     'listByWorkspaceSystem'
@@ -481,6 +485,7 @@ export function brainRoutes(deps: {
     retrievalStore,
     knowledgeStore,
     workspaceSkillStore,
+    workspaceSkillFilesStore,
     connectorInstanceStore,
   } = deps
   const router = Router()
@@ -1058,6 +1063,10 @@ export function brainRoutes(deps: {
       typeof req.query.focus === 'string'
         ? req.query.focus.trim().slice(0, 200)
         : null
+    const skillFocusId =
+      typeof req.query.skillId === 'string' && req.query.skillId.length <= 160
+        ? req.query.skillId
+        : null
     // Opt-in node kinds (Phase 3). `?include=memory` adds entity-linked memory
     // nodes; `file` / `kb_chunk` are reserved for later. Comma-separated.
     const includeKinds = new Set(
@@ -1067,6 +1076,7 @@ export function brainRoutes(deps: {
         .filter((s) => s.length > 0),
     )
     const includeMemory = includeKinds.has('memory')
+    const includeSkillFiles = includeKinds.has('skill_file') || Boolean(skillFocusId)
 
     const ctx = await resolveWorkspaceViewpoint(userId, workspaceId, selectedAssistantId)
     if (ctx === null) {
@@ -1088,8 +1098,10 @@ export function brainRoutes(deps: {
         // (skill→connector) edges derived by skill-edge-hooks survive into
         // the graph. Default was entity↔entity only.
         entityLinksStore.listForWorkspace(ctx, {
-          sourceKinds: ['entity', 'skill'],
-          targetKinds: ['entity', 'memory', 'kb_chunk', 'connector'],
+          sourceKinds: includeSkillFiles ? ['entity', 'skill', 'skill_file'] : ['entity', 'skill'],
+          targetKinds: includeSkillFiles
+            ? ['entity', 'memory', 'kb_chunk', 'connector', 'skill', 'skill_file']
+            : ['entity', 'memory', 'kb_chunk', 'connector', 'skill'],
           // Preserve enough relationships for the source universe. Starving
           // this scan would make later entries look artificially isolated and
           // corrupt the server-side community projection.
@@ -1108,6 +1120,12 @@ export function brainRoutes(deps: {
       const visibleSkills = allSkills
         .filter((s) => s.state !== 'archived')
         .slice(0, nodeLimit)
+      const visibleSkillFiles = includeSkillFiles && workspaceSkillFilesStore
+        ? (await workspaceSkillFilesStore.listForSkills(
+            visibleSkills.map((skill) => skill.rowId),
+            { actingUserId: userId },
+          )).slice(0, nodeLimit)
+        : []
 
       // Entity + knowledge nodes share the same node-cap budget — a
       // workspace whose brain is mostly knowledge entries shouldn't
@@ -1131,6 +1149,7 @@ export function brainRoutes(deps: {
       // the `visibleIds.has(...)` endpoint filter below.
       const visibleSkillIds = new Set(visibleSkills.map((s) => s.rowId))
       for (const id of visibleSkillIds) visibleIds.add(id)
+      for (const file of visibleSkillFiles) visibleIds.add(file.id)
 
       // Chicken-and-egg connector resolution: a connector node appears
       // ONLY when a VISIBLE skill has a `requires_connector` edge pointing
@@ -1304,6 +1323,13 @@ export function brainRoutes(deps: {
           sensitivity: safeSensitivity(s.sensitivity),
           degree: degree.get(s.rowId) ?? 0,
         })),
+        ...visibleSkillFiles.map((file) => ({
+          id: file.id,
+          kind: 'skill_file' as const,
+          name: file.path ?? file.name,
+          sensitivity: 'internal' as Sensitivity,
+          degree: degree.get(file.id) ?? 0,
+        })),
         ...visibleConnectors.map((c) => ({
           id: c.id,
           kind: 'connector' as const,
@@ -1320,10 +1346,35 @@ export function brainRoutes(deps: {
         })),
       ]
 
+      // A skill-focused request is the procedural analogue of the KB entry
+      // ego graph. Keep the skill, its direct neighbours, and one additional
+      // hop so skill → resource → referenced entity remains visible.
+      let projectedNodes = nodes
+      let projectedEdges = visibleEdges
+      if (skillFocusId) {
+        if (!visibleSkillIds.has(skillFocusId)) {
+          res.status(404).json({ error: 'Skill not found' })
+          return
+        }
+        const keep = new Set<string>([skillFocusId])
+        for (let hop = 0; hop < 2; hop += 1) {
+          for (const edge of visibleEdges) {
+            if (keep.has(edge.source) || keep.has(edge.target)) {
+              keep.add(edge.source)
+              keep.add(edge.target)
+            }
+          }
+        }
+        projectedNodes = nodes.filter((node) => keep.has(node.id))
+        projectedEdges = visibleEdges.filter(
+          (edge) => keep.has(edge.source) && keep.has(edge.target),
+        )
+      }
+
       res.status(200).json(
         projectBrainGraphHierarchy({
-          nodes,
-          edges: visibleEdges,
+          nodes: projectedNodes,
+          edges: projectedEdges,
           truncated,
           scopeId,
           focusQuery,

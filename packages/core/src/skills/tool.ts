@@ -23,6 +23,7 @@
 
 import { z } from 'zod'
 import { buildTool } from '../tools/types.js'
+import { formatSkillInstructions } from './bundle.js'
 import type { SkillContent } from './types.js'
 
 const inputSchema = z.object({
@@ -38,6 +39,9 @@ export type UseSkillToolParams = {
    * the tool fires it best-effort and does not await its result.
    */
   recordInvocation?: (skillSlug: string) => void | Promise<void>
+  /** Marks the root as loaded so guarded resource tools can require the
+   * progressive-disclosure order: listing → useSkill → resource read. */
+  onActivated?: (skillSlug: string) => void
   /**
    * Optional load-time content transform — used by the wiring layer to
    * substitute `{{kind:name}}` support-file pointers with their content
@@ -76,6 +80,7 @@ export function createUseSkillTool(params: UseSkillToolParams) {
           isError: true,
         }
       }
+      params.onActivated?.(skill.id)
 
       // CL-8: count the pick. Best-effort, fire-and-forget — counter
       // bookkeeping must never break the tool result the model needs.
@@ -96,10 +101,10 @@ export function createUseSkillTool(params: UseSkillToolParams) {
         }
       }
 
-      // Load-time pointer expansion (best-effort). A lookup/DB failure must
-      // never break the skill the model picked, so fall back to raw content.
-      let instructions = skill.content
-      if (params.expandContent) {
+      // Bundle v2 is progressive-disclosure: root + compact resource index,
+      // never eager resource bodies. Legacy v1 retains pointer expansion.
+      let instructions = formatSkillInstructions(skill)
+      if (skill.bundleVersion !== 2 && params.expandContent) {
         try {
           instructions = await params.expandContent(skill)
         } catch {

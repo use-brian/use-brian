@@ -246,6 +246,7 @@
   --entity-company: #3B6FE0;
   --entity-person: #0E9FB2;
   --entity-skill: #2EA34F;
+  --entity-skill_file: #6FAA79;
   --entity-deal: #0E7C52;
   --entity-project: #C7891B;
   --entity-product: #E06A24;
@@ -261,6 +262,7 @@
   --entity-company: #5B8BF5;
   --entity-person: #22BACE;
   --entity-skill: #4CC06A;
+  --entity-skill_file: #83C68E;
   --entity-deal: #2BA177;
   --entity-project: #E6A93C;
   --entity-product: #F58A44;
@@ -298,6 +300,7 @@
   --graph-entity-company: #3B6FE0;
   --graph-entity-person: #0E9FB2;
   --graph-entity-skill: #2EA34F;
+  --graph-entity-skill_file: #6FAA79;
   --graph-entity-deal: #0E7C52;
   --graph-entity-project: #C7891B;
   --graph-entity-product: #E06A24;
@@ -319,6 +322,7 @@
   --graph-entity-company: #5B8BF5;
   --graph-entity-person: #22BACE;
   --graph-entity-skill: #4CC06A;
+  --graph-entity-skill_file: #83C68E;
   --graph-entity-deal: #2BA177;
   --graph-entity-project: #E6A93C;
   --graph-entity-product: #F58A44;

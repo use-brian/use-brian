@@ -106,6 +106,10 @@ export type DocSessionMessage = {
    *  with no photo (→ initials fallback), and the rare unknown sender. See
    *  `docs/architecture/platform/user-profile.md`. */
   senderAvatarUrl?: string | null;
+  /** The quote this message replied to (`session_messages.reply_to_text`) —
+   *  a text SNAPSHOT, so history restores the quoted block but not a link
+   *  back to the row. `null` on every ordinary message. */
+  replyToText?: string | null;
 };
 
 /**
@@ -132,6 +136,7 @@ type RawMessageRow = {
   senderAssistantId?: string | null;
   senderName?: string | null;
   senderAvatarUrl?: string | null;
+  replyToText?: string | null;
 };
 
 function toIso(value: string | Date): string {
@@ -349,6 +354,34 @@ export async function createWorkspaceSession(
 }
 
 /**
+ * Move a room's bound (default) assistant
+ * (`PATCH /api/sessions/:id/assistant`).
+ *
+ * Rooms only — a personal thread stays bound for its lifetime. The server
+ * admits exactly the assistants that could already answer here by `@`
+ * mention (same workspace, not cleared above the room), so a refusal is a
+ * real answer worth showing the user rather than a transport failure:
+ * the thrown message is the server's own sentence.
+ */
+export async function rebindWorkspaceSessionAssistant(
+  sessionId: string,
+  assistantId: string,
+): Promise<void> {
+  const res = await authFetch(
+    `${API_URL}/api/sessions/${encodeURIComponent(sessionId)}/assistant`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ assistantId }),
+    },
+  );
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `Assistant change failed: ${res.status}`);
+  }
+}
+
+/**
  * Post into a room WITHOUT running a turn (`POST /api/sessions/:id/messages`
  * — multiplayer chat T2). Send = post, instantly, for every member; the
  * assistant replies only when addressed (an ordinary `/api/chat` send).
@@ -357,13 +390,19 @@ export async function createWorkspaceSession(
 export async function postRoomMessage(
   sessionId: string,
   message: string,
+  /** The quote this post replies to, when the user picked one. Text only —
+   *  the stored quote is a snapshot, not a link (see `_reply-context.ts`). */
+  replyTo?: { text: string },
 ): Promise<{ id: string; sequenceNum: number; timestamp: string }> {
   const res = await authFetch(
     `${API_URL}/api/sessions/${encodeURIComponent(sessionId)}/messages`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message }),
+      body: JSON.stringify({
+        message,
+        ...(replyTo ? { replyTo: { text: replyTo.text } } : {}),
+      }),
     },
   );
   if (!res.ok) {
@@ -510,6 +549,7 @@ export async function fetchSessionMessages(
       senderAssistantId: m.senderAssistantId ?? null,
       senderName: m.senderName ?? null,
       senderAvatarUrl: m.senderAvatarUrl ?? null,
+      replyToText: m.replyToText ?? null,
     }));
   } catch {
     return [];

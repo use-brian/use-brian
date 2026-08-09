@@ -25,6 +25,7 @@ import { AssistantAvatar } from "@/components/assistant-avatar";
 import { useT, format } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 import {
+  acceptsMentionSelection,
   completeTrailingAssistantMention,
   mentionCandidatesFor,
   mentionNavigationDelta,
@@ -165,21 +166,23 @@ export function useAssistantMentions(params: {
         dismiss();
         return;
       }
-      const navigationDelta = mentionNavigationDelta(event.key, event.shiftKey);
+      if (acceptsMentionSelection(event.key, event.shiftKey)) {
+        const selected = candidates[selectedIndex];
+        if (!selected) return;
+        // preventDefault keeps Enter from sending the half-typed message and
+        // Tab from leaving the field.
+        event.preventDefault();
+        insert(selected.name);
+        return;
+      }
+      const navigationDelta = mentionNavigationDelta(event.key);
       if (navigationDelta !== null) {
-        // preventDefault keeps ArrowUp/ArrowDown from moving the caret and Tab
-        // from leaving the field while the popup is open.
+        // preventDefault keeps ArrowUp/ArrowDown from moving the caret while
+        // the popup is open.
         event.preventDefault();
         setSelectedIndex((current) =>
           nextMentionSelectionIndex(current, candidates.length, navigationDelta),
         );
-        return;
-      }
-      if (event.key === "Enter" && !event.shiftKey) {
-        const selected = candidates[selectedIndex];
-        if (!selected) return;
-        event.preventDefault();
-        insert(selected.name);
       }
     },
     [candidates, dismiss, insert, open, selectedIndex],

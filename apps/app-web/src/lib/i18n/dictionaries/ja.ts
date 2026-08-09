@@ -3083,6 +3083,7 @@ export const ja: Dictionary = {
         knowledge: "ナレッジ",
         memory: "メモリ",
         skill: "スキル",
+        skill_file: "スキルリソース",
         connector: "コネクタ",
         other: "その他",
       },
@@ -3398,7 +3399,7 @@ export const ja: Dictionary = {
     skillFiles: {
       heading: "ファイル",
       explainer:
-        "このスキルが読み込めるリファレンス、テンプレート、スクリプトです。本文にファイルのトークンを入れると、スキルの実行時にアシスタントがそのファイルを読みます。",
+        "このスキルが必要に応じて読み込めるリファレンス、アセット、テンプレート、スクリプトです。本文から各ファイルにリンクして、いつ読むかを示します。",
       add: "ファイルを追加",
       empty: "ファイルはまだありません。このスキルは本文だけで動作します。",
       edit: "編集",
@@ -3406,12 +3407,13 @@ export const ja: Dictionary = {
       delete: "削除",
       deleteTitle: "このファイルを削除しますか？",
       deleteBody:
-        "{name} をこのスキルから削除します。本文にあるこのファイルのトークンは解決できなくなります。",
-      copyPointer: "トークンをコピー",
+        "{name} をこのスキルから削除します。本文にあるこのファイルへのリンクは解決できなくなります。",
+      copyPointer: "リンクをコピー",
       notReferenced: "本文はまだこのファイルを参照していません。",
       kindLabel: "種類",
       kinds: {
         reference: "リファレンス",
+        asset: "アセット",
         template: "テンプレート",
         script: "スクリプト",
       },
@@ -4373,6 +4375,7 @@ export const ja: Dictionary = {
     viewWorkspace: "ワークスペース",
     newWorkspaceChat: "新しい共有チャット",
     newWorkspaceChatFailed: "共有チャットを開始できませんでした。",
+    roomAssistantChangeFailed: "このチャットのアシスタントを変更できませんでした。",
     workspaceRailEmpty: "共有チャットはまだありません",
     sharedBadge: "ワークスペースと共有中",
     startedBy: "開始者: {name}",
@@ -4398,6 +4401,12 @@ export const ja: Dictionary = {
     editHint: "Enter で保存、Esc でキャンセル",
     editHintRoom: "Enter で保存。@ でメンションすると返信します。",
     editFailed: "メッセージを編集できませんでした。もう一度お試しください。",
+    reply: "返信",
+    replyToSelection: "選択範囲に返信",
+    replyingTo: "{name} に返信中",
+    replyingToMessage: "メッセージに返信中",
+    replyCancel: "返信をキャンセル",
+    replyAuthorYou: "あなた",
     unreadDotAria: "新しいアクティビティ",
     workingAria: "{name} が作業中です",
     confirmNotAllowed: "このターンで質問したメンバー（またはワークスペース管理者）のみ操作できます。",
@@ -4451,6 +4460,8 @@ export const ja: Dictionary = {
       browseFiles: "選択",
       dropToPin: "ドロップしてピン留め",
       fileTooLarge: "このファイルは大きすぎてピン留めできません（最大1 GB）。",
+      fileVideoUnsupported:
+        "動画はピン留めできません。録画を処理できるチャットに送信してください。",
       largeFileTitle: "大きなファイルをアップロードしますか？",
       largeFileDescription:
         "{fileName} は {size} です。アップロードに時間がかかる場合があります。開始しますか？",

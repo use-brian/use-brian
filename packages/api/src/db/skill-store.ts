@@ -68,6 +68,13 @@ export type CreateSkillInput = {
    *  `{ kind, owner?, repo?, path?, ref?, sha?, url? }`, stamped when the
    *  draft came from the GitHub/URL importer. Write-only today. */
   importSource?: Record<string, unknown> | null
+  /** Native Agent Skills bundle contract. New folder/catalog imports use v2;
+   * legacy authored rows default to v1 for Mustache compatibility. */
+  bundleVersion?: 1 | 2
+  sourceDigest?: string | null
+  /** Internal batch seam: native bundle import writes the root and resources
+   * first, then fires one graph recompute after the complete set is visible. */
+  deferGraphRecompute?: boolean
 }
 
 export type UpdateSkillInput = {
@@ -142,6 +149,8 @@ export type WorkspaceSkillRow = {
   verified_at: Date | null
   // Structural-synthesis Phase 2 (mig 301): the v2 blueprint this skill fills.
   blueprint_id: string | null
+  bundle_version?: 1 | 2
+  source_digest?: string | null
 }
 
 /** App-shape view returned by curator / lifecycle methods. */
@@ -193,6 +202,8 @@ export type WorkspaceSkill = {
   verifiedAt?: Date
   /** The v2 blueprint (workspace_page_templates id) this skill fills, if any. */
   blueprintId?: string
+  bundleVersion?: 1 | 2
+  sourceDigest?: string
 }
 
 // ── Mappers ────────────────────────────────────────────────────────
@@ -209,6 +220,8 @@ function rowToSkillContent(row: WorkspaceSkillRow): SkillContent {
     source: row.source as SkillContent['source'],
     authorId: row.author_id ?? undefined,
     blueprintId: row.blueprint_id ?? undefined,
+    bundleVersion: row.bundle_version ?? 1,
+    sourceDigest: row.source_digest ?? undefined,
   }
 }
 
@@ -271,6 +284,8 @@ function rowToWorkspaceSkill(row: WorkspaceSkillRow): WorkspaceSkill {
     verifiedByUserId: row.verified_by_user_id ?? undefined,
     verifiedAt: row.verified_at ?? undefined,
     blueprintId: row.blueprint_id ?? undefined,
+    bundleVersion: row.bundle_version ?? 1,
+    sourceDigest: row.source_digest ?? undefined,
   }
 }
 
@@ -432,11 +447,11 @@ async function resolvePrimaryWorkspace(userId: string): Promise<string> {
 
 /**
  * Optional post-write hooks. `onWritten` fires fire-and-forget after a
- * successful `create` / `update` — it never blocks, never awaits, and is
+ * successful `create` / `update` / bi-temporal close — it never blocks, never awaits, and is
  * isolated from the write (a throwing hook can never fail the skill save).
  * The skill-edge recomputer (`skill-edge-service.ts`) is its sole production
- * implementation: every skill body change re-derives `references_entity` /
- * `requires_connector` edges and refreshes inherited sensitivity
+ * implementation: every skill/bundle change re-derives procedural edges,
+ * closes edges for archived skills, and refreshes inherited sensitivity
  * (`docs/architecture/engine/skill-system.md` §5.1, §6).
  */
 export type WorkspaceSkillStoreHooks = {
@@ -514,10 +529,11 @@ export function createDbWorkspaceSkillStore(hooks?: WorkspaceSkillStoreHooks): W
            write_origin, originating_assistant_id, auto_generated_at,
            induction_source, confidence, activated_at,
            verified_by_user_id, verified_at,
-           sensitivity, sensitivity_overridden, import_source
+           sensitivity, sensitivity_overridden, import_source,
+           bundle_version, source_digest
          )
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-                 ${bornVer ? 'now()' : 'NULL'},$18,$19,$20)
+                 ${bornVer ? 'now()' : 'NULL'},$18,$19,$20,$21,$22)
          RETURNING ${COLS_ALL}`,
         [
           input.slug,
@@ -542,10 +558,12 @@ export function createDbWorkspaceSkillStore(hooks?: WorkspaceSkillStoreHooks): W
           input.sensitivity ?? 'internal',
           input.sensitivity !== undefined,
           input.importSource ? JSON.stringify(input.importSource) : null,
+          input.bundleVersion ?? 1,
+          input.sourceDigest ?? null,
         ],
       )
       const skill = rowToWorkspaceSkill(result.rows[0])
-      fireOnWritten(skill)
+      if (!input.deferGraphRecompute) fireOnWritten(skill)
       notifyWorkspaceChange(skill.workspaceId, 'skill', 'create', skill.rowId)
       return skill
     },
@@ -649,15 +667,18 @@ export function createDbWorkspaceSkillStore(hooks?: WorkspaceSkillStoreHooks): W
     },
 
     async delete(userId, workspaceId, skillId) {
-      const result = await queryWithRLS(
+      const result = await queryWithRLS<WorkspaceSkillRow>(
         userId,
         `UPDATE workspace_skills
          SET valid_to = now(), state = 'archived', state_transitioned_at = now()
-         WHERE id = $1 AND workspace_id = $2 AND valid_to IS NULL`,
+         WHERE id = $1 AND workspace_id = $2 AND valid_to IS NULL
+         RETURNING ${COLS_ALL}`,
         [skillId, workspaceId],
       )
-      if ((result.rowCount ?? 0) > 0) notifyWorkspaceChange(workspaceId, 'skill', 'delete', skillId)
-      return (result.rowCount ?? 0) > 0
+      if (!result.rows[0]) return false
+      fireOnWritten(rowToWorkspaceSkill(result.rows[0]))
+      notifyWorkspaceChange(workspaceId, 'skill', 'delete', skillId)
+      return true
     },
 
     // ── Lookup ───────────────────────────────────────────────────────
@@ -796,7 +817,7 @@ export function createDbWorkspaceSkillStore(hooks?: WorkspaceSkillStoreHooks): W
 
     async setPinned(userId, workspaceId, skillId, pinned) {
       // Pinning an archived skill auto-restores it (S13 invariant 3).
-      await queryWithRLS(
+      const result = await queryWithRLS<WorkspaceSkillRow>(
         userId,
         `UPDATE workspace_skills
          SET pinned = $1,
@@ -807,23 +828,29 @@ export function createDbWorkspaceSkillStore(hooks?: WorkspaceSkillStoreHooks): W
                ELSE state_transitioned_at
              END,
              updated_at = now()
-         WHERE id = $2 AND workspace_id = $3`,
+         WHERE id = $2 AND workspace_id = $3
+         RETURNING ${COLS_ALL}`,
         [pinned, skillId, workspaceId],
       )
+      if (result.rows[0]) fireOnWritten(rowToWorkspaceSkill(result.rows[0]))
       notifyWorkspaceChange(workspaceId, 'skill', 'update', skillId)
     },
 
     // ── V2 — lifecycle (S12) ─────────────────────────────────────────
 
     async setState(skillId, state) {
-      const result = await query<{ workspaceId: string }>(
+      const result = await query<WorkspaceSkillRow>(
         `UPDATE workspace_skills
          SET state = $1, state_transitioned_at = now(), updated_at = now()
          WHERE id = $2
-         RETURNING workspace_id AS "workspaceId"`,
+         RETURNING ${COLS_ALL}`,
         [state, skillId],
       )
-      if (result.rows[0]) notifyWorkspaceChange(result.rows[0].workspaceId, 'skill', 'update', skillId)
+      if (result.rows[0]) {
+        const skill = rowToWorkspaceSkill(result.rows[0])
+        fireOnWritten(skill)
+        notifyWorkspaceChange(skill.workspaceId, 'skill', 'update', skillId)
+      }
     },
 
     async recordInvocation(skillId) {

@@ -41,6 +41,7 @@ export const BRAIN_ENTITY_COLORS: Record<BrainGraphNodeKind, string> = {
   company: "#3B6FE0", // blue — institution
   person: "#0E9FB2", // teal — human
   skill: "#2EA34F", // green — capability (clearly off person's teal)
+  skill_file: "#6FAA79", // softer green — a resource contained by a capability
   // ── Bridge ──
   deal: "#0E7C52", // jade — money / pipeline (actors → work); deeper than skill
   // ── Artifacts (warm) ──
@@ -76,6 +77,7 @@ export const BRAIN_ENTITY_COLORS_VIVID: Record<BrainGraphNodeKind, string> = {
   company: "#5B8BF5",
   person: "#22BACE",
   skill: "#4CC06A",
+  skill_file: "#83C68E",
   deal: "#2BA177",
   project: "#E6A93C",
   product: "#F58A44",

@@ -6,7 +6,7 @@
 
 import { findOrCreateUser, findUserById } from '../db/users.js'
 import { query } from '../db/client.js'
-import { loadBuiltinSkills, formatSkillListing, createUseSkillTool, expandSkillPointers, parseFileContent, shouldInline, isTabular, profileWorkbook, renderWorkbookProfile } from '@use-brian/core'
+import { loadBuiltinSkills, formatSkillListing, createUseSkillTool, createReadSkillResourceTool, createSearchSkillResourcesTool, expandSkillPointers, formatSkillInstructions, sha256, parseFileContent, shouldInline, isTabular, profileWorkbook, renderWorkbookProfile } from '@use-brian/core'
 import type { Tool, UsageStore, BudgetStatus, ContentBlock, FileStore, McpSettingsStore, KnowledgeStoreInterface, KnowledgeRepoWriter, GDriveFilesStore, SkillContent, EngineHooks, FilesApi } from '@use-brian/core'
 import type { ActorIdentity } from '../mcp/auth-headers.js'
 // NOTE: the real DB-backed credit gate (`checkCreditBudget`, closed billing/)
@@ -537,10 +537,9 @@ type InjectSkillsOptions = {
    */
   workspaceSkillEnablementStore?: import('../db/workspace-skill-enablement-store.js').WorkspaceSkillEnablementStore
   /**
-   * Backs load-time `{{kind:name}}` pointer expansion: when set, `useSkill`
-   * substitutes a workspace skill's reference/template/script pointers with
-   * the file content (looked up by the skill's row UUID) before handing the
-   * body to the model. Built-in skills (no row id) pass through unchanged.
+   * Hydrates native bundle resources for guarded exact-path read/search tools.
+   * Legacy v1 also uses it for `{{kind:name}}` pointer expansion. Built-ins
+   * (no row id) pass through unchanged.
    */
   workspaceSkillFilesStore?: import('../db/workspace-skill-files-store.js').WorkspaceSkillFilesStore
   workspaceId?: string
@@ -600,7 +599,7 @@ export async function injectSkills(opts: InjectSkillsOptions): Promise<InjectSki
   // CL-8: slug → workspace_skills.id map. Populated when we have a
   // workspace store + id; built-in skills (loaded from disk) are
   // intentionally absent because they have no DB row.
-  const slugToRowId = new Map<string, string>()
+    const slugToRowId = new Map<string, string>()
 
   // Clearance lookup, keyed by slug (the `SkillContent.id` the gate
   // compares against). Built-in skills are absent here; the gate treats a
@@ -638,11 +637,13 @@ export async function injectSkills(opts: InjectSkillsOptions): Promise<InjectSki
     // skills surface here as `source='auto-generated'` rows; the
     // counter still needs to fire for them.
     const rowIdToSlug = new Map<string, string>()
+    let workspaceSkillsForRuntime: Awaited<ReturnType<WorkspaceSkillStore['listForWorkspace']>> = []
     if (opts.workspaceSkillStore && opts.workspaceId) {
       try {
         const workspaceSkills = await opts.workspaceSkillStore.listForWorkspace(
           opts.workspaceId,
         )
+        workspaceSkillsForRuntime = workspaceSkills
         for (const ws of workspaceSkills) {
           slugToRowId.set(ws.slug, ws.rowId)
           rowIdToSlug.set(ws.rowId, ws.slug)
@@ -653,6 +654,40 @@ export async function injectSkills(opts: InjectSkillsOptions): Promise<InjectSki
         }
       } catch (err) {
         console.error(`[${channel}] CL-8 slug map build failed:`, err)
+      }
+    }
+
+    // Hydrate bundle-v2 resources for workspace skills in one bounded read.
+    // Community skills already carry their registry resources; built-ins have
+    // none today. The bodies stay inside the guarded tool objects and never
+    // enter the listing or the useSkill result.
+    if (opts.workspaceSkillFilesStore && workspaceSkillsForRuntime.length > 0) {
+      try {
+        const fileRows = await opts.workspaceSkillFilesStore.listForSkills(
+          workspaceSkillsForRuntime.map((skill) => skill.rowId),
+          { actingUserId: connectorUserId },
+        )
+        const filesBySlug = new Map<string, SkillContent['resources']>()
+        for (const file of fileRows) {
+          const slug = rowIdToSlug.get(file.workspaceSkillId)
+          if (!slug) continue
+          const resources = filesBySlug.get(slug) ?? []
+          const path = file.path ?? `${file.kind === 'reference' ? 'references' : file.kind === 'asset' ? 'assets' : file.kind === 'template' ? 'templates' : 'scripts'}/${file.name}`
+          resources.push({
+            path,
+            kind: file.kind,
+            name: file.name,
+            content: file.content,
+            description: file.description ?? undefined,
+            contentHash: file.contentHash ?? sha256(file.content),
+          })
+          filesBySlug.set(slug, resources)
+        }
+        for (const skill of userSkills) {
+          if (skill.bundleVersion === 2) skill.resources = filesBySlug.get(skill.id) ?? []
+        }
+      } catch (err) {
+        console.error(`[${channel}] skill resource hydration failed:`, err)
       }
     }
     // S14 enablement, projected from row UUID to slug (the key the gate below
@@ -777,7 +812,13 @@ export async function injectSkills(opts: InjectSkillsOptions): Promise<InjectSki
       ? async (skill: SkillContent): Promise<string> => {
           const rowId = slugToRowId.get(skill.id)
           if (!rowId) return skill.content
-          const expanded = await expandSkillPointers(skill, rowId, filesStore)
+          const expanded = await expandSkillPointers(skill, rowId, {
+            async getByPointer(workspaceSkillId, pointer) {
+              const row = await filesStore.getByPointer(workspaceSkillId, pointer)
+              if (!row || row.kind === 'asset') return null
+              return { kind: row.kind, name: row.name, content: row.content }
+            },
+          })
           return expanded.content
         }
       : undefined
@@ -788,6 +829,7 @@ export async function injectSkills(opts: InjectSkillsOptions): Promise<InjectSki
       promptFragment = `\n\n# Available Skills\nUse the useSkill tool to activate a skill when relevant.\nBefore answering what Use Brian (or you) can do, or how a feature works, activate the most relevant skill FIRST and answer only from it.\n${listing}`
     }
 
+    const activatedSkillSlugs = new Set<string>()
     if (availableSkills.length > 0) {
       tools.set(
         'useSkill',
@@ -795,8 +837,21 @@ export async function injectSkills(opts: InjectSkillsOptions): Promise<InjectSki
           getAvailableSkills: () => availableSkills,
           recordInvocation,
           expandContent,
+          onActivated: (slug) => activatedSkillSlugs.add(slug),
         }),
       )
+    }
+
+    const resourceSkillCandidates = allSkills.filter(
+      (skill) => passesGovernance(skill) && (isInScope(skill) || Boolean(enforceSet?.has(skill.id))),
+    )
+    if (resourceSkillCandidates.some((skill) => skill.bundleVersion === 2 && (skill.resources?.length ?? 0) > 0)) {
+      const resourceParams = {
+        getAvailableSkills: () => resourceSkillCandidates,
+        isSkillActivated: (slug: string) => activatedSkillSlugs.has(slug),
+      }
+      tools.set('readSkillResource', createReadSkillResourceTool(resourceParams))
+      tools.set('searchSkillResources', createSearchSkillResourcesTool(resourceParams))
     }
 
     // Enforced skills — inject the full (pointer-expanded) instructions as a
@@ -810,8 +865,9 @@ export async function injectSkills(opts: InjectSkillsOptions): Promise<InjectSki
       const enforcedSkills = allSkills.filter((s) => enforceSet.has(s.id) && passesGovernance(s))
       const sections: string[] = []
       for (const skill of enforcedSkills) {
-        let instructions = skill.content
-        if (expandContent) {
+        activatedSkillSlugs.add(skill.id)
+        let instructions = formatSkillInstructions(skill)
+        if (skill.bundleVersion !== 2 && expandContent) {
           try {
             instructions = await expandContent(skill)
           } catch {

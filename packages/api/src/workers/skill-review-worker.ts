@@ -57,6 +57,8 @@ import type {
 } from '../db/workspace-skill-files-store.js'
 import type { PendingApprovalsStore } from '../db/pending-approvals-store.js'
 
+type LegacySkillFileKind = Exclude<SkillFileKind, 'asset'>
+
 // ── Tunables ──────────────────────────────────────────────────────
 
 /** Default tick cadence: 15 min — same shape as the consolidation worker. */
@@ -168,7 +170,7 @@ export type SkillReviewAction =
       action: 'add_support_file'
       skillId: string
       file: {
-        kind: SkillFileKind
+        kind: LegacySkillFileKind
         name: string
         content: string
         description?: string
@@ -181,7 +183,7 @@ export type SkillReviewAction =
         description: string
         content: string
         supportFiles?: Array<{
-          kind: SkillFileKind
+          kind: LegacySkillFileKind
           name: string
           content: string
           description?: string
@@ -1173,11 +1175,13 @@ function fileStorePort(fs: WorkspaceSkillFilesStore, actingUserId: string) {
   return {
     async list(workspaceSkillId: string) {
       const rows = await fs.list(workspaceSkillId)
-      return rows.map((r) => ({ kind: r.kind, name: r.name, content: r.content }))
+      return rows
+        .filter((r): r is typeof r & { kind: LegacySkillFileKind } => r.kind !== 'asset')
+        .map((r) => ({ kind: r.kind, name: r.name, content: r.content }))
     },
     async upsert(params: {
       workspaceSkillId: string
-      kind: SkillFileKind
+      kind: LegacySkillFileKind
       name: string
       content: string
       description?: string | null
@@ -1210,7 +1214,7 @@ function approvalsPort(approvals: PendingApprovalsStore, approverUserId: string)
       proposedPatch: {
         newContent?: string
         diff?: string
-        addedFiles?: Array<{ kind: SkillFileKind; name: string; content: string; description?: string }>
+        addedFiles?: Array<{ kind: LegacySkillFileKind; name: string; content: string; description?: string }>
       }
       originatingAssistantId: string | null
       requestedByUserId?: string | null
@@ -1234,7 +1238,7 @@ function approvalsPort(approvals: PendingApprovalsStore, approverUserId: string)
          *  staged before the field existed still typecheck. */
         whenToUse?: string
         content: string
-        supportFiles?: Array<{ kind: SkillFileKind; name: string; content: string; description?: string }>
+        supportFiles?: Array<{ kind: LegacySkillFileKind; name: string; content: string; description?: string }>
       }
       originatingAssistantId: string | null
       origin?: string

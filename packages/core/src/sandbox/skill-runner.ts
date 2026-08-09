@@ -530,6 +530,7 @@ export function createSkillRunnerTools(opts: CreateSkillRunnerToolsOptions): {
 
   const saveBrowserSkill = buildTool({
     name: 'saveBrowserSkill',
+    requiresCapability: 'computer',
     description:
       'Save the recent browser actions from this chat as a reusable deterministic browser skill. Use after completing a flow in My Browser; the saved skill can replay locally without asking the model to snapshot every step.',
     inputSchema: z.object({

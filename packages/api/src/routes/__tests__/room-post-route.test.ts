@@ -41,10 +41,12 @@ vi.mock('../../db/users.js', () => ({
   getDefaultAssistant: vi.fn(),
   getUserAssistant: vi.fn(async (_userId: string, assistantId: string) =>
     assistantId === 'a-sales'
-      ? { id: 'a-sales', workspaceId: 'ws-1', name: 'Sales' }
+      ? { id: 'a-sales', workspaceId: 'ws-1', name: 'Sales', clearance: 'internal' }
       : assistantId === 'a-foreign'
-        ? { id: 'a-foreign', workspaceId: 'ws-OTHER', name: 'Elsewhere' }
-        : null,
+        ? { id: 'a-foreign', workspaceId: 'ws-OTHER', name: 'Elsewhere', clearance: 'internal' }
+        : assistantId === 'a-secret'
+          ? { id: 'a-secret', workspaceId: 'ws-1', name: 'Cap Table', clearance: 'confidential' }
+          : null,
   ),
   getUserProfilesByIds: vi.fn(async () => new Map()),
   getWorkspacePrimaryAssistant: vi.fn(async () => ({ id: 'a-primary', workspaceId: 'ws-1', name: 'Gm' })),
@@ -91,6 +93,7 @@ vi.mock('../../db/sessions.js', async (importOriginal) => {
       attachments: [],
     })),
     getSessionMessageById: vi.fn(),
+    rebindSessionAssistant: vi.fn(async () => {}),
     updateSessionMessageText: vi.fn(async (params: { messageId: string; sessionId: string; text: string }) => ({
       id: params.messageId,
       sessionId: params.sessionId,
@@ -115,6 +118,7 @@ import {
   createWorkspaceChatSession,
   findSessionById,
   getSessionMessageById,
+  rebindSessionAssistant,
   updateSessionMessageText,
 } from '../../db/sessions.js'
 import type { SessionEvent } from '../../session-event-port.js'
@@ -123,6 +127,7 @@ const mockFindSession = vi.mocked(findSessionById)
 const mockAddMessage = vi.mocked(addSessionMessage)
 const mockGetMessage = vi.mocked(getSessionMessageById)
 const mockUpdateMessage = vi.mocked(updateSessionMessageText)
+const mockRebind = vi.mocked(rebindSessionAssistant)
 
 function roomSession(over: Record<string, unknown> = {}) {
   return {
@@ -182,6 +187,7 @@ beforeEach(() => {
   mockAddMessage.mockClear()
   mockGetMessage.mockReset()
   mockUpdateMessage.mockClear()
+  mockRebind.mockClear()
 })
 
 function storedPost(over: Record<string, unknown> = {}) {
@@ -402,6 +408,104 @@ describe('[COMP:api/room-mechanics] POST /api/sessions/:id/typing — the room t
   })
 })
 
+describe('[COMP:api/room-mechanics] PATCH /api/sessions/:id/assistant — rebind', () => {
+  it('moves the room binding, tells every viewer, and leaves the clearance alone', async () => {
+    const published: SessionEvent[] = []
+    mockFindSession.mockResolvedValue(roomSession())
+    const res = await request(makeApp({ published }))
+      .patch('/api/sessions/s-room/assistant')
+      .send({ assistantId: 'a-sales' })
+
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ ok: true, assistantId: 'a-sales' })
+    // The write moves assistant_id and NOTHING else — the room's read floor
+    // is fixed at creation, so the store takes no clearance argument at all.
+    expect(mockRebind.mock.calls).toEqual([['s-room', 'a-sales']])
+    // A room's default voice is shared state: a stale chip would leave a
+    // teammate addressing the assistant that is no longer there.
+    expect(published).toHaveLength(1)
+    expect(published[0]).toMatchObject({
+      kind: 'session_assistant_changed',
+      sessionId: 's-room',
+      payload: { assistantId: 'a-sales', byUserId: 'u-2' },
+    })
+  })
+
+  it('refuses an assistant cleared ABOVE the room, under the mention path code', async () => {
+    const published: SessionEvent[] = []
+    // Room floor is `internal`; the candidate reads `confidential`.
+    mockFindSession.mockResolvedValue(roomSession())
+    const res = await request(makeApp({ published }))
+      .patch('/api/sessions/s-room/assistant')
+      .send({ assistantId: 'a-secret' })
+
+    expect(res.status).toBe(403)
+    expect(res.body.code).toBe('assistant_clearance_exceeds_room')
+    expect(mockRebind).not.toHaveBeenCalled()
+    expect(published).toHaveLength(0)
+  })
+
+  it('refuses an assistant from ANOTHER workspace', async () => {
+    mockFindSession.mockResolvedValue(roomSession())
+    const res = await request(makeApp())
+      .patch('/api/sessions/s-room/assistant')
+      .send({ assistantId: 'a-foreign' })
+    expect(res.status).toBe(403)
+    expect(mockRebind).not.toHaveBeenCalled()
+  })
+
+  it('refuses an assistant the caller cannot reach — same 403 as a missing one', async () => {
+    mockFindSession.mockResolvedValue(roomSession())
+    const res = await request(makeApp())
+      .patch('/api/sessions/s-room/assistant')
+      .send({ assistantId: 'a-nobody' })
+    expect(res.status).toBe(403)
+    expect(mockRebind).not.toHaveBeenCalled()
+  })
+
+  it('refuses a personal session — a bound thread stays bound', async () => {
+    mockFindSession.mockResolvedValue(
+      roomSession({ visibility: 'owner', effectiveClearance: null }),
+    )
+    const res = await request(makeApp())
+      .patch('/api/sessions/s-1/assistant')
+      .send({ assistantId: 'a-sales' })
+    expect(res.status).toBe(403)
+    expect(mockRebind).not.toHaveBeenCalled()
+  })
+
+  it('is accepted while a turn is LIVE — the running turn keeps its own assistant', async () => {
+    // Never gated on status: the turn resolved its assistant at start, and a
+    // room wedged behind a phantom lock has to stay rebindable.
+    mockFindSession.mockResolvedValue(roomSession({ status: 'running' }))
+    const res = await request(makeApp())
+      .patch('/api/sessions/s-room/assistant')
+      .send({ assistantId: 'a-sales' })
+    expect(res.status).toBe(200)
+    expect(mockRebind).toHaveBeenCalledTimes(1)
+  })
+
+  it('is a no-op when the room already runs that assistant — no write, no broadcast', async () => {
+    const published: SessionEvent[] = []
+    mockFindSession.mockResolvedValue(roomSession({ assistantId: 'a-sales' }))
+    const res = await request(makeApp({ published }))
+      .patch('/api/sessions/s-room/assistant')
+      .send({ assistantId: 'a-sales' })
+    expect(res.status).toBe(200)
+    expect(mockRebind).not.toHaveBeenCalled()
+    expect(published).toHaveLength(0)
+  })
+
+  it('rejects a missing assistantId', async () => {
+    mockFindSession.mockResolvedValue(roomSession())
+    const res = await request(makeApp())
+      .patch('/api/sessions/s-room/assistant')
+      .send({})
+    expect(res.status).toBe(400)
+    expect(mockRebind).not.toHaveBeenCalled()
+  })
+})
+
 describe('[COMP:api/room-mechanics] GET /api/sessions/:id/stream — follow mode (T13)', () => {
   it('relays the live turn activity mirror + teammate posts to a second subscriber, and stays open while idle', async () => {
     const subscribers: Array<(e: SessionEvent) => void> = []
@@ -486,6 +590,56 @@ describe('[COMP:api/room-mechanics] GET /api/sessions/:id/stream — follow mode
       // Turn end is an event, not a close.
       expect(received).toContain('event: turn_completed')
       expect(received).not.toContain('event: done')
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
+
+  it('relays a rebind to every open viewer as `assistant_changed`', async () => {
+    const subscribers: Array<(e: SessionEvent) => void> = []
+    mockFindSession.mockResolvedValue(roomSession())
+    const app = makeApp({ subscribers })
+    const server = http.createServer(app)
+    await new Promise<void>((resolve) => server.listen(0, resolve))
+    const port = (server.address() as AddressInfo).port
+
+    try {
+      const done = new Promise<string>((resolve, reject) => {
+        const req = http.get(
+          `http://127.0.0.1:${port}/api/sessions/s-room/stream`,
+          (res) => {
+            let data = ''
+            res.on('data', (chunk: Buffer) => {
+              data += chunk.toString()
+              if (data.includes('event: assistant_changed')) {
+                req.destroy()
+                resolve(data)
+              }
+            })
+            res.on('error', () => resolve(data))
+          },
+        )
+        req.on('error', () => {
+          /* destroyed by us */
+        })
+        setTimeout(() => reject(new Error('timed out waiting for SSE frames')), 5000)
+      })
+
+      await vi.waitFor(() => {
+        expect(subscribers.length).toBeGreaterThan(0)
+      })
+      subscribers.forEach((cb) =>
+        cb({
+          kind: 'session_assistant_changed',
+          sessionId: 's-room',
+          payload: { assistantId: 'a-sales', byUserId: 'u-9' },
+        }),
+      )
+
+      const received = await done
+      // The id rides the frame: the viewer already holds the roster, so the
+      // chip resolves with nothing to fetch.
+      expect(received).toContain('"assistantId":"a-sales"')
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()))
     }

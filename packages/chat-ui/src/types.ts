@@ -68,10 +68,33 @@ export type ToolUsed = {
   errorMessage?: string
 }
 
+/**
+ * A quoted message.
+ *
+ * The text is the only field that always exists, because the server stores a
+ * SNAPSHOT (`session_messages.reply_to_text`) rather than a foreign key — a
+ * quote of a text selection has no row of its own to point at, and a snapshot
+ * still reads correctly after someone edits or truncates the original. So a
+ * PENDING quote (the composer's, built from a row the user just clicked) has
+ * all four fields, and a RESTORED one (loaded from history) has only `text`.
+ *
+ * `id` is what the chat route resolves to decide whether the quoted row was an
+ * assistant's, which is what makes a reply to an assistant address it in a
+ * room. Hosts must therefore send a quote only while they still hold the id.
+ */
 export type ReplyTo = {
-  id: string
-  role: 'user' | 'assistant'
+  id?: string
+  role?: 'user' | 'assistant'
   text: string
+  /** Who was quoted, for the host's "Replying to X" line. Compose-time only. */
+  authorName?: string
+  /**
+   * The assistant that WROTE the quoted message, when one did. Compose-time
+   * only, and a routing hint rather than a display one: in a room holding
+   * several assistants, a reply should be answered by the assistant being
+   * replied to, the same way an `@mention` names its responder.
+   */
+  assistantId?: string
 }
 
 /**

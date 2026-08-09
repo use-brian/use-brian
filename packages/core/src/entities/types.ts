@@ -69,6 +69,10 @@ export const EDGE_TYPES = [
   'references_entity',
   'learned_from',
   'refines',
+  // Native skill-bundle graph.
+  'contains',
+  'uses_skill',
+  'references_resource',
 ] as const
 export type EdgeType = typeof EDGE_TYPES[number]
 
@@ -81,7 +85,7 @@ export type EdgeType = typeof EDGE_TYPES[number]
 // workflow-origin session records `learned_from` → the source workflows row instead of the
 // assistant. source_kind/target_kind are free TEXT in the DB (no CHECK), so these are
 // convention-validated here at the type boundary.
-export const LINK_KINDS = ['entity', 'memory', 'kb_chunk', 'task', 'event', 'file', 'episode', 'workspace', 'skill', 'connector', 'session', 'assistant', 'workflow'] as const
+export const LINK_KINDS = ['entity', 'memory', 'kb_chunk', 'task', 'event', 'file', 'episode', 'workspace', 'skill', 'skill_file', 'connector', 'session', 'assistant', 'workflow'] as const
 export type LinkKind = typeof LINK_KINDS[number]
 
 // ── Resolver helper types (WU-1.4) ───────────────────────────────────

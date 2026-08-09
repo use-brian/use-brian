@@ -128,7 +128,8 @@ describe('[COMP:api/skill-import] importSkillFromPaste', () => {
     expect(result.dialect).toBe('agent-skills')
     expect(result.draft.name).toBe('Release Notes')
     expect(result.supportFiles).toEqual([])
-    expect(result.importSource).toEqual({ kind: 'paste' })
+    expect(result.importSource).toMatchObject({ kind: 'paste' })
+    expect(result.sourceDigest).toMatch(/^[a-f0-9]{64}$/)
   })
 
   // The file name only ever informs dialect detection + name derivation, so a
@@ -204,36 +205,46 @@ describe('[COMP:api/skill-import] importSkillFromGithub', () => {
     })
   })
 
-  it('imports an Agent Skills folder: support files, pointer appendix, warnings', async () => {
+  it('imports a native Agent Skills folder without rewriting SKILL.md', async () => {
+    const linkedSkill = SKILL_MD.replace(
+      'Collect merged PRs, then draft the notes.',
+      'Read [style](references/style.md), then collect merged PRs and draft the notes.',
+    )
     const github = readerOf({
       'notes': [
-        file('notes/SKILL.md', SKILL_MD),
+        file('notes/SKILL.md', linkedSkill),
         dir('notes/references'),
         dir('notes/scripts'),
         dir('notes/assets'),
         file('notes/logo.png', 'x'),
       ],
-      'notes/SKILL.md': file('notes/SKILL.md', SKILL_MD),
+      'notes/SKILL.md': file('notes/SKILL.md', linkedSkill),
       'notes/references': [file('notes/references/style.md', 'House style guide.')],
       'notes/scripts': [file('notes/scripts/collect.sh', 'echo prs')],
+      'notes/assets': [dir('notes/assets/templates')],
+      'notes/assets/templates': [file('notes/assets/templates/release.md', 'Release layout.')],
       'notes/references/style.md': file('notes/references/style.md', 'House style guide.'),
       'notes/scripts/collect.sh': file('notes/scripts/collect.sh', 'echo prs'),
+      'notes/assets/templates/release.md': file('notes/assets/templates/release.md', 'Release layout.'),
     })
 
     const result = await importSkillFromGithub(github, { owner: 'acme', repo: 'skills', path: 'notes' })
 
-    expect(result.supportFiles).toEqual([
-      { kind: 'reference', name: 'style.md', content: 'House style guide.' },
-      { kind: 'script', name: 'collect.sh', content: 'echo prs' },
-    ])
-    expect(result.draft.content).toContain('## Imported support files')
-    expect(result.draft.content).toContain('{{reference:style.md}}')
-    expect(result.draft.content).toContain('{{script:collect.sh}}')
+    expect(result.supportFiles).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'reference', name: 'style.md', path: 'references/style.md' }),
+      expect.objectContaining({ kind: 'script', name: 'collect.sh', path: 'scripts/collect.sh' }),
+      expect.objectContaining({ kind: 'asset', name: 'release.md', path: 'assets/templates/release.md' }),
+    ]))
+    expect(result.draft.content).toBe(
+      'Read [style](references/style.md), then collect merged PRs and draft the notes.',
+    )
+    expect(result.draft.content).not.toContain('{{reference:')
+    expect(result.bundleVersion).toBe(2)
+    expect(result.sourceDigest).toMatch(/^[a-f0-9]{64}$/)
 
     const codes = result.warnings.map((w) => w.code)
     expect(codes).toContain('scripts_not_executable')
     const skipped = result.warnings.find((w) => w.code === 'unsupported_files')
-    expect(skipped!.detail).toContain('assets/')
     expect(skipped!.detail).toContain('logo.png')
     expect(result.importSource).toMatchObject({ kind: 'github', path: 'notes', sha: 'sha-SKILL.md' })
   })
