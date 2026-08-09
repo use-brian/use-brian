@@ -450,16 +450,68 @@ function mergeAttachments(current: CalendarAttachment[], changes: CalendarEventU
   return attachments
 }
 
-function inferAllDay(event: CalendarEvent, explicit?: boolean): boolean {
-  return explicit ?? Boolean(event.start?.date)
+type CalendarBoundaryMode = 'all-day' | 'timed'
+
+const DATE_ONLY_BOUNDARY = /^\d{4}-\d{2}-\d{2}$/
+
+function boundaryMode(value: string): CalendarBoundaryMode {
+  return DATE_ONLY_BOUNDARY.test(value) ? 'all-day' : 'timed'
+}
+
+function inferAllDay(event: CalendarEvent, updates: CalendarEventUpdateInput): boolean {
+  const currentAllDay = Boolean(event.start?.date)
+  const hasStart = updates.start !== undefined
+  const hasEnd = updates.end !== undefined
+
+  if (updates.allDay !== undefined) {
+    if (!hasStart || !hasEnd) {
+      throw new Error('Changing all-day mode requires both start and end boundaries')
+    }
+    return updates.allDay
+  }
+
+  if (hasStart && hasEnd) {
+    const startMode = boundaryMode(updates.start!)
+    const endMode = boundaryMode(updates.end!)
+    if (startMode !== endMode) {
+      throw new Error('Calendar start and end must both be date-only or both be date-time values')
+    }
+    return startMode === 'all-day'
+  }
+
+  const suppliedBoundary = updates.start ?? updates.end
+  if (suppliedBoundary !== undefined) {
+    const suppliedAllDay = boundaryMode(suppliedBoundary) === 'all-day'
+    if (suppliedAllDay !== currentAllDay) {
+      throw new Error('Changing between all-day and timed events requires both start and end boundaries')
+    }
+  }
+  return currentAllDay
+}
+
+function validateUpdateBoundaryMode(updates: CalendarEventUpdateInput, allDay: boolean): void {
+  for (const value of [updates.start, updates.end]) {
+    if (value === undefined) continue
+    const mode = boundaryMode(value)
+    if (allDay && mode !== 'all-day') {
+      throw new Error('All-day events require YYYY-MM-DD start and end dates')
+    }
+    if (!allDay && mode !== 'timed') {
+      throw new Error('Timed events require RFC 3339 start and end date-times')
+    }
+  }
+
+  if (allDay && updates.start !== undefined && updates.end !== undefined) {
+    if (Date.parse(`${updates.end}T00:00:00Z`) <= Date.parse(`${updates.start}T00:00:00Z`)) {
+      throw new Error('An all-day event end date must be after its start date')
+    }
+  }
 }
 
 function updateEventBody(updates: CalendarEventUpdateInput, current: CalendarEvent): Record<string, unknown> {
   const body: Record<string, unknown> = {}
-  if (updates.allDay !== undefined && (updates.start === undefined || updates.end === undefined)) {
-    throw new Error('Changing allDay mode requires both start and end boundaries')
-  }
-  const allDay = inferAllDay(current, updates.allDay)
+  const allDay = inferAllDay(current, updates)
+  validateUpdateBoundaryMode(updates, allDay)
   if (updates.summary !== undefined) body.summary = updates.summary
   if (updates.start !== undefined) body.start = eventBoundary(updates.start, allDay, updates.timeZone)
   if (updates.end !== undefined) body.end = eventBoundary(updates.end, allDay, updates.timeZone)
