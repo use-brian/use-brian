@@ -454,6 +454,35 @@ function defaultWorkerDrainPrompt(notificationText: string): string {
 }
 
 export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<QueryEvent> {
+  // One invocation owns every resource a tool opens across all of its model
+  // turns. Tools register keyed finalizers through the context they receive;
+  // a Map deduplicates repeated calls to the same resource. Wrapping the core
+  // generator is deliberately broader than `turn_complete`: `finally` also
+  // runs when the consumer stops iterating early, the request is cancelled,
+  // or provider/tool code throws before a terminal event can be emitted.
+  const invocationFinalizers = new Map<string, () => void | Promise<void>>()
+  const toolContext: ToolContext = {
+    ...options.context,
+    registerInvocationFinalizer: (key, finalizer) => {
+      invocationFinalizers.set(key, finalizer)
+    },
+  }
+
+  try {
+    yield* queryLoopCore({ ...options, context: toolContext })
+  } finally {
+    const results = await Promise.allSettled(
+      [...invocationFinalizers.values()].map((finalize) => finalize()),
+    )
+    for (const result of results) {
+      if (result.status === 'rejected') {
+        console.warn('[query-loop] invocation finalizer failed:', result.reason)
+      }
+    }
+  }
+}
+
+async function* queryLoopCore(options: QueryLoopOptions): AsyncGenerator<QueryEvent> {
   const {
     provider,
     model,

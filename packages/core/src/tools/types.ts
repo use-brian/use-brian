@@ -73,6 +73,22 @@ export type ToolContext = {
    */
   workflowRunId?: string | null
   abortSignal: AbortSignal
+  /**
+   * Register best-effort resource cleanup for the enclosing `queryLoop`
+   * invocation. Registrations are keyed: repeated tool calls replace the
+   * same cleanup instead of stacking duplicates. The loop runs every
+   * registered finalizer from `finally`, including normal completion,
+   * cancellation, thrown errors, and an early-stopping consumer.
+   *
+   * Browser tasks use this to capture/pull/kill a running cloud sandbox when
+   * the assistant is done. Absent outside `queryLoop` (direct route actions,
+   * unit calls), where the resource's explicit lifecycle/reaper remains
+   * authoritative.
+   */
+  registerInvocationFinalizer?: (
+    key: string,
+    finalizer: () => void | Promise<void>,
+  ) => void
   /** DB-backed cache store for cross-restart tool result persistence. */
   cacheStore?: CacheStore
   /** Session-state store for `trackCommitment` / `resolveCommitment`. See `docs/architecture/context-engine/session-state.md`. */

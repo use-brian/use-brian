@@ -16,7 +16,8 @@ import { BrowserBackendError } from './types.js'
  * Resolves the active cloud sandbox task for a chat session — creating one
  * (with pre-flight budget authorization, §6) when none exists. Owned by the
  * orchestrator; injected so this provider stays a thin adapter. The `url`
- * hint lets task creation pick the vault bundle to re-inject (§4.4);
+ * hint lets task creation pick the vault bundle to re-inject (§4.4) and is
+ * required to start a new browser — target-less ops may only reuse one;
  * `onNavigated` feeds the silent-death probe (§6).
  */
 export type SandboxTaskBinding = {

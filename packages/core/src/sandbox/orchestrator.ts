@@ -20,6 +20,7 @@ import type {
   SandboxProvider,
   SessionVault,
 } from './types.js'
+import { BrowserBackendError } from './types.js'
 
 export type SandboxTaskStatus = 'running' | 'paused' | 'completed' | 'failed'
 
@@ -270,12 +271,36 @@ export function createSandboxOrchestrator(deps: SandboxOrchestratorDeps): Sandbo
     }
   }
 
+  function registerBrowserInvocationFinalizer(ctx: BrowserCallContext): void {
+    ctx.registerInvocationFinalizer?.(
+      `sandbox-browser:${ctx.sessionId}`,
+      async () => {
+        const task = await deps.taskStore.getActiveBySession(ctx.sessionId)
+        if (!task || task.browserStartedAt === null) return
+        // A paused task is waiting for an explicit human Take-Over (login or
+        // captcha). Killing it at the assistant turn boundary would make the
+        // live-view hand-off a dead link. Once resumed, the next invocation
+        // registers this finalizer again; explicit Stop and the reaper remain
+        // the closure paths if the user never resumes it.
+        if (task.status === 'paused') return
+        await completeTaskInternal(task, 'completed')
+      },
+    )
+  }
+
   async function resolve(
     ctx: BrowserCallContext,
     hint?: { url?: string; browser?: boolean },
   ): Promise<{ sandboxId: string }> {
     const existing = await deps.taskStore.getActiveBySession(ctx.sessionId)
     if (existing) {
+      if (hint?.browser && existing.browserStartedAt === null && !hint.url) {
+        throw new BrowserBackendError(
+          'No browser page is active for this session. Open a target URL with browserNavigate before reading or acting on the page.',
+          'no_active_browser',
+        )
+      }
+      if (hint?.browser) registerBrowserInvocationFinalizer(ctx)
       await meterTouch(existing, existing.status === 'running')
       const touchedAt = now()
       const browserStartedPatch =
@@ -297,6 +322,14 @@ export function createSandboxOrchestrator(deps: SandboxOrchestratorDeps): Sandbo
       }
       return { sandboxId: existing.sandboxId }
     }
+
+    if (hint?.browser && !hint.url) {
+      throw new BrowserBackendError(
+        'No browser page is active for this session. Open a target URL with browserNavigate before reading or acting on the page.',
+        'no_active_browser',
+      )
+    }
+    if (hint?.browser) registerBrowserInvocationFinalizer(ctx)
 
     await deps.budget?.checkCreditBudget?.(ctx)
     const authorizedBudgetUsd =

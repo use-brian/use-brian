@@ -79,19 +79,83 @@ describe('[COMP:sandbox/orchestrator] Sandbox task orchestration', () => {
 
   it('does not advertise a compute-only sandbox as a live browser', async () => {
     const { orchestrator, browser } = build()
+    const finalizers = new Map<string, () => void | Promise<void>>()
+    const computeCtx = {
+      ...ctx('s1'),
+      registerInvocationFinalizer: (key: string, finalize: () => void | Promise<void>) => {
+        finalizers.set(key, finalize)
+      },
+    }
 
     // runPython and the file bridge resolve the shared sandbox without a
-    // browser hint. The pre-warmed Chromium process does not make that a
-    // browser task users should be invited to watch.
-    await orchestrator.binding.resolve(ctx('s1'))
+    // browser hint. They neither start nor advertise a browser.
+    await orchestrator.binding.resolve(computeCtx)
     expect((await orchestrator.getActiveTask('s1'))?.browserStartedAt).toBeNull()
     expect(await orchestrator.listActiveTasks('ws-1')).toEqual([])
+    expect(finalizers.size).toBe(0)
 
     // If the same task later enters a real browser path, it becomes visible
     // without creating a second sandbox.
-    await browser.snapshot(ctx('s1'))
+    await browser.navigate(computeCtx, 'https://example.com/')
     expect((await orchestrator.getActiveTask('s1'))?.browserStartedAt).not.toBeNull()
     expect((await orchestrator.listActiveTasks('ws-1')).map((t) => t.sessionId)).toEqual(['s1'])
+    expect(finalizers.size).toBe(1)
+  })
+
+  it('refuses a target-less browser operation before creating or promoting a browser', async () => {
+    const { provider, orchestrator, browser } = build()
+
+    await expect(browser.snapshot(ctx('blank'))).rejects.toMatchObject({
+      code: 'no_active_browser',
+    })
+    expect(provider.sandboxes.size).toBe(0)
+
+    await orchestrator.binding.resolve(ctx('compute'))
+    expect(provider.sandboxes.size).toBe(1)
+    await expect(browser.currentUrl(ctx('compute'))).rejects.toMatchObject({
+      code: 'no_active_browser',
+    })
+    expect((await orchestrator.getActiveTask('compute'))?.browserStartedAt).toBeNull()
+  })
+
+  it('registers one invocation finalizer and kills a running browser when the invocation ends', async () => {
+    const { provider, orchestrator, browser } = build()
+    const finalizers = new Map<string, () => void | Promise<void>>()
+    const browserCtx = {
+      ...ctx('s1'),
+      registerInvocationFinalizer: (key: string, finalize: () => void | Promise<void>) => {
+        finalizers.set(key, finalize)
+      },
+    }
+
+    await browser.navigate(browserCtx, 'https://example.com/')
+    await browser.snapshot(browserCtx)
+    const task = await orchestrator.getActiveTask('s1')
+
+    expect(finalizers.size).toBe(1)
+    await Promise.all([...finalizers.values()].map((finalize) => finalize()))
+
+    expect(provider.sandboxes.get(task!.sandboxId)?.status).toBe('killed')
+    expect(await orchestrator.getActiveTask('s1')).toBeNull()
+  })
+
+  it('keeps a browser paused for human Take-Over alive at invocation end', async () => {
+    const { provider, orchestrator, browser } = build()
+    const finalizers = new Map<string, () => void | Promise<void>>()
+    const browserCtx = {
+      ...ctx('s1'),
+      registerInvocationFinalizer: (key: string, finalize: () => void | Promise<void>) => {
+        finalizers.set(key, finalize)
+      },
+    }
+
+    await browser.navigate(browserCtx, 'https://example.com/login')
+    const task = await orchestrator.getActiveTask('s1')
+    await orchestrator.pauseForTakeover('s1')
+    await Promise.all([...finalizers.values()].map((finalize) => finalize()))
+
+    expect(provider.sandboxes.get(task!.sandboxId)?.status).toBe('paused')
+    expect((await orchestrator.getActiveTask('s1'))?.status).toBe('paused')
   })
 
   it('binds the task to the browsing profile from the call context (R2-4)', async () => {

@@ -50,6 +50,16 @@ export type BrowserCallContext = {
   userId: string
   workspaceId: string
   sessionId: string
+  /**
+   * Forwarded from `ToolContext` when the browser runs inside `queryLoop`.
+   * The sandbox binding uses it to retire a running browser task when the
+   * invocation ends. Direct route-driven Take-Over/login flows omit it and
+   * keep their explicit Stop/reaper lifecycle.
+   */
+  registerInvocationFinalizer?: (
+    key: string,
+    finalizer: () => void | Promise<void>,
+  ) => void
   /** Active cloud task id, when one exists (cloud mode binding key). */
   taskId?: string
   /**
@@ -76,6 +86,7 @@ export type BrowserCallContext = {
 export const BROWSER_BACKEND_ERROR_CODES = [
   'no_extension',   // no paired extension connection at the relay
   'not_configured', // backend has no transport/provider wired (open-core boot without relay/E2B)
+  'no_active_browser', // target-less op attempted before a URL-bearing browser starter
   'timeout',        // the extension/sandbox did not answer in time
   'stopped',        // the user hit Stop in the extension
   'tab_closed',     // the controlled tab went away

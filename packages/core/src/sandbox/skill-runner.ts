@@ -448,6 +448,9 @@ export function createSkillRunnerTools(opts: CreateSkillRunnerToolsOptions): {
             workspaceId: context.workspaceId,
             sessionId: context.sessionId,
             profileId: profile.id,
+            ...(context.registerInvocationFinalizer
+              ? { registerInvocationFinalizer: context.registerInvocationFinalizer }
+              : {}),
           },
           { url: `https://${skill.site}/`, browser: true },
         )

@@ -23,12 +23,9 @@ const AGENT_BROWSER_BIN = 'agent-browser'
 
 /**
  * The ONE agent-browser session name every sandbox uses. A sandbox is
- * task-scoped and single-tenant, so a per-sandbox name bought nothing — and
- * it cost the warm boot: the template snapshot pre-launches the daemon +
- * Chromium under this exact name at build time (`e2b template create -c`,
- * see docs/plans/e2b-template-setup.md), which a name derived from the
- * sandbox id could never match. Changing this string requires a template
- * rebuild with the matching start command.
+ * task-scoped and single-tenant, so a per-sandbox name buys nothing; a fixed
+ * name lets every browser command reconnect to the daemon lazily started by
+ * the first command in that sandbox. The template itself starts no browser.
  */
 export const SANDBOX_SESSION_NAME = 'main'
 
@@ -37,8 +34,8 @@ export const SANDBOX_SESSION_NAME = 'main'
  * (1280×577) letterboxed the Take-Over view into a short wide band and made
  * lazy-loading sites reveal less per screen; 1440×900 matches a typical
  * laptop viewing window. Applied per-navigate (`set viewport` chains into the
- * same exec, so it costs no extra round trip) because the template snapshot's
- * pre-warmed daemon and a vault-injected relaunch both start at the default.
+ * same exec, so it costs no extra round trip) because both the lazy first
+ * launch and a vault-injected relaunch start at the default.
  * The Take-Over wire cost does NOT scale with this: the stream bridge caps
  * frame pixels independently (takeover-stream.ts SCREENCAST maxWidth).
  */

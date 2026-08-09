@@ -280,6 +280,9 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
       userId: context.userId,
       workspaceId: context.workspaceId ?? '',
       sessionId: context.sessionId,
+      ...(context.registerInvocationFinalizer
+        ? { registerInvocationFinalizer: context.registerInvocationFinalizer }
+        : {}),
       ...(state?.profileId ? { profileId: state.profileId } : {}),
     }
   }

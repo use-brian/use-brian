@@ -209,6 +209,9 @@ export function createBuFallbackTool(opts: CreateBuFallbackToolOptions): { brows
             workspaceId: context.workspaceId,
             sessionId: context.sessionId,
             ...(profile ? { profileId: profile.id } : {}),
+            ...(context.registerInvocationFinalizer
+              ? { registerInvocationFinalizer: context.registerInvocationFinalizer }
+              : {}),
           },
           { url: input.url, browser: true },
         )
