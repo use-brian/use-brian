@@ -51,8 +51,8 @@ export function OfficeJobActivityView({ job, events, loading = false, instructio
   const ready = job?.status === "completed" || job === null;
   const failed = job?.status === "failed";
   const failureKind = officeJobFailureKind(job?.errorCode);
-  const failureTitle = failureKind === "presentation_fit" ? t.presentationFitFailed : failureKind === "fit" ? t.fitFailed : t.failed;
-  const failureBody = failureKind === "presentation_fit" ? t.presentationFitFailedBody : failureKind === "fit" ? t.fitFailedBody : t.generationFailedBody;
+  const failureTitle = failureKind === "presentation_fit" ? t.presentationFitFailed : failureKind === "presentation_plan" ? t.presentationPlanFailed : failureKind === "fit" ? t.fitFailed : t.failed;
+  const failureBody = failureKind === "presentation_fit" ? t.presentationFitFailedBody : failureKind === "presentation_plan" ? t.presentationPlanFailedBody : failureKind === "fit" ? t.fitFailedBody : t.generationFailedBody;
 
   const eventLabel = (code: string): string => ({
     "office.job.queued": t.eventQueued,

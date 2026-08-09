@@ -90,7 +90,7 @@ export function OfficeHome({ workspaceId, initialArtifacts }: { workspaceId: str
               const status = startFailed
                 ? t.startFailed
                 : artifact.job?.status === "failed"
-                  ? failureKind === "presentation_fit" ? t.presentationFitFailed : failureKind === "fit" ? t.fitFailed : t.failed
+                  ? failureKind === "presentation_fit" ? t.presentationFitFailed : failureKind === "presentation_plan" ? t.presentationPlanFailed : failureKind === "fit" ? t.fitFailed : t.failed
                 : artifact.job
                   ? t[artifact.job.status as keyof Pick<typeof t, "queued" | "running" | "completed" | "failed" | "cancelled">] ?? artifact.job.stage
                   : null;

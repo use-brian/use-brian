@@ -4304,6 +4304,8 @@ export const en = {
     failed: "Failed",
     presentationFitFailed: "Slide text did not fit",
     presentationFitFailedBody: "Brian could not fit the generated text into the selected slide layout after three attempts. Shorten the content or adjust the template text boxes, then try again.",
+    presentationPlanFailed: "Slide plan could not be generated",
+    presentationPlanFailedBody: "Brian could not produce a valid slide plan after three attempts. Try again, or simplify the presentation request.",
     fitFailed: "Content did not fit the template",
     fitFailedBody: "Brian could not fit the generated content into the selected template. Shorten the content or adjust the layout, then try again.",
     generationFailedBody: "Generation stopped because of an unexpected error. Try again.",

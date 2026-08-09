@@ -4057,6 +4057,8 @@ export const zh: Dictionary = {
     failed: "失敗",
     presentationFitFailed: "投影片文字無法放入版面",
     presentationFitFailedBody: "嘗試三次後，產生的文字仍無法放入所選投影片版面。請縮短內容或調整範本的文字方塊，然後重試。",
+    presentationPlanFailed: "無法產生投影片規劃",
+    presentationPlanFailedBody: "嘗試三次後，Brian 仍無法產生有效的投影片規劃。請重試，或簡化簡報要求。",
     fitFailed: "內容無法放入範本",
     fitFailedBody: "產生的內容無法放入所選範本。請縮短內容或調整版面，然後重試。",
     generationFailedBody: "產生程序因未預期的錯誤而停止。請重試。",

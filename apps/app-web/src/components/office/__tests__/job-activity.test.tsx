@@ -48,4 +48,12 @@ describe("[COMP:app-web/office-iteration-panel] Office iteration panel", () => {
     expect(html).toContain('role="alert"');
     expect(html).not.toContain(en.office.revisionReadyHint);
   });
+
+  it("explains an exhausted presentation-plan failure without exposing validation details", () => {
+    const html = render({ ...job("failed"), errorCode: "presentation_plan_failed" });
+    expect(html).toContain(en.office.presentationPlanFailed);
+    expect(html).toContain(en.office.presentationPlanFailedBody);
+    expect(html).not.toContain("unrecognized_keys");
+    expect(html).not.toContain("slides.6.fields.7");
+  });
 });

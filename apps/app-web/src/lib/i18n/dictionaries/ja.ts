@@ -4099,6 +4099,8 @@ export const ja: Dictionary = {
     failed: "失敗",
     presentationFitFailed: "スライドのテキストが収まりませんでした",
     presentationFitFailedBody: "生成したテキストを、3回試しても選択したスライドレイアウト内に収められませんでした。内容を短くするか、テンプレートのテキストボックスを調整してから、もう一度お試しください。",
+    presentationPlanFailed: "スライド構成を生成できませんでした",
+    presentationPlanFailedBody: "3回試しても有効なスライド構成を生成できませんでした。もう一度試すか、プレゼンテーションの依頼内容を簡潔にしてください。",
     fitFailed: "内容がテンプレートに収まりませんでした",
     fitFailedBody: "生成した内容を選択したテンプレート内に収められませんでした。内容を短くするか、レイアウトを調整してから、もう一度お試しください。",
     generationFailedBody: "予期しないエラーで生成が停止しました。もう一度お試しください。",
