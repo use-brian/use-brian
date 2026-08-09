@@ -20,7 +20,7 @@ import { BrowserBackendError } from './types.js'
  * `onNavigated` feeds the silent-death probe (§6).
  */
 export type SandboxTaskBinding = {
-  resolve(ctx: BrowserCallContext, hint?: { url?: string }): Promise<{ sandboxId: string }>
+  resolve(ctx: BrowserCallContext, hint?: { url?: string; browser?: boolean }): Promise<{ sandboxId: string }>
   onNavigated?(ctx: BrowserCallContext, url: string): Promise<void>
 }
 
@@ -35,7 +35,7 @@ export function createCloudBrowserProvider(deps: {
         'not_configured',
       )
     }
-    const { sandboxId } = await deps.binding.resolve(ctx, hint)
+    const { sandboxId } = await deps.binding.resolve(ctx, { ...hint, browser: true })
     await deps.provider.connect(sandboxId)
     return deps.provider.browser(sandboxId)
   }

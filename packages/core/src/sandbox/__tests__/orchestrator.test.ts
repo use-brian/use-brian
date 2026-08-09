@@ -77,6 +77,23 @@ describe('[COMP:sandbox/orchestrator] Sandbox task orchestration', () => {
     expect((await orchestrator.listActiveTasks('ws-1')).map((t) => t.sessionId)).toEqual(['s2'])
   })
 
+  it('does not advertise a compute-only sandbox as a live browser', async () => {
+    const { orchestrator, browser } = build()
+
+    // runPython and the file bridge resolve the shared sandbox without a
+    // browser hint. The pre-warmed Chromium process does not make that a
+    // browser task users should be invited to watch.
+    await orchestrator.binding.resolve(ctx('s1'))
+    expect((await orchestrator.getActiveTask('s1'))?.browserStartedAt).toBeNull()
+    expect(await orchestrator.listActiveTasks('ws-1')).toEqual([])
+
+    // If the same task later enters a real browser path, it becomes visible
+    // without creating a second sandbox.
+    await browser.snapshot(ctx('s1'))
+    expect((await orchestrator.getActiveTask('s1'))?.browserStartedAt).not.toBeNull()
+    expect((await orchestrator.listActiveTasks('ws-1')).map((t) => t.sessionId)).toEqual(['s1'])
+  })
+
   it('binds the task to the browsing profile from the call context (R2-4)', async () => {
     const { orchestrator, browser } = build()
     await browser.navigate(ctx('s1', 'p9'), 'https://github.com/')

@@ -210,7 +210,7 @@ export function createBuFallbackTool(opts: CreateBuFallbackToolOptions): { brows
             sessionId: context.sessionId,
             ...(profile ? { profileId: profile.id } : {}),
           },
-          { url: input.url },
+          { url: input.url, browser: true },
         )
         const goal = `Start at ${input.url}. ${input.goal}`
         const { trace, output } = await opts.provider.runBrowserUse(sandboxId, {

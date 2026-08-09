@@ -63,6 +63,7 @@ const TASK: SandboxTaskRecord = {
   status: 'running',
   profileId: null,
   injectedSite: null,
+  browserStartedAt: null,
   authorizedBudgetUsd: 2,
   createdAt: 0,
   lastActivityAt: 0,

@@ -37,6 +37,11 @@ export type SandboxTaskRecord = {
   profileId: string | null
   /** Registrable domain whose vault bundle was injected at start (probe target). */
   injectedSite: string | null
+  /**
+   * First real browser-path resolution. Null means this shared sandbox has
+   * only served compute/file-bridge work and must not appear as a live browser.
+   */
+  browserStartedAt: number | null
   authorizedBudgetUsd: number
   createdAt: number
   lastActivityAt: number
@@ -44,7 +49,7 @@ export type SandboxTaskRecord = {
 
 export type SandboxTaskStore = {
   getActiveBySession(sessionId: string): Promise<SandboxTaskRecord | null>
-  /** Every running/paused task in the workspace — the discovery surface (§5). */
+  /** Running/paused tasks that have entered a browser path — the discovery surface (§5). */
   listActiveByWorkspace(workspaceId: string): Promise<SandboxTaskRecord[]>
   create(record: SandboxTaskRecord): Promise<void>
   update(taskId: string, patch: Partial<SandboxTaskRecord>): Promise<void>
@@ -74,7 +79,10 @@ export function createInMemorySandboxTaskStore(): SandboxTaskStore & {
     },
     async listActiveByWorkspace(workspaceId) {
       return [...tasks.values()].filter(
-        (t) => t.workspaceId === workspaceId && (t.status === 'running' || t.status === 'paused'),
+        (t) =>
+          t.workspaceId === workspaceId &&
+          t.browserStartedAt !== null &&
+          (t.status === 'running' || t.status === 'paused'),
       )
     },
     async create(record) {
@@ -262,15 +270,30 @@ export function createSandboxOrchestrator(deps: SandboxOrchestratorDeps): Sandbo
     }
   }
 
-  async function resolve(ctx: BrowserCallContext, hint?: { url?: string }): Promise<{ sandboxId: string }> {
+  async function resolve(
+    ctx: BrowserCallContext,
+    hint?: { url?: string; browser?: boolean },
+  ): Promise<{ sandboxId: string }> {
     const existing = await deps.taskStore.getActiveBySession(ctx.sessionId)
     if (existing) {
       await meterTouch(existing, existing.status === 'running')
+      const touchedAt = now()
+      const browserStartedPatch =
+        hint?.browser && existing.browserStartedAt === null
+          ? { browserStartedAt: touchedAt }
+          : {}
       if (existing.status === 'paused') {
         await deps.provider.resume(existing.sandboxId)
-        await deps.taskStore.update(existing.taskId, { status: 'running', lastActivityAt: now() })
+        await deps.taskStore.update(existing.taskId, {
+          status: 'running',
+          lastActivityAt: touchedAt,
+          ...browserStartedPatch,
+        })
       } else {
-        await deps.taskStore.update(existing.taskId, { lastActivityAt: now() })
+        await deps.taskStore.update(existing.taskId, {
+          lastActivityAt: touchedAt,
+          ...browserStartedPatch,
+        })
       }
       return { sandboxId: existing.sandboxId }
     }
@@ -303,6 +326,7 @@ export function createSandboxOrchestrator(deps: SandboxOrchestratorDeps): Sandbo
       // first navigation so the site is already signed in.
       const injectedSite = await injectVaultBundle(profileId, sandboxId, site)
 
+      const createdAt = now()
       await deps.taskStore.create({
         taskId,
         sandboxId,
@@ -312,9 +336,10 @@ export function createSandboxOrchestrator(deps: SandboxOrchestratorDeps): Sandbo
         status: 'running',
         profileId,
         injectedSite,
+        browserStartedAt: hint?.browser ? createdAt : null,
         authorizedBudgetUsd,
-        createdAt: now(),
-        lastActivityAt: now(),
+        createdAt,
+        lastActivityAt: createdAt,
       })
     } catch (err) {
       // Best-effort: a failed kill must not mask the original cause.

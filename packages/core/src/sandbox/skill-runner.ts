@@ -449,7 +449,7 @@ export function createSkillRunnerTools(opts: CreateSkillRunnerToolsOptions): {
             sessionId: context.sessionId,
             profileId: profile.id,
           },
-          { url: `https://${skill.site}/` },
+          { url: `https://${skill.site}/`, browser: true },
         )
         const { run, result, outcomes } = await runGovernedBlock({
           context,
