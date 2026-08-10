@@ -157,10 +157,11 @@ export type ChannelCredentials =
 export type UserAccessMode = 'allow_all' | 'allowlist' | 'blocklist' | 'group_members'
 
 /**
- * One entry in `requireMentionOverrides`. Presence in the list flips the
- * integration-level `requireMention` default for that chat (or chat+topic
- * when `topicId` is set). If global is `true`, listed entries behave as if
- * `requireMention = false`, and vice versa. See
+ * One entry in `requireMentionOverrides`. One or more matching entries invert
+ * the integration-level `requireMention` default exactly once for that chat
+ * (or chat+topic when `topicId` is set). Parent/child overlaps and duplicates
+ * are cumulative/idempotent. If global is `true`, listed locations behave as
+ * if `requireMention = false`, and vice versa. See
  * docs/architecture/channels/channel-user-identity.md → "BYO Telegram
  * group mention overrides".
  */

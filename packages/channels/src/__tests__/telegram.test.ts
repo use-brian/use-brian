@@ -1461,6 +1461,30 @@ describe('[COMP:channels/telegram] requireMention overrides', () => {
     expect(seen).toEqual([{ channelId: '-100:topic:42' }])
   })
 
+  it('applies overlapping whole-chat and topic overrides cumulatively', () => {
+    const seen: Array<{ channelId: string }> = []
+    const adapter = createTelegramAdapter({
+      token: 'tok',
+      botUsername: 'testbot',
+      config: {
+        requireMention: {
+          default: true,
+          overrides: [
+            { chatId: '-100', topicId: null },
+            { chatId: '-100', topicId: 42 },
+          ],
+        },
+      },
+      onMessage: (m) => { seen.push({ channelId: m.channelId }) },
+    })
+
+    adapter.handleWebhook(
+      buildGroupMessage({ chatId: -100, isForum: true, threadId: 42, text: 'hi' }),
+    )
+
+    expect(seen).toEqual([{ channelId: '-100:topic:42' }])
+  })
+
   it('supports both-direction overrides: default=false with a mention-required override', () => {
     const seen: Array<{ channelId: string }> = []
     const adapter = createTelegramAdapter({
