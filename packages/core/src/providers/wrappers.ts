@@ -60,16 +60,17 @@ export function wrapContextBudget(): StreamWrapper {
  * Guards against hung LLM connections that SDK timeout won't catch.
  *
  * Two windows (2026-06-10): `firstChunkTimeoutMs` covers the wait for the
- * FIRST chunk, which is dominated by server-side prompt prefill — on a large
- * cold context (post-compaction, cache-evicted, long doc session) that
- * legitimately runs past 30s on the pro tier. `timeoutMs` covers every later
- * inter-chunk gap, where silence really does mean a hung connection. One
- * window for both (the pre-split behaviour) turned slow-but-healthy prefills
- * into abort → cold-retry → abort death spirals: the abort threw away a
- * prefill that was about to complete and the retry re-paid it from zero
- * (prod 2026-06-10 15:24 + 15:43 — "Stream idle for 30000ms" on turn 0, the
- * retry stalled the same way, and the turn died with no reply). Omitting
- * `firstChunkTimeoutMs` keeps the single-window behaviour.
+ * FIRST deliverable chunk, which is dominated by server-side prompt prefill
+ * and reasoning — on a large cold context (post-compaction, cache-evicted,
+ * long doc session) that legitimately runs past 30s on the pro/max tiers.
+ * `timeoutMs` covers every later inter-chunk gap, where silence really does
+ * mean a hung connection. One window for both (the pre-split behaviour)
+ * turned slow-but-healthy prefills into abort → cold-retry → abort death
+ * spirals: the abort threw away a prefill that was about to complete and the
+ * retry re-paid it from zero (prod 2026-06-10 15:24 + 15:43 — "Stream idle
+ * for 30000ms" on turn 0, the retry stalled the same way, and the turn died
+ * with no reply). Omitting `firstChunkTimeoutMs` keeps the single-window
+ * behaviour.
  *
  * `message_start` does NOT count as the first chunk. Every adapter yields a
  * synthetic `message_start` before the first network byte (gemini.ts
@@ -79,7 +80,12 @@ export function wrapContextBudget(): StreamWrapper {
  * recurred (prod 2026-07-16, session b3697792 — turn-1 post-tool-result
  * prefill on a ~300k-token prompt aborted at exactly send+30.0s, the retry
  * died the same way, and the Telegram user got "Something went wrong").
- * The window flips only on the first chunk of any other type.
+ * `thinking_delta` is also excluded: it is display-only and may legitimately
+ * pause for longer than 30s before the model commits reply text or a tool call.
+ * Counting it collapsed Max's remaining reasoning window to 30s (prod
+ * 2026-08-10, session abab9918, turn 9); the retry repeated the same pattern
+ * and the user got no final reply. The window flips only on the first chunk
+ * that can become delivered output.
  *
  * The error message keeps the `Stream idle for <n>ms` prefix in both phases —
  * `isTransientStreamError` (query-loop.ts) matches on it.
@@ -89,16 +95,22 @@ export function wrapIdleTimeout(timeoutMs: number, firstChunkTimeoutMs?: number)
     const stream = inner(request)
     const iterator = stream[Symbol.asyncIterator]()
     let timer: ReturnType<typeof setTimeout> | undefined
-    let sawFirstChunk = false
+    let sawFirstDeliverableChunk = false
+    let sawReasoningChunk = false
 
     const timeoutPromise = () => {
-      const windowMs = sawFirstChunk ? timeoutMs : (firstChunkTimeoutMs ?? timeoutMs)
+      const windowMs = sawFirstDeliverableChunk ? timeoutMs : (firstChunkTimeoutMs ?? timeoutMs)
+      const phase = sawFirstDeliverableChunk
+        ? ''
+        : sawReasoningChunk
+          ? ' (reasoning window — no deliverable chunk)'
+          : ' (no deliverable chunk — prefill window)'
       return new Promise<never>((_, reject) => {
         timer = setTimeout(
           () =>
             reject(
               new Error(
-                `Stream idle for ${windowMs}ms${sawFirstChunk ? '' : ' (no first chunk — prefill window)'}`,
+                `Stream idle for ${windowMs}ms${phase}`,
               ),
             ),
           windowMs,
@@ -115,7 +127,11 @@ export function wrapIdleTimeout(timeoutMs: number, firstChunkTimeoutMs?: number)
         if (timer) clearTimeout(timer)
 
         if (result.done) break
-        if (result.value.type !== 'message_start') sawFirstChunk = true
+        if (result.value.type === 'thinking_delta') {
+          sawReasoningChunk = true
+        } else if (result.value.type !== 'message_start') {
+          sawFirstDeliverableChunk = true
+        }
         yield result.value
       }
     } finally {

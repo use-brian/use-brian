@@ -149,7 +149,7 @@ describe('[COMP:providers/wrappers] wrapProvider', () => {
   })
 })
 
-describe('[COMP:providers/wrappers] wrapIdleTimeout — first-chunk vs inter-chunk windows', () => {
+describe('[COMP:providers/wrappers] wrapIdleTimeout — first-deliverable vs inter-chunk windows', () => {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
   /** Inner stream that waits `delays[i]` ms before yielding chunk i. */
@@ -183,9 +183,9 @@ describe('[COMP:providers/wrappers] wrapIdleTimeout — first-chunk vs inter-chu
     await expect(drain(fn)).rejects.toThrow(/Stream idle for 40ms/)
   })
 
-  it('aborts a never-starting stream at the prefill window, tagged as a first-chunk stall', async () => {
+  it('aborts a never-starting stream at the prefill window, tagged as a first-deliverable stall', async () => {
     const fn = wrapIdleTimeout(20, 60)(timedStream([500]))
-    await expect(drain(fn)).rejects.toThrow(/Stream idle for 60ms \(no first chunk/)
+    await expect(drain(fn)).rejects.toThrow(/Stream idle for 60ms \(no deliverable chunk/)
   })
 
   it('aborts a mid-stream hang at the inter-chunk window even when the prefill window is generous', async () => {
@@ -197,11 +197,11 @@ describe('[COMP:providers/wrappers] wrapIdleTimeout — first-chunk vs inter-chu
       err = e
     }
     expect(String(err)).toMatch(/Stream idle for 30ms/)
-    expect(String(err)).not.toMatch(/no first chunk/)
+    expect(String(err)).not.toMatch(/no deliverable chunk/)
   })
 
   /** Real adapter shape: synthetic message_start yielded before the first
-   *  network byte, then a prefill-length wait before the first content chunk
+   *  network byte, then a prefill-length wait before the first deliverable chunk
    *  (gemini.ts convertStreamChunks / anthropic.ts both do this). */
   function adapterShapedStream(prefillMs: number, laterGaps: number[] = []) {
     return async function* (_req: ProviderRequest): AsyncIterable<StreamChunk> {
@@ -224,12 +224,43 @@ describe('[COMP:providers/wrappers] wrapIdleTimeout — first-chunk vs inter-chu
     expect(out).toHaveLength(3)
   })
 
-  it('aborts a prefill overrun after message_start with the first-chunk tag', async () => {
+  it('aborts a prefill overrun after message_start with the first-deliverable tag', async () => {
     const fn = wrapIdleTimeout(20, 60)(adapterShapedStream(500))
-    await expect(drain(fn)).rejects.toThrow(/Stream idle for 60ms \(no first chunk/)
+    await expect(drain(fn)).rejects.toThrow(/Stream idle for 60ms \(no deliverable chunk/)
   })
 
-  it('still enforces the inter-chunk window after the first content chunk', async () => {
+  /** Max can stream a short thought summary, then spend longer than the
+   *  inter-chunk window reasoning before it commits reply text or a tool call. */
+  function reasoningShapedStream(reasoningGapMs: number) {
+    return async function* (_req: ProviderRequest): AsyncIterable<StreamChunk> {
+      yield { type: 'message_start', model: 'fake' }
+      await sleep(5)
+      yield { type: 'thinking_delta', text: 'Considering the workflow change.' }
+      await sleep(reasoningGapMs)
+      yield { type: 'text_delta', text: 'Done.' }
+    }
+  }
+
+  it('keeps the generous window armed through display-only reasoning (prod 2026-08-10)', async () => {
+    // The 80ms reasoning gap exceeds the 30ms inter-chunk window but remains
+    // inside the 160ms first-deliverable window.
+    const fn = wrapIdleTimeout(30, 160)(reasoningShapedStream(80))
+    const out = await drain(fn)
+    expect(out.map((chunk) => chunk.type)).toEqual([
+      'message_start',
+      'thinking_delta',
+      'text_delta',
+    ])
+  })
+
+  it('reports a reasoning-phase overrun at the first-deliverable window', async () => {
+    const fn = wrapIdleTimeout(20, 60)(reasoningShapedStream(500))
+    await expect(drain(fn)).rejects.toThrow(
+      /Stream idle for 60ms \(reasoning window — no deliverable chunk\)/,
+    )
+  })
+
+  it('still enforces the inter-chunk window after the first deliverable chunk', async () => {
     const fn = wrapIdleTimeout(30, 1000)(adapterShapedStream(5, [400]))
     let err: unknown
     try {
@@ -238,6 +269,6 @@ describe('[COMP:providers/wrappers] wrapIdleTimeout — first-chunk vs inter-chu
       err = e
     }
     expect(String(err)).toMatch(/Stream idle for 30ms/)
-    expect(String(err)).not.toMatch(/no first chunk/)
+    expect(String(err)).not.toMatch(/no deliverable chunk/)
   })
 })
