@@ -207,10 +207,16 @@
     {
       "name": "GetProduct",
       "kind": "query",
-      "hash": "da8e6ff894b7a006",
+      "hash": "4f120d4b18694e43",
       "valid": true,
       "scopes": [
-        "read_products"
+        "read_products",
+        "read_files",
+        "read_themes",
+        "read_orders",
+        "read_draft_orders",
+        "read_images",
+        "read_quick_sale"
       ],
       "deprecations": []
     },
@@ -340,10 +346,16 @@
     {
       "name": "ListProducts",
       "kind": "query",
-      "hash": "6c3376587f74c833",
+      "hash": "9723b7443f56b291",
       "valid": true,
       "scopes": [
-        "read_products"
+        "read_products",
+        "read_files",
+        "read_themes",
+        "read_orders",
+        "read_draft_orders",
+        "read_images",
+        "read_quick_sale"
       ],
       "deprecations": []
     },

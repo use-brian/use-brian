@@ -101,6 +101,8 @@ function installBaseResponses() {
           id: "gid://shopify/Product/42",
           title: "Restocked Widget",
           total_inventory: 8,
+          featured_image_url: "https://cdn.shopify.com/widget.jpg",
+          featured_image_alt: "Restocked Widget pouch",
         }],
         has_next_page: false,
       };
@@ -115,7 +117,7 @@ async function completeEditableFields() {
   await click(button("Preview audience"));
   await enter(field("Subject"), "Back in stock");
   await enter(field("Body"), "The widget is available again.");
-  await enter(field("Button label"), "Shop now");
+  await enter(field("Button text"), "Shop now");
 }
 
 beforeEach(() => {
@@ -145,13 +147,24 @@ describe("[COMP:app-web/shopify-campaign] Campaign tab", () => {
         };
       }
       if (tool === "shopifyListProducts") {
-        return { items: [{ id: "gid://shopify/Product/42", title: "Restocked Widget", total_inventory: 8 }] };
+        return { items: [{
+          id: "gid://shopify/Product/42",
+          title: "Restocked Widget",
+          total_inventory: 8,
+          featured_image_url: "https://cdn.shopify.com/widget.jpg",
+          featured_image_alt: "Restocked Widget pouch",
+        }] };
       }
       if (tool === "shopifyListDiscounts") return { items: [] };
       if (tool === "shopifyPreviewCustomerSegment") {
         return { query: "email_subscription_status = 'SUBSCRIBED'", total_count: 24 };
       }
-      if (tool === "shopifyGetProduct") return { title: "Restocked Widget", total_inventory: 7 };
+      if (tool === "shopifyGetProduct") return {
+        title: "Restocked Widget",
+        total_inventory: 7,
+        featured_image_url: "https://cdn.shopify.com/widget.jpg",
+        featured_image_alt: "Restocked Widget pouch",
+      };
       if (tool === "shopifyCreateCustomerSegment") {
         return {
           id: "gid://shopify/Segment/8",
@@ -181,6 +194,8 @@ describe("[COMP:app-web/shopify-campaign] Campaign tab", () => {
 
     await click(button("Continue preparation"));
     expect(container!.textContent).toContain("Campaign package ready");
+    expect(container!.textContent).toContain("Product photo URL");
+    expect(container!.querySelector<HTMLImageElement>('img[src="https://cdn.shopify.com/widget.jpg"]')).toBeTruthy();
     expect(callTool.mock.calls.filter((call) => call[1] === "shopifyCreateCustomerSegment")).toHaveLength(1);
     expect(callTool.mock.calls.filter((call) => call[1] === "shopifyCreateDiscountCode")).toHaveLength(2);
   });
@@ -196,13 +211,22 @@ describe("[COMP:app-web/shopify-campaign] Campaign tab", () => {
         };
       }
       if (tool === "shopifyListProducts") {
-        return { items: [{ id: "gid://shopify/Product/42", title: "Restocked Widget", total_inventory: 2 }] };
+        return { items: [{
+          id: "gid://shopify/Product/42",
+          title: "Restocked Widget",
+          total_inventory: 2,
+          featured_image_url: "https://cdn.shopify.com/widget.jpg",
+        }] };
       }
       if (tool === "shopifyListDiscounts") return { items: [] };
       if (tool === "shopifyPreviewCustomerSegment") {
         return { query: "email_subscription_status = 'SUBSCRIBED'", total_count: 24 };
       }
-      if (tool === "shopifyGetProduct") return { title: "Restocked Widget", total_inventory: 0 };
+      if (tool === "shopifyGetProduct") return {
+        title: "Restocked Widget",
+        total_inventory: 0,
+        featured_image_url: "https://cdn.shopify.com/widget.jpg",
+      };
       throw new Error(`unexpected tool: ${tool} ${JSON.stringify(args)}`);
     });
     await mount();
@@ -214,10 +238,130 @@ describe("[COMP:app-web/shopify-campaign] Campaign tab", () => {
     expect(callTool.mock.calls.some((call) => call[1] === "shopifyCreateDiscountCode")).toBe(false);
   });
 
+  it("blocks preparation before writes when the selected product photo disappears", async () => {
+    callTool.mockImplementation(async (_workspaceId: string, tool: string) => {
+      if (tool === "shopifyGetShop") {
+        return {
+          myshopify_domain: "test-store.myshopify.com",
+          primary_domain: "shop.example",
+          currency: "USD",
+          timezone: "Asia/Hong_Kong",
+        };
+      }
+      if (tool === "shopifyListProducts") {
+        return { items: [{
+          id: "gid://shopify/Product/42",
+          title: "Restocked Widget",
+          total_inventory: 8,
+          featured_image_url: "https://cdn.shopify.com/widget.jpg",
+        }] };
+      }
+      if (tool === "shopifyListDiscounts") return { items: [] };
+      if (tool === "shopifyPreviewCustomerSegment") {
+        return { query: "email_subscription_status = 'SUBSCRIBED'", total_count: 24 };
+      }
+      if (tool === "shopifyGetProduct") return { title: "Restocked Widget", total_inventory: 7 };
+      throw new Error(`unexpected tool: ${tool}`);
+    });
+    await mount();
+    await completeEditableFields();
+
+    await click(button("Prepare campaign"));
+    expect(container!.textContent).toContain("selected product photo is no longer available");
+    expect(callTool.mock.calls.some((call) => call[1] === "shopifyCreateCustomerSegment")).toBe(false);
+    expect(callTool.mock.calls.some((call) => call[1] === "shopifyCreateDiscountCode")).toBe(false);
+  });
+
   it("shows the action-grant blocker and disables audience preparation", async () => {
     await mount(TOOLS.filter((tool) => tool !== "shopifyCreateCustomerSegment"));
     expect(container!.textContent).toContain("missing one or more campaign actions");
     expect(button("Preview audience").disabled).toBe(true);
     expect(button("Prepare campaign").disabled).toBe(true);
+  });
+
+  it("shows edited copy, button destination, and the selected photo in the live preview", async () => {
+    callTool.mockImplementation(async (_workspaceId: string, tool: string) => {
+      if (tool === "shopifyGetShop") {
+        return {
+          myshopify_domain: "test-store.myshopify.com",
+          primary_domain: "shop.example",
+          currency: "USD",
+          timezone: "Asia/Hong_Kong",
+        };
+      }
+      if (tool === "shopifyListProducts") {
+        return { items: [{
+          id: "gid://shopify/Product/42",
+          title: "Restocked Widget",
+          total_inventory: 8,
+          featured_image_url: "https://cdn.shopify.com/widget.jpg",
+          featured_image_alt: "Restocked Widget pouch",
+        }] };
+      }
+      if (tool === "shopifyListDiscounts") return { items: [] };
+      if (tool === "shopifyPreviewCustomerSegment") {
+        return { query: "email_subscription_status = 'SUBSCRIBED'", total_count: 24 };
+      }
+      throw new Error(`unexpected tool: ${tool}`);
+    });
+    await mount();
+    await completeEditableFields();
+
+    const preview = container!.querySelector('[aria-label="Message preview"]')!;
+    expect(preview.textContent).toContain("Back in stock");
+    expect(preview.textContent).toContain("The widget is available again.");
+    expect(preview.textContent).toContain("Shop now");
+    expect(preview.textContent).toContain("https://shop.example");
+    expect(preview.querySelector<HTMLImageElement>('img[src="https://cdn.shopify.com/widget.jpg"]')?.alt)
+      .toBe("Restocked Widget pouch");
+  });
+
+  it("requires a photo decision and allows an explicit text-only campaign", async () => {
+    callTool.mockImplementation(async (_workspaceId: string, tool: string, args: Record<string, unknown>) => {
+      if (tool === "shopifyGetShop") {
+        return {
+          myshopify_domain: "test-store.myshopify.com",
+          primary_domain: "shop.example",
+          currency: "USD",
+          timezone: "Asia/Hong_Kong",
+        };
+      }
+      if (tool === "shopifyListProducts") {
+        return { items: [{ id: "gid://shopify/Product/42", title: "Restocked Widget", total_inventory: 8 }] };
+      }
+      if (tool === "shopifyListDiscounts") return { items: [] };
+      if (tool === "shopifyPreviewCustomerSegment") {
+        return { query: "email_subscription_status = 'SUBSCRIBED'", total_count: 24 };
+      }
+      if (tool === "shopifyGetProduct") return { title: "Restocked Widget", total_inventory: 7 };
+      if (tool === "shopifyCreateCustomerSegment") {
+        return {
+          id: "gid://shopify/Segment/8",
+          name: "Brian - Restock",
+          query: "email_subscription_status = 'SUBSCRIBED'",
+          admin_url: "https://test-store.myshopify.com/admin/customers/segments",
+        };
+      }
+      if (tool === "shopifyCreateDiscountCode") {
+        return {
+          id: "gid://shopify/DiscountCodeNode/9",
+          code: "RESTOCK10",
+          starts_at: args.startsAt,
+          ends_at: args.endsAt,
+        };
+      }
+      throw new Error(`unexpected tool: ${tool}`);
+    });
+    await mount();
+    await completeEditableFields();
+
+    await click(button("Prepare campaign"));
+    expect(container!.textContent).toContain("Choose a product photo or select No photo");
+    expect(callTool.mock.calls.some((call) => call[1] === "shopifyCreateCustomerSegment")).toBe(false);
+
+    await click(container!.querySelector('[aria-label="No photo"]')!);
+    await click(button("Prepare campaign"));
+    expect(container!.textContent).toContain("Campaign package ready");
+    expect(container!.textContent).not.toContain("Product photo URL");
   });
 });

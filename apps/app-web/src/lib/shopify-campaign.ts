@@ -18,6 +18,14 @@ export type CampaignProduct = {
   id: string;
   title: string;
   totalInventory: number;
+  imageUrl?: string;
+  imageAlt?: string;
+};
+
+export type CampaignImage = {
+  productId: string;
+  url: string;
+  alt: string;
 };
 
 type PreparedCampaignSegment = {
@@ -38,6 +46,7 @@ type PreparedCampaignDiscount = {
 type CampaignChecklist = {
   preview: boolean;
   mobile: boolean;
+  image: boolean;
   schedule: boolean;
   automaticDiscount: boolean;
 };
@@ -62,6 +71,8 @@ export type ShopifyCampaignDraft = {
   body: string;
   ctaLabel: string;
   ctaUrl: string;
+  includeProductImage: boolean;
+  selectedImage?: CampaignImage;
   segment?: PreparedCampaignSegment;
   discount?: PreparedCampaignDiscount;
   preparedAt?: number;
@@ -169,9 +180,11 @@ export function createDefaultCampaignDraft(
     body: "",
     ctaLabel: "",
     ctaUrl: primaryDomain ? `https://${primaryDomain}` : "",
+    includeProductImage: true,
     checklist: {
       preview: false,
       mobile: false,
+      image: false,
       schedule: false,
       automaticDiscount: false,
     },
@@ -183,6 +196,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
+function normalizedHttpUrl(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:" ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function normalizeDraft(
   value: unknown,
   fallback: ShopifyCampaignDraft,
@@ -190,13 +213,22 @@ function normalizeDraft(
   if (!isRecord(value) || value.version !== 1) return fallback;
   const candidate = value as Partial<ShopifyCampaignDraft>;
   const selectedProducts = Array.isArray(value.selectedProducts)
-    ? value.selectedProducts.filter(
-        (item): item is CampaignProduct =>
-          isRecord(item) &&
-          typeof item.id === "string" &&
-          typeof item.title === "string" &&
-          typeof item.totalInventory === "number",
-      )
+    ? value.selectedProducts.flatMap((item): CampaignProduct[] => {
+        if (
+          !isRecord(item) ||
+          typeof item.id !== "string" ||
+          typeof item.title !== "string" ||
+          typeof item.totalInventory !== "number"
+        ) return [];
+        const imageUrl = normalizedHttpUrl(item.imageUrl);
+        return [{
+          id: item.id,
+          title: item.title,
+          totalInventory: item.totalInventory,
+          ...(imageUrl ? { imageUrl } : {}),
+          ...(typeof item.imageAlt === "string" ? { imageAlt: item.imageAlt } : {}),
+        }];
+      })
     : [];
   const checklist = isRecord(value.checklist) ? value.checklist : {};
   const segment = isRecord(value.segment) &&
@@ -224,6 +256,22 @@ function normalizeDraft(
         endsAt: value.discount.endsAt,
       }
     : undefined;
+  const rawSelectedImage = isRecord(value.selectedImage) ? value.selectedImage : undefined;
+  const selectedImageUrl = normalizedHttpUrl(rawSelectedImage?.url);
+  const selectedImage = rawSelectedImage &&
+    typeof rawSelectedImage.productId === "string" &&
+    selectedImageUrl &&
+    selectedProducts.some((product) => product.id === rawSelectedImage.productId)
+    ? {
+        productId: rawSelectedImage.productId,
+        url: selectedImageUrl,
+        alt: typeof rawSelectedImage.alt === "string" ? rawSelectedImage.alt : "",
+      }
+    : undefined;
+  // Drafts saved before the photo picker existed are text-only packages.
+  // New drafts write this decision explicitly, so old prepared history does
+  // not become invalid merely by being opened after the feature ships.
+  const includeProductImage = candidate.includeProductImage === true;
   return {
     version: 1,
     selectedProducts,
@@ -244,12 +292,15 @@ function normalizeDraft(
     body: typeof candidate.body === "string" ? candidate.body : "",
     ctaLabel: typeof candidate.ctaLabel === "string" ? candidate.ctaLabel : "",
     ctaUrl: typeof candidate.ctaUrl === "string" ? candidate.ctaUrl : fallback.ctaUrl,
+    includeProductImage,
+    ...(includeProductImage && selectedImage ? { selectedImage } : {}),
     ...(segment ? { segment } : {}),
     ...(discount ? { discount } : {}),
     ...(typeof candidate.preparedAt === "number" ? { preparedAt: candidate.preparedAt } : {}),
     checklist: {
       preview: checklist.preview === true,
       mobile: checklist.mobile === true,
+      image: checklist.image === true,
       schedule: checklist.schedule === true,
       automaticDiscount: checklist.automaticDiscount === true,
     },

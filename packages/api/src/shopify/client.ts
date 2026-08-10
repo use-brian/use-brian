@@ -470,6 +470,7 @@ export async function listProducts(auth: ShopifyAuth, params: ShopifyListParams 
         pageInfo { hasNextPage endCursor }
         edges { node {
           id title handle status vendor productType tags totalInventory updatedAt
+          featuredMedia { preview { image { url altText } } }
           priceRangeV2 {
             minVariantPrice { amount currencyCode }
             maxVariantPrice { amount currencyCode }
@@ -486,6 +487,7 @@ export async function getProduct(auth: ShopifyAuth, productId: string): Promise<
     query GetProduct($id: ID!) {
       product(id: $id) {
         id title handle status vendor productType tags totalInventory
+        featuredMedia { preview { image { url altText } } }
         description
         onlineStoreUrl
         templateSuffix

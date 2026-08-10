@@ -62,18 +62,23 @@ function numericId(id: string): string | undefined {
   return m?.[1]
 }
 
-const productRow = (p: Json) => ({
-  id: str(p, 'id'),
-  title: str(p, 'title'),
-  status: str(p, 'status'),
-  vendor: str(p, 'vendor'),
-  product_type: str(p, 'productType'),
-  tags: p.tags,
-  total_inventory: num(p, 'totalInventory'),
-  price_min: plainMoney(obj(obj(p, 'priceRangeV2'), 'minVariantPrice')),
-  price_max: plainMoney(obj(obj(p, 'priceRangeV2'), 'maxVariantPrice')),
-  updated_at: str(p, 'updatedAt'),
-})
+const productRow = (p: Json) => {
+  const image = obj(obj(obj(p, 'featuredMedia'), 'preview'), 'image') ?? obj(p, 'featuredImage')
+  return {
+    id: str(p, 'id'),
+    title: str(p, 'title'),
+    status: str(p, 'status'),
+    vendor: str(p, 'vendor'),
+    product_type: str(p, 'productType'),
+    tags: p.tags,
+    total_inventory: num(p, 'totalInventory'),
+    featured_image_url: str(image, 'url'),
+    featured_image_alt: str(image, 'altText'),
+    price_min: plainMoney(obj(obj(p, 'priceRangeV2'), 'minVariantPrice')),
+    price_max: plainMoney(obj(obj(p, 'priceRangeV2'), 'maxVariantPrice')),
+    updated_at: str(p, 'updatedAt'),
+  }
+}
 
 const variantRow = (v: Json) => ({
   id: str(v, 'id'),
@@ -498,7 +503,7 @@ export function createShopifyTools(
     description:
       'Search and list products in the Shopify store. Supports Shopify search query syntax via `query` ' +
       '(e.g. "status:active", "title:*shirt*", "tag:summer", "vendor:Acme"). Returns concise product rows ' +
-      'with price range and total inventory.',
+      'with price range, total inventory, and featured-image URL and alt text when present.',
     inputSchema: z.object({
       query: z.string().optional().describe('Shopify product search query (e.g. "status:active tag:sale").'),
       first: z.number().optional().describe('Rows per page (default 10, max 50).'),
@@ -523,7 +528,7 @@ export function createShopifyTools(
     name: 'shopifyGetProduct',
     description:
       'Get a Shopify product by id, including description, SEO fields, and variants with SKU, price, and ' +
-      'inventory quantity. Also returns `template_suffix` - which page layout this product uses, null for the ' +
+      'inventory quantity, plus its featured-image URL and alt text when present. Also returns `template_suffix` - which page layout this product uses, null for the ' +
       'theme default. That suffix can be reused on another product with shopifySetProductTemplate, which is how ' +
       '"give my new product a page like this one" is answered without writing a new template. ' +
       'Accepts a numeric id or a gid://shopify/Product/... id.',

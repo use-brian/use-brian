@@ -13,6 +13,8 @@ import {
   refreshShopifyTokens,
   createShopifyTokenManager,
   shopifyGraphql,
+  listProducts,
+  getProduct,
   listOrders,
   buildCustomerSegmentQuery,
   previewCustomerSegment,
@@ -81,6 +83,23 @@ describe('[COMP:api/shopify-client] Shopify GraphQL client', () => {
   it('toShopifyGid coerces numeric ids and passes GIDs through', () => {
     expect(toShopifyGid('Order', '123')).toBe('gid://shopify/Order/123')
     expect(toShopifyGid('Order', 'gid://shopify/Order/123')).toBe('gid://shopify/Order/123')
+  })
+
+  it('requests featured image metadata for product list and detail reads', async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({
+      data: { products: { edges: [], pageInfo: { hasNextPage: false, endCursor: null } } },
+    }))
+    await listProducts(AUTH, { first: 3 })
+    const listBody = JSON.parse((mockFetch.mock.calls[0][1] as { body: string }).body)
+    expect(listBody.query).toMatch(/featuredMedia\s*\{\s*preview\s*\{\s*image\s*\{\s*url altText\s*\}/)
+
+    mockFetch.mockResolvedValueOnce(jsonResponse({ data: { product: {
+      id: 'gid://shopify/Product/1',
+      featuredMedia: { preview: { image: { url: 'https://cdn.shopify.com/widget.jpg', altText: 'Widget' } } },
+    } } }))
+    await getProduct(AUTH, '1')
+    const getBody = JSON.parse((mockFetch.mock.calls[1][1] as { body: string }).body)
+    expect(getBody.query).toMatch(/featuredMedia\s*\{\s*preview\s*\{\s*image\s*\{\s*url altText\s*\}/)
   })
 
   it('buildCustomerSegmentQuery always subscribes and uses lifetime product matches', () => {

@@ -61,6 +61,7 @@ describe("[COMP:app-web/shopify-campaign] campaign state", () => {
     expect(draft.expiresAt).toBe("2026-08-17T09:00");
     expect(draft.oncePerCustomer).toBe(true);
     expect(draft.audience).toBe("all_subscribers");
+    expect(draft.includeProductImage).toBe(true);
   });
 
   it("keeps campaign state separate by workspace and shop", () => {
@@ -71,9 +72,32 @@ describe("[COMP:app-web/shopify-campaign] campaign state", () => {
     expect(readCampaignStorage(WS, "other.myshopify.com", fallback()).draft.code).toBe("RESTOCK10");
   });
 
+  it("keeps campaign packages saved before the photo picker text-only", () => {
+    const { includeProductImage: _newDecision, ...legacyDraft } = fallback();
+    window.localStorage.setItem(
+      `shopify:campaign:${WS}:${SHOP}`,
+      JSON.stringify({ version: 1, draft: legacyDraft, history: [] }),
+    );
+    expect(readCampaignStorage(WS, SHOP, fallback()).draft.includeProductImage).toBe(false);
+  });
+
   it("drops unknown recipient data instead of persisting it again", () => {
     const unsafeDraft = {
       ...fallback(),
+      selectedProducts: [{
+        id: "gid://shopify/Product/1",
+        title: "Widget",
+        totalInventory: 8,
+        imageUrl: "https://cdn.shopify.com/widget.jpg",
+        imageAlt: "Widget pouch",
+        binary: "secret-bytes",
+      }],
+      selectedImage: {
+        productId: "gid://shopify/Product/1",
+        url: "https://cdn.shopify.com/widget.jpg",
+        alt: "Widget pouch",
+        customerEmail: "customer@example.com",
+      },
       recipientEmails: ["customer@example.com"],
       customers: [{ email: "customer@example.com" }],
     };
@@ -82,6 +106,34 @@ describe("[COMP:app-web/shopify-campaign] campaign state", () => {
     expect(raw).not.toContain("recipientEmails");
     expect(raw).not.toContain("customers");
     expect(raw).not.toContain("customer@example.com");
+    expect(raw).not.toContain("secret-bytes");
+    expect(raw).toContain("https://cdn.shopify.com/widget.jpg");
+    expect(readCampaignStorage(WS, SHOP, fallback()).draft.selectedImage).toEqual({
+      productId: "gid://shopify/Product/1",
+      url: "https://cdn.shopify.com/widget.jpg",
+      alt: "Widget pouch",
+    });
+  });
+
+  it("drops unsafe image URLs from local state", () => {
+    const unsafeDraft = {
+      ...fallback(),
+      selectedProducts: [{
+        id: "gid://shopify/Product/1",
+        title: "Widget",
+        totalInventory: 8,
+        imageUrl: "javascript:alert(1)",
+      }],
+      selectedImage: {
+        productId: "gid://shopify/Product/1",
+        url: "javascript:alert(1)",
+        alt: "Widget",
+      },
+    };
+    writeCampaignStorage(WS, SHOP, unsafeDraft, []);
+    const stored = readCampaignStorage(WS, SHOP, fallback()).draft;
+    expect(stored.selectedProducts[0]?.imageUrl).toBeUndefined();
+    expect(stored.selectedImage).toBeUndefined();
   });
 
   it("records prepared packages newest first and replaces the same discount", () => {

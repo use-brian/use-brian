@@ -23,6 +23,7 @@ import {
   writeCampaignStorage,
   zonedLocalToIso,
   type CampaignHistoryItem,
+  type CampaignImage,
   type CampaignProduct,
   type ShopifyCampaignDraft,
 } from "@/lib/shopify-campaign";
@@ -44,6 +45,8 @@ type ProductPage = {
     id?: string;
     title?: string;
     total_inventory?: number;
+    featured_image_url?: string;
+    featured_image_alt?: string;
   }>;
   has_next_page?: boolean;
   next_cursor?: string;
@@ -94,6 +97,37 @@ function choiceClass(active: boolean): string {
   );
 }
 
+function campaignProduct(item: NonNullable<ProductPage["items"]>[number]): CampaignProduct | null {
+  if (!item.id || !item.title || typeof item.total_inventory !== "number" || item.total_inventory <= 0) {
+    return null;
+  }
+  let imageUrl: string | undefined;
+  if (item.featured_image_url) {
+    try {
+      const url = new URL(item.featured_image_url);
+      if (url.protocol === "http:" || url.protocol === "https:") imageUrl = item.featured_image_url;
+    } catch {
+      // Invalid remote image metadata is ignored instead of entering the preview.
+    }
+  }
+  return {
+    id: item.id,
+    title: item.title,
+    totalInventory: item.total_inventory,
+    ...(imageUrl ? { imageUrl } : {}),
+    ...(typeof item.featured_image_alt === "string" ? { imageAlt: item.featured_image_alt } : {}),
+  };
+}
+
+function productImage(product: CampaignProduct | undefined): CampaignImage | undefined {
+  if (!product?.imageUrl) return undefined;
+  return {
+    productId: product.id,
+    url: product.imageUrl,
+    alt: product.imageAlt || product.title,
+  };
+}
+
 export function CampaignTab({
   workspaceId,
   availableTools,
@@ -128,14 +162,18 @@ export function CampaignTab({
       const fallback = createDefaultCampaignDraft(timeZone, info.primary_domain ?? "");
       const domain = info.myshopify_domain ?? "";
       const stored = readCampaignStorage(workspaceId, domain, fallback);
+      const loadedProducts = (productPage.items ?? [])
+        .map(campaignProduct)
+        .filter((product): product is CampaignProduct => !!product);
+      const byId = new Map(loadedProducts.map((product) => [product.id, product]));
+      const selectedProducts = stored.draft.selectedProducts.map((product) => byId.get(product.id) ?? product);
+      const selectedImage = stored.draft.includeProductImage
+        ? productImage(
+            selectedProducts.find((product) => product.id === stored.draft.selectedImage?.productId),
+          ) ?? selectedProducts.map(productImage).find((image): image is CampaignImage => !!image)
+        : undefined;
       setShop(info);
-      setProducts(
-        (productPage.items ?? [])
-          .filter((item): item is { id: string; title: string; total_inventory: number } =>
-            !!item.id && !!item.title && typeof item.total_inventory === "number" && item.total_inventory > 0,
-          )
-          .map((item) => ({ id: item.id, title: item.title, totalInventory: item.total_inventory })),
-      );
+      setProducts(loadedProducts);
       setMoreProducts(productPage.has_next_page === true);
       setProductCursor(productPage.next_cursor ?? null);
       setAutomaticDiscounts(
@@ -143,7 +181,11 @@ export function CampaignTab({
           (item) => item.kind === "automatic" && item.status?.toUpperCase() === "ACTIVE",
         ),
       );
-      setDraft(stored.draft);
+      setDraft({
+        ...stored.draft,
+        selectedProducts,
+        selectedImage,
+      });
       setHistory(stored.history);
     } catch (err) {
       setError(toolMessage(err));
@@ -164,10 +206,8 @@ export function CampaignTab({
         cursor: productCursor,
       });
       const additions = (page.items ?? [])
-        .filter((item): item is { id: string; title: string; total_inventory: number } =>
-          !!item.id && !!item.title && typeof item.total_inventory === "number" && item.total_inventory > 0,
-        )
-        .map((item) => ({ id: item.id, title: item.title, totalInventory: item.total_inventory }));
+        .map(campaignProduct)
+        .filter((product): product is CampaignProduct => !!product);
       setProducts((current) => {
         const byId = new Map((current ?? []).map((product) => [product.id, product]));
         for (const product of additions) byId.set(product.id, product);
@@ -231,8 +271,16 @@ export function CampaignTab({
     const selected = alreadySelected
       ? draft.selectedProducts.filter((item) => item.id !== product.id)
       : [...draft.selectedProducts, product];
+    const selectedImage = draft.includeProductImage
+      ? productImage(selected.find((item) => item.id === draft.selectedImage?.productId))
+        ?? selected.map(productImage).find((image): image is CampaignImage => !!image)
+      : undefined;
     setError(null);
-    updateDraft({ selectedProducts: selected }, { invalidateAudience: true });
+    updateDraft({
+      selectedProducts: selected,
+      selectedImage,
+      checklist: { ...draft.checklist, image: false },
+    }, { invalidateAudience: true });
   }
 
   async function previewAudience() {
@@ -326,6 +374,9 @@ Reply with ONLY one JSON object, no prose:
     if (!current.subject.trim() || !current.body.trim() || !current.ctaLabel.trim()) {
       return t.shopifyApp.campaignNeedCopy;
     }
+    if (current.includeProductImage && !current.selectedImage) {
+      return t.shopifyApp.campaignNeedPhoto;
+    }
     try {
       const url = new URL(current.ctaUrl);
       if (url.protocol !== "http:" && url.protocol !== "https:") return t.shopifyApp.campaignBadUrl;
@@ -358,7 +409,12 @@ Reply with ONLY one JSON object, no prose:
       setStatus(t.shopifyApp.campaignRefreshingStock);
       const refreshed = await Promise.all(
         working.selectedProducts.map(async (product) => {
-          const current = await callTool<{ title?: string; total_inventory?: number }>(
+          const current = await callTool<{
+            title?: string;
+            total_inventory?: number;
+            featured_image_url?: string;
+            featured_image_alt?: string;
+          }>(
             workspaceId,
             "shopifyGetProduct",
             { productId: product.id },
@@ -367,12 +423,26 @@ Reply with ONLY one JSON object, no prose:
             ...product,
             title: current.title ?? product.title,
             totalInventory: current.total_inventory ?? 0,
+            imageUrl: current.featured_image_url,
+            imageAlt: current.featured_image_alt,
           };
         }),
       );
       if (!refreshed.some((product) => product.totalInventory > 0)) {
         throw new Error(t.shopifyApp.campaignAllOutOfStock);
       }
+      const refreshedImage = working.includeProductImage
+        ? productImage(refreshed.find((product) => product.id === working.selectedImage?.productId))
+        : undefined;
+      if (working.includeProductImage && !refreshedImage) {
+        throw new Error(t.shopifyApp.campaignPhotoUnavailable);
+      }
+      working = {
+        ...working,
+        selectedProducts: refreshed,
+        selectedImage: refreshedImage,
+        updatedAt: Date.now(),
+      };
 
       setStatus(t.shopifyApp.campaignRefreshingAudience);
       const audience = await callTool<AudiencePreview>(workspaceId, "shopifyPreviewCustomerSegment", {
@@ -384,7 +454,6 @@ Reply with ONLY one JSON object, no prose:
       if ((audience.total_count ?? 0) <= 0) throw new Error(t.shopifyApp.campaignEmptyAudience);
       working = {
         ...working,
-        selectedProducts: refreshed,
         audienceCount: audience.total_count,
         audienceQuery: audience.query,
         updatedAt: Date.now(),
@@ -517,6 +586,7 @@ Reply with ONLY one JSON object, no prose:
   const allChecklistReady =
     draft.checklist.preview &&
     draft.checklist.mobile &&
+    (!draft.includeProductImage || draft.checklist.image) &&
     draft.checklist.schedule &&
     (draft.automaticDiscountDecision === "keep" || draft.checklist.automaticDiscount);
 
@@ -559,6 +629,13 @@ Reply with ONLY one JSON object, no prose:
               className={cn(choiceClass(selectedIds.has(product.id)), audienceLocked && "opacity-70")}
             >
               <div className="flex items-start gap-2">
+                {product.imageUrl ? (
+                  <img
+                    src={product.imageUrl}
+                    alt={product.imageAlt || product.title}
+                    className="size-12 rounded-lg border border-border object-cover"
+                  />
+                ) : null}
                 <Checkbox
                   checked={selectedIds.has(product.id)}
                   disabled={audienceLocked}
@@ -758,10 +835,105 @@ Reply with ONLY one JSON object, no prose:
         <div className="grid gap-2 sm:grid-cols-2">
           <Field label={t.shopifyApp.campaignCtaLabel}>
             <input className={inputClass} value={draft.ctaLabel} onChange={(event) => updateDraft({ ctaLabel: event.target.value })} />
+            <span className="text-[11.5px] text-muted-foreground">{t.shopifyApp.campaignCtaLabelHelp}</span>
           </Field>
           <Field label={t.shopifyApp.campaignCtaUrl}>
             <input className={inputClass} value={draft.ctaUrl} onChange={(event) => updateDraft({ ctaUrl: event.target.value })} />
+            <span className="text-[11.5px] text-muted-foreground">{t.shopifyApp.campaignCtaUrlHelp}</span>
           </Field>
+        </div>
+
+        <div className="space-y-2">
+          <div>
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              {t.shopifyApp.campaignPhotoTitle}
+            </h3>
+            <p className="mt-1 text-[12px] text-muted-foreground">{t.shopifyApp.campaignPhotoHelp}</p>
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            <button
+              type="button"
+              className={choiceClass(!draft.includeProductImage)}
+              aria-label={t.shopifyApp.campaignNoPhoto}
+              onClick={() => updateDraft({
+                includeProductImage: false,
+                selectedImage: undefined,
+                checklist: { ...draft.checklist, image: false },
+              })}
+            >
+              <span className="block text-[13px] font-medium">{t.shopifyApp.campaignNoPhoto}</span>
+              <span className="mt-1 block text-[12px] text-muted-foreground">
+                {t.shopifyApp.campaignNoPhotoHelp}
+              </span>
+            </button>
+            {draft.selectedProducts.filter((product) => product.imageUrl).map((product) => (
+              <button
+                type="button"
+                key={product.id}
+                className={cn(choiceClass(
+                  draft.includeProductImage && draft.selectedImage?.productId === product.id,
+                ), "flex items-center gap-3")}
+                aria-label={format(t.shopifyApp.campaignUseProductPhoto, { product: product.title })}
+                onClick={() => updateDraft({
+                  includeProductImage: true,
+                  selectedImage: productImage(product),
+                  checklist: { ...draft.checklist, image: false },
+                })}
+              >
+                <img
+                  src={product.imageUrl}
+                  alt={product.imageAlt || product.title}
+                  className="size-16 shrink-0 rounded-lg border border-border object-cover"
+                />
+                <span className="min-w-0 text-[13px] font-medium">{product.title}</span>
+              </button>
+            ))}
+          </div>
+          {draft.selectedProducts.length > 0 && !draft.selectedProducts.some((product) => product.imageUrl) ? (
+            <Note tone="muted">{t.shopifyApp.campaignNoProductPhotos}</Note>
+          ) : null}
+        </div>
+
+        <div className="space-y-2">
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            {t.shopifyApp.campaignMessagePreviewTitle}
+          </h3>
+          <div
+            aria-label={t.shopifyApp.campaignMessagePreviewTitle}
+            className="overflow-hidden rounded-xl border border-border bg-muted/40 p-3 sm:p-5"
+          >
+            <div className="mx-auto max-w-xl overflow-hidden rounded-xl border border-border bg-background shadow-sm">
+              <div className="border-b border-border px-4 py-3">
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  {t.shopifyApp.campaignSubject}
+                </p>
+                <p className="mt-1 text-sm font-semibold">
+                  {draft.subject || t.shopifyApp.campaignPreviewSubjectPlaceholder}
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {draft.preview || t.shopifyApp.campaignPreviewTextPlaceholder}
+                </p>
+              </div>
+              {draft.includeProductImage && draft.selectedImage ? (
+                <img
+                  src={draft.selectedImage.url}
+                  alt={draft.selectedImage.alt}
+                  className="aspect-[16/9] w-full object-cover"
+                />
+              ) : null}
+              <div className="space-y-4 px-5 py-6 sm:px-8">
+                <p className="whitespace-pre-wrap text-sm leading-6 text-foreground">
+                  {draft.body || t.shopifyApp.campaignPreviewBodyPlaceholder}
+                </p>
+                <span className="inline-flex min-h-10 items-center justify-center rounded-lg bg-foreground px-5 py-2 text-sm font-semibold text-background">
+                  {draft.ctaLabel || t.shopifyApp.campaignPreviewButtonPlaceholder}
+                </span>
+                <p className="break-all text-[11px] text-muted-foreground">
+                  {draft.ctaUrl || t.shopifyApp.campaignPreviewUrlPlaceholder}
+                </p>
+              </div>
+            </div>
+          </div>
         </div>
       </CampaignSection>
 
@@ -806,6 +978,34 @@ Reply with ONLY one JSON object, no prose:
             <CopyField label={t.shopifyApp.campaignCtaLabel} value={draft.ctaLabel} copyKey="cta" copied={copied} onCopy={copyText} copyLabel={t.shopifyApp.copy} copiedLabel={t.shopifyApp.copied} />
             <CopyField label={t.shopifyApp.campaignCtaUrl} value={draft.ctaUrl} copyKey="url" copied={copied} onCopy={copyText} copyLabel={t.shopifyApp.copy} copiedLabel={t.shopifyApp.copied} />
           </div>
+          {draft.includeProductImage && draft.selectedImage ? (
+            <div className="grid gap-3 rounded-xl border border-border bg-background p-3 sm:grid-cols-[160px_1fr]">
+              <img
+                src={draft.selectedImage.url}
+                alt={draft.selectedImage.alt}
+                className="aspect-square w-full rounded-lg border border-border object-cover"
+              />
+              <div className="space-y-2">
+                <CopyField
+                  label={t.shopifyApp.campaignPhotoUrl}
+                  value={draft.selectedImage.url}
+                  copyKey="photo"
+                  copied={copied}
+                  onCopy={copyText}
+                  copyLabel={t.shopifyApp.copy}
+                  copiedLabel={t.shopifyApp.copied}
+                />
+                <a
+                  href={draft.selectedImage.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className={buttonVariants({ variant: "outline", size: "sm" })}
+                >
+                  {t.shopifyApp.campaignOpenPhoto}<ExternalLink className="size-3.5" aria-hidden />
+                </a>
+              </div>
+            </div>
+          ) : null}
 
           <div className="flex flex-wrap gap-2">
             <a href={draft.segment!.adminUrl} target="_blank" rel="noreferrer" className={buttonVariants({ variant: "outline", size: "sm" })}>
@@ -825,6 +1025,9 @@ Reply with ONLY one JSON object, no prose:
             </h3>
             <ChecklistRow checked={draft.checklist.preview} onChange={(checked) => updateDraft({ checklist: { ...draft.checklist, preview: checked } })} label={t.shopifyApp.campaignChecklistPreview} />
             <ChecklistRow checked={draft.checklist.mobile} onChange={(checked) => updateDraft({ checklist: { ...draft.checklist, mobile: checked } })} label={t.shopifyApp.campaignChecklistMobile} />
+            {draft.includeProductImage ? (
+              <ChecklistRow checked={draft.checklist.image} onChange={(checked) => updateDraft({ checklist: { ...draft.checklist, image: checked } })} label={t.shopifyApp.campaignChecklistImage} />
+            ) : null}
             {draft.automaticDiscountDecision === "pause" ? (
               <ChecklistRow checked={draft.checklist.automaticDiscount} onChange={(checked) => updateDraft({ checklist: { ...draft.checklist, automaticDiscount: checked } })} label={t.shopifyApp.campaignChecklistAutomatic} />
             ) : null}

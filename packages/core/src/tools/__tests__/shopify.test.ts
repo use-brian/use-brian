@@ -165,6 +165,41 @@ describe('[COMP:tools/shopify] Shopify tools', () => {
     }
   })
 
+  it('projects featured image metadata from product reads', async () => {
+    const product = {
+      id: 'gid://shopify/Product/1',
+      title: 'Widget',
+      totalInventory: 8,
+      featuredMedia: {
+        preview: { image: { url: 'https://cdn.shopify.com/widget.jpg', altText: 'Widget pouch' } },
+      },
+    }
+    const api = mockApi({
+      listProducts: vi.fn().mockResolvedValue({
+        edges: [{ node: product }],
+        pageInfo: { hasNextPage: false },
+      }),
+      getProduct: vi.fn().mockResolvedValue(product),
+    })
+    const tools = createShopifyTools(api)
+    const list = await tools.find((tool) => tool.name === 'shopifyListProducts')!.execute({}, {} as never)
+    const get = await tools.find((tool) => tool.name === 'shopifyGetProduct')!.execute(
+      { productId: '1' },
+      {} as never,
+    )
+
+    expect(list.data).toMatchObject({
+      items: [{
+        featured_image_url: 'https://cdn.shopify.com/widget.jpg',
+        featured_image_alt: 'Widget pouch',
+      }],
+    })
+    expect(get.data).toMatchObject({
+      featured_image_url: 'https://cdn.shopify.com/widget.jpg',
+      featured_image_alt: 'Widget pouch',
+    })
+  })
+
   it('write + destructive descriptions mention the Approve/Deny prompt, never "Requires confirmation"', () => {
     const tools = createShopifyTools(mockApi())
     for (const tool of tools) {
