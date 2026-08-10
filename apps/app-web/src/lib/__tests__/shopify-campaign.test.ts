@@ -10,6 +10,7 @@ import {
   writeCampaignStorage,
   zonedLocalToIso,
   type CampaignHistoryItem,
+  type ShopifyCampaignDraft,
 } from "../shopify-campaign";
 
 const WS = "workspace-1";
@@ -101,7 +102,7 @@ describe("[COMP:app-web/shopify-campaign] campaign state", () => {
       recipientEmails: ["customer@example.com"],
       customers: [{ email: "customer@example.com" }],
     };
-    writeCampaignStorage(WS, SHOP, unsafeDraft, []);
+    writeCampaignStorage(WS, SHOP, unsafeDraft as unknown as ShopifyCampaignDraft, []);
     const raw = window.localStorage.getItem(`shopify:campaign:${WS}:${SHOP}`) ?? "";
     expect(raw).not.toContain("recipientEmails");
     expect(raw).not.toContain("customers");
@@ -128,7 +129,7 @@ describe("[COMP:app-web/shopify-campaign] campaign state", () => {
         url: "blob:secret-preview-bytes",
       },
     };
-    writeCampaignStorage(WS, SHOP, unsafeDraft, []);
+    writeCampaignStorage(WS, SHOP, unsafeDraft as unknown as ShopifyCampaignDraft, []);
     const raw = window.localStorage.getItem(`shopify:campaign:${WS}:${SHOP}`) ?? "";
     expect(raw).toContain("campaign-photo-1");
     expect(raw).toContain("image/jpeg");
@@ -157,7 +158,7 @@ describe("[COMP:app-web/shopify-campaign] campaign state", () => {
         alt: "Widget",
       },
     };
-    writeCampaignStorage(WS, SHOP, unsafeDraft, []);
+    writeCampaignStorage(WS, SHOP, unsafeDraft as unknown as ShopifyCampaignDraft, []);
     const stored = readCampaignStorage(WS, SHOP, fallback()).draft;
     expect(stored.selectedProducts[0]?.imageUrl).toBeUndefined();
     expect(stored.selectedImage).toBeUndefined();

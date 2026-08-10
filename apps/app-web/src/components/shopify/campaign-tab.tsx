@@ -605,8 +605,9 @@ Reply with ONLY one JSON object, no prose:
           throw new Error(t.shopifyApp.campaignOwnPhotoUnavailable);
         }
       } else if (working.includeProductImage && working.selectedImage?.kind === "product") {
+        const selectedProductId = working.selectedImage.productId;
         refreshedImage = productImage(
-          refreshed.find((product) => product.id === working.selectedImage?.productId),
+          refreshed.find((product) => product.id === selectedProductId),
         );
       }
       if (working.includeProductImage && !refreshedImage) {
