@@ -182,7 +182,7 @@ Reply with ONLY a JSON object, no prose:
       : 0;
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
         {t.shopifyApp.whichOrders}
       </h2>
@@ -215,7 +215,7 @@ Reply with ONLY a JSON object, no prose:
 
       {demand ? (
         <div className="space-y-3">
-          <div className="grid gap-3 sm:grid-cols-3">
+          <div className="grid gap-2 sm:grid-cols-3">
             <Kpi label={t.shopifyApp.orders} value={orderCount} />
             <Kpi label={t.shopifyApp.variants} value={demand.rows.length} />
             <Kpi label={t.shopifyApp.unitsOrdered} value={demand.totalUnits} />
@@ -232,7 +232,7 @@ Reply with ONLY a JSON object, no prose:
             <Note>{`${t.shopifyApp.notFound} ${unmatched.join(", ")}`}</Note>
           ) : null}
           {stock ? (
-            <div className="grid gap-3 sm:grid-cols-3">
+            <div className="grid gap-2 sm:grid-cols-3">
               <Kpi label={t.shopifyApp.short} value={shortCount} />
             </div>
           ) : null}
@@ -241,12 +241,12 @@ Reply with ONLY a JSON object, no prose:
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-border text-[11px] uppercase tracking-wide text-muted-foreground">
-                  <th className="px-3 py-2 text-left font-semibold">{t.shopifyApp.product}</th>
-                  <th className="px-3 py-2 text-left font-semibold">{t.shopifyApp.variant}</th>
-                  <th className="px-3 py-2 text-left font-semibold">{t.shopifyApp.sku}</th>
-                  <th className="px-3 py-2 text-right font-semibold">{t.shopifyApp.ordered}</th>
-                  <th className="px-3 py-2 text-right font-semibold">{t.shopifyApp.onHand}</th>
-                  <th className="px-3 py-2 text-right font-semibold">{t.shopifyApp.short}</th>
+                  <th className="px-2.5 py-1.5 text-left font-semibold">{t.shopifyApp.product}</th>
+                  <th className="px-2.5 py-1.5 text-left font-semibold">{t.shopifyApp.variant}</th>
+                  <th className="px-2.5 py-1.5 text-left font-semibold">{t.shopifyApp.sku}</th>
+                  <th className="px-2.5 py-1.5 text-right font-semibold">{t.shopifyApp.ordered}</th>
+                  <th className="px-2.5 py-1.5 text-right font-semibold">{t.shopifyApp.onHand}</th>
+                  <th className="px-2.5 py-1.5 text-right font-semibold">{t.shopifyApp.short}</th>
                 </tr>
               </thead>
               <tbody>
@@ -258,15 +258,15 @@ Reply with ONLY a JSON object, no prose:
                       key={demandKey(r)}
                       className={`border-b border-border last:border-0 ${gap ? "text-amber-600 dark:text-amber-400" : ""}`}
                     >
-                      <td className="px-3 py-2">{r.title}</td>
-                      <td className="px-3 py-2">{r.variant || "-"}</td>
-                      <td className="px-3 py-2 text-muted-foreground">{r.sku || "-"}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{r.demand}</td>
+                      <td className="px-2.5 py-1.5">{r.title}</td>
+                      <td className="px-2.5 py-1.5">{r.variant || "-"}</td>
+                      <td className="px-2.5 py-1.5 text-muted-foreground">{r.sku || "-"}</td>
+                      <td className="px-2.5 py-1.5 text-right tabular-nums">{r.demand}</td>
                       {/* A variant the assistant could not find shows a dash,
                           never 0: an unknown rendered as zero is how "we have
                           none of these" gets invented. */}
-                      <td className="px-3 py-2 text-right tabular-nums">{onHand ?? "-"}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{gap ? gap : "-"}</td>
+                      <td className="px-2.5 py-1.5 text-right tabular-nums">{onHand ?? "-"}</td>
+                      <td className="px-2.5 py-1.5 text-right tabular-nums">{gap ? gap : "-"}</td>
                     </tr>
                   );
                 })}

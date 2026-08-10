@@ -12,7 +12,9 @@
  * [COMP:app-web/shopify-app]
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { recordRun } from "@/lib/shopify-history";
 import { useT } from "@/lib/i18n/client";
 import { askAssistant, callTool, ShopifyCallError } from "@/lib/api/shopify";
 import {
@@ -91,8 +93,19 @@ export function AnalyseTab({ workspaceId }: { workspaceId: string }) {
     },
   ];
 
-  const [picked, setPicked] = useState(ANALYSES[0].key);
-  const [range, setRange] = useState<Range>(DEFAULT_RANGE);
+  // A history row deep-links back to the exact question and window it ran on,
+  // so those params seed the controls. Read once on mount rather than tracked:
+  // after that the pills and the range picker own the state, and re-seeding on
+  // every param change would yank a selection the owner just made.
+  const params = useSearchParams();
+  const [picked, setPicked] = useState(
+    () => ANALYSES.find((a) => a.key === params?.get("an"))?.key ?? ANALYSES[0].key,
+  );
+  const [range, setRange] = useState<Range>(() => {
+    const since = params?.get("since");
+    const until = params?.get("until");
+    return since && until ? { preset: "custom", since, until } : DEFAULT_RANGE;
+  });
   const [ask, setAsk] = useState("");
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
@@ -176,6 +189,16 @@ Rules:
   contacted. Treat that as a fix to the store, never as outreach.`;
 
       setAnswer(await askAssistant(workspaceId, task));
+      // Recorded only once the question actually produced an answer - a failed
+      // or abandoned run is not history worth reopening.
+      recordRun(workspaceId, {
+        key: analysis.key,
+        title: analysis.title,
+        since: range.since,
+        until: range.until,
+        at: Date.now(),
+        ...(ask ? { ask } : {}),
+      });
       setStatus(null);
     } catch (err) {
       setError(err instanceof ShopifyCallError ? err.message : String(err));
@@ -186,7 +209,7 @@ Rules:
   }
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       <div>
         <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
           {t.shopifyApp.whatToKnow}
@@ -240,7 +263,7 @@ Rules:
       {status ? <p className="text-sm text-muted-foreground">{status}</p> : null}
 
       {kpis ? (
-        <div className="grid gap-3 sm:grid-cols-3">
+        <div className="grid gap-2 sm:grid-cols-3">
           {kpis.map((k) => (
             <Kpi key={k.label} label={k.label} value={k.value} />
           ))}
@@ -253,7 +276,7 @@ Rules:
       ))}
 
       {answer ? (
-        <pre className="whitespace-pre-wrap rounded-xl border border-border bg-card px-4 py-3 text-[13px]">
+        <pre className="whitespace-pre-wrap rounded-xl border border-border bg-card px-3 py-2 text-[13px]">
           {answer}
         </pre>
       ) : null}

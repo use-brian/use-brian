@@ -7,6 +7,12 @@
  * user's session and reaches the store through `/api/apps/shopify`, which
  * executes tools but never decides them.
  *
+ * Structure is the operator-surface shape every other built-in uses -
+ * `OperatorTopbar` over a full-height column, sections in the topbar's `center`
+ * slot AND in the left sidebar panel, exactly as CRM does. The workspace layout
+ * never constrains width, so nothing here may either: a `max-w` on the root is
+ * what made this read as a document rather than an app.
+ *
  * Availability is a runtime question, not a config one. There is no per-
  * workspace install for a built-in, so the surface asks the server what it can
  * reach and says plainly when the answer is nothing - a store connector that
@@ -16,24 +22,42 @@
  * [COMP:app-web/shopify-app]
  */
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { ShoppingBag } from "lucide-react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { buttonVariants } from "@/components/ui/button";
 import { useT } from "@/lib/i18n/client";
 import { listTools } from "@/lib/api/shopify";
+import {
+  SHOPIFY_SECTIONS,
+  shopifySectionFromParams,
+  type ShopifySection,
+} from "@/lib/shopify-view";
+import { cn } from "@/lib/utils";
 import { AnalyseTab } from "./analyse-tab";
 import { DraftTab } from "./draft-tab";
 import { InventoryTab } from "./inventory-tab";
 import { Note } from "./shopify-shared";
 
-type TabKey = "draft" | "inventory" | "analyse";
-
 export function ShopifySurface({ workspaceId }: { workspaceId: string }) {
   const t = useT();
-  const [tab, setTab] = useState<TabKey>("draft");
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const section = shopifySectionFromParams(searchParams);
+
   const [state, setState] = useState<"loading" | "ready" | "empty" | "error">("loading");
   const [error, setError] = useState<string | null>(null);
+
+  // `replace`, not `push`: flipping between sections is a view change, not a
+  // place you should have to press back through three times to leave.
+  const setSection = useCallback(
+    (next: ShopifySection) => {
+      router.replace(`${pathname}?section=${next}`, { scroll: false });
+    },
+    [router, pathname],
+  );
 
   useEffect(() => {
     let alive = true;
@@ -53,80 +77,76 @@ export function ShopifySurface({ workspaceId }: { workspaceId: string }) {
     };
   }, [workspaceId]);
 
-  const tabs: Array<{ key: TabKey; label: string }> = [
-    { key: "draft", label: t.shopifyApp.tabDraft },
-    { key: "inventory", label: t.shopifyApp.tabInventory },
-    { key: "analyse", label: t.shopifyApp.tabAnalyse },
-  ];
+  const labels: Record<ShopifySection, string> = {
+    draft: t.shopifyApp.tabDraft,
+    inventory: t.shopifyApp.tabInventory,
+    analyse: t.shopifyApp.tabAnalyse,
+  };
 
   return (
-    <div className="mx-auto w-full max-w-5xl px-4 py-6">
-      <header className="flex items-start gap-3">
-        <ShoppingBag className="mt-0.5 size-5 text-muted-foreground" aria-hidden />
-        <div>
-          <h1 className="text-lg font-semibold tracking-tight">{t.shopifyApp.title}</h1>
-          <p className="mt-0.5 text-[13px] text-muted-foreground">{t.shopifyApp.subtitle}</p>
-        </div>
-      </header>
+    <div className="flex h-full min-h-0 flex-col">
+      <OperatorTopbar
+        app="shopify"
+        center={
+          state === "ready" ? (
+            <div className="flex shrink-0 items-center gap-0.5 rounded-lg bg-sidebar-accent/60 p-0.5">
+              {SHOPIFY_SECTIONS.map((key) => (
+                <button
+                  key={key}
+                  type="button"
+                  aria-pressed={section === key}
+                  onClick={() => setSection(key)}
+                  className={cn(
+                    "inline-flex h-6.5 items-center rounded-md px-2 text-[12.5px] transition-colors",
+                    section === key
+                      ? "bg-background font-medium shadow-sm"
+                      : "text-sidebar-foreground/70 hover:text-sidebar-accent-foreground",
+                  )}
+                >
+                  {labels[key]}
+                </button>
+              ))}
+            </div>
+          ) : null
+        }
+      />
 
-      {state === "loading" ? (
-        <p className="mt-6 text-sm text-muted-foreground">{t.shopifyApp.loading}</p>
-      ) : null}
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="px-4 py-3">
+          {state === "loading" ? (
+            <p className="text-sm text-muted-foreground">{t.shopifyApp.loading}</p>
+          ) : null}
 
-      {state === "error" ? (
-        <div className="mt-6">
-          <Note tone="error">{error}</Note>
-        </div>
-      ) : null}
+          {state === "error" ? <Note tone="error">{error}</Note> : null}
 
-      {state === "empty" ? (
-        <div className="mt-6 space-y-3 rounded-xl border border-border bg-card px-5 py-6">
-          <p className="text-sm font-medium">{t.shopifyApp.notConnected}</p>
-          <p className="text-[13px] text-muted-foreground">{t.shopifyApp.notConnectedHelp}</p>
-          {/* `buttonVariants`, not hand-rolled classes: the filled action token
-              is `bg-action`, and `bg-primary` fills are a frozen legacy list
-              reserved for compact indicators (badges, avatars). */}
-          <Link
-            href={`/w/${workspaceId}/studio/connectors`}
-            className={buttonVariants({ size: "sm" })}
-          >
-            {t.shopifyApp.openStudio}
-          </Link>
-        </div>
-      ) : null}
-
-      {state === "ready" ? (
-        <>
-          <div
-            role="tablist"
-            aria-label={t.shopifyApp.title}
-            className="mt-5 flex gap-1 border-b border-border"
-          >
-            {tabs.map((x) => (
-              <button
-                key={x.key}
-                role="tab"
-                type="button"
-                aria-selected={tab === x.key}
-                onClick={() => setTab(x.key)}
-                className={`-mb-px border-b-2 px-3 py-2 text-sm font-medium transition-colors ${
-                  tab === x.key
-                    ? "border-primary text-foreground"
-                    : "border-transparent text-muted-foreground hover:text-foreground"
-                }`}
+          {state === "empty" ? (
+            // The measure lives on THIS block, never the root: an empty-state
+            // paragraph stretched across a wide pane is unreadable, while the
+            // tables and template grid below want every pixel.
+            <div className="max-w-xl space-y-2 rounded-xl border border-border bg-card px-4 py-4">
+              <p className="text-sm font-medium">{t.shopifyApp.notConnected}</p>
+              <p className="text-[13px] text-muted-foreground">{t.shopifyApp.notConnectedHelp}</p>
+              {/* `buttonVariants`, not hand-rolled classes: the filled action
+                  token is `bg-action`, and `bg-primary` fills are a frozen
+                  legacy list reserved for compact indicators. */}
+              <Link
+                href={`/w/${workspaceId}/studio/connectors`}
+                className={buttonVariants({ size: "sm" })}
               >
-                {x.label}
-              </button>
-            ))}
-          </div>
+                {t.shopifyApp.openStudio}
+              </Link>
+            </div>
+          ) : null}
 
-          <div className="mt-5">
-            {tab === "draft" ? <DraftTab workspaceId={workspaceId} /> : null}
-            {tab === "inventory" ? <InventoryTab workspaceId={workspaceId} /> : null}
-            {tab === "analyse" ? <AnalyseTab workspaceId={workspaceId} /> : null}
-          </div>
-        </>
-      ) : null}
+          {state === "ready" ? (
+            <>
+              {section === "draft" ? <DraftTab workspaceId={workspaceId} /> : null}
+              {section === "inventory" ? <InventoryTab workspaceId={workspaceId} /> : null}
+              {section === "analyse" ? <AnalyseTab workspaceId={workspaceId} /> : null}
+            </>
+          ) : null}
+        </div>
+      </div>
     </div>
   );
 }

@@ -50,8 +50,13 @@ export function surfaceSkeletonKind(
     case "brain":
       return "brain";
     // Studio and Chat both open as "narrow left rail + wide detail pane".
+    // Shopify joins them: it gained an operator topbar and a sidebar panel on
+    // 2026-08-10, and was briefly classified "page" from when it was a centred
+    // column. A skeleton that outlives its layout paints the wrong frame, which
+    // is worse than the blank it replaced.
     case "studio":
     case "chat":
+    case "shopify":
       return "rail";
     case "workflow":
     case "feed":
@@ -66,13 +71,10 @@ export function surfaceSkeletonKind(
       return "list";
     // `p`, `inbox` (redirects to `/p`), and the root land on the doc surface.
     // `apps` is one full-bleed pane under a chrome row (the custom-app frame),
-    // which is the page shape too. `shopify` is a centred column under a
-    // header - the same measure the doc surface uses, so it swaps in without
-    // a layout jump.
+    // which is the page shape too.
     case "p":
     case "inbox":
     case "apps":
-    case "shopify":
     case null:
     case undefined:
       return "page";

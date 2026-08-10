@@ -133,6 +133,7 @@ import { CrmSidebarPanel } from "./sidebar-panels/crm-sidebar-panel";
 import { BrowsersSidebarPanel } from "./sidebar-panels/browsers-sidebar-panel";
 import { ChatSidebarPanel } from "./sidebar-panels/chat-sidebar-panel";
 import { OfficeSidebarPanel } from "./sidebar-panels/office-sidebar-panel";
+import { ShopifySidebarPanel } from "./sidebar-panels/shopify-sidebar-panel";
 
 export type SidebarMove = {
   viewId: string;
@@ -776,6 +777,8 @@ export function DocSidebar(props: Props) {
           <BrowsersSidebarPanel workspaceId={workspaceId} />
         ) : props.activeSurface === "chat" ? (
           <ChatSidebarPanel workspaceId={workspaceId} />
+        ) : props.activeSurface === "shopify" ? (
+          <ShopifySidebarPanel workspaceId={workspaceId} />
         ) : null}
 
         {props.activeSurface === "p" && (

@@ -14,7 +14,8 @@
  * [COMP:app-web/shopify-app]
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { ImagePlus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useT } from "@/lib/i18n/client";
 import { askAssistant, callTool, ShopifyCallError } from "@/lib/api/shopify";
@@ -43,15 +44,27 @@ const SECTION_LABEL: Record<string, string> = {
 const sectionLabel = (t: string): string =>
   SECTION_LABEL[t] ?? t.replace(/[-_]/g, " ").replace(/^./, (c) => c.toUpperCase());
 
+
+/** The `handle` out of any Shopify product URL. Null when it is not one. */
+export function productHandleFromUrl(raw: string): string | null {
+  const m = /\/products\/([^/?#\s]+)/.exec(String(raw ?? "").trim());
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
 export function DraftTab({ workspaceId }: { workspaceId: string }) {
   const t = useT();
   const [name, setName] = useState("");
   const [price, setPrice] = useState("");
   const [notes, setNotes] = useState("");
   const [files, setFiles] = useState<File[]>([]);
+  const fileInput = useRef<HTMLInputElement>(null);
   const [templates, setTemplates] = useState<Template[] | null>(null);
   const [templateError, setTemplateError] = useState<string | null>(null);
   const [chosen, setChosen] = useState<string>("");
+  const [link, setLink] = useState("");
+  const [linkBusy, setLinkBusy] = useState(false);
+  const [linkNote, setLinkNote] = useState<string | null>(null);
+  const [copiedFrom, setCopiedFrom] = useState<string | null>(null);
   const [steps, setSteps] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -75,6 +88,60 @@ export function DraftTab({ workspaceId }: { workspaceId: string }) {
   }, [workspaceId]);
 
   const log = (line: string) => setSteps((s) => [...s, line]);
+
+  /**
+   * "Give my product a page like THAT one."
+   *
+   * Resolves the pasted link to a product, reads which template it uses, and
+   * selects that template for the new product. This is REUSE, which is what
+   * the pasted link actually means - the owner is pointing at a layout they
+   * already like.
+   *
+   * It cannot CREATE a template: `shopifyCreateProductTemplate` writes a file
+   * into the live theme, so it is destructive-classified and unreachable from
+   * this surface by construction (and from the assistant consult, same
+   * ceiling). When the target has no custom template there is nothing to copy,
+   * and the honest answer is to say so and point at the surface that does have
+   * an approval gate - chat - rather than fail silently.
+   */
+  async function useLayoutFromLink() {
+    const handle = productHandleFromUrl(link);
+    setCopiedFrom(null);
+    if (!handle) {
+      setLinkNote(t.shopifyApp.linkLooksWrong);
+      return;
+    }
+    setLinkBusy(true);
+    setLinkNote(null);
+    try {
+      const found = await callTool<{ items?: Array<{ id?: string; title?: string }> }>(
+        workspaceId,
+        "shopifyListProducts",
+        { query: `handle:${handle}`, first: 1 },
+      );
+      const hit = (found.items ?? [])[0];
+      if (!hit?.id) {
+        setLinkNote(t.shopifyApp.productNotFound);
+        return;
+      }
+      const full = await callTool<{ title?: string; template_suffix?: string | null }>(
+        workspaceId,
+        "shopifyGetProduct",
+        { productId: hit.id },
+      );
+      const suffix = full.template_suffix ?? null;
+      if (!suffix) {
+        setLinkNote(t.shopifyApp.usesThemeDefault);
+        return;
+      }
+      setChosen(suffix);
+      setCopiedFrom(full.title ?? hit.title ?? handle);
+    } catch (err) {
+      setLinkNote(err instanceof ShopifyCallError ? err.message : String(err));
+    } finally {
+      setLinkBusy(false);
+    }
+  }
 
   async function createDraft() {
     if (!name.trim()) {
@@ -171,8 +238,8 @@ on, and every fact you still need before this could go live.`;
   }
 
   return (
-    <div className="space-y-5">
-      <div className="grid gap-3 sm:grid-cols-2">
+    <div className="space-y-3">
+      <div className="grid gap-2 sm:grid-cols-2">
         <Field label={t.shopifyApp.productName}>
           <input
             value={name}
@@ -192,15 +259,45 @@ on, and every fact you still need before this could go live.`;
         </Field>
       </div>
 
-      <Field label={t.shopifyApp.photos}>
-        <input
-          type="file"
-          accept="image/*"
-          multiple
-          onChange={(e) => setFiles([...(e.target.files ?? [])])}
-          className="text-sm"
-        />
-      </Field>
+      {/* The native control renders as "Choose files / No file chosen", which
+          reads as broken chrome next to the rest of the surface. Keep the input
+          for behaviour and accessibility, hide it visually, and drive it from a
+          real button. */}
+      <div className="space-y-1">
+        <span className="text-xs font-medium text-muted-foreground">{t.shopifyApp.photos}</span>
+        <div className="flex items-center gap-2">
+          <input
+            ref={fileInput}
+            type="file"
+            accept="image/*"
+            multiple
+            onChange={(e) => setFiles([...(e.target.files ?? [])])}
+            className="sr-only"
+            id="shopify-photos"
+          />
+          <Button type="button" variant="outline" size="sm" onClick={() => fileInput.current?.click()}>
+            <ImagePlus className="size-4" aria-hidden />
+            {t.shopifyApp.choosePhotos}
+          </Button>
+          {files.length ? (
+            <span className="text-[13px] text-muted-foreground">
+              {files.length} {t.shopifyApp.photoCount}
+            </span>
+          ) : null}
+        </div>
+        {files.length ? (
+          <ul className="mt-1 flex flex-wrap gap-2">
+            {files.map((f) => (
+              <li
+                key={f.name}
+                className="rounded-md border border-border bg-card px-2 py-1 text-[11.5px] text-muted-foreground"
+              >
+                {f.name}
+              </li>
+            ))}
+          </ul>
+        ) : null}
+      </div>
 
       <div className="space-y-1">
         <label htmlFor="shopify-notes" className="text-xs font-medium text-muted-foreground">
@@ -226,8 +323,14 @@ on, and every fact you still need before this could go live.`;
         {!templates && !templateError ? (
           <p className="text-sm text-muted-foreground">{t.shopifyApp.loading}</p>
         ) : null}
+        {/* A theme with no custom templates is the ordinary starting state, not
+            an error - the picker would otherwise show a single "Theme default"
+            card and look broken. */}
+        {templates && templates.filter((x) => x.suffix).length === 0 ? (
+          <Note tone="muted">{t.shopifyApp.noTemplates}</Note>
+        ) : null}
 
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
           {(templates ?? []).map((tpl) => {
             const key = tpl.suffix ?? "";
             const label = tpl.suffix ? tpl.suffix.replace(/-/g, " ") : t.shopifyApp.themeDefault;
@@ -268,6 +371,36 @@ on, and every fact you still need before this could go live.`;
             );
           })}
         </div>
+
+        <div className="space-y-1.5 rounded-xl border border-dashed border-border p-3">
+          <span className="text-xs font-medium text-muted-foreground">
+            {t.shopifyApp.orPasteLink}
+          </span>
+          <p className="text-[12.5px] text-muted-foreground">{t.shopifyApp.pasteLinkHint}</p>
+          <div className="flex flex-wrap gap-2">
+            <input
+              value={link}
+              onChange={(e) => setLink(e.target.value)}
+              placeholder={t.shopifyApp.pasteLinkPlaceholder}
+              className="h-9 min-w-[280px] flex-1 rounded-lg border border-border bg-background px-3 text-sm"
+            />
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={linkBusy || !link.trim()}
+              onClick={() => void useLayoutFromLink()}
+            >
+              {t.shopifyApp.useThisLayout}
+            </Button>
+          </div>
+          {linkNote ? <Note>{linkNote}</Note> : null}
+          {copiedFrom ? (
+            <p className="text-[12.5px] text-muted-foreground">
+              {t.shopifyApp.copiedFrom} <span className="font-medium text-foreground">{copiedFrom}</span>
+            </p>
+          ) : null}
+        </div>
       </div>
 
       <Button onClick={() => void createDraft()} disabled={busy}>
@@ -290,7 +423,7 @@ on, and every fact you still need before this could go live.`;
 
       {answer ? (
         <div className="space-y-2">
-          <pre className="whitespace-pre-wrap rounded-xl border border-border bg-card px-4 py-3 text-[13px]">
+          <pre className="whitespace-pre-wrap rounded-xl border border-border bg-card px-3 py-2 text-[13px]">
             {answer}
           </pre>
           <Note>{t.shopifyApp.stillDraft}</Note>

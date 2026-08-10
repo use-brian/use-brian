@@ -186,7 +186,7 @@
     {
       "name": "GetProduct",
       "kind": "query",
-      "hash": "10654c6acd04f577",
+      "hash": "da8e6ff894b7a006",
       "valid": true,
       "scopes": [
         "read_products"
