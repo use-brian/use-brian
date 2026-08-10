@@ -23,9 +23,11 @@
  * [COMP:doc-model/mapping]
  */
 
+import { normalizeRichTextNodes } from '@use-brian/core/dist/views/blocks.js'
 import type {
   Block,
   Page,
+  RichNode,
   RichTextContent,
   TableBlock,
 } from '@use-brian/core/dist/views/blocks.js'
@@ -88,10 +90,17 @@ function genId(): string {
 /** richText is opaque Tiptap JSON: the old per-block editors stored
  *  `editor.getJSON()` = `{ type: 'doc', content: [...] }`. Return its inner
  *  block content, or a single empty paragraph when absent/empty. The result
- *  always starts with a paragraph so it satisfies listItem/taskItem content. */
+ *  always starts with a paragraph so it satisfies listItem/taskItem content —
+ *  a guarantee `normalizeRichTextNodes` (core `views/blocks.ts`) has to
+ *  ENFORCE, not assume: a model-authored block routinely puts inline text
+ *  directly under `doc`, and passing that through builds `listItem > text`,
+ *  which a browser's y-prosemirror deletes from the shared doc on first open.
+ *  Read that function's comment before touching this one. */
 function richTextToContent(rt: RichTextContent | undefined): PMNode[] {
   const content = (rt as { content?: PMNode[] } | undefined)?.content
-  if (Array.isArray(content) && content.length > 0) return content
+  if (Array.isArray(content) && content.length > 0) {
+    return normalizeRichTextNodes(content as RichNode[]) as PMNode[]
+  }
   return [emptyParagraph()]
 }
 
