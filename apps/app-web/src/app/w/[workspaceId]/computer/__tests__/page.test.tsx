@@ -74,6 +74,18 @@ describe("[COMP:app-web/browsers-surface] Browsers index empty state", () => {
     expect(container?.textContent).toContain("Pair in Browser profiles");
   });
 
+  it("keeps the getting-started content in one centered column", async () => {
+    await mount();
+
+    const emptyState = container?.firstElementChild;
+    const connectCard = emptyState?.children[2];
+
+    expect(emptyState?.classList.contains("items-center")).toBe(true);
+    expect(connectCard?.classList.contains("mt-4")).toBe(true);
+    expect(connectCard?.classList.contains("w-full")).toBe(true);
+    expect(connectCard?.classList.contains("max-w-sm")).toBe(true);
+  });
+
   it("links directly to the browser extension install destination", async () => {
     await mount();
     const install = container?.querySelector("a");

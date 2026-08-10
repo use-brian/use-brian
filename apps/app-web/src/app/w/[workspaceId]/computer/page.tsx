@@ -19,13 +19,13 @@ export function BrowsersEmptyState() {
   const t = useT().computer.sessions;
 
   return (
-    <div className="rounded-lg border border-border bg-muted/20 p-5 text-center">
+    <div className="flex flex-col items-center rounded-lg border border-border bg-muted/20 p-5 text-center">
       <MonitorPlay className="size-8 text-muted-foreground/50" aria-hidden />
       <div className="mx-auto mt-3 max-w-lg space-y-1">
         <p className="text-sm font-medium text-foreground">{t.selectTitle}</p>
         <p className="text-xs text-muted-foreground">{t.selectHint}</p>
       </div>
-      <div className="w-full max-w-sm rounded-lg border border-border bg-muted/30 px-4 py-3">
+      <div className="mt-4 w-full max-w-sm rounded-lg border border-border bg-muted/30 px-4 py-3">
         <p className="text-xs font-medium text-foreground">{t.connectTitle}</p>
         <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
           {t.connectHint}
