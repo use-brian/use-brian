@@ -28,11 +28,14 @@ import { menuForClass, type ModelClass, type ModelRegistryRow } from '@use-brian
 import type { WorkspaceStore } from '../db/workspace-store.js'
 import type { MeteredProfileStore } from '../db/metered-profile-store.js'
 import { isDefaultableClass, type WorkspaceModelDefaultsStore } from '../db/workspace-model-defaults-store.js'
+import type { WorkspaceCustomLlmEndpointStore } from '../db/workspace-custom-llm-endpoints.js'
+import { customLlmAlias } from '../custom-llm-runtime.js'
 
 export type ModelMenuRouteOptions = {
   workspaceStore: WorkspaceStore
   meteredProfileStore: MeteredProfileStore
   modelDefaultsStore: WorkspaceModelDefaultsStore
+  customLlmEndpointStore?: WorkspaceCustomLlmEndpointStore
   /** Provider keys configured at boot (the routing table's keys). */
   configuredProviders: ReadonlySet<string>
   /** Closed billing seam; absent on the open build (menus still work,
@@ -111,9 +114,12 @@ export function modelMenuRoutes(opts: ModelMenuRouteOptions): Router {
     for (const cls of MENU_CLASSES) {
       classes[cls] = menuForClass(cls, opts.configuredProviders).map(serializeRow)
     }
-    const [profiles, defaults] = await Promise.all([
+    const [profiles, defaults, customEndpoints] = await Promise.all([
       opts.meteredProfileStore.list(workspaceId),
       opts.modelDefaultsStore.list(workspaceId),
+      opts.customLlmEndpointStore
+        ? opts.customLlmEndpointStore.list({ actingUserId: req.userId!, workspaceId })
+        : Promise.resolve([]),
     ])
     // Profiles and curated pins over models whose key is gone are hidden with
     // their models (L12) — kept in the DB so a re-keyed deployment restores
@@ -136,6 +142,14 @@ export function modelMenuRoutes(opts: ModelMenuRouteOptions): Router {
           ? visibleProfileIds.has(d.meteredProfileId)
           : d.modelAlias !== null && availableCurated.has(d.modelAlias),
       ),
+      customEndpoints: customEndpoints.map((endpoint) => ({
+        id: endpoint.id,
+        selector: customLlmAlias(endpoint.id),
+        name: endpoint.name,
+        modelId: endpoint.modelId,
+        contextWindow: endpoint.contextWindow,
+        isDefault: endpoint.isDefault,
+      })),
       meteredBillingAvailable: Boolean(opts.estimateMeteredTurn),
     })
   })

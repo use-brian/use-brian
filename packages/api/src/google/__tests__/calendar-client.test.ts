@@ -274,6 +274,41 @@ describe('[COMP:tools/google-calendar] calendar discovery and availability trans
 })
 
 describe('[COMP:tools/google-calendar] updateCalendarEvent transport', () => {
+  it('converts an all-day event to timed boundaries from an RFC 3339 pair without requiring allDay=false', async () => {
+    mockFetch
+      .mockResolvedValueOnce(ok({
+        id: 'dinner',
+        summary: 'Dinner',
+        start: { date: '2026-08-23' },
+        end: { date: '2026-08-24' },
+      }))
+      .mockResolvedValueOnce(ok({ id: 'dinner' }))
+
+    await updateCalendarEvent('tok', 'dinner', {
+      start: '2026-08-23T19:00:00+09:00',
+      end: '2026-08-23T23:00:00+09:00',
+    })
+
+    expect(JSON.parse((mockFetch.mock.calls[1]?.[1] as RequestInit).body as string)).toEqual({
+      start: { dateTime: '2026-08-23T19:00:00+09:00' },
+      end: { dateTime: '2026-08-23T23:00:00+09:00' },
+    })
+  })
+
+  it('rejects a partial all-day to timed conversion before calling Google', async () => {
+    mockFetch.mockResolvedValueOnce(ok({
+      id: 'dinner',
+      summary: 'Dinner',
+      start: { date: '2026-08-23' },
+      end: { date: '2026-08-24' },
+    }))
+
+    await expect(updateCalendarEvent('tok', 'dinner', {
+      start: '2026-08-23T19:00:00+09:00',
+    })).rejects.toThrow('requires both start and end boundaries')
+    expect(mockFetch).toHaveBeenCalledTimes(1)
+  })
+
   it('updates all-day boundaries, reminders, privacy, availability, guest permissions, and conference removal', async () => {
     mockFetch
       .mockResolvedValueOnce(ok({

@@ -39,11 +39,11 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Globe } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useT } from "@/lib/i18n/client";
-import { openWorkspaceSettings } from "@/components/settings-modal/settings-modal";
 import {
   chromeMessenger,
   extensionHasControl,
@@ -67,6 +67,10 @@ const STATUS_POLL_MS = 60_000;
 
 export function ConnectBrowserButton({ workspaceId }: { workspaceId: string }) {
   const c = useT().computer.connectBrowser.sidebarRow;
+  const router = useRouter();
+  const openProfiles = useCallback(() => {
+    router.push(`/w/${workspaceId}/computer/profiles`);
+  }, [router, workspaceId]);
 
   const [status, setStatus] = useState<BrowserExtensionStatus | null>(null);
   /**
@@ -81,7 +85,7 @@ export function ConnectBrowserButton({ workspaceId }: { workspaceId: string }) {
   const alive = useRef(true);
 
   const refreshStatus = useCallback(async () => {
-    const next = await getBrowserExtensionStatus();
+    const next = await getBrowserExtensionStatus(workspaceId);
     if (!alive.current) return;
     setStatus(next);
     // Only worth asking the extension once the relay says this user has one
@@ -92,7 +96,7 @@ export function ConnectBrowserButton({ workspaceId }: { workspaceId: string }) {
     }
     const control = await extensionHasControl({ send: chromeMessenger() });
     if (alive.current) setHasControl(control);
-  }, []);
+  }, [workspaceId]);
 
   useEffect(() => {
     alive.current = true;
@@ -124,14 +128,14 @@ export function ConnectBrowserButton({ workspaceId }: { workspaceId: string }) {
       // `not_installed` here means the extension stopped answering between the
       // probe and the click. The panel is the honest fallback: it owns the
       // install CTA, which is the actual remedy.
-      if (result === "not_installed") openWorkspaceSettings("ws-browser-profiles");
+      if (result === "not_installed") openProfiles();
       else await refreshStatus();
       return;
     }
     // Connected: nothing to pair, so the click is "let me look at this" —
     // hand it to the panel, which owns profiles + disconnect.
     if (connected || !workspaceId) {
-      openWorkspaceSettings("ws-browser-profiles");
+      openProfiles();
       return;
     }
     setBusy(true);
@@ -140,7 +144,7 @@ export function ConnectBrowserButton({ workspaceId }: { workspaceId: string }) {
       // The mint failed (relay down, 503). The panel surfaces the error copy;
       // repeating it in a sidebar row would only shout the same thing twice.
       if (alive.current) setBusy(false);
-      openWorkspaceSettings("ws-browser-profiles");
+      openProfiles();
       return;
     }
     const result = await pairViaExtension({
@@ -155,8 +159,8 @@ export function ConnectBrowserButton({ workspaceId }: { workspaceId: string }) {
     }
     // Not installed, wrong build id, or refused: the panel has the install CTA
     // and the copy fields, and the token we just minted is still valid there.
-    openWorkspaceSettings("ws-browser-profiles");
-  }, [busy, connected, needsControl, workspaceId, refreshStatus]);
+    openProfiles();
+  }, [busy, connected, needsControl, workspaceId, refreshStatus, openProfiles]);
 
   // No relay on this deployment (OSS, or unconfigured) — and nothing rendered
   // until the first probe answers, so the slot never flips under the cursor.

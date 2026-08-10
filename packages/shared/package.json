@@ -45,6 +45,14 @@
     "./assistant-profiles": {
       "types": "./dist/assistant-profiles.d.ts",
       "default": "./dist/assistant-profiles.js"
+    },
+    "./brand": {
+      "types": "./dist/brand/index.d.ts",
+      "default": "./dist/brand/index.js"
+    },
+    "./brand/theme-seed": {
+      "types": "./dist/brand/theme-seed.d.ts",
+      "default": "./dist/brand/theme-seed.js"
     }
   },
   "scripts": {

@@ -124,12 +124,9 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'notionAppendBlocks', description: 'Append content to a Notion page', classification: 'write', defaultPolicy: 'ask' },
   ],
   gdrive: [
-    // Drive tools are phase-gated (require drive.readonly / drive.file scopes
-    // beyond the current Picker-only grant). Uncomment here + in inject.ts
-    // when enabling. Keep list ordering stable across services.
-    // { name: 'googleDriveListFiles', description: 'Search files in Google Drive', classification: 'read', defaultPolicy: 'allow', group: 'drive' },
-    // { name: 'googleDriveGetFile', description: 'Get file metadata', classification: 'read', defaultPolicy: 'allow', group: 'drive' },
-    // { name: 'googleDriveGetFileContent', description: 'Read file content', classification: 'read', defaultPolicy: 'allow', group: 'drive' },
+    { name: 'googleDriveListFiles', description: 'Search files in Google Drive', classification: 'read', defaultPolicy: 'allow', group: 'drive' },
+    { name: 'googleDriveGetFile', description: 'Get file metadata', classification: 'read', defaultPolicy: 'allow', group: 'drive' },
+    { name: 'googleDriveGetFileContent', description: 'Read file content', classification: 'read', defaultPolicy: 'allow', group: 'drive' },
     // { name: 'googleDriveCreateFile', description: 'Create a file in Google Drive', classification: 'write', defaultPolicy: 'ask', group: 'drive' },
     // { name: 'googleDriveUpdateFile', description: 'Update a file in Google Drive', classification: 'write', defaultPolicy: 'ask', group: 'drive' },
     { name: 'googleDocsGetContent', description: 'Read a Google Doc', classification: 'read', defaultPolicy: 'allow', group: 'docs' },
@@ -205,7 +202,9 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'shopifyRefundOrder', description: 'Refund an order in full or by line item', classification: 'destructive', defaultPolicy: 'ask', group: 'orders' },
     { name: 'shopifySearchCustomers', description: 'Search customers by email, name, or tag', classification: 'read', defaultPolicy: 'allow', group: 'customers' },
     { name: 'shopifyGetCustomer', description: 'Get a customer with order count and total spent', classification: 'read', defaultPolicy: 'allow', group: 'customers' },
+    { name: 'shopifyPreviewCustomerSegment', description: 'Count a subscribed campaign audience without returning customer emails', classification: 'read', defaultPolicy: 'allow', group: 'customers' },
     { name: 'shopifyUpdateCustomer', description: 'Update a customer note or tags (never marketing consent)', classification: 'write', defaultPolicy: 'ask', group: 'customers' },
+    { name: 'shopifyCreateCustomerSegment', description: 'Create or reuse a saved subscribed customer segment', classification: 'write', defaultPolicy: 'ask', group: 'customers' },
     { name: 'shopifyGetPayoutsSummary', description: 'Get Shopify Payments balance and recent payouts', classification: 'read', defaultPolicy: 'allow', group: 'finance' },
     { name: 'shopifyListDisputes', description: 'List Shopify Payments disputes and chargebacks', classification: 'read', defaultPolicy: 'allow', group: 'finance' },
     { name: 'shopifyListDiscounts', description: 'List discount and promo codes with status and usage counts', classification: 'read', defaultPolicy: 'allow', group: 'marketing' },
@@ -321,6 +320,10 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
   // would gate every composing click too.
   computer: [
     { name: 'browserNavigate', description: 'Open a URL in the controlled browser (as a browser profile)', classification: 'write', defaultPolicy: 'allow' },
+    { name: 'browserOpenTab', description: 'Open an additional tab in the active local browser profile', classification: 'write', defaultPolicy: 'allow' },
+    { name: 'browserListTabs', description: 'List tabs allowed by the active local browser profile', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'browserSwitchTab', description: 'Switch to an allowed tab in the active local browser profile', classification: 'write', defaultPolicy: 'allow' },
+    { name: 'browserCloseTab', description: 'Close an allowed local-browser tab after confirmation', classification: 'write', defaultPolicy: 'allow' },
     { name: 'browserSnapshot', description: 'List the interactive elements of the current page as refs', classification: 'read', defaultPolicy: 'allow' },
     { name: 'browserClick', description: 'Click an element by ref (send-like clicks require approval)', classification: 'write', defaultPolicy: 'allow' },
     { name: 'browserType', description: 'Type text into an element by ref', classification: 'write', defaultPolicy: 'allow' },
@@ -376,6 +379,8 @@ export function connectorToolGrouping(connectorId: string): {
  * Entra app registered by the customer's own admin sidesteps both Microsoft
  * publisher verification and the cross-tenant admin consent that
  * `ChannelMessage.Read.All` demands unconditionally.
+ * For `gdrive`, the customer's Internal Google Workspace app owns the
+ * restricted `drive.readonly` grant, keeping it off Brian's public app.
  *
  * Adding a connector here requires three things to already be true: the
  * provider must let an end customer register an app, the authorize URL must be
@@ -383,9 +388,10 @@ export function connectorToolGrouping(connectorId: string): {
  * `packages/api/src/connectors/app-credentials.ts`). Adding an id with no
  * route support ships a form that saves credentials nothing reads.
  *
- * See docs/architecture/integrations/msgraph.md -> "Auth".
+ * See docs/architecture/integrations/msgraph.md -> "Auth" and
+ * docs/architecture/integrations/mcp.md -> "The `gdrive` connector".
  */
-export const CONFIGURABLE_APP_CREDENTIAL_CONNECTORS: ReadonlySet<string> = new Set(['msgraph'])
+export const CONFIGURABLE_APP_CREDENTIAL_CONNECTORS: ReadonlySet<string> = new Set(['msgraph', 'gdrive'])
 
 /**
  * OIDC baseline scopes for the Microsoft Graph connector, requested alongside
@@ -561,6 +567,17 @@ export const OFFICIAL_OAUTH_SCOPES: Record<string, string[]> = {
 }
 
 /**
+ * Customer-owned Google Drive grant. Kept separate from
+ * `OFFICIAL_OAUTH_SCOPES.gdrive`: that table is Brian's managed app and must
+ * never acquire the restricted full-Drive scope by accident.
+ */
+export const GDRIVE_BYO_OAUTH_SCOPES: readonly string[] = [
+  'https://www.googleapis.com/auth/userinfo.email',
+  'https://www.googleapis.com/auth/drive.readonly',
+  'https://www.googleapis.com/auth/drive.file',
+]
+
+/**
  * Built-in connector tools that are NOT injected through
  * `packages/api/src/mcp/inject.ts`. Instead they are wired at boot in
  * `packages/api/src/boot.ts` (`bootOpenApi`) using the Tasks/CRM capability-gated pattern
@@ -603,6 +620,10 @@ export const BOOT_INJECTED_BUILTIN_TOOLS: Record<string, readonly string[]> = {
   // extension/sandbox backend returns a clear tool error, never a hang).
   computer: [
     'browserNavigate',
+    'browserOpenTab',
+    'browserListTabs',
+    'browserSwitchTab',
+    'browserCloseTab',
     'browserSnapshot',
     'browserClick',
     'browserType',

@@ -63,6 +63,7 @@ export type WechatRouteOptions = {
   /** Shared secret the connector presents on every call (WECHAT_CONNECTOR_SECRET). */
   connectorSecret: string
   provider: LLMProvider
+  resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
   systemPrompt: string
   tools: Map<string, Tool>
   memoryStore: MemoryStore
@@ -540,6 +541,7 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
       adaptiveResearchEnabled: true,
       abortController,
       provider: options.provider,
+      resolveWorkspaceCustomLlm: options.resolveWorkspaceCustomLlm,
       systemPrompt: options.systemPrompt,
       tools: options.tools,
       memoryStore: options.memoryStore,

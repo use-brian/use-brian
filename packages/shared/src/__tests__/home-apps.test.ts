@@ -12,7 +12,7 @@ import {
 } from '../home-apps.js'
 
 describe('[COMP:shared/home-apps] home-apps config vocabulary', () => {
-  it('holds the seven built-in apps in registry order', () => {
+  it('holds the built-in apps in registry order', () => {
     expect(BUILTIN_HOME_APP_KEYS).toEqual([
       'page',
       'office',
@@ -21,8 +21,22 @@ describe('[COMP:shared/home-apps] home-apps config vocabulary', () => {
       'feed',
       'browsers',
       'chat',
+      'shopify',
     ])
-    expect(HOME_APPS_MAX).toBe(BUILTIN_HOME_APP_KEYS.length)
+  })
+
+  it('has MORE built-ins than the strip can hold, on purpose', () => {
+    // These were equal until Shopify landed (2026-08-10), and the equality
+    // encoded an assumption worth stating now that it is gone: that every
+    // built-in could sit on the strip at once.
+    //
+    // Shopify is opt-in — a store app on the Home of a workspace with no store
+    // is noise — so it ships in the Studio "Hidden" group rather than being
+    // appended to every workspace. Raising the cap to keep the two equal would
+    // change strip density for every user to serve one app nobody asked to see
+    // by default, which is the wrong trade.
+    expect(BUILTIN_HOME_APP_KEYS.length).toBeGreaterThan(HOME_APPS_MAX)
+    expect(HOME_APPS_MAX).toBe(7)
   })
 
   it('defaults a never-configured workspace to Page + Office + Chat', () => {

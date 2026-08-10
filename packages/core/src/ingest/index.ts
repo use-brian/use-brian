@@ -20,6 +20,7 @@ export {
   type EmailThreadContentRef,
   type MeetingContentRef,
   type GithubSyncContentRef,
+  type GDriveFileContentRef,
   type FileUploadContentRef,
   type ManualPasteContentRef,
   type ChannelWindowContentRef,

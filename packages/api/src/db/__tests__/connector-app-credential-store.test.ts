@@ -100,6 +100,27 @@ describe('[COMP:api/connector-app-credential-store] reads', () => {
     expect(mockQueryWithRLS).not.toHaveBeenCalled()
   })
 
+  it('keeps a Drive Picker browser key inside the encrypted secret blob', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [row({
+        provider: 'gdrive',
+        tenant_id: '123456789012',
+        client_secret_ciphertext: encryptCredentials({
+          clientSecret: 'oauth-secret',
+          pickerApiKey: 'picker-key-1',
+        }, key),
+      })],
+    } as never)
+    const store = createConnectorAppCredentialStore(key)
+
+    expect(await store.getSystem(WS, 'gdrive')).toEqual({
+      clientId: 'entra-client-id',
+      clientSecret: 'oauth-secret',
+      tenantId: '123456789012',
+      pickerApiKey: 'picker-key-1',
+    })
+  })
+
   it('refuses to read a secret with no encryption key rather than returning a broken pair', async () => {
     mockQuery.mockResolvedValueOnce({
       rows: [row({ client_secret_ciphertext: encryptCredentials({ clientSecret: 's' }, key) })],

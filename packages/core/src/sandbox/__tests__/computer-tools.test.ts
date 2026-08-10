@@ -81,6 +81,77 @@ async function profilesWith(
 }
 
 describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
+  it('opens, lists, switches, and confirmation-closes local tabs through opaque handles', async () => {
+    const local = fakeProvider('local')
+    local.openTab = async (_ctx, url) => {
+      local.calls.push(`openTab:${url}`)
+      return { tabId: 'tab-2', url, title: 'Second' }
+    }
+    local.listTabs = async () => {
+      local.calls.push('listTabs')
+      return {
+        activeTabId: 'tab-2',
+        tabs: [
+          {
+            id: 'tab-2',
+            title: 'Second',
+            url: 'https://second.example/',
+            active: true,
+            taskOwned: true,
+          },
+        ],
+      }
+    }
+    local.switchTab = async (_ctx, tabId) => {
+      local.calls.push(`switchTab:${tabId}`)
+      return { tabId, url: 'https://second.example/', title: 'Second' }
+    }
+    local.closeTab = async (_ctx, tabId) => {
+      local.calls.push(`closeTab:${tabId}`)
+      return { closed: true, activeTabId: 'tab-1' }
+    }
+    const tools = createComputerTools({
+      local,
+      cloud: fakeProvider('cloud'),
+      cloudAvailable: () => true,
+      profiles: await profilesWith([{ name: 'Personal', defaultBackend: 'local' }]),
+    })
+
+    await run(tools.browserNavigate, { url: 'https://first.example/' })
+    const opened = await run(tools.browserOpenTab, { url: 'https://second.example/' })
+    const listed = await run(tools.browserListTabs, {})
+    const switched = await run(tools.browserSwitchTab, { tabId: 'tab-2' })
+    const closed = await run(tools.browserCloseTab, { tabId: 'tab-2' })
+
+    expect(opened.data).toContain('tab-2')
+    expect(listed.data).toContain('task-owned')
+    expect(switched.data).toContain('Switched to tab-2')
+    expect(closed.data).toContain('Closed tab-2')
+    expect(tools.browserCloseTab.requiresConfirmation).toBe(true)
+    expect(local.calls).toEqual([
+      'navigate:https://first.example/',
+      'snapshot',
+      'openTab:https://second.example/',
+      'snapshot',
+      'listTabs',
+      'switchTab:tab-2',
+      'snapshot',
+      'closeTab:tab-2',
+    ])
+  })
+
+  it('refuses multi-tab operations on the cloud backend without silently emulating them', async () => {
+    const tools = createComputerTools({
+      local: fakeProvider('local'),
+      cloud: fakeProvider('cloud'),
+      cloudAvailable: () => true,
+    })
+    await run(tools.browserNavigate, { url: 'https://example.com/' })
+    const result = await run(tools.browserListTabs, {})
+    expect(result.isError).toBe(true)
+    expect(result.data).toContain('available only with a My Browser profile')
+  })
+
   it('records successful local flat actions with accessible labels for later replay', async () => {
     const local = fakeProvider('local')
     const tools = createComputerTools({ local, cloud: fakeProvider('cloud'), cloudAvailable: () => false })
@@ -237,7 +308,12 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
   })
 
   it('serializes tool calls to P1.2 relay command envelopes through the local provider', async () => {
-    const sent: Array<{ userId: string; op: string; args?: Record<string, unknown> }> = []
+    const sent: Array<{
+      userId: string
+      browserProfileId: string
+      op: string
+      args?: Record<string, unknown>
+    }> = []
     const local = createLocalBrowserProvider({
       transport: {
         async send(params) {
@@ -255,13 +331,21 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
         },
       },
     })
-    const tools = createComputerTools({ local, cloud: fakeProvider('cloud') })
+    const tools = createComputerTools({
+      local,
+      cloud: fakeProvider('cloud'),
+      profiles: await profilesWith([{ name: 'Personal', defaultBackend: 'local' }]),
+    })
     await run(tools.browserNavigate, { url: 'https://www.linkedin.com/messaging/' })
     await run(tools.browserSnapshot, {})
     await run(tools.browserType, { ref: '@e1', text: 'hi there' })
     await run(tools.browserCurrentUrl, {})
     expect(sent.map((s) => s.op)).toEqual(['navigate', 'snapshot', 'snapshot', 'type', 'currentUrl'])
-    expect(sent[0]).toMatchObject({ userId: 'user-1', args: { url: 'https://www.linkedin.com/messaging/' } })
+    expect(sent[0]).toMatchObject({
+      userId: 'user-1',
+      browserProfileId: 'profile-1',
+      args: { url: 'https://www.linkedin.com/messaging/' },
+    })
     expect(sent[3]).toMatchObject({ args: { ref: '@e1', text: 'hi there' } })
   })
 
@@ -269,8 +353,12 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
     const local = createLocalBrowserProvider({
       transport: { send: async () => ({ ok: false, error: 'none', code: 'no_extension' }) },
     })
-    const tools = createComputerTools({ local, cloud: fakeProvider('cloud') })
-    const res = await run(tools.browserSnapshot, {})
+    const tools = createComputerTools({
+      local,
+      cloud: fakeProvider('cloud'),
+      profiles: await profilesWith([{ name: 'Personal', defaultBackend: 'local' }]),
+    })
+    const res = await run(tools.browserNavigate, { url: 'https://example.com/' })
     expect(res.isError).toBe(true)
     expect(String(res.data)).toContain('Use Brian extension')
     expect(res.meta?.code).toBe('no_extension')
@@ -776,14 +864,16 @@ describe('[COMP:sandbox/browser-tools] capability tag', () => {
     // invariants/builtin-primitive-capability greps every factory's source, so
     // the runtime assertion here stays narrow on purpose. This guards the
     // pairing: the governance list must not grow a tool this file silently
-    // stops covering without the invariant picking it up.
+    // stops covering without the invariant picking it up. Compare tools, not
+    // the factory's five non-tool state helpers.
     const { BOOT_INJECTED_BUILTIN_TOOLS } = await import('@use-brian/shared')
+    const factoryTools = Object.values(createComputerTools({
+      local: fakeProvider('local'),
+      cloud: fakeProvider('cloud'),
+      cloudAvailable: () => true,
+    })).filter((value): value is Tool => Boolean(value && typeof value === 'object' && 'name' in value))
     expect(BOOT_INJECTED_BUILTIN_TOOLS.computer.length).toBeGreaterThan(
-      Object.keys(createComputerTools({
-        local: fakeProvider('local'),
-        cloud: fakeProvider('cloud'),
-        cloudAvailable: () => true,
-      })).length,
+      factoryTools.length,
     )
   })
 })

@@ -85,8 +85,6 @@ export type MemoryToolEvent =
 
 export type MemoryToolOptions = {
   onEvent?: (event: MemoryToolEvent) => void
-  /** User's plan — used for memory cap enforcement (free: 20 max). */
-  userPlan?: string
   /**
    * Entity-side stores that enable the CRM-note path on saveMemory
    * (WU-6.12, `docs/architecture/brain/corrections.md` §"CRM notes via
@@ -265,17 +263,6 @@ export function createMemoryTools(
         return {
           data: 'saveMemory requires `summary` when creating a new memory. Pass an `id` to update an existing memory, or include a one-line summary to create a new one.',
           isError: true,
-        }
-      }
-
-      // Free-plan memory cap: 20 memories max (see docs/architecture/platform/cost-and-pricing.md)
-      if (opts?.userPlan === 'free') {
-        const currentCount = await store.count(viewerCtx(context))
-        if (currentCount >= 20) {
-          return {
-            data: 'Memory limit reached. Free accounts can save up to 20 memories. Upgrade to Pro for unlimited memories.',
-            isError: true,
-          }
         }
       }
 

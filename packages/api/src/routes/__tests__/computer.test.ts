@@ -12,7 +12,12 @@ import {
   createLocalBrowserProvider,
   createSandboxOrchestrator,
 } from '@use-brian/core'
-import type { BrowserProvider } from '@use-brian/core'
+import type {
+  BrowserAuthBroker,
+  BrowserCredentialAdminStore,
+  BrowserCredentialMetadata,
+  BrowserProvider,
+} from '@use-brian/core'
 
 const MEMBER_ROLE = async (_userId: string, _workspaceId: string) => 'member'
 
@@ -27,6 +32,10 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
   let localTasks: ReturnType<typeof createInMemoryLocalComputerTaskStore>
   let localOps: Array<{ op: string; args?: Record<string, unknown> }>
   let localStatus: { connected: boolean; terminalEvent: 'stopped' | 'tab_closed' | null } | null
+  let credentials: BrowserCredentialAdminStore
+  let credentialRows: Map<string, BrowserCredentialMetadata>
+  let savedSecret: { username: string; password: string } | null
+  let authBroker: BrowserAuthBroker
   let app: ReturnType<typeof createTestApp>
 
   function makeApp(userId: string) {
@@ -40,6 +49,8 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
         localStatus: async () => localStatus,
         vault,
         profileStore,
+        credentials,
+        authBroker,
         getWorkspaceRole: MEMBER_ROLE,
         setSessionBackend: (sessionId, backend) => void backendFlips.push({ sessionId, backend }),
       }),
@@ -55,6 +66,43 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
     localOps = []
     localStatus = { connected: true, terminalEvent: null }
     localTasks = createInMemoryLocalComputerTaskStore()
+    credentialRows = new Map()
+    savedSecret = null
+    credentials = {
+      async list({ profileId: requestedProfileId }) {
+        return [...credentialRows.values()].filter((row) => row.profileId === requestedProfileId)
+      },
+      async upsert(params) {
+        savedSecret = params.secret
+        const now = '2026-08-10T00:00:00.000Z'
+        const row: BrowserCredentialMetadata = {
+          id: 'cred-1',
+          workspaceId: params.workspaceId,
+          profileId: params.profileId,
+          site: params.site,
+          loginUrl: params.loginUrl,
+          accountLabel: params.accountLabel ?? null,
+          status: 'active',
+          lastUsedAt: null,
+          lastFailureCode: null,
+          createdAt: now,
+          updatedAt: now,
+        }
+        credentialRows.set(row.id, row)
+        return row
+      },
+      async revoke({ profileId: requestedProfileId, credentialId }) {
+        const row = credentialRows.get(credentialId)
+        if (!row || row.profileId !== requestedProfileId) return false
+        credentialRows.delete(credentialId)
+        return true
+      },
+    }
+    authBroker = {
+      async authenticate(params) {
+        return { kind: 'authenticated', credentialId: params.credentialId ?? 'cred-1', site: params.site }
+      },
+    }
     localProvider = createLocalBrowserProvider({
       transport: {
         async send({ op, args }) {
@@ -189,7 +237,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
   })
 
   it('discovers and controls an owned local-browser task through the same Take-Over routes', async () => {
-    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local' }, 'skyscanner.com')
+    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId }, 'skyscanner.com')
 
     const list = await request(app).get('/api/computer/tasks?workspaceId=ws-1')
     expect(list.body.tasks).toEqual(expect.arrayContaining([
@@ -232,20 +280,26 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
     expect((await request(app).get('/api/computer/tasks/sess-local')).status).toBe(404)
   })
 
-  it('keeps one ephemeral local task per user and expires abandoned bindings', () => {
+  it('keeps one ephemeral local task per profile, allows different profiles in parallel, and expires abandoned bindings', () => {
     let now = 1_000
     const tasks = createInMemoryLocalComputerTaskStore(() => now)
-    tasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'first' }, 'one.test')
-    tasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'second' }, 'two.test')
+    tasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'first', profileId: 'profile-a' }, 'one.test')
+    tasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'second', profileId: 'profile-b' }, 'two.test')
+    expect(tasks.getActiveBySession('first')?.profileId).toBe('profile-a')
+    expect(tasks.getActiveBySession('second')?.profileId).toBe('profile-b')
+
+    tasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'third', profileId: 'profile-a' }, 'three.test')
     expect(tasks.getActiveBySession('first')).toBeNull()
     expect(tasks.getActiveBySession('second')?.injectedSite).toBe('two.test')
+    expect(tasks.getActiveBySession('third')?.injectedSite).toBe('three.test')
 
     now += 20 * 60 * 1000
     expect(tasks.getActiveBySession('second')).toBeNull()
+    expect(tasks.getActiveBySession('third')).toBeNull()
   })
 
   it('keeps a local task discoverable when Stop cannot reach the extension', async () => {
-    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local' })
+    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId })
     localProvider = { ...localProvider, stop: async () => { throw new Error('relay unavailable') } }
     app = makeApp('user-1')
 
@@ -255,7 +309,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
   })
 
   it('retires local tasks from discovery when the extension disconnects', async () => {
-    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local' })
+    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId })
     localStatus = { connected: false, terminalEvent: null }
 
     const list = await request(app).get('/api/computer/tasks?workspaceId=ws-1')
@@ -274,7 +328,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
   })
 
   it('keeps local tasks when relay liveness is temporarily unavailable', async () => {
-    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local' })
+    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId })
     localStatus = null
 
     const list = await request(app).get('/api/computer/tasks?workspaceId=ws-1')
@@ -285,7 +339,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
   })
 
   it('retires local tasks after the relay observes the controlled tab closing', async () => {
-    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local' })
+    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId })
     localStatus = { connected: true, terminalEvent: 'tab_closed' }
 
     const list = await request(app).get('/api/computer/tasks?workspaceId=ws-1')
@@ -294,7 +348,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
   })
 
   it('keeps the task when an old relay cannot durably queue Stop during disconnect', async () => {
-    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local' })
+    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId })
     localProvider = {
       ...localProvider,
       stop: async () => { throw new BrowserBackendError('extension disconnected', 'no_extension') },
@@ -307,7 +361,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
   })
 
   it('retires a local task when frame polling reports that its tab closed', async () => {
-    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local' })
+    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId })
     localProvider = {
       ...localProvider,
       nextTakeoverFrame: async () => { throw new BrowserBackendError('tab closed', 'tab_closed') },
@@ -320,7 +374,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
   })
 
   it('keeps a local task retryable after a command timeout', async () => {
-    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local' })
+    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId })
     localProvider = {
       ...localProvider,
       nextTakeoverFrame: async () => { throw new BrowserBackendError('relay timeout', 'timeout') },
@@ -333,7 +387,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
   })
 
   it('keeps a local task retryable while the Firefox companion restarts', async () => {
-    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local' })
+    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId })
     localProvider = {
       ...localProvider,
       nextTakeoverFrame: async () => {
@@ -347,7 +401,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
   })
 
   it('releases a stale local binding when the session switches to cloud', async () => {
-    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-1' })
+    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-1', profileId })
     const flip = await request(app)
       .post('/api/computer/sessions/sess-1/backend')
       .send({ backend: 'cloud' })
@@ -358,7 +412,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
   })
 
   it('does not let another user change or retire an owned local task', async () => {
-    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local' })
+    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId })
     const stranger = makeApp('user-2')
     const flip = await request(stranger)
       .post('/api/computer/sessions/sess-local/backend')
@@ -459,7 +513,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
       // A task whose backend is local still refuses on the task-scoped route
       // (unchanged) — the new profile-scoped route above is the only path
       // for a My Browser capture.
-      localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local' })
+      localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local', profileId })
       const refused = await request(app)
         .post('/api/computer/tasks/sess-local/captured')
         .send({ site: 'skyscanner.com' })
@@ -582,6 +636,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
       const list = await request(app).get('/api/computer/profiles?workspaceId=ws-1')
       expect(list.status).toBe(200)
       expect(list.body.configured).toBe(true)
+      expect(list.body.credentialAuthConfigured).toBe(true)
       expect(list.body.profiles).toEqual([
         expect.objectContaining({
           id: profileId,
@@ -603,6 +658,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
         ownerUserId: 'user-1',
         clearance: 'confidential',
         defaultBackend: 'local',
+        localControlMode: 'task_tabs',
       })
     })
 
@@ -629,11 +685,16 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
     it('updates (clearance downgrade, enablement, backend) and deletes — OWNER only', async () => {
       const patched = await request(app)
         .patch(`/api/computer/profiles/${profileId}`)
-        .send({ clearance: 'internal', enabledAssistantIds: ['11111111-1111-4111-8111-111111111111'] })
+        .send({
+          clearance: 'internal',
+          enabledAssistantIds: ['11111111-1111-4111-8111-111111111111'],
+          localControlMode: 'full_browser',
+        })
       expect(patched.status).toBe(200)
       expect(patched.body.profile).toMatchObject({
         clearance: 'internal',
         enabledAssistantIds: ['11111111-1111-4111-8111-111111111111'],
+        localControlMode: 'full_browser',
       })
 
       const stranger = makeApp('intruder')
@@ -655,6 +716,65 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
       const revoked = await request(app).delete(`/api/computer/profiles/${profileId}/sessions/github.com`)
       expect(revoked.status).toBe(200)
       expect(vault.bundles.size).toBe(0)
+    })
+
+    it('stores browser credentials through owner-only write-only routes and tests via the broker', async () => {
+      const saved = await request(app)
+        .post(`/api/computer/profiles/${profileId}/credentials`)
+        .send({
+          loginUrl: 'https://accounts.example.com/login',
+          accountLabel: 'Primary account',
+          username: 'member@example.com',
+          password: 'secret-password',
+        })
+      expect(saved.status).toBe(200)
+      expect(saved.body.credential).toMatchObject({
+        id: 'cred-1',
+        site: 'example.com',
+        accountLabel: 'Primary account',
+      })
+      expect(saved.body).not.toHaveProperty('username')
+      expect(saved.body).not.toHaveProperty('password')
+      expect(savedSecret).toEqual({ username: 'member@example.com', password: 'secret-password' })
+
+      const list = await request(app).get('/api/computer/profiles?workspaceId=ws-1')
+      expect(list.body.profiles[0].credentials).toEqual([
+        expect.objectContaining({ id: 'cred-1', site: 'example.com' }),
+      ])
+      expect(JSON.stringify(list.body)).not.toContain('secret-password')
+      expect(JSON.stringify(list.body)).not.toContain('member@example.com')
+
+      const tested = await request(app).post(
+        `/api/computer/profiles/${profileId}/credentials/cred-1/test`,
+      )
+      expect(tested.status).toBe(200)
+      expect(tested.body).toEqual({ ok: true, status: 'authenticated', site: 'example.com' })
+
+      const stranger = makeApp('intruder')
+      expect(
+        (
+          await request(stranger)
+            .post(`/api/computer/profiles/${profileId}/credentials`)
+            .send({
+              loginUrl: 'https://accounts.example.com/login',
+              username: 'x',
+              password: 'y',
+            })
+        ).status,
+      ).toBe(404)
+      expect(
+        (
+          await request(app)
+            .post(`/api/computer/profiles/${profileId}/credentials`)
+            .send({ loginUrl: 'http://example.com/login', username: 'x', password: 'y' })
+        ).status,
+      ).toBe(400)
+
+      const revoked = await request(app).delete(
+        `/api/computer/profiles/${profileId}/credentials/cred-1`,
+      )
+      expect(revoked.status).toBe(200)
+      expect(credentialRows.size).toBe(0)
     })
 
     it('starts a user-initiated sign-in task ("Sign in to a site", owner only)', async () => {
@@ -721,7 +841,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
     expect((await request(dark).get('/api/computer/tasks/sess-1')).status).toBe(404)
     const profiles = await request(dark).get('/api/computer/profiles?workspaceId=ws-1')
     expect(profiles.status).toBe(200)
-    expect(profiles.body).toEqual({ configured: false, profiles: [] })
+    expect(profiles.body).toEqual({ configured: false, credentialAuthConfigured: false, profiles: [] })
     expect(
       (await request(dark).post('/api/computer/sessions/sess-1/backend').send({ backend: 'local' })).status,
     ).toBe(501)

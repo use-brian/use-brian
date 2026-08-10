@@ -23,7 +23,8 @@
  * the workspace's registration - which is invisible until a customer's connect
  * lands in the wrong tenant.
  *
- * See docs/architecture/integrations/msgraph.md → "Auth".
+ * See docs/architecture/integrations/msgraph.md → "Auth" and
+ * docs/architecture/integrations/mcp.md → "The `gdrive` connector".
  */
 
 import { getConnectorConfig, type ConnectorProvider } from '../connector-config.js'
@@ -34,8 +35,10 @@ export type ConnectorAppConfigSource = 'workspace' | 'deployment'
 export type ResolvedConnectorAppConfig = {
   clientId: string
   clientSecret: string
-  /** Provider-specific authority hint (msgraph: the Entra directory id). */
+  /** Provider-specific authority hint (msgraph: Entra directory id; gdrive: Picker project number). */
   tenantId?: string
+  /** gdrive only: browser key restricted to Google Picker + the Brian app origin. */
+  pickerApiKey?: string
   source: ConnectorAppConfigSource
 }
 

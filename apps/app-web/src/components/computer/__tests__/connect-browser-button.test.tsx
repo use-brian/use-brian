@@ -5,7 +5,7 @@
  *
  * The control's whole value is that it never dead-ends: it hides where no relay
  * exists, pairs in one click where the extension answers, and hands off to the
- * Settings panel in every other case. Those branches are what is asserted here
+ * Browsers profile index in every other case. Those branches are what is asserted here
  * — jsdom (not the SSR shape the panel test uses), because all of them live
  * behind an effect and a click.
  */
@@ -31,10 +31,8 @@ vi.mock("@/lib/browser-extension-bridge", () => ({
   requestBrowserControl: (...a: unknown[]) => requestBrowserControl(...a),
 }));
 
-const openWorkspaceSettings = vi.fn();
-vi.mock("@/components/settings-modal/settings-modal", () => ({
-  openWorkspaceSettings: (...a: unknown[]) => openWorkspaceSettings(...a),
-}));
+const routerPush = vi.fn();
+vi.mock("next/navigation", () => ({ useRouter: () => ({ push: routerPush }) }));
 
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
@@ -106,7 +104,7 @@ describe("[COMP:app-web/connect-browser-button] My Browser connect control", () 
     expect(dotOf(el)).toBeNull();
   });
 
-  it("pairs in one click and flips to connected without opening Settings", async () => {
+  it("pairs in one click and flips to connected without opening profile management", async () => {
     getBrowserExtensionStatus
       .mockResolvedValueOnce({ configured: true, connected: false })
       .mockResolvedValue({ configured: true, connected: true });
@@ -118,32 +116,32 @@ describe("[COMP:app-web/connect-browser-button] My Browser connect control", () 
     expect(pairViaExtension).toHaveBeenCalledWith(
       expect.objectContaining({ relayUrl: PAIRING.relayUrl, pairingToken: PAIRING.pairingToken }),
     );
-    expect(openWorkspaceSettings).not.toHaveBeenCalled();
+    expect(routerPush).not.toHaveBeenCalled();
     expect(labelOf(el)).toBe(c.manageAria);
     expect(dotOf(el)).toBe("primary");
   });
 
-  it("falls back to the Settings panel when no extension answers", async () => {
+  it("falls back to Browser profile management when no extension answers", async () => {
     getBrowserExtensionStatus.mockResolvedValue({ configured: true, connected: false });
     pairViaExtension.mockResolvedValue("not_installed");
     const { el } = await mount();
 
     await click(el);
 
-    expect(openWorkspaceSettings).toHaveBeenCalledWith("ws-browser-profiles");
+    expect(routerPush).toHaveBeenCalledWith("/w/ws-1/computer/profiles");
   });
 
-  it("falls back to the Settings panel when the extension refuses", async () => {
+  it("falls back to Browser profile management when the extension refuses", async () => {
     getBrowserExtensionStatus.mockResolvedValue({ configured: true, connected: false });
     pairViaExtension.mockResolvedValue("refused");
     const { el } = await mount();
 
     await click(el);
 
-    expect(openWorkspaceSettings).toHaveBeenCalledWith("ws-browser-profiles");
+    expect(routerPush).toHaveBeenCalledWith("/w/ws-1/computer/profiles");
   });
 
-  it("falls back to the Settings panel when the token mint itself fails", async () => {
+  it("falls back to Browser profile management when the token mint itself fails", async () => {
     getBrowserExtensionStatus.mockResolvedValue({ configured: true, connected: false });
     pairBrowserExtension.mockResolvedValue(null);
     const { el } = await mount();
@@ -151,7 +149,7 @@ describe("[COMP:app-web/connect-browser-button] My Browser connect control", () 
     await click(el);
 
     expect(pairViaExtension).not.toHaveBeenCalled();
-    expect(openWorkspaceSettings).toHaveBeenCalledWith("ws-browser-profiles");
+    expect(routerPush).toHaveBeenCalledWith("/w/ws-1/computer/profiles");
   });
 
   it("asks for browser control when the extension is paired but not allowed", async () => {
@@ -168,7 +166,7 @@ describe("[COMP:app-web/connect-browser-button] My Browser connect control", () 
 
     expect(requestBrowserControl).toHaveBeenCalled();
     expect(pairBrowserExtension).not.toHaveBeenCalled();
-    expect(openWorkspaceSettings).not.toHaveBeenCalled();
+    expect(routerPush).not.toHaveBeenCalled();
   });
 
   it("falls back to the panel if the extension stops answering before the allow click", async () => {
@@ -179,7 +177,7 @@ describe("[COMP:app-web/connect-browser-button] My Browser connect control", () 
 
     await click(el);
 
-    expect(openWorkspaceSettings).toHaveBeenCalledWith("ws-browser-profiles");
+    expect(routerPush).toHaveBeenCalledWith("/w/ws-1/computer/profiles");
   });
 
   it("never shows the allow state when no extension answered the control probe", async () => {
@@ -193,7 +191,7 @@ describe("[COMP:app-web/connect-browser-button] My Browser connect control", () 
     expect(dotOf(el)).toBe("primary");
   });
 
-  it("opens the panel to manage an already-connected browser instead of re-pairing", async () => {
+  it("opens profile management for an already-connected browser instead of re-pairing", async () => {
     getBrowserExtensionStatus.mockResolvedValue({ configured: true, connected: true });
     const { el } = await mount();
     expect(dotOf(el)).toBe("primary");
@@ -201,6 +199,6 @@ describe("[COMP:app-web/connect-browser-button] My Browser connect control", () 
     await click(el);
 
     expect(pairBrowserExtension).not.toHaveBeenCalled();
-    expect(openWorkspaceSettings).toHaveBeenCalledWith("ws-browser-profiles");
+    expect(routerPush).toHaveBeenCalledWith("/w/ws-1/computer/profiles");
   });
 });

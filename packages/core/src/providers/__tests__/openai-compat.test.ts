@@ -113,6 +113,46 @@ describe('[COMP:providers/openai-compat] streaming protocol mapping', () => {
 })
 
 describe('[COMP:providers/openai-compat] request construction', () => {
+  it('supports a fixed custom model without auth or vendor extension fields', async () => {
+    const customFetch = vi.fn().mockResolvedValue(sseResponse([
+      { choices: [{ delta: { content: 'ok' }, finish_reason: 'stop' }] },
+      '[DONE]',
+    ]))
+    const custom = createOpenAICompatProvider({
+      baseURL: 'http://local-model.example/v1/',
+      label: 'workspace-test',
+      wireModel: 'llama-local',
+      recordedModel: 'custom:00000000-0000-4000-8000-000000000001',
+      models: ['custom:00000000-0000-4000-8000-000000000001'],
+      fetchFn: customFetch,
+      includeStreamUsage: false,
+      enableThinkingField: false,
+      supportsJsonMode: false,
+      includeErrorDetail: false,
+    })
+
+    const chunks = await collect(custom.stream({
+      model: 'standard-policy-model',
+      systemPrompt: '',
+      messages: [{ role: 'user', content: 'hello' }],
+      thinkingLevel: 'high',
+      responseFormat: 'json',
+    }))
+    const [, init] = customFetch.mock.calls[0] as [string, RequestInit]
+    const body = JSON.parse(init.body as string) as Record<string, unknown>
+    expect(custom.models).toEqual(['custom:00000000-0000-4000-8000-000000000001'])
+    expect(customFetch.mock.calls[0][0]).toBe('http://local-model.example/v1/chat/completions')
+    expect(init.headers).toEqual({ 'Content-Type': 'application/json' })
+    expect(body.model).toBe('llama-local')
+    expect(body).not.toHaveProperty('stream_options')
+    expect(body).not.toHaveProperty('enable_thinking')
+    expect(body).not.toHaveProperty('response_format')
+    expect(chunks[0]).toEqual({
+      type: 'message_start',
+      model: 'custom:00000000-0000-4000-8000-000000000001',
+    })
+  })
+
   it('converts tool_use / tool_result history into tool_calls and role:tool messages', async () => {
     fetchMock.mockResolvedValueOnce(sseResponse([
       { choices: [{ delta: { content: 'ok' }, finish_reason: 'stop' }] }, '[DONE]',

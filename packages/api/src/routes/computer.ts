@@ -4,6 +4,8 @@ import { z } from 'zod'
 import { BrowserBackendError, createCloudBrowserProvider, registrableSiteOf } from '@use-brian/core'
 import type {
   BrowserBackendErrorCode,
+  BrowserAuthBroker,
+  BrowserCredentialAdminStore,
   BrowserProfileStore,
   BrowserProvider,
   BrowserSkillGrantStore,
@@ -114,7 +116,15 @@ export type LocalComputerTaskRecord = {
 }
 
 export type LocalComputerTaskStore = {
-  touch(context: { userId: string; workspaceId?: string | null; sessionId: string }, site?: string | null): void
+  touch(
+    context: {
+      userId: string
+      workspaceId?: string | null
+      sessionId: string
+      profileId?: string | null
+    },
+    site?: string | null,
+  ): void
   getActiveBySession(sessionId: string): LocalComputerTaskRecord | null
   listActiveByWorkspace(workspaceId: string): LocalComputerTaskRecord[]
   complete(sessionId: string): void
@@ -133,9 +143,17 @@ export function createInMemoryLocalComputerTaskStore(now: () => number = Date.no
     touch(context, site) {
       if (!context.workspaceId) return
       prune()
-      // The relay controls one consented tab per user. A newer chat adopts it.
+      const profileId = context.profileId ?? null
+      // One extension connection controls one consented tab per PROFILE. A
+      // newer task adopts that profile's tab; other paired profiles stay live.
       for (const [sessionId, task] of tasks) {
-        if (task.userId === context.userId && sessionId !== context.sessionId) tasks.delete(sessionId)
+        if (
+          task.userId === context.userId &&
+          task.profileId === profileId &&
+          sessionId !== context.sessionId
+        ) {
+          tasks.delete(sessionId)
+        }
       }
       const existing = tasks.get(context.sessionId)
       tasks.set(context.sessionId, {
@@ -144,7 +162,7 @@ export function createInMemoryLocalComputerTaskStore(now: () => number = Date.no
         workspaceId: context.workspaceId,
         sessionId: context.sessionId,
         status: 'running',
-        profileId: null,
+        profileId,
         injectedSite: site ?? existing?.injectedSite ?? null,
         createdAt: existing?.createdAt ?? now(),
         lastActivityAt: now(),
@@ -169,6 +187,7 @@ const CreateProfileSchema = z.object({
   name: z.string().min(1).max(120),
   clearance: ClearanceSchema.optional(),
   defaultBackend: BackendSchema.optional(),
+  localControlMode: z.enum(['task_tabs', 'full_browser']).optional(),
   proxyUrl: z.string().url().max(1024).nullish(),
 })
 
@@ -176,8 +195,16 @@ const UpdateProfileSchema = z.object({
   name: z.string().min(1).max(120).optional(),
   clearance: ClearanceSchema.optional(),
   defaultBackend: BackendSchema.optional(),
+  localControlMode: z.enum(['task_tabs', 'full_browser']).optional(),
   proxyUrl: z.string().url().max(1024).nullish().optional(),
   enabledAssistantIds: z.array(z.string().min(1).max(64)).max(200).optional(),
+})
+
+const SaveCredentialSchema = z.object({
+  loginUrl: z.string().url().max(2048).refine((url) => url.startsWith('https://')),
+  accountLabel: z.string().trim().min(1).max(120).nullish(),
+  username: z.string().min(1).max(512).refine((value) => !value.includes('\0')),
+  password: z.string().min(1).max(2048).refine((value) => !value.includes('\0')),
 })
 
 export function computerRoutes(deps: {
@@ -186,13 +213,17 @@ export function computerRoutes(deps: {
   localProvider?: BrowserProvider | null
   localTasks?: LocalComputerTaskStore | null
   /** Null means relay status was unavailable, never that the extension disconnected. */
-  localStatus?: ((userId: string) => Promise<{
+  localStatus?: ((userId: string, browserProfileId?: string) => Promise<{
     connected: boolean
     terminalEvent: 'stopped' | 'tab_closed' | null
   } | null>) | null
   vault: SessionVault | null
   /** Closed store; null → the Profile-Management surface reports unconfigured. */
   profileStore: BrowserProfileStore | null
+  /** Metadata/write/revoke only. This route object has no decrypt method. */
+  credentials?: BrowserCredentialAdminStore | null
+  /** Host-owned test + automatic reauthentication lane. */
+  authBroker?: BrowserAuthBroker | null
   /** Block-scoped grants (R2-2) — listed + revocable per profile. */
   grants?: BrowserSkillGrantStore | null
   /** Skill lookups so a grant row can show its block's name. */
@@ -241,14 +272,16 @@ export function computerRoutes(deps: {
     let localTasks = deps.localTasks?.listActiveByWorkspace(workspaceId) ?? []
     const callerLocalTasks = localTasks.filter((task) => task.userId === (req.userId as string))
     if (callerLocalTasks.length > 0 && deps.localStatus) {
-      const status = await deps.localStatus(req.userId as string)
-      if (status?.terminalEvent) {
-        for (const task of callerLocalTasks) deps.localTasks?.complete(task.sessionId)
-        localTasks = localTasks.filter((task) => task.userId !== (req.userId as string))
-      } else if (status && !status.connected) {
-        // Hide during reconnect, but retain the record so Stop can still clear
-        // it and a successful reconnect can restore it without a new task.
-        localTasks = localTasks.filter((task) => task.userId !== (req.userId as string))
+      for (const task of callerLocalTasks) {
+        const status = await deps.localStatus(task.userId, task.profileId ?? undefined)
+        if (status?.terminalEvent) {
+          deps.localTasks?.complete(task.sessionId)
+          localTasks = localTasks.filter((item) => item.sessionId !== task.sessionId)
+        } else if (status && !status.connected) {
+          // Hide during reconnect, but retain the record so Stop can still
+          // clear it and a successful reconnect can restore this profile.
+          localTasks = localTasks.filter((item) => item.sessionId !== task.sessionId)
+        }
       }
     }
     const localSessions = new Set(localTasks.map((task) => task.sessionId))
@@ -281,7 +314,7 @@ export function computerRoutes(deps: {
     }
     let connectionState: 'connected' | 'disconnected' | 'unknown' | undefined
     if (task.backend === 'local' && deps.localStatus) {
-      const status = await deps.localStatus(task.task.userId)
+      const status = await deps.localStatus(task.task.userId, task.task.profileId ?? undefined)
       if (status?.terminalEvent) {
         deps.localTasks?.complete(task.task.sessionId)
         res.status(404).json({ error: 'No active computer task for this session' })
@@ -333,6 +366,7 @@ export function computerRoutes(deps: {
           workspaceId: task.task.workspaceId,
           sessionId: task.task.sessionId,
           taskId: task.task.taskId,
+          ...(task.task.profileId ? { profileId: task.task.profileId } : {}),
         })
         deps.localTasks?.touch(task.task, task.task.injectedSite)
       } else {
@@ -418,6 +452,7 @@ export function computerRoutes(deps: {
             workspaceId: task.task.workspaceId,
             sessionId: task.task.sessionId,
             taskId: task.task.taskId,
+            ...(task.task.profileId ? { profileId: task.task.profileId } : {}),
           },
           parsed.data,
         )
@@ -506,6 +541,7 @@ export function computerRoutes(deps: {
           workspaceId: task.task.workspaceId,
           sessionId: task.task.sessionId,
           taskId: task.task.taskId,
+          ...(task.task.profileId ? { profileId: task.task.profileId } : {}),
         })
       } catch (err) {
         if (isAlreadyStoppedLocalTaskError(err)) {
@@ -554,6 +590,7 @@ export function computerRoutes(deps: {
           workspaceId: local.workspaceId,
           sessionId: local.sessionId,
           taskId: local.taskId,
+          ...(local.profileId ? { profileId: local.profileId } : {}),
         })
       } catch (err) {
         if (!isAlreadyStoppedLocalTaskError(err)) {
@@ -584,7 +621,7 @@ export function computerRoutes(deps: {
       return
     }
     if (!deps.profileStore) {
-      res.json({ configured: false, profiles: [] })
+      res.json({ configured: false, credentialAuthConfigured: false, profiles: [] })
       return
     }
     if (!(await requireMember(req.userId as string, workspaceId))) {
@@ -611,11 +648,19 @@ export function computerRoutes(deps: {
         return {
           ...p,
           sessions: deps.vault ? await deps.vault.list({ profileId: p.id }).catch(() => []) : [],
+          credentials:
+            deps.credentials && p.ownerUserId === (req.userId as string)
+              ? await deps.credentials.list({ profileId: p.id }).catch(() => [])
+              : [],
           grants: namedGrants,
         }
       }),
     )
-    res.json({ configured: true, profiles: withSessions })
+    res.json({
+      configured: true,
+      credentialAuthConfigured: Boolean(deps.credentials && deps.authBroker),
+      profiles: withSessions,
+    })
   })
 
   router.post('/profiles', async (req, res) => {
@@ -639,6 +684,7 @@ export function computerRoutes(deps: {
         name: body.data.name,
         clearance: body.data.clearance,
         defaultBackend: body.data.defaultBackend,
+        localControlMode: body.data.localControlMode,
         proxyUrl: body.data.proxyUrl ?? null,
       })
       res.json({ profile })
@@ -683,6 +729,106 @@ export function computerRoutes(deps: {
     }
     await deps.profileStore.delete(req.params.id)
     res.json({ ok: true })
+  })
+
+  // Saved login credentials are owner-only, write-only over REST, and scoped
+  // to the registrable site derived HERE from the saved HTTPS login URL. No
+  // route receives the resolver/decrypt capability.
+  router.post('/profiles/:id/credentials', async (req, res) => {
+    const profile = await ownedProfile(req.params.id, req.userId as string)
+    if (!profile) {
+      res.status(404).json({ error: 'No such profile (or not yours to change)' })
+      return
+    }
+    if (!deps.credentials) {
+      res.status(501).json({ error: 'Encrypted browser credentials are not configured on this deployment' })
+      return
+    }
+    if (profile.defaultBackend !== 'cloud') {
+      res.status(409).json({
+        error: 'My Browser profiles use the logins already in that browser and do not store cloud credentials.',
+        code: 'local_profile',
+      })
+      return
+    }
+    const body = SaveCredentialSchema.safeParse(req.body)
+    if (!body.success) {
+      res.status(400).json({ error: 'A valid HTTPS login URL, username, and password are required' })
+      return
+    }
+    const site = registrableSiteOf(body.data.loginUrl)
+    if (!site) {
+      res.status(400).json({ error: 'The login URL has no valid site' })
+      return
+    }
+    try {
+      const credential = await deps.credentials.upsert({
+        workspaceId: profile.workspaceId,
+        profileId: profile.id,
+        ownerUserId: profile.ownerUserId,
+        site,
+        loginUrl: body.data.loginUrl,
+        accountLabel: body.data.accountLabel ?? null,
+        secret: { username: body.data.username, password: body.data.password },
+      })
+      res.json({ credential })
+    } catch {
+      // Never reflect a database/crypto/provider message from a secret write.
+      res.status(500).json({ error: 'Could not save the encrypted browser credential' })
+    }
+  })
+
+  router.delete('/profiles/:id/credentials/:credentialId', async (req, res) => {
+    const profile = await ownedProfile(req.params.id, req.userId as string)
+    if (!profile || !deps.credentials) {
+      res.status(404).json({ error: 'No such profile or credential' })
+      return
+    }
+    const removed = await deps.credentials.revoke({
+      profileId: profile.id,
+      credentialId: req.params.credentialId,
+    })
+    if (!removed) {
+      res.status(404).json({ error: 'No such credential on this profile' })
+      return
+    }
+    res.json({ ok: true })
+  })
+
+  // Owner-triggered verification uses the exact same model-free auth lane as
+  // automatic session refresh. The response contains only typed status.
+  router.post('/profiles/:id/credentials/:credentialId/test', async (req, res) => {
+    const profile = await ownedProfile(req.params.id, req.userId as string)
+    if (!profile) {
+      res.status(404).json({ error: 'No such profile (or not yours to test)' })
+      return
+    }
+    if (!deps.credentials || !deps.authBroker) {
+      res.status(501).json({ error: 'Headless browser authentication is not configured on this deployment' })
+      return
+    }
+    const credentials = await deps.credentials.list({ profileId: profile.id })
+    const credential = credentials.find((item) => item.id === req.params.credentialId)
+    if (!credential) {
+      res.status(404).json({ error: 'No such credential on this profile' })
+      return
+    }
+    const result = await deps.authBroker.authenticate({
+      userId: req.userId as string,
+      workspaceId: profile.workspaceId,
+      profileId: profile.id,
+      site: credential.site,
+      credentialId: credential.id,
+    })
+    if (result.kind === 'authenticated') {
+      res.json({ ok: true, status: result.kind, site: result.site })
+      return
+    }
+    res.status(result.kind === 'unavailable' ? 409 : 422).json({
+      ok: false,
+      status: result.kind,
+      code: result.code,
+    })
   })
 
   // User-initiated sign-in (§7): "Sign in to a site" in Profile-Management
@@ -745,8 +891,8 @@ export function computerRoutes(deps: {
   // own connected Chrome, into THIS profile's vault, for a later CLOUD
   // browse under the same profile to replay. Unlike "Sign in to a site"
   // above, capture is not a property of a live task — the relay keys the
-  // extension by userId and asks for tab consent on its own, so there is
-  // nothing to resolve except the profile itself. No sandbox task is
+  // extension by (userId, browserProfileId) and asks for tab consent on its
+  // own, so there is nothing to resolve except the profile itself. No sandbox task is
   // created or required. Owner-only, same as every other route that writes
   // an identity into a profile.
   router.post('/profiles/:id/capture', async (req, res) => {

@@ -120,6 +120,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   shopifySalesReport: 'Run sales report',
   shopifyStorefrontFunnel: 'Check storefront funnel',
   shopifyAnalyticsQuery: 'Query store analytics',
+  shopifyPreviewCustomerSegment: 'Preview customer segment',
   shopifyUpdateProduct: 'Update product',
   shopifyCreateProduct: 'Create product',
   shopifyAddProductImage: 'Add product image',
@@ -139,6 +140,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   shopifySetInventory: 'Set inventory',
   shopifyCreateFulfillment: 'Fulfill order',
   shopifyCreateDiscountCode: 'Create discount code',
+  shopifyCreateCustomerSegment: 'Create customer segment',
   shopifyCreateContent: 'Create store content',
   shopifyCancelOrder: 'Cancel order',
   shopifyRefundOrder: 'Refund order',
@@ -189,6 +191,10 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
 
   // Computer use (docs/architecture/engine/computer-use.md)
   browserNavigate: 'Open a page in the browser',
+  browserOpenTab: 'Open a new browser tab',
+  browserListTabs: 'List browser tabs',
+  browserSwitchTab: 'Switch browser tabs',
+  browserCloseTab: 'Close a browser tab',
   browserSnapshot: 'Look at the browser page',
   browserClick: 'Click in the browser',
   browserType: 'Type in the browser',
@@ -275,6 +281,10 @@ const TOOL_STATUS_NAMES: Record<string, string> = {
   // `describeToolInput` overrides the URL-carrying ones with the page host
   // ("Browsing news.ycombinator.com") so the timeline says WHERE, not just WHAT.
   browserNavigate: 'Opening a page',
+  browserOpenTab: 'Opening a new tab',
+  browserListTabs: 'Listing browser tabs',
+  browserSwitchTab: 'Switching browser tabs',
+  browserCloseTab: 'Closing a browser tab',
   browserReadPage: 'Reading a page',
   browserClick: 'Clicking in the browser',
   browserType: 'Typing in the browser',

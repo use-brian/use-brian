@@ -12,6 +12,7 @@
  */
 
 import { query } from './client.js'
+import type { PostMedia } from './content-planning-store.js'
 import {
   CONTENT_PLANNING_PLATFORMS,
   type ContentPlanningPlatform,
@@ -22,6 +23,8 @@ import {
  * state is derived from what it is bound to, never stored (D7) - so a slot
  * and its draft cannot drift.
  */
+export type { PostMedia } from './content-planning-store.js'
+
 export type PlanSlotMark = 'planned' | 'skipped'
 
 /** The status a caller reads. `PlanSlotMark` plus the derived states. */
@@ -41,8 +44,18 @@ export type PlanSlot = {
   platform: ContentPlanningPlatform
   /** `YYYY-MM-DD`. A calendar plans days, not instants (§4). */
   scheduledFor: string
+  /**
+   * Minutes past LOCAL midnight, or null for "that day, no time"
+   * (feed-revamp-depth D26). Deliberately not a timestamp: `scheduledFor`
+   * remains the sole authority for which day, so nothing here can shift a slot
+   * across a day boundary. It is a label a human reads before posting by hand;
+   * nothing schedules from it.
+   */
+  scheduledMinute: number | null
   title: string
   brief: string | null
+  /** Media on the bound draft, projected for the calendar chip thumbnail. */
+  media: PostMedia[]
   /** Derived per §5 - not the stored `slot_status` column. */
   status: PlanSlotStatus
   draftId: string | null
@@ -65,6 +78,12 @@ export type PlanBrief = {
   monthStart: string
   brief: string
   themes: string[]
+  /**
+   * Posts per week this month's plan intends, or null. An integer rather than
+   * prose so the calendar's dashed gap ghosts are derivable in a pure client
+   * function (feed-revamp-depth D28). Drives no engine and creates nothing.
+   */
+  cadencePerWeek: number | null
   updatedBy: string | null
   updatedAt: Date | null
 }
@@ -149,8 +168,10 @@ type SlotRow = {
   assistantId: string
   platform: ContentPlanningPlatform
   scheduledFor: string
+  scheduledMinute: number | null
   title: string
   brief: string | null
+  media: PostMedia[]
   status: PlanSlotStatus
   draftId: string | null
   sessionId: string | null
@@ -169,8 +190,10 @@ const SLOT_SELECT = `
          s.assistant_id::text AS "assistantId",
          s.platform,
          to_char(s.scheduled_for, 'YYYY-MM-DD') AS "scheduledFor",
+         s.scheduled_minute AS "scheduledMinute",
          s.title,
          s.brief,
+         COALESCE(d.media, '[]'::jsonb) AS media,
          CASE
            WHEN d.status = 'pending'  THEN 'drafting'
            WHEN d.status = 'ready'    THEN 'ready'
@@ -200,6 +223,7 @@ export interface ContentPlanStore {
     userId: string
     platform: ContentPlanningPlatform
     scheduledFor: string
+    scheduledMinute?: number | null
     title: string
     brief?: string
   }): Promise<PlanSlot>
@@ -208,6 +232,7 @@ export interface ContentPlanStore {
     slotId: string
     patch: {
       scheduledFor?: string
+      scheduledMinute?: number | null
       title?: string
       brief?: string | null
       mark?: PlanSlotMark
@@ -234,6 +259,7 @@ export interface ContentPlanStore {
     month: string
     brief: string
     themes: string[]
+    cadencePerWeek?: number | null
   }): Promise<PlanBrief>
 }
 
@@ -265,14 +291,15 @@ export function createContentPlanStore(): ContentPlanStore {
     async createSlot(params) {
       const inserted = await query<{ id: string }>(
         `INSERT INTO content_plan_slots (
-           assistant_id, platform, scheduled_for, title, brief, created_by
+           assistant_id, platform, scheduled_for, scheduled_minute, title, brief, created_by
          )
-         VALUES ($1, $2, $3::date, $4, $5, $6)
+         VALUES ($1, $2, $3::date, $4, $5, $6, $7)
          RETURNING id`,
         [
           params.assistantId,
           params.platform,
           params.scheduledFor,
+          params.scheduledMinute ?? null,
           params.title,
           params.brief ?? null,
           params.userId,
@@ -294,6 +321,9 @@ export function createContentPlanStore(): ContentPlanStore {
       if (patch.scheduledFor !== undefined) {
         values.push(patch.scheduledFor)
         sets.push(`scheduled_for = $${values.length}::date`)
+      }
+      if (patch.scheduledMinute !== undefined) {
+        push('scheduled_minute', patch.scheduledMinute)
       }
       if (patch.title !== undefined) push('title', patch.title)
       if (patch.brief !== undefined) push('brief', patch.brief)
@@ -375,6 +405,7 @@ export function createContentPlanStore(): ContentPlanStore {
         monthStart: string
         brief: string
         themes: string[]
+        cadencePerWeek: number | null
         updatedBy: string | null
         updatedAt: Date
       }>(
@@ -382,6 +413,7 @@ export function createContentPlanStore(): ContentPlanStore {
                 to_char(month_start, 'YYYY-MM-DD') AS "monthStart",
                 brief,
                 themes,
+                cadence_per_week AS "cadencePerWeek",
                 updated_by::text AS "updatedBy",
                 updated_at AS "updatedAt"
            FROM content_plan_briefs
@@ -399,22 +431,25 @@ export function createContentPlanStore(): ContentPlanStore {
         monthStart: string
         brief: string
         themes: string[]
+        cadencePerWeek: number | null
         updatedBy: string | null
         updatedAt: Date
       }>(
         `INSERT INTO content_plan_briefs (
-           assistant_id, month_start, brief, themes, updated_by, updated_at
+           assistant_id, month_start, brief, themes, cadence_per_week, updated_by, updated_at
          )
-         VALUES ($1, $2::date, $3, $4, $5, now())
+         VALUES ($1, $2::date, $3, $4, $5, $6, now())
          ON CONFLICT (assistant_id, month_start) DO UPDATE
             SET brief = EXCLUDED.brief,
                 themes = EXCLUDED.themes,
+                cadence_per_week = EXCLUDED.cadence_per_week,
                 updated_by = EXCLUDED.updated_by,
                 updated_at = now()
          RETURNING assistant_id::text AS "assistantId",
                    to_char(month_start, 'YYYY-MM-DD') AS "monthStart",
                    brief,
                    themes,
+                   cadence_per_week AS "cadencePerWeek",
                    updated_by::text AS "updatedBy",
                    updated_at AS "updatedAt"`,
         [
@@ -422,6 +457,7 @@ export function createContentPlanStore(): ContentPlanStore {
           range.start,
           params.brief,
           params.themes,
+          params.cadencePerWeek ?? null,
           params.userId,
         ],
       )

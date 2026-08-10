@@ -102,7 +102,8 @@ export function createInMemorySandboxTaskStore(): SandboxTaskStore & {
 }
 
 /** URL shapes that mean "the session is not signed in here" (silent-death probe, §6). */
-const LOGIN_WALL_PATTERN = /\/(login|signin|sign-in|checkpoint|authwall|sessions\/new)([/?#]|$)/i
+const LOGIN_WALL_PATTERN =
+  /\/(login|log-in|logon|sign-in|signin|checkpoint|authwall|sessions\/new)([./_?#-]|$)/i
 
 export function looksLikeLoginWall(url: string): boolean {
   return LOGIN_WALL_PATTERN.test(url)

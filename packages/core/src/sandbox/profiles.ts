@@ -16,6 +16,7 @@ import { canRead, type Sensitivity } from '../security/sensitivity.js'
 import type { SessionVault } from './types.js'
 
 export type BrowserBackendKind = 'local' | 'cloud'
+export type LocalBrowserControlMode = 'task_tabs' | 'full_browser'
 
 export type BrowserProfile = {
   id: string
@@ -27,6 +28,8 @@ export type BrowserProfile = {
   enabledAssistantIds: string[]
   /** Seeds the interactive toggle; authoritative for unattended runs (R2-3). */
   defaultBackend: BrowserBackendKind
+  /** Scope granted to local-browser tasks. Defaults to task-owned tabs. */
+  localControlMode: LocalBrowserControlMode
   /** Dormant per-profile BYOP proxy hook (agent-browser `-p`). */
   proxyUrl: string | null
   createdAt: string
@@ -39,12 +42,16 @@ export type CreateBrowserProfileParams = {
   name: string
   clearance?: Sensitivity
   defaultBackend?: BrowserBackendKind
+  localControlMode?: LocalBrowserControlMode
   proxyUrl?: string | null
   enabledAssistantIds?: string[]
 }
 
 export type UpdateBrowserProfileParams = Partial<
-  Pick<BrowserProfile, 'name' | 'clearance' | 'defaultBackend' | 'proxyUrl' | 'enabledAssistantIds'>
+  Pick<
+    BrowserProfile,
+    'name' | 'clearance' | 'defaultBackend' | 'localControlMode' | 'proxyUrl' | 'enabledAssistantIds'
+  >
 >
 
 export interface BrowserProfileStore {
@@ -246,6 +253,7 @@ export function createInMemoryBrowserProfileStore(): BrowserProfileStore & {
         clearance: params.clearance ?? 'confidential',
         enabledAssistantIds: params.enabledAssistantIds ?? [],
         defaultBackend: params.defaultBackend ?? 'cloud',
+        localControlMode: params.localControlMode ?? 'task_tabs',
         proxyUrl: params.proxyUrl ?? null,
         createdAt: now,
         updatedAt: now,
@@ -262,6 +270,9 @@ export function createInMemoryBrowserProfileStore(): BrowserProfileStore & {
         ...('clearance' in patch && patch.clearance !== undefined ? { clearance: patch.clearance } : {}),
         ...('defaultBackend' in patch && patch.defaultBackend !== undefined
           ? { defaultBackend: patch.defaultBackend }
+          : {}),
+        ...('localControlMode' in patch && patch.localControlMode !== undefined
+          ? { localControlMode: patch.localControlMode }
           : {}),
         ...('proxyUrl' in patch ? { proxyUrl: patch.proxyUrl ?? null } : {}),
         ...('enabledAssistantIds' in patch && patch.enabledAssistantIds !== undefined

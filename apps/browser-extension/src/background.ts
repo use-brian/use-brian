@@ -2,7 +2,7 @@
  * MV3 background service worker — wires the relay client, the consent gate,
  * and the CDP executor into the P1.2 command loop. The extension is a
  * governed backend: it executes one discrete relay command at a time in the
- * one tab the user allowed, and the Stop button always wins.
+ * profile-scoped tab set the user allowed, and the Stop button always wins.
  */
 import { RelayClient } from './relay-client.js'
 import { TabExecutor, ExecutorError, isDetachedError, retryableAfterReattach } from './executor.js'
@@ -16,6 +16,7 @@ import {
 import { credentialsForConfigure, isTrustedPairingOrigin, type PairRequest } from './pairing.js'
 import { hasBrowserControl } from './browser-control-permission.js'
 import { readBuildStamp } from './build-info.js'
+import type { LocalControlMode } from './protocol.js'
 
 const executor = new TabExecutor()
 
@@ -66,6 +67,14 @@ function hostOf(url: string): string {
 const gate = new TaskGate({ prompt: promptForConsent })
 let relayWasReady = false
 
+async function stopTask(): Promise<void> {
+  const createdTabIds = gate.stop()
+  await executor.detach()
+  if (createdTabIds.length > 0) {
+    await chrome.tabs.remove(createdTabIds).catch(() => undefined)
+  }
+}
+
 // ── Relay connection ───────────────────────────────────────────
 
 async function getStored<T = string>(key: string): Promise<T | null> {
@@ -90,8 +99,7 @@ const client = new RelayClient({
       // A lost control plane must revoke browser control even if the relay
       // process restarts and forgets a queued Stop.
       relayWasReady = false
-      gate.stop()
-      void executor.detach()
+      void stopTask()
     }
     void chrome.action.setBadgeText({ text: state === 'ready' ? 'ON' : '' })
     void chrome.action.setBadgeBackgroundColor({ color: '#16a34a' })
@@ -122,9 +130,14 @@ function pairingMatches(): string[] {
 
 // ── Command loop ───────────────────────────────────────────────
 
-async function handleCommand(cmd: { id: string; op: string; args: Record<string, unknown> }): Promise<void> {
+async function handleCommand(cmd: {
+  id: string
+  op: string
+  args: Record<string, unknown>
+  controlMode: LocalControlMode
+}): Promise<void> {
   try {
-    const data = await executeOp(cmd.op, cmd.args)
+    const data = await executeOp(cmd.op, cmd.args, cmd.controlMode)
     client.sendResult({ id: cmd.id, ok: true, data })
   } catch (err) {
     const code =
@@ -140,21 +153,24 @@ async function handleCommand(cmd: { id: string; op: string; args: Record<string,
   }
 }
 
-async function executeOp(op: string, args: Record<string, unknown>): Promise<unknown> {
+async function executeOp(
+  op: string,
+  args: Record<string, unknown>,
+  controlMode: LocalControlMode,
+): Promise<unknown> {
   if (op === 'stop') {
-    gate.stop()
-    await executor.detach()
+    await stopTask()
     return { stopped: true }
   }
   try {
-    return await dispatch(op, args)
+    return await dispatch(op, args, controlMode)
   } catch (err) {
     // Chrome can drop the CDP session mid-command. Re-attaching costs one
     // round trip and the gate still governs it (a revoked consent re-prompts),
     // so recover once rather than handing the model a dead browser — but only
     // for ops that cannot double-fire. See `retryableAfterReattach`.
     if (!isDetachedError(err) || !retryableAfterReattach(op)) throw err
-    return await dispatch(op, args)
+    return await dispatch(op, args, controlMode)
   }
 }
 
@@ -188,7 +204,11 @@ async function attachToEligibleTab(tabId: number): Promise<void> {
   await executor.attach(tabId)
 }
 
-async function dispatch(op: string, args: Record<string, unknown>): Promise<unknown> {
+async function dispatch(
+  op: string,
+  args: Record<string, unknown>,
+  controlMode: LocalControlMode,
+): Promise<unknown> {
   // Required in the manifest. If it is absent, this install is malformed;
   // report that honestly instead of blaming the website.
   if (!(await hasBrowserControl())) {
@@ -197,7 +217,11 @@ async function dispatch(op: string, args: Record<string, unknown>): Promise<unkn
       'no_browser_permission',
     )
   }
-  const tabId = await gate.requireTab()
+  const tabId = await gate.requireTab(controlMode)
+  if (op === 'openTab') return openTab(args, controlMode)
+  if (op === 'listTabs') return listTabs(controlMode)
+  if (op === 'switchTab') return switchTab(args, controlMode)
+  if (op === 'closeTab') return closeTab(args, controlMode)
   await attachToEligibleTab(tabId)
   switch (op) {
     case 'navigate':
@@ -224,6 +248,98 @@ async function dispatch(op: string, args: Record<string, unknown>): Promise<unkn
   }
 }
 
+function webUrl(value: unknown): string {
+  const raw = String(value ?? '')
+  try {
+    const parsed = new URL(raw)
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return parsed.toString()
+  } catch {
+    // Use our own stable message rather than Chrome's vendor wording.
+  }
+  throw new ExecutorError('Only absolute http(s) URLs can be opened in a new tab.', 'backend_error')
+}
+
+async function openTab(
+  args: Record<string, unknown>,
+  _controlMode: LocalControlMode,
+): Promise<{ tabId: string; url: string; title: string }> {
+  if (!gate.canOpenTaskTab()) {
+    throw new ExecutorError('A task may open at most 8 browser tabs.', 'tab_limit')
+  }
+  const tab = await chrome.tabs.create({ url: webUrl(args.url), active: true })
+  if (tab.id == null) throw new ExecutorError('Chrome did not create the requested tab.', 'backend_error')
+  const handle = gate.registerCreatedTab(tab.id, true)
+  await attachToEligibleTab(tab.id)
+  const current = await chrome.tabs.get(tab.id)
+  return { tabId: handle, url: current.url ?? '', title: current.title ?? '' }
+}
+
+async function eligibleTabs(controlMode: LocalControlMode): Promise<chrome.tabs.Tab[]> {
+  if (controlMode === 'full_browser') {
+    const all = await chrome.tabs.query({})
+    return all.filter((tab) => tab.id != null && !tab.incognito && attachabilityOf(tab.url))
+  }
+  const tabs: chrome.tabs.Tab[] = []
+  for (const entry of gate.entries(controlMode)) {
+    try {
+      const tab = await chrome.tabs.get(entry.tabId)
+      if (!tab.incognito && attachabilityOf(tab.url)) tabs.push(tab)
+    } catch {
+      gate.onTabRemoved(entry.tabId)
+    }
+  }
+  return tabs
+}
+
+async function listTabs(controlMode: LocalControlMode): Promise<{
+  tabs: Array<{ id: string; title: string; url: string; active: boolean; taskOwned: boolean }>
+  activeTabId: string | null
+}> {
+  const tabs = await eligibleTabs(controlMode)
+  const visible = tabs.map((tab) => {
+    const id = tab.id as number
+    const handle = gate.handleForTab(id) ?? gate.registerFullTab(id)
+    return {
+      id: handle,
+      title: tab.title ?? '',
+      url: tab.url ?? '',
+      active: gate.currentTab() === id,
+      taskOwned: gate.isTaskOwnedTab(id),
+    }
+  })
+  return { tabs: visible, activeTabId: gate.currentHandle() }
+}
+
+async function switchTab(
+  args: Record<string, unknown>,
+  controlMode: LocalControlMode,
+): Promise<{ tabId: string; url: string; title: string }> {
+  const handle = String(args.tabId ?? '')
+  const tabId = gate.selectHandle(handle, controlMode)
+  const tab = await chrome.tabs.get(tabId)
+  if (!attachabilityOf(tab.url) || tab.incognito) {
+    gate.onTabRemoved(tabId)
+    throw new ExecutorError(RESTRICTED_TAB_MESSAGE, 'no_eligible_tab')
+  }
+  await chrome.tabs.update(tabId, { active: true })
+  if (tab.windowId != null) await chrome.windows.update(tab.windowId, { focused: true })
+  await attachToEligibleTab(tabId)
+  const current = await chrome.tabs.get(tabId)
+  return { tabId: handle, url: current.url ?? '', title: current.title ?? '' }
+}
+
+async function closeTab(
+  args: Record<string, unknown>,
+  controlMode: LocalControlMode,
+): Promise<{ closed: boolean; activeTabId: string | null }> {
+  const tabId = gate.selectHandle(String(args.tabId ?? ''), controlMode)
+  const wasCurrent = gate.currentTab() === tabId
+  if (wasCurrent) await executor.detach()
+  gate.onTabRemoved(tabId)
+  await chrome.tabs.remove(tabId)
+  return { closed: true, activeTabId: gate.currentHandle() }
+}
+
 // ── Chrome event wiring ────────────────────────────────────────
 
 chrome.debugger.onDetach.addListener((source, reason) => {
@@ -240,8 +356,20 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   if (gate.onTabRemoved(tabId)) {
     void executor.detach()
-    client.sendEvent('tab_closed')
+    if (gate.currentTab() == null) client.sendEvent('tab_closed')
   }
+})
+
+chrome.tabs.onCreated.addListener((tab) => {
+  if (tab.id == null || tab.openerTabId == null || !gate.isAuthorizedTab(tab.openerTabId)) return
+  if (!gate.canOpenTaskTab()) {
+    // The site opened this tab from a task-owned page, so it belongs to the
+    // task even though it exceeded the bounded scope. Close it immediately
+    // instead of leaving an untracked tab that Stop can no longer clean up.
+    void chrome.tabs.remove(tab.id)
+    return
+  }
+  gate.registerCreatedTab(tab.id, tab.active === true)
 })
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -250,8 +378,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     pendingConsent?.({ allowed: msg.allowed === true })
     sendResponse({ ok: true })
   } else if (msg.type === 'stop-task') {
-    gate.stop()
-    void executor.detach()
+    void stopTask()
     client.sendEvent('stopped')
     sendResponse({ ok: true })
   } else if (msg.type === 'configure') {

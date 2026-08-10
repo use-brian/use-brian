@@ -184,13 +184,14 @@ describe('[COMP:ext/agent] Relay client (P1.2 connection lifecycle)', () => {
 
   it('dispatches command frames to onCommand and answers via sendResult', async () => {
     const { sockets, connect } = fakeWsFactory()
-    const commands: Array<{ id: string; op: string }> = []
+    const commands: Array<{ id: string; op: string; controlMode: string }> = []
     const client = new RelayClient({
       getUrl: async () => 'wss://relay.test/ext',
       connect,
       getToken: async () => 'tok',
       onSessionToken: async () => {},
-      onCommand: (c) => void commands.push({ id: c.id, op: c.op }),
+      onCommand: (c) =>
+        void commands.push({ id: c.id, op: c.op, controlMode: c.controlMode }),
     })
     client.start()
     await flush()
@@ -199,7 +200,19 @@ describe('[COMP:ext/agent] Relay client (P1.2 connection lifecycle)', () => {
     ws.onopen?.()
     ws.onmessage?.({ data: JSON.stringify({ type: 'ready' }) })
     ws.onmessage?.({ data: JSON.stringify({ type: 'command', id: 'c1', op: 'snapshot', args: {} }) })
-    expect(commands).toEqual([{ id: 'c1', op: 'snapshot' }])
+    ws.onmessage?.({
+      data: JSON.stringify({
+        type: 'command',
+        id: 'c2',
+        op: 'listTabs',
+        args: {},
+        controlMode: 'full_browser',
+      }),
+    })
+    expect(commands).toEqual([
+      { id: 'c1', op: 'snapshot', controlMode: 'task_tabs' },
+      { id: 'c2', op: 'listTabs', controlMode: 'full_browser' },
+    ])
 
     client.sendResult({ id: 'c1', ok: true, data: { nodes: [] } })
     expect(JSON.parse(ws.sentFrames.at(-1) as string)).toMatchObject({ type: 'result', id: 'c1', ok: true })

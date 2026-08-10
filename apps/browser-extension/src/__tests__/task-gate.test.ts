@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest'
-import { TaskGate, CONSENT_IDLE_RESET_MS } from '../task-gate.js'
+import {
+  TaskGate,
+  CONSENT_IDLE_RESET_MS,
+  MAX_TASK_CREATED_TABS,
+} from '../task-gate.js'
 
 describe('[COMP:ext/agent] Per-task consent gate (P1.7)', () => {
   it('prompts once, then reuses consent within the idle window', async () => {
@@ -203,5 +207,75 @@ describe('[COMP:ext/agent] Per-task consent gate (P1.7)', () => {
     expect(gate.onTabRemoved(4)).toBe(false)
     expect(gate.onTabRemoved(5)).toBe(true)
     expect(gate.currentTab()).toBeNull()
+  })
+})
+
+describe('[COMP:ext/multi-tab-control] Profile-scoped tab handles', () => {
+  it('keeps task mode to the approved root and task-created tabs', async () => {
+    const gate = new TaskGate({ prompt: async () => ({ allowed: true, tabId: 10 }) })
+    await gate.requireTab('task_tabs')
+    const rootHandle = gate.currentHandle()
+    const createdHandle = gate.registerCreatedTab(11)
+
+    expect(rootHandle).toMatch(/^tab-/)
+    expect(createdHandle).toMatch(/^tab-/)
+    expect(gate.entries('task_tabs').map((entry) => entry.tabId)).toEqual([10, 11])
+    expect(gate.isTaskOwnedTab(10)).toBe(true)
+    expect(gate.isTaskOwnedTab(11)).toBe(true)
+  })
+
+  it('adopts pre-existing tabs only in full-profile mode and drops them when narrowed', async () => {
+    const gate = new TaskGate({ prompt: async () => ({ allowed: true, tabId: 10 }) })
+    await gate.requireTab('full_browser')
+    const existing = gate.registerFullTab(99)
+    expect(gate.isTaskOwnedTab(99)).toBe(false)
+    expect(gate.selectHandle(existing, 'full_browser')).toBe(99)
+
+    gate.setMode('task_tabs')
+    expect(() => gate.selectHandle(existing, 'task_tabs')).toThrowError(
+      /outside this browser profile's allowed task scope/i,
+    )
+    expect(gate.currentTab()).toBe(10)
+  })
+
+  it('Stop returns only created tabs for cleanup and preserves the approved root', async () => {
+    const gate = new TaskGate({ prompt: async () => ({ allowed: true, tabId: 10 }) })
+    await gate.requireTab('full_browser')
+    gate.registerCreatedTab(11)
+    gate.registerFullTab(12)
+
+    expect(gate.stop()).toEqual([11])
+    expect(gate.currentTab()).toBeNull()
+  })
+
+  it('keeps task-created tabs tracked for Stop cleanup across an idle re-approval', async () => {
+    let now = 1_000
+    const gate = new TaskGate({
+      prompt: async () => ({ allowed: true, tabId: 10 }),
+      now: () => now,
+    })
+    await gate.requireTab('task_tabs')
+    gate.registerCreatedTab(11)
+    now += CONSENT_IDLE_RESET_MS + 1
+    await gate.requireTab('task_tabs')
+
+    expect(gate.stop()).toEqual([11])
+  })
+
+  it('caps task-created tabs and uses opaque handles instead of Chrome ids', async () => {
+    const gate = new TaskGate({ prompt: async () => ({ allowed: true, tabId: 123456 }) })
+    await gate.requireTab('task_tabs')
+    expect(gate.currentHandle()).not.toContain('123456')
+    for (let i = 0; i < MAX_TASK_CREATED_TABS; i += 1) gate.registerCreatedTab(200 + i)
+    expect(() => gate.registerCreatedTab(999)).toThrowError(/at most 8 browser tabs/i)
+  })
+
+  it('falls back to another scoped tab when the selected tab closes', async () => {
+    const gate = new TaskGate({ prompt: async () => ({ allowed: true, tabId: 10 }) })
+    await gate.requireTab('task_tabs')
+    gate.registerCreatedTab(11)
+    expect(gate.currentTab()).toBe(11)
+    expect(gate.onTabRemoved(11)).toBe(true)
+    expect(gate.currentTab()).toBe(10)
   })
 })

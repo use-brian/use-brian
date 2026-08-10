@@ -13,7 +13,11 @@
 
 import { describe, it, expect, vi } from 'vitest'
 import type { Tool } from '@use-brian/core'
-import { assertActionAllowed, gateToolsOnActionGrants } from '../assert-action-allowed.js'
+import {
+  assertActionAllowed,
+  filterToolsByActionGrants,
+  gateToolsOnActionGrants,
+} from '../assert-action-allowed.js'
 import type { AssistantConnectorGrantsStore } from '../../db/assistant-connector-grants-store.js'
 
 function buildStore(
@@ -135,5 +139,90 @@ describe('[COMP:safety/assert-action-allowed] gateToolsOnActionGrants', () => {
     const gated = gateToolsOnActionGrants([tool], 'fathom', store, 'a-1')
     expect(gated[0]).toBe(tool)
     expect(store.getForAssistantSystem).not.toHaveBeenCalled()
+  })
+
+  it('removes ungranted writes before injection while retaining reads', async () => {
+    const store = buildStore(null)
+    const { tool: read } = fakeTool('githubListIssues')
+    const { tool: write } = fakeTool('githubCreateIssue')
+    const gated = gateToolsOnActionGrants([read, write], 'github', store, 'a-1')
+
+    const visible = await filterToolsByActionGrants(new Map(gated.map((tool) => [tool.name, tool])))
+
+    expect([...visible.keys()]).toEqual(['githubListIssues'])
+  })
+
+  it('keeps an explicitly granted write discoverable', async () => {
+    const store = buildStore({
+      id: 'g-1',
+      assistantId: 'a-1',
+      connectorId: 'gcal',
+      readAllowed: true,
+      allowedActions: ['googleCalendarCreateEvent'],
+      grantedByUserId: 'u-1',
+      grantedAt: new Date(),
+      updatedAt: new Date(),
+    })
+    const { tool } = fakeTool('googleCalendarCreateEvent')
+    const gated = gateToolsOnActionGrants([tool], 'gcal', store, 'a-1')
+
+    const visible = await filterToolsByActionGrants(new Map([[tool.name, gated[0]]]))
+
+    expect(visible.has('googleCalendarCreateEvent')).toBe(true)
+  })
+
+  it('requires an exact account grant instead of inheriting the provider grant', async () => {
+    const providerGrant = {
+      id: 'g-provider',
+      assistantId: 'a-1',
+      connectorId: 'gcal',
+      readAllowed: true,
+      allowedActions: ['googleCalendarCreateEvent'],
+      grantedByUserId: 'u-1',
+      grantedAt: new Date(),
+      updatedAt: new Date(),
+    }
+    const store = buildStore(null)
+    vi.mocked(store.getForAssistantSystem).mockImplementation(async (_assistantId, connectorId) =>
+      connectorId === 'gcal' ? providerGrant : null,
+    )
+    const { tool } = fakeTool('googleCalendarCreateEvent')
+    const [gated] = gateToolsOnActionGrants(
+      [tool],
+      'gcal',
+      store,
+      'a-1',
+      'gcal:hinson-calendar',
+    )
+
+    const visible = await filterToolsByActionGrants(new Map([[tool.name, gated]]))
+
+    expect(visible.has(tool.name)).toBe(false)
+    expect(store.getForAssistantSystem).toHaveBeenCalledWith('a-1', 'gcal:hinson-calendar')
+    expect(store.getForAssistantSystem).not.toHaveBeenCalledWith('a-1', 'gcal')
+  })
+
+  it('re-checks at execution so a grant revoked after injection cannot run', async () => {
+    const grant = {
+      id: 'g-1',
+      assistantId: 'a-1',
+      connectorId: 'gmail',
+      readAllowed: true,
+      allowedActions: ['gmailSendMessage'],
+      grantedByUserId: 'u-1',
+      grantedAt: new Date(),
+      updatedAt: new Date(),
+    }
+    const store = buildStore(grant)
+    vi.mocked(store.getForAssistantSystem)
+      .mockResolvedValueOnce(grant)
+      .mockResolvedValueOnce(null)
+    const { tool, execute } = fakeTool('gmailSendMessage')
+    const [gated] = gateToolsOnActionGrants([tool], 'gmail', store, 'a-1')
+    const visible = await filterToolsByActionGrants(new Map([[tool.name, gated]]))
+
+    expect(visible.has(tool.name)).toBe(true)
+    await expect(gated.execute({} as never, {} as never)).rejects.toThrow(/no grant for gmail/)
+    expect(execute).not.toHaveBeenCalled()
   })
 })

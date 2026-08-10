@@ -81,6 +81,7 @@ type TelegramByoRouteOptions = {
    * channel pipeline so its background calls work without a Google key. */
   backgroundModel?: string
   provider: LLMProvider
+  resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
   systemPrompt: string
   tools: Map<string, Tool>
   memoryStore: MemoryStore
@@ -1108,6 +1109,7 @@ type ProcessMessageParams = {
   externalGuestConnectorTools: boolean
   archiveConnectorInstanceId?: string | null
   provider: LLMProvider
+  resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
   systemPrompt: string
   tools: Map<string, Tool>
   memoryStore: MemoryStore
@@ -1578,6 +1580,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     adaptiveResearchEnabled: true,
     abortController: new AbortController(),
     provider: params.provider,
+    resolveWorkspaceCustomLlm: params.resolveWorkspaceCustomLlm,
     systemPrompt: params.systemPrompt,
     tools: params.tools,
     memoryStore: params.memoryStore,

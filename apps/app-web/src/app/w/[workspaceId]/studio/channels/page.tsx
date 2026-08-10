@@ -1524,7 +1524,8 @@ function ConfigToggle({
 }
 
 /**
- * Telegram-only per-chat / per-topic flips of the `requireMention` default.
+ * Telegram-only cumulative per-chat / per-topic overrides of the
+ * `requireMention` default.
  * The chat / topic inventory (`seenChats`) is webhook-populated and read-only
  * — the bot has to have seen a group before it can be listed here.
  */

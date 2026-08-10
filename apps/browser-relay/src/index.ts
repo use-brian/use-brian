@@ -3,7 +3,8 @@
  * docs/architecture/engine/computer-use.md §4).
  *
  * Terminates the browser extension's WebSocket (`/ext`), verifies P1.3
- * pairing tokens, holds the in-memory `userId → connection` registry, and
+ * pairing tokens, holds the in-memory `(userId, browserProfileId) → connection`
+ * registry, and
  * exposes `POST /internal/browser/command` for the api's relay transport.
  * **Single-instance** on Cloud Run (min=max=1) — the registry is process
  * memory, the wa/discord-connector deployment shape.
@@ -48,7 +49,7 @@ app.use('/internal', (req, res, next) => {
 app.post('/internal/browser/command', async (req, res) => {
   const parsed = InternalCommandRequestSchema.safeParse(req.body)
   if (!parsed.success) {
-    res.status(400).json({ error: 'userId and op are required' })
+    res.status(400).json({ error: 'userId, browserProfileId, and op are required' })
     return
   }
   const result = await relay.dispatchCommand(parsed.data)
@@ -56,7 +57,14 @@ app.post('/internal/browser/command', async (req, res) => {
 })
 
 app.get('/internal/browser/status/:userId', (req, res) => {
-  res.json(relay.connectionStatus(req.params.userId))
+  res.json(
+    relay.connectionStatus(req.params.userId, {
+      ...(typeof req.query.browserProfileId === 'string'
+        ? { browserProfileId: req.query.browserProfileId }
+        : {}),
+      ...(typeof req.query.workspaceId === 'string' ? { workspaceId: req.query.workspaceId } : {}),
+    }),
+  )
 })
 
 // ── WebSocket endpoint for extensions ─────────────────────────

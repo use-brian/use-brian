@@ -152,6 +152,9 @@ export class StubSandboxProvider implements SandboxProvider {
       type: async (ref: string, text: string): Promise<void> => {
         state().actions.push({ op: 'type', args: { ref, text } })
       },
+      typeSecret: async (ref: string): Promise<void> => {
+        state().actions.push({ op: 'typeSecret', args: { ref, redacted: true } })
+      },
       currentUrl: async (): Promise<BrowserUrlResult> => {
         const s = state()
         return { url: s.url, title: s.title }

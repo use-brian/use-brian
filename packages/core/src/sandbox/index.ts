@@ -4,6 +4,8 @@
  */
 export * from './types.js'
 export * from './profiles.js'
+export * from './browser-credentials.js'
+export * from './browser-auth-broker.js'
 export * from './browser-skills.js'
 export * from './effect-contract.js'
 export * from './verb-ceiling.js'

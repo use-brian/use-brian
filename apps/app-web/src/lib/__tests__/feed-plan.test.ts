@@ -1,7 +1,21 @@
 import { describe, expect, it } from "vitest";
 import {
+  WEEK_PX_PER_HOUR,
   addMonths,
+  agendaGroups,
+  cadenceShortfall,
+  compareSlotsInDay,
   deriveSlotStatus,
+  emptySlots,
+  formatSlotMinute,
+  ghostDays,
+  minuteFromOffset,
+  offsetFromMinute,
+  parseSlotMinute,
+  timedSlotsOn,
+  untimedSlotsOn,
+  weekDays,
+  weekStart,
   isoDay,
   monthGridDays,
   monthKey,
@@ -19,8 +33,10 @@ function slot(overrides: Partial<PlanSlot> = {}): PlanSlot {
     assistantId: "assistant-1",
     platform: "threads",
     scheduledFor: "2026-08-04",
+    scheduledMinute: null,
     title: "Launch recap",
     brief: null,
+    media: [],
     status: "planned",
     draftId: null,
     sessionId: null,
@@ -150,5 +166,165 @@ describe("[COMP:app-web/feed-plan] marketing plan helpers", () => {
     expect(
       deriveSlotStatus({ mark: "skipped", draftStatus: "ready", hasSession: true }),
     ).toBe("ready");
+  });
+});
+
+const TODAY = new Date(2026, 7, 15); // 15 Aug 2026, local
+
+describe("[COMP:app-web/feed-plan] Wall-clock minutes", () => {
+  it("formats a minute and renders nothing for no time", () => {
+    expect(formatSlotMinute(540)).toBe("09:00");
+    expect(formatSlotMinute(570)).toBe("09:30");
+    expect(formatSlotMinute(0)).toBe("00:00");
+    expect(formatSlotMinute(1439)).toBe("23:59");
+    // A slot with no time is a real state; "00:00" would invent one.
+    expect(formatSlotMinute(null)).toBeNull();
+    expect(formatSlotMinute(1440)).toBeNull();
+    expect(formatSlotMinute(-1)).toBeNull();
+  });
+
+  it("parses a typed time and treats empty as cleared", () => {
+    expect(parseSlotMinute("09:00")).toBe(540);
+    expect(parseSlotMinute("9:05")).toBe(545);
+    expect(parseSlotMinute("23:59")).toBe(1439);
+    expect(parseSlotMinute("  ")).toBeNull();
+    expect(parseSlotMinute("24:00")).toBeNull();
+    expect(parseSlotMinute("09:60")).toBeNull();
+    expect(parseSlotMinute("morning")).toBeNull();
+  });
+
+  it("sorts timed slots before untimed ones", () => {
+    const a = slot({ id: "a", scheduledMinute: 540 });
+    const b = slot({ id: "b", scheduledMinute: null });
+    const c = slot({ id: "c", scheduledMinute: 120 });
+    expect([a, b, c].sort(compareSlotsInDay).map((s) => s.id)).toEqual([
+      "c",
+      "a",
+      "b",
+    ]);
+  });
+});
+
+describe("[COMP:app-web/feed-plan] Cadence gap ghosts", () => {
+  it("suggests nothing when no cadence is set", () => {
+    // The ghost is opt-in: a month with no stated cadence has no gaps.
+    expect(ghostDays("2026-08", [], null, TODAY)).toEqual([]);
+    expect(ghostDays("2026-08", [], 0, TODAY)).toEqual([]);
+  });
+
+  it("suggests days inside the month only", () => {
+    const ghosts = ghostDays("2026-08", [], 3, TODAY);
+    expect(ghosts.length).toBeGreaterThan(0);
+    for (const iso of ghosts) expect(iso.startsWith("2026-08-")).toBe(true);
+  });
+
+  it("never suggests a day that already has a slot", () => {
+    const first = ghostDays("2026-08", [], 3, TODAY);
+    const occupied = first.slice(0, 2).map((iso) => slot({ scheduledFor: iso }));
+    const after = ghostDays("2026-08", occupied, 3, TODAY);
+    for (const iso of first.slice(0, 2)) expect(after).not.toContain(iso);
+  });
+
+  it("shrinks toward zero as the month fills, so a full month shows no gaps", () => {
+    const empty = cadenceShortfall("2026-08", [], 3, TODAY);
+    const filled = ghostDays("2026-08", [], 3, TODAY).map((iso) =>
+      slot({ scheduledFor: iso }),
+    );
+    expect(cadenceShortfall("2026-08", filled, 3, TODAY)).toBe(0);
+    expect(empty).toBeGreaterThan(0);
+  });
+});
+
+describe("[COMP:app-web/feed-plan] Agenda groups", () => {
+  it("lists only days that carry a slot or a gap, in order, time-sorted", () => {
+    const slots = [
+      slot({ id: "late", scheduledFor: "2026-08-04", scheduledMinute: 870 }),
+      slot({ id: "early", scheduledFor: "2026-08-04", scheduledMinute: 540 }),
+      slot({ id: "other", scheduledFor: "2026-08-20" }),
+    ];
+    const groups = agendaGroups("2026-08", slots, null, TODAY);
+    expect(groups.map((g) => g.iso)).toEqual(["2026-08-04", "2026-08-20"]);
+    expect(groups[0].slots.map((s) => s.id)).toEqual(["early", "late"]);
+    expect(groups[0].isGap).toBe(false);
+  });
+
+  it("includes a cadence gap as its own empty day", () => {
+    const groups = agendaGroups("2026-08", [], 2, TODAY);
+    expect(groups.length).toBeGreaterThan(0);
+    expect(groups.every((g) => g.isGap && g.slots.length === 0)).toBe(true);
+  });
+});
+
+describe("[COMP:app-web/feed-plan] Empty slots for the opt-in fill", () => {
+  it("takes only planned, unbound, brief-less slots", () => {
+    const candidates = [
+      slot({ id: "empty" }),
+      slot({ id: "has-brief", brief: "Say the thing" }),
+      slot({ id: "drafting", status: "drafting", sessionId: "s-1" }),
+      slot({ id: "bound", draftId: "d-1" }),
+      // A deliberate skip is a decision the operator already made; refilling
+      // it would be the surface overruling them.
+      slot({ id: "skipped", status: "skipped" }),
+      slot({ id: "posted", status: "posted" }),
+    ];
+    expect(emptySlots(candidates).map((s) => s.id)).toEqual(["empty"]);
+  });
+});
+
+describe("[COMP:app-web/plan-week] Week geometry", () => {
+  it("anchors the week to its Monday from any day inside it", () => {
+    // 2026-08-05 is a Wednesday.
+    expect(weekStart("2026-08-05")).toBe("2026-08-03");
+    expect(weekStart("2026-08-03")).toBe("2026-08-03");
+    expect(weekStart("2026-08-09")).toBe("2026-08-03"); // Sunday
+    expect(weekStart("garbage")).toBeNull();
+  });
+
+  it("lays out seven Monday-first days and marks the weekend", () => {
+    const days = weekDays("2026-08-05", TODAY);
+    expect(days).toHaveLength(7);
+    expect(days[0].iso).toBe("2026-08-03");
+    expect(days[6].iso).toBe("2026-08-09");
+    expect(days.filter((d) => d.isWeekend).map((d) => d.iso)).toEqual([
+      "2026-08-08",
+      "2026-08-09",
+    ]);
+  });
+
+  it("round-trips a minute through the pixel scale", () => {
+    expect(offsetFromMinute(0)).toBe(0);
+    expect(offsetFromMinute(60)).toBe(WEEK_PX_PER_HOUR);
+    expect(minuteFromOffset(offsetFromMinute(540))).toBe(540);
+  });
+
+  it("snaps a drop to a quarter hour", () => {
+    // Minute-precision drag is a fight, not a feature.
+    const nearlyNine = offsetFromMinute(538);
+    expect(minuteFromOffset(nearlyNine)).toBe(540);
+    expect(minuteFromOffset(offsetFromMinute(550))).toBe(555);
+    expect(minuteFromOffset(offsetFromMinute(547))).toBe(540); // 547.5 is the midpoint
+  });
+
+  it("CLAMPS to the day instead of wrapping past midnight", () => {
+    // A vertical drag must never change the DATE -- that belongs to
+    // scheduledFor. Wrapping here would silently reschedule to tomorrow.
+    expect(minuteFromOffset(-500)).toBe(0);
+    expect(minuteFromOffset(offsetFromMinute(2000))).toBe(1425); // 23:45
+    expect(minuteFromOffset(offsetFromMinute(1440))).toBe(1425);
+  });
+
+  it("splits a day's slots into timed and untimed", () => {
+    const all = [
+      slot({ id: "late", scheduledFor: "2026-08-04", scheduledMinute: 870 }),
+      slot({ id: "early", scheduledFor: "2026-08-04", scheduledMinute: 540 }),
+      slot({ id: "anytime", scheduledFor: "2026-08-04", scheduledMinute: null }),
+      slot({ id: "elsewhere", scheduledFor: "2026-08-05", scheduledMinute: 540 }),
+    ];
+    expect(timedSlotsOn(all, "2026-08-04").map((s) => s.id)).toEqual([
+      "early",
+      "late",
+    ]);
+    // Untimed is a real state, so it gets its own band rather than a fake midnight.
+    expect(untimedSlotsOn(all, "2026-08-04").map((s) => s.id)).toEqual(["anytime"]);
   });
 });

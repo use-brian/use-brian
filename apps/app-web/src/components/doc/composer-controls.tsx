@@ -104,6 +104,10 @@ type Props = {
   meteredSelectedKey?: string | null;
   /** Pick a metered entry (key) or clear back to curated (null). */
   onMeteredSelect?: (key: string | null) => void;
+  /** Workspace-owned OpenAI-compatible endpoints. */
+  customOptions?: Array<{ key: string; label: string; sublabel: string }>;
+  customSelectedKey?: string | null;
+  onCustomSelect?: (key: string | null) => void;
   /** Row layout override (margin) for the host composer. */
   className?: string;
 };
@@ -126,6 +130,9 @@ export function ComposerControls({
   meteredOptions,
   meteredSelectedKey,
   onMeteredSelect,
+  customOptions,
+  customSelectedKey,
+  onCustomSelect,
   className,
 }: Props) {
   const t = useT().chat;
@@ -203,13 +210,20 @@ export function ComposerControls({
       ) : null}
       <div className="flex-1" />
       <Select
-        value={meteredSelectedKey ? `metered:${meteredSelectedKey}` : model}
+        value={customSelectedKey ? `custom:${customSelectedKey}` : meteredSelectedKey ? `metered:${meteredSelectedKey}` : model}
         onValueChange={(v) => {
           if (!v) return;
+          if (v.startsWith("custom:")) {
+            onMeteredSelect?.(null);
+            onCustomSelect?.(v.slice("custom:".length));
+            return;
+          }
           if (v.startsWith("metered:")) {
+            onCustomSelect?.(null);
             onMeteredSelect?.(v.slice("metered:".length));
             return;
           }
+          onCustomSelect?.(null);
           onMeteredSelect?.(null);
           onModelChange(v as ModelTier);
         }}
@@ -222,7 +236,9 @@ export function ComposerControls({
           className="gap-1.5 border-transparent bg-muted/60 text-xs hover:bg-muted disabled:pointer-events-none disabled:opacity-40"
         >
           <span className="font-medium">
-            {meteredSelectedKey
+            {customSelectedKey
+              ? customOptions?.find((o) => o.key === customSelectedKey)?.label ?? t.modelCustomGroup
+              : meteredSelectedKey
               ? meteredOptions?.find((o) => o.key === meteredSelectedKey)?.label ?? t.modelMeteredGroup
               : model === "pro" ? t.modelPro : model === "max" ? t.modelMax : t.modelStandard}
           </span>
@@ -246,6 +262,21 @@ export function ComposerControls({
               <span className="text-[11px] text-muted-foreground">{t.modelMaxDesc}</span>
             </div>
           </SelectItem>
+          {customOptions && customOptions.length > 0 ? (
+            <>
+              <div className="mt-1 border-t border-border/60 px-2 pb-0.5 pt-1.5 text-[10.5px] font-medium uppercase tracking-wide text-muted-foreground">
+                {t.modelCustomGroup}
+              </div>
+              {customOptions.map((o) => (
+                <SelectItem key={o.key} value={`custom:${o.key}`}>
+                  <div className="flex flex-col gap-0.5 py-0.5">
+                    <span className="text-sm font-medium">{o.label}</span>
+                    <span className="text-[11px] text-muted-foreground">{o.sublabel}</span>
+                  </div>
+                </SelectItem>
+              ))}
+            </>
+          ) : null}
           {meteredOptions && meteredOptions.length > 0 ? (
             <>
               <div className="mt-1 border-t border-border/60 px-2 pb-0.5 pt-1.5 text-[10.5px] font-medium uppercase tracking-wide text-muted-foreground">

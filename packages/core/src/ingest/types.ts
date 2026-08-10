@@ -28,6 +28,9 @@ export const SOURCE_KINDS = [
   'email_thread',
   'meeting',
   'github_sync',
+  // Versioned derivative of one live Google Drive file. Full-Drive reads queue
+  // this source lazily; offline pre-filled bundles index without Pipeline B.
+  'gdrive_file',
   'file_upload',
   'manual_paste',
   'channel_window',
@@ -87,6 +90,15 @@ export type GithubSyncContentRef = {
   commit_from: string
   commit_to: string
   files_changed: string[]
+}
+
+/** One versioned Google Drive derivative stored as a workspace artifact. */
+export type GDriveFileContentRef = {
+  source_kind: 'gdrive_file'
+  file_id: string
+  drive_file_id: string
+  source_version: string
+  text?: string
 }
 
 export type FileUploadContentRef = {
@@ -216,6 +228,7 @@ export type EpisodeContentRef =
   | EmailThreadContentRef
   | MeetingContentRef
   | GithubSyncContentRef
+  | GDriveFileContentRef
   | FileUploadContentRef
   | ManualPasteContentRef
   | ChannelWindowContentRef

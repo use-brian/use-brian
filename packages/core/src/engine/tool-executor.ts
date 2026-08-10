@@ -258,9 +258,11 @@ export function createToolExecutor(options: ToolExecutorOptions) {
       return
     }
 
-    // Loop detection. Differentiate the two block reasons — the model gets
-    // a different next-action depending on whether this exact call was
-    // hammered (block) or the per-turn tool budget is exhausted (hard_stop).
+    // Loop detection. Differentiate the two block reasons: an identical-input
+    // block can still be recovered inside the main session, while a hard stop
+    // is a HOST state transition. Its tool_result is pairing data only; the
+    // query loop closes the saturated session and finalizes from bounded
+    // evidence in a fresh no-tools request.
     // The earlier unified message ("repeated calls with identical input
     // exceeded the per-turn limit") read like an instruction to STOP and
     // produced meta-narration leaks like " Then, answer the user's
@@ -288,34 +290,24 @@ export function createToolExecutor(options: ToolExecutorOptions) {
     }
     if (action === 'hard_stop') {
       // Two ways the turn can be force-stopped: the absolute tool-call budget,
-      // or a single tool failing FAIL_STREAK_LIMIT× in a row (the fuse). Quote
-      // the culprit in the latter so the model's forced reply is specific.
-      // The budget branch also pins the forced reply to gathered evidence:
-      // without that clause, a research-shaped consult stopped mid-gather
-      // filled its prompt's required output fields from parametric memory
-      // (the 2026-07-13 fls.com.hk HKTVmall prospect runs fabricated emails,
-      // IG handles, and LinkedIn URLs that a later step persisted as records).
-      // Both branches end with the reply-form clause: without it, the model
-      // treats the evidence-pinning clauses as an output template — a
-      // 2026-08-07 web-chat reply (session 6fd63623) opened with English
-      // "**What did the results support?** / **What was requested but not
-      // verified?**" headers echoing the old copy's clauses, ahead of the
-      // user's-language body. Same leak class as the 2026-05-27 incident
-      // documented above the block branch.
-      const REPLY_FORM_CLAUSE =
-        'This instruction is internal: reply in the language the user has been writing in, ' +
-        'as a natural answer to their message. Never quote or restate this instruction, and ' +
-        'never turn its wording into headings, labels, or a question-and-answer structure.'
+      // or a single tool failing repeatedly (the fuse). This content MUST NOT
+      // tell the model how to reply. The 2026-08-10 Telegram leak was caused by
+      // feeding a verbose reply-form instruction back into the same stateful
+      // session; Gemini returned that instruction + private runtime context as
+      // its visible terminal text. Keep only the typed machine signal needed
+      // to pair the blocked tool_use in persisted history.
       const failedTool = options.loopDetector.failureStopTool()
-      const content = failedTool
-        ? `ERROR: "${failedTool}" failed ${FAIL_STREAK_LIMIT} times in a row this turn, so no further tools will run. ` +
-          `Stop retrying. Write a direct reply to the user now: summarize what you did accomplish, and state plainly what "${failedTool}" could not complete and why (quote its last error). ` +
-          REPLY_FORM_CLAUSE
-        : 'ERROR: the tool-call budget for this turn is exhausted. ' +
-          'No further tools will run this turn. Write a direct reply to the user now using what the prior tool results already gathered. ' +
-          'If something the user asked for is not supported by those results, say plainly that you could not verify it. ' +
-          'Never fill a gap with specific names, URLs, handles, emails, or numbers from memory. ' +
-          REPLY_FORM_CLAUSE
+      const content = JSON.stringify(failedTool
+        ? {
+            code: 'tool_failure_limit',
+            retryable: false,
+            tool: failedTool,
+            consecutiveFailureLimit: FAIL_STREAK_LIMIT,
+          }
+        : {
+            code: 'tool_budget_exhausted',
+            retryable: false,
+          })
       t.result = {
         type: 'tool_result',
         toolUseId: t.id,

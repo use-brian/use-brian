@@ -1,5 +1,5 @@
 import { getHeapStatistics } from 'node:v8'
-import type { LLMProvider, Message, ContentBlock, TokenUsage, AssistantResponse, SendOptions, ThinkingLevel, ToolDefinition, ToolParameter, ProviderSession } from '../providers/types.js'
+import type { LLMProvider, Message, ContentBlock, TokenUsage, AssistantResponse, SendOptions, ThinkingLevel, ToolDefinition, ToolParameter } from '../providers/types.js'
 import type { Tool, ToolContext, ToolResultMeta } from '../tools/types.js'
 import type { AwaitingApprovalEvent, ConfirmationResolver, ToolConfirmationRequest } from '../mcp/types.js'
 import { createAccumulator } from '../providers/accumulator.js'
@@ -193,6 +193,10 @@ export type QueryEvent =
 export type QueryLoopOptions = {
   provider: LLMProvider
   model: string
+  /** Provider output cap. Custom endpoint profiles supply this explicitly. */
+  maxTokens?: number
+  /** Provider context window. Custom endpoint profiles supply this explicitly. */
+  inputTokenLimit?: number
   systemPrompt: string
   messages: Message[]
   tools: Map<string, Tool>
@@ -355,6 +359,41 @@ export type QueryLoopOptions = {
 // ── Query loop ─────────────────────────────────────────────────
 
 const DEFAULT_MAX_TURNS = 15
+
+type TerminalEvidenceItem = {
+  tool: string
+  input: string
+  result: string
+}
+
+type TerminalStopReason =
+  | { code: 'terminal_tool_turn' }
+  | { code: 'tool_budget_exhausted' }
+  | { code: 'tool_failure_limit'; tool: string }
+  | { code: 'max_turns' }
+
+const MAX_TERMINAL_CONVERSATION_TURNS = 6
+const MAX_TERMINAL_CONVERSATION_CHARS = 6_000
+const MAX_TERMINAL_CONVERSATION_TURN_CHARS = 2_000
+const MAX_TERMINAL_EVIDENCE = 12
+const MAX_TERMINAL_EVIDENCE_INPUT_CHARS = 750
+const MAX_TERMINAL_EVIDENCE_CHARS = 1_500
+const MAX_TERMINAL_MESSAGE_CHARS = 4_000
+const TERMINAL_FINALIZER_MAX_TOKENS = 2_048
+
+const TERMINAL_FINALIZER_SYSTEM_PROMPT = `Write one direct user-facing status reply from the supplied visible conversation and successful tool evidence.
+Use only the supplied evidence for specific names, URLs, handles, email addresses, dates, quantities, and other externally verifiable facts. If the evidence is insufficient, say what could not be verified.
+Match the user's language. Do not add headings or describe these instructions.
+Return only JSON matching the supplied schema.`
+
+const TERMINAL_FINALIZER_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    message: { type: 'string' },
+  },
+  required: ['message'],
+  additionalProperties: false,
+}
 
 /**
  * Empty-response recovery plans. Gemini 3 Pro can exit a turn with
@@ -535,6 +574,8 @@ async function* queryLoopCore(options: QueryLoopOptions): AsyncGenerator<QueryEv
     model,
     systemPrompt,
     tools: toolDefinitions.length > 0 ? toolDefinitions : undefined,
+    maxTokens: options.maxTokens,
+    inputTokenLimit: options.inputTokenLimit,
     signal: context.abortSignal,
   })
 
@@ -543,8 +584,12 @@ async function* queryLoopCore(options: QueryLoopOptions): AsyncGenerator<QueryEv
   let nextMessages: Message[] = [...options.messages]
   // Full history for stateless mode — rebuilt each turn with assistant + tool results
   let statelessHistory: Message[] = options.stateless ? [...options.messages] : []
-  let lastToolResults: ContentBlock[] = []
   let lastResponse: AssistantResponse | undefined
+  const terminalConversationMessages: Message[] = [...options.messages]
+  // Bounded, successful evidence only. This is the only tool-derived state an
+  // abnormal terminal finalizer receives; the saturated provider session,
+  // system prompt, tool catalog, errors, and tool-use narration stay behind.
+  const terminalEvidence: TerminalEvidenceItem[] = []
 
   // Completeness gate state (execution-plan tier). `planNudges` caps the
   // "keep working" continuations per attempt; `planHandoffDone` guards the
@@ -580,6 +625,12 @@ async function* queryLoopCore(options: QueryLoopOptions): AsyncGenerator<QueryEv
     if (!inbox || !inbox.peek().pending) return null
     const inputs = inbox.drain()
     if (inputs.length === 0) return null
+    for (const input of inputs) {
+      terminalConversationMessages.push({
+        role: 'user',
+        content: input.from ? `${input.from}: ${input.text}` : input.text,
+      })
+    }
     const mode = resolveDrainMode(inputs)
     if (mode === 'steer') steerSuppressesPlanGate = true
     yield { type: 'turn_input', inputs, mode }
@@ -680,6 +731,8 @@ async function* queryLoopCore(options: QueryLoopOptions): AsyncGenerator<QueryEv
             systemPrompt,
             messages: statelessHistory,
             tools: toolDefinitions.length > 0 ? toolDefinitions : undefined,
+            maxTokens: options.maxTokens,
+            inputTokenLimit: options.inputTokenLimit,
             ...(nextThinkingLevel ? { thinkingLevel: nextThinkingLevel } : {}),
             signal: context.abortSignal,
           })
@@ -925,7 +978,7 @@ async function* queryLoopCore(options: QueryLoopOptions): AsyncGenerator<QueryEv
     // emitted exactly " Then, answer the user's question." as the
     // whole final turn after the loop-detector blocked duplicate tool
     // calls. Previously this detector only ran inside
-    // `forceTextResponse` (hard-limit path) and missed normal turns.
+    // the old same-session hard-limit fallback and missed normal turns.
     {
       // First strip a leading scaffold-primer line ("Your reply to the user
       // MUST start here:\n…") in place, keeping the real reply that follows —
@@ -1090,6 +1143,8 @@ async function* queryLoopCore(options: QueryLoopOptions): AsyncGenerator<QueryEv
       }
     }
 
+    appendTerminalEvidence(response.content, allToolResults, terminalEvidence)
+
     // ── Phase 3b: Per-turn assistant record ────────────────────
     // Emit the completed turn (assistant content + its matched tool_results)
     // for consumers that persist transcripts. This fires for EVERY turn
@@ -1117,7 +1172,6 @@ async function* queryLoopCore(options: QueryLoopOptions): AsyncGenerator<QueryEv
     }
 
     // Save for maxTurns fallback
-    lastToolResults = [...allToolResults]
     lastResponse = response
 
     // ── Phase 4: Check if done ─────────────────────────────────
@@ -1537,17 +1591,23 @@ async function* queryLoopCore(options: QueryLoopOptions): AsyncGenerator<QueryEv
       // the tool had in fact run (prod 2026-08-05, run 86d1c152).
       //
       // Terminality is decided by stopReason; DELIVERABILITY is decided by
-      // content. When they disagree, synthesize a real closing turn from what
-      // the tools returned rather than emitting a turn nobody can use.
-      if (!hasDeliverableText(response) && allToolResults.length > 0 && session) {
-        const fallbackResponse = yield* forceTextResponse(
-          session, allToolResults, totalUsage,
-        )
-        if (fallbackResponse) {
-          yield { type: 'assistant_turn', response: fallbackResponse, toolResults: [] }
-          yield { type: 'turn_complete', response: fallbackResponse, totalUsage }
-          return
-        }
+      // content. When they disagree, synthesize a real closing turn in a
+      // fresh, no-tools request. Never ask the saturated main session to
+      // convert its own private working context into user-bound text.
+      if (!hasDeliverableText(response) && allToolResults.length > 0) {
+        const fallbackResponse = yield* finalizeTerminalResponse({
+          provider,
+          model,
+          messages: terminalConversationMessages,
+          evidence: terminalEvidence,
+          stopReason: { code: 'terminal_tool_turn' },
+          totalUsage,
+          inputTokenLimit: options.inputTokenLimit,
+          signal: context.abortSignal,
+        })
+        yield { type: 'assistant_turn', response: fallbackResponse, toolResults: [] }
+        yield { type: 'turn_complete', response: fallbackResponse, totalUsage }
+        return
       }
 
       yield { type: 'turn_complete', response, totalUsage }
@@ -1601,23 +1661,36 @@ async function* queryLoopCore(options: QueryLoopOptions): AsyncGenerator<QueryEv
       }
     }
 
-    if (loopDetector.totalToolCalls >= maxToolCalls) {
-      yield { type: 'status', message: 'Reached tool execution limit' }
+    const failureStopTool = loopDetector.failureStopTool()
+    if (loopDetector.totalToolCalls >= maxToolCalls || failureStopTool !== null) {
+      yield {
+        type: 'status',
+        message: failureStopTool
+          ? `Stopped after repeated ${failureStopTool} failures`
+          : 'Reached tool execution limit',
+      }
 
       // If the last turn carries no DELIVERABLE text, the user would see
-      // nothing. Do one final no-tools LLM call so the model can synthesize a
-      // text response from whatever it gathered. Gated structurally — a turn
-      // shaped `[narration, tool_use]` has text but no deliverable text, and
-      // gating this lexically let that narration suppress its own rescue.
-      if (!hasDeliverableText(response) && allToolResults.length > 0 && session) {
-        const fallbackResponse = yield* forceTextResponse(
-          session, allToolResults, totalUsage,
-        )
-        if (fallbackResponse) {
-          yield { type: 'assistant_turn', response: fallbackResponse, toolResults: [] }
-          yield { type: 'turn_complete', response: fallbackResponse, totalUsage }
-          return
-        }
+      // nothing. Finalize out-of-session from bounded successful evidence.
+      // Gated structurally — a turn shaped `[narration, tool_use]` has text
+      // but no deliverable text, and lexical gating lets that narration
+      // suppress its own rescue.
+      if (!hasDeliverableText(response) && allToolResults.length > 0) {
+        const fallbackResponse = yield* finalizeTerminalResponse({
+          provider,
+          model,
+          messages: terminalConversationMessages,
+          evidence: terminalEvidence,
+          stopReason: failureStopTool
+            ? { code: 'tool_failure_limit', tool: failureStopTool }
+            : { code: 'tool_budget_exhausted' },
+          totalUsage,
+          inputTokenLimit: options.inputTokenLimit,
+          signal: context.abortSignal,
+        })
+        yield { type: 'assistant_turn', response: fallbackResponse, toolResults: [] }
+        yield { type: 'turn_complete', response: fallbackResponse, totalUsage }
+        return
       }
 
       yield { type: 'turn_complete', response, totalUsage }
@@ -1629,15 +1702,20 @@ async function* queryLoopCore(options: QueryLoopOptions): AsyncGenerator<QueryEv
   // no-tools call so the model synthesizes from what it gathered. Structural
   // gate for the same reason as the tool-cap exit above.
   {
-    if (!hasDeliverableText(lastResponse) && lastToolResults.length > 0 && session) {
-      const fallbackResponse = yield* forceTextResponse(
-        session, lastToolResults, totalUsage,
-      )
-      if (fallbackResponse) {
-        yield { type: 'assistant_turn', response: fallbackResponse, toolResults: [] }
-        yield { type: 'turn_complete', response: fallbackResponse, totalUsage }
-        return
-      }
+    if (!hasDeliverableText(lastResponse) && loopDetector.totalToolCalls > 0) {
+      const fallbackResponse = yield* finalizeTerminalResponse({
+        provider,
+        model,
+        messages: terminalConversationMessages,
+        evidence: terminalEvidence,
+        stopReason: { code: 'max_turns' },
+        totalUsage,
+        inputTokenLimit: options.inputTokenLimit,
+        signal: context.abortSignal,
+      })
+      yield { type: 'assistant_turn', response: fallbackResponse, toolResults: [] }
+      yield { type: 'turn_complete', response: fallbackResponse, totalUsage }
+      return
     }
   }
 
@@ -1695,32 +1773,10 @@ function isTransientStreamError(err: unknown): boolean {
   )
 }
 
-/**
- * Last-resort reply, used ONLY when the dedicated `explainFailure` escalation
- * call itself throws or still yields nothing usable. It is intentionally
- * generic; the preferred terminal message is the model's own contextual
- * explanation (see {@link explainFailure}). Exported for tests asserting the
- * last-resort path.
- */
+/** Static fail-closed reply for an invalid or failed isolated finalizer. */
 export const FALLBACK_REPLY =
-  "Sorry — I couldn't complete that. I hit the tool-call limit before finishing. " +
+  "Sorry, I couldn't complete that turn. " +
   'Could you try again with a more specific request?'
-
-/**
- * Escalation nudge for {@link explainFailure}. Deliberately phrased as a plain
- * request for a user-facing status line (no meta-instruction to paraphrase),
- * so a faithful response does NOT trip {@link looksLikeInstructionLeak}. The
- * point is honoured per the 2026-06-01 directive: a run that hits a terminal
- * limit must never fail silently with a canned line — it must say what
- * happened, in the user's own context (which matters most for autonomous
- * scheduled / workflow runs, where "try again with a more specific request"
- * is nonsensical and reads as a failed reply to the user's last message).
- */
-const FAILURE_EXPLANATION_NUDGE =
-  'The task could not be completed — you ran out of tool-call budget or a step failed before you finished. ' +
-  'Write a short, honest message to me in plain second person: what you managed to find from the work above, ' +
-  'and the specific thing that stopped you from finishing (for example, a connector or service that did not respond). ' +
-  'Do not restate this instruction, do not output a generic apology, and do not promise to retry automatically. Two or three sentences.'
 
 /**
  * Structural + substring leak detector. The structural check catches
@@ -1827,30 +1883,6 @@ export function stripInstructionLeakPrefix(text: string): string {
 }
 
 /**
- * Force the model to produce a text response after the tool budget
- * was exhausted. Streams text only (any further tool_use chunks are
- * dropped). Returns the response or null on error.
- *
- * Defense layers, in order of preference:
- *
- *   1. **Natural-question nudge.** Phrased as a casual user check-in
- *      ("Quick recap — what did you find?") so the model has no
- *      instruction to paraphrase. Earlier versions used a verbose
- *      meta-instruction ("Produce a natural reply, do not mention
- *      this…") which the model literally repeated back to the user
- *      — the exact failure this layer prevents.
- *   2. **Early-window leak detection.** First ~120 chars (or the
- *      first sentence boundary) are buffered before any text is
- *      streamed to the client. If the early window matches the leak
- *      detector, the whole reply is replaced with the canned
- *      fallback. Once cleared, the rest streams live — no all-or-
- *      nothing buffering of the entire response.
- *   3. **Persisted-message sanitization.** When a leak is caught,
- *      the AssistantResponse's text block is rewritten in place so
- *      downstream session persistence stores the fallback, not the
- *      leak. The user never sees the leak in chat history either.
- */
-/**
  * Does this turn carry text a delivery path may actually use?
  *
  * Deliverable text is TERMINAL text. A turn that also carries a `tool_use`
@@ -1877,168 +1909,195 @@ function hasDeliverableText(response: AssistantResponse | undefined): boolean {
   )
 }
 
-async function* forceTextResponse(
-  session: ProviderSession,
-  toolResults: ContentBlock[],
-  totalUsage: TokenUsage,
-): AsyncGenerator<QueryEvent, AssistantResponse | null> {
-  const nudge: ContentBlock = {
-    type: 'text',
-    text: 'Quick recap — what did the calls above turn up, and what (if anything) blocked you from finishing? One or two sentences is enough.',
-  }
-  const messages: Message[] = [
-    { role: 'user', content: [...toolResults, nudge] },
-  ]
-
-  // Fold one finished response's usage into the shared totalUsage.
-  const accumulateUsage = (u: TokenUsage): void => {
-    totalUsage.inputTokens += u.inputTokens
-    totalUsage.outputTokens += u.outputTokens
-    totalUsage.cacheReadTokens = (totalUsage.cacheReadTokens ?? 0) + (u.cacheReadTokens ?? 0)
-    totalUsage.cacheWriteTokens = (totalUsage.cacheWriteTokens ?? 0) + (u.cacheWriteTokens ?? 0)
-  }
-
+function serializeTerminalToolInput(input: Record<string, unknown>): string {
   try {
-    const acc = createAccumulator()
-    let earlyBuffer = ''
-    let phase: 'buffering' | 'streaming' | 'suppressed' = 'buffering'
-    let leakedExcerpt = ''
-    const EARLY_WINDOW = 120
-    for await (const chunk of session.send(messages)) {
-      acc.push(chunk)
-      if (chunk.type !== 'text_delta') continue
-      if (phase === 'streaming') {
-        yield { type: 'text_delta', text: chunk.text }
-        continue
-      }
-      if (phase === 'suppressed') {
-        // Drain remaining text into the accumulator for accurate token
-        // usage, but emit nothing — the leaked recap is discarded and the
-        // escalation call below produces the real message.
-        continue
-      }
-      // phase === 'buffering' — gather signal then decide once.
-      earlyBuffer += chunk.text
-      const atBoundary = /[.!?\n]/.test(earlyBuffer)
-      if (earlyBuffer.length >= EARLY_WINDOW || atBoundary) {
-        if (looksLikeInstructionLeak(earlyBuffer)) {
-          // Stream NOTHING — don't flash the canned line. We escalate to a
-          // dedicated explanation call after draining this leaked recap.
-          phase = 'suppressed'
-          leakedExcerpt = earlyBuffer
-        } else {
-          phase = 'streaming'
-          yield { type: 'text_delta', text: earlyBuffer }
-        }
-      }
-    }
-    // Stream ended before we cleared the early window — short reply.
-    if (phase === 'buffering' && earlyBuffer.length > 0) {
-      if (looksLikeInstructionLeak(earlyBuffer)) {
-        phase = 'suppressed'
-        leakedExcerpt = earlyBuffer
-      } else {
-        yield { type: 'text_delta', text: earlyBuffer }
-      }
-    }
-
-    // Recap leaked instructions → don't ship it (and don't ship the canned
-    // line). Spend one more call whose only job is to say what happened.
-    if (phase === 'suppressed') {
-      accumulateUsage(acc.finish().usage)
-      console.warn(
-        `[query-loop] forceTextResponse: recap leaked instructions, escalating to explanation. Excerpt: ${leakedExcerpt.slice(0, 200)}`,
-      )
-      return yield* explainFailure(session, totalUsage)
-    }
-
-    const resp = acc.finish()
-    accumulateUsage(resp.usage)
-
-    // Anti-empty guarantee. When the recap returns no text (typically because
-    // the model tried to chain more tool_use, which we drop) we don't ship an
-    // empty turn or a canned line — we escalate to a dedicated "explain what
-    // happened" call so the user gets a real, contextual message about what
-    // was gathered and what blocked completion.
-    const respHasText = resp.content.some(
-      (b) => b.type === 'text' && 'text' in b && (b as { text: string }).text.trim().length > 0,
-    )
-    if (!respHasText) {
-      console.warn(
-        '[query-loop] forceTextResponse: recap produced no text; escalating to explanation.',
-      )
-      return yield* explainFailure(session, totalUsage)
-    }
-    return resp
-  } catch (err) {
-    // Even on session.send() throw, give the user something real: try the
-    // explanation call (a fresh send). If that also throws, it falls through
-    // to the canned last-resort reply inside explainFailure.
-    console.error('[query-loop] forceTextResponse threw — escalating to explanation:', err)
-    return yield* explainFailure(session, totalUsage)
+    return JSON.stringify(input).slice(0, MAX_TERMINAL_EVIDENCE_INPUT_CHARS)
+  } catch {
+    return '[input omitted]'
   }
 }
 
-/**
- * Terminal escalation: tell the user what happened.
- *
- * Reached when {@link forceTextResponse}'s recap call produced no usable text
- * — it either tripped the instruction-leak suppressor or came back empty.
- * Rather than ship the canned {@link FALLBACK_REPLY} (which reads as "you try
- * again with a more specific request" — nonsensical for an autonomous
- * scheduled / workflow run, and indistinguishable from a failed reply to the
- * user's *last* message), spend ONE more no-tools call whose only job is to
- * state, in the user's own context, what was accomplished and what blocked
- * completion.
- *
- * The session is stateful, so the prior tool results and the discarded recap
- * attempt are already in context; this call adds only an explicit, leak-
- * resistant nudge ({@link FAILURE_EXPLANATION_NUDGE}) and forces a low-thinking
- * commit. The canned reply survives strictly as a last resort — only if this
- * call throws or still yields nothing usable (empty, or another leak).
- *
- * See docs/architecture/engine/query-loop.md → "Forced text fallback".
- */
-async function* explainFailure(
-  session: ProviderSession,
-  totalUsage: TokenUsage,
-): AsyncGenerator<QueryEvent, AssistantResponse> {
-  try {
-    const acc = createAccumulator()
-    let buffer = ''
-    for await (const chunk of session.send(
-      [{ role: 'user', content: [{ type: 'text', text: FAILURE_EXPLANATION_NUDGE }] }],
-      { thinkingLevel: 'low' },
-    )) {
-      acc.push(chunk)
-      if (chunk.type === 'text_delta') buffer += chunk.text
-    }
-    const resp = acc.finish()
-    totalUsage.inputTokens += resp.usage.inputTokens
-    totalUsage.outputTokens += resp.usage.outputTokens
-    totalUsage.cacheReadTokens = (totalUsage.cacheReadTokens ?? 0) + (resp.usage.cacheReadTokens ?? 0)
-    totalUsage.cacheWriteTokens = (totalUsage.cacheWriteTokens ?? 0) + (resp.usage.cacheWriteTokens ?? 0)
-
-    const text = buffer.trim()
-    if (text.length > 0 && !looksLikeInstructionLeak(text)) {
-      yield { type: 'text_delta', text }
-      return { ...resp, content: [{ type: 'text', text }], stopReason: 'end_turn' }
-    }
-    console.warn(
-      '[query-loop] explainFailure: no usable explanation text; using canned last-resort reply.',
-    )
-  } catch (err) {
-    console.error('[query-loop] explainFailure threw; using canned last-resort reply:', err)
+function appendTerminalEvidence(
+  assistantContent: ContentBlock[],
+  toolResults: ContentBlock[],
+  evidence: TerminalEvidenceItem[],
+): void {
+  const resultsById = new Map<string, Extract<ContentBlock, { type: 'tool_result' }>>()
+  for (const block of toolResults) {
+    if (block.type !== 'tool_result' || block.isError || !block.content.trim()) continue
+    resultsById.set(block.toolUseId, block)
   }
 
-  // True last resort — the explanation call could not produce a clean message.
-  yield { type: 'text_delta', text: FALLBACK_REPLY }
+  for (const block of assistantContent) {
+    if (block.type !== 'tool_use' || block.name === 'mcp_search') continue
+    const result = resultsById.get(block.id)
+    if (!result) continue
+    evidence.push({
+      tool: block.name,
+      input: serializeTerminalToolInput(block.input),
+      result: result.content.slice(0, MAX_TERMINAL_EVIDENCE_CHARS),
+    })
+    if (evidence.length > MAX_TERMINAL_EVIDENCE) evidence.shift()
+  }
+}
+
+function collectTerminalConversation(
+  messages: Message[],
+): Array<{ role: 'user' | 'assistant'; text: string }> {
+  const collected: Array<{ role: 'user' | 'assistant'; text: string }> = []
+  let remainingChars = MAX_TERMINAL_CONVERSATION_CHARS
+
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (collected.length >= MAX_TERMINAL_CONVERSATION_TURNS || remainingChars <= 0) break
+    const message = messages[i]
+    if (message.role !== 'user' && message.role !== 'assistant') continue
+
+    const blocks = typeof message.content === 'string'
+      ? [{ type: 'text' as const, text: message.content }]
+      : message.content
+    if (message.role === 'assistant' && blocks.some((block) => block.type === 'tool_use')) {
+      continue
+    }
+    const text = blocks
+      .filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n')
+      .trim()
+    if (!text) continue
+
+    const clipped = text.slice(
+      Math.max(0, text.length - Math.min(MAX_TERMINAL_CONVERSATION_TURN_CHARS, remainingChars)),
+    )
+    collected.push({ role: message.role, text: clipped })
+    remainingChars -= clipped.length
+  }
+
+  return collected.reverse()
+}
+
+function addUsage(total: TokenUsage, usage: TokenUsage): void {
+  total.inputTokens += usage.inputTokens
+  total.outputTokens += usage.outputTokens
+  total.cacheReadTokens = (total.cacheReadTokens ?? 0) + (usage.cacheReadTokens ?? 0)
+  total.cacheWriteTokens = (total.cacheWriteTokens ?? 0) + (usage.cacheWriteTokens ?? 0)
+}
+
+/**
+ * Detect the long-form scratchpad shape that escaped the ordinary lexical
+ * detector in the 2026-08-10 incident. This check is deliberately structural:
+ * the isolated finalizer is required to return a direct reply with no headings,
+ * so any private-workflow section or explicit delivery instruction is invalid.
+ */
+function looksLikeTerminalScaffold(text: string): boolean {
+  const lower = text.toLowerCase()
+  const sectionMatches = lower.match(
+    /^[ \t]*(?:#{1,6}[ \t]*)?(?:\*\*)?\[?(?:user context|what happened this turn|analysis|reasoning|plan|conclusion|response)\]?(?:\*\*)?[ \t]*(?::(?:[ \t]|$)|$)/gm,
+  ) ?? []
+  if (sectionMatches.length >= 1) return true
+  return (
+    /write only what the user should read/.test(lower)
+    || /do not repeat (?:the )?internal instructions/.test(lower)
+    || /no need to mention the (?:turn|tool(?:-call)?)[ -]?budget/.test(lower)
+    || /^\s*be natural,? (?:and )?(?:do not|don't) use bullet points/m.test(lower)
+    || /use only the supplied evidence/.test(lower)
+    || /supplied (?:visible conversation|successful tool evidence)/.test(lower)
+    || /match the user's language/.test(lower)
+    || /return only json matching/.test(lower)
+  )
+}
+
+function parseTerminalMessage(raw: string): string | null {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return null
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+  const record = parsed as Record<string, unknown>
+  if (Object.keys(record).length !== 1 || !Object.hasOwn(record, 'message')) return null
+  if (typeof record.message !== 'string') return null
+  const message = record.message.trim()
+  if (!message || message.length > MAX_TERMINAL_MESSAGE_CHARS) return null
+  if (looksLikeInstructionLeak(message) || looksLikeTerminalScaffold(message)) return null
+  return message
+}
+
+function fallbackTerminalResponse(): AssistantResponse {
   return {
     content: [{ type: 'text', text: FALLBACK_REPLY }],
     stopReason: 'end_turn',
     usage: { inputTokens: 0, outputTokens: 0 },
     model: 'fallback',
   }
+}
+
+/**
+ * Finalize an abnormal loop exit across a fresh authority boundary. The main
+ * stateful session is intentionally inaccessible here. Nothing is yielded
+ * until the complete JSON envelope has passed local validation.
+ */
+async function* finalizeTerminalResponse(params: {
+  provider: LLMProvider
+  model: string
+  messages: Message[]
+  evidence: TerminalEvidenceItem[]
+  stopReason: TerminalStopReason
+  totalUsage: TokenUsage
+  inputTokenLimit?: number
+  signal?: AbortSignal
+}): AsyncGenerator<QueryEvent, AssistantResponse> {
+  try {
+    const acc = createAccumulator()
+    for await (const chunk of params.provider.stream({
+      model: params.model,
+      systemPrompt: TERMINAL_FINALIZER_SYSTEM_PROMPT,
+      messages: [{
+        role: 'user',
+        content: JSON.stringify({
+          stopReason: params.stopReason,
+          recentConversation: collectTerminalConversation(params.messages),
+          toolEvidence: params.evidence.slice(0, MAX_TERMINAL_EVIDENCE),
+        }),
+      }],
+      maxTokens: TERMINAL_FINALIZER_MAX_TOKENS,
+      inputTokenLimit: params.inputTokenLimit,
+      temperature: 0,
+      thinkingLevel: 'low',
+      responseFormat: 'json',
+      responseSchema: TERMINAL_FINALIZER_SCHEMA,
+      signal: params.signal,
+    })) {
+      acc.push(chunk)
+    }
+
+    const response = acc.finish()
+    addUsage(params.totalUsage, response.usage)
+    const raw = response.content
+      .filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')
+      .map((block) => block.text)
+      .join('')
+      .trim()
+    const onlyTextBlocks = response.content.every((block) => block.type === 'text')
+    const message = response.stopReason === 'end_turn' && onlyTextBlocks
+      ? parseTerminalMessage(raw)
+      : null
+    if (message) {
+      yield { type: 'text_delta', text: message }
+      return {
+        ...response,
+        content: [{ type: 'text', text: message }],
+        stopReason: 'end_turn',
+      }
+    }
+    console.warn('[query-loop] isolated terminal finalizer returned an invalid envelope; using static fallback')
+  } catch (err) {
+    console.error('[query-loop] isolated terminal finalizer failed; using static fallback:', err)
+  }
+
+  const fallback = fallbackTerminalResponse()
+  yield { type: 'text_delta', text: FALLBACK_REPLY }
+  return fallback
 }
 
 /**

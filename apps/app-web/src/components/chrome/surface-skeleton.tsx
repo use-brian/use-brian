@@ -50,8 +50,13 @@ export function surfaceSkeletonKind(
     case "brain":
       return "brain";
     // Studio and Chat both open as "narrow left rail + wide detail pane".
+    // Shopify joins them: it gained an operator topbar and a sidebar panel on
+    // 2026-08-10, and was briefly classified "page" from when it was a centred
+    // column. A skeleton that outlives its layout paints the wrong frame, which
+    // is worse than the blank it replaced.
     case "studio":
     case "chat":
+    case "shopify":
       return "rail";
     case "workflow":
     case "feed":

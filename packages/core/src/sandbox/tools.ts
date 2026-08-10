@@ -1,5 +1,5 @@
 /**
- * The computer-use tool surface (spec §3): five discrete browser tools over
+ * The computer-use tool surface (spec §3): discrete browser tools over
  * the `BrowserProvider` seam, browsing AS a profile (R2-4/R2-10), backend
  * picked by the live toggle seeded from `profile.defaultBackend` (R2-3),
  * send-gated (§8 "no unattended state-change"), fused (P1.8), and
@@ -60,8 +60,20 @@ export type ResolveComputerToolPolicy = (
 
 export type ComputerToolEvent = {
   type: 'browser_action'
-  op: 'navigate' | 'snapshot' | 'click' | 'type' | 'currentUrl' | 'readPage'
+  op:
+    | 'navigate'
+    | 'openTab'
+    | 'listTabs'
+    | 'switchTab'
+    | 'closeTab'
+    | 'snapshot'
+    | 'click'
+    | 'type'
+    | 'currentUrl'
+    | 'readPage'
   backend: BrowserBackendKind
+  /** Resolved profile for this action. Required by the profile-scoped local relay. */
+  profileId?: string | null
   /** Hostname only — never the full URL, never page content. */
   host: string | null
   ok: boolean
@@ -214,6 +226,10 @@ const SNAPSHOT_MAX_LINES = 150
 
 export type ComputerTools = {
   browserNavigate: Tool
+  browserOpenTab: Tool
+  browserListTabs: Tool
+  browserSwitchTab: Tool
+  browserCloseTab: Tool
   browserSnapshot: Tool
   browserClick: Tool
   browserType: Tool
@@ -400,7 +416,10 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
 
   function emit(event: ComputerToolEvent, context: ToolContext): void {
     try {
-      opts.onEvent?.(event, context)
+      opts.onEvent?.(
+        { ...event, profileId: sessions.get(context.sessionId)?.profileId ?? null },
+        context,
+      )
     } catch {
       /* audit must never break the tool */
     }
@@ -717,6 +736,189 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
           context,
         )
         return backendErrorResult(err, backend)
+      }
+    },
+  })
+
+  function localTabOperationError(state: SessionBrowseState, methodAvailable: boolean): ToolResult | null {
+    if (state.backend !== 'local') {
+      return {
+        data:
+          'ERROR: Multi-tab control is available only with a My Browser profile. The cloud browser keeps one controlled tab per task.',
+        isError: true,
+      }
+    }
+    if (!state.profileId) {
+      return {
+        data:
+          'ERROR: No My Browser profile is active in this session. Start with browserNavigate and select the paired profile, then manage its tabs.',
+        isError: true,
+      }
+    }
+    if (!methodAvailable) {
+      return { data: 'ERROR: This local browser does not support multi-tab control.', isError: true }
+    }
+    return null
+  }
+
+  // ── Local multi-tab controls ─────────────────────────────────
+
+  const browserOpenTab = buildTool({
+    name: 'browserOpenTab',
+    requiresCapability: 'computer',
+    description:
+      'Open an additional tab in the active My Browser profile and switch control to it. Use after browserNavigate has selected a paired local profile. Returns a fresh page snapshot.',
+    inputSchema: z.object({ url: z.string().min(1).describe('Absolute http(s) URL to open') }),
+    isReadOnly: false,
+    isConcurrencySafe: false,
+    requiresConfirmation: false,
+    resolveConfirmation: policyAsk('browserOpenTab'),
+    timeoutMs: 60_000,
+    maxResultSizeChars: 24_000,
+    async execute(input, context) {
+      const gate = await gates('browserOpenTab', context)
+      if ('error' in gate) return gate.error
+      let parsed: URL
+      try {
+        parsed = new URL(input.url)
+      } catch {
+        return { data: `ERROR: "${input.url}" is not a valid absolute URL.`, isError: true }
+      }
+      if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+        return { data: 'ERROR: Only http(s) URLs can be opened in the browser.', isError: true }
+      }
+      const provider = providerFor(gate.state.backend)
+      const unavailable = localTabOperationError(gate.state, Boolean(provider.openTab))
+      if (unavailable) return unavailable
+      try {
+        const opened = await provider.openTab!(callCtx(context, gate.state), parsed.toString())
+        gate.state.refLabels.clear()
+        record(gate.state, { action: 'open', url: opened.url })
+        emit({ type: 'browser_action', op: 'openTab', backend: 'local', host: hostOf(opened.url), ok: true }, context)
+        const snap = await inlineSnapshot(context, gate.state, 'local')
+        return {
+          data:
+            `Opened ${opened.url} in ${opened.tabId} and switched to it.` +
+            (snap ? `\n\n${snap.rendered}${pageAdvice(context, gate.state, snap.snapshot)}` : ''),
+          meta: { backend: 'local', tabId: opened.tabId },
+        }
+      } catch (err) {
+        emit({ type: 'browser_action', op: 'openTab', backend: 'local', host: hostOf(input.url), ok: false, code: err instanceof BrowserBackendError ? err.code : undefined }, context)
+        return backendErrorResult(err, 'local')
+      }
+    },
+  })
+
+  const browserListTabs = buildTool({
+    name: 'browserListTabs',
+    requiresCapability: 'computer',
+    description:
+      'List the tabs this task may control in the active My Browser profile. Task-owned mode returns only the approved tab and task-opened tabs; full-profile mode returns every eligible normal web tab.',
+    inputSchema: z.object({}),
+    isReadOnly: true,
+    isConcurrencySafe: false,
+    requiresConfirmation: false,
+    allowsRepeatCalls: true,
+    resolveConfirmation: policyAsk('browserListTabs'),
+    timeoutMs: 45_000,
+    maxResultSizeChars: 16_000,
+    async execute(_input, context) {
+      const gate = await gates('browserListTabs', context)
+      if ('error' in gate) return gate.error
+      const provider = providerFor(gate.state.backend)
+      const unavailable = localTabOperationError(gate.state, Boolean(provider.listTabs))
+      if (unavailable) return unavailable
+      try {
+        const result = await provider.listTabs!(callCtx(context, gate.state))
+        const lines = result.tabs.map(
+          (tab) =>
+            `${tab.active ? '* ' : '  '}${tab.id} - ${tab.title || '(untitled)'} - ${tab.url} (${tab.taskOwned ? 'task-owned' : 'existing'})`,
+        )
+        const data = lines.length > 0 ? `Controllable tabs:\n${lines.join('\n')}` : 'No controllable web tabs are open.'
+        emit({ type: 'browser_action', op: 'listTabs', backend: 'local', host: null, ok: true, ...sized(data) }, context)
+        return {
+          data,
+          meta: {
+            backend: 'local',
+            ...(result.activeTabId ? { activeTabId: result.activeTabId } : {}),
+            tabCount: result.tabs.length,
+          },
+        }
+      } catch (err) {
+        emit({ type: 'browser_action', op: 'listTabs', backend: 'local', host: null, ok: false, code: err instanceof BrowserBackendError ? err.code : undefined }, context)
+        return backendErrorResult(err, 'local')
+      }
+    },
+  })
+
+  const browserSwitchTab = buildTool({
+    name: 'browserSwitchTab',
+    requiresCapability: 'computer',
+    description:
+      'Switch the active My Browser task to a tab handle returned by browserListTabs and return a fresh page snapshot.',
+    inputSchema: z.object({ tabId: z.string().min(1).describe('Opaque tab handle from browserListTabs') }),
+    isReadOnly: false,
+    isConcurrencySafe: false,
+    requiresConfirmation: false,
+    resolveConfirmation: policyAsk('browserSwitchTab'),
+    timeoutMs: 45_000,
+    maxResultSizeChars: 24_000,
+    async execute(input, context) {
+      const gate = await gates('browserSwitchTab', context)
+      if ('error' in gate) return gate.error
+      const provider = providerFor(gate.state.backend)
+      const unavailable = localTabOperationError(gate.state, Boolean(provider.switchTab))
+      if (unavailable) return unavailable
+      try {
+        const selected = await provider.switchTab!(callCtx(context, gate.state), input.tabId)
+        gate.state.refLabels.clear()
+        emit({ type: 'browser_action', op: 'switchTab', backend: 'local', host: hostOf(selected.url), ok: true }, context)
+        const snap = await inlineSnapshot(context, gate.state, 'local')
+        return {
+          data:
+            `Switched to ${selected.tabId}: ${selected.url}.` +
+            (snap ? `\n\n${snap.rendered}${pageAdvice(context, gate.state, snap.snapshot)}` : ''),
+          meta: { backend: 'local', tabId: selected.tabId },
+        }
+      } catch (err) {
+        emit({ type: 'browser_action', op: 'switchTab', backend: 'local', host: null, ok: false, code: err instanceof BrowserBackendError ? err.code : undefined }, context)
+        return backendErrorResult(err, 'local')
+      }
+    },
+  })
+
+  const browserCloseTab = buildTool({
+    name: 'browserCloseTab',
+    requiresCapability: 'computer',
+    description:
+      'Close one tab in the active My Browser profile by its browserListTabs handle. This is consequential and always requires user confirmation.',
+    inputSchema: z.object({ tabId: z.string().min(1).describe('Opaque tab handle from browserListTabs') }),
+    isReadOnly: false,
+    isConcurrencySafe: false,
+    requiresConfirmation: true,
+    resolveConfirmation: policyAsk('browserCloseTab'),
+    timeoutMs: 45_000,
+    maxResultSizeChars: 4_000,
+    async execute(input, context) {
+      const gate = await gates('browserCloseTab', context)
+      if ('error' in gate) return gate.error
+      const provider = providerFor(gate.state.backend)
+      const unavailable = localTabOperationError(gate.state, Boolean(provider.closeTab))
+      if (unavailable) return unavailable
+      try {
+        const closed = await provider.closeTab!(callCtx(context, gate.state), input.tabId)
+        gate.state.refLabels.clear()
+        emit({ type: 'browser_action', op: 'closeTab', backend: 'local', host: null, ok: true }, context)
+        return {
+          data: `Closed ${input.tabId}.${closed.activeTabId ? ` Active tab: ${closed.activeTabId}.` : ' No task tab is active.'}`,
+          meta: {
+            backend: 'local',
+            ...(closed.activeTabId ? { activeTabId: closed.activeTabId } : {}),
+          },
+        }
+      } catch (err) {
+        emit({ type: 'browser_action', op: 'closeTab', backend: 'local', host: null, ok: false, code: err instanceof BrowserBackendError ? err.code : undefined }, context)
+        return backendErrorResult(err, 'local')
       }
     },
   })
@@ -1121,6 +1323,10 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
 
   return {
     browserNavigate,
+    browserOpenTab,
+    browserListTabs,
+    browserSwitchTab,
+    browserCloseTab,
     browserSnapshot,
     browserClick,
     browserType,

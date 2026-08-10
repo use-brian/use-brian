@@ -415,6 +415,8 @@ export type ChannelPipelineParams = {
 
   // ── Stores & services ──
   provider: LLMProvider
+  /** OSS workspace custom endpoint default for user-facing channel turns. */
+  resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
   systemPrompt: string
   tools: Map<string, Tool>
   memoryStore: MemoryStore
@@ -772,6 +774,14 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     }
   }
   const model = resolveModel(effectiveModelAlias, workspacePlan, budgetStatus)
+  const customLlmRuntime = assistant.workspaceId && params.resolveWorkspaceCustomLlm
+    ? await params.resolveWorkspaceCustomLlm({ workspaceId: assistant.workspaceId, allowDefault: true })
+    : null
+  if (customLlmRuntime && userContentBlocks.some((block) => block.type === 'image')) {
+    await hooks.sendError(new Error('Custom model endpoints currently support text and tools only. Remove the inline image or use the web app to choose a built-in model.'))
+    return
+  }
+  const turnProvider = customLlmRuntime?.provider ?? provider
   // Tier budget (chat-route parity) — research mode gets 100/100. Other
   // tiers inherit the queryLoop defaults via `null`.
   const tierBudget = chatTierBudget({ model, researchMode: adaptiveResearchActive })
@@ -1191,7 +1201,6 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
 
   // ── Tools: capability filter + memory ──
   const { saveMemory, getMemory, deleteMemory } = createMemoryTools(memoryStore, {
-    userPlan: workspacePlan,
     onEvent: (evt) => {
       if (evt.type === 'memory_deleted') {
         analytics?.logEvent({
@@ -1569,7 +1578,9 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // ── Query loop ──
   try {
     for await (const event of queryLoop({
-      provider, model,
+      provider: turnProvider, model,
+      maxTokens: customLlmRuntime?.maxTokens,
+      inputTokenLimit: customLlmRuntime?.inputTokenLimit,
       systemPrompt: systemPromptWithPreflight,
       messages, tools: allTools,
       context: {
@@ -1789,7 +1800,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
           // docs/architecture/channels/channel-user-identity.md → "Billing split".
           const usage = event.totalUsage
           if (usageStore && usage) {
-            const cost = calculateCost(event.response.model, usage)
+            const cost = customLlmRuntime ? 0 : calculateCost(event.response.model, usage)
             usageStore.recordUsage({
               userId: billingUserId, actorUserId: userId, assistantId: assistant.id, sessionId: session.id,
               model: event.response.model,
@@ -1807,6 +1818,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
               userMessageId: userMessageRow.id,
               source: workspacePlan === 'free' ? 'free' : 'included',
               triggerKey: 'main_response',
+              providerKeySource: customLlmRuntime ? 'user' : 'platform',
             }).catch((err) => console.error(`[${channelType}] Usage tracking failed:`, err))
 
             analytics?.logEvent({

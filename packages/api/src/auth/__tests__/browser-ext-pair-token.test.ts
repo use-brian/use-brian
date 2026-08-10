@@ -8,23 +8,31 @@ import {
 } from '../browser-ext-pair-token.js'
 
 const SECRET = 's3cret'
+const PROFILE = 'profile-1'
 
 afterEach(() => {
   vi.useRealTimers()
 })
 
 describe('[COMP:sandbox/browser-tools] Browser-extension pairing tokens (P1.3)', () => {
-  it('round-trips a pairing token bound to {userId, workspaceId}', () => {
-    const token = signBrowserExtPairToken({ userId: 'user-1', workspaceId: 'ws-1' }, SECRET)
+  it('round-trips a pairing token bound to {userId, workspaceId, browserProfileId}', () => {
+    const token = signBrowserExtPairToken(
+      { userId: 'user-1', workspaceId: 'ws-1', browserProfileId: PROFILE },
+      SECRET,
+    )
     expect(verifyBrowserExtPairToken(token, SECRET)).toMatchObject({
       kind: 'browser-ext-pair',
       userId: 'user-1',
       workspaceId: 'ws-1',
+      browserProfileId: PROFILE,
     })
   })
 
   it('rejects a tampered token and a wrong secret', () => {
-    const token = signBrowserExtPairToken({ userId: 'user-1', workspaceId: 'ws-1' }, SECRET)
+    const token = signBrowserExtPairToken(
+      { userId: 'user-1', workspaceId: 'ws-1', browserProfileId: PROFILE },
+      SECRET,
+    )
     const [h, b, s] = token.split('.')
     const forgedBody = Buffer.from(
       JSON.stringify({ ...JSON.parse(Buffer.from(b, 'base64url').toString()), userId: 'attacker' }),
@@ -37,8 +45,14 @@ describe('[COMP:sandbox/browser-tools] Browser-extension pairing tokens (P1.3)',
   it('expires: a pair token dies after 10 minutes, a session token survives weeks', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-07-10T00:00:00Z'))
-    const pair = signBrowserExtPairToken({ userId: 'u', workspaceId: 'w' }, SECRET)
-    const session = signBrowserExtSessionToken({ userId: 'u', workspaceId: 'w' }, SECRET)
+    const pair = signBrowserExtPairToken(
+      { userId: 'u', workspaceId: 'w', browserProfileId: PROFILE },
+      SECRET,
+    )
+    const session = signBrowserExtSessionToken(
+      { userId: 'u', workspaceId: 'w', browserProfileId: PROFILE },
+      SECRET,
+    )
 
     vi.setSystemTime(new Date('2026-07-10T00:11:00Z'))
     expect(verifyBrowserExtPairToken(pair, SECRET)).toBeNull()

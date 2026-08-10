@@ -12,6 +12,10 @@ function mockApi(overrides: Partial<ShopifyApi> = {}): ShopifyApi {
     getOrder: vi.fn().mockResolvedValue({ id: 'gid://shopify/Order/1', name: '#1001' }),
     searchCustomers: vi.fn().mockResolvedValue(emptyConn),
     getCustomer: vi.fn().mockResolvedValue({ id: 'gid://shopify/Customer/1', displayName: 'Jane' }),
+    previewCustomerSegment: vi.fn().mockResolvedValue({
+      query: "email_subscription_status = 'SUBSCRIBED'",
+      totalCount: 12,
+    }),
     getInventoryLevels: vi.fn().mockResolvedValue(emptyConn),
     listCollections: vi.fn().mockResolvedValue(emptyConn),
     listDraftOrders: vi.fn().mockResolvedValue(emptyConn),
@@ -29,6 +33,15 @@ function mockApi(overrides: Partial<ShopifyApi> = {}): ShopifyApi {
     sendDraftOrderInvoice: vi.fn().mockResolvedValue({ draftOrder: { id: 'gid://shopify/DraftOrder/9' } }),
     addTags: vi.fn().mockResolvedValue({ node: { id: 'gid://shopify/Order/1' } }),
     updateCustomer: vi.fn().mockResolvedValue({ customer: { id: 'gid://shopify/Customer/1' } }),
+    createCustomerSegment: vi.fn().mockResolvedValue({
+      segment: {
+        id: 'gid://shopify/Segment/1',
+        name: 'Brian - Restock',
+        query: "email_subscription_status = 'SUBSCRIBED'",
+      },
+      reused: false,
+      adminUrl: 'https://test.myshopify.com/admin/customers/segments',
+    }),
     setInventoryQuantity: vi.fn().mockResolvedValue({}),
     createFulfillment: vi.fn().mockResolvedValue({ fulfillment: { id: 'gid://shopify/Fulfillment/1', status: 'SUCCESS' } }),
     createDiscountCode: vi.fn().mockResolvedValue({ codeDiscountNode: { id: 'gid://shopify/DiscountCodeNode/1' } }),
@@ -87,6 +100,7 @@ const READ_TOOLS = [
   'shopifyGetOrder',
   'shopifySearchCustomers',
   'shopifyGetCustomer',
+  'shopifyPreviewCustomerSegment',
   'shopifyGetInventoryLevels',
   'shopifyListCollections',
   'shopifyListDraftOrders',
@@ -114,6 +128,7 @@ const WRITE_TOOLS = [
   'shopifySendDraftOrderInvoice',
   'shopifyAddTags',
   'shopifyUpdateCustomer',
+  'shopifyCreateCustomerSegment',
   'shopifySetInventory',
   'shopifyCreateFulfillment',
   'shopifyCreateDiscountCode',
@@ -127,9 +142,9 @@ const DESTRUCTIVE_TOOLS = [
 ]
 
 describe('[COMP:tools/shopify] Shopify tools', () => {
-  it('creates the full 41-tool catalog', () => {
+  it('creates the full 43-tool catalog', () => {
     const tools = createShopifyTools(mockApi())
-    expect(tools).toHaveLength(41)
+    expect(tools).toHaveLength(43)
     expect(tools.map((t) => t.name).sort()).toEqual(
       [...READ_TOOLS, ...WRITE_TOOLS, ...DESTRUCTIVE_TOOLS].sort(),
     )
@@ -148,6 +163,41 @@ describe('[COMP:tools/shopify] Shopify tools', () => {
         expect(tool.requiresConfirmation, tool.name).toBe(true)
       }
     }
+  })
+
+  it('projects featured image metadata from product reads', async () => {
+    const product = {
+      id: 'gid://shopify/Product/1',
+      title: 'Widget',
+      totalInventory: 8,
+      featuredMedia: {
+        preview: { image: { url: 'https://cdn.shopify.com/widget.jpg', altText: 'Widget pouch' } },
+      },
+    }
+    const api = mockApi({
+      listProducts: vi.fn().mockResolvedValue({
+        edges: [{ node: product }],
+        pageInfo: { hasNextPage: false },
+      }),
+      getProduct: vi.fn().mockResolvedValue(product),
+    })
+    const tools = createShopifyTools(api)
+    const list = await tools.find((tool) => tool.name === 'shopifyListProducts')!.execute({}, {} as never)
+    const get = await tools.find((tool) => tool.name === 'shopifyGetProduct')!.execute(
+      { productId: '1' },
+      {} as never,
+    )
+
+    expect(list.data).toMatchObject({
+      items: [{
+        featured_image_url: 'https://cdn.shopify.com/widget.jpg',
+        featured_image_alt: 'Widget pouch',
+      }],
+    })
+    expect(get.data).toMatchObject({
+      featured_image_url: 'https://cdn.shopify.com/widget.jpg',
+      featured_image_alt: 'Widget pouch',
+    })
   })
 
   it('write + destructive descriptions mention the Approve/Deny prompt, never "Requires confirmation"', () => {
@@ -306,6 +356,55 @@ describe('[COMP:tools/shopify] Shopify tools', () => {
     expect(() => tool.inputSchema.parse({ code: 'XYZ', percentage: 10, amount: '5.00' })).toThrow(/exactly one/i)
     expect(() => tool.inputSchema.parse({ code: 'XYZ', percentage: 10 })).not.toThrow()
     expect(() => tool.inputSchema.parse({ code: 'XYZ', amount: '5.00' })).not.toThrow()
+  })
+
+  it('shopifyPreviewCustomerSegment accepts only typed subscribed audiences', async () => {
+    const previewCustomerSegment = vi.fn().mockResolvedValue({
+      query: "email_subscription_status = 'SUBSCRIBED' AND products_purchased MATCHES (id IN (1))",
+      totalCount: 7,
+    })
+    const tool = createShopifyTools(mockApi({ previewCustomerSegment })).find(
+      (item) => item.name === 'shopifyPreviewCustomerSegment',
+    )!
+
+    expect(() => tool.inputSchema.parse({ audience: 'product_buyers' })).toThrow(/productId/i)
+    expect(() => tool.inputSchema.parse({ audience: 'all_subscribers', productIds: ['1'] })).toThrow(/omit/i)
+    expect(() => tool.inputSchema.parse({ audience: 'product_buyers', productIds: Array(501).fill('1') })).toThrow()
+
+    const result = await tool.execute({ audience: 'product_buyers', productIds: ['1'] }, {} as never)
+    expect(previewCustomerSegment).toHaveBeenCalledWith({ audience: 'product_buyers', productIds: ['1'] })
+    expect(result.data).toEqual({
+      query: "email_subscription_status = 'SUBSCRIBED' AND products_purchased MATCHES (id IN (1))",
+      total_count: 7,
+    })
+    expect(JSON.stringify(result.data)).not.toMatch(/email_address|customer_id|members/i)
+  })
+
+  it('shopifyCreateCustomerSegment is a confirmed write and projects no members', async () => {
+    const createCustomerSegment = vi.fn().mockResolvedValue({
+      segment: {
+        id: 'gid://shopify/Segment/9',
+        name: 'Brian - Restock',
+        query: "email_subscription_status = 'SUBSCRIBED'",
+      },
+      reused: true,
+      adminUrl: 'https://test.myshopify.com/admin/customers/segments',
+    })
+    const tool = createShopifyTools(mockApi({ createCustomerSegment })).find(
+      (item) => item.name === 'shopifyCreateCustomerSegment',
+    )!
+    expect(tool.requiresConfirmation).toBe(true)
+    const result = await tool.execute(
+      { name: 'Brian - Restock', audience: 'all_subscribers' },
+      {} as never,
+    )
+    expect(result.data).toEqual({
+      id: 'gid://shopify/Segment/9',
+      name: 'Brian - Restock',
+      query: "email_subscription_status = 'SUBSCRIBED'",
+      reused: true,
+      admin_url: 'https://test.myshopify.com/admin/customers/segments',
+    })
   })
 
   it('shopifyCreateDiscountCode forwards the validity window and projects it back', async () => {

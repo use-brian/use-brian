@@ -125,7 +125,11 @@ export function createE2bCloudProvider(
     return handle
   }
 
-  async function runBrowserCommand(sandboxId: string, command: string): Promise<string> {
+  async function runBrowserCommand(
+    sandboxId: string,
+    command: string,
+    privateEnvs: Record<string, string> = {},
+  ): Promise<string> {
     const handle = await handleFor(sandboxId)
     const res = await handle.runCommand(command, {
       timeoutMs: COMMAND_TIMEOUT_MS,
@@ -138,6 +142,10 @@ export function createE2bCloudProvider(
         // from this file; pointing at a missing file fails the launch, so
         // only set it once injectStorageState has written one.
         ...(meta(sandboxId).stateInjected ? { AGENT_BROWSER_STATE: injectStatePath(sandboxId) } : {}),
+        // Host-owned auth-broker values are scoped to this single exec. The
+        // command contains the env NAME only; values never enter the command
+        // string, model-facing traces, or provider error messages.
+        ...privateEnvs,
       },
     })
     if (res.exitCode !== 0) {
@@ -188,6 +196,14 @@ export function createE2bCloudProvider(
       },
       type: async (ref, text) => {
         await runBrowserCommand(sandboxId, cli.fill(ref, text))
+      },
+      typeSecret: async (ref, secret) => {
+        if (secret.includes('\0')) {
+          throw new BrowserBackendError('The saved login contains an unsupported null byte.', 'backend_error')
+        }
+        await runBrowserCommand(sandboxId, cli.fillFromSecretEnv(ref), {
+          BRIAN_BROWSER_AUTH_SECRET: secret,
+        })
       },
       currentUrl: async () => {
         const out = await runBrowserCommand(sandboxId, chainCommands(cli.getUrl(), cli.getTitle()))

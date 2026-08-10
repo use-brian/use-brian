@@ -159,6 +159,17 @@ describe('[COMP:tools/google-calendar] Google Calendar tools', () => {
     expect(updateTool.description).toMatch(/responseStatus/)
   })
 
+  it('advertises all-day to timed conversion in the schema shown to the model', () => {
+    const tools = createGoogleCalendarTools(mockApi())
+    const updateTool = tools.find((t) => t.name === 'googleCalendarUpdateEvent')!
+    const jsonSchema = jsonSchemaFromZod(updateTool.inputSchema)
+
+    expect(updateTool.description).toMatch(/all-day event to timed/i)
+    expect(updateTool.description).toMatch(/RFC 3339/)
+    expect(jsonSchema.properties.allDay.description).toMatch(/boundary-mode override/i)
+    expect(jsonSchema.required ?? []).not.toContain('allDay')
+  })
+
   // ── RSVP execution passthrough ──────────────────────────────
 
   it('passes responseStatus through to api.updateEvent', async () => {

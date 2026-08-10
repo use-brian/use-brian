@@ -204,9 +204,9 @@ export type MyChatMemberUpdate = {
 }
 
 /**
- * Either a static `requireMention` default, or a default + list of chat/topic
- * overrides that flip it. Presence of a `(chatId, topicId)` pair in `overrides`
- * inverts the default for that chat (or chat+topic when `topicId` is set).
+ * Either a static `requireMention` default, or a default + cumulative set of
+ * chat/topic overrides. One or more matching entries invert the default once;
+ * overlapping whole-chat and topic entries never cancel each other out.
  *
  * Keeping the simple boolean form for non-BYO callers (tests, shared bot) that
  * don't need per-topic tuning.
@@ -377,11 +377,10 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
 
   /**
    * Resolve the effective `requireMention` for a given chat+topic. For the
-   * structured config form, presence in `overrides` flips the default.
-   * A whole-chat entry (`topicId` null/undefined) applies to every topic in
-   * that chat, and a specific `(chatId, topicId)` entry additionally flips
-   * that one topic (double-flip cancels out — noted but harmless: the UI
-   * shouldn't produce both for the same location).
+   * structured config form, any matching override inverts the default exactly
+   * once. A whole-chat entry (`topicId` null/undefined) applies to every topic
+   * in that chat; an overlapping exact-topic entry is cumulative/idempotent,
+   * not a second inversion.
    */
   function resolveRequireMention(chatId: string, topicId: number | undefined): boolean {
     const cfg = options.config?.requireMention
@@ -389,17 +388,12 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
     if (typeof cfg === 'boolean') return cfg
 
     const { default: base, overrides } = cfg
-    let flipped = false
-    for (const o of overrides) {
-      if (o.chatId !== chatId) continue
-      const ot = o.topicId == null ? null : o.topicId
-      if (ot === null) {
-        flipped = !flipped
-      } else if (topicId != null && ot === topicId) {
-        flipped = !flipped
-      }
-    }
-    return flipped ? !base : base
+    const matched = overrides.some((o) => {
+      if (o.chatId !== chatId) return false
+      const overrideTopicId = o.topicId == null ? null : o.topicId
+      return overrideTopicId === null || (topicId != null && overrideTopicId === topicId)
+    })
+    return matched ? !base : base
   }
 
   function parseMessage(msg: TelegramMessage): IncomingMessage | null {
