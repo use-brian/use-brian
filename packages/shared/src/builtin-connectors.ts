@@ -102,8 +102,16 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'googleTasksDeleteTask', description: 'Delete a task', classification: 'write', defaultPolicy: 'ask' },
   ],
   gmail: [
-    { name: 'gmailListMessages', description: 'Search Gmail messages', classification: 'read', defaultPolicy: 'allow' },
-    { name: 'gmailGetMessage', description: 'Read a specific email', classification: 'read', defaultPolicy: 'allow' },
+    // Read tools are phase-gated (require the restricted `gmail.readonly`
+    // scope + a Google CASA audit; `OFFICIAL_OAUTH_SCOPES.gmail` requests
+    // `gmail.send` only). `createGmailTools()` returns just `sendMessage`,
+    // so listing them here advertised a grant the model could never use:
+    // the tools page offered an allow/ask/block toggle, the user granted
+    // it, and the assistant still reported no read access. Uncomment here
+    // + in `createGmailTools()` + in `INJECTED_BUILTIN_TOOLS_BY_CONNECTOR`
+    // when the scope lands. Same phase-gate shape as gdrive below.
+    // { name: 'gmailListMessages', description: 'Search Gmail messages', classification: 'read', defaultPolicy: 'allow' },
+    // { name: 'gmailGetMessage', description: 'Read a specific email', classification: 'read', defaultPolicy: 'allow' },
     { name: 'gmailSendMessage', description: 'Send an email (can attach workspace files)', classification: 'write', defaultPolicy: 'ask' },
   ],
   notion: [

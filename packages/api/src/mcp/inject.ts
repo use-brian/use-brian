@@ -213,16 +213,16 @@ export const INJECTED_BUILTIN_TOOLS_BY_CONNECTOR: Record<string, readonly string
     'googleTasksDeleteTask',
   ],
   gmail: [
-    'gmailListMessages',
-    'gmailGetMessage',
+    // 'gmailListMessages' / 'gmailGetMessage' are phase-gated off in
+    // `createGmailTools()` (need the restricted gmail.readonly scope).
+    // Listing them here made the drift sweep agree with the governance
+    // table while neither matched the builder — see the phase-gate note
+    // in `OFFICIAL_CONNECTOR_TOOLS.gmail`.
     'gmailSendMessage',
   ],
   gdrive: [
-    'googleDriveListFiles',
-    'googleDriveGetFile',
-    'googleDriveGetFileContent',
-    'googleDriveCreateFile',
-    'googleDriveUpdateFile',
+    // 'googleDrive*' are phase-gated off in `createGoogleDriveTools()`
+    // (need drive.readonly / drive.file); same reason as gmail above.
     'googleDocsGetContent',
     'googleDocsAppendText',
     'googleDocsReplaceText',
