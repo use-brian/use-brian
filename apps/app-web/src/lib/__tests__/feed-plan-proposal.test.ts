@@ -120,3 +120,59 @@ describe("[COMP:app-web/feed-plan-proposal] plan cardboard", () => {
     expect(pendingProposedSlots(null, [])).toEqual([]);
   });
 });
+
+describe("[COMP:app-web/feed-plan-proposal] filling an existing slot (D31)", () => {
+  const UUID = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
+
+  it("carries a valid slotId through, so Accept can patch instead of create", () => {
+    // Without this the opt-in fill creates a SECOND slot beside the empty one
+    // the operator already made, which is the exact duplicate it exists to
+    // avoid.
+    const parsed = parseProposePlanInput({
+      month: "2026-08",
+      rationale: "fill the gaps",
+      slots: [
+        {
+          index: 1,
+          slotId: UUID,
+          date: "2026-08-04",
+          platform: "threads",
+          title: "Launch recap",
+          brief: "What shipped.",
+        },
+      ],
+    });
+    expect(parsed?.slots[0].slotId).toBe(UUID);
+  });
+
+  it("drops a malformed slotId rather than discarding the whole card", () => {
+    // Falling back to "create a new slot" is safe; throwing away a good
+    // proposal because the model fumbled one field is not.
+    const parsed = parseProposePlanInput({
+      month: "2026-08",
+      rationale: "fill the gaps",
+      slots: [
+        {
+          index: 1,
+          slotId: "not-a-uuid",
+          date: "2026-08-04",
+          platform: "threads",
+          title: "Launch recap",
+        },
+      ],
+    });
+    expect(parsed?.slots).toHaveLength(1);
+    expect(parsed?.slots[0].slotId).toBeUndefined();
+  });
+
+  it("leaves slotId unset on an ordinary proposal", () => {
+    const parsed = parseProposePlanInput({
+      month: "2026-08",
+      rationale: "a fresh month",
+      slots: [
+        { index: 1, date: "2026-08-04", platform: "threads", title: "Launch recap" },
+      ],
+    });
+    expect(parsed?.slots[0].slotId).toBeUndefined();
+  });
+});

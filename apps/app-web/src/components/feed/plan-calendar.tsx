@@ -24,10 +24,15 @@ import { useMemo, useState } from "react";
 import { ChevronLeft, ChevronRight, Plus } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
-import { PlatformIcon } from "@/components/feed/platform-icon";
-import { StatusDot } from "@/components/feed/feed-status";
+import {
+  IDEA_DRAG_TYPE,
+  PlanSlotChip,
+  SLOT_DRAG_TYPE,
+} from "@/components/feed/plan-slot-chip";
 import {
   addMonths,
+  compareSlotsInDay,
+  ghostDays,
   monthGridDays,
   parseMonthKey,
   slotsByDay,
@@ -47,10 +52,24 @@ export function PlanCalendar({
   onAddOnDay,
   onSelectSlot,
   onReschedule,
+  cadencePerWeek = null,
+  onDuplicateSlot,
+  onDeleteSlot,
+  onDropIdea,
 }: {
   /** `YYYY-MM`. */
   month: string;
   slots: readonly PlanSlot[];
+  /** Drives the dashed gap ghosts (D28). Null means no cadence, no ghosts. */
+  cadencePerWeek?: number | null;
+  onDuplicateSlot?: (slot: PlanSlot) => void;
+  onDeleteSlot?: (slot: PlanSlot) => void;
+  /**
+   * An idea chip was dropped on a day. The parent opens the prefilled slot
+   * editor dated to that day rather than writing (D27) - a slipped mouse must
+   * never schedule anything.
+   */
+  onDropIdea?: (ideaId: string, iso: string) => void;
   /** Injected so the grid is deterministic in tests. */
   today: Date;
   selectedSlotId: string | null;
@@ -67,6 +86,10 @@ export function PlanCalendar({
 
   const days = useMemo(() => monthGridDays(month, today), [month, today]);
   const byDay = useMemo(() => slotsByDay(slots), [slots]);
+  const ghosts = useMemo(
+    () => new Set(ghostDays(month, slots, cadencePerWeek, today)),
+    [month, slots, cadencePerWeek, today],
+  );
 
   // Locale-aware month name and weekday headers, matching how the rest of the
   // app formats dates. Falls back to the raw key if the month is malformed.
@@ -138,7 +161,9 @@ export function PlanCalendar({
 
         <div className="grid grid-cols-7">
           {days.map((day) => {
-            const daySlots = byDay.get(day.iso) ?? [];
+            const daySlots = [...(byDay.get(day.iso) ?? [])].sort(
+              compareSlotsInDay,
+            );
             const shown = daySlots.slice(0, MAX_CHIPS_PER_DAY);
             const overflow = daySlots.length - shown.length;
             const isDropTarget = dragOverDay === day.iso;
@@ -146,7 +171,14 @@ export function PlanCalendar({
               <div
                 key={day.iso}
                 onDragOver={(e) => {
-                  if (!dragSlotId || !canEdit) return;
+                  if (!canEdit) return;
+                  // Two different things can land on a day, so the cell reads
+                  // the payload TYPE rather than assuming a slot drag (D40).
+                  const kinds = e.dataTransfer.types;
+                  const carries =
+                    kinds.includes(SLOT_DRAG_TYPE) ||
+                    kinds.includes(IDEA_DRAG_TYPE);
+                  if (!carries && !dragSlotId) return;
                   // Only preventDefault marks the cell as a valid drop target.
                   e.preventDefault();
                   setDragOverDay(day.iso);
@@ -157,7 +189,15 @@ export function PlanCalendar({
                 onDrop={(e) => {
                   e.preventDefault();
                   setDragOverDay(null);
-                  const slot = slots.find((s) => s.id === dragSlotId);
+                  const ideaId = e.dataTransfer.getData(IDEA_DRAG_TYPE);
+                  if (ideaId) {
+                    setDragSlotId(null);
+                    onDropIdea?.(ideaId, day.iso);
+                    return;
+                  }
+                  const draggedId =
+                    e.dataTransfer.getData(SLOT_DRAG_TYPE) || dragSlotId;
+                  const slot = slots.find((s) => s.id === draggedId);
                   setDragSlotId(null);
                   // A drop back on the same day is a no-op, not a write.
                   if (slot && slot.scheduledFor !== day.iso) {
@@ -201,43 +241,43 @@ export function PlanCalendar({
 
                 <div className="flex min-h-0 flex-col gap-1">
                   {shown.map((slot) => (
-                    <button
+                    <PlanSlotChip
                       key={slot.id}
-                      type="button"
-                      draggable={canEdit}
-                      onDragStart={() => setDragSlotId(slot.id)}
+                      slot={slot}
+                      selected={selectedSlotId === slot.id}
+                      canEdit={canEdit}
+                      dragging={dragSlotId === slot.id}
+                      onSelect={() => onSelectSlot(slot)}
+                      onDragStart={(e) => {
+                        setDragSlotId(slot.id);
+                        e.dataTransfer.setData(SLOT_DRAG_TYPE, slot.id);
+                        e.dataTransfer.effectAllowed = "move";
+                      }}
                       onDragEnd={() => {
                         setDragSlotId(null);
                         setDragOverDay(null);
                       }}
-                      onClick={() => onSelectSlot(slot)}
-                      title={slot.title}
-                      className={cn(
-                        "flex items-center gap-1.5 rounded-md border px-1.5 py-1 text-left text-[11px] transition-colors",
-                        selectedSlotId === slot.id
-                          ? "border-transparent bg-foreground text-background"
-                          : "border-border/60 bg-background hover:bg-accent",
-                        dragSlotId === slot.id && "opacity-40",
-                        slot.status === "skipped" && "opacity-60",
-                      )}
-                    >
-                      <PlatformIcon
-                        platform={slot.platform}
-                        className="size-3 shrink-0"
-                      />
-                      <span
-                        className={cn(
-                          "min-w-0 flex-1 truncate",
-                          slot.status === "skipped" && "line-through",
-                        )}
-                      >
-                        {slot.title}
-                      </span>
-                      {selectedSlotId === slot.id ? null : (
-                        <StatusDot status={slot.status} />
-                      )}
-                    </button>
+                      onDuplicate={
+                        onDuplicateSlot ? () => onDuplicateSlot(slot) : undefined
+                      }
+                      onDelete={
+                        onDeleteSlot ? () => onDeleteSlot(slot) : undefined
+                      }
+                    />
                   ))}
+                  {daySlots.length === 0 && ghosts.has(day.iso) && canEdit ? (
+                    // A cadence suggestion, not a post: dashed, muted, and it
+                    // writes nothing until clicked (D28).
+                    <button
+                      type="button"
+                      onClick={() => onAddOnDay(day.iso)}
+                      title={tp.gapSuggestion}
+                      className="flex items-center gap-1 rounded-md border border-dashed border-border px-1.5 py-1 text-left text-[11px] text-muted-foreground/70 transition-colors hover:bg-accent hover:text-foreground"
+                    >
+                      <Plus className="size-3 shrink-0" aria-hidden />
+                      <span className="truncate">{tp.gapShort}</span>
+                    </button>
+                  ) : null}
                   {overflow > 0 ? (
                     <button
                       type="button"

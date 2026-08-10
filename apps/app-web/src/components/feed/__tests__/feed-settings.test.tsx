@@ -80,6 +80,7 @@ function workspace(
     me: { id: "u-1" },
     profiles,
     assistants: [],
+    brand: null,
     refresh: async () => {},
   };
 }

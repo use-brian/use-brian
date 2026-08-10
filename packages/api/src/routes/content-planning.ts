@@ -14,6 +14,8 @@ import {
   getWorkspaceMembershipSystem,
 } from '../db/workspace-store.js'
 import { query } from '../db/client.js'
+import { parsePostMedia } from '../content-planning/media.js'
+import type { PostMedia } from '../db/content-planning-store.js'
 import {
   createContentPlanningStore,
   isContentPlanningPlatform,
@@ -644,6 +646,7 @@ export function parseContentDraftBody(value: unknown):
       text: string
       platform: ContentPlanningPlatform
       imageBrief?: string
+      media?: PostMedia[]
       topicTag?: string
       postFormat?: 'post' | 'thread' | 'article'
       threadSegments?: string[]
@@ -706,6 +709,8 @@ export function parseContentDraftBody(value: unknown):
   ) {
     return 'invalid'
   }
+  const media = parsePostMedia(value.media)
+  if (!media.ok) return 'invalid'
   if (
     value.topicTag !== undefined
     && (typeof value.topicTag !== 'string' || value.topicTag.length > 200)
@@ -753,6 +758,7 @@ export function parseContentDraftBody(value: unknown):
   return {
     text: value.text.trim(),
     platform: value.platform,
+    media: media.media,
     ...(typeof value.imageBrief === 'string' && value.imageBrief.trim()
       ? { imageBrief: value.imageBrief.trim() }
       : {}),
