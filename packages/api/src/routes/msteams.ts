@@ -81,6 +81,7 @@ export type MsTeamsRouteOptions = {
    * channel pipeline so its background calls work without a Google key. */
   backgroundModel?: string
   provider: LLMProvider
+  resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
   systemPrompt: string
   tools: Map<string, Tool>
   memoryStore: MemoryStore
@@ -431,6 +432,7 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
       adaptiveResearchEnabled: true,
       abortController,
       provider: options.provider,
+      resolveWorkspaceCustomLlm: options.resolveWorkspaceCustomLlm,
       systemPrompt: options.systemPrompt,
       tools: options.tools,
       memoryStore: options.memoryStore,

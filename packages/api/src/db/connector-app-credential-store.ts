@@ -36,8 +36,10 @@ import { decryptCredentials, encryptCredentials } from './credential-crypto.js'
 export type ConnectorAppCredentials = {
   clientId: string
   clientSecret: string
-  /** Provider-specific authority hint (msgraph: the Entra directory id). */
+  /** Provider-specific authority hint (msgraph: Entra directory id; gdrive: Picker project number). */
   tenantId?: string
+  /** gdrive only: browser key restricted to Google Picker + the Brian app origin. */
+  pickerApiKey?: string
 }
 
 /** What a route may return: everything except the secret. */
@@ -50,7 +52,7 @@ export type ConnectorAppCredentialSummary = {
   updatedAt: Date
 }
 
-type SecretBlob = { clientSecret: string }
+type SecretBlob = { clientSecret: string; pickerApiKey?: string }
 
 type Row = {
   workspace_id: string
@@ -67,6 +69,7 @@ export type SetConnectorAppCredentialsParams = {
   clientId: string
   clientSecret: string
   tenantId?: string | null
+  pickerApiKey?: string | null
 }
 
 export type ConnectorAppCredentialStore = {
@@ -121,13 +124,16 @@ function toSummary(row: Row): ConnectorAppCredentialSummary {
 export function createConnectorAppCredentialStore(
   encryptionKey: Buffer | null,
 ): ConnectorAppCredentialStore {
-  function encryptSecret(clientSecret: string): Buffer {
+  function encryptSecret(clientSecret: string, pickerApiKey?: string | null): Buffer {
     if (!encryptionKey) {
       throw new Error(
         'connector-app-credential-store: CHANNEL_CREDENTIAL_KEY is required to store an app secret — refusing to store plaintext',
       )
     }
-    return encryptCredentials<SecretBlob>({ clientSecret }, encryptionKey)
+    return encryptCredentials<SecretBlob>({
+      clientSecret,
+      ...(pickerApiKey ? { pickerApiKey } : {}),
+    }, encryptionKey)
   }
 
   return {
@@ -157,17 +163,18 @@ export function createConnectorAppCredentialStore(
           'connector-app-credential-store: CHANNEL_CREDENTIAL_KEY is required to read an app secret',
         )
       }
-      const { clientSecret } = decryptCredentials<SecretBlob>(row.client_secret_ciphertext, encryptionKey)
+      const { clientSecret, pickerApiKey } = decryptCredentials<SecretBlob>(row.client_secret_ciphertext, encryptionKey)
       return {
         clientId: row.client_id,
         clientSecret,
         ...(row.tenant_id ? { tenantId: row.tenant_id } : {}),
+        ...(pickerApiKey ? { pickerApiKey } : {}),
       }
     },
 
     async set(params) {
       await assertWorkspaceAdmin(params.actingUserId, params.workspaceId)
-      const ciphertext = encryptSecret(params.clientSecret)
+      const ciphertext = encryptSecret(params.clientSecret, params.pickerApiKey)
       const result = await queryWithRLS<Row>(
         params.actingUserId,
         `INSERT INTO connector_app_credentials

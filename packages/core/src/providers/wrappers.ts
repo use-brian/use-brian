@@ -30,7 +30,8 @@ export type StreamWrapper = (inner: StreamFn) => StreamFn
  */
 export function wrapContextBudget(): StreamWrapper {
   return (inner) => async function* (request) {
-    const budget = Math.floor(resolveInputTokenLimit(request.model) * MODEL_CONTEXT_FIT_RATIO)
+    const inputLimit = request.inputTokenLimit ?? resolveInputTokenLimit(request.model)
+    const budget = Math.floor(inputLimit * MODEL_CONTEXT_FIT_RATIO)
     const fitted = fitMessagesToBudget(request.messages, budget)
     const primaryReq = fitted.trimmed ? { ...request, messages: fitted.messages } : request
 
@@ -665,6 +666,7 @@ export function wrapProvider(
             messages,
             tools: sessionOpts.tools,
             maxTokens: sessionOpts.maxTokens,
+            inputTokenLimit: sessionOpts.inputTokenLimit,
             temperature: sessionOpts.temperature,
             thinkingLevel: sendOpts?.thinkingLevel ?? sessionOpts.thinkingLevel,
             signal: sessionOpts.signal,

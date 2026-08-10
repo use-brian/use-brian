@@ -106,6 +106,12 @@ async function executeOp(op: string, args: Record<string, unknown>): Promise<unk
     boundTabId = null
     return native.request('stop')
   }
+  if (op === 'openTab' || op === 'listTabs' || op === 'switchTab' || op === 'closeTab') {
+    throw new FirefoxNativeError(
+      'Multi-tab control is currently available in the Chrome and Edge extension only.',
+      'unsupported_browser',
+    )
+  }
   const status = await native.status()
   if (!status.ready) {
     throw new FirefoxNativeError(

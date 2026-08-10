@@ -4,7 +4,7 @@
  * construction and token storage are injected so the state machine is
  * unit-testable outside Chrome.
  */
-import { parseRelayMessage, type ExtensionToRelay } from './protocol.js'
+import { parseRelayMessage, type ExtensionToRelay, type LocalControlMode } from './protocol.js'
 
 export type WebSocketLike = {
   readyState: number
@@ -26,7 +26,12 @@ export type RelayClientDeps = {
   getBuild?: () => Promise<string | null>
   /** Persist the session token the relay hands back in ready. */
   onSessionToken: (token: string) => Promise<void>
-  onCommand: (cmd: { id: string; op: string; args: Record<string, unknown> }) => void
+  onCommand: (cmd: {
+    id: string
+    op: string
+    args: Record<string, unknown>
+    controlMode: LocalControlMode
+  }) => void
   onStateChange?: (state: RelayClientState) => void
   /** Injected timers so tests can drive time. */
   setTimer?: (fn: () => void, ms: number) => unknown
@@ -38,8 +43,8 @@ export type RelayClientDeps = {
 export type RelayClientState = 'disconnected' | 'connecting' | 'ready' | 'unpaired' | 'replaced'
 
 /**
- * The relay's close code when this user's slot was handed to a newer
- * connection (one connection per user). Reconnecting into it is a mutual
+ * The relay's close code when this Use Brian browser profile's slot was handed
+ * to a newer connection (one connection per profile). Reconnecting into it is a mutual
  * eviction loop — and because `attempts` resets on every `ready`, the backoff
  * never escalates, so both clients hammer the relay at its first step. Another
  * client owns the pairing now; the honest move is to stand down and say so.
@@ -50,8 +55,9 @@ const CLOSE_REPLACED = 4000
  * Must stay UNDER Chrome's 30 s MV3 service-worker idle kill — the ping is
  * what resets the idle timer, so an interval at exactly 30 s races the
  * teardown and the socket dies on any quiet stretch. The relay keys live
- * connections by userId in process memory, so a dropped socket reaches the
- * assistant as `no_extension` while the popup still reads "connected".
+ * connections by `(userId, browserProfileId)` in process memory, so a dropped
+ * socket reaches calls on that profile as `no_extension` while the popup still
+ * reads "connected".
  * (Claude in Chrome solves the same constraint with a 20 s offscreen-document
  * keepalive; 20 s gives us a full interval of headroom either way.)
  */

@@ -33,6 +33,14 @@ const getGoogleTask = vi.fn(
 const getCalendarEvent = vi.fn(
   async (_token: string, eventId: string, _calendarId: string) => ({ id: eventId, summary: 'Planning' }),
 )
+const getDriveFileContentWithMetadata = vi.fn(async (_token: string, _fileId: string, _mime?: string) => ({
+  file: {
+    id: 'drive-file-1', name: 'Renewal playbook',
+    mimeType: 'application/vnd.google-apps.document', version: '128',
+    modifiedTime: '2026-08-10T08:30:00.000Z',
+  },
+  content: 'Renewals require finance approval.',
+}))
 vi.mock('../../google/client.js', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   refreshGoogleAccessToken: (refreshToken: string, clientId: string, clientSecret: string) =>
@@ -41,6 +49,34 @@ vi.mock('../../google/client.js', async (importOriginal) => ({
     getGoogleTask(token, taskListId, taskId),
   getCalendarEvent: (token: string, eventId: string, calendarId: string) =>
     getCalendarEvent(token, eventId, calendarId),
+  getDriveFileContentWithMetadata: (token: string, fileId: string, mime?: string) =>
+    getDriveFileContentWithMetadata(token, fileId, mime),
+}))
+
+const enqueueGDriveLazyEnrichment = vi.fn(async (_input: unknown) => ({ enqueued: true, jobId: 'job-1' }))
+vi.mock('../../db/gdrive-enrichment-store.js', () => ({
+  enqueueGDriveLazyEnrichment: (input: unknown) => enqueueGDriveLazyEnrichment(input),
+}))
+
+type CatalogPolicyStub = {
+  configured: boolean
+  syncScope: string | null
+  status: string | null
+  selectedFolders: Array<{ id: string; name: string }>
+  allowed: boolean
+}
+type CatalogRuntimeStub = Omit<CatalogPolicyStub, 'allowed'>
+const getGDriveCatalogReadPolicy = vi.fn<(input: unknown) => Promise<CatalogPolicyStub>>(async () => ({
+  configured: false, syncScope: null, status: null, selectedFolders: [], allowed: true,
+}))
+const getGDriveCatalogRuntimeScope = vi.fn<(input: unknown) => Promise<CatalogRuntimeStub>>(async () => ({
+  configured: false, syncScope: null, status: null, selectedFolders: [],
+}))
+const listGDriveCatalogFiles = vi.fn<(input: unknown) => Promise<Array<Record<string, unknown>>>>(async () => [])
+vi.mock('../../db/gdrive-catalog-store.js', () => ({
+  getGDriveCatalogReadPolicy: (input: unknown) => getGDriveCatalogReadPolicy(input),
+  getGDriveCatalogRuntimeScope: (input: unknown) => getGDriveCatalogRuntimeScope(input),
+  listGDriveCatalogFiles: (input: unknown) => listGDriveCatalogFiles(input),
 }))
 
 // Custom remote MCP discovery / calls — stubbed so the tests never hit the
@@ -80,6 +116,7 @@ import {
 } from '../inject.js'
 import { buildUnavailableCapabilitiesPrompt } from '../../routes/route-helpers.js'
 import { packMsGraphTokens } from '../../msgraph/token.js'
+import { packGoogleRefreshCredential } from '../../google/client.js'
 
 function settingsStoreStub() {
   // Generous stub — the no-connector path touches few of these, but
@@ -98,6 +135,16 @@ beforeEach(() => {
   callRemoteMcpTool.mockReset()
   discoverCliServer.mockReset()
   callCliMcpTool.mockReset()
+  getGDriveCatalogReadPolicy.mockReset()
+  getGDriveCatalogReadPolicy.mockResolvedValue({
+    configured: false, syncScope: null, status: null, selectedFolders: [], allowed: true,
+  })
+  getGDriveCatalogRuntimeScope.mockReset()
+  getGDriveCatalogRuntimeScope.mockResolvedValue({
+    configured: false, syncScope: null, status: null, selectedFolders: [],
+  })
+  listGDriveCatalogFiles.mockReset()
+  listGDriveCatalogFiles.mockResolvedValue([])
 })
 
 describe('[COMP:api/mcp-inject] injectMcpTools', () => {
@@ -1103,6 +1150,45 @@ describe('[COMP:api/mcp-inject] per-assistant write-grant gate', () => {
   })
 })
 
+describe('[COMP:api/mcp-inject] Google Drive BYO credential refresh', () => {
+  afterEach(() => {
+    getConnectorConfig.mockReset()
+    getConnectorConfig.mockReturnValue(undefined)
+  })
+
+  it('uses the encrypted customer app pair without deployment Google config', async () => {
+    getConnectorConfig.mockReturnValue(undefined)
+    refreshGoogleAccessToken.mockClear()
+    const secret = packGoogleRefreshCredential({
+      refreshToken: 'customer-refresh',
+      appClientId: 'customer-client',
+      appClientSecret: 'customer-secret',
+    })
+    const connectorStore = {
+      list: vi.fn().mockResolvedValue([
+        { id: 'drive-1', connectorId: 'gdrive', name: 'Company Drive', connected: true, url: null, custom: false, config: { driveAccessMode: 'full_drive_readonly' }, createdAt: new Date(0) },
+      ]),
+      getCredentials: vi.fn().mockResolvedValue({ client_id: 'google_refresh', client_secret: secret }),
+      getConfig: vi.fn().mockResolvedValue({ driveAccessMode: 'full_drive_readonly' }),
+      setConnected: vi.fn(),
+    }
+    const tools = new Map()
+
+    await injectMcpTools({
+      userId: 'u-1', assistantId: 'a-1', tools,
+      connectorStore: connectorStore as never,
+      settingsStore: settingsStoreStub() as never,
+      keepBuiltinsDirect: true,
+    })
+
+    expect(refreshGoogleAccessToken).toHaveBeenCalledWith(
+      'customer-refresh', 'customer-client', 'customer-secret',
+    )
+    expect(tools.has('googleDriveListFiles')).toBe(true)
+    expect(tools.has('googleDriveGetFileContent')).toBe(true)
+  })
+})
+
 describe('[COMP:api/mcp-inject] grant overlay instance binding', () => {
   // Incident 2026-07-08 (fls.com.hk): a workspace assistant sent mail from a
   // PERSONAL Gmail that was never exposed to the workspace. The team-grant
@@ -1206,6 +1292,125 @@ describe('[COMP:api/mcp-inject] grant overlay instance binding', () => {
     expect(names).toContain('gmailSendMessage')
     expect(names.some((n) => n.startsWith('googleCalendar'))).toBe(false)
     expect(names.some((n) => n.startsWith('googleTasks'))).toBe(false)
+  })
+
+  it('queues one versioned enrichment after a full-Drive content read', async () => {
+    const connectorStore = {
+      list: vi.fn().mockResolvedValue([]),
+      getCredentials: vi.fn(),
+      getConfig: vi.fn().mockResolvedValue({}),
+      setConnected: vi.fn(),
+    }
+    const connectorInstanceStore = {
+      getCredentialsSystem: vi.fn().mockResolvedValue({ client_id: 'google_refresh', client_secret: 'refresh-drive' }),
+      updateCredentialsSystem: vi.fn(),
+      markHealth: vi.fn(),
+      listByWorkspaceSystem: vi.fn().mockResolvedValue([]),
+    }
+    const connectorGrantStore = {
+      listForTargetSystem: vi.fn().mockResolvedValue([{
+        grantedByUserId: 'grantor-1',
+        instance: {
+          id: 'ci-drive-exposed', scope: 'user', userId: 'grantor-1', workspaceId: null,
+          provider: 'gdrive', label: 'Company Drive', url: null, custom: false,
+          connected: true, healthStatus: 'ok', sensitivity: 'confidential',
+          config: { driveAccessMode: 'full_drive_readonly' },
+        },
+      }]),
+    }
+    const tools = new Map()
+    enqueueGDriveLazyEnrichment.mockClear()
+
+    await injectMcpTools({
+      userId: 'owner-1', assistantId: 'a-1', tools,
+      connectorStore: connectorStore as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorInstanceStore: connectorInstanceStore as never,
+      connectorGrantStore: connectorGrantStore as never,
+      assistantTeamId: 'ws-1',
+      keepBuiltinsDirect: true,
+    })
+
+    const read = tools.get('googleDriveGetFileContent') as { execute: (input: unknown, context: unknown) => Promise<unknown> }
+    await read.execute({ fileId: 'drive-file-1' }, {})
+    expect(enqueueGDriveLazyEnrichment).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: 'ws-1',
+      connectorInstanceId: 'ci-drive-exposed',
+      externalFileId: 'drive-file-1',
+      sourceVersion: '128',
+    }))
+  })
+
+  it('uses the local catalog for selected-folder search and rejects out-of-scope reads', async () => {
+    getGDriveCatalogRuntimeScope.mockResolvedValue({
+      configured: true,
+      syncScope: 'selected_folders',
+      status: 'done',
+      selectedFolders: [{ id: 'folder-1', name: 'Company' }],
+    })
+    listGDriveCatalogFiles.mockResolvedValue([{
+      externalFileId: 'drive-file-1',
+      name: 'Renewal playbook',
+      mimeType: 'application/vnd.google-apps.document',
+      sourceVersion: '128',
+      modifiedTime: '2026-08-10T08:30:00.000Z',
+      sizeBytes: null,
+      webViewLink: 'https://drive.google.com/file/drive-file-1',
+      parentIds: ['folder-1'],
+      folderPath: ['Company'],
+      isFolder: false,
+    }])
+    getGDriveCatalogReadPolicy.mockImplementation(async (input: unknown) => ({
+      configured: true,
+      syncScope: 'selected_folders',
+      status: 'done',
+      selectedFolders: [{ id: 'folder-1', name: 'Company' }],
+      allowed: (input as { externalFileId: string }).externalFileId === 'drive-file-1',
+    }))
+    const connectorStore = {
+      list: vi.fn().mockResolvedValue([]),
+      getCredentials: vi.fn(),
+      getConfig: vi.fn().mockResolvedValue({}),
+      setConnected: vi.fn(),
+    }
+    const connectorInstanceStore = {
+      getCredentialsSystem: vi.fn().mockResolvedValue({ client_id: 'google_refresh', client_secret: 'refresh-drive' }),
+      updateCredentialsSystem: vi.fn(),
+      markHealth: vi.fn(),
+      listByWorkspaceSystem: vi.fn().mockResolvedValue([]),
+    }
+    const connectorGrantStore = {
+      listForTargetSystem: vi.fn().mockResolvedValue([{
+        grantedByUserId: 'grantor-1',
+        instance: {
+          id: 'ci-drive-exposed', scope: 'user', userId: 'grantor-1', workspaceId: null,
+          provider: 'gdrive', label: 'Company Drive', url: null, custom: false,
+          connected: true, healthStatus: 'ok', sensitivity: 'confidential',
+          config: { driveAccessMode: 'full_drive_readonly' },
+        },
+      }]),
+    }
+    const tools = new Map()
+    await injectMcpTools({
+      userId: 'owner-1', assistantId: 'a-1', tools,
+      connectorStore: connectorStore as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorInstanceStore: connectorInstanceStore as never,
+      connectorGrantStore: connectorGrantStore as never,
+      assistantTeamId: 'ws-1',
+      keepBuiltinsDirect: true,
+    })
+
+    const list = tools.get('googleDriveListFiles') as { execute: (input: unknown, context: unknown) => Promise<{ data: unknown }> }
+    const listed = await list.execute({ query: 'renewal' }, {})
+    expect(listGDriveCatalogFiles).toHaveBeenCalledWith(expect.objectContaining({ query: 'renewal' }))
+    expect(listed.data).toEqual([expect.objectContaining({ id: 'drive-file-1' })])
+
+    const read = tools.get('googleDriveGetFileContent') as { execute: (input: unknown, context: unknown) => Promise<{ data: unknown; isError?: boolean }> }
+    const blocked = await read.execute({ fileId: 'outside-file' }, {})
+    expect(blocked.isError).toBe(true)
+    expect(String(blocked.data)).toContain('outside the Google Drive folders')
+    expect(getDriveFileContentWithMetadata).not.toHaveBeenCalledWith(expect.anything(), 'outside-file', expect.anything())
   })
 
   it('injects every exposed Gmail account and honors an exact extra-account enable switch', async () => {

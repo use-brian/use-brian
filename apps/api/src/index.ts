@@ -106,6 +106,7 @@ const env: OpenApiEnv = {
   WECHAT_CONNECTOR_SECRET: process.env.WECHAT_CONNECTOR_SECRET,
   BRIAN_MESSAGE_STORE_URL: process.env.BRIAN_MESSAGE_STORE_URL,
   BRIAN_MESSAGE_STORE_HMAC_SECRET: process.env.BRIAN_MESSAGE_STORE_HMAC_SECRET,
+  LLM_PROVIDER_KEY_ENCRYPTION_KEY: process.env.LLM_PROVIDER_KEY_ENCRYPTION_KEY,
 }
 
 // Wire the OPEN Pipeline B episode ingestors so brain distillation (doc-page

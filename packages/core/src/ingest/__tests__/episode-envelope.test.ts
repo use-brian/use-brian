@@ -33,10 +33,9 @@ const ENVELOPE_FIXTURE: EpisodeEnvelope = {
 
 describe('[COMP:brain/episode-envelope] Episode envelope contract', () => {
   describe('SourceKind vocabulary', () => {
-    it('declares all 16 locked source kinds', () => {
-      // 15 from the data-model lock + `recording` (2026-07-10 — three
-      // platform writers already emitted it; the vocabulary caught up).
-      expect(SOURCE_KINDS).toHaveLength(16)
+    it('declares all 17 locked source kinds', () => {
+      // 15 from the data-model lock + `recording` + versioned Drive files.
+      expect(SOURCE_KINDS).toHaveLength(17)
     })
 
     it('includes SV 2026-05-14 additions', () => {
@@ -119,6 +118,16 @@ describe('[COMP:brain/episode-envelope] Episode envelope contract', () => {
           commit_from: 'aaa111',
           commit_to: 'bbb222',
           files_changed: ['src/index.ts', 'README.md'],
+        },
+      },
+      {
+        name: 'gdrive_file',
+        fixture: {
+          source_kind: 'gdrive_file',
+          file_id: 'wf-drive-1',
+          drive_file_id: 'drive-1',
+          source_version: '128',
+          text: 'indexed head',
         },
       },
       {
@@ -236,7 +245,7 @@ describe('[COMP:brain/episode-envelope] Episode envelope contract', () => {
       },
     ]
 
-    it('covers all 16 source kinds', () => {
+    it('covers all 17 source kinds', () => {
       expect(variants.map((v) => v.name)).toEqual(Array.from(SOURCE_KINDS))
     })
 

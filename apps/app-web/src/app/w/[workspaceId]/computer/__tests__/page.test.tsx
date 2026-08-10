@@ -12,15 +12,8 @@ import { createRoot, type Root } from "react-dom/client";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const openWorkspaceSettings = vi.fn();
-vi.mock("@/components/settings-modal/settings-modal", () => ({
-  openWorkspaceSettings: (...args: unknown[]) => openWorkspaceSettings(...args),
-}));
-
-vi.mock("next/navigation", () => ({ useRouter: vi.fn() }));
-vi.mock("@/lib/api/computer", () => ({
-  listActiveComputerTasks: vi.fn(),
-  mostRecentComputerTask: vi.fn(),
+vi.mock("@/components/computer/browser-profiles-section", () => ({
+  BrowserProfilesSection: () => <div>Profile management</div>,
 }));
 vi.mock("@/lib/i18n/client", () => ({
   useT: () => ({
@@ -37,7 +30,7 @@ vi.mock("@/lib/i18n/client", () => ({
   }),
 }));
 
-import { BrowsersEmptyState } from "../page";
+import BrowsersIndexPage, { BrowsersEmptyState } from "../page";
 
 let root: Root | null = null;
 let container: HTMLElement | null = null;
@@ -58,6 +51,20 @@ afterEach(() => {
 });
 
 describe("[COMP:app-web/browsers-surface] Browsers index empty state", () => {
+  it("owns Profile management instead of redirecting into Settings", async () => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () =>
+      root?.render(
+        <BrowsersIndexPage params={Promise.resolve({ workspaceId: "ws-1" })} />,
+      ),
+    );
+
+    expect(container.textContent).toContain("Profile management");
+    expect(container.querySelector("#browser-profiles")).not.toBeNull();
+  });
+
   it("explains how to connect My Browser when no session is live", async () => {
     await mount();
 
@@ -76,15 +83,10 @@ describe("[COMP:app-web/browsers-surface] Browsers index empty state", () => {
     expect(install?.getAttribute("rel")).toBe("noopener noreferrer");
   });
 
-  it("opens Browser profiles from the connection action", async () => {
+  it("links to Browser profiles inside the Browsers mini app", async () => {
     await mount();
-    const button = container?.querySelector("button");
-    expect(button).toBeTruthy();
-
-    await act(async () => {
-      button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
-
-    expect(openWorkspaceSettings).toHaveBeenCalledWith("ws-browser-profiles");
+    const links = [...(container?.querySelectorAll("a") ?? [])];
+    const profiles = links.find((link) => link.textContent === "Pair in Browser profiles");
+    expect(profiles?.getAttribute("href")).toBe("#browser-profiles");
   });
 });

@@ -127,6 +127,20 @@ describe('[COMP:sandbox/e2b-cloud] E2BCloudProvider', () => {
     expect(commands.every((c) => c.envs?.AGENT_BROWSER_SESSION_NAME === SANDBOX_SESSION_NAME)).toBe(true)
   })
 
+  it('keeps trusted auth fills out of command strings and ordinary action text', async () => {
+    const { runtime, commands } = fakeRuntime()
+    const provider = createE2bCloudProvider(runtime)
+    const { sandboxId } = await provider.create({ workspaceId: 'w', taskId: 'auth-task' })
+    const password = 'correct horse battery staple'
+
+    await provider.browser(sandboxId).typeSecret?.('@e9', password)
+
+    expect(commands).toHaveLength(1)
+    expect(commands[0]?.cmd).toBe(cli.fillFromSecretEnv('@e9'))
+    expect(commands[0]?.cmd).not.toContain(password)
+    expect(commands[0]?.envs?.BRIAN_BROWSER_AUTH_SECRET).toBe(password)
+  })
+
   it('appends the BYOP --proxy flag to open only when a proxy is configured (§4.6)', async () => {
     const { runtime, commands } = fakeRuntime((cmd) =>
       cmd.includes(cli.getUrl())

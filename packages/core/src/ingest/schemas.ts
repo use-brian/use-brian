@@ -68,6 +68,14 @@ const githubSyncContentRefSchema = z.object({
   files_changed: z.array(z.string().min(1)),
 })
 
+const gdriveFileContentRefSchema = z.object({
+  source_kind: z.literal('gdrive_file'),
+  file_id: z.string().min(1),
+  drive_file_id: z.string().min(1),
+  source_version: z.string().min(1),
+  text: z.string().optional(),
+})
+
 const fileUploadContentRefSchema = z.object({
   source_kind: z.literal('file_upload'),
   file_id: z.string().min(1),
@@ -178,6 +186,7 @@ export const episodeContentRefSchema = z.discriminatedUnion('source_kind', [
   emailThreadContentRefSchema,
   meetingContentRefSchema,
   githubSyncContentRefSchema,
+  gdriveFileContentRefSchema,
   fileUploadContentRefSchema,
   manualPasteContentRefSchema,
   channelWindowContentRefSchema,

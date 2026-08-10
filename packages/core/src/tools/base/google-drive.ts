@@ -13,7 +13,7 @@ import { buildTool, type Tool } from '../types.js'
  * A file the user has explicitly picked via the Google Picker.
  * Writes against these files skip the confirmation prompt — the pick itself
  * is the consent ceremony. See docs/architecture/integrations/mcp.md →
- * "The `gdrive` connector — `drive.file` + Google Picker".
+ * "The `gdrive` connector — managed Picker or BYO full-Drive read".
  */
 export type AuthorizedFile = {
   id: string
@@ -55,10 +55,11 @@ export function createGoogleDriveTools(api: GoogleDriveApi, authorizedFiles: Aut
   const listFiles = buildTool({
     name: 'googleDriveListFiles',
     description:
-      'Search and list files in Google Drive. Returns file names, types, and IDs. ' +
-      'Use the query parameter to search by name. Use folderId to list files in a specific folder.',
+      'Search and list files in Google Drive. Selected-folder BYO connections search Brian\'s scoped ' +
+      'metadata catalog by file name and folder path; other connections use Google\'s title and full-text index. ' +
+      'Returns file names, types, and IDs. Use folderId to list files in a specific folder.',
     inputSchema: z.object({
-      query: z.string().optional().describe('Search by file name. Omit to list recent files.'),
+      query: z.string().optional().describe('Search file names and available index text. Omit to list files.'),
       maxResults: z.number().optional().describe('Max files to return (default 20).'),
       folderId: z.string().optional().describe('Folder ID to list files from.'),
     }),
@@ -197,10 +198,12 @@ export function createGoogleDriveTools(api: GoogleDriveApi, authorizedFiles: Aut
   })
 
   return [
-    // Phase 2: requires drive.readonly scope (restricted, needs CASA audit)
-    // listFiles,
-    // getFile,
-    // getFileContent,
+    // Under drive.file Google limits these reads to Picker-selected or
+    // app-created files. A customer-owned drive.readonly grant broadens the
+    // same tools to the signed-in account's full visible Drive.
+    listFiles,
+    getFile,
+    getFileContent,
 
     // Phase 1.5: requires drive.file scope (non-sensitive, add with Picker UI)
     // createFile,

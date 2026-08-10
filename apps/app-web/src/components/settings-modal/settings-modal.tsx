@@ -31,7 +31,6 @@ import { AccountSection } from "./sections/account-section";
 import { GeneralSection } from "./sections/general-section";
 import { PrivacySection } from "./sections/privacy-section";
 import { BillingSection } from "./sections/billing-section";
-import { BrowserProfilesSection } from "./sections/browser-profiles-section";
 import { ModelsSection } from "./sections/models-section";
 import { DomainsSection } from "./sections/domains-section";
 import {
@@ -51,8 +50,7 @@ export type SettingsSection =
   | "ws-domains"
   | "ws-plan"
   | "ws-usage"
-  | "ws-models"
-  | "ws-browser-profiles";
+  | "ws-models";
 
 // Cross-component request to open the settings modal at a given section. The
 // modal is owned by `workspace-switcher.tsx` (local state), so surfaces that
@@ -101,10 +99,6 @@ const WORKSPACE_SECTIONS: SettingsSection[] = [
   // Metered model profiles (model-registry.md L15). Hosted-only: the lane
   // bills credits; the OSS list below omits it.
   "ws-models",
-  // Computer-use Profile-Management. OSS keeps this navigation entry for the
-  // open My Browser pairing panel; without the optional closed profile/vault
-  // ports, the remaining profile controls report unconfigured.
-  "ws-browser-profiles",
   // ws-usage is absent on purpose: the Usage block renders inside ws-plan
   // ("Plan & usage") — the alias case below still routes old deep links.
   // Billing sits last in the group: day-to-day workspace config first.
@@ -112,14 +106,13 @@ const WORKSPACE_SECTIONS: SettingsSection[] = [
 ];
 // The OSS single-player edition has no billing: drop the Plan + Usage sections
 // entirely. Members stays (relabeled "Teammates"), routed to the hosted-upgrade
-// pitch instead of the live members manager. Browser profiles stays so OSS can
-// pair its self-hosted My Browser relay. Hosted keeps the full list above.
+// pitch instead of the live members manager. Browser profiles live in the
+// Browsers mini app in both editions.
 const OSS_WORKSPACE_SECTIONS: SettingsSection[] = [
   "ws-general",
   "ws-members",
   "ws-llm-key",
   "ws-domains",
-  "ws-browser-profiles",
 ];
 
 const OSS_SOURCE_URL = "https://github.com/use-brian/use-brian";
@@ -223,7 +216,6 @@ export function SettingsModal({ open, initialSection = "profile", onClose }: Pro
                   "ws-plan": t.chrome.settingsModal.workspace.plan,
                   "ws-usage": t.chrome.settingsModal.workspace.usage,
                   "ws-models": t.chrome.settingsModal.workspace.models,
-                  "ws-browser-profiles": t.chrome.settingsModal.workspace.browserProfiles,
                 }}
               />
               <div className="mt-4">
@@ -357,7 +349,7 @@ function SectionGroup({
   );
 }
 
-export function SectionBody({
+function SectionBody({
   section,
   onClose,
 }: {
@@ -400,10 +392,6 @@ export function SectionBody({
       // Metered model profiles (model-registry.md L15). The lane is a
       // hosted billing construct; OSS nav hides the section, this is defensive.
       return isOssEdition() ? <HostedUpgradeSection /> : <ModelsSection />;
-    case "ws-browser-profiles":
-      // My Browser pairing is open and available in OSS. Optional persistent
-      // profile/vault ports report unconfigured inside the section when absent.
-      return <BrowserProfilesSection />;
   }
 }
 

@@ -10,11 +10,9 @@
  * the caller via `onPicked`; the caller is responsible for POSTing them to
  * `/api/connectors/gdrive/authorized-files`.
  *
- * INFRA NOTE: the Picker needs `NEXT_PUBLIC_GOOGLE_API_KEY` and
- * `NEXT_PUBLIC_GOOGLE_PROJECT_NUMBER`, supplied as public build metadata.
- * When unset, `open()` surfaces an actionable "not configured" message rather
- * than failing silently, so the UI degrades gracefully until the deployment
- * supplies them.
+ * Managed connections use `NEXT_PUBLIC_GOOGLE_API_KEY` and
+ * `NEXT_PUBLIC_GOOGLE_PROJECT_NUMBER`. BYO connections receive the matching
+ * customer Picker key + app id from the exact-instance access-token response.
  *
  * See docs/architecture/integrations/mcp.md → "The `gdrive` connector".
  *
@@ -88,7 +86,7 @@ declare global {
 }
 
 type PickerReadyState = {
-  /** Fully ready: scripts loaded and env vars configured. */
+  /** The Picker script is loaded. Credential readiness is checked on open. */
   ready: boolean;
   /** If not ready, why. Surfaced as a tooltip/message. */
   disabledReason?: string;
@@ -106,14 +104,29 @@ type DrivePickerProps = {
   ) => React.ReactNode;
   onPicked: (files: PickedFile[]) => void;
   onError?: (message: string) => void;
+  /** File consent for Brian OAuth, or recursive-root selection for BYO OAuth. */
+  mode?: "files" | "folders";
+  /** Binds the Picker token to the exact Drive account in multi-account setups. */
+  connectorInstanceId?: string;
 };
 
-export function DrivePicker({ children, onPicked, onError }: DrivePickerProps) {
+export function DrivePicker({
+  children,
+  onPicked,
+  onError,
+  mode = "files",
+  connectorInstanceId,
+}: DrivePickerProps) {
   const t = useT();
   const [apiLoaded, setApiLoaded] = useState(false);
   const [pickerLoaded, setPickerLoaded] = useState(false);
   const [isOpening, setIsOpening] = useState(false);
-  const lastTokenRef = useRef<{ token: string; expiresAt: number } | null>(null);
+  const lastTokenRef = useRef<{
+    token: string;
+    expiresAt: number;
+    pickerApiKey: string;
+    pickerAppId: string;
+  } | null>(null);
 
   // Load the `picker` module once gapi itself has loaded.
   useEffect(() => {
@@ -122,29 +135,36 @@ export function DrivePicker({ children, onPicked, onError }: DrivePickerProps) {
     window.gapi.load("picker", () => setPickerLoaded(true));
   }, [apiLoaded, pickerLoaded]);
 
-  const getAccessToken = useCallback(async (): Promise<string> => {
+  const getAccessToken = useCallback(async () => {
     const cached = lastTokenRef.current;
-    if (cached && cached.expiresAt > Date.now() + 60_000) return cached.token;
+    if (cached && cached.expiresAt > Date.now() + 60_000) return cached;
 
-    const res = await authFetch(`${API_URL}/api/connectors/gdrive/access-token`);
+    const qs = connectorInstanceId
+      ? `?${new URLSearchParams({ connectorInstanceId })}`
+      : "";
+    const res = await authFetch(`${API_URL}/api/connectors/gdrive/access-token${qs}`);
     if (!res.ok) {
       throw new Error(
         res.status === 409 ? t.drivePicker.connectFirst : t.drivePicker.noToken,
       );
     }
-    const body = (await res.json()) as { accessToken: string; expiresIn: number };
-    lastTokenRef.current = {
+    const body = (await res.json()) as {
+      accessToken: string;
+      expiresIn: number;
+      pickerApiKey?: string;
+      pickerAppId?: string;
+    };
+    const session = {
       token: body.accessToken,
       expiresAt: Date.now() + body.expiresIn * 1000,
+      pickerApiKey: body.pickerApiKey ?? GOOGLE_API_KEY,
+      pickerAppId: body.pickerAppId ?? GOOGLE_PROJECT_NUMBER,
     };
-    return body.accessToken;
-  }, [t]);
+    lastTokenRef.current = session;
+    return session;
+  }, [connectorInstanceId, t]);
 
   const open = useCallback(async () => {
-    if (!GOOGLE_API_KEY || !GOOGLE_PROJECT_NUMBER) {
-      onError?.(t.drivePicker.notConfigured);
-      return;
-    }
     if (!pickerLoaded || !window.google?.picker) {
       onError?.(t.drivePicker.loading);
       return;
@@ -152,23 +172,34 @@ export function DrivePicker({ children, onPicked, onError }: DrivePickerProps) {
 
     setIsOpening(true);
     try {
-      const token = await getAccessToken();
+      const session = await getAccessToken();
+      if (!session.pickerApiKey || !session.pickerAppId) {
+        onError?.(t.drivePicker.notConfigured);
+        return;
+      }
       const picker = window.google.picker;
 
-      const docsView = new picker.DocsView(picker.ViewId.DOCS);
-      docsView.setSelectFolderEnabled(false);
-      const sheetsView = new picker.DocsView(picker.ViewId.SPREADSHEETS);
-      const slidesView = new picker.DocsView(picker.ViewId.PRESENTATIONS);
-
-      new picker.PickerBuilder()
-        .setOAuthToken(token)
-        .setDeveloperKey(GOOGLE_API_KEY)
-        .setAppId(GOOGLE_PROJECT_NUMBER)
-        .addView(docsView)
-        .addView(sheetsView)
-        .addView(slidesView)
+      const builder = new picker.PickerBuilder()
+        .setOAuthToken(session.token)
+        .setDeveloperKey(session.pickerApiKey)
+        .setAppId(session.pickerAppId)
         .enableFeature(picker.Feature.MULTISELECT_ENABLED)
-        .enableFeature(picker.Feature.SUPPORT_DRIVES)
+        .enableFeature(picker.Feature.SUPPORT_DRIVES);
+
+      if (mode === "folders") {
+        const folderView = new picker.DocsView(picker.ViewId.DOCS);
+        folderView.setMimeTypes("application/vnd.google-apps.folder");
+        folderView.setSelectFolderEnabled(true);
+        builder.addView(folderView);
+      } else {
+        const docsView = new picker.DocsView(picker.ViewId.DOCS);
+        docsView.setSelectFolderEnabled(false);
+        builder.addView(docsView);
+        builder.addView(new picker.DocsView(picker.ViewId.SPREADSHEETS));
+        builder.addView(new picker.DocsView(picker.ViewId.PRESENTATIONS));
+      }
+
+      builder
         .setCallback((data) => {
           if (data.action === picker.Action.PICKED && data.docs?.length) {
             onPicked(
@@ -183,19 +214,13 @@ export function DrivePicker({ children, onPicked, onError }: DrivePickerProps) {
     } finally {
       setIsOpening(false);
     }
-  }, [pickerLoaded, getAccessToken, onPicked, onError, t]);
+  }, [pickerLoaded, getAccessToken, mode, onPicked, onError, t]);
 
-  // Only keep `disabled` for loading states — unconfigured env still lets the
-  // click through so `open()` can surface an actionable error. Otherwise the
-  // user sees a greyed-out button with no explanation.
-  const notConfigured = !GOOGLE_API_KEY || !GOOGLE_PROJECT_NUMBER;
-  const disabled = !notConfigured && !pickerLoaded;
-  const disabledReason = notConfigured
-    ? t.drivePicker.notConfiguredDeployment
-    : !pickerLoaded
-      ? t.drivePicker.loadingPicker
-      : undefined;
-  const ready = !disabled && !notConfigured;
+  // A BYO instance may be fully configured even when this deployment has no
+  // managed Picker metadata, so credential readiness is resolved on open.
+  const disabled = !pickerLoaded;
+  const disabledReason = !pickerLoaded ? t.drivePicker.loadingPicker : undefined;
+  const ready = pickerLoaded;
 
   return (
     <>

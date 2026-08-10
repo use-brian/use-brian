@@ -49,6 +49,7 @@ export type DiscordRouteOptions = {
   /** Shared secret the connector presents on every call (DISCORD_CONNECTOR_SECRET). */
   connectorSecret: string
   provider: LLMProvider
+  resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
   systemPrompt: string
   tools: Map<string, Tool>
   memoryStore: MemoryStore
@@ -570,6 +571,7 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
       adaptiveResearchEnabled: true,
       abortController,
       provider: options.provider,
+      resolveWorkspaceCustomLlm: options.resolveWorkspaceCustomLlm,
       systemPrompt: options.systemPrompt,
       tools: extraTools,
       memoryStore: options.memoryStore,

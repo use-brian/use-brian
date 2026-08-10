@@ -5,8 +5,8 @@ import { createHmac } from 'node:crypto'
  * mode, spec §4 "Local mode"): minted by the authed
  * `POST /api/browser-extension/pair`, presented by the extension in the
  * relay's `hello{pairingToken}` envelope, verified by the relay with the
- * same shared JWT_SECRET, and bound to `{userId, workspaceId}` for the life
- * of the WebSocket connection.
+ * same shared JWT_SECRET, and bound to `{userId, workspaceId,
+ * browserProfileId}` for the life of the WebSocket connection.
  *
  * HS256 like jwt.ts / tg-link-token.ts; the `kind: 'browser-ext-pair'`
  * claim keeps it distinct from access/refresh and tg-link tokens.
@@ -18,6 +18,7 @@ export type BrowserExtPairTokenPayload = {
   kind: 'browser-ext-pair'
   userId: string
   workspaceId: string
+  browserProfileId: string
   iat: number
   exp: number
 }
@@ -28,7 +29,7 @@ function base64url(data: string | Buffer): string {
 }
 
 export function signBrowserExtPairToken(
-  input: { userId: string; workspaceId: string },
+  input: { userId: string; workspaceId: string; browserProfileId: string },
   secret: string,
 ): string {
   const now = Math.floor(Date.now() / 1000)
@@ -36,6 +37,7 @@ export function signBrowserExtPairToken(
     kind: 'browser-ext-pair',
     userId: input.userId,
     workspaceId: input.workspaceId,
+    browserProfileId: input.browserProfileId,
     iat: now,
     exp: now + TTL_SECONDS,
   }
@@ -60,7 +62,7 @@ export function verifyBrowserExtPairToken(
  * successful pair-token hello and returns in `ready{sessionToken}` — so the
  * extension can reconnect with backoff + re-`hello` for weeks without asking
  * the user to re-pair. Revocation = rotating JWT_SECRET or unpairing in the
- * extension; per-user server-side revocation can ride the vault work later.
+ * extension; per-profile server-side revocation can ride the vault work later.
  */
 const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60 // 30 days
 
@@ -68,12 +70,13 @@ export type BrowserExtSessionTokenPayload = {
   kind: 'browser-ext-session'
   userId: string
   workspaceId: string
+  browserProfileId: string
   iat: number
   exp: number
 }
 
 export function signBrowserExtSessionToken(
-  input: { userId: string; workspaceId: string },
+  input: { userId: string; workspaceId: string; browserProfileId: string },
   secret: string,
 ): string {
   const now = Math.floor(Date.now() / 1000)
@@ -81,6 +84,7 @@ export function signBrowserExtSessionToken(
     kind: 'browser-ext-session',
     userId: input.userId,
     workspaceId: input.workspaceId,
+    browserProfileId: input.browserProfileId,
     iat: now,
     exp: now + SESSION_TTL_SECONDS,
   }
@@ -104,7 +108,12 @@ export function verifyBrowserExtSessionToken(
 export function verifyBrowserExtHelloToken(
   token: string,
   secret: string,
-): { kind: 'browser-ext-pair' | 'browser-ext-session'; userId: string; workspaceId: string } | null {
+): {
+  kind: 'browser-ext-pair' | 'browser-ext-session'
+  userId: string
+  workspaceId: string
+  browserProfileId: string
+} | null {
   return (
     verifyBrowserExtPairToken(token, secret) ?? verifyBrowserExtSessionToken(token, secret)
   )
@@ -114,7 +123,14 @@ function verifyKind(
   token: string,
   secret: string,
   kind: 'browser-ext-pair' | 'browser-ext-session',
-): { kind: typeof kind; userId: string; workspaceId: string; iat: number; exp: number } | null {
+): {
+  kind: typeof kind
+  userId: string
+  workspaceId: string
+  browserProfileId: string
+  iat: number
+  exp: number
+} | null {
   const parts = token.split('.')
   if (parts.length !== 3) return null
 
@@ -130,14 +146,23 @@ function verifyKind(
       kind?: string
       userId?: string
       workspaceId?: string
+      browserProfileId?: string
       iat?: number
       exp?: number
     }
     if (payload.kind !== kind) return null
     if (typeof payload.userId !== 'string' || payload.userId.length === 0) return null
     if (typeof payload.workspaceId !== 'string' || payload.workspaceId.length === 0) return null
+    if (typeof payload.browserProfileId !== 'string' || payload.browserProfileId.length === 0) return null
     if (typeof payload.exp !== 'number' || payload.exp < Math.floor(Date.now() / 1000)) return null
-    return payload as { kind: typeof kind; userId: string; workspaceId: string; iat: number; exp: number }
+    return payload as {
+      kind: typeof kind
+      userId: string
+      workspaceId: string
+      browserProfileId: string
+      iat: number
+      exp: number
+    }
   } catch {
     return null
   }

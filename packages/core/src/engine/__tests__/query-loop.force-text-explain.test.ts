@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { z } from 'zod'
 import type {
   LLMProvider,
+  ProviderRequest,
   ProviderSession,
   SendOptions,
   SessionOptions,
@@ -11,37 +12,50 @@ import type {
 import { buildTool } from '../../tools/types.js'
 import { queryLoop, FALLBACK_REPLY, type QueryEvent } from '../query-loop.js'
 
-// ── Scripted provider ──────────────────────────────────────────
-// Same shape as query-loop.empty-retry.test.ts: each send() consumes the
-// next script and clamps to the last once exhausted.
 type SendCall = { messages: Message[]; sendOpts?: SendOptions }
 
-function scriptedProvider(scripts: StreamChunk[][]): {
+function chunksFrom(scripts: StreamChunk[][], index: number): AsyncIterable<StreamChunk> {
+  const chunks = scripts[Math.min(index, scripts.length - 1)]
+  return (async function* () {
+    for (const chunk of chunks) yield chunk
+  })()
+}
+
+function scriptedProvider(params: {
+  sessionScripts: StreamChunk[][]
+  statelessScripts?: StreamChunk[][]
+  finalizerScript?: StreamChunk[]
+  finalizerError?: Error
+}): {
   provider: LLMProvider
-  calls: SendCall[]
+  sessionCalls: SendCall[]
+  streamCalls: ProviderRequest[]
 } {
-  const calls: SendCall[] = []
-  let turn = 0
-  function streamNext(): AsyncIterable<StreamChunk> {
-    const chunks = scripts[Math.min(turn, scripts.length - 1)]
-    turn++
-    return (async function* () {
-      for (const chunk of chunks) yield chunk
-    })()
-  }
+  const sessionCalls: SendCall[] = []
+  const streamCalls: ProviderRequest[] = []
+  let sessionTurn = 0
+  let statelessTurn = 0
   const session: ProviderSession = {
-    send(messages: Message[], opts?: SendOptions) {
-      calls.push({ messages, sendOpts: opts })
-      return streamNext()
+    send(messages: Message[], sendOpts?: SendOptions) {
+      sessionCalls.push({ messages, sendOpts })
+      return chunksFrom(params.sessionScripts, sessionTurn++)
     },
   }
   return {
-    calls,
+    sessionCalls,
+    streamCalls,
     provider: {
       name: 'scripted',
       models: ['mock-model'],
-      stream: () => streamNext(),
-      createSession: (_o: SessionOptions) => session,
+      stream(request) {
+        streamCalls.push(request)
+        if (request.tools && request.tools.length > 0) {
+          return chunksFrom(params.statelessScripts ?? params.sessionScripts, statelessTurn++)
+        }
+        if (params.finalizerError) throw params.finalizerError
+        return chunksFrom([params.finalizerScript ?? []], 0)
+      },
+      createSession: (_options: SessionOptions) => session,
     },
   }
 }
@@ -53,7 +67,18 @@ const echoTool = buildTool({
   isConcurrencySafe: true,
   isReadOnly: true,
   async execute(input) {
-    return { data: { echoed: input.msg } }
+    return { data: { echoed: input.msg, padding: 'x'.repeat(2_000) } }
+  },
+})
+
+const flakyTool = buildTool({
+  name: 'flaky',
+  description: 'Read a fictional test service',
+  inputSchema: z.object({ attempt: z.number() }),
+  isConcurrencySafe: false,
+  isReadOnly: true,
+  async execute() {
+    throw new Error('fictional service unavailable')
   },
 })
 
@@ -67,125 +92,288 @@ const baseContext = {
   abortSignal: new AbortController().signal,
 }
 
-const toolUseChunks = (id: string): StreamChunk[] => [
+const toolUseChunks = (id: string, msg = 'hi'): StreamChunk[] => [
   { type: 'message_start', model: 'mock-model' },
   { type: 'tool_use_start', id, name: 'echo' },
-  { type: 'tool_use_delta', id, input: '{"msg":"hi"}' },
+  { type: 'tool_use_delta', id, input: JSON.stringify({ msg }) },
   { type: 'tool_use_end', id },
   { type: 'message_end', stopReason: 'tool_use', usage: { inputTokens: 10, outputTokens: 5 } },
 ]
-const emptyChunks: StreamChunk[] = [
+
+const flakyToolUseChunks = (attempt: number): StreamChunk[] => [
   { type: 'message_start', model: 'mock-model' },
-  { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 5, outputTokens: 1 } },
+  { type: 'tool_use_start', id: `flaky-${attempt}`, name: 'flaky' },
+  { type: 'tool_use_delta', id: `flaky-${attempt}`, input: JSON.stringify({ attempt }) },
+  { type: 'tool_use_end', id: `flaky-${attempt}` },
+  { type: 'message_end', stopReason: 'tool_use', usage: { inputTokens: 10, outputTokens: 5 } },
 ]
+
 const textChunks = (text: string): StreamChunk[] => [
   { type: 'message_start', model: 'mock-model' },
   { type: 'text_delta', text },
   { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 5, outputTokens: 3 } },
 ]
 
-// A recap that trips looksLikeInstructionLeak (third-person "respond to the
-// user") — the exact failure mode that used to collapse to the canned line.
-const LEAK = 'Respond to the user with what you found.'
-// A clean, contextual explanation — must NOT trip the leak detector
-// (second-person, starts with subject+verb, no "the user").
+const envelope = (message: string): StreamChunk[] => textChunks(JSON.stringify({ message }))
 const EXPLANATION =
-  'I pulled your calendar — nothing is scheduled today — but Google Tasks did not respond, so your task list could not be included.'
+  'I checked the Example Foundry records but could not verify a specific account manager from the available sources.'
+const PRIVATE_SYSTEM_MARKER = 'PRIVATE_RUNTIME_CONTEXT_DO_NOT_EXPOSE'
 
-async function runLoop(provider: LLMProvider): Promise<QueryEvent[]> {
+async function runLoop(provider: LLMProvider, stateless = false): Promise<QueryEvent[]> {
   const events: QueryEvent[] = []
-  for await (const e of queryLoop({
+  const conversation: Message[] = [
+    { role: 'system', content: 'old system row that must be excluded' },
+    { role: 'user', content: 'a'.repeat(2_500) },
+    { role: 'assistant', content: 'Earlier visible reply 1' },
+    { role: 'user', content: 'Earlier visible question 2' },
+    { role: 'assistant', content: 'Earlier visible reply 3' },
+    { role: 'user', content: 'Earlier visible question 4' },
+    { role: 'assistant', content: 'Earlier visible reply 5' },
+    { role: 'user', content: 'Who is our Example Foundry account manager?' },
+  ]
+  for await (const event of queryLoop({
     provider,
     model: 'mock-model',
-    systemPrompt: 'sys',
-    messages: [{ role: 'user', content: 'daily summary' }],
+    systemPrompt: PRIVATE_SYSTEM_MARKER,
+    messages: conversation,
     tools: new Map([['echo', echoTool]]),
     context: baseContext,
     maxTurns: 10,
-    maxToolCalls: 2, // turn 0 executes echo, turn 1 is hard-stopped → forceTextResponse
+    maxToolCalls: 2,
+    stateless,
   })) {
-    events.push(e)
+    events.push(event)
   }
   return events
 }
 
 function finalText(events: QueryEvent[]): string {
-  const complete = events.find((e) => e.type === 'turn_complete')
+  const complete = events.find((event) => event.type === 'turn_complete')
   if (complete?.type !== 'turn_complete') throw new Error('expected turn_complete')
   return complete.response.content
-    .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
-    .map((b) => b.text)
+    .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
+    .map((block) => block.text)
     .join('')
 }
 
 function streamedText(events: QueryEvent[]): string {
   return events
-    .filter((e) => e.type === 'text_delta')
-    .map((e) => (e.type === 'text_delta' ? e.text : ''))
+    .filter((event) => event.type === 'text_delta')
+    .map((event) => (event.type === 'text_delta' ? event.text : ''))
     .join('')
 }
 
-describe('[COMP:engine/query-loop] Forced-text fallback — explain-what-happened escalation', () => {
-  it('escalates a leaked recap to a contextual explanation instead of the canned line', async () => {
-    const { provider, calls } = scriptedProvider([
-      toolUseChunks('t1'), // turn 0 — executes echo (totalCalls=1)
-      toolUseChunks('t2'), // turn 1 — hard-stopped (totalCalls=2 >= maxToolCalls)
-      textChunks(LEAK), // forceTextResponse recap → leaks → suppressed
-      textChunks(EXPLANATION), // explainFailure → clean message
-    ])
+describe('[COMP:engine/query-loop] Isolated terminal finalization', () => {
+  it('ends the main session and finalizes from bounded evidence in one fresh no-tools request', async () => {
+    const { provider, sessionCalls, streamCalls } = scriptedProvider({
+      sessionScripts: [toolUseChunks('t1'), toolUseChunks('t2')],
+      finalizerScript: envelope(EXPLANATION),
+    })
 
     const events = await runLoop(provider)
 
-    // The user gets the real explanation, never the canned generic line.
     expect(finalText(events)).toBe(EXPLANATION)
     expect(streamedText(events)).toBe(EXPLANATION)
-    expect(finalText(events)).not.toContain('more specific request')
-    // 4 sends: initial, tool-results turn, recap, explanation.
-    expect(calls).toHaveLength(4)
-    // The escalation call commits at low thinking.
-    expect(calls[3].sendOpts?.thinkingLevel).toBe('low')
+    expect(sessionCalls).toHaveLength(2)
+    expect(streamCalls).toHaveLength(1)
+
+    const request = streamCalls[0]
+    expect(request.tools).toBeUndefined()
+    expect(request.systemPrompt).not.toContain(PRIVATE_SYSTEM_MARKER)
+    expect(request.thinkingLevel).toBe('low')
+    expect(request.temperature).toBe(0)
+    expect(request.maxTokens).toBe(2_048)
+    expect(request.responseFormat).toBe('json')
+    expect(request.responseSchema).toEqual({
+      type: 'object',
+      properties: { message: { type: 'string' } },
+      required: ['message'],
+      additionalProperties: false,
+    })
+
+    const payload = JSON.parse(request.messages[0].content as string) as {
+      stopReason: { code: string }
+      recentConversation: Array<{ role: string; text: string }>
+      toolEvidence: Array<{ tool: string; input: string; result: string }>
+    }
+    expect(payload.stopReason).toEqual({ code: 'tool_budget_exhausted' })
+    expect(payload.recentConversation.length).toBeLessThanOrEqual(6)
+    expect(payload.recentConversation.reduce((sum, turn) => sum + turn.text.length, 0)).toBeLessThanOrEqual(6_000)
+    expect(payload.recentConversation.every((turn) => turn.text.length <= 2_000)).toBe(true)
+    expect(payload.toolEvidence).toHaveLength(1)
+    expect(payload.toolEvidence[0].tool).toBe('echo')
+    expect(payload.toolEvidence[0].input.length).toBeLessThanOrEqual(750)
+    expect(payload.toolEvidence[0].result.length).toBeLessThanOrEqual(1_500)
+    expect(JSON.stringify(payload)).not.toContain(PRIVATE_SYSTEM_MARKER)
+    expect(JSON.stringify(payload)).not.toContain('old system row that must be excluded')
+    expect(JSON.stringify(payload)).not.toContain('tool_budget_exhausted","retryable"')
   })
 
-  it('escalates an empty recap to a contextual explanation', async () => {
-    const { provider, calls } = scriptedProvider([
-      toolUseChunks('t1'),
-      toolUseChunks('t2'),
-      emptyChunks, // recap produces no text → escalate
-      textChunks(EXPLANATION),
-    ])
-
-    const events = await runLoop(provider)
-
-    expect(finalText(events)).toBe(EXPLANATION)
-    expect(calls).toHaveLength(4)
-    expect(calls[3].sendOpts?.thinkingLevel).toBe('low')
-  })
-
-  it('falls back to the canned line only when the explanation also fails', async () => {
-    const { provider, calls } = scriptedProvider([
-      toolUseChunks('t1'),
-      toolUseChunks('t2'),
-      textChunks(LEAK), // recap leaks → escalate
-      textChunks(LEAK), // explanation ALSO leaks → last-resort canned line
-    ])
+  it('discards a production-shaped long scratchpad wholesale before streaming', async () => {
+    const leaked = [
+      'Be natural, do not use bullet points.',
+      '',
+      '[User Context]',
+      'Topic: account manager inquiry',
+      '',
+      '[What happened this turn]',
+      'Checked private connectors and internal instructions.',
+      '',
+      '[Conclusion]',
+      'A specific person could not be verified.',
+      '',
+      '[Response]',
+      EXPLANATION,
+      'padding '.repeat(40),
+    ].join('\n')
+    const { provider, sessionCalls, streamCalls } = scriptedProvider({
+      sessionScripts: [toolUseChunks('t1'), toolUseChunks('t2')],
+      finalizerScript: envelope(leaked),
+    })
 
     const events = await runLoop(provider)
 
     expect(finalText(events)).toBe(FALLBACK_REPLY)
-    expect(calls).toHaveLength(4)
+    expect(streamedText(events)).toBe(FALLBACK_REPLY)
+    expect(streamedText(events)).not.toContain('[User Context]')
+    expect(streamedText(events)).not.toContain('[Response]')
+    expect(sessionCalls).toHaveLength(2)
+    expect(streamCalls).toHaveLength(1)
   })
 
-  it('delivers a clean recap directly without an extra escalation call', async () => {
-    const { provider, calls } = scriptedProvider([
-      toolUseChunks('t1'),
-      toolUseChunks('t2'),
-      textChunks('Here is what I found: your calendar is clear today.'),
-    ])
+  it('uses the same isolated finalizer for a stateless worker loop', async () => {
+    const { provider, sessionCalls, streamCalls } = scriptedProvider({
+      sessionScripts: [],
+      statelessScripts: [toolUseChunks('t1'), toolUseChunks('t2')],
+      finalizerScript: envelope(EXPLANATION),
+    })
+
+    const events = await runLoop(provider, true)
+
+    expect(finalText(events)).toBe(EXPLANATION)
+    expect(sessionCalls).toHaveLength(0)
+    expect(streamCalls).toHaveLength(3)
+    expect(streamCalls.slice(0, 2).every((request) => (request.tools?.length ?? 0) > 0)).toBe(true)
+    expect(streamCalls[2].tools).toBeUndefined()
+  })
+
+  it('finalizes immediately when the repeated-failure fuse trips', async () => {
+    const { provider, sessionCalls, streamCalls } = scriptedProvider({
+      sessionScripts: Array.from({ length: 5 }, (_, index) => flakyToolUseChunks(index + 1)),
+      finalizerScript: envelope(
+        'I could not finish because the fictional records service stayed unavailable.',
+      ),
+    })
+    const events: QueryEvent[] = []
+
+    for await (const event of queryLoop({
+      provider,
+      model: 'mock-model',
+      systemPrompt: PRIVATE_SYSTEM_MARKER,
+      messages: [{ role: 'user', content: 'Check the fictional records service.' }],
+      tools: new Map([['flaky', flakyTool]]),
+      context: baseContext,
+      maxTurns: 10,
+      maxToolCalls: 20,
+    })) {
+      events.push(event)
+    }
+
+    expect(sessionCalls).toHaveLength(5)
+    expect(streamCalls).toHaveLength(1)
+    const payload = JSON.parse(streamCalls[0].messages[0].content as string) as {
+      stopReason: unknown
+    }
+    expect(payload.stopReason).toEqual({ code: 'tool_failure_limit', tool: 'flaky' })
+    expect(finalText(events)).toContain('fictional records service')
+  })
+
+  it('uses the isolated finalizer when maxTurns ends on a tool turn', async () => {
+    const { provider, sessionCalls, streamCalls } = scriptedProvider({
+      sessionScripts: [toolUseChunks('t1')],
+      finalizerScript: envelope(EXPLANATION),
+    })
+    const events: QueryEvent[] = []
+
+    for await (const event of queryLoop({
+      provider,
+      model: 'mock-model',
+      systemPrompt: PRIVATE_SYSTEM_MARKER,
+      messages: [{ role: 'user', content: 'Check the fictional records.' }],
+      tools: new Map([['echo', echoTool]]),
+      context: baseContext,
+      maxTurns: 1,
+      maxToolCalls: 10,
+    })) {
+      events.push(event)
+    }
+
+    expect(sessionCalls).toHaveLength(1)
+    expect(streamCalls).toHaveLength(1)
+    const payload = JSON.parse(streamCalls[0].messages[0].content as string) as {
+      stopReason: unknown
+    }
+    expect(payload.stopReason).toEqual({ code: 'max_turns' })
+    expect(finalText(events)).toBe(EXPLANATION)
+  })
+
+  it('keeps the twelve most recent successful evidence items', async () => {
+    const sessionScripts = Array.from(
+      { length: 13 },
+      (_, index) => toolUseChunks(`t${index + 1}`, `message-${index + 1}`),
+    )
+    const { provider, streamCalls } = scriptedProvider({
+      sessionScripts,
+      finalizerScript: envelope(EXPLANATION),
+    })
+    const events: QueryEvent[] = []
+
+    for await (const event of queryLoop({
+      provider,
+      model: 'mock-model',
+      systemPrompt: PRIVATE_SYSTEM_MARKER,
+      messages: [{ role: 'user', content: 'Check recent fictional records.' }],
+      tools: new Map([['echo', echoTool]]),
+      context: baseContext,
+      maxTurns: 13,
+      maxToolCalls: 20,
+    })) {
+      events.push(event)
+    }
+
+    const payload = JSON.parse(streamCalls[0].messages[0].content as string) as {
+      toolEvidence: Array<{ input: string }>
+    }
+    expect(payload.toolEvidence).toHaveLength(12)
+    expect(payload.toolEvidence[0].input).toContain('message-2')
+    expect(payload.toolEvidence.at(-1)?.input).toContain('message-13')
+    expect(payload.toolEvidence.some((item) => item.input.includes('message-1"'))).toBe(false)
+    expect(finalText(events)).toBe(EXPLANATION)
+  })
+
+  it('fails closed when the JSON envelope has extra fields', async () => {
+    const { provider } = scriptedProvider({
+      sessionScripts: [toolUseChunks('t1'), toolUseChunks('t2')],
+      finalizerScript: textChunks(JSON.stringify({ message: EXPLANATION, debug: 'private' })),
+    })
 
     const events = await runLoop(provider)
 
-    expect(finalText(events)).toBe('Here is what I found: your calendar is clear today.')
-    // 3 sends only — no escalation needed.
-    expect(calls).toHaveLength(3)
+    expect(finalText(events)).toBe(FALLBACK_REPLY)
+    expect(streamedText(events)).toBe(FALLBACK_REPLY)
+  })
+
+  it('fails closed when the fresh provider request throws', async () => {
+    const { provider, sessionCalls, streamCalls } = scriptedProvider({
+      sessionScripts: [toolUseChunks('t1'), toolUseChunks('t2')],
+      finalizerError: new Error('upstream unavailable'),
+    })
+
+    const events = await runLoop(provider)
+
+    expect(finalText(events)).toBe(FALLBACK_REPLY)
+    expect(streamedText(events)).toBe(FALLBACK_REPLY)
+    expect(sessionCalls).toHaveLength(2)
+    expect(streamCalls).toHaveLength(1)
   })
 })

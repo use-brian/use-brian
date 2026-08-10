@@ -21,15 +21,18 @@ import {
   captureProfileSession,
   createBrowserProfile,
   deleteBrowserProfile,
-  getBrowserExtensionStatus,
   listBrowserProfiles,
   revokeProfileGrant,
+  revokeBrowserCredential,
   revokeProfileSession,
+  saveBrowserCredential,
   startProfileLogin,
+  testBrowserCredential,
   updateBrowserProfile,
   type BrowserBackend,
   type BrowserProfile,
   type BrowserProfileClearance,
+  type LocalBrowserControlMode,
 } from "@/lib/api/computer";
 
 /** "instagram.com" and "https://instagram.com/x" both work in the sign-in box. */
@@ -88,6 +91,7 @@ export function profileSurfaces(profile: BrowserProfile): {
 
 const CLEARANCES: BrowserProfileClearance[] = ["confidential", "internal", "public"];
 const BACKENDS: BrowserBackend[] = ["cloud", "local"];
+const LOCAL_CONTROL_MODES: LocalBrowserControlMode[] = ["task_tabs", "full_browser"];
 
 export function BrowserProfilesSection() {
   const t = useT();
@@ -97,7 +101,7 @@ export function BrowserProfilesSection() {
   const [state, setState] = useState<
     | { kind: "loading" }
     | { kind: "unconfigured" }
-    | { kind: "ready"; profiles: BrowserProfile[] }
+    | { kind: "ready"; profiles: BrowserProfile[]; credentialAuthConfigured: boolean }
     | { kind: "error" }
   >({ kind: "loading" });
   const [assistants, setAssistants] = useState<StudioAssistantSummary[]>([]);
@@ -115,15 +119,39 @@ export function BrowserProfilesSection() {
   const [captureResults, setCaptureResults] = useState<
     Record<string, { site: string; capturedAt: string | null }>
   >({});
-  // Whether the caller's own browser is connected (story 8) - the same
-  // status the connect panel above already polls via
-  // `getBrowserExtensionStatus`, reused here rather than a second probe.
-  // Capture is a userId-keyed relay op, not a property of any task, so this
-  // is the only precondition worth checking client-side.
-  const [extensionConnected, setExtensionConnected] = useState(false);
+  // Each Use Brian profile has its own extension connection. This is what
+  // keeps simultaneous local identities from sharing a tab/cookie context.
+  const [extensionConnected, setExtensionConnected] = useState<Record<string, boolean>>({});
   // Proxy URL drafts (D7) - undefined until the user edits, so the input
   // falls back to the saved value.
   const [proxyDrafts, setProxyDrafts] = useState<Record<string, string>>({});
+  const [credentialDrafts, setCredentialDrafts] = useState<
+    Record<
+      string,
+      { loginUrl: string; accountLabel: string; username: string; password: string }
+    >
+  >({});
+  const [credentialBusyId, setCredentialBusyId] = useState<string | null>(null);
+
+  const setCredentialField = useCallback(
+    (
+      profileId: string,
+      field: "loginUrl" | "accountLabel" | "username" | "password",
+      value: string,
+    ) => {
+      setCredentialDrafts((current) => ({
+        ...current,
+        [profileId]: {
+          loginUrl: current[profileId]?.loginUrl ?? "",
+          accountLabel: current[profileId]?.accountLabel ?? "",
+          username: current[profileId]?.username ?? "",
+          password: current[profileId]?.password ?? "",
+          [field]: value,
+        },
+      }));
+    },
+    [],
+  );
 
   const reload = useCallback(async () => {
     if (!workspaceId) {
@@ -132,7 +160,15 @@ export function BrowserProfilesSection() {
     }
     try {
       const res = await listBrowserProfiles(workspaceId);
-      setState(res.configured ? { kind: "ready", profiles: res.profiles } : { kind: "unconfigured" });
+      setState(
+        res.configured
+          ? {
+              kind: "ready",
+              profiles: res.profiles,
+              credentialAuthConfigured: res.credentialAuthConfigured,
+            }
+          : { kind: "unconfigured" },
+      );
     } catch {
       setState({ kind: "error" });
     }
@@ -147,17 +183,10 @@ export function BrowserProfilesSection() {
     void listAssistants(workspaceId).then(setAssistants).catch(() => setAssistants([]));
   }, [workspaceId]);
 
-  useEffect(() => {
-    let cancelled = false;
-    const check = () => void getBrowserExtensionStatus().then((s) => {
-      if (!cancelled) setExtensionConnected(s.connected);
-    });
-    check();
-    const id = setInterval(check, 5000);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
+  const onConnectionChange = useCallback((profileId: string, connected: boolean) => {
+    setExtensionConnected((current) =>
+      current[profileId] === connected ? current : { ...current, [profileId]: connected },
+    );
   }, []);
 
   const onCreate = useCallback(async () => {
@@ -252,7 +281,7 @@ export function BrowserProfilesSection() {
   const onCapture = useCallback(
     async (profile: BrowserProfile) => {
       const url = normalizeLoginUrl(captureDrafts[profile.id] ?? "");
-      if (!url || captureBusyId || !extensionConnected) return;
+      if (!url || captureBusyId || !extensionConnected[profile.id]) return;
       const site = siteFromLoginUrl(url);
       setActionError(null);
       setCaptureBusyId(profile.id);
@@ -304,6 +333,74 @@ export function BrowserProfilesSection() {
     [reload, t],
   );
 
+  const onSaveCredential = useCallback(
+    async (profile: BrowserProfile) => {
+      const draft = credentialDrafts[profile.id];
+      const loginUrl = normalizeLoginUrl(draft?.loginUrl ?? "");
+      if (
+        !loginUrl?.startsWith("https://") ||
+        !draft?.username.trim() ||
+        !draft.password ||
+        credentialBusyId
+      ) {
+        return;
+      }
+      setActionError(null);
+      setCredentialBusyId(profile.id);
+      const saved = await saveBrowserCredential(profile.id, {
+        loginUrl,
+        accountLabel: draft.accountLabel.trim() || null,
+        username: draft.username,
+        password: draft.password,
+      }).catch(() => null);
+      setCredentialBusyId(null);
+      if (!saved) {
+        setActionError(t.computer.profiles.credentialSaveFailed);
+        return;
+      }
+      setCredentialDrafts((current) => ({
+        ...current,
+        [profile.id]: { loginUrl: "", accountLabel: "", username: "", password: "" },
+      }));
+      void reload();
+    },
+    [credentialBusyId, credentialDrafts, reload, t],
+  );
+
+  const onTestCredential = useCallback(
+    async (profileId: string, credentialId: string) => {
+      if (credentialBusyId) return;
+      setActionError(null);
+      setCredentialBusyId(credentialId);
+      const result = await testBrowserCredential(profileId, credentialId).catch(() => null);
+      setCredentialBusyId(null);
+      if (!result?.ok) {
+        setActionError(
+          result?.status === "needs_user"
+            ? t.computer.profiles.credentialNeedsUser
+            : t.computer.profiles.credentialTestFailed,
+        );
+      }
+      void reload();
+    },
+    [credentialBusyId, reload, t],
+  );
+
+  const onRevokeCredential = useCallback(
+    async (profileId: string, credentialId: string, site: string) => {
+      const confirmed = await confirmDialog({
+        title: t.computer.profiles.credentialRevokeTitle,
+        description: t.computer.profiles.credentialRevokeBody.replace("{site}", site),
+        confirmLabel: t.computer.profiles.revoke,
+        variant: "destructive",
+      });
+      if (!confirmed) return;
+      await revokeBrowserCredential(profileId, credentialId).catch(() => false);
+      void reload();
+    },
+    [reload, t],
+  );
+
   const clearanceLabel = (clearance: BrowserProfileClearance): string =>
     clearance === "confidential"
       ? t.computer.profiles.clearanceConfidential
@@ -314,13 +411,29 @@ export function BrowserProfilesSection() {
   const backendLabel = (backend: BrowserBackend): string =>
     backend === "cloud" ? t.computer.profiles.backendCloud : t.computer.profiles.backendLocal;
 
+  const localControlModeLabel = (mode: LocalBrowserControlMode): string =>
+    mode === "task_tabs"
+      ? t.computer.profiles.localControlTaskTabs
+      : t.computer.profiles.localControlFullBrowser;
+
+  const onLocalControlMode = useCallback(
+    async (profile: BrowserProfile, mode: LocalBrowserControlMode) => {
+      if (mode === profile.localControlMode) return;
+      if (mode === "full_browser") {
+        const confirmed = await confirmDialog({
+          title: t.computer.profiles.localControlFullConfirmTitle,
+          description: t.computer.profiles.localControlFullConfirmBody,
+          confirmLabel: t.computer.profiles.localControlFullConfirmAction,
+        });
+        if (!confirmed) return;
+      }
+      await mutate(profile.id, { localControlMode: mode });
+    },
+    [mutate, t],
+  );
+
   return (
     <div className="space-y-4">
-      {/* "My Browser" (local backend) connect surface (my-browser.md P1) sits
-          above the profile list: connect your own Chrome, then set a profile's
-          backend to My Browser to route browsing to it. */}
-      <ConnectBrowserPanel />
-
       <div>
         <h3 className="text-sm font-medium">{t.computer.profiles.title}</h3>
         <p className="mt-1 text-xs text-muted-foreground">{t.computer.profiles.description}</p>
@@ -379,6 +492,47 @@ export function BrowserProfilesSection() {
                     </button>
                   </div>
 
+                  {/* Pairing is profile-scoped. A distinct real Chrome profile
+                      can keep this connection live while another Use Brian
+                      profile uses another extension instance concurrently. */}
+                  <div className="mt-3">
+                    <ConnectBrowserPanel
+                      profileId={profile.id}
+                      profileName={profile.name}
+                      onConnectionChange={onConnectionChange}
+                    />
+                  </div>
+
+                  {/* Standing local-browser scope. The extension still asks
+                      for per-task consent; this setting only bounds which
+                      eligible tabs that task may select afterward. */}
+                  <div className="mt-3">
+                    <p className="text-[11px] font-medium text-muted-foreground">
+                      {t.computer.profiles.localControlLabel}
+                    </p>
+                    <div className="mt-1 flex gap-1">
+                      {LOCAL_CONTROL_MODES.map((mode) => (
+                        <button
+                          key={mode}
+                          type="button"
+                          onClick={() => void onLocalControlMode(profile, mode)}
+                          className={
+                            profile.localControlMode === mode
+                              ? "rounded-md bg-primary/10 px-2 py-1 text-[11px] font-medium text-primary"
+                              : "rounded-md border border-border px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent"
+                          }
+                        >
+                          {localControlModeLabel(mode)}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="mt-1 text-[11px] text-muted-foreground">
+                      {profile.localControlMode === "full_browser"
+                        ? t.computer.profiles.localControlFullHint
+                        : t.computer.profiles.localControlTaskHint}
+                    </p>
+                  </div>
+
                   {/* A My Browser profile has no vault to fill — it rides the
                       logins already in the user's real Chrome. */}
                   {profileSurfaces(profile).ownBrowserNote ? (
@@ -389,6 +543,145 @@ export function BrowserProfilesSection() {
                       <p className="mt-1 text-[11px] text-muted-foreground">
                         {t.computer.profiles.ownBrowserHint}
                       </p>
+                    </div>
+                  ) : null}
+
+                  {/* The secret goes from this authenticated app form to the
+                      host-owned broker store. It never enters chat or a
+                      model-facing browser tool. Cloud profiles only. */}
+                  {profileSurfaces(profile).signIn ? (
+                    <div className="mt-3 rounded-md border border-border bg-muted/20 p-3">
+                      <p className="text-[11px] font-medium text-foreground">
+                        {t.computer.profiles.credentialLabel}
+                      </p>
+                      <p className="mt-1 text-[11px] text-muted-foreground">
+                        {state.credentialAuthConfigured
+                          ? t.computer.profiles.credentialHint
+                          : t.computer.profiles.credentialNotConfigured}
+                      </p>
+                      {state.credentialAuthConfigured ? (
+                        <>
+                          <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                            <input
+                              type="text"
+                              autoComplete="off"
+                              value={credentialDrafts[profile.id]?.loginUrl ?? ""}
+                              onChange={(event) =>
+                                setCredentialField(profile.id, "loginUrl", event.target.value)
+                              }
+                              placeholder={t.computer.profiles.credentialUrlPlaceholder}
+                              className="h-8 rounded-md border border-border bg-background px-2.5 text-sm outline-none focus:ring-1 focus:ring-ring sm:col-span-2"
+                            />
+                            <input
+                              type="text"
+                              autoComplete="off"
+                              value={credentialDrafts[profile.id]?.accountLabel ?? ""}
+                              onChange={(event) =>
+                                setCredentialField(profile.id, "accountLabel", event.target.value)
+                              }
+                              placeholder={t.computer.profiles.credentialAccountPlaceholder}
+                              className="h-8 rounded-md border border-border bg-background px-2.5 text-sm outline-none focus:ring-1 focus:ring-ring sm:col-span-2"
+                            />
+                            <input
+                              type="text"
+                              autoComplete="username"
+                              value={credentialDrafts[profile.id]?.username ?? ""}
+                              onChange={(event) =>
+                                setCredentialField(profile.id, "username", event.target.value)
+                              }
+                              placeholder={t.computer.profiles.credentialUsernamePlaceholder}
+                              className="h-8 rounded-md border border-border bg-background px-2.5 text-sm outline-none focus:ring-1 focus:ring-ring"
+                            />
+                            <input
+                              type="password"
+                              autoComplete="current-password"
+                              value={credentialDrafts[profile.id]?.password ?? ""}
+                              onChange={(event) =>
+                                setCredentialField(profile.id, "password", event.target.value)
+                              }
+                              placeholder={t.computer.profiles.credentialPasswordPlaceholder}
+                              className="h-8 rounded-md border border-border bg-background px-2.5 text-sm outline-none focus:ring-1 focus:ring-ring"
+                            />
+                          </div>
+                          <button
+                            type="button"
+                            disabled={
+                              credentialBusyId !== null ||
+                              !normalizeLoginUrl(
+                                credentialDrafts[profile.id]?.loginUrl ?? "",
+                              )?.startsWith("https://") ||
+                              !(credentialDrafts[profile.id]?.username ?? "").trim() ||
+                              !(credentialDrafts[profile.id]?.password ?? "")
+                            }
+                            onClick={() => void onSaveCredential(profile)}
+                            className="mt-2 h-8 rounded-md bg-action px-3 text-xs font-medium text-action-foreground disabled:opacity-50"
+                          >
+                            {credentialBusyId === profile.id
+                              ? t.computer.profiles.credentialSaving
+                              : t.computer.profiles.credentialSaveAction}
+                          </button>
+                        </>
+                      ) : null}
+
+                      {profile.credentials.length > 0 ? (
+                        <ul className="mt-3 divide-y divide-border rounded-md border border-border bg-background">
+                          {profile.credentials.map((credential) => (
+                            <li
+                              key={credential.id}
+                              className="flex items-center justify-between gap-3 px-2.5 py-2"
+                            >
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-2">
+                                  <span className="truncate text-xs font-medium">
+                                    {credential.accountLabel || credential.site}
+                                  </span>
+                                  <span
+                                    className={
+                                      credential.status === "active"
+                                        ? "rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary"
+                                        : "rounded-full bg-destructive/10 px-2 py-0.5 text-[10px] font-medium text-destructive"
+                                    }
+                                  >
+                                    {credential.status === "active"
+                                      ? t.computer.profiles.credentialReady
+                                      : t.computer.profiles.credentialNeedsAttention}
+                                  </span>
+                                </div>
+                                <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
+                                  {credential.site}
+                                </p>
+                              </div>
+                              <div className="flex shrink-0 items-center gap-1">
+                                <button
+                                  type="button"
+                                  disabled={credentialBusyId !== null}
+                                  onClick={() =>
+                                    void onTestCredential(profile.id, credential.id)
+                                  }
+                                  className="rounded-md border border-border px-2.5 py-1 text-xs font-medium hover:bg-accent disabled:opacity-50"
+                                >
+                                  {credentialBusyId === credential.id
+                                    ? t.computer.profiles.credentialTesting
+                                    : t.computer.profiles.credentialTestAction}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    void onRevokeCredential(
+                                      profile.id,
+                                      credential.id,
+                                      credential.site,
+                                    )
+                                  }
+                                  className="rounded-md border border-destructive/40 px-2.5 py-1 text-xs font-medium text-destructive hover:bg-destructive/10"
+                                >
+                                  {t.computer.profiles.revoke}
+                                </button>
+                              </div>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : null}
                     </div>
                   ) : null}
 
@@ -459,7 +752,7 @@ export function BrowserProfilesSection() {
                         type="button"
                         disabled={
                           captureBusyId !== null ||
-                          !extensionConnected ||
+                          !extensionConnected[profile.id] ||
                           normalizeLoginUrl(captureDrafts[profile.id] ?? "") === null
                         }
                         onClick={() => void onCapture(profile)}
@@ -471,7 +764,9 @@ export function BrowserProfilesSection() {
                       </button>
                     </div>
                     <p className="mt-1 text-[11px] text-muted-foreground">
-                      {extensionConnected ? t.computer.profiles.captureHint : t.computer.profiles.captureNoSession}
+                      {extensionConnected[profile.id]
+                        ? t.computer.profiles.captureHint
+                        : t.computer.profiles.captureNoSession}
                     </p>
                     {captureResults[profile.id] ? (
                       <p className="mt-1 text-[11px] text-primary">

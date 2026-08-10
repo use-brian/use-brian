@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { createLocalBrowserProvider } from '../local-browser-provider.js'
 import { createCloudBrowserProvider } from '../cloud-browser-provider.js'
 import { StubSandboxProvider } from '../providers/stub.js'
@@ -17,14 +17,23 @@ const CTX: BrowserCallContext = {
   userId: 'user-1',
   workspaceId: 'ws-1',
   sessionId: 'sess-1',
+  profileId: 'profile-1',
 }
 
 // ── LocalBrowserProvider: op → relay-command serialization ─────
 
 function transportRecording(
   respond: (op: string) => RelayCommandResult,
-): { transport: RelayCommandTransport; sent: Array<{ userId: string; op: string; args?: Record<string, unknown> }> } {
-  const sent: Array<{ userId: string; op: string; args?: Record<string, unknown> }> = []
+): {
+  transport: RelayCommandTransport
+  sent: Array<{ userId: string; browserProfileId: string; op: string; args?: Record<string, unknown> }>
+} {
+  const sent: Array<{
+    userId: string
+    browserProfileId: string
+    op: string
+    args?: Record<string, unknown>
+  }> = []
   return {
     sent,
     transport: {
@@ -37,7 +46,7 @@ function transportRecording(
 }
 
 describe('[COMP:sandbox/local-browser] LocalBrowserProvider', () => {
-  it('serializes each tool op to the P1.2 command envelope with the caller user id', async () => {
+  it('serializes each tool op to the P1.2 command envelope with the caller and profile ids', async () => {
     const { transport, sent } = transportRecording((op) => {
       if (op === 'navigate') return { ok: true, data: { url: 'https://example.com/' } }
       if (op === 'snapshot') {
@@ -51,6 +60,27 @@ describe('[COMP:sandbox/local-browser] LocalBrowserProvider', () => {
         }
       }
       if (op === 'currentUrl') return { ok: true, data: { url: 'https://example.com/', title: 'Example' } }
+      if (op === 'openTab' || op === 'switchTab') {
+        return { ok: true, data: { tabId: 'tab-2', url: 'https://second.example/', title: 'Second' } }
+      }
+      if (op === 'listTabs') {
+        return {
+          ok: true,
+          data: {
+            activeTabId: 'tab-2',
+            tabs: [
+              {
+                id: 'tab-2',
+                title: 'Second',
+                url: 'https://second.example/',
+                active: true,
+                taskOwned: true,
+              },
+            ],
+          },
+        }
+      }
+      if (op === 'closeTab') return { ok: true, data: { closed: true, activeTabId: 'tab-1' } }
       if (op === 'captureFrame') return { ok: true, data: { data: 'jpeg-data', mimeType: 'image/jpeg' } }
       return { ok: true }
     })
@@ -61,6 +91,10 @@ describe('[COMP:sandbox/local-browser] LocalBrowserProvider', () => {
     await provider.click(CTX, '@e1')
     await provider.type(CTX, '@e2', 'hello there')
     await provider.currentUrl(CTX)
+    await provider.openTab?.(CTX, 'https://second.example/')
+    await provider.listTabs?.(CTX)
+    await provider.switchTab?.(CTX, 'tab-2')
+    await provider.closeTab?.(CTX, 'tab-2')
     const frame = await provider.nextTakeoverFrame?.(CTX)
     await provider.sendTakeoverInput?.(CTX, { kind: 'click', x: 20, y: 10, frameW: 200, frameH: 100 })
     await provider.stop(CTX)
@@ -71,15 +105,24 @@ describe('[COMP:sandbox/local-browser] LocalBrowserProvider', () => {
       'click',
       'type',
       'currentUrl',
+      'openTab',
+      'listTabs',
+      'switchTab',
+      'closeTab',
       'captureFrame',
       'takeoverInput',
       'stop',
     ])
     expect(sent.every((s) => s.userId === 'user-1')).toBe(true)
+    expect(sent.every((s) => s.browserProfileId === 'profile-1')).toBe(true)
     expect(sent[0]?.args).toEqual({ url: 'https://example.com/' })
     expect(sent[2]?.args).toEqual({ ref: '@e1' })
     expect(sent[3]?.args).toEqual({ ref: '@e2', text: 'hello there' })
-    expect(sent[6]?.args).toEqual({
+    expect(sent[5]?.args).toEqual({ url: 'https://second.example/' })
+    expect(sent[7]?.args).toEqual({ tabId: 'tab-2' })
+    expect(sent[8]?.args).toEqual({ tabId: 'tab-2' })
+    expect(sent[8]?.browserProfileId).toBe('profile-1')
+    expect(sent[10]?.args).toEqual({
       event: { kind: 'click', x: 20, y: 10, frameW: 200, frameH: 100 },
     })
     expect(snap.nodes[0]).toMatchObject({ ref: '@e1', role: 'button', name: 'Send' })
@@ -190,6 +233,17 @@ describe('[COMP:sandbox/local-browser] LocalBrowserProvider', () => {
     expect((err as BrowserBackendError).code).toBe('not_configured')
   })
 
+  it('refuses a local call with no resolved profile instead of routing to an arbitrary browser', async () => {
+    const { transport, sent } = transportRecording(() => ({ ok: true }))
+    const provider = createLocalBrowserProvider({ transport })
+    const err = await provider
+      .navigate({ ...CTX, profileId: undefined }, 'https://example.com/')
+      .catch((e: unknown) => e)
+
+    expect((err as BrowserBackendError).code).toBe('profile_required')
+    expect(sent).toEqual([])
+  })
+
   it('passes through known backend error codes (user Stop)', async () => {
     const { transport } = transportRecording(() => ({ ok: false, error: 'user stopped the task', code: 'stopped' }))
     const provider = createLocalBrowserProvider({ transport })
@@ -249,7 +303,12 @@ describe('[COMP:sandbox/local-browser] LocalBrowserProvider', () => {
 
     const bundle = await provider.captureState?.(CTX, 'example.com')
 
-    expect(sent[0]).toEqual({ userId: 'user-1', op: 'captureState', args: { site: 'example.com' } })
+    expect(sent[0]).toEqual({
+      userId: 'user-1',
+      browserProfileId: 'profile-1',
+      op: 'captureState',
+      args: { site: 'example.com' },
+    })
     expect(bundle).toEqual({
       site: 'example.com',
       cookies: [{ name: 'session', value: 'abc', domain: '.example.com' }],
@@ -281,6 +340,40 @@ describe('[COMP:sandbox/local-browser] LocalBrowserProvider', () => {
 // ── CloudBrowserProvider: stateless connect-by-id per op ───────
 
 describe('[COMP:sandbox/browser-provider] CloudBrowserProvider', () => {
+  it('re-resolves once after a host-owned login recovery and returns the retried target', async () => {
+    const stub = new StubSandboxProvider({ loginWall: true })
+    const first = await stub.create({ workspaceId: 'ws-1', taskId: 'task-dead' })
+    const fresh = await stub.create({ workspaceId: 'ws-1', taskId: 'task-fresh' })
+    await stub.browser(fresh.sandboxId).injectStorageState({
+      site: 'example.com',
+      cookies: [{ name: 'session', value: 'fresh', domain: 'example.com' }],
+      capturedAt: '2026-08-10T00:00:00.000Z',
+    })
+    const ids = [first.sandboxId, fresh.sandboxId]
+    const recoverLogin = vi.fn().mockResolvedValue({ retry: true })
+    const provider = createCloudBrowserProvider({
+      provider: stub,
+      binding: {
+        resolve: async () => ({ sandboxId: ids.shift() ?? fresh.sandboxId }),
+        recoverLogin,
+      },
+    })
+
+    const result = await provider.navigate(CTX, 'https://example.com/account')
+
+    expect(result.url).toBe('https://example.com/account')
+    expect(recoverLogin).toHaveBeenCalledOnce()
+    expect(recoverLogin).toHaveBeenCalledWith(
+      CTX,
+      expect.objectContaining({
+        requestedUrl: 'https://example.com/account',
+        currentUrl: expect.stringContaining('/login'),
+      }),
+    )
+    expect(stub.sandboxes.get(first.sandboxId)?.actions.map((a) => a.op)).toContain('navigate')
+    expect(stub.sandboxes.get(fresh.sandboxId)?.actions.map((a) => a.op)).toContain('navigate')
+  })
+
   it('resolves the task sandbox and connects by id on every op (stateless orchestrator discipline)', async () => {
     const stub = new StubSandboxProvider()
     const { sandboxId } = await stub.create({ workspaceId: 'ws-1', taskId: 'task-1' })

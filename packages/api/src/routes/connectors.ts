@@ -58,7 +58,7 @@
 import { Router } from 'express'
 import { constants as fsConstants, promises as fs } from 'node:fs'
 import * as nodePath from 'node:path'
-import { classifyTool, defaultPolicy, type McpSettingsStore } from '@use-brian/core'
+import { classifyTool, defaultPolicy, type FilesApi, type McpSettingsStore } from '@use-brian/core'
 import {
   APP_LEVEL_ASSISTANT_ID,
   CONFIGURABLE_APP_CREDENTIAL_CONNECTORS,
@@ -83,6 +83,30 @@ import { ConnectorAppCredentialAuthError } from '../db/connector-app-credential-
 import { getConnectorAppConfigStatus, resolveConnectorAppConfig } from '../connectors/app-credentials.js'
 import { exchangeMsGraphAuthorizationCode, packMsGraphTokens } from '../msgraph/token.js'
 import { decodeMsGraphIdToken } from '../msgraph/oauth.js'
+import {
+  exchangeGoogleAuthorizationCode,
+  packGoogleRefreshCredential,
+  refreshGoogleAccessToken,
+  unpackGoogleRefreshCredential,
+} from '../google/client.js'
+import { parseGDriveOfflineEnrichmentBundle } from '../google/enrichment-bundle.js'
+import {
+  gdriveCatalogScopeSchema,
+  mintGDriveInstanceAccessToken,
+  scanGDriveCatalog,
+} from '../google/drive-catalog.js'
+import {
+  assertGDriveWorkspaceAdminAuthority,
+  enqueueGDriveOfflineEnrichment,
+  getGDriveEnrichmentStatus,
+  GDriveEnrichmentImportAuthError,
+} from '../db/gdrive-enrichment-store.js'
+import {
+  configureGDriveCatalog,
+  getGDriveCatalogStatus,
+  listGDriveCatalogArtifactsOutsideGeneration,
+} from '../db/gdrive-catalog-store.js'
+import { getConnectorConfig } from '../connector-config.js'
 import { resolveShopifyDomain, type ShopifyDomainResolution } from '../shopify/resolve-domain.js'
 import { DESKTOP_OAUTH_EXCHANGERS, type DesktopOAuthExchangeResult } from '../connectors/desktop-oauth-exchange.js'
 import { resolveMailboxPreset } from '../mailbox/presets.js'
@@ -115,6 +139,9 @@ type ConnectorRowOut = {
   connected: boolean
   /** Pipeline-C state; drives the stronger removal confirmation in Studio. */
   ingestionEnabled?: boolean
+  scopeVersion?: number
+  /** Google Drive connection capability: managed Picker or BYO full-Drive read. */
+  driveAccessMode?: 'picked_files' | 'full_drive_readonly'
   custom?: boolean
   url?: string
   oauthRequired?: boolean
@@ -190,6 +217,12 @@ type ConnectorRouteOptions = {
    * the pre-migration-383 behavior.
    */
   connectorAppCredentialStore?: ConnectorAppCredentialStore
+  /** Network seams for metadata-only Drive scope preflight tests. */
+  gdriveCatalog?: {
+    scan?: typeof scanGDriveCatalog
+    mintAccessToken?: typeof mintGDriveInstanceAccessToken
+  }
+  filesApi?: Pick<FilesApi, 'delete'>
 }
 
 /** Built-in connector that carries an external credential (excludes auth_type 'none'). */
@@ -287,6 +320,7 @@ function placeholderRow(entry: ConnectorEntry): ConnectorRowOut {
 /** A real connector_instance row, projected to the page's connector shape. */
 function instanceRow(inst: ConnectorInstance, isPrimary: boolean): ConnectorRowOut {
   const entry = OFFICIAL_BY_ID.get(inst.provider)
+  const config = inst.config ?? {}
   return {
     id: inst.provider,
     connectorInstanceId: inst.id,
@@ -302,6 +336,10 @@ function instanceRow(inst: ConnectorInstance, isPrimary: boolean): ConnectorRowO
     oauthRequired: entry?.oauth_required,
     category: entry ? entry.category : 'community',
     connectedEmail: inst.connectedEmail ?? undefined,
+    scopeVersion: typeof config.scopeVersion === 'number' ? config.scopeVersion : undefined,
+    driveAccessMode: config.driveAccessMode === 'full_drive_readonly'
+      ? 'full_drive_readonly'
+      : inst.provider === 'gdrive' ? 'picked_files' : undefined,
     healthStatus: inst.healthStatus,
   }
 }
@@ -1735,6 +1773,18 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     return tenantId
   }
 
+  function readGDrivePickerConfig(
+    provider: string,
+    input: { projectNumber?: unknown; pickerApiKey?: unknown },
+  ): { projectNumber: string; pickerApiKey: string } | null {
+    if (provider !== 'gdrive') return null
+    const projectNumber = typeof input.projectNumber === 'string' ? input.projectNumber.trim() : ''
+    const pickerApiKey = typeof input.pickerApiKey === 'string' ? input.pickerApiKey.trim() : ''
+    if (!/^\d{6,32}$/.test(projectNumber)) return null
+    if (!pickerApiKey || pickerApiKey.length > 512 || /[\r\n]/.test(pickerApiKey)) return null
+    return { projectNumber, pickerApiKey }
+  }
+
   function mapAppCredentialError(err: unknown, res: import('express').Response): void {
     if (err instanceof ConnectorAppCredentialAuthError) {
       res.status(403).json({ error: err.reason })
@@ -1788,11 +1838,20 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     const store = opts.connectorAppCredentialStore
     if (!store) { res.status(404).json({ error: 'Workspace app credentials are not available' }); return }
 
-    const body = (req.body ?? {}) as { workspaceId?: string; clientId?: unknown; clientSecret?: unknown; tenantId?: unknown }
+    const body = (req.body ?? {}) as {
+      workspaceId?: string
+      clientId?: unknown
+      clientSecret?: unknown
+      tenantId?: unknown
+      projectNumber?: unknown
+      pickerApiKey?: unknown
+    }
     if (!body.workspaceId || !UUID_RE.test(body.workspaceId)) { res.status(400).json({ error: 'Invalid workspaceId' }); return }
     const pair = readAppPair(body)
     if (!pair) { res.status(400).json({ error: 'invalid_app_credentials' }); return }
-    const tenantId = readTenantId(body.tenantId)
+    const pickerConfig = readGDrivePickerConfig(provider, body)
+    if (provider === 'gdrive' && !pickerConfig) { res.status(400).json({ error: 'invalid_picker_credentials' }); return }
+    const tenantId = provider === 'gdrive' ? pickerConfig!.projectNumber : readTenantId(body.tenantId)
     if (tenantId === undefined) { res.status(400).json({ error: 'invalid_tenant_id' }); return }
 
     try {
@@ -1803,6 +1862,7 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
         clientId: pair.clientId,
         clientSecret: pair.clientSecret,
         tenantId,
+        ...(pickerConfig ? { pickerApiKey: pickerConfig.pickerApiKey } : {}),
       })
       res.json({
         ok: true,
@@ -1810,6 +1870,7 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
         source: 'workspace',
         clientId: summary.clientId,
         tenantId: summary.tenantId,
+        ...(provider === 'gdrive' ? { projectNumber: summary.tenantId, hasPickerConfig: true } : {}),
         workspaceOwned: true,
         updatedAt: summary.updatedAt.toISOString(),
       })
@@ -1837,6 +1898,288 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
       res.json({ ok: true, removed })
     } catch (err) {
       mapAppCredentialError(err, res)
+    }
+  })
+
+  // POST /gdrive/oauth-callback — exchange a customer-owned Internal Google
+  // OAuth grant server-side. The app secret never enters app-web.
+  router.post('/gdrive/oauth-callback', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+
+    const body = (req.body ?? {}) as {
+      code?: string
+      redirectUri?: string
+      workspaceId?: string
+      createNew?: boolean
+      instanceId?: string
+      label?: string
+    }
+    const code = typeof body.code === 'string' ? body.code.trim() : ''
+    const redirectUri = typeof body.redirectUri === 'string' ? body.redirectUri.trim() : ''
+    if (!code || !redirectUri) { res.status(400).json({ error: 'invalid_callback' }); return }
+    if (!body.workspaceId || !UUID_RE.test(body.workspaceId)) {
+      res.status(400).json({ error: 'Invalid workspaceId' }); return
+    }
+    if (body.instanceId !== undefined && !UUID_RE.test(body.instanceId)) {
+      res.status(400).json({ error: 'Invalid instanceId' }); return
+    }
+
+    if (!opts.connectorAppCredentialStore) {
+      res.status(400).json({ error: 'app_credentials_missing' }); return
+    }
+    let app: Awaited<ReturnType<typeof resolveConnectorAppConfig>>
+    try {
+      // Membership/RLS proof before the system decrypt read in resolve. A
+      // caller must not be able to name another workspace and spend its app.
+      const visible = await opts.connectorAppCredentialStore.get(userId, body.workspaceId, 'gdrive')
+      if (!visible) { res.status(400).json({ error: 'app_credentials_missing' }); return }
+      app = await resolveConnectorAppConfig({
+        provider: 'gdrive',
+        workspaceId: body.workspaceId,
+        store: opts.connectorAppCredentialStore,
+      })
+    } catch (err) {
+      mapAppCredentialError(err, res)
+      return
+    }
+    // This endpoint represents the restricted-scope BYO path. Never fall back
+    // to Brian's deployment app and accidentally request drive.readonly on it.
+    if (!app || app.source !== 'workspace') {
+      res.status(400).json({ error: 'app_credentials_missing' }); return
+    }
+    if (!app.tenantId || !app.pickerApiKey) {
+      res.status(400).json({ error: 'picker_credentials_missing' }); return
+    }
+
+    try {
+      const grant = await exchangeGoogleAuthorizationCode({
+        code,
+        redirectUri,
+        clientId: app.clientId,
+        clientSecret: app.clientSecret,
+      })
+      const stored = await persistConnectorInstance({
+        store: connectorInstanceStore,
+        userId,
+        provider: 'gdrive',
+        fallbackLabel: OFFICIAL_BY_ID.get('gdrive')?.name ?? 'Google Drive',
+        credentials: {
+          type: 'oauth',
+          client_id: 'google_refresh',
+          client_secret: packGoogleRefreshCredential({
+            refreshToken: grant.refreshToken,
+            appClientId: app.clientId,
+            appClientSecret: app.clientSecret,
+            pickerAppId: app.tenantId,
+            pickerApiKey: app.pickerApiKey,
+          }),
+        },
+        email: grant.email,
+        label: body.label ?? grant.email ?? undefined,
+        configPatch: { scopeVersion: 3, driveAccessMode: 'full_drive_readonly' },
+        ...(body.instanceId ? { instanceId: body.instanceId } : {}),
+        ...(body.createNew ? { createNew: true } : {}),
+      })
+      if (!stored.ok) { res.status(stored.status).json({ error: stored.error }); return }
+      res.json({ ok: true, connectorInstanceId: stored.connectorInstanceId })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (msg.includes('CHANNEL_CREDENTIAL_KEY')) {
+        res.status(503).json({ error: 'Connector credential storage is not configured (CHANNEL_CREDENTIAL_KEY)' })
+        return
+      }
+      console.error('[connectors] gdrive BYO oauth-callback failed:', err)
+      res.status(502).json({ error: 'token_exchange_failed' })
+    }
+  })
+
+  // Premium/managed onboarding: import already-computed Drive enrichment into
+  // the same version ledger used by first-read lazy enrichment. Strict JSON,
+  // owner/admin only, and no model call on the offline path.
+  router.post('/gdrive/enrichment-import', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const body = (req.body ?? {}) as {
+      workspaceId?: string
+      connectorInstanceId?: string
+      bundle?: unknown
+    }
+    if (!body.workspaceId || !UUID_RE.test(body.workspaceId)) {
+      res.status(400).json({ error: 'Invalid workspaceId' }); return
+    }
+    if (!body.connectorInstanceId || !UUID_RE.test(body.connectorInstanceId)) {
+      res.status(400).json({ error: 'Invalid connectorInstanceId' }); return
+    }
+    const parsed = parseGDriveOfflineEnrichmentBundle(body.bundle)
+    if (!parsed.ok) { res.status(400).json({ error: 'invalid_enrichment_bundle', detail: parsed.error }); return }
+    try {
+      const result = await enqueueGDriveOfflineEnrichment({
+        actingUserId: userId,
+        workspaceId: body.workspaceId,
+        connectorInstanceId: body.connectorInstanceId,
+        files: parsed.value.files,
+      })
+      res.json({ ok: true, ...result })
+    } catch (err) {
+      if (err instanceof GDriveEnrichmentImportAuthError) {
+        res.status(403).json({ error: 'workspace_admin_required' }); return
+      }
+      console.error('[connectors] Drive enrichment import failed:', err)
+      res.status(500).json({ error: 'enrichment_import_failed' })
+    }
+  })
+
+  router.get('/gdrive/enrichment-status', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const workspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId : ''
+    const connectorInstanceId = typeof req.query.connectorInstanceId === 'string' ? req.query.connectorInstanceId : ''
+    if (!UUID_RE.test(workspaceId)) { res.status(400).json({ error: 'Invalid workspaceId' }); return }
+    if (!UUID_RE.test(connectorInstanceId)) { res.status(400).json({ error: 'Invalid connectorInstanceId' }); return }
+    try {
+      res.json(await getGDriveEnrichmentStatus({ actingUserId: userId, workspaceId, connectorInstanceId }))
+    } catch (err) {
+      if (err instanceof GDriveEnrichmentImportAuthError) {
+        res.status(403).json({ error: 'workspace_admin_required' }); return
+      }
+      console.error('[connectors] Drive enrichment status failed:', err)
+      res.status(500).json({ error: 'enrichment_status_failed' })
+    }
+  })
+
+  router.post('/gdrive/catalog-estimate', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const body = (req.body ?? {}) as Record<string, unknown>
+    const workspaceId = typeof body.workspaceId === 'string' ? body.workspaceId : ''
+    const connectorInstanceId = typeof body.connectorInstanceId === 'string' ? body.connectorInstanceId : ''
+    if (!UUID_RE.test(workspaceId)) { res.status(400).json({ error: 'Invalid workspaceId' }); return }
+    if (!UUID_RE.test(connectorInstanceId)) { res.status(400).json({ error: 'Invalid connectorInstanceId' }); return }
+    const scope = gdriveCatalogScopeSchema.safeParse({
+      syncScope: body.syncScope,
+      selectedFolders: body.selectedFolders,
+    })
+    if (!scope.success) { res.status(400).json({ error: 'invalid_catalog_scope' }); return }
+    try {
+      await assertGDriveWorkspaceAdminAuthority({ actingUserId: userId, workspaceId, connectorInstanceId })
+      const token = await (opts.gdriveCatalog?.mintAccessToken ?? mintGDriveInstanceAccessToken)({
+        connectorInstanceId,
+        connectorInstanceStore,
+      })
+      const result = await (opts.gdriveCatalog?.scan ?? scanGDriveCatalog)({
+        accessToken: token,
+        ...scope.data,
+      })
+      res.json({ estimatedFiles: result.fileCount, totalItems: result.totalItems })
+    } catch (err) {
+      if (err instanceof GDriveEnrichmentImportAuthError) {
+        res.status(403).json({ error: 'workspace_admin_required' }); return
+      }
+      console.error('[connectors] Drive catalog estimate failed:', err)
+      res.status(502).json({ error: 'catalog_estimate_failed' })
+    }
+  })
+
+  router.put('/gdrive/catalog-scope', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    if (!opts.filesApi) { res.status(503).json({ error: 'Drive catalog storage is not configured' }); return }
+    const body = (req.body ?? {}) as Record<string, unknown>
+    const workspaceId = typeof body.workspaceId === 'string' ? body.workspaceId : ''
+    const connectorInstanceId = typeof body.connectorInstanceId === 'string' ? body.connectorInstanceId : ''
+    const estimatedFiles = typeof body.estimatedFiles === 'number' ? body.estimatedFiles : -1
+    if (!UUID_RE.test(workspaceId)) { res.status(400).json({ error: 'Invalid workspaceId' }); return }
+    if (!UUID_RE.test(connectorInstanceId)) { res.status(400).json({ error: 'Invalid connectorInstanceId' }); return }
+    if (!Number.isInteger(estimatedFiles) || estimatedFiles < 0 || estimatedFiles > 100_000) {
+      res.status(400).json({ error: 'Invalid estimatedFiles' }); return
+    }
+    const scope = gdriveCatalogScopeSchema.safeParse({
+      syncScope: body.syncScope,
+      selectedFolders: body.selectedFolders,
+    })
+    if (!scope.success) { res.status(400).json({ error: 'invalid_catalog_scope' }); return }
+    try {
+      const generation = await configureGDriveCatalog({
+        actingUserId: userId,
+        workspaceId,
+        connectorInstanceId,
+        estimatedFiles,
+        ...scope.data,
+      })
+      const staleArtifacts = await listGDriveCatalogArtifactsOutsideGeneration({
+        workspaceId, connectorInstanceId, generation,
+      })
+      for (const artifactFileId of staleArtifacts) {
+        const removed = await opts.filesApi.delete({ workspaceId, userId }, artifactFileId)
+        if (!removed.ok && removed.error.kind !== 'not_found') {
+          throw new Error(`Could not retract the previous Drive catalog: ${removed.error.kind}`)
+        }
+      }
+      res.json({ ok: true })
+    } catch (err) {
+      if (err instanceof GDriveEnrichmentImportAuthError) {
+        res.status(403).json({ error: 'workspace_admin_required' }); return
+      }
+      console.error('[connectors] Drive catalog configuration failed:', err)
+      res.status(500).json({ error: 'catalog_configuration_failed' })
+    }
+  })
+
+  router.get('/gdrive/catalog-status', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const workspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId : ''
+    const connectorInstanceId = typeof req.query.connectorInstanceId === 'string' ? req.query.connectorInstanceId : ''
+    if (!UUID_RE.test(workspaceId)) { res.status(400).json({ error: 'Invalid workspaceId' }); return }
+    if (!UUID_RE.test(connectorInstanceId)) { res.status(400).json({ error: 'Invalid connectorInstanceId' }); return }
+    try {
+      res.json(await getGDriveCatalogStatus({ actingUserId: userId, workspaceId, connectorInstanceId }))
+    } catch (err) {
+      if (err instanceof GDriveEnrichmentImportAuthError) {
+        res.status(403).json({ error: 'workspace_admin_required' }); return
+      }
+      console.error('[connectors] Drive catalog status failed:', err)
+      res.status(500).json({ error: 'catalog_status_failed' })
+    }
+  })
+
+  // Short-lived token for either the managed file Picker or the BYO folder
+  // Picker. An explicit instance id prevents multi-account token ambiguity.
+  router.get('/gdrive/access-token', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const connectorInstanceId = typeof req.query.connectorInstanceId === 'string'
+      ? req.query.connectorInstanceId
+      : ''
+    if (connectorInstanceId && !UUID_RE.test(connectorInstanceId)) {
+      res.status(400).json({ error: 'Invalid connectorInstanceId' }); return
+    }
+    try {
+      const creds = connectorInstanceId
+        ? await connectorInstanceStore.getCredentials(userId, connectorInstanceId)
+        : await connectorStore.getCredentials(userId, 'gdrive')
+      if (!creds || creds.client_id !== 'google_refresh' || !creds.client_secret) {
+        res.status(409).json({ error: 'gdrive not connected' }); return
+      }
+      const grant = unpackGoogleRefreshCredential(creds.client_secret)
+      const deployment = getConnectorConfig('google')
+      const clientId = grant.appClientId ?? deployment?.clientId
+      const clientSecret = grant.appClientSecret ?? deployment?.clientSecret
+      if (!clientId || !clientSecret) {
+        res.status(500).json({ error: 'Google OAuth not configured' }); return
+      }
+      const accessToken = await refreshGoogleAccessToken(grant.refreshToken, clientId, clientSecret)
+      res.json({
+        accessToken,
+        expiresIn: 3000,
+        ...(grant.pickerAppId && grant.pickerApiKey
+          ? { pickerAppId: grant.pickerAppId, pickerApiKey: grant.pickerApiKey }
+          : {}),
+      })
+    } catch (err) {
+      console.error('[connectors] gdrive access-token failed:', err)
+      res.status(500).json({ error: 'Failed to mint access token' })
     }
   })
 
@@ -2107,6 +2450,9 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
         return
       }
       credentials = credentialsFor(secret)
+      if (provider === 'gdrive') {
+        configPatch = { scopeVersion: 2, driveAccessMode: 'picked_files' }
+      }
     }
 
     try {

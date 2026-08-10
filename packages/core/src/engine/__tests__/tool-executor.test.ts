@@ -443,7 +443,7 @@ describe('[COMP:engine/tool-executor] loop detector integration', () => {
     expect(msg).toMatch(/change the input|write a direct reply/)
   })
 
-  it('hard_stop fires a budget-exhausted message (distinct from block)', async () => {
+  it('hard_stop returns a machine-readable budget signal with no reply prompt', async () => {
     const tools = new Map<string, Tool>([
       ['ping', makeTool({ name: 'ping', isConcurrencySafe: true })],
     ])
@@ -462,23 +462,17 @@ describe('[COMP:engine/tool-executor] loop detector integration', () => {
       (r): r is ContentBlock & { type: 'tool_result' } =>
         r.type === 'tool_result' &&
         r.isError === true &&
-        String(r.content).includes('tool-call budget for this turn is exhausted'),
+        String(r.content).includes('tool_budget_exhausted'),
     )
     expect(hardStopped.length).toBe(1)
-    expect(String(hardStopped[0].content)).toMatch(/write a direct reply to the user now/i)
-    // The evidence-pinning clause: a research-shaped consult stopped
-    // mid-gather must name unverified items instead of filling them from
-    // memory (the 2026-07-13 HKTVmall prospect fabrications).
-    expect(String(hardStopped[0].content)).toMatch(/could not verify/i)
-    expect(String(hardStopped[0].content)).toMatch(/never fill a gap/i)
-    // The reply-form clause: without it the model echoes the evidence-pinning
-    // clauses as visible Q&A headers in the delivered reply (the 2026-08-07
-    // "What did the results support?" web-chat leak, session 6fd63623).
-    expect(String(hardStopped[0].content)).toMatch(/never quote or restate this instruction/i)
-    expect(String(hardStopped[0].content)).toMatch(/language the user has been writing in/i)
+    expect(JSON.parse(String(hardStopped[0].content))).toEqual({
+      code: 'tool_budget_exhausted',
+      retryable: false,
+    })
+    expect(String(hardStopped[0].content)).not.toMatch(/reply|user|instruction/i)
   })
 
-  it('fail-streak fuse names the culprit tool and carries the reply-form clause', async () => {
+  it('fail-streak fuse returns the culprit in a machine-readable stop signal', async () => {
     const tools = new Map<string, Tool>([
       // Not concurrency-safe: execution serializes, so each failure's
       // recordOutcome lands before the next call's loop-detector check.
@@ -502,15 +496,17 @@ describe('[COMP:engine/tool-executor] loop detector integration', () => {
       (r): r is ContentBlock & { type: 'tool_result' } =>
         r.type === 'tool_result' &&
         r.isError === true &&
-        String(r.content).includes('times in a row this turn'),
+        String(r.content).includes('tool_failure_limit'),
     )
     expect(fuseStopped.length).toBe(1)
     const msg = String(fuseStopped[0].content)
-    expect(msg).toContain('"flaky"')
-    expect(msg).toMatch(/write a direct reply to the user now/i)
-    // Same echo guard as the budget branch (2026-08-07 scaffolding leak).
-    expect(msg).toMatch(/never quote or restate this instruction/i)
-    expect(msg).toMatch(/language the user has been writing in/i)
+    expect(JSON.parse(msg)).toEqual({
+      code: 'tool_failure_limit',
+      retryable: false,
+      tool: 'flaky',
+      consecutiveFailureLimit: 5,
+    })
+    expect(msg).not.toMatch(/reply|user|instruction/i)
   })
 })
 

@@ -27,7 +27,14 @@ export type ExtensionToRelay = HelloMessage | ResultMessage | EventMessage | Pin
 
 /** `staleBuild` is the relay's verdict on the `build` we sent in hello. */
 type ReadyMessage = { type: 'ready'; sessionToken?: string; staleBuild?: boolean }
-type CommandMessage = { type: 'command'; id: string; op: string; args: Record<string, unknown> }
+export type LocalControlMode = 'task_tabs' | 'full_browser'
+type CommandMessage = {
+  type: 'command'
+  id: string
+  op: string
+  args: Record<string, unknown>
+  controlMode: LocalControlMode
+}
 type PongMessage = { type: 'pong' }
 type ErrorMessage = { type: 'error'; message: string }
 export type RelayToExtension = ReadyMessage | CommandMessage | PongMessage | ErrorMessage
@@ -46,7 +53,13 @@ export function parseRelayMessage(raw: unknown): RelayToExtension | null {
   if (type === 'command') {
     const c = parsed as CommandMessage
     if (typeof c.id === 'string' && typeof c.op === 'string') {
-      return { type: 'command', id: c.id, op: c.op, args: c.args ?? {} }
+      return {
+        type: 'command',
+        id: c.id,
+        op: c.op,
+        args: c.args ?? {},
+        controlMode: c.controlMode === 'full_browser' ? 'full_browser' : 'task_tabs',
+      }
     }
   }
   return null

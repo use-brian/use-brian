@@ -79,6 +79,14 @@ export const cli = {
   fill(ref: string, text: string): string {
     return `${AGENT_BROWSER_BIN} fill ${shellQuote(ref)} ${shellQuote(text)}`
   },
+  /**
+   * Trusted auth-broker fill: the command string contains no credential.
+   * The E2B adapter supplies `BRIAN_BROWSER_AUTH_SECRET` only on this one
+   * process invocation; the shell expands it as one quoted argument.
+   */
+  fillFromSecretEnv(ref: string): string {
+    return `${AGENT_BROWSER_BIN} fill ${shellQuote(ref)} "$BRIAN_BROWSER_AUTH_SECRET"`
+  },
   getUrl(): string {
     return `${AGENT_BROWSER_BIN} get url`
   },

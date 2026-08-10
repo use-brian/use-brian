@@ -228,7 +228,16 @@ async function* sseData(res: Response): AsyncGenerator<string> {
 
 // ── Streaming core ─────────────────────────────────────────────
 
-type CompatConfig = { apiKey: string; baseURL: string; label: string }
+type CompatConfig = {
+  apiKey?: string
+  baseURL: string
+  label: string
+  fetchFn?: typeof fetch
+  includeStreamUsage: boolean
+  enableThinkingField: boolean
+  supportsJsonMode: boolean
+  includeErrorDetail: boolean
+}
 
 async function* streamCompat(
   cfg: CompatConfig,
@@ -254,28 +263,36 @@ async function* streamCompat(
     model: wireModel,
     messages: ccMessages,
     stream: true,
-    stream_options: { include_usage: true },
+    ...(cfg.includeStreamUsage ? { stream_options: { include_usage: true } } : {}),
     ...(tools ? { tools, tool_choice: 'auto' } : {}),
     ...(options.maxTokens !== undefined ? { max_tokens: options.maxTokens } : {}),
     ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
-    // DashScope thinking switch (Qwen); vendors without it ignore the field.
-    ...(options.thinkingLevel !== undefined ? { enable_thinking: options.thinkingLevel === 'high' } : {}),
+    // DashScope thinking switch (Qwen). It is opt-in because arbitrary
+    // OpenAI-compatible endpoints may reject unknown extension fields.
+    ...(cfg.enableThinkingField && options.thinkingLevel !== undefined
+      ? { enable_thinking: options.thinkingLevel === 'high' }
+      : {}),
     // JSON mode and tools are mutually exclusive (same rule as Gemini).
-    ...(options.responseFormat === 'json' && !tools ? { response_format: { type: 'json_object' } } : {}),
+    ...(cfg.supportsJsonMode && options.responseFormat === 'json' && !tools
+      ? { response_format: { type: 'json_object' } }
+      : {}),
   }
 
-  const res = await fetch(`${cfg.baseURL}/chat/completions`, {
+  const res = await (cfg.fetchFn ?? fetch)(`${cfg.baseURL}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${cfg.apiKey}`,
+      ...(cfg.apiKey ? { Authorization: `Bearer ${cfg.apiKey}` } : {}),
     },
     body: JSON.stringify(body),
     signal: options.signal,
   })
   if (!res.ok || !res.body) {
     const detail = (await res.text().catch(() => '')).slice(0, 500)
-    const err = new Error(`[openai-compat:${cfg.label}] HTTP ${res.status}: ${detail}`) as Error & { status?: number }
+    const suffix = cfg.includeErrorDetail && detail ? `: ${detail}` : ''
+    const err = new Error(`[openai-compat:${cfg.label}] HTTP ${res.status}${suffix}`, {
+      cause: detail || undefined,
+    }) as Error & { status?: number }
     err.status = res.status
     throw err
   }
@@ -333,27 +350,50 @@ async function* streamCompat(
 // ── Provider ───────────────────────────────────────────────────
 
 export type OpenAICompatProviderOptions = {
-  apiKey: string
+  apiKey?: string
   baseURL: string
   /** Registry provider suffix: rows with `provider: 'openai-compat:<label>'` dispatch here. */
   label: string
+  /** Fixed endpoint model. When set, callers cannot alter the wire id. */
+  wireModel?: string
+  /** Stable model id emitted in message_start and usage records. */
+  recordedModel?: string
+  /** Request-visible model selectors. Defaults to the compile-time registry. */
+  models?: readonly string[]
+  /** Injectable transport for probes and tests. */
+  fetchFn?: typeof fetch
+  /** Vendor extensions. Existing DashScope behavior remains the default. */
+  includeStreamUsage?: boolean
+  enableThinkingField?: boolean
+  supportsJsonMode?: boolean
+  /** Keep upstream response text out of user-facing errors for custom endpoints. */
+  includeErrorDetail?: boolean
 }
 
 export function createOpenAICompatProvider(options: OpenAICompatProviderOptions): LLMProvider {
-  if (!options.apiKey) throw new Error('createOpenAICompatProvider: apiKey is required')
   if (!options.baseURL) throw new Error('createOpenAICompatProvider: baseURL is required')
   const providerKey = `openai-compat:${options.label}` as ModelProvider
   const aliases = providerAliasMap(providerKey)
-  const cfg: CompatConfig = { apiKey: options.apiKey, baseURL: options.baseURL.replace(/\/$/, ''), label: options.label }
+  const cfg: CompatConfig = {
+    apiKey: options.apiKey,
+    baseURL: options.baseURL.replace(/\/$/, ''),
+    label: options.label,
+    fetchFn: options.fetchFn,
+    includeStreamUsage: options.includeStreamUsage ?? true,
+    enableThinkingField: options.enableThinkingField ?? true,
+    supportsJsonMode: options.supportsJsonMode ?? true,
+    includeErrorDetail: options.includeErrorDetail ?? true,
+  }
 
-  const resolveWireModel = (model: string) => aliases[model] ?? model
+  const resolveWireModel = (model: string) => options.wireModel ?? aliases[model] ?? model
+  const resolveRecordedModel = (model: string) => options.recordedModel ?? model
 
   return {
     name: providerKey,
-    models: [...providerModelIds(providerKey)],
+    models: options.models ? [...options.models] : [...providerModelIds(providerKey)],
 
     stream(request: ProviderRequest): AsyncIterable<StreamChunk> {
-      return streamCompat(cfg, resolveWireModel(request.model), request.model, request.systemPrompt, request.messages, {
+      return streamCompat(cfg, resolveWireModel(request.model), resolveRecordedModel(request.model), request.systemPrompt, request.messages, {
         tools: request.tools,
         maxTokens: request.maxTokens,
         temperature: request.temperature,
@@ -373,7 +413,7 @@ export function createOpenAICompatProvider(options: OpenAICompatProviderOptions)
       return {
         send: (messages: Message[], sendOpts?: SendOptions): AsyncIterable<StreamChunk> => {
           const attempt: Message[] = [...history, ...messages]
-          const inner = streamCompat(cfg, resolveWireModel(sessionOpts.model), sessionOpts.model, sessionOpts.systemPrompt, attempt, {
+          const inner = streamCompat(cfg, resolveWireModel(sessionOpts.model), resolveRecordedModel(sessionOpts.model), sessionOpts.systemPrompt, attempt, {
             tools: sessionOpts.tools,
             maxTokens: sessionOpts.maxTokens,
             temperature: sessionOpts.temperature,

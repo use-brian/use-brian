@@ -2,12 +2,10 @@
  * Unit tests for the Google Drive tools factory.
  * Component tag: [COMP:tools/google-drive].
  *
- * The Drive-file tools (list/get/read/create/update) are built inside
- * createGoogleDriveTools but deliberately NOT returned — they require
- * the restricted `drive.readonly` / `drive.file` scopes that are gated
- * behind a CASA audit (see google-drive.ts Phase 1.5 / Phase 2 notes).
- * This is a tripwire: when the surface is activated, the empty-array
- * assertion fails loudly, forcing the OFFICIAL_CONNECTOR_TOOLS update.
+ * The three read tools work at both access levels: Google constrains a
+ * `drive.file` grant to Picker-selected / app-created files, while a customer
+ * BYO `drive.readonly` grant broadens the same calls to full-Drive read.
+ * Writes remain withheld from this factory's returned surface.
  */
 
 import { describe, it, expect, vi } from 'vitest'
@@ -25,14 +23,22 @@ function stubApi(): GoogleDriveApi {
 }
 
 describe('[COMP:tools/google-drive] createGoogleDriveTools', () => {
-  it('withholds the Drive tool surface — Phase 2, pending CASA audit', () => {
-    expect(createGoogleDriveTools(stubApi())).toEqual([])
+  it('returns the live search/read surface and withholds Drive writes', () => {
+    expect(createGoogleDriveTools(stubApi()).map((tool) => tool.name)).toEqual([
+      'googleDriveListFiles',
+      'googleDriveGetFile',
+      'googleDriveGetFileContent',
+    ])
   })
 
-  it('accepts an authorized-files list without exposing any tools', () => {
+  it('keeps the same read surface when an authorized-files list is supplied', () => {
     const authorized: AuthorizedFile[] = [
       { id: 'f-1', name: 'Doc', mimeType: 'application/pdf', addedAt: '2026-05-16T00:00:00Z' },
     ]
-    expect(createGoogleDriveTools(stubApi(), authorized)).toEqual([])
+    expect(createGoogleDriveTools(stubApi(), authorized).map((tool) => tool.name)).toEqual([
+      'googleDriveListFiles',
+      'googleDriveGetFile',
+      'googleDriveGetFileContent',
+    ])
   })
 })
