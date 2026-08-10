@@ -251,9 +251,96 @@ export type ChildPageBlock = {
 // there ahead of the server union. Phase 2.5 promotes them into the
 // canonical `Block` union so `renderPage` / `patchPage` can author + Zod-
 // validate them. `richText` is opaque Tiptap `JSONContent` — the server
-// stores it verbatim and never inspects it.
+// stores it verbatim apart from the one structural repair below.
 
 export type RichTextContent = Record<string, unknown>
+
+/** Loose Tiptap/ProseMirror JSON node. Only `type` / `text` / `content` are
+ *  read here; `attrs` / `marks` and anything else ride through untouched. */
+export type RichNode = {
+  type?: string
+  text?: string
+  content?: RichNode[]
+  [key: string]: unknown
+}
+
+/**
+ * Inline leaf types the doc schema declares — `text` + `hardBreak` from
+ * StarterKit plus the two mention nodes (`packages/doc-model/src/schema.ts`).
+ * Listed literally so this module (and `doc-model`'s deliberately schema-free
+ * block mapping) stay free of a `prosemirror-model` dependency.
+ */
+const INLINE_RICH_NODE_TYPES = new Set([
+  'text',
+  'hardBreak',
+  'personMention',
+  'pageMention',
+])
+
+/** True for an inline leaf. A node carrying a `text` string counts regardless
+ *  of its declared type, so an unrecognised inline leaf still normalizes
+ *  rather than being promoted to a block. */
+function isInlineRichNode(n: RichNode): boolean {
+  return typeof n.text === 'string' || INLINE_RICH_NODE_TYPES.has(n.type ?? '')
+}
+
+/**
+ * Gather runs of bare inline leaves into a `paragraph`; pass block nodes
+ * through. Returns the input array by reference when it is already canonical.
+ *
+ * The editor's `editor.getJSON()` always nests inlines under a paragraph, so
+ * this is a no-op for human-authored richText. A **model**-authored block does
+ * not: the Doc edit agent commonly emits
+ * `richText: { type:'doc', content:[{ type:'text', text:'…' }] }` — inline text
+ * as a direct child of `doc`. That shape validates (the schema is
+ * `z.record(z.string(), z.unknown())` — richText is opaque by design) and
+ * persists, but it builds `listItem > text`, which violates `listItem`'s
+ * `paragraph block*` content spec. Nothing on the write path rejects it:
+ * `Node.fromJSON` does not validate content and the Y.Doc encode is purely
+ * structural, so the page reads back intact server-side. The moment a browser
+ * opens it, y-prosemirror's `createNodeFromYElement` fails `createChecked` and
+ * DELETES the offending element from the shared doc; doc-sync then persists
+ * the mutilation.
+ *
+ * That is how page c4b2f11a lost all 26 of its list items on 2026-08-10 while
+ * its 12 heading/text/divider blocks survived — the user saw headings with no
+ * content, and each repair attempt only re-added plain `text` blocks (the one
+ * kind that round-trips), so the page grew "a little bit more" every time
+ * instead of being fixed.
+ *
+ * Applied at both ends: `liftListItemText` (tool-input boundary, so new
+ * `saved_views.page` JSONB is canonical) and `doc-model`'s `richTextToContent`
+ * (encode path, so already-persisted degenerate pages heal on their next
+ * encode). See `docs/architecture/features/doc.md` → "Markdown normalization".
+ */
+export function normalizeRichTextNodes(content: RichNode[]): RichNode[] {
+  if (!content.some(isInlineRichNode)) return content
+  const out: RichNode[] = []
+  let run: RichNode[] | null = null
+  for (const node of content) {
+    if (isInlineRichNode(node)) {
+      if (!run) {
+        run = []
+        out.push({ type: 'paragraph', content: run })
+      }
+      run.push(node)
+    } else {
+      run = null
+      out.push(node)
+    }
+  }
+  return out
+}
+
+/** `normalizeRichTextNodes` over a whole opaque richText doc. Returns the input
+ *  by reference when nothing changed, so a canonical block stays a pure
+ *  pass-through (`liftListItemText` relies on identity to skip the copy). */
+export function normalizeRichTextContent(rt: RichTextContent): RichTextContent {
+  const content = (rt as { content?: unknown }).content
+  if (!Array.isArray(content) || content.length === 0) return rt
+  const normalized = normalizeRichTextNodes(content as RichNode[])
+  return normalized === content ? rt : { ...rt, content: normalized }
+}
 
 export type CalloutBlock = {
   kind: 'callout'

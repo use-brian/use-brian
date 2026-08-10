@@ -47,10 +47,15 @@ import type {
   Op,
   Ops,
   Page,
+  RichTextContent,
   TmpId,
 } from './page-types.js'
 import { bindingConfigSchema } from '../views/schemas.js'
-import { chartBlockSchema, coerceHeadingLevel } from '../views/blocks.js'
+import {
+  chartBlockSchema,
+  coerceHeadingLevel,
+  normalizeRichTextContent,
+} from '../views/blocks.js'
 import { liftTableRows } from './markdown.js'
 
 // ── id generator default ─────────────────────────────────────────────
@@ -293,6 +298,19 @@ function applyOne(
       if (current.kind === 'table' && 'rows' in op.patch) {
         const tbl = merged as Extract<Block, { kind: 'table' }>
         tbl.rows = liftTableRows(tbl.rows) as typeof tbl.rows
+      }
+      // Mirror the paragraph-wrap for richText: an `edit` patch replacing
+      // `richText` rides the same open `patch` record, so a doc holding bare
+      // inline nodes would persist and then be DELETED from the shared Y.Doc
+      // the next time a browser opens the page (see `normalizeRichTextContent`
+      // in views/blocks.ts — repair #4 in `liftListItemText` covers the `add`
+      // path, this covers `edit`).
+      if ('richText' in op.patch) {
+        const rich = (merged as { richText?: unknown }).richText
+        if (rich !== null && typeof rich === 'object') {
+          ;(merged as { richText?: unknown }).richText =
+            normalizeRichTextContent(rich as RichTextContent)
+        }
       }
       // Mirror the binding guard for headings: a model often patches a
       // heading's level with a Notion/Markdown-flavored value (`"h2"`, `"##"`),
