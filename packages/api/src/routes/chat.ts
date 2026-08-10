@@ -6850,6 +6850,16 @@ export function chatRoutes(options: WebChatOptions): Router {
                 sessionId: session.id,
                 role: 'assistant',
                 content: [{ type: 'text', text: synthesised }],
+                // Stamp the ANSWERING assistant, exactly like the normal
+                // turn write above. A fallback is still that assistant's
+                // reply: unstamped, a room renders it under the session's
+                // bound (usually primary) assistant, and `toStampedMessages`
+                // skips the `[Name]:` foreign-voice prefix — so the next
+                // turn reads another assistant's words as its OWN. That is
+                // how the 2026-08-09 Snapio room blamed the primary for a
+                // @CFO turn and then inherited "I'd need QuickBooks" as its
+                // own position. See db/sessions.ts → `assistantVoices`.
+                senderAssistantId: assistant.id,
               })
             } else {
               sendEvent('text_delta', {
@@ -6904,6 +6914,8 @@ export function chatRoutes(options: WebChatOptions): Router {
               sessionId: session.id,
               role: 'assistant',
               content: [{ type: 'text', text: recovered.text }],
+              // Same attribution contract as the empty-turn synthesis above.
+              senderAssistantId: assistant.id,
             })
             await recordOverheadUsage({
               usageStore: options.usageStore,
