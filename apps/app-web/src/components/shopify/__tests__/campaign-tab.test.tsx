@@ -108,6 +108,12 @@ function installBaseResponses() {
       };
     }
     if (tool === "shopifyListDiscounts" && args.query === "status:active") return { items: [] };
+    if (tool === "shopifyGetProduct") {
+      return { url: "https://shop.example/products/restocked-widget" };
+    }
+    if (tool === "shopifyPreviewCustomerSegment") {
+      return { query: "email_subscription_status = 'SUBSCRIBED'", total_count: 0 };
+    }
     throw new Error(`unexpected tool: ${tool}`);
   });
 }
@@ -277,6 +283,44 @@ describe("[COMP:app-web/shopify-campaign] Campaign tab", () => {
     expect(container!.textContent).toContain("missing one or more campaign actions");
     expect(button("Preview audience").disabled).toBe(true);
     expect(button("Prepare campaign").disabled).toBe(true);
+  });
+
+  it("drafts every message field except the product photo and resolves the product button URL", async () => {
+    askAssistant.mockResolvedValue(JSON.stringify({
+      subject: "The Restocked Widget is back",
+      preview: "Save 10% with RESTOCK10 before the offer ends.",
+      body: "The Restocked Widget is available again. Use RESTOCK10 for 10% off before the exact expiry.",
+      ctaLabel: "Shop the restock",
+    }));
+    await mount();
+    await click(container!.querySelector('[aria-label="Restocked Widget"]')!);
+
+    await click(button("Draft message"));
+
+    expect(field("Subject").value).toBe("The Restocked Widget is back");
+    expect(field("Preview text").value).toBe("Save 10% with RESTOCK10 before the offer ends.");
+    expect(field("Body").value).toContain("RESTOCK10");
+    expect(field("Button text").value).toBe("Shop the restock");
+    expect(field("Button destination URL").value)
+      .toBe("https://shop.example/products/restocked-widget");
+    expect(callTool).toHaveBeenCalledWith(
+      WORKSPACE,
+      "shopifyGetProduct",
+      { productId: "gid://shopify/Product/42" },
+    );
+    const prompt = String(askAssistant.mock.calls[0]?.[1]);
+    expect(prompt).toContain("Button destination URL: https://shop.example/products/restocked-widget");
+    expect(prompt).toContain("merchant handles the photo separately");
+  });
+
+  it("links a zero-subscriber test audience to Shopify Customers with consent guidance", async () => {
+    await mount();
+    await click(button("Preview audience"));
+
+    expect(container!.textContent).toContain("Customer agreed to receive marketing emails");
+    expect(container!.textContent).toContain("Use All email subscribers");
+    expect(container!.querySelector<HTMLAnchorElement>('a[href="https://test-store.myshopify.com/admin/customers"]'))
+      .toBeTruthy();
   });
 
   it("shows edited copy, button destination, and the selected photo in the live preview", async () => {

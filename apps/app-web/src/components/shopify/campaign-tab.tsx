@@ -319,6 +319,21 @@ export function CampaignTab({
     setError(null);
     setStatus(t.shopifyApp.campaignDraftingCopy);
     try {
+      const primaryProduct = await callTool<{ url?: string }>(workspaceId, "shopifyGetProduct", {
+        productId: draft.selectedProducts[0].id,
+      });
+      let ctaUrl = draft.ctaUrl || `https://${shop.primary_domain || shop.myshopify_domain}`;
+      if (primaryProduct.url) {
+        try {
+          const candidate = new URL(primaryProduct.url);
+          if (candidate.protocol === "http:" || candidate.protocol === "https:") {
+            ctaUrl = primaryProduct.url;
+          }
+        } catch {
+          // Shopify should return an absolute storefront URL. Keep the safe
+          // store fallback if a connector response is malformed.
+        }
+      }
       const offer = draft.discountKind === "percentage"
         ? `${draft.discountValue}%`
         : `${draft.discountValue} ${shop.currency ?? ""}`.trim();
@@ -336,13 +351,14 @@ Offer: ${offer} off with code ${draft.code}
 Send time in ${shop.timezone ?? "UTC"}: ${draft.sendAt}
 Expiry in ${shop.timezone ?? "UTC"}: ${draft.expiresAt}
 Language: ${language}
-CTA URL: ${draft.ctaUrl}
+Button destination URL: ${ctaUrl}
 
-Do not invent product claims, ingredients, stock quantities or urgency beyond the expiry.
+Complete every text field. The body must state the discount code and its exact expiry. The CTA label is the customer-visible button text for the provided destination URL.
+Do not invent product claims, ingredients, stock quantities or urgency beyond the expiry. Do not include an image, image markup or instructions about adding a photo; the merchant handles the photo separately.
 Reply with ONLY one JSON object, no prose:
 {"subject":"","preview":"","body":"","ctaLabel":""}`);
       const parsed = extractJson<GeneratedCopy>(answer);
-      if (!parsed?.subject || !parsed.body || !parsed.ctaLabel) {
+      if (!parsed?.subject || !parsed.preview || !parsed.body || !parsed.ctaLabel) {
         setError(t.shopifyApp.campaignCopyFailed);
         return;
       }
@@ -351,6 +367,7 @@ Reply with ONLY one JSON object, no prose:
         preview: parsed.preview ?? "",
         body: parsed.body,
         ctaLabel: parsed.ctaLabel,
+        ctaUrl,
       });
     } catch (err) {
       setError(toolMessage(err));
@@ -582,6 +599,7 @@ Reply with ONLY one JSON object, no prose:
   }
 
   const discountAdminUrl = `https://${shop.myshopify_domain}/admin/discounts`;
+  const customersAdminUrl = `https://${shop.myshopify_domain}/admin/customers`;
   const messagingUrl = `https://${shop.myshopify_domain}/admin/marketing`;
   const allChecklistReady =
     draft.checklist.preview &&
@@ -691,8 +709,25 @@ Reply with ONLY one JSON object, no prose:
           <span className="text-[12px] text-muted-foreground">{t.shopifyApp.campaignPrivacyNote}</span>
         </div>
         {draft.audienceCount !== undefined ? (
-          <div className="max-w-xs">
-            <Kpi label={t.shopifyApp.campaignEligibleSubscribers} value={draft.audienceCount.toLocaleString()} />
+          <div className="space-y-2">
+            <div className="max-w-xs">
+              <Kpi label={t.shopifyApp.campaignEligibleSubscribers} value={draft.audienceCount.toLocaleString()} />
+            </div>
+            {draft.audienceCount === 0 ? (
+              <Note>
+                <div className="space-y-2">
+                  <p>{t.shopifyApp.campaignNoSubscribersHelp}</p>
+                  <a
+                    href={customersAdminUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className={buttonVariants({ variant: "outline", size: "sm" })}
+                  >
+                    {t.shopifyApp.campaignOpenCustomers}<ExternalLink className="size-3.5" aria-hidden />
+                  </a>
+                </div>
+              </Note>
+            ) : null}
           </div>
         ) : null}
       </CampaignSection>
