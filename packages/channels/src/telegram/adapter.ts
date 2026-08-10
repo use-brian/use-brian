@@ -382,6 +382,25 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
    * in that chat; an overlapping exact-topic entry is cumulative/idempotent,
    * not a second inversion.
    */
+  /**
+   * True when this bot is scoped to specific topics of `chatId` and the message
+   * did not arrive in one of them — i.e. the conversation belongs to a sibling
+   * bot sharing the group.
+   *
+   * A whole-chat override (`topicId` null/undefined) claims every topic, so a
+   * bot holding one is never "bound elsewhere". A bot with no override for this
+   * chat at all is not topic-bound and is likewise never excluded — that is the
+   * single-bot-in-a-group case the capture-only exit was built for.
+   */
+  function isBoundToOtherTopics(chatId: string, topicId: number | undefined): boolean {
+    const cfg = options.config?.requireMention
+    if (cfg === undefined || typeof cfg === 'boolean') return false
+    const forThisChat = cfg.overrides.filter((o) => o.chatId === chatId)
+    if (forThisChat.length === 0) return false
+    if (forThisChat.some((o) => o.topicId == null)) return false
+    return !forThisChat.some((o) => topicId != null && o.topicId === topicId)
+  }
+
   function resolveRequireMention(chatId: string, topicId: number | undefined): boolean {
     const cfg = options.config?.requireMention
     if (cfg === undefined) return true
@@ -482,6 +501,16 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
     // Anything not capturable keeps the historical drop.
     const capturable =
       mediaType === 'document' || mediaType === 'audio' || mediaType === 'video'
+    // A capture is a write plus a "Filed X" reply, so it must only be taken by
+    // a bot that is party to this conversation. Telegram delivers every group
+    // message to every bot in the group, and a workspace that runs one BYO bot
+    // per assistant in one topic-organized supergroup therefore had EVERY bot
+    // take the capture exit: on 2026-08-11 a single CSV dropped in one topic
+    // produced eight workspace-file copies and seven stray "Filed" replies from
+    // assistants that were never addressed. The per-topic `requireMention`
+    // overrides are the user's own statement of which topics a bot owns, so a
+    // topic-bound bot outside its topics keeps the historical drop.
+    if (unaddressed && isBoundToOtherTopics(chatIdStr, topicId)) return null
     if (unaddressed && !capturable) return null
 
     // Must have text or media
