@@ -34,7 +34,10 @@ import type { ConnectorActionAudit, ConnectorActionPreflight } from '../connecto
 import { workspacePolicyAsSettingsStore } from '../db/workspace-tool-policy-store.js'
 import { discoverMcpServer, callRemoteMcpTool } from './client.js'
 import { discoverCliServer, callCliMcpTool, type CliServerParams } from './cli-transport.js'
-import { gateToolsOnActionGrants } from '../safety/assert-action-allowed.js'
+import {
+  filterToolsByActionGrants,
+  gateToolsOnActionGrants,
+} from '../safety/assert-action-allowed.js'
 import { createHealthReporter, wrapToolsWithHealthProbe, connectorReconnectNotice, classifyConnectorAuthError, type HealthReporter } from './connector-health.js'
 import { buildConnectorAuthHeaders, mergeValidatedHeaders, preflightHeadersToRecord, actorIdentityHeaders, type ActorIdentity } from './auth-headers.js'
 import {
@@ -1498,6 +1501,16 @@ export async function injectMcpTools(params: {
     }
   }
 
+  // ── Per-assistant connector action grants ──────────────────
+  // The grant is an outer capability boundary, not a call-time error path.
+  // Remove ungranted write/destructive actions before either the direct tool
+  // map or the folded mcp_search index becomes model-visible. Retained tools
+  // still carry the fresh execute-time check installed by
+  // `gateToolsOnActionGrants`, so a mid-turn revocation also fails closed.
+  const grantFilteredTools = await filterToolsByActionGrants(tools)
+  tools.clear()
+  for (const [name, tool] of grantFilteredTools) tools.set(name, tool)
+
   // ── Reconcile the not-connected advert with what actually injected ──
   //
   // The base built-in pass runs BEFORE both overlays, and for a workspace
@@ -2402,8 +2415,7 @@ async function injectGoogleTools(
             throw err
           }
         },
-      }, userTimezone), 'gcal', assistantConnectorGrantsStore, assistantId, governanceId,
-      governanceId === 'gcal' ? undefined : 'gcal')
+      }, userTimezone), 'gcal', assistantConnectorGrantsStore, assistantId, governanceId)
       if (gcalEnabled) {
         const calTools = buildCalTools(() => getAccessToken('gcal'))
         for (const tool of calTools) {
@@ -2581,7 +2593,7 @@ async function injectGoogleTools(
           }
         },
       }, { filesApi, senderEmail: senderEmail ?? undefined }), 'gmail', assistantConnectorGrantsStore,
-      assistantId, governanceId, governanceId === 'gmail' ? undefined : 'gmail')
+      assistantId, governanceId)
       if (gmailEnabled) {
         const gmailTools = buildGmailToolSet(
           () => getAccessToken('gmail'),
@@ -2709,8 +2721,7 @@ async function injectGoogleTools(
           const token = await getToken()
           return updateDriveFileContent(token, fileId, params)
         },
-      }, gdriveAuthorizedFiles), 'gdrive', assistantConnectorGrantsStore, assistantId, governanceId,
-      governanceId === 'gdrive' ? undefined : 'gdrive')
+      }, gdriveAuthorizedFiles), 'gdrive', assistantConnectorGrantsStore, assistantId, governanceId)
       if (gdriveEnabled) {
         const driveTools = buildDriveTools(() => getAccessToken('gdrive'))
         for (const tool of driveTools) {
@@ -2745,8 +2756,7 @@ async function injectGoogleTools(
           recordCreated('doc', doc.documentId, doc.title, doc.url, 'application/vnd.google-apps.document')
           return doc
         },
-      }, gdriveAuthorizedFiles), 'gdrive', assistantConnectorGrantsStore, assistantId, governanceId,
-      governanceId === 'gdrive' ? undefined : 'gdrive')
+      }, gdriveAuthorizedFiles), 'gdrive', assistantConnectorGrantsStore, assistantId, governanceId)
       if (gdriveEnabled) {
         const docsTools = buildDocsTools(() => getAccessToken('gdrive'))
         for (const tool of docsTools) {
@@ -2793,8 +2803,7 @@ async function injectGoogleTools(
           const token = await getToken()
           return batchUpdateSpreadsheet(token, spreadsheetId, requests)
         },
-      }, gdriveAuthorizedFiles), 'gdrive', assistantConnectorGrantsStore, assistantId, governanceId,
-      governanceId === 'gdrive' ? undefined : 'gdrive')
+      }, gdriveAuthorizedFiles), 'gdrive', assistantConnectorGrantsStore, assistantId, governanceId)
       if (gdriveEnabled) {
         const sheetsTools = buildSheetsTools(() => getAccessToken('gdrive'))
         for (const tool of sheetsTools) {
@@ -2858,8 +2867,7 @@ async function injectGoogleTools(
           recordCreated('slide', pres.presentationId, pres.title, pres.url, 'application/vnd.google-apps.presentation')
           return pres
         },
-      }, gdriveAuthorizedFiles), 'gdrive', assistantConnectorGrantsStore, assistantId, governanceId,
-      governanceId === 'gdrive' ? undefined : 'gdrive')
+      }, gdriveAuthorizedFiles), 'gdrive', assistantConnectorGrantsStore, assistantId, governanceId)
       if (gdriveEnabled) {
         const slidesTools = buildSlidesTools(() => getAccessToken('gdrive'))
         for (const tool of slidesTools) {
@@ -2942,8 +2950,7 @@ async function injectGoogleTools(
           const token = await getToken()
           return deleteGoogleTask(token, taskListId, taskId)
         },
-      }), 'gcal', assistantConnectorGrantsStore, assistantId, governanceId,
-      governanceId === 'gcal' ? undefined : 'gcal')
+      }), 'gcal', assistantConnectorGrantsStore, assistantId, governanceId)
       if (gcalEnabled) {
         const tasksTools = buildTasksTools(() => getAccessToken('gcal'))
         for (const tool of tasksTools) {
@@ -3109,8 +3116,7 @@ async function injectGitHubTools(
       createIssueComment: async (owner, repo, issueNumber, body) => createIssueComment(await getPat(), owner, repo, issueNumber, body),
       getFileContents: async (owner, repo, path, ref) => getFileContents(await getPat(), owner, repo, path, ref),
       createOrUpdateFile: async (owner, repo, params) => createOrUpdateFile(await getPat(), owner, repo, params),
-    }), 'github', assistantConnectorGrantsStore, assistantId, governanceId,
-    governanceId === 'github' ? undefined : 'github')
+    }), 'github', assistantConnectorGrantsStore, assistantId, governanceId)
   }
 
   async function getPat(): Promise<string> {
@@ -3204,8 +3210,7 @@ async function injectNotionTools(
       createPage: async (params) => createNotionPage(await getAccessToken(), params),
       updatePage: async (pageId, params) => updateNotionPage(await getAccessToken(), pageId, params),
       appendBlocks: async (pageId, content) => appendNotionBlocks(await getAccessToken(), pageId, content),
-    }), 'notion', assistantConnectorGrantsStore, assistantId, governanceId,
-    governanceId === 'notion' ? undefined : 'notion')
+    }), 'notion', assistantConnectorGrantsStore, assistantId, governanceId)
   }
 
   async function getAccessToken(): Promise<string> {
@@ -3552,8 +3557,7 @@ async function injectShopifyTools(
             }
           }
         : undefined,
-    }), 'shopify', assistantConnectorGrantsStore, assistantId, governanceId,
-    governanceId === 'shopify' ? undefined : 'shopify')
+    }), 'shopify', assistantConnectorGrantsStore, assistantId, governanceId)
   }
 
   const primaryInstanceId = healthProbe?.instanceId ?? (shopify as { id?: string }).id ?? null
@@ -3996,7 +4000,6 @@ async function injectMailboxTools(params: {
         assistantConnectorGrantsStore,
         assistantId,
         governanceId,
-        'imap',
       )
 
       // Archive search + on-demand sync stay outside the live API health wrap,

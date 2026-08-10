@@ -3,8 +3,9 @@
  * (#4 from `docs/architecture/integrations/connector-actions.md`).
  *
  * Fronts `assistant_connector_grants` (migration 178). The runtime
- * helper `packages/api/src/safety/assert-action-allowed.ts` gates every
- * connector write tool's execute callback on a matching grant; the
+ * helpers in `packages/api/src/safety/assert-action-allowed.ts` remove every
+ * ungranted write from the injected surface and re-check retained writes at
+ * execution; the
  * Studio UI surface (`apps/web/src/components/studio/assistant-detail.tsx`)
  * mutates via the REST route in `packages/api/src/routes/assistant-connector-grants.ts`.
  *
@@ -38,7 +39,8 @@ export type UpsertAssistantConnectorGrant = {
 export type AssistantConnectorGrantsStore = {
   /**
    * Look up the grant for a single (assistant, connector). Returns
-   * `null` when no row exists — the safe default (no writes allowed).
+   * `null` when no exact row exists — the safe default (no writes allowed).
+   * Instance-qualified connector ids never fall back to the provider row.
    * System-level read because the runtime check inside
    * `assertActionAllowed` happens during a tool execute callback where
    * the acting user is the message author, not the assistant owner,
@@ -47,7 +49,6 @@ export type AssistantConnectorGrantsStore = {
   getForAssistantSystem(
     assistantId: string,
     connectorId: string,
-    fallbackConnectorId?: string,
   ): Promise<AssistantConnectorGrant | null>
 
   /** List every grant row for an assistant. Used by the Studio panel. */
@@ -76,13 +77,12 @@ const COLS = `
 
 export function createDbAssistantConnectorGrantsStore(): AssistantConnectorGrantsStore {
   return {
-    async getForAssistantSystem(assistantId, connectorId, fallbackConnectorId) {
+    async getForAssistantSystem(assistantId, connectorId) {
       const result = await query<AssistantConnectorGrant>(
         `SELECT ${COLS} FROM assistant_connector_grants
-         WHERE assistant_id = $1 AND connector_id IN ($2, $3)
-         ORDER BY CASE WHEN connector_id = $2 THEN 0 ELSE 1 END
+         WHERE assistant_id = $1 AND connector_id = $2
          LIMIT 1`,
-        [assistantId, connectorId, fallbackConnectorId ?? connectorId],
+        [assistantId, connectorId],
       )
       return result.rows[0] ?? null
     },

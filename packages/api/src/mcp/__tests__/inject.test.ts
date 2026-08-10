@@ -965,8 +965,8 @@ describe('[COMP:api/mcp-inject] per-assistant write-grant gate', () => {
   // The registry-derived `gateToolsOnActionGrants` wrapper must ride the
   // REAL injection path for every built-in with write tools — a missing
   // wire here is exactly the dead-checkbox drift (Studio shows grant
-  // boxes the runtime never enforces). Deny paths only: the gate throws
-  // before any network client is reached, so no HTTP mocks are needed.
+  // boxes the runtime never enforces). Missing grants must remove writes
+  // before either direct injection or the folded search index is built.
   const grantsStore = {
     getForAssistantSystem: vi.fn(),
     listForAssistant: vi.fn(),
@@ -985,7 +985,7 @@ describe('[COMP:api/mcp-inject] per-assistant write-grant gate', () => {
     getConnectorConfig.mockReturnValue(undefined)
   })
 
-  async function injectWith(connectorRows: unknown[]) {
+  async function injectWith(connectorRows: unknown[], keepBuiltinsDirect = true) {
     const tools = new Map()
     await injectMcpTools({
       userId: 'u-1',
@@ -999,38 +999,107 @@ describe('[COMP:api/mcp-inject] per-assistant write-grant gate', () => {
       } as never,
       settingsStore: settingsStoreStub() as never,
       assistantConnectorGrantsStore: grantsStore as never,
-      keepBuiltinsDirect: true,
+      keepBuiltinsDirect,
     })
     return tools
   }
 
-  it('denies an ungranted gmailSendMessage at the tool boundary', async () => {
+  it('does not inject an ungranted gmailSendMessage', async () => {
     const tools = await injectWith([
       { id: 'ci-gm1', connectorId: 'gmail', name: 'Gmail', connected: true, url: null, custom: false, createdAt: new Date('2026-01-01T00:00:00Z') },
     ])
-    const send = tools.get('gmailSendMessage') as { execute: (i: unknown, c: unknown) => Promise<unknown> }
-    expect(send).toBeTruthy()
-    await expect(send.execute({ to: 'x@example.com', subject: 's', body: 'b' }, {})).rejects.toThrow(/no grant for gmail/)
+    expect(tools.has('gmailSendMessage')).toBe(false)
     expect(grantsStore.getForAssistantSystem).toHaveBeenCalledWith('a-1', 'gmail')
   })
 
-  it('denies an ungranted googleTasksCreateTask (gcal-connector write) at the tool boundary', async () => {
+  it('does not inject an ungranted googleTasksCreateTask', async () => {
     const tools = await injectWith([
       { id: 'ci-gc1', connectorId: 'gcal', name: 'Google Calendar', connected: true, url: null, custom: false, createdAt: new Date('2026-01-01T00:00:00Z') },
     ])
-    const create = tools.get('googleTasksCreateTask') as { execute: (i: unknown, c: unknown) => Promise<unknown> }
-    expect(create).toBeTruthy()
-    await expect(create.execute({ title: 't' }, {})).rejects.toThrow(/no grant for gcal/)
+    expect(tools.has('googleTasksCreateTask')).toBe(false)
   })
 
-  it('denies an ungranted githubCreateIssue at the tool boundary', async () => {
+  it('does not inject an ungranted githubCreateIssue', async () => {
     const tools = await injectWith([
       { id: 'ci-gh1', connectorId: 'github', name: 'GitHub', connected: true, url: null, custom: false, createdAt: new Date('2026-01-01T00:00:00Z') },
     ])
-    const create = tools.get('githubCreateIssue') as { execute: (i: unknown, c: unknown) => Promise<unknown> }
-    expect(create).toBeTruthy()
-    await expect(create.execute({ owner: 'o', repo: 'r', title: 't' }, {})).rejects.toThrow(/no grant for github/)
+    expect(tools.has('githubCreateIssue')).toBe(false)
     expect(grantsStore.getForAssistantSystem).toHaveBeenCalledWith('a-1', 'github')
+  })
+
+  it('keeps an ungranted Calendar write out of mcp_search discovery', async () => {
+    const tools = await injectWith([
+      { id: 'ci-gc1', connectorId: 'gcal', name: 'Google Calendar', connected: true, url: null, custom: false, createdAt: new Date('2026-01-01T00:00:00Z') },
+    ], false)
+    const search = tools.get('mcp_search') as { execute: (i: unknown, c: unknown) => Promise<{ data: unknown }> }
+    const hits = await search.execute({ query: 'create calendar event', limit: 8 }, {} as never)
+
+    expect(JSON.stringify(hits.data)).not.toContain('googleCalendarCreateEvent')
+    expect(JSON.stringify(hits.data)).toContain('googleCalendarListEvents')
+  })
+
+  it('keeps an explicitly granted write discoverable through mcp_search', async () => {
+    grantsStore.getForAssistantSystem.mockResolvedValue({
+      id: 'g-1', assistantId: 'a-1', connectorId: 'gcal', readAllowed: true,
+      allowedActions: ['googleCalendarCreateEvent'], grantedByUserId: 'u-1',
+      grantedAt: new Date(), updatedAt: new Date(),
+    })
+    const tools = new Map()
+    await injectMcpTools({
+      userId: 'u-1', assistantId: 'a-1', tools,
+      connectorStore: {
+        list: vi.fn().mockResolvedValue([
+          { id: 'ci-gc1', connectorId: 'gcal', name: 'Google Calendar', connected: true, url: null, custom: false, createdAt: new Date('2026-01-01T00:00:00Z') },
+        ]),
+        getCredentials: vi.fn().mockResolvedValue({ client_id: 'google_refresh', client_secret: 'refresh-primary' }),
+        getConfig: vi.fn().mockResolvedValue({}),
+        setConnected: vi.fn(),
+      } as never,
+      settingsStore: settingsStoreStub() as never,
+      assistantConnectorGrantsStore: grantsStore as never,
+      keepBuiltinsDirect: false,
+    })
+
+    const search = tools.get('mcp_search') as { execute: (i: unknown, c: unknown) => Promise<{ data: unknown }> }
+    const hits = await search.execute({ query: 'create calendar event', limit: 8 }, {} as never)
+    expect(JSON.stringify(hits.data)).toContain('googleCalendarCreateEvent')
+  })
+
+  it('does not let a provider grant expose a sibling Calendar account write', async () => {
+    grantsStore.getForAssistantSystem.mockImplementation(async (_assistantId: string, connectorId: string) =>
+      connectorId === 'gcal'
+        ? {
+            id: 'g-primary', assistantId: 'a-1', connectorId: 'gcal', readAllowed: true,
+            allowedActions: ['googleCalendarCreateEvent'], grantedByUserId: 'u-1',
+            grantedAt: new Date(), updatedAt: new Date(),
+          }
+        : null,
+    )
+    const tools = new Map()
+    await injectMcpTools({
+      userId: 'u-1', assistantId: 'a-1', tools,
+      connectorStore: {
+        list: vi.fn().mockResolvedValue([
+          { id: 'ci-gc1', connectorId: 'gcal', name: 'Personal', connected: true, url: null, custom: false, createdAt: new Date('2026-01-01T00:00:00Z') },
+          { id: 'ci-gc2', connectorId: 'gcal', name: 'Work', connected: true, url: null, custom: false, createdAt: new Date('2026-02-01T00:00:00Z') },
+        ]),
+        getCredentials: vi.fn().mockResolvedValue({ client_id: 'google_refresh', client_secret: 'refresh-primary' }),
+        getConfig: vi.fn().mockResolvedValue({}),
+        setConnected: vi.fn(),
+      } as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorInstanceStore: {
+        getCredentialsSystem: vi.fn(async (id: string) => ({ client_id: 'google_refresh', client_secret: `refresh-${id}` })),
+        updateCredentialsSystem: vi.fn(),
+        markHealth: vi.fn(),
+      } as never,
+      assistantConnectorGrantsStore: grantsStore as never,
+      keepBuiltinsDirect: true,
+    })
+
+    expect(tools.has('googleCalendarCreateEvent')).toBe(true)
+    expect([...tools.keys()].some((name) => name.startsWith('googleCalendarCreateEvent__'))).toBe(false)
+    expect([...tools.keys()].some((name) => name.startsWith('googleCalendarListEvents__'))).toBe(true)
   })
 })
 
