@@ -517,7 +517,10 @@ export function createShopifyTools(
     name: 'shopifyGetProduct',
     description:
       'Get a Shopify product by id, including description, SEO fields, and variants with SKU, price, and ' +
-      'inventory quantity. Accepts a numeric id or a gid://shopify/Product/... id.',
+      'inventory quantity. Also returns `template_suffix` - which page layout this product uses, null for the ' +
+      'theme default. That suffix can be reused on another product with shopifySetProductTemplate, which is how ' +
+      '"give my new product a page like this one" is answered without writing a new template. ' +
+      'Accepts a numeric id or a gid://shopify/Product/... id.',
     inputSchema: z.object({
       productId: z.string().describe('Product id (numeric or GID).'),
     }),
@@ -533,6 +536,12 @@ export function createShopifyTools(
           ...productRow(p),
           description: str(p, 'description'),
           url: str(p, 'onlineStoreUrl'),
+          // Which page layout this product uses. Absent until 2026-08-10, and
+          // its absence was load-bearing: "make one like that page" is the
+          // common ask, and nothing could answer WHICH template that page
+          // uses, so every route led to creating a new one instead of reusing.
+          // null means the theme default.
+          template_suffix: str(p, 'templateSuffix') ?? null,
           seo_title: str(obj(p, 'seo'), 'title'),
           seo_description: str(obj(p, 'seo'), 'description'),
           created_at: str(p, 'createdAt'),

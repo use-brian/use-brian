@@ -154,3 +154,52 @@ describe('[COMP:api/home-app-bundle-route] deleteBundle clears the previous vers
     ])
   })
 })
+
+describe('[COMP:api/home-app-bundle-route] DELETE cleans the bundle up with it', () => {
+  it('passes the acting user through, so the files layer can actually run', async () => {
+    // The cleanup is fire-and-forget behind `.catch`, and the route has already
+    // answered `{ ok: true }` by then - so when it fails, nothing anywhere says
+    // so. It failed for every delete: `deleteBundle` was called without
+    // `actingUserId`, which becomes `userId: ''`, and the files layer binds
+    // that into an RLS session variable where an empty string is not a uuid.
+    // Every removed app left its whole bundle behind, invisibly.
+    const { deleteHomeApp } = await import('../../db/home-apps-store.js')
+    vi.mocked(deleteHomeApp).mockResolvedValue({
+      ok: true,
+      app: { id: 'app-1', workspaceId: 'ws-1' },
+    } as never)
+    vi.mocked(listWorkspaceFilesUnderReservedPrefix).mockResolvedValue([
+      { path: '/apps/app-1/index.html' },
+    ] as never)
+
+    const deleted: unknown[][] = []
+    const filesApi = {
+      search: vi.fn(async () => []),
+      delete: vi.fn(async (...args: unknown[]) => {
+        deleted.push(args)
+        return { ok: true as const }
+      }),
+    }
+
+    const app = express()
+    app.use(express.json())
+    app.use((req, _res, next) => { (req as { userId?: string }).userId = 'user-9'; next() })
+    app.use('/api/home-apps', homeAppRoutes({
+      requireAuth: (_q: unknown, _s: unknown, n: () => void) => n(),
+      filesApi,
+      secret: 's',
+    } as never))
+
+    const res = await request(app).delete('/api/home-apps/app-1').send({ workspaceId: 'ws-1' })
+    expect(res.status).toBe(200)
+
+    // The cleanup is not awaited by the handler, so let its microtasks run
+    // before asserting - otherwise this passes for the wrong reason.
+    await new Promise((r) => setTimeout(r, 0))
+
+    // The RLS context must carry a real user id, never ''.
+    const ctx = deleted[0]?.[0] as { userId?: string } | undefined
+    expect(ctx?.userId).toBe('user-9')
+    expect(deleted[0]?.[1]).toBe('/apps/app-1/index.html')
+  })
+})

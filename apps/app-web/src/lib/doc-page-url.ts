@@ -131,27 +131,15 @@ export function pageIdFromInAppHref(
  *                       redirects to `/p`, but the segment is still classified)
  *   - `null`            the workspace root, a non-workspace path, or nullish
  */
-export type WorkspaceSurface =
-  | "p"
-  | "office"
-  | "brain"
-  | "studio"
-  | "workflow"
-  | "feed"
-  | "tasks"
-  | "crm"
-  | "computer"
-  | "chat"
-  | "apps"
-  | "goals"
-  | "approvals"
-  | "recordings"
-  | "inbox";
-
-/** Matches the first path segment after `/w/<workspaceId>/`. */
-const SURFACE_PATH_RE = /^\/w\/[^/]+\/([^/?#]+)/;
-
-const KNOWN_SURFACES: ReadonlySet<string> = new Set([
+/**
+ * Every first path segment under `/w/<workspaceId>/`.
+ *
+ * The array is the source and the type is derived, not the other way round:
+ * this was a union PLUS a hand-copied `KNOWN_SURFACES` set, and the two could
+ * disagree silently — a surface added to the type but missed in the set parses
+ * as "no surface", which reads as a routing bug nowhere near this file.
+ */
+export const WORKSPACE_SURFACES = [
   "p",
   "office",
   "brain",
@@ -167,7 +155,15 @@ const KNOWN_SURFACES: ReadonlySet<string> = new Set([
   "approvals",
   "recordings",
   "inbox",
-]);
+  "shopify",
+] as const;
+
+export type WorkspaceSurface = (typeof WORKSPACE_SURFACES)[number];
+
+/** Matches the first path segment after `/w/<workspaceId>/`. */
+const SURFACE_PATH_RE = /^\/w\/[^/]+\/([^/?#]+)/;
+
+const KNOWN_SURFACES: ReadonlySet<string> = new Set(WORKSPACE_SURFACES);
 
 /**
  * Classify a workspace pathname into its active top-level surface. Returns

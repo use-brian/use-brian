@@ -48,6 +48,12 @@ export const BUILTIN_HOME_APP_KEYS = [
   'feed',
   'browsers',
   'chat',
+  // Added 2026-08-10. NOT appended to existing workspaces by migration, unlike
+  // Office: `HOME_APPS_MAX` is 7 and this is the 8th, so they cannot all sit on
+  // one strip anyway — and a store app on the Home of a workspace with no store
+  // is noise. It ships discoverable in Studio → Mini apps "Hidden" and the page
+  // itself explains what to connect. See docs/architecture/integrations/shopify.md.
+  'shopify',
 ] as const
 
 export type HomeAppKey = (typeof BUILTIN_HOME_APP_KEYS)[number]

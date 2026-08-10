@@ -488,6 +488,7 @@ export async function getProduct(auth: ShopifyAuth, productId: string): Promise<
         id title handle status vendor productType tags totalInventory
         description
         onlineStoreUrl
+        templateSuffix
         seo { title description }
         createdAt updatedAt
         variants(first: 50) {

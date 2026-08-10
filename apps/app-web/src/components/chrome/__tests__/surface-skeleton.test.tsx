@@ -16,24 +16,20 @@ import {
   surfaceSkeletonKind,
   type SurfaceSkeletonKind,
 } from "@/components/chrome/surface-skeleton";
-import type { WorkspaceSurface } from "@/lib/doc-page-url";
+import { WORKSPACE_SURFACES } from "@/lib/doc-page-url";
 
-// Mirrors the `WorkspaceSurface` union. Kept as a literal (not derived) on
-// purpose: adding a surface to the union must force a decision here.
-const ALL_SURFACES: WorkspaceSurface[] = [
-  "p",
-  "brain",
-  "studio",
-  "workflow",
-  "feed",
-  "tasks",
-  "crm",
-  "computer",
-  "goals",
-  "approvals",
-  "recordings",
-  "inbox",
-];
+// DERIVED from the union's source array, not copied.
+//
+// This was a literal, with a comment saying that was deliberate so "adding a
+// surface must force a decision here". It did the opposite: nothing errors
+// when the union grows, so the list just silently tested fewer surfaces — by
+// 2026-08-10 it was four behind (`office`, `chat`, `apps`, `shopify`) while
+// still claiming to cover every one.
+//
+// The forcing function is the exhaustive `switch` in `surfaceSkeletonKind`,
+// which fails to compile on an unhandled surface. This list's job is only to
+// assert the mapping at runtime, so it should track the real vocabulary.
+const ALL_SURFACES = WORKSPACE_SURFACES;
 
 const KINDS: SurfaceSkeletonKind[] = ["page", "list", "grid", "rail", "brain"];
 
