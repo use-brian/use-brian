@@ -1,11 +1,9 @@
 /**
  * [COMP:app-web/profile-management] Which surfaces a profile shows.
  *
- * A profile is only "ONE cookie jar" on the CLOUD backend, where the vault
- * holds its logins. A `local` ("My Browser") profile borrows the logins of the
- * user's real Chrome: nothing is captured, nothing is stored, and the vault is
- * never read. Showing it the vault surface tells the user two false things —
- * that they must sign in through us, and that they have no sites signed in.
+ * A Remote profile leads to the live sign-in + vault flow. A Local profile
+ * leads to extension pairing + local-control scope. Mixing those surfaces
+ * makes both profile types read as half-configured.
  *
  * Pure decision table so it is testable in this package's no-DOM vitest; the
  * JSX wiring itself stays web-QA.
@@ -36,7 +34,7 @@ function profile(overrides: Partial<BrowserProfile> = {}): BrowserProfile {
 }
 
 describe("[COMP:app-web/profile-management] Profile surfaces by backend", () => {
-  it("offers the vault surface on a cloud profile (the vault is what holds its logins)", () => {
+  it("offers live sign-in and the vault on a Remote profile", () => {
     expect(profileSurfaces(profile({ defaultBackend: "cloud" }))).toEqual({
       signIn: true,
       vaultSessions: true,
@@ -46,7 +44,7 @@ describe("[COMP:app-web/profile-management] Profile surfaces by backend", () => 
     });
   });
 
-  it("replaces the vault surface with the own-browser note on a My Browser profile", () => {
+  it("offers pairing and local control on a Local profile", () => {
     expect(profileSurfaces(profile({ defaultBackend: "local" }))).toEqual({
       signIn: false,
       vaultSessions: false,

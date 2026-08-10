@@ -7621,7 +7621,7 @@ export const en = {
     profiles: {
       title: "Browser profiles",
       description:
-        "A profile is a browsing identity: one cookie jar your assistant browses as, signed into your sites. New profiles are private to you; sharing is an explicit downgrade. Enable a profile per assistant to let it browse as that identity.",
+        "Profiles control which browser identity an assistant uses. Choose Remote to save cloud sign-ins or Local to pair your own browser. New profiles are private to you; sharing is an explicit downgrade.",
       createTitle: "Create a browser profile",
       typeLabel: "Browser location",
       remoteTitle: "Remote browser",
@@ -7630,7 +7630,7 @@ export const en = {
       localTitle: "Local browser",
       localDescription:
         "Your own Chrome or Edge profile. Pair the extension to use its existing sign-ins.",
-      empty: "No browser profiles yet. Create one, then sign in to sites during a browser task to fill it.",
+      empty: "No browser profiles yet. Create a Remote profile for saved cloud sign-ins, or a Local profile to pair your browser.",
       notConfigured: "Browser profiles are not configured on this deployment.",
       loadFailed: "Could not load profiles. Please try again.",
       createPlaceholder: "New profile name (e.g. Personal, Company IG)",
@@ -7708,12 +7708,12 @@ export const en = {
         "The encrypted username and password for {site} will be deleted. Any already-saved browser session remains until you revoke it separately.",
       loginLabel: "Sign in to a site",
       loginPlaceholder: "instagram.com or a full URL",
-      loginAction: "Open sign-in browser",
+      loginAction: "Open live sign-in",
       loginOpening: "Opening...",
       loginFailed:
         "Could not open the sign-in browser. Only the profile's owner can sign in, and cloud browsing must be configured on this deployment.",
       loginHint:
-        "Opens the site in a cloud browser you control. Sign in there and save the session into this profile; your password goes to the site only, never to us.",
+        "Opens a live remote browser you control. Sign in there, then save its cookies into this profile. Your password goes only to the site, never through us.",
       captureLabel: "Save this login from my browser",
       capturePlaceholder: "instagram.com or a full URL",
       captureAction: "Save this login",
