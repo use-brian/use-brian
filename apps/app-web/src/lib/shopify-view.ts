@@ -11,7 +11,7 @@
  * [COMP:app-web/shopify-app]
  */
 
-export const SHOPIFY_SECTIONS = ["draft", "inventory", "analyse"] as const;
+export const SHOPIFY_SECTIONS = ["draft", "inventory", "analyse", "campaign"] as const;
 export type ShopifySection = (typeof SHOPIFY_SECTIONS)[number];
 
 /** Where the surface opens when the URL says nothing. */
