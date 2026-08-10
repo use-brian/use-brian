@@ -43,6 +43,35 @@ export type BrowserNavigateResult = z.infer<typeof BrowserNavigateResultSchema>
 export const BrowserUrlResultSchema = z.object({ url: z.string(), title: z.string().default('') })
 export type BrowserUrlResult = z.infer<typeof BrowserUrlResultSchema>
 
+/** Opaque task-local tab handle. Raw Chrome tab ids never cross this seam. */
+export const BrowserTabSchema = z.object({
+  id: z.string().min(1),
+  title: z.string(),
+  url: z.string(),
+  active: z.boolean(),
+  taskOwned: z.boolean(),
+})
+export type BrowserTab = z.infer<typeof BrowserTabSchema>
+
+export const BrowserTabListResultSchema = z.object({
+  tabs: z.array(BrowserTabSchema),
+  activeTabId: z.string().nullable(),
+})
+export type BrowserTabListResult = z.infer<typeof BrowserTabListResultSchema>
+
+export const BrowserTabSelectionResultSchema = z.object({
+  tabId: z.string(),
+  url: z.string(),
+  title: z.string().default(''),
+})
+export type BrowserTabSelectionResult = z.infer<typeof BrowserTabSelectionResultSchema>
+
+export const BrowserTabCloseResultSchema = z.object({
+  closed: z.boolean(),
+  activeTabId: z.string().nullable(),
+})
+export type BrowserTabCloseResult = z.infer<typeof BrowserTabCloseResultSchema>
+
 // ── Call context ───────────────────────────────────────────────
 
 /** Identity a browser op executes under. Derived from ToolContext — never from model input. */
@@ -85,6 +114,7 @@ export type BrowserCallContext = {
  */
 export const BROWSER_BACKEND_ERROR_CODES = [
   'no_extension',   // no paired extension connection at the relay
+  'profile_required', // local browsing has no resolved profile/connection identity
   'not_configured', // backend has no transport/provider wired (open-core boot without relay/E2B)
   'no_active_browser', // target-less op attempted before a URL-bearing browser starter
   'timeout',        // the extension/sandbox did not answer in time
@@ -93,6 +123,8 @@ export const BROWSER_BACKEND_ERROR_CODES = [
   'detached',       // Chrome ended the CDP session (banner cancelled, DevTools, crash)
   'consent_denied', // the user declined the extension's per-tab Allow prompt
   'no_eligible_tab', // the active tab is one Chrome will not attach the debugger to
+  'tab_not_allowed', // opaque handle is outside the profile's current control scope
+  'tab_limit',      // the task already owns the maximum number of created tabs
   'site_mismatch',  // the allowed tab is not on the site captureState was asked for
   'no_browser_permission', // the optional `debugger` permission has not been granted yet
   'firefox_companion_missing', // Firefox extension cannot reach the installed desktop host
@@ -140,6 +172,11 @@ export interface BrowserProvider {
   click(ctx: BrowserCallContext, ref: string): Promise<void>
   type(ctx: BrowserCallContext, ref: string, text: string): Promise<void>
   currentUrl(ctx: BrowserCallContext): Promise<BrowserUrlResult>
+  /** Local multi-tab operations. Cloud providers intentionally omit them. */
+  openTab?(ctx: BrowserCallContext, url: string): Promise<BrowserTabSelectionResult>
+  listTabs?(ctx: BrowserCallContext): Promise<BrowserTabListResult>
+  switchTab?(ctx: BrowserCallContext, tabId: string): Promise<BrowserTabSelectionResult>
+  closeTab?(ctx: BrowserCallContext, tabId: string): Promise<BrowserTabCloseResult>
   /**
    * Capture the live authenticated session for `site` and return it in the
    * vault's bundle shape (D1), so a login can move from the browser the user
@@ -173,6 +210,8 @@ export type RelayCommandResult =
 export type RelayCommandTransport = {
   send(params: {
     userId: string
+    /** The Use Brian profile whose paired local browser must receive this command. */
+    browserProfileId: string
     op: string
     args?: Record<string, unknown>
   }): Promise<RelayCommandResult>
@@ -350,6 +389,14 @@ export type SandboxBrowser = {
   snapshot(): Promise<BrowserSnapshot>
   click(ref: string): Promise<void>
   type(ref: string, text: string): Promise<void>
+  /**
+   * Trusted auth-lane fill. This deliberately does NOT exist on
+   * `BrowserProvider`, the model-facing browser seam: only host-owned code
+   * that already holds a concrete sandbox browser can supply a secret. The
+   * provider must keep the plaintext out of command strings and observable
+   * action traces.
+   */
+  typeSecret?(ref: string, secret: string): Promise<void>
   currentUrl(): Promise<BrowserUrlResult>
   captureStorageState(site: string): Promise<SessionBundle>
   injectStorageState(bundle: SessionBundle): Promise<void>

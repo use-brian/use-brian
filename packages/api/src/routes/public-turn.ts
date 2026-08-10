@@ -99,6 +99,8 @@ import { query } from '../db/client.js'
  *  object straight through. */
 export type PublicTurnDeps = {
   provider: LLMProvider
+  /** OSS workspace custom endpoint default for the main response only. */
+  resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
   configuredProviders?: ReadonlySet<string>
   tools: Map<string, Tool>
   systemPrompt: string
@@ -619,6 +621,10 @@ export async function executePublicTurn(
         deps.configuredProviders,
       )
     : resolveModel(assistant.apiModelAlias, workspacePlan, budgetStatus)
+  const customLlmRuntime = assistant.workspaceId && deps.resolveWorkspaceCustomLlm
+    ? await deps.resolveWorkspaceCustomLlm({ workspaceId: assistant.workspaceId, allowDefault: true })
+    : null
+  const turnProvider = customLlmRuntime?.provider ?? deps.provider
 
   // ── 7. Persist user message ──────────────────────────────
   const userContent: ContentBlock[] = [{ type: 'text', text: body.message }]
@@ -1061,8 +1067,10 @@ export async function executePublicTurn(
 
   try {
     for await (const event of queryLoop({
-      provider: deps.provider,
+      provider: turnProvider,
       model,
+      maxTokens: customLlmRuntime?.maxTokens,
+      inputTokenLimit: customLlmRuntime?.inputTokenLimit,
       systemPrompt: fullSystemPrompt,
       messages,
       tools: baseTools,
@@ -1161,7 +1169,7 @@ export async function executePublicTurn(
   // pivot to the shadow. See migration 100 and
   // docs/architecture/platform/analytics.md → "Actor vs billing party".
   if (deps.usageStore && totalUsage && responseModel) {
-    const cost = calculateCost(responseModel, totalUsage)
+    const cost = customLlmRuntime ? 0 : calculateCost(responseModel, totalUsage)
     deps.usageStore.recordUsage({
       userId: ownerId,
       actorUserId: user.id,
@@ -1175,6 +1183,7 @@ export async function executePublicTurn(
       actualCostUsd: cost,
       source: 'api',
       userMessageId: storedUserMsg.id,
+      providerKeySource: customLlmRuntime ? 'user' : 'platform',
     }).catch((err) => {
       // Mirror chat.ts: log AND surface to analytics so the
       // failure isn't silent. The previous version only console

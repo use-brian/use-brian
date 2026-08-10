@@ -295,7 +295,7 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
     }))
   })
 
-  it('multi-account: write grants are looked up per mailbox with legacy provider fallback', async () => {
+  it('multi-account: only explicitly granted mailbox writes are discoverable', async () => {
     const primary = imapConnectorRow()
     const second = {
       ...imapConnectorRow(), id: 'inst-imap-2', name: 'ops@harborlane.example',
@@ -328,10 +328,13 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
     })
 
     const sends = [...tools.entries()].filter(([name]) => name === 'imapSendMessage' || name.startsWith('imapSendMessage__'))
+    const searches = [...tools.keys()].filter((name) => name === 'imapSearchMessages' || name.startsWith('imapSearchMessages__'))
+    expect(sends).toHaveLength(1)
+    expect(searches).toHaveLength(2)
     await sends[0][1].execute({ to: ['x@y.z'], subject: 's', body: 'b' }, {} as never)
-    await expect(sends[1][1].execute({ to: ['x@y.z'], subject: 's', body: 'b' }, {} as never)).rejects.toThrow(/cannot perform/)
-    expect(getForAssistantSystem).toHaveBeenCalledWith('a-1', 'imap:inst-imap-1', 'imap')
-    expect(getForAssistantSystem).toHaveBeenCalledWith('a-1', 'imap:inst-imap-2', 'imap')
+    expect(getForAssistantSystem).toHaveBeenCalledWith('a-1', 'imap:inst-imap-1')
+    expect(getForAssistantSystem).toHaveBeenCalledWith('a-1', 'imap:inst-imap-2')
+    expect(getForAssistantSystem).not.toHaveBeenCalledWith('a-1', 'imap')
   })
 
   it('workspace grant overlay binds a tool set for every exposed mailbox from the winning grantor and no others', async () => {

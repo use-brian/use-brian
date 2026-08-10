@@ -43,6 +43,14 @@ export type ModelMenu = {
   classes: Record<string, MenuModel[]>;
   profiles: MeteredProfile[];
   defaults: WorkspaceModelDefault[];
+  customEndpoints: Array<{
+    id: string;
+    selector: string;
+    name: string;
+    modelId: string;
+    contextWindow: number;
+    isDefault: boolean;
+  }>;
   meteredBillingAvailable: boolean;
 };
 

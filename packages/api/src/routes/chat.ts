@@ -265,6 +265,8 @@ type WebChatOptions = {
    * app alongside `llmProviderSettingsStore`.
    */
   buildWorkspaceProvider?: (apiKey: string) => LLMProvider
+  /** OSS workspace custom endpoint resolver. Main-response turns only. */
+  resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
   systemPrompt: string
   tools: Map<string, Tool>
   memoryStore: MemoryStore
@@ -2118,6 +2120,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // platform key, which would silently charge them.
       let turnProvider: LLMProvider = options.provider
       let usedByoKey = false
+      let customLlmRuntime: import('../custom-llm-runtime.js').ResolvedWorkspaceCustomLlm | null = null
       if (
         assistant.workspaceId &&
         options.llmProviderSettingsStore &&
@@ -4283,7 +4286,6 @@ export function chatRoutes(options: WebChatOptions): Router {
 
       // Add memory tools (with analytics callbacks)
       const { saveMemory, getMemory, deleteMemory } = createMemoryTools(options.memoryStore, {
-        userPlan,
         entityStore: options.entitiesStore,
         entityLinksStore: options.entityLinksStore,
         recallBuffer,
@@ -5003,17 +5005,50 @@ export function chatRoutes(options: WebChatOptions): Router {
         }
       }
 
+      const explicitCustomSelector = requestedModel?.startsWith('custom:')
+        ? requestedModel
+        : undefined
+      const policyRequestedModel = explicitCustomSelector ? undefined : requestedModel
       const resolvedModel = meteredTurn
         ? meteredTurn.alias
         : researchMode && budgetStatus !== 'downgraded'
           ? resolveModel('research', 'max_5x', budgetStatus)
-          : resolveModel(requestedModel, userPlan, budgetStatus)
+          : resolveModel(policyRequestedModel, userPlan, budgetStatus)
       // Substitute a configured model when the default (Gemini) has no key —
       // lets a Qwen-only deployment serve chat by default. No-op when Gemini
       // is configured, or when the caller doesn't pass configuredProviders.
       const model = options.configuredProviders
         ? ensureServableModel(resolvedModel, options.configuredProviders)
         : resolvedModel
+
+      if (assistant.workspaceId && options.resolveWorkspaceCustomLlm && !meteredTurn) {
+        customLlmRuntime = await options.resolveWorkspaceCustomLlm({
+          workspaceId: assistant.workspaceId,
+          requestedModel: explicitCustomSelector,
+          allowDefault: true,
+        })
+        if (explicitCustomSelector && !customLlmRuntime) {
+          res.status(400).json({
+            error: 'custom_model_unavailable',
+            message: 'This custom model endpoint is unavailable in this workspace.',
+          })
+          return
+        }
+        if (customLlmRuntime) {
+          if (userContentBlocks.some((block) => block.type === 'image')) {
+            res.status(400).json({
+              error: 'custom_model_media_unsupported',
+              message: 'Custom model endpoints currently support text and tools only. Remove the inline image or choose a built-in model.',
+            })
+            return
+          }
+          // A selected custom endpoint is authoritative. It supersedes both
+          // the platform provider and a workspace Gemini key, and never falls
+          // back to either if its request fails.
+          turnProvider = customLlmRuntime.provider
+          usedByoKey = true
+        }
+      }
 
       // Reset worker manager — prevents stale workers from prior requests blocking Phase 4b
       options.workerManager?.reset()
@@ -5858,6 +5893,8 @@ export function chatRoutes(options: WebChatOptions): Router {
           // response runs against that provider (else the platform provider).
           provider: turnProvider,
           model,
+          maxTokens: customLlmRuntime?.maxTokens,
+          inputTokenLimit: customLlmRuntime?.inputTokenLimit,
           systemPrompt: systemPromptWithPreflight,
           messages,
           tools: loopTools,
@@ -6851,6 +6888,16 @@ export function chatRoutes(options: WebChatOptions): Router {
                 sessionId: session.id,
                 role: 'assistant',
                 content: [{ type: 'text', text: synthesised }],
+                // Stamp the ANSWERING assistant, exactly like the normal
+                // turn write above. A fallback is still that assistant's
+                // reply: unstamped, a room renders it under the session's
+                // bound (usually primary) assistant, and `toStampedMessages`
+                // skips the `[Name]:` foreign-voice prefix — so the next
+                // turn reads another assistant's words as its OWN. That is
+                // how the 2026-08-09 Snapio room blamed the primary for a
+                // @CFO turn and then inherited "I'd need QuickBooks" as its
+                // own position. See db/sessions.ts → `assistantVoices`.
+                senderAssistantId: assistant.id,
               })
             } else {
               sendEvent('text_delta', {
@@ -6905,6 +6952,8 @@ export function chatRoutes(options: WebChatOptions): Router {
               sessionId: session.id,
               role: 'assistant',
               content: [{ type: 'text', text: recovered.text }],
+              // Same attribution contract as the empty-turn synthesis above.
+              senderAssistantId: assistant.id,
             })
             await recordOverheadUsage({
               usageStore: options.usageStore,

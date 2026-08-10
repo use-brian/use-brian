@@ -33,6 +33,14 @@ const getGoogleTask = vi.fn(
 const getCalendarEvent = vi.fn(
   async (_token: string, eventId: string, _calendarId: string) => ({ id: eventId, summary: 'Planning' }),
 )
+const getDriveFileContentWithMetadata = vi.fn(async (_token: string, _fileId: string, _mime?: string) => ({
+  file: {
+    id: 'drive-file-1', name: 'Renewal playbook',
+    mimeType: 'application/vnd.google-apps.document', version: '128',
+    modifiedTime: '2026-08-10T08:30:00.000Z',
+  },
+  content: 'Renewals require finance approval.',
+}))
 vi.mock('../../google/client.js', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   refreshGoogleAccessToken: (refreshToken: string, clientId: string, clientSecret: string) =>
@@ -41,6 +49,34 @@ vi.mock('../../google/client.js', async (importOriginal) => ({
     getGoogleTask(token, taskListId, taskId),
   getCalendarEvent: (token: string, eventId: string, calendarId: string) =>
     getCalendarEvent(token, eventId, calendarId),
+  getDriveFileContentWithMetadata: (token: string, fileId: string, mime?: string) =>
+    getDriveFileContentWithMetadata(token, fileId, mime),
+}))
+
+const enqueueGDriveLazyEnrichment = vi.fn(async (_input: unknown) => ({ enqueued: true, jobId: 'job-1' }))
+vi.mock('../../db/gdrive-enrichment-store.js', () => ({
+  enqueueGDriveLazyEnrichment: (input: unknown) => enqueueGDriveLazyEnrichment(input),
+}))
+
+type CatalogPolicyStub = {
+  configured: boolean
+  syncScope: string | null
+  status: string | null
+  selectedFolders: Array<{ id: string; name: string }>
+  allowed: boolean
+}
+type CatalogRuntimeStub = Omit<CatalogPolicyStub, 'allowed'>
+const getGDriveCatalogReadPolicy = vi.fn<(input: unknown) => Promise<CatalogPolicyStub>>(async () => ({
+  configured: false, syncScope: null, status: null, selectedFolders: [], allowed: true,
+}))
+const getGDriveCatalogRuntimeScope = vi.fn<(input: unknown) => Promise<CatalogRuntimeStub>>(async () => ({
+  configured: false, syncScope: null, status: null, selectedFolders: [],
+}))
+const listGDriveCatalogFiles = vi.fn<(input: unknown) => Promise<Array<Record<string, unknown>>>>(async () => [])
+vi.mock('../../db/gdrive-catalog-store.js', () => ({
+  getGDriveCatalogReadPolicy: (input: unknown) => getGDriveCatalogReadPolicy(input),
+  getGDriveCatalogRuntimeScope: (input: unknown) => getGDriveCatalogRuntimeScope(input),
+  listGDriveCatalogFiles: (input: unknown) => listGDriveCatalogFiles(input),
 }))
 
 // Custom remote MCP discovery / calls — stubbed so the tests never hit the
@@ -80,6 +116,7 @@ import {
 } from '../inject.js'
 import { buildUnavailableCapabilitiesPrompt } from '../../routes/route-helpers.js'
 import { packMsGraphTokens } from '../../msgraph/token.js'
+import { packGoogleRefreshCredential } from '../../google/client.js'
 
 function settingsStoreStub() {
   // Generous stub — the no-connector path touches few of these, but
@@ -98,6 +135,16 @@ beforeEach(() => {
   callRemoteMcpTool.mockReset()
   discoverCliServer.mockReset()
   callCliMcpTool.mockReset()
+  getGDriveCatalogReadPolicy.mockReset()
+  getGDriveCatalogReadPolicy.mockResolvedValue({
+    configured: false, syncScope: null, status: null, selectedFolders: [], allowed: true,
+  })
+  getGDriveCatalogRuntimeScope.mockReset()
+  getGDriveCatalogRuntimeScope.mockResolvedValue({
+    configured: false, syncScope: null, status: null, selectedFolders: [],
+  })
+  listGDriveCatalogFiles.mockReset()
+  listGDriveCatalogFiles.mockResolvedValue([])
 })
 
 describe('[COMP:api/mcp-inject] injectMcpTools', () => {
@@ -965,8 +1012,8 @@ describe('[COMP:api/mcp-inject] per-assistant write-grant gate', () => {
   // The registry-derived `gateToolsOnActionGrants` wrapper must ride the
   // REAL injection path for every built-in with write tools — a missing
   // wire here is exactly the dead-checkbox drift (Studio shows grant
-  // boxes the runtime never enforces). Deny paths only: the gate throws
-  // before any network client is reached, so no HTTP mocks are needed.
+  // boxes the runtime never enforces). Missing grants must remove writes
+  // before either direct injection or the folded search index is built.
   const grantsStore = {
     getForAssistantSystem: vi.fn(),
     listForAssistant: vi.fn(),
@@ -985,7 +1032,7 @@ describe('[COMP:api/mcp-inject] per-assistant write-grant gate', () => {
     getConnectorConfig.mockReturnValue(undefined)
   })
 
-  async function injectWith(connectorRows: unknown[]) {
+  async function injectWith(connectorRows: unknown[], keepBuiltinsDirect = true) {
     const tools = new Map()
     await injectMcpTools({
       userId: 'u-1',
@@ -999,38 +1046,146 @@ describe('[COMP:api/mcp-inject] per-assistant write-grant gate', () => {
       } as never,
       settingsStore: settingsStoreStub() as never,
       assistantConnectorGrantsStore: grantsStore as never,
-      keepBuiltinsDirect: true,
+      keepBuiltinsDirect,
     })
     return tools
   }
 
-  it('denies an ungranted gmailSendMessage at the tool boundary', async () => {
+  it('does not inject an ungranted gmailSendMessage', async () => {
     const tools = await injectWith([
       { id: 'ci-gm1', connectorId: 'gmail', name: 'Gmail', connected: true, url: null, custom: false, createdAt: new Date('2026-01-01T00:00:00Z') },
     ])
-    const send = tools.get('gmailSendMessage') as { execute: (i: unknown, c: unknown) => Promise<unknown> }
-    expect(send).toBeTruthy()
-    await expect(send.execute({ to: 'x@example.com', subject: 's', body: 'b' }, {})).rejects.toThrow(/no grant for gmail/)
+    expect(tools.has('gmailSendMessage')).toBe(false)
     expect(grantsStore.getForAssistantSystem).toHaveBeenCalledWith('a-1', 'gmail')
   })
 
-  it('denies an ungranted googleTasksCreateTask (gcal-connector write) at the tool boundary', async () => {
+  it('does not inject an ungranted googleTasksCreateTask', async () => {
     const tools = await injectWith([
       { id: 'ci-gc1', connectorId: 'gcal', name: 'Google Calendar', connected: true, url: null, custom: false, createdAt: new Date('2026-01-01T00:00:00Z') },
     ])
-    const create = tools.get('googleTasksCreateTask') as { execute: (i: unknown, c: unknown) => Promise<unknown> }
-    expect(create).toBeTruthy()
-    await expect(create.execute({ title: 't' }, {})).rejects.toThrow(/no grant for gcal/)
+    expect(tools.has('googleTasksCreateTask')).toBe(false)
   })
 
-  it('denies an ungranted githubCreateIssue at the tool boundary', async () => {
+  it('does not inject an ungranted githubCreateIssue', async () => {
     const tools = await injectWith([
       { id: 'ci-gh1', connectorId: 'github', name: 'GitHub', connected: true, url: null, custom: false, createdAt: new Date('2026-01-01T00:00:00Z') },
     ])
-    const create = tools.get('githubCreateIssue') as { execute: (i: unknown, c: unknown) => Promise<unknown> }
-    expect(create).toBeTruthy()
-    await expect(create.execute({ owner: 'o', repo: 'r', title: 't' }, {})).rejects.toThrow(/no grant for github/)
+    expect(tools.has('githubCreateIssue')).toBe(false)
     expect(grantsStore.getForAssistantSystem).toHaveBeenCalledWith('a-1', 'github')
+  })
+
+  it('keeps an ungranted Calendar write out of mcp_search discovery', async () => {
+    const tools = await injectWith([
+      { id: 'ci-gc1', connectorId: 'gcal', name: 'Google Calendar', connected: true, url: null, custom: false, createdAt: new Date('2026-01-01T00:00:00Z') },
+    ], false)
+    const search = tools.get('mcp_search') as { execute: (i: unknown, c: unknown) => Promise<{ data: unknown }> }
+    const hits = await search.execute({ query: 'create calendar event', limit: 8 }, {} as never)
+
+    expect(JSON.stringify(hits.data)).not.toContain('googleCalendarCreateEvent')
+    expect(JSON.stringify(hits.data)).toContain('googleCalendarListEvents')
+  })
+
+  it('keeps an explicitly granted write discoverable through mcp_search', async () => {
+    grantsStore.getForAssistantSystem.mockResolvedValue({
+      id: 'g-1', assistantId: 'a-1', connectorId: 'gcal', readAllowed: true,
+      allowedActions: ['googleCalendarCreateEvent'], grantedByUserId: 'u-1',
+      grantedAt: new Date(), updatedAt: new Date(),
+    })
+    const tools = new Map()
+    await injectMcpTools({
+      userId: 'u-1', assistantId: 'a-1', tools,
+      connectorStore: {
+        list: vi.fn().mockResolvedValue([
+          { id: 'ci-gc1', connectorId: 'gcal', name: 'Google Calendar', connected: true, url: null, custom: false, createdAt: new Date('2026-01-01T00:00:00Z') },
+        ]),
+        getCredentials: vi.fn().mockResolvedValue({ client_id: 'google_refresh', client_secret: 'refresh-primary' }),
+        getConfig: vi.fn().mockResolvedValue({}),
+        setConnected: vi.fn(),
+      } as never,
+      settingsStore: settingsStoreStub() as never,
+      assistantConnectorGrantsStore: grantsStore as never,
+      keepBuiltinsDirect: false,
+    })
+
+    const search = tools.get('mcp_search') as { execute: (i: unknown, c: unknown) => Promise<{ data: unknown }> }
+    const hits = await search.execute({ query: 'create calendar event', limit: 8 }, {} as never)
+    expect(JSON.stringify(hits.data)).toContain('googleCalendarCreateEvent')
+  })
+
+  it('does not let a provider grant expose a sibling Calendar account write', async () => {
+    grantsStore.getForAssistantSystem.mockImplementation(async (_assistantId: string, connectorId: string) =>
+      connectorId === 'gcal'
+        ? {
+            id: 'g-primary', assistantId: 'a-1', connectorId: 'gcal', readAllowed: true,
+            allowedActions: ['googleCalendarCreateEvent'], grantedByUserId: 'u-1',
+            grantedAt: new Date(), updatedAt: new Date(),
+          }
+        : null,
+    )
+    const tools = new Map()
+    await injectMcpTools({
+      userId: 'u-1', assistantId: 'a-1', tools,
+      connectorStore: {
+        list: vi.fn().mockResolvedValue([
+          { id: 'ci-gc1', connectorId: 'gcal', name: 'Personal', connected: true, url: null, custom: false, createdAt: new Date('2026-01-01T00:00:00Z') },
+          { id: 'ci-gc2', connectorId: 'gcal', name: 'Work', connected: true, url: null, custom: false, createdAt: new Date('2026-02-01T00:00:00Z') },
+        ]),
+        getCredentials: vi.fn().mockResolvedValue({ client_id: 'google_refresh', client_secret: 'refresh-primary' }),
+        getConfig: vi.fn().mockResolvedValue({}),
+        setConnected: vi.fn(),
+      } as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorInstanceStore: {
+        getCredentialsSystem: vi.fn(async (id: string) => ({ client_id: 'google_refresh', client_secret: `refresh-${id}` })),
+        updateCredentialsSystem: vi.fn(),
+        markHealth: vi.fn(),
+      } as never,
+      assistantConnectorGrantsStore: grantsStore as never,
+      keepBuiltinsDirect: true,
+    })
+
+    expect(tools.has('googleCalendarCreateEvent')).toBe(true)
+    expect([...tools.keys()].some((name) => name.startsWith('googleCalendarCreateEvent__'))).toBe(false)
+    expect([...tools.keys()].some((name) => name.startsWith('googleCalendarListEvents__'))).toBe(true)
+  })
+})
+
+describe('[COMP:api/mcp-inject] Google Drive BYO credential refresh', () => {
+  afterEach(() => {
+    getConnectorConfig.mockReset()
+    getConnectorConfig.mockReturnValue(undefined)
+  })
+
+  it('uses the encrypted customer app pair without deployment Google config', async () => {
+    getConnectorConfig.mockReturnValue(undefined)
+    refreshGoogleAccessToken.mockClear()
+    const secret = packGoogleRefreshCredential({
+      refreshToken: 'customer-refresh',
+      appClientId: 'customer-client',
+      appClientSecret: 'customer-secret',
+    })
+    const connectorStore = {
+      list: vi.fn().mockResolvedValue([
+        { id: 'drive-1', connectorId: 'gdrive', name: 'Company Drive', connected: true, url: null, custom: false, config: { driveAccessMode: 'full_drive_readonly' }, createdAt: new Date(0) },
+      ]),
+      getCredentials: vi.fn().mockResolvedValue({ client_id: 'google_refresh', client_secret: secret }),
+      getConfig: vi.fn().mockResolvedValue({ driveAccessMode: 'full_drive_readonly' }),
+      setConnected: vi.fn(),
+    }
+    const tools = new Map()
+
+    await injectMcpTools({
+      userId: 'u-1', assistantId: 'a-1', tools,
+      connectorStore: connectorStore as never,
+      settingsStore: settingsStoreStub() as never,
+      keepBuiltinsDirect: true,
+    })
+
+    expect(refreshGoogleAccessToken).toHaveBeenCalledWith(
+      'customer-refresh', 'customer-client', 'customer-secret',
+    )
+    expect(tools.has('googleDriveListFiles')).toBe(true)
+    expect(tools.has('googleDriveGetFileContent')).toBe(true)
   })
 })
 
@@ -1137,6 +1292,125 @@ describe('[COMP:api/mcp-inject] grant overlay instance binding', () => {
     expect(names).toContain('gmailSendMessage')
     expect(names.some((n) => n.startsWith('googleCalendar'))).toBe(false)
     expect(names.some((n) => n.startsWith('googleTasks'))).toBe(false)
+  })
+
+  it('queues one versioned enrichment after a full-Drive content read', async () => {
+    const connectorStore = {
+      list: vi.fn().mockResolvedValue([]),
+      getCredentials: vi.fn(),
+      getConfig: vi.fn().mockResolvedValue({}),
+      setConnected: vi.fn(),
+    }
+    const connectorInstanceStore = {
+      getCredentialsSystem: vi.fn().mockResolvedValue({ client_id: 'google_refresh', client_secret: 'refresh-drive' }),
+      updateCredentialsSystem: vi.fn(),
+      markHealth: vi.fn(),
+      listByWorkspaceSystem: vi.fn().mockResolvedValue([]),
+    }
+    const connectorGrantStore = {
+      listForTargetSystem: vi.fn().mockResolvedValue([{
+        grantedByUserId: 'grantor-1',
+        instance: {
+          id: 'ci-drive-exposed', scope: 'user', userId: 'grantor-1', workspaceId: null,
+          provider: 'gdrive', label: 'Company Drive', url: null, custom: false,
+          connected: true, healthStatus: 'ok', sensitivity: 'confidential',
+          config: { driveAccessMode: 'full_drive_readonly' },
+        },
+      }]),
+    }
+    const tools = new Map()
+    enqueueGDriveLazyEnrichment.mockClear()
+
+    await injectMcpTools({
+      userId: 'owner-1', assistantId: 'a-1', tools,
+      connectorStore: connectorStore as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorInstanceStore: connectorInstanceStore as never,
+      connectorGrantStore: connectorGrantStore as never,
+      assistantTeamId: 'ws-1',
+      keepBuiltinsDirect: true,
+    })
+
+    const read = tools.get('googleDriveGetFileContent') as { execute: (input: unknown, context: unknown) => Promise<unknown> }
+    await read.execute({ fileId: 'drive-file-1' }, {})
+    expect(enqueueGDriveLazyEnrichment).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: 'ws-1',
+      connectorInstanceId: 'ci-drive-exposed',
+      externalFileId: 'drive-file-1',
+      sourceVersion: '128',
+    }))
+  })
+
+  it('uses the local catalog for selected-folder search and rejects out-of-scope reads', async () => {
+    getGDriveCatalogRuntimeScope.mockResolvedValue({
+      configured: true,
+      syncScope: 'selected_folders',
+      status: 'done',
+      selectedFolders: [{ id: 'folder-1', name: 'Company' }],
+    })
+    listGDriveCatalogFiles.mockResolvedValue([{
+      externalFileId: 'drive-file-1',
+      name: 'Renewal playbook',
+      mimeType: 'application/vnd.google-apps.document',
+      sourceVersion: '128',
+      modifiedTime: '2026-08-10T08:30:00.000Z',
+      sizeBytes: null,
+      webViewLink: 'https://drive.google.com/file/drive-file-1',
+      parentIds: ['folder-1'],
+      folderPath: ['Company'],
+      isFolder: false,
+    }])
+    getGDriveCatalogReadPolicy.mockImplementation(async (input: unknown) => ({
+      configured: true,
+      syncScope: 'selected_folders',
+      status: 'done',
+      selectedFolders: [{ id: 'folder-1', name: 'Company' }],
+      allowed: (input as { externalFileId: string }).externalFileId === 'drive-file-1',
+    }))
+    const connectorStore = {
+      list: vi.fn().mockResolvedValue([]),
+      getCredentials: vi.fn(),
+      getConfig: vi.fn().mockResolvedValue({}),
+      setConnected: vi.fn(),
+    }
+    const connectorInstanceStore = {
+      getCredentialsSystem: vi.fn().mockResolvedValue({ client_id: 'google_refresh', client_secret: 'refresh-drive' }),
+      updateCredentialsSystem: vi.fn(),
+      markHealth: vi.fn(),
+      listByWorkspaceSystem: vi.fn().mockResolvedValue([]),
+    }
+    const connectorGrantStore = {
+      listForTargetSystem: vi.fn().mockResolvedValue([{
+        grantedByUserId: 'grantor-1',
+        instance: {
+          id: 'ci-drive-exposed', scope: 'user', userId: 'grantor-1', workspaceId: null,
+          provider: 'gdrive', label: 'Company Drive', url: null, custom: false,
+          connected: true, healthStatus: 'ok', sensitivity: 'confidential',
+          config: { driveAccessMode: 'full_drive_readonly' },
+        },
+      }]),
+    }
+    const tools = new Map()
+    await injectMcpTools({
+      userId: 'owner-1', assistantId: 'a-1', tools,
+      connectorStore: connectorStore as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorInstanceStore: connectorInstanceStore as never,
+      connectorGrantStore: connectorGrantStore as never,
+      assistantTeamId: 'ws-1',
+      keepBuiltinsDirect: true,
+    })
+
+    const list = tools.get('googleDriveListFiles') as { execute: (input: unknown, context: unknown) => Promise<{ data: unknown }> }
+    const listed = await list.execute({ query: 'renewal' }, {})
+    expect(listGDriveCatalogFiles).toHaveBeenCalledWith(expect.objectContaining({ query: 'renewal' }))
+    expect(listed.data).toEqual([expect.objectContaining({ id: 'drive-file-1' })])
+
+    const read = tools.get('googleDriveGetFileContent') as { execute: (input: unknown, context: unknown) => Promise<{ data: unknown; isError?: boolean }> }
+    const blocked = await read.execute({ fileId: 'outside-file' }, {})
+    expect(blocked.isError).toBe(true)
+    expect(String(blocked.data)).toContain('outside the Google Drive folders')
+    expect(getDriveFileContentWithMetadata).not.toHaveBeenCalledWith(expect.anything(), 'outside-file', expect.anything())
   })
 
   it('injects every exposed Gmail account and honors an exact extra-account enable switch', async () => {

@@ -453,6 +453,7 @@ export function createGoogleCalendarTools(api: GoogleCalendarApi, userTimezone?:
     name: 'googleCalendarUpdateEvent',
     description:
       'Update an event, RSVP, recurring occurrence, entire series, or this-and-following split. Only include fields that change. ' +
+      'To convert an all-day event to timed, provide both start and end as RFC 3339 date-times; to convert to all-day, provide both as YYYY-MM-DD dates. ' +
       'recurringScope defaults to instance; use series or following only when the user explicitly asks. recurrence changes require series/following. ' +
       'Use attendeeChanges and attachmentChanges to preserve existing RSVP/file metadata. responseStatus changes YOUR RSVP. eventType itself is immutable. Call directly; the UI handles Approve/Deny.',
     inputSchema: z.object({
@@ -462,7 +463,7 @@ export function createGoogleCalendarTools(api: GoogleCalendarApi, userTimezone?:
       summary: z.string().optional().describe('New title.'),
       start: z.string().optional().describe('New RFC 3339 datetime or all-day date.'),
       end: z.string().optional().describe('New RFC 3339 datetime or exclusive all-day end date.'),
-      allDay: z.boolean().optional().describe('Set when changing between timed and all-day boundaries.'),
+      allDay: z.boolean().optional().describe('Optional boundary-mode override. Complete RFC 3339 or YYYY-MM-DD start/end pairs also select timed or all-day mode.'),
       description: z.string().optional().describe('New description; empty string clears it.'),
       location: z.string().optional().describe('New location; empty string clears it.'),
       attendees: z.array(attendeeSchema).optional().describe('Complete attendee replacement. Prefer attendeeChanges for add/remove.'),

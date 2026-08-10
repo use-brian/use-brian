@@ -615,6 +615,11 @@ export function FloatingChat({
     toolRounds: number;
     label: string;
   } | null>(null);
+  const [customEndpoint, setCustomEndpoint] = useState<{
+    key: string;
+    selector: string;
+    label: string;
+  } | null>(null);
   const [modelMenu, setModelMenu] = useState<import("@/lib/api/models").ModelMenu | null>(null);
   // Deferred research (surface seeds only): the first turn sends standard (a
   // cheap clarifying round-trip), then research arms once the reply lands —
@@ -924,6 +929,12 @@ export function FloatingChat({
     }
     return opts;
   }, [modelMenu, t]);
+  const customOptions = useMemo(() =>
+    (modelMenu?.customEndpoints ?? []).map((endpoint) => ({
+      key: endpoint.id,
+      label: endpoint.name,
+      sublabel: `${endpoint.modelId}${endpoint.isDefault ? ` · ${t.meteredDefaultTag}` : ""}`,
+    })), [modelMenu, t.meteredDefaultTag]);
 
   // Pre-flight invariant (L8): estimate at the CHOSEN budget → confirm →
   // only then arm the selection. The send body then carries
@@ -1552,7 +1563,9 @@ export function FloatingChat({
           // metered pick (confirmed at selection time) wins over the tier —
           // unless this turn runs research mode, which forces its own model.
           model:
-            metered && !override?.model && !(override?.researchMode ?? researchMode)
+            customEndpoint && !override?.model && !(override?.researchMode ?? researchMode)
+              ? customEndpoint.selector
+              : metered && !override?.model && !(override?.researchMode ?? researchMode)
               ? metered.alias
               : override?.model ?? model,
           ...(metered && !override?.model && !(override?.researchMode ?? researchMode)
@@ -2345,7 +2358,7 @@ export function FloatingChat({
       // Indicate to the caller (e.g. seed effect) that a stream actually started.
       return true;
     },
-    [selectedAssistantId, workspaceId, origin, isDocOrigin, model, metered, researchMode, session, stream, t, resetTurnBuffers, pendingQuestion, pendingRecordings, rec.status, att, applyQueuedInput, buildStreamedTurnMessage, flushQueuedInputs],
+    [selectedAssistantId, workspaceId, origin, isDocOrigin, model, metered, customEndpoint, researchMode, session, stream, t, resetTurnBuffers, pendingQuestion, pendingRecordings, rec.status, att, applyQueuedInput, buildStreamedTurnMessage, flushQueuedInputs],
   );
 
   useEffect(() => {
@@ -3203,7 +3216,10 @@ export function FloatingChat({
             researchMode={researchMode}
             onResearchModeChange={(next) => {
               // Research forces its own model — arming it clears a metered pick.
-              if (next) setMetered(null);
+              if (next) {
+                setMetered(null);
+                setCustomEndpoint(null);
+              }
               setResearchMode(next);
             }}
             researchQuota={researchQuota}
@@ -3212,6 +3228,16 @@ export function FloatingChat({
             meteredOptions={meteredOptions}
             meteredSelectedKey={metered?.key ?? null}
             onMeteredSelect={handleMeteredSelect}
+            customOptions={customOptions}
+            customSelectedKey={customEndpoint?.key ?? null}
+            onCustomSelect={(key) => {
+              if (!key) { setCustomEndpoint(null); return; }
+              const endpoint = modelMenu?.customEndpoints.find((item) => item.id === key);
+              if (!endpoint) return;
+              setResearchMode(false);
+              setMetered(null);
+              setCustomEndpoint({ key, selector: endpoint.selector, label: endpoint.name });
+            }}
             className="mt-2"
           />
         </div>

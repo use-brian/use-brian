@@ -24,10 +24,12 @@ function profile(overrides: Partial<BrowserProfile> = {}): BrowserProfile {
     clearance: "confidential",
     enabledAssistantIds: [],
     defaultBackend: "cloud",
+    localControlMode: "task_tabs",
     proxyUrl: null,
     createdAt: "2026-07-21T00:00:00.000Z",
     updatedAt: "2026-07-21T00:00:00.000Z",
     sessions: [],
+    credentials: [],
     grants: [],
     ...overrides,
   };
@@ -55,6 +57,14 @@ describe("[COMP:app-web/profile-management] Profile surfaces by backend", () => 
       "http://proxy.example:8080",
     );
     expect(profile({ defaultBackend: "local", proxyUrl: null }).proxyUrl).toBeNull();
+  });
+
+  it("keeps the local control scope on the profile independently of its default backend", () => {
+    expect(profile().localControlMode).toBe("task_tabs");
+    expect(profile({ defaultBackend: "cloud", localControlMode: "full_browser" })).toMatchObject({
+      defaultBackend: "cloud",
+      localControlMode: "full_browser",
+    });
   });
 });
 

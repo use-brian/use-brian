@@ -30,6 +30,7 @@ function draft(overrides: Partial<SavedContentDraft> = {}): SavedContentDraft {
     topicTag: null,
     postFormat: 'post',
     formatData: {},
+    media: [],
     replyExternalId: null,
     replyAuthor: null,
     replyText: null,
@@ -176,6 +177,7 @@ describe('[COMP:feed/content-planning-routes] planning input parsing', () => {
     })).toEqual({
       text: 'A thoughtful reply.',
       platform: 'twitter',
+      media: [],
       postFormat: 'post',
       reply: {
         externalId: '123',

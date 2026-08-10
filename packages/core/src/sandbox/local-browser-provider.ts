@@ -14,6 +14,9 @@ import {
   BrowserCaptureResultSchema,
   BrowserNavigateResultSchema,
   BrowserSnapshotSchema,
+  BrowserTabCloseResultSchema,
+  BrowserTabListResultSchema,
+  BrowserTabSelectionResultSchema,
   TakeoverFrameSchema,
   BrowserUrlResultSchema,
   NO_EXTENSION_MESSAGE,
@@ -67,7 +70,18 @@ export function createLocalBrowserProvider(deps: {
         'not_configured',
       )
     }
-    const res = await deps.transport.send({ userId: ctx.userId, op, args })
+    if (!ctx.profileId) {
+      throw new BrowserBackendError(
+        'My Browser requires a browser profile. Choose or create a profile, pair that profile to the browser extension, then retry.',
+        'profile_required',
+      )
+    }
+    const res = await deps.transport.send({
+      userId: ctx.userId,
+      browserProfileId: ctx.profileId,
+      op,
+      args,
+    })
     if (!res.ok) throw toBackendError(res.error, res.code, res.staleBuild)
     return res.data
   }
@@ -88,6 +102,18 @@ export function createLocalBrowserProvider(deps: {
     },
     async currentUrl(ctx) {
       return BrowserUrlResultSchema.parse(await send(ctx, 'currentUrl'))
+    },
+    async openTab(ctx, url) {
+      return BrowserTabSelectionResultSchema.parse(await send(ctx, 'openTab', { url }))
+    },
+    async listTabs(ctx) {
+      return BrowserTabListResultSchema.parse(await send(ctx, 'listTabs'))
+    },
+    async switchTab(ctx, tabId) {
+      return BrowserTabSelectionResultSchema.parse(await send(ctx, 'switchTab', { tabId }))
+    },
+    async closeTab(ctx, tabId) {
+      return BrowserTabCloseResultSchema.parse(await send(ctx, 'closeTab', { tabId }))
     },
     async captureState(ctx, site) {
       return BrowserCaptureResultSchema.parse(await send(ctx, 'captureState', { site }))

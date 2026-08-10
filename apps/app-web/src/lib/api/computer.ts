@@ -15,6 +15,9 @@
  *   GET    /api/computer/profiles?workspaceId=         Profile-Management list (R2-4)
  *   POST   /api/computer/profiles                      create a profile
  *   POST   /api/computer/profiles/:id/login            start a user-initiated sign-in task (owner only)
+ *   POST   /api/computer/profiles/:id/credentials      save/replace one encrypted site login (owner only)
+ *   POST   /api/computer/profiles/:id/credentials/:credentialId/test  verify through the auth broker
+ *   DELETE /api/computer/profiles/:id/credentials/:credentialId       revoke the saved login
  *   PATCH  /api/computer/profiles/:id                  update (owner only)
  *   DELETE /api/computer/profiles/:id                  delete (owner only)
  *   DELETE /api/computer/profiles/:id/sessions/:site   revoke one site's session
@@ -64,6 +67,7 @@ type VaultedSession = {
 
 export type BrowserProfileClearance = "public" | "internal" | "confidential";
 export type BrowserBackend = "local" | "cloud";
+export type LocalBrowserControlMode = "task_tabs" | "full_browser";
 
 type BrowserSkillGrantSummary = {
   id: string;
@@ -71,6 +75,32 @@ type BrowserSkillGrantSummary = {
   skillName: string;
   createdAt: string;
   lastUsedAt: string | null;
+};
+
+export type BrowserCredentialFailureCode =
+  | "auth_unavailable"
+  | "cross_site_redirect"
+  | "human_verification"
+  | "mfa_required"
+  | "field_not_found"
+  | "field_ambiguous"
+  | "submit_not_found"
+  | "login_rejected"
+  | "empty_session"
+  | "backend_error";
+
+export type BrowserCredentialMetadata = {
+  id: string;
+  workspaceId: string;
+  profileId: string;
+  site: string;
+  loginUrl: string;
+  accountLabel: string | null;
+  status: "active" | "invalid";
+  lastUsedAt: string | null;
+  lastFailureCode: BrowserCredentialFailureCode | null;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type BrowserProfile = {
@@ -81,10 +111,13 @@ export type BrowserProfile = {
   clearance: BrowserProfileClearance;
   enabledAssistantIds: string[];
   defaultBackend: BrowserBackend;
+  localControlMode: LocalBrowserControlMode;
   proxyUrl: string | null;
   createdAt: string;
   updatedAt: string;
   sessions: VaultedSession[];
+  /** Metadata only. Username and password are never returned by the API. */
+  credentials: BrowserCredentialMetadata[];
   /** Standing block grants on this identity (R2-2) - revocable here. */
   grants: BrowserSkillGrantSummary[];
 };
@@ -264,12 +297,21 @@ export async function setComputerSessionBackend(
 
 export async function listBrowserProfiles(
   workspaceId: string,
-): Promise<{ configured: boolean; profiles: BrowserProfile[] }> {
+): Promise<{
+  configured: boolean;
+  credentialAuthConfigured: boolean;
+  profiles: BrowserProfile[];
+}> {
   const res = await authFetch(
     `${API_URL}/api/computer/profiles?workspaceId=${encodeURIComponent(workspaceId)}`,
   );
   if (!res.ok) throw new Error(`browser profiles list failed (${res.status})`);
-  return (await res.json()) as { configured: boolean; profiles: BrowserProfile[] };
+  const body = (await res.json()) as {
+    configured: boolean;
+    credentialAuthConfigured?: boolean;
+    profiles: BrowserProfile[];
+  };
+  return { ...body, credentialAuthConfigured: body.credentialAuthConfigured === true };
 }
 
 export async function createBrowserProfile(params: {
@@ -277,6 +319,7 @@ export async function createBrowserProfile(params: {
   name: string;
   clearance?: BrowserProfileClearance;
   defaultBackend?: BrowserBackend;
+  localControlMode?: LocalBrowserControlMode;
 }): Promise<BrowserProfile | null> {
   const res = await authFetch(`${API_URL}/api/computer/profiles`, {
     method: "POST",
@@ -284,8 +327,77 @@ export async function createBrowserProfile(params: {
     body: JSON.stringify(params),
   });
   if (!res.ok) return null;
-  const body = (await res.json()) as { profile: Omit<BrowserProfile, "sessions" | "grants"> | null };
-  return body.profile ? { ...body.profile, sessions: [], grants: [] } : null;
+  const body = (await res.json()) as {
+    profile: Omit<BrowserProfile, "sessions" | "credentials" | "grants"> | null;
+  };
+  return body.profile
+    ? { ...body.profile, sessions: [], credentials: [], grants: [] }
+    : null;
+}
+
+/** Secret values are sent directly to the authenticated API and never returned. */
+export async function saveBrowserCredential(
+  profileId: string,
+  params: {
+    loginUrl: string;
+    accountLabel?: string | null;
+    username: string;
+    password: string;
+  },
+): Promise<BrowserCredentialMetadata | null> {
+  const res = await authFetch(
+    `${API_URL}/api/computer/profiles/${encodeURIComponent(profileId)}/credentials`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+    },
+  );
+  if (!res.ok) return null;
+  const body = (await res.json()) as { credential?: BrowserCredentialMetadata };
+  return body.credential ?? null;
+}
+
+export async function revokeBrowserCredential(
+  profileId: string,
+  credentialId: string,
+): Promise<boolean> {
+  const res = await authFetch(
+    `${API_URL}/api/computer/profiles/${encodeURIComponent(profileId)}/credentials/${encodeURIComponent(credentialId)}`,
+    { method: "DELETE" },
+  );
+  return res.ok;
+}
+
+export async function testBrowserCredential(
+  profileId: string,
+  credentialId: string,
+): Promise<
+  | { ok: true; status: "authenticated"; site: string }
+  | {
+      ok: false;
+      status: "unavailable" | "needs_user" | "failed";
+      code: BrowserCredentialFailureCode | "no_credential" | "not_configured";
+    }
+> {
+  const res = await authFetch(
+    `${API_URL}/api/computer/profiles/${encodeURIComponent(profileId)}/credentials/${encodeURIComponent(credentialId)}/test`,
+    { method: "POST" },
+  );
+  const body = (await res.json().catch(() => null)) as
+    | { status?: string; site?: string; code?: string }
+    | null;
+  if (res.ok && body?.status === "authenticated" && body.site) {
+    return { ok: true, status: "authenticated", site: body.site };
+  }
+  return {
+    ok: false,
+    status:
+      body?.status === "needs_user" || body?.status === "unavailable"
+        ? body.status
+        : "failed",
+    code: (body?.code ?? "backend_error") as BrowserCredentialFailureCode,
+  };
 }
 
 /**
@@ -339,7 +451,10 @@ export async function captureProfileSession(
 export async function updateBrowserProfile(
   profileId: string,
   patch: Partial<
-    Pick<BrowserProfile, "name" | "clearance" | "defaultBackend" | "proxyUrl" | "enabledAssistantIds">
+    Pick<
+      BrowserProfile,
+      "name" | "clearance" | "defaultBackend" | "localControlMode" | "proxyUrl" | "enabledAssistantIds"
+    >
   >,
 ): Promise<boolean> {
   const res = await authFetch(`${API_URL}/api/computer/profiles/${encodeURIComponent(profileId)}`, {
@@ -399,8 +514,13 @@ const STATUS_UNAVAILABLE: BrowserExtensionStatus = {
 
 /** Poll target for the connect surface. Never throws — a status probe must
  *  never take the Settings panel down. */
-export async function getBrowserExtensionStatus(): Promise<BrowserExtensionStatus> {
-  const res = await authFetch(`${API_URL}/api/browser-extension/status`).catch(() => null);
+export async function getBrowserExtensionStatus(
+  workspaceId: string,
+  browserProfileId?: string,
+): Promise<BrowserExtensionStatus> {
+  const query = new URLSearchParams({ workspaceId });
+  if (browserProfileId) query.set("browserProfileId", browserProfileId);
+  const res = await authFetch(`${API_URL}/api/browser-extension/status?${query}`).catch(() => null);
   if (!res?.ok) return STATUS_UNAVAILABLE;
   return (await res.json().catch(() => STATUS_UNAVAILABLE)) as BrowserExtensionStatus;
 }
@@ -408,6 +528,7 @@ export async function getBrowserExtensionStatus(): Promise<BrowserExtensionStatu
 export type BrowserExtensionPairing = {
   pairingToken: string;
   relayUrl: string;
+  browserProfileId: string;
   expiresInSeconds: number;
 };
 
@@ -418,11 +539,12 @@ export type BrowserExtensionPairing = {
  */
 export async function pairBrowserExtension(
   workspaceId: string,
+  browserProfileId?: string,
 ): Promise<BrowserExtensionPairing | null> {
   const res = await authFetch(`${API_URL}/api/browser-extension/pair`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ workspaceId }),
+    body: JSON.stringify({ workspaceId, ...(browserProfileId ? { browserProfileId } : {}) }),
   }).catch(() => null);
   if (!res?.ok) return null;
   return (await res.json().catch(() => null)) as BrowserExtensionPairing | null;

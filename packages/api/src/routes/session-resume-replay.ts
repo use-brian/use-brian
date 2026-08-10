@@ -47,6 +47,8 @@ import type { SessionResumeReplay, ResumeReplayParams } from './chat.js'
 
 export type SessionResumeReplayDeps = {
   provider: LLMProvider
+  /** Resolve the workspace default custom endpoint for the resumed user turn. */
+  resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
   /** Boot-time tool registry — the suspended tool is resolved from here. */
   tools: Map<string, Tool>
   /** Base L1 system prompt. The assistant's L2 is appended per-session. */
@@ -294,9 +296,15 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
       ? `${deps.systemPrompt}\n\n${assistant.systemPrompt}`
       : deps.systemPrompt
 
+    const customLlm = assistant.workspaceId && deps.resolveWorkspaceCustomLlm
+      ? await deps.resolveWorkspaceCustomLlm({ workspaceId: assistant.workspaceId })
+      : null
+
     for await (const event of queryLoop({
-      provider: deps.provider,
-      model,
+      provider: customLlm?.provider ?? deps.provider,
+      model: customLlm?.selector ?? model,
+      maxTokens: customLlm?.maxTokens,
+      inputTokenLimit: customLlm?.inputTokenLimit,
       systemPrompt,
       messages,
       tools: deps.tools,

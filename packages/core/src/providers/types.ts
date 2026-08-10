@@ -119,6 +119,8 @@ export type SessionOptions = {
   systemPrompt: string
   tools?: ToolDefinition[]
   maxTokens?: number
+  /** Request-scoped context window for models that are not in the registry. */
+  inputTokenLimit?: number
   temperature?: number
   /** Session default thinking level; may be overridden per `send()` call. */
   thinkingLevel?: ThinkingLevel
@@ -157,6 +159,8 @@ export type ProviderRequest = {
   systemPrompt: string
   tools?: ToolDefinition[]
   maxTokens?: number
+  /** Request-scoped context window for models that are not in the registry. */
+  inputTokenLimit?: number
   temperature?: number
   thinkingLevel?: ThinkingLevel
   signal?: AbortSignal

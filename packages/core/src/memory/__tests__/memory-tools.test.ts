@@ -317,31 +317,7 @@ describe('[COMP:memory/tools] saveMemory', () => {
     expect(store.rows).toHaveLength(0)
   })
 
-  it('enforces 20-memory cap for free plan users', async () => {
-    const store = makeFakeStore()
-    // Seed 20 memories for this user
-    for (let i = 0; i < 20; i++) {
-      await store.create({
-        assistantId: ctx.assistantId,
-        userId: ctx.userId,
-      createdByUserId: ctx.userId,
-      createdByAssistantId: ctx.assistantId,
-        summary: `Memory ${i}`,
-        sensitivity: 'internal',
-      })
-    }
-    const { saveMemory } = createMemoryTools(store, { userPlan: 'free' })
-    const result = await saveMemory.execute(
-      { summary: 'One too many', },
-      ctx,
-    )
-    expect(result.isError).toBe(true)
-    expect(String(result.data)).toContain('Memory limit reached')
-    // Should still be 20
-    expect(store.rows).toHaveLength(20)
-  })
-
-  it('does not enforce the 20-memory cap for paid plans', async () => {
+  it('does not cap memory writes for OSS workspaces using the free plan sentinel', async () => {
     const store = makeFakeStore()
     for (let i = 0; i < 20; i++) {
       await store.create({
@@ -353,9 +329,9 @@ describe('[COMP:memory/tools] saveMemory', () => {
         sensitivity: 'internal',
       })
     }
-    const { saveMemory } = createMemoryTools(store, { userPlan: 'pro' })
+    const { saveMemory } = createMemoryTools(store)
     const result = await saveMemory.execute(
-      { summary: 'Memory 21', },
+      { summary: 'Memory 21' },
       ctx,
     )
     expect(result.isError).toBeFalsy()

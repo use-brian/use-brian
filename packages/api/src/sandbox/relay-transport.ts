@@ -1,4 +1,8 @@
-import type { RelayCommandResult, RelayCommandTransport } from '@use-brian/core'
+import type {
+  LocalBrowserControlMode,
+  RelayCommandResult,
+  RelayCommandTransport,
+} from '@use-brian/core'
 
 /**
  * The api-side half of the local-browser path (computer-use.md §4): a
@@ -16,11 +20,25 @@ export function createRelayCommandTransport(opts: {
   relayUrl: string
   relaySecret: string
   fetchImpl?: typeof fetch
+  /** Server-owned profile policy, resolved afresh for every command. */
+  resolveLocalControlMode?: (browserProfileId: string) => Promise<LocalBrowserControlMode>
 }): RelayCommandTransport {
   const fetchImpl = opts.fetchImpl ?? fetch
   const base = opts.relayUrl.replace(/\/$/, '')
   return {
     async send(params): Promise<RelayCommandResult> {
+      let controlMode: LocalBrowserControlMode
+      try {
+        controlMode = opts.resolveLocalControlMode
+          ? await opts.resolveLocalControlMode(params.browserProfileId)
+          : 'task_tabs'
+      } catch {
+        return {
+          ok: false,
+          error: 'Could not read the Browser profile local-control policy.',
+          code: 'backend_error',
+        }
+      }
       try {
         const res = await fetchImpl(`${base}/internal/browser/command`, {
           method: 'POST',
@@ -28,7 +46,13 @@ export function createRelayCommandTransport(opts: {
             'content-type': 'application/json',
             'x-relay-secret': opts.relaySecret,
           },
-          body: JSON.stringify({ userId: params.userId, op: params.op, args: params.args ?? {} }),
+          body: JSON.stringify({
+            userId: params.userId,
+            browserProfileId: params.browserProfileId,
+            controlMode,
+            op: params.op,
+            args: params.args ?? {},
+          }),
           signal: AbortSignal.timeout(RELAY_HTTP_TIMEOUT_MS),
         })
         if (!res.ok) {
@@ -71,12 +95,17 @@ export async function relayExtensionStatus(opts: {
   relayUrl: string
   relaySecret: string
   userId: string
+  browserProfileId?: string
+  workspaceId?: string
   fetchImpl?: typeof fetch
 }): Promise<RelayExtensionStatus | null> {
   const fetchImpl = opts.fetchImpl ?? fetch
   try {
+    const query = new URLSearchParams()
+    if (opts.browserProfileId) query.set('browserProfileId', opts.browserProfileId)
+    if (opts.workspaceId) query.set('workspaceId', opts.workspaceId)
     const res = await fetchImpl(
-      `${opts.relayUrl.replace(/\/$/, '')}/internal/browser/status/${encodeURIComponent(opts.userId)}`,
+      `${opts.relayUrl.replace(/\/$/, '')}/internal/browser/status/${encodeURIComponent(opts.userId)}${query.size > 0 ? `?${query}` : ''}`,
       {
         headers: { 'x-relay-secret': opts.relaySecret },
         signal: AbortSignal.timeout(5_000),

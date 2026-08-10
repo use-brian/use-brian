@@ -63,6 +63,7 @@ import { getWorkspaceMembershipSystem } from '../db/workspace-store.js'
 
 export type PublicApiRouteOptions = {
   provider: LLMProvider
+  resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
   /** Provider names configured at boot — substitutes a servable model when the
    *  resolved default (Gemini) has no key. See `ensureServableModel`. */
   configuredProviders?: ReadonlySet<string>

@@ -425,7 +425,15 @@ export function homeAppRoutes(opts: HomeAppRouteOptions): Router {
     // Best-effort bundle cleanup. The row is gone either way — a stale blob is
     // storage debt, but a row that survives a "remove" is a live grant the
     // admin believes they revoked.
-    void deleteBundle(opts.filesApi, result.app.workspaceId, appId).catch((err) => {
+    //
+    // `userId` is REQUIRED even though this runs `system: true`: the files
+    // layer still binds it into an RLS session variable, and an empty string is
+    // not a uuid. Omitting it made every delete log
+    // `invalid input syntax for type uuid: ""` and leave the whole bundle
+    // behind — invisible, because the failure is caught and the route had
+    // already answered `{ ok: true }`. Found 2026-08-10 by deleting a real app
+    // and counting the rows afterwards.
+    void deleteBundle(opts.filesApi, result.app.workspaceId, appId, userId).catch((err) => {
       console.warn('[home-apps] bundle cleanup failed:', err)
     })
     notifyWorkspaceChange(result.app.workspaceId, 'workspace_config', 'update')

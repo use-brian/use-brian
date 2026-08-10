@@ -13,8 +13,8 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID ?? "";
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET ?? "";
 
 /**
- * Google OAuth callback for connector consent (Calendar, Gmail, Drive) —
- * app-web copy.
+ * Google OAuth callback for connector consent (Calendar, Gmail, managed Drive,
+ * and customer-owned BYO Drive) — app-web copy.
  *
  * Ported from `apps/web/src/app/api/auth/callback/google-connector/route.ts`
  * (app consolidation §9 #5). Same pattern: exchange the code for tokens with
@@ -67,6 +67,7 @@ export async function GET(request: Request) {
   }
 
   const { connector, createNew, instanceId, workspaceId, nonce } = parseConnectorState(stateRaw);
+  const isGdriveByo = connector === "gdrive-byo";
 
   if (error || !code || !connector) {
     return NextResponse.redirect(
@@ -84,6 +85,58 @@ export async function GET(request: Request) {
     return NextResponse.redirect(
       new URL(connectorsPath(workspaceId, { error: "invalid_state" }), appOrigin),
     );
+  }
+
+  // A BYO Drive secret is stored in the API's workspace credential table, not
+  // in this Next process. Keep app-web's only job to the cookie-bound CSRF gate,
+  // then forward the raw code for server-side exchange and encrypted storage.
+  if (isGdriveByo) {
+    const accessToken = cookieStore.get("access_token")?.value;
+    if (!accessToken) return NextResponse.redirect(new URL("/login", appOrigin));
+
+    try {
+      const redirectUri = `${appOrigin}/api/auth/callback/google-connector`;
+      const exchangeRes = await fetch(`${API_URL}/api/connectors/gdrive/oauth-callback`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({
+          code,
+          redirectUri,
+          workspaceId,
+          ...(instanceId ? { instanceId } : { createNew }),
+        }),
+      });
+      if (!exchangeRes.ok) {
+        const detail = await exchangeRes.text();
+        console.error("[google-connector] BYO Drive exchange failed:", detail);
+        const reason = detail.includes("app_credentials_missing")
+          ? "app_credentials_missing"
+          : "token_exchange_failed";
+        return NextResponse.redirect(
+          new URL(connectorsPath(workspaceId, { error: reason }), appOrigin),
+        );
+      }
+      const stored = (await exchangeRes.json().catch(() => ({}))) as {
+        connectorInstanceId?: string;
+      };
+      return NextResponse.redirect(
+        new URL(
+          connectorsPath(workspaceId, {
+            connected: "gdrive",
+            instance: stored.connectorInstanceId,
+          }),
+          appOrigin,
+        ),
+      );
+    } catch (err) {
+      console.error("[google-connector] BYO Drive callback error:", err);
+      return NextResponse.redirect(
+        new URL(connectorsPath(workspaceId, { error: "unexpected" }), appOrigin),
+      );
+    }
   }
 
   try {

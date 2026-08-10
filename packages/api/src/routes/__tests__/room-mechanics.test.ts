@@ -17,6 +17,7 @@
  * Spec: docs/architecture/features/chat-app.md → "The room model".
  */
 
+import { readFileSync } from 'node:fs'
 import { describe, it, expect, vi } from 'vitest'
 import {
   buildRoomResponseCoordinationBlock,
@@ -458,5 +459,68 @@ describe('[COMP:api/turn-stop] turnStopOutcome', () => {
     // freeing the slot early would let a second turn claim the session.
     expect(turnStopOutcome({ status: 'running', abortedLocally: false, reclaimedStale: false }))
       .toBe('cancel_requested')
+  })
+})
+
+/**
+ * [COMP:api/room-mechanics] — every assistant row the chat route writes is
+ * attributed to the assistant that produced it.
+ *
+ * Source guard, because the writes live inside the SSE handler and cannot be
+ * reached without a provider, a database and a live stream. The happy-path
+ * write has carried `senderAssistantId` since migration 390; the FALLBACK
+ * writes (empty-turn synthesis, error recovery) did not, and nothing caught
+ * it — both typecheck, both unit-test green, and the column is nullable
+ * because pre-390 rows legitimately have no stamp.
+ *
+ * The 2026-08-09 Snapio room is what an unstamped fallback costs. A `@CFO`
+ * turn thought-burnt in research mode; the synthesised reply persisted with
+ * no stamp, so the room rendered it under the session's bound assistant and
+ * the founder read the PRIMARY as refusing a question the CFO answered three
+ * minutes later. The quieter half is worse: `toStampedMessages` only prefixes
+ * `[Name]:` when a row IS stamped, so on the next turn the primary read
+ * "I would need access to ... NetSuite or QuickBooks" as its OWN prior
+ * position and inherited a refusal it never made.
+ */
+describe('[COMP:api/room-mechanics] Assistant-row attribution (source guard)', () => {
+  const source = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8')
+
+  /** Every `addSessionMessage({ … })` call, brace-balanced from the literal. */
+  function addSessionMessageCalls(src: string): string[] {
+    const calls: string[] = []
+    const OPEN = 'addSessionMessage({'
+    let from = 0
+    for (;;) {
+      const start = src.indexOf(OPEN, from)
+      if (start === -1) return calls
+      let depth = 0
+      let i = start + OPEN.length - 1
+      for (; i < src.length; i++) {
+        if (src[i] === '{') depth++
+        else if (src[i] === '}') {
+          depth--
+          if (depth === 0) break
+        }
+      }
+      calls.push(src.slice(start, i + 1))
+      from = i + 1
+    }
+  }
+
+  it('finds the call sites it means to guard', () => {
+    // A parser that silently matches nothing would make every assertion
+    // below vacuously pass — the failure mode this whole guard exists to
+    // prevent. Pin a floor instead of trusting the scan.
+    const calls = addSessionMessageCalls(source)
+    expect(calls.length).toBeGreaterThanOrEqual(5)
+    expect(calls.filter((c) => /role: 'assistant'/.test(c)).length).toBeGreaterThanOrEqual(3)
+  })
+
+  it('stamps senderAssistantId on every assistant-role write', () => {
+    const unstamped = addSessionMessageCalls(source)
+      .filter((call) => /role: 'assistant'/.test(call))
+      .filter((call) => !/senderAssistantId/.test(call))
+    // Name the offenders — a bare count tells the next session nothing.
+    expect(unstamped.map((c) => c.replace(/\s+/g, ' ').slice(0, 120))).toEqual([])
   })
 })

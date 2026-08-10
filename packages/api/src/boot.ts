@@ -116,6 +116,7 @@ import {
   createComputeTools,
   createLocalBrowserProvider,
   createCloudBrowserProvider,
+  createBrowserAuthBroker,
   createSandboxOrchestrator,
   createInMemorySandboxTaskStore,
   createSandboxReaper,
@@ -132,11 +133,14 @@ import {
   type BrowserSkillGrantStore,
   type ComputerToolPolicy,
   type BrowserProfileStore,
+  type BrowserCredentialStore,
   type SandboxOrchestrator,
   type SandboxProvider,
   type SandboxTaskStore,
   type Sensitivity,
   type SessionVault,
+  looksLikeLoginWall,
+  registrableSiteOf,
 } from '@use-brian/core'
 
 import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTORS, OFFICIAL_CONNECTOR_TOOLS } from '@use-brian/shared'
@@ -372,6 +376,8 @@ import {
 import { createArtifactPromoter } from './files/artifact-promote.js'
 import { createFileIngestor } from './files/ingest-file.js'
 import { createFileIngestWorker } from './files/file-ingest-worker.js'
+import { createGDriveEnrichmentWorker } from './google/enrichment-worker.js'
+import { createGDriveCatalogWorker } from './google/catalog-worker.js'
 import { createLinkedInImportWorker } from './linkedin-import/worker.js'
 import { enqueueFileIngestJob, claimNextFileIngestJob, markFileIngestJobDone, markFileIngestJobFailed } from './db/file-ingest-jobs-store.js'
 import { createCachedByoFilesResolver, type WorkspaceStorageBinding } from './files/byo-files-resolver.js'
@@ -530,11 +536,16 @@ import { createDbBrainKeyStore } from './db/brain-keys-store.js'
 import { brainKeysRoutes } from './routes/brain-keys.js'
 import { createDbWorkspaceLlmProviderSettingsStore, loadLlmProviderKeyEncryptionKey } from './db/workspace-llm-provider-settings.js'
 import { workspaceLlmKeysRoutes } from './routes/workspace-llm-keys.js'
+import { createDbWorkspaceCustomLlmEndpointStore } from './db/workspace-custom-llm-endpoints.js'
+import { workspaceCustomLlmEndpointsRoutes } from './routes/workspace-custom-llm-endpoints.js'
+import { createWorkspaceCustomLlmResolver } from './custom-llm-runtime.js'
 import { createDbCompartmentStore } from './db/compartment-store.js'
 import { compartmentRoutes } from './routes/compartments.js'
 import { brainMcpRoutes } from './brain-mcp/server.js'
 import { createStoreToolResolver } from './home-apps/store-tools-resolver.js'
+import { appsShopifyRoutes } from './routes/apps-shopify.js'
 import { agentAllowedToolsFor } from './brain-mcp/store-tools.js'
+import type { AppStoreScope } from '@use-brian/brian-app'
 import { resolveWriteTarget } from './brain-mcp/tools.js'
 import { enginesMcpRoutes, enginesMcpEnabled } from './engines-mcp/server.js'
 import { createDbOAuthClientStore } from './db/oauth-client-store.js'
@@ -830,6 +841,12 @@ export interface OpenApiPorts {
    * Profile-Management reports unconfigured).
    */
   browserProfileStore?: BrowserProfileStore
+  /**
+   * Encrypted saved-login metadata + the broker-only resolver capability.
+   * Absent → profiles and manual Take-Over continue to work, while headless
+   * reauthentication and its Browser-app forms stay unavailable.
+   */
+  browserCredentialStore?: BrowserCredentialStore
   /**
    * Block-scoped grants (R2-2) — closed impl over `browser_skill_grants`.
    * Absent → every terminal send a logic-block reaches queues async.
@@ -1637,17 +1654,23 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const integrationStore = credKey ? createDbChannelIntegrationStore(credKey) : null
   const apiKeyStore = createDbApiKeyStore()
   const brainKeyStore = createDbBrainKeyStore()
-  const llmProviderSettingsStore = (() => {
+  const llmProviderEncryptionKey = (() => {
     if (!env.LLM_PROVIDER_KEY_ENCRYPTION_KEY) return null
     try {
-      return createDbWorkspaceLlmProviderSettingsStore(
-        loadLlmProviderKeyEncryptionKey(env.LLM_PROVIDER_KEY_ENCRYPTION_KEY),
-      )
+      return loadLlmProviderKeyEncryptionKey(env.LLM_PROVIDER_KEY_ENCRYPTION_KEY)
     } catch (err) {
-      console.warn('[provider] LLM_PROVIDER_KEY_ENCRYPTION_KEY invalid — BYO Gemini keys disabled:', (err as Error).message)
+      console.warn('[provider] LLM_PROVIDER_KEY_ENCRYPTION_KEY invalid — provider bearer-key storage disabled:', (err as Error).message)
       return null
     }
   })()
+  const llmProviderSettingsStore = llmProviderEncryptionKey
+    ? createDbWorkspaceLlmProviderSettingsStore(llmProviderEncryptionKey)
+    : null
+  const customLlmNetworkPolicy = isSelfHostedOssEnv() ? 'private-network' : 'public-only'
+  const customLlmEndpointStore = createDbWorkspaceCustomLlmEndpointStore(llmProviderEncryptionKey ?? undefined)
+  const resolveWorkspaceCustomLlm = createWorkspaceCustomLlmResolver(customLlmEndpointStore, {
+    networkPolicy: customLlmNetworkPolicy,
+  })
   const compartmentStore = createDbCompartmentStore()
   const oauthClientStore = createDbOAuthClientStore()
   const oauthAuthorizationStore = createDbOAuthAuthorizationStore()
@@ -2221,6 +2244,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   const calleeExecutor = createCalleeExecutor({
     provider,
+    resolveWorkspaceCustomLlm,
     tools: allTools,
     memoryStore,
     // Lazy getter: `filesApi` is assigned further down (the workspace-
@@ -3320,6 +3344,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       ? createRelayCommandTransport({
           relayUrl: browserRelayUrl,
           relaySecret: env.BROWSER_RELAY_SECRET,
+          resolveLocalControlMode: async (browserProfileId) =>
+            (await ports.browserProfileStore?.get(browserProfileId))?.localControlMode ?? 'task_tabs',
         })
       : null
   // Cloud mode (§5): E2B behind the SandboxProvider seam. providers/e2b is
@@ -3413,6 +3439,54 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           : undefined,
       })
     : null
+  const browserAuthBroker =
+    sandboxProvider && sandboxOrchestrator && ports.browserCredentialStore
+      ? createBrowserAuthBroker({
+          provider: sandboxProvider,
+          orchestrator: sandboxOrchestrator,
+          credentials: ports.browserCredentialStore,
+        })
+      : null
+  const cloudBrowserBinding = sandboxOrchestrator
+    ? {
+        ...sandboxOrchestrator.binding,
+        recoverLogin: browserAuthBroker
+          ? async (
+              browseCtx: Parameters<typeof sandboxOrchestrator.binding.resolve>[0],
+              navigation: { requestedUrl: string; currentUrl: string },
+            ) => {
+              if (!browseCtx.profileId || !looksLikeLoginWall(navigation.currentUrl)) {
+                return { retry: false }
+              }
+              const site = registrableSiteOf(navigation.requestedUrl)
+              if (!site) return { retry: false }
+              const refreshed = await browserAuthBroker.authenticate({
+                userId: browseCtx.userId,
+                workspaceId: browseCtx.workspaceId,
+                profileId: browseCtx.profileId,
+                site,
+              })
+              if (refreshed.kind !== 'authenticated') return { retry: false }
+              // The dead task has already had `injectedSite` cleared by the
+              // orchestrator's login-wall probe, so failure teardown cannot
+              // overwrite the freshly brokered vault bundle. The cloud
+              // adapter now resolves a new task and injects that bundle.
+              await sandboxOrchestrator.completeTask(browseCtx.sessionId, 'failed')
+              return {
+                retry: true,
+                afterRetry: async (currentUrl: string) => {
+                  if (!looksLikeLoginWall(currentUrl)) return
+                  await ports.browserCredentialStore?.recordResult({
+                    credentialId: refreshed.credentialId,
+                    result: 'failure',
+                    failureCode: 'login_rejected',
+                  })
+                },
+              }
+            }
+          : undefined,
+      }
+    : null
   const COMPUTER_CONNECTOR_ID = 'computer'
   const computerToolDefaults = new Map(
     (OFFICIAL_CONNECTOR_TOOLS[COMPUTER_CONNECTOR_ID] ?? []).map((t) => [t.name, t.defaultPolicy]),
@@ -3458,7 +3532,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     local: localBrowserProvider,
     cloud: createCloudBrowserProvider({
       provider: sandboxProvider,
-      binding: sandboxOrchestrator?.binding ?? null,
+      binding: cloudBrowserBinding,
     }),
     cloudAvailable: () => sandboxProvider !== null,
     // Browser profiles (R2-4/R2-10): the closed store when the platform
@@ -3509,7 +3583,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     getWorkspacePlan,
     onEvent: (evt, ctx) => {
       if (evt.backend === 'local' && evt.ok) {
-        localComputerTasks.touch(ctx, evt.host)
+        localComputerTasks.touch({ ...ctx, profileId: evt.profileId ?? null }, evt.host)
         void sandboxOrchestrator?.completeTask(ctx.sessionId).catch(() => {})
       } else if (evt.backend === 'cloud' && evt.ok) {
         localComputerTasks.complete(ctx.sessionId)
@@ -3537,6 +3611,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   })
   allTools.set('browserNavigate', computerTools.browserNavigate)
+  allTools.set('browserOpenTab', computerTools.browserOpenTab)
+  allTools.set('browserListTabs', computerTools.browserListTabs)
+  allTools.set('browserSwitchTab', computerTools.browserSwitchTab)
+  allTools.set('browserCloseTab', computerTools.browserCloseTab)
   allTools.set('browserSnapshot', computerTools.browserSnapshot)
   allTools.set('browserClick', computerTools.browserClick)
   allTools.set('browserType', computerTools.browserType)
@@ -3792,6 +3870,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     buildWorkspaceProvider: llmProviderSettingsStore
       ? (apiKey: string) => wrapProvider(createGeminiProvider(apiKey))
       : undefined,
+    resolveWorkspaceCustomLlm,
     systemPrompt: webChatSystemPrompt,
     tools: allTools,
     capabilityStore,
@@ -3852,6 +3931,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   app.use('/api/v1', publicApiRoutes({
     provider,
+    resolveWorkspaceCustomLlm,
     configuredProviders,
     tools: allTools,
     systemPrompt: LAYER_1_SYSTEM_PROMPT,
@@ -3879,6 +3959,65 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     apiKeyStore,
     capabilityStore,
     agentTools: { reads: agentToolset.reads, writes: agentToolset.writes },
+  }))
+
+  // ── Shopify store access, shared by BOTH surfaces that have it ──────────
+  //
+  // ONE resolver instance, deliberately. The sandboxed Home-app bridge
+  // (brain-MCP, `authKind: 'home_app'`) and the built-in Shopify app's route
+  // (`/api/apps/shopify`) must reach exactly the same tools under the same
+  // four filters — workspace exposure ∩ connector action grants ∩ tier ∩ NOT
+  // destructive. Constructing a second resolver beside this one would compile,
+  // pass every test, and drift the day someone changes one call site's deps.
+  //
+  // Bound to the workspace primary assistant, so its connector action grants
+  // apply before the caller's own tier narrows further.
+  const shopifyStoreTools = createStoreToolResolver({
+    connectorStore,
+    settingsStore: mcpSettingsStore,
+    assistantConnectorStore,
+    assistantConnectorGrantsStore,
+    // The three below are load-bearing together with the resolver's
+    // `assistantTeamId`. That field suppresses the owner-personal base load
+    // (the connector boundary); THESE are the overlays that put the
+    // workspace's own connectors back. Passing the boundary without the
+    // overlays fails closed but renders the feature permanently inert — a
+    // caller with store scope would see zero tools forever, with nothing in
+    // the UI explaining why.
+    connectorGrantStore,
+    connectorInstanceStore,
+    workspaceToolPolicyStore,
+  })
+
+  // The assistant consult, capped at the CALLER's own tool ceiling via
+  // `allowedTools`, so the model can reason and chain calls but cannot reach
+  // anything the direct tool gate refused. Without that cap this is a ladder
+  // around every rule in `store-tools.ts`, destructive tools included.
+  const askShopifyAssistant = async (params: {
+    workspaceId: string
+    storeScope: AppStoreScope
+    task: string
+    callerSessionId: string
+  }): Promise<string> => {
+    const target = await resolveWriteTarget(params.workspaceId)
+    if (!target) throw new Error('This workspace has no assistant to ask.')
+    return calleeExecutor({
+      callerAssistantId: target.assistantId,
+      calleeAssistantId: target.assistantId,
+      question: params.task,
+      callerSessionId: params.callerSessionId,
+      allowedTools: agentAllowedToolsFor('shopify', params.storeScope),
+    })
+  }
+
+  // The built-in Shopify app's data path. Per-route `requireAuth` (never a bare
+  // `app.use('/api', requireAuth, …)`, which would 401 later-registered public
+  // routes — see CLAUDE.md → route mount order).
+  app.use('/api/apps/shopify', appsShopifyRoutes({
+    requireAuth: requireAuth(env.JWT_SECRET),
+    storeTools: shopifyStoreTools,
+    askAssistant: ({ workspaceId, storeScope, task }) =>
+      askShopifyAssistant({ workspaceId, storeScope, task, callerSessionId: 'app:shopify' }),
   }))
 
   app.use('/api/brain/mcp', brainMcpRoutes({
@@ -3938,38 +4077,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // Commerce-store tools for a granted custom Home app. Bound to the
     // workspace primary assistant, so its connector action grants apply
     // before the app's own `scopes.store` tier narrows further.
-    storeTools: createStoreToolResolver({
-      connectorStore,
-      settingsStore: mcpSettingsStore,
-      assistantConnectorStore,
-      assistantConnectorGrantsStore,
-      // The three below are load-bearing together with the resolver's
-      // `assistantTeamId`. That field suppresses the owner-personal base load
-      // (the connector boundary); THESE are the overlays that put the
-      // workspace's own connectors back. Passing the boundary without the
-      // overlays fails closed but renders the feature permanently inert — an
-      // app granted `scopes.store` would see zero tools forever, with nothing
-      // in the UI explaining why.
-      connectorGrantStore,
-      connectorInstanceStore,
-      workspaceToolPolicyStore,
-    }),
+    storeTools: shopifyStoreTools,
     // `scopes.agent: 'ask'` — the app hands a task to the workspace assistant.
-    // The consult is capped at the app's OWN tool ceiling via `allowedTools`,
-    // so the model can reason and chain calls but cannot reach anything the
-    // direct tool gate refused. Without that cap this would be a ladder around
-    // every rule in `store-tools.ts`, destructive tools included.
-    agentTask: async ({ workspaceId, storeScope, appId, task }) => {
-      const target = await resolveWriteTarget(workspaceId)
-      if (!target) throw new Error('This workspace has no assistant to ask.')
-      return calleeExecutor({
-        callerAssistantId: target.assistantId,
-        calleeAssistantId: target.assistantId,
-        question: task,
-        callerSessionId: `home-app:${appId}`,
-        allowedTools: agentAllowedToolsFor('shopify', storeScope),
-      })
-    },
+    agentTask: ({ workspaceId, storeScope, appId, task }) =>
+      askShopifyAssistant({ workspaceId, storeScope, task, callerSessionId: `home-app:${appId}` }),
   }))
 
   // AI Engines MCP — read-only observation of external answer engines + GSC,
@@ -4213,6 +4324,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         },
       },
       connectorAppCredentialStore,
+      ...(filesApi ? { filesApi } : {}),
     }))
   }
 
@@ -4423,6 +4535,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   if (llmProviderSettingsStore) {
     app.use('/api/workspaces/:workspaceId/llm-keys', requireAuth(env.JWT_SECRET), workspaceLlmKeysRoutes({ llmProviderSettingsStore, workspaceStore }))
   }
+  app.use(
+    '/api/workspaces/:workspaceId/custom-llm-endpoints',
+    requireAuth(env.JWT_SECRET),
+    workspaceCustomLlmEndpointsRoutes({
+      endpointStore: customLlmEndpointStore,
+      workspaceStore,
+      networkPolicy: customLlmNetworkPolicy,
+    }),
+  )
 
   app.use('/api/workspaces/:workspaceId/compartments', requireAuth(env.JWT_SECRET), compartmentRoutes({ compartmentStore, workspaceStore }))
 
@@ -4445,15 +4566,18 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     localTasks: localComputerTasks,
     localStatus:
       browserRelayUrl && env.BROWSER_RELAY_SECRET
-        ? (userId) =>
+        ? (userId, browserProfileId) =>
             relayExtensionStatus({
               relayUrl: browserRelayUrl as string,
               relaySecret: env.BROWSER_RELAY_SECRET as string,
               userId,
+              ...(browserProfileId ? { browserProfileId } : {}),
             })
         : null,
     vault: ports.browserSessionVault ?? null,
     profileStore: ports.browserProfileStore ?? null,
+    credentials: ports.browserCredentialStore ?? null,
+    authBroker: browserAuthBroker,
     grants: ports.browserSkillGrantStore ?? null,
     skills: browserSkillsStore,
     getWorkspaceRole: (userId, workspaceId) => workspaceStore.getRole(userId, workspaceId),
@@ -4466,14 +4590,16 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api/browser-extension', requireAuth(env.JWT_SECRET), browserExtensionRoutes({
     jwtSecret: env.JWT_SECRET,
     workspaceStore,
+    profileStore: ports.browserProfileStore ?? null,
     relayWsUrl: browserRelayWsUrl,
     extensionStatus:
       browserRelayUrl && env.BROWSER_RELAY_SECRET
-        ? (userId) =>
+        ? (userId, options) =>
             relayExtensionStatus({
               relayUrl: browserRelayUrl as string,
               relaySecret: env.BROWSER_RELAY_SECRET as string,
               userId,
+              ...options,
             })
         : null,
   }))
@@ -4512,6 +4638,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // See docs/architecture/features/public-chat-link.md.
   app.use('/api', publicChatRoutes({
     provider,
+    resolveWorkspaceCustomLlm,
     configuredProviders,
     tools: allTools,
     systemPrompt: LAYER_1_SYSTEM_PROMPT,
@@ -4628,6 +4755,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     workspaceStore,
     meteredProfileStore,
     modelDefaultsStore,
+    customLlmEndpointStore,
     configuredProviders,
     estimateMeteredTurn: ports.meteredBilling?.estimateMeteredTurn,
   }))
@@ -5547,6 +5675,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   const sessionResumeReplay = createSessionResumeReplay({
     provider,
+    resolveWorkspaceCustomLlm,
     tools: allTools,
     systemPrompt: webChatSystemPrompt,
     analytics,
@@ -5999,6 +6128,30 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       })
     : null
   if (runWorkers && fileIngestWorker) fileIngestWorker.start()
+
+  // ── Progressive Google Drive enrichment worker ───────────────
+  // A full-Drive content read inserts one version-idempotent row. The worker
+  // re-opens that exact OAuth instance, materializes/indexes a workspace-file
+  // derivative, and runs Pipeline B only for native lazy jobs. Offline bundle
+  // rows are already enriched and deliberately bypass the model.
+  const gdriveEnrichmentWorker = filesApi
+    ? createGDriveEnrichmentWorker({
+        filesApi,
+        connectorInstanceStore,
+        distill: async ({ buffer, mime }) =>
+          (await distillFileToText({ buffer, mime }, { backend: mediaBackend })).text,
+        ...(brainEpisodeIngestor ? { brainIngest: brainEpisodeIngestor } : {}),
+      })
+    : null
+  if (runWorkers && gdriveEnrichmentWorker) gdriveEnrichmentWorker.start()
+
+  // Metadata discovery is deliberately separate from deep enrichment. It
+  // writes small Drive descriptors whose normal workspace-file embeddings
+  // make names and folder paths searchable, without downloading content.
+  const gdriveCatalogWorker = filesApi
+    ? createGDriveCatalogWorker({ filesApi, connectorInstanceStore })
+    : null
+  if (runWorkers && gdriveCatalogWorker) gdriveCatalogWorker.start()
 
   // ── Lossless LinkedIn archive worker ──
   // Own deterministic queue: exact ZIP/member/row ledger first, conservative
@@ -6542,6 +6695,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             adaptiveResearchEnabled: true,
             abortController,
             provider,
+            resolveWorkspaceCustomLlm,
             systemPrompt: LAYER_1_SYSTEM_PROMPT,
             tools: allTools,
             memoryStore,
@@ -6608,7 +6762,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     if (integrationStore) {
       app.use('/webhook/telegram', telegramByoRoutes({
         backgroundModel,
-        provider, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
+        provider, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
         memoryStore, usageStore, checkCreditBudget: ports.checkCreditBudget,
         appUrl: env.APP_URL, apiUrl: env.API_URL, integrationStore,
         linkedAccountStore, ownerPairing: {
@@ -6629,7 +6783,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         backgroundModel,
         ingestChannelMediaRef: channelHosts.slackIngestChannelMediaRef,
         artifactPromoter,
-        provider, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
+        provider, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
         memoryStore, usageStore, checkCreditBudget: ports.checkCreditBudget,
         integrationStore, channelUserStore, linkedAccountStore, linkCodeStore,
         workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
@@ -6645,7 +6799,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       // docs/architecture/channels/msteams.md.
       app.use('/webhook/msteams', msteamsRoutes({
         backgroundModel,
-        provider, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
+        provider, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
         memoryStore, usageStore, checkCreditBudget: ports.checkCreditBudget,
         integrationStore, channelUserStore,
         workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
@@ -6660,7 +6814,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         backgroundModel,
           ingestChannelMediaRef: channelHosts.discordIngestChannelMediaRef,
           artifactPromoter,
-          connectorSecret: env.DISCORD_CONNECTOR_SECRET, provider, systemPrompt: LAYER_1_SYSTEM_PROMPT,
+          connectorSecret: env.DISCORD_CONNECTOR_SECRET, provider, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT,
           tools: allTools, capabilityStore, memoryStore, usageStore,
           checkCreditBudget: ports.checkCreditBudget, integrationStore, channelUserStore,
           workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
@@ -6672,7 +6826,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         app.use('/internal/wechat', wechatRoutes({
           backgroundModel,
           artifactPromoter,
-          connectorSecret: env.WECHAT_CONNECTOR_SECRET, provider, systemPrompt: LAYER_1_SYSTEM_PROMPT,
+          connectorSecret: env.WECHAT_CONNECTOR_SECRET, provider, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT,
           tools: allTools, capabilityStore, memoryStore, usageStore,
           checkCreditBudget: ports.checkCreditBudget, integrationStore, channelUserStore,
           workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
@@ -6722,6 +6876,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     chatArchiveMediaWorker?.stop()
     stuckSessionSweeper.stop()
     fileIngestWorker?.stop()
+    gdriveEnrichmentWorker?.stop()
+    gdriveCatalogWorker?.stop()
     linkedinImportWorker?.stop()
     recordingProcessWorker?.stop()
     officeLifecycleWorker.stop()

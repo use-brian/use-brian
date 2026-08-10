@@ -6,7 +6,7 @@ import {
   MULTI_INSTANCE_CONNECTOR_IDS,
   OFFICIAL_CONNECTORS,
 } from '../connector-registry.js'
-import { connectorToolGrouping, OFFICIAL_CONNECTOR_TOOLS, OFFICIAL_OAUTH_SCOPES } from '../builtin-connectors.js'
+import { GDRIVE_BYO_OAUTH_SCOPES, connectorToolGrouping, OFFICIAL_CONNECTOR_TOOLS, OFFICIAL_OAUTH_SCOPES } from '../builtin-connectors.js'
 import { TOOL_DISPLAY_NAMES } from '../tool-display-names.js'
 
 /**
@@ -185,7 +185,7 @@ describe('[COMP:shared/connector-registry] Official connector registry', () => {
     it('connectorToolGrouping maps every grouped tool and stays empty for flat connectors', () => {
       const shopify = connectorToolGrouping('shopify')
       expect(Object.keys(shopify.byTool)).toHaveLength(OFFICIAL_CONNECTOR_TOOLS.shopify?.length ?? 0)
-      expect(connectorToolGrouping('gdrive').order).toEqual(['docs', 'sheets', 'slides'])
+      expect(connectorToolGrouping('gdrive').order).toEqual(['drive', 'docs', 'sheets', 'slides'])
       expect(connectorToolGrouping('gmail')).toEqual({ order: [], byTool: {} })
     })
 
@@ -198,6 +198,14 @@ describe('[COMP:shared/connector-registry] Official connector registry', () => {
       )
       const strays = Object.keys(OFFICIAL_OAUTH_SCOPES).filter((id) => !oauthIds.has(id))
       expect(strays).toEqual([])
+    })
+
+    it('keeps restricted full-Drive read off Brian OAuth and on BYO only', () => {
+      expect(OFFICIAL_OAUTH_SCOPES.gdrive).toEqual([
+        'https://www.googleapis.com/auth/drive.file',
+      ])
+      expect(GDRIVE_BYO_OAUTH_SCOPES).toContain('https://www.googleapis.com/auth/drive.readonly')
+      expect(GDRIVE_BYO_OAUTH_SCOPES).toContain('https://www.googleapis.com/auth/drive.file')
     })
   })
 })

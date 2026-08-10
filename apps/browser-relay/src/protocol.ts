@@ -57,7 +57,13 @@ type ExtensionMessage = z.infer<typeof ExtensionMessageSchema>
 // ── Relay → extension ──────────────────────────────────────────
 
 type ReadyMessage = { type: 'ready'; sessionToken?: string; staleBuild?: boolean }
-type CommandMessage = { type: 'command'; id: string; op: string; args: Record<string, unknown> }
+type CommandMessage = {
+  type: 'command'
+  id: string
+  op: string
+  args: Record<string, unknown>
+  controlMode?: 'task_tabs' | 'full_browser'
+}
 type PongMessage = { type: 'pong' }
 type ErrorMessage = { type: 'error'; message: string }
 export type RelayToExtensionMessage = ReadyMessage | CommandMessage | PongMessage | ErrorMessage
@@ -66,6 +72,8 @@ export type RelayToExtensionMessage = ReadyMessage | CommandMessage | PongMessag
 
 export const InternalCommandRequestSchema = z.object({
   userId: z.string().min(1),
+  browserProfileId: z.string().min(1),
+  controlMode: z.enum(['task_tabs', 'full_browser']).default('task_tabs'),
   op: z.string().min(1),
   args: z.record(z.unknown()).optional(),
 })

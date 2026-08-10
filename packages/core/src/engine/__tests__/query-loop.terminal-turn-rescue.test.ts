@@ -130,7 +130,7 @@ describe('[COMP:engine/query-loop] Terminal-turn rescue — stopReason says term
   it('synthesizes a closing turn when the terminal turn carries a tool_use block', async () => {
     const provider = scriptedProvider([
       truncatedNarrationTurn('t1', NARRATION),
-      textChunks(SYNTHESIS),
+      textChunks(JSON.stringify({ message: SYNTHESIS })),
     ])
 
     const events = await runLoop(provider)
@@ -151,7 +151,7 @@ describe('[COMP:engine/query-loop] Terminal-turn rescue — stopReason says term
   it('leaves a non-empty deliverable for a consult that drops non-terminal turns', async () => {
     const provider = scriptedProvider([
       truncatedNarrationTurn('t1', NARRATION),
-      textChunks(SYNTHESIS),
+      textChunks(JSON.stringify({ message: SYNTHESIS })),
     ])
 
     const events = await runLoop(provider)

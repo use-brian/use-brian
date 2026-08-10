@@ -33,7 +33,7 @@ const c = en.computer.connectBrowser;
 function render(): string {
   return renderToString(
     <I18nProvider locale="en" dict={dict}>
-      <ConnectBrowserPanel />
+      <ConnectBrowserPanel profileId="profile-1" profileName="Personal" />
     </I18nProvider>,
   );
 }

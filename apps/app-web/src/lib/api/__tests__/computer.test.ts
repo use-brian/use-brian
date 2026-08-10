@@ -17,13 +17,18 @@ import {
   deleteBrowserProfile,
   getComputerFrame,
   getComputerTask,
+  getBrowserExtensionStatus,
   listBrowserProfiles,
   mostRecentComputerTask,
+  pairBrowserExtension,
   markComputerSessionCaptured,
   resumeComputerTask,
   revokeProfileSession,
+  revokeBrowserCredential,
+  saveBrowserCredential,
   sendComputerInput,
   setComputerSessionBackend,
+  testBrowserCredential,
   updateBrowserProfile,
 } from '../computer'
 
@@ -180,12 +185,14 @@ describe('[COMP:app-web/profile-management] Profile-Management SDK (R2-4)', () =
     mockFetch.mockResolvedValueOnce(
       respond(200, {
         configured: true,
+        credentialAuthConfigured: true,
         profiles: [
           {
             id: 'p1',
             name: 'Personal',
             clearance: 'confidential',
             defaultBackend: 'cloud',
+            localControlMode: 'task_tabs',
             enabledAssistantIds: [],
             sessions: [{ site: 'github.com', capturedAt: 'x', lastUsedAt: null, status: 'active' }],
           },
@@ -194,6 +201,7 @@ describe('[COMP:app-web/profile-management] Profile-Management SDK (R2-4)', () =
     )
     const res = await listBrowserProfiles('ws-1')
     expect(res.configured).toBe(true)
+    expect(res.credentialAuthConfigured).toBe(true)
     expect(res.profiles[0].sessions[0].site).toBe('github.com')
     expect(String(mockFetch.mock.calls[0][0])).toContain('/api/computer/profiles?workspaceId=ws-1')
   })
@@ -205,15 +213,24 @@ describe('[COMP:app-web/profile-management] Profile-Management SDK (R2-4)', () =
     const created = await createBrowserProfile({ workspaceId: 'ws-1', name: 'Company IG' })
     expect(created?.id).toBe('p2')
     expect(created?.sessions).toEqual([])
+    expect(created?.credentials).toEqual([])
     const create = mockFetch.mock.calls.at(-1)!
     expect(String(create[0])).toContain('/api/computer/profiles')
     expect(create[1]).toMatchObject({ method: 'POST' })
 
-    await updateBrowserProfile('p2', { clearance: 'internal', defaultBackend: 'local' })
+    await updateBrowserProfile('p2', {
+      clearance: 'internal',
+      defaultBackend: 'local',
+      localControlMode: 'full_browser',
+    })
     const patch = mockFetch.mock.calls.at(-1)!
     expect(String(patch[0])).toContain('/api/computer/profiles/p2')
     expect(patch[1]).toMatchObject({ method: 'PATCH' })
-    expect(JSON.parse(patch[1]!.body as string)).toEqual({ clearance: 'internal', defaultBackend: 'local' })
+    expect(JSON.parse(patch[1]!.body as string)).toEqual({
+      clearance: 'internal',
+      defaultBackend: 'local',
+      localControlMode: 'full_browser',
+    })
 
     await deleteBrowserProfile('p2')
     const del = mockFetch.mock.calls.at(-1)!
@@ -226,5 +243,84 @@ describe('[COMP:app-web/profile-management] Profile-Management SDK (R2-4)', () =
     const call = mockFetch.mock.calls.at(-1)!
     expect(String(call[0])).toContain('/api/computer/profiles/p1/sessions/github.com')
     expect(call[1]).toMatchObject({ method: 'DELETE' })
+  })
+
+  it('saves, tests, and revokes a write-only browser credential', async () => {
+    mockFetch.mockResolvedValueOnce(
+      respond(200, {
+        credential: {
+          id: 'cred-1',
+          profileId: 'p1',
+          workspaceId: 'ws-1',
+          site: 'example.com',
+          loginUrl: 'https://accounts.example.com/login',
+          accountLabel: 'Primary',
+          status: 'active',
+          lastUsedAt: null,
+          lastFailureCode: null,
+          createdAt: 'x',
+          updatedAt: 'x',
+        },
+      }),
+    )
+    const saved = await saveBrowserCredential('p1', {
+      loginUrl: 'https://accounts.example.com/login',
+      accountLabel: 'Primary',
+      username: 'member@example.com',
+      password: 'secret-password',
+    })
+    expect(saved?.site).toBe('example.com')
+    const saveCall = mockFetch.mock.calls.at(-1)!
+    expect(String(saveCall[0])).toContain('/profiles/p1/credentials')
+    expect(JSON.parse(saveCall[1]!.body as string)).toEqual({
+      loginUrl: 'https://accounts.example.com/login',
+      accountLabel: 'Primary',
+      username: 'member@example.com',
+      password: 'secret-password',
+    })
+
+    mockFetch.mockResolvedValueOnce(
+      respond(422, { ok: false, status: 'needs_user', code: 'mfa_required' }),
+    )
+    expect(await testBrowserCredential('p1', 'cred-1')).toEqual({
+      ok: false,
+      status: 'needs_user',
+      code: 'mfa_required',
+    })
+    expect(String(mockFetch.mock.calls.at(-1)?.[0])).toContain(
+      '/profiles/p1/credentials/cred-1/test',
+    )
+
+    expect(await revokeBrowserCredential('p1', 'cred-1')).toBe(true)
+    const revoke = mockFetch.mock.calls.at(-1)!
+    expect(String(revoke[0])).toContain('/profiles/p1/credentials/cred-1')
+    expect(revoke[1]).toMatchObject({ method: 'DELETE' })
+  })
+})
+
+describe('[COMP:app-web/connect-browser] Profile-scoped extension pairing SDK', () => {
+  it('scopes status and pairing to the selected browser profile', async () => {
+    mockFetch.mockResolvedValueOnce(
+      respond(200, { configured: true, connected: true, build: 'abc', staleBuild: false }),
+    )
+    expect(await getBrowserExtensionStatus('ws-1', 'profile-1')).toMatchObject({ connected: true })
+    expect(String(mockFetch.mock.calls.at(-1)?.[0])).toContain(
+      '/api/browser-extension/status?workspaceId=ws-1&browserProfileId=profile-1',
+    )
+
+    mockFetch.mockResolvedValueOnce(
+      respond(200, {
+        pairingToken: 'token',
+        relayUrl: 'wss://relay.example/ext',
+        browserProfileId: 'profile-1',
+        expiresInSeconds: 600,
+      }),
+    )
+    const paired = await pairBrowserExtension('ws-1', 'profile-1')
+    expect(paired?.browserProfileId).toBe('profile-1')
+    expect(JSON.parse(mockFetch.mock.calls.at(-1)?.[1]?.body as string)).toEqual({
+      workspaceId: 'ws-1',
+      browserProfileId: 'profile-1',
+    })
   })
 })

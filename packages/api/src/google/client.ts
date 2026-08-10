@@ -36,6 +36,113 @@ const SLIDES_API = 'https://slides.googleapis.com/v1'
 
 // ── Token refresh ─────────────────────────────────────────────
 
+/**
+ * The encrypted connector secret for a Google grant.
+ *
+ * Legacy / Brian-managed grants are stored as the raw refresh token and use
+ * deployment Google app credentials. A BYO Drive grant must carry the app that
+ * minted it: OAuth refresh tokens are client-bound, while runtime injection has
+ * an instance id but no reliable workspace id from which to re-resolve the app.
+ */
+export type GoogleRefreshCredential = {
+  refreshToken: string
+  appClientId?: string
+  appClientSecret?: string
+  /** BYO Drive Picker metadata from the same customer Cloud project. */
+  pickerAppId?: string
+  pickerApiKey?: string
+}
+
+/** Pack a BYO grant into the encrypted connector-instance envelope. */
+export function packGoogleRefreshCredential(input: {
+  refreshToken: string
+  appClientId: string
+  appClientSecret: string
+  pickerAppId?: string
+  pickerApiKey?: string
+}): string {
+  return JSON.stringify({
+    version: input.pickerAppId && input.pickerApiKey ? 2 : 1,
+    refreshToken: input.refreshToken,
+    appClientId: input.appClientId,
+    appClientSecret: input.appClientSecret,
+    ...(input.pickerAppId ? { pickerAppId: input.pickerAppId } : {}),
+    ...(input.pickerApiKey ? { pickerApiKey: input.pickerApiKey } : {}),
+  })
+}
+
+/** Parse both the BYO envelope and every legacy raw refresh-token row. */
+export function unpackGoogleRefreshCredential(secret: string): GoogleRefreshCredential {
+  const raw = secret.trim()
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>
+    if (
+      typeof parsed.refreshToken === 'string' && parsed.refreshToken.trim() &&
+      typeof parsed.appClientId === 'string' && parsed.appClientId.trim() &&
+      typeof parsed.appClientSecret === 'string' && parsed.appClientSecret.trim()
+    ) {
+      return {
+        refreshToken: parsed.refreshToken,
+        appClientId: parsed.appClientId,
+        appClientSecret: parsed.appClientSecret,
+        ...(typeof parsed.pickerAppId === 'string' && parsed.pickerAppId.trim()
+          ? { pickerAppId: parsed.pickerAppId }
+          : {}),
+        ...(typeof parsed.pickerApiKey === 'string' && parsed.pickerApiKey.trim()
+          ? { pickerApiKey: parsed.pickerApiKey }
+          : {}),
+      }
+    }
+  } catch {
+    // Legacy refresh tokens are opaque strings, not JSON.
+  }
+  return { refreshToken: raw }
+}
+
+export type GoogleAuthorizationCodeResult = {
+  accessToken: string
+  refreshToken: string
+  email: string | null
+}
+
+/** Server-side authorization-code exchange shared by both connector routers. */
+export async function exchangeGoogleAuthorizationCode(input: {
+  code: string
+  redirectUri: string
+  clientId: string
+  clientSecret: string
+}): Promise<GoogleAuthorizationCodeResult> {
+  const res = await fetch(GOOGLE_TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      code: input.code,
+      client_id: input.clientId,
+      client_secret: input.clientSecret,
+      redirect_uri: input.redirectUri,
+      grant_type: 'authorization_code',
+    }),
+  })
+  if (!res.ok) throw new Error(`Google token exchange failed (HTTP ${res.status})`)
+
+  const tokens = await res.json() as { access_token?: string; refresh_token?: string }
+  if (!tokens.access_token || !tokens.refresh_token) {
+    throw new Error('Google returned an incomplete offline grant')
+  }
+
+  let email: string | null = null
+  try {
+    const userInfo = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+      headers: { Authorization: `Bearer ${tokens.access_token}` },
+    })
+    if (userInfo.ok) email = ((await userInfo.json()) as { email?: string }).email ?? null
+  } catch {
+    // Account display is best-effort; the refresh grant is still valid.
+  }
+
+  return { accessToken: tokens.access_token, refreshToken: tokens.refresh_token, email }
+}
+
 export async function refreshGoogleAccessToken(
   refreshToken: string,
   clientId: string,
@@ -450,16 +557,68 @@ function mergeAttachments(current: CalendarAttachment[], changes: CalendarEventU
   return attachments
 }
 
-function inferAllDay(event: CalendarEvent, explicit?: boolean): boolean {
-  return explicit ?? Boolean(event.start?.date)
+type CalendarBoundaryMode = 'all-day' | 'timed'
+
+const DATE_ONLY_BOUNDARY = /^\d{4}-\d{2}-\d{2}$/
+
+function boundaryMode(value: string): CalendarBoundaryMode {
+  return DATE_ONLY_BOUNDARY.test(value) ? 'all-day' : 'timed'
+}
+
+function inferAllDay(event: CalendarEvent, updates: CalendarEventUpdateInput): boolean {
+  const currentAllDay = Boolean(event.start?.date)
+  const hasStart = updates.start !== undefined
+  const hasEnd = updates.end !== undefined
+
+  if (updates.allDay !== undefined) {
+    if (!hasStart || !hasEnd) {
+      throw new Error('Changing all-day mode requires both start and end boundaries')
+    }
+    return updates.allDay
+  }
+
+  if (hasStart && hasEnd) {
+    const startMode = boundaryMode(updates.start!)
+    const endMode = boundaryMode(updates.end!)
+    if (startMode !== endMode) {
+      throw new Error('Calendar start and end must both be date-only or both be date-time values')
+    }
+    return startMode === 'all-day'
+  }
+
+  const suppliedBoundary = updates.start ?? updates.end
+  if (suppliedBoundary !== undefined) {
+    const suppliedAllDay = boundaryMode(suppliedBoundary) === 'all-day'
+    if (suppliedAllDay !== currentAllDay) {
+      throw new Error('Changing between all-day and timed events requires both start and end boundaries')
+    }
+  }
+  return currentAllDay
+}
+
+function validateUpdateBoundaryMode(updates: CalendarEventUpdateInput, allDay: boolean): void {
+  for (const value of [updates.start, updates.end]) {
+    if (value === undefined) continue
+    const mode = boundaryMode(value)
+    if (allDay && mode !== 'all-day') {
+      throw new Error('All-day events require YYYY-MM-DD start and end dates')
+    }
+    if (!allDay && mode !== 'timed') {
+      throw new Error('Timed events require RFC 3339 start and end date-times')
+    }
+  }
+
+  if (allDay && updates.start !== undefined && updates.end !== undefined) {
+    if (Date.parse(`${updates.end}T00:00:00Z`) <= Date.parse(`${updates.start}T00:00:00Z`)) {
+      throw new Error('An all-day event end date must be after its start date')
+    }
+  }
 }
 
 function updateEventBody(updates: CalendarEventUpdateInput, current: CalendarEvent): Record<string, unknown> {
   const body: Record<string, unknown> = {}
-  if (updates.allDay !== undefined && (updates.start === undefined || updates.end === undefined)) {
-    throw new Error('Changing allDay mode requires both start and end boundaries')
-  }
-  const allDay = inferAllDay(current, updates.allDay)
+  const allDay = inferAllDay(current, updates)
+  validateUpdateBoundaryMode(updates, allDay)
   if (updates.summary !== undefined) body.summary = updates.summary
   if (updates.start !== undefined) body.start = eventBoundary(updates.start, allDay, updates.timeZone)
   if (updates.end !== undefined) body.end = eventBoundary(updates.end, allDay, updates.timeZone)
@@ -1263,11 +1422,20 @@ export type DriveFile = {
   id: string
   name: string
   mimeType: string
+  /** Monotonic Drive-side version used for enrichment idempotency. */
+  version?: string
   modifiedTime?: string
   size?: string
   webViewLink?: string
   parents?: string[]
 }
+
+export type DriveFilesPage = {
+  files: DriveFile[]
+  nextPageToken?: string
+}
+
+export const GOOGLE_DRIVE_FOLDER_MIME = 'application/vnd.google-apps.folder'
 
 /** MIME types for Google Workspace documents (need export, not download). */
 const WORKSPACE_MIME_TYPES = new Set([
@@ -1277,24 +1445,43 @@ const WORKSPACE_MIME_TYPES = new Set([
   'application/vnd.google-apps.drawing',
 ])
 
-export async function listDriveFiles(
+export async function listDriveFilesPage(
   accessToken: string,
   params: {
     query?: string
     maxResults?: number
     folderId?: string
+    pageToken?: string
+    /** Internal discovery seam for metadata-only catalog scans. */
+    rawQuery?: string
+    orderBy?: string
   },
-): Promise<DriveFile[]> {
+): Promise<DriveFilesPage> {
+  const pageSize = Math.max(1, Math.min(params.maxResults ?? 20, 1000))
   const qs = new URLSearchParams({
-    pageSize: String(params.maxResults ?? 20),
-    fields: 'files(id,name,mimeType,modifiedTime,size,webViewLink,parents)',
+    pageSize: String(pageSize),
+    fields: 'nextPageToken,files(id,name,mimeType,version,modifiedTime,size,webViewLink,parents)',
+    supportsAllDrives: 'true',
+    includeItemsFromAllDrives: 'true',
   })
 
-  const qParts: string[] = ['trashed = false']
-  if (params.folderId) qParts.push(`'${params.folderId}' in parents`)
-  if (params.query) qParts.push(`name contains '${params.query.replace(/'/g, "\\'")}'`)
-  qs.set('q', qParts.join(' and '))
-  qs.set('orderBy', 'modifiedTime desc')
+  if (params.pageToken) qs.set('pageToken', params.pageToken)
+
+  if (params.rawQuery) {
+    qs.set('q', params.rawQuery)
+  } else {
+    const qParts: string[] = ['trashed = false']
+    if (params.folderId) {
+      const folderId = params.folderId.replace(/\\/g, '\\\\').replace(/'/g, "\\'")
+      qParts.push(`'${folderId}' in parents`)
+    }
+    if (params.query) {
+      const query = params.query.replace(/\\/g, '\\\\').replace(/'/g, "\\'")
+      qParts.push(`(name contains '${query}' or fullText contains '${query}')`)
+    }
+    qs.set('q', qParts.join(' and '))
+  }
+  qs.set('orderBy', params.orderBy ?? 'modifiedTime desc')
 
   const res = await fetch(`${DRIVE_API}/files?${qs}`, {
     headers: { Authorization: `Bearer ${accessToken}` },
@@ -1305,8 +1492,22 @@ export async function listDriveFiles(
     throw new Error(`Drive API error (${res.status}): ${err}`)
   }
 
-  const data = await res.json() as { files?: DriveFile[] }
-  return data.files ?? []
+  const data = await res.json() as { files?: DriveFile[]; nextPageToken?: string }
+  return {
+    files: data.files ?? [],
+    ...(data.nextPageToken ? { nextPageToken: data.nextPageToken } : {}),
+  }
+}
+
+export async function listDriveFiles(
+  accessToken: string,
+  params: {
+    query?: string
+    maxResults?: number
+    folderId?: string
+  },
+): Promise<DriveFile[]> {
+  return (await listDriveFilesPage(accessToken, params)).files
 }
 
 export async function getDriveFile(
@@ -1314,7 +1515,8 @@ export async function getDriveFile(
   fileId: string,
 ): Promise<DriveFile> {
   const qs = new URLSearchParams({
-    fields: 'id,name,mimeType,modifiedTime,size,webViewLink,parents',
+    fields: 'id,name,mimeType,version,modifiedTime,size,webViewLink,parents',
+    supportsAllDrives: 'true',
   })
 
   const res = await fetch(`${DRIVE_API}/files/${encodeURIComponent(fileId)}?${qs}`, {
@@ -1334,7 +1536,15 @@ export async function getDriveFileContent(
   fileId: string,
   exportMimeType?: string,
 ): Promise<string> {
-  // First get metadata to determine file type
+  return (await getDriveFileContentWithMetadata(accessToken, fileId, exportMimeType)).content
+}
+
+/** Content plus the exact metadata/version used to choose its export path. */
+export async function getDriveFileContentWithMetadata(
+  accessToken: string,
+  fileId: string,
+  exportMimeType?: string,
+): Promise<{ file: DriveFile; content: string }> {
   const meta = await getDriveFile(accessToken, fileId)
 
   if (WORKSPACE_MIME_TYPES.has(meta.mimeType)) {
@@ -1351,19 +1561,55 @@ export async function getDriveFileContent(
       const err = await res.text()
       throw new Error(`Drive export error (${res.status}): ${err}`)
     }
-    return await res.text()
+    return { file: meta, content: await res.text() }
   }
 
   // Regular files — download content
   const res = await fetch(
-    `${DRIVE_API}/files/${encodeURIComponent(fileId)}?alt=media`,
+    `${DRIVE_API}/files/${encodeURIComponent(fileId)}?alt=media&supportsAllDrives=true`,
     { headers: { Authorization: `Bearer ${accessToken}` } },
   )
   if (!res.ok) {
     const err = await res.text()
     throw new Error(`Drive download error (${res.status}): ${err}`)
   }
-  return await res.text()
+  return { file: meta, content: await res.text() }
+}
+
+/**
+ * Byte-preserving worker read. Google Workspace files are exported to a local
+ * text representation; regular files retain their provider MIME and bytes so
+ * DOCX/XLSX/PDF/image enrichment can use Brian's normal parser/distiller.
+ */
+export async function getDriveFileBytesWithMetadata(
+  accessToken: string,
+  fileId: string,
+): Promise<{ file: DriveFile; bytes: Uint8Array; mimeType: string }> {
+  const meta = await getDriveFile(accessToken, fileId)
+  if (WORKSPACE_MIME_TYPES.has(meta.mimeType)) {
+    const mimeType = meta.mimeType === 'application/vnd.google-apps.spreadsheet'
+      ? 'text/csv'
+      : 'text/plain'
+    const res = await fetch(
+      `${DRIVE_API}/files/${encodeURIComponent(fileId)}/export?mimeType=${encodeURIComponent(mimeType)}`,
+      { headers: { Authorization: `Bearer ${accessToken}` } },
+    )
+    if (!res.ok) {
+      const err = await res.text()
+      throw new Error(`Drive export error (${res.status}): ${err}`)
+    }
+    return { file: meta, bytes: new Uint8Array(await res.arrayBuffer()), mimeType }
+  }
+
+  const res = await fetch(
+    `${DRIVE_API}/files/${encodeURIComponent(fileId)}?alt=media&supportsAllDrives=true`,
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+  )
+  if (!res.ok) {
+    const err = await res.text()
+    throw new Error(`Drive download error (${res.status}): ${err}`)
+  }
+  return { file: meta, bytes: new Uint8Array(await res.arrayBuffer()), mimeType: meta.mimeType }
 }
 
 export async function createDriveFile(

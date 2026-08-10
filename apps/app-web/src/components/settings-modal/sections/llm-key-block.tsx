@@ -28,6 +28,7 @@ import { Button } from "@/components/ui/button";
 import { AlertDialog } from "@base-ui/react/alert-dialog";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n";
+import { CustomLlmEndpointsBlock } from "./custom-llm-endpoints-block";
 
 export function WorkspaceLlmKeyBlock() {
   const t = useT();
@@ -113,6 +114,7 @@ export function WorkspaceLlmKeyBlock() {
   }
 
   return (
+    <div>
     <div className="border-t border-border pt-6 space-y-3">
       <div>
         <h3 className="text-sm font-medium">{tk.heading}</h3>
@@ -190,6 +192,8 @@ export function WorkspaceLlmKeyBlock() {
         onCancel={() => setConfirmOpen(false)}
         onConfirm={remove}
       />
+    </div>
+    <CustomLlmEndpointsBlock />
     </div>
   );
 }

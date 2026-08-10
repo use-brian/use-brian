@@ -25,8 +25,10 @@ function slot(overrides: Partial<PlanSlot> = {}): PlanSlot {
     assistantId: 'assistant-1',
     platform: 'threads',
     scheduledFor: '2026-08-04',
+    scheduledMinute: null,
     title: 'Launch recap',
     brief: 'What shipped and what broke.',
+    media: [],
     status: 'planned',
     draftId: null,
     sessionId: null,
@@ -51,6 +53,7 @@ function fakeStore(overrides: Partial<ContentPlanStore> = {}): ContentPlanStore 
       monthStart: '2026-08-01',
       brief: 'Ship the launch.',
       themes: ['launch'],
+      cadencePerWeek: null,
       updatedBy: 'user-1',
       updatedAt: new Date('2026-07-29T01:00:00Z'),
     })),
@@ -145,6 +148,7 @@ describe('[COMP:feed/content-plan-routes] Marketing plan wire contract', () => {
       })
       .expect(201)
     expect(createSlot).toHaveBeenCalledWith({
+      scheduledMinute: null,
       assistantId: 'assistant-1',
       userId: 'user-1',
       platform: 'threads',
@@ -250,6 +254,7 @@ describe('[COMP:feed/content-plan-routes] Marketing plan wire contract', () => {
       monthStart: '2026-08-01',
       brief: 'Ship the launch.',
       themes: ['launch'],
+      cadencePerWeek: null,
       updatedBy: 'user-1',
       updatedAt: new Date('2026-07-29T01:00:00Z'),
     }))
@@ -262,12 +267,87 @@ describe('[COMP:feed/content-plan-routes] Marketing plan wire contract', () => {
       })
       .expect(200)
     expect(upsertBrief).toHaveBeenCalledWith({
+      cadencePerWeek: null,
       assistantId: 'assistant-1',
       userId: 'user-1',
       month: '2026-08',
       brief: 'Ship the launch.',
       themes: ['launch', 'proof'],
     })
+  })
+
+  // D26. The column is minutes past LOCAL midnight, so a value outside one day
+  // could only mean the caller thinks it carries a date -- which it does not.
+  // Letting that through would put a number in the column whose meaning nobody
+  // agrees on, and the UI would render it as a time.
+  it('rejects a scheduledMinute outside a single day', async () => {
+    for (const bad of [1440, -1, 12.5, '09:00']) {
+      const createSlot = vi.fn(async () => slot())
+      await request(app(fakeStore({ createSlot })))
+        .post('/api/distribution/assistant-1/plan-slots')
+        .send({
+          platform: 'threads',
+          scheduledFor: '2026-08-04',
+          title: 'Launch recap',
+          scheduledMinute: bad,
+        })
+        .expect(400)
+      expect(createSlot).not.toHaveBeenCalled()
+    }
+  })
+
+  it('accepts a wall-clock minute and a null that clears it', async () => {
+    const createSlot = vi.fn(async () => slot({ scheduledMinute: 570 }))
+    await request(app(fakeStore({ createSlot })))
+      .post('/api/distribution/assistant-1/plan-slots')
+      .send({
+        platform: 'threads',
+        scheduledFor: '2026-08-04',
+        title: 'Launch recap',
+        scheduledMinute: 570,
+      })
+      .expect(201)
+    expect(createSlot).toHaveBeenCalledWith(
+      expect.objectContaining({ scheduledMinute: 570 }),
+    )
+
+    const updateSlot = vi.fn(async () => slot())
+    await request(app(fakeStore({ updateSlot })))
+      .patch('/api/distribution/assistant-1/plan-slots/slot-1')
+      .send({ scheduledMinute: null })
+      .expect(200)
+    expect(updateSlot).toHaveBeenCalledWith({
+      assistantId: 'assistant-1',
+      slotId: 'slot-1',
+      patch: { scheduledMinute: null },
+    })
+  })
+
+  it('rejects a cadence outside 1..21 and accepts one inside it', async () => {
+    const upsertBrief = vi.fn(async () => ({
+      assistantId: 'assistant-1',
+      monthStart: '2026-08-01',
+      brief: '',
+      themes: [],
+      cadencePerWeek: 3,
+      updatedBy: 'user-1',
+      updatedAt: new Date('2026-08-01T00:00:00Z'),
+    }))
+    for (const bad of [0, 22, 2.5]) {
+      await request(app(fakeStore({ upsertBrief })))
+        .put('/api/distribution/assistant-1/plan-brief')
+        .send({ month: '2026-08', brief: '', themes: [], cadencePerWeek: bad })
+        .expect(400)
+    }
+    expect(upsertBrief).not.toHaveBeenCalled()
+
+    await request(app(fakeStore({ upsertBrief })))
+      .put('/api/distribution/assistant-1/plan-brief')
+      .send({ month: '2026-08', brief: '', themes: [], cadencePerWeek: 3 })
+      .expect(200)
+    expect(upsertBrief).toHaveBeenCalledWith(
+      expect.objectContaining({ cadencePerWeek: 3 }),
+    )
   })
 
   it('lets a member without draft permission read but not write', async () => {

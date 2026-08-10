@@ -28,22 +28,32 @@ import { createSearchEmailArchiveTool, getGlobalMailboxArchiveDeps } from '../ma
 import { createSyncMailboxNowTool, getGlobalMailboxSyncDeps } from '../mailbox/sync-tool.js'
 import type { MailboxAccountSettings } from '../mailbox/types.js'
 import { enqueueFileIngestJob } from '../db/file-ingest-jobs-store.js'
+import { enqueueGDriveLazyEnrichment } from '../db/gdrive-enrichment-store.js'
+import {
+  getGDriveCatalogReadPolicy,
+  getGDriveCatalogRuntimeScope,
+  listGDriveCatalogFiles,
+} from '../db/gdrive-catalog-store.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
 import type { ConnectorActionAudit, ConnectorActionPreflight } from '../connector-action-port.js'
 import { workspacePolicyAsSettingsStore } from '../db/workspace-tool-policy-store.js'
 import { discoverMcpServer, callRemoteMcpTool } from './client.js'
 import { discoverCliServer, callCliMcpTool, type CliServerParams } from './cli-transport.js'
-import { gateToolsOnActionGrants } from '../safety/assert-action-allowed.js'
+import {
+  filterToolsByActionGrants,
+  gateToolsOnActionGrants,
+} from '../safety/assert-action-allowed.js'
 import { createHealthReporter, wrapToolsWithHealthProbe, connectorReconnectNotice, classifyConnectorAuthError, type HealthReporter } from './connector-health.js'
 import { buildConnectorAuthHeaders, mergeValidatedHeaders, preflightHeadersToRecord, actorIdentityHeaders, type ActorIdentity } from './auth-headers.js'
 import {
   refreshGoogleAccessToken,
+  unpackGoogleRefreshCredential,
   listCalendarList, listCalendarEvents, getCalendarEvent, queryCalendarFreeBusy,
   createCalendarEvent, updateCalendarEvent, deleteCalendarEvent,
   listGmailMessages, getGmailMessage, sendGmailMessage,
   listTaskLists, listGoogleTasks, getGoogleTask, createGoogleTask, updateGoogleTask, deleteGoogleTask,
-  listDriveFiles, getDriveFile, getDriveFileContent, createDriveFile, updateDriveFileContent,
+  listDriveFiles, getDriveFile, getDriveFileContentWithMetadata, createDriveFile, updateDriveFileContent,
   getDocContent, appendToDoc, replaceInDoc, createDocument,
   getSpreadsheetInfo, readSheetRange, writeSheetRange, appendSheetRows, createSpreadsheet, formatSpreadsheet, batchUpdateSpreadsheet,
   getPresentationInfo, getSlideContent, getSlideThumbnail,
@@ -221,8 +231,6 @@ export const INJECTED_BUILTIN_TOOLS_BY_CONNECTOR: Record<string, readonly string
     'googleDriveListFiles',
     'googleDriveGetFile',
     'googleDriveGetFileContent',
-    'googleDriveCreateFile',
-    'googleDriveUpdateFile',
     'googleDocsGetContent',
     'googleDocsAppendText',
     'googleDocsReplaceText',
@@ -908,6 +916,7 @@ export async function injectMcpTools(params: {
           id: c.id,
           label: c.name,
           connectedEmail: c.connectedEmail,
+          driveAccessMode: c.config?.driveAccessMode === 'full_drive_readonly' ? 'full_drive_readonly' : 'picked_files',
         })))
       }
     }
@@ -935,7 +944,7 @@ export async function injectMcpTools(params: {
     healthProbe: { report: reportHealth },
     filesApi,
   })
-  const enricher = await injectGoogleTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, userTimezone, unavailable, gdriveFilesStore, undefined, connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain, filesApi, extrasByProvider, resolveInstanceCreds, reportHealth)
+  const enricher = await injectGoogleTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, userTimezone, unavailable, gdriveFilesStore, undefined, connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain, filesApi, extrasByProvider, resolveInstanceCreds, reportHealth, assistantTeamId ? { workspaceId: assistantTeamId, actingUserId: userId } : undefined)
 
   // ── Team overlays (Stage 4/5 of the team-connector promotion) ──
   //
@@ -1052,12 +1061,13 @@ export async function injectMcpTools(params: {
             unavailable.push(connectorReconnectNotice(p, sibling.instance.label))
           }
         }
-        const extraInstances = siblingInstances
+        const extraInstances: ConnectorInstanceRef[] = siblingInstances
           .filter((sibling) => sibling.instance.healthStatus !== 'auth_failed')
           .map((sibling) => ({
             id: sibling.instance.id,
             label: sibling.instance.label,
             connectedEmail: sibling.instance.connectedEmail,
+            driveAccessMode: sibling.instance.config?.driveAccessMode === 'full_drive_readonly' ? 'full_drive_readonly' : 'picked_files',
           }))
         const grantorConnectors = await connectorStore.list(g.grantedByUserId).catch(() => [])
         // Bind the granted built-in connector to the EXACT exposed instance
@@ -1148,16 +1158,19 @@ export async function injectMcpTools(params: {
           // service (e.g. a personal Calendar) ride along on a granted Gmail.
           await injectGoogleTools(
             [{
+              id: g.instance.id,
               connectorId: p,
               connected: true,
               name: g.instance.label,
               connectedEmail: g.instance.connectedEmail,
+              config: g.instance.config,
             }],
             connectorStore, settingsStore, g.grantedByUserId, assistantId,
             assistantConnectorStore, tools, userTimezone, undefined,
             gdriveFilesStore, { [p]: boundGrantCreds }, connectorActionAudit,
             assistantConnectorGrantsStore, workspaceDomain, filesApi,
             new Map([[p, extraInstances]]), resolveGrantedInstanceCreds, reportHealth,
+            { workspaceId: assistantTeamId, actingUserId: userId },
           )
         } else if (g.instance.custom && g.instance.url) {
           // Custom remote MCP shared via a grant. Respect Layer-2 enablement
@@ -1216,11 +1229,13 @@ export async function injectMcpTools(params: {
       // logic don't need to change. `credsOverride` / `credsOverridePerConnector`
       // reroute the actual credential reads.
       const syntheticConnectors: Array<{
+        id?: string
         connectorId: string
         connected: boolean
         name?: string
         connectedEmail?: string | null
         url?: string | null
+        config?: Record<string, unknown>
       }> = []
 
       for (const inst of teamNative) {
@@ -1308,19 +1323,22 @@ export async function injectMcpTools(params: {
             unavailable.push(connectorReconnectNotice(p, sibling.label))
           }
         }
-        const extraInstances = siblingInstances
+        const extraInstances: ConnectorInstanceRef[] = siblingInstances
           .filter((sibling) => sibling.healthStatus !== 'auth_failed')
           .map((sibling) => ({
             id: sibling.id,
             label: sibling.label,
             connectedEmail: sibling.connectedEmail,
+            driveAccessMode: sibling.config?.driveAccessMode === 'full_drive_readonly' ? 'full_drive_readonly' : 'picked_files',
           }))
         syntheticConnectors.push({
+          id: inst.id,
           connectorId: p,
           connected: true,
           name: inst.label,
           connectedEmail: inst.connectedEmail,
           url: inst.url ?? null,
+          config: inst.config,
         })
 
         if (p === 'github') {
@@ -1451,6 +1469,7 @@ export async function injectMcpTools(params: {
           teamExtrasByProvider,
           resolveTeamInstanceCreds,
           reportHealth,
+          { workspaceId: assistantTeamId, actingUserId: userId },
         )
       }
 
@@ -1497,6 +1516,16 @@ export async function injectMcpTools(params: {
       console.error('[mcp-inject] team-native overlay failed:', err)
     }
   }
+
+  // ── Per-assistant connector action grants ──────────────────
+  // The grant is an outer capability boundary, not a call-time error path.
+  // Remove ungranted write/destructive actions before either the direct tool
+  // map or the folded mcp_search index becomes model-visible. Retained tools
+  // still carry the fresh execute-time check installed by
+  // `gateToolsOnActionGrants`, so a mid-turn revocation also fails closed.
+  const grantFilteredTools = await filterToolsByActionGrants(tools)
+  tools.clear()
+  for (const [name, tool] of grantFilteredTools) tools.set(name, tool)
 
   // ── Reconcile the not-connected advert with what actually injected ──
   //
@@ -1816,6 +1845,7 @@ export type ConnectorInstanceRef = {
   id: string
   label: string
   connectedEmail?: string | null
+  driveAccessMode?: 'picked_files' | 'full_drive_readonly'
 }
 
 /**
@@ -1990,11 +2020,13 @@ function expiredCredentialsNotice(displayName: string): string {
 
 async function injectGoogleTools(
   connectors: Array<{
+    id?: string
     connectorId: string
     connected: boolean
     name?: string
     connectedEmail?: string | null
     url?: string | null
+    config?: Record<string, unknown>
   }>,
   connectorStore: ConnectorStore,
   settingsStore: McpSettingsStore,
@@ -2066,12 +2098,23 @@ async function injectGoogleTools(
    * auto-disconnect path above instead.
    */
   healthReport?: HealthReporter,
+  /** Acting workspace context for lazy full-Drive enrichment. */
+  driveEnrichmentContext?: { workspaceId: string; actingUserId: string },
 ): Promise<ConfirmationEnricher> {
   const googleCfg = getConnectorConfig('google')
-  if (!googleCfg) return async (_t, input) => input
 
-  const clientId = googleCfg.clientId
-  const clientSecret = googleCfg.clientSecret
+  /**
+   * Refresh with the app that minted this grant. Managed/legacy rows use the
+   * deployment Google app; BYO Drive rows carry their customer app pair inside
+   * the encrypted instance credential.
+   */
+  async function refreshStoredGoogleCredential(stored: string): Promise<string> {
+    const grant = unpackGoogleRefreshCredential(stored)
+    const clientId = grant.appClientId ?? googleCfg?.clientId
+    const clientSecret = grant.appClientSecret ?? googleCfg?.clientSecret
+    if (!clientId || !clientSecret) throw new Error('Google OAuth app is not configured for this grant')
+    return refreshGoogleAccessToken(grant.refreshToken, clientId, clientSecret)
+  }
 
   // ── Token prevalidation + cache ─────────────────────────────
   // Validate tokens once up-front instead of letting each tool call
@@ -2096,7 +2139,7 @@ async function injectGoogleTools(
     const refreshToken = await readRefreshToken(connectorId)
     if (!refreshToken) return false
     try {
-      const token = await refreshGoogleAccessToken(refreshToken, clientId, clientSecret)
+      const token = await refreshStoredGoogleCredential(refreshToken)
       tokenCache.set(connectorId, token)
       return true
     } catch (err) {
@@ -2124,7 +2167,7 @@ async function injectGoogleTools(
     // Fallback: refresh on demand (transient prevalidation failure, or token expired mid-request)
     const refreshToken = await readRefreshToken(connectorId)
     if (!refreshToken) throw new Error(`${connectorId} not connected`)
-    const token = await refreshGoogleAccessToken(refreshToken, clientId, clientSecret)
+    const token = await refreshStoredGoogleCredential(refreshToken)
     tokenCache.set(connectorId, token)
     return token
   }
@@ -2142,7 +2185,7 @@ async function injectGoogleTools(
     if (cached) return cached
     const refreshToken = resolveInstanceCreds ? await resolveInstanceCreds(instanceId) : null
     if (!refreshToken) throw new Error(`Google account instance ${instanceId} has no credentials`)
-    const token = await refreshGoogleAccessToken(refreshToken, clientId, clientSecret)
+    const token = await refreshStoredGoogleCredential(refreshToken)
     tokenCache.set(cacheKey, token)
     return token
   }
@@ -2402,8 +2445,7 @@ async function injectGoogleTools(
             throw err
           }
         },
-      }, userTimezone), 'gcal', assistantConnectorGrantsStore, assistantId, governanceId,
-      governanceId === 'gcal' ? undefined : 'gcal')
+      }, userTimezone), 'gcal', assistantConnectorGrantsStore, assistantId, governanceId)
       if (gcalEnabled) {
         const calTools = buildCalTools(() => getAccessToken('gcal'))
         for (const tool of calTools) {
@@ -2581,7 +2623,7 @@ async function injectGoogleTools(
           }
         },
       }, { filesApi, senderEmail: senderEmail ?? undefined }), 'gmail', assistantConnectorGrantsStore,
-      assistantId, governanceId, governanceId === 'gmail' ? undefined : 'gmail')
+      assistantId, governanceId)
       if (gmailEnabled) {
         const gmailTools = buildGmailToolSet(
           () => getAccessToken('gmail'),
@@ -2680,6 +2722,118 @@ async function injectGoogleTools(
           .catch((e) => console.error('[mcp-inject] updateOnAccess failed:', e))
       }
 
+      type DriveEnrichmentTarget = {
+        instanceId?: string
+        accessMode?: 'picked_files' | 'full_drive_readonly'
+      }
+      const primaryDriveTarget: DriveEnrichmentTarget = {
+        instanceId: gdrive?.id,
+        accessMode: gdrive?.config?.driveAccessMode === 'full_drive_readonly'
+          ? 'full_drive_readonly'
+          : 'picked_files',
+      }
+
+      async function assertDriveReadInScope(
+        fileId: string,
+        target: DriveEnrichmentTarget,
+      ): Promise<void> {
+        if (
+          target.accessMode !== 'full_drive_readonly'
+          || !target.instanceId
+          || !driveEnrichmentContext
+        ) return
+        const policy = await getGDriveCatalogReadPolicy({
+          workspaceId: driveEnrichmentContext.workspaceId,
+          connectorInstanceId: target.instanceId,
+          externalFileId: fileId,
+        })
+        if (!policy.allowed) {
+          throw new Error('This file is outside the Google Drive folders selected for this Brian workspace')
+        }
+      }
+
+      async function listScopedDriveFiles(
+        token: string,
+        params: { query?: string; maxResults?: number; folderId?: string },
+        target: DriveEnrichmentTarget,
+      ) {
+        if (
+          target.accessMode !== 'full_drive_readonly'
+          || !target.instanceId
+          || !driveEnrichmentContext
+        ) return listDriveFiles(token, params)
+        const runtime = await getGDriveCatalogRuntimeScope({
+          workspaceId: driveEnrichmentContext.workspaceId,
+          connectorInstanceId: target.instanceId,
+        })
+        if (runtime.syncScope !== 'selected_folders') return listDriveFiles(token, params)
+        if (params.folderId) await assertDriveReadInScope(params.folderId, target)
+        const rows = await listGDriveCatalogFiles({
+          workspaceId: driveEnrichmentContext.workspaceId,
+          connectorInstanceId: target.instanceId,
+          query: params.query,
+          folderId: params.folderId,
+          limit: params.maxResults,
+        })
+        return rows.map((entry) => ({
+          id: entry.externalFileId,
+          name: entry.name,
+          mimeType: entry.mimeType,
+          version: entry.sourceVersion,
+          ...(entry.modifiedTime ? { modifiedTime: entry.modifiedTime } : {}),
+          ...(entry.sizeBytes !== null ? { size: String(entry.sizeBytes) } : {}),
+          ...(entry.webViewLink ? { webViewLink: entry.webViewLink } : {}),
+          parents: entry.parentIds,
+        }))
+      }
+
+      async function enqueueDriveRead(
+        file: Awaited<ReturnType<typeof getDriveFile>>,
+        target: DriveEnrichmentTarget,
+      ): Promise<void> {
+        if (
+          target.accessMode !== 'full_drive_readonly'
+          || !target.instanceId
+          || !driveEnrichmentContext
+        ) return
+        const sourceVersion = file.version?.trim() || file.modifiedTime?.trim()
+        if (!sourceVersion) {
+          console.warn(`[mcp-inject] Drive enrichment skipped for ${file.id}: no stable version`)
+          return
+        }
+        try {
+          await enqueueGDriveLazyEnrichment({
+            workspaceId: driveEnrichmentContext.workspaceId,
+            connectorInstanceId: target.instanceId,
+            actingUserId: driveEnrichmentContext.actingUserId,
+            assistantId,
+            externalFileId: file.id,
+            sourceVersion,
+            fileName: file.name,
+            mimeType: file.mimeType,
+            modifiedTime: file.modifiedTime,
+            webViewLink: file.webViewLink,
+          })
+        } catch (err) {
+          // A knowledge derivative must never mask a successful live Drive
+          // read. The next read retries the idempotent enqueue.
+          console.error('[mcp-inject] failed to enqueue Drive enrichment:', err)
+        }
+      }
+
+      async function enqueueDriveReadById(
+        token: string,
+        fileId: string,
+        target: DriveEnrichmentTarget,
+      ): Promise<void> {
+        if (target.accessMode !== 'full_drive_readonly') return
+        try {
+          await enqueueDriveRead(await getDriveFile(token, fileId), target)
+        } catch (err) {
+          console.error('[mcp-inject] failed to resolve Drive version for enrichment:', err)
+        }
+      }
+
       // Per-account tool-set builders — instantiated for the primary below
       // and re-bound per extra account in the variants block after the four
       // families. `gdriveAuthorizedFiles`, `recordCreated`, and `syncOnRead`
@@ -2688,18 +2842,23 @@ async function injectGoogleTools(
       const buildDriveTools = (
         getToken: () => Promise<string>,
         governanceId: string = 'gdrive',
+        enrichmentTarget: DriveEnrichmentTarget = primaryDriveTarget,
       ) => gateToolsOnActionGrants(createGoogleDriveTools({
         listFiles: async (params) => {
           const token = await getToken()
-          return listDriveFiles(token, params)
+          return listScopedDriveFiles(token, params, enrichmentTarget)
         },
         getFile: async (fileId) => {
           const token = await getToken()
+          await assertDriveReadInScope(fileId, enrichmentTarget)
           return getDriveFile(token, fileId)
         },
         getFileContent: async (fileId, exportMimeType) => {
           const token = await getToken()
-          return getDriveFileContent(token, fileId, exportMimeType)
+          await assertDriveReadInScope(fileId, enrichmentTarget)
+          const fetched = await getDriveFileContentWithMetadata(token, fileId, exportMimeType)
+          await enqueueDriveRead(fetched.file, enrichmentTarget)
+          return fetched.content
         },
         createFile: async (params) => {
           const token = await getToken()
@@ -2709,8 +2868,7 @@ async function injectGoogleTools(
           const token = await getToken()
           return updateDriveFileContent(token, fileId, params)
         },
-      }, gdriveAuthorizedFiles), 'gdrive', assistantConnectorGrantsStore, assistantId, governanceId,
-      governanceId === 'gdrive' ? undefined : 'gdrive')
+      }, gdriveAuthorizedFiles), 'gdrive', assistantConnectorGrantsStore, assistantId, governanceId)
       if (gdriveEnabled) {
         const driveTools = buildDriveTools(() => getAccessToken('gdrive'))
         for (const tool of driveTools) {
@@ -2724,11 +2882,14 @@ async function injectGoogleTools(
       const buildDocsTools = (
         getToken: () => Promise<string>,
         governanceId: string = 'gdrive',
+        enrichmentTarget: DriveEnrichmentTarget = primaryDriveTarget,
       ) => gateToolsOnActionGrants(createGoogleDocsTools({
         getContent: async (documentId) => {
           const token = await getToken()
+          await assertDriveReadInScope(documentId, enrichmentTarget)
           const doc = await getDocContent(token, documentId)
           syncOnRead(documentId, doc.title)
+          await enqueueDriveReadById(token, documentId, enrichmentTarget)
           return doc
         },
         appendText: async (documentId, text) => {
@@ -2745,8 +2906,7 @@ async function injectGoogleTools(
           recordCreated('doc', doc.documentId, doc.title, doc.url, 'application/vnd.google-apps.document')
           return doc
         },
-      }, gdriveAuthorizedFiles), 'gdrive', assistantConnectorGrantsStore, assistantId, governanceId,
-      governanceId === 'gdrive' ? undefined : 'gdrive')
+      }, gdriveAuthorizedFiles), 'gdrive', assistantConnectorGrantsStore, assistantId, governanceId)
       if (gdriveEnabled) {
         const docsTools = buildDocsTools(() => getAccessToken('gdrive'))
         for (const tool of docsTools) {
@@ -2760,16 +2920,21 @@ async function injectGoogleTools(
       const buildSheetsTools = (
         getToken: () => Promise<string>,
         governanceId: string = 'gdrive',
+        enrichmentTarget: DriveEnrichmentTarget = primaryDriveTarget,
       ) => gateToolsOnActionGrants(createGoogleSheetsTools({
         getSpreadsheetInfo: async (spreadsheetId) => {
           const token = await getToken()
+          await assertDriveReadInScope(spreadsheetId, enrichmentTarget)
           const info = await getSpreadsheetInfo(token, spreadsheetId)
           syncOnRead(spreadsheetId, info.title)
           return info
         },
         readRange: async (spreadsheetId, range) => {
           const token = await getToken()
-          return readSheetRange(token, spreadsheetId, range)
+          await assertDriveReadInScope(spreadsheetId, enrichmentTarget)
+          const values = await readSheetRange(token, spreadsheetId, range)
+          await enqueueDriveReadById(token, spreadsheetId, enrichmentTarget)
+          return values
         },
         writeRange: async (spreadsheetId, range, values) => {
           const token = await getToken()
@@ -2793,8 +2958,7 @@ async function injectGoogleTools(
           const token = await getToken()
           return batchUpdateSpreadsheet(token, spreadsheetId, requests)
         },
-      }, gdriveAuthorizedFiles), 'gdrive', assistantConnectorGrantsStore, assistantId, governanceId,
-      governanceId === 'gdrive' ? undefined : 'gdrive')
+      }, gdriveAuthorizedFiles), 'gdrive', assistantConnectorGrantsStore, assistantId, governanceId)
       if (gdriveEnabled) {
         const sheetsTools = buildSheetsTools(() => getAccessToken('gdrive'))
         for (const tool of sheetsTools) {
@@ -2809,20 +2973,29 @@ async function injectGoogleTools(
       const buildSlidesTools = (
         getToken: () => Promise<string>,
         governanceId: string = 'gdrive',
+        enrichmentTarget: DriveEnrichmentTarget = primaryDriveTarget,
       ) => gateToolsOnActionGrants(createGoogleSlidesTools({
         getPresentationInfo: async (presentationId) => {
           const token = await getToken()
+          await assertDriveReadInScope(presentationId, enrichmentTarget)
           const info = await getPresentationInfo(token, presentationId)
           syncOnRead(presentationId, info.title)
+          await enqueueDriveReadById(token, presentationId, enrichmentTarget)
           return info
         },
         getSlideContent: async (presentationId, slideIndex) => {
           const token = await getToken()
-          return getSlideContent(token, presentationId, slideIndex)
+          await assertDriveReadInScope(presentationId, enrichmentTarget)
+          const content = await getSlideContent(token, presentationId, slideIndex)
+          await enqueueDriveReadById(token, presentationId, enrichmentTarget)
+          return content
         },
         getSlideThumbnail: async (presentationId, slideObjectId, options) => {
           const token = await getToken()
-          return getSlideThumbnail(token, presentationId, slideObjectId, options)
+          await assertDriveReadInScope(presentationId, enrichmentTarget)
+          const thumbnail = await getSlideThumbnail(token, presentationId, slideObjectId, options)
+          await enqueueDriveReadById(token, presentationId, enrichmentTarget)
+          return thumbnail
         },
         createSlide: async (presentationId, args) => {
           const token = await getToken()
@@ -2858,8 +3031,7 @@ async function injectGoogleTools(
           recordCreated('slide', pres.presentationId, pres.title, pres.url, 'application/vnd.google-apps.presentation')
           return pres
         },
-      }, gdriveAuthorizedFiles), 'gdrive', assistantConnectorGrantsStore, assistantId, governanceId,
-      governanceId === 'gdrive' ? undefined : 'gdrive')
+      }, gdriveAuthorizedFiles), 'gdrive', assistantConnectorGrantsStore, assistantId, governanceId)
       if (gdriveEnabled) {
         const slidesTools = buildSlidesTools(() => getAccessToken('gdrive'))
         for (const tool of slidesTools) {
@@ -2881,11 +3053,12 @@ async function injectGoogleTools(
           buildToolsForInstance: (inst, governanceId) => {
             const getToken = () => getAccessTokenForInstance(inst.id)
             instanceTokenBySuffix.set(instanceToolSuffix(inst.id, inst.label), getToken)
+            const target = { instanceId: inst.id, accessMode: inst.driveAccessMode }
             return probeVariant([
-              ...buildDriveTools(getToken, governanceId),
-              ...buildDocsTools(getToken, governanceId),
-              ...buildSheetsTools(getToken, governanceId),
-              ...buildSlidesTools(getToken, governanceId),
+              ...buildDriveTools(getToken, governanceId, target),
+              ...buildDocsTools(getToken, governanceId, target),
+              ...buildSheetsTools(getToken, governanceId, target),
+              ...buildSlidesTools(getToken, governanceId, target),
             ], inst.id)
           },
         })
@@ -2942,8 +3115,7 @@ async function injectGoogleTools(
           const token = await getToken()
           return deleteGoogleTask(token, taskListId, taskId)
         },
-      }), 'gcal', assistantConnectorGrantsStore, assistantId, governanceId,
-      governanceId === 'gcal' ? undefined : 'gcal')
+      }), 'gcal', assistantConnectorGrantsStore, assistantId, governanceId)
       if (gcalEnabled) {
         const tasksTools = buildTasksTools(() => getAccessToken('gcal'))
         for (const tool of tasksTools) {
@@ -3109,8 +3281,7 @@ async function injectGitHubTools(
       createIssueComment: async (owner, repo, issueNumber, body) => createIssueComment(await getPat(), owner, repo, issueNumber, body),
       getFileContents: async (owner, repo, path, ref) => getFileContents(await getPat(), owner, repo, path, ref),
       createOrUpdateFile: async (owner, repo, params) => createOrUpdateFile(await getPat(), owner, repo, params),
-    }), 'github', assistantConnectorGrantsStore, assistantId, governanceId,
-    governanceId === 'github' ? undefined : 'github')
+    }), 'github', assistantConnectorGrantsStore, assistantId, governanceId)
   }
 
   async function getPat(): Promise<string> {
@@ -3204,8 +3375,7 @@ async function injectNotionTools(
       createPage: async (params) => createNotionPage(await getAccessToken(), params),
       updatePage: async (pageId, params) => updateNotionPage(await getAccessToken(), pageId, params),
       appendBlocks: async (pageId, content) => appendNotionBlocks(await getAccessToken(), pageId, content),
-    }), 'notion', assistantConnectorGrantsStore, assistantId, governanceId,
-    governanceId === 'notion' ? undefined : 'notion')
+    }), 'notion', assistantConnectorGrantsStore, assistantId, governanceId)
   }
 
   async function getAccessToken(): Promise<string> {
@@ -3552,8 +3722,7 @@ async function injectShopifyTools(
             }
           }
         : undefined,
-    }), 'shopify', assistantConnectorGrantsStore, assistantId, governanceId,
-    governanceId === 'shopify' ? undefined : 'shopify')
+    }), 'shopify', assistantConnectorGrantsStore, assistantId, governanceId)
   }
 
   const primaryInstanceId = healthProbe?.instanceId ?? (shopify as { id?: string }).id ?? null
@@ -3996,7 +4165,6 @@ async function injectMailboxTools(params: {
         assistantConnectorGrantsStore,
         assistantId,
         governanceId,
-        'imap',
       )
 
       // Archive search + on-demand sync stay outside the live API health wrap,

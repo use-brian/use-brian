@@ -83,6 +83,8 @@ import type { InjectExtraTools, ResolveAppSoul } from '../tool-injection-port.js
 
 export type CalleeExecutorOptions = {
   provider: LLMProvider
+  /** OSS workspace custom endpoint default for the callee's final loop. */
+  resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
   /** Base tool set (will be cloned + MCP-injected per callee). */
   tools: Map<string, Tool>
   memoryStore: MemoryStore
@@ -1280,6 +1282,13 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       : params.modelAlias
         ? MODEL_MAP[params.modelAlias] ?? MODEL_MAP.standard
         : 'gemini-flash'
+    const customLlmRuntime = calleeAssistant.workspaceId && options.resolveWorkspaceCustomLlm
+      ? await options.resolveWorkspaceCustomLlm({
+          workspaceId: calleeAssistant.workspaceId,
+          allowDefault: true,
+        })
+      : null
+    const loopProvider = customLlmRuntime?.provider ?? options.provider
 
     // Run the parallel research pass before the synthesis loop. Best-effort:
     // a fan-out failure must never fail the step — the synthesis loop still
@@ -1450,8 +1459,10 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     try {
       if (!synthesisHandled)
       for await (const event of queryLoop({
-        provider: options.provider,
+        provider: loopProvider,
         model,
+        maxTokens: customLlmRuntime?.maxTokens,
+        inputTokenLimit: customLlmRuntime?.inputTokenLimit,
         systemPrompt: loopSystemPrompt,
         messages,
         tools: finalTools,
@@ -1684,9 +1695,10 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
                 outputTokens: usage.outputTokens,
                 cacheReadTokens: usage.cacheReadTokens,
                 cacheWriteTokens: usage.cacheWriteTokens,
-                actualCostUsd: calculateCost(event.response.model, usage),
+                actualCostUsd: customLlmRuntime ? 0 : calculateCost(event.response.model, usage),
                 source: 'included',
                 triggerKey,
+                providerKeySource: customLlmRuntime ? 'user' : 'platform',
               })
               .catch((err) => {
                 console.error('[inter-assistant] usage tracking failed:', err)

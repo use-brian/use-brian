@@ -23,7 +23,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { z } from 'zod'
 
-export type ConnectorProvider = 'google' | 'notion' | 'fathom' | 'shopify' | 'msgraph'
+export type ConnectorProvider = 'google' | 'gdrive' | 'notion' | 'fathom' | 'shopify' | 'msgraph'
 
 export type ConnectorAppConfig = {
   clientId: string
@@ -38,6 +38,7 @@ const appConfigSchema = z.object({
 const fileSchema = z
   .object({
     google: appConfigSchema.optional(),
+    gdrive: appConfigSchema.optional(),
     notion: appConfigSchema.optional(),
     fathom: appConfigSchema.optional(),
     shopify: appConfigSchema.optional(),
@@ -76,6 +77,9 @@ function loadConnectorConfig(): FileConfig {
 
 const ENV_KEYS: Record<ConnectorProvider, { id: string; secret: string }> = {
   google: { id: 'GOOGLE_CLIENT_ID', secret: 'GOOGLE_CLIENT_SECRET' },
+  // Workspace BYO rows use the provider-specific `gdrive` key, while a
+  // deployment-owned Drive connection remains the shared Google OAuth app.
+  gdrive: { id: 'GOOGLE_CLIENT_ID', secret: 'GOOGLE_CLIENT_SECRET' },
   notion: { id: 'NOTION_CLIENT_ID', secret: 'NOTION_CLIENT_SECRET' },
   fathom: { id: 'FATHOM_CLIENT_ID', secret: 'FATHOM_CLIENT_SECRET' },
   shopify: { id: 'SHOPIFY_CLIENT_ID', secret: 'SHOPIFY_CLIENT_SECRET' },
@@ -93,7 +97,8 @@ const ENV_KEYS: Record<ConnectorProvider, { id: string; secret: string }> = {
  * so a test or the platform can mutate `process.env` between calls.
  */
 export function getConnectorConfig(provider: ConnectorProvider): ConnectorAppConfig | undefined {
-  const fromFile = loadConnectorConfig()[provider]
+  const file = loadConnectorConfig()
+  const fromFile = file[provider] ?? (provider === 'gdrive' ? file.google : undefined)
   if (fromFile) return fromFile
   const keys = ENV_KEYS[provider]
   const clientId = process.env[keys.id]

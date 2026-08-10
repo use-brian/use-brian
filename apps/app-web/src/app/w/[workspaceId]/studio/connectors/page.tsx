@@ -54,7 +54,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { Check, Pencil, X } from "lucide-react";
+import { Check, Download, FolderOpen, Pencil, Upload, X } from "lucide-react";
 import { authFetch } from "@/lib/auth-fetch";
 import { BrowseDirectory } from "./browse-directory";
 import { DrivePicker, type PickedFile } from "@/components/drive-picker";
@@ -80,7 +80,7 @@ import {
   resolveConnectorAddAnotherFlow,
 } from "@/lib/connector-add-another";
 import { cn } from "@/lib/utils";
-import { OFFICIAL_OAUTH_SCOPES, OFFICIAL_CONNECTOR_TOOLS, type ConnectorAuthType } from "@use-brian/shared/builtin-connectors";
+import { GDRIVE_BYO_OAUTH_SCOPES, OFFICIAL_OAUTH_SCOPES, OFFICIAL_CONNECTOR_TOOLS, type ConnectorAuthType } from "@use-brian/shared/builtin-connectors";
 import { BUILTIN_PRIMITIVE_CONNECTOR_IDS, OFFICIAL_CONNECTORS } from "@use-brian/shared/connector-registry";
 import { useT } from "@/lib/i18n/client";
 import { resolveAutoExpose, type AutoExposeArm } from "@/lib/connector-auto-expose";
@@ -215,6 +215,8 @@ type Connector = {
    * connected row mean the user needs to reconnect to use the new flow.
    */
   scopeVersion?: number;
+  /** Managed Picker access or customer-owned full-Drive read access. */
+  driveAccessMode?: "picked_files" | "full_drive_readonly";
   /** Custom connectors only — how outbound MCP calls authenticate. */
   authType?: ConnectorAuthType;
   /** Custom-header connectors only — the non-secret header name. */
@@ -535,6 +537,446 @@ function GDriveAuthorizedFiles() {
   );
 }
 
+type GDriveEnrichmentStatus = {
+  pending: number;
+  processing: number;
+  done: number;
+  failed: number;
+  superseded: number;
+  total: number;
+  lastUpdatedAt: string | null;
+};
+
+type GDriveCatalogScope = "entire_drive" | "selected_folders";
+type GDriveCatalogFolder = { id: string; name: string };
+type GDriveCatalogStatus = {
+  configured: boolean;
+  syncScope: GDriveCatalogScope | null;
+  selectedFolders: GDriveCatalogFolder[];
+  status: "pending" | "processing" | "done" | "failed" | null;
+  estimatedFiles: number | null;
+  filesSeen: number;
+  filesIndexed: number;
+  catalogFiles: number;
+  lastError: string | null;
+  nextSyncAt: string | null;
+  lastCompletedAt: string | null;
+};
+
+function GDriveCatalogScopePanel(props: { workspaceId: string; connectorInstanceId: string }) {
+  const t = useT();
+  const copy = t.settings.connectors.gdriveCatalog;
+  const [scope, setScope] = useState<GDriveCatalogScope>("entire_drive");
+  const [folders, setFolders] = useState<GDriveCatalogFolder[]>([]);
+  const [status, setStatus] = useState<GDriveCatalogStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadStatus = useCallback(async () => {
+    try {
+      const qs = new URLSearchParams({
+        workspaceId: props.workspaceId,
+        connectorInstanceId: props.connectorInstanceId,
+      });
+      const res = await authFetch(`${API_URL}/api/connectors/gdrive/catalog-status?${qs}`);
+      if (res.status === 403) { setError(copy.errNotAdmin); return; }
+      if (!res.ok) throw new Error(copy.errStatus);
+      const next = await res.json() as GDriveCatalogStatus;
+      setStatus(next);
+      if (next.configured && next.syncScope) {
+        setScope(next.syncScope);
+        setFolders(next.selectedFolders);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : copy.errStatus);
+    } finally {
+      setLoading(false);
+    }
+  }, [copy.errNotAdmin, copy.errStatus, props.connectorInstanceId, props.workspaceId]);
+
+  useEffect(() => { void loadStatus(); }, [loadStatus]);
+  useEffect(() => {
+    if (!status || (status.status !== "pending" && status.status !== "processing")) return;
+    const timer = window.setInterval(() => { void loadStatus(); }, 5_000);
+    return () => window.clearInterval(timer);
+  }, [loadStatus, status]);
+
+  function addFolders(picked: PickedFile[]) {
+    setError(null);
+    setFolders((current) => {
+      const merged = new Map(current.map((folder) => [folder.id, folder]));
+      for (const file of picked) merged.set(file.id, { id: file.id, name: file.name });
+      const result = [...merged.values()];
+      if (result.length > 50) {
+        setError(copy.errTooManyFolders);
+        return result.slice(0, 50);
+      }
+      return result;
+    });
+  }
+
+  async function estimateAndStart() {
+    if (scope === "selected_folders" && folders.length === 0) {
+      setError(copy.errSelectFolder);
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const selectedFolders = scope === "selected_folders" ? folders : [];
+      const estimateRes = await authFetch(`${API_URL}/api/connectors/gdrive/catalog-estimate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId: props.workspaceId,
+          connectorInstanceId: props.connectorInstanceId,
+          syncScope: scope,
+          selectedFolders,
+        }),
+      });
+      if (estimateRes.status === 403) throw new Error(copy.errNotAdmin);
+      if (!estimateRes.ok) throw new Error(copy.errEstimate);
+      const estimate = await estimateRes.json() as { estimatedFiles: number; totalItems: number };
+      const confirmed = await confirmDialog({
+        title: copy.confirmTitle,
+        description: copy.confirmDesc.replace("{count}", estimate.estimatedFiles.toLocaleString()),
+        confirmLabel: copy.confirmBtn,
+        cancelLabel: copy.cancelBtn,
+      });
+      if (!confirmed) return;
+      const saveRes = await authFetch(`${API_URL}/api/connectors/gdrive/catalog-scope`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId: props.workspaceId,
+          connectorInstanceId: props.connectorInstanceId,
+          syncScope: scope,
+          selectedFolders,
+          estimatedFiles: estimate.estimatedFiles,
+        }),
+      });
+      if (saveRes.status === 403) throw new Error(copy.errNotAdmin);
+      if (!saveRes.ok) throw new Error(copy.errSave);
+      setStatus((current) => ({
+        configured: true,
+        syncScope: scope,
+        selectedFolders,
+        status: "pending",
+        estimatedFiles: estimate.estimatedFiles,
+        filesSeen: 0,
+        filesIndexed: 0,
+        catalogFiles: current?.catalogFiles ?? 0,
+        lastError: null,
+        nextSyncAt: null,
+        lastCompletedAt: current?.lastCompletedAt ?? null,
+      }));
+      await loadStatus();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : copy.errSave);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const statusText = !status?.configured
+    ? copy.statusNotStarted
+    : status.status === "pending"
+      ? copy.statusQueued.replace("{count}", String(status.estimatedFiles ?? 0))
+      : status.status === "processing"
+        ? copy.statusProcessing
+          .replace("{seen}", String(status.filesIndexed))
+          .replace("{count}", String(status.estimatedFiles ?? status.filesIndexed))
+        : status.status === "done"
+          ? copy.statusDone.replace("{count}", String(status.catalogFiles))
+          : copy.statusFailed;
+
+  return (
+    <div className="mt-3 rounded-lg border border-border bg-muted/20 p-3 space-y-3">
+      <div>
+        <div className="text-[13px] font-medium">{copy.title}</div>
+        <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">{copy.desc}</p>
+      </div>
+
+      <div className="grid gap-2 sm:grid-cols-2">
+        {([
+          { value: "entire_drive" as const, title: copy.entireTitle, desc: copy.entireDesc },
+          { value: "selected_folders" as const, title: copy.foldersTitle, desc: copy.foldersDesc },
+        ]).map((option) => (
+          <button
+            type="button"
+            key={option.value}
+            onClick={() => setScope(option.value)}
+            className={cn(
+              "rounded-lg border p-3 text-left transition-colors",
+              scope === option.value
+                ? "border-primary bg-primary/5"
+                : "border-border bg-background hover:border-foreground/20",
+            )}
+          >
+            <span className="flex items-center gap-2 text-[12px] font-medium">
+              <span className={cn(
+                "h-3.5 w-3.5 rounded-full border flex items-center justify-center",
+                scope === option.value ? "border-primary" : "border-muted-foreground/50",
+              )}>
+                {scope === option.value && <span className="h-1.5 w-1.5 rounded-full bg-primary" />}
+              </span>
+              {option.title}
+            </span>
+            <span className="mt-1.5 block text-[11px] leading-relaxed text-muted-foreground">{option.desc}</span>
+          </button>
+        ))}
+      </div>
+
+      {scope === "selected_folders" && (
+        <div className="space-y-2">
+          <DrivePicker
+            mode="folders"
+            connectorInstanceId={props.connectorInstanceId}
+            onPicked={addFolders}
+            onError={setError}
+          >
+            {({ open, isOpening, disabled }) => (
+              <button
+                type="button"
+                onClick={open}
+                disabled={disabled || isOpening}
+                className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1.5 text-[11px] font-medium hover:bg-muted disabled:opacity-50"
+              >
+                <FolderOpen className="h-3.5 w-3.5" />
+                {isOpening ? copy.openingPicker : copy.chooseFolders}
+              </button>
+            )}
+          </DrivePicker>
+          {folders.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {folders.map((folder) => (
+                <span key={folder.id} className="inline-flex max-w-full items-center gap-1 rounded-md bg-muted px-2 py-1 text-[11px]">
+                  <span className="truncate">{folder.name}</span>
+                  <button
+                    type="button"
+                    aria-label={copy.removeFolder.replace("{name}", folder.name)}
+                    onClick={() => setFolders((current) => current.filter((item) => item.id !== folder.id))}
+                    className="text-muted-foreground hover:text-foreground"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+          <p className="text-[10px] leading-relaxed text-amber-700 dark:text-amber-300">{copy.enforcementNote}</p>
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3">
+        <div className="text-[11px] text-muted-foreground">
+          {loading ? copy.loadingStatus : statusText}
+          {status?.lastCompletedAt && (
+            <span className="ml-1">{copy.lastSynced.replace("{time}", new Date(status.lastCompletedAt).toLocaleString())}</span>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={() => void estimateAndStart()}
+          disabled={saving || loading}
+          className="rounded-md bg-action px-3 py-1.5 text-[11px] font-medium text-action-foreground hover:bg-action/90 disabled:opacity-50"
+        >
+          {saving ? copy.estimatingBtn : status?.configured ? copy.updateBtn : copy.startBtn}
+        </button>
+      </div>
+      <p className="text-[10px] leading-relaxed text-muted-foreground">{copy.progressiveNote}</p>
+      {error && <p className="text-[11px] text-destructive">{error}</p>}
+    </div>
+  );
+}
+
+function GDriveEnrichmentImport(props: { workspaceId: string; connectorInstanceId: string }) {
+  const t = useT();
+  const copy = t.settings.connectors.gdriveEnrichment;
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<{ accepted: number; skipped: number } | null>(null);
+  const [status, setStatus] = useState<GDriveEnrichmentStatus | null>(null);
+
+  const loadStatus = useCallback(async () => {
+    try {
+      const qs = new URLSearchParams({
+        workspaceId: props.workspaceId,
+        connectorInstanceId: props.connectorInstanceId,
+      });
+      const res = await authFetch(`${API_URL}/api/connectors/gdrive/enrichment-status?${qs}`);
+      if (res.status === 403) { setError(copy.errNotAdmin); return; }
+      if (!res.ok) return;
+      setStatus(await res.json() as GDriveEnrichmentStatus);
+    } catch {
+      // Status is advisory. Upload remains available and reports its own error.
+    }
+  }, [copy.errNotAdmin, props.connectorInstanceId, props.workspaceId]);
+
+  useEffect(() => { void loadStatus(); }, [loadStatus]);
+  useEffect(() => {
+    if (!status || status.pending + status.processing === 0) return;
+    const timer = window.setInterval(() => { void loadStatus(); }, 5_000);
+    return () => window.clearInterval(timer);
+  }, [loadStatus, status]);
+
+  function downloadTemplate() {
+    const template = {
+      schemaVersion: 1,
+      source: "google-drive",
+      files: [{
+        fileId: "drive-file-id",
+        version: "128",
+        name: "Customer renewal playbook",
+        mimeType: "application/vnd.google-apps.document",
+        modifiedTime: "2026-08-10T08:30:00.000Z",
+        webViewLink: "https://drive.google.com/drive-file-link",
+        folderPath: ["Company", "Sales"],
+        summary: "How account teams prepare and approve renewals.",
+        keywords: ["renewal", "approval", "account team"],
+        content: "Optional normalized source text or selected evidence.",
+      }],
+    };
+    const url = URL.createObjectURL(new Blob([JSON.stringify(template, null, 2)], { type: "application/json" }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "brian-google-drive-enrichment-v1.json";
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function buildBatches(files: unknown[]): unknown[][] {
+    const batches: unknown[][] = [];
+    let current: unknown[] = [];
+    for (const file of files) {
+      const candidate = [...current, file];
+      const bytes = new TextEncoder().encode(JSON.stringify({
+        schemaVersion: 1,
+        source: "google-drive",
+        files: candidate,
+      })).byteLength;
+      if (candidate.length > 25 || bytes > 750_000) {
+        if (current.length === 0) throw new Error(copy.errEntryTooLarge);
+        batches.push(current);
+        current = [file];
+        const singleBytes = new TextEncoder().encode(JSON.stringify(file)).byteLength;
+        if (singleBytes > 700_000) throw new Error(copy.errEntryTooLarge);
+      } else {
+        current = candidate;
+      }
+    }
+    if (current.length) batches.push(current);
+    return batches;
+  }
+
+  async function uploadBundle(file: File) {
+    setUploading(true);
+    setError(null);
+    setResult(null);
+    try {
+      if (file.size > 20 * 1024 * 1024) throw new Error(copy.errFileTooLarge);
+      let parsed: unknown;
+      try { parsed = JSON.parse(await file.text()); }
+      catch { throw new Error(copy.errInvalidJson); }
+      if (!parsed || typeof parsed !== "object") throw new Error(copy.errInvalidBundle);
+      const bundle = parsed as { schemaVersion?: unknown; source?: unknown; files?: unknown };
+      if (bundle.schemaVersion !== 1 || bundle.source !== "google-drive" || !Array.isArray(bundle.files) || bundle.files.length === 0) {
+        throw new Error(copy.errInvalidBundle);
+      }
+      const confirmed = await confirmDialog({
+        title: copy.confirmTitle,
+        description: copy.confirmDesc.replace("{count}", String(bundle.files.length)),
+        confirmLabel: copy.confirmBtn,
+        cancelLabel: copy.cancelBtn,
+      });
+      if (!confirmed) return;
+      const batches = buildBatches(bundle.files);
+      let accepted = 0;
+      let skipped = 0;
+      for (const files of batches) {
+        const res = await authFetch(`${API_URL}/api/connectors/gdrive/enrichment-import`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            workspaceId: props.workspaceId,
+            connectorInstanceId: props.connectorInstanceId,
+            bundle: { schemaVersion: 1, source: "google-drive", files },
+          }),
+        });
+        if (res.status === 403) throw new Error(copy.errNotAdmin);
+        if (!res.ok) throw new Error(copy.errInvalidBundle);
+        const data = await res.json() as { accepted?: number; skipped?: number };
+        accepted += data.accepted ?? 0;
+        skipped += data.skipped ?? 0;
+      }
+      setResult({ accepted, skipped });
+      await loadStatus();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : copy.errUpload);
+    } finally {
+      setUploading(false);
+      if (inputRef.current) inputRef.current.value = "";
+    }
+  }
+
+  return (
+    <div className="mt-4 rounded-lg border border-border bg-muted/20 p-3 space-y-3">
+      <div>
+        <div className="text-[13px] font-medium">{copy.title}</div>
+        <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">{copy.desc}</p>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={() => inputRef.current?.click()}
+          disabled={uploading}
+          className="inline-flex items-center gap-1.5 rounded-md bg-action px-3 py-1.5 text-xs font-medium text-action-foreground hover:bg-action/90 disabled:opacity-50"
+        >
+          <Upload className="h-3.5 w-3.5" />
+          {uploading ? copy.uploadingBtn : copy.uploadBtn}
+        </button>
+        <button
+          type="button"
+          onClick={downloadTemplate}
+          disabled={uploading}
+          className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-muted disabled:opacity-50"
+        >
+          <Download className="h-3.5 w-3.5" />
+          {copy.templateBtn}
+        </button>
+        <input
+          ref={inputRef}
+          type="file"
+          accept="application/json,.json"
+          className="hidden"
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            if (file) void uploadBundle(file);
+          }}
+        />
+      </div>
+      <p className="text-[10px] leading-relaxed text-muted-foreground">{copy.formatHint}</p>
+      {result && (
+        <p className="text-[11px] text-emerald-600 dark:text-emerald-400">
+          {copy.uploaded.replace("{accepted}", String(result.accepted)).replace("{skipped}", String(result.skipped))}
+        </p>
+      )}
+      {status && status.total > 0 && (
+        <p className="text-[11px] text-muted-foreground">
+          {copy.status
+            .replace("{done}", String(status.done))
+            .replace("{pending}", String(status.pending))
+            .replace("{processing}", String(status.processing))
+            .replace("{failed}", String(status.failed))}
+        </p>
+      )}
+      {error && <p className="text-[11px] text-destructive">{error}</p>}
+    </div>
+  );
+}
+
 // ── Chevron icon ──────────────────────────────────────────────
 function ChevronIcon({ open }: { open: boolean }) {
   return (
@@ -803,6 +1245,18 @@ function ConnectorsList() {
   const [msgraphShowHelp, setMsGraphShowHelp] = useState(false);
   const [msgraphConnectOpts, setMsGraphConnectOpts] = useState<{ addAnother?: boolean; instanceId?: string } | null>(null);
   const [msgraphStatus, setMsGraphStatus] = useState<MsGraphAppStatus | null>(null);
+
+  // Google Drive has two explicit connect paths. Managed uses Brian's
+  // drive.file app + Picker; BYO stores a workspace admin's Internal Google
+  // OAuth app before requesting full-Drive read consent.
+  const [showGDriveConnect, setShowGDriveConnect] = useState<string | null>(null);
+  const [gdriveConnectStep, setGdriveConnectStep] = useState<"choice" | "byo">("choice");
+  const [gdriveAppId, setGdriveAppId] = useState("");
+  const [gdriveAppSecret, setGdriveAppSecret] = useState("");
+  const [gdriveProjectNumber, setGdriveProjectNumber] = useState("");
+  const [gdrivePickerApiKey, setGdrivePickerApiKey] = useState("");
+  const [gdriveConnectError, setGdriveConnectError] = useState<string | null>(null);
+  const [gdriveConnectOpts, setGdriveConnectOpts] = useState<{ addAnother?: boolean; instanceId?: string } | null>(null);
 
   // "Add another account" state — provider slug whose add-another form is open,
   // plus the nickname + secret for the new instance.
@@ -1147,6 +1601,44 @@ function ConnectorsList() {
     return true;
   }
 
+  function startGoogleAuthorize(input: {
+    connector: string;
+    stateConnector?: string;
+    clientId: string;
+    scopes: string[];
+    opts?: { addAnother?: boolean; instanceId?: string } | null;
+    desktop?: boolean;
+  }) {
+    const redirectUri = `${window.location.origin}/api/auth/callback/google-connector`;
+    const sp = new URLSearchParams({
+      client_id: input.clientId,
+      redirect_uri: redirectUri,
+      response_type: "code",
+      scope: input.scopes.join(" "),
+      access_type: "offline",
+      prompt: "consent",
+    });
+    if (
+      input.desktop &&
+      startConnectorOAuthOnDesktop({
+        connector: input.connector,
+        authorizeBase: "https://accounts.google.com/o/oauth2/v2/auth",
+        params: sp,
+        redirectUri,
+        opts: input.opts ?? undefined,
+      })
+    ) return;
+    const nonce = armConnectorOauthState();
+    sp.set("state", buildConnectorState({
+      connector: input.stateConnector ?? input.connector,
+      workspaceId,
+      createNew: !!input.opts?.addAnother,
+      instanceId: input.opts?.instanceId,
+      nonce,
+    }));
+    window.location.href = `https://accounts.google.com/o/oauth2/v2/auth?${sp}`;
+  }
+
   // `opts.addAnother` connects a NEW account for a provider that already has
   // one (OAuth state carries an `:add` suffix so the callback creates a fresh
   // instance instead of overwriting the first).
@@ -1203,6 +1695,18 @@ function ConnectorsList() {
     if (id === "imap") {
       setShowImapForm(rid);
       setImapError(null);
+      setConnecting(null);
+      return;
+    }
+
+    // Google Drive is the one Google connector whose connect button first
+    // chooses a capability level: Brian-managed Picker or customer-owned
+    // restricted full-Drive read.
+    if (id === "gdrive") {
+      setShowGDriveConnect(rid);
+      setGdriveConnectStep("choice");
+      setGdriveConnectOpts(opts ?? null);
+      setGdriveConnectError(null);
       setConnecting(null);
       return;
     }
@@ -1289,19 +1793,13 @@ function ConnectorsList() {
     // fresh instance instead of overwriting the first).
     const scopes = OAUTH_SCOPES_WITH_EMAIL[id];
     if (scopes) {
-      const redirectUri = `${window.location.origin}/api/auth/callback/google-connector`;
-      const sp = new URLSearchParams({
-        client_id: GOOGLE_CLIENT_ID,
-        redirect_uri: redirectUri,
-        response_type: "code",
-        scope: scopes.join(" "),
-        access_type: "offline",
-        prompt: "consent",
+      startGoogleAuthorize({
+        connector: id,
+        clientId: GOOGLE_CLIENT_ID,
+        scopes,
+        opts,
+        desktop: true,
       });
-      if (startConnectorOAuthOnDesktop({ connector: id, authorizeBase: "https://accounts.google.com/o/oauth2/v2/auth", params: sp, redirectUri, opts })) return;
-      const nonce = armConnectorOauthState();
-      sp.set("state", buildConnectorState({ connector: id, workspaceId, createNew: !!opts?.addAnother, instanceId: opts?.instanceId, nonce }));
-      window.location.href = `https://accounts.google.com/o/oauth2/v2/auth?${sp}`;
       return;
     }
 
@@ -1519,6 +2017,70 @@ function ConnectorsList() {
   // owner/admin only), then redirect to consent against it. The code exchange
   // runs in the API, never here - app-web must not hold a customer's client
   // secret. docs/architecture/integrations/msgraph.md -> "Auth".
+
+  function startManagedGDriveConnect() {
+    if (!GOOGLE_CLIENT_ID) {
+      setGdriveConnectError(tc.gdriveConnect.errManagedUnavailable);
+      return;
+    }
+    startGoogleAuthorize({
+      connector: "gdrive",
+      clientId: GOOGLE_CLIENT_ID,
+      scopes: OAUTH_SCOPES_WITH_EMAIL.gdrive ?? [],
+      opts: gdriveConnectOpts,
+      desktop: true,
+    });
+  }
+
+  async function saveGDriveByoApp(c: Connector) {
+    const clientId = gdriveAppId.trim();
+    const clientSecret = gdriveAppSecret.trim();
+    const projectNumber = gdriveProjectNumber.trim();
+    const pickerApiKey = gdrivePickerApiKey.trim();
+    if (!clientId || !clientSecret || !projectNumber || !pickerApiKey) return;
+    const rid = rowId(c);
+    setConnecting(rid);
+    setGdriveConnectError(null);
+    try {
+      const res = await authFetch(`${API_URL}/api/connectors/gdrive/app-credentials`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceId, clientId, clientSecret, projectNumber, pickerApiKey }),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        setGdriveConnectError(
+          body.error === "not_admin" || body.error === "not_member"
+            ? tc.gdriveConnect.errNotAdmin
+            : tc.gdriveConnect.errSave,
+        );
+        setConnecting(null);
+        return;
+      }
+      const saved = (await res.json()) as { clientId?: string };
+      startGoogleAuthorize({
+        connector: "gdrive",
+        stateConnector: "gdrive-byo",
+        clientId: saved.clientId ?? clientId,
+        scopes: [...GDRIVE_BYO_OAUTH_SCOPES],
+        opts: gdriveConnectOpts,
+      });
+    } catch {
+      setGdriveConnectError(tc.gdriveConnect.errSave);
+      setConnecting(null);
+    }
+  }
+
+  function closeGDriveConnect() {
+    setShowGDriveConnect(null);
+    setGdriveConnectStep("choice");
+    setGdriveAppId("");
+    setGdriveAppSecret("");
+    setGdriveProjectNumber("");
+    setGdrivePickerApiKey("");
+    setGdriveConnectError(null);
+    setGdriveConnectOpts(null);
+  }
 
   async function fetchMsGraphAppStatus(): Promise<MsGraphAppStatus | null> {
     try {
@@ -3230,7 +3792,7 @@ function ConnectorsList() {
                   )}
 
                   {/* Quick "Add from Drive" picker — only for gdrive when connected. */}
-                  {sel.id === "gdrive" && sel.connected && (sel.scopeVersion ?? 0) >= (CURRENT_SCOPE_VERSION.gdrive ?? 0) && (
+                  {sel.id === "gdrive" && sel.connected && sel.driveAccessMode !== "full_drive_readonly" && (sel.scopeVersion ?? 0) >= (CURRENT_SCOPE_VERSION.gdrive ?? 0) && (
                     <DrivePicker
                       onPicked={async (picked) => {
                         const res = await authFetch(`${API_URL}/api/connectors/gdrive/authorized-files`, {
@@ -3256,6 +3818,144 @@ function ConnectorsList() {
                   )}
 
                 </div>
+                )}
+
+                {/* Google Drive connection mode: two capability levels, shown
+                    before any OAuth redirect so restricted access is never a
+                    surprise on Google's consent screen. */}
+                {showGDriveConnect === rid && (
+                  <div className="space-y-3 rounded-lg border border-border bg-muted/20 px-4 py-3">
+                    {gdriveConnectStep === "choice" ? (
+                      <>
+                        <div>
+                          <div className="text-[13px] font-medium">{tc.gdriveConnect.title}</div>
+                          <p className="mt-0.5 text-[11px] text-muted-foreground">{tc.gdriveConnect.desc}</p>
+                        </div>
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          <button
+                            type="button"
+                            onClick={startManagedGDriveConnect}
+                            className="rounded-lg border border-border bg-background px-3 py-3 text-left transition-colors hover:border-primary/40 hover:bg-muted/50"
+                          >
+                            <span className="block text-xs font-semibold text-foreground">{tc.gdriveConnect.managedTitle}</span>
+                            <span className="mt-1 block text-[11px] leading-relaxed text-muted-foreground">{tc.gdriveConnect.managedDesc}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => { setGdriveConnectStep("byo"); setGdriveConnectError(null); }}
+                            className="rounded-lg border border-border bg-background px-3 py-3 text-left transition-colors hover:border-primary/40 hover:bg-muted/50"
+                          >
+                            <span className="block text-xs font-semibold text-foreground">{tc.gdriveConnect.byoTitle}</span>
+                            <span className="mt-1 block text-[11px] leading-relaxed text-muted-foreground">{tc.gdriveConnect.byoDesc}</span>
+                          </button>
+                        </div>
+                        {gdriveConnectError && <p className="text-xs text-destructive">{gdriveConnectError}</p>}
+                        <button
+                          type="button"
+                          onClick={closeGDriveConnect}
+                          className="text-[11px] text-muted-foreground underline underline-offset-2 hover:text-foreground"
+                        >
+                          {tc.cancel}
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <div>
+                          <div className="text-[13px] font-medium">{tc.gdriveConnect.setupTitle}</div>
+                          <p className="mt-0.5 text-[11px] text-muted-foreground">{tc.gdriveConnect.setupIntro}</p>
+                        </div>
+                        <ol className="list-decimal space-y-1.5 pl-5 text-[11px] leading-relaxed text-muted-foreground">
+                          <li>
+                            {tc.gdriveConnect.stepProject}{" "}
+                            <a href="https://console.cloud.google.com/" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                              {tc.gdriveConnect.openConsole}
+                            </a>
+                          </li>
+                          <li>{tc.gdriveConnect.stepApis}</li>
+                          <li>{tc.gdriveConnect.stepAudience}</li>
+                          <li>{tc.gdriveConnect.stepScopes}</li>
+                          <li>{tc.gdriveConnect.stepClient}</li>
+                          <li>
+                            {tc.gdriveConnect.stepRedirect}{" "}
+                            <code className="break-all rounded bg-muted px-1 py-0.5 text-foreground">
+                              {typeof window === "undefined" ? "" : `${window.location.origin}/api/auth/callback/google-connector`}
+                            </code>
+                          </li>
+                          <li>{tc.gdriveConnect.stepPickerKey}</li>
+                          <li>{tc.gdriveConnect.stepPaste}</li>
+                        </ol>
+                        <div className="rounded-md bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-700 dark:text-amber-300">
+                          {tc.gdriveConnect.internalNote}
+                        </div>
+                        <input
+                          type="text"
+                          placeholder={tc.gdriveConnect.clientIdPlaceholder}
+                          value={gdriveAppId}
+                          onChange={(e) => setGdriveAppId(e.target.value)}
+                          autoComplete="off"
+                          className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+                        />
+                        <input
+                          type="password"
+                          placeholder={tc.gdriveConnect.clientSecretPlaceholder}
+                          value={gdriveAppSecret}
+                          onChange={(e) => setGdriveAppSecret(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === "Enter") void saveGDriveByoApp(sel); }}
+                          autoComplete="off"
+                          className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+                        />
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          placeholder={tc.gdriveConnect.projectNumberPlaceholder}
+                          value={gdriveProjectNumber}
+                          onChange={(e) => setGdriveProjectNumber(e.target.value)}
+                          autoComplete="off"
+                          className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+                        />
+                        <input
+                          type="password"
+                          placeholder={tc.gdriveConnect.pickerApiKeyPlaceholder}
+                          value={gdrivePickerApiKey}
+                          onChange={(e) => setGdrivePickerApiKey(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === "Enter") void saveGDriveByoApp(sel); }}
+                          autoComplete="off"
+                          className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+                        />
+                        {gdriveConnectError && <p className="text-xs text-destructive">{gdriveConnectError}</p>}
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            onClick={() => { setGdriveConnectStep("choice"); setGdriveConnectError(null); }}
+                            className="rounded-lg border border-border px-3 py-1 text-xs font-medium text-muted-foreground hover:bg-muted"
+                          >
+                            {tc.gdriveConnect.backBtn}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void saveGDriveByoApp(sel)}
+                            disabled={
+                              !gdriveAppId.trim() ||
+                              !gdriveAppSecret.trim() ||
+                              !gdriveProjectNumber.trim() ||
+                              !gdrivePickerApiKey.trim() ||
+                              connecting === rid
+                            }
+                            className="rounded-lg bg-action px-3 py-1 text-xs font-medium text-action-foreground hover:bg-action/90 disabled:opacity-50"
+                          >
+                            {connecting === rid ? tc.gdriveConnect.connectingBtn : tc.gdriveConnect.connectBtn}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={closeGDriveConnect}
+                            className="px-2 py-1 text-xs font-medium text-muted-foreground hover:text-foreground"
+                          >
+                            {tc.cancel}
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
                 )}
 
                 {/* PAT input form (for GitHub and other API key connectors) */}
@@ -4150,7 +4850,24 @@ function ConnectorsList() {
 
                     {/* Google Drive settings — authorized files (Picker-managed) */}
                     {expandTab === "settings" && sel.id === "gdrive" && !sel.custom && (
-                      <GDriveAuthorizedFiles />
+                      sel.driveAccessMode === "full_drive_readonly" ? (
+                        <div className="space-y-1 py-1">
+                          <div className="text-[13px] font-medium">{tc.gdriveConnect.fullAccessTitle}</div>
+                          <p className="text-[11px] leading-relaxed text-muted-foreground">{tc.gdriveConnect.fullAccessDesc}</p>
+                          {sel.connectorInstanceId && (
+                            <>
+                              <GDriveCatalogScopePanel
+                                workspaceId={workspaceId}
+                                connectorInstanceId={sel.connectorInstanceId}
+                              />
+                              <GDriveEnrichmentImport
+                                workspaceId={workspaceId}
+                                connectorInstanceId={sel.connectorInstanceId}
+                              />
+                            </>
+                          )}
+                        </div>
+                      ) : <GDriveAuthorizedFiles />
                     )}
                   </>
                 )}

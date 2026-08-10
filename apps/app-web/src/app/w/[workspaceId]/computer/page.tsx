@@ -1,35 +1,27 @@
 "use client";
 
 /**
- * Browsers surface index (`/w/[id]/computer`) — the full-width prompt shown
- * when no session is selected and no task is live. If a task is available,
- * opening the Browsers app routes directly to the most recently active live
- * session; the sidebar still lets the user switch between multiple sessions.
+ * Browsers surface index (`/w/[id]/computer`) — the operational home for
+ * Browser profiles, encrypted sign-ins, My Browser pairing, and the compact
+ * getting-started guide. Live tasks stay reachable from the persistent rail;
+ * this index never redirects away from profile management.
  *
  * [COMP:app-web/browsers-surface]
  */
 
-import { use as usePromise, useEffect } from "react";
-import { useRouter } from "next/navigation";
 import { MonitorPlay } from "lucide-react";
-import { openWorkspaceSettings } from "@/components/settings-modal/settings-modal";
+import { BrowserProfilesSection } from "@/components/computer/browser-profiles-section";
 import { BROWSER_EXTENSION_INSTALL_URL } from "@/lib/browser-extension-bridge";
 import { useT } from "@/lib/i18n/client";
-import {
-  listActiveComputerTasks,
-  mostRecentComputerTask,
-} from "@/lib/api/computer";
-
-const POLL_MS = 2_000;
 
 /** Persistent getting-started copy for the no-live-session state. */
 export function BrowsersEmptyState() {
   const t = useT().computer.sessions;
 
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-5 p-8 text-center">
+    <div className="rounded-lg border border-border bg-muted/20 p-5 text-center">
       <MonitorPlay className="size-8 text-muted-foreground/50" aria-hidden />
-      <div className="max-w-sm space-y-1">
+      <div className="mx-auto mt-3 max-w-lg space-y-1">
         <p className="text-sm font-medium text-foreground">{t.selectTitle}</p>
         <p className="text-xs text-muted-foreground">{t.selectHint}</p>
       </div>
@@ -47,13 +39,12 @@ export function BrowsersEmptyState() {
           >
             {t.installAction}
           </a>
-          <button
-            type="button"
-            onClick={() => openWorkspaceSettings("ws-browser-profiles")}
+          <a
+            href="#browser-profiles"
             className="inline-flex h-8 items-center justify-center rounded-md border border-border bg-background px-3 text-xs font-medium text-foreground transition-colors hover:bg-accent"
           >
             {t.connectAction}
-          </button>
+          </a>
         </div>
       </div>
     </div>
@@ -63,29 +54,15 @@ export function BrowsersEmptyState() {
 export default function BrowsersIndexPage(props: {
   params: Promise<{ workspaceId: string }>;
 }) {
-  const { workspaceId } = usePromise(props.params);
-  const router = useRouter();
-
-  useEffect(() => {
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const probe = async () => {
-      const tasks = await listActiveComputerTasks(workspaceId);
-      const task = mostRecentComputerTask(tasks);
-      if (!cancelled && task) {
-        router.replace(
-          `/w/${workspaceId}/computer/${encodeURIComponent(task.sessionId)}`,
-        );
-        return;
-      }
-      if (!cancelled) timer = setTimeout(() => void probe(), POLL_MS);
-    };
-    void probe();
-    return () => {
-      cancelled = true;
-      if (timer) clearTimeout(timer);
-    };
-  }, [router, workspaceId]);
-
-  return <BrowsersEmptyState />;
+  void props;
+  return (
+    <div className="h-full overflow-y-auto p-4 sm:p-6">
+      <div className="mx-auto max-w-4xl space-y-5">
+        <BrowsersEmptyState />
+        <div id="browser-profiles" className="scroll-mt-4">
+          <BrowserProfilesSection />
+        </div>
+      </div>
+    </div>
+  );
 }

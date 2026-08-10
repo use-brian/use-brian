@@ -8,23 +8,12 @@ vi.mock("@/lib/edition", () => ({
   isOssEdition: () => true,
   HOSTED_UPGRADE_URL: "https://usebrian.ai",
 }));
-vi.mock("../sections/browser-profiles-section", () => ({
-  BrowserProfilesSection: () => "my-browser-settings",
-}));
+import { OssVersionFooter, workspaceSettingsSections } from "../settings-modal";
 
-import { OssVersionFooter, SectionBody, workspaceSettingsSections } from "../settings-modal";
-
-describe("[COMP:app-web/connect-browser] OSS settings navigation", () => {
-  it("shows Browser profiles so OSS users can pair My Browser", () => {
-    expect(workspaceSettingsSections(true)).toContain("ws-browser-profiles");
-  });
-
-  it("renders My Browser settings instead of the hosted upgrade in OSS", () => {
-    const html = renderToString(
-      createElement(SectionBody, { section: "ws-browser-profiles", onClose: () => undefined }),
-    );
-    expect(html).toContain("my-browser-settings");
-    expect(html).not.toContain("Upgrade to hosted");
+describe("[COMP:app-web/profile-management] settings navigation", () => {
+  it("keeps Browser profiles out of Settings in both editions", () => {
+    expect(workspaceSettingsSections(true)).not.toContain("ws-browser-profiles");
+    expect(workspaceSettingsSections(false)).not.toContain("ws-browser-profiles");
   });
 
   it("keeps hosted-only billing and model sections out of OSS", () => {

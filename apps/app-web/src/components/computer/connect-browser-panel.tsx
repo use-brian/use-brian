@@ -6,8 +6,8 @@
  * their logins and home network, for hardened/authenticated sites the cloud
  * browser cannot reach. Paid-gated on the hosted edition (D3); OSS exposes the
  * same section without a plan gate for a configured self-hosted relay. Renders
- * at the top of the Browser profiles section - setting a profile's backend to
- * "My Browser" routes browsing to the paired Chrome.
+ * inside one Browser profile card. Each card pairs independently, so separate
+ * Chrome profiles can serve separate assistants at the same time.
  *
  * [COMP:app-web/connect-browser]
  */
@@ -79,7 +79,15 @@ function CopyField({
   );
 }
 
-export function ConnectBrowserPanel() {
+export function ConnectBrowserPanel({
+  profileId,
+  profileName,
+  onConnectionChange,
+}: {
+  profileId: string;
+  profileName: string;
+  onConnectionChange?: (profileId: string, connected: boolean) => void;
+}) {
   const t = useT();
   const c = t.computer.connectBrowser;
   const params = useParams<{ workspaceId?: string }>();
@@ -111,8 +119,10 @@ export function ConnectBrowserPanel() {
   }, [workspaceId]);
 
   const refreshStatus = useCallback(async () => {
-    setStatus(await getBrowserExtensionStatus());
-  }, []);
+    const next = await getBrowserExtensionStatus(workspaceId, profileId);
+    setStatus(next);
+    onConnectionChange?.(profileId, next.connected);
+  }, [onConnectionChange, profileId, workspaceId]);
 
   useEffect(() => {
     void refreshStatus();
@@ -137,14 +147,14 @@ export function ConnectBrowserPanel() {
     if (busy || !workspaceId) return;
     setBusy(true);
     setError(null);
-    const p = await pairBrowserExtension(workspaceId);
+    const p = await pairBrowserExtension(workspaceId, profileId);
     setBusy(false);
     if (!p) {
       setError(c.generateFailed);
       return;
     }
     setPairing(p);
-  }, [busy, workspaceId, c.generateFailed]);
+  }, [busy, workspaceId, profileId, c.generateFailed]);
 
   /**
    * One click: mint a code and hand it straight to the extension. Falling back
@@ -156,7 +166,7 @@ export function ConnectBrowserPanel() {
     if (busy || !workspaceId) return;
     setBusy(true);
     setError(null);
-    const p = await pairBrowserExtension(workspaceId);
+    const p = await pairBrowserExtension(workspaceId, profileId);
     if (!p) {
       setBusy(false);
       setError(c.generateFailed);
@@ -177,7 +187,7 @@ export function ConnectBrowserPanel() {
     setPairing(p);
     setInstalled(false);
     if (result === "refused") setError(c.oneClickFailed);
-  }, [busy, workspaceId, c.generateFailed, c.oneClickFailed, refreshStatus]);
+  }, [busy, workspaceId, profileId, c.generateFailed, c.oneClickFailed, refreshStatus]);
 
   // Gated: paid feature upsell (opens the Plan section in-app).
   if (gated) {
@@ -201,7 +211,7 @@ export function ConnectBrowserPanel() {
   return (
     <div className="rounded-lg border border-border p-3">
       <div className="flex items-center justify-between gap-2">
-        <h3 className="text-sm font-medium">{c.title}</h3>
+        <h3 className="text-sm font-medium">{c.title}: {profileName}</h3>
         <span
           className={
             connected

@@ -23,6 +23,21 @@ import { BrowserBackendError } from './types.js'
 export type SandboxTaskBinding = {
   resolve(ctx: BrowserCallContext, hint?: { url?: string; browser?: boolean }): Promise<{ sandboxId: string }>
   onNavigated?(ctx: BrowserCallContext, url: string): Promise<void>
+  /**
+   * Host-owned one-shot recovery hook. It may retire the current task and
+   * install a fresh profile session; true asks this adapter to resolve a new
+   * sandbox and retry the ORIGINAL URL once. It is never exposed as a model
+   * tool and is intentionally absent from the bare orchestrator binding used
+   * by the auth broker itself.
+   */
+  recoverLogin?(
+    ctx: BrowserCallContext,
+    navigation: { requestedUrl: string; currentUrl: string },
+  ): Promise<{
+    retry: boolean
+    /** Host-owned postcondition check, called once with the retried URL. */
+    afterRetry?(currentUrl: string): Promise<void>
+  }>
 }
 
 export function createCloudBrowserProvider(deps: {
@@ -44,8 +59,21 @@ export function createCloudBrowserProvider(deps: {
   return {
     kind: 'cloud',
     async navigate(ctx, url) {
-      const result = await (await browserFor(ctx, { url })).navigate(url)
+      let result = await (await browserFor(ctx, { url })).navigate(url)
       await deps.binding?.onNavigated?.(ctx, result.url)
+      // One bounded retry only. The recovery hook runs host-side, and when it
+      // succeeds it has retired this login-walled task and vaulted a session
+      // from a separate auth sandbox. Resolving again therefore creates a
+      // fresh assistant sandbox that receives the session bundle, never the
+      // credential.
+      const recovery = deps.binding?.recoverLogin
+        ? await deps.binding.recoverLogin(ctx, { requestedUrl: url, currentUrl: result.url })
+        : null
+      if (recovery?.retry) {
+        result = await (await browserFor(ctx, { url })).navigate(url)
+        await deps.binding?.onNavigated?.(ctx, result.url)
+        await recovery.afterRetry?.(result.url)
+      }
       return result
     },
     async snapshot(ctx) {

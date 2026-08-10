@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import {
   fitMessagesToBudget,
   resolveInputTokenLimit,
@@ -9,7 +9,7 @@ import {
 import { wrapContextBudget } from '../wrappers.js'
 import { collectStream } from '../accumulator.js'
 import { estimateStringTokens, estimateTokens } from '../../compaction/index.js'
-import type { Message, StreamChunk, StreamFn } from '../types.js'
+import type { Message, ProviderRequest, StreamChunk, StreamFn } from '../types.js'
 
 function makeChunks(text: string): StreamChunk[] {
   return [
@@ -191,6 +191,29 @@ describe('[COMP:providers/context-budget] fitMessagesToBudget', () => {
 })
 
 describe('[COMP:providers/context-budget] wrapContextBudget', () => {
+  it('prefers a request-scoped input limit for an unregistered custom model', async () => {
+    const seen: Message[][] = []
+    const inner = vi.fn(async function* (request: ProviderRequest) {
+      seen.push(request.messages)
+      yield { type: 'message_end' as const, stopReason: 'end_turn' as const, usage: { inputTokens: 1, outputTokens: 1 } }
+    })
+    const wrapped = wrapContextBudget()(inner)
+    const messages: Message[] = [
+      { role: 'user', content: 'old '.repeat(6000) },
+      { role: 'assistant', content: 'answer '.repeat(6000) },
+      { role: 'user', content: 'latest question' },
+    ]
+    for await (const _chunk of wrapped({
+      model: 'custom:00000000-0000-4000-8000-000000000001',
+      systemPrompt: '',
+      messages,
+      inputTokenLimit: 2048,
+    })) { /* consume */ }
+    expect(seen).toHaveLength(1)
+    expect(seen[0]!.length).toBeLessThan(messages.length)
+    expect(seen[0]!.at(-1)).toEqual(messages.at(-1))
+  })
+
   it('passes through unchanged when under budget', async () => {
     let seen: Message[] | undefined
     const inner: StreamFn = async function* (req) {

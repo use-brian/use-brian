@@ -17,6 +17,12 @@ const planSlotSchema = z.object({
   index: z.number().int().min(1).max(99).describe(
     '1-based slot identifier. Reuse an index to revise that slot.',
   ),
+  slotId: z.string().uuid().optional().describe(
+    'The id of an EXISTING empty slot this proposal fills. Set it only when '
+    + 'the operator supplied that slot in the conversation; accepting then '
+    + 'updates that slot in place instead of creating a new one. Omit to '
+    + 'propose a brand new slot.',
+  ),
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe(
     'The calendar day for this post, YYYY-MM-DD. Must fall inside the month being planned.',
   ),
@@ -52,8 +58,11 @@ export function buildProposePlanTool(): Tool {
     description:
       'Surface a proposed month of posts in the plan cardboard. Put the slots '
       + 'in this tool, not in the chat message. Reuse an index to revise a slot '
-      + 'and use the next unused index to add one. The operator accepts slots '
-      + 'before anything is scheduled.',
+      + 'and use the next unused index to add one. When the operator asked to '
+      + 'fill existing empty slots, carry each one\'s slotId so accepting '
+      + 'updates that slot rather than creating a duplicate beside it. Propose '
+      + 'briefs, not finished copy. The operator accepts slots before anything '
+      + 'is scheduled.',
     inputSchema: proposePlanInputSchema,
     isReadOnly: true,
     isConcurrencySafe: true,
@@ -66,6 +75,7 @@ export function buildProposePlanTool(): Tool {
           month: input.month,
           count: input.slots.length,
           indices: input.slots.map((slot) => slot.index),
+          filled: input.slots.filter((slot) => slot.slotId).length,
         },
       }
     },
