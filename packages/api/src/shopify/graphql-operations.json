@@ -64,6 +64,17 @@
       "deprecations": []
     },
     {
+      "name": "CreateCustomerSegment",
+      "kind": "mutation",
+      "hash": "38039aec918796c0",
+      "valid": true,
+      "scopes": [
+        "write_customers",
+        "read_customers"
+      ],
+      "deprecations": []
+    },
+    {
       "name": "CreateDiscountCode",
       "kind": "mutation",
       "hash": "b74bf21f40e33792",
@@ -135,6 +146,16 @@
       "hash": "85a671e100fd856c",
       "valid": true,
       "scopes": [],
+      "deprecations": []
+    },
+    {
+      "name": "FindCustomerSegment",
+      "kind": "query",
+      "hash": "72533d2413ef8048",
+      "valid": true,
+      "scopes": [
+        "read_customers"
+      ],
       "deprecations": []
     },
     {
@@ -362,6 +383,14 @@
         "read_shopify_payments_accounts",
         "read_shopify_payments_payouts"
       ],
+      "deprecations": []
+    },
+    {
+      "name": "PreviewCustomerSegment",
+      "kind": "query",
+      "hash": "a244c4b356349405",
+      "valid": true,
+      "scopes": [],
       "deprecations": []
     },
     {

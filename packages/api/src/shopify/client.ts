@@ -578,6 +578,72 @@ export async function getCustomer(auth: ShopifyAuth, customerId: string): Promis
   return data.customer
 }
 
+export type ShopifyCustomerSegmentAudience = 'all_subscribers' | 'product_buyers'
+
+export type ShopifyCustomerSegmentParams = {
+  audience: ShopifyCustomerSegmentAudience
+  productIds?: string[]
+}
+
+/**
+ * Build one of the two campaign audiences the product exposes.
+ *
+ * This is deliberately not a general ShopifyQL escape hatch. Segment syntax
+ * has no safe introspection path, so callers choose an enum and the server
+ * owns every field/operator. Product ids are the only variable vocabulary.
+ */
+export function buildCustomerSegmentQuery(params: ShopifyCustomerSegmentParams): string {
+  const subscribed = "email_subscription_status = 'SUBSCRIBED'"
+  const suppliedIds = params.productIds ?? []
+
+  if (params.audience === 'all_subscribers') {
+    if (suppliedIds.length > 0) {
+      throw new Error('Shopify API error: productIds are only valid for the product_buyers audience')
+    }
+    return subscribed
+  }
+
+  if (params.audience !== 'product_buyers') {
+    throw new Error('Shopify API error: unsupported customer segment audience')
+  }
+  if (suppliedIds.length === 0) {
+    throw new Error('Shopify API error: product_buyers requires at least one productId')
+  }
+  if (suppliedIds.length > 500) {
+    throw new Error('Shopify API error: product_buyers accepts at most 500 productIds')
+  }
+
+  const productIds = [...new Set(suppliedIds.map((raw) => {
+    const match = /^(?:gid:\/\/shopify\/Product\/)?(\d+)$/.exec(raw.trim())
+    if (!match) {
+      throw new Error(`Shopify API error: invalid Product id "${raw.slice(0, 80)}"`)
+    }
+    return match[1]
+  }))]
+
+  return `${subscribed} AND products_purchased MATCHES (id IN (${productIds.join(', ')}))`
+}
+
+/** Count a typed campaign audience without selecting a single customer row. */
+export async function previewCustomerSegment(
+  auth: ShopifyAuth,
+  params: ShopifyCustomerSegmentParams,
+): Promise<{ query: string; totalCount: number }> {
+  const query = buildCustomerSegmentQuery(params)
+  const data = await shopifyGraphql<{ customerSegmentMembers?: { totalCount?: number } }>(auth, `
+    query PreviewCustomerSegment($query: String!) {
+      customerSegmentMembers(first: 1, query: $query) {
+        totalCount
+      }
+    }
+  `, { query })
+  const totalCount = data.customerSegmentMembers?.totalCount
+  if (typeof totalCount !== 'number') {
+    throw new Error('Shopify API error: customer segment count was missing')
+  }
+  return { query, totalCount }
+}
+
 /**
  * Inventory by variant search (`product_id:` / `sku:` query syntax), with
  * per-location available quantities.
@@ -639,6 +705,64 @@ export async function updateProduct(auth: ShopifyAuth, params: ShopifyProductUpd
   `, { product })
   expectNoUserErrors(data, 'productUpdate')
   return (data as Record<string, unknown>).productUpdate
+}
+
+/**
+ * Create the typed campaign segment, reusing a saved segment with the same
+ * canonical query. The lookup makes a retry after a lost response idempotent.
+ */
+export async function createCustomerSegment(
+  auth: ShopifyAuth,
+  params: ShopifyCustomerSegmentParams & { name: string },
+): Promise<unknown> {
+  const name = params.name.trim()
+  if (!name) throw new Error('Shopify API error: customer segment name is required')
+  const query = buildCustomerSegmentQuery(params)
+  const canonical = (value: string) => value.replace(/\s+/g, ' ').trim()
+  const adminUrl = `https://${auth.shopDomain}/admin/customers/segments`
+  type SegmentNode = { id?: string; name?: string; query?: string }
+  type SegmentPageData = {
+    segments?: {
+      pageInfo?: { hasNextPage?: boolean; endCursor?: string | null }
+      edges?: Array<{ node?: SegmentNode }>
+    }
+  }
+  let after: string | null = null
+  do {
+    const existing: SegmentPageData = await shopifyGraphql<SegmentPageData>(auth, `
+      query FindCustomerSegment($first: Int!, $after: String) {
+        segments(first: $first, after: $after) {
+          pageInfo { hasNextPage endCursor }
+          edges { node { id name query } }
+        }
+      }
+    `, { first: 250, after })
+    const match = (existing.segments?.edges ?? [])
+      .map((edge) => edge.node)
+      .find((segment) => segment?.query && canonical(segment.query) === canonical(query))
+    if (match?.id) {
+      return { segment: match, reused: true, adminUrl }
+    }
+    const pageInfo = existing.segments?.pageInfo
+    after = pageInfo?.hasNextPage && pageInfo.endCursor ? pageInfo.endCursor : null
+  } while (after)
+
+  const data = await shopifyGraphql(auth, `
+    mutation CreateCustomerSegment($name: String!, $query: String!) {
+      segmentCreate(name: $name, query: $query) {
+        segment { id name query }
+        userErrors { field message }
+      }
+    }
+  `, { name, query })
+  expectNoUserErrors(data, 'segmentCreate')
+  const payload = (data as Record<string, unknown>).segmentCreate as
+    | { segment?: { id?: string; name?: string; query?: string } }
+    | undefined
+  if (!payload?.segment?.id) {
+    throw new Error('Shopify API error: segmentCreate returned no segment')
+  }
+  return { ...payload, reused: false, adminUrl }
 }
 
 export type ShopifyDraftOrderLineItem = {

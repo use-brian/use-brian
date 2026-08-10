@@ -14,6 +14,9 @@ import {
   createShopifyTokenManager,
   shopifyGraphql,
   listOrders,
+  buildCustomerSegmentQuery,
+  previewCustomerSegment,
+  createCustomerSegment,
   updateProduct,
   addTags,
   addProductImage,
@@ -78,6 +81,134 @@ describe('[COMP:api/shopify-client] Shopify GraphQL client', () => {
   it('toShopifyGid coerces numeric ids and passes GIDs through', () => {
     expect(toShopifyGid('Order', '123')).toBe('gid://shopify/Order/123')
     expect(toShopifyGid('Order', 'gid://shopify/Order/123')).toBe('gid://shopify/Order/123')
+  })
+
+  it('buildCustomerSegmentQuery always subscribes and uses lifetime product matches', () => {
+    expect(buildCustomerSegmentQuery({ audience: 'all_subscribers' })).toBe(
+      "email_subscription_status = 'SUBSCRIBED'",
+    )
+    expect(buildCustomerSegmentQuery({
+      audience: 'product_buyers',
+      productIds: ['gid://shopify/Product/42', '7', '42'],
+    })).toBe(
+      "email_subscription_status = 'SUBSCRIBED' AND products_purchased MATCHES (id IN (42, 7))",
+    )
+    expect(() => buildCustomerSegmentQuery({ audience: 'product_buyers' })).toThrow(/at least one/)
+    expect(() => buildCustomerSegmentQuery({ audience: 'all_subscribers', productIds: ['1'] })).toThrow(/only valid/)
+    expect(() => buildCustomerSegmentQuery({
+      audience: 'product_buyers',
+      productIds: Array.from({ length: 501 }, (_, index) => String(index + 1)),
+    })).toThrow(/at most 500/)
+    expect(() => buildCustomerSegmentQuery({
+      audience: 'product_buyers',
+      productIds: ['gid://shopify/Customer/1'],
+    })).toThrow(/invalid Product id/)
+  })
+
+  it('previewCustomerSegment selects only totalCount and never customer fields', async () => {
+    mockFetch.mockResolvedValue(jsonResponse({
+      data: { customerSegmentMembers: { totalCount: 37 } },
+    }))
+    await expect(previewCustomerSegment(AUTH, {
+      audience: 'product_buyers',
+      productIds: ['42'],
+    })).resolves.toEqual({
+      query: "email_subscription_status = 'SUBSCRIBED' AND products_purchased MATCHES (id IN (42))",
+      totalCount: 37,
+    })
+    const body = JSON.parse((mockFetch.mock.calls[0][1] as { body: string }).body)
+    expect(body.query).toContain('totalCount')
+    expect(body.query).not.toMatch(/edges|node|emailAddress|firstName|lastName/)
+    expect(body.variables).toEqual({
+      query: "email_subscription_status = 'SUBSCRIBED' AND products_purchased MATCHES (id IN (42))",
+    })
+  })
+
+  it('createCustomerSegment reuses an exact query and skips the mutation', async () => {
+    mockFetch.mockResolvedValue(jsonResponse({
+      data: { segments: { edges: [{ node: {
+        id: 'gid://shopify/Segment/8',
+        name: 'Email subscribers',
+        query: "email_subscription_status = 'SUBSCRIBED'",
+      } }] } },
+    }))
+    await expect(createCustomerSegment(AUTH, {
+      name: 'Brian - Restock',
+      audience: 'all_subscribers',
+    })).resolves.toMatchObject({
+      segment: { id: 'gid://shopify/Segment/8', name: 'Email subscribers' },
+      reused: true,
+    })
+    expect(mockFetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('createCustomerSegment follows segment pagination before creating', async () => {
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse({ data: { segments: {
+        pageInfo: { hasNextPage: true, endCursor: 'next-page' },
+        edges: [{ node: {
+          id: 'gid://shopify/Segment/7',
+          name: 'Other segment',
+          query: "email_subscription_status = 'NOT_SUBSCRIBED'",
+        } }],
+      } } }))
+      .mockResolvedValueOnce(jsonResponse({ data: { segments: {
+        pageInfo: { hasNextPage: false, endCursor: null },
+        edges: [{ node: {
+          id: 'gid://shopify/Segment/8',
+          name: 'Email subscribers',
+          query: "email_subscription_status = 'SUBSCRIBED'",
+        } }],
+      } } }))
+
+    await expect(createCustomerSegment(AUTH, {
+      name: 'Brian - Restock',
+      audience: 'all_subscribers',
+    })).resolves.toMatchObject({
+      segment: { id: 'gid://shopify/Segment/8' },
+      reused: true,
+    })
+    expect(mockFetch).toHaveBeenCalledTimes(2)
+    const secondBody = JSON.parse((mockFetch.mock.calls[1][1] as { body: string }).body)
+    expect(secondBody.variables).toEqual({ first: 250, after: 'next-page' })
+  })
+
+  it('createCustomerSegment creates a missing segment and surfaces user errors', async () => {
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse({ data: { segments: { edges: [] } } }))
+      .mockResolvedValueOnce(jsonResponse({ data: { segmentCreate: {
+        segment: {
+          id: 'gid://shopify/Segment/9',
+          name: 'Brian - Restock',
+          query: "email_subscription_status = 'SUBSCRIBED'",
+        },
+        userErrors: [],
+      } } }))
+    await expect(createCustomerSegment(AUTH, {
+      name: 'Brian - Restock',
+      audience: 'all_subscribers',
+    })).resolves.toMatchObject({
+      segment: { id: 'gid://shopify/Segment/9' },
+      reused: false,
+      adminUrl: `https://${SHOP}/admin/customers/segments`,
+    })
+    const mutationBody = JSON.parse((mockFetch.mock.calls[1][1] as { body: string }).body)
+    expect(mutationBody.variables).toEqual({
+      name: 'Brian - Restock',
+      query: "email_subscription_status = 'SUBSCRIBED'",
+    })
+
+    mockFetch.mockReset()
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse({ data: { segments: { edges: [] } } }))
+      .mockResolvedValueOnce(jsonResponse({ data: { segmentCreate: {
+        segment: null,
+        userErrors: [{ field: ['query'], message: 'Invalid segment query' }],
+      } } }))
+    await expect(createCustomerSegment(AUTH, {
+      name: 'Brian - Restock',
+      audience: 'all_subscribers',
+    })).rejects.toThrow(/query: Invalid segment query/)
   })
 
   // ── Credential tuple ─────────────────────────────────────
@@ -1049,6 +1180,7 @@ describe('[COMP:api/shopify-client] Shopify GraphQL client', () => {
       getOrder: nullApi,
       searchCustomers: nullApi,
       getCustomer: nullApi,
+      previewCustomerSegment: nullApi,
       getInventoryLevels: nullApi,
       listCollections: nullApi,
       listDraftOrders: nullApi,
@@ -1066,6 +1198,7 @@ describe('[COMP:api/shopify-client] Shopify GraphQL client', () => {
       sendDraftOrderInvoice: nullApi,
       addTags: nullApi,
       updateCustomer: nullApi,
+      createCustomerSegment: nullApi,
       setInventoryQuantity: nullApi,
       createFulfillment: nullApi,
       createDiscountCode: nullApi,

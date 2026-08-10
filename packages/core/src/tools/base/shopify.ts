@@ -309,6 +309,10 @@ function fieldHelp(schema: string | null, message: string): string {
 // ── API port ───────────────────────────────────────────────────
 
 type ShopifyListParams = { query?: string; first?: number; cursor?: string }
+type ShopifyCustomerSegmentParams = {
+  audience: 'all_subscribers' | 'product_buyers'
+  productIds?: string[]
+}
 
 export type ShopifyApi = {
   getShop(): Promise<unknown>
@@ -318,6 +322,7 @@ export type ShopifyApi = {
   getOrder(orderId: string): Promise<unknown>
   searchCustomers(params: ShopifyListParams): Promise<unknown>
   getCustomer(customerId: string): Promise<unknown>
+  previewCustomerSegment(params: ShopifyCustomerSegmentParams): Promise<unknown>
   getInventoryLevels(params: { query?: string; first?: number }): Promise<unknown>
   listCollections(params: ShopifyListParams): Promise<unknown>
   listDraftOrders(params: ShopifyListParams): Promise<unknown>
@@ -363,6 +368,7 @@ export type ShopifyApi = {
   sendDraftOrderInvoice(draftOrderId: string): Promise<unknown>
   addTags(resource: 'order' | 'customer' | 'product', resourceId: string, tags: string[]): Promise<unknown>
   updateCustomer(params: { id: string; note?: string; tags?: string[] }): Promise<unknown>
+  createCustomerSegment(params: ShopifyCustomerSegmentParams & { name: string }): Promise<unknown>
   setInventoryQuantity(params: { variantId: string; locationId?: string; quantity: number }): Promise<unknown>
   createFulfillment(params: {
     orderId: string
@@ -684,6 +690,50 @@ export function createShopifyTools(
           last_order: lastOrder
             ? { id: str(lastOrder, 'id'), name: str(lastOrder, 'name'), created_at: str(lastOrder, 'createdAt') }
             : undefined,
+        } }
+      } catch (err) {
+        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+      }
+    },
+  })
+
+  const customerSegmentFields = {
+    audience: z.enum(['all_subscribers', 'product_buyers']).describe(
+      'all_subscribers, or product_buyers for subscribed customers who bought selected products over all time.',
+    ),
+    productIds: z.array(z.string()).max(500).optional().describe(
+      'Product ids for product_buyers (numeric ids or Product GIDs, 1-500). Omit for all_subscribers.',
+    ),
+  }
+  const validateCustomerSegment = (
+    value: { audience: 'all_subscribers' | 'product_buyers'; productIds?: string[] },
+    ctx: z.RefinementCtx,
+  ) => {
+    const count = value.productIds?.length ?? 0
+    if (value.audience === 'product_buyers' && count === 0) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['productIds'], message: 'product_buyers requires at least one productId.' })
+    }
+    if (value.audience === 'all_subscribers' && count > 0) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['productIds'], message: 'Omit productIds for all_subscribers.' })
+    }
+  }
+
+  const previewCustomerSegmentTool = buildTool({
+    name: 'shopifyPreviewCustomerSegment',
+    description:
+      'Count a privacy-preserving Shopify campaign audience. Always includes only email subscribers. ' +
+      'product_buyers means subscribers who bought any selected product over all time; it does not need read_all_orders. ' +
+      'Returns only the audience query and total count, never customer rows or email addresses.',
+    inputSchema: z.object(customerSegmentFields).superRefine(validateCustomerSegment),
+    isConcurrencySafe: true,
+    isReadOnly: true,
+    timeoutMs: 15_000,
+    async execute(input) {
+      try {
+        const data = ((await api.previewCustomerSegment(input)) ?? {}) as Json
+        return { data: {
+          query: str(data, 'query'),
+          total_count: num(data, 'totalCount'),
         } }
       } catch (err) {
         return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
@@ -1734,6 +1784,37 @@ export function createShopifyTools(
     },
   })
 
+  const createCustomerSegmentTool = buildTool({
+    name: 'shopifyCreateCustomerSegment',
+    description:
+      'Create or reuse a saved Shopify customer segment for a restock campaign. The audience always contains only ' +
+      'email subscribers and never returns member rows or email addresses. Call this tool directly - the user will ' +
+      'see an Approve/Deny prompt.',
+    inputSchema: z.object({
+      ...customerSegmentFields,
+      name: z.string().trim().min(1).max(255).describe('Saved segment name shown in Shopify admin.'),
+    }).superRefine(validateCustomerSegment),
+    isConcurrencySafe: false,
+    isReadOnly: false,
+    requiresConfirmation: true,
+    timeoutMs: 20_000,
+    async execute(input) {
+      try {
+        const data = ((await api.createCustomerSegment(input)) ?? {}) as Json
+        const segment = obj(data, 'segment')
+        return { data: {
+          id: str(segment, 'id'),
+          name: str(segment, 'name'),
+          query: str(segment, 'query'),
+          reused: bool(data, 'reused') ?? false,
+          admin_url: str(data, 'adminUrl'),
+        } }
+      } catch (err) {
+        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+      }
+    },
+  })
+
   const createContentTool = buildTool({
     name: 'shopifyCreateContent',
     description:
@@ -1867,6 +1948,7 @@ export function createShopifyTools(
     getOrder,
     searchCustomers,
     getCustomer,
+    previewCustomerSegmentTool,
     getInventoryLevels,
     listCollections,
     listDraftOrdersTool,
@@ -1894,6 +1976,7 @@ export function createShopifyTools(
     sendDraftOrderInvoiceTool,
     addTagsTool,
     updateCustomerTool,
+    createCustomerSegmentTool,
     setInventoryTool,
     createFulfillmentTool,
     createDiscountCodeTool,
