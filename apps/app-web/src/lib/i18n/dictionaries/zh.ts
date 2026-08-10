@@ -7267,6 +7267,9 @@ export const zh: Dictionary = {
       liveCount: "{count} 個執行中",
       selectTitle: "觀看即時瀏覽器",
       selectHint: "在左側選擇一個工作階段來觀看或接管，或等待助理開啟瀏覽器。",
+      liveView: "即時瀏覽器",
+      profilesView: "瀏覽器身分",
+      viewSwitcherAria: "瀏覽器檢視",
       connectTitle: "使用你自己的 Chrome",
       connectHint:
         "安裝 Use Brian 擴充功能，然後在「瀏覽器身分」中配對「我的瀏覽器」。之後助理就能在你核准的分頁中，使用現有的登入狀態操作。",
@@ -7323,6 +7326,12 @@ export const zh: Dictionary = {
       title: "瀏覽器身分",
       description:
         "身分是一個瀏覽用的 Cookie 容器：助理會以這個身分、帶著已登入的網站瀏覽。新身分預設只有你能用；分享屬於明確的降級操作。按助理逐一啟用後，該助理才能以此身分瀏覽。",
+      createTitle: "建立瀏覽器身分",
+      typeLabel: "瀏覽器位置",
+      remoteTitle: "遠端瀏覽器",
+      remoteDescription: "專屬的雲端瀏覽器。開啟即時登入，儲存 Cookie 與已登入的網站。",
+      localTitle: "本機瀏覽器",
+      localDescription: "你自己的 Chrome 或 Edge 個人資料。配對擴充功能後即可使用現有登入狀態。",
       empty: "還沒有瀏覽器身分。先建立一個，然後在瀏覽器任務中登入網站來累積。",
       notConfigured: "此部署尚未設定瀏覽器身分。",
       loadFailed: "無法載入身分清單。請重試。",

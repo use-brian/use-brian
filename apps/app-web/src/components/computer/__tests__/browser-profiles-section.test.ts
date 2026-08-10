@@ -13,7 +13,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { BrowserProfile } from "@/lib/api/computer";
-import { isValidProxyUrl, profileSurfaces, siteFromLoginUrl } from "../browser-profiles-section";
+import { isValidProxyUrl, profileSurfaces } from "../browser-profiles-section";
 
 function profile(overrides: Partial<BrowserProfile> = {}): BrowserProfile {
   return {
@@ -40,6 +40,8 @@ describe("[COMP:app-web/profile-management] Profile surfaces by backend", () => 
     expect(profileSurfaces(profile({ defaultBackend: "cloud" }))).toEqual({
       signIn: true,
       vaultSessions: true,
+      pairBrowser: false,
+      localControl: false,
       ownBrowserNote: false,
     });
   });
@@ -48,6 +50,8 @@ describe("[COMP:app-web/profile-management] Profile surfaces by backend", () => 
     expect(profileSurfaces(profile({ defaultBackend: "local" }))).toEqual({
       signIn: false,
       vaultSessions: false,
+      pairBrowser: true,
+      localControl: true,
       ownBrowserNote: true,
     });
   });
@@ -65,23 +69,6 @@ describe("[COMP:app-web/profile-management] Profile surfaces by backend", () => 
       defaultBackend: "cloud",
       localControlMode: "full_browser",
     });
-  });
-});
-
-/**
- * "Save this login from my browser" (browser-session-portability.md D5): the
- * site the capture route is asked to save comes from the same normalised URL
- * the sign-in box already validates, reduced to the registrable-ish domain
- * the vault keys sessions by.
- */
-describe("[COMP:app-web/profile-management] siteFromLoginUrl", () => {
-  it("takes the hostname, stripping a leading www.", () => {
-    expect(siteFromLoginUrl("https://www.instagram.com/")).toBe("instagram.com");
-    expect(siteFromLoginUrl("https://instagram.com/accounts/login")).toBe("instagram.com");
-  });
-
-  it("leaves a non-www subdomain alone", () => {
-    expect(siteFromLoginUrl("https://app.example.com/")).toBe("app.example.com");
   });
 });
 

@@ -13,12 +13,12 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
+import { Cloud, Laptop } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { ConnectBrowserPanel } from "./connect-browser-panel";
 import { listAssistants, type StudioAssistantSummary } from "@/lib/api/studio";
 import {
-  captureProfileSession,
   createBrowserProfile,
   deleteBrowserProfile,
   listBrowserProfiles,
@@ -48,14 +48,6 @@ function normalizeLoginUrl(raw: string): string | null {
   }
 }
 
-/** The registrable-ish site a normalised login URL captures against - strips
- *  a leading "www." the way the profile's vault sessions are keyed. The
- *  extension re-validates against the actually-allowed tab (`site_mismatch`
- *  refuses a mismatch), so an approximate strip here is safe. */
-export function siteFromLoginUrl(url: string): string {
-  return new URL(url).hostname.replace(/^www\./i, "");
-}
-
 /** A proxy URL must be an absolute URL with a real host - `new URL` alone is
  *  not enough, since a bare "host:port" typo (the common one, e.g.
  *  "proxy.example:8080") parses as a valid OPAQUE url whose "scheme" is the
@@ -83,10 +75,18 @@ export function isValidProxyUrl(raw: string): boolean {
 export function profileSurfaces(profile: BrowserProfile): {
   signIn: boolean;
   vaultSessions: boolean;
+  pairBrowser: boolean;
+  localControl: boolean;
   ownBrowserNote: boolean;
 } {
   const local = profile.defaultBackend === "local";
-  return { signIn: !local, vaultSessions: !local, ownBrowserNote: local };
+  return {
+    signIn: !local,
+    vaultSessions: !local,
+    pairBrowser: local,
+    localControl: local,
+    ownBrowserNote: local,
+  };
 }
 
 const CLEARANCES: BrowserProfileClearance[] = ["confidential", "internal", "public"];
@@ -106,22 +106,12 @@ export function BrowserProfilesSection() {
   >({ kind: "loading" });
   const [assistants, setAssistants] = useState<StudioAssistantSummary[]>([]);
   const [newName, setNewName] = useState("");
+  const [newBackend, setNewBackend] = useState<BrowserBackend>("cloud");
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   // "Sign in to a site" drafts + in-flight flag, keyed by profile id.
   const [loginDrafts, setLoginDrafts] = useState<Record<string, string>>({});
   const [loginBusyId, setLoginBusyId] = useState<string | null>(null);
-  // "Save this login from my browser" (browser-session-portability.md D5/D7):
-  // drafts + in-flight flag, keyed by profile id, plus the last successful
-  // capture per profile so the box can show which site and when (story 3).
-  const [captureDrafts, setCaptureDrafts] = useState<Record<string, string>>({});
-  const [captureBusyId, setCaptureBusyId] = useState<string | null>(null);
-  const [captureResults, setCaptureResults] = useState<
-    Record<string, { site: string; capturedAt: string | null }>
-  >({});
-  // Each Use Brian profile has its own extension connection. This is what
-  // keeps simultaneous local identities from sharing a tab/cookie context.
-  const [extensionConnected, setExtensionConnected] = useState<Record<string, boolean>>({});
   // Proxy URL drafts (D7) - undefined until the user edits, so the input
   // falls back to the saved value.
   const [proxyDrafts, setProxyDrafts] = useState<Record<string, string>>({});
@@ -183,18 +173,16 @@ export function BrowserProfilesSection() {
     void listAssistants(workspaceId).then(setAssistants).catch(() => setAssistants([]));
   }, [workspaceId]);
 
-  const onConnectionChange = useCallback((profileId: string, connected: boolean) => {
-    setExtensionConnected((current) =>
-      current[profileId] === connected ? current : { ...current, [profileId]: connected },
-    );
-  }, []);
-
   const onCreate = useCallback(async () => {
     const name = newName.trim();
     if (!name || busy) return;
     setBusy(true);
     setActionError(null);
-    const created = await createBrowserProfile({ workspaceId, name }).catch(() => null);
+    const created = await createBrowserProfile({
+      workspaceId,
+      name,
+      defaultBackend: newBackend,
+    }).catch(() => null);
     setBusy(false);
     if (!created) {
       setActionError(t.computer.profiles.createFailed);
@@ -202,7 +190,7 @@ export function BrowserProfilesSection() {
     }
     setNewName("");
     void reload();
-  }, [busy, newName, reload, t, workspaceId]);
+  }, [busy, newBackend, newName, reload, t, workspaceId]);
 
   const mutate = useCallback(
     async (profileId: string, patch: Parameters<typeof updateBrowserProfile>[1]) => {
@@ -269,40 +257,6 @@ export function BrowserProfilesSection() {
       );
     },
     [loginBusyId, loginDrafts, t, workspaceId],
-  );
-
-  // "Save this login from my browser" (D5): captures the named site straight
-  // out of the caller's already-connected Chrome (no cloud sandbox, no
-  // separate sign-in tab) into this profile's vault, for a later cloud
-  // browse under the same profile to replay. Requires the caller's own
-  // browser to be connected (story 8) - the extension asks for tab consent
-  // on its own when the command arrives, so there is nothing else to check
-  // client-side.
-  const onCapture = useCallback(
-    async (profile: BrowserProfile) => {
-      const url = normalizeLoginUrl(captureDrafts[profile.id] ?? "");
-      if (!url || captureBusyId || !extensionConnected[profile.id]) return;
-      const site = siteFromLoginUrl(url);
-      setActionError(null);
-      setCaptureBusyId(profile.id);
-      const result = await captureProfileSession(profile.id, site).catch(
-        () => ({ ok: false, site: undefined, capturedAt: undefined, error: undefined }),
-      );
-      setCaptureBusyId(null);
-      if (!result.ok) {
-        // The server's message verbatim (story 20): "no extension" and
-        // "wrong tab's site" must stay distinguishable, not one flattened
-        // failure - only translate when the server gave nothing back.
-        setActionError(result.error ?? t.computer.profiles.captureFailed);
-        return;
-      }
-      setCaptureResults((r) => ({
-        ...r,
-        [profile.id]: { site: result.site ?? site, capturedAt: result.capturedAt ?? null },
-      }));
-      void reload();
-    },
-    [captureBusyId, captureDrafts, extensionConnected, reload, t],
   );
 
   // Proxy URL (D7): free-text, validated client-side as a URL, saved through
@@ -408,8 +362,13 @@ export function BrowserProfilesSection() {
         ? t.computer.profiles.clearanceInternal
         : t.computer.profiles.clearancePublic;
 
-  const backendLabel = (backend: BrowserBackend): string =>
-    backend === "cloud" ? t.computer.profiles.backendCloud : t.computer.profiles.backendLocal;
+  const backendTitle = (backend: BrowserBackend): string =>
+    backend === "cloud" ? t.computer.profiles.remoteTitle : t.computer.profiles.localTitle;
+
+  const backendDescription = (backend: BrowserBackend): string =>
+    backend === "cloud"
+      ? t.computer.profiles.remoteDescription
+      : t.computer.profiles.localDescription;
 
   const localControlModeLabel = (mode: LocalBrowserControlMode): string =>
     mode === "task_tabs"
@@ -447,25 +406,67 @@ export function BrowserProfilesSection() {
         <p className="text-xs text-destructive">{t.computer.profiles.loadFailed}</p>
       ) : (
         <>
-          <div className="flex items-center gap-2">
-            <input
-              type="text"
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") void onCreate();
-              }}
-              placeholder={t.computer.profiles.createPlaceholder}
-              className="h-8 flex-1 rounded-md border border-border bg-background px-2.5 text-sm outline-none focus:ring-1 focus:ring-ring"
-            />
-            <button
-              type="button"
-              disabled={busy || newName.trim().length === 0}
-              onClick={() => void onCreate()}
-              className="h-8 shrink-0 rounded-md border border-border px-3 text-xs font-medium hover:bg-accent disabled:opacity-50"
+          <div className="rounded-lg border border-border bg-muted/15 p-4">
+            <h4 className="text-sm font-medium">{t.computer.profiles.createTitle}</h4>
+            <p className="mt-3 text-[11px] font-medium text-muted-foreground">
+              {t.computer.profiles.typeLabel}
+            </p>
+            <div
+              role="radiogroup"
+              aria-label={t.computer.profiles.typeLabel}
+              className="mt-1.5 grid gap-2 sm:grid-cols-2"
             >
-              {t.computer.profiles.createAction}
-            </button>
+              {BACKENDS.map((backend) => {
+                const selected = newBackend === backend;
+                const Icon = backend === "cloud" ? Cloud : Laptop;
+                return (
+                  <button
+                    key={backend}
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    onClick={() => setNewBackend(backend)}
+                    className={
+                      selected
+                        ? "flex min-h-20 items-start gap-3 rounded-lg border border-primary bg-primary/5 p-3 text-left ring-1 ring-primary/20"
+                        : "flex min-h-20 items-start gap-3 rounded-lg border border-border bg-background p-3 text-left transition-colors hover:bg-accent/50"
+                    }
+                  >
+                    <span className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-md bg-muted">
+                      <Icon className="size-4 text-muted-foreground" aria-hidden />
+                    </span>
+                    <span className="min-w-0">
+                      <span className="block text-xs font-medium text-foreground">
+                        {backendTitle(backend)}
+                      </span>
+                      <span className="mt-1 block text-[11px] leading-relaxed text-muted-foreground">
+                        {backendDescription(backend)}
+                      </span>
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="mt-3 flex items-center gap-2">
+              <input
+                type="text"
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void onCreate();
+                }}
+                placeholder={t.computer.profiles.createPlaceholder}
+                className="h-9 flex-1 rounded-md border border-border bg-background px-2.5 text-sm outline-none focus:ring-1 focus:ring-ring"
+              />
+              <button
+                type="button"
+                disabled={busy || newName.trim().length === 0}
+                onClick={() => void onCreate()}
+                className="h-9 shrink-0 rounded-md bg-action px-3 text-xs font-medium text-action-foreground hover:bg-action/90 disabled:opacity-50"
+              >
+                {t.computer.profiles.createAction}
+              </button>
+            </div>
           </div>
 
           {actionError ? <p className="text-xs text-destructive">{actionError}</p> : null}
@@ -479,6 +480,9 @@ export function BrowserProfilesSection() {
                   <div className="flex items-center justify-between gap-3">
                     <div className="flex min-w-0 items-center gap-2">
                       <span className="truncate text-sm font-medium">{profile.name}</span>
+                      <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">
+                        {backendTitle(profile.defaultBackend)}
+                      </span>
                       <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
                         {clearanceLabel(profile.clearance)}
                       </span>
@@ -492,20 +496,59 @@ export function BrowserProfilesSection() {
                     </button>
                   </div>
 
+                  <div className="mt-3">
+                    <p className="text-[11px] font-medium text-muted-foreground">
+                      {t.computer.profiles.typeLabel}
+                    </p>
+                    <div
+                      role="radiogroup"
+                      aria-label={t.computer.profiles.typeLabel}
+                      className="mt-1.5 grid gap-2 sm:grid-cols-2"
+                    >
+                      {BACKENDS.map((backend) => {
+                        const selected = profile.defaultBackend === backend;
+                        const Icon = backend === "cloud" ? Cloud : Laptop;
+                        return (
+                          <button
+                            key={backend}
+                            type="button"
+                            role="radio"
+                            aria-checked={selected}
+                            onClick={() => void mutate(profile.id, { defaultBackend: backend })}
+                            className={
+                              selected
+                                ? "flex items-start gap-2 rounded-md border border-primary bg-primary/5 p-2.5 text-left"
+                                : "flex items-start gap-2 rounded-md border border-border p-2.5 text-left transition-colors hover:bg-accent/50"
+                            }
+                          >
+                            <Icon className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden />
+                            <span className="min-w-0">
+                              <span className="block text-xs font-medium">
+                                {backendTitle(backend)}
+                              </span>
+                              <span className="mt-0.5 block text-[11px] leading-relaxed text-muted-foreground">
+                                {backendDescription(backend)}
+                              </span>
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
                   {/* Pairing is profile-scoped. A distinct real Chrome profile
                       can keep this connection live while another Use Brian
                       profile uses another extension instance concurrently. */}
-                  <div className="mt-3">
-                    <ConnectBrowserPanel
-                      profileId={profile.id}
-                      profileName={profile.name}
-                      onConnectionChange={onConnectionChange}
-                    />
-                  </div>
+                  {profileSurfaces(profile).pairBrowser ? (
+                    <div className="mt-3">
+                      <ConnectBrowserPanel profileId={profile.id} profileName={profile.name} />
+                    </div>
+                  ) : null}
 
                   {/* Standing local-browser scope. The extension still asks
                       for per-task consent; this setting only bounds which
                       eligible tabs that task may select afterward. */}
+                  {profileSurfaces(profile).localControl ? (
                   <div className="mt-3">
                     <p className="text-[11px] font-medium text-muted-foreground">
                       {t.computer.profiles.localControlLabel}
@@ -532,6 +575,7 @@ export function BrowserProfilesSection() {
                         : t.computer.profiles.localControlTaskHint}
                     </p>
                   </div>
+                  ) : null}
 
                   {/* A My Browser profile has no vault to fill — it rides the
                       logins already in the user's real Chrome. */}
@@ -726,63 +770,6 @@ export function BrowserProfilesSection() {
                   </div>
                   ) : null}
 
-                  {/* "Save this login from my browser" (D5): capture a site's
-                      already-signed-in cookies straight from the caller's own
-                      connected Chrome, no separate sign-in tab needed. Same
-                      vault, same later cloud replay as the box above. */}
-                  {profileSurfaces(profile).signIn ? (
-                  <div className="mt-3">
-                    <p className="text-[11px] font-medium text-muted-foreground">
-                      {t.computer.profiles.captureLabel}
-                    </p>
-                    <div className="mt-1 flex items-center gap-2">
-                      <input
-                        type="text"
-                        value={captureDrafts[profile.id] ?? ""}
-                        onChange={(e) =>
-                          setCaptureDrafts((d) => ({ ...d, [profile.id]: e.target.value }))
-                        }
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") void onCapture(profile);
-                        }}
-                        placeholder={t.computer.profiles.capturePlaceholder}
-                        className="h-8 flex-1 rounded-md border border-border bg-background px-2.5 text-sm outline-none focus:ring-1 focus:ring-ring"
-                      />
-                      <button
-                        type="button"
-                        disabled={
-                          captureBusyId !== null ||
-                          !extensionConnected[profile.id] ||
-                          normalizeLoginUrl(captureDrafts[profile.id] ?? "") === null
-                        }
-                        onClick={() => void onCapture(profile)}
-                        className="h-8 shrink-0 rounded-md bg-action px-3 text-xs font-medium text-action-foreground disabled:opacity-50"
-                      >
-                        {captureBusyId === profile.id
-                          ? t.computer.profiles.captureSaving
-                          : t.computer.profiles.captureAction}
-                      </button>
-                    </div>
-                    <p className="mt-1 text-[11px] text-muted-foreground">
-                      {extensionConnected[profile.id]
-                        ? t.computer.profiles.captureHint
-                        : t.computer.profiles.captureNoSession}
-                    </p>
-                    {captureResults[profile.id] ? (
-                      <p className="mt-1 text-[11px] text-primary">
-                        {t.computer.profiles.captureSuccess
-                          .replace("{site}", captureResults[profile.id]!.site)
-                          .replace(
-                            "{date}",
-                            captureResults[profile.id]!.capturedAt
-                              ? new Date(captureResults[profile.id]!.capturedAt as string).toLocaleString()
-                              : "",
-                          )}
-                      </p>
-                    ) : null}
-                  </div>
-                  ) : null}
-
                   {/* Clearance rung (top rung = owner-only; lower = shared) */}
                   <div className="mt-3">
                     <p className="text-[11px] font-medium text-muted-foreground">
@@ -809,32 +796,10 @@ export function BrowserProfilesSection() {
                     </p>
                   </div>
 
-                  {/* Default backend (R2-3): seeds the toggle; authoritative unattended */}
-                  <div className="mt-3">
-                    <p className="text-[11px] font-medium text-muted-foreground">
-                      {t.computer.profiles.backendLabel}
-                    </p>
-                    <div className="mt-1 flex gap-1">
-                      {BACKENDS.map((backend) => (
-                        <button
-                          key={backend}
-                          type="button"
-                          onClick={() => void mutate(profile.id, { defaultBackend: backend })}
-                          className={
-                            profile.defaultBackend === backend
-                              ? "rounded-md bg-primary/10 px-2 py-1 text-[11px] font-medium text-primary"
-                              : "rounded-md border border-border px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent"
-                          }
-                        >
-                          {backendLabel(backend)}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
                   {/* Proxy URL (D7): routes the CLOUD browser's traffic
                       through the user's own proxy, so its egress resembles
                       where a captured session's cookies were minted. */}
+                  {profileSurfaces(profile).signIn ? (
                   <div className="mt-3">
                     <p className="text-[11px] font-medium text-muted-foreground">
                       {t.computer.profiles.proxyLabel}
@@ -864,6 +829,7 @@ export function BrowserProfilesSection() {
                       {t.computer.profiles.proxyHint}
                     </p>
                   </div>
+                  ) : null}
 
                   {/* Enabled assistants (R2-4: explicit enablement) */}
                   <div className="mt-3">

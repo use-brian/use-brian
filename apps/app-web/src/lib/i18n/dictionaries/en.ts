@@ -7559,6 +7559,9 @@ export const en = {
       selectTitle: "Watch a live browser",
       selectHint:
         "Pick a session on the left to watch or take over, or wait for an assistant to open one.",
+      liveView: "Live browser",
+      profilesView: "Browser profiles",
+      viewSwitcherAria: "Browser view",
       connectTitle: "Use your own Chrome",
       connectHint:
         "Install the Use Brian extension, then pair My Browser in Browser profiles. Your assistant can then work in a tab you approve, using your existing sign-ins.",
@@ -7619,6 +7622,14 @@ export const en = {
       title: "Browser profiles",
       description:
         "A profile is a browsing identity: one cookie jar your assistant browses as, signed into your sites. New profiles are private to you; sharing is an explicit downgrade. Enable a profile per assistant to let it browse as that identity.",
+      createTitle: "Create a browser profile",
+      typeLabel: "Browser location",
+      remoteTitle: "Remote browser",
+      remoteDescription:
+        "A private cloud browser. Open a live sign-in to save cookies and reuse those signed-in sites.",
+      localTitle: "Local browser",
+      localDescription:
+        "Your own Chrome or Edge profile. Pair the extension to use its existing sign-ins.",
       empty: "No browser profiles yet. Create one, then sign in to sites during a browser task to fill it.",
       notConfigured: "Browser profiles are not configured on this deployment.",
       loadFailed: "Could not load profiles. Please try again.",
