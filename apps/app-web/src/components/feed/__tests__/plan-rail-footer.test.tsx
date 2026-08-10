@@ -61,6 +61,7 @@ describe("[COMP:app-web/plan-slot-peek] dock-safe footer", () => {
           id: null,
           platform: "twitter",
           scheduledFor: "2026-08-03",
+          scheduledMinute: null,
           title: "Launch note",
           brief: "Explain the release.",
         }}

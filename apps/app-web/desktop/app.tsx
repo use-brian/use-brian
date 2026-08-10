@@ -88,13 +88,11 @@ import KbNewStubPage from "@/app/w/[workspaceId]/knowledge-base/new/page";
 // `FeedSurfaceShell` reproduces `feed/layout.tsx` (profiles context + gate)
 // and the `:platform` guard reproduces `feed/[platform]/layout.tsx`.
 import { FeedSurfaceShell } from "@/components/feed/feed-surface-shell";
-import { FeedHome } from "@/components/feed/feed-home";
-import { FeedInbox } from "@/components/feed/feed-inbox";
+import { FeedPlan } from "@/components/feed/feed-plan";
 import { FeedVoice } from "@/components/feed/feed-voice";
 import { FeedInsights } from "@/components/feed/feed-insights";
 import { FeedInspiration } from "@/components/feed/feed-inspiration";
 import { DraftSessionsList } from "@/components/feed/draft-sessions-list";
-import { DraftSessionDetail } from "@/components/feed/draft-session-detail";
 import { FeedConnection } from "@/components/feed/feed-connection";
 import { FeedPolicy } from "@/components/feed/feed-policy";
 import { FeedSettings } from "@/components/feed/feed-settings";
@@ -187,8 +185,7 @@ export function App() {
                   FeedSurfaceShell (profiles context, readiness gate, the
                   feed tuning dock under the chat-dock suppression hold). */}
               <Route path="feed" element={<FeedShell />}>
-                <Route index element={<FeedHome />} />
-                <Route path="inbox" element={<FeedInbox />} />
+                <Route index element={<FeedPlan />} />
                 <Route path="voice" element={<FeedVoice />} />
                 <Route path=":platform" element={<FeedPlatformGuard />}>
                   {/* No Next page exists at the bare platform root — land on
@@ -197,10 +194,6 @@ export function App() {
                   <Route path="insights" element={<FeedInsights />} />
                   <Route path="inspiration" element={<FeedInspiration />} />
                   <Route path="draft-sessions" element={<DraftSessionsList />} />
-                  <Route
-                    path="draft-sessions/:sessionId"
-                    element={<DraftSessionDetail />}
-                  />
                   <Route path="connection" element={<FeedConnection />} />
                   <Route path="policy" element={<FeedPolicy />} />
                   <Route path="settings" element={<FeedSettings />} />

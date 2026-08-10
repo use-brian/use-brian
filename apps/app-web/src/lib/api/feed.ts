@@ -17,6 +17,7 @@
  */
 
 import { authFetch } from "@/lib/auth-fetch";
+import type { PostMedia } from "@/lib/feed-media";
 import type { FeedPlatform } from "@/lib/feed-nav";
 import type {
   FeedIdea,
@@ -63,6 +64,13 @@ export type FeedProfile = {
    *  fall back to the letter-circle avatar. */
   profilePictureUrl: string | null;
   enabled: boolean;
+  /**
+   * Whether approving a post on THIS connection actually ships its images
+   * (feed-revamp-depth D34). Threads always can; X needs the `media.write`
+   * scope, which is not retroactive, so a connection made before it was
+   * requested reads false until the operator reconnects.
+   */
+  canPublishMedia?: boolean;
   assistant: {
     id: string;
     name: string;
@@ -501,7 +509,7 @@ export type FeedReplyTargetSummary = {
   permalink: string | null;
 };
 
-export type FeedSavedDraftStatus =
+type FeedSavedDraftStatus =
   | "pending"
   /** Approved for MANUAL posting — sits in the ready-to-post queue until
    *  the operator marks it posted (docs/plans/feed-create-split.md D2). */
@@ -599,6 +607,8 @@ export type FeedDraftSessionSummary = {
  */
 export type FeedSavedDraft = {
   id: string;
+  /** Images bound to this draft (feed-revamp-depth D32). */
+  media?: PostMedia[];
   platform: FeedPlatform;
   platformReplyId: string | null;
   /** The model's original proposal — preserved for audit. */
@@ -742,6 +752,8 @@ export async function saveFeedSessionDraft(
     topicTag?: string;
     /** Written brief of the visual for image-first platforms (D9). */
     imageBrief?: string;
+    /** Images bound to this draft. Its own field, never inside formatData. */
+    media?: PostMedia[];
     postFormat?: FeedPostFormat;
     threadSegments?: string[];
     article?: FeedArticleFields;
@@ -1276,6 +1288,8 @@ export async function createPlanSlot(
   input: {
     platform: FeedPlatform;
     scheduledFor: string;
+    /** Minutes past local midnight; omit or null for "that day, no time". */
+    scheduledMinute?: number | null;
     title: string;
     brief?: string;
   },
@@ -1305,6 +1319,7 @@ export async function updatePlanSlot(
   slotId: string,
   patch: {
     scheduledFor?: string;
+    scheduledMinute?: number | null;
     title?: string;
     brief?: string | null;
     status?: PlanSlotMark;
@@ -1380,7 +1395,13 @@ export async function fetchPlanBrief(
 
 export async function savePlanBrief(
   assistantId: string,
-  input: { month: string; brief: string; themes: string[] },
+  input: {
+    month: string;
+    brief: string;
+    themes: string[];
+    /** Posts per week, 1..21, or null to clear. Drives the gap ghosts only. */
+    cadencePerWeek?: number | null;
+  },
 ): Promise<{ ok: true; brief: PlanBrief } | { ok: false; error: string | null }> {
   const res = await authFetch(
     `${API_URL}/api/distribution/${assistantId}/plan-brief`,

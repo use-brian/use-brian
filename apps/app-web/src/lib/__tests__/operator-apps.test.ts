@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it } from "vitest";
+import { BUILTIN_HOME_APP_KEYS } from "@use-brian/shared/home-apps";
 import {
   DEFAULT_OPERATOR_APP,
   OPERATOR_APP_KEYS,
@@ -21,16 +22,20 @@ describe("[COMP:app-web/operator-app-bar] operator app registry", () => {
     window.localStorage.clear();
   });
 
-  it("keeps Office next to Page and preserves the configured app-bar order", () => {
-    expect(OPERATOR_APP_KEYS).toEqual([
-      "page",
-      "office",
-      "tasks",
-      "crm",
-      "feed",
-      "browsers",
-      "chat",
-    ]);
+  it("is the shared vocabulary, not a copy of it", () => {
+    // This used to restate the seven keys, which made it a fourth copy of a
+    // list the shared package already owns — and the copy in
+    // `operator-apps.ts` had to be edited by hand for every new app, with
+    // nothing failing when someone forgot. `OPERATOR_APP_KEYS` is now derived,
+    // so the property worth pinning is the derivation itself.
+    expect(OPERATOR_APP_KEYS).toBe(BUILTIN_HOME_APP_KEYS);
+  });
+
+  it("still starts at Page and keeps Office beside it", () => {
+    // The order seeds the default strip and groups Studio's "Hidden" list, so
+    // the front of it is a product decision worth holding.
+    expect(OPERATOR_APP_KEYS[0]).toBe("page");
+    expect(OPERATOR_APP_KEYS[1]).toBe("office");
   });
 
   it("maps operator surfaces to their app and leaves the rest null", () => {

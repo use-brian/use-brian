@@ -1891,10 +1891,23 @@ export async function resolveAgentGate(workspaceId: string): Promise<boolean> {
  * brain-key trace lives in `channelType: 'programmatic'` + `channelId: keyId`,
  * which carry through to analytics without needing a non-UUID sessionId.
  */
-function makeBrainContextResolver(
+/**
+ * Build the per-request `ToolContext` for a workspace-bound tool call.
+ *
+ * Exported for first-party app routes (`routes/apps-shopify.ts`) as well as
+ * the brain-MCP surface. Both bind to the same principal - the workspace owner
+ * plus its primary assistant, via `resolveWriteTarget` - so a second
+ * hand-rolled context beside this one would be a place for the two to drift on
+ * clearance, compartments or capabilities without anything failing.
+ *
+ * `channelType` only labels the call for attribution and analytics; it is a
+ * free string on `ToolContext`, not a routing decision.
+ */
+export function makeBrainContextResolver(
   workspaceId: string,
   keyId: string,
   maxClearance: Sensitivity | null,
+  channelType = 'programmatic',
 ): () => Promise<ToolContext | { error: string }> {
   let cached: ToolContext | { error: string } | undefined
   return async () => {
@@ -1913,7 +1926,7 @@ function makeBrainContextResolver(
       assistantId: target.assistantId,
       sessionId: randomUUID(),
       appId: target.assistantId,
-      channelType: 'programmatic',
+      channelType,
       channelId: keyId,
       workspaceId,
       assistantKind: target.kind,

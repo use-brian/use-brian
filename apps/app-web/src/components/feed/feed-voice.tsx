@@ -28,6 +28,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import { brandVoiceSummary } from "@/lib/feed-brand";
 import { cn } from "@/lib/utils";
 import { useFeedWorkspace } from "@/contexts/feed-profiles-context";
 import {
@@ -211,6 +212,13 @@ export function FeedVoice({ scope }: { scope: VoiceScope }) {
     requestFeedChatSeed({ prefill });
   }
   const t = feedT.voice;
+  const tb = feedT.brand;
+  // D37. Read-only, company scope only, and null unless the workspace has an
+  // APPROVED brand with something to say.
+  const brandVoice = useMemo(
+    () => brandVoiceSummary(team.brand),
+    [team.brand],
+  );
   // Create split (feed-create-split.md D7): voice works with zero
   // connections — fall back to the workspace's brand-voice assistant when
   // no profile is connected.
@@ -528,6 +536,65 @@ export function FeedVoice({ scope }: { scope: VoiceScope }) {
               ) : null}
             </div>
           </header>
+
+          {/*
+            D37. The approved brand's voice, above the Feed's own rules and
+            READ-ONLY. Studio owns the record; two editors over one record is
+            how they drift. Company scope only - the brand does not have a
+            per-platform voice, and repeating it under every platform would
+            imply it does.
+          */}
+          {voicePlatform === "company" && brandVoice ? (
+            <section className="space-y-2.5 rounded-xl border border-border/60 p-4 shadow-xs">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <div>
+                  <h2 className="text-[13px] font-semibold">{tb.voiceTitle}</h2>
+                  <p className="text-[11px] text-muted-foreground">
+                    {tb.voiceSubtitle}
+                  </p>
+                </div>
+                <Link
+                  href={`/w/${team.workspaceId}/studio/brand`}
+                  className="text-[12px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                >
+                  {tb.voiceEditInStudio}
+                </Link>
+              </div>
+
+              {brandVoice.traits.length > 0 ? (
+                <ul className="space-y-1.5">
+                  {brandVoice.traits.map((trait) => (
+                    <li key={trait.trait} className="text-[12.5px] leading-relaxed">
+                      <span className="font-medium">{trait.trait}</span>
+                      <span className="text-muted-foreground">
+                        {" "}
+                        {tb.voiceMeans}: {trait.means}
+                        {trait.avoid ? ` · ${tb.voiceAvoid}: ${trait.avoid}` : ""}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+
+              {brandVoice.toneNotes.length > 0 ? (
+                <p className="text-[12px] text-muted-foreground">
+                  <span className="font-medium text-foreground">
+                    {tb.voiceTone}:
+                  </span>{" "}
+                  {brandVoice.toneNotes.join(" · ")}
+                </p>
+              ) : null}
+
+              {brandVoice.capitalization ? (
+                <p className="text-[12px] text-muted-foreground">
+                  <span className="font-medium text-foreground">
+                    {tb.voiceCapitalization}:
+                  </span>{" "}
+                  {brandVoice.capitalization}
+                </p>
+              ) : null}
+            </section>
+          ) : null}
 
           {types.length > 2 ? (
             <div className="flex items-center gap-1 overflow-x-auto -mx-1 px-1 pb-1">

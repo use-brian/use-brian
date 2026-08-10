@@ -32,6 +32,7 @@
  */
 
 import {
+  BUILTIN_HOME_APP_KEYS,
   DEFAULT_HOME_APPS,
   customHomeAppId,
   isBuiltinHomeAppKey,
@@ -50,20 +51,21 @@ export {
   isBuiltinHomeAppKey,
 } from "@use-brian/shared/home-apps";
 
-/** The built-in operator apps, in DEFAULT strip order. Page is the historical
- *  default; Feed holds the 4th slot, Browsers the 5th, Chat the 6th. This is
- *  the order a workspace starts at and the order the Studio tab lists the
- *  hidden apps in — the order the strip actually renders is whatever
- *  `home_apps` stores, which an admin can drag (`reorderHomeApps`). */
-export const OPERATOR_APP_KEYS = [
-  "page",
-  "office",
-  "tasks",
-  "crm",
-  "feed",
-  "browsers",
-  "chat",
-] as const;
+/**
+ * The built-in operator apps, in DEFAULT strip order — DERIVED, not restated.
+ *
+ * This was a hand-copied literal until 2026-08-10, which made the header's
+ * claim above ("can never disagree") untrue: adding a key to the shared list
+ * left this one behind, and the app simply had no route, icon or label for it
+ * while the API happily accepted it. Deriving also makes `APP_SEGMENT` and
+ * `APP_ICON` exhaustive against the real vocabulary, so the next key added
+ * cannot compile until it has both.
+ *
+ * The order the strip actually renders is whatever `home_apps` stores, which
+ * an admin can drag (`reorderHomeApps`); this order only seeds the default and
+ * groups the Studio "Hidden" list.
+ */
+export const OPERATOR_APP_KEYS = BUILTIN_HOME_APP_KEYS;
 export type OperatorAppKey = (typeof OPERATOR_APP_KEYS)[number];
 const OPERATOR_APP_SET: ReadonlySet<string> = new Set(OPERATOR_APP_KEYS);
 
@@ -85,6 +87,7 @@ const APP_SEGMENT: Record<OperatorAppKey, string> = {
   crm: "crm",
   browsers: "computer",
   chat: "chat",
+  shopify: "shopify",
 };
 
 /** Surfaces that belong to an operator app (the bar shows on these). */
@@ -96,6 +99,7 @@ const SURFACE_TO_APP: Partial<Record<WorkspaceSurface, OperatorAppKey>> = {
   crm: "crm",
   computer: "browsers",
   chat: "chat",
+  shopify: "shopify",
 };
 
 /** The BUILT-IN operator app a surface belongs to, or null for Brain/Studio/…

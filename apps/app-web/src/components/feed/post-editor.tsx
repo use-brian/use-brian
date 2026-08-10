@@ -34,9 +34,14 @@ import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 import { useFeedWorkspace } from "@/contexts/feed-profiles-context";
+import { brandPreviewIdentity } from "@/lib/feed-brand";
+import type { BrandRecord } from "@use-brian/shared/brand";
 import { PlatformIcon } from "@/components/feed/platform-icon";
 import { StatusLabel } from "@/components/feed/feed-status";
 import { CaptionEditor } from "@/components/feed/caption-editor";
+import { BrandCheck } from "@/components/feed/brand-check";
+import { PostMediaTray } from "@/components/feed/post-media-tray";
+import type { PostMedia } from "@/lib/feed-media";
 import { TuningChatPanel } from "@/components/feed/tuning-chat-panel";
 import { Button } from "@/components/ui/button";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
@@ -121,7 +126,7 @@ export function replayProposals(
 
 type SavedComposition = Pick<
   FeedSavedDraft,
-  "draftText" | "postedText" | "postFormat" | "threadSegments" | "article"
+  "draftText" | "postedText" | "postFormat" | "threadSegments" | "article" | "media"
 >;
 
 /** Compare editor state with the persisted review version. Article fields are
@@ -365,6 +370,9 @@ function PostPane({
   workspaceId: string;
   connected: boolean;
 }) {
+  // PostPane always renders inside FeedSurfaceShell's provider, so the brand
+  // read is a context lookup rather than another prop threaded through.
+  const workspace = useFeedWorkspace();
   const t = useT().feedPage;
   const te = t.postEditor;
   const router = useRouter();
@@ -415,6 +423,7 @@ function PostPane({
         savedDrafts.find((draft) => draft.status === "pending" || draft.status === "ready")
         ?? savedDrafts[0]
         ?? null;
+      setMedia(savedComposition?.media ?? []);
       const restoredFormat = savedComposition?.postFormat ?? seedIntent?.format ?? "post";
       const supported = postFormatsForPlatform(platform).includes(restoredFormat)
         ? restoredFormat
@@ -462,6 +471,10 @@ function PostPane({
   // A committed post is read-only: editing something already approved or
   // posted would let the copy drift away from what was actually reviewed.
   const readOnly = status === "ready" || status === "posted";
+  // D32. Media lives beside the caption, not inside formatData: saveDraft
+  // rewrites formatData wholesale from postFormat, so a Post<->Thread switch
+  // would silently erase it.
+  const [media, setMedia] = useState<PostMedia[]>([]);
 
   useEffect(() => {
     if (
@@ -480,6 +493,7 @@ function PostPane({
         text,
         platform,
         postFormat,
+        media,
         ...(postFormat === "thread" ? { threadSegments } : {}),
         ...(postFormat === "article" ? { article } : {}),
       });
@@ -491,7 +505,7 @@ function PostPane({
       setError(result.error ?? te.actionFailed);
       return false;
     },
-    [assistantId, sessionId, platform, postFormat, threadSegments, article, load, te.actionFailed],
+    [assistantId, sessionId, platform, postFormat, media, threadSegments, article, load, te.actionFailed],
   );
 
   async function commitVersion() {
@@ -799,16 +813,47 @@ function PostPane({
                   </p>
                 ) : null}
 
-                {selected?.imageBrief ? (
-                  <div className="space-y-1 rounded-xl border border-border/60 bg-muted/30 p-3">
-                    <div className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-                      {te.imageBriefLabel}
-                    </div>
-                    <p className="whitespace-pre-wrap text-xs text-muted-foreground">
-                      {selected.imageBrief}
-                    </p>
-                  </div>
-                ) : null}
+                {/*
+                  D38. Under the copy it describes, warn-only, and silent
+                  unless the workspace has an approved brand AND the text
+                  actually contains a flagged phrase.
+                */}
+                <BrandCheck
+                  brand={workspace.brand}
+                  text={
+                    postFormat === "thread"
+                      ? threadSegments.join("\n\n")
+                      : (selected?.text ?? "")
+                  }
+                />
+
+                <PostMediaTray
+                  workspaceId={workspaceId}
+                  platform={platform}
+                  media={media}
+                  imageBrief={selected?.imageBrief ?? null}
+                  readOnly={readOnly}
+                  onChange={(next) => {
+                    setMedia(next);
+                    // Media is a deliberate act, so it persists immediately
+                    // rather than waiting for the caption's idle autosave.
+                    void saveFeedSessionDraft(assistantId, sessionId, {
+                      text: selected?.text ?? "",
+                      platform,
+                      postFormat,
+                      media: next,
+                      ...(postFormat === "thread" ? { threadSegments } : {}),
+                      ...(postFormat === "article" ? { article } : {}),
+                    }).then((r) => {
+                      if (r.ok) {
+                        notifyFeedPostsChanged();
+                        void load();
+                      } else {
+                        setError(r.error ?? te.actionFailed);
+                      }
+                    });
+                  }}
+                />
 
                 <div className="flex flex-wrap items-center gap-2 border-t border-border/60 pt-4">
                   {status === "drafting" ? (
@@ -885,6 +930,7 @@ function PostPane({
                   threadSegments={threadSegments}
                   article={article}
                   accountName={assistantName || te.previewAccount}
+                  brand={workspace.brand}
                 />
               </aside>
             </div>
@@ -1106,6 +1152,7 @@ function PlatformPostPreview({
   threadSegments,
   article,
   accountName,
+  brand = null,
 }: {
   platform: FeedPlatform;
   postFormat: FeedPostFormat;
@@ -1113,14 +1160,22 @@ function PlatformPostPreview({
   threadSegments: string[];
   article: FeedArticleFields;
   accountName: string;
+  /** The workspace's APPROVED brand record, or null (D36). */
+  brand?: BrandRecord | null;
 }) {
   const t = useT().feedPage;
   const te = t.postEditor;
-  const displayName = accountName.trim() || te.previewAccount;
-  const handle = displayName
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "")
-    .slice(0, 18);
+  const identity = brandPreviewIdentity(brand);
+  const displayName =
+    identity.displayName || accountName.trim() || te.previewAccount;
+  /*
+    D36. This used to be `displayName.toLowerCase().replace(...)` -- a handle
+    invented from the assistant's name, shown confidently on the one surface
+    whose whole job is previewing how the post appears in public. A workspace
+    whose real handle differed saw a lie. Now it is the brand's actual handle
+    or nothing at all; no handle renders no handle.
+  */
+  const handle = identity.handle;
   const parts = postFormat === "thread" ? threadSegments : [text];
   let sourceHost = "";
   try {

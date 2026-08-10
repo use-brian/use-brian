@@ -543,7 +543,9 @@ import { createDbCompartmentStore } from './db/compartment-store.js'
 import { compartmentRoutes } from './routes/compartments.js'
 import { brainMcpRoutes } from './brain-mcp/server.js'
 import { createStoreToolResolver } from './home-apps/store-tools-resolver.js'
+import { appsShopifyRoutes } from './routes/apps-shopify.js'
 import { agentAllowedToolsFor } from './brain-mcp/store-tools.js'
+import type { AppStoreScope } from '@use-brian/brian-app'
 import { resolveWriteTarget } from './brain-mcp/tools.js'
 import { enginesMcpRoutes, enginesMcpEnabled } from './engines-mcp/server.js'
 import { createDbOAuthClientStore } from './db/oauth-client-store.js'
@@ -3959,6 +3961,65 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     agentTools: { reads: agentToolset.reads, writes: agentToolset.writes },
   }))
 
+  // ── Shopify store access, shared by BOTH surfaces that have it ──────────
+  //
+  // ONE resolver instance, deliberately. The sandboxed Home-app bridge
+  // (brain-MCP, `authKind: 'home_app'`) and the built-in Shopify app's route
+  // (`/api/apps/shopify`) must reach exactly the same tools under the same
+  // four filters — workspace exposure ∩ connector action grants ∩ tier ∩ NOT
+  // destructive. Constructing a second resolver beside this one would compile,
+  // pass every test, and drift the day someone changes one call site's deps.
+  //
+  // Bound to the workspace primary assistant, so its connector action grants
+  // apply before the caller's own tier narrows further.
+  const shopifyStoreTools = createStoreToolResolver({
+    connectorStore,
+    settingsStore: mcpSettingsStore,
+    assistantConnectorStore,
+    assistantConnectorGrantsStore,
+    // The three below are load-bearing together with the resolver's
+    // `assistantTeamId`. That field suppresses the owner-personal base load
+    // (the connector boundary); THESE are the overlays that put the
+    // workspace's own connectors back. Passing the boundary without the
+    // overlays fails closed but renders the feature permanently inert — a
+    // caller with store scope would see zero tools forever, with nothing in
+    // the UI explaining why.
+    connectorGrantStore,
+    connectorInstanceStore,
+    workspaceToolPolicyStore,
+  })
+
+  // The assistant consult, capped at the CALLER's own tool ceiling via
+  // `allowedTools`, so the model can reason and chain calls but cannot reach
+  // anything the direct tool gate refused. Without that cap this is a ladder
+  // around every rule in `store-tools.ts`, destructive tools included.
+  const askShopifyAssistant = async (params: {
+    workspaceId: string
+    storeScope: AppStoreScope
+    task: string
+    callerSessionId: string
+  }): Promise<string> => {
+    const target = await resolveWriteTarget(params.workspaceId)
+    if (!target) throw new Error('This workspace has no assistant to ask.')
+    return calleeExecutor({
+      callerAssistantId: target.assistantId,
+      calleeAssistantId: target.assistantId,
+      question: params.task,
+      callerSessionId: params.callerSessionId,
+      allowedTools: agentAllowedToolsFor('shopify', params.storeScope),
+    })
+  }
+
+  // The built-in Shopify app's data path. Per-route `requireAuth` (never a bare
+  // `app.use('/api', requireAuth, …)`, which would 401 later-registered public
+  // routes — see CLAUDE.md → route mount order).
+  app.use('/api/apps/shopify', appsShopifyRoutes({
+    requireAuth: requireAuth(env.JWT_SECRET),
+    storeTools: shopifyStoreTools,
+    askAssistant: ({ workspaceId, storeScope, task }) =>
+      askShopifyAssistant({ workspaceId, storeScope, task, callerSessionId: 'app:shopify' }),
+  }))
+
   app.use('/api/brain/mcp', brainMcpRoutes({
     brainKeyStore,
     authorizationStore: oauthAuthorizationStore,
@@ -4016,38 +4077,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // Commerce-store tools for a granted custom Home app. Bound to the
     // workspace primary assistant, so its connector action grants apply
     // before the app's own `scopes.store` tier narrows further.
-    storeTools: createStoreToolResolver({
-      connectorStore,
-      settingsStore: mcpSettingsStore,
-      assistantConnectorStore,
-      assistantConnectorGrantsStore,
-      // The three below are load-bearing together with the resolver's
-      // `assistantTeamId`. That field suppresses the owner-personal base load
-      // (the connector boundary); THESE are the overlays that put the
-      // workspace's own connectors back. Passing the boundary without the
-      // overlays fails closed but renders the feature permanently inert — an
-      // app granted `scopes.store` would see zero tools forever, with nothing
-      // in the UI explaining why.
-      connectorGrantStore,
-      connectorInstanceStore,
-      workspaceToolPolicyStore,
-    }),
+    storeTools: shopifyStoreTools,
     // `scopes.agent: 'ask'` — the app hands a task to the workspace assistant.
-    // The consult is capped at the app's OWN tool ceiling via `allowedTools`,
-    // so the model can reason and chain calls but cannot reach anything the
-    // direct tool gate refused. Without that cap this would be a ladder around
-    // every rule in `store-tools.ts`, destructive tools included.
-    agentTask: async ({ workspaceId, storeScope, appId, task }) => {
-      const target = await resolveWriteTarget(workspaceId)
-      if (!target) throw new Error('This workspace has no assistant to ask.')
-      return calleeExecutor({
-        callerAssistantId: target.assistantId,
-        calleeAssistantId: target.assistantId,
-        question: task,
-        callerSessionId: `home-app:${appId}`,
-        allowedTools: agentAllowedToolsFor('shopify', storeScope),
-      })
-    },
+    agentTask: ({ workspaceId, storeScope, appId, task }) =>
+      askShopifyAssistant({ workspaceId, storeScope, task, callerSessionId: `home-app:${appId}` }),
   }))
 
   // AI Engines MCP — read-only observation of external answer engines + GSC,

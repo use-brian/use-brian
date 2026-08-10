@@ -8,6 +8,17 @@ import { randomUUID } from 'node:crypto'
 import { query } from './client.js'
 import { addSessionMessage } from './sessions.js'
 
+/**
+ * One image bound to a draft (feed-revamp-depth D32). `fileId` is a
+ * `workspace_files` row id - the brand record's binding convention, an id and
+ * never a path, so the storage key can move without rewriting draft rows.
+ */
+export type PostMedia = {
+  fileId: string
+  mimeType: string
+  alt?: string
+}
+
 export const CONTENT_PLANNING_PLATFORMS = [
   'instagram',
   'threads',
@@ -74,6 +85,7 @@ export type SavedContentDraft = {
   topicTag: string | null
   postFormat: 'post' | 'thread' | 'article'
   formatData: Record<string, unknown>
+  media: PostMedia[]
   replyExternalId: string | null
   replyAuthor: string | null
   replyText: string | null
@@ -228,6 +240,7 @@ function mapDraftRow(row: {
   topicTag: string | null
   postFormat: 'post' | 'thread' | 'article'
   formatData: Record<string, unknown>
+  media: PostMedia[]
   replyExternalId: string | null
   replyAuthor: string | null
   replyText: string | null
@@ -270,6 +283,13 @@ export interface ContentPlanningStore {
     imageBrief?: string
     topicTag?: string
     postFormat?: 'post' | 'thread' | 'article'
+    /**
+     * Images bound to this draft (feed-revamp-depth D32). Deliberately its own
+     * column, NOT a key inside `formatData`: the INSERT below rewrites
+     * `format_data` wholesale from `postFormat`, so media stored there would
+     * be silently erased the moment an operator switched Post <-> Thread.
+     */
+    media?: PostMedia[]
     threadSegments?: string[]
     article?: {
       sourceUrl: string
@@ -534,10 +554,10 @@ export function createContentPlanningStore(): ContentPlanningStore {
       const result = await query<Parameters<typeof mapDraftRow>[0]>(
         `INSERT INTO content_planning_drafts (
            assistant_id, session_id, platform, draft_text, image_brief,
-           topic_tag, post_format, format_data, reply_external_id,
+           topic_tag, post_format, format_data, media, reply_external_id,
            reply_author, reply_text, reply_permalink, created_by
          )
-         SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13
+         SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14
            FROM sessions s
           WHERE s.id = $2
             AND s.assistant_id = $1
@@ -552,6 +572,7 @@ export function createContentPlanningStore(): ContentPlanningStore {
                    topic_tag AS "topicTag",
                    post_format AS "postFormat",
                    format_data AS "formatData",
+                   media,
                    reply_external_id AS "replyExternalId",
                    reply_author AS "replyAuthor",
                    reply_text AS "replyText",
@@ -575,6 +596,7 @@ export function createContentPlanningStore(): ContentPlanningStore {
             : params.postFormat === 'article'
               ? { article: params.article ?? null }
               : {},
+          JSON.stringify(params.media ?? []),
           params.reply?.externalId ?? null,
           params.reply?.authorHandle ?? null,
           params.reply?.text ?? null,
@@ -699,6 +721,7 @@ const DRAFT_SELECT = `
          d.topic_tag AS "topicTag",
          d.post_format AS "postFormat",
          d.format_data AS "formatData",
+         d.media,
          d.reply_external_id AS "replyExternalId",
          d.reply_author AS "replyAuthor",
          d.reply_text AS "replyText",

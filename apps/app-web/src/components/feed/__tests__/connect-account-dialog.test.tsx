@@ -64,6 +64,7 @@ function setWorkspace(role: "owner" | "admin" | "member" = "admin") {
     canDraft: true,
     me: { id: "u-1" },
     profiles: [],
+    brand: null,
     refresh: async () => {},
   };
 }

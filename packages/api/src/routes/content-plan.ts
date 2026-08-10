@@ -44,6 +44,37 @@ const MAX_TITLE = 200
 const MAX_BRIEF = 4_000
 const MAX_THEMES = 12
 const MAX_THEME = 80
+/** Posts per week, ceiling 21 = 3/day (feed-revamp-depth D28). */
+const MAX_CADENCE = 21
+
+const SCHEDULED_MINUTE_ERROR =
+  'scheduledMinute must be an integer from 0 to 1439, or null'
+const CADENCE_ERROR = `cadencePerWeek must be an integer from 1 to ${MAX_CADENCE}, or null`
+
+/**
+ * `scheduled_minute` is minutes past LOCAL midnight, never a timestamp
+ * (feed-revamp-depth D26). `undefined` means "not in this request" and is the
+ * caller's business; `null` clears the time. Anything else must be a whole
+ * minute inside a single day, because a value outside that range could only
+ * mean the caller thinks this column carries a date, which it does not.
+ */
+function parseScheduledMinute(
+  raw: unknown,
+): { ok: true; value: number | null } | { ok: false } {
+  if (raw === undefined || raw === null) return { ok: true, value: null }
+  if (typeof raw !== 'number' || !Number.isInteger(raw)) return { ok: false }
+  if (raw < 0 || raw > 1439) return { ok: false }
+  return { ok: true, value: raw }
+}
+
+function parseCadence(
+  raw: unknown,
+): { ok: true; value: number | null } | { ok: false } {
+  if (raw === undefined || raw === null) return { ok: true, value: null }
+  if (typeof raw !== 'number' || !Number.isInteger(raw)) return { ok: false }
+  if (raw < 1 || raw > MAX_CADENCE) return { ok: false }
+  return { ok: true, value: raw }
+}
 
 export function contentPlanRoutes(
   options: ContentPlanRouteOptions = {},
@@ -136,12 +167,18 @@ export function contentPlanRoutes(
         res.status(400).json({ error: 'title is required' })
         return
       }
+      const minute = parseScheduledMinute(body.scheduledMinute)
+      if (!minute.ok) {
+        res.status(400).json({ error: SCHEDULED_MINUTE_ERROR })
+        return
+      }
       try {
         const slot = await store.createSlot({
           assistantId: req.params.assistantId,
           userId: ctx.userId,
           platform: body.platform,
           scheduledFor,
+          scheduledMinute: minute.value,
           title,
           brief:
             typeof body.brief === 'string'
@@ -171,6 +208,14 @@ export function contentPlanRoutes(
           return
         }
         patch.scheduledFor = scheduledFor
+      }
+      if (body.scheduledMinute !== undefined) {
+        const patched = parseScheduledMinute(body.scheduledMinute)
+        if (!patched.ok) {
+          res.status(400).json({ error: SCHEDULED_MINUTE_ERROR })
+          return
+        }
+        patch.scheduledMinute = patched.value
       }
       if (body.title !== undefined) {
         const title =
@@ -324,6 +369,7 @@ export function contentPlanRoutes(
             monthStart: parseMonthRange(month)!.start,
             brief: '',
             themes: [],
+            cadencePerWeek: null,
             updatedBy: null,
             updatedAt: null,
           },
@@ -350,6 +396,11 @@ export function contentPlanRoutes(
             .filter(Boolean)
             .slice(0, MAX_THEMES)
         : []
+      const cadence = parseCadence(body.cadencePerWeek)
+      if (!cadence.ok) {
+        res.status(400).json({ error: CADENCE_ERROR })
+        return
+      }
       try {
         const brief = await store.upsertBrief({
           assistantId: req.params.assistantId,
@@ -358,6 +409,7 @@ export function contentPlanRoutes(
           brief:
             typeof body.brief === 'string' ? body.brief.slice(0, MAX_BRIEF) : '',
           themes,
+          cadencePerWeek: cadence.value,
         })
         res.json({ brief })
       } catch (error) {
