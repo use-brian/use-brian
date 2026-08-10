@@ -96,6 +96,20 @@ export function PlanSlotPeek({
     if (isNew) titleRef.current?.focus();
   }, [isNew]);
 
+  /**
+   * The time field's own text, so a partially typed value can exist without
+   * having to be a valid minute yet. Re-seeded when a DIFFERENT slot is
+   * selected (keyed on id, not on the minute) -- keying on the minute would
+   * overwrite what the operator is mid-way through typing.
+   */
+  const [timeText, setTimeText] = useState(
+    formatSlotMinute(draft.scheduledMinute) ?? "",
+  );
+  useEffect(() => {
+    setTimeText(formatSlotMinute(draft.scheduledMinute) ?? "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft.id]);
+
   const dayLabel = (() => {
     const parsed = parseIsoDay(draft.scheduledFor);
     return parsed
@@ -107,11 +121,17 @@ export function PlanSlotPeek({
       : draft.scheduledFor;
   })();
 
+  // Every field the editor can change has to appear here. `scheduledMinute`
+  // was missing: changing only the time left `dirty` false, which disabled
+  // Save AND made the footer fall through to "Draft this" -- so a time the
+  // operator had just typed could not be written at all.
   const dirty =
     !!slot &&
     (slot.title !== draft.title.trim() ||
       (slot.brief ?? "") !== draft.brief.trim() ||
-      slot.platform !== draft.platform);
+      slot.platform !== draft.platform ||
+      slot.scheduledMinute !== draft.scheduledMinute ||
+      slot.scheduledFor !== draft.scheduledFor);
   const canSave = canEdit && draft.title.trim().length > 0 && (isNew || dirty);
 
   return (
@@ -193,24 +213,38 @@ export function PlanSlotPeek({
               type="text"
               inputMode="numeric"
               disabled={!canEdit}
-              value={formatSlotMinute(draft.scheduledMinute) ?? ""}
+              value={timeText}
               placeholder={tp.timePlaceholder}
               onChange={(e) => {
                 const raw = e.target.value;
-                const parsed = parseSlotMinute(raw);
-                // An unparseable string leaves the stored value alone rather
-                // than clearing it, so a half-typed "9:" does not wipe 09:30.
+                // The field owns its own text while the operator types.
+                // Deriving `value` from the committed minute instead made this
+                // unusable: every intermediate string ("09:0", "1") fails to
+                // parse, so nothing committed, the render snapped back, and no
+                // character ever survived.
+                setTimeText(raw);
                 if (!raw.trim()) onChange({ ...draft, scheduledMinute: null });
-                else if (parsed !== null) {
-                  onChange({ ...draft, scheduledMinute: parsed });
+                else {
+                  const parsed = parseSlotMinute(raw);
+                  if (parsed !== null) {
+                    onChange({ ...draft, scheduledMinute: parsed });
+                  }
                 }
+              }}
+              onBlur={() => {
+                // Leaving the field with something unparseable would strand a
+                // string that means nothing; show what is actually stored.
+                setTimeText(formatSlotMinute(draft.scheduledMinute) ?? "");
               }}
               className="h-7 w-20 rounded-md border border-border bg-background px-2 text-[12.5px] tabular-nums outline-none focus-visible:border-foreground/40 disabled:opacity-60"
             />
             {draft.scheduledMinute !== null && canEdit ? (
               <button
                 type="button"
-                onClick={() => onChange({ ...draft, scheduledMinute: null })}
+                onClick={() => {
+                  setTimeText("");
+                  onChange({ ...draft, scheduledMinute: null });
+                }}
                 className="h-7 rounded-md px-2 text-[12.5px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
               >
                 {tp.clearTime}
