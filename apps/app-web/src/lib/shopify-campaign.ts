@@ -22,11 +22,30 @@ export type CampaignProduct = {
   imageAlt?: string;
 };
 
-export type CampaignImage = {
+export const CAMPAIGN_IMAGE_MIME = [
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
+] as const;
+
+export const MAX_CAMPAIGN_IMAGE_BYTES = 20 * 1024 * 1024;
+
+export type CampaignProductImage = {
+  kind: "product";
   productId: string;
   url: string;
   alt: string;
 };
+
+export type CampaignUploadImage = {
+  kind: "upload";
+  fileId: string;
+  mimeType: (typeof CAMPAIGN_IMAGE_MIME)[number];
+  sizeBytes: number;
+};
+
+export type CampaignImage = CampaignProductImage | CampaignUploadImage;
 
 type PreparedCampaignSegment = {
   id: string;
@@ -258,16 +277,41 @@ function normalizeDraft(
     : undefined;
   const rawSelectedImage = isRecord(value.selectedImage) ? value.selectedImage : undefined;
   const selectedImageUrl = normalizedHttpUrl(rawSelectedImage?.url);
-  const selectedImage = rawSelectedImage &&
+  let selectedImage: CampaignImage | undefined;
+  if (
+    rawSelectedImage?.kind === "upload" &&
+    typeof rawSelectedImage.fileId === "string" &&
+    rawSelectedImage.fileId.length > 0 &&
+    rawSelectedImage.fileId.length <= 128 &&
+    typeof rawSelectedImage.mimeType === "string" &&
+    (CAMPAIGN_IMAGE_MIME as readonly string[]).includes(rawSelectedImage.mimeType) &&
+    typeof rawSelectedImage.sizeBytes === "number" &&
+    Number.isInteger(rawSelectedImage.sizeBytes) &&
+    rawSelectedImage.sizeBytes > 0 &&
+    rawSelectedImage.sizeBytes <= MAX_CAMPAIGN_IMAGE_BYTES
+  ) {
+    selectedImage = {
+      kind: "upload",
+      fileId: rawSelectedImage.fileId,
+      mimeType: rawSelectedImage.mimeType as CampaignUploadImage["mimeType"],
+      sizeBytes: rawSelectedImage.sizeBytes,
+    };
+  } else if (
+    rawSelectedImage &&
+    (rawSelectedImage.kind === undefined || rawSelectedImage.kind === "product") &&
     typeof rawSelectedImage.productId === "string" &&
     selectedImageUrl &&
     selectedProducts.some((product) => product.id === rawSelectedImage.productId)
-    ? {
-        productId: rawSelectedImage.productId,
-        url: selectedImageUrl,
-        alt: typeof rawSelectedImage.alt === "string" ? rawSelectedImage.alt : "",
-      }
-    : undefined;
+  ) {
+    // `kind` was added after product-photo selection shipped. Treat the old
+    // safe shape as a product image so prepared packages stay usable.
+    selectedImage = {
+      kind: "product",
+      productId: rawSelectedImage.productId,
+      url: selectedImageUrl,
+      alt: typeof rawSelectedImage.alt === "string" ? rawSelectedImage.alt : "",
+    };
+  }
   // Drafts saved before the photo picker existed are text-only packages.
   // New drafts write this decision explicitly, so old prepared history does
   // not become invalid merely by being opened after the feature ships.

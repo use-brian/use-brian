@@ -7,11 +7,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const callTool = vi.fn();
 const askAssistant = vi.fn();
+const authFetch = vi.fn();
+const resolveDocFileSrc = vi.fn();
+const fetchDocFileBlob = vi.fn();
 vi.mock("@/lib/api/shopify", () => ({
   callTool: (...args: unknown[]) => callTool(...args),
   askAssistant: (...args: unknown[]) => askAssistant(...args),
   extractJson: (text: string) => JSON.parse(text),
   ShopifyCallError: class ShopifyCallError extends Error {},
+}));
+vi.mock("@/lib/auth-fetch", () => ({
+  authFetch: (...args: unknown[]) => authFetch(...args),
+}));
+vi.mock("@/components/doc/doc-file-url", () => ({
+  resolveDocFileSrc: (...args: unknown[]) => resolveDocFileSrc(...args),
+  fetchDocFileBlob: (...args: unknown[]) => fetchDocFileBlob(...args),
 }));
 
 import { I18nProvider } from "@/lib/i18n/client";
@@ -129,6 +139,16 @@ async function completeEditableFields() {
 beforeEach(() => {
   vi.clearAllMocks();
   window.localStorage.clear();
+  resolveDocFileSrc.mockResolvedValue("https://signed.example/campaign-photo.jpg");
+  fetchDocFileBlob.mockResolvedValue(new Blob(["photo"], { type: "image/jpeg" }));
+  Object.defineProperty(URL, "createObjectURL", {
+    configurable: true,
+    value: vi.fn(() => "blob:download-photo"),
+  });
+  Object.defineProperty(URL, "revokeObjectURL", {
+    configurable: true,
+    value: vi.fn(),
+  });
   installBaseResponses();
 });
 
@@ -360,6 +380,90 @@ describe("[COMP:app-web/shopify-campaign] Campaign tab", () => {
       .toBe("Restocked Widget pouch");
   });
 
+  it("uploads, previews and downloads the merchant's own photo without persisting its bytes", async () => {
+    callTool.mockImplementation(async (_workspaceId: string, tool: string, args: Record<string, unknown>) => {
+      if (tool === "shopifyGetShop") {
+        return {
+          myshopify_domain: "test-store.myshopify.com",
+          primary_domain: "shop.example",
+          currency: "USD",
+          timezone: "Asia/Hong_Kong",
+        };
+      }
+      if (tool === "shopifyListProducts") {
+        return { items: [{
+          id: "gid://shopify/Product/42",
+          title: "Restocked Widget",
+          total_inventory: 8,
+          featured_image_url: "https://cdn.shopify.com/widget.jpg",
+        }] };
+      }
+      if (tool === "shopifyListDiscounts") return { items: [] };
+      if (tool === "shopifyPreviewCustomerSegment") {
+        return { query: "email_subscription_status = 'SUBSCRIBED'", total_count: 24 };
+      }
+      if (tool === "shopifyGetProduct") {
+        return {
+          title: "Restocked Widget",
+          total_inventory: 7,
+          featured_image_url: "https://cdn.shopify.com/widget.jpg",
+        };
+      }
+      if (tool === "shopifyCreateCustomerSegment") {
+        return {
+          id: "gid://shopify/Segment/8",
+          name: "Brian - Restock",
+          query: "email_subscription_status = 'SUBSCRIBED'",
+          admin_url: "https://test-store.myshopify.com/admin/customers/segments",
+        };
+      }
+      if (tool === "shopifyCreateDiscountCode") {
+        return {
+          id: "gid://shopify/DiscountCodeNode/9",
+          code: "RESTOCK10",
+          starts_at: args.startsAt,
+          ends_at: args.endsAt,
+        };
+      }
+      throw new Error(`unexpected tool: ${tool}`);
+    });
+    authFetch.mockResolvedValue(new Response(JSON.stringify({
+      files: [{ id: "workspace-file-7", mimeType: "image/jpeg", sizeBytes: 5 }],
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    await mount();
+    await completeEditableFields();
+
+    const input = container!.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const file = new File(["SECRET_IMAGE_BYTES_7843"], "private-launch-photo.jpg", { type: "image/jpeg" });
+    Object.defineProperty(input, "files", { configurable: true, value: [file] });
+    await act(async () => input.dispatchEvent(new Event("change", { bubbles: true })));
+    await settle();
+    await settle();
+
+    expect(authFetch).toHaveBeenCalledWith(
+      `http://localhost:4000/api/doc-files/${WORKSPACE}/upload`,
+      expect.objectContaining({ method: "POST", body: expect.any(FormData) }),
+    );
+    const preview = container!.querySelector('[aria-label="Message preview"]')!;
+    expect(preview.querySelector<HTMLImageElement>('img[src="https://signed.example/campaign-photo.jpg"]')?.alt)
+      .toBe("Uploaded campaign photo");
+    const raw = window.localStorage.getItem(`shopify:campaign:${WORKSPACE}:test-store.myshopify.com`) ?? "";
+    expect(raw).toContain("workspace-file-7");
+    expect(raw).not.toContain("private-launch-photo.jpg");
+    expect(raw).not.toContain("signed.example");
+    expect(raw).not.toContain("SECRET_IMAGE_BYTES_7843");
+
+    await click(button("Prepare campaign"));
+    expect(container!.textContent).toContain("Campaign package ready");
+    expect(container!.textContent).toContain("upload it manually in Shopify Messaging");
+
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    await click(button("Download photo"));
+    expect(fetchDocFileBlob).toHaveBeenCalledWith(WORKSPACE, "workspace-file-7");
+    expect(anchorClick).toHaveBeenCalledOnce();
+    anchorClick.mockRestore();
+  });
+
   it("requires a photo decision and allows an explicit text-only campaign", async () => {
     callTool.mockImplementation(async (_workspaceId: string, tool: string, args: Record<string, unknown>) => {
       if (tool === "shopifyGetShop") {
@@ -400,7 +504,7 @@ describe("[COMP:app-web/shopify-campaign] Campaign tab", () => {
     await completeEditableFields();
 
     await click(button("Prepare campaign"));
-    expect(container!.textContent).toContain("Choose a product photo or select No photo");
+    expect(container!.textContent).toContain("Choose a product photo, upload your own photo, or select No photo");
     expect(callTool.mock.calls.some((call) => call[1] === "shopifyCreateCustomerSegment")).toBe(false);
 
     await click(container!.querySelector('[aria-label="No photo"]')!);

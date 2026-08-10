@@ -109,9 +109,36 @@ describe("[COMP:app-web/shopify-campaign] campaign state", () => {
     expect(raw).not.toContain("secret-bytes");
     expect(raw).toContain("https://cdn.shopify.com/widget.jpg");
     expect(readCampaignStorage(WS, SHOP, fallback()).draft.selectedImage).toEqual({
+      kind: "product",
       productId: "gid://shopify/Product/1",
       url: "https://cdn.shopify.com/widget.jpg",
       alt: "Widget pouch",
+    });
+  });
+
+  it("persists only a durable reference for a merchant-uploaded photo", () => {
+    const unsafeDraft = {
+      ...fallback(),
+      selectedImage: {
+        kind: "upload",
+        fileId: "campaign-photo-1",
+        mimeType: "image/jpeg",
+        sizeBytes: 1234,
+        name: "private-launch-photo.jpg",
+        url: "blob:secret-preview-bytes",
+      },
+    };
+    writeCampaignStorage(WS, SHOP, unsafeDraft, []);
+    const raw = window.localStorage.getItem(`shopify:campaign:${WS}:${SHOP}`) ?? "";
+    expect(raw).toContain("campaign-photo-1");
+    expect(raw).toContain("image/jpeg");
+    expect(raw).not.toContain("private-launch-photo.jpg");
+    expect(raw).not.toContain("secret-preview-bytes");
+    expect(readCampaignStorage(WS, SHOP, fallback()).draft.selectedImage).toEqual({
+      kind: "upload",
+      fileId: "campaign-photo-1",
+      mimeType: "image/jpeg",
+      sizeBytes: 1234,
     });
   });
 

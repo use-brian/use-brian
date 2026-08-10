@@ -10,13 +10,26 @@
  * [COMP:app-web/shopify-campaign]
  */
 
-import { useEffect, useMemo, useState } from "react";
-import { CheckCircle2, Copy, ExternalLink, Megaphone, RefreshCw, Sparkles } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  CheckCircle2,
+  Copy,
+  Download,
+  ExternalLink,
+  ImagePlus,
+  Megaphone,
+  RefreshCw,
+  Sparkles,
+} from "lucide-react";
+import { fetchDocFileBlob, resolveDocFileSrc } from "@/components/doc/doc-file-url";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { askAssistant, callTool, extractJson, ShopifyCallError } from "@/lib/api/shopify";
+import { authFetch } from "@/lib/auth-fetch";
 import {
+  CAMPAIGN_IMAGE_MIME,
+  MAX_CAMPAIGN_IMAGE_BYTES,
   createDefaultCampaignDraft,
   readCampaignStorage,
   recordPreparedCampaign,
@@ -25,6 +38,8 @@ import {
   type CampaignHistoryItem,
   type CampaignImage,
   type CampaignProduct,
+  type CampaignProductImage,
+  type CampaignUploadImage,
   type ShopifyCampaignDraft,
 } from "@/lib/shopify-campaign";
 import { format } from "@/lib/i18n/format";
@@ -73,9 +88,16 @@ type DiscountResult = {
   ends_at?: string;
 };
 type GeneratedCopy = { subject?: string; preview?: string; body?: string; ctaLabel?: string };
+type UploadedCampaignFile = {
+  id?: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  error?: string;
+};
 
 const inputClass = "h-9 w-full rounded-lg border border-border bg-background px-3 text-sm";
 const textAreaClass = "w-full rounded-lg border border-border bg-background px-3 py-2 text-sm";
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 const CAMPAIGN_TOOLS = [
   "shopifyGetShop",
   "shopifyListProducts",
@@ -119,13 +141,23 @@ function campaignProduct(item: NonNullable<ProductPage["items"]>[number]): Campa
   };
 }
 
-function productImage(product: CampaignProduct | undefined): CampaignImage | undefined {
+function productImage(product: CampaignProduct | undefined): CampaignProductImage | undefined {
   if (!product?.imageUrl) return undefined;
   return {
+    kind: "product",
     productId: product.id,
     url: product.imageUrl,
     alt: product.imageAlt || product.title,
   };
+}
+
+function isCampaignImageMime(value: string): value is CampaignUploadImage["mimeType"] {
+  return CAMPAIGN_IMAGE_MIME.some((mimeType) => mimeType === value);
+}
+
+function campaignImageExtension(mimeType: CampaignUploadImage["mimeType"]): string {
+  if (mimeType === "image/jpeg") return "jpg";
+  return mimeType.slice("image/".length);
 }
 
 export function CampaignTab({
@@ -144,9 +176,12 @@ export function CampaignTab({
   const [draft, setDraft] = useState<ShopifyCampaignDraft | null>(null);
   const [history, setHistory] = useState<CampaignHistoryItem[]>([]);
   const [busy, setBusy] = useState<"load" | "audience" | "copy" | "prepare" | null>("load");
+  const [photoBusy, setPhotoBusy] = useState<"upload" | "download" | null>(null);
+  const [uploadedPhotoSrc, setUploadedPhotoSrc] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
+  const ownPhotoInputRef = useRef<HTMLInputElement>(null);
   const missingCampaignTools = CAMPAIGN_TOOLS.filter((tool) => !availableTools.includes(tool));
 
   async function loadStore() {
@@ -167,11 +202,15 @@ export function CampaignTab({
         .filter((product): product is CampaignProduct => !!product);
       const byId = new Map(loadedProducts.map((product) => [product.id, product]));
       const selectedProducts = stored.draft.selectedProducts.map((product) => byId.get(product.id) ?? product);
-      const selectedImage = stored.draft.includeProductImage
-        ? productImage(
-            selectedProducts.find((product) => product.id === stored.draft.selectedImage?.productId),
-          ) ?? selectedProducts.map(productImage).find((image): image is CampaignImage => !!image)
-        : undefined;
+      const storedImage = stored.draft.selectedImage;
+      const selectedImage = !stored.draft.includeProductImage
+        ? undefined
+        : storedImage?.kind === "upload"
+          ? storedImage
+          : productImage(
+              selectedProducts.find((product) =>
+                product.id === (storedImage?.kind === "product" ? storedImage.productId : undefined)),
+            ) ?? selectedProducts.map(productImage).find((image): image is CampaignProductImage => !!image);
       setShop(info);
       setProducts(loadedProducts);
       setMoreProducts(productPage.has_next_page === true);
@@ -234,6 +273,33 @@ export function CampaignTab({
     writeCampaignStorage(workspaceId, shop.myshopify_domain, draft, history);
   }, [workspaceId, shop?.myshopify_domain, draft, history]);
 
+  const uploadedPhotoId = draft?.selectedImage?.kind === "upload"
+    ? draft.selectedImage.fileId
+    : null;
+
+  useEffect(() => {
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    setUploadedPhotoSrc(null);
+    if (!uploadedPhotoId) return;
+    void resolveDocFileSrc(workspaceId, uploadedPhotoId)
+      .then((src) => {
+        if (cancelled) {
+          if (src.startsWith("blob:")) URL.revokeObjectURL(src);
+          return;
+        }
+        objectUrl = src.startsWith("blob:") ? src : null;
+        setUploadedPhotoSrc(src);
+      })
+      .catch(() => {
+        if (!cancelled) setError(t.shopifyApp.campaignOwnPhotoUnavailable);
+      });
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [t.shopifyApp.campaignOwnPhotoUnavailable, uploadedPhotoId, workspaceId]);
+
   const prepared = !!draft?.segment && !!draft?.discount;
   const audienceLocked = !!draft?.segment;
   const offerLocked = !!draft?.discount;
@@ -271,16 +337,97 @@ export function CampaignTab({
     const selected = alreadySelected
       ? draft.selectedProducts.filter((item) => item.id !== product.id)
       : [...draft.selectedProducts, product];
-    const selectedImage = draft.includeProductImage
-      ? productImage(selected.find((item) => item.id === draft.selectedImage?.productId))
-        ?? selected.map(productImage).find((image): image is CampaignImage => !!image)
-      : undefined;
+    const selectedImage = !draft.includeProductImage
+      ? undefined
+      : draft.selectedImage?.kind === "upload"
+        ? draft.selectedImage
+        : productImage(selected.find((item) =>
+            item.id === (draft.selectedImage?.kind === "product"
+              ? draft.selectedImage.productId
+              : undefined)))
+          ?? selected.map(productImage).find((image): image is CampaignProductImage => !!image);
     setError(null);
     updateDraft({
       selectedProducts: selected,
       selectedImage,
       checklist: { ...draft.checklist, image: false },
     }, { invalidateAudience: true });
+  }
+
+  async function uploadOwnPhoto(file: File) {
+    if (!draft) return;
+    if (!isCampaignImageMime(file.type)) {
+      setError(t.shopifyApp.campaignOwnPhotoType);
+      return;
+    }
+    if (file.size <= 0 || file.size > MAX_CAMPAIGN_IMAGE_BYTES) {
+      setError(t.shopifyApp.campaignOwnPhotoTooLarge);
+      return;
+    }
+    setPhotoBusy("upload");
+    setError(null);
+    try {
+      const formData = new FormData();
+      formData.append("files", file);
+      const response = await authFetch(
+        `${API_URL}/api/doc-files/${encodeURIComponent(workspaceId)}/upload`,
+        { method: "POST", body: formData },
+      );
+      const payload = await response.json().catch(() => null) as { files?: UploadedCampaignFile[] } | null;
+      const uploaded = payload?.files?.[0];
+      const mimeType = uploaded?.mimeType ?? file.type;
+      const sizeBytes = uploaded?.sizeBytes ?? file.size;
+      if (
+        !response.ok ||
+        uploaded?.error ||
+        !uploaded?.id ||
+        !isCampaignImageMime(mimeType) ||
+        !Number.isInteger(sizeBytes) ||
+        sizeBytes <= 0 ||
+        sizeBytes > MAX_CAMPAIGN_IMAGE_BYTES
+      ) {
+        throw new Error(uploaded?.error || t.shopifyApp.campaignOwnPhotoUploadFailed);
+      }
+      updateDraft({
+        includeProductImage: true,
+        selectedImage: {
+          kind: "upload",
+          fileId: uploaded.id,
+          mimeType,
+          sizeBytes,
+        },
+        checklist: { ...draft.checklist, image: false },
+      });
+    } catch (err) {
+      setError(err instanceof Error && err.message
+        ? err.message
+        : t.shopifyApp.campaignOwnPhotoUploadFailed);
+    } finally {
+      setPhotoBusy(null);
+      if (ownPhotoInputRef.current) ownPhotoInputRef.current.value = "";
+    }
+  }
+
+  async function downloadOwnPhoto() {
+    const image = draft?.selectedImage;
+    if (image?.kind !== "upload") return;
+    setPhotoBusy("download");
+    setError(null);
+    try {
+      const blob = await fetchDocFileBlob(workspaceId, image.fileId);
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `restock-campaign-photo.${campaignImageExtension(image.mimeType)}`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      setError(t.shopifyApp.campaignDownloadPhotoFailed);
+    } finally {
+      setPhotoBusy(null);
+    }
   }
 
   async function previewAudience() {
@@ -448,9 +595,20 @@ Reply with ONLY one JSON object, no prose:
       if (!refreshed.some((product) => product.totalInventory > 0)) {
         throw new Error(t.shopifyApp.campaignAllOutOfStock);
       }
-      const refreshedImage = working.includeProductImage
-        ? productImage(refreshed.find((product) => product.id === working.selectedImage?.productId))
-        : undefined;
+      let refreshedImage: CampaignImage | undefined;
+      if (working.includeProductImage && working.selectedImage?.kind === "upload") {
+        refreshedImage = working.selectedImage;
+        try {
+          const src = await resolveDocFileSrc(workspaceId, refreshedImage.fileId);
+          if (src.startsWith("blob:")) URL.revokeObjectURL(src);
+        } catch {
+          throw new Error(t.shopifyApp.campaignOwnPhotoUnavailable);
+        }
+      } else if (working.includeProductImage && working.selectedImage?.kind === "product") {
+        refreshedImage = productImage(
+          refreshed.find((product) => product.id === working.selectedImage?.productId),
+        );
+      }
       if (working.includeProductImage && !refreshedImage) {
         throw new Error(t.shopifyApp.campaignPhotoUnavailable);
       }
@@ -601,6 +759,12 @@ Reply with ONLY one JSON object, no prose:
   const discountAdminUrl = `https://${shop.myshopify_domain}/admin/discounts`;
   const customersAdminUrl = `https://${shop.myshopify_domain}/admin/customers`;
   const messagingUrl = `https://${shop.myshopify_domain}/admin/marketing`;
+  const selectedImageSrc = draft.selectedImage?.kind === "product"
+    ? draft.selectedImage.url
+    : uploadedPhotoSrc;
+  const selectedImageAlt = draft.selectedImage?.kind === "product"
+    ? draft.selectedImage.alt
+    : t.shopifyApp.campaignOwnPhotoAlt;
   const allChecklistReady =
     draft.checklist.preview &&
     draft.checklist.mobile &&
@@ -906,7 +1070,9 @@ Reply with ONLY one JSON object, no prose:
                 type="button"
                 key={product.id}
                 className={cn(choiceClass(
-                  draft.includeProductImage && draft.selectedImage?.productId === product.id,
+                  draft.includeProductImage &&
+                    draft.selectedImage?.kind === "product" &&
+                    draft.selectedImage.productId === product.id,
                 ), "flex items-center gap-3")}
                 aria-label={format(t.shopifyApp.campaignUseProductPhoto, { product: product.title })}
                 onClick={() => updateDraft({
@@ -923,6 +1089,48 @@ Reply with ONLY one JSON object, no prose:
                 <span className="min-w-0 text-[13px] font-medium">{product.title}</span>
               </button>
             ))}
+            <button
+              type="button"
+              className={cn(
+                choiceClass(draft.includeProductImage && draft.selectedImage?.kind === "upload"),
+                "flex items-center gap-3",
+              )}
+              aria-label={t.shopifyApp.campaignUploadOwnPhoto}
+              disabled={busy !== null || photoBusy !== null}
+              onClick={() => ownPhotoInputRef.current?.click()}
+            >
+              {draft.selectedImage?.kind === "upload" && uploadedPhotoSrc ? (
+                <img
+                  src={uploadedPhotoSrc}
+                  alt={t.shopifyApp.campaignOwnPhotoAlt}
+                  className="size-16 shrink-0 rounded-lg border border-border object-cover"
+                />
+              ) : (
+                <span className="flex size-16 shrink-0 items-center justify-center rounded-lg border border-border bg-muted">
+                  <ImagePlus className="size-5 text-muted-foreground" aria-hidden />
+                </span>
+              )}
+              <span className="min-w-0">
+                <span className="block text-[13px] font-medium">
+                  {photoBusy === "upload"
+                    ? t.shopifyApp.campaignUploadingOwnPhoto
+                    : t.shopifyApp.campaignUploadOwnPhoto}
+                </span>
+                <span className="mt-1 block text-[12px] text-muted-foreground">
+                  {t.shopifyApp.campaignOwnPhotoHelp}
+                </span>
+              </span>
+            </button>
+            <input
+              ref={ownPhotoInputRef}
+              type="file"
+              accept={CAMPAIGN_IMAGE_MIME.join(",")}
+              className="hidden"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (file) void uploadOwnPhoto(file);
+              }}
+            />
           </div>
           {draft.selectedProducts.length > 0 && !draft.selectedProducts.some((product) => product.imageUrl) ? (
             <Note tone="muted">{t.shopifyApp.campaignNoProductPhotos}</Note>
@@ -949,12 +1157,16 @@ Reply with ONLY one JSON object, no prose:
                   {draft.preview || t.shopifyApp.campaignPreviewTextPlaceholder}
                 </p>
               </div>
-              {draft.includeProductImage && draft.selectedImage ? (
+              {draft.includeProductImage && draft.selectedImage && selectedImageSrc ? (
                 <img
-                  src={draft.selectedImage.url}
-                  alt={draft.selectedImage.alt}
+                  src={selectedImageSrc}
+                  alt={selectedImageAlt}
                   className="aspect-[16/9] w-full object-cover"
                 />
+              ) : draft.includeProductImage && draft.selectedImage?.kind === "upload" ? (
+                <div className="flex aspect-[16/9] items-center justify-center bg-muted text-xs text-muted-foreground">
+                  {t.shopifyApp.campaignPhotoPreviewLoading}
+                </div>
               ) : null}
               <div className="space-y-4 px-5 py-6 sm:px-8">
                 <p className="whitespace-pre-wrap text-sm leading-6 text-foreground">
@@ -982,7 +1194,7 @@ Reply with ONLY one JSON object, no prose:
         {!prepared ? (
           <>
             <Note>{t.shopifyApp.campaignPrepareWarning}</Note>
-            <Button disabled={busy !== null || missingCampaignTools.length > 0} onClick={() => void prepareCampaign()}>
+            <Button disabled={busy !== null || photoBusy !== null || missingCampaignTools.length > 0} onClick={() => void prepareCampaign()}>
               <Megaphone className="size-4" aria-hidden />
               {draft.segment ? t.shopifyApp.campaignRetryPreparation : t.shopifyApp.campaignPrepare}
             </Button>
@@ -1013,31 +1225,53 @@ Reply with ONLY one JSON object, no prose:
             <CopyField label={t.shopifyApp.campaignCtaLabel} value={draft.ctaLabel} copyKey="cta" copied={copied} onCopy={copyText} copyLabel={t.shopifyApp.copy} copiedLabel={t.shopifyApp.copied} />
             <CopyField label={t.shopifyApp.campaignCtaUrl} value={draft.ctaUrl} copyKey="url" copied={copied} onCopy={copyText} copyLabel={t.shopifyApp.copy} copiedLabel={t.shopifyApp.copied} />
           </div>
-          {draft.includeProductImage && draft.selectedImage ? (
+          {draft.includeProductImage && draft.selectedImage && selectedImageSrc ? (
             <div className="grid gap-3 rounded-xl border border-border bg-background p-3 sm:grid-cols-[160px_1fr]">
               <img
-                src={draft.selectedImage.url}
-                alt={draft.selectedImage.alt}
+                src={selectedImageSrc}
+                alt={selectedImageAlt}
                 className="aspect-square w-full rounded-lg border border-border object-cover"
               />
               <div className="space-y-2">
-                <CopyField
-                  label={t.shopifyApp.campaignPhotoUrl}
-                  value={draft.selectedImage.url}
-                  copyKey="photo"
-                  copied={copied}
-                  onCopy={copyText}
-                  copyLabel={t.shopifyApp.copy}
-                  copiedLabel={t.shopifyApp.copied}
-                />
-                <a
-                  href={draft.selectedImage.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className={buttonVariants({ variant: "outline", size: "sm" })}
-                >
-                  {t.shopifyApp.campaignOpenPhoto}<ExternalLink className="size-3.5" aria-hidden />
-                </a>
+                {draft.selectedImage.kind === "product" ? (
+                  <>
+                    <CopyField
+                      label={t.shopifyApp.campaignPhotoUrl}
+                      value={draft.selectedImage.url}
+                      copyKey="photo"
+                      copied={copied}
+                      onCopy={copyText}
+                      copyLabel={t.shopifyApp.copy}
+                      copiedLabel={t.shopifyApp.copied}
+                    />
+                    <a
+                      href={draft.selectedImage.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className={buttonVariants({ variant: "outline", size: "sm" })}
+                    >
+                      {t.shopifyApp.campaignOpenPhoto}<ExternalLink className="size-3.5" aria-hidden />
+                    </a>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-[13px] font-medium">{t.shopifyApp.campaignOwnPhoto}</p>
+                    <p className="text-[12px] text-muted-foreground">
+                      {t.shopifyApp.campaignOwnPhotoHandoffHelp}
+                    </p>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={photoBusy !== null}
+                      onClick={() => void downloadOwnPhoto()}
+                    >
+                      <Download className="size-3.5" aria-hidden />
+                      {photoBusy === "download"
+                        ? t.shopifyApp.campaignDownloadingPhoto
+                        : t.shopifyApp.campaignDownloadPhoto}
+                    </Button>
+                  </>
+                )}
               </div>
             </div>
           ) : null}
