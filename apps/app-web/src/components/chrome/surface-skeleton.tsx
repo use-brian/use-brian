@@ -66,10 +66,13 @@ export function surfaceSkeletonKind(
       return "list";
     // `p`, `inbox` (redirects to `/p`), and the root land on the doc surface.
     // `apps` is one full-bleed pane under a chrome row (the custom-app frame),
-    // which is the page shape too.
+    // which is the page shape too. `shopify` is a centred column under a
+    // header - the same measure the doc surface uses, so it swaps in without
+    // a layout jump.
     case "p":
     case "inbox":
     case "apps":
+    case "shopify":
     case null:
     case undefined:
       return "page";
