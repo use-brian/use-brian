@@ -351,6 +351,7 @@ import { listUsableWorkspaceConnectors } from './connectors/usable-connectors.js
 import { type GoalDeliver } from './goals/writeback.js'
 import {
   tryClaimGoalForTick,
+  transitionRunningGoalStatusSystem,
   getGoalByIdSystem,
   updateGoalSystem,
   getGoalAwaitingEventSystem,
@@ -2595,6 +2596,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const goalDriver = createGoalDriver({
     goalStore,
     tryClaim: tryClaimGoalForTick,
+    transitionRunningStatus: transitionRunningGoalStatusSystem,
     sessionCostUsd: (sessionId) =>
       usageStore ? usageStore.getSessionCostUsd(sessionId) : Promise.resolve(0),
     meteringAvailable: () => Boolean(usageStore),

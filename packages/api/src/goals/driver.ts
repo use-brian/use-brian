@@ -43,6 +43,7 @@ import {
   type ActingLoopDeps,
   type EventSubscription,
   type GoalRecord,
+  type GoalStatus,
   type GoalStore,
 } from '@use-brian/core'
 import { buildGoalResolvers, finishGoal, type GoalDeliver } from './writeback.js'
@@ -135,6 +136,14 @@ export type GoalDriverDeps = {
   /** Single-flight claim: atomically flip `active`→`running`. `false` means
    *  another tick already owns this goal — the caller returns without acting. */
   tryClaim: (goalId: string) => Promise<boolean>
+  /** Production ownership handoff after `tryClaim`: transition only while the
+   * row is still `running`. Task deletion may retire it to `abandoned` during
+   * the bounded iteration; `false` makes that explicit cancellation win. */
+  transitionRunningStatus?: (
+    goalId: string,
+    status: GoalStatus,
+    blockerReason?: string | null,
+  ) => Promise<boolean>
   /** Per-run COGS read (R3). Spend for a run = `sessionCostUsd('workflow_run_'
    *  + runId)` — the run's session id is derived, not stored. */
   sessionCostUsd: (sessionId: string) => Promise<number>
@@ -211,6 +220,13 @@ export type GoalDriver = {
 
 export function createGoalDriver(deps: GoalDriverDeps): GoalDriver {
   const finishDeps = { goalStore: deps.goalStore, deliver: deps.deliver }
+  const claimedFinishDeps = deps.transitionRunningStatus
+    ? {
+        goalStore: deps.goalStore,
+        deliver: deps.deliver,
+        claimTerminal: deps.transitionRunningStatus,
+      }
+    : finishDeps
 
   async function tickGoal(goalId: string, carried?: GoalLoopState): Promise<void> {
     const goal = await deps.goalStore.getByIdSystem(goalId)
@@ -256,13 +272,16 @@ export function createGoalDriver(deps: GoalDriverDeps): GoalDriver {
         // Release the claim and re-arm on the error backoff, carrying the
         // bumped streak. `iteration`/`spend`/`noProgressStreak` carry unchanged
         // — an errored attempt is not a completed iteration.
-        await deps.goalStore.setStatusSystem(goal.id, 'active')
+        const released = deps.transitionRunningStatus
+          ? await deps.transitionRunningStatus(goal.id, 'active')
+          : Boolean(await deps.goalStore.setStatusSystem(goal.id, 'active'))
+        if (!released && deps.transitionRunningStatus) return
         const state = carried ?? INITIAL_STATE
         const fireAt = new Date(deps.now().getTime() + tickErrorBackoffSeconds(streak) * 1000)
         await deps.scheduleGoalTick(goal, fireAt, { ...state, errorStreak: streak })
       } else {
         const msg = err instanceof Error ? err.message : String(err)
-        await finishGoal(goal, 'blocked', `tick_error: ${msg.slice(0, 200)}`, finishDeps)
+        await finishGoal(goal, 'blocked', `tick_error: ${msg.slice(0, 200)}`, claimedFinishDeps)
       }
       deps.onTickError?.(goal, err, willRetry)
     } catch (recoveryErr) {
@@ -289,7 +308,7 @@ export function createGoalDriver(deps: GoalDriverDeps): GoalDriver {
     // monthly cap a chat turn does. Over cap → block + escalate (the user can
     // upgrade / wait, then re-activate). OSS omits the gate.
     if (deps.meteringAvailable() && deps.workspaceBudgetOk && !(await deps.workspaceBudgetOk(goal.workspaceId))) {
-      await finishGoal(goal, 'blocked', 'workspace_over_budget', finishDeps)
+      await finishGoal(goal, 'blocked', 'workspace_over_budget', claimedFinishDeps)
       return
     }
 
@@ -298,6 +317,7 @@ export function createGoalDriver(deps: GoalDriverDeps): GoalDriver {
     let activeRunId = state.runId
     let lastSpend = 0
     let lastProgressed = false
+    let ownsRunningGoal = true
 
     const loopDeps: ActingLoopDeps = {
       meteringAvailable: deps.meteringAvailable,
@@ -327,9 +347,20 @@ export function createGoalDriver(deps: GoalDriverDeps): GoalDriver {
         }
       },
       resolversFor: (g) => buildGoalResolvers(g, deps.goalStore),
-      setStatus: (id, s) => deps.goalStore.setStatusSystem(id, s).then(() => undefined),
-      finish: (g, terminal, reason) => finishGoal(g, terminal, reason, finishDeps),
+      setStatus: async (id, status) => {
+        if (!deps.transitionRunningStatus) {
+          await deps.goalStore.setStatusSystem(id, status)
+          return
+        }
+        // `tryClaim` already wrote running. Every later transition must be a
+        // compare-and-set from running so an explicit task deletion can change
+        // the goal to abandoned without this stale iteration resurrecting it.
+        if (status === 'running') return
+        ownsRunningGoal = await deps.transitionRunningStatus(id, status)
+      },
+      finish: (g, terminal, reason) => finishGoal(g, terminal, reason, claimedFinishDeps),
       rearm: async (g, resume) => {
+        if (!ownsRunningGoal) return
         const nextState: GoalLoopState = {
           iteration: state.iteration + 1,
           spend: state.spend + lastSpend,

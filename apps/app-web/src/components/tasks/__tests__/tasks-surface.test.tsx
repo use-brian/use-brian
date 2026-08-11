@@ -175,6 +175,12 @@ beforeEach(() => {
   taskApi.fetchWorkspaceTasks.mockReset();
   taskApi.fetchWorkspaceTasks.mockResolvedValue(rows);
   taskApi.bulkTasks.mockReset();
+  taskApi.bulkTasks.mockImplementation(
+    async (_workspaceId: string, body: { ids: string[] }) => ({
+      ok: true,
+      results: body.ids.map((id) => ({ id, ok: true })),
+    }),
+  );
   brainApi.deleteBrainRow.mockReset().mockResolvedValue({ ok: true });
   dialogs.promptDialog.mockReset().mockResolvedValue(null);
   guardrailApi.loadTaskCandidates.mockReset().mockResolvedValue([]);
@@ -347,18 +353,50 @@ describe("[COMP:app-web/tasks-surface] current-filter select all", () => {
       multiline: true,
       allowEmpty: true,
     });
-    expect(brainApi.deleteBrainRow).toHaveBeenCalledTimes(2);
-    for (const id of ["task-unassigned", "task-assigned"]) {
-      expect(brainApi.deleteBrainRow).toHaveBeenCalledWith(
-        "workspace-1",
-        "task",
-        id,
-        {
-          reason: "Slack discussion about existing work is not a new task.",
-          createRule: true,
-        },
-      );
-    }
+    expect(taskApi.bulkTasks).toHaveBeenCalledOnce();
+    expect(taskApi.bulkTasks).toHaveBeenCalledWith("workspace-1", {
+      action: "delete",
+      ids: ["task-unassigned", "task-assigned"],
+      reason: "Slack discussion about existing work is not a new task.",
+      create_rule: true,
+    });
+    expect(brainApi.deleteBrainRow).not.toHaveBeenCalled();
+  });
+
+  it("removes the complete selection in one paint before the bulk request settles", async () => {
+    let resolveBulk!: (value: {
+      ok: boolean;
+      results: { id: string; ok: boolean }[];
+    }) => void;
+    taskApi.bulkTasks.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveBulk = resolve;
+        }),
+    );
+    dialogs.promptDialog.mockResolvedValue("");
+    await renderSurface();
+
+    await act(async () => {
+      buttonNamed("Select all 2 matching").click();
+    });
+    await act(async () => {
+      buttonNamed("Delete").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(taskApi.bulkTasks).toHaveBeenCalledOnce();
+    expect(container!.textContent).not.toContain("Unassigned task");
+    expect(container!.textContent).not.toContain("Assigned task");
+
+    await act(async () => {
+      resolveBulk({
+        ok: true,
+        results: rows.map((row) => ({ id: row.id, ok: true })),
+      });
+      await Promise.resolve();
+    });
   });
 
   it("sends the shared reason through the large-selection server lane", async () => {
@@ -396,6 +434,42 @@ describe("[COMP:app-web/tasks-surface] current-filter select all", () => {
     expect(brainApi.deleteBrainRow).not.toHaveBeenCalled();
   });
 
+  it("restores only the unconfirmed tail when a later delete batch loses transport", async () => {
+    const manyRows = Array.from({ length: 201 }, (_, index) => ({
+      ...rows[0]!,
+      id: `task-${index}`,
+      title: `Task ${index}`,
+    }));
+    taskApi.fetchWorkspaceTasks.mockResolvedValue(manyRows);
+    taskApi.bulkTasks
+      .mockResolvedValueOnce({
+        ok: true,
+        results: manyRows
+          .slice(0, 200)
+          .map((row) => ({ id: row.id, ok: true })),
+      })
+      .mockRejectedValueOnce(new Error("network lost"));
+    dialogs.promptDialog.mockResolvedValue("");
+    navigation.search = "view=board";
+    await renderSurface();
+
+    await act(async () => {
+      buttonNamed("Select all 201 matching").click();
+    });
+    await act(async () => {
+      buttonNamed("Delete").click();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(taskApi.bulkTasks).toHaveBeenCalledTimes(2);
+    expect(container!.textContent).toContain("1 selected");
+    expect(container!.textContent).toContain(
+      "1 of 201 changes failed. The failed rows stay selected so you can retry.",
+    );
+  });
+
   it("deletes without a tombstone or rule when the reason is left blank", async () => {
     dialogs.promptDialog.mockResolvedValue("");
     await renderSurface();
@@ -410,16 +484,40 @@ describe("[COMP:app-web/tasks-surface] current-filter select all", () => {
       await Promise.resolve();
     });
 
-    expect(brainApi.deleteBrainRow).toHaveBeenCalledTimes(2);
-    for (const id of ["task-unassigned", "task-assigned"]) {
-      expect(brainApi.deleteBrainRow).toHaveBeenCalledWith(
-        "workspace-1",
-        "task",
-        id,
-        undefined,
-      );
-    }
+    expect(taskApi.bulkTasks).toHaveBeenCalledWith("workspace-1", {
+      action: "delete",
+      ids: ["task-unassigned", "task-assigned"],
+    });
+    expect(brainApi.deleteBrainRow).not.toHaveBeenCalled();
     expect(container!.textContent).not.toContain("Enter at least 3 characters.");
+  });
+
+  it("restores and reselects only failed bulk-delete rows", async () => {
+    dialogs.promptDialog.mockResolvedValue("");
+    taskApi.fetchWorkspaceTasks
+      .mockReset()
+      .mockResolvedValueOnce(rows)
+      .mockResolvedValue([rows[1]!]);
+    taskApi.bulkTasks.mockResolvedValue({
+      ok: false,
+      // A missing per-id outcome is treated as failure, not silent success.
+      results: [{ id: "task-unassigned", ok: true }],
+    });
+    await renderSurface();
+
+    await act(async () => {
+      buttonNamed("Select all 2 matching").click();
+    });
+    await act(async () => {
+      buttonNamed("Delete").click();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(container!.textContent).not.toContain("Unassigned task");
+    expect(container!.textContent).toContain("Assigned task");
+    expect(container!.textContent).toContain("1 selected");
   });
 
   it("omits reason and create_rule on the server lane for a blank reason", async () => {
@@ -467,6 +565,7 @@ describe("[COMP:app-web/tasks-surface] current-filter select all", () => {
     });
 
     expect(brainApi.deleteBrainRow).not.toHaveBeenCalled();
+    expect(taskApi.bulkTasks).not.toHaveBeenCalled();
     expect(container!.textContent).toContain("2 selected");
     expect(container!.textContent).toContain("Enter at least 3 characters.");
   });

@@ -41,7 +41,10 @@ import {
   type BrainInboxPrimitive,
 } from '../db/brain-inbox-store.js'
 import { createInspectionSession } from '../db/sessions.js'
-import { abandonGoalsForHostTaskSystem } from '../db/goals.js'
+import {
+  abandonGoalsForHostTaskSystem,
+  GOAL_TERMINAL_STATUSES,
+} from '../db/goals.js'
 import { rejectTask as rejectTaskWithReason } from '../db/task-admission-store.js'
 import {
   updateMemory,
@@ -1950,17 +1953,17 @@ export function brainInboxRoutes({
 
   // ── POST /:workspaceId/tasks/bulk ───────────────────────────────
   //
-  // One-round-trip bulk task mutation for the Tasks operator surface's
-  // LARGE selections (the surface client-loops small ones for per-row
-  // retry UX — tasks-operator-surface §1.6/§6 Phase 4). Body:
+  // One-round-trip bulk task mutation for the Tasks operator surface. Every
+  // multi-delete uses this lane; uniform updates use it past the client-side
+  // threshold. Body:
   //   { action: 'update', ids: string[], set: { status?, assignee_id?,
   //     priority?, due_at? } }  |  { action: 'delete', ids: string[],
   //     reason?, create_rule? }
-  // Server-side it loops the SAME per-row primitives the single-row
-  // endpoints use: `updateTask` supersession for updates (priority merged
-  // into each row's live attributes). Reasoned deletes use the same atomic
-  // rejection primitive as single-row Delete (tombstone + optional active
-  // narrow rule); reasonless calls retain the legacy soft-delete path.
+  // Updates loop the SAME per-row supersession primitive as the single-row
+  // endpoint (priority merged into each row's live attributes). Reasoned
+  // deletes use the same atomic rejection primitive as single-row Delete
+  // (tombstone + optional active narrow rule); reasonless deletes close tasks,
+  // retire hosted goals, and audit them in one data-modifying CTE.
   // Per-id outcomes come back so the client can keep failed rows selected.
   // Capped at 200 ids per call.
   //
@@ -1991,6 +1994,10 @@ export function brainInboxRoutes({
       res.status(400).json({ error: 'ids must be 1-200 task ids' })
       return
     }
+    if (new Set(ids as string[]).size !== ids.length) {
+      res.status(400).json({ error: 'ids must be unique' })
+      return
+    }
     const rejectReason =
       action === 'delete' && typeof reason === 'string' ? reason.trim() : ''
     const createRule = action === 'delete' && createRuleInput === true
@@ -2004,6 +2011,53 @@ export function brainInboxRoutes({
     }
     if (createRule && rejectReason.length < 3) {
       res.status(400).json({ error: 'A reason of at least 3 characters is required' })
+      return
+    }
+
+    // Plain delete is a real set operation: close every owned live task,
+    // retire every hosted Assignable / Auto-pilot goal (including a running
+    // goal whose driver now loses its guarded status handoff), and append the
+    // audit rows in one statement. Missing / cross-workspace ids simply return
+    // `ok:false`, preserving the endpoint's per-id retry contract.
+    if (action === 'delete' && !rejectReason) {
+      const taskIds = ids as string[]
+      try {
+        const deleted = await query<{ id: string }>(
+          `WITH deleted_tasks AS (
+             UPDATE tasks
+                SET valid_to = now(), updated_at = now()
+              WHERE id = ANY($1::uuid[])
+                AND workspace_id = $2
+                AND valid_to IS NULL
+              RETURNING id
+           ), retired_goals AS (
+             UPDATE goals
+                SET status = 'abandoned',
+                    blocker_reason = 'host_task_deleted',
+                    updated_at = now()
+              WHERE host_type = 'task'
+                AND host_id IN (SELECT id FROM deleted_tasks)
+                AND status <> ALL($3)
+              RETURNING id
+           ), audits AS (
+             INSERT INTO brain_verifications (
+               target_kind, target_id, workspace_id, verified_by, action
+             )
+             SELECT 'task', id, $2, $4, 'delete'
+               FROM deleted_tasks
+             RETURNING target_id
+           )
+           SELECT id::text AS id FROM deleted_tasks`,
+          [taskIds, workspaceId, GOAL_TERMINAL_STATUSES, userId],
+        )
+        const deletedIds = new Set(deleted.rows.map((row) => row.id))
+        const results = taskIds.map((id) => ({ id, ok: deletedIds.has(id) }))
+        void notifyBrainInboxChange(workspaceId, 'task', taskIds[0], 'delete')
+        res.json({ ok: results.every((row) => row.ok), results })
+      } catch (err) {
+        console.error('[brain-inbox] tasks bulk delete failed:', err)
+        res.status(500).json({ error: 'Failed to delete tasks' })
+      }
       return
     }
 
@@ -2092,39 +2146,20 @@ export function brainInboxRoutes({
           continue
         }
         if (action === 'delete') {
-          if (rejectReason) {
-            const rejected = await rejectTaskWithReason({
-              workspaceId,
-              userId,
-              taskId: id,
-              reason: rejectReason,
-              createRule,
-            })
-            if (!rejected) {
-              results.push({ id, ok: false })
-              continue
-            }
-            await appendBrainVerification({
-              targetKind: 'task',
-              targetId: id,
-              workspaceId,
-              verifiedByUserId: userId,
-              action: 'delete',
-            })
-            results.push({
-              id,
-              ok: true,
-              tombstoned: true,
-              activeRuleId: rejected.activeRuleId,
-            })
+          // Reasonless deletes returned through the set lane above, so this is
+          // always the rejection path (one atomic tombstone/rule transaction
+          // per independently teachable task).
+          const rejected = await rejectTaskWithReason({
+            workspaceId,
+            userId,
+            taskId: id,
+            reason: rejectReason,
+            createRule,
+          })
+          if (!rejected) {
+            results.push({ id, ok: false })
             continue
           }
-          await query(
-            `UPDATE tasks SET valid_to = now(), updated_at = now() WHERE id = $1 AND valid_to IS NULL`,
-            [id],
-          )
-          // Host-lifecycle cascade — see the single-row DELETE below.
-          await abandonGoalsForHostTaskSystem(id, 'host_task_deleted')
           await appendBrainVerification({
             targetKind: 'task',
             targetId: id,
@@ -2132,7 +2167,12 @@ export function brainInboxRoutes({
             verifiedByUserId: userId,
             action: 'delete',
           })
-          results.push({ id, ok: true })
+          results.push({
+            id,
+            ok: true,
+            tombstoned: true,
+            activeRuleId: rejected.activeRuleId,
+          })
         } else {
           const rowFields: TaskUpdateFields = { ...fields }
           if (priorityChange !== undefined) {

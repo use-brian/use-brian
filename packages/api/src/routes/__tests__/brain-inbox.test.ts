@@ -653,8 +653,9 @@ describe('[COMP:api/brain-inbox-explain] Source descriptor', () => {
     expect(cascadeSql).toMatch(/UPDATE goals/)
     expect(cascadeSql).toMatch(/status = 'abandoned'/)
     expect(cascadeSql).toMatch(/host_type = 'task'/)
-    // Never a `running` goal — the acting loop owns a claimed goal.
-    expect(mockQuery.mock.calls[2][1]).toEqual([ROW, 'host_task_deleted', ['done', 'abandoned', 'running']])
+    // Explicit deletion also retires a running goal; guarded driver status
+    // handoffs prevent the bounded in-flight iteration from resurrecting it.
+    expect(mockQuery.mock.calls[2][1]).toEqual([ROW, 'host_task_deleted', ['done', 'abandoned']])
   })
 
   it('reasoned task DELETE creates a tombstone and explicitly activates a narrow rule', async () => {
