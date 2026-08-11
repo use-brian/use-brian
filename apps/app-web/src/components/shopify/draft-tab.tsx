@@ -14,42 +14,16 @@
  * [COMP:app-web/shopify-app]
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { ImagePlus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useT } from "@/lib/i18n/client";
 import { askAssistant, callTool, ShopifyCallError } from "@/lib/api/shopify";
 import { storeFiles } from "@/lib/api/ingest";
 import { Field, Note } from "./shopify-shared";
+import { LayoutPicker } from "./layout-picker";
 
-type Template = { suffix: string | null; filename: string; sections: string[] };
-type TemplateList = { theme?: string; templates?: Template[] };
 type Created = { id?: string; product_id?: string; product?: { id?: string } };
-
-/** A theme section TYPE is a developer string; the owner is picking a layout. */
-const SECTION_LABEL: Record<string, string> = {
-  "main-product": "Product, price and buy button",
-  "related-products": "Related products",
-  "rich-text": "Text block",
-  multicolumn: "Feature columns",
-  "collapsible-content": "FAQ / accordion",
-  "image-with-text": "Image beside text",
-  slideshow: "Slideshow",
-  video: "Video",
-  newsletter: "Email signup",
-  "product-recommendations": "Recommendations",
-  apps: "App block",
-};
-
-const sectionLabel = (t: string): string =>
-  SECTION_LABEL[t] ?? t.replace(/[-_]/g, " ").replace(/^./, (c) => c.toUpperCase());
-
-
-/** The `handle` out of any Shopify product URL. Null when it is not one. */
-export function productHandleFromUrl(raw: string): string | null {
-  const m = /\/products\/([^/?#\s]+)/.exec(String(raw ?? "").trim());
-  return m ? decodeURIComponent(m[1]) : null;
-}
 
 export function DraftTab({ workspaceId }: { workspaceId: string }) {
   const t = useT();
@@ -58,90 +32,14 @@ export function DraftTab({ workspaceId }: { workspaceId: string }) {
   const [notes, setNotes] = useState("");
   const [files, setFiles] = useState<File[]>([]);
   const fileInput = useRef<HTMLInputElement>(null);
-  const [templates, setTemplates] = useState<Template[] | null>(null);
-  const [templateError, setTemplateError] = useState<string | null>(null);
   const [chosen, setChosen] = useState<string>("");
-  const [link, setLink] = useState("");
-  const [linkBusy, setLinkBusy] = useState(false);
-  const [linkNote, setLinkNote] = useState<string | null>(null);
-  const [copiedFrom, setCopiedFrom] = useState<string | null>(null);
+  const [wanted, setWanted] = useState<string[]>([]);
   const [steps, setSteps] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [answer, setAnswer] = useState<string | null>(null);
 
-  useEffect(() => {
-    let alive = true;
-    void (async () => {
-      try {
-        const res = await callTool<TemplateList>(workspaceId, "shopifyListProductTemplates", {});
-        if (alive) setTemplates(res.templates ?? []);
-      } catch (err) {
-        // Theme access is a grant the merchant turns on for their own app, not
-        // something to work around. Relay it and keep the rest usable.
-        if (alive) setTemplateError(err instanceof ShopifyCallError ? err.message : String(err));
-      }
-    })();
-    return () => {
-      alive = false;
-    };
-  }, [workspaceId]);
-
   const log = (line: string) => setSteps((s) => [...s, line]);
-
-  /**
-   * "Give my product a page like THAT one."
-   *
-   * Resolves the pasted link to a product, reads which template it uses, and
-   * selects that template for the new product. This is REUSE, which is what
-   * the pasted link actually means - the owner is pointing at a layout they
-   * already like.
-   *
-   * It cannot CREATE a template: `shopifyCreateProductTemplate` writes a file
-   * into the live theme, so it is destructive-classified and unreachable from
-   * this surface by construction (and from the assistant consult, same
-   * ceiling). When the target has no custom template there is nothing to copy,
-   * and the honest answer is to say so and point at the surface that does have
-   * an approval gate - chat - rather than fail silently.
-   */
-  async function useLayoutFromLink() {
-    const handle = productHandleFromUrl(link);
-    setCopiedFrom(null);
-    if (!handle) {
-      setLinkNote(t.shopifyApp.linkLooksWrong);
-      return;
-    }
-    setLinkBusy(true);
-    setLinkNote(null);
-    try {
-      const found = await callTool<{ items?: Array<{ id?: string; title?: string }> }>(
-        workspaceId,
-        "shopifyListProducts",
-        { query: `handle:${handle}`, first: 1 },
-      );
-      const hit = (found.items ?? [])[0];
-      if (!hit?.id) {
-        setLinkNote(t.shopifyApp.productNotFound);
-        return;
-      }
-      const full = await callTool<{ title?: string; template_suffix?: string | null }>(
-        workspaceId,
-        "shopifyGetProduct",
-        { productId: hit.id },
-      );
-      const suffix = full.template_suffix ?? null;
-      if (!suffix) {
-        setLinkNote(t.shopifyApp.usesThemeDefault);
-        return;
-      }
-      setChosen(suffix);
-      setCopiedFrom(full.title ?? hit.title ?? handle);
-    } catch (err) {
-      setLinkNote(err instanceof ShopifyCallError ? err.message : String(err));
-    } finally {
-      setLinkBusy(false);
-    }
-  }
 
   async function createDraft() {
     if (!name.trim()) {
@@ -209,6 +107,7 @@ What the owner told me, verbatim. This may be empty:
 ${notes.trim() || "(nothing)"}
 
 Page layout the owner picked: ${chosen ? `the "${chosen}" template` : "the theme default"}
+${wanted.length ? `Sections the owner asked this page to have: ${wanted.join(", ")}` : ""}
 
 Do this:
 1. Write the product description and set it with shopifyUpdateProduct. Write real
@@ -313,95 +212,14 @@ on, and every fact you still need before this could go live.`;
         />
       </div>
 
-      <div className="space-y-2">
-        <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-          {t.shopifyApp.pageLayout}
-        </h2>
-        <p className="text-[13px] text-muted-foreground">{t.shopifyApp.layoutHelp}</p>
-
-        {templateError ? <Note>{templateError}</Note> : null}
-        {!templates && !templateError ? (
-          <p className="text-sm text-muted-foreground">{t.shopifyApp.loading}</p>
-        ) : null}
-        {/* A theme with no custom templates is the ordinary starting state, not
-            an error - the picker would otherwise show a single "Theme default"
-            card and look broken. */}
-        {templates && templates.filter((x) => x.suffix).length === 0 ? (
-          <Note tone="muted">{t.shopifyApp.noTemplates}</Note>
-        ) : null}
-
-        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-          {(templates ?? []).map((tpl) => {
-            const key = tpl.suffix ?? "";
-            const label = tpl.suffix ? tpl.suffix.replace(/-/g, " ") : t.shopifyApp.themeDefault;
-            return (
-              <button
-                key={tpl.filename}
-                type="button"
-                onClick={() => setChosen(key)}
-                aria-pressed={key === chosen}
-                className={`rounded-xl border p-3 text-left transition-colors ${
-                  key === chosen
-                    ? "border-primary bg-primary/5"
-                    : "border-border bg-card hover:border-primary/40"
-                }`}
-              >
-                <div className="flex items-baseline justify-between gap-2">
-                  <span className="text-[13px] font-semibold capitalize">{label}</span>
-                  <span className="text-[11px] text-muted-foreground">
-                    {tpl.sections.length} {t.shopifyApp.sections}
-                  </span>
-                </div>
-                {/* The layout IS the choice: a page with an ingredients panel
-                    and an FAQ versus one that is just a buy button. */}
-                <div className="mt-2 flex flex-col gap-1">
-                  {tpl.sections.map((s, i) => (
-                    <div
-                      key={`${s}-${i}`}
-                      className={`rounded-md border bg-background px-2 py-1 ${
-                        i === 0 ? "border-primary/40" : "border-border"
-                      }`}
-                    >
-                      <div className="text-[11.5px] leading-tight">{sectionLabel(s)}</div>
-                      <div className="font-mono text-[9.5px] text-muted-foreground">{s}</div>
-                    </div>
-                  ))}
-                </div>
-              </button>
-            );
-          })}
-        </div>
-
-        <div className="space-y-1.5 rounded-xl border border-dashed border-border p-3">
-          <span className="text-xs font-medium text-muted-foreground">
-            {t.shopifyApp.orPasteLink}
-          </span>
-          <p className="text-[12.5px] text-muted-foreground">{t.shopifyApp.pasteLinkHint}</p>
-          <div className="flex flex-wrap gap-2">
-            <input
-              value={link}
-              onChange={(e) => setLink(e.target.value)}
-              placeholder={t.shopifyApp.pasteLinkPlaceholder}
-              className="h-9 min-w-[280px] flex-1 rounded-lg border border-border bg-background px-3 text-sm"
-            />
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={linkBusy || !link.trim()}
-              onClick={() => void useLayoutFromLink()}
-            >
-              {t.shopifyApp.useThisLayout}
-            </Button>
-          </div>
-          {linkNote ? <Note>{linkNote}</Note> : null}
-          {copiedFrom ? (
-            <p className="text-[12.5px] text-muted-foreground">
-              {t.shopifyApp.copiedFrom} <span className="font-medium text-foreground">{copiedFrom}</span>
-            </p>
-          ) : null}
-        </div>
-      </div>
+      <LayoutPicker
+        workspaceId={workspaceId}
+        productName={name}
+        chosen={chosen}
+        onChoose={setChosen}
+        wanted={wanted}
+        onWanted={setWanted}
+      />
 
       <Button onClick={() => void createDraft()} disabled={busy}>
         {t.shopifyApp.createDraft}

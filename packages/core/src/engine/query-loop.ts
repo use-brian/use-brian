@@ -22,6 +22,7 @@ import {
 } from './turn-inbox.js'
 import { compactConversation } from '../compaction/compact.js'
 import { isContextOverflowError } from '../providers/context-budget.js'
+import { calculateCost } from '../billing/cost-tracker.js'
 
 /**
  * Heap-pressure threshold for graceful loop abort. When the V8 heap exceeds
@@ -960,10 +961,7 @@ async function* queryLoopCore(options: QueryLoopOptions): AsyncGenerator<QueryEv
     }
 
     const response = accumulator.finish()
-    totalUsage.inputTokens += response.usage.inputTokens
-    totalUsage.outputTokens += response.usage.outputTokens
-    totalUsage.cacheReadTokens = (totalUsage.cacheReadTokens ?? 0) + (response.usage.cacheReadTokens ?? 0)
-    totalUsage.cacheWriteTokens = (totalUsage.cacheWriteTokens ?? 0) + (response.usage.cacheWriteTokens ?? 0)
+    addUsage(totalUsage, response.usage, response.model)
 
     // ── Turn-boundary instruction-leak sanitiser ────────────────
     // When the WHOLE assistant text is a plan-tail meta-narration
@@ -1975,11 +1973,12 @@ function collectTerminalConversation(
   return collected.reverse()
 }
 
-function addUsage(total: TokenUsage, usage: TokenUsage): void {
+function addUsage(total: TokenUsage, usage: TokenUsage, model: string): void {
   total.inputTokens += usage.inputTokens
   total.outputTokens += usage.outputTokens
   total.cacheReadTokens = (total.cacheReadTokens ?? 0) + (usage.cacheReadTokens ?? 0)
   total.cacheWriteTokens = (total.cacheWriteTokens ?? 0) + (usage.cacheWriteTokens ?? 0)
+  total.calculatedCostUsd = (total.calculatedCostUsd ?? 0) + calculateCost(model, usage)
 }
 
 /**
@@ -2072,7 +2071,7 @@ async function* finalizeTerminalResponse(params: {
     }
 
     const response = acc.finish()
-    addUsage(params.totalUsage, response.usage)
+    addUsage(params.totalUsage, response.usage, response.model)
     const raw = response.content
       .filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')
       .map((block) => block.text)

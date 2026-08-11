@@ -105,6 +105,47 @@ describe('[COMP:billing/cost-tracker] calculateCost', () => {
       .toBeGreaterThan(calculateCost('gemini-3-flash-standard', usage))
   })
 
+  it('matches Gemini Pro 3.1 pricing on both sides of the 200K prompt threshold', () => {
+    expect(calculateCost('gemini-3.1-pro-preview', {
+      inputTokens: 200_000,
+      outputTokens: 10_000,
+    })).toBeCloseTo(0.52, 10)
+
+    expect(calculateCost('gemini-3.1-pro-preview', {
+      inputTokens: 200_001,
+      outputTokens: 10_000,
+    })).toBeCloseTo(0.980004, 10)
+  })
+
+  it('uses the full prompt including cache reads for the Pro 3.1 length bracket', () => {
+    const cost = calculateCost('gemini-3-pro-research', {
+      inputTokens: 10_000,
+      cacheReadTokens: 200_000,
+      outputTokens: 10_000,
+    })
+    // Full prompt is 210K: fresh input and output use the >200K bracket;
+    // cached input keeps Google's $0.20/M cache-read rate.
+    expect(cost).toBeCloseTo(0.26, 10)
+  })
+
+  it('preserves per-request pricing on usage aggregated by the query loop', () => {
+    const first = calculateCost('gemini-3.1-pro-preview', {
+      inputTokens: 150_000,
+      outputTokens: 1_000,
+    })
+    const second = calculateCost('gemini-3.1-pro-preview', {
+      inputTokens: 150_000,
+      outputTokens: 1_000,
+    })
+
+    const aggregate = calculateCost('gemini-3.1-pro-preview', {
+      inputTokens: 300_000,
+      outputTokens: 2_000,
+      calculatedCostUsd: first + second,
+    })
+    expect(aggregate).toBeCloseTo(0.624, 10)
+  })
+
   it('falls back to Flash pricing for unknown models', () => {
     const cost = calculateCost('unknown-model', { inputTokens: 1000, outputTokens: 500 })
     expect(cost).toBeGreaterThan(0)

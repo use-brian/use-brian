@@ -9,7 +9,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { productHandleFromUrl } from "../draft-tab";
+import { productHandleFromUrl } from "../layout-match";
 
 describe("[COMP:app-web/shopify-app] product handle from a pasted link", () => {
   it("reads a plain product URL", () => {

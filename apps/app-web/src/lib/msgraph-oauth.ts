@@ -48,6 +48,23 @@ export function msGraphAuthorizeUrl(tenant?: string | null): string {
 }
 
 /**
+ * Decide whether Connect must collect a workspace-owned Entra registration
+ * before consent. Catalog Connect prefers the workspace form over a deployment
+ * fallback because a hosted customer cannot configure that fallback; ordinary
+ * detail-panel Connect may still use deployment config on a self-host.
+ */
+export function shouldCollectWorkspaceMsGraphApp(
+  status: { configured: boolean; clientId: string | null; workspaceOwned: boolean } | null,
+  preferWorkspaceApp: boolean,
+): boolean {
+  return (
+    !status?.configured ||
+    !status.clientId ||
+    (preferWorkspaceApp && !status.workspaceOwned)
+  );
+}
+
+/**
  * Build the Entra authorize URL. `response_mode=query` keeps the code in the
  * query string, which is what the callback route reads.
  */

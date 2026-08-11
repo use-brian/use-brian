@@ -4,6 +4,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   addLocalDays,
+  campaignProductQuery,
   createDefaultCampaignDraft,
   readCampaignStorage,
   recordPreparedCampaign,
@@ -172,5 +173,18 @@ describe("[COMP:app-web/shopify-campaign] campaign state", () => {
     history = recordPreparedCampaign(history, { ...first, preparedAt: 3 });
     expect(history.map((item) => item.discount.code)).toEqual(["RESTOCK1", "RESTOCK2"]);
     expect(history[0].preparedAt).toBe(3);
+  });
+  it("composes a prefix search query the merchant never has to write", () => {
+    expect(campaignProductQuery("")).toBe("status:active");
+    expect(campaignProductQuery("   ")).toBe("status:active");
+    expect(campaignProductQuery("winter jack")).toBe("status:active winter* jack*");
+    // Hyphens inside a SKU survive; a leading one is the NOT modifier and does not.
+    expect(campaignProductQuery("ABC-123")).toBe("status:active ABC-123*");
+    expect(campaignProductQuery("-shirt")).toBe("status:active shirt*");
+    // Grammar characters are stripped so a stray quote cannot change the query.
+    expect(campaignProductQuery('title:"green (hoodie)"')).toBe("status:active title* green* hoodie*");
+    expect(campaignProductQuery("*")).toBe("status:active");
+    // A query is bounded: five words is a search, more is a scan.
+    expect(campaignProductQuery("a b c d e f g")).toBe("status:active a* b* c* d* e*");
   });
 });
