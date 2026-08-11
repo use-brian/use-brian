@@ -49,6 +49,9 @@ export type TokenUsage = {
   outputTokens: number
   cacheReadTokens?: number
   cacheWriteTokens?: number
+  /** Exact sum when usage aggregates multiple provider calls. Length-tiered
+   * pricing must be calculated per request, not from the combined token count. */
+  calculatedCostUsd?: number
 }
 
 // ── Messages (internal representation) ─────────────────────────

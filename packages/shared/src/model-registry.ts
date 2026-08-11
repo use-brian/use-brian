@@ -204,12 +204,11 @@ const FLASH36_RATES: ModelRates = {
   cacheWritePerMTok: 1.50,
 }
 
-// Google lists $4/$18 above 200K input for Pro 3.1; the single bracket below
-// deliberately keeps the pre-registry flat pricing so P1 changes no billing
-// math. Bracketed repricing is a deliberate follow-up, not a refactor side
-// effect. See model-registry.md → "Pricing fidelity".
 const PRO31_RATES: ModelRates = {
-  brackets: [{ upToInputTokens: Infinity, inPerMTok: 2.00, outPerMTok: 12.00 }],
+  brackets: [
+    { upToInputTokens: 200_000, inPerMTok: 2.00, outPerMTok: 12.00 },
+    { upToInputTokens: Infinity, inPerMTok: 4.00, outPerMTok: 18.00 },
+  ],
   cacheReadPerMTok: 0.20,
   cacheWritePerMTok: 2.00,
 }
@@ -880,8 +879,7 @@ export function modelRates(id: string): ModelRates | undefined {
   return byPricingId.get(id)?.rates
 }
 
-/** First bracket the given input size fits under; the top bracket otherwise.
- * Single-bracket models (everything Gemini today) hit index 0 unconditionally. */
+/** First bracket the given input size fits under; the top bracket otherwise. */
 export function bracketFor(rates: ModelRates, inputTokens: number): RateBracket {
   for (const b of rates.brackets) {
     if (inputTokens <= b.upToInputTokens) return b
@@ -1020,6 +1018,21 @@ export function providerModelIds(provider: ModelProvider): readonly string[] {
     for (const id of [row.alias, ...(row.idAliases ?? [])]) {
       if (!CHAT_TIER_KEYS.has(id)) ids.push(id)
     }
+  }
+  return ids
+}
+
+/** Every id that can be recorded and priced for one provider. Unlike
+ * `providerModelIds`, this includes embeddings and historical aliases so
+ * ledger queries cover old and new usage rows. */
+export function providerPricingIds(provider: ModelProvider): ReadonlySet<string> {
+  const ids = new Set<string>()
+  for (const row of MODEL_REGISTRY) {
+    if (row.provider !== provider) continue
+    ids.add(row.alias)
+    ids.add(row.apiModelId)
+    for (const id of row.idAliases ?? []) ids.add(id)
+    for (const id of row.priceAliases ?? []) ids.add(id)
   }
   return ids
 }
