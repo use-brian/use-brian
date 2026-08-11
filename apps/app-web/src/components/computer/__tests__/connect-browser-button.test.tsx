@@ -128,7 +128,7 @@ describe("[COMP:app-web/connect-browser-button] My Browser connect control", () 
 
     await click(el);
 
-    expect(routerPush).toHaveBeenCalledWith("/w/ws-1/computer#browser-profiles");
+    expect(routerPush).toHaveBeenCalledWith("/w/ws-1/computer/profiles");
   });
 
   it("falls back to Browser profile management when the extension refuses", async () => {
@@ -138,7 +138,7 @@ describe("[COMP:app-web/connect-browser-button] My Browser connect control", () 
 
     await click(el);
 
-    expect(routerPush).toHaveBeenCalledWith("/w/ws-1/computer#browser-profiles");
+    expect(routerPush).toHaveBeenCalledWith("/w/ws-1/computer/profiles");
   });
 
   it("falls back to Browser profile management when the token mint itself fails", async () => {
@@ -149,7 +149,7 @@ describe("[COMP:app-web/connect-browser-button] My Browser connect control", () 
     await click(el);
 
     expect(pairViaExtension).not.toHaveBeenCalled();
-    expect(routerPush).toHaveBeenCalledWith("/w/ws-1/computer#browser-profiles");
+    expect(routerPush).toHaveBeenCalledWith("/w/ws-1/computer/profiles");
   });
 
   it("asks for browser control when the extension is paired but not allowed", async () => {
@@ -177,7 +177,7 @@ describe("[COMP:app-web/connect-browser-button] My Browser connect control", () 
 
     await click(el);
 
-    expect(routerPush).toHaveBeenCalledWith("/w/ws-1/computer#browser-profiles");
+    expect(routerPush).toHaveBeenCalledWith("/w/ws-1/computer/profiles");
   });
 
   it("never shows the allow state when no extension answered the control probe", async () => {
@@ -199,6 +199,6 @@ describe("[COMP:app-web/connect-browser-button] My Browser connect control", () 
     await click(el);
 
     expect(pairBrowserExtension).not.toHaveBeenCalled();
-    expect(routerPush).toHaveBeenCalledWith("/w/ws-1/computer#browser-profiles");
+    expect(routerPush).toHaveBeenCalledWith("/w/ws-1/computer/profiles");
   });
 });

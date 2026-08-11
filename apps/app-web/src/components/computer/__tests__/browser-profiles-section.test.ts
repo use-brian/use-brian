@@ -1,11 +1,9 @@
 /**
  * [COMP:app-web/profile-management] Which surfaces a profile shows.
  *
- * A profile is only "ONE cookie jar" on the CLOUD backend, where the vault
- * holds its logins. A `local` ("My Browser") profile borrows the logins of the
- * user's real Chrome: nothing is captured, nothing is stored, and the vault is
- * never read. Showing it the vault surface tells the user two false things —
- * that they must sign in through us, and that they have no sites signed in.
+ * A Remote profile leads to the live sign-in + vault flow. A Local profile
+ * leads to extension pairing + local-control scope. Mixing those surfaces
+ * makes both profile types read as half-configured.
  *
  * Pure decision table so it is testable in this package's no-DOM vitest; the
  * JSX wiring itself stays web-QA.
@@ -13,7 +11,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { BrowserProfile } from "@/lib/api/computer";
-import { isValidProxyUrl, profileSurfaces, siteFromLoginUrl } from "../browser-profiles-section";
+import { isValidProxyUrl, profileSurfaces } from "../browser-profiles-section";
 
 function profile(overrides: Partial<BrowserProfile> = {}): BrowserProfile {
   return {
@@ -36,18 +34,22 @@ function profile(overrides: Partial<BrowserProfile> = {}): BrowserProfile {
 }
 
 describe("[COMP:app-web/profile-management] Profile surfaces by backend", () => {
-  it("offers the vault surface on a cloud profile (the vault is what holds its logins)", () => {
+  it("offers live sign-in and the vault on a Remote profile", () => {
     expect(profileSurfaces(profile({ defaultBackend: "cloud" }))).toEqual({
       signIn: true,
       vaultSessions: true,
+      pairBrowser: false,
+      localControl: false,
       ownBrowserNote: false,
     });
   });
 
-  it("replaces the vault surface with the own-browser note on a My Browser profile", () => {
+  it("offers pairing and local control on a Local profile", () => {
     expect(profileSurfaces(profile({ defaultBackend: "local" }))).toEqual({
       signIn: false,
       vaultSessions: false,
+      pairBrowser: true,
+      localControl: true,
       ownBrowserNote: true,
     });
   });
@@ -65,23 +67,6 @@ describe("[COMP:app-web/profile-management] Profile surfaces by backend", () => 
       defaultBackend: "cloud",
       localControlMode: "full_browser",
     });
-  });
-});
-
-/**
- * "Save this login from my browser" (browser-session-portability.md D5): the
- * site the capture route is asked to save comes from the same normalised URL
- * the sign-in box already validates, reduced to the registrable-ish domain
- * the vault keys sessions by.
- */
-describe("[COMP:app-web/profile-management] siteFromLoginUrl", () => {
-  it("takes the hostname, stripping a leading www.", () => {
-    expect(siteFromLoginUrl("https://www.instagram.com/")).toBe("instagram.com");
-    expect(siteFromLoginUrl("https://instagram.com/accounts/login")).toBe("instagram.com");
-  });
-
-  it("leaves a non-www subdomain alone", () => {
-    expect(siteFromLoginUrl("https://app.example.com/")).toBe("app.example.com");
   });
 });
 

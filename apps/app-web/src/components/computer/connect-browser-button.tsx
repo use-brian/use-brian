@@ -69,7 +69,7 @@ export function ConnectBrowserButton({ workspaceId }: { workspaceId: string }) {
   const c = useT().computer.connectBrowser.sidebarRow;
   const router = useRouter();
   const openProfiles = useCallback(() => {
-    router.push(`/w/${workspaceId}/computer#browser-profiles`);
+    router.push(`/w/${workspaceId}/computer/profiles`);
   }, [router, workspaceId]);
 
   const [status, setStatus] = useState<BrowserExtensionStatus | null>(null);

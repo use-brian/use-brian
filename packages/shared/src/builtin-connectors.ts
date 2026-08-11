@@ -102,8 +102,16 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'googleTasksDeleteTask', description: 'Delete a task', classification: 'write', defaultPolicy: 'ask' },
   ],
   gmail: [
-    { name: 'gmailListMessages', description: 'Search Gmail messages', classification: 'read', defaultPolicy: 'allow' },
-    { name: 'gmailGetMessage', description: 'Read a specific email', classification: 'read', defaultPolicy: 'allow' },
+    // Read tools are phase-gated (require the restricted `gmail.readonly`
+    // scope + a Google CASA audit; `OFFICIAL_OAUTH_SCOPES.gmail` requests
+    // `gmail.send` only). `createGmailTools()` returns just `sendMessage`,
+    // so listing them here advertised a grant the model could never use:
+    // the tools page offered an allow/ask/block toggle, the user granted
+    // it, and the assistant still reported no read access. Uncomment here
+    // + in `createGmailTools()` + in `INJECTED_BUILTIN_TOOLS_BY_CONNECTOR`
+    // when the scope lands. Same phase-gate shape as gdrive below.
+    // { name: 'gmailListMessages', description: 'Search Gmail messages', classification: 'read', defaultPolicy: 'allow' },
+    // { name: 'gmailGetMessage', description: 'Read a specific email', classification: 'read', defaultPolicy: 'allow' },
     { name: 'gmailSendMessage', description: 'Send an email (can attach workspace files)', classification: 'write', defaultPolicy: 'ask' },
   ],
   notion: [
@@ -194,7 +202,9 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'shopifyRefundOrder', description: 'Refund an order in full or by line item', classification: 'destructive', defaultPolicy: 'ask', group: 'orders' },
     { name: 'shopifySearchCustomers', description: 'Search customers by email, name, or tag', classification: 'read', defaultPolicy: 'allow', group: 'customers' },
     { name: 'shopifyGetCustomer', description: 'Get a customer with order count and total spent', classification: 'read', defaultPolicy: 'allow', group: 'customers' },
+    { name: 'shopifyPreviewCustomerSegment', description: 'Count a subscribed campaign audience without returning customer emails', classification: 'read', defaultPolicy: 'allow', group: 'customers' },
     { name: 'shopifyUpdateCustomer', description: 'Update a customer note or tags (never marketing consent)', classification: 'write', defaultPolicy: 'ask', group: 'customers' },
+    { name: 'shopifyCreateCustomerSegment', description: 'Create or reuse a saved subscribed customer segment', classification: 'write', defaultPolicy: 'ask', group: 'customers' },
     { name: 'shopifyGetPayoutsSummary', description: 'Get Shopify Payments balance and recent payouts', classification: 'read', defaultPolicy: 'allow', group: 'finance' },
     { name: 'shopifyListDisputes', description: 'List Shopify Payments disputes and chargebacks', classification: 'read', defaultPolicy: 'allow', group: 'finance' },
     { name: 'shopifyListDiscounts', description: 'List discount and promo codes with status and usage counts', classification: 'read', defaultPolicy: 'allow', group: 'marketing' },

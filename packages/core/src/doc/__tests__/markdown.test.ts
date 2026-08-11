@@ -367,6 +367,91 @@ describe('[COMP:doc/markdown-normalizer] List-item text lift (pre-validation)', 
     })
   })
 
+  // Repair #4 (2026-08-10, page c4b2f11a): the model authors `richText`
+  // itself and puts inline text DIRECTLY under `doc`. That validates
+  // (richText is an opaque `z.record`) and persists, then a browser's
+  // y-prosemirror deletes the block from the shared Y.Doc on first open —
+  // the user sees headings with no content. See `normalizeRichTextContent`.
+  describe('liftListItemText — bare-inline richText', () => {
+    const bareInline = (text: string) => ({
+      type: 'doc',
+      content: [{ type: 'text', text }],
+    })
+
+    for (const kind of [
+      'bulleted_list_item',
+      'numbered_list_item',
+      'to_do',
+      'toggle',
+      'quote',
+      'callout',
+    ]) {
+      it(`paragraph-wraps unwrapped inline text on ${kind}`, () => {
+        const lifted = liftListItemText({
+          kind,
+          id: 'b1',
+          richText: bareInline('Ship the thing'),
+        }) as Record<string, unknown>
+        const doc = lifted.richText as { content: { type: string }[] }
+        expect(doc.content[0].type).toBe('paragraph')
+        expect(richPlain(lifted.richText)).toBe('Ship the thing')
+      })
+    }
+
+    it('groups a run of inline nodes into ONE paragraph, not one each', () => {
+      const lifted = liftListItemText({
+        kind: 'bulleted_list_item',
+        id: 'b1',
+        richText: {
+          type: 'doc',
+          content: [
+            { type: 'text', text: 'bold', marks: [{ type: 'bold' }] },
+            { type: 'text', text: ' tail' },
+          ],
+        },
+      }) as Record<string, unknown>
+      const doc = lifted.richText as { content: { type: string; content: unknown[] }[] }
+      expect(doc.content).toHaveLength(1)
+      expect(doc.content[0].content).toHaveLength(2)
+      expect(richPlain(lifted.richText)).toBe('bold tail')
+    })
+
+    it('leaves an already-canonical richText by reference', () => {
+      const canonical = {
+        kind: 'bulleted_list_item',
+        id: 'b1',
+        richText: {
+          type: 'doc',
+          content: [{ type: 'paragraph', content: [{ type: 'text', text: 'ok' }] }],
+        },
+      }
+      expect(liftListItemText(canonical)).toBe(canonical)
+    })
+
+    it('is idempotent — a second pass changes nothing', () => {
+      const once = liftListItemText({
+        kind: 'quote',
+        id: 'q1',
+        richText: bareInline('quoted'),
+      })
+      expect(liftListItemText(once)).toBe(once)
+    })
+
+    it('repairs a container child too (recursion still applies)', () => {
+      const lifted = liftListItemText({
+        kind: 'toggle',
+        id: 'g1',
+        richText: bareInline('summary'),
+        children: [
+          { kind: 'bulleted_list_item', id: 'c1', richText: bareInline('child') },
+        ],
+      }) as Record<string, unknown>
+      const child = (lifted.children as Record<string, unknown>[])[0]
+      const doc = child.richText as { content: { type: string }[] }
+      expect(doc.content[0].type).toBe('paragraph')
+    })
+  })
+
   describe('liftListItemText — mirror slip (richText on a plain kind)', () => {
     for (const kind of ['text', 'heading'] as const) {
       it(`flattens a richText doc into plain text on ${kind}`, () => {

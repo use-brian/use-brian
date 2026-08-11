@@ -1,15 +1,12 @@
 /**
- * [COMP:app-web/feed-draft-sessions] Draft sessions (list + detail) —
- * static render contracts + the ported pure helpers.
+ * [COMP:app-web/feed-draft-sessions] Draft-session list render contracts and
+ * pure helpers.
  *
  * vitest in app-web is node-only — `renderToString` + module mocks (the
  * feed-inbox test shape). Effects never run under SSR, so the list always
- * paints its loading skeleton and the detail its loading-conversation
- * shell; the connect-first / not-connected gates render when the platform
- * has no profile. Everything interactive (streams, SSE, approve/reject)
- * is web-QA. The pure helpers exported from both pages (URL parsing,
- * status derivation, proposeDrafts replay, the SSE frame parser) carry
- * the port's logic contracts and are asserted directly.
+ * paints its loading skeleton. The no-brand and unconnected-platform paths
+ * are rendered explicitly. Interactive list behavior remains web-QA; the
+ * exported URL, status, filter, and card helpers are asserted directly.
  *
  * SSR quirk: adjacent text/expression JSX renders with comment-node
  * separators — assertions stick to substrings that live inside a single

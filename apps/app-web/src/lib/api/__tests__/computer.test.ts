@@ -210,13 +210,22 @@ describe('[COMP:app-web/profile-management] Profile-Management SDK (R2-4)', () =
     mockFetch.mockResolvedValueOnce(
       respond(200, { profile: { id: 'p2', name: 'Company IG', clearance: 'confidential' } }),
     )
-    const created = await createBrowserProfile({ workspaceId: 'ws-1', name: 'Company IG' })
+    const created = await createBrowserProfile({
+      workspaceId: 'ws-1',
+      name: 'Company IG',
+      defaultBackend: 'local',
+    })
     expect(created?.id).toBe('p2')
     expect(created?.sessions).toEqual([])
     expect(created?.credentials).toEqual([])
     const create = mockFetch.mock.calls.at(-1)!
     expect(String(create[0])).toContain('/api/computer/profiles')
     expect(create[1]).toMatchObject({ method: 'POST' })
+    expect(JSON.parse(create[1]!.body as string)).toEqual({
+      workspaceId: 'ws-1',
+      name: 'Company IG',
+      defaultBackend: 'local',
+    })
 
     await updateBrowserProfile('p2', {
       clearance: 'internal',

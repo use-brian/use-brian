@@ -91,6 +91,8 @@ import {
   getOrder as getShopifyOrder,
   searchCustomers as searchShopifyCustomers,
   getCustomer as getShopifyCustomer,
+  previewCustomerSegment as previewShopifyCustomerSegment,
+  createCustomerSegment as createShopifyCustomerSegment,
   getInventoryLevels as getShopifyInventoryLevels,
   listCollections as listShopifyCollections,
   listDraftOrders as listShopifyDraftOrders,
@@ -223,11 +225,17 @@ export const INJECTED_BUILTIN_TOOLS_BY_CONNECTOR: Record<string, readonly string
     'googleTasksDeleteTask',
   ],
   gmail: [
-    'gmailListMessages',
-    'gmailGetMessage',
+    // 'gmailListMessages' / 'gmailGetMessage' are phase-gated off in
+    // `createGmailTools()` (need the restricted gmail.readonly scope).
+    // Listing them here made the drift sweep agree with the governance
+    // table while neither matched the builder — see the phase-gate note
+    // in `OFFICIAL_CONNECTOR_TOOLS.gmail`.
     'gmailSendMessage',
   ],
   gdrive: [
+    // `createGoogleDriveTools()` returns these three under drive.file;
+    // `googleDriveCreateFile` / `googleDriveUpdateFile` stay phase-gated off
+    // there and in `OFFICIAL_CONNECTOR_TOOLS`, same shape as gmail above.
     'googleDriveListFiles',
     'googleDriveGetFile',
     'googleDriveGetFileContent',
@@ -290,6 +298,7 @@ export const INJECTED_BUILTIN_TOOLS_BY_CONNECTOR: Record<string, readonly string
     'shopifyGetOrder',
     'shopifySearchCustomers',
     'shopifyGetCustomer',
+    'shopifyPreviewCustomerSegment',
     'shopifyGetInventoryLevels',
     'shopifyListCollections',
     'shopifyListDraftOrders',
@@ -317,6 +326,7 @@ export const INJECTED_BUILTIN_TOOLS_BY_CONNECTOR: Record<string, readonly string
     'shopifySendDraftOrderInvoice',
     'shopifyAddTags',
     'shopifyUpdateCustomer',
+    'shopifyCreateCustomerSegment',
     'shopifySetInventory',
     'shopifyCreateFulfillment',
     'shopifyCreateDiscountCode',
@@ -3641,6 +3651,7 @@ async function injectShopifyTools(
       getOrder: async (orderId) => getShopifyOrder(await tm.getAuth(), orderId),
       searchCustomers: async (params) => searchShopifyCustomers(await tm.getAuth(), params),
       getCustomer: async (customerId) => getShopifyCustomer(await tm.getAuth(), customerId),
+      previewCustomerSegment: async (params) => previewShopifyCustomerSegment(await tm.getAuth(), params),
       getInventoryLevels: async (params) => getShopifyInventoryLevels(await tm.getAuth(), params),
       listCollections: async (params) => listShopifyCollections(await tm.getAuth(), params),
       listDraftOrders: async (params) => listShopifyDraftOrders(await tm.getAuth(), params),
@@ -3658,6 +3669,7 @@ async function injectShopifyTools(
       sendDraftOrderInvoice: async (draftOrderId) => sendShopifyDraftOrderInvoice(await tm.getAuth(), draftOrderId),
       addTags: async (resource, resourceId, tags) => addShopifyTags(await tm.getAuth(), resource, resourceId, tags),
       updateCustomer: async (params) => updateShopifyCustomer(await tm.getAuth(), params),
+      createCustomerSegment: async (params) => createShopifyCustomerSegment(await tm.getAuth(), params),
       setInventoryQuantity: async (params) => setShopifyInventoryQuantity(await tm.getAuth(), params),
       createFulfillment: async (params) => createShopifyFulfillment(await tm.getAuth(), params),
       createDiscountCode: async (params) => createShopifyDiscountCode(await tm.getAuth(), params),

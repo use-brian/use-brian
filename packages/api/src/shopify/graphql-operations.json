@@ -64,6 +64,17 @@
       "deprecations": []
     },
     {
+      "name": "CreateCustomerSegment",
+      "kind": "mutation",
+      "hash": "38039aec918796c0",
+      "valid": true,
+      "scopes": [
+        "write_customers",
+        "read_customers"
+      ],
+      "deprecations": []
+    },
+    {
       "name": "CreateDiscountCode",
       "kind": "mutation",
       "hash": "b74bf21f40e33792",
@@ -138,6 +149,16 @@
       "deprecations": []
     },
     {
+      "name": "FindCustomerSegment",
+      "kind": "query",
+      "hash": "72533d2413ef8048",
+      "valid": true,
+      "scopes": [
+        "read_customers"
+      ],
+      "deprecations": []
+    },
+    {
       "name": "FirstBlog",
       "kind": "query",
       "hash": "4a5c50d81502c3e1",
@@ -186,10 +207,16 @@
     {
       "name": "GetProduct",
       "kind": "query",
-      "hash": "da8e6ff894b7a006",
+      "hash": "4f120d4b18694e43",
       "valid": true,
       "scopes": [
-        "read_products"
+        "read_products",
+        "read_files",
+        "read_themes",
+        "read_orders",
+        "read_draft_orders",
+        "read_images",
+        "read_quick_sale"
       ],
       "deprecations": []
     },
@@ -319,10 +346,16 @@
     {
       "name": "ListProducts",
       "kind": "query",
-      "hash": "6c3376587f74c833",
+      "hash": "9723b7443f56b291",
       "valid": true,
       "scopes": [
-        "read_products"
+        "read_products",
+        "read_files",
+        "read_themes",
+        "read_orders",
+        "read_draft_orders",
+        "read_images",
+        "read_quick_sale"
       ],
       "deprecations": []
     },
@@ -362,6 +395,14 @@
         "read_shopify_payments_accounts",
         "read_shopify_payments_payouts"
       ],
+      "deprecations": []
+    },
+    {
+      "name": "PreviewCustomerSegment",
+      "kind": "query",
+      "hash": "a244c4b356349405",
+      "valid": true,
+      "scopes": [],
       "deprecations": []
     },
     {

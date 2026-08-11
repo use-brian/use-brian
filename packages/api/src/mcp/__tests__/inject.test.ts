@@ -114,6 +114,8 @@ import {
   INJECTED_BUILTIN_TOOLS_BY_CONNECTOR,
   _getMcpDiscoveryCacheSize,
 } from '../inject.js'
+import { createGmailTools, createGoogleDriveTools } from '@use-brian/core'
+import { OFFICIAL_CONNECTOR_TOOLS } from '@use-brian/shared/builtin-connectors'
 import { buildUnavailableCapabilitiesPrompt } from '../../routes/route-helpers.js'
 import { packMsGraphTokens } from '../../msgraph/token.js'
 import { packGoogleRefreshCredential } from '../../google/client.js'
@@ -774,6 +776,45 @@ describe('[COMP:api/mcp-inject] INJECTED_BUILTIN_TOOLS_BY_CONNECTOR', () => {
       expect(new Set(toolNames).size, `${connector} has duplicate tool names`).toBe(toolNames.length)
     }
   })
+
+  // Regression: both static tables are hand-maintained, and the Drift Sweep
+  // page only diffs them against EACH OTHER — so a tool phase-gated OFF in
+  // its `createXxxTools()` return array but left listed in both tables reads
+  // as "no drift" while being uncallable. That is how Gmail shipped
+  // `gmailListMessages` / `gmailGetMessage` as grantable toggles on the
+  // assistant tools page for a connector whose only OAuth scope is
+  // `gmail.send`: a user granted read access, and the assistant still
+  // (correctly) reported it could not read mail. The builder is the truth;
+  // anchor both tables to it for the phase-gated Google connectors.
+  const PHASE_GATED_BUILDERS: Array<{ connectorId: string; build: () => { name: string }[] }> = [
+    { connectorId: 'gmail', build: () => createGmailTools({} as never) },
+    { connectorId: 'gdrive', build: () => createGoogleDriveTools({} as never) },
+  ]
+
+  for (const { connectorId, build } of PHASE_GATED_BUILDERS) {
+    it(`only advertises ${connectorId} tools that the builder actually returns`, () => {
+      const built = new Set(build().map((t) => t.name))
+      const injected = INJECTED_BUILTIN_TOOLS_BY_CONNECTOR[connectorId] ?? []
+      const governed = (OFFICIAL_CONNECTOR_TOOLS[connectorId] ?? []).map((t) => t.name)
+
+      // Tools from OTHER builders share a connector row (gdrive carries the
+      // Docs / Sheets / Slides / picker sets), so only assert the direction
+      // that phase-gating breaks: nothing this builder gates off may remain
+      // listed. A name the builder does return must be listed in both.
+      for (const name of built) {
+        expect(injected, `${connectorId}: ${name} is built but missing from INJECTED_BUILTIN_TOOLS_BY_CONNECTOR`)
+          .toContain(name)
+        expect(governed, `${connectorId}: ${name} is built but missing from OFFICIAL_CONNECTOR_TOOLS`)
+          .toContain(name)
+      }
+
+      const ownPrefix = connectorId === 'gmail' ? 'gmail' : 'googleDrive'
+      const phantomInjected = injected.filter((n) => n.startsWith(ownPrefix) && !built.has(n))
+      const phantomGoverned = governed.filter((n) => n.startsWith(ownPrefix) && !built.has(n))
+      expect(phantomInjected, `${connectorId}: listed in INJECTED_BUILTIN_TOOLS_BY_CONNECTOR but never built`).toEqual([])
+      expect(phantomGoverned, `${connectorId}: grantable in the tools page but never built`).toEqual([])
+    })
+  }
 })
 
 describe('[COMP:api/mcp-inject] multi-instance built-ins', () => {

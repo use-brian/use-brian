@@ -36,6 +36,7 @@ import {
 } from "@/lib/shopify-view";
 import { cn } from "@/lib/utils";
 import { AnalyseTab } from "./analyse-tab";
+import { CampaignTab } from "./campaign-tab";
 import { DraftTab } from "./draft-tab";
 import { InventoryTab } from "./inventory-tab";
 import { Note } from "./shopify-shared";
@@ -49,6 +50,7 @@ export function ShopifySurface({ workspaceId }: { workspaceId: string }) {
 
   const [state, setState] = useState<"loading" | "ready" | "empty" | "error">("loading");
   const [error, setError] = useState<string | null>(null);
+  const [availableTools, setAvailableTools] = useState<string[]>([]);
 
   // `replace`, not `push`: flipping between sections is a view change, not a
   // place you should have to press back through three times to leave.
@@ -65,6 +67,7 @@ export function ShopifySurface({ workspaceId }: { workspaceId: string }) {
       try {
         const res = await listTools(workspaceId);
         if (!alive) return;
+        setAvailableTools(res.tools);
         setState(res.connected ? "ready" : "empty");
       } catch (err) {
         if (!alive) return;
@@ -81,6 +84,7 @@ export function ShopifySurface({ workspaceId }: { workspaceId: string }) {
     draft: t.shopifyApp.tabDraft,
     inventory: t.shopifyApp.tabInventory,
     analyse: t.shopifyApp.tabAnalyse,
+    campaign: t.shopifyApp.tabCampaign,
   };
 
   return (
@@ -143,6 +147,9 @@ export function ShopifySurface({ workspaceId }: { workspaceId: string }) {
               {section === "draft" ? <DraftTab workspaceId={workspaceId} /> : null}
               {section === "inventory" ? <InventoryTab workspaceId={workspaceId} /> : null}
               {section === "analyse" ? <AnalyseTab workspaceId={workspaceId} /> : null}
+              {section === "campaign" ? (
+                <CampaignTab workspaceId={workspaceId} availableTools={availableTools} />
+              ) : null}
             </>
           ) : null}
         </div>

@@ -2,8 +2,8 @@
 /**
  * [COMP:app-web/browsers-surface] Browsers index empty state.
  *
- * With no live session, this route must teach both entry paths: ask the
- * assistant to browse, or open Browser profiles to connect the user's Chrome.
+ * Profile management has its own top-bar mode; this route stays a focused
+ * live-browser canvas when no session is selected.
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -12,19 +12,12 @@ import { createRoot, type Root } from "react-dom/client";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-vi.mock("@/components/computer/browser-profiles-section", () => ({
-  BrowserProfilesSection: () => <div>Profile management</div>,
-}));
 vi.mock("@/lib/i18n/client", () => ({
   useT: () => ({
     computer: {
       sessions: {
         selectTitle: "Watch a live browser",
         selectHint: "Ask your assistant to browse.",
-        connectTitle: "Use your own Chrome",
-        connectHint: "Install the extension and pair My Browser.",
-        installAction: "Install extension",
-        connectAction: "Pair in Browser profiles",
       },
     },
   }),
@@ -51,42 +44,30 @@ afterEach(() => {
 });
 
 describe("[COMP:app-web/browsers-surface] Browsers index empty state", () => {
-  it("owns Profile management instead of redirecting into Settings", async () => {
+  it("renders the live-browser landing state without profile management", async () => {
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
-    await act(async () =>
-      root?.render(
-        <BrowsersIndexPage params={Promise.resolve({ workspaceId: "ws-1" })} />,
-      ),
-    );
+    await act(async () => root?.render(<BrowsersIndexPage />));
 
-    expect(container.textContent).toContain("Profile management");
-    expect(container.querySelector("#browser-profiles")).not.toBeNull();
+    expect(container.textContent).toContain("Watch a live browser");
+    expect(container.textContent).not.toContain("Profile management");
   });
 
-  it("explains how to connect My Browser when no session is live", async () => {
+  it("explains how to select or wait for a live session", async () => {
     await mount();
 
-    expect(container?.textContent).toContain("Use your own Chrome");
-    expect(container?.textContent).toContain("Install the extension and pair My Browser.");
-    expect(container?.textContent).toContain("Install extension");
-    expect(container?.textContent).toContain("Pair in Browser profiles");
+    expect(container?.textContent).toContain("Watch a live browser");
+    expect(container?.textContent).toContain("Ask your assistant to browse.");
+    expect(container?.querySelector("a")).toBeNull();
   });
 
-  it("links directly to the browser extension install destination", async () => {
+  it("centers the empty live canvas", async () => {
     await mount();
-    const install = container?.querySelector("a");
 
-    expect(install?.getAttribute("href")).toContain("chromewebstore.google.com");
-    expect(install?.getAttribute("target")).toBe("_blank");
-    expect(install?.getAttribute("rel")).toBe("noopener noreferrer");
-  });
-
-  it("links to Browser profiles inside the Browsers mini app", async () => {
-    await mount();
-    const links = [...(container?.querySelectorAll("a") ?? [])];
-    const profiles = links.find((link) => link.textContent === "Pair in Browser profiles");
-    expect(profiles?.getAttribute("href")).toBe("#browser-profiles");
+    const emptyState = container?.firstElementChild;
+    expect(emptyState?.classList.contains("items-center")).toBe(true);
+    expect(emptyState?.classList.contains("justify-center")).toBe(true);
+    expect(emptyState?.classList.contains("h-full")).toBe(true);
   });
 });
