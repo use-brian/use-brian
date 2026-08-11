@@ -112,6 +112,18 @@ describe("[COMP:msgraph/oauth] Microsoft Graph connector OAuth", () => {
     expect(shouldCollectWorkspaceMsGraphApp(workspace, true)).toBe(false);
   });
 
+  it("keeps workspace app settings reachable after credentials are saved", () => {
+    const page = readFileSync(
+      resolve(process.cwd(), "src/app/w/[workspaceId]/studio/connectors/page.tsx"),
+      "utf8",
+    );
+
+    expect(page).toContain("openMsGraphAppEditor");
+    expect(page).toContain("tc.msgraph.editLink");
+    expect(page).toContain('setMsGraphAppId(status?.workspaceOwned ? (status.clientId ?? "") : "")');
+    expect(page).toContain('setMsGraphTenantId(status?.workspaceOwned ? (status.tenantId ?? "") : "")');
+  });
+
   /**
    * The load-bearing boundary of the workspace-owned-app design: the client
    * secret may belong to a CUSTOMER (their own Entra registration, stored

@@ -2112,6 +2112,23 @@ function ConnectorsList() {
     }
   }
 
+  /** Open the workspace app editor without starting OAuth. The public fields
+   *  are safe to prefill; the client secret remains write-only and must be
+   *  pasted again when replacing the registration. */
+  async function openMsGraphAppEditor(c: Connector) {
+    const rid = rowId(c);
+    setConnecting(rid);
+    setMsGraphError(null);
+    const status = await fetchMsGraphAppStatus();
+    setConnecting(null);
+    setMsGraphAppId(status?.workspaceOwned ? (status.clientId ?? "") : "");
+    setMsGraphAppSecret("");
+    setMsGraphTenantId(status?.workspaceOwned ? (status.tenantId ?? "") : "");
+    setMsGraphConnectOpts({ instanceId: c.connectorInstanceId });
+    setShowMsGraphForm(rid);
+    if (!status) setMsGraphError(tc.msgraph.errSave);
+  }
+
   function startMsGraphAuthorize(input: {
     clientId: string;
     tenant?: string | null;
@@ -2186,11 +2203,18 @@ function ConnectorsList() {
     });
     if (!ok) return;
     try {
-      await authFetch(
+      const res = await authFetch(
         `${API_URL}/api/connectors/msgraph/app-credentials?workspaceId=${encodeURIComponent(workspaceId)}`,
         { method: "DELETE" },
       );
+      if (!res.ok) {
+        setMsGraphError(tc.msgraph.errSave);
+        return;
+      }
       await fetchMsGraphAppStatus();
+      setMsGraphAppId("");
+      setMsGraphAppSecret("");
+      setMsGraphTenantId("");
     } catch {
       setMsGraphError(tc.msgraph.errSave);
     }
@@ -3795,6 +3819,19 @@ function ConnectorsList() {
                   )}
                   {/* Connect another account — for multi-instance providers that
                       already have a connected primary. Shown once, on the primary row. */}
+                  {/* Workspace Entra credentials outlive connector instances,
+                      so their editor must remain reachable independently of the
+                      Connect/Remove lifecycle. */}
+                  {sel.id === "msgraph" && showMsGraphForm !== rid && (
+                    <button
+                      type="button"
+                      onClick={() => void openMsGraphAppEditor(sel)}
+                      disabled={connecting === rid}
+                      className="text-xs font-medium border border-border px-3 py-1 rounded-lg text-muted-foreground hover:text-foreground hover:border-primary/30 transition-colors disabled:opacity-50"
+                    >
+                      {tc.msgraph.editLink}
+                    </button>
+                  )}
                   {sel.connected && sel.addable && sel.isPrimary && (
                     <button
                       onClick={() => handleAddAnother(sel)}
@@ -4032,14 +4069,16 @@ function ConnectorsList() {
                   </div>
                 )}
 
-                {/* Shopify connect form — store domain (resolved to the
-                    canonical myshopify host) then a pasted Admin API token,
-                    which the server verifies against the store before saving.
-                    There is deliberately no OAuth button: see
-                    docs/architecture/integrations/shopify.md → "Auth model". */}
+                {/* Microsoft Teams workspace app registration. Public ids can
+                    be loaded for editing; the secret is always write-only. */}
                 {showMsGraphForm === rid && (
                   <div className="space-y-2">
                     <p className="text-xs text-muted-foreground">{tc.msgraph.formHelp}</p>
+                    {msgraphStatus?.workspaceOwned && (
+                      <p className="text-[11px] text-muted-foreground">
+                        {tc.msgraph.workspaceCredentialNote}
+                      </p>
+                    )}
                     <input
                       type="text"
                       placeholder={tc.msgraph.appIdPlaceholder}
