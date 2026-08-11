@@ -20,6 +20,16 @@ browser-relay (`apps/browser-relay`); the app-web connect surface is
 - `firefox-background.ts` / `firefox-native-client.ts` — Firefox relay/consent wiring and the fixed-operation native-messaging bridge to either the standalone companion or the installed Electron app (`[COMP:ext/firefox-agent]`).
 - `firefox-popup.ts` / `firefox-allow.ts` — the Firefox pages, visually matched to the Chromium popup/allow pages.
 
+## Browser-specific builds
+
+- `pnpm build` compiles the Chromium entrypoints and their imports into `dist/`.
+- `pnpm build:firefox` compiles the Firefox entrypoints and their imports into `dist-firefox/`.
+- Each command cleans only its own output first. Never compile all `src/` files
+  into `dist/`: that leaks Firefox code, declarations, source maps, and stale
+  deleted files into the Chrome Web Store package.
+- Package the contents of `dist/` for Chrome and `dist-firefox/` for Firefox;
+  neither output is a combined cross-browser extension.
+
 ## Governance guardrail (my-browser.md §4 D4 / §6) — WIDEN ONLY THROUGH PROFILE POLICY
 
 The narrow surface **is** the feature. The extension:
