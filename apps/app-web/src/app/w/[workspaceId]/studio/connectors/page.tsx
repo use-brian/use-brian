@@ -57,6 +57,7 @@ import { useParams } from "next/navigation";
 import { Check, Download, FolderOpen, Pencil, Upload, X } from "lucide-react";
 import { authFetch } from "@/lib/auth-fetch";
 import { BrowseDirectory } from "./browse-directory";
+import { resolveDirectoryConnectRow } from "@/lib/connector-directory-connect";
 import { DrivePicker, type PickedFile } from "@/components/drive-picker";
 import { ConnectorToolList, type ToolPolicy } from "@/components/connectors/connector-tool-list";
 import { ConnectorIcon } from "@/components/connectors/connector-icon";
@@ -1642,6 +1643,23 @@ function ConnectorsList() {
   // `opts.addAnother` connects a NEW account for a provider that already has
   // one (OAuth state carries an `:add` suffix so the callback creates a fresh
   // instance instead of overwriting the first).
+  /**
+   * Put an inline connect form on screen.
+   *
+   * `handleConnect` answers some connectors with a form rendered inside the
+   * SELECTED row's detail panel instead of a redirect. Rail callers are on
+   * that row already and the `?connect=` deep link selects before it fires,
+   * so the form was only ever visible by the caller's good manners. The
+   * Directory modal is neither on the row nor dismissed, so a Shopify connect
+   * from there set state nobody rendered and read as a dead button. Selecting
+   * here (a directory-only row surfaces through `selectedHiddenAvailable`) and
+   * closing the modal makes the form reachable from every entry point.
+   */
+  function revealConnectForm(rid: string) {
+    setSelected(rid);
+    setShowBrowse(false);
+  }
+
   async function handleConnect(c: Connector, opts?: { addAnother?: boolean; instanceId?: string }) {
     const id = c.id;
     const rid = rowId(c);
@@ -1650,6 +1668,7 @@ function ConnectorsList() {
     // PAT connectors — show inline token input instead of connecting immediately
     if (isPatConnector(id)) {
       setShowPatInput(rid);
+      revealConnectForm(rid);
       setConnecting(null);
       return;
     }
@@ -1658,6 +1677,7 @@ function ConnectorsList() {
     // server-side) instead of the generic mark-connected POST.
     if (id === "gcs") {
       setShowGcsForm(rid);
+      revealConnectForm(rid);
       setGcsError(null);
       setConnecting(null);
       return;
@@ -1667,6 +1687,7 @@ function ConnectorsList() {
     // (validated server-side) instead of the generic mark-connected POST.
     if (id === "s3") {
       setShowS3Form(rid);
+      revealConnectForm(rid);
       setS3Error(null);
       setConnecting(null);
       return;
@@ -1767,6 +1788,7 @@ function ConnectorsList() {
         setMsGraphConnectOpts(opts ?? null);
         setMsGraphError(null);
         setShowMsGraphForm(rid);
+        revealConnectForm(rid);
         return;
       }
       startMsGraphAuthorize({ clientId: status.clientId, tenant: status.tenantId, opts });
@@ -1781,6 +1803,7 @@ function ConnectorsList() {
     // Shopify connect falls through to the GOOGLE authorize URL.
     if (id === "shopify") {
       setShowShopifyForm(rid);
+      revealConnectForm(rid);
       setShopifyConnectOpts(opts ?? null);
       setShopifyError(null);
       setConnecting(null);
@@ -3154,7 +3177,12 @@ function ConnectorsList() {
         // OAuth entries (Google/Notion/Fathom) connect + "Add another"
         // through this page's per-provider OAuth flow, which threads the
         // `[:add]:<workspaceId>` state the callbacks expect.
-        onOauthConnect={(entry, opts) => handleConnect({ id: entry.id } as Connector, opts)}
+        // Resolve the real row first: a synthetic `{ id }` carries no
+        // `connectorInstanceId`, so its `rowId` is the slug while the rail
+        // row's is the instance UUID, and no `showXForm === rid` can match.
+        onOauthConnect={(entry, opts) =>
+          handleConnect(resolveDirectoryConnectRow(connectors, entry.id) as Connector, opts)
+        }
       />
 
       {gdriveError && (

@@ -30,6 +30,7 @@ import { authFetch } from "@/lib/auth-fetch";
 import {
   CAMPAIGN_IMAGE_MIME,
   MAX_CAMPAIGN_IMAGE_BYTES,
+  campaignProductQuery,
   createDefaultCampaignDraft,
   readCampaignStorage,
   recordPreparedCampaign,
@@ -64,7 +65,7 @@ type ProductPage = {
     featured_image_alt?: string;
   }>;
   has_next_page?: boolean;
-  next_cursor?: string;
+  end_cursor?: string;
 };
 
 type DiscountPage = {
@@ -98,6 +99,9 @@ type UploadedCampaignFile = {
 const inputClass = "h-9 w-full rounded-lg border border-border bg-background px-3 text-sm";
 const textAreaClass = "w-full rounded-lg border border-border bg-background px-3 py-2 text-sm";
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+/** `shopifyListProducts` caps a page at 50 rows, so this is the largest page there is. */
+const PRODUCT_PAGE_SIZE = 50;
+const PRODUCT_SEARCH_DEBOUNCE_MS = 300;
 const CAMPAIGN_TOOLS = [
   "shopifyGetShop",
   "shopifyListProducts",
@@ -141,6 +145,13 @@ function campaignProduct(item: NonNullable<ProductPage["items"]>[number]): Campa
   };
 }
 
+/** The in-stock products of one `shopifyListProducts` page, in the order Shopify returned them. */
+function inStockProducts(page: ProductPage): CampaignProduct[] {
+  return (page.items ?? [])
+    .map(campaignProduct)
+    .filter((product): product is CampaignProduct => !!product);
+}
+
 function productImage(product: CampaignProduct | undefined): CampaignProductImage | undefined {
   if (!product?.imageUrl) return undefined;
   return {
@@ -172,6 +183,9 @@ export function CampaignTab({
   const [products, setProducts] = useState<CampaignProduct[] | null>(null);
   const [moreProducts, setMoreProducts] = useState(false);
   const [productCursor, setProductCursor] = useState<string | null>(null);
+  const [productSearch, setProductSearch] = useState("");
+  const [appliedSearch, setAppliedSearch] = useState("");
+  const [searching, setSearching] = useState(false);
   const [automaticDiscounts, setAutomaticDiscounts] = useState<NonNullable<DiscountPage["items"]>>([]);
   const [draft, setDraft] = useState<ShopifyCampaignDraft | null>(null);
   const [history, setHistory] = useState<CampaignHistoryItem[]>([]);
@@ -182,6 +196,9 @@ export function CampaignTab({
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const ownPhotoInputRef = useRef<HTMLInputElement>(null);
+  // Every product listing carries a generation. A slower reply from an
+  // abandoned search or a superseded page must not overwrite the current one.
+  const listingRef = useRef(0);
   const missingCampaignTools = CAMPAIGN_TOOLS.filter((tool) => !availableTools.includes(tool));
 
   async function loadStore() {
@@ -190,16 +207,17 @@ export function CampaignTab({
     try {
       const [info, productPage, discountPage] = await Promise.all([
         callTool<ShopInfo>(workspaceId, "shopifyGetShop", {}),
-        callTool<ProductPage>(workspaceId, "shopifyListProducts", { query: "status:active", first: 50 }),
+        callTool<ProductPage>(workspaceId, "shopifyListProducts", {
+          query: campaignProductQuery(""),
+          first: PRODUCT_PAGE_SIZE,
+        }),
         callTool<DiscountPage>(workspaceId, "shopifyListDiscounts", { query: "status:active", first: 50 }),
       ]);
       const timeZone = info.timezone || "UTC";
       const fallback = createDefaultCampaignDraft(timeZone, info.primary_domain ?? "");
       const domain = info.myshopify_domain ?? "";
       const stored = readCampaignStorage(workspaceId, domain, fallback);
-      const loadedProducts = (productPage.items ?? [])
-        .map(campaignProduct)
-        .filter((product): product is CampaignProduct => !!product);
+      const loadedProducts = inStockProducts(productPage);
       const byId = new Map(loadedProducts.map((product) => [product.id, product]));
       const selectedProducts = stored.draft.selectedProducts.map((product) => byId.get(product.id) ?? product);
       const storedImage = stored.draft.selectedImage;
@@ -212,9 +230,12 @@ export function CampaignTab({
                 product.id === (storedImage?.kind === "product" ? storedImage.productId : undefined)),
             ) ?? selectedProducts.map(productImage).find((image): image is CampaignProductImage => !!image);
       setShop(info);
+      listingRef.current += 1;
       setProducts(loadedProducts);
       setMoreProducts(productPage.has_next_page === true);
-      setProductCursor(productPage.next_cursor ?? null);
+      setProductCursor(productPage.end_cursor ?? null);
+      setProductSearch("");
+      setAppliedSearch("");
       setAutomaticDiscounts(
         (discountPage.items ?? []).filter(
           (item) => item.kind === "automatic" && item.status?.toUpperCase() === "ACTIVE",
@@ -236,28 +257,59 @@ export function CampaignTab({
 
   async function loadMoreProducts() {
     if (!productCursor) return;
+    const generation = listingRef.current;
     setBusy("load");
     setError(null);
     try {
       const page = await callTool<ProductPage>(workspaceId, "shopifyListProducts", {
-        query: "status:active",
-        first: 50,
+        query: campaignProductQuery(appliedSearch),
+        first: PRODUCT_PAGE_SIZE,
         cursor: productCursor,
       });
-      const additions = (page.items ?? [])
-        .map(campaignProduct)
-        .filter((product): product is CampaignProduct => !!product);
+      // A search that started while this page was in flight already owns the
+      // list; appending a page of the previous query would corrupt it.
+      if (generation !== listingRef.current) return;
+      const additions = inStockProducts(page);
       setProducts((current) => {
         const byId = new Map((current ?? []).map((product) => [product.id, product]));
         for (const product of additions) byId.set(product.id, product);
         return [...byId.values()];
       });
       setMoreProducts(page.has_next_page === true);
-      setProductCursor(page.next_cursor ?? null);
+      setProductCursor(page.end_cursor ?? null);
     } catch (err) {
+      if (generation === listingRef.current) setError(toolMessage(err));
+    } finally {
+      // `busy` is owned by this call whatever happened to the listing, so it
+      // is always released; leaving it set would freeze the whole surface.
+      setBusy(null);
+    }
+  }
+
+  /** Replace the listing with the first page matching `term`. */
+  async function searchProducts(term: string) {
+    const generation = listingRef.current + 1;
+    listingRef.current = generation;
+    setSearching(true);
+    setError(null);
+    try {
+      const page = await callTool<ProductPage>(workspaceId, "shopifyListProducts", {
+        query: campaignProductQuery(term),
+        first: PRODUCT_PAGE_SIZE,
+      });
+      if (generation !== listingRef.current) return;
+      setProducts(inStockProducts(page));
+      setMoreProducts(page.has_next_page === true);
+      setProductCursor(page.end_cursor ?? null);
+      setAppliedSearch(term);
+    } catch (err) {
+      if (generation !== listingRef.current) return;
+      // The applied term still advances so a failed search is not retried on
+      // every render; the merchant retries by editing the box.
+      setAppliedSearch(term);
       setError(toolMessage(err));
     } finally {
-      setBusy(null);
+      if (generation === listingRef.current) setSearching(false);
     }
   }
 
@@ -267,6 +319,19 @@ export function CampaignTab({
     // provided because store stock can move without route navigation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
+
+  // Search is server-side: the picker shows one page at a time, so filtering
+  // what is already loaded would never reach the product the merchant means.
+  useEffect(() => {
+    const term = productSearch.trim();
+    if (products === null || term === appliedSearch) return;
+    const timer = window.setTimeout(() => {
+      void searchProducts(term);
+    }, PRODUCT_SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+    // `searchProducts` is stable in behavior and intentionally excluded.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [productSearch, appliedSearch, products]);
 
   useEffect(() => {
     if (!shop?.myshopify_domain || !draft) return;
@@ -745,6 +810,14 @@ Reply with ONLY one JSON object, no prose:
     [draft?.selectedProducts],
   );
 
+  // Selected products lead the grid so a search or a further page never hides
+  // a choice the merchant already made, and never makes it look unselected.
+  const visibleProducts = useMemo(() => {
+    const selected = draft?.selectedProducts ?? [];
+    const pinned = new Set(selected.map((product) => product.id));
+    return [...selected, ...(products ?? []).filter((product) => !pinned.has(product.id))];
+  }, [draft?.selectedProducts, products]);
+
   if (!draft || !shop || !products) {
     return (
       <div className="space-y-3">
@@ -791,14 +864,40 @@ Reply with ONLY one JSON object, no prose:
 
       <CampaignSection number="1" title={t.shopifyApp.campaignProductsTitle}>
         <p className="text-[13px] text-muted-foreground">{t.shopifyApp.campaignProductsHelp}</p>
-        {products.length === 0 ? <Note tone="muted">{t.shopifyApp.campaignNoInStockProducts}</Note> : null}
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            type="search"
+            className={cn(inputClass, "max-w-xs")}
+            value={productSearch}
+            placeholder={t.shopifyApp.campaignProductSearchPlaceholder}
+            aria-label={t.shopifyApp.campaignProductSearchLabel}
+            onChange={(event) => setProductSearch(event.target.value)}
+          />
+          {productSearch ? (
+            <Button variant="ghost" size="sm" onClick={() => setProductSearch("")}>
+              {t.shopifyApp.campaignProductSearchClear}
+            </Button>
+          ) : null}
+          {searching ? (
+            <span className="text-[12px] text-muted-foreground">{t.shopifyApp.campaignProductSearching}</span>
+          ) : null}
+        </div>
+        {products.length === 0 && !searching ? (
+          <Note tone="muted">
+            {appliedSearch
+              ? t.shopifyApp.campaignNoProductMatches
+              : t.shopifyApp.campaignNoInStockProducts}
+          </Note>
+        ) : null}
         {moreProducts ? (
           <div className="flex flex-wrap items-center gap-2">
-            <Note>{t.shopifyApp.campaignProductLimit}</Note>
+            <Note>
+              {appliedSearch ? t.shopifyApp.campaignSearchLimit : t.shopifyApp.campaignProductLimit}
+            </Note>
             <Button
               variant="outline"
               size="sm"
-              disabled={busy !== null || !productCursor}
+              disabled={busy !== null || searching || !productCursor}
               onClick={() => void loadMoreProducts()}
             >
               {t.shopifyApp.campaignLoadMoreProducts}
@@ -806,7 +905,7 @@ Reply with ONLY one JSON object, no prose:
           </div>
         ) : null}
         <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
-          {products.map((product) => (
+          {visibleProducts.map((product) => (
             <label
               key={product.id}
               className={cn(choiceClass(selectedIds.has(product.id)), audienceLocked && "opacity-70")}

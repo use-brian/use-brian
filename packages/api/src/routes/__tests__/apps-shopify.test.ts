@@ -65,6 +65,37 @@ describe('[COMP:api/apps-shopify-route] the resolver decides, the route executes
     expect(res.body.error).toBe('tool_not_available')
   })
 
+  it('asks the resolver for the ONE destructive tool this surface may reach, and no other', async () => {
+    // `alsoAllow` is a literal of names, not a tier or a flag - so the
+    // widening is enumerable by reading it and cannot grow by class. The three
+    // destructive tools that move money stay out; the one whose containment is
+    // server-enforced and whose write is inert comes in.
+    const { a, storeTools } = app([tool('shopifyGetShop')])
+    await request(a).get(`/api/apps/shopify/tools?workspaceId=${WS}`)
+    // Asserted as an EXACT array rather than a `toContain`: the point is what
+    // is absent, and a containment check would pass on a list that had grown.
+    expect(storeTools).toHaveBeenCalledWith(
+      expect.objectContaining({ alsoAllow: ['shopifyCreateProductTemplate'] }),
+    )
+  })
+
+  it('executes shopifyCreateProductTemplate once the resolver returns it', async () => {
+    const exec = vi.fn(async () => ({ data: { filename: 'templates/product.amla.json' } }))
+    const { a } = app([tool('shopifyCreateProductTemplate', exec)])
+    const res = await request(a).post('/api/apps/shopify/call')
+      .send({ workspaceId: WS, tool: 'shopifyCreateProductTemplate', args: {} })
+    expect(res.status).toBe(200)
+    expect(exec).toHaveBeenCalled()
+  })
+
+  it('does NOT widen the assistant consult', async () => {
+    // A model choosing to write a theme file is a different decision from a
+    // merchant clicking a confirm, so `/ask` keeps the ceiling it always had.
+    const { a, askAssistant } = app([tool('shopifyGetShop')])
+    await request(a).post('/api/apps/shopify/ask').send({ workspaceId: WS, task: 'do a thing' })
+    expect(askAssistant).toHaveBeenCalledWith({ workspaceId: WS, storeScope: 'write', task: 'do a thing' })
+  })
+
   it('executes a tool the resolver did return', async () => {
     const exec = vi.fn(async () => ({ data: { name: 'Brian Test' } }))
     const { a } = app([tool('shopifyGetShop', exec)])
@@ -99,7 +130,11 @@ describe('[COMP:api/apps-shopify-route] the resolver decides, the route executes
   it('asks the resolver at the fixed tier, and passes the workspace through', async () => {
     const { a, storeTools } = app([tool('shopifyGetShop')])
     await request(a).post('/api/apps/shopify/call').send({ workspaceId: WS, tool: 'shopifyGetShop' })
-    expect(storeTools).toHaveBeenCalledWith({ workspaceId: WS, storeScope: 'write' })
+    expect(storeTools).toHaveBeenCalledWith({
+      workspaceId: WS,
+      storeScope: 'write',
+      alsoAllow: ['shopifyCreateProductTemplate'],
+    })
   })
 
   it('matches a multi-store suffixed tool by its canonical name', async () => {
