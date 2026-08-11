@@ -78,10 +78,11 @@ type BrowseDirectoryProps = {
   onClose: () => void;
   onConnectorAdded: () => void;
   /**
-   * Launches the connectors page's OAuth flow for an oauth_required entry
-   * (Google / Notion / Fathom) — the page owns the per-provider authorize
-   * URLs and threads `[:add]:<workspaceId>` through `state`, so both Connect
-   * and "Add another" land on the right callback with the right intent.
+   * Launches the connectors page's OAuth flow for an oauth_required entry.
+   * The page owns the per-provider authorize/setup flow, closes this catalog,
+   * selects hidden providers before showing inline forms, and threads
+   * `[:add]:<workspaceId>` through `state` so both Connect and "Add another"
+   * land on the right callback with the right intent.
    * Absent → the modal falls back to its degraded self-built Google URL
    * (legacy standalone use).
    */

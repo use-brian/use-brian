@@ -162,17 +162,36 @@ export function TeamAvatar({
   id,
   name,
   iconSeed,
+  iconUrl,
   size = "md",
 }: {
   id: string;
   name: string;
   iconSeed?: number | null;
+  iconUrl?: string | null;
   size?: "xs" | "sm" | "md" | "lg";
 }) {
+  const [imageFailed, setImageFailed] = React.useState(false);
+  React.useEffect(() => setImageFailed(false), [iconUrl]);
+
   const seed = iconSeed ?? Array.from(id).reduce((h, c) => ((h << 5) - h + c.charCodeAt(0)) | 0, 0);
   // xs (18px) is the compact switcher size — roughly the label's cap height
   // beside it, Notion-style, so the icon doesn't dominate the row.
   const s = size === "xs" ? 18 : size === "sm" ? 28 : size === "md" ? 40 : 56;
+
+  if (iconUrl && !imageFailed) {
+    return (
+      <img
+        src={iconUrl}
+        alt={name}
+        width={s}
+        height={s}
+        className="shrink-0 object-cover"
+        style={{ width: s, height: s, borderRadius: s * 0.18 }}
+        onError={() => setImageFailed(true)}
+      />
+    );
+  }
 
   return (
     <svg

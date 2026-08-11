@@ -24,10 +24,11 @@ import {
 import { isHostedEdition } from "@/lib/edition";
 import {
   planGateApplies,
+  planGateCheckoutReturn,
   planGateDismissKey,
   planGateTrialCheckoutBody,
 } from "@/lib/plan-gate";
-import { getUsage } from "@/lib/api/usage";
+import { getUsage, reconcileBillingCheckout } from "@/lib/api/usage";
 import { authFetch } from "@/lib/auth-fetch";
 import { webAppUrl } from "@/lib/primary-auth";
 import { useT } from "@/lib/i18n/client";
@@ -105,11 +106,48 @@ export function PlanGate({ workspaceId }: { workspaceId: string }) {
     setDismissed(
       sessionStorage.getItem(planGateDismissKey(workspaceId)) === "1",
     );
-    void getUsage(workspaceId).then((usage) => {
+    void (async () => {
+      const checkoutReturn = planGateCheckoutReturn(window.location.search);
+      let usage = await getUsage(workspaceId);
       if (cancelled || !usage?.plan) return;
-      setPlan(usage.plan);
+
+      // A successful checkout must not wait on webhook delivery. Trial-
+      // eligible free workspaces also attempt the customer-scoped fallback so
+      // an older `/home?checkout=success` return that lost its query can
+      // self-heal. A never-started trial has no Stripe customer, so the server
+      // exits without making a Stripe request.
+      if (
+        usage.plan === "free" &&
+        checkoutReturn?.status !== "cancelled" &&
+        (usage.trialEligible === true || checkoutReturn?.status === "success")
+      ) {
+        const reconciled = await reconcileBillingCheckout(
+          workspaceId,
+          checkoutReturn?.sessionId,
+        ).catch(() => null);
+        if (cancelled) return;
+        if (reconciled?.plan && reconciled.plan !== "free") {
+          usage = (await getUsage(workspaceId)) ?? {
+            ...usage,
+            plan: reconciled.plan,
+            trialEligible: false,
+          };
+        }
+      }
+
+      if (cancelled) return;
+      const resolvedPlan = usage.plan;
+      if (!resolvedPlan) return;
+      setPlan(resolvedPlan);
       setTrialEligible(usage.trialEligible === true);
-    });
+
+      if (checkoutReturn) {
+        const url = new URL(window.location.href);
+        url.searchParams.delete("checkout");
+        url.searchParams.delete("session_id");
+        window.history.replaceState({}, "", url.toString());
+      }
+    })();
     return () => {
       cancelled = true;
     };

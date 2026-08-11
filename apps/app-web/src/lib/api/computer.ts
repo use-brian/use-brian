@@ -110,6 +110,9 @@ export type BrowserProfile = {
   name: string;
   clearance: BrowserProfileClearance;
   enabledAssistantIds: string[];
+  assistantRoutingNotes?: Record<string, string>;
+  /** Only the profile owner may mutate its assistant allowlist and notes. */
+  canManage?: boolean;
   defaultBackend: BrowserBackend;
   localControlMode: LocalBrowserControlMode;
   proxyUrl: string | null;
@@ -453,7 +456,13 @@ export async function updateBrowserProfile(
   patch: Partial<
     Pick<
       BrowserProfile,
-      "name" | "clearance" | "defaultBackend" | "localControlMode" | "proxyUrl" | "enabledAssistantIds"
+      | "name"
+      | "clearance"
+      | "defaultBackend"
+      | "localControlMode"
+      | "proxyUrl"
+      | "enabledAssistantIds"
+      | "assistantRoutingNotes"
     >
   >,
 ): Promise<boolean> {

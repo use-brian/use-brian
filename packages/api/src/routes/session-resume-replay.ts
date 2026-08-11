@@ -44,6 +44,7 @@ import {
 } from '../db/sessions.js'
 import { findAssistantById } from '../db/users.js'
 import type { SessionResumeReplay, ResumeReplayParams } from './chat.js'
+import { tierForModel } from '../model-resolution.js'
 
 export type SessionResumeReplayDeps = {
   provider: LLMProvider
@@ -297,7 +298,10 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
       : deps.systemPrompt
 
     const customLlm = assistant.workspaceId && deps.resolveWorkspaceCustomLlm
-      ? await deps.resolveWorkspaceCustomLlm({ workspaceId: assistant.workspaceId })
+      ? await deps.resolveWorkspaceCustomLlm({
+          workspaceId: assistant.workspaceId,
+          requestedTier: tierForModel(model),
+        })
       : null
 
     for await (const event of queryLoop({

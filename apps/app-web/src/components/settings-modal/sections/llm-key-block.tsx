@@ -9,10 +9,10 @@
  * instead of erroring.
  *
  * Extracted from `workspace-sections.tsx` so it can render in two homes:
- * hosted embeds it in the Models section (`sections/models-section.tsx`,
- * one place for everything model-related), while the OSS edition — which
- * has no Models section (the metered lane is a hosted billing construct) —
- * keeps it as the standalone `ws-llm-key` section.
+ * hosted embeds it in the Advanced view of Models
+ * (`sections/models-section.tsx`), while OSS keeps it in the standalone
+ * `ws-llm-key` section. The custom endpoint block can be omitted when Models
+ * renders it separately in its Custom models view.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -30,7 +30,15 @@ import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n";
 import { CustomLlmEndpointsBlock } from "./custom-llm-endpoints-block";
 
-export function WorkspaceLlmKeyBlock() {
+export function WorkspaceLlmKeyBlock({
+  onCustomLlmChanged,
+  showCustomEndpoints = true,
+  embedded = false,
+}: {
+  onCustomLlmChanged?: () => void | Promise<void>;
+  showCustomEndpoints?: boolean;
+  embedded?: boolean;
+} = {}) {
   const t = useT();
   const ctx = useWorkspaceContext();
   const workspaceId = ctx.workspaceId;
@@ -115,7 +123,7 @@ export function WorkspaceLlmKeyBlock() {
 
   return (
     <div>
-    <div className="border-t border-border pt-6 space-y-3">
+    <div className={embedded ? "space-y-3" : "space-y-3 border-t border-border pt-6"}>
       <div>
         <h3 className="text-sm font-medium">{tk.heading}</h3>
         <p className="text-[12px] text-muted-foreground mt-0.5">{tk.description}</p>
@@ -193,7 +201,7 @@ export function WorkspaceLlmKeyBlock() {
         onConfirm={remove}
       />
     </div>
-    <CustomLlmEndpointsBlock />
+    {showCustomEndpoints ? <CustomLlmEndpointsBlock onChanged={onCustomLlmChanged} /> : null}
     </div>
   );
 }

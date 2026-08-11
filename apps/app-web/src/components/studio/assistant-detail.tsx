@@ -21,6 +21,7 @@ import { useT } from "@/lib/i18n/client";
 import type { Dictionary } from "@/lib/i18n";
 import { format } from "@/lib/i18n";
 import { ModelTierRow, isModelAlias, type ModelAlias } from "@/components/studio/model-tier-row";
+import { BrowserIdentitiesPanel } from "@/components/studio/browser-identities-panel";
 
 /**
  * Assistant detail (app-web) — the tabbed editor for one assistant.
@@ -33,7 +34,7 @@ import { ModelTierRow, isModelAlias, type ModelAlias } from "@/components/studio
  *
  * Tab consolidation:
  *   Brain     = memory + knowledge
- *   Tools     = connectors (MCP tool catalog) + skills
+ *   Tools     = connectors + browser identities + skills
  *   Api       = programmatic API keys + public chat link
  *   Settings  = name, charter (mission / audience / success / instructions), team, cost, delete
  * (The Network tab was removed 2026-07-24 with the assistant_modes /
@@ -1300,7 +1301,7 @@ function ConnectorsTab({ assistantId, workspaceId }: { assistantId: string; work
   const params = useParams<{ workspaceId: string }>();
   const routeWs = params?.workspaceId ?? "";
   const studioHref = (segment: string) => `/w/${routeWs}/studio/${segment}`;
-  const [subTab, setSubTab] = useState<"connectors" | "skills">("connectors");
+  const [subTab, setSubTab] = useState<"connectors" | "browser-identities" | "skills">("connectors");
   const [userConnectors, setUserConnectors] = useState<UserConnector[]>([]);
   const [loading, setLoading] = useState(true);
   const [toggling, setToggling] = useState<string | null>(null);
@@ -1495,9 +1496,9 @@ function ConnectorsTab({ assistantId, workspaceId }: { assistantId: string; work
 
   return (
     <div className="space-y-6">
-      {/* Sub-tab toggle — Connectors / Skills */}
+      {/* Sub-tab toggle: Connectors / Browser identities / Skills */}
       <div className="flex gap-1 border-b border-border pb-2">
-        {(["connectors", "skills"] as const).map((sub) => (
+        {(["connectors", "browser-identities", "skills"] as const).map((sub) => (
           <button
             key={sub}
             onClick={() => setSubTab(sub)}
@@ -1505,12 +1506,18 @@ function ConnectorsTab({ assistantId, workspaceId }: { assistantId: string; work
               subTab === sub ? "bg-muted text-foreground font-medium" : "text-muted-foreground hover:text-foreground"
             }`}
           >
-            {sub === "skills" ? t.assistant.toolsTab.subTabSkills : t.assistant.toolsTab.subTabConnectors}
+            {sub === "skills"
+              ? t.assistant.toolsTab.subTabSkills
+              : sub === "browser-identities"
+                ? t.assistant.toolsTab.subTabBrowserIdentities
+                : t.assistant.toolsTab.subTabConnectors}
           </button>
         ))}
       </div>
 
-      {subTab === "skills" ? (
+      {subTab === "browser-identities" ? (
+        <BrowserIdentitiesPanel assistantId={assistantId} workspaceId={workspaceId} />
+      ) : subTab === "skills" ? (
         <div className="space-y-3">
           <div className="flex items-start justify-between gap-4">
             <p className="text-xs text-muted-foreground">

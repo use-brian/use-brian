@@ -55,6 +55,9 @@ import { isOssEdition } from '../edition.js'
 import type { WorkspaceAuditStore, WorkspaceAuditEventType } from '../db/workspace-audit-store.js'
 import type { WorkspaceInvitationStore } from '../db/workspace-invitation-store.js'
 import type { SmtpClient } from '../email/smtp-client.js'
+import { getWorkspaceIconPointer } from '../db/workspace-icon.js'
+import type { GcsFilesClient } from '../files/gcs-client.js'
+import type { FilesClientResolver } from '../files/files-api.js'
 import {
   countWorkspaceMemories,
   transferWorkspaceMemories,
@@ -75,6 +78,11 @@ type WorkspaceRouteOptions = {
   smtpClient?: SmtpClient
   /** Base URL used to build the accept link (`${appUrl}/invite?token=...`). */
   appUrl?: string
+  /** Optional storage dependencies used to remove an uploaded icon when its
+   * workspace is deleted. The database delete remains authoritative if blob
+   * cleanup cannot resolve the historical backend. */
+  blobClient?: GcsFilesClient
+  filesResolver?: FilesClientResolver
 }
 
 export function workspaceRoutes({
@@ -83,6 +91,8 @@ export function workspaceRoutes({
   invitationStore,
   smtpClient,
   appUrl,
+  blobClient,
+  filesResolver,
 }: WorkspaceRouteOptions): Router {
   const router = Router()
   // Stateless (uses query() under the hood) — used to keep the workspace's
@@ -703,6 +713,9 @@ export function workspaceRoutes({
           })
         }
       }
+      if (updates.name !== undefined) {
+        notifyWorkspaceChange(req.params.workspaceId, 'workspace_config', 'update')
+      }
       res.json(team)
     } catch (err) {
       console.error('[workspaces] update failed:', err)
@@ -720,8 +733,25 @@ export function workspaceRoutes({
     if (!role) return
 
     try {
+      // Capture the pointer before the workspace row (and its columns) is
+      // cascade-deleted. Blob cleanup is best-effort: a storage outage must
+      // not resurrect or prevent deletion of the authoritative workspace.
+      const iconPointer = blobClient && filesResolver
+        ? await getWorkspaceIconPointer(req.params.workspaceId).catch((err) => {
+            console.warn('[workspaces] could not resolve icon before delete:', err)
+            return null
+          })
+        : null
       const deleted = await workspaceStore.delete(userId, req.params.workspaceId)
       if (!deleted) { res.status(404).json({ error: 'Workspace not found' }); return }
+      if (iconPointer?.iconStorageKey) {
+        const iconClient = iconPointer.iconStorageUri
+          ? await filesResolver!.forUri(req.params.workspaceId, iconPointer.iconStorageUri).catch(() => null)
+          : blobClient
+        await iconClient?.deleteBlob(iconPointer.iconStorageKey).catch((err) => {
+          console.warn('[workspaces] icon cleanup after delete failed:', err)
+        })
+      }
       res.status(204).end()
     } catch (err) {
       console.error('[workspaces] delete failed:', err)
@@ -1563,6 +1593,7 @@ export function workspaceRoutes({
           details: { iconSeed: newSeed },
         })
       }
+      notifyWorkspaceChange(workspaceId, 'workspace_config', 'update')
       res.json({ iconSeed: newSeed })
     } catch (err) {
       console.error('[workspaces] regenerate-icon failed:', err)

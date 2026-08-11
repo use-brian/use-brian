@@ -366,6 +366,8 @@ function WorkspaceShell() {
         if (!res.ok) throw new Error(`workspace HTTP ${res.status}`);
         const team = (await res.json()) as {
           name?: string;
+          iconSeed?: number | null;
+          iconUrl?: string | null;
           role?: WorkspaceContextValue["role"];
           clearance?: WorkspaceContextValue["clearance"];
           me?: { id?: string };
@@ -376,6 +378,8 @@ function WorkspaceShell() {
           value: {
             workspaceId,
             name: team.name ?? "Workspace",
+            iconSeed: team.iconSeed ?? null,
+            iconUrl: team.iconUrl ?? null,
             role: team.role ?? "member",
             clearance: team.clearance ?? "internal",
             me: { id: team.me?.id ?? "" },

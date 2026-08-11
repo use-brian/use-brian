@@ -20,8 +20,13 @@ import type { TokenUsage } from '../providers/types.js'
  * cost instead of silently free rows.
  */
 export function calculateCost(model: string, usage: TokenUsage): number {
+  if (usage.calculatedCostUsd !== undefined) return usage.calculatedCostUsd
+
   const rates = modelRates(model) ?? UNKNOWN_MODEL_RATES
-  const bracket = bracketFor(rates, usage.inputTokens)
+  // Gemini reports cached prompt tokens separately from fresh input, but its
+  // length tier is selected by the full prompt presented to the model.
+  const promptTokens = usage.inputTokens + (usage.cacheReadTokens ?? 0)
+  const bracket = bracketFor(rates, promptTokens)
 
   return (
     (usage.inputTokens / 1_000_000) * bracket.inPerMTok +
@@ -239,4 +244,3 @@ export type UsageStore = {
   /** Daily cost totals for one assistant over the last N days. */
   getAssistantDailyTrend(workspaceId: string, assistantId: string, days: number): Promise<Array<{ date: string; costUsd: number }>>
 }
-

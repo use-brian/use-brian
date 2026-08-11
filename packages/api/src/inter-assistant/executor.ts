@@ -59,7 +59,7 @@ import {
   addSessionMessage,
   getSessionMessages,
 } from '../db/sessions.js'
-import { BACKGROUND_MODEL, MODEL_MAP } from '../model-resolution.js'
+import { BACKGROUND_MODEL, MODEL_MAP, tierForModel } from '../model-resolution.js'
 import { notifyBrainWriteIfMatch, BRAIN_WRITE_TOOL_SIGNALS } from '../brain-stream/notify.js'
 import { runProactiveCompaction } from '../routes/proactive-compaction.js'
 import { registerSchedulerResolver, unregisterSchedulerResolver } from '../scheduling/confirmation-registry.js'
@@ -1285,6 +1285,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     const customLlmRuntime = calleeAssistant.workspaceId && options.resolveWorkspaceCustomLlm
       ? await options.resolveWorkspaceCustomLlm({
           workspaceId: calleeAssistant.workspaceId,
+          requestedTier: tierForModel(model),
           allowDefault: true,
         })
       : null

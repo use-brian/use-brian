@@ -94,6 +94,74 @@ describe('[COMP:api/home-app-store-tools] tier boundaries', () => {
   })
 })
 
+describe('[COMP:api/home-app-store-tools] the named widening', () => {
+  // `alsoAllow` is the ONE way past the destructive exclusion, and it exists
+  // for the first-party native app surface (`apps-shopify.ts`), never for a
+  // bundle. What is being defended here is that it can only ever admit what it
+  // NAMES: not a class, not a tier, and nothing the registry does not know.
+  const NATIVE = ['shopifyCreateProductTemplate']
+
+  it('admits exactly the named tool and no other destructive one', () => {
+    const names = storeToolNamesFor('shopify', 'write', NATIVE)
+    expect(names.has('shopifyCreateProductTemplate')).toBe(true)
+    for (const destructive of DESTRUCTIVE.filter((d) => !NATIVE.includes(d))) {
+      expect(names.has(destructive)).toBe(false)
+    }
+    // Exactly one more than the plain tier reaches.
+    expect(names.size).toBe(storeToolNamesFor('shopify', 'write').size + 1)
+  })
+
+  it('changes nothing for a caller that does not pass it', () => {
+    // The bundle bridge omits the argument entirely. The default must be the
+    // old behaviour, so a new caller has to opt IN rather than remember to
+    // opt out.
+    for (const tier of ALL_TIERS) {
+      expect([...storeToolNamesFor('shopify', tier)].sort())
+        .toEqual([...storeToolNamesFor('shopify', tier, [])].sort())
+    }
+  })
+
+  it('still grants nothing at the "none" tier', () => {
+    // A surface that has no store scope has no store, named tool or not.
+    expect(storeToolNamesFor('shopify', 'none', NATIVE).size).toBe(0)
+  })
+
+  it('cannot mint reach for a name the registry has never heard of', () => {
+    // A typo here must fail closed, not invent a tool.
+    const names = storeToolNamesFor('shopify', 'write', ['shopifyCreateProductTemplat'])
+    expect(names.has('shopifyCreateProductTemplat')).toBe(false)
+    expect(names.size).toBe(storeToolNamesFor('shopify', 'write').size)
+  })
+
+  it('carries through filterStoreTools, instance suffixes included', () => {
+    const tools = [
+      { name: 'shopifyCreateProductTemplate' },
+      { name: 'shopifyRefundOrder' },
+    ]
+    expect(
+      filterStoreTools(tools, { connectorId: 'shopify', storeScope: 'write', alsoAllow: NATIVE })
+        .map((x) => x.name),
+    ).toEqual(['shopifyCreateProductTemplate'])
+
+    expect(
+      filterStoreTools([{ name: 'shopifyCreateProductTemplate__mystore_1a2b3c4d' }], {
+        connectorId: 'shopify',
+        storeScope: 'write',
+        alsoAllow: NATIVE,
+      }),
+    ).toHaveLength(1)
+  })
+
+  it('does NOT widen the assistant consult', () => {
+    // `agentAllowedToolsFor` takes no such argument on purpose: a model
+    // choosing to write a theme file is a different decision from a merchant
+    // clicking a confirm, and `/ask` keeps the ceiling it has always had.
+    for (const tier of ALL_TIERS) {
+      expect(agentAllowedToolsFor('shopify', tier)).not.toContain('shopifyCreateProductTemplate')
+    }
+  })
+})
+
 describe('[COMP:api/home-app-store-tools] fails closed on the unknown', () => {
   it('drops a tool the registry has never heard of', () => {
     // Opposite of gateToolsOnActionGrants, on purpose: there the caller is a

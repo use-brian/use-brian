@@ -223,7 +223,7 @@
     {
       "name": "InventoryLevels",
       "kind": "query",
-      "hash": "460c625aa7620a8a",
+      "hash": "cdf5c1fcd6f01367",
       "valid": true,
       "scopes": [
         "read_products",

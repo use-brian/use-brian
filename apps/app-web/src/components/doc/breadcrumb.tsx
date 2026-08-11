@@ -87,7 +87,13 @@ export function Breadcrumb({ crumbs, onNavigate, onRenameCurrent }: BreadcrumbPr
         className="hidden shrink-0 items-center gap-1.5 rounded px-1 py-0.5 hover:bg-muted hover:text-foreground sm:flex"
       >
         <span className="grid size-[18px] place-items-center [&_svg]:size-[18px]">
-          <TeamAvatar id={ws.workspaceId} name={ws.name} size="sm" />
+          <TeamAvatar
+            id={ws.workspaceId}
+            name={ws.name}
+            iconSeed={ws.iconSeed}
+            iconUrl={ws.iconUrl}
+            size="sm"
+          />
         </span>
         <span className="max-w-[140px] truncate">{ws.name}</span>
       </button>

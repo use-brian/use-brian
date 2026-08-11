@@ -11,7 +11,11 @@
 
 import { describe, expect, it } from "vitest";
 import type { BrowserProfile } from "@/lib/api/computer";
-import { isValidProxyUrl, profileSurfaces } from "../browser-profiles-section";
+import {
+  isValidProxyUrl,
+  profileSurfaces,
+  selectedBrowserProfile,
+} from "../browser-profiles-section";
 
 function profile(overrides: Partial<BrowserProfile> = {}): BrowserProfile {
   return {
@@ -67,6 +71,21 @@ describe("[COMP:app-web/profile-management] Profile surfaces by backend", () => 
       defaultBackend: "cloud",
       localControlMode: "full_browser",
     });
+  });
+});
+
+describe("[COMP:app-web/profile-management] Master-detail selection", () => {
+  const profiles = [profile({ id: "p1" }), profile({ id: "p2", name: "Work" })];
+
+  it("uses the query-addressed profile and falls back to the first row", () => {
+    expect(selectedBrowserProfile(profiles, "p2", false)?.id).toBe("p2");
+    expect(selectedBrowserProfile(profiles, "missing", false)?.id).toBe("p1");
+    expect(selectedBrowserProfile(profiles, undefined, false)?.id).toBe("p1");
+  });
+
+  it("shows no detail while the create form is active", () => {
+    expect(selectedBrowserProfile(profiles, "p1", true)).toBeNull();
+    expect(selectedBrowserProfile([], undefined, false)).toBeNull();
   });
 });
 

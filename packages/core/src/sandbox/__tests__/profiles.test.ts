@@ -12,6 +12,7 @@ import {
   createInMemorySessionVault,
   describeProfileResolution,
   resolveProfileForCall,
+  routingNoteFor,
   type ProfileActor,
 } from '../profiles.js'
 
@@ -104,13 +105,32 @@ describe('[COMP:sandbox/profiles] Profile at call time (R2-10)', () => {
     await s.create({
       workspaceId: 'ws-1', ownerUserId: 'owner-1', name: 'Company IG',
       clearance: 'internal', enabledAssistantIds: ['asst-1'],
+      assistantRoutingNotes: { 'asst-1': 'Use for the company brand account.' },
     })
     const res = await resolveProfileForCall({ store: s, actor: OWNER, site: 'instagram.com' })
     expect(res.kind).toBe('must_name')
     if (res.kind === 'must_name') {
       expect(res.candidates.sort()).toEqual(['Company IG', 'Personal IG'])
       expect(describeProfileResolution(res)).toMatch(/name one/i)
+      expect(res.guidance).toEqual({ 'Company IG': 'Use for the company brand account.' })
+      expect(describeProfileResolution(res)).toContain('company brand account')
     }
+  })
+
+  it('projects only the acting assistant note and normalizes whitespace', async () => {
+    const s = store()
+    const profile = await s.create({
+      workspaceId: 'ws-1',
+      ownerUserId: 'owner-1',
+      name: 'Company',
+      enabledAssistantIds: ['asst-1'],
+      assistantRoutingNotes: {
+        'asst-1': '  Use for\ncompany accounts.  ',
+        'asst-2': 'Private note for another assistant',
+      },
+    })
+    expect(routingNoteFor(profile, 'asst-1')).toBe('Use for company accounts.')
+    expect(routingNoteFor(profile, 'asst-3')).toBeNull()
   })
 
   it('prefers the profile already logged into the site (vault-informed narrowing)', async () => {

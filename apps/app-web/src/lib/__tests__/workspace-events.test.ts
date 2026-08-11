@@ -14,6 +14,7 @@ import { BRAIN_REFRESH_EVENT } from "@/lib/brain-events";
 import { APPROVALS_REFRESH_EVENT } from "@/lib/approvals-events";
 import { WORKFLOW_REFRESH_EVENT } from "@/lib/workflow-events";
 import { HOME_APPS_REFRESH_EVENT } from "@/lib/home-apps-events";
+import { WORKSPACE_IDENTITY_REFRESH_EVENT } from "@/lib/workspace-identity-events";
 import {
   allDomainDispatches,
   createRefreshFolder,
@@ -99,9 +100,13 @@ describe("[COMP:app-web/workspace-events] routeWorkspaceChange", () => {
   // Same class of bug as the assistant roster: the Home app-bar renders inside
   // the never-unmounting workspace layout, so a config change has to arrive as
   // a signal or the strip stays stale until a full reload.
-  it("routes workspace_config to the home-apps bus", () => {
+  it("routes workspace_config to the home-app and workspace-identity buses", () => {
     expect(routeWorkspaceChange(payload("workspace_config"))).toEqual([
       { event: HOME_APPS_REFRESH_EVENT, detail: { workspaceId: "ws-1" } },
+      {
+        event: WORKSPACE_IDENTITY_REFRESH_EVENT,
+        detail: { workspaceId: "ws-1" },
+      },
     ]);
   });
 
@@ -127,6 +132,7 @@ describe("[COMP:app-web/workspace-events] routeWorkspaceChange", () => {
     expect(events).toContain("sidan:assistant-refresh");
     // ...and the app-bar config, for the same reason.
     expect(events).toContain(HOME_APPS_REFRESH_EVENT);
+    expect(events).toContain(WORKSPACE_IDENTITY_REFRESH_EVENT);
   });
 });
 

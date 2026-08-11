@@ -90,7 +90,7 @@ import {
   truncateMessagesFrom,
 } from '../db/sessions.js'
 import { billingPartyForAssistant } from '../billing-party.js'
-import { resolveModel, ensureServableModel } from '../model-resolution.js'
+import { resolveModel, ensureServableModel, tierForModel } from '../model-resolution.js'
 import { checkUsageBudget, type CreditBudgetGate } from './route-helpers.js'
 import { query } from '../db/client.js'
 
@@ -644,7 +644,11 @@ export async function executePublicTurn(
       )
     : resolveModel(assistant.apiModelAlias, workspacePlan, budgetStatus)
   const customLlmRuntime = assistant.workspaceId && deps.resolveWorkspaceCustomLlm
-    ? await deps.resolveWorkspaceCustomLlm({ workspaceId: assistant.workspaceId, allowDefault: true })
+    ? await deps.resolveWorkspaceCustomLlm({
+        workspaceId: assistant.workspaceId,
+        requestedTier: tierForModel(model),
+        allowDefault: true,
+      })
     : null
   const turnProvider = customLlmRuntime?.provider ?? deps.provider
 

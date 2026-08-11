@@ -642,6 +642,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
           id: profileId,
           name: 'Personal',
           clearance: 'confidential',
+          canManage: true,
           sessions: [expect.objectContaining({ site: 'github.com' })],
         }),
       ])
@@ -682,26 +683,42 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
       expect(cleared.body.profile.proxyUrl).toBeNull()
     })
 
-    it('updates (clearance downgrade, enablement, backend) and deletes — OWNER only', async () => {
+    it('updates clearance, enablement, and per-assistant routing notes, then deletes - OWNER only', async () => {
       const patched = await request(app)
         .patch(`/api/computer/profiles/${profileId}`)
         .send({
           clearance: 'internal',
           enabledAssistantIds: ['11111111-1111-4111-8111-111111111111'],
+          assistantRoutingNotes: {
+            '11111111-1111-4111-8111-111111111111': 'Use for the company Instagram.',
+          },
           localControlMode: 'full_browser',
         })
       expect(patched.status).toBe(200)
       expect(patched.body.profile).toMatchObject({
         clearance: 'internal',
         enabledAssistantIds: ['11111111-1111-4111-8111-111111111111'],
+        assistantRoutingNotes: {
+          '11111111-1111-4111-8111-111111111111': 'Use for the company Instagram.',
+        },
         localControlMode: 'full_browser',
       })
 
       const stranger = makeApp('intruder')
+      const strangerList = await request(stranger).get('/api/computer/profiles?workspaceId=ws-1')
+      expect(strangerList.body.profiles[0]).toMatchObject({
+        canManage: false,
+        assistantRoutingNotes: {},
+      })
       expect(
         (await request(stranger).patch(`/api/computer/profiles/${profileId}`).send({ name: 'Mine now' })).status,
       ).toBe(404)
       expect((await request(stranger).delete(`/api/computer/profiles/${profileId}`)).status).toBe(404)
+
+      const invalidNote = await request(app)
+        .patch(`/api/computer/profiles/${profileId}`)
+        .send({ assistantRoutingNotes: { 'assistant-1': '  not trimmed  ' } })
+      expect(invalidNote.status).toBe(400)
 
       expect((await request(app).delete(`/api/computer/profiles/${profileId}`)).status).toBe(200)
       expect(await profileStore.get(profileId)).toBeNull()
