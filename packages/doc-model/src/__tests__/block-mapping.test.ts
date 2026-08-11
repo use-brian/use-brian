@@ -5,6 +5,7 @@ import {
   canonicalizeBlock,
   pageToPlaintext,
 } from '../block-mapping.js'
+import { docSchema } from '../schema.js'
 import type { Block } from '@use-brian/core/dist/views/blocks.js'
 import { ALL_KINDS } from './fixtures.js'
 
@@ -348,5 +349,114 @@ describe('[COMP:doc-model/mapping] nested to-dos (TaskItem nested:true)', () => 
     const out = pmDocToBlocks(doc)
     expect(out).toEqual(blocks.map(canonicalizeBlock))
     expect((out[1] as { indent?: number }).indent).toBe(1)
+  })
+})
+
+describe('[COMP:doc-model/mapping] bare-inline richText (model-authored)', () => {
+  /** The shape the Doc edit agent emits when it authors `richText` itself:
+   *  inline text as a DIRECT child of `doc`, with no paragraph wrapper. */
+  const bareInline = (text: string) =>
+    ({ type: 'doc', content: [{ type: 'text', text }] }) as unknown as Record<
+      string,
+      unknown
+    >
+
+  const bullet = (id: string, text: string, indent?: number): Block =>
+    ({
+      kind: 'bulleted_list_item',
+      id,
+      richText: bareInline(text),
+      ...(indent ? { indent } : {}),
+    }) as Block
+
+  /**
+   * The discriminating assertion for the 2026-08-10 data loss (page
+   * c4b2f11a). A structural round-trip is LOSSLESS on the broken shape —
+   * `Node.fromJSON` never validates content and the Y.Doc encode is purely
+   * structural — so counting blocks proves nothing and would have PASSED
+   * against the bug. Only a schema `check()` separates the two: unwrapped
+   * inline text builds `listItem > text`, which violates `listItem`'s
+   * `paragraph block*` spec, and the browser's y-prosemirror deletes every
+   * such element from the SHARED doc on first open. Assert validity, never
+   * block count.
+   */
+  const expectSchemaValid = (blocks: Block[]) => {
+    expect(() =>
+      docSchema().nodeFromJSON(blocksToPMDoc(blocks)).check(),
+    ).not.toThrow()
+  }
+
+  it('wraps a list item authored with unwrapped inline text', () => {
+    const blocks = [bullet('b1', 'Ship the thing')]
+    expectSchemaValid(blocks)
+    const item = blocksToPMDoc(blocks).content[0].content![0]
+    expect(item.content![0]).toMatchObject({ type: 'paragraph' })
+  })
+
+  it('keeps a whole bare-inline list run schema-valid, nesting included', () => {
+    expectSchemaValid([
+      bullet('b1', 'Parent'),
+      bullet('b2', 'Child', 1),
+      bullet('b3', 'Sibling'),
+    ])
+  })
+
+  it('covers every richText-bearing kind, not just list items', () => {
+    expectSchemaValid([
+      bullet('b1', 'bullet'),
+      { kind: 'numbered_list_item', id: 'n1', richText: bareInline('step') } as Block,
+      { kind: 'to_do', id: 't1', checked: false, richText: bareInline('task') } as Block,
+      { kind: 'quote', id: 'q1', richText: bareInline('quoted') } as Block,
+      { kind: 'callout', id: 'c1', icon: '💡', richText: bareInline('note') } as Block,
+      { kind: 'toggle', id: 'g1', richText: bareInline('summary') } as Block,
+      {
+        kind: 'table',
+        id: 'tb1',
+        hasHeaderRow: true,
+        hasHeaderColumn: false,
+        rows: [[bareInline('Col')], [bareInline('Val')]],
+      } as Block,
+    ])
+  })
+
+  it('recovers the text, so the repair is not a silent blanking', () => {
+    const out = pmDocToBlocks(blocksToPMDoc([bullet('b1', 'Ship the thing')]))
+    expect(pageToPlaintext({ blocks: out })).toBe('Ship the thing')
+  })
+
+  it('still satisfies the canonicalizeBlock round-trip contract', () => {
+    const blocks = [bullet('b1', 'Parent'), bullet('b2', 'Child', 1)]
+    expect(pmDocToBlocks(blocksToPMDoc(blocks))).toEqual(
+      blocks.map(canonicalizeBlock),
+    )
+  })
+
+  it('leaves canonical paragraph-wrapped richText untouched', () => {
+    const blocks: Block[] = [
+      { kind: 'bulleted_list_item', id: 'b1', richText: cell('already fine') } as Block,
+    ]
+    expectSchemaValid(blocks)
+    expect(pmDocToBlocks(blocksToPMDoc(blocks))).toEqual(
+      blocks.map(canonicalizeBlock),
+    )
+  })
+
+  it('keeps a mixed run in order: inline lead, then a real block node', () => {
+    const blocks: Block[] = [
+      {
+        kind: 'quote',
+        id: 'q1',
+        richText: {
+          type: 'doc',
+          content: [
+            { type: 'text', text: 'lead' },
+            { type: 'paragraph', content: [{ type: 'text', text: 'body' }] },
+          ],
+        } as unknown as Record<string, unknown>,
+      } as Block,
+    ]
+    expectSchemaValid(blocks)
+    const quote = blocksToPMDoc(blocks).content[0]
+    expect(quote.content!.map((n) => n.type)).toEqual(['paragraph', 'paragraph'])
   })
 })

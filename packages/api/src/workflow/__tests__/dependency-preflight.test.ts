@@ -183,19 +183,23 @@ describe('[COMP:workflow/dependency-preflight] preflightConnectorTool', () => {
         return p.assistantId === ASSISTANT_ID ? { policy: 'block' } : null
       },
     }
+    // Notion, not Gmail: `gmailListMessages` used to stand in for the
+    // default-allow read tool here, but it was a phantom registry row for a
+    // connector scoped `gmail.send` only and is now commented out
+    // (integrations/gmail.md → "Why the two read rows are commented out").
     const { preflightConnectorTool } = createWorkflowDependencyPreflight({
-      connectorStore: connectorStoreWith({ gmail: { client_secret: 'tok' } }),
+      connectorStore: connectorStoreWith({ notion: { client_secret: 'tok' } }),
       mcpSettingsStore: settingsStore,
     })
     const r = await preflightConnectorTool({
       userId: USER_ID,
-      toolName: 'gmailListMessages',
+      toolName: 'notionSearch',
       assistantId: ASSISTANT_ID,
     })
     expect(r?.policy).toBe('block')
     // L1 (app-level) + L2 (per-assistant) both consulted, against the provider server name.
     expect(calls).toHaveLength(2)
-    expect(calls[1]).toEqual({ assistantId: ASSISTANT_ID, toolName: 'gmailListMessages', serverName: 'gmail' })
+    expect(calls[1]).toEqual({ assistantId: ASSISTANT_ID, toolName: 'notionSearch', serverName: 'notion' })
   })
 
   it('mirrors the runtime rule: L1 allow alone does not loosen an ask default; L1+L2 allow does', async () => {

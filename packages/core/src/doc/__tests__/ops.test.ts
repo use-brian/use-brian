@@ -359,6 +359,44 @@ describe('[COMP:doc/ops] applyOps — edit', () => {
     expect(cellText(merged.rows[0][0])).toBe('Company Name')
     expect(cellText(merged.rows[0][1])).toBe('Expert Local Consultant')
   })
+
+  it('paragraph-wraps bare-inline richText in an `edit` patch (same open-patch bypass)', () => {
+    // Mirror of the table lift above, for the 2026-08-10 loss (page c4b2f11a):
+    // an `edit` patch replacing `richText` skips `liftedBlockSchema`, so an
+    // unwrapped-inline doc reaches storage and the browser's y-prosemirror
+    // then DELETES the block from the shared Y.Doc on first open.
+    const page: Page = {
+      blocks: [
+        {
+          kind: 'bulleted_list_item',
+          id: 'b1',
+          richText: {
+            type: 'doc',
+            content: [{ type: 'paragraph', content: [{ type: 'text', text: 'old' }] }],
+          },
+        } as Block,
+      ],
+    }
+    const { page: out } = applyOps(
+      page,
+      [
+        {
+          op: 'edit',
+          blockId: 'b1',
+          patch: {
+            richText: { type: 'doc', content: [{ type: 'text', text: 'Ship the thing' }] },
+          } as unknown as Record<string, unknown>,
+        },
+      ],
+      makeIdGen(),
+    )
+    const merged = out.blocks[0] as unknown as {
+      richText: { content: { type: string }[] }
+    }
+    expect(merged.richText.content[0].type).toBe('paragraph')
+    const inline = merged.richText.content[0] as { content?: { text?: string }[] }
+    expect((inline.content ?? []).map((n) => n.text ?? '').join('')).toBe('Ship the thing')
+  })
 })
 
 describe('[COMP:doc/ops] applyOps — delete', () => {

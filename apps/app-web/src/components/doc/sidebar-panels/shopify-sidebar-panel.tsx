@@ -33,7 +33,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
-import { ClipboardList, ExternalLink, PackageSearch, Sparkles, Store } from "lucide-react";
+import { ClipboardList, ExternalLink, Megaphone, PackageSearch, Sparkles, Store } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { callTool, listTools } from "@/lib/api/shopify";
@@ -64,6 +64,7 @@ const SECTION_ICON: Record<ShopifySection, LucideIcon> = {
   draft: ClipboardList,
   inventory: PackageSearch,
   analyse: Sparkles,
+  campaign: Megaphone,
 };
 
 type DraftProduct = { id?: string; title?: string; updated_at?: string };
@@ -146,6 +147,7 @@ export function ShopifySidebarPanel({ workspaceId }: { workspaceId: string }) {
     draft: t.shopifyApp.tabDraft,
     inventory: t.shopifyApp.tabInventory,
     analyse: t.shopifyApp.tabAnalyse,
+    campaign: t.shopifyApp.tabCampaign,
   };
 
   /** The history nested under a section, rendered only while it is open. */

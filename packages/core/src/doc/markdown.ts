@@ -46,6 +46,7 @@ import type {
   RichTextContent,
   TextBlock,
 } from './page-types.js'
+import { normalizeRichTextContent } from '../views/blocks.js'
 import { richTextToPlain } from './rich-text.js'
 
 // ── id generator (mirrors ops.ts defaultGenerateId) ───────────────────
@@ -321,6 +322,15 @@ export function liftTableRows(rows: unknown): unknown {
  *
  * A third repair (2026-07-22) lifts stray-shaped `table` cells — see
  * `liftTableRows` above.
+ *
+ * A fourth (2026-08-10) paragraph-wraps a `richText` doc whose top level holds
+ * bare INLINE nodes — `{ type:'doc', content:[{ type:'text', text:'…' }] }`,
+ * the shape the Doc edit agent reaches for when it authors `richText` itself
+ * instead of letting repair #1 build it. `richText` is opaque by design
+ * (`z.record(z.string(), z.unknown())`), so that validates, persists, and reads
+ * back fine server-side — then a browser's y-prosemirror deletes every such
+ * block from the shared doc on first open. See `normalizeRichTextContent`
+ * (`../views/blocks.js`) for the full failure chain and the prod repro.
  */
 export function liftListItemText(raw: unknown): unknown {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return raw
@@ -347,6 +357,20 @@ export function liftListItemText(raw: unknown): unknown {
   ) {
     const { richText, ...rest } = next
     next = { ...rest, text: richTextToPlain(richText as RichTextContent) }
+  }
+
+  // Bare-inline richText (repair #4, 2026-08-10): a rich kind whose `richText`
+  // doc holds inline leaves at its top level instead of paragraphs. Runs after
+  // the two shape swaps above so a richText just minted by repair #1 (already
+  // canonical) is a pure pass-through.
+  if (
+    typeof next.kind === 'string' &&
+    RICHTEXT_KINDS.has(next.kind) &&
+    next.richText !== null &&
+    typeof next.richText === 'object'
+  ) {
+    const richText = normalizeRichTextContent(next.richText as RichTextContent)
+    if (richText !== next.richText) next = { ...next, richText }
   }
 
   // Table cells (repair #3, 2026-07-22): a `table` authored with plain-string

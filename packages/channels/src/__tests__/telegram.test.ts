@@ -1815,6 +1815,99 @@ describe('[COMP:channels/telegram] unaddressed group media', () => {
   })
 })
 
+// ── Capture-only in a group shared by several BYO bots ─────────
+//
+// Regression cover for 2026-08-11. Telegram delivers every group message to
+// every bot in the group. A workspace running one BYO bot per assistant, all
+// added to one topic-organized supergroup, therefore had all eight bots take
+// the capture-only exit for a CSV dropped in ONE topic: eight workspace-file
+// copies of the same upload and seven stray "Filed" replies from assistants
+// nobody addressed. The per-topic `requireMention` overrides are the user's
+// own statement of topic ownership, so a topic-bound bot outside its topics
+// keeps the pre-2026-08-07 drop. See adapter-pattern.md → "Unaddressed group
+// media" → "Several bots in one group".
+
+describe('[COMP:channels/telegram] capture-only with several bots in one group', () => {
+  const CHAT_ID = -1004393075094
+
+  const build = (overrides: Array<{ chatId: string; topicId?: number | null }>) =>
+    createTelegramAdapter({
+      token: 'test-token',
+      botUsername: 'gymbro_bot',
+      onMessage: vi.fn(),
+      config: { requireMention: { default: true, overrides } },
+    })
+
+  const topicDoc = (topicId: number, extra: Record<string, unknown> = {}) => ({
+    update_id: 910,
+    message: {
+      message_id: 710,
+      from: { id: 42, first_name: 'Alice' },
+      chat: { id: CHAT_ID, type: 'supergroup', is_forum: true },
+      message_thread_id: topicId,
+      date: 1700000000,
+      document: { file_id: 'doc-csv', mime_type: 'text/csv', file_name: 'strong_workouts.csv', file_size: 254_159 },
+      ...extra,
+    },
+  })
+
+  it('drops an uncaptioned document posted in a topic this bot does not own', () => {
+    const adapter = build([{ chatId: String(CHAT_ID), topicId: 222 }])
+    expect(adapter.parseIncoming(topicDoc(37))).toBeNull()
+  })
+
+  it('answers normally for a document in the topic this bot owns', () => {
+    const adapter = build([{ chatId: String(CHAT_ID), topicId: 222 }])
+    const msg = adapter.parseIncoming(topicDoc(222))
+    expect(msg).not.toBeNull()
+    expect(msg!.captureOnly).toBeUndefined()
+    expect(msg!.mediaName).toBe('strong_workouts.csv')
+  })
+
+  it('still captures when the bot holds no override for this chat', () => {
+    // The 2026-08-07 shape: one bot in the group, no topic binding. Its
+    // overrides name a different chat entirely, so it is not topic-bound here.
+    const adapter = build([{ chatId: '-100999', topicId: 5 }])
+    expect(adapter.parseIncoming(topicDoc(37))!.captureOnly).toBe(true)
+  })
+
+  it('still captures when the bot claims the whole chat (topicId null)', () => {
+    const adapter = build([{ chatId: String(CHAT_ID), topicId: null }])
+    // A whole-chat override inverts requireMention to false, so the message is
+    // addressed outright rather than capture-only — either way, never dropped.
+    const msg = adapter.parseIncoming(topicDoc(37))
+    expect(msg).not.toBeNull()
+    expect(msg!.mediaName).toBe('strong_workouts.csv')
+  })
+
+  it('still answers an explicit mention inside another bot\'s topic', () => {
+    const adapter = build([{ chatId: String(CHAT_ID), topicId: 222 }])
+    const msg = adapter.parseIncoming(topicDoc(37, {
+      caption: '@gymbro_bot read this',
+      caption_entities: [{ type: 'mention', offset: 0, length: 11 }],
+    }))
+    expect(msg).not.toBeNull()
+    expect(msg!.captureOnly).toBeUndefined()
+    expect(msg!.isMentioned).toBe(true)
+  })
+
+  it('drops the General topic of a forum chat where the bot is topic-bound', () => {
+    // Deliberate: no `message_thread_id` means the General topic, which no
+    // topic-bound bot claims. Documented in adapter-pattern.md.
+    const adapter = build([{ chatId: String(CHAT_ID), topicId: 222 }])
+    expect(adapter.parseIncoming({
+      update_id: 911,
+      message: {
+        message_id: 711,
+        from: { id: 42, first_name: 'Alice' },
+        chat: { id: CHAT_ID, type: 'supergroup', is_forum: true },
+        date: 1700000000,
+        document: { file_id: 'doc-csv', mime_type: 'text/csv', file_name: 'strong_workouts.csv' },
+      },
+    })).toBeNull()
+  })
+})
+
 describe('[COMP:channels/telegram] media group (album) merge', () => {
   const ALBUM_FILES = [
     { file_id: 'f1', mime_type: 'text/markdown', file_name: 'Cloud_Startup_Programs_Guide.md', file_size: 4_198 },
