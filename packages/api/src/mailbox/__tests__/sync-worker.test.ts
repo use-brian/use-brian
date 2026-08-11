@@ -814,6 +814,19 @@ describe('[COMP:api/mailbox-sync-worker] rules routing (mixed batch)', () => {
       tasks: deps.tasks,
       taskAdmission,
     })
+    expect(runExtraction.mock.calls[0][0]).toMatchObject({
+      sourceKind: 'email_thread',
+      channelRef: BRAIN_CTX.connectorInstanceId,
+    })
+    expect(deps.episodes.createEpisode).toHaveBeenCalledWith(
+      BRAIN_CTX.userId,
+      expect.objectContaining({
+        sourceRef: expect.objectContaining({
+          connector: 'imap',
+          channel_ref: BRAIN_CTX.connectorInstanceId,
+        }),
+      }),
+    )
   })
 
   it('correspondence → realtime episode; newsletter → digest batch; notification → dropped', async () => {
@@ -849,7 +862,17 @@ describe('[COMP:api/mailbox-sync-worker] rules routing (mixed batch)', () => {
     )
     expect(newsletter).toBeNull()
     expect(appendBatch).toHaveBeenCalledTimes(1)
-    expect(appendBatch.mock.calls[0][0]).toMatchObject({ ruleId: 'r-bulk', source: 'imap' })
+    expect(appendBatch.mock.calls[0][0]).toMatchObject({
+      ruleId: 'r-bulk',
+      source: 'imap',
+      event: {
+        source: 'imap',
+        normalized: expect.objectContaining({
+          channel_ref: BRAIN_CTX.connectorInstanceId,
+          message_id_chain: ['INBOX:2'],
+        }),
+      },
+    })
 
     const notification = await router.route(
       {
