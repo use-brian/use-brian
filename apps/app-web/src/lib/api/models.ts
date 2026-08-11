@@ -45,11 +45,20 @@ export type ModelMenu = {
   defaults: WorkspaceModelDefault[];
   customEndpoints: Array<{
     id: string;
+    endpointId: string;
+    endpointName: string;
     selector: string;
     name: string;
     modelId: string;
     contextWindow: number;
+    tiers: Array<"standard" | "pro" | "max" | "research">;
     isDefault: boolean;
+  }>;
+  customTierDefaults: Array<{
+    workspaceId: string;
+    tier: "standard" | "pro" | "max" | "research";
+    profileId: string;
+    updatedAt: string;
   }>;
   meteredBillingAvailable: boolean;
 };

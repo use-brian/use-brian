@@ -76,6 +76,23 @@ function app(userId?: string) {
   )
 }
 
+function appWithIconStorage(
+  userId: string,
+  blobClient: { deleteBlob: ReturnType<typeof vi.fn> },
+  filesResolver: { forUri: ReturnType<typeof vi.fn> },
+) {
+  return createTestApp(
+    '/api/workspaces',
+    workspaceRoutes({
+      workspaceStore: workspaceStore as never,
+      auditStore: auditStore as never,
+      blobClient: blobClient as never,
+      filesResolver: filesResolver as never,
+    }),
+    { userId },
+  )
+}
+
 const LONG_PURPOSE = 'Share infrastructure and project decisions for the team.'
 
 beforeEach(() => {
@@ -211,6 +228,37 @@ describe('[COMP:api/workspaces-route] requireWorkspaceRole gate', () => {
     workspaceStore.getRole.mockResolvedValueOnce('owner')
     workspaceStore.delete.mockResolvedValueOnce(true)
     expect((await request(app('u-1')).delete('/api/workspaces/ws-1')).status).toBe(204)
+  })
+
+  it('DELETE /:workspaceId removes its uploaded icon from the recorded backend', async () => {
+    const historicalClient = { deleteBlob: vi.fn().mockResolvedValue(undefined) }
+    const blobClient = { deleteBlob: vi.fn() }
+    const filesResolver = {
+      forUri: vi.fn().mockResolvedValue(historicalClient),
+    }
+    workspaceStore.getRole.mockResolvedValueOnce('owner')
+    workspaceStore.delete.mockResolvedValueOnce(true)
+    mockQuery.mockResolvedValueOnce({
+      rows: [{
+        iconUrl: 'https://api.example/api/workspace-icons/ws-1?v=12345678',
+        iconStorageKey: 'workspaces/ws-1/workspace-icons/icon-1',
+        iconStorageUri: 's3://bucket/workspaces/ws-1/workspace-icons/icon-1',
+      }],
+      rowCount: 1,
+    } as never)
+
+    const res = await request(appWithIconStorage('u-1', blobClient, filesResolver))
+      .delete('/api/workspaces/ws-1')
+
+    expect(res.status).toBe(204)
+    expect(filesResolver.forUri).toHaveBeenCalledWith(
+      'ws-1',
+      's3://bucket/workspaces/ws-1/workspace-icons/icon-1',
+    )
+    expect(historicalClient.deleteBlob).toHaveBeenCalledWith(
+      'workspaces/ws-1/workspace-icons/icon-1',
+    )
+    expect(blobClient.deleteBlob).not.toHaveBeenCalled()
   })
 
   it('DELETE /:workspaceId/data requires the owner role', async () => {

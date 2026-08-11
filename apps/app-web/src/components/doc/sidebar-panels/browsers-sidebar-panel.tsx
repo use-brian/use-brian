@@ -28,12 +28,14 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
-import { Eye } from "lucide-react";
+import { usePathname, useSearchParams } from "next/navigation";
+import { Cloud, Eye, Laptop, Plus } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import {
   listActiveComputerTasks,
+  listBrowserProfiles,
+  type BrowserProfile,
   type ComputerTaskSummary,
 } from "@/lib/api/computer";
 
@@ -49,8 +51,16 @@ export function sessionIdFromPathname(
   pathname: string | null | undefined,
 ): string | null {
   if (!pathname) return null;
+  if (/\/computer\/profiles(?:\/|$)/.test(pathname)) return null;
   const match = COMPUTER_SESSION_RE.exec(pathname);
   return match ? decodeURIComponent(match[1]) : null;
+}
+
+/** Profiles mode is static and wins over the dynamic live-session segment. */
+export function profilesModeFromPathname(
+  pathname: string | null | undefined,
+): boolean {
+  return Boolean(pathname && /\/computer\/profiles(?:\/|$)/.test(pathname));
 }
 
 const sectionHeaderCls =
@@ -136,13 +146,93 @@ export function BrowsersSessionList({
   );
 }
 
+/** Compact master list shown while the top bar is in Browser profiles mode. */
+export function BrowsersProfileList({
+  workspaceId,
+  profiles,
+  activeProfileId,
+  creating,
+}: {
+  workspaceId: string;
+  profiles: BrowserProfile[];
+  activeProfileId: string | null;
+  creating: boolean;
+}) {
+  const t = useT().computer.profiles;
+  const selectedId = creating ? null : (activeProfileId ?? profiles[0]?.id ?? null);
+
+  return (
+    <div className="flex flex-col gap-1 px-1 pt-1">
+      <div className="flex items-center justify-between gap-2 pb-0.5">
+        <span className={sectionHeaderCls}>{t.title}</span>
+        <div className="flex items-center gap-1">
+          {profiles.length > 0 ? (
+            <span className="tabular-nums text-[11px] text-sidebar-foreground/50">
+              {profiles.length}
+            </span>
+          ) : null}
+          <Link
+            href={`/w/${workspaceId}/computer/profiles?new=1`}
+            aria-label={t.createTitle}
+            title={t.createTitle}
+            aria-current={creating ? "page" : undefined}
+            className={cn(
+              "grid size-6 place-items-center rounded-md transition-colors",
+              creating
+                ? "doc-nav-active text-sidebar-accent-foreground"
+                : "text-sidebar-foreground/60 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+            )}
+          >
+            <Plus className="size-3.5" aria-hidden />
+          </Link>
+        </div>
+      </div>
+      {profiles.length === 0 ? (
+        <p className="select-none px-2 py-1 text-[12px] text-sidebar-foreground/40">
+          {t.sidebarEmpty}
+        </p>
+      ) : (
+        <ul className="flex flex-col gap-0.5">
+          {profiles.map((profile) => {
+            const active = profile.id === selectedId;
+            const Icon = profile.defaultBackend === "cloud" ? Cloud : Laptop;
+            const typeLabel =
+              profile.defaultBackend === "cloud" ? t.remoteTitle : t.localTitle;
+            return (
+              <li key={profile.id}>
+                <Link
+                  href={`/w/${workspaceId}/computer/profiles?profile=${encodeURIComponent(profile.id)}`}
+                  aria-current={active ? "page" : undefined}
+                  className={rowCls(active)}
+                >
+                  <span className="grid size-6 shrink-0 place-items-center rounded-md bg-sidebar-accent/70">
+                    <Icon className="size-3.5 text-sidebar-foreground/60" aria-hidden />
+                  </span>
+                  <span className="min-w-0 flex-1 truncate font-medium">
+                    {profile.name}
+                  </span>
+                  <span className="sr-only">{typeLabel}</span>
+                </Link>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 /** Polling wrapper rendered by `DocSidebar` for the `computer` surface. */
 export function BrowsersSidebarPanel({ workspaceId }: { workspaceId: string }) {
   const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const profilesMode = profilesModeFromPathname(pathname);
   const activeSessionId = sessionIdFromPathname(pathname);
   const [tasks, setTasks] = useState<ComputerTaskSummary[]>([]);
+  const [profiles, setProfiles] = useState<BrowserProfile[]>([]);
 
   useEffect(() => {
+    if (profilesMode) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const probe = async () => {
@@ -156,7 +246,35 @@ export function BrowsersSidebarPanel({ workspaceId }: { workspaceId: string }) {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [workspaceId]);
+  }, [profilesMode, workspaceId]);
+
+  useEffect(() => {
+    if (!profilesMode) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const probe = async () => {
+      const found = await listBrowserProfiles(workspaceId).catch(() => null);
+      if (cancelled) return;
+      setProfiles(found?.configured ? found.profiles : []);
+      timer = setTimeout(() => void probe(), POLL_MS);
+    };
+    void probe();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [profilesMode, workspaceId]);
+
+  if (profilesMode) {
+    return (
+      <BrowsersProfileList
+        workspaceId={workspaceId}
+        profiles={profiles}
+        activeProfileId={searchParams.get("profile")}
+        creating={searchParams.get("new") === "1"}
+      />
+    );
+  }
 
   return (
     <BrowsersSessionList

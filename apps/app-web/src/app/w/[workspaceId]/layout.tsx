@@ -13,6 +13,8 @@ import { SupportDiagnosticsIndicator } from "@/components/chrome/support-diagnos
 type TeamApiResponse = {
   id: string;
   name: string;
+  iconSeed?: number | null;
+  iconUrl?: string | null;
   role: "owner" | "admin" | "member";
   clearance?: "public" | "internal" | "confidential";
   me?: { id: string };
@@ -57,6 +59,8 @@ export default async function WorkspaceLayout(props: {
       value={{
         workspaceId,
         name: team.name,
+        iconSeed: team.iconSeed ?? null,
+        iconUrl: team.iconUrl ?? null,
         role: team.role,
         clearance: team.clearance ?? "internal",
         me: { id: team.me?.id ?? "" },

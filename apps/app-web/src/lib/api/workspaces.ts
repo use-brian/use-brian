@@ -24,6 +24,54 @@ import { getUserInfo } from "@/lib/user";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
+/** Mirrors the backend cap on `POST /api/workspaces/:workspaceId/icon`. */
+export const MAX_WORKSPACE_ICON_BYTES = 5 * 1024 * 1024;
+
+export type WorkspaceIconUpdate = { iconUrl: string | null };
+
+/** Upload and activate a custom workspace picture. Admin/owner only. */
+export async function uploadWorkspaceIcon(
+  workspaceId: string,
+  file: File,
+): Promise<WorkspaceIconUpdate> {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/icon`,
+    { method: "POST", body: form },
+  );
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as {
+      error?: string;
+      detail?: string;
+    };
+    throw new WorkspaceApiError(
+      body.detail ?? body.error ?? "Could not update the workspace icon",
+      res.status,
+    );
+  }
+  const body = (await res.json()) as WorkspaceIconUpdate;
+  return { iconUrl: body.iconUrl ?? null };
+}
+
+/** Remove the custom picture and reveal the generated landmark fallback. */
+export async function removeWorkspaceIcon(
+  workspaceId: string,
+): Promise<WorkspaceIconUpdate> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/icon`,
+    { method: "DELETE" },
+  );
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new WorkspaceApiError(
+      body.error ?? "Could not remove the workspace icon",
+      res.status,
+    );
+  }
+  return { iconUrl: null };
+}
+
 /** The blueprint-relevant slice of the workspace detail response. */
 export type WorkspaceDefaultBlueprint = {
   id: string;

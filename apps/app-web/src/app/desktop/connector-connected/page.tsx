@@ -39,7 +39,7 @@ export default async function DesktopConnectorConnectedPage(props: {
         <img
           src="/icon.png"
           alt=""
-          className="mx-auto h-14 w-14 rounded-2xl ring-1 ring-primary/30 shadow-[0_8px_30px_-10px_color-mix(in_srgb,var(--primary)_50%,transparent)]"
+          className="mx-auto h-14 w-14"
         />
         <h1
           className="text-2xl font-bold tracking-tight"

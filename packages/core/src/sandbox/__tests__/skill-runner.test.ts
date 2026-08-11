@@ -427,7 +427,17 @@ describe('[COMP:sandbox/skill-runner] Profile at call time (R2-10) + backends + 
   })
 
   it('listBrowserSkills + listBrowserProfiles give the model its discovery surface', async () => {
-    const { tools, addSkill } = await build({ profiles: [{ name: 'Personal IG' }] })
+    const { tools, addSkill, profileStore, profiles: created } = await build({ profiles: [{ name: 'Personal IG' }] })
+    await profileStore.update(created['Personal IG'].id, {
+      assistantRoutingNotes: { 'asst-1': 'Use for personal social accounts.' },
+    })
+    await profileStore.create({
+      workspaceId: 'ws-1',
+      ownerUserId: 'user-1',
+      name: 'Hidden Company',
+      enabledAssistantIds: [],
+      assistantRoutingNotes: { 'asst-1': 'This must stay hidden.' },
+    })
     await addSkill('dm-followers', SENDING_CODE)
     await addSkill('collect-feed', READ_ONLY_CODE)
     const skills = await run(tools.listBrowserSkills, {})
@@ -438,7 +448,9 @@ describe('[COMP:sandbox/skill-runner] Profile at call time (R2-10) + backends + 
 
     const profiles = await run(tools.listBrowserProfiles, {})
     expect(String(profiles.data)).toContain('Personal IG')
-    expect(String(profiles.data)).toContain('[usable]')
+    expect(String(profiles.data)).toContain('Use for personal social accounts.')
+    expect(String(profiles.data)).not.toContain('Hidden Company')
+    expect(String(profiles.data)).not.toContain('This must stay hidden.')
   })
 
   it('an EMPTY profile list never reads as "browsing is blocked" (2026-07-15 refusal source)', async () => {

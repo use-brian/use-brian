@@ -9,7 +9,7 @@ vi.mock('../client.js', () => ({
   rollbackAndRelease: vi.fn(),
 }))
 
-import { query, queryWithRLS } from '../client.js'
+import { getAppPool, query, queryWithRLS } from '../client.js'
 import {
   createDbWorkspaceCustomLlmEndpointStore,
   CustomLlmEncryptionKeyRequiredError,
@@ -18,97 +18,138 @@ import { decryptApiKey } from '../workspace-llm-provider-settings.js'
 
 const mockQuery = vi.mocked(query)
 const mockQueryWithRLS = vi.mocked(queryWithRLS)
+const mockGetAppPool = vi.mocked(getAppPool)
 
-const publicRow = {
+const workspaceId = '00000000-0000-4000-8000-000000000010'
+const endpointRow = {
   id: '00000000-0000-4000-8000-000000000001',
-  workspaceId: '00000000-0000-4000-8000-000000000010',
-  name: 'Local',
+  workspaceId,
+  name: 'Local gateway',
   baseUrl: 'http://model.example/v1',
-  modelId: 'llama-local',
-  contextWindow: 32768,
-  maxOutputTokens: 4096,
-  supportsTools: true,
-  verifiedAt: new Date(),
-  isDefault: true,
   hasApiKey: true,
   createdAt: new Date(),
   updatedAt: new Date(),
 }
+const profileRow = {
+  id: endpointRow.id,
+  endpointId: endpointRow.id,
+  workspaceId,
+  name: 'Balanced',
+  modelId: 'local-balanced',
+  contextWindow: 32768,
+  maxOutputTokens: 4096,
+  supportsTools: true,
+  verifiedAt: new Date(),
+  createdAt: new Date(),
+  updatedAt: new Date(),
+}
+
+function mockCreateTransaction() {
+  const clientQuery = vi.fn()
+    .mockResolvedValueOnce({})
+    .mockResolvedValueOnce({ rows: [endpointRow], rowCount: 1 })
+    .mockResolvedValueOnce({ rows: [profileRow], rowCount: 1 })
+    .mockResolvedValueOnce({})
+  mockGetAppPool.mockReturnValue({
+    connect: vi.fn().mockResolvedValue({ query: clientQuery }),
+  } as never)
+  return clientQuery
+}
 
 beforeEach(() => vi.clearAllMocks())
 
-describe('[COMP:api/custom-llm-endpoints] custom endpoint store', () => {
-  it('encrypts a bearer key and never returns it from the administrative row', async () => {
+describe('[COMP:api/custom-llm-endpoints] custom connection/profile store', () => {
+  it('stores the bearer key once on the connection and creates its first profile atomically', async () => {
     const key = randomBytes(32)
     const store = createDbWorkspaceCustomLlmEndpointStore(key)
-    mockQueryWithRLS.mockResolvedValueOnce({ rows: [publicRow], rowCount: 1 } as never)
+    const clientQuery = mockCreateTransaction()
     const result = await store.create({
       actingUserId: 'user-1',
-      workspaceId: publicRow.workspaceId,
+      workspaceId,
       input: {
-        name: 'Local',
-        baseUrl: 'http://model.example/v1',
+        name: 'Local gateway',
+        baseUrl: endpointRow.baseUrl,
         apiKey: 'private-token-1234',
-        modelId: 'llama-local',
+        modelId: profileRow.modelId,
         contextWindow: 32768,
         maxOutputTokens: 4096,
         supportsTools: true,
         verifiedAt: new Date(),
-        isDefault: false,
       },
     })
-    const params = mockQueryWithRLS.mock.calls[0]![2] as unknown[]
-    const encrypted = params[3] as Buffer
-    expect(decryptApiKey(encrypted, key)).toBe('private-token-1234')
-    expect(result).toEqual(publicRow)
+    const endpointParams = clientQuery.mock.calls[1]![1] as unknown[]
+    expect(decryptApiKey(endpointParams[4] as Buffer, key)).toBe('private-token-1234')
+    expect(result).toMatchObject({ name: endpointRow.name, profiles: [profileRow] })
     expect(JSON.stringify(result)).not.toContain('private-token-1234')
   })
 
-  it('allows an unauthenticated local endpoint without an encryption key', async () => {
+  it('allows a no-auth connection without an encryption key', async () => {
     const store = createDbWorkspaceCustomLlmEndpointStore()
-    mockQueryWithRLS.mockResolvedValueOnce({ rows: [{ ...publicRow, hasApiKey: false }], rowCount: 1 } as never)
+    const clientQuery = mockCreateTransaction()
     await store.create({
-      actingUserId: 'user-1',
-      workspaceId: publicRow.workspaceId,
+      actingUserId: 'user-1', workspaceId,
       input: {
-        name: 'Local', baseUrl: publicRow.baseUrl, apiKey: null, modelId: publicRow.modelId,
-        contextWindow: 32768, maxOutputTokens: 4096, supportsTools: true,
-        verifiedAt: new Date(),
+        name: endpointRow.name, baseUrl: endpointRow.baseUrl, apiKey: null,
+        modelId: profileRow.modelId, contextWindow: 32768, maxOutputTokens: 4096,
+        supportsTools: true, verifiedAt: new Date(),
       },
     })
-    expect((mockQueryWithRLS.mock.calls[0]![2] as unknown[])[3]).toBeNull()
+    expect((clientQuery.mock.calls[1]![1] as unknown[])[4]).toBeNull()
   })
 
-  it('fails closed when a bearer key cannot be encrypted', async () => {
+  it('fails closed before opening a transaction when a bearer key cannot be encrypted', async () => {
     const store = createDbWorkspaceCustomLlmEndpointStore()
     await expect(store.create({
-      actingUserId: 'user-1',
-      workspaceId: publicRow.workspaceId,
+      actingUserId: 'user-1', workspaceId,
       input: {
-        name: 'Local', baseUrl: publicRow.baseUrl, apiKey: 'secret', modelId: publicRow.modelId,
-        contextWindow: 32768, maxOutputTokens: 4096, supportsTools: true,
-        verifiedAt: new Date(),
+        name: endpointRow.name, baseUrl: endpointRow.baseUrl, apiKey: 'secret',
+        modelId: profileRow.modelId, contextWindow: 32768, maxOutputTokens: 4096,
+        supportsTools: true, verifiedAt: new Date(),
       },
     })).rejects.toBeInstanceOf(CustomLlmEncryptionKeyRequiredError)
-    expect(mockQueryWithRLS).not.toHaveBeenCalled()
+    expect(mockGetAppPool).not.toHaveBeenCalled()
   })
 
-  it('decrypts a credential only through the system runtime accessor', async () => {
+  it('groups profiles under their reusable endpoint on administrative reads', async () => {
+    const store = createDbWorkspaceCustomLlmEndpointStore()
+    mockQueryWithRLS
+      .mockResolvedValueOnce({ rows: [endpointRow], rowCount: 1 } as never)
+      .mockResolvedValueOnce({ rows: [profileRow], rowCount: 1 } as never)
+    await expect(store.list({ actingUserId: 'user-1', workspaceId }))
+      .resolves.toEqual([{ ...endpointRow, profiles: [profileRow] }])
+  })
+
+  it('decrypts connection auth only through a profile runtime accessor', async () => {
     const key = randomBytes(32)
     const store = createDbWorkspaceCustomLlmEndpointStore(key)
-    // Capture a real encrypted blob through create.
-    mockQueryWithRLS.mockResolvedValueOnce({ rows: [publicRow], rowCount: 1 } as never)
+    const encrypted = Buffer.concat([Buffer.alloc(12), Buffer.alloc(16), Buffer.from('unused')])
+    // Use a real encrypted value captured through the public helper path.
+    const clientQuery = mockCreateTransaction()
     await store.create({
-      actingUserId: 'user-1', workspaceId: publicRow.workspaceId,
+      actingUserId: 'user-1', workspaceId,
       input: {
-        name: 'Local', baseUrl: publicRow.baseUrl, apiKey: 'system-only', modelId: publicRow.modelId,
-        contextWindow: 32768, maxOutputTokens: 4096, supportsTools: true,
-        verifiedAt: new Date(),
+        name: endpointRow.name, baseUrl: endpointRow.baseUrl, apiKey: 'system-only',
+        modelId: profileRow.modelId, contextWindow: 32768, maxOutputTokens: 4096,
+        supportsTools: true, verifiedAt: new Date(),
       },
     })
-    const encrypted = (mockQueryWithRLS.mock.calls[0]![2] as unknown[])[3] as Buffer
-    mockQuery.mockResolvedValueOnce({ rows: [{ ...publicRow, apiKeyEncrypted: encrypted }], rowCount: 1 } as never)
-    await expect(store.getRuntimeSystem({ workspaceId: publicRow.workspaceId, endpointId: publicRow.id }))
-      .resolves.toMatchObject({ apiKey: 'system-only', id: publicRow.id })
+    const realEncrypted = (clientQuery.mock.calls[1]![1] as unknown[])[4] as Buffer
+    expect(encrypted).not.toEqual(realEncrypted)
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ ...profileRow, endpointName: endpointRow.name, baseUrl: endpointRow.baseUrl, apiKeyEncrypted: realEncrypted }],
+      rowCount: 1,
+    } as never)
+    await expect(store.getRuntimeSystem({ workspaceId, profileId: profileRow.id }))
+      .resolves.toMatchObject({ apiKey: 'system-only', id: profileRow.id, endpointId: endpointRow.id })
+  })
+
+  it('persists one independent custom profile assignment per Brian tier', async () => {
+    const store = createDbWorkspaceCustomLlmEndpointStore()
+    const setting = { workspaceId, tier: 'max', profileId: profileRow.id, updatedAt: new Date() }
+    mockQueryWithRLS.mockResolvedValueOnce({ rows: [setting], rowCount: 1 } as never)
+    await expect(store.setTierDefault({
+      actingUserId: 'user-1', workspaceId, tier: 'max', profileId: profileRow.id,
+    })).resolves.toEqual(setting)
+    expect(mockQueryWithRLS.mock.calls[0]![2]).toEqual([workspaceId, 'max', profileRow.id, 'user-1'])
   })
 })

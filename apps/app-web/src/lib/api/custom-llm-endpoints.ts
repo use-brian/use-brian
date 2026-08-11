@@ -2,20 +2,38 @@ import { authFetch } from "@/lib/auth-fetch";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
-export type CustomLlmEndpoint = {
+export type CustomLlmTier = "standard" | "pro" | "max" | "research";
+
+export type CustomLlmProfile = {
   id: string;
+  endpointId: string;
   workspaceId: string;
   selector: string;
   name: string;
-  baseUrl: string;
   modelId: string;
   contextWindow: number;
   maxOutputTokens: number;
   supportsTools: boolean;
   verifiedAt: string;
-  isDefault: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CustomLlmEndpoint = {
+  id: string;
+  workspaceId: string;
+  name: string;
+  baseUrl: string;
   hasApiKey: boolean;
   createdAt: string;
+  updatedAt: string;
+  profiles: CustomLlmProfile[];
+};
+
+export type CustomLlmTierDefault = {
+  workspaceId: string;
+  tier: CustomLlmTier;
+  profileId: string;
   updatedAt: string;
 };
 
@@ -26,7 +44,13 @@ export type CustomLlmEndpointInput = {
   modelId: string;
   contextWindow: number;
   maxOutputTokens: number;
-  isDefault?: boolean;
+};
+
+export type CustomLlmProfileInput = {
+  name: string;
+  modelId: string;
+  contextWindow: number;
+  maxOutputTokens: number;
 };
 
 export class CustomLlmEndpointsUnavailableError extends Error {}
@@ -38,11 +62,18 @@ async function responseError(res: Response, fallback: string): Promise<Error> {
   return error;
 }
 
-export async function listCustomLlmEndpoints(workspaceId: string): Promise<CustomLlmEndpoint[]> {
+export async function getCustomLlmConfiguration(workspaceId: string): Promise<{
+  endpoints: CustomLlmEndpoint[];
+  tierDefaults: CustomLlmTierDefault[];
+}> {
   const res = await authFetch(`${API_URL}/api/workspaces/${workspaceId}/custom-llm-endpoints`);
   if (res.status === 404) throw new CustomLlmEndpointsUnavailableError();
   if (!res.ok) throw await responseError(res, `endpoint list failed (${res.status})`);
-  return ((await res.json()) as { endpoints: CustomLlmEndpoint[] }).endpoints;
+  return (await res.json()) as { endpoints: CustomLlmEndpoint[]; tierDefaults: CustomLlmTierDefault[] };
+}
+
+export async function listCustomLlmEndpoints(workspaceId: string): Promise<CustomLlmEndpoint[]> {
+  return (await getCustomLlmConfiguration(workspaceId)).endpoints;
 }
 
 export async function createCustomLlmEndpoint(
@@ -59,6 +90,31 @@ export async function createCustomLlmEndpoint(
   return ((await res.json()) as { endpoint: CustomLlmEndpoint }).endpoint;
 }
 
+export async function createCustomLlmProfile(
+  workspaceId: string,
+  endpointId: string,
+  input: CustomLlmProfileInput,
+): Promise<CustomLlmProfile> {
+  const res = await authFetch(`${API_URL}/api/workspaces/${workspaceId}/custom-llm-endpoints/${endpointId}/profiles`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) throw await responseError(res, `profile create failed (${res.status})`);
+  return ((await res.json()) as { profile: CustomLlmProfile }).profile;
+}
+
+export async function deleteCustomLlmProfile(
+  workspaceId: string,
+  endpointId: string,
+  profileId: string,
+): Promise<void> {
+  const res = await authFetch(`${API_URL}/api/workspaces/${workspaceId}/custom-llm-endpoints/${endpointId}/profiles/${profileId}`, {
+    method: "DELETE",
+  });
+  if (!res.ok && res.status !== 404) throw await responseError(res, `profile delete failed (${res.status})`);
+}
+
 export async function deleteCustomLlmEndpoint(workspaceId: string, endpointId: string): Promise<void> {
   const res = await authFetch(`${API_URL}/api/workspaces/${workspaceId}/custom-llm-endpoints/${endpointId}`, {
     method: "DELETE",
@@ -66,19 +122,23 @@ export async function deleteCustomLlmEndpoint(workspaceId: string, endpointId: s
   if (!res.ok && res.status !== 404) throw await responseError(res, `endpoint delete failed (${res.status})`);
 }
 
-export async function setCustomLlmEndpointDefault(
+export async function setCustomLlmTierDefault(
   workspaceId: string,
-  endpointId: string,
-): Promise<void> {
-  const res = await authFetch(`${API_URL}/api/workspaces/${workspaceId}/custom-llm-endpoints/${endpointId}/default`, {
+  tier: CustomLlmTier,
+  profileId: string,
+): Promise<CustomLlmTierDefault> {
+  const res = await authFetch(`${API_URL}/api/workspaces/${workspaceId}/custom-llm-endpoints/tiers/${tier}`, {
     method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ profileId }),
   });
-  if (!res.ok) throw await responseError(res, `endpoint default failed (${res.status})`);
+  if (!res.ok) throw await responseError(res, `tier update failed (${res.status})`);
+  return ((await res.json()) as { tierDefault: CustomLlmTierDefault }).tierDefault;
 }
 
-export async function clearCustomLlmEndpointDefault(workspaceId: string): Promise<void> {
-  const res = await authFetch(`${API_URL}/api/workspaces/${workspaceId}/custom-llm-endpoints/default`, {
+export async function clearCustomLlmTierDefault(workspaceId: string, tier: CustomLlmTier): Promise<void> {
+  const res = await authFetch(`${API_URL}/api/workspaces/${workspaceId}/custom-llm-endpoints/tiers/${tier}`, {
     method: "DELETE",
   });
-  if (!res.ok) throw await responseError(res, `endpoint default clear failed (${res.status})`);
+  if (!res.ok) throw await responseError(res, `tier clear failed (${res.status})`);
 }

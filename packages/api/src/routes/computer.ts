@@ -64,6 +64,12 @@ const InputEventSchema = z.union([
 
 const ClearanceSchema = z.enum(['public', 'internal', 'confidential'])
 const BackendSchema = z.enum(['local', 'cloud'])
+const AssistantRoutingNotesSchema = z
+  .record(
+    z.string().min(1).max(64),
+    z.string().min(1).max(500).refine((note) => note === note.trim()),
+  )
+  .refine((notes) => Object.keys(notes).length <= 200)
 
 const TERMINAL_LOCAL_ERROR_CODES = new Set([
   'stopped',
@@ -198,6 +204,7 @@ const UpdateProfileSchema = z.object({
   localControlMode: z.enum(['task_tabs', 'full_browser']).optional(),
   proxyUrl: z.string().url().max(1024).nullish().optional(),
   enabledAssistantIds: z.array(z.string().min(1).max(64)).max(200).optional(),
+  assistantRoutingNotes: AssistantRoutingNotesSchema.optional(),
 })
 
 const SaveCredentialSchema = z.object({
@@ -631,6 +638,7 @@ export function computerRoutes(deps: {
     const profiles = await deps.profileStore.list({ workspaceId })
     const withSessions = await Promise.all(
       profiles.map(async (p) => {
+        const canManage = p.ownerUserId === (req.userId as string)
         const grants = deps.grants
           ? (await deps.grants.list({ workspaceId, profileId: p.id }).catch(() => [])).filter(
               (g) => g.status === 'active',
@@ -647,9 +655,14 @@ export function computerRoutes(deps: {
         )
         return {
           ...p,
+          // Routing notes are owner-managed profile metadata. Workspace
+          // members may discover a shared profile's existence, but do not
+          // receive notes belonging to its owner's assistant configuration.
+          assistantRoutingNotes: canManage ? (p.assistantRoutingNotes ?? {}) : {},
+          canManage,
           sessions: deps.vault ? await deps.vault.list({ profileId: p.id }).catch(() => []) : [],
           credentials:
-            deps.credentials && p.ownerUserId === (req.userId as string)
+            deps.credentials && canManage
               ? await deps.credentials.list({ profileId: p.id }).catch(() => [])
               : [],
           grants: namedGrants,

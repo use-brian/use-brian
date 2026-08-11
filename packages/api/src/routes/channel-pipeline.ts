@@ -61,7 +61,7 @@ import {
   getGroupChatContext, buildGroupChatContextPrompt, getSessionTopicLabels,
   markDowngradeNoticeSent, clearDowngradeNotice,
 } from '../db/sessions.js'
-import { resolveModel, wouldBudgetDowngradeAffectModel, chatTierBudget, BACKGROUND_MODEL } from '../model-resolution.js'
+import { resolveModel, wouldBudgetDowngradeAffectModel, chatTierBudget, BACKGROUND_MODEL, tierForModel } from '../model-resolution.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
 import type { SkillStore } from '../db/skill-store.js'
@@ -775,7 +775,11 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   }
   const model = resolveModel(effectiveModelAlias, workspacePlan, budgetStatus)
   const customLlmRuntime = assistant.workspaceId && params.resolveWorkspaceCustomLlm
-    ? await params.resolveWorkspaceCustomLlm({ workspaceId: assistant.workspaceId, allowDefault: true })
+    ? await params.resolveWorkspaceCustomLlm({
+        workspaceId: assistant.workspaceId,
+        requestedTier: tierForModel(model),
+        allowDefault: true,
+      })
     : null
   if (customLlmRuntime && userContentBlocks.some((block) => block.type === 'image')) {
     await hooks.sendError(new Error('Custom model endpoints currently support text and tools only. Remove the inline image or use the web app to choose a built-in model.'))

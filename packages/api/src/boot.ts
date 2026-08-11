@@ -234,6 +234,7 @@ import { assistantRoutes } from './routes/assistants.js'
 import { assistantConnectorGrantsRoutes } from './routes/assistant-connector-grants.js'
 import { skillRoutes } from './routes/skills.js'
 import { workspaceRoutes } from './routes/workspaces.js'
+import { workspaceIconPublicRoutes, workspaceIconRoutes } from './routes/workspace-icon.js'
 import { invitationRoutes } from './routes/invitations.js'
 import { createWorkspaceInvitationStore } from './db/workspace-invitation-store.js'
 import { createWorkspaceStore, getWorkspaceInboxRetentionDays, getWorkspaceMembershipWithClearanceSystem, getWorkspacePlan, getWorkspaceTranscriptionPrefs, setWorkspaceTranscriptionPrefs } from './db/workspace-store.js'
@@ -4284,6 +4285,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       blobClient: filesBlobClient,
       filesResolver,
     }))
+    app.use('/api/workspace-icons', workspaceIconPublicRoutes({
+      blobClient: filesBlobClient,
+      filesResolver,
+    }))
   }
   app.use('/api/account', requireAuth(env.JWT_SECRET), accountRoutes({
     linkedAccountStore,
@@ -4520,7 +4525,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     invitationStore: workspaceInvitationStore,
     smtpClient: emailAuth?.smtpClient,
     appUrl: env.APP_URL,
+    blobClient: filesBlobClient ?? undefined,
+    filesResolver: filesResolver ?? undefined,
   })
+  app.use('/api/workspaces', requireAuth(env.JWT_SECRET), workspaceIconRoutes({
+    workspaceStore,
+    auditStore: workspaceAuditStore,
+    blobClient: filesBlobClient ?? undefined,
+    filesResolver: filesResolver ?? undefined,
+  }))
   app.use('/api/workspaces', requireAuth(env.JWT_SECRET), workspaceRouter)
 
   const invitationRouter = invitationRoutes({

@@ -31,6 +31,7 @@ import {
   canUseProfile,
   describeProfileResolution,
   resolveProfileForCall,
+  routingNoteFor,
   type BrowserProfile,
   type BrowserProfileStore,
 } from './profiles.js'
@@ -655,7 +656,7 @@ export function createSkillRunnerTools(opts: CreateSkillRunnerToolsOptions): {
     name: 'listBrowserProfiles',
     requiresCapability: 'computer',
     description:
-      'List this workspace\'s browser profiles (saved LOGIN identities for signed-in browsing) and which of them you can browse as. Pass a profile name to browserNavigate or runBrowserSkill when several match. Browsing public sites needs no profile at all — do not call this before an ordinary browse.',
+      'List the browser profiles available to this assistant for signed-in browsing, including the user\'s guidance for when to use each one. Pass a profile name to browserNavigate or runBrowserSkill when several match. Browsing public sites needs no profile at all; do not call this before an ordinary browse.',
     inputSchema: z.object({}),
     isReadOnly: true,
     isConcurrencySafe: true,
@@ -672,23 +673,24 @@ export function createSkillRunnerTools(opts: CreateSkillRunnerToolsOptions): {
       const blocked = await policyGate('listBrowserProfiles', context)
       if (blocked) return blocked
       const clearance = await opts.profiles.assistantClearance(context)
-      const profiles = await opts.profiles.store.list({ workspaceId: context.workspaceId })
+      const allProfiles = await opts.profiles.store.list({ workspaceId: context.workspaceId })
+      const actor = {
+        userId: context.userId,
+        workspaceId: context.workspaceId,
+        assistantId: context.assistantId,
+        assistantClearance: clearance,
+      }
+      const profiles = allProfiles.filter((profile) => canUseProfile(profile, actor).ok)
       if (profiles.length === 0) {
         // The 2026-07-15 refusal echoed this line verbatim — it must never
         // read as "browsing is unavailable". Profiles only add saved logins.
         return {
           data:
-            'No browser profiles exist in this workspace. That does NOT block browsing: public sites work without one (browserNavigate / browserExplore run identity-less) — proceed with the browse. A profile is only needed for signed-in tasks or running a saved browser skill; the user can create one under Settings > Browser profiles.',
+            'No browser profiles are available to this assistant. That does NOT block browsing: public sites work without one (browserNavigate / browserExplore run identity-less), so proceed with the browse. A profile is only needed for signed-in tasks or a saved browser skill. The user can create one in Browsers > Browser profiles, then make it available under Assistant > Tools > Browser identities.',
         }
       }
       const lines: string[] = []
       for (const profile of profiles) {
-        const gate = canUseProfile(profile, {
-          userId: context.userId,
-          workspaceId: context.workspaceId,
-          assistantId: context.assistantId,
-          assistantClearance: clearance,
-        })
         let sites = ''
         if (opts.profiles.vault) {
           try {
@@ -699,9 +701,8 @@ export function createSkillRunnerTools(opts: CreateSkillRunnerToolsOptions): {
             /* sites are a nicety */
           }
         }
-        lines.push(
-          `- ${profile.name} (${profile.defaultBackend} browser${sites}) ${gate.ok ? '[usable]' : `[not usable: ${gate.reason}]`}`,
-        )
+        const guidance = routingNoteFor(profile, context.assistantId)
+        lines.push(`- ${profile.name} (${profile.defaultBackend} browser${sites})${guidance ? `; when to use: ${guidance}` : ''}`)
       }
       return { data: `Browser profiles:\n${lines.join('\n')}` }
     },

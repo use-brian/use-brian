@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Browser profiles mode for the Browsers operator surface.
  *
@@ -11,12 +9,22 @@
 
 import { BrowserProfilesSection } from "@/components/computer/browser-profiles-section";
 
-export default function BrowserProfilesPage() {
+export default async function BrowserProfilesPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ profile?: string | string[]; new?: string | string[] }>;
+}) {
+  const query = await searchParams;
+  const selectedProfileId =
+    typeof query.profile === "string" ? query.profile : undefined;
+  const creating = query.new === "1";
+
   return (
-    <div className="h-full overflow-y-auto p-4 sm:p-6">
-      <div className="mx-auto max-w-4xl">
-        <BrowserProfilesSection />
-      </div>
+    <div className="h-full overflow-y-auto px-3 py-4 sm:px-4 sm:py-5 lg:px-5">
+      <BrowserProfilesSection
+        selectedProfileId={selectedProfileId}
+        creating={creating}
+      />
     </div>
   );
 }

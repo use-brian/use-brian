@@ -932,9 +932,11 @@ export function FloatingChat({
   const customOptions = useMemo(() =>
     (modelMenu?.customEndpoints ?? []).map((endpoint) => ({
       key: endpoint.id,
-      label: endpoint.name,
-      sublabel: `${endpoint.modelId}${endpoint.isDefault ? ` · ${t.meteredDefaultTag}` : ""}`,
-    })), [modelMenu, t.meteredDefaultTag]);
+      label: `${endpoint.endpointName} / ${endpoint.name === endpoint.endpointName ? endpoint.modelId : endpoint.name}`,
+      sublabel: `${endpoint.modelId}${endpoint.tiers.length > 0 ? ` · ${endpoint.tiers.map((tier) =>
+        tier === "standard" ? t.modelStandard : tier === "pro" ? t.modelPro : tier === "max" ? t.modelMax : t.research
+      ).join(", ")}` : ""}`,
+    })), [modelMenu, t.modelStandard, t.modelPro, t.modelMax, t.research]);
 
   // Pre-flight invariant (L8): estimate at the CHOSEN budget → confirm →
   // only then arm the selection. The send body then carries

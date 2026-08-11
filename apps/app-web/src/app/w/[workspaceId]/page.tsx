@@ -20,6 +20,8 @@
  * always land on `/p` regardless of config: both are doc-surface affordances
  * (open a fresh draft, start the dock recorder), so honouring them anywhere
  * else would silently drop what the user was capturing.
+ * Stripe's one-shot `checkout` / `session_id` handoff is also preserved onto
+ * the resolved Home path so the workspace plan gate can reconcile it there.
  *
  * Spec: docs/architecture/features/home-apps.md → "Home resolution".
  */
@@ -28,6 +30,7 @@ import { Suspense, useEffect } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useSidebarData } from "@/components/doc/doc-sidebar-data";
 import { homePath } from "@/lib/operator-apps";
+import { forwardPlanGateCheckoutReturn } from "@/lib/plan-gate";
 
 function WorkspaceRootRedirect() {
   const params = useParams<{ workspaceId: string }>();
@@ -44,7 +47,12 @@ function WorkspaceRootRedirect() {
       router.replace(`/w/${workspaceId}/p?${capture ? "capture=1" : "record=1"}`);
       return;
     }
-    router.replace(homePath(workspaceId, homeApps));
+    router.replace(
+      forwardPlanGateCheckoutReturn(
+        homePath(workspaceId, homeApps),
+        searchParams?.toString() ?? "",
+      ),
+    );
   }, [homeApps, router, searchParams, workspaceId]);
 
   return null;

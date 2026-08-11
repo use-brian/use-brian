@@ -26,6 +26,8 @@ export type BrowserProfile = {
   clearance: Sensitivity
   /** Assistants explicitly enabled for this identity (R2-4). */
   enabledAssistantIds: string[]
+  /** Per-assistant selection guidance. This never grants profile access. */
+  assistantRoutingNotes?: Record<string, string>
   /** Seeds the interactive toggle; authoritative for unattended runs (R2-3). */
   defaultBackend: BrowserBackendKind
   /** Scope granted to local-browser tasks. Defaults to task-owned tabs. */
@@ -45,12 +47,19 @@ export type CreateBrowserProfileParams = {
   localControlMode?: LocalBrowserControlMode
   proxyUrl?: string | null
   enabledAssistantIds?: string[]
+  assistantRoutingNotes?: Record<string, string>
 }
 
 export type UpdateBrowserProfileParams = Partial<
   Pick<
     BrowserProfile,
-    'name' | 'clearance' | 'defaultBackend' | 'localControlMode' | 'proxyUrl' | 'enabledAssistantIds'
+    | 'name'
+    | 'clearance'
+    | 'defaultBackend'
+    | 'localControlMode'
+    | 'proxyUrl'
+    | 'enabledAssistantIds'
+    | 'assistantRoutingNotes'
   >
 >
 
@@ -95,9 +104,15 @@ export function canUseProfile(
   return { ok: true }
 }
 
+/** The acting assistant's note only; whitespace-only guidance is absent. */
+export function routingNoteFor(profile: BrowserProfile, assistantId: string): string | null {
+  const note = profile.assistantRoutingNotes?.[assistantId]?.replace(/\s+/g, ' ').trim()
+  return note || null
+}
+
 export type ProfileResolution =
   | { kind: 'ok'; profile: BrowserProfile }
-  | { kind: 'must_name'; candidates: string[] }
+  | { kind: 'must_name'; candidates: string[]; guidance?: Record<string, string> }
   | { kind: 'not_found'; name: string }
   | { kind: 'denied'; profile: BrowserProfile; reason: ProfileDenialReason }
   | { kind: 'none' }
@@ -143,7 +158,17 @@ export async function resolveProfileForCall(params: {
   }
   if (candidates.length === 1) return { kind: 'ok', profile: candidates[0] }
   if (candidates.length > 1) {
-    return { kind: 'must_name', candidates: candidates.map((p) => p.name) }
+    const guidance = Object.fromEntries(
+      candidates.flatMap((profile) => {
+        const note = routingNoteFor(profile, actor.assistantId)
+        return note ? [[profile.name, note]] : []
+      }),
+    )
+    return {
+      kind: 'must_name',
+      candidates: candidates.map((p) => p.name),
+      ...(Object.keys(guidance).length > 0 ? { guidance } : {}),
+    }
   }
   return { kind: 'none' }
 }
@@ -152,13 +177,18 @@ export async function resolveProfileForCall(params: {
 export function describeProfileResolution(res: Exclude<ProfileResolution, { kind: 'ok' }>): string {
   switch (res.kind) {
     case 'must_name':
-      return `Several browser profiles match — name one with the "profile" parameter: ${res.candidates.map((c) => `"${c}"`).join(', ')}.`
+      return `Several browser profiles match. Name one with the "profile" parameter: ${res.candidates
+        .map((candidate) => {
+          const guidance = res.guidance?.[candidate]
+          return guidance ? `"${candidate}" (${guidance})` : `"${candidate}"`
+        })
+        .join(', ')}.`
     case 'not_found':
-      return `No browser profile named "${res.name}" exists in this workspace. Ask the user to create it under Settings > Browser profiles, or omit the parameter to use an available profile.`
+      return `No browser profile named "${res.name}" exists in this workspace. Ask the user to create it in Browsers > Browser profiles, or omit the parameter to use an available profile.`
     case 'denied':
       switch (res.reason) {
         case 'not_enabled':
-          return `This assistant is not enabled for the browser profile "${res.profile.name}". A workspace member can enable it under Settings > Browser profiles.`
+          return `This assistant is not enabled for the browser profile "${res.profile.name}". Its owner can make it available under Assistant > Tools > Browser identities.`
         case 'clearance':
           return `This assistant's clearance does not cover the browser profile "${res.profile.name}".`
         case 'owner_only':
@@ -170,7 +200,7 @@ export function describeProfileResolution(res: Exclude<ProfileResolution, { kind
       // and explore proceed identity-less on 'none' (R2-10). Keep the
       // requirement honest but never let it read as "browsing is blocked"
       // (the 2026-07-15 refusal was the model echoing exactly that belief).
-      return 'No browser profile is enabled for this assistant. Running a saved browser skill requires one (skills replay signed-in flows) — the user can create and enable it under Settings > Browser profiles. Public pages need no profile: browse them directly with browserNavigate or browserExplore instead.'
+      return 'No browser profile is available to this assistant. Running a saved browser skill requires one (skills replay signed-in flows). The user can create one in Browsers > Browser profiles, then make it available under Assistant > Tools > Browser identities. Public pages need no profile: browse them directly with browserNavigate or browserExplore instead.'
   }
 }
 
@@ -252,6 +282,7 @@ export function createInMemoryBrowserProfileStore(): BrowserProfileStore & {
         name: params.name,
         clearance: params.clearance ?? 'confidential',
         enabledAssistantIds: params.enabledAssistantIds ?? [],
+        assistantRoutingNotes: params.assistantRoutingNotes ?? {},
         defaultBackend: params.defaultBackend ?? 'cloud',
         localControlMode: params.localControlMode ?? 'task_tabs',
         proxyUrl: params.proxyUrl ?? null,
@@ -277,6 +308,9 @@ export function createInMemoryBrowserProfileStore(): BrowserProfileStore & {
         ...('proxyUrl' in patch ? { proxyUrl: patch.proxyUrl ?? null } : {}),
         ...('enabledAssistantIds' in patch && patch.enabledAssistantIds !== undefined
           ? { enabledAssistantIds: patch.enabledAssistantIds }
+          : {}),
+        ...('assistantRoutingNotes' in patch && patch.assistantRoutingNotes !== undefined
+          ? { assistantRoutingNotes: patch.assistantRoutingNotes }
           : {}),
         updatedAt: new Date().toISOString(),
       }

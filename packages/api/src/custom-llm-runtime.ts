@@ -6,9 +6,10 @@ import {
   type LLMProvider,
 } from '@use-brian/core'
 import type {
-  WorkspaceCustomLlmEndpointRuntime,
+  WorkspaceCustomLlmProfileRuntime,
   WorkspaceCustomLlmEndpointStore,
 } from './db/workspace-custom-llm-endpoints.js'
+import { isCustomLlmTier } from './db/workspace-custom-llm-endpoints.js'
 import {
   createPublicCustomLlmFetch,
   CustomLlmPublicEndpointError,
@@ -91,14 +92,14 @@ export type CustomLlmConnectionInput = {
 }
 
 function providerFor(
-  profile: CustomLlmConnectionInput & { endpointId: string },
+  profile: CustomLlmConnectionInput & { profileId: string },
   fetchFn: typeof fetch = fetch,
 ): LLMProvider {
-  const recordedModel = customLlmAlias(profile.endpointId)
+  const recordedModel = customLlmAlias(profile.profileId)
   return createOpenAICompatProvider({
     apiKey: profile.apiKey?.trim() || undefined,
     baseURL: profile.baseUrl,
-    label: `workspace-${profile.endpointId}`,
+    label: `workspace-${profile.profileId}`,
     wireModel: profile.modelId,
     recordedModel,
     models: [recordedModel],
@@ -128,7 +129,7 @@ export async function probeCustomLlmEndpoint(
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), options?.timeoutMs ?? 30_000)
   const provider = providerFor(
-    { ...input, baseUrl, endpointId: '00000000-0000-4000-8000-000000000000' },
+    { ...input, baseUrl, profileId: '00000000-0000-4000-8000-000000000000' },
     options?.fetchFn ?? (networkPolicy === 'public-only' ? createPublicCustomLlmFetch() : fetch),
   )
   let toolName = ''
@@ -204,6 +205,7 @@ export type ResolvedWorkspaceCustomLlm = {
 export type WorkspaceCustomLlmResolver = (params: {
   workspaceId: string
   requestedModel?: string
+  requestedTier?: string
   allowDefault?: boolean
 }) => Promise<ResolvedWorkspaceCustomLlm | null>
 
@@ -215,19 +217,19 @@ export function createWorkspaceCustomLlmResolver(
   },
 ): WorkspaceCustomLlmResolver {
   const networkPolicy = options?.networkPolicy ?? 'private-network'
-  return async ({ workspaceId, requestedModel, allowDefault = true }) => {
+  return async ({ workspaceId, requestedModel, requestedTier, allowDefault = true }) => {
     const explicitId = customLlmEndpointIdFromAlias(requestedModel)
-    const profile: WorkspaceCustomLlmEndpointRuntime | null = explicitId
-      ? await store.getRuntimeSystem({ workspaceId, endpointId: explicitId })
-      : allowDefault
-        ? await store.getDefaultRuntimeSystem({ workspaceId })
+    const profile: WorkspaceCustomLlmProfileRuntime | null = explicitId
+      ? await store.getRuntimeSystem({ workspaceId, profileId: explicitId })
+      : allowDefault && requestedTier && isCustomLlmTier(requestedTier)
+        ? await store.getTierRuntimeSystem({ workspaceId, tier: requestedTier })
         : null
     if (!profile) return null
     const selector = customLlmAlias(profile.id)
     const fetchFn = options?.fetchFn ?? (networkPolicy === 'public-only' ? createPublicCustomLlmFetch() : fetch)
     return {
       provider: wrapProvider(providerFor({
-        endpointId: profile.id,
+        profileId: profile.id,
         baseUrl: profile.baseUrl,
         apiKey: profile.apiKey,
         modelId: profile.modelId,

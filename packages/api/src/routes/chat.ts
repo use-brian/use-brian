@@ -45,7 +45,7 @@ import { recordExternalCostFromMeta } from '../billing-external.js'
 // no-op/false/null/unset defaults in chatRoutes(). See oss §12.5.
 import type { Message, LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, FileStore, ContentBlock, CacheStore, McpSettingsStore, ConfirmationDecision, ConfirmationResolver, TopicClassification, ClassifierRecentTurn, EpisodicStore, CapabilityStore, RetrievalStore, TranscribeResult, TokenUsage, WorkerResult, EngineHooks } from '@use-brian/core'
 
-import { resolveModel, ensureServableModel, backgroundLatencyBudgetMs, backgroundModelFor, isStandardTier, chatTierBudget, planNudgeCap } from '../model-resolution.js'
+import { resolveModel, ensureServableModel, backgroundLatencyBudgetMs, backgroundModelFor, isStandardTier, chatTierBudget, planNudgeCap, tierForModel } from '../model-resolution.js'
 import { registryRow } from '@use-brian/shared/model-registry'
 import type { ConnectorStore } from '../db/connector-store.js'
 import { getToolDisplayName, stripFollowUps, stripCommentThreadReplyTag, resolveCharter, charterMission } from '@use-brian/shared'
@@ -5025,6 +5025,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         customLlmRuntime = await options.resolveWorkspaceCustomLlm({
           workspaceId: assistant.workspaceId,
           requestedModel: explicitCustomSelector,
+          requestedTier: tierForModel(model),
           allowDefault: true,
         })
         if (explicitCustomSelector && !customLlmRuntime) {
