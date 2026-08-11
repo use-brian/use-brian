@@ -4,6 +4,7 @@
  * both names lets old and new releases safely skip the same migration.
  */
 const migrationRenames = [
+  ['429_workspace_custom_llm_endpoints.sql', '434_workspace_custom_llm_endpoints.sql'],
   ['394_office_artifacts.sql', '3941_office_artifacts.sql'],
   ['395_office_templates_resources.sql', '3942_office_templates_resources.sql'],
   ['396_office_collaboration.sql', '3943_office_collaboration.sql'],

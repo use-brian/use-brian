@@ -172,7 +172,11 @@ export function createPublicCustomLlmFetch(options?: {
         headers,
         signal: init?.signal ?? undefined,
         servername: isIP(hostname) ? undefined : hostname,
-        lookup: (_requestedHostname, _lookupOptions, callback) => {
+        lookup: (_requestedHostname, lookupOptions, callback) => {
+          if (lookupOptions.all) {
+            callback(null, [{ address: target.address, family: target.family }])
+            return
+          }
           callback(null, target.address, target.family)
         },
       }
