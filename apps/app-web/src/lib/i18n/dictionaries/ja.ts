@@ -6942,6 +6942,7 @@ export const ja: Dictionary = {
     connectedBadge: "接続済み",
     availableBadge: "利用可能",
     connect: "接続",
+    configure: "設定",
     add: "追加",
     addAnother: "+ 別のアカウントを追加",
     adding: "追加中...",

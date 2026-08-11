@@ -2145,6 +2145,7 @@ function ConnectorsList() {
     setMsGraphTenantId(status?.workspaceOwned ? (status.tenantId ?? "") : "");
     setMsGraphConnectOpts({ instanceId: c.connectorInstanceId });
     setShowMsGraphForm(rid);
+    revealConnectForm(rid);
     if (!status) setMsGraphError(tc.msgraph.errSave);
   }
 
@@ -3220,6 +3221,10 @@ function ConnectorsList() {
             // deployment's fallback identity.
             preferWorkspaceApp: entry.id === "msgraph",
           });
+        }}
+        onConfigureApp={(entry) => {
+          const connector = resolveDirectoryConnectRow(connectors, entry.id) as Connector;
+          void openMsGraphAppEditor(connector);
         }}
       />
 

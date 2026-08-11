@@ -7156,6 +7156,7 @@ export const en = {
     connectedBadge: "Connected",
     availableBadge: "Available",
     connect: "Connect",
+    configure: "Configure",
     add: "Add",
     addAnother: "+ Add another",
     adding: "Adding...",
