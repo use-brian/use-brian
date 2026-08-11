@@ -10,8 +10,9 @@
  * Use Brian maps that to a Tier 1 (with email) or Tier 2 (without
  * email) shadow user.
  *
- * v1 shape:
- *   - Synchronous JSON, no SSE.
+ * Delivery shape:
+ *   - Synchronous JSON by default; `Accept: text/event-stream` streams the
+ *     same turn's live query-loop deltas without changing request semantics.
  *   - Base + KB tools, PLUS the same MCP injection web chat gets
  *     (`applyMcpInjection`, scope `public-api`): granted connectors and
  *     `mcp_search`/`mcp_call`. Confirmation-required tools are stripped
@@ -228,6 +229,15 @@ const messageSchema = z.object({
   }
 })
 
+/** Exact content negotiation for the public assistant stream. Wildcards keep
+ * the backwards-compatible JSON response; callers must opt in explicitly. */
+export function acceptsPublicAssistantSse(accept: string | string[] | undefined): boolean {
+  if (typeof accept !== 'string') return false
+  return accept.split(',').some((entry) =>
+    entry.split(';', 1)[0]?.trim().toLowerCase() === 'text/event-stream',
+  )
+}
+
 export function publicApiRoutes(options: PublicApiRouteOptions): Router {
   const router = Router()
   const maxMessageChars = options.maxMessageChars ?? 16_000
@@ -332,6 +342,7 @@ export function publicApiRoutes(options: PublicApiRouteOptions): Router {
             body,
             contextScope: 'internal-member',
             internalActor: { email: body.actorEmail ?? null, defaultUserId: keyRow.createdBy },
+            delivery: acceptsPublicAssistantSse(req.headers.accept) ? 'sse' : 'json',
             analyticsMeta: { api_key_id: keyRow.id, context_scope: 'internal-member' },
           },
           req,
@@ -358,6 +369,7 @@ export function publicApiRoutes(options: PublicApiRouteOptions): Router {
           identityNamespace: `api:${keyRow.id}`,
           body,
           contextScope: fullAnonymousLane ? 'assistant-full' : undefined,
+          delivery: acceptsPublicAssistantSse(req.headers.accept) ? 'sse' : 'json',
           analyticsMeta: { api_key_id: keyRow.id, context_scope: fullAnonymousLane ? 'assistant-full' : 'external-client' },
         },
         req,

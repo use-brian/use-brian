@@ -27,6 +27,7 @@ import {
   extractText,
   handlePublicHistory,
   laneReadsSystemSide,
+  openPublicTurnSse,
   resolvePublicContextBlock,
 } from '../public-turn.js'
 import { formatPrivateRuntimeContext } from '../_prompt-builder.js'
@@ -49,6 +50,34 @@ function makeRes() {
 beforeEach(() => vi.clearAllMocks())
 
 describe('[COMP:api/public-turn] Shared public turn pipeline', () => {
+  describe('public SSE wire', () => {
+    it('sets anti-buffering headers and emits named JSON events', () => {
+      const headers = new Map<string, string>()
+      const frames: string[] = []
+      const res = {
+        writableEnded: false,
+        destroyed: false,
+        setHeader(name: string, value: string) { headers.set(name, value) },
+        flushHeaders: vi.fn(),
+        write(frame: string) { frames.push(frame); return true },
+      }
+
+      const send = openPublicTurnSse(res as never)
+      send('text_delta', { text: 'Hello' })
+
+      expect(headers.get('Content-Type')).toBe('text/event-stream')
+      expect(headers.get('Cache-Control')).toBe('no-cache, no-transform')
+      expect(headers.get('Connection')).toBe('keep-alive')
+      expect(headers.get('X-Accel-Buffering')).toBe('no')
+      expect(res.flushHeaders).toHaveBeenCalledOnce()
+      expect(frames).toEqual(['event: text_delta\ndata: {"text":"Hello"}\n\n'])
+
+      res.writableEnded = true
+      send('done', {})
+      expect(frames).toHaveLength(1)
+    })
+  })
+
   describe('extractText', () => {
     it('surfaces only text blocks, joined and trimmed', () => {
       expect(

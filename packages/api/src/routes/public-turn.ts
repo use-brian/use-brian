@@ -243,6 +243,9 @@ export type PublicTurnInput = {
    * with 403 `actor_not_member`.
    */
   internalActor?: { email: string | null; defaultUserId: string | null }
+  /** JSON remains the default. SSE streams the same query loop when the keyed
+   * route receives an explicit `Accept: text/event-stream`. */
+  delivery?: 'json' | 'sse'
   /** Extra analytics metadata (api_key_id / chat_link_id …). */
   analyticsMeta?: Record<string, unknown>
 }
@@ -267,6 +270,25 @@ export function fail(
   detail?: string,
 ) {
   res.status(status).json(detail ? { error, detail } : { error })
+}
+
+export type PublicTurnSseSender = (event: string, data: unknown) => void
+
+/** Open the public assistant SSE response with the same anti-buffering headers
+ * as the authenticated web chat. Exported so the wire format is unit-tested. */
+export function openPublicTurnSse(
+  res: import('express').Response,
+): PublicTurnSseSender {
+  res.setHeader('Content-Type', 'text/event-stream')
+  res.setHeader('Cache-Control', 'no-cache, no-transform')
+  res.setHeader('Connection', 'keep-alive')
+  res.setHeader('X-Accel-Buffering', 'no')
+  res.flushHeaders()
+
+  return (event, data) => {
+    if (res.writableEnded || res.destroyed) return
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+  }
 }
 
 /**
@@ -1059,6 +1081,8 @@ export async function executePublicTurn(
   const abortController = new AbortController()
   req.on('close', () => abortController.abort())
   const timeout = setTimeout(() => abortController.abort(), 180_000)
+  const sendEvent = input.delivery === 'sse' ? openPublicTurnSse(res) : null
+  sendEvent?.('session', { sessionId: channelId })
 
   let responseText = ''
   let totalUsage: TokenUsage | null = null
@@ -1124,6 +1148,7 @@ export async function executePublicTurn(
     })) {
       if (event.type === 'text_delta') {
         responseText += event.text
+        sendEvent?.('text_delta', { text: event.text })
       } else if (event.type === 'tool_result') {
         // Realtime parity with the web chat lane (realtime-sync): a
         // brain write from a public-API turn repaints open brain pages.
@@ -1153,11 +1178,23 @@ export async function executePublicTurn(
         }
       } else if (event.type === 'error') {
         console.error('[public-turn] query loop error:', event.error)
+        if (sendEvent) {
+          sendEvent('error', { error: 'upstream_failed', detail: event.error?.message })
+          sendEvent('done', {})
+          res.end()
+          return
+        }
         return fail(res, 502, 'upstream_failed', event.error?.message)
       }
     }
   } catch (err) {
     console.error('[public-turn] query loop threw:', err)
+    if (sendEvent) {
+      sendEvent('error', { error: 'upstream_failed', detail: (err as Error).message })
+      sendEvent('done', {})
+      res.end()
+      return
+    }
     return fail(res, 502, 'upstream_failed', (err as Error).message)
   } finally {
     clearTimeout(timeout)
@@ -1220,14 +1257,27 @@ export async function executePublicTurn(
     },
   })
 
-  // Strip any model scaffolding / meta-commentary — programmatic consumers
-  // have no client render layer to do it (see sanitizeDeliveryText).
+  const finalMessageId = assistantMessageId ?? randomUUID()
+  const finalModel = responseModel ?? model
+  if (sendEvent) {
+    sendEvent('turn_complete', {
+      sessionId: channelId,
+      messageId: finalMessageId,
+      model: finalModel,
+    })
+    sendEvent('done', {})
+    res.end()
+    return
+  }
+
+  // Strip any model scaffolding / meta-commentary — synchronous programmatic
+  // consumers have no client render layer to do it (see sanitizeDeliveryText).
   const trimmed = sanitizeDeliveryText(responseText)
   res.json({
     sessionId: channelId,
-    messageId: assistantMessageId ?? randomUUID(),
+    messageId: finalMessageId,
     reply: trimmed.length > 0 ? trimmed : "I couldn't generate a reply — please rephrase or try again.",
-    model: responseModel ?? model,
+    model: finalModel,
   })
 }
 

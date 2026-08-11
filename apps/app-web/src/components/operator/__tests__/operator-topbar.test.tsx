@@ -86,4 +86,14 @@ describe("[COMP:app-web/operator-topbar] Operator top bar chrome", () => {
     expect(html).toContain("CENTER-SLOT");
     expect(html).toContain("RIGHT-SLOT");
   });
+
+  it("accepts a surface-owned responsive app-chip width", () => {
+    const html = wrap(
+      <OperatorTopbar
+        app="browsers"
+        appChipClassName="hidden sm:flex sm:w-[200px]"
+      />,
+    );
+    expect(html).toContain("hidden sm:flex sm:w-[200px]");
+  });
 });

@@ -35,7 +35,7 @@ vi.mock('../public-turn.js', async (io) => ({
   }),
 }))
 
-import { publicApiRoutes } from '../public-api.js'
+import { acceptsPublicAssistantSse, publicApiRoutes } from '../public-api.js'
 import { executePublicTurn } from '../public-turn.js'
 
 const mockTurn = vi.mocked(executePublicTurn)
@@ -63,6 +63,16 @@ const activeKey = { id: 'k-1', assistantId: 'a-1', status: 'active', keyHash: 'h
 beforeEach(() => {
   vi.clearAllMocks()
   vi.spyOn(console, 'error').mockImplementation(() => {})
+})
+
+describe('[COMP:api/public-api-route] SSE content negotiation', () => {
+  it('requires an explicit text/event-stream media type', () => {
+    expect(acceptsPublicAssistantSse(undefined)).toBe(false)
+    expect(acceptsPublicAssistantSse('*/*')).toBe(false)
+    expect(acceptsPublicAssistantSse('application/json')).toBe(false)
+    expect(acceptsPublicAssistantSse('application/json, text/event-stream; q=0.9')).toBe(true)
+    expect(acceptsPublicAssistantSse('TEXT/EVENT-STREAM')).toBe(true)
+  })
 })
 
 describe('[COMP:api/public-api-route] POST /assistants/:id/messages — auth', () => {
@@ -198,6 +208,17 @@ describe('[COMP:api/public-api-route] lane derivation (docs/plans/api-chat-modes
     const input = mockTurn.mock.calls[0][1]
     expect(input.contextScope).toBeUndefined()
     expect(input.internalActor).toBeUndefined()
+    expect(input.delivery).toBe('json')
+  })
+
+  it('forwards explicit SSE delivery without changing lane derivation', async () => {
+    const req = authedPost(keyRow(), {})
+    req.set('Accept', 'text/event-stream')
+    const res = await req
+    expect(res.status).toBe(200)
+    const input = mockTurn.mock.calls[0][1]
+    expect(input.contextScope).toBeUndefined()
+    expect(input.delivery).toBe('sse')
   })
 
   it("external full key, anonymous turn → 'assistant-full' (D2)", async () => {

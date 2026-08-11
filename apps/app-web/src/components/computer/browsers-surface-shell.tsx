@@ -60,7 +60,7 @@ function BrowsersViewToggle({ workspaceId }: { workspaceId: string }) {
             href={item.href}
             aria-current={active ? "page" : undefined}
             className={cn(
-              "inline-flex h-7 items-center rounded px-2.5 text-xs font-medium whitespace-nowrap transition-colors",
+              "inline-flex h-7 items-center rounded px-2 text-xs font-medium whitespace-nowrap transition-colors sm:px-2.5",
               active
                 ? "bg-background text-foreground shadow-sm"
                 : "text-sidebar-foreground/65 hover:text-sidebar-accent-foreground",
@@ -86,6 +86,7 @@ export function BrowsersSurfaceShell({
     <div className="flex h-full min-h-0 flex-col">
       <OperatorTopbar
         app="browsers"
+        appChipClassName="hidden sm:flex sm:w-[200px]"
         center={<BrowsersViewToggle workspaceId={workspaceId} />}
         right={<ConnectBrowserButton workspaceId={workspaceId} />}
       />

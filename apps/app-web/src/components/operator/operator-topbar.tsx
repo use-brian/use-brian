@@ -58,6 +58,7 @@ const iconBtnCls =
 export function OperatorTopbar({
   app,
   customApp,
+  appChipClassName,
   center,
   right,
 }: {
@@ -71,6 +72,9 @@ export function OperatorTopbar({
    * manifest names an icon this build's lucide set does not carry.
    */
   customApp?: { name: string; icon: string | null };
+  /** Optional responsive layout override for surfaces whose center controls
+   *  must stay directly visible on narrow screens. */
+  appChipClassName?: string;
   /** Cluster after the tab chip (CRM's section switch). Scrolls instead of
    *  painting over the right cluster when the bar is cramped. */
   center?: React.ReactNode;
@@ -146,6 +150,7 @@ export function OperatorTopbar({
           className={cn(
             "flex h-9 w-[200px] min-w-0 items-center gap-1.5 rounded-t-lg pl-3 pr-3 text-sm",
             "relative z-10 -mb-px border border-b-0 border-sidebar-border bg-background font-medium text-foreground",
+            appChipClassName,
           )}
         >
           <span className="grid size-4 shrink-0 place-items-center">
