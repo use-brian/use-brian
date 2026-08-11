@@ -648,17 +648,32 @@ export async function previewCustomerSegment(
 
 /**
  * Inventory by variant search (`product_id:` / `sku:` query syntax), with
- * per-location available quantities.
+ * per-location available quantities. Cursored, so a caller can enumerate a
+ * whole catalogue rather than guess one variant at a time.
+ *
+ * COST. The Admin API refuses any single query costing over 1000 points, and
+ * checks that BEFORE running it. This one costs `2 + N * (5 + 3L)` where N is
+ * `first` and L is the nested `inventoryLevels(first: L)` - so 35 points per
+ * variant at L=10: 702 at N=20, 877 at N=25, and 1752 at N=50. `first: 50` was
+ * therefore never servable on any store or plan; it returned MAX_COST_EXCEEDED,
+ * which the Shopify app's location picker silently swallowed for months. The
+ * tool caps `first` at 25 for exactly this reason, and raising L below would
+ * force that cap down (L=20 leaves room for only 15 variants a page).
+ *
+ * `tracked` is a scalar and costs nothing, but it is the difference between
+ * "we have none" and "Shopify is not counting these": an untracked item
+ * reports `inventoryQuantity: 0` with no levels at all.
  */
 export async function getInventoryLevels(auth: ShopifyAuth, params: ShopifyListParams = {}): Promise<unknown> {
   const data = await shopifyGraphql<{ productVariants?: unknown }>(auth, `
-    query InventoryLevels($first: Int!, $query: String) {
-      productVariants(first: $first, query: $query) {
+    query InventoryLevels($first: Int!, $after: String, $query: String) {
+      productVariants(first: $first, after: $after, query: $query) {
         pageInfo { hasNextPage endCursor }
         edges { node {
           id title sku inventoryQuantity
           product { id title }
           inventoryItem {
+            tracked
             inventoryLevels(first: 10) {
               edges { node {
                 location { name }
@@ -669,7 +684,7 @@ export async function getInventoryLevels(auth: ShopifyAuth, params: ShopifyListP
         } }
       }
     }
-  `, { first: params.first ?? 20, query: params.query ?? null })
+  `, { first: params.first ?? 20, after: params.cursor ?? null, query: params.query ?? null })
   return data.productVariants
 }
 
@@ -1674,7 +1689,14 @@ export type ShopifyProductTemplateSummary = {
   /** null for the theme default (`templates/product.json`). */
   suffix: string | null
   filename: string
-  /** Ordered section TYPES, e.g. ["main-product","image-with-text","faq"]. */
+  /**
+   * Ordered section TYPES, e.g. ["main-product","image-with-text","faq"].
+   *
+   * ENABLED sections only. A section can sit in `order` with `disabled: true`
+   * and never render on the storefront, so listing it would report a page that
+   * has an FAQ when the live page has none - and this stack is what a caller
+   * FILTERS on when choosing a layout.
+   */
   sections: string[]
 }
 
@@ -1708,12 +1730,19 @@ export async function listProductTemplates(auth: ShopifyAuth, params: {
     try {
       const parsed = parseThemeJson(content)
       const order = Array.isArray(parsed.order) ? (parsed.order as string[]) : []
-      const bag = (parsed.sections ?? {}) as Record<string, { type?: string }>
+      const bag = (parsed.sections ?? {}) as Record<string, { type?: string; disabled?: boolean }>
       // `order` is authoritative for sequence; `sections` holds the types. A
       // template whose JSON we cannot parse still LISTS - it just lists with an
       // empty stack, because dropping it would hide a real template that the
       // create path would then refuse to overwrite for reasons nobody can see.
-      sections = order.map((k) => bag[k]?.type).filter((t): t is string => Boolean(t))
+      //
+      // A `disabled` section is IN the file and NOT on the page. It is dropped
+      // rather than flagged: every consumer of this stack is asking what the
+      // page has, and the section count is read as the size of the page.
+      sections = order
+        .filter((k) => bag[k]?.disabled !== true)
+        .map((k) => bag[k]?.type)
+        .filter((t): t is string => Boolean(t))
     } catch {
       sections = []
     }

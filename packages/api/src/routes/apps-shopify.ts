@@ -12,16 +12,31 @@
  *   workspace exposure  ∩  connector action grants  ∩  tier  ∩  NOT destructive
  *
  * **The resolver's list IS the allowlist.** A tool name it did not return is a
- * 404 here, so there is no branch in this file that can widen reach. That is
- * deliberate and load-bearing: a per-resource REST surface would have had to
- * re-check exposure and grants itself, and the two connector-scoping incidents
- * this codebase carries (2026-06-01, 2026-07-14) are exactly what happens when
- * that check exists in two places and one of them is wrong.
+ * 404 here. There is exactly ONE input this file contributes to that list,
+ * `NATIVE_EXTRA_TOOLS`, and it is a literal of names rather than a tier or a
+ * flag - so the widening is enumerable by reading it, and it cannot grow by
+ * class. Everything else about the decision still happens in the resolver: a
+ * per-resource REST surface would have had to re-check exposure and grants
+ * itself, and the two connector-scoping incidents this codebase carries
+ * (2026-06-01, 2026-07-14) are exactly what happens when that check exists in
+ * two places and one of them is wrong.
  *
- * The destructive four are unreachable for the same reason they are unreachable
- * from a bundle: `store-tools.ts` excludes them by construction at every tier.
- * Their safety model is the chat Approve/Deny card, and a page cannot render
- * one any more than an iframe could.
+ * Three of the destructive four are unreachable here for the same reason they
+ * are unreachable from a bundle: `store-tools.ts` excludes them by
+ * construction at every tier, and their safety model is the chat Approve/Deny
+ * card. `shopifyCreateProductTemplate` is the exception, and the difference is
+ * not that a page is trusted more than an iframe - it is that this tool's
+ * containment is enforced by the SERVER and does not depend on any gate the
+ * client renders. `createProductTemplate` derives the filename from a suffix
+ * (so only `templates/product.<suffix>.json` is reachable), refuses to
+ * overwrite an existing file, and validates every section type against the
+ * theme before writing. And the write is INERT: a created template changes no
+ * page until a separate `shopifySetProductTemplate` points a product at it.
+ * The worst outcome of a bypassed client confirm is an unreferenced file. The
+ * other three move money, which is why they stay out.
+ *
+ * See docs/architecture/integrations/shopify.md → "The native app is a
+ * different consumer".
  *
  * [COMP:api/apps-shopify-route]
  */
@@ -45,10 +60,28 @@ import { getWorkspaceMembershipWithClearanceSystem } from '../db/workspace-store
  */
 const STORE_SCOPE: AppStoreScope = 'write'
 
+/**
+ * Destructive tools this NATIVE surface may reach, past the tier, by name.
+ *
+ * Never widened to a classification and never passed by the bundle bridge (see
+ * `store-tools-resolver.ts`). Adding a name here hands it to every signed-in
+ * workspace member with no chat approval in the way, so the bar is the one
+ * argued in this file's header: server-enforced containment that does not rely
+ * on the client, and an effect that is inert until a separate call activates
+ * it. `/ask` deliberately does NOT pass this - the assistant consult keeps the
+ * ceiling it has always had, because a model choosing to write a theme file is
+ * a different decision from a merchant clicking a confirm.
+ */
+const NATIVE_EXTRA_TOOLS = ['shopifyCreateProductTemplate'] as const
+
 export type AppsShopifyRouteOptions = {
   requireAuth: RequestHandler
   /** The shared resolver. Same instance the brain-MCP bridge is given. */
-  storeTools: (params: { workspaceId: string; storeScope: AppStoreScope }) => Promise<Tool[]>
+  storeTools: (params: {
+    workspaceId: string
+    storeScope: AppStoreScope
+    alsoAllow?: readonly string[]
+  }) => Promise<Tool[]>
   /** Hand a task to the workspace assistant, capped at this surface's own tools. */
   askAssistant: (params: { workspaceId: string; storeScope: AppStoreScope; task: string }) => Promise<string>
 }
@@ -108,7 +141,11 @@ export function appsShopifyRoutes(opts: AppsShopifyRouteOptions): Router {
     if (!(await guard(req as { userId?: string }, res, workspaceId))) return
 
     try {
-      const tools = await opts.storeTools({ workspaceId, storeScope: STORE_SCOPE })
+      const tools = await opts.storeTools({
+        workspaceId,
+        storeScope: STORE_SCOPE,
+        alsoAllow: NATIVE_EXTRA_TOOLS,
+      })
       // Zero is a real answer, not an error: it means the store connector is
       // not exposed to this workspace. The page says so rather than looking
       // broken, because that is a thing the owner can fix in Studio.
@@ -129,7 +166,11 @@ export function appsShopifyRoutes(opts: AppsShopifyRouteOptions): Router {
 
     let tools: Tool[]
     try {
-      tools = await opts.storeTools({ workspaceId, storeScope: STORE_SCOPE })
+      tools = await opts.storeTools({
+        workspaceId,
+        storeScope: STORE_SCOPE,
+        alsoAllow: NATIVE_EXTRA_TOOLS,
+      })
     } catch (err) {
       res.status(502).json({ error: 'store_unreachable', detail: message(err) })
       return

@@ -15,6 +15,7 @@ import {
   shopifyGraphql,
   listProducts,
   getProduct,
+  getInventoryLevels,
   listOrders,
   buildCustomerSegmentQuery,
   previewCustomerSegment,
@@ -28,6 +29,7 @@ import {
   setProductOptions,
   productTemplateFilename,
   readProductTemplate,
+  listProductTemplates,
   createProductTemplate,
   setProductTemplate,
   runShopifyqlQuery,
@@ -540,6 +542,13 @@ describe('[COMP:api/shopify-client] Shopify GraphQL client', () => {
     await listOrders(AUTH, { query: 'financial_status:paid', first: 5, cursor: 'cur' })
     const body = JSON.parse((mockFetch.mock.calls[0][1] as { body: string }).body)
     expect(body.variables).toEqual({ first: 5, after: 'cur', query: 'financial_status:paid' })
+  })
+
+  it('getInventoryLevels passes the cursor so the catalogue can be enumerated', async () => {
+    mockFetch.mockResolvedValue(jsonResponse({ data: { productVariants: { edges: [], pageInfo: { hasNextPage: false } } } }))
+    await getInventoryLevels(AUTH, { first: 25, cursor: 'cur' })
+    const body = JSON.parse((mockFetch.mock.calls[0][1] as { body: string }).body)
+    expect(body.variables).toEqual({ first: 25, after: 'cur', query: null })
   })
 
   it('updateProduct throws on userErrors instead of returning silently', async () => {
@@ -1115,6 +1124,36 @@ describe('[COMP:api/shopify-client] Shopify GraphQL client', () => {
     expect(tpl.filename).toBe('templates/product.json')
     // The raw body is returned verbatim so the model edits what really exists.
     expect(tpl.content).toContain('auto-generated')
+  })
+
+  it('listProductTemplates reports the ENABLED section stack, not what the file contains', async () => {
+    // A `disabled` section is in `order` and not on the page. Reporting it says
+    // the page has an FAQ when the live page has none - and this stack is what
+    // the layout picker filters on, so the lie becomes a wrong template.
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse({ data: { themes: { edges: [
+        { node: { id: 'gid://shopify/OnlineStoreTheme/1', name: 'Dawn', role: 'MAIN' } },
+      ] } } }))
+      .mockResolvedValueOnce(jsonResponse({ data: { theme: { files: { edges: [
+        { node: { filename: 'templates/product.json', body: { content: JSON.stringify({
+          sections: { main: { type: 'main-product' } }, order: ['main'],
+        }) } } },
+        { node: { filename: 'templates/product.amla.json', body: { content: JSON.stringify({
+          sections: {
+            main: { type: 'main-product' },
+            faq: { type: 'collapsible-content', disabled: true },
+            tail: { type: 'testimonials' },
+          },
+          order: ['main', 'faq', 'tail'],
+        }) } } },
+        // Unparseable still LISTS, with an empty stack.
+        { node: { filename: 'templates/product.broken.json', body: { content: 'not json' } } },
+      ] } } } }))
+
+    const { templates } = await listProductTemplates(AUTH, {})
+    expect(templates.map((t) => t.suffix)).toEqual([null, 'amla', 'broken'])
+    expect(templates[1].sections).toEqual(['main-product', 'testimonials'])
+    expect(templates[2].sections).toEqual([])
   })
 
   it('setProductTemplate validates the suffix before pointing a product at it', async () => {

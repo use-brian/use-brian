@@ -240,18 +240,3 @@ export function AutoTable({ rows }: { rows: Array<Record<string, unknown>> }) {
     </div>
   );
 }
-
-/**
- * An assistant reply rendered as prose.
- *
- * Used when a reply that was ASKED for JSON did not come back as JSON. The
- * answer is never dropped for having the wrong shape: an analysis that is good
- * but unparseable is still the thing the owner asked for.
- */
-export function LooseAnswer({ text }: { text: string }) {
-  return (
-    <pre className="whitespace-pre-wrap rounded-xl border border-border bg-card px-3 py-2 text-[13px]">
-      {text}
-    </pre>
-  );
-}

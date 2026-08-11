@@ -48,6 +48,13 @@ export function createStoreToolResolver(deps: StoreToolResolverDeps) {
   return async function resolveStoreTools(params: {
     workspaceId: string
     storeScope: AppStoreScope
+    /**
+     * Extra tools admitted by NAME, past the tier. Reserved for first-party
+     * native app surfaces; the sandboxed bundle bridge never passes it, and
+     * the `undefined` default is what keeps that true by omission rather than
+     * by every caller remembering to say no.
+     */
+    alsoAllow?: readonly string[]
   }): Promise<Tool[]> {
     if (params.storeScope === 'none') return []
 
@@ -102,7 +109,11 @@ export function createStoreToolResolver(deps: StoreToolResolverDeps) {
     const collected: Tool[] = []
     for (const connectorId of STORE_CONNECTORS) {
       collected.push(
-        ...filterStoreTools([...tools.values()], { connectorId, storeScope: params.storeScope }),
+        ...filterStoreTools([...tools.values()], {
+          connectorId,
+          storeScope: params.storeScope,
+          alsoAllow: params.alsoAllow,
+        }),
       )
     }
     return collected

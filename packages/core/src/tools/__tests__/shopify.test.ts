@@ -736,7 +736,27 @@ describe('[COMP:tools/shopify] Shopify tools', () => {
     const api = mockApi()
     const tool = createShopifyTools(api).find((t) => t.name === 'shopifyGetInventoryLevels')!
     await tool.execute({ productId: 'gid://shopify/Product/55', sku: 'SKU-1' }, {} as never)
-    expect(api.getInventoryLevels).toHaveBeenCalledWith({ query: 'product_id:55 sku:SKU-1', first: 20 })
+    expect(api.getInventoryLevels).toHaveBeenCalledWith({ query: 'product_id:55 sku:SKU-1', first: 20, cursor: undefined })
+  })
+
+  it('shopifyGetInventoryLevels forwards the cursor so a caller can enumerate', async () => {
+    // Without this the whole catalogue is unreachable and the only way to ask
+    // about a variant is one sku at a time - which is what made the Shopify
+    // app's stock column blank for every product that has no sku.
+    const api = mockApi()
+    const tool = createShopifyTools(api).find((t) => t.name === 'shopifyGetInventoryLevels')!
+    await tool.execute({ cursor: 'CUR1' }, {} as never)
+    expect(api.getInventoryLevels).toHaveBeenCalledWith({ query: undefined, first: 20, cursor: 'CUR1' })
+  })
+
+  it('shopifyGetInventoryLevels clamps first to 25, under Shopify cost ceiling', async () => {
+    // This query costs 2 + first*35 and Shopify rejects any single query over
+    // 1000 points BEFORE running it, so the old cap of 50 (1752) had never
+    // returned anything on any store.
+    const api = mockApi()
+    const tool = createShopifyTools(api).find((t) => t.name === 'shopifyGetInventoryLevels')!
+    await tool.execute({ first: 50 }, {} as never)
+    expect(api.getInventoryLevels).toHaveBeenCalledWith({ query: undefined, first: 25, cursor: undefined })
   })
 
   it('shopifyUpdateProduct maps description to descriptionHtml and only sends set fields', async () => {
