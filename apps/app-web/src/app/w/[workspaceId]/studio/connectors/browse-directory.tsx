@@ -87,6 +87,8 @@ type BrowseDirectoryProps = {
    * (legacy standalone use).
    */
   onOauthConnect?: (entry: { id: string }, opts?: { addAnother?: boolean }) => void;
+  /** Opens provider app settings without starting OAuth. */
+  onConfigureApp?: (entry: { id: string }) => void;
 };
 
 type SkillCatalogEntry = {
@@ -99,7 +101,7 @@ type SkillCatalogEntry = {
   source: string;
 };
 
-export function BrowseDirectory({ open, onClose, onConnectorAdded, onOauthConnect }: BrowseDirectoryProps) {
+export function BrowseDirectory({ open, onClose, onConnectorAdded, onOauthConnect, onConfigureApp }: BrowseDirectoryProps) {
   const t = useT();
   const [activeTab, setActiveTab] = useState<"connectors" | "skills">("connectors");
   const [directory, setDirectory] = useState<DirectoryEntry[]>([]);
@@ -422,6 +424,7 @@ export function BrowseDirectory({ open, onClose, onConnectorAdded, onOauthConnec
                       onAdd={handleAdd}
                       onAddAnother={handleAddAnother}
                       onConnect={handleConnect}
+                      onConfigure={onConfigureApp}
                     />
                   )}
                   {community.length > 0 && (
@@ -432,6 +435,7 @@ export function BrowseDirectory({ open, onClose, onConnectorAdded, onOauthConnec
                       onAdd={handleAdd}
                       onAddAnother={handleAddAnother}
                       onConnect={handleConnect}
+                      onConfigure={onConfigureApp}
                       footer={
                         <p className="text-[11px] text-muted-foreground/60 mt-3">
                           {t.browseDirectory.browseAllPrefix}{" "}
@@ -467,6 +471,7 @@ function DirectorySection({
   onAdd,
   onAddAnother,
   onConnect,
+  onConfigure,
   footer,
 }: {
   title: string;
@@ -475,6 +480,7 @@ function DirectorySection({
   onAdd: (entry: DirectoryEntry) => void;
   onAddAnother: (entry: DirectoryEntry) => void;
   onConnect: (entry: DirectoryEntry) => void;
+  onConfigure?: (entry: DirectoryEntry) => void;
   footer?: React.ReactNode;
 }) {
   return (
@@ -491,6 +497,7 @@ function DirectorySection({
             onAdd={() => onAdd(entry)}
             onAddAnother={() => onAddAnother(entry)}
             onConnect={() => onConnect(entry)}
+            onConfigure={onConfigure ? () => onConfigure(entry) : undefined}
           />
         ))}
       </div>
@@ -507,34 +514,56 @@ function DirectoryCard({
   onAdd,
   onAddAnother,
   onConnect,
+  onConfigure,
 }: {
   entry: DirectoryEntry;
   adding: boolean;
   onAdd: () => void;
   onAddAnother: () => void;
   onConnect: () => void;
+  onConfigure?: () => void;
 }) {
   const t = useT();
+
+  function renderConfigureAction() {
+    if (entry.id !== "msgraph" || !onConfigure) return null;
+    return (
+      <button
+        onClick={(e) => { e.stopPropagation(); onConfigure(); }}
+        disabled={adding}
+        className="text-[11px] font-medium border border-border px-2.5 py-1 rounded-lg text-muted-foreground hover:text-foreground hover:border-primary/30 disabled:opacity-50 transition-colors"
+      >
+        {t.browseDirectory.configure}
+      </button>
+    );
+  }
+
   function renderAction() {
     // Connected → compact pill (kept narrow so it doesn't crowd the title).
     // The "Add another" affordance for multi-instance connectors lives in a
     // full-width footer below instead (see DirectoryCard).
     if (entry.connected) {
       return (
-        <span className="text-[10px] font-medium text-primary bg-primary/10 px-2 py-0.5 rounded-full">
-          {t.browseDirectory.connectedBadge}
-        </span>
+        <div className="flex items-center gap-1.5">
+          {renderConfigureAction()}
+          <span className="text-[10px] font-medium text-primary bg-primary/10 px-2 py-0.5 rounded-full">
+            {t.browseDirectory.connectedBadge}
+          </span>
+        </div>
       );
     }
     if (entry.added) {
       return (
-        <button
-          onClick={(e) => { e.stopPropagation(); onConnect(); }}
-          disabled={adding}
-          className="text-[11px] font-medium bg-action text-action-foreground px-2.5 py-1 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
-        >
-          {adding ? "..." : t.browseDirectory.connect}
-        </button>
+        <div className="flex items-center gap-1.5">
+          {renderConfigureAction()}
+          <button
+            onClick={(e) => { e.stopPropagation(); onConnect(); }}
+            disabled={adding}
+            className="text-[11px] font-medium bg-action text-action-foreground px-2.5 py-1 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
+          >
+            {adding ? "..." : t.browseDirectory.connect}
+          </button>
+        </div>
       );
     }
     return (

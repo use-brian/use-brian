@@ -6931,6 +6931,7 @@ export const zh: Dictionary = {
     connectedBadge: "已連接",
     availableBadge: "可用",
     connect: "連接",
+    configure: "設定",
     add: "新增",
     addAnother: "+ 新增另一個",
     adding: "新增中…",
