@@ -6,6 +6,7 @@ import {
   buildMsGraphAuthorizeUrl,
   msGraphAuthorizeUrl,
   msGraphScopes,
+  shouldCollectWorkspaceMsGraphApp,
 } from "@/lib/msgraph-oauth";
 
 /**
@@ -91,6 +92,36 @@ describe("[COMP:msgraph/oauth] Microsoft Graph connector OAuth", () => {
     expect(scopes).toContain("offline_access");
     expect(scopes).toContain("openid");
     expect(new Set(scopes).size).toBe(scopes.length);
+  });
+
+  it("collects a workspace app when catalog Connect only finds deployment config", () => {
+    const deployment = {
+      configured: true,
+      clientId: "deployment-app",
+      workspaceOwned: false,
+    };
+    const workspace = {
+      configured: true,
+      clientId: "workspace-app",
+      workspaceOwned: true,
+    };
+
+    expect(shouldCollectWorkspaceMsGraphApp(null, false)).toBe(true);
+    expect(shouldCollectWorkspaceMsGraphApp(deployment, true)).toBe(true);
+    expect(shouldCollectWorkspaceMsGraphApp(deployment, false)).toBe(false);
+    expect(shouldCollectWorkspaceMsGraphApp(workspace, true)).toBe(false);
+  });
+
+  it("keeps workspace app settings reachable after credentials are saved", () => {
+    const page = readFileSync(
+      resolve(process.cwd(), "src/app/w/[workspaceId]/studio/connectors/page.tsx"),
+      "utf8",
+    );
+
+    expect(page).toContain("openMsGraphAppEditor");
+    expect(page).toContain("tc.msgraph.editLink");
+    expect(page).toContain('setMsGraphAppId(status?.workspaceOwned ? (status.clientId ?? "") : "")');
+    expect(page).toContain('setMsGraphTenantId(status?.workspaceOwned ? (status.tenantId ?? "") : "")');
   });
 
   /**

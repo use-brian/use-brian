@@ -88,7 +88,10 @@ import { resolveAutoExpose, type AutoExposeArm } from "@/lib/connector-auto-expo
 import { buildConnectorState } from "@/lib/connector-oauth-state";
 import { armConnectorOauthState } from "@/lib/oauth-state-cookie";
 import { desktopBridge } from "@/lib/desktop-auth-source";
-import { buildMsGraphAuthorizeUrl } from "@/lib/msgraph-oauth";
+import {
+  buildMsGraphAuthorizeUrl,
+  shouldCollectWorkspaceMsGraphApp,
+} from "@/lib/msgraph-oauth";
 import { normalizeShopifyShopDomain, isShpssPrefixed } from "@/lib/shopify-domain";
 import {
   buildCustomConnectorPayload,
@@ -174,6 +177,13 @@ type MsGraphAppStatus = {
   /** True when this workspace owns the registration, i.e. it can be replaced or removed. */
   workspaceOwned: boolean;
   updatedAt: string | null;
+};
+
+type ConnectorConnectOptions = {
+  addAnother?: boolean;
+  instanceId?: string;
+  /** Catalog Connect should collect a workspace app instead of using deployment fallback. */
+  preferWorkspaceApp?: boolean;
 };
 
 type Connector = {
@@ -1640,27 +1650,23 @@ function ConnectorsList() {
     window.location.href = `https://accounts.google.com/o/oauth2/v2/auth?${sp}`;
   }
 
-  // `opts.addAnother` connects a NEW account for a provider that already has
-  // one (OAuth state carries an `:add` suffix so the callback creates a fresh
-  // instance instead of overwriting the first).
   /**
    * Put an inline connect form on screen.
    *
    * `handleConnect` answers some connectors with a form rendered inside the
-   * SELECTED row's detail panel instead of a redirect. Rail callers are on
-   * that row already and the `?connect=` deep link selects before it fires,
-   * so the form was only ever visible by the caller's good manners. The
-   * Directory modal is neither on the row nor dismissed, so a Shopify connect
-   * from there set state nobody rendered and read as a dead button. Selecting
-   * here (a directory-only row surfaces through `selectedHiddenAvailable`) and
-   * closing the modal makes the form reachable from every entry point.
+   * selected row's detail panel instead of a redirect. Selecting here (a
+   * directory-only row surfaces through `selectedHiddenAvailable`) and closing
+   * the modal makes the form reachable from every entry point.
    */
   function revealConnectForm(rid: string) {
     setSelected(rid);
     setShowBrowse(false);
   }
 
-  async function handleConnect(c: Connector, opts?: { addAnother?: boolean; instanceId?: string }) {
+  // `opts.addAnother` connects a new account for a provider that already has
+  // one. OAuth state carries an `:add` suffix so the callback creates a fresh
+  // instance instead of overwriting the first.
+  async function handleConnect(c: Connector, opts?: ConnectorConnectOptions) {
     const id = c.id;
     const rid = rowId(c);
     setConnecting(rid);
@@ -1782,15 +1788,21 @@ function ConnectorsList() {
       setConnecting(rid);
       const status = await fetchMsGraphAppStatus();
       setConnecting(null);
-      if (!status?.configured || !status.clientId) {
-        // No app anywhere: open the form so they can register one, instead of
-        // telling them to go edit an environment they do not have.
+      if (shouldCollectWorkspaceMsGraphApp(status, opts?.preferWorkspaceApp === true)) {
+        // No workspace-owned app for this catalog flow: open the form instead
+        // of silently consenting against deployment config the customer cannot
+        // inspect or change. Ordinary detail-panel Connect can still use that
+        // fallback on a self-host.
         setMsGraphConnectOpts(opts ?? null);
         setMsGraphError(null);
         setShowMsGraphForm(rid);
         revealConnectForm(rid);
         return;
       }
+      // `shouldCollectWorkspaceMsGraphApp` already rejects this shape; keep the
+      // explicit guard so TypeScript does not have to infer narrowing through a
+      // helper call.
+      if (!status?.clientId) return;
       startMsGraphAuthorize({ clientId: status.clientId, tenant: status.tenantId, opts });
       return;
     }
@@ -2119,6 +2131,23 @@ function ConnectorsList() {
     }
   }
 
+  /** Open the workspace app editor without starting OAuth. The public fields
+   *  are safe to prefill; the client secret remains write-only and must be
+   *  pasted again when replacing the registration. */
+  async function openMsGraphAppEditor(c: Connector) {
+    const rid = rowId(c);
+    setConnecting(rid);
+    setMsGraphError(null);
+    const status = await fetchMsGraphAppStatus();
+    setConnecting(null);
+    setMsGraphAppId(status?.workspaceOwned ? (status.clientId ?? "") : "");
+    setMsGraphAppSecret("");
+    setMsGraphTenantId(status?.workspaceOwned ? (status.tenantId ?? "") : "");
+    setMsGraphConnectOpts({ instanceId: c.connectorInstanceId });
+    setShowMsGraphForm(rid);
+    if (!status) setMsGraphError(tc.msgraph.errSave);
+  }
+
   function startMsGraphAuthorize(input: {
     clientId: string;
     tenant?: string | null;
@@ -2193,11 +2222,18 @@ function ConnectorsList() {
     });
     if (!ok) return;
     try {
-      await authFetch(
+      const res = await authFetch(
         `${API_URL}/api/connectors/msgraph/app-credentials?workspaceId=${encodeURIComponent(workspaceId)}`,
         { method: "DELETE" },
       );
+      if (!res.ok) {
+        setMsGraphError(tc.msgraph.errSave);
+        return;
+      }
       await fetchMsGraphAppStatus();
+      setMsGraphAppId("");
+      setMsGraphAppSecret("");
+      setMsGraphTenantId("");
     } catch {
       setMsGraphError(tc.msgraph.errSave);
     }
@@ -3174,15 +3210,17 @@ function ConnectorsList() {
         open={showBrowse}
         onClose={() => setShowBrowse(false)}
         onConnectorAdded={() => fetchConnectors()}
-        // OAuth entries (Google/Notion/Fathom) connect + "Add another"
-        // through this page's per-provider OAuth flow, which threads the
-        // `[:add]:<workspaceId>` state the callbacks expect.
-        // Resolve the real row first: a synthetic `{ id }` carries no
-        // `connectorInstanceId`, so its `rowId` is the slug while the rail
-        // row's is the instance UUID, and no `showXForm === rid` can match.
-        onOauthConnect={(entry, opts) =>
-          handleConnect(resolveDirectoryConnectRow(connectors, entry.id) as Connector, opts)
-        }
+        // Resolve the real row first: a synthetic `{ id }` carries no instance
+        // UUID, so its form key becomes stale when Directory Add refetches.
+        onOauthConnect={(entry, opts) => {
+          const connector = resolveDirectoryConnectRow(connectors, entry.id) as Connector;
+          void handleConnect(connector, {
+            ...opts,
+            // Hosted customers configure the workspace app, not this
+            // deployment's fallback identity.
+            preferWorkspaceApp: entry.id === "msgraph",
+          });
+        }}
       />
 
       {gdriveError && (
@@ -3792,6 +3830,19 @@ function ConnectorsList() {
                   )}
                   {/* Connect another account — for multi-instance providers that
                       already have a connected primary. Shown once, on the primary row. */}
+                  {/* Workspace Entra credentials outlive connector instances,
+                      so their editor must remain reachable independently of the
+                      Connect/Remove lifecycle. */}
+                  {sel.id === "msgraph" && showMsGraphForm !== rid && (
+                    <button
+                      type="button"
+                      onClick={() => void openMsGraphAppEditor(sel)}
+                      disabled={connecting === rid}
+                      className="text-xs font-medium border border-border px-3 py-1 rounded-lg text-muted-foreground hover:text-foreground hover:border-primary/30 transition-colors disabled:opacity-50"
+                    >
+                      {tc.msgraph.editLink}
+                    </button>
+                  )}
                   {sel.connected && sel.addable && sel.isPrimary && (
                     <button
                       onClick={() => handleAddAnother(sel)}
@@ -4029,14 +4080,16 @@ function ConnectorsList() {
                   </div>
                 )}
 
-                {/* Shopify connect form — store domain (resolved to the
-                    canonical myshopify host) then a pasted Admin API token,
-                    which the server verifies against the store before saving.
-                    There is deliberately no OAuth button: see
-                    docs/architecture/integrations/shopify.md → "Auth model". */}
+                {/* Microsoft Teams workspace app registration. Public ids can
+                    be loaded for editing; the secret is always write-only. */}
                 {showMsGraphForm === rid && (
                   <div className="space-y-2">
                     <p className="text-xs text-muted-foreground">{tc.msgraph.formHelp}</p>
+                    {msgraphStatus?.workspaceOwned && (
+                      <p className="text-[11px] text-muted-foreground">
+                        {tc.msgraph.workspaceCredentialNote}
+                      </p>
+                    )}
                     <input
                       type="text"
                       placeholder={tc.msgraph.appIdPlaceholder}
