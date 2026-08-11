@@ -94,6 +94,19 @@ async function enter(target: HTMLInputElement | HTMLTextAreaElement, value: stri
   await act(async () => target.dispatchEvent(new Event("input", { bubbles: true })));
 }
 
+function searchBox(): HTMLInputElement {
+  const input = container!.querySelector<HTMLInputElement>('input[aria-label="Search products"]');
+  if (!input) throw new Error("product search box not found");
+  return input;
+}
+
+/** Let the picker's search debounce elapse. */
+async function debounce() {
+  await act(async () => {
+    await new Promise((resolve) => window.setTimeout(resolve, 350));
+  });
+}
+
 function installBaseResponses() {
   callTool.mockImplementation(async (_workspaceId: string, tool: string, args: Record<string, unknown>) => {
     if (tool === "shopifyGetShop") {
@@ -511,5 +524,124 @@ describe("[COMP:app-web/shopify-campaign] Campaign tab", () => {
     await click(button("Prepare campaign"));
     expect(container!.textContent).toContain("Campaign package ready");
     expect(container!.textContent).not.toContain("Product photo URL");
+  });
+
+  it("pages the picker with the cursor the tool returns", async () => {
+    callTool.mockImplementation(async (_workspaceId: string, tool: string, args: Record<string, unknown>) => {
+      if (tool === "shopifyGetShop") {
+        return {
+          name: "Test Store",
+          myshopify_domain: "test-store.myshopify.com",
+          primary_domain: "shop.example",
+          currency: "USD",
+          timezone: "Asia/Hong_Kong",
+        };
+      }
+      if (tool === "shopifyListDiscounts") return { items: [] };
+      if (tool === "shopifyListProducts") {
+        if (!args.cursor) {
+          return {
+            items: [{ id: "gid://shopify/Product/42", title: "Restocked Widget", total_inventory: 8 }],
+            has_next_page: true,
+            end_cursor: "cursor-page-1",
+          };
+        }
+        return {
+          items: [{ id: "gid://shopify/Product/77", title: "Second Page Lamp", total_inventory: 3 }],
+          has_next_page: false,
+        };
+      }
+      throw new Error(`unexpected tool: ${tool}`);
+    });
+    await mount();
+
+    const loadMore = button("Load more products");
+    expect(loadMore.disabled).toBe(false);
+    await click(loadMore);
+
+    expect(callTool).toHaveBeenCalledWith(WORKSPACE, "shopifyListProducts", {
+      query: "status:active",
+      first: 50,
+      cursor: "cursor-page-1",
+    });
+    expect(container!.textContent).toContain("Second Page Lamp");
+    expect(container!.textContent).toContain("Restocked Widget");
+    expect(container!.textContent).not.toContain("More active products are available");
+  });
+
+  it("searches the store for a product no loaded page contains, keeping the selection visible", async () => {
+    callTool.mockImplementation(async (_workspaceId: string, tool: string, args: Record<string, unknown>) => {
+      if (tool === "shopifyGetShop") {
+        return {
+          name: "Test Store",
+          myshopify_domain: "test-store.myshopify.com",
+          primary_domain: "shop.example",
+          currency: "USD",
+          timezone: "Asia/Hong_Kong",
+        };
+      }
+      if (tool === "shopifyListDiscounts") return { items: [] };
+      if (tool === "shopifyListProducts") {
+        if (args.query === "status:active winter* jack*") {
+          return {
+            items: [{ id: "gid://shopify/Product/91", title: "Winter Jacket", total_inventory: 5 }],
+            has_next_page: false,
+          };
+        }
+        return {
+          items: [{ id: "gid://shopify/Product/42", title: "Restocked Widget", total_inventory: 8 }],
+          has_next_page: true,
+          end_cursor: "cursor-page-1",
+        };
+      }
+      if (tool === "shopifyPreviewCustomerSegment") {
+        return { query: "email_subscription_status = 'SUBSCRIBED'", total_count: 0 };
+      }
+      throw new Error(`unexpected tool: ${tool}`);
+    });
+    await mount();
+    await click(container!.querySelector('[aria-label="Restocked Widget"]')!);
+
+    await enter(searchBox(), "winter jack");
+    await debounce();
+
+    expect(callTool).toHaveBeenCalledWith(WORKSPACE, "shopifyListProducts", {
+      query: "status:active winter* jack*",
+      first: 50,
+    });
+    expect(container!.textContent).toContain("Winter Jacket");
+    // The selected product stays on screen even though it does not match.
+    expect(container!.querySelector('[aria-label="Restocked Widget"]')).not.toBeNull();
+    expect(container!.textContent).not.toContain("Load more products");
+  });
+
+  it("reports a search that matches nothing without claiming the store is empty", async () => {
+    callTool.mockImplementation(async (_workspaceId: string, tool: string, args: Record<string, unknown>) => {
+      if (tool === "shopifyGetShop") {
+        return {
+          name: "Test Store",
+          myshopify_domain: "test-store.myshopify.com",
+          primary_domain: "shop.example",
+          currency: "USD",
+          timezone: "Asia/Hong_Kong",
+        };
+      }
+      if (tool === "shopifyListDiscounts") return { items: [] };
+      if (tool === "shopifyListProducts") {
+        if (args.query === "status:active zzz*") return { items: [], has_next_page: false };
+        return {
+          items: [{ id: "gid://shopify/Product/42", title: "Restocked Widget", total_inventory: 8 }],
+          has_next_page: false,
+        };
+      }
+      throw new Error(`unexpected tool: ${tool}`);
+    });
+    await mount();
+
+    await enter(searchBox(), "zzz");
+    await debounce();
+
+    expect(container!.textContent).toContain("No active product with positive inventory matches this search");
+    expect(container!.textContent).not.toContain("No active products with positive inventory were found");
   });
 });

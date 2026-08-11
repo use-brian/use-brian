@@ -411,3 +411,35 @@ export function recordPreparedCampaign(
   return [draft, ...history.filter((item) => item.discount.id !== draft.discount.id)]
     .slice(0, MAX_CAMPAIGN_HISTORY);
 }
+
+/** The filter every campaign product listing keeps: a campaign only announces buyable products. */
+const CAMPAIGN_PRODUCT_BASE_QUERY = "status:active";
+
+/** Words a merchant may type before the query stops being a search and starts being a scan. */
+const MAX_CAMPAIGN_SEARCH_WORDS = 5;
+
+/**
+ * Compose the Shopify product search query for the campaign picker.
+ *
+ * The merchant types plain words, never Shopify search syntax, so each word is
+ * split on the grammar's special characters (a stray quote or parenthesis would
+ * otherwise change what the query means) and given a trailing `*`.
+ * Shopify's default field search then matches title, SKU, vendor and tags on a
+ * partial word. A leading `*` is not part of the syntax, so a word is a prefix
+ * match and never an infix one - "hood" finds "Hoodie", "oodie" does not.
+ *
+ * A leading `-` is dropped because it is the NOT modifier: typing "-shirt"
+ * should search for shirts, not exclude them. An empty or all-punctuation term
+ * returns the unfiltered active listing rather than a query matching nothing.
+ */
+export function campaignProductQuery(term: string): string {
+  const words = term
+    .replace(/["'\\():<>=*]/g, " ")
+    .trim()
+    .split(/\s+/)
+    .map((word) => word.replace(/^-+/, ""))
+    .filter((word) => word.length > 0)
+    .slice(0, MAX_CAMPAIGN_SEARCH_WORDS);
+  if (words.length === 0) return CAMPAIGN_PRODUCT_BASE_QUERY;
+  return [CAMPAIGN_PRODUCT_BASE_QUERY, ...words.map((word) => `${word}*`)].join(" ");
+}

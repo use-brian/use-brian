@@ -14,14 +14,24 @@
  *      CLAUDE.md exists to prevent.
  *
  *   2. **Destructive tools are excluded at EVERY tier**, including `write`.
- *      Not by default policy — by construction, with no parameter that turns
- *      them back on. Refunds, cancellations, completing a draft order and
- *      writing a theme template are `classification: 'destructive'` because
- *      they move money or change what customers see, and their safety model is
- *      the chat Approve/Deny card. A bundle frame has no chat channel to show
- *      one on. An app that needs a destructive effect STAGES it for the
- *      Approvals inbox instead (docs/architecture/features/home-apps.md →
- *      "Store scope").
+ *      Not by default policy — by construction. Refunds, cancellations,
+ *      completing a draft order and writing a theme template are
+ *      `classification: 'destructive'` because they move money or change what
+ *      customers see, and their safety model is the chat Approve/Deny card. A
+ *      bundle frame has no chat channel to show one on. An app that needs a
+ *      destructive effect STAGES it for the Approvals inbox instead
+ *      (docs/architecture/features/home-apps.md → "Store scope").
+ *
+ *      `alsoAllow` is the ONE crack, and it is deliberately not a tier: it
+ *      admits tools BY NAME, so widening it is never accidental and never
+ *      class-wide. It exists for first-party native app surfaces, which do
+ *      have a channel to confirm on (`confirmDialog`) and which the merchant
+ *      reached through their own signed-in session rather than through a
+ *      bundle someone published. **Nothing on the bundle path may pass it**;
+ *      see `apps-shopify.ts` for the single caller that does, and
+ *      docs/architecture/integrations/shopify.md → "The native app is a
+ *      different consumer" for why `shopifyCreateProductTemplate` in
+ *      particular is the safe member of that class.
  *
  *   3. **An unrecognized tool is dropped, not passed through.**
  *      `gateToolsOnActionGrants` deliberately passes registry-unknown tools
@@ -61,10 +71,24 @@ const TIER_RANK: Record<AppStoreScope, number> = { none: 0, read: 1, write: 2 }
 export function storeToolNamesFor(
   connectorId: string,
   storeScope: AppStoreScope,
+  /**
+   * Extra tools admitted BY NAME, on top of what the tier reaches.
+   *
+   * Only a name already in this connector's registry can be admitted: an
+   * unknown name is dropped rather than trusted, so a typo here fails closed
+   * and a caller cannot mint reach for a tool that does not exist. `none`
+   * still means none.
+   */
+  alsoAllow: readonly string[] = [],
 ): ReadonlySet<string> {
   const allowed = new Set<string>()
   if (storeScope === 'none') return allowed
+  const named = new Set(alsoAllow)
   for (const entry of OFFICIAL_CONNECTOR_TOOLS[connectorId] ?? []) {
+    if (named.has(entry.name)) {
+      allowed.add(entry.name)
+      continue
+    }
     const required = TIER_FOR_CLASSIFICATION[entry.classification]
     // `undefined` covers `destructive` AND any classification a future build
     // adds that this one has never heard of. Both must fail closed.
@@ -82,9 +106,9 @@ export function storeToolNamesFor(
  */
 export function filterStoreTools<T extends { name: string }>(
   tools: readonly T[],
-  opts: { connectorId: string; storeScope: AppStoreScope },
+  opts: { connectorId: string; storeScope: AppStoreScope; alsoAllow?: readonly string[] },
 ): T[] {
-  const allowed = storeToolNamesFor(opts.connectorId, opts.storeScope)
+  const allowed = storeToolNamesFor(opts.connectorId, opts.storeScope, opts.alsoAllow)
   // Match on the CANONICAL name: a multi-store workspace injects a parallel
   // tool set per extra instance under `<name>__<label>_<id8>` names. Matching
   // raw names would drop every extra store — safe, but a silent, confusing

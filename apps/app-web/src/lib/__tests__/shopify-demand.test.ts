@@ -8,10 +8,13 @@
 
 import { describe, it, expect } from "vitest";
 import {
+  ALL_LOCATIONS,
   aggregateDemand,
   matchStock,
   demandKey,
+  onHandOf,
   shortfall,
+  variantKey,
   type OrderRow,
 } from "../shopify-demand";
 
@@ -90,6 +93,48 @@ describe("[COMP:app-web/shopify-app] demand aggregation", () => {
   });
 });
 
+describe("[COMP:app-web/shopify-app] variant identity", () => {
+  it("treats Shopify's Default Title placeholder as no variant at all", () => {
+    // The join's whole failure mode. An order line reports variantTitle null
+    // for a single-variant product; the inventory projection reports the
+    // placeholder string. Raw, they never meet, and every SKU-less row shows a
+    // dash while the fetch is working perfectly.
+    expect(variantKey("Blueberry Bagel", "Default Title")).toBe(
+      variantKey("Blueberry Bagel", ""),
+    );
+    expect(variantKey("Blueberry Bagel", null)).toBe(variantKey("Blueberry Bagel", undefined));
+    expect(variantKey("Blueberry Bagel", "  default   TITLE ")).toBe(
+      variantKey("Blueberry Bagel", ""),
+    );
+  });
+
+  it("folds case and internal whitespace on both sides", () => {
+    expect(variantKey(" Blueberry   Bagel ", "6 Pack")).toBe(
+      variantKey("blueberry bagel", "6 pack"),
+    );
+  });
+
+  it("does not let the separator make two different variants collide", () => {
+    // A space separator makes product "A B" variant "C" indistinguishable from
+    // product "A" variant "B C".
+    expect(variantKey("A B", "C")).not.toBe(variantKey("A", "B C"));
+  });
+
+  it("normalizes the demand side too, so one stock row cannot serve two rows", () => {
+    // Normalizing only the stock side leaves these as two demand rows that
+    // both match the same stock row, double-counting the shortfall. A wrong
+    // number is worse than a dash.
+    const out = aggregateDemand([
+      order([
+        { title: "Greens", quantity: 2 },
+        { title: "greens", quantity: 3 },
+      ]),
+    ]);
+    expect(out.rows).toHaveLength(1);
+    expect(out.rows[0].demand).toBe(5);
+  });
+});
+
 describe("[COMP:app-web/shopify-app] stock matching", () => {
   const rows = aggregateDemand([
     order([
@@ -98,40 +143,135 @@ describe("[COMP:app-web/shopify-app] stock matching", () => {
     ]),
   ]).rows;
 
+  const greensKey = `nm:${variantKey("Greens", "")}`;
+
   it("matches by SKU first", () => {
-    const m = matchStock(rows, [{ sku: "IB-5G", onHand: 10 }]);
-    expect(m.get("sku:IB-5G")).toBe(10);
+    const m = matchStock(rows, [{ sku: "IB-5G", total_available: 10 }]);
+    expect(m.get("sku:IB-5G")).toEqual({ kind: "known", onHand: 10 });
   });
 
-  it("falls back to product + variant when there is no SKU", () => {
-    const m = matchStock(rows, [{ product: "Greens", variant: "", onHand: 3 }]);
-    expect(m.get("nm:Greens ")).toBe(3);
+  it("matches a no-SKU line against the Default Title placeholder", () => {
+    // This is the row the user actually sees blank: a bagel with no SKU whose
+    // inventory row carries Shopify's placeholder variant title.
+    const m = matchStock(rows, [
+      { product: "Greens", variant: "Default Title", total_available: 3 },
+    ]);
+    expect(m.get(greensKey)).toEqual({ kind: "known", onHand: 3 });
   });
 
-  it("reports an unfound variant as null, never zero", () => {
+  it("reports an unfound variant as unknown, never zero", () => {
     // The assertion that matters. Zero reads as "we have none", which is a
     // different and actionable claim from "I could not find it".
     const m = matchStock(rows, []);
-    expect(m.get("sku:IB-5G")).toBeNull();
-    expect(m.get("sku:IB-5G")).not.toBe(0);
+    expect(m.get("sku:IB-5G")).toEqual({ kind: "unknown" });
+    expect(onHandOf(m.get("sku:IB-5G"))).toBeNull();
+  });
+
+  it("says not-tracked rather than zero when Shopify is not counting the item", () => {
+    // An untracked item reports inventoryQuantity 0 with no levels. Rendering
+    // that as 0 invents "we have none of these".
+    const m = matchStock(rows, [{ sku: "IB-5G", total_available: 0, tracked: false }]);
+    expect(m.get("sku:IB-5G")).toEqual({ kind: "untracked" });
+  });
+
+  it("uses the cross-location total for all-locations, not a sum of levels", () => {
+    // total_available is Shopify's own figure and is immune to the nested
+    // inventoryLevels(first: 10) cut-off; summing the array is not.
+    const m = matchStock(
+      rows,
+      [
+        {
+          sku: "IB-5G",
+          total_available: 12,
+          locations: [
+            { location: "Shop", available: 5 },
+            { location: "Warehouse", available: 7 },
+          ],
+        },
+      ],
+      ALL_LOCATIONS,
+    );
+    expect(m.get("sku:IB-5G")).toEqual({ kind: "known", onHand: 12 });
+  });
+
+  it("uses the named location's own figure when one is chosen", () => {
+    const m = matchStock(
+      rows,
+      [
+        {
+          sku: "IB-5G",
+          total_available: 12,
+          locations: [
+            { location: "Shop", available: 5 },
+            { location: "Warehouse", available: 7 },
+          ],
+        },
+      ],
+      "Warehouse",
+    );
+    expect(m.get("sku:IB-5G")).toEqual({ kind: "known", onHand: 7 });
+  });
+
+  it("reports a real zero when a COMPLETE location list omits the location", () => {
+    // Shopify only materializes a level where the item is stocked, so this is
+    // the one place a zero is honest, and the merchant needs it.
+    const m = matchStock(
+      rows,
+      [{ sku: "IB-5G", total_available: 5, locations: [{ location: "Shop", available: 5 }] }],
+      "Warehouse",
+    );
+    expect(m.get("sku:IB-5G")).toEqual({ kind: "none" });
+    expect(onHandOf(m.get("sku:IB-5G"))).toBe(0);
+  });
+
+  it("refuses that zero when the location list may have been cut off", () => {
+    const m = matchStock(
+      rows,
+      [
+        {
+          sku: "IB-5G",
+          total_available: 5,
+          locations_truncated: true,
+          locations: [{ location: "Shop", available: 5 }],
+        },
+      ],
+      "Warehouse",
+    );
+    expect(m.get("sku:IB-5G")).toEqual({ kind: "unknown" });
+  });
+
+  it("keeps matched rows true when the enumeration hit its page cap", () => {
+    // A capped read makes the rows we did NOT reach unknown. It does not make
+    // the rows we did reach any less true.
+    const m = matchStock(rows, [{ sku: "IB-5G", total_available: 9 }], ALL_LOCATIONS, false);
+    expect(m.get("sku:IB-5G")).toEqual({ kind: "known", onHand: 9 });
+    expect(m.get(greensKey)).toEqual({ kind: "unknown" });
   });
 });
 
 describe("[COMP:app-web/shopify-app] shortfall", () => {
-  it("is null when stock is unknown", () => {
-    expect(shortfall(5, null)).toBeNull();
+  it("is null when stock is unknown or untracked, so nothing is invented", () => {
+    expect(shortfall(5, { kind: "unknown" })).toBeNull();
+    expect(shortfall(5, { kind: "untracked" })).toBeNull();
+    expect(shortfall(5, undefined)).toBeNull();
+  });
+
+  it("is the whole demand when stock is a real zero", () => {
+    expect(shortfall(5, { kind: "none" })).toBe(5);
   });
 
   it("is zero when stock covers demand, never negative", () => {
-    expect(shortfall(2, 10)).toBe(0);
+    expect(shortfall(2, { kind: "known", onHand: 10 })).toBe(0);
   });
 
   it("is the gap when stock is short", () => {
-    expect(shortfall(10, 4)).toBe(6);
+    expect(shortfall(10, { kind: "known", onHand: 4 })).toBe(6);
   });
 
   it("keys a row stably for React and for lookup", () => {
     expect(demandKey({ title: "A", variant: "x", sku: "S1", demand: 0, orders: 0 })).toBe("sku:S1");
-    expect(demandKey({ title: "A", variant: "x", sku: "", demand: 0, orders: 0 })).toBe("nm:A x");
+    expect(demandKey({ title: "A", variant: "x", sku: "", demand: 0, orders: 0 })).toBe(
+      `nm:${variantKey("A", "x")}`,
+    );
   });
 });

@@ -129,19 +129,31 @@ const customerRow = (c: Json) => ({
   created_at: str(c, 'createdAt'),
 })
 
-const inventoryLevelRow = (v: Json) => ({
-  variant_id: str(v, 'id'),
-  sku: str(v, 'sku'),
-  variant: str(v, 'title'),
-  product: str(obj(v, 'product'), 'title'),
-  total_available: num(v, 'inventoryQuantity'),
-  locations: connRows(obj(obj(v, 'inventoryItem'), 'inventoryLevels')).map((lvl) => ({
-    location: str(obj(lvl, 'location'), 'name'),
-    ...Object.fromEntries(
-      asRows(lvl.quantities).map((q) => [str(q, 'name') ?? 'available', num(q, 'quantity')]),
-    ),
-  })),
-})
+const inventoryLevelRow = (v: Json) => {
+  const item = obj(v, 'inventoryItem')
+  const levels = connRows(obj(item, 'inventoryLevels'))
+  return {
+    variant_id: str(v, 'id'),
+    sku: str(v, 'sku'),
+    variant: str(v, 'title'),
+    product: str(obj(v, 'product'), 'title'),
+    total_available: num(v, 'inventoryQuantity'),
+    // Shopify reports `inventoryQuantity: 0` and no levels for an item it is
+    // not tracking, which is indistinguishable from genuinely having none.
+    // Carry the flag so a caller can say "not tracked" instead of inventing 0.
+    tracked: bool(item, 'tracked'),
+    // The nested `inventoryLevels(first: 10)` is a cost ceiling, not a guess at
+    // how many locations exist (see the client). At exactly 10 the list MAY be
+    // cut off, so a location missing from it is no longer proof of zero there.
+    locations_truncated: levels.length >= 10,
+    locations: levels.map((lvl) => ({
+      location: str(obj(lvl, 'location'), 'name'),
+      ...Object.fromEntries(
+        asRows(lvl.quantities).map((q) => [str(q, 'name') ?? 'available', num(q, 'quantity')]),
+      ),
+    })),
+  }
+}
 
 function projectConnection<U>(raw: unknown, limit: number, map: (row: Json) => U) {
   const rows = connRows(raw)
@@ -328,7 +340,7 @@ export type ShopifyApi = {
   searchCustomers(params: ShopifyListParams): Promise<unknown>
   getCustomer(customerId: string): Promise<unknown>
   previewCustomerSegment(params: ShopifyCustomerSegmentParams): Promise<unknown>
-  getInventoryLevels(params: { query?: string; first?: number }): Promise<unknown>
+  getInventoryLevels(params: ShopifyListParams): Promise<unknown>
   listCollections(params: ShopifyListParams): Promise<unknown>
   listDraftOrders(params: ShopifyListParams): Promise<unknown>
   listDiscounts(params: ShopifyListParams): Promise<unknown>
@@ -750,11 +762,14 @@ export function createShopifyTools(
     name: 'shopifyGetInventoryLevels',
     description:
       'Get inventory quantities for product variants, with per-location available counts. ' +
-      'Filter by productId or sku (at least one recommended; without a filter returns the first variants).',
+      'Filter by productId or sku, or omit both and page through the whole catalogue with ' +
+      'cursor (pass the previous response\'s end_cursor). ' +
+      'Rows carry tracked=false when Shopify is not counting that item, which is not the same as zero.',
     inputSchema: z.object({
       productId: z.string().optional().describe('Limit to one product (numeric id or GID).'),
       sku: z.string().optional().describe('Limit to one SKU.'),
-      first: z.number().optional().describe('Variants per page (default 20, max 50).'),
+      first: z.number().optional().describe('Variants per page (default 20, max 25).'),
+      cursor: z.string().optional().describe('end_cursor from a previous page.'),
     }),
     isConcurrencySafe: true,
     isReadOnly: true,
@@ -769,10 +784,14 @@ export function createShopifyTools(
           filters.push(`product_id:${pid}`)
         }
         if (input.sku) filters.push(`sku:${input.sku}`)
-        const first = Math.min(input.first ?? 20, 50)
+        // 25, not 50: this query costs `2 + first * 35` and Shopify rejects any
+        // single query over 1000 points before running it. 50 was 1752 and had
+        // never worked. See the client's `getInventoryLevels` for the arithmetic.
+        const first = Math.min(input.first ?? 20, 25)
         const data = await api.getInventoryLevels({
           query: filters.length ? filters.join(' ') : undefined,
           first,
+          cursor: input.cursor,
         })
         return { data: projectConnection(data, first, inventoryLevelRow) }
       } catch (err) {
