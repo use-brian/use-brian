@@ -92,12 +92,11 @@ const WORKSPACE_SECTIONS: SettingsSection[] = [
   "ws-members",
   // ws-llm-key is absent here on purpose: hosted surfaces the BYO Gemini key
   // block inside the Models section (everything model-related in one place).
-  // The OSS list below keeps the standalone section — it has no Models entry.
+  // The OSS list below keeps the standalone section as well.
   // Domains (custom-domains.md + platform-subdomains.md) — the workspace-level
   // manager for published-page hostnames. Open feature, so OSS keeps it too.
   "ws-domains",
-  // Metered model profiles (model-registry.md L15). Hosted-only: the lane
-  // bills credits; the OSS list below omits it.
+  // Models also owns custom endpoint profiles and tier assignments.
   "ws-models",
   // ws-usage is absent on purpose: the Usage block renders inside ws-plan
   // ("Plan & usage") — the alias case below still routes old deep links.
@@ -112,6 +111,7 @@ const OSS_WORKSPACE_SECTIONS: SettingsSection[] = [
   "ws-general",
   "ws-members",
   "ws-llm-key",
+  "ws-models",
   "ws-domains",
 ];
 
@@ -389,9 +389,9 @@ function SectionBody({
       // sensible. OSS has no billing; defensive upgrade pitch.
       return isOssEdition() ? <HostedUpgradeSection /> : <BillingSection />;
     case "ws-models":
-      // Metered model profiles (model-registry.md L15). The lane is a
-      // hosted billing construct; OSS nav hides the section, this is defensive.
-      return isOssEdition() ? <HostedUpgradeSection /> : <ModelsSection />;
+      // Custom endpoint profiles and tier assignments work in both editions.
+      // Hosted additionally exposes metered profiles and billing estimates.
+      return <ModelsSection />;
   }
 }
 

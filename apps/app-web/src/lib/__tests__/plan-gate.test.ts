@@ -4,6 +4,8 @@ import {
   modelTierPlanGateApplies,
   planGateApplies,
   planGateDismissKey,
+  forwardPlanGateCheckoutReturn,
+  planGateCheckoutReturn,
   planGateTrialCheckoutBody,
 } from "../plan-gate";
 
@@ -55,5 +57,30 @@ describe("[COMP:app-web/plan-gate] Plan gate decision", () => {
       plan: "pro",
       returnTo: "/home",
     });
+  });
+
+  it("parses and forwards a successful checkout handoff", () => {
+    expect(
+      planGateCheckoutReturn("?checkout=success&session_id=cs_test_123"),
+    ).toEqual({ status: "success", sessionId: "cs_test_123" });
+    expect(
+      forwardPlanGateCheckoutReturn(
+        "/w/ws_1/p",
+        "?checkout=success&session_id=cs_test_123&ignored=value",
+      ),
+    ).toBe("/w/ws_1/p?checkout=success&session_id=cs_test_123");
+  });
+
+  it("preserves cancellation without inventing a session id", () => {
+    expect(planGateCheckoutReturn("?checkout=cancelled")).toEqual({
+      status: "cancelled",
+      sessionId: null,
+    });
+    expect(
+      forwardPlanGateCheckoutReturn("/w/ws_1/p", "?checkout=cancelled"),
+    ).toBe("/w/ws_1/p?checkout=cancelled");
+    expect(forwardPlanGateCheckoutReturn("/w/ws_1/p", "?foo=bar")).toBe(
+      "/w/ws_1/p",
+    );
   });
 });

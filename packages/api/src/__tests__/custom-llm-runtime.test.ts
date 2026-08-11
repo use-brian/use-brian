@@ -65,8 +65,10 @@ describe('[COMP:api/custom-llm-endpoints] custom endpoint runtime', () => {
     const endpointId = '00000000-0000-4000-8000-000000000001'
     const runtime = {
       id: endpointId,
+      endpointId,
       workspaceId: '00000000-0000-4000-8000-000000000010',
       name: 'Local',
+      endpointName: 'Gateway',
       baseUrl: 'http://model.example/v1',
       apiKey: null,
       modelId: 'llama-local',
@@ -74,14 +76,12 @@ describe('[COMP:api/custom-llm-endpoints] custom endpoint runtime', () => {
       maxOutputTokens: 4096,
       supportsTools: true,
       verifiedAt: new Date(),
-      isDefault: false,
-      hasApiKey: false,
       createdAt: new Date(),
       updatedAt: new Date(),
     }
     const store = {
       getRuntimeSystem: vi.fn().mockResolvedValue(runtime),
-      getDefaultRuntimeSystem: vi.fn(),
+      getTierRuntimeSystem: vi.fn(),
     } as unknown as WorkspaceCustomLlmEndpointStore
     const resolved = await createWorkspaceCustomLlmResolver(store)({
       workspaceId: runtime.workspaceId,
@@ -93,7 +93,37 @@ describe('[COMP:api/custom-llm-endpoints] custom endpoint runtime', () => {
       maxTokens: 4096,
       providerKeySource: 'user',
     })
-    expect(store.getRuntimeSystem).toHaveBeenCalledWith({ workspaceId: runtime.workspaceId, endpointId })
-    expect(store.getDefaultRuntimeSystem).not.toHaveBeenCalled()
+    expect(store.getRuntimeSystem).toHaveBeenCalledWith({ workspaceId: runtime.workspaceId, profileId: endpointId })
+    expect(store.getTierRuntimeSystem).not.toHaveBeenCalled()
+  })
+
+  it('resolves the assigned profile for the already-resolved Brian tier', async () => {
+    const profileId = '00000000-0000-4000-8000-000000000002'
+    const runtime = {
+      id: profileId,
+      endpointId: '00000000-0000-4000-8000-000000000001',
+      workspaceId: '00000000-0000-4000-8000-000000000010',
+      name: 'Max',
+      endpointName: 'Gateway',
+      baseUrl: 'http://model.example/v1',
+      apiKey: null,
+      modelId: 'sol-max',
+      contextWindow: 200000,
+      maxOutputTokens: 32768,
+      supportsTools: true,
+      verifiedAt: new Date(),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    }
+    const store = {
+      getRuntimeSystem: vi.fn(),
+      getTierRuntimeSystem: vi.fn().mockResolvedValue(runtime),
+    } as unknown as WorkspaceCustomLlmEndpointStore
+    const resolved = await createWorkspaceCustomLlmResolver(store)({
+      workspaceId: runtime.workspaceId,
+      requestedTier: 'max',
+    })
+    expect(resolved).toMatchObject({ selector: customLlmAlias(profileId), maxTokens: 32768 })
+    expect(store.getTierRuntimeSystem).toHaveBeenCalledWith({ workspaceId: runtime.workspaceId, tier: 'max' })
   })
 })

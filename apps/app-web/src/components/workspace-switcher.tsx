@@ -57,7 +57,9 @@ import {
 } from "@/components/ui/popover";
 import {
   useWorkspaceContext,
+  WORKSPACE_ICON_CHANGED_EVENT,
   WORKSPACE_RENAMED_EVENT,
+  type WorkspaceIconChangedDetail,
   type WorkspaceRenamedDetail,
 } from "@/lib/workspace-context";
 import {
@@ -87,6 +89,7 @@ type Workspace = {
   id: string;
   name: string;
   iconSeed: number | null;
+  iconUrl?: string | null;
   plan?: string | null;
 };
 
@@ -163,6 +166,31 @@ export function WorkspaceSwitcher() {
     }
     window.addEventListener(OPEN_SETTINGS_EVENT, onOpenSettings);
     return () => window.removeEventListener(OPEN_SETTINGS_EVENT, onOpenSettings);
+  }, []);
+
+  // Keep both the active trigger (through WorkspaceContextProvider) and the
+  // lazily-cached popover list current after an upload/remove/reroll.
+  useEffect(() => {
+    function onIconChanged(e: Event) {
+      const detail = (e as CustomEvent<WorkspaceIconChangedDetail>).detail;
+      if (!detail?.workspaceId) return;
+      setWorkspaces((prev) =>
+        prev
+          ? prev.map((w) =>
+              w.id === detail.workspaceId
+                ? {
+                    ...w,
+                    iconSeed: detail.iconSeed,
+                    iconUrl: detail.iconUrl,
+                  }
+                : w,
+            )
+          : prev,
+      );
+    }
+    window.addEventListener(WORKSPACE_ICON_CHANGED_EVENT, onIconChanged);
+    return () =>
+      window.removeEventListener(WORKSPACE_ICON_CHANGED_EVENT, onIconChanged);
   }, []);
 
   // Keep the lazily-cached workspace list in sync with a settings-modal
@@ -343,7 +371,13 @@ export function WorkspaceSwitcher() {
           "px-1.5 py-1 text-sm hover:bg-muted transition-colors",
         )}
       >
-        <TeamAvatar id={ctx.workspaceId} name={ctx.name} size="xs" />
+        <TeamAvatar
+          id={ctx.workspaceId}
+          name={ctx.name}
+          iconSeed={ctx.iconSeed}
+          iconUrl={ctx.iconUrl}
+          size="xs"
+        />
         <span className="min-w-0 max-w-[140px] truncate text-[13px] font-semibold">
           {ctx.name}
         </span>
@@ -630,6 +664,7 @@ function WorkspaceRow({
         id={workspace.id}
         name={workspace.name}
         iconSeed={workspace.iconSeed}
+        iconUrl={workspace.iconUrl}
         size="sm"
       />
       <span className="flex-1 truncate">{workspace.name}</span>

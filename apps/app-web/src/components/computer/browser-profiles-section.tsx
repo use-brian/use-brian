@@ -12,12 +12,12 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { useParams } from "next/navigation";
-import { Cloud, Laptop } from "lucide-react";
+import Link from "next/link";
+import { useParams, useRouter } from "next/navigation";
+import { Cloud, Laptop, Settings2, Trash2 } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { ConnectBrowserPanel } from "./connect-browser-panel";
-import { listAssistants, type StudioAssistantSummary } from "@/lib/api/studio";
 import {
   createBrowserProfile,
   deleteBrowserProfile,
@@ -89,12 +89,29 @@ export function profileSurfaces(profile: BrowserProfile): {
   };
 }
 
+/** Query selection for the master-detail profile surface. */
+export function selectedBrowserProfile(
+  profiles: BrowserProfile[],
+  selectedProfileId: string | undefined,
+  creating: boolean,
+): BrowserProfile | null {
+  if (creating) return null;
+  return profiles.find((profile) => profile.id === selectedProfileId) ?? profiles[0] ?? null;
+}
+
 const CLEARANCES: BrowserProfileClearance[] = ["confidential", "internal", "public"];
 const BACKENDS: BrowserBackend[] = ["cloud", "local"];
 const LOCAL_CONTROL_MODES: LocalBrowserControlMode[] = ["task_tabs", "full_browser"];
 
-export function BrowserProfilesSection() {
+export function BrowserProfilesSection({
+  selectedProfileId,
+  creating = false,
+}: {
+  selectedProfileId?: string;
+  creating?: boolean;
+}) {
   const t = useT();
+  const router = useRouter();
   const params = useParams<{ workspaceId?: string }>();
   const workspaceId = params?.workspaceId ?? "";
 
@@ -104,7 +121,6 @@ export function BrowserProfilesSection() {
     | { kind: "ready"; profiles: BrowserProfile[]; credentialAuthConfigured: boolean }
     | { kind: "error" }
   >({ kind: "loading" });
-  const [assistants, setAssistants] = useState<StudioAssistantSummary[]>([]);
   const [newName, setNewName] = useState("");
   const [newBackend, setNewBackend] = useState<BrowserBackend>("cloud");
   const [busy, setBusy] = useState(false);
@@ -168,11 +184,6 @@ export function BrowserProfilesSection() {
     void reload();
   }, [reload]);
 
-  useEffect(() => {
-    if (!workspaceId) return;
-    void listAssistants(workspaceId).then(setAssistants).catch(() => setAssistants([]));
-  }, [workspaceId]);
-
   const onCreate = useCallback(async () => {
     const name = newName.trim();
     if (!name || busy) return;
@@ -189,8 +200,11 @@ export function BrowserProfilesSection() {
       return;
     }
     setNewName("");
-    void reload();
-  }, [busy, newBackend, newName, reload, t, workspaceId]);
+    await reload();
+    router.replace(
+      `/w/${workspaceId}/computer/profiles?profile=${encodeURIComponent(created.id)}`,
+    );
+  }, [busy, newBackend, newName, reload, router, t, workspaceId]);
 
   const mutate = useCallback(
     async (profileId: string, patch: Parameters<typeof updateBrowserProfile>[1]) => {
@@ -213,10 +227,14 @@ export function BrowserProfilesSection() {
       if (!confirmed) return;
       setActionError(null);
       const ok = await deleteBrowserProfile(profile.id).catch(() => false);
-      if (!ok) setActionError(t.computer.profiles.updateFailed);
-      void reload();
+      if (!ok) {
+        setActionError(t.computer.profiles.updateFailed);
+        return;
+      }
+      await reload();
+      router.replace(`/w/${workspaceId}/computer/profiles`);
     },
-    [reload, t],
+    [reload, router, t, workspaceId],
   );
 
   const onRevoke = useCallback(
@@ -365,11 +383,6 @@ export function BrowserProfilesSection() {
   const backendTitle = (backend: BrowserBackend): string =>
     backend === "cloud" ? t.computer.profiles.remoteTitle : t.computer.profiles.localTitle;
 
-  const backendDescription = (backend: BrowserBackend): string =>
-    backend === "cloud"
-      ? t.computer.profiles.remoteDescription
-      : t.computer.profiles.localDescription;
-
   const localControlModeLabel = (mode: LocalBrowserControlMode): string =>
     mode === "task_tabs"
       ? t.computer.profiles.localControlTaskTabs
@@ -391,13 +404,16 @@ export function BrowserProfilesSection() {
     [mutate, t],
   );
 
+  const readyProfiles = state.kind === "ready" ? state.profiles : [];
+  const selectedProfile = selectedBrowserProfile(
+    readyProfiles,
+    selectedProfileId,
+    creating,
+  );
+  const showCreate = state.kind === "ready" && (creating || readyProfiles.length === 0);
+
   return (
     <div className="space-y-4">
-      <div>
-        <h3 className="text-sm font-medium">{t.computer.profiles.title}</h3>
-        <p className="mt-1 text-xs text-muted-foreground">{t.computer.profiles.description}</p>
-      </div>
-
       {state.kind === "loading" ? (
         <p className="text-xs text-muted-foreground">…</p>
       ) : state.kind === "unconfigured" ? (
@@ -406,15 +422,13 @@ export function BrowserProfilesSection() {
         <p className="text-xs text-destructive">{t.computer.profiles.loadFailed}</p>
       ) : (
         <>
-          <div className="rounded-lg border border-border bg-muted/15 p-4">
+          {showCreate ? (
+          <div className="rounded-xl border border-border bg-background p-4 shadow-sm">
             <h4 className="text-sm font-medium">{t.computer.profiles.createTitle}</h4>
-            <p className="mt-3 text-[11px] font-medium text-muted-foreground">
-              {t.computer.profiles.typeLabel}
-            </p>
             <div
               role="radiogroup"
               aria-label={t.computer.profiles.typeLabel}
-              className="mt-1.5 grid gap-2 sm:grid-cols-2"
+              className="mt-3 flex flex-wrap gap-2"
             >
               {BACKENDS.map((backend) => {
                 const selected = newBackend === backend;
@@ -428,21 +442,12 @@ export function BrowserProfilesSection() {
                     onClick={() => setNewBackend(backend)}
                     className={
                       selected
-                        ? "flex min-h-20 items-start gap-3 rounded-lg border border-primary bg-primary/5 p-3 text-left ring-1 ring-primary/20"
-                        : "flex min-h-20 items-start gap-3 rounded-lg border border-border bg-background p-3 text-left transition-colors hover:bg-accent/50"
+                        ? "inline-flex h-9 items-center gap-2 rounded-md border border-primary bg-primary/5 px-3 text-xs font-medium text-primary ring-1 ring-primary/20"
+                        : "inline-flex h-9 items-center gap-2 rounded-md border border-border px-3 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent"
                     }
                   >
-                    <span className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-md bg-muted">
-                      <Icon className="size-4 text-muted-foreground" aria-hidden />
-                    </span>
-                    <span className="min-w-0">
-                      <span className="block text-xs font-medium text-foreground">
-                        {backendTitle(backend)}
-                      </span>
-                      <span className="mt-1 block text-[11px] leading-relaxed text-muted-foreground">
-                        {backendDescription(backend)}
-                      </span>
-                    </span>
+                    <Icon className="size-4" aria-hidden />
+                    {backendTitle(backend)}
                   </button>
                 );
               })}
@@ -468,42 +473,40 @@ export function BrowserProfilesSection() {
               </button>
             </div>
           </div>
+          ) : null}
 
           {actionError ? <p className="text-xs text-destructive">{actionError}</p> : null}
 
-          {state.profiles.length === 0 ? (
-            <p className="text-xs text-muted-foreground">{t.computer.profiles.empty}</p>
-          ) : (
+          {selectedProfile ? (
             <ul className="space-y-3">
-              {state.profiles.map((profile) => (
-                <li key={profile.id} className="rounded-lg border border-border p-3">
-                  <div className="flex items-center justify-between gap-3">
+              {[selectedProfile].map((profile) => (
+                <li key={profile.id} className="rounded-xl border border-border bg-background p-4 shadow-sm">
+                  <div className="flex items-center justify-between gap-3 border-b border-border pb-3">
                     <div className="flex min-w-0 items-center gap-2">
-                      <span className="truncate text-sm font-medium">{profile.name}</span>
-                      <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">
-                        {backendTitle(profile.defaultBackend)}
-                      </span>
+                      <span className="truncate text-base font-medium">{profile.name}</span>
                       <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
-                        {clearanceLabel(profile.clearance)}
+                        {backendTitle(profile.defaultBackend)}
                       </span>
                     </div>
                     <button
                       type="button"
                       onClick={() => void onDelete(profile)}
-                      className="shrink-0 rounded-md border border-destructive/40 px-2.5 py-1 text-xs font-medium text-destructive hover:bg-destructive/10"
+                      aria-label={t.computer.profiles.deleteProfile}
+                      title={t.computer.profiles.deleteProfile}
+                      className="grid size-8 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
                     >
-                      {t.computer.profiles.deleteProfile}
+                      <Trash2 className="size-4" aria-hidden />
                     </button>
                   </div>
 
-                  <div className="mt-3">
-                    <p className="text-[11px] font-medium text-muted-foreground">
+                  <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-[11px] font-medium text-muted-foreground">
                       {t.computer.profiles.typeLabel}
-                    </p>
+                    </span>
                     <div
                       role="radiogroup"
                       aria-label={t.computer.profiles.typeLabel}
-                      className="mt-1.5 grid gap-2 sm:grid-cols-2"
+                      className="flex gap-1"
                     >
                       {BACKENDS.map((backend) => {
                         const selected = profile.defaultBackend === backend;
@@ -517,19 +520,12 @@ export function BrowserProfilesSection() {
                             onClick={() => void mutate(profile.id, { defaultBackend: backend })}
                             className={
                               selected
-                                ? "flex items-start gap-2 rounded-md border border-primary bg-primary/5 p-2.5 text-left"
-                                : "flex items-start gap-2 rounded-md border border-border p-2.5 text-left transition-colors hover:bg-accent/50"
+                                ? "inline-flex h-8 items-center gap-1.5 rounded-md bg-primary/10 px-2.5 text-xs font-medium text-primary"
+                                : "inline-flex h-8 items-center gap-1.5 rounded-md border border-border px-2.5 text-xs text-muted-foreground transition-colors hover:bg-accent"
                             }
                           >
-                            <Icon className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden />
-                            <span className="min-w-0">
-                              <span className="block text-xs font-medium">
-                                {backendTitle(backend)}
-                              </span>
-                              <span className="mt-0.5 block text-[11px] leading-relaxed text-muted-foreground">
-                                {backendDescription(backend)}
-                              </span>
-                            </span>
+                            <Icon className="size-3.5" aria-hidden />
+                            {backendTitle(backend)}
                           </button>
                         );
                       })}
@@ -569,25 +565,7 @@ export function BrowserProfilesSection() {
                         </button>
                       ))}
                     </div>
-                    <p className="mt-1 text-[11px] text-muted-foreground">
-                      {profile.localControlMode === "full_browser"
-                        ? t.computer.profiles.localControlFullHint
-                        : t.computer.profiles.localControlTaskHint}
-                    </p>
                   </div>
-                  ) : null}
-
-                  {/* A My Browser profile has no vault to fill — it rides the
-                      logins already in the user's real Chrome. */}
-                  {profileSurfaces(profile).ownBrowserNote ? (
-                    <div className="mt-3">
-                      <p className="text-[11px] font-medium text-muted-foreground">
-                        {t.computer.profiles.ownBrowserLabel}
-                      </p>
-                      <p className="mt-1 text-[11px] text-muted-foreground">
-                        {t.computer.profiles.ownBrowserHint}
-                      </p>
-                    </div>
                   ) : null}
 
                   {/* The secret goes from this authenticated app form to the
@@ -770,6 +748,12 @@ export function BrowserProfilesSection() {
                   </div>
                   ) : null}
 
+                  <details className="group mt-4 border-t border-border pt-3 [&_summary::-webkit-details-marker]:hidden">
+                    <summary className="flex cursor-pointer list-none items-center gap-2 rounded-md px-1 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
+                      <Settings2 className="size-3.5" aria-hidden />
+                      {t.computer.profiles.advancedTitle}
+                    </summary>
+                    <div className="pb-1 pl-1">
                   {/* Clearance rung (top rung = owner-only; lower = shared) */}
                   <div className="mt-3">
                     <p className="text-[11px] font-medium text-muted-foreground">
@@ -831,42 +815,16 @@ export function BrowserProfilesSection() {
                   </div>
                   ) : null}
 
-                  {/* Enabled assistants (R2-4: explicit enablement) */}
+                  {/* Assistant access is configured from the assistant, where
+                      users can reason about all of its available identities
+                      together and leave per-profile routing guidance. */}
                   <div className="mt-3">
-                    <p className="text-[11px] font-medium text-muted-foreground">
-                      {t.computer.profiles.assistantsLabel}
-                    </p>
-                    {assistants.length === 0 ? (
-                      <p className="mt-1 text-[11px] text-muted-foreground">
-                        {t.computer.profiles.assistantsEmpty}
-                      </p>
-                    ) : (
-                      <div className="mt-1 flex flex-wrap gap-1">
-                        {assistants.map((assistant) => {
-                          const enabled = profile.enabledAssistantIds.includes(assistant.id);
-                          return (
-                            <button
-                              key={assistant.id}
-                              type="button"
-                              onClick={() =>
-                                void mutate(profile.id, {
-                                  enabledAssistantIds: enabled
-                                    ? profile.enabledAssistantIds.filter((id) => id !== assistant.id)
-                                    : [...profile.enabledAssistantIds, assistant.id],
-                                })
-                              }
-                              className={
-                                enabled
-                                  ? "rounded-full bg-primary/10 px-2.5 py-0.5 text-[11px] font-medium text-primary"
-                                  : "rounded-full border border-border px-2.5 py-0.5 text-[11px] text-muted-foreground hover:bg-accent"
-                              }
-                            >
-                              {assistant.name}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    )}
+                    <Link
+                      href={`/w/${workspaceId}/studio/assistants?tab=tools`}
+                      className="inline-flex h-8 items-center rounded-md border border-border px-2.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                    >
+                      {t.computer.profiles.manageAssistantAccess}
+                    </Link>
                   </div>
 
                   {/* Standing skill grants on this identity (R2-2) */}
@@ -901,6 +859,8 @@ export function BrowserProfilesSection() {
                       </ul>
                     </div>
                   ) : null}
+                    </div>
+                  </details>
 
                   {/* Per-site sessions inside the cookie jar. Cloud only: a My
                       Browser profile never captures into the vault, so an
@@ -960,7 +920,7 @@ export function BrowserProfilesSection() {
                 </li>
               ))}
             </ul>
-          )}
+          ) : null}
         </>
       )}
     </div>

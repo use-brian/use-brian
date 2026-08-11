@@ -8,33 +8,49 @@ import type { CustomLlmNetworkPolicy } from '../../custom-llm-runtime.js'
 
 const workspaceId = '00000000-0000-4000-8000-000000000010'
 const endpointId = '00000000-0000-4000-8000-000000000001'
-const row = {
+const profileId = '00000000-0000-4000-8000-000000000002'
+const profile = {
   id: endpointId,
+  endpointId,
   workspaceId,
-  name: 'Local Llama',
-  baseUrl: 'http://model.example/v1',
-  modelId: 'llama-local',
+  name: 'Balanced',
+  modelId: 'terra-high',
   contextWindow: 32768,
   maxOutputTokens: 4096,
   supportsTools: true,
   verifiedAt: new Date('2026-08-10T00:00:00Z'),
-  isDefault: true,
+  createdAt: new Date('2026-08-10T00:00:00Z'),
+  updatedAt: new Date('2026-08-10T00:00:00Z'),
+}
+const endpoint = {
+  id: endpointId,
+  workspaceId,
+  name: 'Local gateway',
+  baseUrl: 'http://model.example/v1',
   hasApiKey: false,
   createdAt: new Date('2026-08-10T00:00:00Z'),
   updatedAt: new Date('2026-08-10T00:00:00Z'),
+  profiles: [profile],
 }
 
 function setup(networkPolicy: CustomLlmNetworkPolicy = 'private-network') {
   const endpointStore = {
-    list: vi.fn().mockResolvedValue([row]),
-    create: vi.fn().mockResolvedValue(row),
-    update: vi.fn(),
+    list: vi.fn().mockResolvedValue([endpoint]),
+    listTierDefaults: vi.fn().mockResolvedValue([]),
+    create: vi.fn().mockResolvedValue(endpoint),
+    createProfile: vi.fn().mockResolvedValue({ ...profile, id: profileId, endpointId }),
     delete: vi.fn().mockResolvedValue(true),
-    setDefault: vi.fn().mockResolvedValue(row),
-    clearDefault: vi.fn().mockResolvedValue(undefined),
+    deleteProfile: vi.fn().mockResolvedValue(true),
+    setTierDefault: vi.fn().mockResolvedValue({ workspaceId, tier: 'max', profileId, updatedAt: new Date() }),
+    clearTierDefault: vi.fn().mockResolvedValue(undefined),
+    getEndpointRuntimeSystem: vi.fn().mockResolvedValue({
+      ...endpoint,
+      profiles: undefined,
+      apiKey: null,
+    }),
   } as unknown as WorkspaceCustomLlmEndpointStore
   const workspaceStore = { getRole: vi.fn().mockResolvedValue('owner') } as unknown as WorkspaceStore
-  const probe = vi.fn().mockResolvedValue({ supportsTools: true as const, verifiedAt: row.verifiedAt })
+  const probe = vi.fn().mockResolvedValue({ supportsTools: true as const, verifiedAt: profile.verifiedAt })
   const app = express()
   app.use(express.json())
   app.use((req, _res, next) => {
@@ -62,52 +78,77 @@ describe('[COMP:api/custom-llm-endpoints] custom endpoint route', () => {
     const res = await request(app)
       .post(`/api/workspaces/${workspaceId}/custom-llm-endpoints`)
       .send({
-        name: 'Hosted Llama',
-        baseUrl: 'http://models.example.com/v1',
-        modelId: 'llama-hosted',
-        contextWindow: 32768,
-        maxOutputTokens: 4096,
+        name: 'Hosted gateway', baseUrl: 'http://models.example.com/v1',
+        modelId: 'terra-high', contextWindow: 32768, maxOutputTokens: 4096,
       })
       .expect(400)
     expect(res.body.code).toBe('endpoint_public_https_required')
     expect(probe).not.toHaveBeenCalled()
   })
 
-  it('lists masked endpoint metadata and stable selectors', async () => {
-    const { app } = setup()
+  it('lists masked connections, child profiles, stable selectors, and tier assignments', async () => {
+    const { app, endpointStore } = setup()
+    vi.mocked(endpointStore.listTierDefaults).mockResolvedValueOnce([
+      { workspaceId, tier: 'max', profileId: profile.id, updatedAt: new Date() },
+    ])
     const res = await request(app).get(`/api/workspaces/${workspaceId}/custom-llm-endpoints`).expect(200)
-    expect(res.body.endpoints[0]).toMatchObject({
+    expect(res.body.endpoints[0]).toMatchObject({ id: endpointId, hasApiKey: false })
+    expect(res.body.endpoints[0].profiles[0]).toMatchObject({
       id: endpointId,
       selector: `custom:${endpointId}`,
-      hasApiKey: false,
+      modelId: 'terra-high',
     })
     expect(res.body.endpoints[0]).not.toHaveProperty('apiKey')
+    expect(res.body.tierDefaults[0]).toMatchObject({ tier: 'max', profileId: endpointId })
   })
 
-  it('probes before saving a normalized endpoint', async () => {
+  it('probes before saving a normalized connection and its first profile', async () => {
     const { app, endpointStore, probe } = setup()
     const res = await request(app)
       .post(`/api/workspaces/${workspaceId}/custom-llm-endpoints`)
       .send({
-        name: 'Local Llama',
-        baseUrl: 'http://model.example/v1/',
-        apiKey: null,
-        modelId: 'llama-local',
-        contextWindow: 32768,
-        maxOutputTokens: 4096,
-        isDefault: true,
+        name: 'Local gateway', baseUrl: 'http://model.example/v1/', apiKey: null,
+        modelId: 'terra-high', contextWindow: 32768, maxOutputTokens: 4096,
       })
       .expect(201)
     expect(probe).toHaveBeenCalledWith({
-      baseUrl: 'http://model.example/v1',
-      apiKey: null,
-      modelId: 'llama-local',
+      baseUrl: 'http://model.example/v1', apiKey: null, modelId: 'terra-high',
     })
     expect(endpointStore.create).toHaveBeenCalledWith(expect.objectContaining({
       workspaceId,
       input: expect.objectContaining({ supportsTools: true, baseUrl: 'http://model.example/v1' }),
     }))
-    expect(res.body.endpoint.selector).toBe(`custom:${endpointId}`)
+    expect(res.body.endpoint.profiles[0].selector).toBe(`custom:${endpointId}`)
+  })
+
+  it('creates another verified model profile without resending connection auth', async () => {
+    const { app, endpointStore, probe } = setup()
+    const res = await request(app)
+      .post(`/api/workspaces/${workspaceId}/custom-llm-endpoints/${endpointId}/profiles`)
+      .send({ name: 'Max', modelId: 'sol-max', contextWindow: 200000, maxOutputTokens: 32768 })
+      .expect(201)
+    expect(endpointStore.getEndpointRuntimeSystem).toHaveBeenCalledWith({ workspaceId, endpointId })
+    expect(probe).toHaveBeenCalledWith({
+      baseUrl: endpoint.baseUrl, apiKey: null, modelId: 'sol-max',
+    })
+    expect(res.body.profile.selector).toBe(`custom:${profileId}`)
+  })
+
+  it('assigns and clears a custom profile independently for one Brian tier', async () => {
+    const { app, endpointStore } = setup()
+    await request(app)
+      .put(`/api/workspaces/${workspaceId}/custom-llm-endpoints/tiers/max`)
+      .send({ profileId })
+      .expect(200)
+    expect(endpointStore.setTierDefault).toHaveBeenCalledWith({
+      actingUserId: 'user-1', workspaceId, tier: 'max', profileId,
+    })
+    await request(app)
+      .delete(`/api/workspaces/${workspaceId}/custom-llm-endpoints/tiers/max`)
+      .expect(204)
+    expect(endpointStore.clearTierDefault).toHaveBeenCalledWith({
+      actingUserId: 'user-1', workspaceId, tier: 'max',
+    })
   })
 
   it('gates writes to workspace admins', async () => {

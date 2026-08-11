@@ -16,9 +16,9 @@ describe("[COMP:app-web/profile-management] settings navigation", () => {
     expect(workspaceSettingsSections(false)).not.toContain("ws-browser-profiles");
   });
 
-  it("keeps hosted-only billing and model sections out of OSS", () => {
+  it("keeps hosted-only billing out of OSS but exposes model routing", () => {
     expect(workspaceSettingsSections(true)).not.toContain("ws-plan");
-    expect(workspaceSettingsSections(true)).not.toContain("ws-models");
+    expect(workspaceSettingsSections(true)).toContain("ws-models");
   });
 });
 

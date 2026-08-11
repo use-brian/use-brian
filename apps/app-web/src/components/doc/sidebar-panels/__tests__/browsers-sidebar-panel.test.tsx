@@ -14,9 +14,11 @@ import { renderToString } from "react-dom/server";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
-import type { ComputerTaskSummary } from "@/lib/api/computer";
+import type { BrowserProfile, ComputerTaskSummary } from "@/lib/api/computer";
 import {
+  BrowsersProfileList,
   BrowsersSessionList,
+  profilesModeFromPathname,
   sessionIdFromPathname,
 } from "../browsers-sidebar-panel";
 
@@ -44,14 +46,40 @@ function task(overrides: Partial<ComputerTaskSummary>): ComputerTaskSummary {
   };
 }
 
+function profile(overrides: Partial<BrowserProfile>): BrowserProfile {
+  return {
+    id: "profile-1",
+    workspaceId: "ws-1",
+    ownerUserId: "user-1",
+    name: "Personal",
+    clearance: "confidential",
+    enabledAssistantIds: [],
+    defaultBackend: "cloud",
+    localControlMode: "task_tabs",
+    proxyUrl: null,
+    createdAt: "2026-08-11T00:00:00.000Z",
+    updatedAt: "2026-08-11T00:00:00.000Z",
+    sessions: [],
+    credentials: [],
+    grants: [],
+    ...overrides,
+  };
+}
+
 describe("[COMP:app-web/browsers-surface] Live-session sidebar panel", () => {
   it("reads the active session id off a /computer/<id> path (null at the index)", () => {
     expect(sessionIdFromPathname("/w/ws-1/computer/sess-1")).toBe("sess-1");
     expect(sessionIdFromPathname("/w/ws-1/computer")).toBeNull();
+    expect(sessionIdFromPathname("/w/ws-1/computer/profiles")).toBeNull();
     expect(sessionIdFromPathname("/w/ws-1/p")).toBeNull();
     expect(sessionIdFromPathname(null)).toBeNull();
     // Encoded segments decode back to the raw session id for comparison.
     expect(sessionIdFromPathname("/w/ws-1/computer/a%2Fb?x=1")).toBe("a/b");
+  });
+
+  it("recognizes the profile-management mode", () => {
+    expect(profilesModeFromPathname("/w/ws-1/computer/profiles")).toBe(true);
+    expect(profilesModeFromPathname("/w/ws-1/computer/session-1")).toBe(false);
   });
 
   it("shows the empty state when no session is live", () => {
@@ -80,5 +108,39 @@ describe("[COMP:app-web/browsers-surface] Live-session sidebar panel", () => {
     expect(html).toContain(en.computer.sessions.statusPaused);
     // The active row is marked for the current selection.
     expect(html).toContain('aria-current="page"');
+  });
+});
+
+describe("[COMP:app-web/profile-management] Browser-profile sidebar list", () => {
+  it("lists Remote and Local profiles with query-addressed links", () => {
+    const html = wrap(
+      <BrowsersProfileList
+        workspaceId="ws-1"
+        profiles={[
+          profile({ id: "remote-1", name: "Work" }),
+          profile({ id: "local-1", name: "Personal", defaultBackend: "local" }),
+        ]}
+        activeProfileId="local-1"
+        creating={false}
+      />,
+    );
+    expect(html).toContain("/w/ws-1/computer/profiles?profile=remote-1");
+    expect(html).toContain("/w/ws-1/computer/profiles?profile=local-1");
+    expect(html).toContain(en.computer.profiles.remoteTitle);
+    expect(html).toContain(en.computer.profiles.localTitle);
+    expect(html).toContain('aria-current="page"');
+  });
+
+  it("offers a compact create action and a short empty state", () => {
+    const html = wrap(
+      <BrowsersProfileList
+        workspaceId="ws-1"
+        profiles={[]}
+        activeProfileId={null}
+        creating
+      />,
+    );
+    expect(html).toContain("/w/ws-1/computer/profiles?new=1");
+    expect(html).toContain(en.computer.profiles.sidebarEmpty);
   });
 });

@@ -55,6 +55,12 @@ export type Workspace = {
   ownerUserId: string
   iconSeed: number | null
   /**
+   * Versioned public proxy URL for an admin-uploaded workspace picture.
+   * `null` means render the deterministic `iconSeed` landmark fallback.
+   * Migration 437; see workspaces.md -> "Workspace icon".
+   */
+  iconUrl: string | null
+  /**
    * True for the auto-created default workspace each user gets at signup
    * (named "Personal"). A pure **label/anchor**: it enforces the free-tier
    * "only paid users can create more workspaces" cap, anchors default-assistant
@@ -183,6 +189,7 @@ const WORKSPACE_COLUMNS = `
   id, name, purpose,
   owner_user_id AS "ownerUserId",
   icon_seed AS "iconSeed",
+  icon_url AS "iconUrl",
   is_personal AS "isPersonal",
   plan,
   default_recording_blueprint_id AS "defaultRecordingBlueprintId",

@@ -62,3 +62,36 @@ export function planGateTrialCheckoutBody(workspaceId: string): {
     returnTo: PLAN_GATE_TRIAL_RETURN_PATH,
   };
 }
+
+export type PlanGateCheckoutReturn = {
+  status: "success" | "cancelled";
+  sessionId: string | null;
+};
+
+/** Read the one-shot state Stripe returns through the legacy `/home` entry. */
+export function planGateCheckoutReturn(
+  search: string,
+): PlanGateCheckoutReturn | null {
+  const params = new URLSearchParams(search);
+  const status = params.get("checkout");
+  if (status !== "success" && status !== "cancelled") return null;
+  const rawSessionId = params.get("session_id")?.trim();
+  return {
+    status,
+    sessionId: rawSessionId || null,
+  };
+}
+
+/** Preserve only the checkout handoff while workspace Home resolves. */
+export function forwardPlanGateCheckoutReturn(
+  path: string,
+  search: string,
+): string {
+  const checkoutReturn = planGateCheckoutReturn(search);
+  if (!checkoutReturn) return path;
+  const params = new URLSearchParams({ checkout: checkoutReturn.status });
+  if (checkoutReturn.sessionId) {
+    params.set("session_id", checkoutReturn.sessionId);
+  }
+  return `${path}${path.includes("?") ? "&" : "?"}${params.toString()}`;
+}

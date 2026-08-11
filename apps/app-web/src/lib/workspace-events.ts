@@ -22,8 +22,9 @@
  *                     WorkspaceChrome's default interlocutor + the FloatingChat
  *                     switcher, both of which live in the never-unmounting
  *                     workspace layout and so cannot self-heal on navigation)
- *   workspace_config → HOME_APPS_REFRESH_EVENT (the Home app-bar strip — same
- *                     never-unmounting-layout problem as the roster above)
+ *   workspace_config → HOME_APPS_REFRESH_EVENT +
+ *                     WORKSPACE_IDENTITY_REFRESH_EVENT (Home app-bar plus the
+ *                     workspace name/icon in persistent chrome)
  *
  * Catch-up without replay: on every EventSource `open` (first connect AND
  * each auto-reconnect) and on `visibilitychange → visible`, all domain
@@ -70,6 +71,10 @@ import {
   HOME_APPS_REFRESH_EVENT,
   type HomeAppsRefreshDetail,
 } from "@/lib/home-apps-events";
+import {
+  WORKSPACE_IDENTITY_REFRESH_EVENT,
+  type WorkspaceIdentityRefreshDetail,
+} from "@/lib/workspace-identity-events";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -197,6 +202,12 @@ export function routeWorkspaceChange(
             workspaceId: payload.workspaceId,
           } satisfies HomeAppsRefreshDetail,
         },
+        {
+          event: WORKSPACE_IDENTITY_REFRESH_EVENT,
+          detail: {
+            workspaceId: payload.workspaceId,
+          } satisfies WorkspaceIdentityRefreshDetail,
+        },
       ];
     default:
       return [];
@@ -213,6 +224,7 @@ export function allDomainDispatches(workspaceId: string): DomainDispatch[] {
     { event: SCHEDULED_JOB_REFRESH_EVENT, detail: { workspaceId } },
     { event: ASSISTANT_REFRESH_EVENT, detail: { workspaceId } },
     { event: HOME_APPS_REFRESH_EVENT, detail: { workspaceId } },
+    { event: WORKSPACE_IDENTITY_REFRESH_EVENT, detail: { workspaceId } },
   ];
 }
 

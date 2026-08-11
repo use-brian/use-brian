@@ -114,11 +114,14 @@ export function modelMenuRoutes(opts: ModelMenuRouteOptions): Router {
     for (const cls of MENU_CLASSES) {
       classes[cls] = menuForClass(cls, opts.configuredProviders).map(serializeRow)
     }
-    const [profiles, defaults, customEndpoints] = await Promise.all([
+    const [profiles, defaults, customConnections, customTierDefaults] = await Promise.all([
       opts.meteredProfileStore.list(workspaceId),
       opts.modelDefaultsStore.list(workspaceId),
       opts.customLlmEndpointStore
         ? opts.customLlmEndpointStore.list({ actingUserId: req.userId!, workspaceId })
+        : Promise.resolve([]),
+      opts.customLlmEndpointStore
+        ? opts.customLlmEndpointStore.listTierDefaults({ actingUserId: req.userId!, workspaceId })
         : Promise.resolve([]),
     ])
     // Profiles and curated pins over models whose key is gone are hidden with
@@ -142,14 +145,22 @@ export function modelMenuRoutes(opts: ModelMenuRouteOptions): Router {
           ? visibleProfileIds.has(d.meteredProfileId)
           : d.modelAlias !== null && availableCurated.has(d.modelAlias),
       ),
-      customEndpoints: customEndpoints.map((endpoint) => ({
-        id: endpoint.id,
-        selector: customLlmAlias(endpoint.id),
-        name: endpoint.name,
-        modelId: endpoint.modelId,
-        contextWindow: endpoint.contextWindow,
-        isDefault: endpoint.isDefault,
-      })),
+      customEndpoints: customConnections.flatMap((endpoint) =>
+        endpoint.profiles.map((profile) => ({
+          id: profile.id,
+          endpointId: endpoint.id,
+          endpointName: endpoint.name,
+          selector: customLlmAlias(profile.id),
+          name: profile.name,
+          modelId: profile.modelId,
+          contextWindow: profile.contextWindow,
+          tiers: customTierDefaults
+            .filter((setting) => setting.profileId === profile.id)
+            .map((setting) => setting.tier),
+          isDefault: customTierDefaults.some((setting) => setting.profileId === profile.id),
+        })),
+      ),
+      customTierDefaults,
       meteredBillingAvailable: Boolean(opts.estimateMeteredTurn),
     })
   })

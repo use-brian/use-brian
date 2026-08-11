@@ -194,6 +194,8 @@ describe('[COMP:app-web/profile-management] Profile-Management SDK (R2-4)', () =
             defaultBackend: 'cloud',
             localControlMode: 'task_tabs',
             enabledAssistantIds: [],
+            assistantRoutingNotes: { 'assistant-1': 'Use for personal accounts.' },
+            canManage: true,
             sessions: [{ site: 'github.com', capturedAt: 'x', lastUsedAt: null, status: 'active' }],
           },
         ],
@@ -203,6 +205,8 @@ describe('[COMP:app-web/profile-management] Profile-Management SDK (R2-4)', () =
     expect(res.configured).toBe(true)
     expect(res.credentialAuthConfigured).toBe(true)
     expect(res.profiles[0].sessions[0].site).toBe('github.com')
+    expect(res.profiles[0].canManage).toBe(true)
+    expect(res.profiles[0].assistantRoutingNotes?.['assistant-1']).toContain('personal')
     expect(String(mockFetch.mock.calls[0][0])).toContain('/api/computer/profiles?workspaceId=ws-1')
   })
 
@@ -231,6 +235,7 @@ describe('[COMP:app-web/profile-management] Profile-Management SDK (R2-4)', () =
       clearance: 'internal',
       defaultBackend: 'local',
       localControlMode: 'full_browser',
+      assistantRoutingNotes: { 'assistant-1': 'Use for the company account.' },
     })
     const patch = mockFetch.mock.calls.at(-1)!
     expect(String(patch[0])).toContain('/api/computer/profiles/p2')
@@ -239,6 +244,7 @@ describe('[COMP:app-web/profile-management] Profile-Management SDK (R2-4)', () =
       clearance: 'internal',
       defaultBackend: 'local',
       localControlMode: 'full_browser',
+      assistantRoutingNotes: { 'assistant-1': 'Use for the company account.' },
     })
 
     await deleteBrowserProfile('p2')

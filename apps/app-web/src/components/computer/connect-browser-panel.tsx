@@ -14,6 +14,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
+import { Cable, Check, Copy, Download, Link2, RefreshCw } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { isOssEdition } from "@/lib/edition";
 import { planGateApplies } from "@/lib/plan-gate";
@@ -70,9 +71,11 @@ function CopyField({
         <button
           type="button"
           onClick={() => void onCopy()}
-          className="h-8 shrink-0 rounded-md border border-border px-3 text-xs font-medium hover:bg-accent"
+          aria-label={copied ? copiedLabel : copyLabel}
+          title={copied ? copiedLabel : copyLabel}
+          className="grid size-8 shrink-0 place-items-center rounded-md border border-border text-muted-foreground hover:bg-accent hover:text-foreground"
         >
-          {copied ? copiedLabel : copyLabel}
+          {copied ? <Check className="size-3.5" aria-hidden /> : <Copy className="size-3.5" aria-hidden />}
         </button>
       </div>
     </div>
@@ -209,9 +212,13 @@ export function ConnectBrowserPanel({
   const connected = status?.connected === true;
 
   return (
-    <div className="rounded-lg border border-border p-3">
+    <div className="rounded-lg border border-border bg-muted/15 p-3">
       <div className="flex items-center justify-between gap-2">
-        <h3 className="text-sm font-medium">{c.title}: {profileName}</h3>
+        <h3 className="flex items-center gap-2 text-sm font-medium">
+          <Cable className="size-4 text-muted-foreground" aria-hidden />
+          {c.title}
+          <span className="sr-only">{profileName}</span>
+        </h3>
         <span
           className={
             connected
@@ -222,8 +229,6 @@ export function ConnectBrowserPanel({
           {connected ? c.statusConnected : c.statusDisconnected}
         </span>
       </div>
-      <p className="mt-1 text-xs text-muted-foreground">{c.description}</p>
-
       {/* Shown alongside the connected badge, never instead of it: a stale
           extension is genuinely connected, and saying otherwise would send the
           user to re-pair when the fix is to reload. */}
@@ -236,45 +241,49 @@ export function ConnectBrowserPanel({
       {status && !status.configured ? (
         <p className="mt-3 text-xs text-muted-foreground">{c.notConfigured}</p>
       ) : connected ? (
-        <p className="mt-3 text-xs text-muted-foreground">{c.connectedHint}</p>
+        null
       ) : installed && !pairing ? (
         // The extension answered, so it already has everything it needs from
         // us. Asking the user to copy a relay address and a code into a popup
         // before a 10 minute expiry buys nothing here.
         <div className="mt-3">
-          <p className="text-[11px] text-muted-foreground">{c.oneClickBody}</p>
           <button
             type="button"
             disabled={busy}
             onClick={() => void onOneClickConnect()}
-            className="mt-2 h-8 rounded-md bg-action px-3 text-xs font-medium text-action-foreground disabled:opacity-50"
+            className="inline-flex h-8 items-center gap-1.5 rounded-md bg-action px-3 text-xs font-medium text-action-foreground disabled:opacity-50"
           >
+            <Cable className="size-3.5" aria-hidden />
             {busy ? c.oneClickConnecting : c.oneClickCta}
           </button>
           {error ? <p className="mt-1 text-[11px] text-destructive">{error}</p> : null}
         </div>
       ) : (
-        <div className="mt-3 space-y-3">
-          {/* Step 1: install */}
-          <div>
-            <p className="text-[11px] font-medium">{c.step1Title}</p>
-            <p className="mt-0.5 text-[11px] text-muted-foreground">{c.step1Body}</p>
+        <div className="mt-3">
+          <div className="flex flex-wrap gap-2">
             <a
               href={BROWSER_EXTENSION_INSTALL_URL}
               target="_blank"
               rel="noopener noreferrer"
-              className="mt-1 inline-flex h-8 items-center rounded-md border border-border px-3 text-xs font-medium hover:bg-accent"
+              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border px-3 text-xs font-medium hover:bg-accent"
             >
+              <Download className="size-3.5" aria-hidden />
               {c.step1Cta}
             </a>
+            {!pairing ? (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void onGenerate()}
+                className="inline-flex h-8 items-center gap-1.5 rounded-md bg-action px-3 text-xs font-medium text-action-foreground disabled:opacity-50"
+              >
+                <Link2 className="size-3.5" aria-hidden />
+                {busy ? c.generating : c.generate}
+              </button>
+            ) : null}
           </div>
-
-          {/* Step 2: pair */}
-          <div>
-            <p className="text-[11px] font-medium">{c.step2Title}</p>
-            <p className="mt-0.5 text-[11px] text-muted-foreground">{c.step2Body}</p>
             {pairing ? (
-              <div className="mt-2 space-y-2">
+              <div className="mt-3 space-y-2">
                 <CopyField
                   label={c.relayLabel}
                   value={pairing.relayUrl}
@@ -291,23 +300,14 @@ export function ConnectBrowserPanel({
                 <button
                   type="button"
                   onClick={() => void refreshStatus()}
-                  className="h-8 rounded-md border border-border px-3 text-xs font-medium hover:bg-accent"
+                  className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border px-3 text-xs font-medium hover:bg-accent"
                 >
+                  <RefreshCw className="size-3.5" aria-hidden />
                   {c.refresh}
                 </button>
               </div>
-            ) : (
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => void onGenerate()}
-                className="mt-1 h-8 rounded-md bg-action px-3 text-xs font-medium text-action-foreground disabled:opacity-50"
-              >
-                {busy ? c.generating : c.generate}
-              </button>
-            )}
+            ) : null}
             {error ? <p className="mt-1 text-[11px] text-destructive">{error}</p> : null}
-          </div>
         </div>
       )}
     </div>

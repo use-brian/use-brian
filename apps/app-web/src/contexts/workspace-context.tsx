@@ -42,6 +42,8 @@ export type Workspace = {
   /** Live `workspace_members` count; drives solo-vs-shared connector behavior. */
   memberCount?: number;
   iconSeed?: number | null;
+  /** Versioned public proxy URL for an uploaded workspace picture. */
+  iconUrl?: string | null;
   /** `true` for the auto-created default workspace (`is_personal`) — a label
    *  only; it gates no connector/sharing behavior (that keys on `memberCount`). */
   isPersonal?: boolean;

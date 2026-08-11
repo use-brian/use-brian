@@ -13,7 +13,7 @@
  * (`useWorkspaces()` + `updateWorkspace()`); app-web only exposes a
  * single active workspace via `useWorkspaceContext()` → { workspaceId,
  * name, role, me }. All displayed workspace fields (name, role, purpose,
- * iconSeed) come straight from the `GET /api/workspaces/:id` detail fetch
+ * iconSeed, iconUrl) come straight from the `GET /api/workspaces/:id` detail fetch
  * here, and the icon-regenerate path updates local state via `refetch()`
  * instead of pushing into a switcher list. Because the route context is a
  * static snapshot, a successful rename must also broadcast
@@ -23,7 +23,14 @@
  * until a full reload.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+} from "react";
 import { authFetch } from "@/lib/auth-fetch";
 import { WorkspaceLlmKeyBlock } from "./sections/llm-key-block";
 import { CodexProviderCard } from "./sections/codex-provider-card";
@@ -31,6 +38,9 @@ import {
   setWorkspaceDefaultBlueprint,
   setWorkspaceInboxRetention,
   setWorkspaceTranscriptionScript,
+  uploadWorkspaceIcon,
+  removeWorkspaceIcon,
+  MAX_WORKSPACE_ICON_BYTES,
   WorkspaceApiError,
   type ChineseScriptPref,
 } from "@/lib/api/workspaces";
@@ -40,6 +50,7 @@ import type { CustomPageTemplateSummary } from "@use-brian/doc-model";
 import { getUserInfo } from "@/lib/user";
 import {
   useWorkspaceContext,
+  emitWorkspaceIconChanged,
   emitWorkspaceRenamed,
 } from "@/lib/workspace-context";
 import { updateWorkspace } from "@/contexts/workspace-context";
@@ -57,6 +68,7 @@ import {
   type SearchableSelectItem,
 } from "@/components/ui/searchable-select";
 import { Button } from "@/components/ui/button";
+import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { AlertDialog } from "@base-ui/react/alert-dialog";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n";
@@ -116,6 +128,8 @@ type WorkspaceDetail = {
   role: "owner" | "admin" | "member";
   /** Echoed by the detail endpoint (spread of the full workspace row). */
   iconSeed?: number | null;
+  /** Versioned public proxy URL for an uploaded workspace picture. */
+  iconUrl?: string | null;
   /**
    * The workspace default recording blueprint (migration 291) — a
    * `workspace_page_templates` id carrying an `extraction` spec, or `null` for
@@ -175,6 +189,12 @@ export function WorkspaceGeneralSection({ onWorkspaceDeleted }: { onWorkspaceDel
   const [editing, setEditing] = useState(false);
   const [nameInput, setNameInput] = useState("");
   const [regenerating, setRegenerating] = useState(false);
+  const [uploadingIcon, setUploadingIcon] = useState(false);
+  const [removingIcon, setRemovingIcon] = useState(false);
+  const [iconStatus, setIconStatus] = useState<
+    { kind: "success" | "error"; text: string } | null
+  >(null);
+  const iconInputRef = useRef<HTMLInputElement>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [flushOpen, setFlushOpen] = useState(false);
@@ -406,19 +426,135 @@ export function WorkspaceGeneralSection({ onWorkspaceDeleted }: { onWorkspaceDel
     }
   }
 
-  // Admins can reroll the deterministic pixel landmark. The new seed is
-  // persisted server-side; we re-fetch the detail so the avatar repaints.
-  // (apps/web also pushes the seed into its switcher list — app-web's
-  // switcher re-fetches its own list on open, so that path is dropped.)
+  async function pickWorkspaceIcon(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!data || !file) return;
+    if (file.size > MAX_WORKSPACE_ICON_BYTES) {
+      setIconStatus({
+        kind: "error",
+        text: t.workspaceDetailInline.iconTooLarge,
+      });
+      return;
+    }
+    if (
+      ![
+        "image/png",
+        "image/jpeg",
+        "image/webp",
+        "image/gif",
+        "image/avif",
+      ].includes(file.type.toLowerCase())
+    ) {
+      setIconStatus({
+        kind: "error",
+        text: t.workspaceDetailInline.iconUnsupported,
+      });
+      return;
+    }
+
+    setUploadingIcon(true);
+    setIconStatus(null);
+    try {
+      const updated = await uploadWorkspaceIcon(data.id, file);
+      const detail = {
+        workspaceId: data.id,
+        iconSeed: data.iconSeed ?? null,
+        iconUrl: updated.iconUrl,
+      };
+      emitWorkspaceIconChanged(detail);
+      updateWorkspace(data.id, {
+        iconSeed: detail.iconSeed,
+        iconUrl: detail.iconUrl,
+      });
+      await refetch();
+      setIconStatus({
+        kind: "success",
+        text: t.workspaceDetailInline.iconUpdated,
+      });
+    } catch {
+      setIconStatus({
+        kind: "error",
+        text: t.workspaceDetailInline.iconUpdateFailed,
+      });
+    } finally {
+      setUploadingIcon(false);
+    }
+  }
+
+  async function removeCustomIcon() {
+    if (!data || removingIcon) return;
+    const ok = await confirmDialog({
+      title: t.workspaceDetailInline.removeIconTitle,
+      description: t.workspaceDetailInline.removeIconConfirm,
+      confirmLabel: t.workspaceDetailInline.removeIcon,
+      cancelLabel: t.workspaceDetailInline.cancel,
+      variant: "destructive",
+    });
+    if (!ok) return;
+
+    setRemovingIcon(true);
+    setIconStatus(null);
+    try {
+      await removeWorkspaceIcon(data.id);
+      const detail = {
+        workspaceId: data.id,
+        iconSeed: data.iconSeed ?? null,
+        iconUrl: null,
+      };
+      emitWorkspaceIconChanged(detail);
+      updateWorkspace(data.id, {
+        iconSeed: detail.iconSeed,
+        iconUrl: null,
+      });
+      await refetch();
+      setIconStatus({
+        kind: "success",
+        text: t.workspaceDetailInline.iconRemoved,
+      });
+    } catch {
+      setIconStatus({
+        kind: "error",
+        text: t.workspaceDetailInline.iconRemoveFailed,
+      });
+    } finally {
+      setRemovingIcon(false);
+    }
+  }
+
+  // Admins can reroll the deterministic pixel landmark while it is visible.
   async function regenerateIcon() {
     if (!data || regenerating) return;
     setRegenerating(true);
+    setIconStatus(null);
     try {
       const res = await authFetch(
         `${API_URL}/api/workspaces/${data.id}/regenerate-icon`,
         { method: "POST" },
       );
-      if (res.ok) await refetch();
+      if (!res.ok) throw new Error("regenerate_failed");
+      const body = (await res.json()) as { iconSeed?: number };
+      const nextSeed = body.iconSeed ?? data.iconSeed ?? null;
+      const detail = {
+        workspaceId: data.id,
+        iconSeed: nextSeed,
+        iconUrl: data.iconUrl ?? null,
+      };
+      emitWorkspaceIconChanged(detail);
+      updateWorkspace(data.id, {
+        iconSeed: nextSeed,
+        iconUrl: detail.iconUrl,
+      });
+      await refetch();
+      setIconStatus({
+        kind: "success",
+        text: t.workspaceDetailInline.iconGenerated,
+      });
+    } catch {
+      setIconStatus({
+        kind: "error",
+        text: t.workspaceDetailInline.iconGenerateFailed,
+      });
     } finally {
       setRegenerating(false);
     }
@@ -496,79 +632,115 @@ export function WorkspaceGeneralSection({ onWorkspaceDeleted }: { onWorkspaceDel
       <h2 className="text-lg font-semibold">{t.chrome.settingsModal.workspace.general}</h2>
 
       <div className="border-t border-border pt-6">
-        <div className="flex items-center gap-4">
-          {/* Workspace icon — admins click to roll a new pixel landmark. */}
-          {isAdmin ? (
-            <button
-              type="button"
-              onClick={regenerateIcon}
-              disabled={regenerating}
-              title={t.workspaceDetailInline.regenerateIcon}
-              aria-label={t.workspaceDetailInline.regenerateIcon}
-              className="group relative shrink-0 cursor-pointer rounded-[10px] disabled:opacity-60"
-            >
-              <TeamAvatar id={data.id} name={data.name} iconSeed={data.iconSeed} size="lg" />
-              <span className="absolute inset-0 flex items-center justify-center rounded-[10px] bg-black/40 opacity-0 transition-opacity group-hover:opacity-100">
-                <svg
-                  width="18"
-                  height="18"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="white"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  aria-hidden
-                >
-                  <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" />
-                </svg>
-              </span>
-            </button>
-          ) : (
-            <TeamAvatar id={data.id} name={data.name} iconSeed={data.iconSeed} size="lg" />
-          )}
+        <div className="flex items-start gap-4">
+          <TeamAvatar
+            id={data.id}
+            name={data.name}
+            iconSeed={data.iconSeed}
+            iconUrl={data.iconUrl}
+            size="lg"
+          />
 
-          {/* Name + role */}
-          <div className="flex min-w-0 flex-1 items-center gap-2">
-            {editing ? (
-              <>
-                <input
-                  type="text"
-                  value={nameInput}
-                  onChange={(e) => setNameInput(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && rename()}
-                  className="flex-1 text-sm bg-muted/50 border border-border rounded-lg px-3 py-1.5"
-                  autoFocus
-                  maxLength={100}
-                />
-                <button onClick={rename} className="text-xs font-medium text-primary hover:underline">
-                  {t.workspaceDetailInline.save}
-                </button>
-                <button
-                  onClick={() => {
-                    setEditing(false);
-                    setNameInput(data.name);
-                  }}
-                  className="text-xs text-muted-foreground hover:underline"
-                >
-                  {t.workspaceDetailInline.cancel}
-                </button>
-              </>
-            ) : (
-              <>
-                <span className="text-sm font-medium truncate">{data.name}</span>
-                {isAdmin && (
+          <div className="min-w-0 flex-1 space-y-2">
+            {/* Name + role */}
+            <div className="flex min-w-0 items-center gap-2">
+              {editing ? (
+                <>
+                  <input
+                    type="text"
+                    value={nameInput}
+                    onChange={(e) => setNameInput(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && rename()}
+                    className="flex-1 text-sm bg-muted/50 border border-border rounded-lg px-3 py-1.5"
+                    autoFocus
+                    maxLength={100}
+                  />
+                  <button onClick={rename} className="text-xs font-medium text-primary hover:underline">
+                    {t.workspaceDetailInline.save}
+                  </button>
                   <button
-                    onClick={() => setEditing(true)}
-                    className="text-xs text-muted-foreground hover:text-foreground shrink-0"
+                    onClick={() => {
+                      setEditing(false);
+                      setNameInput(data.name);
+                    }}
+                    className="text-xs text-muted-foreground hover:underline"
                   >
-                    {t.workspaceDetailInline.edit}
+                    {t.workspaceDetailInline.cancel}
+                  </button>
+                </>
+              ) : (
+                <>
+                  <span className="text-sm font-medium truncate">{data.name}</span>
+                  {isAdmin && (
+                    <button
+                      onClick={() => setEditing(true)}
+                      className="text-xs text-muted-foreground hover:text-foreground shrink-0"
+                    >
+                      {t.workspaceDetailInline.edit}
+                    </button>
+                  )}
+                  <span className="text-xs text-muted-foreground bg-muted px-2 py-0.5 rounded-full capitalize ml-auto shrink-0">
+                    {data.role}
+                  </span>
+                </>
+              )}
+            </div>
+
+            {isAdmin && (
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                <input
+                  ref={iconInputRef}
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp,image/gif,image/avif"
+                  className="hidden"
+                  onChange={pickWorkspaceIcon}
+                />
+                <button
+                  type="button"
+                  onClick={() => iconInputRef.current?.click()}
+                  disabled={uploadingIcon || removingIcon || regenerating}
+                  className="text-[12px] text-primary hover:underline disabled:opacity-50"
+                >
+                  {uploadingIcon
+                    ? t.workspaceDetailInline.iconUploading
+                    : t.workspaceDetailInline.uploadIcon}
+                </button>
+                {data.iconUrl ? (
+                  <button
+                    type="button"
+                    onClick={removeCustomIcon}
+                    disabled={uploadingIcon || removingIcon || regenerating}
+                    className="text-[12px] text-muted-foreground hover:text-foreground disabled:opacity-50"
+                  >
+                    {removingIcon
+                      ? t.workspaceDetailInline.iconRemoving
+                      : t.workspaceDetailInline.removeIcon}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={regenerateIcon}
+                    disabled={uploadingIcon || removingIcon || regenerating}
+                    className="text-[12px] text-muted-foreground hover:text-foreground disabled:opacity-50"
+                  >
+                    {regenerating
+                      ? t.workspaceDetailInline.iconGenerating
+                      : t.workspaceDetailInline.regenerateIcon}
                   </button>
                 )}
-                <span className="text-xs text-muted-foreground bg-muted px-2 py-0.5 rounded-full capitalize ml-auto shrink-0">
-                  {data.role}
-                </span>
-              </>
+              </div>
+            )}
+
+            {iconStatus && (
+              <p
+                className={
+                  iconStatus.kind === "success"
+                    ? "text-[12px] text-primary"
+                    : "text-[12px] text-red-400"
+                }
+              >
+                {iconStatus.text}
+              </p>
             )}
           </div>
         </div>

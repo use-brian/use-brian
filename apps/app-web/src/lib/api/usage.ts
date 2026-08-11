@@ -57,6 +57,33 @@ export async function getUsage(workspaceId: string): Promise<UsageResponse | nul
   return (await res.json()) as UsageResponse;
 }
 
+export type BillingCheckoutReconcileResponse = {
+  reconciled: boolean;
+  plan: string;
+  status?: string;
+};
+
+/**
+ * Project a completed Stripe Checkout into workspace billing immediately.
+ * The optional session id is preferred; the server can recover a legacy
+ * success return from the workspace's dedicated Stripe customer when absent.
+ */
+export async function reconcileBillingCheckout(
+  workspaceId: string,
+  sessionId?: string | null,
+): Promise<BillingCheckoutReconcileResponse | null> {
+  const res = await authFetch(`${API_URL}/api/billing/checkout/reconcile`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      workspace_id: workspaceId,
+      ...(sessionId ? { session_id: sessionId } : {}),
+    }),
+  });
+  if (!res.ok) return null;
+  return (await res.json()) as BillingCheckoutReconcileResponse;
+}
+
 /**
  * Start a Stripe Checkout for one prepaid extra-usage pack
  * ($100 / 2,500 credits, current billing cycle only). Owner-only on the
