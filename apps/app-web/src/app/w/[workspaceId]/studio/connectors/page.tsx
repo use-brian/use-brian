@@ -87,7 +87,10 @@ import { resolveAutoExpose, type AutoExposeArm } from "@/lib/connector-auto-expo
 import { buildConnectorState } from "@/lib/connector-oauth-state";
 import { armConnectorOauthState } from "@/lib/oauth-state-cookie";
 import { desktopBridge } from "@/lib/desktop-auth-source";
-import { buildMsGraphAuthorizeUrl } from "@/lib/msgraph-oauth";
+import {
+  buildMsGraphAuthorizeUrl,
+  shouldCollectWorkspaceMsGraphApp,
+} from "@/lib/msgraph-oauth";
 import { normalizeShopifyShopDomain, isShpssPrefixed } from "@/lib/shopify-domain";
 import {
   buildCustomConnectorPayload,
@@ -173,6 +176,13 @@ type MsGraphAppStatus = {
   /** True when this workspace owns the registration, i.e. it can be replaced or removed. */
   workspaceOwned: boolean;
   updatedAt: string | null;
+};
+
+type ConnectorConnectOptions = {
+  addAnother?: boolean;
+  instanceId?: string;
+  /** Catalog Connect should collect a workspace app instead of using deployment fallback. */
+  preferWorkspaceApp?: boolean;
 };
 
 type Connector = {
@@ -1642,7 +1652,7 @@ function ConnectorsList() {
   // `opts.addAnother` connects a NEW account for a provider that already has
   // one (OAuth state carries an `:add` suffix so the callback creates a fresh
   // instance instead of overwriting the first).
-  async function handleConnect(c: Connector, opts?: { addAnother?: boolean; instanceId?: string }) {
+  async function handleConnect(c: Connector, opts?: ConnectorConnectOptions) {
     const id = c.id;
     const rid = rowId(c);
     setConnecting(rid);
@@ -1761,14 +1771,20 @@ function ConnectorsList() {
       setConnecting(rid);
       const status = await fetchMsGraphAppStatus();
       setConnecting(null);
-      if (!status?.configured || !status.clientId) {
-        // No app anywhere: open the form so they can register one, instead of
-        // telling them to go edit an environment they do not have.
+      if (shouldCollectWorkspaceMsGraphApp(status, opts?.preferWorkspaceApp === true)) {
+        // No workspace-owned app for this catalog flow: open the form instead
+        // of silently consenting against deployment config the customer cannot
+        // inspect or change. Ordinary detail-panel Connect can still use that
+        // fallback on a self-host.
         setMsGraphConnectOpts(opts ?? null);
         setMsGraphError(null);
         setShowMsGraphForm(rid);
         return;
       }
+      // `shouldCollectWorkspaceMsGraphApp` already rejects this shape; keep the
+      // explicit guard so TypeScript does not have to infer narrowing through a
+      // helper call.
+      if (!status?.clientId) return;
       startMsGraphAuthorize({ clientId: status.clientId, tenant: status.tenantId, opts });
       return;
     }
@@ -3151,10 +3167,25 @@ function ConnectorsList() {
         open={showBrowse}
         onClose={() => setShowBrowse(false)}
         onConnectorAdded={() => fetchConnectors()}
-        // OAuth entries (Google/Notion/Fathom) connect + "Add another"
-        // through this page's per-provider OAuth flow, which threads the
-        // `[:add]:<workspaceId>` state the callbacks expect.
-        onOauthConnect={(entry, opts) => handleConnect({ id: entry.id } as Connector, opts)}
+        // OAuth entries connect + "Add another" through this page's
+        // per-provider flow. Close the catalog and select the hidden provider
+        // first so any inline setup form renders in the visible detail panel.
+        onOauthConnect={(entry, opts) => {
+          // Directory Add may already have minted a disconnected instance.
+          // Carry that row's UUID through selection + form state; using a bare
+          // provider slug makes the form key stale as soon as the refetch lands.
+          const connector = connectors.find((candidate) => candidate.id === entry.id) ??
+            ({ id: entry.id } as Connector);
+          setShowBrowse(false);
+          setSelected(rowId(connector));
+          void handleConnect(connector, {
+            ...opts,
+            // A hosted customer can configure a workspace app, not this
+            // deployment's environment. Workspace-owned config still skips
+            // straight to consent on subsequent connects.
+            preferWorkspaceApp: entry.id === "msgraph",
+          });
+        }}
       />
 
       {gdriveError && (
