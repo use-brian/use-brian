@@ -45,6 +45,15 @@ const spawnWorkerTool = buildTool({
   },
 })
 
+const lookupTool = buildTool({
+  name: 'lookup',
+  description: 'Look something up',
+  inputSchema: z.object({ query: z.string() }),
+  async execute() {
+    return { data: 'found' }
+  },
+})
+
 const baseContext = {
   userId: 'u',
   assistantId: 'a',
@@ -76,6 +85,39 @@ const synthesisAnswer: StreamChunk[] = [
 ]
 
 describe('[COMP:engine/query-loop] suppressIntermediateText', () => {
+  it('aggregates length-tiered cost per provider request', async () => {
+    const first: StreamChunk[] = [
+      { type: 'message_start', model: 'gemini-3.1-pro-preview' },
+      { type: 'tool_use_start', id: 'call_1', name: 'lookup' },
+      { type: 'tool_use_delta', id: 'call_1', input: '{"query":"pricing"}' },
+      { type: 'tool_use_end', id: 'call_1' },
+      { type: 'message_end', stopReason: 'tool_use', usage: { inputTokens: 150_000, outputTokens: 1_000 } },
+    ]
+    const second: StreamChunk[] = [
+      { type: 'message_start', model: 'gemini-3.1-pro-preview' },
+      { type: 'text_delta', text: 'Final answer.' },
+      { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 150_000, outputTokens: 1_000 } },
+    ]
+    const events: QueryEvent[] = []
+
+    for await (const event of queryLoop({
+      provider: scriptedProvider([first, second]),
+      model: 'gemini-3.1-pro-preview',
+      systemPrompt: 'sp',
+      messages: [{ role: 'user', content: 'hi' }],
+      tools: new Map([['lookup', lookupTool]]),
+      context: baseContext,
+      maxTurns: 3,
+    })) {
+      events.push(event)
+    }
+
+    const complete = events.find((event) => event.type === 'turn_complete')
+    if (complete?.type !== 'turn_complete') throw new Error('expected turn_complete')
+    expect(complete.totalUsage.inputTokens).toBe(300_000)
+    expect(complete.totalUsage.calculatedCostUsd).toBeCloseTo(0.624, 10)
+  })
+
   it('LEAK BASELINE: without the option, pre-spawnWorker text leaks to the consumer', async () => {
     const provider = scriptedProvider([preambleThenSpawn, synthesisAnswer])
     const events: QueryEvent[] = []

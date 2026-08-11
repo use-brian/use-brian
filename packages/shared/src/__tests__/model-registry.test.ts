@@ -13,6 +13,7 @@ import {
   providerAliasMap,
   recordedAliasIds,
   providerModelIds,
+  providerPricingIds,
   menuForClass,
   MutableProviderAvailability,
   bracketFor,
@@ -219,6 +220,15 @@ describe('[COMP:providers/model-registry] provider derivations', () => {
       'gpt-5.2',
     ])
   })
+
+  it('providerPricingIds includes recorded, wire, embedding, and historical ids', () => {
+    const gemini = providerPricingIds('gemini')
+    expect(gemini).toContain('gemini-3-pro-research')
+    expect(gemini).toContain('gemini-3.1-pro-preview')
+    expect(gemini).toContain('gemini:gemini-embedding-001')
+    expect(gemini).toContain('gemini-2.5-flash')
+    expect(gemini).not.toContain('claude-haiku-4-5')
+  })
 })
 
 describe('[COMP:providers/model-registry] wave-1 slate + menus (plan §5.1)', () => {
@@ -345,7 +355,7 @@ describe('[COMP:providers/model-registry] L6 effective rate', () => {
 
   it('a cache-heavy mix can invert a sticker-price ordering (why L6 exists)', () => {
     // The live counterexample from the plan (§5): deepseek-v4-pro's sticker
-    // ($2.40/$4.80) undercuts Pro 3.1 ($2.00/$12.00) on output — but it is
+    // ($2.40/$4.80) undercuts short-context Pro 3.1 ($2.00/$12.00) on output — but it is
     // EXCLUDED from the cache discount, so a deep agentic loop dominated by
     // cache reads prices it far above the incumbent. Sticker classification
     // would have admitted it; the effective rate rejects it.
