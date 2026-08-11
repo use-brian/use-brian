@@ -56,6 +56,7 @@ describe('[COMP:api/custom-llm-endpoints] hosted public endpoint transport', () 
 
   it('pins the vetted IP while preserving the original TLS hostname and does not follow redirects', async () => {
     let pinned: { address?: string; family?: number } = {}
+    let pinnedAll: Array<{ address: string; family: number }> = []
     const request = vi.fn((
       _url: URL,
       options: RequestOptions,
@@ -64,6 +65,10 @@ describe('[COMP:api/custom-llm-endpoints] hosted public endpoint transport', () 
       options.lookup?.('models.example.com', {}, (error, address, family) => {
         if (error) throw error
         pinned = { address: address as string, family: family as number }
+      })
+      options.lookup?.('models.example.com', { all: true }, (error, addresses) => {
+        if (error) throw error
+        pinnedAll = addresses as Array<{ address: string; family: number }>
       })
       const response = Readable.from([Buffer.from('redirect')]) as IncomingMessage
       response.statusCode = 302
@@ -94,5 +99,6 @@ describe('[COMP:api/custom-llm-endpoints] hosted public endpoint transport', () 
     expect(url.hostname).toBe('models.example.com')
     expect(options.servername).toBe('models.example.com')
     expect(pinned).toEqual({ address: '8.8.8.8', family: 4 })
+    expect(pinnedAll).toEqual([{ address: '8.8.8.8', family: 4 }])
   })
 })
