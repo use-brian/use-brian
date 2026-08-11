@@ -54,6 +54,7 @@ import {
   type PipelineBEpisode,
   type PlaceholderResolver,
   type SourceKind,
+  type TaskAdmissionPort,
   type TaskStore,
   type UsageStore,
 } from '@use-brian/core'
@@ -296,6 +297,12 @@ export type MailboxBrainRouterDeps = {
   entityLinks: EntityLinksStore
   memories: MemoryStore
   tasks?: TaskStore
+  /**
+   * Extracted-task admission is required on this built-in realtime path.
+   * `processEpisode` keeps the port optional for legacy callers, but pairing a
+   * task store with no gate selects its direct-create fallback.
+   */
+  taskAdmission: TaskAdmissionPort
   episodes: DbEpisodesStore
   ingestRulesStore: IngestRulesStore
   resolvePlaceholders: PlaceholderResolver
@@ -413,6 +420,7 @@ export function createMailboxBrainRouter(deps: MailboxBrainRouterDeps): MailboxB
       entityLinks: deps.entityLinks,
       memories: deps.memories,
       tasks: deps.tasks,
+      taskAdmission: deps.taskAdmission,
       episodes: deps.episodes,
       classifierModel: deps.classifierModel,
       analytics: deps.analytics,

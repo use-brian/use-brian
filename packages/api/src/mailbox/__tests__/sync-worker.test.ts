@@ -747,9 +747,11 @@ function makeBrainDeps(over: Partial<MailboxBrainRouterDeps> = {}): {
   runExtraction: ReturnType<typeof vi.fn>
   appendBatch: ReturnType<typeof vi.fn>
   createEpisode: ReturnType<typeof vi.fn>
+  taskAdmission: MailboxBrainRouterDeps['taskAdmission']
 } {
   const runExtraction = vi.fn(async () => ({}))
   const appendBatch = vi.fn(async () => {})
+  const taskAdmission = {} as MailboxBrainRouterDeps['taskAdmission']
   const createEpisode = vi.fn(async (_actor: string, input: Record<string, unknown>) => ({
     id: 'ep-1',
     sourceKind: input.sourceKind,
@@ -767,6 +769,8 @@ function makeBrainDeps(over: Partial<MailboxBrainRouterDeps> = {}): {
     entities: {} as never,
     entityLinks: {} as never,
     memories: {} as never,
+    tasks: {} as never,
+    taskAdmission,
     episodes: { createEpisode } as never,
     ingestRulesStore: {
       listByConnectorInstanceSystem: vi.fn(async () => seededImapRules()),
@@ -778,7 +782,7 @@ function makeBrainDeps(over: Partial<MailboxBrainRouterDeps> = {}): {
     appendBatchEvent: appendBatch as never,
     ...over,
   }
-  return { deps, runExtraction, appendBatch, createEpisode }
+  return { deps, runExtraction, appendBatch, createEpisode, taskAdmission }
 }
 
 const BRAIN_CTX = {
@@ -789,6 +793,29 @@ const BRAIN_CTX = {
 }
 
 describe('[COMP:api/mailbox-sync-worker] rules routing (mixed batch)', () => {
+  it('pairs the task store with admission on realtime extraction', async () => {
+    const { deps, runExtraction, taskAdmission } = makeBrainDeps()
+    const router = createMailboxBrainRouter(deps)
+
+    await router.route(
+      {
+        account_email: 'maya@harborlane.example',
+        folder: 'INBOX',
+        provider_message_id: 'INBOX:1',
+        from: 'Casey Example <casey@client.example>',
+        subject: 'Deal terms',
+        text: 'Can we revise clause 4?',
+      },
+      BRAIN_CTX,
+    )
+
+    expect(runExtraction).toHaveBeenCalledTimes(1)
+    expect(runExtraction.mock.calls[0][2]).toMatchObject({
+      tasks: deps.tasks,
+      taskAdmission,
+    })
+  })
+
   it('correspondence → realtime episode; newsletter → digest batch; notification → dropped', async () => {
     const { deps, runExtraction, appendBatch, createEpisode } = makeBrainDeps()
     const router = createMailboxBrainRouter(deps)

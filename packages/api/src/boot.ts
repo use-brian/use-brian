@@ -6396,6 +6396,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       entityLinks: entityLinksStore,
       memories: memoryStore,
       tasks: taskStore,
+      taskAdmission: createTaskAdmissionPort(),
       episodes: episodesStore,
       ingestRulesStore,
       resolvePlaceholders: resolveIngestPlaceholders,
