@@ -57,6 +57,7 @@ import { useParams } from "next/navigation";
 import { Check, Download, FolderOpen, Pencil, Upload, X } from "lucide-react";
 import { authFetch } from "@/lib/auth-fetch";
 import { BrowseDirectory } from "./browse-directory";
+import { resolveDirectoryConnectRow } from "@/lib/connector-directory-connect";
 import { DrivePicker, type PickedFile } from "@/components/drive-picker";
 import { ConnectorToolList, type ToolPolicy } from "@/components/connectors/connector-tool-list";
 import { ConnectorIcon } from "@/components/connectors/connector-icon";
@@ -1649,9 +1650,22 @@ function ConnectorsList() {
     window.location.href = `https://accounts.google.com/o/oauth2/v2/auth?${sp}`;
   }
 
-  // `opts.addAnother` connects a NEW account for a provider that already has
-  // one (OAuth state carries an `:add` suffix so the callback creates a fresh
-  // instance instead of overwriting the first).
+  /**
+   * Put an inline connect form on screen.
+   *
+   * `handleConnect` answers some connectors with a form rendered inside the
+   * selected row's detail panel instead of a redirect. Selecting here (a
+   * directory-only row surfaces through `selectedHiddenAvailable`) and closing
+   * the modal makes the form reachable from every entry point.
+   */
+  function revealConnectForm(rid: string) {
+    setSelected(rid);
+    setShowBrowse(false);
+  }
+
+  // `opts.addAnother` connects a new account for a provider that already has
+  // one. OAuth state carries an `:add` suffix so the callback creates a fresh
+  // instance instead of overwriting the first.
   async function handleConnect(c: Connector, opts?: ConnectorConnectOptions) {
     const id = c.id;
     const rid = rowId(c);
@@ -1660,6 +1674,7 @@ function ConnectorsList() {
     // PAT connectors — show inline token input instead of connecting immediately
     if (isPatConnector(id)) {
       setShowPatInput(rid);
+      revealConnectForm(rid);
       setConnecting(null);
       return;
     }
@@ -1668,6 +1683,7 @@ function ConnectorsList() {
     // server-side) instead of the generic mark-connected POST.
     if (id === "gcs") {
       setShowGcsForm(rid);
+      revealConnectForm(rid);
       setGcsError(null);
       setConnecting(null);
       return;
@@ -1677,6 +1693,7 @@ function ConnectorsList() {
     // (validated server-side) instead of the generic mark-connected POST.
     if (id === "s3") {
       setShowS3Form(rid);
+      revealConnectForm(rid);
       setS3Error(null);
       setConnecting(null);
       return;
@@ -1779,6 +1796,7 @@ function ConnectorsList() {
         setMsGraphConnectOpts(opts ?? null);
         setMsGraphError(null);
         setShowMsGraphForm(rid);
+        revealConnectForm(rid);
         return;
       }
       // `shouldCollectWorkspaceMsGraphApp` already rejects this shape; keep the
@@ -1797,6 +1815,7 @@ function ConnectorsList() {
     // Shopify connect falls through to the GOOGLE authorize URL.
     if (id === "shopify") {
       setShowShopifyForm(rid);
+      revealConnectForm(rid);
       setShopifyConnectOpts(opts ?? null);
       setShopifyError(null);
       setConnecting(null);
@@ -3191,22 +3210,14 @@ function ConnectorsList() {
         open={showBrowse}
         onClose={() => setShowBrowse(false)}
         onConnectorAdded={() => fetchConnectors()}
-        // OAuth entries connect + "Add another" through this page's
-        // per-provider flow. Close the catalog and select the hidden provider
-        // first so any inline setup form renders in the visible detail panel.
+        // Resolve the real row first: a synthetic `{ id }` carries no instance
+        // UUID, so its form key becomes stale when Directory Add refetches.
         onOauthConnect={(entry, opts) => {
-          // Directory Add may already have minted a disconnected instance.
-          // Carry that row's UUID through selection + form state; using a bare
-          // provider slug makes the form key stale as soon as the refetch lands.
-          const connector = connectors.find((candidate) => candidate.id === entry.id) ??
-            ({ id: entry.id } as Connector);
-          setShowBrowse(false);
-          setSelected(rowId(connector));
+          const connector = resolveDirectoryConnectRow(connectors, entry.id) as Connector;
           void handleConnect(connector, {
             ...opts,
-            // A hosted customer can configure a workspace app, not this
-            // deployment's environment. Workspace-owned config still skips
-            // straight to consent on subsequent connects.
+            // Hosted customers configure the workspace app, not this
+            // deployment's fallback identity.
             preferWorkspaceApp: entry.id === "msgraph",
           });
         }}
