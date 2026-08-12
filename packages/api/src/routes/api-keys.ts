@@ -6,6 +6,8 @@ import { Router } from 'express'
 import { z } from 'zod'
 import type { ApiKeyStore } from '../db/api-key-store.js'
 
+type AssistantParams = { assistantId: string }
+
 const createSchema = z.object({
   name: z.string().min(1).max(120),
   scope: z.enum(['chat', 'agent']).default('chat'),
@@ -16,7 +18,7 @@ const createSchema = z.object({
 export function apiKeyRoutes(store: ApiKeyStore): Router {
   const router = Router({ mergeParams: true })
 
-  router.post('/', async (req, res) => {
+  router.post<AssistantParams>('/', async (req, res) => {
     const userId = req.userId
     if (!userId) { res.status(401).json({ error: 'Missing or invalid Authorization header' }); return }
     const parsed = createSchema.safeParse(req.body)
@@ -59,7 +61,7 @@ export function apiKeyRoutes(store: ApiKeyStore): Router {
     }
   })
 
-  router.get('/', async (req, res) => {
+  router.get<AssistantParams>('/', async (req, res) => {
     const userId = req.userId
     if (!userId) { res.status(401).json({ error: 'Missing or invalid Authorization header' }); return }
     try {
@@ -70,7 +72,7 @@ export function apiKeyRoutes(store: ApiKeyStore): Router {
     }
   })
 
-  router.delete('/:keyId', async (req, res) => {
+  router.delete<{ assistantId: string; keyId: string }>('/:keyId', async (req, res) => {
     const userId = req.userId
     if (!userId) { res.status(401).json({ error: 'Missing or invalid Authorization header' }); return }
     try {
