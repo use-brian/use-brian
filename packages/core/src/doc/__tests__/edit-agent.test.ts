@@ -12,6 +12,7 @@ import {
   createDelegateDocEditTool,
   isolateDocEditToolContext,
   runDocEditAgent,
+  toolsForDocEditIntent,
 } from '../edit-agent.js'
 
 const parentContext: ToolContext = {
@@ -212,22 +213,98 @@ describe('[COMP:doc/edit-agent] context-clean Doc editor', () => {
       model: 'cheap',
       systemPrompt: 'isolated editor protocol',
       tools: new Map([['patchPage', patchTool([])]]),
+      targetPageId: 'page-1',
       loadPageContext: async () => 'pageId=page-1 version=1',
     })
 
     expect(tool.name).toBe('delegateDocEdit')
     expect(tool.timeoutMs).toBe(180_000)
-    expect(tool.inputSchema.safeParse({ instruction: 'Change the heading.' }).success).toBe(true)
-    expect(tool.inputSchema.safeParse({ instruction: '', history: [] }).success).toBe(false)
+    expect(tool.inputSchema.safeParse({
+      intent: 'edit',
+      pageId: 'page-1',
+      instruction: 'Change the heading.',
+    }).success).toBe(true)
+    expect(tool.inputSchema.safeParse({ intent: 'edit', instruction: 'Change it.' }).success).toBe(false)
+    expect(tool.inputSchema.safeParse({ intent: 'create', pageId: 'page-1', instruction: 'New.' }).success).toBe(false)
 
-    const result = await tool.execute({ instruction: 'Change the heading.' }, parentContext)
+    const result = await tool.execute({
+      intent: 'edit',
+      pageId: 'page-1',
+      instruction: 'Change the heading.',
+    }, parentContext)
     expect(result.isError).toBe(false)
     expect(result.data).toMatchObject({ status: 'completed', mutationTools: ['patchPage'] })
 
-    const duplicate = await tool.execute({ instruction: 'Change it again.' }, parentContext)
+    const duplicate = await tool.execute({
+      intent: 'edit',
+      pageId: 'page-1',
+      instruction: 'Change it again.',
+    }, parentContext)
     expect(duplicate.isError).toBe(true)
     expect(duplicate.data).toMatchObject({ error: 'doc_edit_already_delegated' })
     expect(requests).toHaveLength(2)
+  })
+
+  it('fails an edit before the child runs when no existing page target is bound', async () => {
+    const requests: ProviderRequest[] = []
+    const provider = providerFrom(() => textTurn('must not run'), requests)
+    const tool = createDelegateDocEditTool({
+      provider,
+      model: 'cheap',
+      systemPrompt: 'isolated editor protocol',
+      tools: new Map([['renderPage', patchTool([])]]),
+      loadPageContext: async () => '(no page)',
+    })
+
+    const result = await tool.execute({
+      intent: 'edit',
+      pageId: 'page-1',
+      instruction: 'Modify the Review item.',
+    }, parentContext)
+
+    expect(result.isError).toBe(true)
+    expect(result.data).toMatchObject({ error: 'missing_page_target' })
+    expect(requests).toHaveLength(0)
+  })
+
+  it('fails a mismatched page target before the child runs', async () => {
+    const requests: ProviderRequest[] = []
+    const provider = providerFrom(() => textTurn('must not run'), requests)
+    const tool = createDelegateDocEditTool({
+      provider,
+      model: 'cheap',
+      systemPrompt: 'isolated editor protocol',
+      tools: new Map([['patchPage', patchTool([])]]),
+      targetPageId: 'page-1',
+      loadPageContext: async () => 'pageId=page-1',
+    })
+
+    const result = await tool.execute({
+      intent: 'edit',
+      pageId: 'page-2',
+      instruction: 'Modify another page.',
+    }, parentContext)
+
+    expect(result.isError).toBe(true)
+    expect(result.data).toMatchObject({ error: 'page_target_mismatch' })
+    expect(requests).toHaveLength(0)
+  })
+
+  it('removes every page-creation operation from an existing-page edit', () => {
+    const tool = (name: string) => ({ name } as Tool)
+    const tools = new Map([
+      ['renderPage', tool('renderPage')],
+      ['createSubPage', tool('createSubPage')],
+      ['importToPage', tool('importToPage')],
+      ['patchPage', tool('patchPage')],
+      ['getCurrentPage', tool('getCurrentPage')],
+    ])
+
+    expect([...toolsForDocEditIntent(tools, 'edit').keys()]).toEqual([
+      'patchPage',
+      'getCurrentPage',
+    ])
+    expect(toolsForDocEditIntent(tools, 'create')).toBe(tools)
   })
 
   it('the allow-list helper never carries nested execution surfaces', () => {

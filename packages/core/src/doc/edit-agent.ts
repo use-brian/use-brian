@@ -36,11 +36,34 @@ export const DOC_MUTATION_TOOLS = new Set([
   'resolveComment',
 ])
 
-const delegateDocEditInputSchema = z.object({
-  instruction: z.string().trim().min(1).max(20_000).describe(
-    'Self-contained description of the finished page change. Include the target page id/title when known, relevant facts and citations, and exact placement constraints. The editor cannot see this conversation.',
-  ),
-})
+const delegateDocEditInputSchema = z
+  .object({
+    intent: z.enum(['create', 'edit']).describe(
+      'Use edit only for an existing validated open page. Use create only when the user explicitly asked for a new page.',
+    ),
+    pageId: z.string().min(1).optional().describe(
+      'Required for edit: the exact currently-open page id supplied by runtime context. Omit for create.',
+    ),
+    instruction: z.string().trim().min(1).max(20_000).describe(
+      'Self-contained description of the finished page change. Include relevant facts, citations, and placement constraints. The editor cannot see this conversation.',
+    ),
+  })
+  .superRefine((input, ctx) => {
+    if (input.intent === 'edit' && !input.pageId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['pageId'],
+        message: 'pageId is required for an existing-page edit.',
+      })
+    }
+    if (input.intent === 'create' && input.pageId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['pageId'],
+        message: 'pageId must be omitted for a new-page create.',
+      })
+    }
+  })
 
 export type DocEditAttemptUsage = {
   model: string
@@ -284,10 +307,25 @@ export async function runDocEditAgent(
   }
 }
 
+export function toolsForDocEditIntent(
+  tools: Map<string, Tool>,
+  intent: 'create' | 'edit',
+): Map<string, Tool> {
+  if (intent === 'create') return tools
+  return new Map(
+    [...tools].filter(
+      ([name]) => !['renderPage', 'createSubPage', 'importToPage'].includes(name),
+    ),
+  )
+}
+
 export type CreateDelegateDocEditToolOptions = Omit<
   RunDocEditAgentOptions,
   'instruction' | 'context'
->
+> & {
+  /** Existing page validated and loaded by the route for this turn. */
+  targetPageId?: string | null
+}
 
 export function createDelegateDocEditTool(
   options: CreateDelegateDocEditToolOptions,
@@ -295,10 +333,10 @@ export function createDelegateDocEditTool(
   // One gateway instance is minted per parent turn. Consuming it once prevents
   // a looping supervisor from spawning multiple expensive child transcripts.
   let consumed = false
-  return buildTool({
+  return buildTool<typeof delegateDocEditInputSchema>({
     name: DOC_EDIT_GATEWAY_TOOL,
     description:
-      'Apply a requested Doc page, entity, or comment change through a fresh isolated editor. Submit one self-contained brief after gathering any needed evidence. The editor cannot see the current conversation or tool results unless you include their relevant facts and source URLs in the instruction. Questions that do not require a Doc mutation should be answered directly without this tool.',
+      'Apply a requested Doc page, entity, or comment change through a fresh isolated editor. Choose edit only when runtime context supplies an existing open page id; an edit can never create a page. Choose create only when the user explicitly asks for a new page. Submit one self-contained brief after gathering needed evidence. The editor cannot see this conversation or tool results unless you include their relevant facts and source URLs. Questions that do not require a Doc mutation should be answered directly.',
     inputSchema: delegateDocEditInputSchema,
     isReadOnly: false,
     isConcurrencySafe: false,
@@ -319,10 +357,40 @@ export function createDelegateDocEditTool(
           isError: true,
         }
       }
+      if (input.intent === 'edit') {
+        if (!options.targetPageId) {
+          return {
+            data: {
+              status: 'failed',
+              summary: 'No existing Doc page is open for this edit. Open the page first; no new page was created.',
+              mutationTools: [],
+              pageIds: [],
+              fallbackUsed: false,
+              error: 'missing_page_target',
+            } satisfies DocEditReceipt,
+            isError: true,
+          }
+        }
+        if (input.pageId !== options.targetPageId) {
+          return {
+            data: {
+              status: 'failed',
+              summary: 'The requested page does not match the page validated for this turn.',
+              mutationTools: [],
+              pageIds: [],
+              fallbackUsed: false,
+              error: 'page_target_mismatch',
+            } satisfies DocEditReceipt,
+            isError: true,
+          }
+        }
+      }
       consumed = true
+      const tools = toolsForDocEditIntent(options.tools, input.intent)
       const receipt = await runDocEditAgent({
         ...options,
         instruction: input.instruction,
+        tools,
         context,
       })
       return {

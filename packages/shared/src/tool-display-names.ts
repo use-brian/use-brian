@@ -236,6 +236,8 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
 
   // Workspace skills
   updateViewedSkill: 'Update workspace skill',
+  updateBrainEntry: 'Edit Brain entry',
+  findEditableBrainEntries: 'Find Brain entries',
 }
 
 /**

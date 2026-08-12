@@ -303,16 +303,50 @@ export async function createInspectionSession(params: {
   userId: string
   appId?: string
 }): Promise<Session> {
-  const appId = params.appId ?? 'Use Brian'
-  // Fresh UUID per call — no conflict on the (assistant, user,
-  // channel_type, channel_id, app_id) uniqueness constraint, since the
-  // channel_id is unique per Ask. crypto.randomUUID() ships in Node ≥ 19.
-  const channelId = crypto.randomUUID()
+  // Fresh UUID per call: each Ask thread is an unrelated deliberation.
+  return createTransientBrainSession({
+    primaryAssistantId: params.primaryAssistantId,
+    userId: params.userId,
+    appId: params.appId,
+    channelType: 'brain_inspection',
+    channelId: crypto.randomUUID(),
+  })
+}
+
+/**
+ * Brain-entry editing session. The channel id is the immutable server-bound
+ * target for this transient conversation; any model-supplied target must
+ * match it exactly. A superseding apply rotates the client to a fresh session
+ * for the live row while preserving the temporary transcript in local UI state.
+ */
+export async function createBrainEditSession(params: {
+  primaryAssistantId: string
+  userId: string
+  primitive: string
+  rowId: string
+  appId?: string
+}): Promise<Session> {
+  return createTransientBrainSession({
+    primaryAssistantId: params.primaryAssistantId,
+    userId: params.userId,
+    appId: params.appId,
+    channelType: 'brain_edit',
+    channelId: `${params.primitive}:${params.rowId}:${crypto.randomUUID()}`,
+  })
+}
+
+async function createTransientBrainSession(params: {
+  primaryAssistantId: string
+  userId: string
+  appId?: string
+  channelType: 'brain_inspection' | 'brain_edit'
+  channelId: string
+}): Promise<Session> {
   const result = await query<Session>(
     `INSERT INTO sessions (
        assistant_id, user_id, channel_type, channel_id, app_id, transient
      )
-     VALUES ($1, $2, 'brain_inspection', $3, $4, TRUE)
+     VALUES ($1, $2, $3, $4, $5, TRUE)
      RETURNING id, assistant_id as "assistantId", user_id as "userId",
                channel_type as "channelType", channel_id as "channelId",
                app_id as "appId", app_origin as "appOrigin", status, compact_summary as "compactSummary",
@@ -322,7 +356,13 @@ export async function createInspectionSession(params: {
                downgrade_notice_pin_message_id as "downgradeNoticePinMessageId",
                mode, visibility, effective_clearance as "effectiveClearance",
                created_at as "createdAt", last_active_at as "lastActiveAt"`,
-    [params.primaryAssistantId, params.userId, channelId, appId],
+    [
+      params.primaryAssistantId,
+      params.userId,
+      params.channelType,
+      params.channelId,
+      params.appId ?? 'Use Brian',
+    ],
   )
   return result.rows[0]
 }

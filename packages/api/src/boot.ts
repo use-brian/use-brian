@@ -195,6 +195,7 @@ import { codexProviderRoutes } from './routes/codex-provider.js'
 import { saveLocalProviderPreference } from './local-provider-preference.js'
 import { brainRoutes } from './routes/brain.js'
 import { brainInboxRoutes } from './routes/brain-inbox.js'
+import { createBrainEntryMutator } from './brain-entry-mutation.js'
 import { taskGuardrailRoutes } from './routes/task-guardrails.js'
 import { homeRoutes } from './routes/home.js'
 import { homeDockRoutes } from './routes/home-dock.js'
@@ -1757,6 +1758,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const { createConnectorGrantStore } = await import('./db/connector-grant-store.js')
   const connectorGrantStore = createConnectorGrantStore()
   const workspaceStore = createWorkspaceStore({ connectorGrantStore, channelRouteStore })
+  const brainEntryMutator = createBrainEntryMutator({
+    workspaceStore,
+    entityLinks: entityLinksStore,
+  })
   const meteredProfileStore = createMeteredProfileStore()
   const modelDefaultsStore = createWorkspaceModelDefaultsStore()
 
@@ -3923,6 +3928,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     retrievalStore,
     memoryRecallEventsStore,
     inspectionTools: brainInspectionTools,
+    brainEntryMutator,
     generateBlueprintTool,
     blueprintRecordTools,
     buildBlueprintPromptFragment,
@@ -5410,6 +5416,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     filesApi,
     entityLinks: entityLinksStore,
     workspaceSkillStore,
+    brainEntryMutator,
   }))
   // Task guardrails — rules, the suggestions tray, and the rejection log.
   // Authenticated, so it mounts here without tripping the public-route

@@ -76,7 +76,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   docPagePath,
   pageIdFromInAppHref,
@@ -171,7 +171,13 @@ import {
   describeToolFromInput,
   type NarrationDict,
 } from "@/lib/tool-narration";
-import { requestBrainRefresh } from "@/lib/brain-events";
+import {
+  BRAIN_ENTRY_VIEW_EVENT,
+  requestBrainRefresh,
+  type BrainEntryViewDetail,
+} from "@/lib/brain-events";
+import { viewingBrainEntryFromLocation } from "@/lib/brain-deep-link";
+import type { BrainPrimitive } from "@/lib/api/brain-inbox";
 import { requestApprovalsRefresh } from "@/lib/approvals-events";
 import {
   SURFACE_CHAT_SEED_EVENT,
@@ -480,6 +486,7 @@ export function FloatingChat({
   const tRecorder = useT().recorder;
   const router = useRouter();
   const pathname = usePathname();
+  const searchParams = useSearchParams();
   const [expanded, setExpanded] = useState(false);
   const [input, setInput] = useState("");
 
@@ -1029,6 +1036,35 @@ export function FloatingChat({
   useEffect(() => {
     viewingSkillRowIdRef.current = skillRowIdFromPathname(pathname);
   }, [pathname]);
+
+  // Seed from the canonical Brain deep link, then let the detail drawer's
+  // live event override it for Review rows opened from local page state.
+  // Every turn carries that exact pair so "this entry" cannot be mistaken
+  // for a Doc title.
+  const viewingBrainEntryRef = useRef<{
+    primitive: BrainPrimitive;
+    rowId: string;
+  } | null>(null);
+  useEffect(() => {
+    viewingBrainEntryRef.current = viewingBrainEntryFromLocation(
+      pathname,
+      new URLSearchParams(searchParams.toString()),
+    );
+  }, [pathname, searchParams]);
+  useEffect(() => {
+    const onEntryView = (event: Event) => {
+      const detail = (event as CustomEvent<BrainEntryViewDetail>).detail;
+      if (detail.workspaceId !== workspaceId) return;
+      viewingBrainEntryRef.current = detail.entry
+        ? {
+            primitive: detail.entry.primitive as BrainPrimitive,
+            rowId: detail.entry.rowId,
+          }
+        : null;
+    };
+    window.addEventListener(BRAIN_ENTRY_VIEW_EVENT, onEntryView);
+    return () => window.removeEventListener(BRAIN_ENTRY_VIEW_EVENT, onEntryView);
+  }, [workspaceId]);
 
   // Per-turn buffers — keyed by toolUseId / URL so re-emits replace prior entry.
   const turnViewsRef = useRef<ViewAttachment[]>([]);
@@ -1610,6 +1646,9 @@ export function FloatingChat({
           ...(viewingSkillRowIdRef.current
             ? { viewingSkillRowId: viewingSkillRowIdRef.current }
             : {}),
+          ...(viewingBrainEntryRef.current
+            ? { viewingBrainEntry: viewingBrainEntryRef.current }
+            : {}),
           // The custom theme the user currently has applied (a per-user
           // localStorage value). Lets the server inject `refineActiveTheme` so
           // "make my theme warmer" works in chat. Only sent on a custom
@@ -1938,6 +1977,42 @@ export function FloatingChat({
                 status: "pending",
               };
               session.addConfirmation(conf);
+              break;
+            }
+            case "brain_entry_updated": {
+              const primitive =
+                typeof payload.primitive === "string"
+                  ? (payload.primitive as BrainPrimitive)
+                  : null;
+              const previousRowId =
+                typeof payload.previousRowId === "string"
+                  ? payload.previousRowId
+                  : null;
+              const liveRowId =
+                typeof payload.liveRowId === "string"
+                  ? payload.liveRowId
+                  : null;
+              requestBrainRefresh(workspaceId);
+              const open = viewingBrainEntryRef.current;
+              if (
+                primitive &&
+                previousRowId &&
+                liveRowId &&
+                open?.primitive === primitive &&
+                open.rowId === previousRowId
+              ) {
+                viewingBrainEntryRef.current = {
+                  primitive,
+                  rowId: liveRowId,
+                };
+                const params = new URLSearchParams(window.location.search);
+                params.set("row", liveRowId);
+                if (primitive === "task") params.delete("kind");
+                else params.set("kind", primitive);
+                router.replace(`${pathname}?${params.toString()}`, {
+                  scroll: false,
+                });
+              }
               break;
             }
             case "awaiting_approval": {

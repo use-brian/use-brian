@@ -3,6 +3,7 @@ import {
   brainRowUrl,
   parseBrainDeepLink,
   DEFAULT_LINKED_PRIMITIVE,
+  viewingBrainEntryFromLocation,
 } from "@/lib/brain-deep-link";
 
 describe("[COMP:app-web/brain-deep-link] Brain row deep links", () => {
@@ -40,6 +41,18 @@ describe("[COMP:app-web/brain-deep-link] Brain row deep links", () => {
       expect(
         parseBrainDeepLink(new URLSearchParams("view=graph&row=abc&kind=deal")),
       ).toEqual({ rowId: "abc", primitive: "deal" });
+    });
+  });
+
+  describe("viewingBrainEntryFromLocation", () => {
+    it("lends an entry to floating chat only on the canonical Brain surface", () => {
+      const params = new URLSearchParams("row=memory-1&kind=memory");
+      expect(
+        viewingBrainEntryFromLocation("/w/ws-1/brain", params),
+      ).toEqual({ rowId: "memory-1", primitive: "memory" });
+      expect(
+        viewingBrainEntryFromLocation("/w/ws-1/p/page-1", params),
+      ).toBeNull();
     });
   });
 

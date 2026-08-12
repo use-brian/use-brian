@@ -52,7 +52,7 @@ function ConfirmationLines({
   toolName: string;
   lines: string[];
 }) {
-  if (toolName !== "updateKnowledgeEntry") {
+  if (toolName !== "updateKnowledgeEntry" && toolName !== "updateBrainEntry") {
     return (
       <ul className="text-xs text-muted-foreground space-y-0.5">
         {lines.map((line, i) => (
@@ -129,7 +129,9 @@ export function ChatConfirmationCard({
    *  `declinedToolResult` so the assistant revises rather than re-asks. */
   onDeny: (toolCallId: string, comment?: string) => void;
 }) {
-  const t = useT().chat;
+  const dictionary = useT();
+  const t = dictionary.chat;
+  const brainEdit = dictionary.brainPage.detailDrawer;
   // "Deny with comment": the composer is revealed on demand so the default
   // card stays a two-button Approve/Deny. Submitting sends the trimmed note
   // (or a plain deny when left blank).
@@ -137,6 +139,18 @@ export function ChatConfirmationCard({
   const [comment, setComment] = useState("");
   const title = confirmation.displayName ?? confirmation.toolName;
   const isInFlight = confirmation.status === "approving";
+  const effectiveApproveLabel =
+    confirmation.toolName === "updateBrainEntry"
+      ? brainEdit.editThreadApply
+      : approveLabel;
+  const effectiveDenyLabel =
+    confirmation.toolName === "updateBrainEntry"
+      ? brainEdit.editThreadKeepEditing
+      : denyLabel;
+  const effectiveApprovingLabel =
+    confirmation.toolName === "updateBrainEntry"
+      ? brainEdit.editThreadApplying
+      : approvingLabel;
   const preview = parseToolPreview(confirmation.toolName, confirmation.input);
   const submitDenial = () => {
     if (isInFlight) return;
@@ -233,7 +247,7 @@ export function ChatConfirmationCard({
                 "transition-colors hover:bg-action/90 disabled:opacity-50 disabled:cursor-not-allowed",
               )}
             >
-              {isInFlight ? approvingLabel : approveLabel}
+              {isInFlight ? effectiveApprovingLabel : effectiveApproveLabel}
             </button>
             <button
               type="button"
@@ -244,7 +258,7 @@ export function ChatConfirmationCard({
                 "transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed",
               )}
             >
-              {denyLabel}
+              {effectiveDenyLabel}
             </button>
             <button
               type="button"

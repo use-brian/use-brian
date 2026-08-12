@@ -517,6 +517,7 @@ export async function injectDocTools(
     fallbackModel: options.fallbackModel,
     systemPrompt: buildDocEditAgentPrompt({ mode: options.editMode ?? 'page' }),
     tools: new Map(childTools.map((tool) => [tool.name, tool])),
+    targetPageId: options.pageId ?? null,
     loadPageContext,
     onUsage: options.onEditUsage,
     onToolResult: options.onChildToolResult,

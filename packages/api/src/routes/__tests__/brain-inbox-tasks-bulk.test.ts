@@ -28,7 +28,10 @@ vi.mock('../../db/brain-inbox-store.js', () => ({
   pruneDanglingEntityLinks: vi.fn(),
   primitiveToTable: vi.fn((p: string) => (p === 'task' ? 'tasks' : p)),
 }))
-vi.mock('../../db/sessions.js', () => ({ createInspectionSession: vi.fn() }))
+vi.mock('../../db/sessions.js', () => ({
+  createInspectionSession: vi.fn(),
+  createBrainEditSession: vi.fn(),
+}))
 vi.mock('../../db/memories.js', () => ({
   updateMemory: vi.fn(),
   getMemoryByIdSystem: vi.fn(),

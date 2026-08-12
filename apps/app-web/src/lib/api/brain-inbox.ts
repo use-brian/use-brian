@@ -20,6 +20,7 @@
  *   DELETE /api/brain-inbox/:workspaceId/:primitive/:rowId
  *   GET    /api/brain-inbox/:workspaceId/:primitive/:rowId/explain
  *   POST   /api/brain-inbox/:workspaceId/:primitive/:rowId/inspection-session
+ *   POST   /api/brain-inbox/:workspaceId/:primitive/:rowId/edit-session
  */
 
 import { authFetch } from "@/lib/auth-fetch";
@@ -577,6 +578,33 @@ export async function createInspectionSession(
   if (res.ok) return (await res.json()) as InspectionSession;
   const data = (await res.json().catch(() => ({}))) as { error?: string };
   return { error: data.error ?? `Inspection session failed (${res.status})` };
+}
+
+export type BrainEditSession = {
+  sessionId: string;
+  assistantId: string;
+  assistantName: string;
+  entryContext: {
+    primitive: BrainPrimitive;
+    rowId: string;
+    updatedAt: string;
+    editableFields: string[];
+  };
+};
+
+/** Create a temporary server-bound session for Edit with assistant. */
+export async function createBrainEditSession(
+  workspaceId: string,
+  primitive: BrainPrimitive,
+  rowId: string,
+): Promise<BrainEditSession | { error: string }> {
+  const res = await authFetch(
+    `${API_URL}/api/brain-inbox/${encodeURIComponent(workspaceId)}/${primitive}/${encodeURIComponent(rowId)}/edit-session`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
+  );
+  if (res.ok) return (await res.json()) as BrainEditSession;
+  const data = (await res.json().catch(() => ({}))) as { error?: string };
+  return { error: data.error ?? `Edit session failed (${res.status})` };
 }
 
 // ── Back-compat re-exports for memories-review SDK consumers ────────

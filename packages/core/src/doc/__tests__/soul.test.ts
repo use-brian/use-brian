@@ -16,6 +16,8 @@ describe('[COMP:doc/soul] doc skill block', () => {
     const editor = buildDocEditAgentPrompt({ mode: 'page', teamName: 'Acme' })
 
     expect(supervisor).toContain('delegateDocEdit')
+    expect(supervisor).toContain('`intent: "edit"`')
+    expect(supervisor).toContain('An edit never creates a replacement page')
     expect(supervisor).toMatch(/exactly once/i)
     expect(supervisor).not.toContain('renderPage')
     expect(supervisor).not.toContain('patchPage')
@@ -159,6 +161,8 @@ describe('[COMP:doc/soul] ambient doc skill block', () => {
   it('names only the delegation gateway so the capability is discoverable', () => {
     const out = buildAmbientDocSkillBlock()
     expect(out).toContain('delegateDocEdit')
+    expect(out).toContain('Choose `create` only when the user explicitly requested a new page')
+    expect(out).toContain('if no page is open, ask the user to open the target')
     expect(out).not.toContain('renderPage')
     expect(out).not.toContain('patchPage')
     expect(out).not.toContain('createSubPage')
