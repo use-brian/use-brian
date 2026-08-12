@@ -15,12 +15,12 @@ From the OSS repository root:
 ```bash
 cd scripts/e2b-template
 e2b template create use-brian-computer \
-  --cpu-count 4 --memory-mb 4096 \
-  -c 'HOME=/home/user AGENT_BROWSER_SESSION_NAME=main agent-browser open about:blank' \
-  --ready-cmd 'HOME=/home/user AGENT_BROWSER_SESSION_NAME=main agent-browser get url'
+  --cpu-count 4 --memory-mb 4096
 ```
 
-The command prints the template ID. Configure:
+Do not add a start command or ready command. Chromium starts on the first real
+browser operation so compute-only sandboxes do not allocate it. The command
+prints the template ID. Configure:
 
 ```dotenv
 E2B_API_KEY=your-api-key
@@ -41,11 +41,12 @@ credential.
 
 After any image or agent-browser update, create a sandbox and verify:
 
-1. `HOME=/home/user AGENT_BROWSER_SESSION_NAME=main agent-browser get url`
-   returns `about:blank` without a cold Chromium launch.
-2. `unshare -rn python3 -I` cannot reach the network.
-3. Plain Python imports `pandas`, `numpy`, and `browser_use`.
-4. `agent-browser snapshot -i`, click, type, screenshot, state save, and state
+1. A newly created sandbox has no Chromium process.
+2. `HOME=/home/user AGENT_BROWSER_SESSION_NAME=main agent-browser open about:blank`
+   starts Chromium; a following `agent-browser get url` returns `about:blank`.
+3. `unshare -rn python3 -I` cannot reach the network.
+4. Plain Python imports `pandas`, `numpy`, and `browser_use`.
+5. `agent-browser snapshot -i`, click, type, screenshot, state save, and state
    restore match `packages/core/src/sandbox/providers/e2b/agent-browser-cli.ts`.
 
 ## Smoke Test
