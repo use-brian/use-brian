@@ -493,29 +493,19 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     }
   }
 
-  function renderSnapshot(
-    snapshot: BrowserSnapshot,
-    window: { offset?: number; limit?: number } = {},
-  ): string {
-    const offset = window.offset ?? 0
-    const limit = window.limit ?? SNAPSHOT_MAX_LINES
-    const end = Math.min(offset + limit, snapshot.nodes.length)
+  function renderSnapshot(snapshot: BrowserSnapshot): string {
     const lines = snapshot.nodes
-      .slice(offset, end)
+      .slice(0, SNAPSHOT_MAX_LINES)
       .map((n) => {
         const value = n.value ? ` value=${JSON.stringify(n.value)}` : ''
         const disabled = n.disabled ? ' (disabled)' : ''
         return `${n.ref} ${n.role} ${JSON.stringify(n.name)}${value}${disabled}`
       })
-    const range =
-      snapshot.nodes.length > limit || offset > 0
-        ? `\nShowing interactive nodes ${lines.length > 0 ? `${offset + 1}-${end}` : 'none'} of ${snapshot.nodes.length}.`
+    const truncated =
+      snapshot.nodes.length > SNAPSHOT_MAX_LINES
+        ? `\n… ${snapshot.nodes.length - SNAPSHOT_MAX_LINES} more interactive nodes (act on what you see, or navigate closer)`
         : ''
-    const more =
-      end < snapshot.nodes.length
-        ? `\n… ${snapshot.nodes.length - end} more interactive nodes (call browserSnapshot with offset ${end})`
-        : ''
-    return `Page: ${snapshot.title || '(untitled)'}\nURL: ${snapshot.url}\n${lines.join('\n')}${range}${more}`
+    return `Page: ${snapshot.title || '(untitled)'}\nURL: ${snapshot.url}\n${lines.join('\n')}${truncated}`
   }
 
   /**
@@ -939,11 +929,8 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     name: 'browserSnapshot',
     requiresCapability: 'computer',
     description:
-      'Re-list the interactive elements of the current browser page as refs (@e1 button "Send"). Returns the first 150 by default; when more exist, call again with the reported offset to read later ranges. browserNavigate and browserClick already return a fresh first-page snapshot — use this when the page changed on its own or you need another range. Refs are valid until the next navigation or snapshot — act on the latest snapshot only.',
-    inputSchema: z.object({
-      offset: z.number().int().min(0).default(0).describe('Zero-based interactive-node offset; use the next offset reported by the previous snapshot'),
-      limit: z.number().int().min(1).max(SNAPSHOT_MAX_LINES).default(SNAPSHOT_MAX_LINES).describe('Maximum nodes to return (1-150)'),
-    }),
+      'Re-list the interactive elements of the current browser page as refs (@e1 button "Send"). browserNavigate and browserClick already return a fresh snapshot — use this only when the page changed on its own (slow load, redirect, dynamic content). Refs are valid until the next navigation or snapshot — act on the latest snapshot only.',
+    inputSchema: z.object({}),
     isReadOnly: true,
     isConcurrencySafe: false,
     requiresConfirmation: false,
@@ -954,7 +941,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     resolveConfirmation: policyAsk('browserSnapshot'),
     timeoutMs: 45_000,
     maxResultSizeChars: 24_000,
-    async execute(input, context) {
+    async execute(_input, context) {
       const gate = await gates('browserSnapshot', context)
       if ('error' in gate) return gate.error
       const backend = gate.state.backend
@@ -963,8 +950,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
       try {
         const snapshot = await providerFor(backend).snapshot(callCtx(context, gate.state))
         gate.state.refLabels = new Map(snapshot.nodes.map((n) => [n.ref, n.name]))
-        const data = renderSnapshot(snapshot, input) + pageAdvice(context, gate.state, snapshot)
-        const end = Math.min(input.offset + input.limit, snapshot.nodes.length)
+        const data = renderSnapshot(snapshot) + pageAdvice(context, gate.state, snapshot)
         emit(
           {
             type: 'browser_action',
@@ -976,16 +962,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
           },
           context,
         )
-        return {
-          data,
-          meta: {
-            backend,
-            nodes: snapshot.nodes.length,
-            offset: input.offset,
-            shown: Math.max(0, end - input.offset),
-            ...(end < snapshot.nodes.length ? { nextOffset: end } : {}),
-          },
-        }
+        return { data, meta: { backend, nodes: snapshot.nodes.length } }
       } catch (err) {
         emit(
           {
