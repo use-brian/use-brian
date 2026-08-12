@@ -26,7 +26,10 @@ describe('[COMP:api/integrations-api-keys] API key management', () => {
     })
     const res = await request(app('u-1')).post('/api/assistants/a-1/integrations/api-keys').send({ name: 'CI' })
     expect(res.body.key).toBe('sk_live_secret')
-    expect(store.create).toHaveBeenCalledWith({ assistantId: 'a-1', name: 'CI', actingUserId: 'u-1', scope: 'chat' })
+    expect(store.create).toHaveBeenCalledWith({
+      assistantId: 'a-1', name: 'CI', actingUserId: 'u-1', scope: 'chat',
+      audience: 'external', anonymousContext: 'thin',
+    })
   })
 
   it('lists and revokes keys', async () => {
@@ -41,5 +44,17 @@ describe('[COMP:api/integrations-api-keys] API key management', () => {
   it('maps authorization failures to 403', async () => {
     store.create.mockRejectedValueOnce(new Error('Not authorized to modify this assistant'))
     expect((await request(app('u-1')).post('/api/assistants/a-1/integrations/api-keys').send({ name: 'Nope' })).status).toBe(403)
+  })
+
+  it('preserves audience and anonymous-context behavior', async () => {
+    store.create.mockResolvedValueOnce({
+      id: 'key-2', name: 'Embed', plaintext: 'sk_live_full', prefix: 'sk_live_fu', scope: 'chat',
+      audience: 'external', anonymousContext: 'full', status: 'active', createdAt: new Date(), lastUsedAt: null,
+    })
+    const full = await request(app('u-1')).post('/api/assistants/a-1/integrations/api-keys')
+      .send({ name: 'Embed', anonymousContext: 'full' })
+    expect(full.body).toMatchObject({ audience: 'external', anonymousContext: 'full' })
+    expect((await request(app('u-1')).post('/api/assistants/a-1/integrations/api-keys')
+      .send({ name: 'Bad', audience: 'internal', anonymousContext: 'full' })).status).toBe(400)
   })
 })

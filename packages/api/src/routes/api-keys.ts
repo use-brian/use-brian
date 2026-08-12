@@ -9,6 +9,8 @@ import type { ApiKeyStore } from '../db/api-key-store.js'
 const createSchema = z.object({
   name: z.string().min(1).max(120),
   scope: z.enum(['chat', 'agent']).default('chat'),
+  audience: z.enum(['external', 'internal']).default('external'),
+  anonymousContext: z.enum(['thin', 'full']).default('thin'),
 }).strict()
 
 export function apiKeyRoutes(store: ApiKeyStore): Router {
@@ -19,12 +21,21 @@ export function apiKeyRoutes(store: ApiKeyStore): Router {
     if (!userId) { res.status(401).json({ error: 'Missing or invalid Authorization header' }); return }
     const parsed = createSchema.safeParse(req.body)
     if (!parsed.success) { res.status(400).json({ error: 'Invalid input', detail: parsed.error.message }); return }
+    if (parsed.data.audience === 'internal' && parsed.data.anonymousContext === 'full') {
+      res.status(400).json({
+        error: 'Invalid input',
+        detail: 'anonymousContext "full" applies to external-audience keys only',
+      })
+      return
+    }
     try {
       const created = await store.create({
         assistantId: req.params.assistantId,
         name: parsed.data.name,
         actingUserId: userId,
         scope: parsed.data.scope,
+        audience: parsed.data.audience,
+        anonymousContext: parsed.data.anonymousContext,
       })
       res.json({
         id: created.id,
@@ -32,6 +43,8 @@ export function apiKeyRoutes(store: ApiKeyStore): Router {
         key: created.plaintext,
         prefix: created.prefix,
         scope: created.scope,
+        audience: created.audience,
+        anonymousContext: created.anonymousContext,
         status: created.status,
         createdAt: created.createdAt,
         lastUsedAt: created.lastUsedAt,
