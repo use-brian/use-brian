@@ -285,7 +285,7 @@ import { chatArchiveMediaRoutes } from './chat-archive/media-routes.js'
 import { createChatArchiveMediaService, type ChatArchiveMediaService } from './chat-archive/media-service.js'
 import { createChatArchiveMediaWorker, type ChatArchiveMediaWorker } from './chat-archive/media-worker.js'
 import { createWorkspaceToolPolicyStore } from './db/workspace-tool-policy-store.js'
-import { buildOpenSyncCredentials } from './build-sync-credentials.js'
+import { createSyncCredentialProvider } from './knowledge/sync-credentials.js'
 import { createDbAssistantConnectorStore } from './db/assistant-connector-store.js'
 import { createDbAssistantConnectorGrantsStore } from './db/assistant-connector-grants-store.js'
 import { createDbSkillStore, createDbWorkspaceSkillStore, type WorkspaceSkill } from './db/skill-store.js'
@@ -532,6 +532,7 @@ import {
 } from './db/channel-integrations.js'
 import { createDbApiKeyStore } from './db/api-key-store.js'
 import { publicApiRoutes } from './routes/public-api.js'
+import { apiKeyRoutes } from './routes/api-keys.js'
 import { generateSynthesisRoutes, type GenerateSynthesisBilling } from './routes/generate-synthesis.js'
 import { assistantMcpRoutes } from './routes/assistant-mcp.js'
 import { createControlPlaneReader } from './agent-surface/control-plane-reader.js'
@@ -869,20 +870,6 @@ export interface OpenApiPorts {
   pendingClassificationStore?: PendingClassificationStore
   /** Google-Drive knowledge-file store; absent → gdrive files unavailable to chat/workflow. */
   gdriveFilesStore?: GDriveFilesStore
-  /**
-   * Builds the closed GitHub-PAT resolver for the knowledge sync worker over
-   * boot's connector stores (the same stores the knowledge route resolves edit
-   * proposals through). Open default: unset → the worker ticks but every GitHub
-   * source fails resolution with a clear "not configured" error rather than
-   * syncing.
-   */
-  buildSyncCredentials?: (deps: {
-    connectorInstanceStore: ReturnType<typeof createConnectorInstanceStore>
-    connectorGrantStore: Awaited<
-      ReturnType<typeof import('./db/connector-grant-store.js').createConnectorGrantStore>
-    >
-  }) => SyncCredentials
-
   // ── Closed first-party tool factories — open default: omitted ──
   /** Capability-gated triage/sentiment/analytics-query tools (platform-only). */
   buildClosedTools?: () => Tool[]
@@ -1773,16 +1760,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const modelDefaultsStore = createWorkspaceModelDefaultsStore()
 
   // ── KB sync-credential resolver ──
-  // Resolves the GitHub PAT a synced knowledge source operates through, by
-  // `(workspaceId, connectorInstanceId)`. The platform passes a closed factory
-  // via `ports.buildSyncCredentials`; the open build falls back to a resolver
-  // over the same connector stores (available in OSS since migration
-  // 280_oss_connectors). Both the edit-proposal routes and the sync worker use
-  // this single instance. See build-sync-credentials.ts.
-  const syncCredentials: SyncCredentials = ports.buildSyncCredentials?.({
+  // One open resolver serves the sync worker, knowledge routes, Home apps, and
+  // repo writer in both editions. Hosted supplies no override or duplicate.
+  const syncCredentials: SyncCredentials = createSyncCredentialProvider(
     connectorInstanceStore,
     connectorGrantStore,
-  }) ?? buildOpenSyncCredentials({ connectorInstanceStore, connectorGrantStore })
+  )
 
   const workspaceDirectoryStore: WorkspaceDirectoryStore = {
     async listMembers(userId, workspaceId) {
@@ -3975,6 +3958,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     capabilityStore,
     agentTools: { reads: agentToolset.reads, writes: agentToolset.writes },
   }))
+
+  app.use(
+    '/api/assistants/:assistantId/integrations/api-keys',
+    requireAuth(env.JWT_SECRET),
+    apiKeyRoutes(apiKeyStore),
+  )
 
   // ── Shopify store access, shared by BOTH surfaces that have it ──────────
   //
