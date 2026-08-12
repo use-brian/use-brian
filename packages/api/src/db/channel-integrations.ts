@@ -42,6 +42,18 @@ export type WhatsAppCredentials = {
   phone_number: string  // for display only; actual auth state lives in GCS
 }
 
+/** Official Meta WhatsApp Cloud API credentials, encrypted per channel. */
+export type WhatsAppCloudCredentials = {
+  provider: 'cloud_api'
+  access_token: string
+  app_secret: string
+  verify_token: string
+  phone_number_id: string
+  waba_id: string
+  display_phone_number: string
+  graph_api_version: string
+}
+
 /**
  * Discord BYO credentials. The bot token is the only secret — sending is
  * Discord REST (Authorization: Bot <token>) and receiving is the Gateway
@@ -142,6 +154,7 @@ export type ChannelCredentials =
   | SlackCredentials
   | TelegramCredentials
   | WhatsAppCredentials
+  | WhatsAppCloudCredentials
   | DiscordCredentials
   | MsTeamsCredentials
   | ThreadsCredentials

@@ -98,7 +98,12 @@ export async function deliverToChannel(params: DeliveryParams): Promise<void> {
         })
         await adapter.sendMessage(channelId, { text, format: 'markdown' })
       }
-    } else if (channelType === 'whatsapp' && params.waConnectorUrl && params.waConnectorSecret) {
+    } else if (
+      channelType === 'whatsapp'
+      && channelId.includes('@')
+      && params.waConnectorUrl
+      && params.waConnectorSecret
+    ) {
       const adapter = createWhatsAppAdapter({
         connectorUrl: params.waConnectorUrl,
         connectorSecret: params.waConnectorSecret,

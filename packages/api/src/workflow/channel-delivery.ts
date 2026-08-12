@@ -178,16 +178,19 @@ export function createWorkflowChannelDelivery(
       // channelId may be a placeholder ('notifications') when the workflow
       // wasn't authored from a WhatsApp chat — resolve a real JID.
       let waChannelId = channelId
-      if (!waChannelId.includes('@')) {
+      if (waChannelId === 'notifications') {
         const waSession = await query<{ channel_id: string }>(
           `SELECT channel_id FROM sessions
            WHERE assistant_id = $1 AND user_id = $2 AND channel_type = 'whatsapp'
-             AND channel_id != 'notifications'
+              AND channel_id LIKE '%@%'
            ORDER BY last_active_at DESC LIMIT 1`,
           [assistantId, userId],
         )
         if (!waSession.rows[0]) return { status: 'skipped', channelType, reason: 'no_recipient' }
         waChannelId = waSession.rows[0].channel_id
+      }
+      if (!waChannelId.includes('@')) {
+        return { status: 'skipped', channelType, reason: 'no_integration' }
       }
       await createWhatsAppAdapter({
         connectorUrl: options.waConnectorUrl,

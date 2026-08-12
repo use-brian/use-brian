@@ -321,6 +321,7 @@ import { chatLinkRoutes } from './routes/chat-links.js'
 import { createChatLinkStore } from './db/chat-link-store.js'
 import { channelsRoutes } from './routes/channels.js'
 import { whatsappByonRoutes } from './routes/whatsapp-byon.js'
+import { whatsappCloudRoutes } from './routes/whatsapp-cloud.js'
 import { whatsappIngestAdminRoutes } from './routes/whatsapp-byon-admin.js'
 import { telegramByoRoutes } from './routes/telegram-byo.js'
 import { slackRoutes } from './routes/slack.js'
@@ -7175,6 +7176,16 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         slackWebhookIngestor: channelHosts.slackWebhookIngestor, connectorActionStore, episodesStore,
         buildConnectorActionAudit: ports.buildConnectorActionAudit,
         fileStore,
+      }))
+      app.use('/webhook/whatsapp', whatsappCloudRoutes({
+        backgroundModel,
+        provider, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
+        memoryStore, usageStore, checkCreditBudget: ports.checkCreditBudget,
+        integrationStore, channelUserStore,
+        workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
+        connectorInstanceStore, knowledgeStore, gdriveFilesStore, workspaceFilesStore,
+        filesApi: filesApi ?? undefined, analytics, skillStore,
+        episodicStore, sessionStateStore, artifactPromoter, fileStore,
       }))
       // Microsoft Teams — public Bot Framework messaging endpoint, per-channel
       // JWT-verified. No connector app (webhook transport). See

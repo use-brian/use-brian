@@ -25,6 +25,9 @@ import {
   validateTelegramCredentials,
   validateDiscordCredentials,
   validateMsTeamsCredentials,
+  validateWhatsAppCloudCredentials,
+  subscribeWhatsAppCloudApp,
+  DEFAULT_WHATSAPP_GRAPH_API_VERSION,
   createTelegramApi,
   TELEGRAM_BOT_COMMANDS,
   createSlackApi,
@@ -181,6 +184,17 @@ const connectMsTeamsSchema = z.object({
   displayName: z.string().min(1).max(200).optional(),
 }).strict()
 
+const connectWhatsAppCloudSchema = z.object({
+  accessToken: z.string().min(1),
+  appSecret: z.string().min(8),
+  verifyToken: z.string().min(8).max(256).optional(),
+  phoneNumberId: z.string().regex(/^\d+$/),
+  wabaId: z.string().regex(/^\d+$/),
+  graphApiVersion: z.string().regex(/^v\d+\.\d+$/).default(DEFAULT_WHATSAPP_GRAPH_API_VERSION),
+  defaultAssistantId: z.string().uuid().nullish(),
+  displayName: z.string().min(1).max(200).optional(),
+}).strict()
+
 const wechatPairStartSchema = z.object({
   defaultAssistantId: z.string().uuid().nullish(),
 }).strict()
@@ -204,6 +218,9 @@ const TELEGRAM_DESTINATION_ID_PATTERN = /^(-?\d+)(?::topic:([1-9]\d*))?$/
 const DESTINATION_ID_SHAPE: Record<string, RegExp> = {
   telegram: TELEGRAM_DESTINATION_ID_PATTERN,
   slack: /^[CDG][A-Z0-9]+$/,
+  // Only linked-number JIDs support proactive delivery today. Official Cloud
+  // API phone numbers are omitted until approved template sends exist.
+  whatsapp: /@/,
 }
 
 function parseTelegramDestinationId(channelId: string): {
@@ -249,6 +266,13 @@ function serializeChannel(
     integrationLabel: integration?.botUsername
       ? `@${integration.botUsername}`
       : integration?.teamName ?? null,
+    // Non-secret transport discriminator. Existing WhatsApp linked-number
+    // rows have no provider marker; official Meta rows are `cloud_api`.
+    integrationProvider: integration?.channelType === 'whatsapp'
+      && integration.botUserId
+      && integration.teamId
+      ? 'cloud_api'
+      : null,
     config: integration?.config ?? null,
   }
 }
@@ -1121,6 +1145,128 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
     })
   })
 
+  // POST /workspaces/:workspaceId/channels/whatsapp-cloud — official Meta
+  // Cloud API transport. The operator registers the returned callback URL and
+  // verify token in Meta's WhatsApp webhook settings.
+  router.post('/workspaces/:workspaceId/channels/whatsapp-cloud', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const { workspaceId } = req.params
+    const role = await opts.workspaceStore.getRole(userId, workspaceId)
+    if (!role) { res.status(403).json({ error: 'Not a member of this workspace' }); return }
+    if (!opts.integrationStore) {
+      res.status(503).json({ error: 'Channel integrations are not configured on this server' })
+      return
+    }
+
+    const parsed = connectWhatsAppCloudSchema.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Invalid input', detail: parsed.error.message })
+      return
+    }
+
+    const graphOptions = {
+      accessToken: parsed.data.accessToken,
+      phoneNumberId: parsed.data.phoneNumberId,
+      graphApiVersion: parsed.data.graphApiVersion,
+    }
+    let info
+    try {
+      info = await validateWhatsAppCloudCredentials(graphOptions)
+    } catch (err) {
+      res.status(400).json({ error: 'Meta rejected the WhatsApp credentials', detail: (err as Error).message })
+      return
+    }
+
+    try {
+      await subscribeWhatsAppCloudApp(graphOptions, parsed.data.wabaId)
+    } catch (err) {
+      res.status(400).json({
+        error: 'Meta could not subscribe the app to this WhatsApp Business Account',
+        detail: (err as Error).message,
+      })
+      return
+    }
+
+    let provisioned
+    try {
+      provisioned = await findOrCreateChannelForWorkspaceConnect({
+        workspaceId,
+        channelType: 'whatsapp',
+        displayName: parsed.data.displayName ?? `${info.verifiedName} (${info.displayPhoneNumber})`,
+        // phone_number_id is globally stable and distinguishes Cloud API rows
+        // from linked-number rows, whose botUserId is null.
+        externalIdentity: { botUserId: info.id },
+        defaultAssistantId: parsed.data.defaultAssistantId ?? null,
+        // Free-form Cloud API messages are valid only inside Meta's 24-hour
+        // customer-service window. Do not advertise proactive broadcast until
+        // template-message delivery is implemented.
+        enabledCapabilities: ['chat'],
+      })
+    } catch (err) {
+      const msg = (err as Error).message
+      console.error('[channels] WhatsApp Cloud channel provisioning failed:', err)
+      if (msg.toLowerCase().includes('workspace')) {
+        res.status(400).json({ error: 'defaultAssistantId must belong to this workspace' })
+        return
+      }
+      res.status(500).json({ error: 'Failed to provision channel' })
+      return
+    }
+
+    const verifyToken = parsed.data.verifyToken ?? randomBytes(32).toString('hex')
+    try {
+      const integration = await opts.integrationStore.upsert({
+        channelId: provisioned.channelId,
+        channelType: 'whatsapp',
+        teamId: parsed.data.wabaId,
+        teamName: info.verifiedName,
+        botUserId: info.id,
+        botUsername: null,
+        credentials: {
+          provider: 'cloud_api',
+          access_token: parsed.data.accessToken,
+          app_secret: parsed.data.appSecret,
+          verify_token: verifyToken,
+          phone_number_id: info.id,
+          waba_id: parsed.data.wabaId,
+          display_phone_number: info.displayPhoneNumber,
+          graph_api_version: parsed.data.graphApiVersion,
+        },
+        actingUserId: userId,
+      })
+      if (!provisioned.reused) {
+        // A public business number is fail-closed. Operators explicitly add
+        // phone numbers (E.164 digits) before those callers can reach Brian.
+        await opts.integrationStore.updateConfig({
+          actingUserId: userId,
+          id: integration.id,
+          config: { userAccessMode: 'allowlist', allowedUserIds: [] },
+        })
+      }
+    } catch (err) {
+      console.error('[channels] WhatsApp Cloud integration upsert failed:', err)
+      res.status(500).json({ error: 'Failed to save integration' })
+      return
+    }
+
+    const channel = await getChannelForUser(userId, provisioned.channelId)
+    if (!channel) {
+      res.status(500).json({ error: 'Channel created but no longer visible' })
+      return
+    }
+    const integrations = await loadIntegrations(userId, workspaceId)
+    const webhookPath = `/webhook/whatsapp/${provisioned.channelId}`
+    res.status(provisioned.reused ? 200 : 201).json({
+      channel: serializeChannel(channel, integrations.get(provisioned.channelId)),
+      reused: provisioned.reused,
+      displayPhoneNumber: info.displayPhoneNumber,
+      webhookPath,
+      webhookUrl: opts.apiUrl ? `${opts.apiUrl}${webhookPath}` : null,
+      verifyToken,
+    })
+  })
+
   // ── WeChat — BYON iLink bot, QR pairing ─────────────────────────
   //
   // Unlike the token-paste platforms, WeChat binds a bot identity by QR scan:
@@ -1367,13 +1513,19 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
     const channel = await loadChannel(userId, workspaceId, channelId, res)
     if (!channel) return
 
-    if (channel.channelType === 'whatsapp' && opts.whatsappConnector) {
+    const integrations = await loadIntegrations(userId, workspaceId)
+    const channelIntegration = integrations.get(channelId)
+    const isWhatsAppCloud = channel.channelType === 'whatsapp' && channelIntegration
+      ? ((await opts.integrationStore?.getForUserWithCredentials(userId, channelIntegration.id))?.credentials as { provider?: string } | undefined)?.provider === 'cloud_api'
+      : false
+
+    if (channel.channelType === 'whatsapp' && !isWhatsAppCloud && opts.whatsappConnector) {
       await opts.whatsappConnector.disconnect(channelId).catch((err) => {
         console.error('[channels] whatsapp connector disconnect failed:', err)
       })
     }
 
-    if (channel.channelType === 'whatsapp') {
+    if (channel.channelType === 'whatsapp' && !isWhatsAppCloud) {
       await query('DELETE FROM wa_auth_state WHERE channel_id = $1', [channelId])
     }
 

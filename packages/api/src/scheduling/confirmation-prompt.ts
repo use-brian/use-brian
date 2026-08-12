@@ -132,11 +132,11 @@ export async function sendConfirmationPrompt(
       }
     } else if (target.channelType === 'whatsapp' && deps.waConnectorUrl && deps.waConnectorSecret) {
       let waChannelId = target.channelId
-      if (!waChannelId.includes('@')) {
+      if (waChannelId === 'notifications') {
         const waSession = await query<{ channel_id: string }>(
           `SELECT channel_id FROM sessions
            WHERE assistant_id = $1 AND channel_type = 'whatsapp'
-             AND channel_id != 'notifications'
+              AND channel_id LIKE '%@%'
            ORDER BY last_active_at DESC LIMIT 1`,
           [target.assistantId],
         )

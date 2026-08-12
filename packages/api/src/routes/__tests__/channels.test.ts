@@ -30,6 +30,9 @@ vi.mock('@use-brian/channels', () => ({
   validateTelegramCredentials: vi.fn(),
   validateDiscordCredentials: vi.fn(),
   validateMsTeamsCredentials: vi.fn(),
+  validateWhatsAppCloudCredentials: vi.fn(),
+  subscribeWhatsAppCloudApp: vi.fn(),
+  DEFAULT_WHATSAPP_GRAPH_API_VERSION: 'v26.0',
   TELEGRAM_BOT_COMMANDS: [{ command: 'ask', description: 'Ask Brian anything' }],
   createTelegramApi: vi.fn(),
   createSlackApi: vi.fn(),
@@ -62,6 +65,8 @@ import {
   validateTelegramCredentials,
   validateDiscordCredentials,
   validateMsTeamsCredentials,
+  validateWhatsAppCloudCredentials,
+  subscribeWhatsAppCloudApp,
   createTelegramApi,
   createSlackApi,
 } from '@use-brian/channels'
@@ -427,6 +432,51 @@ describe('[COMP:api/channels-route] workspace-driven connect', () => {
       .send({ appId: 'app-1', appPassword: 'bad', tenantId: 'tid-1' })
     expect(res.status).toBe(400)
     expect(res.body.detail).toContain('AADSTS7000215')
+  })
+
+  it('POST /whatsapp-cloud provisions official Meta credentials and callback', async () => {
+    vi.mocked(validateWhatsAppCloudCredentials).mockResolvedValue({
+      id: '123456789', displayPhoneNumber: '+1 555 123 4567', verifiedName: 'Acme Support',
+    })
+    vi.mocked(subscribeWhatsAppCloudApp).mockResolvedValue(undefined)
+    vi.mocked(findOrCreateChannelForWorkspaceConnect).mockResolvedValue({ channelId: 'chan-wa', reused: false })
+    vi.mocked(getChannelForUser).mockResolvedValue(
+      makeChannel({ id: 'chan-wa', channelType: 'whatsapp', displayName: 'Acme Support' }),
+    )
+    const integration = makeIntegration({ id: 'int-wa', channelId: 'chan-wa', channelType: 'whatsapp', botUserId: '123456789' })
+    const upsert = vi.fn().mockResolvedValue(integration)
+    const updateConfig = vi.fn().mockResolvedValue({ ...integration, config: { userAccessMode: 'allowlist', allowedUserIds: [] } })
+    const integrationStore = {
+      upsert,
+      updateConfig,
+      listForWorkspace: vi.fn().mockResolvedValue([
+        integration,
+      ]),
+    } as unknown as ChannelIntegrationStore
+    const res = await request(buildApp({ integrationStore, apiUrl: 'https://api.example.com' }))
+      .post('/api/workspaces/ws-1/channels/whatsapp-cloud')
+      .send({
+        accessToken: 'permanent-token', appSecret: 'app-secret-value', verifyToken: 'verify-me-123',
+        phoneNumberId: '123456789', wabaId: '987654321',
+      })
+    expect(res.status).toBe(201)
+    expect(res.body.webhookUrl).toBe('https://api.example.com/webhook/whatsapp/chan-wa')
+    expect(res.body.verifyToken).toBe('verify-me-123')
+    expect(subscribeWhatsAppCloudApp).toHaveBeenCalledWith(
+      expect.objectContaining({ phoneNumberId: '123456789' }),
+      '987654321',
+    )
+    expect(upsert).toHaveBeenCalledWith(expect.objectContaining({
+      channelType: 'whatsapp',
+      botUserId: '123456789',
+      credentials: expect.objectContaining({
+        provider: 'cloud_api', phone_number_id: '123456789', waba_id: '987654321',
+      }),
+    }))
+    expect(updateConfig).toHaveBeenCalledWith({
+      actingUserId: 'user-1', id: 'int-wa',
+      config: { userAccessMode: 'allowlist', allowedUserIds: [] },
+    })
   })
 
   it('POST /slack 400s when Slack rejects the credentials', async () => {
