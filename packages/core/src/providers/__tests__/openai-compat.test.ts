@@ -311,4 +311,35 @@ describe('[COMP:providers/openai-compat] non-image inline documents', () => {
     )
     expect(note).toBeTruthy()
   })
+
+  it('degrades historical images for a text-only porter instead of wedging later turns', async () => {
+    // Production regression, 2026-08-12: a custom porter verified text and
+    // function calls, then rejected a later text turn because replayed history
+    // still contained an older screenshot at messages.70.content.0.
+    fetchMock.mockResolvedValueOnce(sseResponse([
+      { choices: [{ delta: { content: 'ok' }, finish_reason: 'stop' }] },
+      '[DONE]',
+    ]))
+    const textOnly = createOpenAICompatProvider({
+      baseURL: 'https://porter.example/v1',
+      label: 'workspace-test',
+      supportsVision: false,
+    })
+
+    await collect(textOnly.stream({
+      model: 'text-and-tools',
+      systemPrompt: '',
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image', mimeType: 'image/png', data: 'iVBORw0KGgo=' },
+          { type: 'text', text: 'Continue with the next task.' },
+        ],
+      }],
+    }))
+
+    const body = lastRequestBody()
+    expect(JSON.stringify(body.messages)).not.toContain('image_url')
+    expect(JSON.stringify(body.messages)).toContain('text-only model cannot inspect it')
+  })
 })

@@ -18,6 +18,14 @@ function toolSse(): Response {
   return new Response(events.map((event) => `data: ${typeof event === 'string' ? event : JSON.stringify(event)}\n\n`).join(''))
 }
 
+function textSse(): Response {
+  const events = [
+    { choices: [{ delta: { content: 'ok' }, finish_reason: 'stop' }] },
+    '[DONE]',
+  ]
+  return new Response(events.map((event) => `data: ${typeof event === 'string' ? event : JSON.stringify(event)}\n\n`).join(''))
+}
+
 describe('[COMP:api/custom-llm-endpoints] custom endpoint runtime', () => {
   it('normalizes an API base URL and rejects a full chat-completions URL', () => {
     expect(normalizeCustomLlmBaseUrl('http://127.0.0.1:11434/v1/')).toBe('http://127.0.0.1:11434/v1')
@@ -61,7 +69,7 @@ describe('[COMP:api/custom-llm-endpoints] custom endpoint runtime', () => {
       .rejects.toMatchObject({ code: 'endpoint_tools_unsupported' })
   })
 
-  it('resolves an explicit workspace profile to a fixed-model provider', async () => {
+  it('resolves an explicit workspace profile to a fixed-model, text-only provider', async () => {
     const endpointId = '00000000-0000-4000-8000-000000000001'
     const runtime = {
       id: endpointId,
@@ -83,7 +91,8 @@ describe('[COMP:api/custom-llm-endpoints] custom endpoint runtime', () => {
       getRuntimeSystem: vi.fn().mockResolvedValue(runtime),
       getTierRuntimeSystem: vi.fn(),
     } as unknown as WorkspaceCustomLlmEndpointStore
-    const resolved = await createWorkspaceCustomLlmResolver(store)({
+    const fetchFn = vi.fn().mockResolvedValue(textSse())
+    const resolved = await createWorkspaceCustomLlmResolver(store, { fetchFn })({
       workspaceId: runtime.workspaceId,
       requestedModel: customLlmAlias(endpointId),
     })
@@ -95,6 +104,25 @@ describe('[COMP:api/custom-llm-endpoints] custom endpoint runtime', () => {
     })
     expect(store.getRuntimeSystem).toHaveBeenCalledWith({ workspaceId: runtime.workspaceId, profileId: endpointId })
     expect(store.getTierRuntimeSystem).not.toHaveBeenCalled()
+
+    if (!resolved) throw new Error('expected a resolved custom provider')
+    for await (const _chunk of resolved.provider.stream({
+      model: resolved.selector,
+      systemPrompt: '',
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image', mimeType: 'image/png', data: 'iVBORw0KGgo=' },
+          { type: 'text', text: 'Continue.' },
+        ],
+      }],
+    })) {
+      // Drain the stream so the request body can be inspected below.
+    }
+    const [, init] = fetchFn.mock.calls[0] as [string, RequestInit]
+    const requestBody = JSON.parse(init.body as string) as { messages: unknown }
+    expect(JSON.stringify(requestBody.messages)).not.toContain('image_url')
+    expect(JSON.stringify(requestBody.messages)).toContain('text-only model cannot inspect it')
   })
 
   it('resolves the assigned profile for the already-resolved Brian tier', async () => {

@@ -107,6 +107,7 @@ function providerFor(
     includeStreamUsage: false,
     enableThinkingField: false,
     supportsJsonMode: false,
+    supportsVision: false,
     includeErrorDetail: false,
   })
 }
