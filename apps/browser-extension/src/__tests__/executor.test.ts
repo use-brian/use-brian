@@ -182,6 +182,78 @@ describe('[COMP:ext/agent] CDP attachment lifecycle', () => {
   })
 })
 
+describe('[COMP:ext/agent] Native dropdown option clicks', () => {
+  it('selects an option through its owning select when the option has no box model', async () => {
+    const executor = new TabExecutor()
+    await executor.attach(42)
+    dbg.sendCommand.mockImplementation(async (_target, method, params) => {
+      if (method === 'Accessibility.getFullAXTree') {
+        return {
+          nodes: [
+            {
+              nodeId: 'station-option',
+              backendDOMNodeId: 7,
+              role: { value: 'option' },
+              name: { value: 'Olympic' },
+              ignored: false,
+            },
+          ],
+        }
+      }
+      if (method === 'DOM.scrollIntoViewIfNeeded' && params?.backendNodeId === 7) {
+        throw new Error('Could not compute box model.')
+      }
+      if (method === 'DOM.getBoxModel' && params?.backendNodeId === 7) {
+        throw new Error('Could not compute box model.')
+      }
+      if (method === 'DOM.resolveNode') return { object: { objectId: 'option-object' } }
+      if (method === 'Runtime.callFunctionOn' && params?.returnByValue === true) {
+        // Disabled line-heading options are excluded, so Olympic is the third selectable item.
+        return { result: { value: { disabled: false, enabledIndex: 2, multiple: false } } }
+      }
+      if (method === 'Runtime.callFunctionOn') return { result: { objectId: 'select-object' } }
+      if (method === 'DOM.describeNode') return { node: { backendNodeId: 8 } }
+      if (method === 'DOM.getBoxModel' && params?.backendNodeId === 8) {
+        return { model: { content: [0, 0, 100, 0, 100, 20, 0, 20] } }
+      }
+      return {}
+    })
+
+    const snapshot = await executor.snapshot()
+    await expect(executor.click(snapshot.nodes[0]!.ref)).resolves.toBeUndefined()
+
+    const mouse = dbg.sendCommand.mock.calls.filter((call) => call[1] === 'Input.dispatchMouseEvent')
+    expect(mouse).toHaveLength(3)
+    expect(mouse[1]?.[2]).toMatchObject({ type: 'mousePressed', x: 50, y: 10 })
+    const keys = dbg.sendCommand.mock.calls
+      .filter((call) => call[1] === 'Input.dispatchKeyEvent' && call[2]?.type === 'keyDown')
+      .map((call) => call[2]?.key)
+    expect(keys).toEqual(['Home', 'ArrowDown', 'ArrowDown', 'Enter'])
+  })
+
+  it('keeps an ordinary box-model failure actionable instead of leaking Chrome wording', async () => {
+    const executor = new TabExecutor()
+    await executor.attach(42)
+    dbg.sendCommand.mockImplementation(async (_target, method) => {
+      if (method === 'Accessibility.getFullAXTree') {
+        return {
+          nodes: [{
+            nodeId: 'button', backendDOMNodeId: 9, role: { value: 'button' },
+            name: { value: 'Search' }, ignored: false,
+          }],
+        }
+      }
+      if (method === 'DOM.getBoxModel') throw new Error('Could not compute box model.')
+      return {}
+    })
+    const snapshot = await executor.snapshot()
+
+    const err = (await executor.click(snapshot.nodes[0]!.ref).catch((error: unknown) => error)) as ExecutorError
+    expect(err.message).toBe(`Ref ${snapshot.nodes[0]!.ref} is not visible on the page.`)
+    expect(err.message).not.toMatch(/box model/i)
+  })
+})
+
 describe('[COMP:ext/agent] Detach recovery policy', () => {
   it('recognises the Chrome detach message however it is phrased', () => {
     expect(isDetachedError(new Error('Debugger is not attached to the tab with id: 1.'))).toBe(true)

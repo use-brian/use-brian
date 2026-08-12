@@ -277,6 +277,98 @@ export class TabExecutor {
     return backendNodeId
   }
 
+  private async pressKey(tabId: number, name: keyof typeof TAKEOVER_KEYS): Promise<void> {
+    const key = TAKEOVER_KEYS[name]
+    await this.cdp(tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', ...key })
+    await this.cdp(tabId, 'Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      key: key.key,
+      code: key.code,
+      windowsVirtualKeyCode: key.windowsVirtualKeyCode,
+    })
+  }
+
+  /** Native option popups have no page-layout box of their own in Chromium. */
+  private async clickNativeOption(tabId: number, backendNodeId: number, ref: string): Promise<void> {
+    const resolved = await this.cdp<{ object?: { objectId?: string } }>(tabId, 'DOM.resolveNode', {
+      backendNodeId,
+      objectGroup: 'use-brian-native-option',
+    })
+    const optionObjectId = resolved.object?.objectId
+    if (!optionObjectId) {
+      throw new ExecutorError(`Ref ${ref} is no longer attached to the page. Take a fresh browserSnapshot.`, 'stale_ref')
+    }
+    try {
+      const infoResult = await this.cdp<{ result?: { value?: unknown } }>(tabId, 'Runtime.callFunctionOn', {
+        objectId: optionObjectId,
+        returnByValue: true,
+        functionDeclaration: `function () {
+          const select = this.closest('select');
+          if (!select) return null;
+          const enabled = Array.from(select.options).filter((option) =>
+            !option.disabled && !(option.parentElement?.tagName === 'OPTGROUP' && option.parentElement.disabled)
+          );
+          return {
+            disabled: this.disabled || (this.parentElement?.tagName === 'OPTGROUP' && this.parentElement.disabled),
+            enabledIndex: enabled.indexOf(this),
+            multiple: select.multiple
+          };
+        }`,
+      })
+      const info = infoResult.result?.value as {
+        disabled?: boolean
+        enabledIndex?: number
+        multiple?: boolean
+      } | null | undefined
+      if (!info || info.disabled || !Number.isInteger(info.enabledIndex) || info.enabledIndex! < 0) {
+        throw new ExecutorError(`Ref ${ref} is a disabled native dropdown option.`, 'backend_error')
+      }
+      if (info.multiple) {
+        throw new ExecutorError(`Ref ${ref} belongs to a multi-select control, which cannot be chosen with browserClick.`, 'backend_error')
+      }
+
+      const selectResult = await this.cdp<{ result?: { objectId?: string } }>(tabId, 'Runtime.callFunctionOn', {
+        objectId: optionObjectId,
+        functionDeclaration: `function () { return this.closest('select'); }`,
+      })
+      const selectObjectId = selectResult.result?.objectId
+      if (!selectObjectId) {
+        throw new ExecutorError(`Ref ${ref} has no selectable dropdown. Take a fresh browserSnapshot.`, 'stale_ref')
+      }
+      const described = await this.cdp<{ node?: { backendNodeId?: number } }>(tabId, 'DOM.describeNode', {
+        objectId: selectObjectId,
+      })
+      const selectBackendNodeId = described.node?.backendNodeId
+      if (typeof selectBackendNodeId !== 'number') {
+        throw new ExecutorError(`Ref ${ref} has no selectable dropdown. Take a fresh browserSnapshot.`, 'stale_ref')
+      }
+
+      await this.cdp(tabId, 'DOM.scrollIntoViewIfNeeded', { backendNodeId: selectBackendNodeId })
+      const box = await this.cdp<{ model?: { content?: number[] } }>(tabId, 'DOM.getBoxModel', {
+        backendNodeId: selectBackendNodeId,
+      })
+      const quad = box.model?.content
+      if (!quad || quad.length < 8) {
+        throw new ExecutorError(`The dropdown for ref ${ref} is not visible on the page.`, 'backend_error')
+      }
+      const x = (quad[0] + quad[4]) / 2
+      const y = (quad[1] + quad[5]) / 2
+      const base = { x, y, button: 'left', clickCount: 1 } as const
+      await this.cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y })
+      await this.cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', ...base })
+      await this.cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', ...base })
+      await this.pressKey(tabId, 'Home')
+      for (let index = 0; index < info.enabledIndex!; index += 1) {
+        await this.pressKey(tabId, 'ArrowDown')
+      }
+      await this.pressKey(tabId, 'Enter')
+    } finally {
+      await this.cdp(tabId, 'Runtime.releaseObjectGroup', {
+        objectGroup: 'use-brian-native-option',
+      }).catch(() => undefined)
+    }
+  }
+
   async navigate(url: string): Promise<{ url: string }> {
     const tabId = this.mustTab()
     this.lastSnapshot = null
@@ -298,14 +390,29 @@ export class TabExecutor {
   async click(ref: string): Promise<void> {
     const tabId = this.mustTab()
     const backendNodeId = this.resolveRef(ref)
+    const role = this.lastSnapshot?.nodes.find((node) => node.ref === ref)?.role
     try {
       await sendCdp(tabId, 'DOM.scrollIntoViewIfNeeded', { backendNodeId })
     } catch {
       // Best effort — some nodes reject it; the click may still land.
     }
-    const box = await this.cdp<{ model?: { content?: number[] } }>(tabId, 'DOM.getBoxModel', { backendNodeId })
-    const quad = box.model?.content
+    let quad: number[] | undefined
+    try {
+      const box = await this.cdp<{ model?: { content?: number[] } }>(tabId, 'DOM.getBoxModel', { backendNodeId })
+      quad = box.model?.content
+    } catch (err) {
+      if (isDetachedError(err)) throw err
+      if (role === 'option' || role === 'listboxoption') {
+        await this.clickNativeOption(tabId, backendNodeId, ref)
+        return
+      }
+      throw new ExecutorError(`Ref ${ref} is not visible on the page.`, 'backend_error', { cause: err })
+    }
     if (!quad || quad.length < 8) {
+      if (role === 'option' || role === 'listboxoption') {
+        await this.clickNativeOption(tabId, backendNodeId, ref)
+        return
+      }
       throw new ExecutorError(`Ref ${ref} is not visible on the page.`, 'backend_error')
     }
     const x = (quad[0] + quad[4]) / 2
@@ -441,13 +548,7 @@ export class TabExecutor {
       } else {
         const key = TAKEOVER_KEYS[event.text]
         if (!key) return
-        await this.cdp(tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', ...key })
-        await this.cdp(tabId, 'Input.dispatchKeyEvent', {
-          type: 'keyUp',
-          key: key.key,
-          code: key.code,
-          windowsVirtualKeyCode: key.windowsVirtualKeyCode,
-        })
+        await this.pressKey(tabId, event.text)
       }
       return
     }
