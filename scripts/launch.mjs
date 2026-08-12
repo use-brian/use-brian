@@ -13,8 +13,9 @@
  *      until it accepts connections - it migrates open-schema-v1 on first boot.
  *   4. start the api (:4000), doc-sync sidecar (:8080), app-web (:3003), local
  *      Discord Gateway connector (:8090), local WhatsApp connector (:8091),
- *      local chat archive (:8092), and local WeChat connector (:8093), all
- *      pointed at the local API; single-process event buses.
+ *      local chat archive (:8092), local WeChat connector (:8093), and local
+ *      browser relay (first free port from :8094), all pointed at the local API;
+ *      single-process event buses.
  *   5. open the browser straight into an authenticated session as the local
  *      owner (/auth/local-session auto-provisions one Personal workspace — no
  *      /login, no /teams, no "dev" identity).
@@ -23,7 +24,7 @@
  * a real postgres:// string and the brain server step is skipped.
  */
 import { spawn } from 'node:child_process'
-import { connect } from 'node:net'
+import { connect, createServer } from 'node:net'
 import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync, readdirSync, statSync, rmSync } from 'node:fs'
 import { homedir, platform, arch, userInfo } from 'node:os'
 import { join, dirname, resolve } from 'node:path'
@@ -81,6 +82,40 @@ function loadDotEnv(path) {
   }
 }
 loadDotEnv(join(ROOT, '.env'))
+
+// Hold the selected loopback port until the relay is ready to spawn. This
+// avoids both colliding with an already-running local service and giving
+// another process a long build-time window to claim the port after our check.
+function reserveAvailablePort(preferredPort) {
+  return new Promise((resolveReservation, reject) => {
+    const tryPort = (port) => {
+      if (port > 65_535) {
+        reject(new Error(`no available browser relay port found from :${preferredPort}`))
+        return
+      }
+      const server = createServer()
+      server.unref()
+      const onError = (err) => {
+        if (err?.code === 'EADDRINUSE' || err?.code === 'EACCES') {
+          tryPort(port + 1)
+        } else {
+          reject(err)
+        }
+      }
+      server.once('error', onError)
+      server.listen({ port, host: '127.0.0.1', exclusive: true }, () => {
+        server.off('error', onError)
+        resolveReservation({
+          port,
+          release: () => new Promise((resolveClose, rejectClose) => {
+            server.close((err) => err ? rejectClose(err) : resolveClose())
+          }),
+        })
+      })
+    }
+    tryPort(preferredPort)
+  })
+}
 
 // The embedded brain uses a distinctive high port so it never collides with a
 // developer's local Postgres on the default 5432 (verified failure mode).
@@ -162,6 +197,10 @@ const wechatConnectorSecret = process.env.WECHAT_CONNECTOR_SECRET || config.wech
 // processes, so this follows the same generate-once/persist lifecycle as the
 // other local bridge secrets and is never printed.
 const messageStoreHmacSecret = process.env.BRIAN_MESSAGE_STORE_HMAC_SECRET || config.messageStoreHmacSecret || randomBytes(32).toString('hex')
+// Shared API <-> browser-relay authentication. An external value wins so a
+// separately deployed relay can be used; otherwise local boot owns and keeps
+// one stable secret for the relay it launches.
+const browserRelaySecret = process.env.BROWSER_RELAY_SECRET || config.browserRelaySecret || randomBytes(32).toString('base64')
 // AES-GCM key that encrypts connector OAuth refresh-tokens / PATs at rest in
 // `connector_instance.credentials`. Without it the api boots with a null
 // credential key and `/api/connectors/:provider/store-credentials` returns 503,
@@ -169,9 +208,12 @@ const messageStoreHmacSecret = process.env.BRIAN_MESSAGE_STORE_HMAC_SECRET || co
 // Base64 of 32 random bytes -- the format `loadChannelCredentialKey` decodes.
 // Generated + persisted like the other secrets so it survives restarts.
 const channelCredentialKey = config.channelCredentialKey || randomBytes(32).toString('base64')
+// AES-GCM key for saved browser sessions. Keep it stable across local restarts
+// so sessions captured through My Browser or cloud browsing remain usable.
+const browserVaultEncryptionKey = process.env.BROWSER_VAULT_ENCRYPTION_KEY || config.browserVaultEncryptionKey || randomBytes(32).toString('base64')
 writeFileSync(
   CONFIG_FILE,
-  JSON.stringify({ ...config, ...(geminiKey ? { geminiApiKey: geminiKey } : {}), ...(preferredProvider ? { preferredProvider } : {}), jwtSecret, docSyncSecret, discordConnectorSecret, waConnectorSecret, wechatConnectorSecret, messageStoreHmacSecret, channelCredentialKey, ownerName }, null, 2),
+  JSON.stringify({ ...config, ...(geminiKey ? { geminiApiKey: geminiKey } : {}), ...(preferredProvider ? { preferredProvider } : {}), jwtSecret, docSyncSecret, discordConnectorSecret, waConnectorSecret, wechatConnectorSecret, messageStoreHmacSecret, browserRelaySecret, channelCredentialKey, browserVaultEncryptionKey, ownerName }, null, 2),
 )
 
 // External-store escape hatch: a real Postgres URL skips the embedded brain.
@@ -180,6 +222,9 @@ const databaseUrl = process.env.DATABASE_URL || `postgres://localhost:${PORTS.pg
 const useLocalDiscordConnector = !process.env.DISCORD_CONNECTOR_URL
 const useLocalWaConnector = !process.env.WA_CONNECTOR_URL
 const useLocalWechatConnector = !process.env.WECHAT_CONNECTOR_URL
+const useLocalBrowserRelay = !process.env.BROWSER_RELAY_URL
+const browserRelayReservation = useLocalBrowserRelay ? await reserveAvailablePort(8094) : null
+const browserRelayPort = browserRelayReservation?.port
 const messageStoreLaunch = resolveMessageStoreLaunch({ root: ROOT, env: process.env })
 
 const env = {
@@ -208,6 +253,9 @@ const env = {
   WA_CONNECTOR_SECRET: waConnectorSecret,
   WECHAT_CONNECTOR_URL: process.env.WECHAT_CONNECTOR_URL || `http://127.0.0.1:${PORTS.wechatConnector}`,
   WECHAT_CONNECTOR_SECRET: wechatConnectorSecret,
+  BROWSER_RELAY_URL: process.env.BROWSER_RELAY_URL || `http://127.0.0.1:${browserRelayPort}`,
+  BROWSER_RELAY_SECRET: browserRelaySecret,
+  BROWSER_VAULT_ENCRYPTION_KEY: browserVaultEncryptionKey,
   ...(messageStoreLaunch.enabled
     ? {
         BRIAN_MESSAGE_STORE_URL: `http://127.0.0.1:${PORTS.messageStore}`,
@@ -244,7 +292,7 @@ const children = []
 // OOMs alone, run()'s exit handler names it, and the launcher shuts down
 // cleanly. The platform repo already caps its API dev process the same way.
 // Sized generously above observed steady-state; override with USEBRIAN_HEAP_MB.
-const HEAP_MB = { pglite: 1024, api: 2048, 'doc-sync': 1024, 'app-web': 2048, 'discord-connector': 512, 'wa-connector': 512, 'wechat-connector': 512 }
+const HEAP_MB = { pglite: 1024, api: 2048, 'doc-sync': 1024, 'app-web': 2048, 'browser-relay': 512, 'discord-connector': 512, 'wa-connector': 512, 'wechat-connector': 512 }
 function run(label, cmd, args, extraEnv = {}, cwd = ROOT) {
   const heapMb = Number(process.env.USEBRIAN_HEAP_MB) || HEAP_MB[label]
   const nodeOptions = heapMb
@@ -415,6 +463,18 @@ if (messageStoreLaunch.enabled) {
   console.log('[launch] chat message store checkout not found — local chat archive is disabled for this session.')
 }
 
+if (useLocalBrowserRelay) {
+  await browserRelayReservation.release()
+  console.log(`[launch] starting browser relay (:${browserRelayPort}) ...`)
+  run('browser-relay', 'pnpm', ['--filter', '@use-brian/browser-relay', 'exec', 'tsx', 'src/index.ts'], {
+    HOST: '127.0.0.1',
+    PORT: String(browserRelayPort),
+    JWT_SECRET: jwtSecret,
+    BROWSER_RELAY_SECRET: browserRelaySecret,
+  })
+  await waitForPort(browserRelayPort, 'browser relay')
+}
+
 console.log('[launch] starting api (:4000), doc-sync (:8080), app-web (:3003) ...')
 run('api', 'pnpm', ['--filter', '@use-brian/api-open', 'exec', 'tsx', 'src/index.ts'])
 run('doc-sync', 'pnpm', ['--filter', '@use-brian/doc-sync', 'exec', 'tsx', 'src/index.ts'],
@@ -467,7 +527,8 @@ const discordStatus = useLocalDiscordConnector ? ` · discord :${PORTS.discordCo
 const waStatus = useLocalWaConnector ? ` · whatsapp :${PORTS.waConnector}` : ' · whatsapp external'
 const messageStoreStatus = messageStoreLaunch.enabled ? ` · chat-archive :${PORTS.messageStore}` : ' · chat-archive off'
 const wechatStatus = useLocalWechatConnector ? ` · wechat :${PORTS.wechatConnector}` : ' · wechat external'
-console.log(`\n[launch] Use Brian is up. Opening ${entryUrl}\n  (api :${PORTS.api} · doc-sync :${PORTS.docSync} · app-web :${PORTS.appWeb}${discordStatus}${waStatus}${messageStoreStatus}${wechatStatus})\n  Ctrl-C to stop everything.\n`)
+const browserRelayStatus = useLocalBrowserRelay ? ` · browser-relay :${browserRelayPort}` : ' · browser-relay external'
+console.log(`\n[launch] Use Brian is up. Opening ${entryUrl}\n  (api :${PORTS.api} · doc-sync :${PORTS.docSync} · app-web :${PORTS.appWeb}${discordStatus}${waStatus}${messageStoreStatus}${wechatStatus}${browserRelayStatus})\n  Ctrl-C to stop everything.\n`)
 if (preferredProvider === 'openai-codex') {
   console.log('[launch] Open Settings → AI providers to complete ChatGPT sign-in.')
 }
