@@ -1,7 +1,62 @@
 import { describe, it, expect, vi } from 'vitest'
-import { appAssistantForbidsResearch, appAssistantForbidsCoordinator, isAdaptiveResearchEligible, isUserBlocked, sanitizeTitle, buildActivePageInstruction, buildViewingSkillBlock, createUpdateViewedSkillTool, workspaceSkillRevision, resolveStickyChannelId, isDocSurface, isAppSurface, attachUserVisibleContext, settleInlineToolApproval, buildAttachedRecordingContext, buildUnscopedFileAttachmentInstruction, mayOfferWorkspaceChatHandoff, turnInputAdmission } from '../chat.js'
-import type { ConfirmationResolver, Message, ToolContext } from '@use-brian/core'
+import { appAssistantForbidsResearch, appAssistantForbidsCoordinator, isAdaptiveResearchEligible, isUserBlocked, sanitizeTitle, buildActivePageInstruction, buildViewingSkillBlock, createUpdateViewedSkillTool, workspaceSkillRevision, resolveStickyChannelId, isDocSurface, isAppSurface, attachUserVisibleContext, settleInlineToolApproval, buildAttachedRecordingContext, buildUnscopedFileAttachmentInstruction, mayOfferWorkspaceChatHandoff, turnInputAdmission, filterBrainSurfaceTools } from '../chat.js'
+import type { ConfirmationResolver, Message, Tool, ToolContext } from '@use-brian/core'
 import type { PendingApproval, PendingApprovalsStore } from '../../db/pending-approvals-store.js'
+
+describe('[COMP:api/brain-entry-edit] transient Brain tool policy', () => {
+  const tool = (name: string, isReadOnly: boolean) => ({
+    name,
+    isReadOnly,
+  }) as Tool
+  const tools = new Map<string, Tool>([
+    ['search', tool('search', true)],
+    // Read-only search would reveal folded write schemas whose executor is
+    // intentionally absent on these bounded Brain lanes.
+    ['mcp_search', tool('mcp_search', true)],
+    ['mcp_call', tool('mcp_call', false)],
+    ['inspectRowProvenance', tool('inspectRowProvenance', true)],
+    ['updateBrainEntry', tool('updateBrainEntry', false)],
+    ['delegateDocEdit', tool('delegateDocEdit', false)],
+    ['saveMemory', tool('saveMemory', false)],
+  ])
+
+  it('makes inspection sessions mechanically read-only', () => {
+    expect([...filterBrainSurfaceTools(tools, {
+      inspection: true,
+      editSession: false,
+      scopedOpenEntry: false,
+      allowBrainUpdate: false,
+    }).keys()]).toEqual(['search', 'inspectRowProvenance'])
+  })
+
+  it('keeps reads plus only the confirmed row update for edit/open-entry turns', () => {
+    expect([...filterBrainSurfaceTools(tools, {
+      inspection: false,
+      editSession: true,
+      scopedOpenEntry: false,
+      allowBrainUpdate: true,
+    }).keys()]).toEqual([
+      'search',
+      'inspectRowProvenance',
+      'updateBrainEntry',
+    ])
+    expect([...filterBrainSurfaceTools(tools, {
+      inspection: false,
+      editSession: false,
+      scopedOpenEntry: true,
+      allowBrainUpdate: true,
+    }).keys()]).not.toContain('delegateDocEdit')
+  })
+
+  it('does not fall back to an unscoped writer when the bound row vanished', () => {
+    expect([...filterBrainSurfaceTools(tools, {
+      inspection: false,
+      editSession: true,
+      scopedOpenEntry: false,
+      allowBrainUpdate: false,
+    }).keys()]).toEqual(['search', 'inspectRowProvenance'])
+  })
+})
 
 describe('[COMP:api/chat-route] staged recording context', () => {
   it('treats upload as storage only and asks for purpose before processing', () => {

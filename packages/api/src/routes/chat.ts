@@ -37,6 +37,12 @@ import { createSessionPinTools } from '../session-pin-tools.js'
 import type { InjectExtraTools, ResolveAppSoul } from '../tool-injection-port.js'
 import type { BuildConnectorActionAudit } from '../connector-action-port.js'
 import { notifyBrainWriteIfMatch } from '../brain-stream/notify.js'
+import {
+  buildViewingBrainEntryBlock,
+  createBrainEntryEditTools,
+  parseBrainEditChannelId,
+  type BrainEntryEditTools,
+} from '../brain-entry-edit-tools.js'
 import { recordExternalCostFromMeta } from '../billing-external.js'
 // Host-specific seams (the real session-event bus, the placeholder-title helpers,
 // the per-turn extra-tool injector) are NOT imported here — they are injected via
@@ -79,6 +85,35 @@ const activeResolvers = new Map<string, ConfirmationResolver>()
 
 export function _getActiveResolversSize(): number {
   return activeResolvers.size
+}
+
+/** Exact transient/open-entry effect policy, kept pure for regression tests. */
+export function filterBrainSurfaceTools(
+  tools: Map<string, Tool>,
+  options: {
+    inspection: boolean
+    editSession: boolean
+    scopedOpenEntry: boolean
+    allowBrainUpdate: boolean
+  },
+): Map<string, Tool> {
+  if (options.inspection) {
+    return new Map(
+      [...tools].filter(
+        ([name, tool]) => tool.isReadOnly && name !== 'mcp_search',
+      ),
+    )
+  }
+  if (options.editSession || options.scopedOpenEntry) {
+    return new Map(
+      [...tools].filter(
+        ([name, tool]) =>
+          (tool.isReadOnly && name !== 'mcp_search') ||
+          (options.allowBrainUpdate && name === 'updateBrainEntry'),
+      ),
+    )
+  }
+  return tools
 }
 
 /**
@@ -518,6 +553,8 @@ type WebChatOptions = {
    * a DB-backed inspection store. See docs/architecture/brain/corrections.md.
    */
   inspectionTools?: Record<string, import('@use-brian/core').Tool>
+  /** Existing Brain-entry discovery + confirmed mutation seam. */
+  brainEntryMutator?: import('../brain-entry-mutation.js').BrainEntryMutator
   /** Generate mode as a chat tool (fill a blueprint from the brain). Built at
    *  boot with generateSynthesize + pageTemplateStore; workspace-scoped. */
   generateBlueprintTool?: Tool
@@ -1755,7 +1792,7 @@ export function chatRoutes(options: WebChatOptions): Router {
   const router = Router()
 
   router.post('/', async (req, res) => {
-    const { message: rawMessage, sessionId: requestedSessionId, model: requestedModel, fileIds, attachedRecordingIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, appOrigin: requestedAppOrigin, followupChips: requestedFollowupChips, viewingSkillRowId: requestedViewingSkillRowId, kbSourceId: requestedKbSourceId, meteredProfileId, meteredToolRounds, meteredAccepted, ask: requestedAsk, roomResponseGroup: rawRoomResponseGroup, steer: requestedSteer, inputId: requestedInputId, midTurn: requestedMidTurn } = req.body as {
+    const { message: rawMessage, sessionId: requestedSessionId, model: requestedModel, fileIds, attachedRecordingIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, appOrigin: requestedAppOrigin, followupChips: requestedFollowupChips, viewingSkillRowId: requestedViewingSkillRowId, viewingBrainEntry: requestedViewingBrainEntry, kbSourceId: requestedKbSourceId, meteredProfileId, meteredToolRounds, meteredAccepted, ask: requestedAsk, roomResponseGroup: rawRoomResponseGroup, steer: requestedSteer, inputId: requestedInputId, midTurn: requestedMidTurn } = req.body as {
       message?: string
       sessionId?: string
       model?: string
@@ -1851,6 +1888,11 @@ export function chatRoutes(options: WebChatOptions): Router {
        * user couldn't open.
        */
       viewingSkillRowId?: string
+      /** Brain entry currently open in the Review/detail drawer. */
+      viewingBrainEntry?: {
+        primitive?: string
+        rowId?: string
+      }
       /**
        * Knowledge-surface anchor: the `workspace_knowledge_sources` row id
        * the Studio ▸ Knowledge chat panel is focused on (or the literal
@@ -3989,6 +4031,9 @@ export function chatRoutes(options: WebChatOptions): Router {
         ? [splitPrompt.userVisibleContext]
         : []
       let updateViewedSkillTool: Tool | null = null
+      let brainEntryEditTools: BrainEntryEditTools | null = null
+      let scopedBrainEntryActive = false
+      let scopedBrainUpdateAllowed = false
 
       // Shared-chat participants are application-derived runtime metadata.
       // They remain private even though doing so makes this system suffix
@@ -4225,6 +4270,50 @@ export function chatRoutes(options: WebChatOptions): Router {
         }
       }
 
+      // ── Currently-viewing / server-bound Brain entry ───────────
+      // A normal floating-chat turn may carry a live drawer/URL anchor. A
+      // `brain_edit` session ignores client target input and reconstructs its
+      // immutable target from sessions.channel_id. Both are re-read by
+      // workspace + row before trusted context or a scoped write exists.
+      if (options.brainEntryMutator && assistant.workspaceId) {
+        try {
+          const bound = session.channelType === 'brain_edit'
+            ? parseBrainEditChannelId(session.channelId)
+            : null
+          const requested =
+            !bound &&
+            requestedViewingBrainEntry &&
+            typeof requestedViewingBrainEntry === 'object' &&
+            typeof requestedViewingBrainEntry.primitive === 'string' &&
+            typeof requestedViewingBrainEntry.rowId === 'string'
+              ? {
+                  primitive: requestedViewingBrainEntry.primitive,
+                  rowId: requestedViewingBrainEntry.rowId,
+                }
+              : null
+          const target = bound ?? requested
+          const scopedEntry = target
+            ? await options.brainEntryMutator.getEditableEntry(
+                assistant.workspaceId,
+                target.primitive,
+                target.rowId,
+                { userId: user.id, clearance: readClearance },
+              )
+            : null
+          if (scopedEntry) {
+            scopedBrainEntryActive = true
+            scopedBrainUpdateAllowed = true
+            privateRuntimeContextParts.push(buildViewingBrainEntryBlock(scopedEntry))
+          }
+          brainEntryEditTools = createBrainEntryEditTools({
+            mutator: options.brainEntryMutator,
+            scopedEntry,
+          })
+        } catch (err) {
+          console.error('[chat] viewing Brain entry injection failed:', err)
+        }
+      }
+
       // ── Knowledge-source scope (Studio ▸ Knowledge chat panel) ──
       // `kbSourceId` anchors this session to the focused knowledge source.
       // The block is application-composed runtime metadata, so it stays in
@@ -4328,6 +4417,16 @@ export function chatRoutes(options: WebChatOptions): Router {
       allTools.set('deleteMemory', deleteMemory)
       if (updateViewedSkillTool) {
         allTools.set(updateViewedSkillTool.name, updateViewedSkillTool)
+      }
+      if (brainEntryEditTools) {
+        allTools.set(
+          brainEntryEditTools.findEditableBrainEntries.name,
+          brainEntryEditTools.findEditableBrainEntries,
+        )
+        allTools.set(
+          brainEntryEditTools.updateBrainEntry.name,
+          brainEntryEditTools.updateBrainEntry,
+        )
       }
 
       // A private web conversation can explicitly hand its reviewed current
@@ -4448,6 +4547,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // (they'd error on the workspace check inside each tool's
       // execute path).
       const isInspectionSession = session.channelType === 'brain_inspection'
+      const isBrainEditSession = session.channelType === 'brain_edit'
       const isPrimaryWithWorkspace =
         assistant.kind === 'primary' && !!assistant.workspaceId
       if (
@@ -5451,11 +5551,21 @@ export function chatRoutes(options: WebChatOptions): Router {
       //     rejected createEntity call.
       //   - Tool descriptions explicitly require listing/getting
       //     before calling createEdge with stale or unknown ids.
+      // Transient Brain surfaces carry exact effect policies. Inspection is
+      // mechanically read-only. Editing keeps reads plus one confirmed,
+      // row-bound write. This filter runs after every ambient injector,
+      // including Doc, so no later merge can reintroduce a mutation tool.
+      const brainSurfaceTools = filterBrainSurfaceTools(allTools, {
+        inspection: isInspectionSession,
+        editSession: isBrainEditSession,
+        scopedOpenEntry: scopedBrainEntryActive,
+        allowBrainUpdate: scopedBrainUpdateAllowed,
+      })
       const loopTools = coordinatorMode
-        ? new Map([...allTools].filter(([name]) => coordinatorAllowedTools.has(name)))
+        ? new Map([...brainSurfaceTools].filter(([name]) => coordinatorAllowedTools.has(name)))
         : preflightContext
-          ? new Map([...allTools].filter(([name]) => !RESEARCH_TOOLS.has(name)))
-          : allTools
+          ? new Map([...brainSurfaceTools].filter(([name]) => !RESEARCH_TOOLS.has(name)))
+          : brainSurfaceTools
 
       // Coordinator-mode addendum. The base wording covers "spawn 2-3 workers,
       // synthesize, done" — adequate for the splitter-triggered parallel-research
@@ -6243,6 +6353,27 @@ export function chatRoutes(options: WebChatOptions): Router {
                       toolUseId: block.toolUseId,
                       ...document,
                     })
+                  }
+                }
+                if (block.name === 'updateBrainEntry' && !(block.isError ?? false)) {
+                  try {
+                    const receipt = JSON.parse(block.content) as {
+                      kind?: string
+                      primitive?: string
+                      previousRowId?: string
+                      liveRowId?: string
+                      changedFields?: string[]
+                    }
+                    if (
+                      receipt.kind === 'brain_entry_updated' &&
+                      typeof receipt.primitive === 'string' &&
+                      typeof receipt.liveRowId === 'string'
+                    ) {
+                      sendEvent('brain_entry_updated', receipt)
+                    }
+                  } catch {
+                    // The model still receives the tool result. This event is
+                    // only the client re-anchor side channel.
                   }
                 }
                 // Step status only for room viewers — never the result body
@@ -7187,6 +7318,8 @@ export function chatRoutes(options: WebChatOptions): Router {
                 ? `Insert the content immediately after block ${anchorBlockId}.`
                 : 'The open page is empty; build it in place.'
               const result = await delegateDocEdit.execute({
+                intent: 'edit',
+                pageId: requestedDocViewId,
                 instruction: [
                   `Edit page ${requestedDocViewId} in place.`,
                   placement,

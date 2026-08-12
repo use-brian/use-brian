@@ -15,6 +15,7 @@
  */
 
 export const BRAIN_REFRESH_EVENT = "sidan:brain-refresh";
+export const BRAIN_ENTRY_VIEW_EVENT = "sidan:brain-entry-view";
 
 export type BrainRefreshDetail = {
   /**
@@ -23,6 +24,19 @@ export type BrainRefreshDetail = {
    */
   workspaceId: string | null;
 };
+
+export type BrainEntryViewDetail = {
+  workspaceId: string;
+  entry: { primitive: string; rowId: string } | null;
+};
+
+/** Publish the detail drawer's exact live target to persistent workspace chrome. */
+export function publishBrainEntryView(detail: BrainEntryViewDetail): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(
+    new CustomEvent<BrainEntryViewDetail>(BRAIN_ENTRY_VIEW_EVENT, { detail }),
+  );
+}
 
 export function requestBrainRefresh(workspaceId: string | null): void {
   if (typeof window === "undefined") return;

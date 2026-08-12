@@ -78,6 +78,14 @@ export function parseBrainDeepLink(
  * The `kind` param is omitted for a task so the common case stays short and
  * pasteable — `parseBrainDeepLink` defaults it back.
  */
+/** Only the canonical Brain surface may lend its row to floating chat. */
+export function viewingBrainEntryFromLocation(
+  pathname: string,
+  params: URLSearchParams,
+): BrainDeepLink | null {
+  return pathname.endsWith("/brain") ? parseBrainDeepLink(params) : null;
+}
+
 export function brainRowUrl(
   origin: string,
   workspaceId: string,

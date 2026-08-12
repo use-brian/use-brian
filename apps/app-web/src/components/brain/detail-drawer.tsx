@@ -54,7 +54,10 @@ import {
 import { getActiveAssistantId } from "@/lib/sidebar-cache";
 import { useWorkspaceContext } from "@/lib/workspace-context";
 import type { BrainContentCacheScope } from "@/lib/offline/brain-content-cache";
-import { requestBrainRefresh } from "@/lib/brain-events";
+import {
+  publishBrainEntryView,
+  requestBrainRefresh,
+} from "@/lib/brain-events";
 import { authFetch } from "@/lib/auth-fetch";
 import {
   type AdjustMemoryChanges,
@@ -87,6 +90,7 @@ import {
   deleteSkill,
 } from "@/lib/api/skills";
 import { EntryThread } from "@/components/brain/entry-thread";
+import { EntryEditThread } from "@/components/brain/entry-edit-thread";
 import { EntityRow } from "@/components/brain/entity-row";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import {
@@ -631,6 +635,27 @@ export function BrainDetailDrawer({
     };
   }, [displayRow, primitive, workspaceId, cacheScope]);
 
+  // Publish the exact live drawer target to persistent chrome. This covers
+  // state-opened Review rows as well as `?row=` deep links, so floating chat
+  // always knows what "this entry" means. Hooks stay before early returns.
+  const viewedActionPrim = displayRow
+    ? ENTITY_KINDS.has(displayRow.kind as EntityKind)
+      ? ("entity" as InboxPrimitive)
+      : brainKindToInboxPrimitive(displayRow.kind)
+    : null;
+  useEffect(() => {
+    const liveRowId = primitive?.id ?? displayRow?.id;
+    if (!row || !viewedActionPrim || !liveRowId) {
+      publishBrainEntryView({ workspaceId, entry: null });
+      return;
+    }
+    publishBrainEntryView({
+      workspaceId,
+      entry: { primitive: viewedActionPrim, rowId: liveRowId },
+    });
+    return () => publishBrainEntryView({ workspaceId, entry: null });
+  }, [row, workspaceId, viewedActionPrim, primitive?.id, displayRow?.id]);
+
   // Skill primitive — its own drawer shell (governance block + body + trust
   // actions). Rendered ahead of the row branch so a skill open short-circuits
   // the entity/primitive/knowledge machinery (which keys on `displayRow`).
@@ -696,7 +721,7 @@ export function BrainDetailDrawer({
 
   // Toolbar actions target the same primitive the sections adjust. Knowledge
   // is read-only (no inbox primitive) → no actions, no composer.
-  const actionPrim = isEntityKind ? ("entity" as InboxPrimitive) : inboxPrim;
+  const actionPrim = viewedActionPrim;
   const canAct =
     !readOnly &&
     !loading &&
@@ -943,8 +968,30 @@ export function BrainDetailDrawer({
             />
           )}
 
-          {/* The "Comments" analog — an inline ephemeral Q&A thread with
-              the workspace's primary assistant, right on the page. */}
+          {/* Editing and Q&A are deliberately separate transcripts. The edit
+              lane is server-bound to this row and confirms every write; the
+              Ask lane below remains mechanically read-only. */}
+          {canAct && primitive && actionPrim && actionPrim !== "entity_link" && (
+            <EntryEditThread
+              workspaceId={workspaceId}
+              primitive={actionPrim}
+              rowId={primitive.id}
+              onUpdated={async (liveRowId) => {
+                const next = await fetchBrainRow(
+                  workspaceId,
+                  actionPrim,
+                  liveRowId,
+                  cacheScope,
+                );
+                if (next) setPrimitive(next);
+                if (isEntityKind) requestEntityRefresh();
+                requestBrainRefresh(workspaceId);
+              }}
+            />
+          )}
+
+          {/* The "Comments" analog — an inline ephemeral read-only Q&A thread
+              with the workspace's primary assistant, right on the page. */}
           {canAct && primitive && actionPrim && (
             <EntryThread
               key={displayRowId ?? "none"}
