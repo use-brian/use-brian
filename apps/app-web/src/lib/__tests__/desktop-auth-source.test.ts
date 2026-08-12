@@ -13,6 +13,8 @@ import {
   desktopSignOut,
   classifyRefreshStatus,
   usesGatewayCredentials,
+  onDesktopMessageBrian,
+  acknowledgeDesktopMessageBrian,
 } from "../desktop-auth-source";
 
 const realFetch = globalThis.fetch;
@@ -50,6 +52,30 @@ describe("[COMP:app-web/desktop-auth-source] usesGatewayCredentials", () => {
     expect(usesGatewayCredentials()).toBe(false);
     setBridge({ signIn: () => {}, gatewayCredentials: true });
     expect(usesGatewayCredentials()).toBe(true);
+  });
+});
+
+describe("[COMP:app-web/desktop-auth-source] onDesktopMessageBrian", () => {
+  it("is a no-op outside Electron", () => {
+    expect(onDesktopMessageBrian(() => {})).toBeTypeOf("function");
+  });
+
+  it("subscribes through the shell bridge and returns its cleanup", () => {
+    const cleanup = vi.fn();
+    const subscribe = vi.fn(() => cleanup);
+    const callback = vi.fn();
+    setBridge({ signIn: () => {}, onMessageBrian: subscribe });
+
+    expect(onDesktopMessageBrian(callback)).toBe(cleanup);
+    expect(subscribe).toHaveBeenCalledWith(callback);
+  });
+
+  it("acknowledges consumption only when the shell exposes it", () => {
+    acknowledgeDesktopMessageBrian();
+    const acknowledgeMessageBrian = vi.fn();
+    setBridge({ signIn: () => {}, acknowledgeMessageBrian });
+    acknowledgeDesktopMessageBrian();
+    expect(acknowledgeMessageBrian).toHaveBeenCalledOnce();
   });
 });
 

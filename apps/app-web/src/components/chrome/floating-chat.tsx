@@ -450,6 +450,10 @@ type FloatingChatProps = {
    * instruction at the same page. Soft by design — it warns, it doesn't block.
    */
   othersRun?: AssistantRunState | null;
+  /** Reveal and focus the already-mounted composer when this token changes. */
+  messageBrianRequest?: number;
+  /** Called after the requested composer is mounted, visible, and focused. */
+  onMessageBrianRevealed?: () => void;
 };
 
 const CLIENT_TIMEZONE: string | null = (() => {
@@ -470,6 +474,8 @@ export function FloatingChat({
   activePage = null,
   seedRequest,
   othersRun = null,
+  messageBrianRequest,
+  onMessageBrianRevealed,
 }: FloatingChatProps) {
   // 'side-panel' fills its parent column and stays open (no pill); 'floating'
   // is the bottom-right collapsible dock. Drives positioning + the pill below.
@@ -489,6 +495,20 @@ export function FloatingChat({
   const searchParams = useSearchParams();
   const [expanded, setExpanded] = useState(false);
   const [input, setInput] = useState("");
+
+  useEffect(() => {
+    if (messageBrianRequest === undefined || isSidePanel) return;
+    setExpanded(true);
+  }, [isSidePanel, messageBrianRequest]);
+
+  const acknowledgedMessageBrianRef = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (messageBrianRequest === undefined) return;
+    if (!isSidePanel && !expanded) return;
+    if (acknowledgedMessageBrianRef.current === messageBrianRequest) return;
+    acknowledgedMessageBrianRef.current = messageBrianRequest;
+    onMessageBrianRevealed?.();
+  }, [expanded, isSidePanel, messageBrianRequest, onMessageBrianRevealed]);
 
   // ── Assistant switcher ───────────────────────────────────────────────────
   // The chat talks to the workspace PRIMARY by default (the `assistantId`
@@ -3119,6 +3139,7 @@ export function FloatingChat({
           <ChatComposer
             value={input}
             onChange={setInput}
+            focusRequest={messageBrianRequest}
             // While a turn streams, Send QUEUES: the message is handed to the
             // running turn, which takes it at its next safe boundary.
             // Cmd/Ctrl+Enter steers instead — take it as soon as possible.

@@ -94,6 +94,10 @@ type Props = {
   };
   /** Soft double-text guard — forwarded to the inner `<FloatingChat>`. */
   othersRun?: AssistantRunState | null;
+  /** Reveal and focus the composer when the desktop companion is activated. */
+  messageBrianRequest?: number;
+  /** Called after the inner composer confirms it is visible. */
+  onMessageBrianRevealed?: () => void;
 };
 
 /** Vertical pixel threshold (downward swipe) that dismisses the bottom sheet. */
@@ -106,6 +110,8 @@ export function MobileChatDrawer({
   activePage = null,
   seed,
   othersRun = null,
+  messageBrianRequest,
+  onMessageBrianRevealed,
 }: Props) {
   const t = useT().docPage;
   const [open, setOpen] = useState(false);
@@ -135,6 +141,11 @@ export function MobileChatDrawer({
     setMounted(true);
     setOpen(true);
   }, []);
+
+  useEffect(() => {
+    if (messageBrianRequest === undefined) return;
+    openDrawer();
+  }, [messageBrianRequest, openDrawer]);
 
   // Chat-seed: when the shell routes a seed to this (mobile) surface, make
   // `<FloatingChat>` available and forward the seed to it (as `seedRequest`)
@@ -319,6 +330,8 @@ export function MobileChatDrawer({
               activePage={activePage}
               seedRequest={seed}
               othersRun={othersRun}
+              messageBrianRequest={messageBrianRequest}
+              onMessageBrianRevealed={onMessageBrianRevealed}
             />
           ) : null}
         </div>
