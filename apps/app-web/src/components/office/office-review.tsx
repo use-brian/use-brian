@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useId, useState } from "react";
 import { Download, Eye, MonitorPlay, Trash2, Undo2, X } from "lucide-react";
 import { columnIndexToName, parseCellAddress, type OfficeArtifactSnapshot, type SpreadsheetSnapshot } from "@use-brian/office-model";
 import type { OfficeArtifact } from "@/lib/office/api";
@@ -16,6 +16,8 @@ export function OfficeReview({ artifact, artifactId, workspaceId, snapshot, onLi
   const [pendingFormat, setPendingFormat] = useState<"native" | "pdf">("native");
   const [pdfPreview, setPdfPreview] = useState<{ url: string; filename: string } | null>(null);
   const [purgeConfirmation, setPurgeConfirmation] = useState("");
+  const purgeInputId = useId();
+  const purgeTitleId = `${purgeInputId}-title`;
 
   const releaseInput = (format: "native" | "pdf"): OfficeReleaseInput => {
     const input: OfficeReleaseInput = { expectedVersion: artifact.version, action: "export", destination: { sensitivity: "internal", external: false }, format };
@@ -63,7 +65,12 @@ export function OfficeReview({ artifact, artifactId, workspaceId, snapshot, onLi
     </section>
     <section className="space-y-2 border-t pt-4">
       {artifact.lifecycleState === "active" ? <button type="button" disabled={offlineCopy} onClick={() => void transitionOfficeLifecycle(artifactId, "trash", "Moved to Trash from Office file actions").then(onLifecycle)} className="flex items-center gap-2 rounded px-2 py-1.5 text-destructive disabled:opacity-50"><Trash2 className="size-4" aria-hidden />{t.moveToTrash}</button> : artifact.lifecycleState === "archived" || artifact.lifecycleState === "trash" || artifact.lifecycleState === "retained" ? <button type="button" disabled={offlineCopy} onClick={() => void transitionOfficeLifecycle(artifactId, artifact.lifecycleState === "archived" ? "unarchive" : "restore", "Restored from Office file actions").then(onLifecycle)} className="flex items-center gap-2 rounded px-2 py-1.5 disabled:opacity-50"><Undo2 className="size-4" aria-hidden />{t.restore}</button> : null}
-      {artifact.lifecycleState === "trash" || artifact.lifecycleState === "retained" ? <div className="space-y-2 rounded border border-destructive/40 p-3"><label className="block text-xs text-muted-foreground">{t.typeTitleToDelete}</label><input value={purgeConfirmation} onChange={(event) => setPurgeConfirmation(event.target.value)} placeholder={artifact.title} className="h-9 w-full rounded border px-2" /><button type="button" disabled={offlineCopy || purgeConfirmation !== artifact.title} onClick={() => void transitionOfficeLifecycle(artifactId, "purge", "Permanent deletion confirmed by exact title").then(onLifecycle)} className="rounded bg-destructive px-3 py-2 text-destructive-foreground disabled:opacity-50">{t.deletePermanently}</button></div> : null}
+      {artifact.lifecycleState === "trash" || artifact.lifecycleState === "retained" ? <div className="space-y-2 rounded border border-destructive/40 p-3">
+        <label htmlFor={purgeInputId} className="block text-xs text-muted-foreground">{t.typeTitleToDelete}</label>
+        <p id={purgeTitleId} className="whitespace-pre-wrap break-words rounded bg-muted px-2 py-1.5 font-mono text-xs text-foreground select-text">{artifact.title}</p>
+        <input id={purgeInputId} aria-describedby={purgeTitleId} value={purgeConfirmation} onChange={(event) => setPurgeConfirmation(event.target.value)} placeholder={t.titleConfirmationPlaceholder} autoComplete="off" autoCapitalize="off" spellCheck={false} className="h-9 w-full min-w-0 rounded border px-2" />
+        <button type="button" disabled={offlineCopy || purgeConfirmation !== artifact.title} onClick={() => void transitionOfficeLifecycle(artifactId, "purge", "Permanent deletion confirmed by exact title").then(onLifecycle)} className="w-full whitespace-normal rounded bg-destructive px-3 py-2 text-destructive-foreground disabled:opacity-50">{t.deletePermanently}</button>
+      </div> : null}
     </section>
     {pdfPreview ? <div role="dialog" aria-modal="true" aria-label={t.pdfPreview} className="fixed inset-0 z-[100] flex flex-col bg-background/95 p-4 backdrop-blur-sm lg:p-8">
       <div className="mx-auto flex w-full max-w-5xl items-center gap-3 border-b bg-background p-3"><h2 className="font-semibold">{t.pdfPreview}</h2><a href={pdfPreview.url} download={pdfPreview.filename} className="ml-auto inline-flex h-9 items-center gap-2 rounded-md bg-action px-3 font-medium text-action-foreground"><Download className="size-4" />{t.downloadPdf}</a><button type="button" aria-label={t.closePdfPreview} onClick={() => { URL.revokeObjectURL(pdfPreview.url); setPdfPreview(null); }} className="rounded p-2 hover:bg-muted"><X className="size-5" /></button></div>

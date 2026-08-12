@@ -42,8 +42,7 @@ export function createOfficeService(deps: OfficeServiceDeps): OfficeToolPort {
         sourceHandles: params.sourceHandles,
         requestedSensitivityFloor: 'internal',
         templateId: params.templateId,
-        canonicalWebsite: params.canonicalWebsite,
-        companyHasNoWebsite: params.companyHasNoWebsite,
+        additionalContext: params.additionalContext,
         idempotencyKey: params.idempotencyKey,
       }
       let job: OfficeGenerationJobRow

@@ -12,9 +12,9 @@ describe('[COMP:office/tools] Office tools', () => {
       revise: vi.fn(async () => null),
     }
     const tools = new Map(createOfficeTools({ port, appOrigin: 'https://app.example.com' }).map((tool) => [tool.name, tool]))
-    const result = await tools.get('createOfficeArtifact')!.execute({ family: 'document', outcome: 'Build a report', audience: 'Board', sourceHandles: [], canonicalWebsite: 'https://example.com', companyHasNoWebsite: false, idempotencyKey: 'request-12345678' }, context)
+    const result = await tools.get('createOfficeArtifact')!.execute({ family: 'document', outcome: 'Build a report', audience: 'Board', additionalContext: 'Use the figures at https://reports.example.com/q2', sourceHandles: [], idempotencyKey: 'request-12345678' }, context)
     expect(result.data).toMatchObject({ artifactId: id(1), jobId: id(90), status: 'queued', editorUrl: `https://app.example.com/w/${id(2)}/office/${id(1)}` })
-    expect(port.create).toHaveBeenCalledWith(expect.objectContaining({ userId: id(80), assistantId: id(81), workspaceId: id(2) }))
+    expect(port.create).toHaveBeenCalledWith(expect.objectContaining({ userId: id(80), assistantId: id(81), workspaceId: id(2), additionalContext: 'Use the figures at https://reports.example.com/q2' }))
   })
 
   it('preserves version conflicts and Comment-mode proposals', async () => {
@@ -103,4 +103,3 @@ describe('[COMP:office/tools] Office governance', () => {
     expect(res.isError).toBeFalsy()
   })
 })
-

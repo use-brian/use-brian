@@ -25,12 +25,9 @@ export const OfficeGenerationBriefSchema = z.object({
   sourceHandles: z.array(z.string().min(1).max(1_000)).max(100),
   requestedSensitivityFloor: OfficeSensitivitySchema,
   templateId: OfficeUuidSchema.optional(),
-  canonicalWebsite: z.string().url().refine((url) => url.startsWith('https:'), 'Canonical website must use HTTPS').optional(),
-  companyHasNoWebsite: z.boolean().default(false),
+  additionalContext: z.string().min(1).max(4_000).optional(),
   idempotencyKey: z.string().min(8).max(255),
-}).strict().refine((brief) => !(brief.canonicalWebsite && brief.companyHasNoWebsite), {
-  message: 'canonicalWebsite and companyHasNoWebsite are mutually exclusive',
-})
+}).strict()
 export type OfficeGenerationBrief = z.infer<typeof OfficeGenerationBriefSchema>
 
 export type OfficeAuthorityProjection = {
@@ -45,7 +42,8 @@ export type OfficeGenerationEventCode =
   | 'office.job.authority_resolved'
   | 'office.job.template_selected'
   | 'office.job.grounding_started'
-  | 'office.job.website_inspected'
+  | 'office.job.reference_url_inspected'
+  | 'office.job.context_grounded'
   | 'office.job.claim_plan_ready'
   | 'office.job.objects_constructed'
   | 'office.job.media_processed'
@@ -80,7 +78,7 @@ export type OfficeEvidencePacket = {
 
 export type OfficeGenerationOutcome =
   | { status: 'completed'; artifactId: string; version: number; exportBytes: Uint8Array; semanticHash: string }
-  | { status: 'needs_input'; code: 'website_required' | 'template_ambiguous' | 'material_fact_missing'; question: string }
+  | { status: 'needs_input'; code: 'template_ambiguous' | 'material_fact_missing'; question: string }
   | { status: 'failed'; code: string; message: string }
   | { status: 'cancelled' }
 
