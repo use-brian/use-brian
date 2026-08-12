@@ -4,8 +4,9 @@
  * A hardened BrowserWindow loads the deployed canvas web app and adds the
  * native capabilities a browser cannot: a global quick-capture hotkey, a tray,
  * OS-level menus, a `usebrian://` deep-link protocol, and a system-browser
- * sign-in flow (RFC 8252 + PKCE). It owns no UI and no backend — every pixel is
- * served by apps/app-web. All decisions are delegated to the pure helpers
+ * sign-in flow (RFC 8252 + PKCE). Product UI is served by apps/app-web; the
+ * only shell-owned interactive surface is the bundled ambient Brian companion.
+ * It owns no backend. All decisions are delegated to the pure helpers
  * (config / window-policy / deep-link / quick-capture / desktop-auth) so this
  * file stays thin and they stay tested.
  *
@@ -13,7 +14,7 @@
  * [COMP:app-desktop/main]
  */
 
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { existsSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { spawn } from "node:child_process";
@@ -29,6 +30,7 @@ import {
   safeStorage,
   dialog,
   powerMonitor,
+  powerSaveBlocker,
   screen,
   systemPreferences,
   net,
@@ -48,6 +50,11 @@ import {
 import electronUpdater from "electron-updater";
 
 import { resolveConfig } from "./config.js";
+import {
+  AWAKE_BRIAN_FILE_NAME,
+  parseAwakeBrianPreference,
+  serializeAwakeBrianPreference,
+} from "./awake-brian.js";
 import {
   DEFAULT_LOCAL_APP_URL,
   TARGET_FILE_NAME,
@@ -204,6 +211,8 @@ const cfg = resolveConfig(process.env, readPersistedTargetRaw());
 const isDev = !app.isPackaged;
 
 const PRELOAD_PATH = join(__dirname, "preload.cjs");
+const PET_PRELOAD_PATH = join(__dirname, "pet-preload.cjs");
+const BRIAN_PET_PAGE = join(__dirname, "brian-pet.html");
 const SIGNIN_PAGE = join(__dirname, "signin.html");
 /**
  * The offline landing — shown (instead of the sign-in landing) when a signed-in
@@ -233,6 +242,10 @@ type SwitchResult = { ok: true } | { ok: false; error: "switch" | "reauth" };
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
+let brianPetWindow: BrowserWindow | null = null;
+let awakeBrianBlockerId: number | null = null;
+let keepBrianAwake = false;
+let pendingMessageBrian = false;
 /** The PKCE verifier for an in-flight sign-in; held until the callback returns. */
 let pendingVerifier: string | null = null;
 /** Whether the in-flight sign-in adds a second account (stash) vs replaces the active one. */
@@ -263,6 +276,16 @@ let activeAccessGrant: CloudflareAccessGrant | null = null;
 let accessReauthorizationNeeded = false;
 
 const GATEWAY_RECHECK_INTERVAL_MS = 1000;
+
+function awakeBrianFile(): string {
+  return join(app.getPath("userData"), AWAKE_BRIAN_FILE_NAME);
+}
+
+try {
+  keepBrianAwake = parseAwakeBrianPreference(readFileSync(awakeBrianFile(), "utf8"));
+} catch {
+  keepBrianAwake = false;
+}
 
 /** Electron-session transport: HttpOnly deployment-gateway cookies stay on-device. */
 const gatewayProbeFetch: GatewayProbeFetch = (input, init) => {
@@ -461,6 +484,7 @@ function createWindow(): BrowserWindow {
   win.webContents.on("did-finish-load", () => {
     if (!win.webContents.isDestroyed()) void win.webContents.insertCSS(DESKTOP_CHROME_SAFETY_CSS);
     if (cfg.target === "local") void detectLoadedGatewayChallenge(win);
+    flushMessageBrian(win);
   });
 
   // §2.3 visible target indicator: a local target suffixes every page title so
@@ -541,6 +565,130 @@ function createWindow(): BrowserWindow {
     destroyRecorderOverlay();
   });
   return win;
+}
+
+// ── Awake Brian companion ─────────────────────────────────────
+
+const BRIAN_PET_WIDTH = 150;
+const BRIAN_PET_HEIGHT = 154;
+const BRIAN_PET_GUTTER = 18;
+
+function isAppPage(win: BrowserWindow): boolean {
+  try {
+    const current = new URL(win.webContents.getURL());
+    if (current.origin === cfg.appOrigin) return true;
+    return bundledAvailable() && current.pathname === pathToFileURL(BUNDLE_INDEX).pathname;
+  } catch {
+    return false;
+  }
+}
+
+function flushMessageBrian(win: BrowserWindow): void {
+  if (!pendingMessageBrian || win.isDestroyed() || !isAppPage(win)) return;
+  focusWindow(win);
+  win.webContents.send("Use Brian:message-brian");
+}
+
+function messageBrian(): void {
+  pendingMessageBrian = true;
+  const win = ensureWindow();
+  focusWindow(win);
+  flushMessageBrian(win);
+}
+
+function positionBrianPet(): void {
+  if (!brianPetWindow || brianPetWindow.isDestroyed()) return;
+  const area = screen.getPrimaryDisplay().workArea;
+  brianPetWindow.setPosition(
+    area.x + area.width - BRIAN_PET_WIDTH - BRIAN_PET_GUTTER,
+    area.y + area.height - BRIAN_PET_HEIGHT - BRIAN_PET_GUTTER,
+    false,
+  );
+}
+
+function showBrianPet(): void {
+  if (brianPetWindow && !brianPetWindow.isDestroyed()) {
+    positionBrianPet();
+    brianPetWindow.showInactive();
+    return;
+  }
+
+  const win = new BrowserWindow({
+    width: BRIAN_PET_WIDTH,
+    height: BRIAN_PET_HEIGHT,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    maximizable: false,
+    minimizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    hasShadow: false,
+    show: false,
+    webPreferences: {
+      preload: PET_PRELOAD_PATH,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      devTools: false,
+      spellcheck: false,
+    },
+  });
+  brianPetWindow = win;
+  positionBrianPet();
+  win.setAlwaysOnTop(true, "floating");
+  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  win.webContents.on("will-navigate", (event) => event.preventDefault());
+  win.once("ready-to-show", () => win.showInactive());
+  win.on("closed", () => {
+    if (brianPetWindow === win) brianPetWindow = null;
+  });
+  void win.loadFile(BRIAN_PET_PAGE);
+}
+
+function stopAwakeBrianBlocker(): void {
+  if (awakeBrianBlockerId === null) return;
+  if (powerSaveBlocker.isStarted(awakeBrianBlockerId)) {
+    powerSaveBlocker.stop(awakeBrianBlockerId);
+  }
+  awakeBrianBlockerId = null;
+}
+
+function syncAwakeBrianMode(): void {
+  if (keepBrianAwake) {
+    if (awakeBrianBlockerId === null || !powerSaveBlocker.isStarted(awakeBrianBlockerId)) {
+      awakeBrianBlockerId = powerSaveBlocker.start("prevent-app-suspension");
+    }
+    showBrianPet();
+    return;
+  }
+
+  stopAwakeBrianBlocker();
+  if (brianPetWindow && !brianPetWindow.isDestroyed()) brianPetWindow.destroy();
+  brianPetWindow = null;
+}
+
+function toggleKeepBrianAwake(): void {
+  const next = !keepBrianAwake;
+  try {
+    writeFileSync(awakeBrianFile(), serializeAwakeBrianPreference(next));
+  } catch (error) {
+    console.warn("Failed to persist Keep Brian Awake preference:", error);
+    refreshAppMenu();
+    refreshTrayMenu();
+    dialog.showErrorBox(
+      "Could not update Keep Brian Awake",
+      "Use Brian could not save this setting. Check that its application data folder is writable and try again.",
+    );
+    return;
+  }
+  keepBrianAwake = next;
+  syncAwakeBrianMode();
+  refreshAppMenu();
+  refreshTrayMenu();
 }
 
 // ── Recorder overlay (docs/architecture/media/live-capture.md) ─────────
@@ -2372,12 +2520,14 @@ function refreshAppMenu(): void {
       onSwitchTarget: () => void switchTargetFromMenu(),
       onUninstall: () => void confirmAndUninstall(),
       onStartFirefoxControl: () => void startFirefoxForControl(),
+      onToggleKeepAwake: toggleKeepBrianAwake,
       isDev,
       update: updateMenuItem(),
       target: { kind: cfg.target, label: cfg.targetLabel },
       // Packaged macOS only: Windows has the NSIS uninstaller; a dev run has
       // no bundle (and its exe lives in node_modules/electron).
       uninstall: process.platform === "darwin" && app.isPackaged,
+      keepBrianAwake,
     }),
   );
 }
@@ -2393,6 +2543,12 @@ function buildTrayMenu(): Menu {
     { label: "Open Use Brian", click: () => focusWindow(ensureWindow()) },
     { label: "Quick Capture", click: () => summonAndCapture() },
     { label: "Start Recording", click: () => summonAndRecord() },
+    {
+      label: "Keep Brian Awake",
+      type: "checkbox",
+      checked: keepBrianAwake,
+      click: () => toggleKeepBrianAwake(),
+    },
     { label: "Start Firefox for My Browser…", click: () => void startFirefoxForControl() },
   ];
   // A local target has no login — the tray mirrors the app menu (§2.3).
@@ -2474,6 +2630,20 @@ if (!gotLock) {
 
   // The sign-in landing's button asks the main process to start the flow.
   ipcMain.on("Use Brian:sign-in", () => startSignIn());
+  ipcMain.on("Use Brian:message-brian", (event) => {
+    if (
+      brianPetWindow &&
+      !brianPetWindow.isDestroyed() &&
+      event.sender.id === brianPetWindow.webContents.id
+    ) {
+      messageBrian();
+    }
+  });
+  ipcMain.on("Use Brian:message-brian-consumed", (event) => {
+    if (mainWindow && !mainWindow.isDestroyed() && event.sender.id === mainWindow.webContents.id) {
+      pendingMessageBrian = false;
+    }
+  });
 
   // Dock live recording: show/close the floating overlay with the capture.
   ipcMain.on("Use Brian:recording-state", (_event, on: unknown) => {
@@ -2768,6 +2938,10 @@ if (!gotLock) {
     mainWindow = createWindow();
     refreshAppMenu();
     tray = createTray();
+    syncAwakeBrianMode();
+    screen.on("display-added", positionBrianPet);
+    screen.on("display-removed", positionBrianPet);
+    screen.on("display-metrics-changed", positionBrianPet);
 
     const ok = globalShortcut.register(cfg.quickCaptureHotkey, summonAndCapture);
     if (!ok) console.warn(`Failed to register hotkey: ${cfg.quickCaptureHotkey}`);
@@ -2792,7 +2966,10 @@ if (!gotLock) {
     // intentional no-op — stay resident until the user quits explicitly.
   });
 
-  app.on("will-quit", () => globalShortcut.unregisterAll());
+  app.on("will-quit", () => {
+    globalShortcut.unregisterAll();
+    stopAwakeBrianBlocker();
+  });
 }
 
 // Keep the tray reference alive for the GC.
