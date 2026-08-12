@@ -532,6 +532,7 @@ import {
 } from './db/channel-integrations.js'
 import { createDbApiKeyStore } from './db/api-key-store.js'
 import { publicApiRoutes } from './routes/public-api.js'
+import { generateSynthesisRoutes, type GenerateSynthesisBilling } from './routes/generate-synthesis.js'
 import { assistantMcpRoutes } from './routes/assistant-mcp.js'
 import { createControlPlaneReader } from './agent-surface/control-plane-reader.js'
 import { buildAgentToolset } from './agent-surface/toolset.js'
@@ -779,6 +780,11 @@ export interface OpenApiPorts {
   ingestCharge?: (episode: { id: string; workspaceId: string; sourceKind: string; createdByUserId: string }) => Promise<void>
   /** Hosted recording-duration credit quote; absent in OSS/self-hosted. */
   recordingSurchargeCredits?: (durationSeconds: number) => number
+  /**
+   * Hosted standalone Generate-from-Brain pricing + success charge. The open
+   * route remains fully usable without it and reports zero credits in OSS.
+   */
+  generateBilling?: GenerateSynthesisBilling
   /**
    * Metered model lane billing (model-registry.md L8/L15) — the closed
    * `5 + ceil(cost/$0.040)` estimate / spend-cap / charge seams. Default
@@ -4910,6 +4916,22 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       ? ({ userId, pageId }) => ingestPageRunner({ userId, pageId })
       : undefined,
   }))
+
+  // Standalone Generate from Brain is open in both editions. Hosted injects
+  // quote/gate/charge billing policy; OSS confirms the long-lived run but is
+  // unmetered because the operator pays the configured model provider directly.
+  app.use(
+    '/api/workspaces/:workspaceId/blueprints',
+    requireAuth(env.JWT_SECRET),
+    generateSynthesisRoutes({
+      getRole: (userId, workspaceId) => workspaceStore.getRole(userId, workspaceId),
+      generateSynthesize,
+      resolvePrimaryAssistantForWorkspace,
+      pageTemplateStore,
+      checkCreditBudget: ports.generateBilling ? ports.checkCreditBudget : undefined,
+      billing: ports.generateBilling,
+    }),
+  )
 
   // Teamspaces (migration 313) — Notion-style page containers above the doc
   // page tree. Visibility rides RLS; sensitivity gates live in the routes.
