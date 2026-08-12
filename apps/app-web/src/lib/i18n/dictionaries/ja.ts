@@ -7576,6 +7576,11 @@ export const ja: Dictionary = {
     inputFailed: "ブラウザに入力を送信できませんでした",
     streamLive: "ライブ",
     streamDelayed: "遅延表示",
+    backendSwitchLabel: "アシスタントのブラウザ",
+    backendSwitchHint:
+      "このセッションでアシスタントが次に操作するブラウザを選びます。それまでは現在のライブ表示が続きます。",
+    backendSwitchSaved: "アシスタントの次のブラウザ操作では {browser} を使用します。",
+    backendSwitchFailed: "このセッションのブラウザを切り替えられませんでした。もう一度お試しください。",
     navBack: "戻る",
     navForward: "進む",
     navReload: "再読み込み",
@@ -7773,14 +7778,15 @@ export const ja: Dictionary = {
       loginHint:
         "あなたが操作するリモートブラウザをライブで開きます。そこでサインインし、Cookieをこのプロフィールに保存してください。パスワードはサイトにのみ送られ、私たちには届きません。",
       captureLabel: "自分のブラウザからこのログインを保存",
-      capturePlaceholder: "instagram.com または完全な URL",
+      capturePlaceholder: "instagram.com",
       captureAction: "このログインを保存",
       captureSaving: "保存中...",
       captureHint:
-        "指定したサイトのCookieを、接続済みのブラウザから取得してここに保存します。以降このプロフィールでのクラウドブラウズは、最初からサインイン済みの状態で始まります。",
+        "このプロフィールとペアリングしたブラウザで指定サイトを開くと、タブの許可を求めた後、そのサイトのCookieだけをプロフィールのクラウド保管庫へ明示的にコピーします。パスワードはコピーされません。",
       captureNoSession: "先にこのプロフィールのMy Browserを接続してください。接続後、ここに戻ってログインを保存できます。",
-      captureFailed: "ブラウザからのセッション保存に失敗しました。もう一度お試しください。",
+      captureFailed: "このログインを保存できませんでした。許可したタブを指定サイトで開いたまま、もう一度お試しください。",
       captureSuccess: "{site} を {date} に保存しました。",
+      captureSuccessNoDate: "{site} を保存しました。",
       proxyLabel: "プロキシURL",
       proxyPlaceholder: "http://user:pass@proxy.example:8080",
       proxyHint:
