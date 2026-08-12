@@ -1,21 +1,35 @@
+/** @vitest-environment jsdom */
+
+import { act } from "react";
 import { describe, expect, it } from "vitest";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { OfficeArtifact } from "@/lib/office/api";
 import { OfficeReview } from "../office-review";
 
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+function artifact(family: OfficeArtifact["family"], lifecycleState: OfficeArtifact["lifecycleState"] = "active", title = "Quarterly update"): OfficeArtifact {
+  return { artifactId: "artifact-1", family, title, version: 2, lifecycleState, role: "edit" };
+}
+
+function review(subject: OfficeArtifact) {
+  return <I18nProvider locale="en" dict={en}>
+    <OfficeReview
+      artifact={subject}
+      artifactId="artifact-1"
+      workspaceId="workspace-1"
+      selectedObjectIds={[]}
+      onLifecycle={() => undefined}
+    />
+  </I18nProvider>;
+}
+
 function render(family: OfficeArtifact["family"]) {
   return renderToStaticMarkup(
-    <I18nProvider locale="en" dict={en}>
-      <OfficeReview
-        artifact={{ artifactId: "artifact-1", family, title: "Quarterly update", version: 2, lifecycleState: "active", role: "edit" }}
-        artifactId="artifact-1"
-        workspaceId="workspace-1"
-        selectedObjectIds={[]}
-        onLifecycle={() => undefined}
-      />
-    </I18nProvider>,
+    review(artifact(family)),
   );
 }
 
@@ -45,5 +59,39 @@ describe("[COMP:app-web/office-iteration-panel] Office file actions", () => {
     expect(html).toContain("Download XLSX");
     expect(html).toContain("Preview invoice PDF");
     expect(html).not.toContain(">Present<");
+  });
+
+  it("keeps the full deletion title visible while the member types", () => {
+    const title = "Generate a 10 pages presentation with the complete quarterly launch plan";
+    const host = document.createElement("div");
+    const root = createRoot(host);
+    act(() => root.render(review(artifact("presentation", "trash", title))));
+
+    const input = host.querySelector<HTMLInputElement>("input")!;
+    const referenceId = input.getAttribute("aria-describedby")!;
+    const reference = host.querySelector<HTMLElement>(`[id="${referenceId}"]`)!;
+    const deleteButton = [...host.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Delete permanently")!;
+    expect(reference.textContent).toBe(title);
+    expect(reference.className).toContain("break-words");
+    expect(input.placeholder).toBe("Enter the title shown above");
+
+    const setValue = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
+    act(() => {
+      setValue.call(input, title[0]);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    expect(input.value).toBe(title[0]);
+    expect(reference.textContent).toBe(title);
+    expect(deleteButton.disabled).toBe(true);
+
+    act(() => {
+      setValue.call(input, title);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(deleteButton.disabled).toBe(false);
+
+    act(() => root.unmount());
   });
 });

@@ -12,6 +12,7 @@ import {
   deleteCustomLlmEndpoint,
   listCustomLlmEndpoints,
   setCustomLlmTierDefault,
+  updateCustomLlmProfile,
 } from "../custom-llm-endpoints";
 
 const mockFetch = vi.mocked(authFetch);
@@ -37,19 +38,26 @@ describe("[COMP:app-web/custom-llm-endpoints] custom endpoint SDK", () => {
   it("creates profiles and drives independent tier assignment routes", async () => {
     mockFetch
       .mockResolvedValueOnce(new Response(JSON.stringify({ profile: { id: "profile-1" } }), { status: 201 }))
+      .mockResolvedValueOnce(ok({ profile: { id: "profile-1", contextWindow: 1048576 } }))
       .mockResolvedValueOnce(ok({ tierDefault: { tier: "max", profileId: "profile-1" } }))
       .mockResolvedValue(ok());
     await createCustomLlmProfile("workspace-1", "endpoint-1", {
       name: "Max", modelId: "sol-max", contextWindow: 200000, maxOutputTokens: 32768,
+    });
+    await updateCustomLlmProfile("workspace-1", "endpoint-1", "profile-1", {
+      name: "Max", modelId: "sol-max", contextWindow: 1048576, maxOutputTokens: 65536,
     });
     await setCustomLlmTierDefault("workspace-1", "max", "profile-1");
     await clearCustomLlmTierDefault("workspace-1", "max");
     await deleteCustomLlmProfile("workspace-1", "endpoint-1", "profile-1");
     await deleteCustomLlmEndpoint("workspace-1", "endpoint-1");
     expect(String(mockFetch.mock.calls[0][0])).toContain("/endpoint-1/profiles");
-    expect(String(mockFetch.mock.calls[1][0])).toMatch(/custom-llm-endpoints\/tiers\/max$/);
-    expect((mockFetch.mock.calls[2][1] as RequestInit).method).toBe("DELETE");
-    expect(String(mockFetch.mock.calls[3][0])).toContain("/endpoint-1/profiles/profile-1");
+    expect(String(mockFetch.mock.calls[1][0])).toContain("/endpoint-1/profiles/profile-1");
+    expect((mockFetch.mock.calls[1][1] as RequestInit).method).toBe("PATCH");
+    expect(JSON.parse((mockFetch.mock.calls[1][1] as RequestInit).body as string)).toMatchObject({ contextWindow: 1048576 });
+    expect(String(mockFetch.mock.calls[2][0])).toMatch(/custom-llm-endpoints\/tiers\/max$/);
+    expect((mockFetch.mock.calls[3][1] as RequestInit).method).toBe("DELETE");
+    expect(String(mockFetch.mock.calls[4][0])).toContain("/endpoint-1/profiles/profile-1");
   });
 
   it("treats a 404 list as an unavailable OSS-only surface", async () => {

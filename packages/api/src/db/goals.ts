@@ -32,7 +32,7 @@ const FULL_SELECT = `
   brief, created_at as "createdAt", updated_at as "updatedAt"
 `
 
-const TERMINAL_STATUSES = ['done', 'abandoned']
+export const GOAL_TERMINAL_STATUSES = ['done', 'abandoned'] as const
 
 type GoalRow = {
   id: string
@@ -177,7 +177,7 @@ export async function listGoals(
     idx++
   } else if (!filters.includeTerminal) {
     wheres.push(`status <> ALL($${idx})`)
-    values.push(TERMINAL_STATUSES)
+    values.push(GOAL_TERMINAL_STATUSES)
     idx++
   }
   if (filters.hostType) {
@@ -230,12 +230,11 @@ export async function listGoals(
 /** Why a host-lifecycle cascade retired the goal. Lands in `blocker_reason`. */
 export type GoalHostCascadeReason = 'host_task_deleted' | 'host_task_closed'
 
-/** Statuses the cascade never touches: already terminal (nothing to retire), or
- *  `running` — the acting loop owns a claimed goal and would re-arm straight
- *  over our write, so we leave it to the loop, whose host resolvers already
- *  surface a missing host as "not satisfied" and block legibly. Same
- *  single-flight rule the structural rollup follows. */
-const CASCADE_SKIP_STATUSES = [...TERMINAL_STATUSES, 'running']
+/** Task CLOSE skips already-terminal goals plus `running` (the loop may be
+ * completing that host). Task DELETE skips terminal goals only: the host is
+ * explicitly gone, and guarded driver transitions keep an in-flight bounded
+ * iteration from resurrecting its retired goal. */
+const CLOSE_CASCADE_SKIP_STATUSES = [...GOAL_TERMINAL_STATUSES, 'running']
 
 /** Minimal executor seam: the default is the owner pool (`query`), but a caller
  *  already inside a transaction passes its own client so the cascade commits
@@ -262,12 +261,15 @@ export async function abandonGoalsForHostTaskSystem(
   opts: { draftsOnly?: boolean; exec?: GoalCascadeExecutor } = {},
 ): Promise<number> {
   const exec = opts.exec ?? { query: (text: string, values: unknown[]) => query(text, values) }
+  const skippedStatuses = opts.draftsOnly
+    ? CLOSE_CASCADE_SKIP_STATUSES
+    : GOAL_TERMINAL_STATUSES
   const result = await exec.query(
     `UPDATE goals
-        SET status = 'abandoned', blocker_reason = $2
+        SET status = 'abandoned', blocker_reason = $2, updated_at = now()
       WHERE host_type = 'task' AND host_id = $1
         AND status <> ALL($3)${opts.draftsOnly ? '\n        AND confirmed_at IS NULL' : ''}`,
-    [taskId, reason, CASCADE_SKIP_STATUSES],
+    [taskId, reason, skippedStatuses],
   )
   return result.rowCount ?? 0
 }
@@ -294,6 +296,28 @@ export async function setGoalStatusSystem(
     [status, blockerReason, id],
   )
   return result.rows.length === 0 ? null : toRecord(result.rows[0])
+}
+
+/**
+ * Complete an acting driver's ownership handoff without racing an explicit
+ * user cancellation. The driver owns a goal only while it is `running`; task
+ * deletion may retire that same row to `abandoned`. A conditional transition
+ * makes the deletion win instead of letting a stale bounded iteration
+ * overwrite it with `active`, `done`, or `blocked`.
+ */
+export async function transitionRunningGoalStatusSystem(
+  id: string,
+  status: GoalStatus,
+  blockerReason: string | null = null,
+): Promise<boolean> {
+  const result = await query(
+    `UPDATE goals
+        SET status = $1, blocker_reason = $2, updated_at = now()
+      WHERE id = $3 AND status = 'running'
+      RETURNING id`,
+    [status, blockerReason, id],
+  )
+  return (result.rowCount ?? 0) > 0
 }
 
 /** Update a goal's curated fields and/or confirm it (autopilot §4). `confirm:
@@ -347,7 +371,7 @@ export async function countOpenSubGoalsSystem(id: string): Promise<number> {
   const result = await query<{ count: string }>(
     `SELECT count(*)::text as count FROM goals
      WHERE parent_goal_id = $1 AND status <> ALL($2)`,
-    [id, TERMINAL_STATUSES],
+    [id, GOAL_TERMINAL_STATUSES],
   )
   return Number(result.rows[0]?.count ?? '0')
 }
@@ -408,7 +432,7 @@ export async function findEventWaitingGoalsSystem(
       WHERE awaiting_event IS NOT NULL
         AND workspace_id = $1
         AND status <> ALL($2)`,
-    [workspaceId, TERMINAL_STATUSES],
+    [workspaceId, GOAL_TERMINAL_STATUSES],
   )
   return result.rows.map((r) => ({ goalId: r.goalId, subscriptions: r.subscriptions ?? [] }))
 }

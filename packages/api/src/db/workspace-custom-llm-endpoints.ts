@@ -73,6 +73,7 @@ export type WorkspaceCustomLlmEndpointStore = {
   listTierDefaults(params: { actingUserId: string; workspaceId: string }): Promise<WorkspaceCustomLlmTierDefault[]>
   create(params: { actingUserId: string; workspaceId: string; input: VerifiedCustomLlmEndpointInput }): Promise<WorkspaceCustomLlmEndpoint>
   createProfile(params: { actingUserId: string; workspaceId: string; endpointId: string; input: VerifiedCustomLlmProfileInput }): Promise<WorkspaceCustomLlmProfile | null>
+  updateProfile(params: { actingUserId: string; workspaceId: string; endpointId: string; profileId: string; input: VerifiedCustomLlmProfileInput }): Promise<WorkspaceCustomLlmProfile | null>
   delete(params: { actingUserId: string; workspaceId: string; endpointId: string }): Promise<boolean>
   deleteProfile(params: { actingUserId: string; workspaceId: string; endpointId: string; profileId: string }): Promise<boolean>
   setTierDefault(params: { actingUserId: string; workspaceId: string; tier: CustomLlmTier; profileId: string }): Promise<WorkspaceCustomLlmTierDefault | null>
@@ -254,6 +255,24 @@ export function createDbWorkspaceCustomLlmEndpointStore(
           WHERE e.workspace_id = $1 AND e.id = $2
          RETURNING ${PROFILE_COLS}`,
         [workspaceId, endpointId, input.name, input.modelId, input.contextWindow, input.maxOutputTokens, input.verifiedAt],
+      )
+      return result.rows[0] ?? null
+    },
+
+    async updateProfile({ actingUserId, workspaceId, endpointId, profileId, input }) {
+      const result = await queryWithRLS<WorkspaceCustomLlmProfile>(
+        actingUserId,
+        `UPDATE workspace_custom_llm_profiles
+            SET name = $4,
+                model_id = $5,
+                context_window = $6,
+                max_output_tokens = $7,
+                supports_tools = true,
+                verified_at = $8,
+                updated_at = now()
+          WHERE workspace_id = $1 AND endpoint_id = $2 AND id = $3
+          RETURNING ${PROFILE_COLS}`,
+        [workspaceId, endpointId, profileId, input.name, input.modelId, input.contextWindow, input.maxOutputTokens, input.verifiedAt],
       )
       return result.rows[0] ?? null
     },

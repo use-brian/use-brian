@@ -404,6 +404,31 @@ describe('[COMP:workflow/dependency-preflight] listSlackChannels', () => {
     ])
   })
 
+  it('looks up a supplied private channel id directly instead of trusting list absence', async () => {
+    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) =>
+      new Response(
+        JSON.stringify({
+          ok: true,
+          channel: { id: 'C0PRIVATE1', name: 'engineering-private', is_private: true, is_member: true },
+        }),
+        { status: 200 },
+      ),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const { listSlackChannels } = createWorkflowDependencyPreflight({
+      integrationStore: integrationStoreWith({ slack: { credentials: { bot_token: 'xoxb-1' } } }),
+    })
+
+    const r = await listSlackChannels({ assistantId: ASSISTANT_ID, channelId: 'C0PRIVATE1' })
+
+    expect(r).toEqual({
+      ok: true,
+      channels: [{ id: 'C0PRIVATE1', name: 'engineering-private', isMember: true }],
+    })
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain('/conversations.info')
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({ channel: 'C0PRIVATE1' })
+  })
+
   it('surfaces a missing_scope error instead of throwing', async () => {
     vi.stubGlobal(
       'fetch',

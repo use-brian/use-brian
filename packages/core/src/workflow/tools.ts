@@ -216,11 +216,13 @@ export type WorkflowToolDeps = {
    * Authoring-time Slack channel discovery — backs the `listSlackChannels`
    * tool so the model can target a real Slack channel id (`C…`/`G…`) from any
    * session (including web/Telegram) instead of guessing, then set it on the
-   * step's `deliver.channelId`. Enumerates the BYO bot's channels via Slack
-   * `conversations.list`. Absent (tests, minimal boots) → the tool reports that
-   * discovery is unavailable. See docs/plans/slack-native-delivery-target.md.
+   * step's `deliver.channelId`. With no `channelId`, enumerates the BYO bot's
+   * channels via Slack `conversations.list`; with a concrete id, performs the
+   * authoritative `conversations.info` lookup so browse-list absence is never
+   * confused with lack of access. Absent (tests, minimal boots) → the tool
+   * reports that discovery is unavailable. See docs/architecture/features/workflow.md.
    */
-  listSlackChannels?: (args: { assistantId: string }) => Promise<
+  listSlackChannels?: (args: { assistantId: string; channelId?: string }) => Promise<
     | { ok: true; channels: Array<{ id: string; name: string; isMember: boolean }> }
     | { ok: false; reason: string }
   >
@@ -699,14 +701,19 @@ async function dependencyIssues(
   def: WorkflowDefinition,
   trigger: WorkflowTrigger | undefined,
   context: ToolContext,
-  deps: Pick<WorkflowToolDeps, 'validateDeliveryTarget' | 'preflightConnectorTool' | 'resolvePageAnchor'>,
+  deps: Pick<WorkflowToolDeps, 'validateDeliveryTarget' | 'preflightConnectorTool' | 'resolvePageAnchor' | 'resolvePrimary'>,
 ): Promise<{ errors: string[]; warnings: string[] }> {
   const errors: string[] = []
   const warnings: string[] = []
 
   // ── A. Delivery-target reachability ──────────────────────────────────────
   if (deps.validateDeliveryTarget) {
-    const targets: Array<{ stepId: string; channelType: 'telegram' | 'slack' | 'whatsapp'; channelId: string }> = []
+    const targets: Array<{
+      stepId: string
+      assistantTarget: AssistantCallStep['target']['assistantId']
+      channelType: 'telegram' | 'slack' | 'whatsapp'
+      channelId: string
+    }> = []
     for (const step of def.steps) {
       if (
         step.type === 'assistant_call' &&
@@ -717,7 +724,12 @@ async function dependencyIssues(
         // reachability validation — the send simply attempts at run time.
         step.deliver.channelType !== 'msteams'
       ) {
-        targets.push({ stepId: step.id, channelType: step.deliver.channelType, channelId: step.deliver.channelId })
+        targets.push({
+          stepId: step.id,
+          assistantTarget: step.target.assistantId,
+          channelType: step.deliver.channelType,
+          channelId: step.deliver.channelId,
+        })
       }
     }
     // The schedule trigger's `delivery` sugar is stamped onto the terminal
@@ -728,23 +740,39 @@ async function dependencyIssues(
     if (trigger?.kind === 'schedule' && trigger.delivery) {
       const channel = trigger.delivery.channel
       const termId = terminalAssistantCallId(def)
-      if (termId && !terminalExplicitDeliverId(def, channel)) {
+      const termStep = termId ? def.steps.find((step) => step.id === termId) : undefined
+      if (termStep?.type === 'assistant_call' && !terminalExplicitDeliverId(def, channel)) {
         const resolved = resolveDeliveryChannel(context, channel)
         if (!resolved.channelId) {
           errors.push(unresolvedDeliveryError(channel))
         } else if (resolved.channelType !== 'web') {
           targets.push({
-            stepId: termId,
+            stepId: termStep.id,
+            assistantTarget: termStep.target.assistantId,
             channelType: resolved.channelType as 'telegram' | 'slack' | 'whatsapp',
             channelId: resolved.channelId,
           })
         }
       }
     }
+    let primaryAssistantId: string | null | undefined
     for (const t of targets) {
       try {
+        // Channel credentials belong to the assistant that will execute and
+        // deliver this step, not the assistant hosting the authoring chat.
+        // Resolve the durable `primary` sentinel the same way the executor and
+        // REST authoring path do. If the resolver is unwired, skip the probe:
+        // substituting the chat assistant would recreate the Product → Brian
+        // false rejection from production.
+        if (t.assistantTarget === 'primary' && primaryAssistantId === undefined) {
+          primaryAssistantId = context.workspaceId && deps.resolvePrimary
+            ? await deps.resolvePrimary(context.workspaceId)
+            : null
+        }
+        const assistantId = t.assistantTarget === 'primary' ? primaryAssistantId : t.assistantTarget
+        if (!assistantId) continue
         const res = await deps.validateDeliveryTarget({
-          assistantId: context.assistantId,
+          assistantId,
           channelType: t.channelType,
           channelId: t.channelId,
         })
@@ -2107,8 +2135,9 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
   const listSlackChannels = buildTool({
     name: 'listSlackChannels',
     description:
-      "List the Slack channels this workspace's bot can post to: each channel's id (a Slack `C…`/`G…` id) and name. " +
-      'Call this BEFORE setting a Slack delivery target on a workflow or reminder, then use the chosen channel\'s `id` as the delivery target — set it on the terminal step\'s `deliver` as `{ channelType: "slack", channelId: "<id>" }`. ' +
+      "Browse Slack channels visible to the delivering assistant's bot: each channel's id (a Slack `C…`/`G…` id) and name. " +
+      'If the user supplied a concrete channel id, pass it as `channelId`: that performs an authoritative direct lookup for the exact channel. A channel missing from the browse list is NOT proof the bot lacks access; never ask for an invite or reconnect from list absence alone. Use the direct lookup or `proposeWorkflow` to check it. ' +
+      'When choosing by name, call this before setting a Slack delivery target, then use the chosen channel\'s `id` on the terminal step\'s `deliver` as `{ channelType: "slack", channelId: "<id>" }`. ' +
       'The internal channel UUID from `listChannels` is NOT a Slack channel id and fails `channel_not_found` — always use an id from here. ' +
       '`isMember: true` marks channels the bot is already in (postable without a join).',
     inputSchema: z.object({
@@ -2117,6 +2146,11 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
         .uuid()
         .optional()
         .describe('The delivering assistant (the workflow step target). Defaults to the current assistant.'),
+      channelId: z
+        .string()
+        .min(1)
+        .optional()
+        .describe('A concrete user-supplied Slack channel id to verify directly. Omit only when browsing channels.'),
     }),
     isReadOnly: true,
     isConcurrencySafe: true,
@@ -2126,7 +2160,10 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       if (!deps.listSlackChannels) {
         return { data: 'Slack channel discovery is not available in this context.', isError: true }
       }
-      const res = await deps.listSlackChannels({ assistantId: input.assistantId ?? context.assistantId })
+      const res = await deps.listSlackChannels({
+        assistantId: input.assistantId ?? context.assistantId,
+        channelId: input.channelId,
+      })
       if (!res.ok) return { data: res.reason, isError: true }
       return { data: { channels: res.channels } }
     },

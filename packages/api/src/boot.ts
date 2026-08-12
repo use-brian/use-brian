@@ -352,6 +352,7 @@ import { listUsableWorkspaceConnectors } from './connectors/usable-connectors.js
 import { type GoalDeliver } from './goals/writeback.js'
 import {
   tryClaimGoalForTick,
+  transitionRunningGoalStatusSystem,
   getGoalByIdSystem,
   updateGoalSystem,
   getGoalAwaitingEventSystem,
@@ -2600,6 +2601,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const goalDriver = createGoalDriver({
     goalStore,
     tryClaim: tryClaimGoalForTick,
+    transitionRunningStatus: transitionRunningGoalStatusSystem,
     sessionCostUsd: (sessionId) =>
       usageStore ? usageStore.getSessionCostUsd(sessionId) : Promise.resolve(0),
     meteringAvailable: () => Boolean(usageStore),
@@ -5150,7 +5152,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             return match?.[1] ? [match[1]] : []
           })
           const stopwords = new Set(['about', 'after', 'again', 'also', 'and', 'audience', 'create', 'deck', 'for', 'from', 'generate', 'help', 'intro', 'introduction', 'into', 'make', 'presentation', 'public', 'slide', 'slides', 'that', 'the', 'this', 'to', 'with'])
-          const terms = [...new Set(`${brief.outcome} ${brief.audience}`.toLocaleLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? [])]
+          const terms = [...new Set(`${brief.outcome} ${brief.audience} ${brief.additionalContext ?? ''}`.toLocaleLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? [])]
             .filter((term) => !stopwords.has(term))
             .slice(0, 8)
           const [explicit, searched] = await Promise.all([
@@ -5164,24 +5166,25 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             sensitivity: entry.sensitivity,
           }))
         },
-        async inspectWebsite(url) {
+        async inspectUrl(url) {
           const response = await fetch(url, { signal: AbortSignal.timeout(10_000), headers: { 'User-Agent': 'UseBrian-Office/1.0' } })
-          if (!response.ok) throw new Error(`Canonical website returned ${response.status}`)
+          if (!response.ok) throw new Error(`Reference URL returned ${response.status}`)
           const excerpt = (await response.text()).replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 8_000)
           return [{ url, excerpt }]
         },
         async planClaims(brief, evidence) {
           return [
             { objectHint: brief.family, text: brief.outcome, classification: 'user_attested' as const, confidence: 1, sourceHandles: brief.sourceHandles },
+            ...(brief.additionalContext ? [{ objectHint: brief.family, text: brief.additionalContext, classification: 'user_attested' as const, confidence: 1, sourceHandles: brief.sourceHandles }] : []),
             ...evidence.brain.map((entry) => ({ objectHint: brief.family, text: entry.excerpt.slice(0, 1_000), classification: 'evidence_supported' as const, confidence: 0.9, sourceHandles: [entry.handle] })),
             ...evidence.website.map((entry) => ({ objectHint: brief.family, text: entry.excerpt.slice(0, 1_000), classification: 'evidence_supported' as const, confidence: 0.8, sourceHandles: [entry.url] })),
           ].slice(0, 100)
         },
         async construct(brief, evidence, claims, template) {
           const brandVoice = await resolveBrandVoice(job.initiatedByUserId, job.workspaceId)
-          if (brief.family === 'document') return generateDocumentFromTemplate({ provider, model: backgroundModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, template, brandVoice })
-          if (brief.family === 'presentation') return generatePresentationFromTemplate({ provider, model: backgroundModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, evidence, claims, template, brandVoice })
-          return generateSpreadsheetFromTemplate({ provider, model: backgroundModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, template, brandVoice })
+          if (brief.family === 'document') return generateDocumentFromTemplate({ provider, model: backgroundModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, additionalContext: brief.additionalContext, template, brandVoice })
+          if (brief.family === 'presentation') return generatePresentationFromTemplate({ provider, model: backgroundModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, additionalContext: brief.additionalContext, evidence, claims, template, brandVoice })
+          return generateSpreadsheetFromTemplate({ provider, model: backgroundModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, additionalContext: brief.additionalContext, template, brandVoice })
         },
         async processMedia(snapshot) { return snapshot },
         async resolveResource(resourceId) {
@@ -6403,6 +6406,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       entityLinks: entityLinksStore,
       memories: memoryStore,
       tasks: taskStore,
+      taskAdmission: createTaskAdmissionPort(),
       episodes: episodesStore,
       ingestRulesStore,
       resolvePlaceholders: resolveIngestPlaceholders,

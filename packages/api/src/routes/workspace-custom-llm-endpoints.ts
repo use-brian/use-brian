@@ -176,6 +176,48 @@ export function workspaceCustomLlmEndpointsRoutes(opts: Options): Router {
     }
   })
 
+  router.patch('/:endpointId/profiles/:profileId', async (req, res) => {
+    const workspaceId = await gate(req, res)
+    if (!workspaceId) return
+    const endpointId = typeof req.params.endpointId === 'string' ? req.params.endpointId : ''
+    const profileId = typeof req.params.profileId === 'string' ? req.params.profileId : ''
+    if (!UUID_RE.test(endpointId) || !UUID_RE.test(profileId)) {
+      res.status(400).json({ error: 'Invalid endpoint or profile id', code: 'invalid_input' })
+      return
+    }
+    const parsed = ProfileBody.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Invalid input', code: 'invalid_input', detail: parsed.error.message })
+      return
+    }
+    try {
+      const existing = await opts.endpointStore.getRuntimeSystem({ workspaceId, profileId })
+      if (!existing || existing.endpointId !== endpointId) {
+        res.status(404).json({ error: 'Profile not found' })
+        return
+      }
+      const verified = await probe({
+        baseUrl: existing.baseUrl,
+        apiKey: existing.apiKey,
+        modelId: parsed.data.modelId,
+      })
+      const profile = await opts.endpointStore.updateProfile({
+        actingUserId: req.userId!,
+        workspaceId,
+        endpointId,
+        profileId,
+        input: { ...parsed.data, ...verified },
+      })
+      if (!profile) {
+        res.status(404).json({ error: 'Profile not found' })
+        return
+      }
+      res.json({ profile: serializeProfile(profile) })
+    } catch (err) {
+      sendError(res, err, 'Failed to update custom model profile')
+    }
+  })
+
   router.put('/tiers/:tier', async (req, res) => {
     const workspaceId = await gate(req, res)
     if (!workspaceId) return

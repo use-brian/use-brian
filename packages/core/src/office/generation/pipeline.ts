@@ -25,7 +25,7 @@ export type OfficeGenerationPipelineDeps = {
   resolveAuthority(brief: OfficeGenerationBrief): Promise<OfficeAuthorityProjection | null>
   selectTemplate(brief: OfficeGenerationBrief, authority: OfficeAuthorityProjection): Promise<{ template?: OfficeTemplateBundle; ambiguous?: string[] }>
   retrieveBrain(brief: OfficeGenerationBrief, authority: OfficeAuthorityProjection): Promise<OfficeEvidencePacket['brain']>
-  inspectWebsite(url: string): Promise<OfficeEvidencePacket['website']>
+  inspectUrl(url: string): Promise<OfficeEvidencePacket['website']>
   planClaims(brief: OfficeGenerationBrief, evidence: OfficeEvidencePacket, template: OfficeTemplateBundle): Promise<OfficeClaimPlanEntry[]>
   construct(brief: OfficeGenerationBrief, evidence: OfficeEvidencePacket, claims: OfficeClaimPlanEntry[], template: OfficeTemplateBundle): Promise<OfficeArtifactSnapshot>
   processMedia(snapshot: OfficeArtifactSnapshot, authority: OfficeAuthorityProjection): Promise<OfficeArtifactSnapshot>
@@ -35,6 +35,12 @@ export type OfficeGenerationPipelineDeps = {
   cancelled(): Promise<boolean>
   drainSteering(stage: OfficeGenerationStage): Promise<string[]>
   commit(snapshot: OfficeArtifactSnapshot, params: { authority: OfficeAuthorityProjection; templateVersionId: string; summary: string }): Promise<{ artifactId: string; version: number }>
+}
+
+function referenceUrls(additionalContext: string | undefined): string[] {
+  if (!additionalContext) return []
+  const urls = additionalContext.match(/https:\/\/[^\s<>()\[\]{}"']+/gi) ?? []
+  return [...new Set(urls.map((url) => url.replace(/[.,;:!?]+$/, '')))].slice(0, 2)
 }
 
 function admittedReadabilityExemptObjectIds(template: OfficeTemplateBundle): string[] {
@@ -86,18 +92,16 @@ export async function runOfficeGenerationPipeline(input: unknown, deps: OfficeGe
     if (template.status !== 'admitted') return { status: 'failed', code: 'template_not_admitted', message: 'Generation requires an admitted immutable template version.' }
     if (!await stage(deps, { stage: 'template', version: 2, templateVersionId: template.id }, 'office.job.template_selected', { templateId: template.id, templateVersion: template.version })) return { status: 'cancelled' }
 
-    if (!brief.canonicalWebsite && !brief.companyHasNoWebsite) {
-      await deps.emit({ stage: 'needs_input', code: 'office.job.needs_input', params: { reason: 'website_required' } })
-      return { status: 'needs_input', code: 'website_required', question: 'What is the company’s canonical public website, or should I proceed because the company has no website?' }
-    }
     await deps.emit({ stage: 'grounding', code: 'office.job.grounding_started', params: {} })
-    const [brain, website] = await Promise.all([
+    const urls = referenceUrls(brief.additionalContext)
+    const [brain, inspected] = await Promise.all([
       deps.retrieveBrain(brief, authority),
-      brief.canonicalWebsite ? deps.inspectWebsite(brief.canonicalWebsite) : Promise.resolve([]),
+      Promise.allSettled(urls.map((url) => deps.inspectUrl(url))),
     ])
+    const website = inspected.flatMap((result) => result.status === 'fulfilled' ? result.value : [])
     const evidence: OfficeEvidencePacket = { brain, website, conflicts: [] }
-    if (brief.canonicalWebsite) await deps.emit({ stage: 'grounding', code: 'office.job.website_inspected', params: { url: brief.canonicalWebsite } })
-    if (!await stage(deps, { stage: 'grounding', version: 3, templateVersionId: template.id, evidence }, 'office.job.website_inspected', { sources: brain.length + website.length })) return { status: 'cancelled' }
+    for (const entry of website) await deps.emit({ stage: 'grounding', code: 'office.job.reference_url_inspected', params: { url: entry.url } })
+    if (!await stage(deps, { stage: 'grounding', version: 3, templateVersionId: template.id, evidence }, 'office.job.context_grounded', { sources: brain.length + website.length })) return { status: 'cancelled' }
 
     const claims = await deps.planClaims(brief, evidence, template)
     if (!await stage(deps, { stage: 'claim_plan', version: 4, templateVersionId: template.id, evidence, claims }, 'office.job.claim_plan_ready', { claims: claims.length })) return { status: 'cancelled' }

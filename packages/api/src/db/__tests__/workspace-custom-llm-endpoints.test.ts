@@ -119,6 +119,47 @@ describe('[COMP:api/custom-llm-endpoints] custom connection/profile store', () =
       .resolves.toEqual([{ ...endpointRow, profiles: [profileRow] }])
   })
 
+  it('updates a verified profile in place without changing its selector identity', async () => {
+    const store = createDbWorkspaceCustomLlmEndpointStore()
+    const verifiedAt = new Date('2026-08-12T00:00:00Z')
+    const updated = {
+      ...profileRow,
+      name: 'High context',
+      modelId: 'terra-high',
+      contextWindow: 1_048_576,
+      maxOutputTokens: 65_536,
+      verifiedAt,
+    }
+    mockQueryWithRLS.mockResolvedValueOnce({ rows: [updated], rowCount: 1 } as never)
+
+    await expect(store.updateProfile({
+      actingUserId: 'user-1',
+      workspaceId,
+      endpointId: endpointRow.id,
+      profileId: profileRow.id,
+      input: {
+        name: updated.name,
+        modelId: updated.modelId,
+        contextWindow: updated.contextWindow,
+        maxOutputTokens: updated.maxOutputTokens,
+        supportsTools: true,
+        verifiedAt,
+      },
+    })).resolves.toEqual(updated)
+
+    expect(mockQueryWithRLS.mock.calls[0]![1]).toContain('UPDATE workspace_custom_llm_profiles')
+    expect(mockQueryWithRLS.mock.calls[0]![2]).toEqual([
+      workspaceId,
+      endpointRow.id,
+      profileRow.id,
+      'High context',
+      'terra-high',
+      1_048_576,
+      65_536,
+      verifiedAt,
+    ])
+  })
+
   it('decrypts connection auth only through a profile runtime accessor', async () => {
     const key = randomBytes(32)
     const store = createDbWorkspaceCustomLlmEndpointStore(key)

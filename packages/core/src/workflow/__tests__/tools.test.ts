@@ -19,6 +19,8 @@ import type { DeliverToChannel } from '../executor.js'
 const WORKSPACE_ID = '00000000-0000-0000-0000-000000000001'
 const PRIMARY_ASSISTANT_ID = '00000000-0000-0000-0000-000000000002'
 const USER_ID = '00000000-0000-0000-0000-000000000003'
+const DELIVERING_ASSISTANT_ID = '00000000-0000-0000-0000-000000000004'
+const AUTHORING_ASSISTANT_ID = '00000000-0000-0000-0000-000000000005'
 
 /** Deterministic valid-UUID generator for seeding runs directly into the
  *  fake store's Map (bypassing runWorkflow) — used by the getWorkflowRun
@@ -282,7 +284,7 @@ function makeAllTools(opts?: {
     reason?: string
     policy?: 'allow' | 'ask' | 'block'
   } | null>
-  listSlackChannels?: (args: { assistantId: string }) => Promise<
+  listSlackChannels?: (args: { assistantId: string; channelId?: string }) => Promise<
     | { ok: true; channels: Array<{ id: string; name: string; isMember: boolean }> }
     | { ok: false; reason: string }
   >
@@ -602,6 +604,30 @@ describe('[COMP:workflow/tools] Slack native delivery target', () => {
     const r = await tools.listSlackChannels.execute({}, makeContext())
     expect(r.isError).toBeFalsy()
     expect(r.data).toEqual({ channels: [{ id: 'C0BB4AK5BHB', name: 'deltadefi-dev', isMember: true }] })
+  })
+
+  it('listSlackChannels forwards a concrete channel id for authoritative lookup', async () => {
+    const calls: Array<{ assistantId: string; channelId?: string }> = []
+    const { tools } = makeAllTools({
+      listSlackChannels: async (args) => {
+        calls.push(args)
+        return {
+          ok: true,
+          channels: [{ id: 'C0PRIVATE1', name: 'engineering-private', isMember: true }],
+        }
+      },
+    })
+
+    const r = await tools.listSlackChannels.execute(
+      { assistantId: DELIVERING_ASSISTANT_ID, channelId: 'C0PRIVATE1' },
+      makeContext({ assistantId: AUTHORING_ASSISTANT_ID }),
+    )
+
+    expect(r.isError).toBeFalsy()
+    expect(calls).toEqual([{ assistantId: DELIVERING_ASSISTANT_ID, channelId: 'C0PRIVATE1' }])
+    expect(r.data).toEqual({
+      channels: [{ id: 'C0PRIVATE1', name: 'engineering-private', isMember: true }],
+    })
   })
 
   it('listSlackChannels reports when discovery is unwired', async () => {
@@ -1632,13 +1658,17 @@ describe('[COMP:workflow/tools] page anchor authoring checks', () => {
 })
 
 describe('[COMP:workflow/tools] external-dependency authoring checks', () => {
-  const deliverDef = (channelType: 'slack' | 'telegram', channelId: string): WorkflowDefinition => ({
+  const deliverDef = (
+    channelType: 'slack' | 'telegram',
+    channelId: string,
+    assistantId = 'primary',
+  ): WorkflowDefinition => ({
     startStepId: 's1',
     steps: [
       {
         id: 's1',
         type: 'assistant_call',
-        target: { assistantId: 'primary' },
+        target: { assistantId },
         prompt: 'Summarize and send.',
         deliver: { channelType, channelId },
       },
@@ -1660,6 +1690,21 @@ describe('[COMP:workflow/tools] external-dependency authoring checks', () => {
       assistantId: PRIMARY_ASSISTANT_ID,
       channelType: 'slack',
       channelId: 'web-session-123',
+    })
+  })
+
+  it('validates delivery with the step target, not the assistant hosting the authoring chat', async () => {
+    const validateDeliveryTarget = vi.fn(async () => ({ ok: true }))
+    const { tools } = makeAllTools({ validateDeliveryTarget })
+    const r = await tools.proposeWorkflow.execute(
+      { name: 'X', definition: deliverDef('slack', 'C_TARGET', DELIVERING_ASSISTANT_ID) },
+      makeContext({ assistantId: AUTHORING_ASSISTANT_ID }),
+    )
+    expect(r.isError).toBeFalsy()
+    expect(validateDeliveryTarget).toHaveBeenCalledWith({
+      assistantId: DELIVERING_ASSISTANT_ID,
+      channelType: 'slack',
+      channelId: 'C_TARGET',
     })
   })
 
@@ -1691,10 +1736,17 @@ describe('[COMP:workflow/tools] external-dependency authoring checks', () => {
       // the sugar-resolved target is validated — and the validator rejects this
       // (stale/unreachable) channel. (A cross-type request with no resolvable
       // Slack channel is blocked earlier, without a reachability probe.)
-      makeContext({ preferredChannel: { channelType: 'slack', channelId: 'C_STALE' } }),
+      makeContext({
+        assistantId: AUTHORING_ASSISTANT_ID,
+        preferredChannel: { channelType: 'slack', channelId: 'C_STALE' },
+      }),
     )
     expect(r.isError).toBe(true)
-    expect(validateDeliveryTarget).toHaveBeenCalled()
+    expect(validateDeliveryTarget).toHaveBeenCalledWith({
+      assistantId: PRIMARY_ASSISTANT_ID,
+      channelType: 'slack',
+      channelId: 'C_STALE',
+    })
   })
 
   it('allows a reachable delivery target', async () => {

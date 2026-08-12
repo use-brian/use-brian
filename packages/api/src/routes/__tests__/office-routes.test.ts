@@ -56,7 +56,8 @@ describe('[COMP:api/office-routes] Office API routes', () => {
   it('creates a shell/job and exposes permission-filtered artifact state', async () => {
     const test = app()
     await request(test.server).get('/api/office/capabilities').expect(200, { generationAvailable: true, generationFamilies: ['document', 'presentation', 'spreadsheet'] })
-    await request(test.server).post('/api/office/artifacts').send({ workspaceId: WORKSPACE, assistantId: ASSISTANT, family: 'document', outcome: 'Create a board report', audience: 'Board', sourceHandles: [], canonicalWebsite: 'https://example.com', companyHasNoWebsite: false, idempotencyKey: 'request-12345678' }).expect(202, { artifactId: ARTIFACT, jobId: JOB })
+    await request(test.server).post('/api/office/artifacts').send({ workspaceId: WORKSPACE, assistantId: ASSISTANT, family: 'document', outcome: 'Create a board report', audience: 'Board', additionalContext: 'Use the approved Q2 figures.', sourceHandles: [], idempotencyKey: 'request-12345678' }).expect(202, { artifactId: ARTIFACT, jobId: JOB })
+    expect(test.artifacts.service.create).toHaveBeenCalledWith(expect.objectContaining({ additionalContext: 'Use the approved Q2 figures.' }))
     const read = await request(test.server).get(`/api/office/artifacts/${ARTIFACT}`).expect(200)
     expect(read.body.artifact).toMatchObject({ artifactId: ARTIFACT, role: 'edit', job: { id: JOB, stage: 'queued', errorCode: null } })
   })
@@ -76,7 +77,7 @@ describe('[COMP:api/office-routes] Office API routes', () => {
     await request(test.server).post(`/api/office/jobs/${JOB}/steering`).send({ instruction: 'Emphasize retention' }).expect(202)
     expect(test.jobs.steer).toHaveBeenCalledWith({ userId: USER, workspaceId: WORKSPACE, jobId: JOB, instruction: 'Emphasize retention' })
     await request(test.server).post(`/api/office/jobs/${JOB}/cancel`).send({}).expect(202)
-    await request(test.server).post('/api/office/templates').send({ workspaceId: WORKSPACE, family: 'presentation', name: 'Pitch', description: 'Company pitch', creationMethod: 'guided', sensitivity: 'internal' }).expect(201)
+    await request(test.server).post('/api/office/templates').send({ workspaceId: WORKSPACE, family: 'presentation', name: 'Pitch', description: 'Company pitch', creationMethod: 'guided', canonicalWebsite: 'https://example.com', sensitivity: 'internal' }).expect(201)
     expect(test.templates.createDraft).toHaveBeenCalledWith(expect.objectContaining({ draftArtifactId: ARTIFACT }))
     expect(test.templates.initializeDraft).toHaveBeenCalledWith(expect.objectContaining({ artifactId: ARTIFACT, snapshot: expect.objectContaining({ artifactId: ARTIFACT, family: 'presentation', templateVersionId: null, slides: expect.arrayContaining([expect.objectContaining({ title: 'Title' }), expect.objectContaining({ title: 'Content' })]) }) }))
     expect(test.templates.saveDraftRouting).toHaveBeenCalledWith(expect.objectContaining({ templateId: 'template-1', routing: expect.objectContaining({ source: 'guided', slideRecipes: expect.arrayContaining([expect.objectContaining({ role: 'cover' })]) }) }))
@@ -102,17 +103,26 @@ describe('[COMP:api/office-routes] Office API routes', () => {
   })
 
   it('seeds guided template drafts with editable canonical structure', () => {
-    const document = guidedTemplateSnapshot({ artifactId: ARTIFACT, workspaceId: WORKSPACE, family: 'document', title: 'Letterhead', guidance: 'Formal letters with company contact details.' })
+    const document = guidedTemplateSnapshot({ artifactId: ARTIFACT, workspaceId: WORKSPACE, family: 'document', title: 'Letterhead', guidance: 'Formal letters with company contact details.', canonicalWebsite: 'https://example.com' })
     expect(() => OfficeArtifactSnapshotSchema.parse(document)).not.toThrow()
     expect(preflightOfficeCandidate(document).ok).toBe(true)
     expect(document.family).toBe('document')
-    if (document.family === 'document') expect(document.sections[0].nodes).toMatchObject([{ kind: 'heading' }, { kind: 'paragraph' }, { kind: 'heading' }, { kind: 'paragraph' }])
+    if (document.family === 'document') {
+      expect(document.sections[0].nodes).toMatchObject([{ kind: 'heading' }, { kind: 'paragraph' }, { kind: 'heading' }, { kind: 'paragraph' }])
+      expect(document.sections[0].footer[0]?.text).toBe('https://example.com')
+    }
 
     const presentation = guidedTemplateSnapshot({ artifactId: ARTIFACT, workspaceId: WORKSPACE, family: 'presentation', title: 'Company deck', guidance: 'Use for general introductions and updates.' })
     expect(() => OfficeArtifactSnapshotSchema.parse(presentation)).not.toThrow()
     expect(preflightOfficeCandidate(presentation).ok).toBe(true)
     expect(presentation.family).toBe('presentation')
     if (presentation.family === 'presentation') expect(presentation.slides.map((slide) => slide.title)).toEqual(['Title', 'Content'])
+  })
+
+  it('accepts an explicit no-website choice during guided template setup', async () => {
+    const test = app()
+    await request(test.server).post('/api/office/templates').send({ workspaceId: WORKSPACE, family: 'document', name: 'Internal memo', description: 'Internal company updates', creationMethod: 'guided', companyHasNoWebsite: true, sensitivity: 'internal' }).expect(201)
+    expect(test.templates.initializeDraft).toHaveBeenCalledWith(expect.objectContaining({ snapshot: expect.objectContaining({ family: 'document' }) }))
   })
 
   it('idempotently initializes a linked legacy template draft', async () => {
@@ -126,6 +136,7 @@ describe('[COMP:api/office-routes] Office API routes', () => {
   it('rejects invalid boundaries before touching stores', async () => {
     const test = app()
     await request(test.server).post('/api/office/artifacts').send({ workspaceId: 'bad' }).expect(400)
+    await request(test.server).post('/api/office/templates').send({ workspaceId: WORKSPACE, family: 'document', name: 'Letterhead', description: 'Company letters', creationMethod: 'guided', sensitivity: 'internal' }).expect(400)
     await request(test.server).post(`/api/office/jobs/${JOB}/steering`).send({ instruction: '' }).expect(400)
     expect(test.artifacts.service.create).not.toHaveBeenCalled()
   })
@@ -133,7 +144,7 @@ describe('[COMP:api/office-routes] Office API routes', () => {
   it('returns a typed retryable error when no generation runner is configured', async () => {
     const test = app()
     test.artifacts.service.create.mockRejectedValueOnce(new OfficeGenerationUnavailableError())
-    await request(test.server).post('/api/office/artifacts').send({ workspaceId: WORKSPACE, assistantId: ASSISTANT, family: 'presentation', outcome: 'Company introduction', audience: 'Public', sourceHandles: [], canonicalWebsite: 'https://example.com', companyHasNoWebsite: false, idempotencyKey: 'request-12345678' }).expect(503, { error: 'office_generation_unavailable' })
+    await request(test.server).post('/api/office/artifacts').send({ workspaceId: WORKSPACE, assistantId: ASSISTANT, family: 'presentation', outcome: 'Company introduction', audience: 'Public', sourceHandles: [], idempotencyKey: 'request-12345678' }).expect(503, { error: 'office_generation_unavailable' })
   })
 })
 
