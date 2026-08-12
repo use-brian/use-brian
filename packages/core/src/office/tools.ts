@@ -22,7 +22,7 @@ export type OfficeArtifactToolProjection = {
 }
 
 export type OfficeToolPort = {
-  create(params: { userId: string; assistantId: string; workspaceId: string; family: 'document' | 'presentation' | 'spreadsheet'; outcome: string; audience: string; sourceHandles: string[]; templateId?: string; canonicalWebsite?: string; companyHasNoWebsite: boolean; idempotencyKey: string }): Promise<{ artifactId: string; jobId: string }>
+  create(params: { userId: string; assistantId: string; workspaceId: string; family: 'document' | 'presentation' | 'spreadsheet'; outcome: string; audience: string; additionalContext?: string; sourceHandles: string[]; templateId?: string; idempotencyKey: string }): Promise<{ artifactId: string; jobId: string }>
   get(params: { userId: string; artifactId: string }): Promise<OfficeArtifactToolProjection | null>
   revise(params: { userId: string; assistantId: string; artifactId: string; instruction: string; targetIds: string[]; expectedVersion: number; idempotencyKey: string }): Promise<{ jobId: string; mode: 'direct' | 'proposal' } | 'version_conflict' | null>
 }
@@ -84,15 +84,14 @@ export function createOfficeTools(params: {
     resolveConfirmation: askGate('createOfficeArtifact'),
     isConcurrencySafe: false,
     isReadOnly: false,
-    description: 'Start a durable Brian-native Document, Presentation, or Spreadsheet only after an explicit user request to create/build/draft one. Returns an artifact shell and background job immediately. The worker requires an admitted template, permission-filtered brain grounding, and a canonical public website unless the user explicitly says the company has none. This tool creates inside the workspace; it does not export, share, send, publish, or bypass a missing-fact/template/permission gate.',
+    description: 'Start a durable Brian-native Document, Presentation, or Spreadsheet only after an explicit user request to create/build/draft one. Returns an artifact shell and background job immediately. The worker requires an admitted template and permission-filtered brain grounding. Optional additional context can carry user-supplied facts, constraints, examples, or reference URLs. This tool creates inside the workspace; it does not export, share, send, publish, or bypass a missing-fact/template/permission gate.',
     inputSchema: z.object({
       family: z.enum(['document', 'presentation', 'spreadsheet']),
       outcome: z.string().min(1).max(4_000).describe('The requested deliverable and intended outcome'),
       audience: z.string().min(1).max(1_000),
+      additionalContext: z.string().min(1).max(4_000).optional().describe('Optional user-supplied facts, constraints, examples, or reference URLs for this artifact'),
       sourceHandles: z.array(z.string().min(1).max(1_000)).max(100).default([]).describe('Explicit accessible page/file/URL handles named by the user or resolved during the turn'),
       templateId: z.string().uuid().optional(),
-      canonicalWebsite: z.string().url().refine((url) => url.startsWith('https:')).optional(),
-      companyHasNoWebsite: z.boolean().default(false),
       idempotencyKey: z.string().min(8).max(255),
     }),
     async execute(input, context) {

@@ -392,6 +392,7 @@ export async function generatePresentationFromTemplate(params: {
   templateVersionId: string
   outcome: string
   audience: string
+  additionalContext?: string
   evidence: OfficeEvidencePacket
   claims: OfficeClaimPlanEntry[]
   template: OfficeTemplateBundle
@@ -405,7 +406,8 @@ export async function generatePresentationFromTemplate(params: {
     website: params.evidence.website.slice(0, 2).map((entry) => ({ ...entry, excerpt: entry.excerpt.slice(0, 8_000) })),
     claims: params.claims.slice(0, 100),
   }
-  const requestContext = `Outcome:\n${params.outcome}\n\nAudience:\n${params.audience}\n\nTemplate guidance:\n${template.description}\n\nAdmitted slide catalogue:\n${JSON.stringify(catalogue)}\n\nGrounding:\n${JSON.stringify(evidence)}`
+  const additionalContext = params.additionalContext?.trim() ? `\n\nAdditional context:\n${params.additionalContext.trim()}` : ''
+  const requestContext = `Outcome:\n${params.outcome}\n\nAudience:\n${params.audience}${additionalContext}\n\nTemplate guidance:\n${template.description}\n\nAdmitted slide catalogue:\n${JSON.stringify(catalogue)}\n\nGrounding:\n${JSON.stringify(evidence)}`
   let rejectedPlan: unknown
   let rejectionKind: 'fit' | 'plan' | undefined
   let diagnostics: Array<Record<string, unknown>> = []

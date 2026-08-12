@@ -85,12 +85,11 @@ function OfficeCreateForm({
   const router = useRouter();
   const [outcome, setOutcome] = useState("");
   const [audience, setAudience] = useState("");
-  const [website, setWebsite] = useState("");
-  const [noWebsite, setNoWebsite] = useState(false);
+  const [additionalContext, setAdditionalContext] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<"failed" | "unavailable" | null>(null);
   const [generationAvailable, setGenerationAvailable] = useState<boolean | null>(null);
-  const dirty = Boolean(outcome || audience || website || noWebsite);
+  const dirty = Boolean(outcome || audience || additionalContext);
 
   useEffect(() => {
     onDirtyChange?.(dirty);
@@ -131,8 +130,7 @@ function OfficeCreateForm({
         family: template.family,
         outcome,
         audience,
-        canonicalWebsite: noWebsite || !website ? undefined : website,
-        companyHasNoWebsite: noWebsite,
+        additionalContext: additionalContext.trim() || undefined,
         templateId: String(template.currentVersionId),
         idempotencyKey: crypto.randomUUID(),
       });
@@ -150,12 +148,11 @@ function OfficeCreateForm({
     <form onSubmit={submit} className="mt-8 space-y-6">
           <label className="block text-sm font-medium">{t.outcome}<textarea required value={outcome} onChange={(event) => setOutcome(event.target.value)} placeholder={t.outcomePlaceholder} className="mt-2 min-h-32 w-full rounded-md border bg-background p-3 font-normal" /></label>
           <label className="block text-sm font-medium">{t.audience}<input required value={audience} onChange={(event) => setAudience(event.target.value)} placeholder={t.audiencePlaceholder} className="mt-2 h-10 w-full rounded-md border bg-background px-3 font-normal" /></label>
-          <label className="block text-sm font-medium">{t.website}<input type="url" disabled={noWebsite} value={website} onChange={(event) => setWebsite(event.target.value)} placeholder={t.websitePlaceholder} className="mt-2 h-10 w-full rounded-md border bg-background px-3 font-normal disabled:opacity-50" /></label>
-          <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={noWebsite} onChange={(event) => setNoWebsite(event.target.checked)} />{t.noWebsite}</label>
+          <label className="block text-sm font-medium">{t.additionalContext}<textarea value={additionalContext} onChange={(event) => setAdditionalContext(event.target.value)} placeholder={t.additionalContextPlaceholder} className="mt-2 min-h-24 w-full rounded-md border bg-background p-3 font-normal" /></label>
           {error ? <p role="alert" className="text-sm text-destructive">{error === "unavailable" ? t.createUnavailable : t.createFailed}</p> : null}
       <div className="flex justify-end gap-2 border-t pt-5">
         <button type="button" onClick={onCancel} className="h-10 rounded-md border px-4 text-sm font-medium">{copy.common.cancel}</button>
-        <button type="submit" disabled={generationAvailable !== true || busy || !outcome.trim() || !audience.trim() || (!noWebsite && !website)} className="h-10 rounded-md bg-action px-5 text-sm font-medium text-action-foreground disabled:opacity-50">{busy ? t.generating : t.generate}</button>
+        <button type="submit" disabled={generationAvailable !== true || busy || !outcome.trim() || !audience.trim()} className="h-10 rounded-md bg-action px-5 text-sm font-medium text-action-foreground disabled:opacity-50">{busy ? t.generating : t.generate}</button>
       </div>
     </form>
   </div>;

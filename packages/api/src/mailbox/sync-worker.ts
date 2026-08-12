@@ -54,6 +54,7 @@ import {
   type PipelineBEpisode,
   type PlaceholderResolver,
   type SourceKind,
+  type TaskAdmissionPort,
   type TaskStore,
   type UsageStore,
 } from '@use-brian/core'
@@ -296,6 +297,12 @@ export type MailboxBrainRouterDeps = {
   entityLinks: EntityLinksStore
   memories: MemoryStore
   tasks?: TaskStore
+  /**
+   * Extracted-task admission is required on this built-in realtime path.
+   * `processEpisode` keeps the port optional for legacy callers, but pairing a
+   * task store with no gate selects its direct-create fallback.
+   */
+  taskAdmission: TaskAdmissionPort
   episodes: DbEpisodesStore
   ingestRulesStore: IngestRulesStore
   resolvePlaceholders: PlaceholderResolver
@@ -382,7 +389,11 @@ export function createMailboxBrainRouter(deps: MailboxBrainRouterDeps): MailboxB
 
     const episode = await deps.episodes.createEpisode(ctx.userId, {
       sourceKind: MAILBOX_SOURCE_KIND,
-      sourceRef: envelope.source_ref,
+      sourceRef: {
+        ...envelope.source_ref,
+        connector: 'imap',
+        channel_ref: ctx.connectorInstanceId,
+      },
       occurredAt: envelope.occurred_at,
       workspaceId: envelope.workspace_id,
       userId: envelope.user_id,
@@ -404,6 +415,7 @@ export function createMailboxBrainRouter(deps: MailboxBrainRouterDeps): MailboxB
       assistantId: episode.assistantId,
       createdByUserId: episode.createdByUserId,
       createdByAssistantId: episode.createdByAssistantId,
+      channelRef: ctx.connectorInstanceId,
     }
     await runExtraction(pipelineEpisode, content, {
       provider: deps.provider,
@@ -413,6 +425,7 @@ export function createMailboxBrainRouter(deps: MailboxBrainRouterDeps): MailboxB
       entityLinks: deps.entityLinks,
       memories: deps.memories,
       tasks: deps.tasks,
+      taskAdmission: deps.taskAdmission,
       episodes: deps.episodes,
       classifierModel: deps.classifierModel,
       analytics: deps.analytics,
@@ -476,12 +489,20 @@ export function createMailboxBrainRouter(deps: MailboxBrainRouterDeps): MailboxB
           source: 'imap',
           firesAt,
           event: {
+            source: 'imap',
             normalized: {
               sender: extractBareAddress(sender),
               subject,
               text: mailboxEpisodeText(message),
+              timestamp: message.timestamp ?? null,
+              message_id_chain: [
+                ...(message.references ?? []),
+                message.rfc_message_id ?? message.provider_message_id,
+              ],
+              channel_ref: ctx.connectorInstanceId,
             },
           },
+          episodeSensitivity: decision.episode_sensitivity,
         })
         return null
       }

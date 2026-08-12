@@ -55,6 +55,8 @@ export function OfficeTemplateLibrary({ workspaceId, templateId }: { workspaceId
   const [family, setFamily] = useState<OfficeFamily>(starterTemplate === "general-presentation" ? "presentation" : starterTemplate === "invoice" ? "spreadsheet" : "document");
   const [name, setName] = useState("");
   const [guidance, setGuidance] = useState("");
+  const [website, setWebsite] = useState("");
+  const [noWebsite, setNoWebsite] = useState(false);
   const [generateState, setGenerateState] = useState<"idle" | "working" | "failed">("idle");
   const [uploadOpen, setUploadOpen] = useState(false);
   const [uploadFile, setUploadFile] = useState<File | null>(null);
@@ -114,6 +116,8 @@ export function OfficeTemplateLibrary({ workspaceId, templateId }: { workspaceId
     setFamily("document");
     setName("");
     setGuidance("");
+    setWebsite("");
+    setNoWebsite(false);
     setGenerateState("idle");
     setGenerateOpen(true);
   }
@@ -128,7 +132,15 @@ export function OfficeTemplateLibrary({ workspaceId, templateId }: { workspaceId
     event.preventDefault();
     setGenerateState("working");
     try {
-      const created = await createOfficeTemplate({ workspaceId, family, name, description: guidance, creationMethod: "guided" });
+      const created = await createOfficeTemplate({
+        workspaceId,
+        family,
+        name,
+        description: guidance,
+        creationMethod: "guided",
+        canonicalWebsite: noWebsite ? undefined : website,
+        companyHasNoWebsite: noWebsite,
+      });
       setGenerateOpen(false);
       router.push(`/w/${workspaceId}/office/${created.draftArtifactId}?templateId=${created.id}`);
     } catch {
@@ -215,8 +227,10 @@ export function OfficeTemplateLibrary({ workspaceId, templateId }: { workspaceId
               <Select value={family} onValueChange={(value) => { if (value) setFamily(value as OfficeFamily); }}><SelectTrigger aria-label={t.family} className="h-9 w-full">{familyLabel(t, family)}</SelectTrigger><SelectContent><SelectItem value="document">{t.document}</SelectItem><SelectItem value="presentation">{t.presentation}</SelectItem><SelectItem value="spreadsheet">{t.spreadsheet}</SelectItem></SelectContent></Select>
               <input required disabled={generateState === "working"} value={name} onChange={(event) => setName(event.target.value)} placeholder={t.templateName} className="h-9 rounded border px-2 disabled:opacity-60" />
               <textarea required disabled={generateState === "working"} value={guidance} onChange={(event) => setGuidance(event.target.value)} placeholder={t.templateInstructions} className="min-h-28 rounded border p-2 disabled:opacity-60" />
+              <label className="text-sm font-medium">{t.website}<input type="url" required={!noWebsite} disabled={generateState === "working" || noWebsite} value={website} onChange={(event) => setWebsite(event.target.value)} placeholder={t.websitePlaceholder} className="mt-2 h-9 w-full rounded border px-2 font-normal disabled:opacity-50" /></label>
+              <label className="flex items-center gap-2 text-sm"><input type="checkbox" disabled={generateState === "working"} checked={noWebsite} onChange={(event) => setNoWebsite(event.target.checked)} />{t.noWebsite}</label>
               {generateState === "failed" ? <p role="alert" className="text-sm text-destructive">{t.generateTemplateFailed}</p> : null}
-              <div className="mt-2 flex justify-end gap-2 border-t pt-4"><button type="button" disabled={generateState === "working"} onClick={closeGenerate} className="h-9 rounded border px-3 text-sm font-medium disabled:opacity-50">{copy.common.cancel}</button><button type="submit" disabled={generateState === "working" || !name.trim() || !guidance.trim()} className="h-9 rounded bg-action px-3 text-sm font-medium text-action-foreground disabled:opacity-50">{generateState === "working" ? t.generatingTemplate : t.generateDraft}</button></div>
+              <div className="mt-2 flex justify-end gap-2 border-t pt-4"><button type="button" disabled={generateState === "working"} onClick={closeGenerate} className="h-9 rounded border px-3 text-sm font-medium disabled:opacity-50">{copy.common.cancel}</button><button type="submit" disabled={generateState === "working" || !name.trim() || !guidance.trim() || (!noWebsite && !website.trim())} className="h-9 rounded bg-action px-3 text-sm font-medium text-action-foreground disabled:opacity-50">{generateState === "working" ? t.generatingTemplate : t.generateDraft}</button></div>
             </form>
           </Dialog.Popup>
         </Dialog.Portal>

@@ -229,6 +229,8 @@ export type PreflightConnectorTool = (args: {
  */
 export type ListSlackChannels = (args: {
   assistantId: string
+  /** Exact Slack id supplied by the user. When present, bypass enumeration. */
+  channelId?: string
 }) => Promise<
   | { ok: true; channels: Array<{ id: string; name: string; isMember: boolean }> }
   | { ok: false; reason: string }
@@ -372,7 +374,7 @@ export function createWorkflowDependencyPreflight(options: WorkflowDependencyPre
     return { ok: true, provider, policy }
   }
 
-  const listSlackChannels: ListSlackChannels = async ({ assistantId }) => {
+  const listSlackChannels: ListSlackChannels = async ({ assistantId, channelId }) => {
     if (!options.integrationStore) {
       return { ok: false, reason: 'Slack channel listing is unavailable in this context' }
     }
@@ -380,7 +382,26 @@ export function createWorkflowDependencyPreflight(options: WorkflowDependencyPre
     const botToken = integ && (integ.credentials as { bot_token?: string }).bot_token
     if (!botToken) return { ok: false, reason: 'Slack is not connected for this assistant' }
     try {
-      const { channels } = await createSlackApi({ botToken }).conversationsList()
+      const slack = createSlackApi({ botToken })
+      if (channelId) {
+        // `conversations.list` is a browsing surface, not an authorization
+        // oracle. A concrete user-supplied private channel can be absent from
+        // an enumeration snapshot while `conversations.info` resolves it. The
+        // exact-id path must therefore bypass the list entirely (prod
+        // 2026-08-11: Brian falsely asked for an invite to a member channel).
+        const { channel } = await slack.conversationsInfo(channelId)
+        if (channel.is_archived) return { ok: false, reason: `channel "${channelId}" is archived` }
+        return {
+          ok: true,
+          channels: [{
+            id: channel.id,
+            name: channel.name ?? channel.id,
+            isMember: channel.is_member ?? false,
+          }],
+        }
+      }
+
+      const { channels } = await slack.conversationsList()
       const usable = channels
         .filter((c) => !c.isArchived)
         // Member channels first (postable without a join), then by name.
@@ -389,7 +410,7 @@ export function createWorkflowDependencyPreflight(options: WorkflowDependencyPre
       return { ok: true, channels: usable }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      return { ok: false, reason: msg.replace(/^Slack API conversations\.list:\s*/, 'Slack: ') }
+      return { ok: false, reason: msg.replace(/^Slack API conversations\.(?:list|info):\s*/, 'Slack: ') }
     }
   }
 

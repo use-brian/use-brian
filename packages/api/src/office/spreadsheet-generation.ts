@@ -203,15 +203,17 @@ export async function generateSpreadsheetFromTemplate(params: {
   templateVersionId: string
   outcome: string
   audience: string
+  additionalContext?: string
   template: OfficeTemplateBundle
 }): Promise<SpreadsheetSnapshot> {
   if (params.template.family !== 'spreadsheet' || params.template.snapshot.family !== 'spreadsheet') throw new Error('Spreadsheet generation requires a spreadsheet template')
   const placeholders = spreadsheetPlaceholders(params.template.snapshot)
   if (placeholders.length === 0) throw new Error('Spreadsheet template contains no fillable fields')
+  const additionalContext = params.additionalContext?.trim() ? `\n\nAdditional context:\n${params.additionalContext.trim()}` : ''
   const response = await collectStream(params.provider.stream({
     model: params.model,
     systemPrompt: withBrandVoice(GENERATION_SYSTEM_PROMPT, params.brandVoice),
-    messages: [{ role: 'user', content: `Outcome:\n${params.outcome}\n\nAudience:\n${params.audience}\n\nTemplate guidance:\n${params.template.description}\n\nAllowed placeholders:\n${JSON.stringify(placeholders)}\n\nTemplate cell context:\n${JSON.stringify(spreadsheetTemplateContext(params.template.snapshot))}` }] as Message[],
+    messages: [{ role: 'user', content: `Outcome:\n${params.outcome}\n\nAudience:\n${params.audience}${additionalContext}\n\nTemplate guidance:\n${params.template.description}\n\nAllowed placeholders:\n${JSON.stringify(placeholders)}\n\nTemplate cell context:\n${JSON.stringify(spreadsheetTemplateContext(params.template.snapshot))}` }] as Message[],
     maxTokens: 8_000,
     temperature: 0.2,
   }))

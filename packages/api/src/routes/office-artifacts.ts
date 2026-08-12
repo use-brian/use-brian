@@ -23,8 +23,7 @@ const CreateSchema = z.object({
   audience: z.string().min(1).max(1_000),
   sourceHandles: z.array(z.string().min(1).max(1_000)).max(100).default([]),
   templateId: z.string().uuid().optional(),
-  canonicalWebsite: z.string().url().refine((url) => url.startsWith('https:')).optional(),
-  companyHasNoWebsite: z.boolean().default(false),
+  additionalContext: z.string().min(1).max(4_000).optional(),
   idempotencyKey: z.string().min(8).max(255),
 }).strict()
 

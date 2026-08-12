@@ -7,7 +7,7 @@
  * body validation (action / ids / set), the once-per-call assignee
  * membership check, per-row ownership (cross-workspace rows fail their id
  * without failing the batch), the priority merge into each row's live
- * attributes, and the delete path's soft-delete + audit.
+ * attributes, and the delete path's set-wise task / goal / audit operation.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
@@ -109,6 +109,9 @@ describe('[COMP:api/tasks-bulk-route] POST /:workspaceId/tasks/bulk', () => {
     expect(
       (await request(app).post(URL).send({ action: 'delete', ids: ['t1'], create_rule: true })).status,
     ).toBe(400)
+    expect(
+      (await request(app).post(URL).send({ action: 'delete', ids: ['t1', 't1'] })).status,
+    ).toBe(400)
   })
 
   it('validates a string assignee against workspace_members once per call', async () => {
@@ -143,26 +146,32 @@ describe('[COMP:api/tasks-bulk-route] POST /:workspaceId/tasks/bulk', () => {
     expect(fields.attributes).toEqual({ estimate_days: 3, priority: 'urgent' })
   })
 
-  it('delete soft-deletes each owned row, cascades its hosted goals, and audits it', async () => {
+  it('plain delete closes tasks, retires every hosted goal, and audits in one set operation', async () => {
     const app = makeApp()
-    queueRow('w1') // pre-check
-    mockQuery.mockResolvedValueOnce({ rows: [] } as any) // the UPDATE … SET valid_to
-    mockQuery.mockResolvedValueOnce({ rowCount: 1 } as any) // the goal cascade
-    const res = await request(app).post(URL).send({ action: 'delete', ids: ['t1'] })
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 't1' }] } as any)
+    const res = await request(app).post(URL).send({ action: 'delete', ids: ['t1', 'missing'] })
     expect(res.status).toBe(200)
-    expect(res.body).toEqual({ ok: true, results: [{ id: 't1', ok: true }] })
-    const updateSql = String(mockQuery.mock.calls[1][0])
-    expect(updateSql).toContain('SET valid_to = now()')
-    // Host-lifecycle cascade: the bulk lane must retire the goals bound to each
-    // deleted task, or a judge-drafted goal outlives its task and keeps its slot
-    // on the "Tasks assignable" surface forever.
-    const cascadeSql = String(mockQuery.mock.calls[2][0])
-    expect(cascadeSql).toContain('UPDATE goals')
-    expect(cascadeSql).toContain("status = 'abandoned'")
-    expect(mockQuery.mock.calls[2][1]).toEqual(['t1', 'host_task_deleted', ['done', 'abandoned', 'running']])
-    expect(mockAudit).toHaveBeenCalledWith(
-      expect.objectContaining({ targetKind: 'task', targetId: 't1', action: 'delete' }),
-    )
+    expect(res.body).toEqual({
+      ok: false,
+      results: [
+        { id: 't1', ok: true },
+        { id: 'missing', ok: false },
+      ],
+    })
+    expect(mockQuery).toHaveBeenCalledTimes(1)
+    const sql = String(mockQuery.mock.calls[0][0])
+    expect(sql).toContain('WITH deleted_tasks AS')
+    expect(sql).toContain('id = ANY($1::uuid[])')
+    expect(sql).toContain('UPDATE goals')
+    expect(sql).toContain("status = 'abandoned'")
+    expect(sql).toContain('INSERT INTO brain_verifications')
+    expect(mockQuery.mock.calls[0][1]).toEqual([
+      ['t1', 'missing'],
+      'w1',
+      ['done', 'abandoned'],
+      'u1',
+    ])
+    expect(mockAudit).not.toHaveBeenCalled()
     expect(mockUpdate).not.toHaveBeenCalled()
   })
 

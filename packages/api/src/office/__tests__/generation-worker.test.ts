@@ -302,7 +302,7 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
     await expect(service.create({
       userId: 'user-1', assistantId: 'assistant-1', workspaceId: 'workspace-1',
       family: 'presentation', outcome: 'Company introduction', audience: 'Public',
-      sourceHandles: [], canonicalWebsite: 'https://example.com', companyHasNoWebsite: false,
+      sourceHandles: [], additionalContext: 'Use the supplied launch notes.',
       idempotencyKey: 'request-12345678',
     })).rejects.toBe(failure)
     expect(deps.deleteEmptyShell).toHaveBeenCalledWith('user-1', 'artifact-1')
@@ -318,7 +318,7 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
     await expect(service.create({
       userId: 'user-1', assistantId: 'assistant-1', workspaceId: 'workspace-1',
       family: 'presentation', outcome: 'Company introduction', audience: 'Public',
-      sourceHandles: [], canonicalWebsite: 'https://example.com', companyHasNoWebsite: false,
+      sourceHandles: [],
       idempotencyKey: 'request-12345678',
     })).rejects.toMatchObject({ code: 'office_generation_unavailable' })
     expect(deps.createShell).not.toHaveBeenCalled()
@@ -336,7 +336,7 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
     await expect(service.create({
       userId: 'user-1', assistantId: 'assistant-1', workspaceId: 'workspace-1',
       family: 'document', outcome: 'Board memo', audience: 'Board', sourceHandles: [],
-      canonicalWebsite: 'https://example.com', companyHasNoWebsite: false,
+      additionalContext: 'Keep it to one page.',
       idempotencyKey: 'request-12345678',
     })).resolves.toEqual({ artifactId: 'original-artifact', jobId: 'original-job' })
     expect(deps.deleteEmptyShell).toHaveBeenCalledWith('user-1', 'new-shell')
@@ -374,7 +374,7 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
     const job = { id: '30000000-0000-4000-8000-000000000001', workspaceId: '30000000-0000-4000-8000-000000000002', artifactId: '30000000-0000-4000-8000-000000000003', initiatedByUserId: '30000000-0000-4000-8000-000000000004', assistantId: '30000000-0000-4000-8000-000000000005', jobKind: 'create', status: 'queued', stage: 'queued', brief: {}, authorityProjection: {}, templateVersionId: null, baseArtifactVersion: 0, checkpoint: {}, checkpointVersion: 0, leaseToken: null, leaseExpiresAt: null, cancelRequestedAt: null, errorCode: null, createdAt: new Date(), updatedAt: new Date() } as OfficeGenerationJobRow
     const store = { claim: vi.fn(async () => job), checkpoint: vi.fn(async () => true), appendEvent: vi.fn(async () => ({})), drainSteering: vi.fn(async () => []), finish: vi.fn(async () => true) }
     const worker = createOfficeGenerationWorker({ store, workerUserId: job.initiatedByUserId, buildPipelineDeps: () => ({
-      resolveAuthority: vi.fn(async () => null), selectTemplate: vi.fn(), retrieveBrain: vi.fn(), inspectWebsite: vi.fn(), planClaims: vi.fn(), construct: vi.fn(), processMedia: vi.fn(), resolveResource: async () => null, cancelled: vi.fn(async () => false), commit: vi.fn(),
+      resolveAuthority: vi.fn(async () => null), selectTemplate: vi.fn(), retrieveBrain: vi.fn(), inspectUrl: vi.fn(), planClaims: vi.fn(), construct: vi.fn(), processMedia: vi.fn(), resolveResource: async () => null, cancelled: vi.fn(async () => false), commit: vi.fn(),
     }) })
     const status = await worker.runOnce()
     expect(status).toBe('failed')

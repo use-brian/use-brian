@@ -104,8 +104,7 @@ export async function createOfficeArtifact(input: {
   family: OfficeFamily;
   outcome: string;
   audience: string;
-  canonicalWebsite?: string;
-  companyHasNoWebsite: boolean;
+  additionalContext?: string;
   sourceHandles?: string[];
   templateId?: string;
   idempotencyKey: string;
@@ -233,7 +232,7 @@ export async function listOfficeTemplates(workspaceId: string): Promise<OfficeTe
   return body.templates;
 }
 
-export async function createOfficeTemplate(input: { workspaceId: string; family: OfficeFamily; name: string; description: string; creationMethod: "guided" | "upload" }): Promise<{ id: string; draftArtifactId: string }> {
+export async function createOfficeTemplate(input: { workspaceId: string; family: OfficeFamily; name: string; description: string; creationMethod: "guided" | "upload"; canonicalWebsite?: string; companyHasNoWebsite?: boolean }): Promise<{ id: string; draftArtifactId: string }> {
   return json(await authFetch(`${API_URL}/api/office/templates`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...input, sensitivity: "internal" }) }), "office_template_create_failed");
 }
 

@@ -50,6 +50,7 @@ import {
   deleteCustomLlmProfile,
   getCustomLlmConfiguration,
   setCustomLlmTierDefault,
+  updateCustomLlmProfile,
   type CustomLlmEndpoint,
   type CustomLlmProfile,
   type CustomLlmTier,
@@ -61,6 +62,14 @@ import { WorkspaceLlmKeyBlock } from "./llm-key-block";
 const DEFAULTABLE_CLASSES: WorkspaceModelDefault["modelClass"][] = ["standard-pro", "max", "research"];
 const CUSTOM_TIERS: CustomLlmTier[] = ["standard", "pro", "max", "research"];
 type ModelsView = "routing" | "custom" | "advanced";
+type CustomProfileDraft = {
+  endpointId: string;
+  profileId: string;
+  name: string;
+  modelId: string;
+  contextWindow: number;
+  maxOutputTokens: number;
+};
 
 export function ModelsSection() {
   const t = useT().chrome.settingsModal.models;
@@ -85,6 +94,7 @@ export function ModelsSection() {
   const [newCustomContextWindow, setNewCustomContextWindow] = useState(32768);
   const [newCustomMaxOutput, setNewCustomMaxOutput] = useState(4096);
   const [customSaving, setCustomSaving] = useState(false);
+  const [editingCustomProfile, setEditingCustomProfile] = useState<CustomProfileDraft | null>(null);
   const [saving, setSaving] = useState(false);
   const [activeView, setActiveView] = useState<ModelsView>("routing");
   const [showCustomCreate, setShowCustomCreate] = useState(false);
@@ -188,6 +198,44 @@ export function ModelsSection() {
       setCustomSaving(false);
     }
   }, [workspaceId, newCustomEndpointId, newCustomName, newCustomModelId, newCustomContextWindow, newCustomMaxOutput, reload, t]);
+
+  const startCustomProfileEdit = useCallback((endpoint: CustomLlmEndpoint, profile: CustomLlmProfile) => {
+    setShowCustomCreate(false);
+    setError(null);
+    setEditingCustomProfile((current) => current?.profileId === profile.id ? null : {
+      endpointId: endpoint.id,
+      profileId: profile.id,
+      name: profile.name,
+      modelId: profile.modelId,
+      contextWindow: profile.contextWindow,
+      maxOutputTokens: profile.maxOutputTokens,
+    });
+  }, []);
+
+  const onUpdateCustomProfile = useCallback(async () => {
+    if (!workspaceId || !editingCustomProfile || !editingCustomProfile.name.trim() || !editingCustomProfile.modelId.trim()) return;
+    setCustomSaving(true);
+    setError(null);
+    try {
+      await updateCustomLlmProfile(
+        workspaceId,
+        editingCustomProfile.endpointId,
+        editingCustomProfile.profileId,
+        {
+          name: editingCustomProfile.name.trim(),
+          modelId: editingCustomProfile.modelId.trim(),
+          contextWindow: editingCustomProfile.contextWindow,
+          maxOutputTokens: editingCustomProfile.maxOutputTokens,
+        },
+      );
+      setEditingCustomProfile(null);
+      await reload();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t.saveError);
+    } finally {
+      setCustomSaving(false);
+    }
+  }, [workspaceId, editingCustomProfile, reload, t]);
 
   const onCustomTierChange = useCallback(async (tier: CustomLlmTier, value: string) => {
     if (!workspaceId) return;
@@ -361,7 +409,10 @@ export function ModelsSection() {
                   variant="outline"
                   size="sm"
                   disabled={customEndpoints.length === 0}
-                  onClick={() => setShowCustomCreate((current) => !current)}
+                  onClick={() => {
+                    setEditingCustomProfile(null);
+                    setShowCustomCreate((current) => !current);
+                  }}
                 >
                   <Plus className="mr-1 size-3.5" aria-hidden />
                   {showCustomCreate ? t.cancelCreateCta : t.addProfileCta}
@@ -380,18 +431,68 @@ export function ModelsSection() {
                           ? t.classMax
                           : t.classResearch);
                   return (
-                    <li key={profile.id} className="flex items-center gap-3 rounded-lg bg-muted/25 px-3 py-2.5">
-                      <Layers3 className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate text-[13px] font-medium">{customProfileLabel(endpoint, profile)}</div>
-                        <div className="truncate text-[11.5px] text-muted-foreground">
-                          {profile.modelId}
-                          {assigned.length > 0 ? ` · ${t.assignedTo.replace("{tiers}", assigned.join(", "))}` : ""}
+                    <li key={profile.id} className="space-y-3 rounded-lg bg-muted/25 px-3 py-2.5">
+                      <div className="flex items-center gap-3">
+                        <Layers3 className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-[13px] font-medium">{customProfileLabel(endpoint, profile)}</div>
+                          <div className="truncate text-[11.5px] text-muted-foreground">
+                            {profile.modelId}
+                            {assigned.length > 0 ? ` · ${t.assignedTo.replace("{tiers}", assigned.join(", "))}` : ""}
+                          </div>
                         </div>
+                        <Button variant="ghost" size="icon" aria-label={t.editProfileCta} onClick={() => startCustomProfileEdit(endpoint, profile)}>
+                          <Pencil className="size-3.5" aria-hidden />
+                        </Button>
+                        <Button variant="ghost" size="icon" aria-label={t.deleteCta} onClick={() => void onDeleteCustomProfile(endpoint, profile)}>
+                          <Trash2 className="size-3.5" aria-hidden />
+                        </Button>
                       </div>
-                      <Button variant="ghost" size="icon" aria-label={t.deleteCta} onClick={() => void onDeleteCustomProfile(endpoint, profile)}>
-                        <Trash2 className="size-3.5" aria-hidden />
-                      </Button>
+                      {editingCustomProfile?.profileId === profile.id ? (
+                        <div className="space-y-3 border-t border-border/60 pt-3">
+                          <div>
+                            <div className="text-[12.5px] font-medium">{t.customEditTitle}</div>
+                            <p className="mt-0.5 text-[11.5px] text-muted-foreground">{t.customEditBlurb}</p>
+                          </div>
+                          <div className="grid gap-2 sm:grid-cols-2">
+                            <label className="space-y-1 text-[11.5px] text-muted-foreground">
+                              {t.profileNameLabel}
+                              <input value={editingCustomProfile.name} onChange={(event) => setEditingCustomProfile((current) => current ? { ...current, name: event.target.value } : current)} maxLength={80} className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-[12.5px] text-foreground" />
+                            </label>
+                            <label className="space-y-1 text-[11.5px] text-muted-foreground">
+                              {t.modelIdLabel}
+                              <input value={editingCustomProfile.modelId} onChange={(event) => setEditingCustomProfile((current) => current ? { ...current, modelId: event.target.value } : current)} maxLength={200} spellCheck={false} className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-[12.5px] text-foreground" />
+                            </label>
+                            <label className="space-y-1 text-[11.5px] text-muted-foreground">
+                              {t.contextLabel}
+                              <input type="number" min={1024} max={4000000} value={editingCustomProfile.contextWindow} onChange={(event) => setEditingCustomProfile((current) => current ? { ...current, contextWindow: Number(event.target.value) } : current)} className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-[12.5px] text-foreground" />
+                            </label>
+                            <label className="space-y-1 text-[11.5px] text-muted-foreground">
+                              {t.outputLabel}
+                              <input type="number" min={64} max={262144} value={editingCustomProfile.maxOutputTokens} onChange={(event) => setEditingCustomProfile((current) => current ? { ...current, maxOutputTokens: Number(event.target.value) } : current)} className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-[12.5px] text-foreground" />
+                            </label>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <Button
+                              size="sm"
+                              disabled={customSaving
+                                || !editingCustomProfile.name.trim()
+                                || !editingCustomProfile.modelId.trim()
+                                || editingCustomProfile.contextWindow < 1024
+                                || editingCustomProfile.contextWindow > 4000000
+                                || editingCustomProfile.maxOutputTokens < 64
+                                || editingCustomProfile.maxOutputTokens > 262144}
+                              onClick={() => void onUpdateCustomProfile()}
+                            >
+                              <Pencil className="mr-1 size-3.5" aria-hidden />
+                              {customSaving ? t.testingProfile : t.updateProfileCta}
+                            </Button>
+                            <Button variant="ghost" size="sm" disabled={customSaving} onClick={() => setEditingCustomProfile(null)}>
+                              {t.cancelCreateCta}
+                            </Button>
+                          </div>
+                        </div>
+                      ) : null}
                     </li>
                   );
                 })}

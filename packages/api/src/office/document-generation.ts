@@ -200,18 +200,20 @@ export async function generateDocumentFromTemplate(params: {
   templateVersionId: string
   outcome: string
   audience: string
+  additionalContext?: string
   template: OfficeTemplateBundle
 }): Promise<DocumentSnapshot> {
   if (params.template.family !== 'document' || params.template.snapshot.family !== 'document') throw new Error('Document generation requires a document template')
   const placeholders = collectDocumentPlaceholders(params.template.snapshot)
   if (placeholders.length === 0) throw new Error('Document template contains no fillable fields')
   const isLetter = placeholders.includes('LETTER_BODY')
+  const additionalContext = params.additionalContext?.trim() ? `\n\nAdditional context:\n${params.additionalContext.trim()}` : ''
   const response = await collectStream(params.provider.stream({
     model: params.model,
     systemPrompt: withBrandVoice(isLetter ? LETTER_SYSTEM_PROMPT : GENERIC_DOCUMENT_SYSTEM_PROMPT, params.brandVoice),
     messages: [{ role: 'user', content: isLetter
-      ? `Outcome:\n${params.outcome}\n\nAudience:\n${params.audience}\n\nTemplate guidance:\n${params.template.description}`
-      : `Outcome:\n${params.outcome}\n\nAudience:\n${params.audience}\n\nTemplate guidance:\n${params.template.description}\n\nAllowed placeholders:\n${JSON.stringify(placeholders)}\n\nTemplate text near placeholders:\n${JSON.stringify(documentTemplateContext(params.template.snapshot))}` }] as Message[],
+      ? `Outcome:\n${params.outcome}\n\nAudience:\n${params.audience}${additionalContext}\n\nTemplate guidance:\n${params.template.description}`
+      : `Outcome:\n${params.outcome}\n\nAudience:\n${params.audience}${additionalContext}\n\nTemplate guidance:\n${params.template.description}\n\nAllowed placeholders:\n${JSON.stringify(placeholders)}\n\nTemplate text near placeholders:\n${JSON.stringify(documentTemplateContext(params.template.snapshot))}` }] as Message[],
     maxTokens: isLetter ? 3_000 : 6_000,
     temperature: 0.25,
   }))

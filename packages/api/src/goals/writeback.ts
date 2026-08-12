@@ -145,9 +145,25 @@ export async function finishGoal(
   goal: GoalRecord,
   terminal: GoalHostTerminal,
   reason: string | null,
-  deps: { goalStore: GoalStore; deliver: GoalDeliver },
+  deps: {
+    goalStore: GoalStore
+    deliver: GoalDeliver
+    /** Acting-driver ownership guard. When present, this atomically changes a
+     * still-running goal to the terminal status. `false` means an explicit
+     * cancellation already retired it, so host write-back and delivery must
+     * not run. Rollup callers omit it and keep the ordinary store write. */
+    claimTerminal?: (
+      id: string,
+      terminal: GoalHostTerminal,
+      reason: string | null,
+    ) => Promise<boolean>
+  },
 ): Promise<void> {
-  await deps.goalStore.setStatusSystem(goal.id, terminal, reason)
+  if (deps.claimTerminal) {
+    if (!(await deps.claimTerminal(goal.id, terminal, reason))) return
+  } else {
+    await deps.goalStore.setStatusSystem(goal.id, terminal, reason)
+  }
   if (goal.host && goal.createdByUserId) {
     const hostStore = createHostStore({ actorUserId: goal.createdByUserId })
     await hostStore.adapterFor(goal.host.type).setTerminal(goal.host, terminal, reason)
