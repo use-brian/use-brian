@@ -183,6 +183,17 @@ scan the QR code, and the local bridge on port `8091` persists the pairing acros
 restarts. Set `WA_CONNECTOR_URL` and `WA_CONNECTOR_SECRET` only when using an
 external bridge instead.
 
+For an official WhatsApp Business connection, choose **Official Cloud API** in
+the same WhatsApp tab and enter the Meta app secret, permanent access token,
+phone number ID, and WhatsApp Business Account ID. Studio returns the callback
+URL and verify token to register under Meta App Dashboard → WhatsApp →
+Configuration and subscribes the app to the Business Account. The API verifies
+`X-Hub-Signature-256` on every event. Add
+permitted sender numbers to the channel allowlist before they can invoke the
+assistant. Free-form outbound replies are subject to Meta's 24-hour
+customer-service window; proactive workflow delivery is disabled until approved
+template-message support is available.
+
 ### What it asks before doing
 
 You make the calls, so it governs every tool by what that tool does, fail-closed:
