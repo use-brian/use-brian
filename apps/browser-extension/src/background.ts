@@ -6,7 +6,12 @@
  */
 import { RelayClient } from './relay-client.js'
 import { TabExecutor, ExecutorError, isDetachedError, retryableAfterReattach } from './executor.js'
-import { TaskGate, CONSENT_PROMPT_TIMEOUT_MS, type ConsentOutcome } from './task-gate.js'
+import {
+  TaskGate,
+  CONSENT_PROMPT_TIMEOUT_MS,
+  type ConsentOutcome,
+  type ConsentPromptOptions,
+} from './task-gate.js'
 import {
   activeTabForConsent,
   attachabilityOf,
@@ -16,6 +21,7 @@ import {
 import { credentialsForConfigure, isTrustedPairingOrigin, type PairRequest } from './pairing.js'
 import { hasBrowserControl } from './browser-control-permission.js'
 import { readBuildStamp } from './build-info.js'
+import { isTabControlPreapproved } from './consent-preapproval.js'
 import type { LocalControlMode } from './protocol.js'
 
 const executor = new TabExecutor()
@@ -24,7 +30,7 @@ const executor = new TabExecutor()
 
 let pendingConsent: ((res: { allowed: boolean }) => void) | null = null
 
-async function promptForConsent(): Promise<ConsentOutcome> {
+async function promptForConsent(options: ConsentPromptOptions): Promise<ConsentOutcome> {
   const activeTab = await activeTabForConsent((options) => chrome.windows.getLastFocused(options))
   // An unattachable page is NOT a refusal. Reporting it as one told users they
   // had declined a prompt never shown, and sent the assistant chasing a consent
@@ -34,6 +40,9 @@ async function promptForConsent(): Promise<ConsentOutcome> {
   if (activeTab?.id == null) return { allowed: false, reason: 'no_active_tab' }
 
   const targetTabId = activeTab.id
+  if (options.allowPreApproval && await isTabControlPreapproved(chrome.storage.local)) {
+    return { allowed: true, tabId: targetTabId }
+  }
   await chrome.windows.create({
     url: chrome.runtime.getURL(`allow.html?host=${encodeURIComponent(hostOf(activeTab.url ?? ''))}`),
     type: 'popup',
@@ -348,7 +357,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
   if (reason === 'canceled_by_user') {
     // The user dismissed Chrome's own debugging banner. Treat it as a refusal:
     // ask again through our per-task Allow window instead of re-attaching.
-    gate.revokeConsent()
+    gate.revokeConsent({ requireManualApproval: true })
     client.sendEvent('detached')
   }
 })
@@ -373,13 +382,25 @@ chrome.tabs.onCreated.addListener((tab) => {
 })
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  const msg = message as { type?: string; allowed?: boolean; relayUrl?: string; pairingToken?: string }
+  const msg = message as {
+    type?: string
+    allowed?: boolean
+    relayUrl?: string
+    pairingToken?: string
+    preapproveEnabled?: boolean
+  }
   if (msg.type === 'consent-response') {
     pendingConsent?.({ allowed: msg.allowed === true })
     sendResponse({ ok: true })
   } else if (msg.type === 'stop-task') {
     void stopTask()
     client.sendEvent('stopped')
+    sendResponse({ ok: true })
+  } else if (msg.type === 'consent-preapproval-changed') {
+    if (msg.preapproveEnabled !== true) {
+      gate.revokeConsent()
+      void executor.detach()
+    }
     sendResponse({ ok: true })
   } else if (msg.type === 'configure') {
     void (async () => {

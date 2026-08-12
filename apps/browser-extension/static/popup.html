@@ -8,6 +8,7 @@
       .row { margin-bottom: 8px; }
       label { display: block; font-weight: 600; margin-bottom: 3px; }
       input { width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 12px; }
+      input[type="checkbox"] { width: 16px; height: 16px; margin: 1px 0 0; accent-color: #111; }
       button { padding: 6px 12px; border-radius: 6px; border: 1px solid #cbd5e1; background: #fff; cursor: pointer; font-size: 12px; }
       button.primary { background: #111; color: #fff; border-color: #111; }
       button.danger { background: #dc2626; color: #fff; border-color: #dc2626; }
@@ -18,6 +19,9 @@
       .hint { color: #64748b; font-size: 11px; margin-top: 8px; }
       .warn { background: #fef3c7; border: 1px solid #fcd34d; color: #78350f; border-radius: 6px; padding: 7px 9px; font-size: 12px; margin-top: 8px; }
       .build { color: #94a3b8; font-size: 10px; margin-top: 10px; font-variant-numeric: tabular-nums; }
+      .toggle { display: flex; align-items: flex-start; gap: 9px; padding: 9px; border: 1px solid #cbd5e1; border-radius: 7px; }
+      .toggle label { margin: 0; }
+      .toggle small { display: block; color: #64748b; font-size: 11px; font-weight: 400; margin-top: 2px; }
     </style>
   </head>
   <body>
@@ -34,12 +38,19 @@
       <label for="pairing-token">Pairing token</label>
       <input id="pairing-token" placeholder="Paste from Settings > Browser extension" />
     </div>
+    <div class="row toggle">
+      <input id="preapprove-tab-control" type="checkbox" />
+      <label for="preapprove-tab-control">
+        Pre-approve tab control
+        <small>Skip the Allow popup for eligible tabs. Stop still requires a fresh manual Allow.</small>
+      </label>
+    </div>
     <div class="actions">
       <button id="connect" class="primary">Connect</button>
       <button id="disconnect">Disconnect</button>
       <button id="stop" class="danger">Stop task</button>
     </div>
-    <p class="hint">The assistant only acts in a tab you allow, one task at a time. Stop ends the current task immediately.</p>
+    <p class="hint">The assistant only acts within this browser profile's configured tab scope. Stop ends the current task immediately.</p>
     <!-- Which build is loaded. Answering this once cost a SHA256 of the folder
          path Chrome derived the extension id from. -->
     <p class="build" id="build-line"></p>
