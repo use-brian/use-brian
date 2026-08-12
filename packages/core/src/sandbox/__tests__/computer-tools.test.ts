@@ -371,6 +371,30 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
     expect(String(res.data)).toContain('URL: https://www.linkedin.com/messaging/')
   })
 
+  it('pages through snapshots beyond the first 150 interactive nodes', async () => {
+    const local = fakeProvider('local')
+    local.snapshot = async () => ({
+      url: 'https://example.com/large',
+      title: 'Large page',
+      nodes: Array.from({ length: 320 }, (_, index) => ({
+        ref: `@e${index + 1}`,
+        role: 'button',
+        name: `Action ${index + 1}`,
+      })),
+    })
+    const tools = createComputerTools({ local, cloud: fakeProvider('cloud') })
+
+    const res = await run(tools.browserSnapshot, { offset: 150 })
+
+    expect(String(res.data)).toContain('@e151 button "Action 151"')
+    expect(String(res.data)).toContain('@e300 button "Action 300"')
+    expect(String(res.data)).not.toContain('@e301 button "Action 301"')
+    expect(String(res.data)).toContain('Showing interactive nodes 151-300 of 320')
+    expect(String(res.data)).toContain('call browserSnapshot with offset 300')
+    expect(res.meta).toMatchObject({ nodes: 320, offset: 150, shown: 150, nextOffset: 300 })
+    expect(() => tools.browserSnapshot.inputSchema.parse({ limit: 151 })).toThrow()
+  })
+
   describe('send gate (P1.7 / §8 no unattended state-change)', () => {
     async function gateFor(input: { ref: string; intent?: string }, snapshotFirst = true) {
       const tools = createComputerTools({ local: fakeProvider('local'), cloud: fakeProvider('cloud') })
