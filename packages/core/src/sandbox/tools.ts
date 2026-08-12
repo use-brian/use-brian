@@ -133,7 +133,7 @@ const DEFAULT_FUSE_IDLE_RESET_MS = 5 * 60 * 1000
  * Profile plumbing for the browse tools (R2-4/R2-10): the store + vault used
  * by `resolveProfileForCall`, and the acting assistant's clearance (boot
  * resolves it from the assistant row — never model input). Null → the
- * profile-less posture (OSS boot without the closed store).
+ * profile-less posture when no profile store is configured.
  */
 export type ComputerToolProfiles = {
   store: BrowserProfileStore

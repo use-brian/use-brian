@@ -269,7 +269,7 @@ export interface SessionVault {
   revoke(params: { profileId: string; site: string }): Promise<void>
   /**
    * Per-plan inactivity purge (§4.10: ~30 d free / 90 d paid). Optional —
-   * the closed impl derives the cutoff from the workspace plan; the reaper
+   * the DB impl derives the cutoff from the workspace plan; the reaper
    * runs it daily. Returns the number of purged bundles.
    */
   purgeInactive?(): Promise<number>

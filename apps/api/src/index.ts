@@ -21,6 +21,11 @@ import { bootOpenApi, type OpenApiEnv } from '@use-brian/api/boot.js'
 import { buildEpisodeIngestors } from '@use-brian/api/build-episode-ingestors.js'
 import { buildOpenChannelHosts } from '@use-brian/api/channel-hosts.js'
 import { loadLocalProviderPreference } from '@use-brian/api/local-provider-preference.js'
+import { createBrowserCredentialStore } from '@use-brian/api/db/browser-credential-store.js'
+import { createBrowserProfileStore } from '@use-brian/api/db/browser-profile-store.js'
+import { createBrowserSessionVault } from '@use-brian/api/db/browser-session-vault.js'
+import { createBrowserSkillGrantStore } from '@use-brian/api/db/browser-skill-grant-store.js'
+import { createSandboxTaskStore } from '@use-brian/api/db/sandbox-task-store.js'
 
 dotenv.config()
 
@@ -84,6 +89,7 @@ const env: OpenApiEnv = {
   BROWSER_RELAY_SECRET: process.env.BROWSER_RELAY_SECRET,
   E2B_API_KEY: process.env.E2B_API_KEY,
   E2B_TEMPLATE_ID: process.env.E2B_TEMPLATE_ID,
+  BROWSER_USE_MODEL: process.env.BROWSER_USE_MODEL,
   COMPUTER_USE_UNATTENDED_ENABLED: process.env.COMPUTER_USE_UNATTENDED_ENABLED === 'true',
   // AES-GCM key for connector credentials at rest. The launcher generates +
   // persists it; absent (bare `node index.js` boot) → connectors can't store
@@ -113,9 +119,25 @@ const env: OpenApiEnv = {
 // "Sync to brain", brain-MCP ingestToBrain, chat compaction) runs locally. This
 // is the one closed seam the open edition fills with an open impl over the same
 // store graph — see packages/api/src/build-episode-ingestors.ts.
+const browserEncryptionKey = process.env.BROWSER_VAULT_ENCRYPTION_KEY
+  ? Buffer.from(process.env.BROWSER_VAULT_ENCRYPTION_KEY, 'base64')
+  : null
+
 const { start } = await bootOpenApi({
   env,
   runWorkers: true,
-  ports: { buildEpisodeIngestors, buildChannelHosts: buildOpenChannelHosts },
+  ports: {
+    buildEpisodeIngestors,
+    buildChannelHosts: buildOpenChannelHosts,
+    browserProfileStore: createBrowserProfileStore(),
+    browserSkillGrantStore: createBrowserSkillGrantStore(),
+    sandboxTaskStore: createSandboxTaskStore(),
+    browserSessionVault: browserEncryptionKey
+      ? createBrowserSessionVault({ encryptionKey: browserEncryptionKey })
+      : undefined,
+    browserCredentialStore: browserEncryptionKey
+      ? createBrowserCredentialStore({ encryptionKey: browserEncryptionKey })
+      : undefined,
+  },
 })
 await start()
