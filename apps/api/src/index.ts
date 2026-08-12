@@ -122,6 +122,9 @@ const env: OpenApiEnv = {
 const browserEncryptionKey = process.env.BROWSER_VAULT_ENCRYPTION_KEY
   ? Buffer.from(process.env.BROWSER_VAULT_ENCRYPTION_KEY, 'base64')
   : null
+const browserCredentialEncryptionKey = process.env.BROWSER_CREDENTIAL_ENCRYPTION_KEY
+  ? Buffer.from(process.env.BROWSER_CREDENTIAL_ENCRYPTION_KEY, 'base64')
+  : null
 
 const { start } = await bootOpenApi({
   env,
@@ -135,8 +138,8 @@ const { start } = await bootOpenApi({
     browserSessionVault: browserEncryptionKey
       ? createBrowserSessionVault({ encryptionKey: browserEncryptionKey })
       : undefined,
-    browserCredentialStore: browserEncryptionKey
-      ? createBrowserCredentialStore({ encryptionKey: browserEncryptionKey })
+    browserCredentialStore: browserCredentialEncryptionKey
+      ? createBrowserCredentialStore({ encryptionKey: browserCredentialEncryptionKey })
       : undefined,
   },
 })

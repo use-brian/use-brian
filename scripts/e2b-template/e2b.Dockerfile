@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
-RUN npm install -g agent-browser \
+RUN npm install -g agent-browser@0.31.1 \
     && HOME=/home/user agent-browser install --with-deps \
     && chown -R user:user /home/user/.agent-browser
 

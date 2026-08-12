@@ -36,6 +36,7 @@ describe('[COMP:sandbox/profiles] OSS browser composition', () => {
       expect(source).toMatch(new RegExp(`${port}:`))
     }
     expect(source).toContain('BROWSER_VAULT_ENCRYPTION_KEY')
+    expect(source).toContain('BROWSER_CREDENTIAL_ENCRYPTION_KEY')
   })
 
   it('starts the local relay and ships the optional cloud template from OSS', async () => {
@@ -44,10 +45,13 @@ describe('[COMP:sandbox/profiles] OSS browser composition', () => {
 
     expect(launcher).toContain("config.browserRelaySecret")
     expect(launcher).toContain("config.browserVaultEncryptionKey")
+    expect(launcher).toContain("config.browserCredentialEncryptionKey")
     expect(launcher).toContain("'@use-brian/browser-relay'")
     expect(launcher).toContain('BROWSER_RELAY_URL:')
     expect(launcher).toContain('BROWSER_VAULT_ENCRYPTION_KEY:')
+    expect(launcher).toContain('BROWSER_CREDENTIAL_ENCRYPTION_KEY:')
     expect(template).toContain('FROM e2bdev/code-interpreter:latest')
     expect(template).toContain('browser-use==0.13.4')
+    expect(template).toContain('agent-browser@0.31.1')
   })
 })

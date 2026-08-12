@@ -26,12 +26,12 @@ prints the template ID. Configure:
 E2B_API_KEY=your-api-key
 E2B_TEMPLATE_ID=your-template-id
 BROWSER_VAULT_ENCRYPTION_KEY=base64-of-32-random-bytes
+BROWSER_CREDENTIAL_ENCRYPTION_KEY=another-base64-32-byte-key
 ```
 
-`pnpm start` generates and persists `BROWSER_VAULT_ENCRYPTION_KEY` when it is
-unset. For a separately deployed API, generate it with
-`openssl rand -base64 32`. Do not rotate it without intentionally discarding
-saved browser sessions and credentials.
+`pnpm start` generates and persists both encryption keys when they are unset.
+For a separately deployed API, generate each with `openssl rand -base64 32`.
+Do not rotate either key without intentionally discarding the data it protects.
 
 `BROWSER_USE_MODEL` optionally selects the watched `browserExplore` model. The
 API otherwise chooses a low-cost model for the configured Anthropic or Gemini

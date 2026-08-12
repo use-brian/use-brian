@@ -211,9 +211,12 @@ const channelCredentialKey = config.channelCredentialKey || randomBytes(32).toSt
 // AES-GCM key for saved browser sessions. Keep it stable across local restarts
 // so sessions captured through My Browser or cloud browsing remain usable.
 const browserVaultEncryptionKey = process.env.BROWSER_VAULT_ENCRYPTION_KEY || config.browserVaultEncryptionKey || randomBytes(32).toString('base64')
+// Separate key for saved usernames/passwords. Keeping it distinct from the
+// session-vault key limits the blast radius of either credential class.
+const browserCredentialEncryptionKey = process.env.BROWSER_CREDENTIAL_ENCRYPTION_KEY || config.browserCredentialEncryptionKey || randomBytes(32).toString('base64')
 writeFileSync(
   CONFIG_FILE,
-  JSON.stringify({ ...config, ...(geminiKey ? { geminiApiKey: geminiKey } : {}), ...(preferredProvider ? { preferredProvider } : {}), jwtSecret, docSyncSecret, discordConnectorSecret, waConnectorSecret, wechatConnectorSecret, messageStoreHmacSecret, browserRelaySecret, channelCredentialKey, browserVaultEncryptionKey, ownerName }, null, 2),
+  JSON.stringify({ ...config, ...(geminiKey ? { geminiApiKey: geminiKey } : {}), ...(preferredProvider ? { preferredProvider } : {}), jwtSecret, docSyncSecret, discordConnectorSecret, waConnectorSecret, wechatConnectorSecret, messageStoreHmacSecret, browserRelaySecret, channelCredentialKey, browserVaultEncryptionKey, browserCredentialEncryptionKey, ownerName }, null, 2),
 )
 
 // External-store escape hatch: a real Postgres URL skips the embedded brain.
@@ -256,6 +259,7 @@ const env = {
   BROWSER_RELAY_URL: process.env.BROWSER_RELAY_URL || `http://127.0.0.1:${browserRelayPort}`,
   BROWSER_RELAY_SECRET: browserRelaySecret,
   BROWSER_VAULT_ENCRYPTION_KEY: browserVaultEncryptionKey,
+  BROWSER_CREDENTIAL_ENCRYPTION_KEY: browserCredentialEncryptionKey,
   ...(messageStoreLaunch.enabled
     ? {
         BRIAN_MESSAGE_STORE_URL: `http://127.0.0.1:${PORTS.messageStore}`,
