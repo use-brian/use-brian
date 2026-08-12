@@ -1,7 +1,6 @@
 // Copy the static assets that the TypeScript build doesn't emit — the sandboxed
-// preload (`preload.cjs`) and the sign-in / offline landings (`signin.html`,
-// `offline.html`) — from src/ into dist/. Run after `tsc` by the `build` / `dev`
-// scripts.
+// preloads (`preload.cjs`, `pet-preload.cjs`) and the bundled HTML surfaces —
+// from src/ into dist/. Run after `tsc` by the `build` / `dev` scripts.
 //
 // This replaces a Unix `cp` that broke the Windows build: npm/pnpm run scripts via
 // cmd.exe on Windows, which has no `cp`, so `package:win` failed at the copy step
@@ -13,6 +12,12 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const pkgRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
-for (const file of ["preload.cjs", "signin.html", "offline.html"]) {
+for (const file of [
+  "preload.cjs",
+  "pet-preload.cjs",
+  "signin.html",
+  "offline.html",
+  "brian-pet.html",
+]) {
   copyFileSync(join(pkgRoot, "src", file), join(pkgRoot, "dist", file));
 }

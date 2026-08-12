@@ -32,6 +32,8 @@ export interface MenuHandlers {
   onUninstall: () => void;
   /** Start Firefox with its loopback Remote Agent enabled for My Browser. */
   onStartFirefoxControl: () => void;
+  /** Toggle the persisted power blocker + ambient Brian companion. */
+  onToggleKeepAwake: () => void;
   /** Whether DevTools / reload affordances should be shown (dev only). */
   isDev: boolean;
   /** Show "Uninstall …" in the macOS app menu (packaged macOS builds only). */
@@ -40,6 +42,8 @@ export interface MenuHandlers {
   update: { readonly label: string; readonly enabled: boolean } | null;
   /** The active target for the indicator + switch items (see menu-template.ts). */
   target: { readonly kind: "cloud" | "local"; readonly label: string } | null;
+  /** Whether the persisted awake companion mode is currently enabled. */
+  keepBrianAwake: boolean;
 }
 
 export function buildAppMenu(handlers: MenuHandlers): Menu {
@@ -51,6 +55,7 @@ export function buildAppMenu(handlers: MenuHandlers): Menu {
       update: handlers.update,
       target: handlers.target,
       uninstall: handlers.uninstall,
+      keepBrianAwake: handlers.keepBrianAwake,
     },
     handlers,
   );
