@@ -16,7 +16,7 @@ function server(overrides: Partial<OfficeResourceRouteDeps> = {}, authenticated 
   const image: NormalizedOfficeImage = { bytes, hash: createHash('sha256').update(bytes).digest('hex'), mime: 'image/png', widthPx: 3, heightPx: 2 }
   const deps: OfficeResourceRouteDeps = {
     load: vi.fn(async () => ({ artifact: { id: ARTIFACT, workspaceId: WORKSPACE, lifecycleState: 'active', sensitivity: 'internal' }, access: { canEdit: true }, snapshot: { resources: [] } } as never)),
-    readUpload: vi.fn(async () => ({ bytes, sensitivity: 'internal' })),
+    readUpload: vi.fn(async () => ({ bytes, sensitivity: 'internal' as const })),
     normalizeImage: vi.fn(async () => image),
     persistImage: vi.fn(async () => ({ id: RESOURCE })),
     readResource: vi.fn(async () => ({ bytes, mime: image.mime, hash: image.hash })),
@@ -38,6 +38,7 @@ describe('[COMP:api/office-resources] Office image admission', () => {
     const response = await request(test.app).post(`/api/office/artifacts/${ARTIFACT}/resources`).send({ fileId: FILE, kind: 'image' }).expect(201)
     expect(response.body).toEqual({ resource: { id: RESOURCE, kind: 'image', hash: test.image.hash, mime: 'image/png', sensitivity: 'internal' }, widthPx: 3, heightPx: 2 })
     expect(test.deps.persistImage).toHaveBeenCalledWith(expect.objectContaining({ userId: USER, workspaceId: WORKSPACE, artifactId: ARTIFACT, image: test.image }))
+    expect(test.image.hash).toBe(createHash('sha256').update(test.image.bytes).digest('hex'))
   })
 
   it.each([
@@ -51,7 +52,7 @@ describe('[COMP:api/office-resources] Office image admission', () => {
   })
 
   it('rejects oversize, spoofed, and unsupported image input with owned codes', async () => {
-    await request(server({ readUpload: vi.fn(async () => ({ bytes: new Uint8Array(20 * 1024 * 1024 + 1), sensitivity: 'internal' })) }).app).post(`/api/office/artifacts/${ARTIFACT}/resources`).send({ fileId: FILE, kind: 'image' }).expect(413, { error: 'office_image_too_large' })
+    await request(server({ readUpload: vi.fn(async () => ({ bytes: new Uint8Array(20 * 1024 * 1024 + 1), sensitivity: 'internal' as const })) }).app).post(`/api/office/artifacts/${ARTIFACT}/resources`).send({ fileId: FILE, kind: 'image' }).expect(413, { error: 'office_image_too_large' })
     await request(server({ normalizeImage: vi.fn(async () => { throw new Error('office_image_invalid') }) }).app).post(`/api/office/artifacts/${ARTIFACT}/resources`).send({ fileId: FILE, kind: 'image' }).expect(415, { error: 'office_image_invalid' })
     await request(server({ normalizeImage: vi.fn(async () => { throw new Error('office_image_unsupported') }) }).app).post(`/api/office/artifacts/${ARTIFACT}/resources`).send({ fileId: FILE, kind: 'image' }).expect(415, { error: 'office_image_unsupported' })
   })
@@ -67,7 +68,7 @@ describe('[COMP:api/office-resources] Office image admission', () => {
   })
 
   it('retains the stricter source sensitivity on admission', async () => {
-    const test = server({ readUpload: vi.fn(async () => ({ bytes: new Uint8Array([1, 2, 3]), sensitivity: 'confidential' })) })
+    const test = server({ readUpload: vi.fn(async () => ({ bytes: new Uint8Array([1, 2, 3]), sensitivity: 'confidential' as const })) })
     vi.mocked(test.deps.persistImage).mockResolvedValue({ id: RESOURCE, sensitivity: 'confidential' })
     const response = await request(test.app).post(`/api/office/artifacts/${ARTIFACT}/resources`).send({ fileId: FILE, kind: 'image' }).expect(201)
     expect(test.deps.persistImage).toHaveBeenCalledWith(expect.objectContaining({ sensitivity: 'confidential' }))
