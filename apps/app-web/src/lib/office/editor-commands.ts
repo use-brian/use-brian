@@ -1,6 +1,6 @@
 /** One command vocabulary for every adaptive Office input surface. */
 import { APP_LEVEL_ASSISTANT_ID } from "@use-brian/shared";
-import type { OfficeCommand, OfficeRichTextRun, PresentationObject, SpreadsheetCell, SpreadsheetWorksheet } from "@use-brian/office-model";
+import type { OfficeCommand, OfficeResourceRef, OfficeRichTextRun, PresentationObject, SpreadsheetCell, SpreadsheetWorksheet } from "@use-brian/office-model";
 
 const actor = { type: "user" as const, id: APP_LEVEL_ASSISTANT_ID };
 const base = (artifactId: string, baseVersion: number) => ({ commandId: crypto.randomUUID(), artifactId, baseVersion, actor, origin: "manual" as const });
@@ -31,6 +31,22 @@ export function addSlideCommand(artifactId: string, baseVersion: number, index: 
 
 export function reorderSlideCommand(artifactId: string, baseVersion: number, slideId: string, index: number): OfficeCommand {
   return { ...base(artifactId, baseVersion), kind: "reorderSlide", slideId, index };
+}
+
+export function deleteSlideCommand(artifactId: string, baseVersion: number, slideId: string): OfficeCommand {
+  return { ...base(artifactId, baseVersion), kind: "deleteSlide", slideId };
+}
+
+export function reorderSlideObjectCommand(artifactId: string, baseVersion: number, slideId: string, objectId: string, index: number): OfficeCommand {
+  return { ...base(artifactId, baseVersion), kind: "reorderSlideObject", slideId, objectId, index };
+}
+
+export function attachResourceCommand(artifactId: string, baseVersion: number, resource: OfficeResourceRef): OfficeCommand {
+  return { ...base(artifactId, baseVersion), kind: "attachResource", resource };
+}
+
+export function batchCommand(artifactId: string, baseVersion: number, commands: Array<Exclude<OfficeCommand, { kind: "batch" }>>): OfficeCommand {
+  return { ...base(artifactId, baseVersion), kind: "batch", commands };
 }
 
 export function setSpreadsheetCellCommand(params: { artifactId: string; baseVersion: number; sheetId: string; cellId: string; address: string; valueType: Extract<SpreadsheetCell["valueType"], "blank" | "string" | "number" | "boolean" | "date">; value: SpreadsheetCell["value"]; formula?: string }): OfficeCommand {
