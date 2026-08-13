@@ -21,6 +21,8 @@ import {
 import type { OfficeExportReceipt } from '../docx/index.js'
 import { importExternalPresentation } from './external.js'
 
+export * from './pdf.js'
+
 const PptxGenJS = (PptxGenJSImport as { default?: typeof PptxGenJSImport }).default ?? PptxGenJSImport
 type Pptx = InstanceType<typeof PptxGenJS>
 type Slide = ReturnType<Pptx['addSlide']>

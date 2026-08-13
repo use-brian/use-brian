@@ -6,6 +6,19 @@ import { columnIndexToName, parseCellAddress, type OfficeArtifactSnapshot, type 
 import type { OfficeArtifact } from "@/lib/office/api";
 import { readOfficeReleasedFile, releaseOfficeArtifact, reviewOfficeRelease, transitionOfficeLifecycle, type OfficeReleaseInput, type OfficeReleaseReceipt } from "@/lib/office/api";
 import { useT } from "@/lib/i18n/client";
+import type { Dictionary } from "@/lib/i18n/dictionaries";
+
+type OfficeCopy = Dictionary["office"];
+
+export function officeReleaseIssueMessage(issue: { code: string; message: string }, t: OfficeCopy): string {
+  const messages: Record<string, string> = {
+    "presentation.converter_unavailable": t.presentationPdfConverterUnavailable,
+    "presentation.timeout": t.presentationPdfTimeout,
+    "presentation.invalid_pdf": t.presentationPdfInvalid,
+    "presentation.page_count_mismatch": t.presentationPdfPageCountMismatch,
+  };
+  return messages[issue.code] ?? issue.message;
+}
 
 /** Focused file actions. Advanced release/derivative/offline machinery remains
  * behind the API contract, but the editor exposes only the normal file tasks. */
@@ -44,6 +57,7 @@ export function OfficeReview({ artifact, artifactId, workspaceId, snapshot, onLi
       const acknowledgement = reviewed?.warnings.length ? { version: artifact.version, action: "export" as const, codes: reviewed.warnings.map((warning) => warning.code) } : undefined;
       const released = await releaseOfficeArtifact(artifactId, { ...releaseInput(format), acknowledgement });
       setReceipt(released.receipt);
+      if (released.receipt.status !== "ready" || !released.fileId) return;
       if (format === "pdf") {
         const blob = await readOfficeReleasedFile(workspaceId, released.fileId);
         if (pdfPreview) URL.revokeObjectURL(pdfPreview.url);
@@ -60,8 +74,9 @@ export function OfficeReview({ artifact, artifactId, workspaceId, snapshot, onLi
       <div><h3 className="font-medium">{t.fileActions}</h3><p className="mt-1 text-xs text-muted-foreground">{t.fileActionsDescription}</p></div>
       <button type="button" disabled={busy || offlineCopy} onClick={() => void startRelease("native")} className="flex h-9 w-full items-center justify-center gap-2 rounded-md bg-action px-3 font-medium text-action-foreground disabled:opacity-50"><Download className="size-4" aria-hidden />{artifact.family === "spreadsheet" ? t.downloadXlsx : t.downloadFile}</button>
       {artifact.family === "spreadsheet" ? <button type="button" disabled={busy || offlineCopy || snapshot?.family !== "spreadsheet"} onClick={() => void startRelease("pdf")} className="flex h-9 w-full items-center justify-center gap-2 rounded-md border px-3 font-medium disabled:opacity-50"><Eye className="size-4" aria-hidden />{t.previewInvoicePdf}</button> : null}
+      {artifact.family === "presentation" ? <button type="button" disabled={busy || offlineCopy || snapshot?.family !== "presentation"} onClick={() => void startRelease("pdf")} className="flex h-9 w-full items-center justify-center gap-2 rounded-md border px-3 font-medium disabled:opacity-50"><Eye className="size-4" aria-hidden />{t.previewPresentationPdf}</button> : null}
       {artifact.family === "presentation" ? <button type="button" disabled={offlineCopy} onClick={onPresent} className="flex h-9 w-full items-center justify-center gap-2 rounded-md border px-3 font-medium disabled:opacity-50"><MonitorPlay className="size-4" aria-hidden />{t.present}</button> : null}
-      {receipt ? <div className="space-y-2 rounded border p-3"><strong>{receipt.status === "blocked" ? t.releaseBlocked : receipt.status === "needs_ack" ? t.releaseWarnings : t.releaseReady}</strong>{[...receipt.blocks, ...receipt.warnings].map((issue) => <p key={`${issue.code}-${issue.subjectId ?? "artifact"}`} className="text-xs text-muted-foreground">{issue.message}</p>)}{receipt.status === "needs_ack" ? <button type="button" disabled={busy || offlineCopy} onClick={() => void completeRelease()} className="rounded bg-action px-3 py-2 text-action-foreground disabled:opacity-50">{t.acknowledgeRelease}</button> : null}</div> : null}
+      {receipt ? <div className="space-y-2 rounded border p-3"><strong>{receipt.status === "blocked" ? t.releaseBlocked : receipt.status === "needs_ack" ? t.releaseWarnings : t.releaseReady}</strong>{[...receipt.blocks, ...receipt.warnings].map((issue) => <p key={`${issue.code}-${issue.subjectId ?? "artifact"}`} className="text-xs text-muted-foreground">{officeReleaseIssueMessage(issue, t)}</p>)}{receipt.status === "needs_ack" ? <button type="button" disabled={busy || offlineCopy} onClick={() => void completeRelease()} className="rounded bg-action px-3 py-2 text-action-foreground disabled:opacity-50">{t.acknowledgeRelease}</button> : null}</div> : null}
     </section>
     <section className="space-y-2 border-t pt-4">
       {artifact.lifecycleState === "active" ? <button type="button" disabled={offlineCopy} onClick={() => void transitionOfficeLifecycle(artifactId, "trash", "Moved to Trash from Office file actions").then(onLifecycle)} className="flex items-center gap-2 rounded px-2 py-1.5 text-destructive disabled:opacity-50"><Trash2 className="size-4" aria-hidden />{t.moveToTrash}</button> : artifact.lifecycleState === "archived" || artifact.lifecycleState === "trash" || artifact.lifecycleState === "retained" ? <button type="button" disabled={offlineCopy} onClick={() => void transitionOfficeLifecycle(artifactId, artifact.lifecycleState === "archived" ? "unarchive" : "restore", "Restored from Office file actions").then(onLifecycle)} className="flex items-center gap-2 rounded px-2 py-1.5 disabled:opacity-50"><Undo2 className="size-4" aria-hidden />{t.restore}</button> : null}

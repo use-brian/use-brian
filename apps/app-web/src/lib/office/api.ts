@@ -307,7 +307,7 @@ export async function uploadOfficeSource(workspaceId: string, file: File): Promi
 }
 
 type SpreadsheetPdfRequest = { sheetId: string; printArea: string; calculationMode: "automatic" | "stored"; expectedPageCount: number; preset: "invoice" | "worksheet" };
-export type OfficeReleaseReceipt = { status: "blocked" | "needs_ack" | "ready"; version: number; action: string; blocks: Array<{ code: string; message: string; subjectId?: string }>; warnings: Array<{ code: string; message: string; subjectId?: string }>; acknowledgedCodes: string[]; spreadsheetPdf?: { sheetId: string; printArea: string; expectedPageCount: number; actualPageCount?: number; issues: Array<{ code: string; message: string; severity: "warning" | "error"; address?: string }> } };
+export type OfficeReleaseReceipt = { status: "blocked" | "needs_ack" | "ready"; version: number; action: string; blocks: Array<{ code: string; message: string; subjectId?: string }>; warnings: Array<{ code: string; message: string; subjectId?: string }>; acknowledgedCodes: string[]; spreadsheetPdf?: { sheetId: string; printArea: string; expectedPageCount: number; actualPageCount?: number; issues: Array<{ code: string; message: string; severity: "warning" | "error"; address?: string }> }; presentationPdf?: { expectedPageCount: number; actualPageCount?: number; renderer: "libreoffice"; issues: Array<{ code: string; message: string; severity: "error" }> } };
 export type OfficeReleaseInput = { expectedVersion: number; action: "export" | "share" | "present" | "send" | "publish"; destination: { sensitivity: "public" | "internal" | "confidential"; external: boolean; disclosureSatisfied?: boolean }; format?: "native" | "pdf"; spreadsheetPdf?: SpreadsheetPdfRequest; acknowledgement?: { version: number; action: "export" | "share" | "present" | "send" | "publish"; codes: string[] } };
 
 export async function reviewOfficeRelease(artifactId: string, input: OfficeReleaseInput): Promise<OfficeReleaseReceipt> {
@@ -315,8 +315,15 @@ export async function reviewOfficeRelease(artifactId: string, input: OfficeRelea
   return body.receipt;
 }
 
-export async function releaseOfficeArtifact(artifactId: string, input: OfficeReleaseInput): Promise<{ releaseId: string; fileId: string; receipt: OfficeReleaseReceipt }> {
-  return json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/releases`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) }), "office_release_failed");
+export type OfficeReleaseResult = { releaseId?: string; fileId?: string; receipt: OfficeReleaseReceipt };
+
+export async function releaseOfficeArtifact(artifactId: string, input: OfficeReleaseInput): Promise<OfficeReleaseResult> {
+  const response = await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/releases`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
+  if (response.status === 409) {
+    const body = await response.clone().json().catch(() => null) as { receipt?: OfficeReleaseReceipt } | null;
+    if (body?.receipt) return { receipt: body.receipt };
+  }
+  return json(response, "office_release_failed");
 }
 
 export async function readOfficeReleasedFile(workspaceId: string, fileId: string): Promise<Blob> {

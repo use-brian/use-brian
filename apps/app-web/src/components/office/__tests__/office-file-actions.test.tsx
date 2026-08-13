@@ -7,7 +7,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { OfficeArtifact } from "@/lib/office/api";
-import { OfficeReview } from "../office-review";
+import { OfficeReview, officeReleaseIssueMessage } from "../office-review";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -50,8 +50,23 @@ describe("[COMP:app-web/office-iteration-panel] Office file actions", () => {
     const html = render("presentation");
     expect(html).toContain(">Present<");
     expect(html).toContain("Download");
+    expect(html).toContain("Preview presentation PDF");
     expect(html).not.toContain('aria-label="Release action"');
     expect(html).not.toContain('aria-label="Destination sensitivity"');
+  });
+
+  it("localizes every owned Presentation PDF failure code", () => {
+    expect([
+      "presentation.converter_unavailable",
+      "presentation.timeout",
+      "presentation.invalid_pdf",
+      "presentation.page_count_mismatch",
+    ].map((code) => officeReleaseIssueMessage({ code, message: "vendor text" }, en.office))).toEqual([
+      en.office.presentationPdfConverterUnavailable,
+      en.office.presentationPdfTimeout,
+      en.office.presentationPdfInvalid,
+      en.office.presentationPdfPageCountMismatch,
+    ]);
   });
 
   it("adds native XLSX download and explicit PDF preview for spreadsheets", () => {
