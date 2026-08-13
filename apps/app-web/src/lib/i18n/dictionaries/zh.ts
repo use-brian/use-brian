@@ -4598,6 +4598,8 @@ export const zh: Dictionary = {
     readingOrderLater: "延後閱讀",
     readingOrderFirst: "此物件已是最先閱讀。",
     readingOrderLast: "此物件已是最後閱讀。",
+    readingOrderSingleSelection: "請選取一個物件以變更閱讀順序。",
+    readingOrderLocked: "請解除鎖定此物件以變更閱讀順序。",
     video: "影片",
     pageBreak: "分頁符號",
     sectionBreak: "分節符號",

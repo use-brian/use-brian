@@ -4640,6 +4640,8 @@ export const ja: Dictionary = {
     readingOrderLater: "後に読み上げる",
     readingOrderFirst: "このオブジェクトはすでに最初に読み上げられます。",
     readingOrderLast: "このオブジェクトはすでに最後に読み上げられます。",
+    readingOrderSingleSelection: "読み上げ順序を変更するには、オブジェクトを 1 つ選択してください。",
+    readingOrderLocked: "読み上げ順序を変更するには、このオブジェクトのロックを解除してください。",
     video: "動画",
     pageBreak: "改ページ",
     sectionBreak: "セクション区切り",

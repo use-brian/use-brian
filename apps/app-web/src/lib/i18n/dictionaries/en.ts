@@ -4845,6 +4845,8 @@ export const en = {
     readingOrderLater: "Read later",
     readingOrderFirst: "This object is already read first.",
     readingOrderLast: "This object is already read last.",
+    readingOrderSingleSelection: "Select one object to change reading order.",
+    readingOrderLocked: "Unlock this object to change reading order.",
     video: "Video",
     pageBreak: "Page break",
     sectionBreak: "Section break",
