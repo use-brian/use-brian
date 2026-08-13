@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { FileCheck2, FileSpreadsheet, FileText, MessageSquare, PanelRightClose, PanelRightOpen, Presentation, Route, Sparkles } from "lucide-react";
 import type { OfficeCommand } from "@use-brian/office-model";
@@ -18,12 +18,14 @@ import { compileOfficeTemplateDraft, getOfficeArtifact, getOfficeSnapshot, initi
 import { useCollabProvider } from "@/lib/collab/use-collab-provider";
 import { usePresence, usePublishPresenceActivity, usePublishPresenceIdentity } from "@/lib/collab/use-presence";
 import { getUserInfo } from "@/lib/user";
-import { appendOfficeCommand, applyOfficeUpdate, yDocToSnapshot } from "@use-brian/office-model";
-import { appendOfflineCommand, classifyOfficeReconnect, listOfflineJournal, loadOfflinePackage, removeOfflineJournalEntry, removeOfflinePackage, type OfficeOfflineStatus } from "@/lib/office/offline";
+import { appendOfficeCommand, applyOfficeUpdate, createOfficeUndoManager, officeCommandIds, yDocToSnapshot } from "@use-brian/office-model";
+import { appendOfflineCommand, classifyOfficeReconnect, listOfflineJournal, loadOfflinePackage, removeOfflineJournalEntry, removeOfflinePackage, type OfficeOfflineStatus, type OfflineJournalEntry } from "@/lib/office/offline";
+import { handleOfficeHistoryShortcut, observeOfficeHistory } from "@/lib/office/editor-history";
 import { OfficeTopbar } from "./office-topbar";
 import { cn } from "@/lib/utils";
 import { TemplateRoutingInspector, type TemplateRoutingInspectorState } from "./template-routing-inspector";
 import { chatDockSuppression } from "@/lib/chat-dock-suppress";
+import { OfficeHistoryControls } from "./office-history-controls";
 
 export function OfficeEditorShell({ workspaceId, artifactId }: { workspaceId: string; artifactId: string }) {
   const t = useT().office;
@@ -43,6 +45,12 @@ export function OfficeEditorShell({ workspaceId, artifactId }: { workspaceId: st
   const [recoveryState, setRecoveryState] = useState<"idle" | "moving" | "failed">("idle");
   const [templateDraftFailed, setTemplateDraftFailed] = useState(false);
   const [templateRoutingState, setTemplateRoutingState] = useState<TemplateRoutingInspectorState>({ ready: false, dirty: false, saving: false });
+  const [historyState, setHistoryState] = useState({ canUndo: false, canRedo: false });
+  const editorRootRef = useRef<HTMLElement | null>(null);
+  const historyRef = useRef<ReturnType<typeof createOfficeUndoManager> | null>(null);
+  const offlineUndoneCommands = useRef(new Map<string, Extract<OfflineJournalEntry, { kind: "command" }>>());
+  const offlineHistoryQueue = useRef<Promise<void>>(Promise.resolve());
+  const reconcileHistoryRef = useRef<(action: "undo" | "redo", before: Set<string>, after: Set<string>) => void>(() => undefined);
   const templateId = useSearchParams().get("templateId");
   const collab = useCollabProvider(artifact && live && artifact.lifecycleState === "active" && !isOfficeStartFailed(artifact) ? `office:${artifactId}` : null);
   const currentUser = getUserInfo();
@@ -150,6 +158,62 @@ export function OfficeEditorShell({ workspaceId, artifactId }: { workspaceId: st
       }
     }).catch(() => undefined);
   }, [artifactId, collab.status, collab.synced]);
+  useEffect(() => {
+    const doc = collab.doc;
+    if (!doc || artifact?.lifecycleState !== "active" || artifact.role !== "edit" || suggestMode) return;
+    const history = createOfficeUndoManager(doc);
+    historyRef.current = history;
+    const stopObserving = observeOfficeHistory(history, setHistoryState);
+    const onKeyDown = (event: KeyboardEvent) => {
+      const before = new Set(officeCommandIds(doc));
+      const action = handleOfficeHistoryShortcut(event, history, editorRootRef.current);
+      if (!action) return;
+      const after = new Set(officeCommandIds(doc));
+      reconcileHistoryRef.current(action, before, after);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      stopObserving();
+      if (historyRef.current === history) historyRef.current = null;
+      setHistoryState({ canUndo: false, canRedo: false });
+      history.destroy();
+    };
+  }, [artifact?.lifecycleState, artifact?.role, artifactId, collab.doc, suggestMode]);
+
+  reconcileHistoryRef.current = (action, before, after) => {
+    const changedIds = action === "undo" ? [...before].filter((id) => !after.has(id)) : [...after].filter((id) => !before.has(id));
+    if (changedIds.length === 0) return;
+    offlineHistoryQueue.current = offlineHistoryQueue.current.then(async () => {
+      if (action === "undo") {
+        const changedSet = new Set(changedIds);
+        const entries = await listOfflineJournal(artifactId);
+        for (const entry of entries) {
+          if (entry.kind !== "command" || !changedSet.has(entry.command.commandId)) continue;
+          offlineUndoneCommands.current.set(entry.command.commandId, entry);
+          await removeOfflineJournalEntry(entry);
+        }
+        return;
+      }
+      for (const commandId of changedIds) {
+        const entry = offlineUndoneCommands.current.get(commandId);
+        if (!entry) continue;
+        await appendOfflineCommand(entry);
+        offlineUndoneCommands.current.delete(commandId);
+      }
+    }).catch(() => undefined);
+  };
+
+  function runHistory(action: "undo" | "redo") {
+    const history = historyRef.current;
+    const doc = collab.doc;
+    if (!history || !doc) return;
+    const before = new Set(officeCommandIds(doc));
+    const changed = action === "undo" ? history.undo() : history.redo();
+    if (!changed) return;
+    const after = new Set(officeCommandIds(doc));
+    reconcileHistoryRef.current(action, before, after);
+  }
   if (artifact === undefined) return <div className="flex flex-1 flex-col"><OfficeTopbar workspaceId={workspaceId} breadcrumbs={[{ label: t.editorLoading }]} /><p className="m-auto text-sm text-muted-foreground">{t.editorLoading}</p></div>;
   if (artifact === null) return <div className="flex flex-1 flex-col"><OfficeTopbar workspaceId={workspaceId} breadcrumbs={[{ label: t.editorFailed }]} /><p className="m-auto text-sm text-destructive">{t.editorFailed}</p></div>;
   const Icon = artifact.family === "document" ? FileText : artifact.family === "presentation" ? Presentation : FileSpreadsheet;
@@ -189,16 +253,16 @@ export function OfficeEditorShell({ workspaceId, artifactId }: { workspaceId: st
     }
   }
   const editorRole = artifact.lifecycleState === "active" ? artifact.role : "view" as const;
-  const editor = live?.snapshot.family === "document" ? <DocumentEditor snapshot={live.snapshot} baseVersion={live.baseVersion} role={editorRole} suggestMode={suggestMode} onCommand={(command) => void apply(command)} onSelectTargets={setTargets} /> : live?.snapshot.family === "presentation" ? <PresentationEditor snapshot={live.snapshot} baseVersion={live.baseVersion} role={editorRole} suggestMode={suggestMode} onCommand={(command) => void apply(command)} onSelectTargets={setTargets} /> : live?.snapshot.family === "spreadsheet" ? <SpreadsheetEditor snapshot={live.snapshot} baseVersion={live.baseVersion} role={editorRole} suggestMode={suggestMode} onCommand={(command) => void apply(command)} onSelectTargets={setTargets} /> : <p className="m-auto text-sm text-muted-foreground">{t.running}</p>;
+  const editor = live?.snapshot.family === "document" ? <DocumentEditor snapshot={live.snapshot} baseVersion={live.baseVersion} role={editorRole} suggestMode={suggestMode} doc={collab.doc} provider={collab.provider} currentUser={currentUser} synced={collab.synced || Boolean(offlineCopyAt)} onCommand={(command) => void apply(command)} onSelectTargets={setTargets} /> : live?.snapshot.family === "presentation" ? <PresentationEditor snapshot={live.snapshot} baseVersion={live.baseVersion} role={editorRole} suggestMode={suggestMode} onCommand={(command) => void apply(command)} onSelectTargets={setTargets} /> : live?.snapshot.family === "spreadsheet" ? <SpreadsheetEditor snapshot={live.snapshot} baseVersion={live.baseVersion} role={editorRole} suggestMode={suggestMode} onCommand={(command) => void apply(command)} onSelectTargets={setTargets} /> : <p className="m-auto text-sm text-muted-foreground">{t.running}</p>;
   const showTemplateRouting = artifact.mode === "template" && live?.snapshot.family === "presentation" && Boolean(templateId);
   const templateRoutingBlocked = showTemplateRouting && (!templateRoutingState.ready || templateRoutingState.dirty || templateRoutingState.saving);
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <OfficeTopbar workspaceId={workspaceId} breadcrumbs={[{ label: artifact.title }]} right={<div className="flex items-center gap-2"><Icon className="size-4 shrink-0 text-muted-foreground" aria-hidden /><PresenceAvatars users={presence} /></div>} />
+      <OfficeTopbar workspaceId={workspaceId} breadcrumbs={[{ label: artifact.title }]} right={<div className="flex items-center gap-2"><OfficeHistoryControls canUndo={historyState.canUndo} canRedo={historyState.canRedo} onUndo={() => runHistory("undo")} onRedo={() => runHistory("redo")} /><Icon className="size-4 shrink-0 text-muted-foreground" aria-hidden /><PresenceAvatars users={presence} /></div>} />
       {offlineCopyAt ? <div className="border-b bg-amber-50 px-4 py-2 text-xs text-amber-950">{reconnectStatus === "needs_attention" ? t.offlineNeedsAttention : t.offlineCopy.replace("{time}", new Date(offlineCopyAt).toLocaleString())}</div> : null}
       {artifact.mode === "template" ? <div className="flex items-center justify-between gap-3 border-b bg-amber-50 px-4 py-2 text-xs font-medium text-amber-950"><span>{t.templateMode}</span>{templateId ? <button type="button" title={templateRoutingBlocked ? t.routingSaveBeforePublish : t.templateAdmit} disabled={templateCompileState === "queued" || !live || templateRoutingBlocked} className="rounded bg-amber-950 px-3 py-1.5 text-amber-50 disabled:opacity-50" onClick={() => void publishTemplate()}>{templateRoutingBlocked ? t.routingSaveBeforePublish : templateCompileState === "queued" ? t.templateCompiling : templateCompileState === "failed" ? t.templateCompileFailed : t.templateAdmit}</button> : null}</div> : null}
       <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
-        <main className="flex min-h-0 flex-1 overflow-hidden bg-muted/30">{editor}</main>
+        <main ref={editorRootRef} className="flex min-h-0 flex-1 overflow-hidden bg-muted/30">{editor}</main>
         <aside className={cn("shrink-0 overflow-y-auto border-t bg-background transition-[width] lg:border-l lg:border-t-0", panelOpen ? showTemplateRouting && panel === "routing" ? "w-full lg:w-80" : "w-full lg:w-64" : "w-full lg:w-12")} data-office-panel={panelOpen ? "open" : "collapsed"}>
           {panelOpen ? <>
             <div className="flex items-center justify-between gap-2 border-b p-2">

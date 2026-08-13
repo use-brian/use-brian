@@ -45,8 +45,9 @@ export function attachResourceCommand(artifactId: string, baseVersion: number, r
   return { ...base(artifactId, baseVersion), kind: "attachResource", resource };
 }
 
-export function batchCommand(artifactId: string, baseVersion: number, commands: Array<Exclude<OfficeCommand, { kind: "batch" }>>): OfficeCommand {
-  return { ...base(artifactId, baseVersion), kind: "batch", commands };
+export function batchCommand(artifactId: string, baseVersion: number, commands: OfficeCommand[]): OfficeCommand {
+  if (commands.some((command) => command.kind === "batch")) throw new Error("Nested Office command batches are not supported");
+  return { ...base(artifactId, baseVersion), kind: "batch", commands } as OfficeCommand;
 }
 
 export function setSpreadsheetCellCommand(params: { artifactId: string; baseVersion: number; sheetId: string; cellId: string; address: string; valueType: Extract<SpreadsheetCell["valueType"], "blank" | "string" | "number" | "boolean" | "date">; value: SpreadsheetCell["value"]; formula?: string }): OfficeCommand {

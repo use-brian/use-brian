@@ -6,6 +6,11 @@ describe('[COMP:office/capabilities] Office capability and admission contract', 
   it('declares every editable path and a reason for every rejection', () => {
     expect(validateOfficeCapabilityManifest()).toEqual([])
     expect(officeCapabilityManifest.capabilities.some((capability) => capability.id === 'animation' && capability.disposition === 'rejected')).toBe(true)
+    expect(officeCapabilityManifest.capabilities.filter((capability) => capability.family === 'spreadsheet' && capability.disposition === 'rejected').map((capability) => capability.id)).toEqual(expect.arrayContaining(['spreadsheetChart', 'spreadsheetTable', 'spreadsheetHyperlink', 'spreadsheetRichText', 'spreadsheetFilter', 'spreadsheetProtection']))
+    expect(officeCapabilityManifest.capabilities.filter((capability) => capability.family === 'spreadsheet' && capability.browserAuthoring === 'manual').map((capability) => capability.id)).toEqual(['worksheet', 'cellValue', 'cellFormula'])
+    expect(officeCapabilityManifest.capabilities.filter((capability) => (capability.family === 'document' || capability.family === 'shared') && capability.browserAuthoring === 'manual').map((capability) => capability.id)).toEqual(['richText', 'hyperlink', 'headerFooter'])
+    expect(officeCapabilityManifest.capabilities.find((capability) => capability.id === 'chart')?.browserAuthoring).toBe('projection-only')
+    expect(officeCapabilityManifest.capabilities.find((capability) => capability.id === 'video')?.browserAuthoring).toBe('projection-only')
   })
 
   it('returns object-specific missing-resource diagnostics without mutation', () => {

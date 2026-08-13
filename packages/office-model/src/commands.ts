@@ -23,6 +23,14 @@ const CommandBaseSchema = z.object({
 
 const AtomicOfficeCommandSchema = z.discriminatedUnion('kind', [
   CommandBaseSchema.extend({ kind: z.literal('updateText'), targetId: OfficeUuidSchema, runs: z.array(OfficeRichTextRunSchema) }).strict(),
+  CommandBaseSchema.extend({
+    kind: z.literal('replaceTextRange'),
+    targetId: OfficeUuidSchema,
+    from: z.number().int().min(0),
+    to: z.number().int().min(0),
+    runs: z.array(OfficeRichTextRunSchema),
+    preimageHash: z.string().regex(/^[a-f0-9]{64}$/),
+  }).strict(),
   CommandBaseSchema.extend({ kind: z.literal('insertDocumentNode'), sectionId: OfficeUuidSchema, index: z.number().int().min(0), node: DocumentFlowNodeSchema }).strict(),
   CommandBaseSchema.extend({ kind: z.literal('insertSlideObject'), slideId: OfficeUuidSchema, index: z.number().int().min(0), object: PresentationObjectSchema }).strict(),
   CommandBaseSchema.extend({ kind: z.literal('deleteObject'), targetId: OfficeUuidSchema }).strict(),
@@ -94,6 +102,8 @@ function applySingleMutable(next: OfficeArtifactSnapshot, command: AtomicOfficeC
     const target = findObject(next, command.targetId)
     if (!target || !('runs' in target)) throw new Error(`Text target ${command.targetId} was not found`)
     target.runs = command.runs
+  } else if (command.kind === 'replaceTextRange') {
+    throw new Error('replaceTextRange requires the Document fragment adapter')
   } else if (command.kind === 'insertDocumentNode') {
     if (next.family !== 'document') throw new Error('insertDocumentNode requires a document')
     const section = next.sections.find((candidate) => candidate.id === command.sectionId)
@@ -198,6 +208,7 @@ function applySingleMutable(next: OfficeArtifactSnapshot, command: AtomicOfficeC
 
 export function applyOfficeCommand(snapshot: OfficeArtifactSnapshot, input: OfficeCommand): OfficeArtifactSnapshot {
   const command = OfficeCommandSchema.parse(input)
+  if (command.kind === 'replaceTextRange' && command.to < command.from) throw new Error('Range end must not precede range start')
   const next = clone(snapshot) as OfficeArtifactSnapshot
   if (command.kind !== 'batch') applySingleMutable(next, command)
   else {

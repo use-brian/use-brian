@@ -9,10 +9,11 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import type {
-  OfficeRichTextRun,
-  PresentationObject,
-  PresentationSnapshot,
+import {
+  snapPresentationGeometry,
+  type PresentationObject,
+  type PresentationSnapshot,
+  type OfficeRichTextRun,
 } from "@use-brian/office-model";
 import { useT } from "@/lib/i18n/client";
 import { getOfficeResourceObjectUrl } from "@/lib/office/api";
@@ -113,23 +114,37 @@ interface Interaction {
 export function PresentationObjectFrame({
   artifactId,
   object,
+  externalGeometry,
   selected,
+  primary,
   canChange,
   slideSize,
+  otherObjects = [],
+  snap = true,
   onSelect,
   onText,
   onGeometryPreview,
   onGeometry,
+  onMovePreview,
+  onMove,
+  onSnapGuides,
 }: {
   artifactId: string;
   object: PresentationObject;
+  externalGeometry?: PresentationGeometry;
   selected: boolean;
+  primary?: boolean;
   canChange: boolean;
   slideSize: SlideSize;
-  onSelect(): void;
+  otherObjects?: PresentationObject[];
+  snap?: boolean;
+  onSelect(additive?: boolean): void;
   onText(id: string, runs: OfficeRichTextRun[]): void;
   onGeometryPreview(id: string, geometry: PresentationGeometry | null): void;
   onGeometry(id: string, geometry: PresentationGeometry): void;
+  onMovePreview?(id: string, geometry: PresentationGeometry): void;
+  onMove?(id: string, geometry: PresentationGeometry): void;
+  onSnapGuides?(guides: ReturnType<typeof snapPresentationGeometry>["guides"]): void;
 }) {
   const t = useT().office;
   const editable = canChange && !object.locked;
@@ -137,7 +152,7 @@ export function PresentationObjectFrame({
   const [editingText, setEditingText] = useState(false);
   const interaction = useRef<Interaction | null>(null);
   const textAreaRef = useRef<HTMLTextAreaElement | null>(null);
-  const geometry = draftGeometry ?? object.geometry;
+  const geometry = draftGeometry ?? externalGeometry ?? object.geometry;
 
   useEffect(() => {
     setDraftGeometry(null);
@@ -170,7 +185,7 @@ export function PresentationObjectFrame({
 
   function startTransform(event: ReactPointerEvent<HTMLElement>, mode: TransformMode) {
     event.stopPropagation();
-    onSelect();
+    onSelect(event.shiftKey);
     if (!editable || editingText || event.button !== 0) return;
     const slide = event.currentTarget.closest<HTMLElement>("[data-slide-canvas='true']");
     if (!slide) return;
@@ -196,7 +211,7 @@ export function PresentationObjectFrame({
     const moved = current.moved || Math.abs(event.clientX - current.startClientX) > 2 || Math.abs(event.clientY - current.startClientY) > 2;
     if (!moved) return;
     event.preventDefault();
-    const next = current.mode === "rotate"
+    let next = current.mode === "rotate"
       ? rotatePresentationGeometry(
           current.startGeometry,
           (event.clientX - current.slideRect.left) / current.slideRect.width * slideSize.widthPt,
@@ -209,10 +224,16 @@ export function PresentationObjectFrame({
           (event.clientX - current.startClientX) / current.slideRect.width * slideSize.widthPt,
           (event.clientY - current.startClientY) / current.slideRect.height * slideSize.heightPt,
         );
+    if (current.mode === "move" && snap && !event.altKey) {
+      const snapped = snapPresentationGeometry(next, otherObjects, slideSize);
+      next = snapped.geometry;
+      onSnapGuides?.(snapped.guides);
+    } else onSnapGuides?.([]);
     current.moved = true;
     current.draftGeometry = next;
     setDraftGeometry(next);
     onGeometryPreview(object.id, next);
+    if (current.mode === "move") onMovePreview?.(object.id, next);
   }
 
   function finishTransform(event: ReactPointerEvent<HTMLElement>) {
@@ -220,8 +241,12 @@ export function PresentationObjectFrame({
     if (!current || current.pointerId !== event.pointerId) return;
     interaction.current = null;
     if (event.currentTarget.hasPointerCapture?.(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-    if (current.moved) onGeometry(object.id, current.draftGeometry);
+    if (current.moved) {
+      if (current.mode === "move" && onMove) onMove(object.id, current.draftGeometry);
+      else onGeometry(object.id, current.draftGeometry);
+    }
     else setDraftGeometry(null);
+    onSnapGuides?.([]);
   }
 
   function cancelTransform(event: ReactPointerEvent<HTMLElement>) {
@@ -229,6 +254,7 @@ export function PresentationObjectFrame({
     interaction.current = null;
     setDraftGeometry(null);
     onGeometryPreview(object.id, null);
+    onSnapGuides?.([]);
   }
 
   function onFrameKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
@@ -244,7 +270,8 @@ export function PresentationObjectFrame({
     const next = nudgePresentationGeometry(geometry, event.key as "ArrowLeft" | "ArrowRight" | "ArrowUp" | "ArrowDown", event.shiftKey);
     setDraftGeometry(next);
     onGeometryPreview(object.id, next);
-    onGeometry(object.id, next);
+    if (onMove) onMove(object.id, next);
+    else onGeometry(object.id, next);
   }
 
   function handleLabel(dimensions: "width" | "height" | "both"): string {
@@ -273,7 +300,7 @@ export function PresentationObjectFrame({
       onPointerMove={updateTransform}
       onPointerUp={finishTransform}
       onPointerCancel={cancelTransform}
-      onClick={(event) => { event.stopPropagation(); onSelect(); }}
+      onClick={(event) => { event.stopPropagation(); onSelect(event.shiftKey); }}
       onDoubleClick={(event) => {
         if (object.kind !== "text" || !editable) return;
         event.stopPropagation();
@@ -296,7 +323,7 @@ export function PresentationObjectFrame({
             />
           : <PresentationObjectVisual artifactId={artifactId} object={object} slideSize={slideSize} />}
       </div>
-      {selected && editable && !editingText ? <>
+      {selected && primary && editable && !editingText ? <>
         <span aria-hidden className="pointer-events-none absolute left-1/2 top-[-1.4rem] h-[1.15rem] border-l border-primary" />
         <button
           type="button"
