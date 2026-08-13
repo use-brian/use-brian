@@ -277,6 +277,187 @@ export class TabExecutor {
     return backendNodeId
   }
 
+  private async pressKey(tabId: number, name: keyof typeof TAKEOVER_KEYS): Promise<void> {
+    const key = TAKEOVER_KEYS[name]
+    await this.cdp(tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', ...key })
+    await this.cdp(tabId, 'Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      key: key.key,
+      code: key.code,
+      windowsVirtualKeyCode: key.windowsVirtualKeyCode,
+    })
+  }
+
+  /**
+   * Composite widgets can expose a hidden AX implementation node beside the
+   * rendered control. Resolve only through DOM structure so duplicate labels
+   * elsewhere on the page cannot redirect an action.
+   */
+  private async resolveAssociatedTarget(
+    tabId: number,
+    backendNodeId: number,
+    intent: 'click' | 'type',
+  ): Promise<number | null> {
+    const objectGroup = 'use-brian-associated-target'
+    try {
+      const resolved = await this.cdp<{ object?: { objectId?: string } }>(tabId, 'DOM.resolveNode', {
+        backendNodeId,
+        objectGroup,
+      })
+      const objectId = resolved.object?.objectId
+      if (!objectId) return null
+      const associated = await this.cdp<{ result?: { objectId?: string } }>(tabId, 'Runtime.callFunctionOn', {
+        objectId,
+        objectGroup,
+        arguments: [{ value: intent }],
+        functionDeclaration: `function (intent) {
+          if (!(this instanceof Element)) return null;
+          const visible = (element) => {
+            const style = getComputedStyle(element);
+            const rect = element.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' &&
+              style.visibility !== 'collapse' && rect.width > 0 && rect.height > 0 &&
+              element.getClientRects().length > 0;
+          };
+          const usable = (element) => {
+            if (!visible(element) || element.matches(':disabled, [aria-disabled="true"]')) return false;
+            if (intent === 'click') return true;
+            return element.matches('input:not([type="hidden"]), textarea, [contenteditable="true"], [role="textbox"], [role="combobox"]') &&
+              !element.matches('[readonly], [aria-readonly="true"]');
+          };
+          const selector = intent === 'type'
+            ? 'input:not([type="hidden"]), textarea, [contenteditable="true"], [role="textbox"], [role="combobox"]'
+            : 'input:not([type="hidden"]), textarea, select, button, [contenteditable="true"], [role="textbox"], [role="combobox"], [role="button"]';
+          const labels = this.labels ? Array.from(this.labels) : [];
+          for (const label of labels) {
+            const candidates = Array.from(label.querySelectorAll(selector)).filter((candidate) =>
+              candidate !== this && usable(candidate)
+            );
+            if (candidates.length === 1) return candidates[0];
+            if (candidates.length > 1) return null;
+          }
+          let ancestor = this.parentElement;
+          for (let depth = 0; ancestor && depth < 5; depth += 1, ancestor = ancestor.parentElement) {
+            const candidates = Array.from(ancestor.querySelectorAll(selector)).filter((candidate) =>
+              candidate !== this && usable(candidate)
+            );
+            if (ancestor.matches(selector) && usable(ancestor)) candidates.unshift(ancestor);
+            if (candidates.length === 1) return candidates[0];
+            if (candidates.length > 1) return null;
+          }
+          return null;
+        }`,
+      })
+      const associatedObjectId = associated.result?.objectId
+      if (!associatedObjectId) return null
+      const described = await this.cdp<{ node?: { backendNodeId?: number } }>(tabId, 'DOM.describeNode', {
+        objectId: associatedObjectId,
+      })
+      return typeof described.node?.backendNodeId === 'number' ? described.node.backendNodeId : null
+    } catch (err) {
+      if (isDetachedError(err)) throw err
+      return null
+    } finally {
+      await this.cdp(tabId, 'Runtime.releaseObjectGroup', { objectGroup }).catch(() => undefined)
+    }
+  }
+
+  private async targetBox(tabId: number, backendNodeId: number): Promise<number[] | null> {
+    try {
+      await this.cdp(tabId, 'DOM.scrollIntoViewIfNeeded', { backendNodeId })
+    } catch (err) {
+      if (isDetachedError(err)) throw err
+    }
+    try {
+      const box = await this.cdp<{ model?: { content?: number[] } }>(tabId, 'DOM.getBoxModel', { backendNodeId })
+      const quad = box.model?.content
+      return quad && quad.length >= 8 ? quad : null
+    } catch (err) {
+      if (isDetachedError(err)) throw err
+      return null
+    }
+  }
+
+  /** Native option popups have no page-layout box of their own in Chromium. */
+  private async clickNativeOption(tabId: number, backendNodeId: number, ref: string): Promise<void> {
+    const resolved = await this.cdp<{ object?: { objectId?: string } }>(tabId, 'DOM.resolveNode', {
+      backendNodeId,
+      objectGroup: 'use-brian-native-option',
+    })
+    const optionObjectId = resolved.object?.objectId
+    if (!optionObjectId) {
+      throw new ExecutorError(`Ref ${ref} is no longer attached to the page. Take a fresh browserSnapshot.`, 'stale_ref')
+    }
+    try {
+      const infoResult = await this.cdp<{ result?: { value?: unknown } }>(tabId, 'Runtime.callFunctionOn', {
+        objectId: optionObjectId,
+        returnByValue: true,
+        functionDeclaration: `function () {
+          const select = this.closest('select');
+          if (!select) return null;
+          const enabled = Array.from(select.options).filter((option) =>
+            !option.disabled && !(option.parentElement?.tagName === 'OPTGROUP' && option.parentElement.disabled)
+          );
+          return {
+            disabled: this.disabled || (this.parentElement?.tagName === 'OPTGROUP' && this.parentElement.disabled),
+            enabledIndex: enabled.indexOf(this),
+            multiple: select.multiple
+          };
+        }`,
+      })
+      const info = infoResult.result?.value as {
+        disabled?: boolean
+        enabledIndex?: number
+        multiple?: boolean
+      } | null | undefined
+      if (!info || info.disabled || !Number.isInteger(info.enabledIndex) || info.enabledIndex! < 0) {
+        throw new ExecutorError(`Ref ${ref} is a disabled native dropdown option.`, 'backend_error')
+      }
+      if (info.multiple) {
+        throw new ExecutorError(`Ref ${ref} belongs to a multi-select control, which cannot be chosen with browserClick.`, 'backend_error')
+      }
+
+      const selectResult = await this.cdp<{ result?: { objectId?: string } }>(tabId, 'Runtime.callFunctionOn', {
+        objectId: optionObjectId,
+        functionDeclaration: `function () { return this.closest('select'); }`,
+      })
+      const selectObjectId = selectResult.result?.objectId
+      if (!selectObjectId) {
+        throw new ExecutorError(`Ref ${ref} has no selectable dropdown. Take a fresh browserSnapshot.`, 'stale_ref')
+      }
+      const described = await this.cdp<{ node?: { backendNodeId?: number } }>(tabId, 'DOM.describeNode', {
+        objectId: selectObjectId,
+      })
+      const selectBackendNodeId = described.node?.backendNodeId
+      if (typeof selectBackendNodeId !== 'number') {
+        throw new ExecutorError(`Ref ${ref} has no selectable dropdown. Take a fresh browserSnapshot.`, 'stale_ref')
+      }
+
+      const quad = await this.targetBox(tabId, selectBackendNodeId)
+      if (!quad) {
+        throw new ExecutorError(
+          `The dropdown for ref ${ref} has no usable rendered target. Take a fresh browserSnapshot and use the ref for the visible control.`,
+          'backend_error',
+        )
+      }
+      const x = (quad[0] + quad[4]) / 2
+      const y = (quad[1] + quad[5]) / 2
+      const base = { x, y, button: 'left', clickCount: 1 } as const
+      await this.cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y })
+      await this.cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', ...base })
+      await this.cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', ...base })
+      await this.pressKey(tabId, 'Home')
+      for (let index = 0; index < info.enabledIndex!; index += 1) {
+        await this.pressKey(tabId, 'ArrowDown')
+      }
+      await this.pressKey(tabId, 'Enter')
+    } finally {
+      await this.cdp(tabId, 'Runtime.releaseObjectGroup', {
+        objectGroup: 'use-brian-native-option',
+      }).catch(() => undefined)
+    }
+  }
+
   async navigate(url: string): Promise<{ url: string }> {
     const tabId = this.mustTab()
     this.lastSnapshot = null
@@ -287,10 +468,10 @@ export class TabExecutor {
     return { url: tab.url ?? url }
   }
 
-  async snapshot(): Promise<{ url: string; title: string; nodes: BuiltSnapshot['nodes'] }> {
+  async snapshot(mode: 'interactive' | 'full' = 'interactive'): Promise<{ url: string; title: string; nodes: BuiltSnapshot['nodes'] }> {
     const tabId = this.mustTab()
     const res = await this.cdp<{ nodes: CdpAXNode[] }>(tabId, 'Accessibility.getFullAXTree')
-    this.lastSnapshot = buildSnapshot(res.nodes ?? [])
+    this.lastSnapshot = buildSnapshot(res.nodes ?? [], mode)
     const tab = await chrome.tabs.get(tabId)
     return { url: tab.url ?? '', title: tab.title ?? '', nodes: this.lastSnapshot.nodes }
   }
@@ -298,15 +479,21 @@ export class TabExecutor {
   async click(ref: string): Promise<void> {
     const tabId = this.mustTab()
     const backendNodeId = this.resolveRef(ref)
-    try {
-      await sendCdp(tabId, 'DOM.scrollIntoViewIfNeeded', { backendNodeId })
-    } catch {
-      // Best effort — some nodes reject it; the click may still land.
+    const role = this.lastSnapshot?.nodes.find((node) => node.ref === ref)?.role
+    let quad = await this.targetBox(tabId, backendNodeId)
+    if (!quad && (role === 'option' || role === 'listboxoption')) {
+      await this.clickNativeOption(tabId, backendNodeId, ref)
+      return
     }
-    const box = await this.cdp<{ model?: { content?: number[] } }>(tabId, 'DOM.getBoxModel', { backendNodeId })
-    const quad = box.model?.content
-    if (!quad || quad.length < 8) {
-      throw new ExecutorError(`Ref ${ref} is not visible on the page.`, 'backend_error')
+    if (!quad) {
+      const associated = await this.resolveAssociatedTarget(tabId, backendNodeId, 'click')
+      if (associated != null) quad = await this.targetBox(tabId, associated)
+    }
+    if (!quad) {
+      throw new ExecutorError(
+        `Ref ${ref} has no usable rendered target. Take a fresh browserSnapshot and use the ref for the visible control.`,
+        'backend_error',
+      )
     }
     const x = (quad[0] + quad[4]) / 2
     const y = (quad[1] + quad[5]) / 2
@@ -319,7 +506,29 @@ export class TabExecutor {
   async type(ref: string, text: string): Promise<void> {
     const tabId = this.mustTab()
     const backendNodeId = this.resolveRef(ref)
-    await this.cdp(tabId, 'DOM.focus', { backendNodeId })
+    try {
+      await this.cdp(tabId, 'DOM.focus', { backendNodeId })
+    } catch (err) {
+      if (isDetachedError(err)) throw err
+      const associated = await this.resolveAssociatedTarget(tabId, backendNodeId, 'type')
+      if (associated == null) {
+        throw new ExecutorError(
+          `Ref ${ref} has no usable editable target. Take a fresh browserSnapshot and use the ref for the visible control.`,
+          'backend_error',
+          { cause: err },
+        )
+      }
+      try {
+        await this.cdp(tabId, 'DOM.focus', { backendNodeId: associated })
+      } catch (associatedErr) {
+        if (isDetachedError(associatedErr)) throw associatedErr
+        throw new ExecutorError(
+          `Ref ${ref} has no usable editable target. Take a fresh browserSnapshot and use the ref for the visible control.`,
+          'backend_error',
+          { cause: associatedErr },
+        )
+      }
+    }
     await this.cdp(tabId, 'Input.insertText', { text })
   }
 
@@ -441,13 +650,7 @@ export class TabExecutor {
       } else {
         const key = TAKEOVER_KEYS[event.text]
         if (!key) return
-        await this.cdp(tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', ...key })
-        await this.cdp(tabId, 'Input.dispatchKeyEvent', {
-          type: 'keyUp',
-          key: key.key,
-          code: key.code,
-          windowsVirtualKeyCode: key.windowsVirtualKeyCode,
-        })
+        await this.pressKey(tabId, event.text)
       }
       return
     }

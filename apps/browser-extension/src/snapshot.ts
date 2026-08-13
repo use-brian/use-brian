@@ -17,7 +17,7 @@ export type CdpAXNode = {
 }
 
 type SnapshotNode = {
-  ref: string
+  ref?: string
   role: string
   name: string
   value?: string
@@ -58,6 +58,23 @@ const INTERACTIVE_ROLES: ReadonlySet<string> = new Set([
   'popupbutton',
 ])
 
+const INFORMATION_ROLES: ReadonlySet<string> = new Set([
+  'caption',
+  'cell',
+  'columnheader',
+  'definition',
+  'heading',
+  'labeltext',
+  'legend',
+  'listitem',
+  'paragraph',
+  'row',
+  'rowheader',
+  'statictext',
+  'table',
+  'term',
+])
+
 function asString(v: unknown): string {
   return typeof v === 'string' ? v : ''
 }
@@ -73,7 +90,7 @@ function propTrue(node: CdpAXNode, name: string): boolean {
  * plus focusable nodes that carry a name (covers contenteditable message
  * boxes that report generic roles). Skips ignored/nameless-noise nodes.
  */
-export function buildSnapshot(axNodes: CdpAXNode[]): BuiltSnapshot {
+export function buildSnapshot(axNodes: CdpAXNode[], mode: 'interactive' | 'full' = 'interactive'): BuiltSnapshot {
   const nodes: SnapshotNode[] = []
   const refToBackendNodeId = new Map<string, number>()
   const refToName = new Map<string, string>()
@@ -81,26 +98,31 @@ export function buildSnapshot(axNodes: CdpAXNode[]): BuiltSnapshot {
 
   for (const ax of axNodes) {
     if (ax.ignored) continue
-    if (typeof ax.backendDOMNodeId !== 'number') continue
     const role = asString(ax.role?.value).toLowerCase()
     const name = asString(ax.name?.value).trim()
     const interactive = INTERACTIVE_ROLES.has(role) || (propTrue(ax, 'focusable') && name.length > 0)
-    if (!interactive) continue
+    if (interactive && typeof ax.backendDOMNodeId !== 'number') continue
+    if (!interactive && (mode !== 'full' || !INFORMATION_ROLES.has(role) || name.length === 0)) continue
+    // StaticText is the stable semantic text node. InlineTextBox fragments are
+    // layout artifacts and produce the duplicated, line-wrapped transcripts
+    // seen on MTR fare tables.
+    if (role === 'inlinetextbox') continue
     if (name.length === 0 && !INTERACTIVE_ROLES.has(role)) continue
 
-    counter += 1
-    const ref = `@e${counter}`
+    const ref = interactive ? `@e${++counter}` : undefined
     const value = asString(ax.value?.value)
     const node: SnapshotNode = {
-      ref,
       role: role || 'node',
       name,
+      ...(ref ? { ref } : {}),
       ...(value ? { value } : {}),
       ...(propTrue(ax, 'disabled') ? { disabled: true } : {}),
     }
     nodes.push(node)
-    refToBackendNodeId.set(ref, ax.backendDOMNodeId)
-    refToName.set(ref, name)
+    if (ref && typeof ax.backendDOMNodeId === 'number') {
+      refToBackendNodeId.set(ref, ax.backendDOMNodeId)
+      refToName.set(ref, name)
+    }
   }
 
   return { nodes, refToBackendNodeId, refToName }

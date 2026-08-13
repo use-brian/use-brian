@@ -1,10 +1,16 @@
 /** Firefox My Browser background page: relay + consent + native companion. */
 import { RelayClient } from './relay-client.js'
-import { TaskGate, CONSENT_PROMPT_TIMEOUT_MS, type ConsentOutcome } from './task-gate.js'
+import {
+  TaskGate,
+  CONSENT_PROMPT_TIMEOUT_MS,
+  type ConsentOutcome,
+  type ConsentPromptOptions,
+} from './task-gate.js'
 import { activeTabForConsent, eligibilityOf } from './tab-eligibility.js'
 import { credentialsForConfigure, type PairRequest } from './pairing.js'
 import { FirefoxNativeClient, FirefoxNativeError } from './firefox-native-client.js'
 import { readBuildStamp } from './build-info.js'
+import { isTabControlPreapproved } from './consent-preapproval.js'
 
 const ext = (globalThis as unknown as { browser: typeof chrome }).browser
 const native = new FirefoxNativeClient()
@@ -20,12 +26,15 @@ function hostOf(url: string): string {
   }
 }
 
-async function promptForConsent(): Promise<ConsentOutcome> {
+async function promptForConsent(options: ConsentPromptOptions): Promise<ConsentOutcome> {
   const activeTab = await activeTabForConsent((options) => ext.windows.getLastFocused(options))
   const eligibility = eligibilityOf(activeTab?.url, { allowFirefoxNewTab: true })
   if (!eligibility.eligible) return { allowed: false, reason: eligibility.reason }
   if (activeTab?.id == null) return { allowed: false, reason: 'no_active_tab' }
   const targetTabId = activeTab.id
+  if (options.allowPreApproval && await isTabControlPreapproved(ext.storage.local)) {
+    return { allowed: true, tabId: targetTabId }
+  }
   await ext.windows.create({
     url: ext.runtime.getURL(`allow.html?host=${encodeURIComponent(hostOf(activeTab.url ?? ''))}`),
     type: 'popup',
@@ -143,7 +152,13 @@ ext.tabs.onRemoved.addListener((tabId) => {
 })
 
 ext.runtime.onMessage.addListener((message: unknown) => {
-  const msg = message as { type?: string; allowed?: boolean; relayUrl?: string; pairingToken?: string }
+  const msg = message as {
+    type?: string
+    allowed?: boolean
+    relayUrl?: string
+    pairingToken?: string
+    preapproveEnabled?: boolean
+  }
   if (msg.type === 'consent-response') {
     pendingConsent?.({ allowed: msg.allowed === true })
     return Promise.resolve({ ok: true })
@@ -153,6 +168,14 @@ ext.runtime.onMessage.addListener((message: unknown) => {
     boundTabId = null
     void native.request('stop')
     client.sendEvent('stopped')
+    return Promise.resolve({ ok: true })
+  }
+  if (msg.type === 'consent-preapproval-changed') {
+    if (msg.preapproveEnabled !== true) {
+      gate.revokeConsent()
+      boundTabId = null
+      void native.request('stop')
+    }
     return Promise.resolve({ ok: true })
   }
   if (msg.type === 'configure') {

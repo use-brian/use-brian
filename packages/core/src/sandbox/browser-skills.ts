@@ -5,8 +5,8 @@
  *  - `BrowserSkillStore` — the block artifact itself (open table
  *    `browser_skills`, migration 319): code + effect contract + recording,
  *    versioned, site-scoped + identity-agnostic.
- *  - `BrowserSkillGrantStore` — block+profile standing grants (R2-2; closed
- *    table, the platform impl arrives with the grants phase). A satisfied
+ *  - `BrowserSkillGrantStore` — block+profile standing grants (R2-2; open
+ *    table and DB store). A satisfied
  *    grant auto-approves a terminal send; drift voids it.
  *  - `BlockApprovalsPort` — the async `pending_approvals` bridge: un-granted
  *    sends queue (kind `browser_skill_send`), grant auto-approvals still
@@ -183,7 +183,7 @@ export interface BrowserSkillGrantStore {
   revoke(id: string): Promise<void>
 }
 
-/** In-memory grants for OSS/tests (the platform impl is `browser_skill_grants`). */
+/** In-memory grants for tests; production uses `browser_skill_grants`. */
 export function createInMemoryBrowserSkillGrantStore(opts?: {
   now?: () => number
 }): BrowserSkillGrantStore & { grants: Map<string, BrowserSkillGrant & { usesLastHour: number[] }> } {

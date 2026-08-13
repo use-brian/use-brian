@@ -85,7 +85,7 @@ export type CreateSkillRunnerToolsOptions = {
   binding: SandboxTaskBinding | null
   /** The block artifacts (open store over `browser_skills`). */
   skills: BrowserSkillStore | null
-  /** Block+profile grants (R2-2; closed impl). Null → every send queues. */
+  /** Block+profile grants (R2-2). Null means every send queues. */
   grants?: BrowserSkillGrantStore | null
   /** The async pending_approvals bridge. Null → sends fail closed. */
   approvals?: BlockApprovalsPort | null
