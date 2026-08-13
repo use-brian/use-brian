@@ -3,7 +3,7 @@ import type { PresentationObject, PresentationSnapshot } from "@use-brian/office
 
 type PresentationSlide = PresentationSnapshot["slides"][number];
 
-export const PRESENTATION_CLIPBOARD_MIME = "application/x-use-brian-presentation+json";
+const PRESENTATION_CLIPBOARD_MIME = "application/x-use-brian-presentation+json";
 
 export type PresentationClipboardEnvelope = {
   version: 1;
