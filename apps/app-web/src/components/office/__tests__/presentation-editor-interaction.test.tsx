@@ -18,7 +18,9 @@ vi.mock("@/lib/office/api", async (importOriginal) => ({ ...await importOriginal
 
 describe("[COMP:app-web/office-presentation-editor] Presentation interaction loops", () => {
   let host: HTMLDivElement;
+  let roots: Array<ReturnType<typeof createRoot>>;
   beforeEach(() => {
+    roots = [];
     host = document.createElement("div");
     document.body.append(host);
     clearPresentationClipboardForTest();
@@ -26,7 +28,11 @@ describe("[COMP:app-web/office-presentation-editor] Presentation interaction loo
     vi.stubGlobal("crypto", { randomUUID: vi.fn(() => `10000000-0000-4000-8000-${String(nextId++).padStart(12, "0")}`) });
     vi.stubGlobal("navigator", { ...navigator, clipboard: undefined });
   });
-  afterEach(() => { host.remove(); vi.unstubAllGlobals(); });
+  afterEach(() => {
+    act(() => { for (const root of roots) root.unmount(); });
+    host.remove();
+    vi.unstubAllGlobals();
+  });
 
   function mount(snapshot = presentationFixture()) {
     snapshot.resources = [];
@@ -35,6 +41,7 @@ describe("[COMP:app-web/office-presentation-editor] Presentation interaction loo
     const onCommand = vi.fn<(command: OfficeCommand) => void>();
     const onSelectTargets = vi.fn<(ids: string[]) => void>();
     const root = createRoot(host);
+    roots.push(root);
     act(() => root.render(<I18nProvider locale="en" dict={en as unknown as Dictionary}><PresentationEditor snapshot={snapshot} baseVersion={1} role="edit" suggestMode={false} onCommand={onCommand} onSelectTargets={onSelectTargets} /></I18nProvider>));
     return { root, onCommand, onSelectTargets };
   }
@@ -98,6 +105,7 @@ describe("[COMP:app-web/office-presentation-editor] Presentation interaction loo
     expect(host.querySelector<HTMLButtonElement>(`button[aria-label="${en.office.deleteSlide}"]`)?.disabled).toBe(true);
     expect(first.onCommand).not.toHaveBeenCalled();
     act(() => first.root.unmount());
+    roots.splice(roots.indexOf(first.root), 1);
 
     const snapshot = presentationFixture();
     snapshot.slides.push({ ...structuredClone(snapshot.slides[0]), id: crypto.randomUUID(), title: "Second" });
@@ -156,6 +164,7 @@ describe("[COMP:app-web/office-presentation-editor] Presentation interaction loo
     const secondHost = document.createElement("div");
     document.body.append(secondHost);
     const root = createRoot(secondHost);
+    roots.push(root);
     act(() => root.render(<I18nProvider locale="en" dict={en as unknown as Dictionary}><PresentationEditor snapshot={snapshot} baseVersion={1} role="edit" suggestMode={false} onCommand={onCommand} /></I18nProvider>));
     const lockedFrames = [...secondHost.querySelectorAll<HTMLElement>("[data-slide-object]")];
     act(() => lockedFrames[0].dispatchEvent(new MouseEvent("click", { bubbles: true })));
@@ -163,6 +172,7 @@ describe("[COMP:app-web/office-presentation-editor] Presentation interaction loo
     act(() => lockedFrames[0].dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true, cancelable: true })));
     expect(onCommand).not.toHaveBeenCalled();
     act(() => root.unmount());
+    roots.splice(roots.indexOf(root), 1);
     secondHost.remove();
   });
 
@@ -259,6 +269,7 @@ describe("[COMP:app-web/office-presentation-editor] Presentation interaction loo
     expect(onCommand).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "batch", commands: expect.arrayContaining([expect.objectContaining({ kind: "reorderSlideObject" })]) }));
 
     act(() => first.root.unmount());
+    roots.splice(roots.indexOf(first.root), 1);
     const second = mount(presentationFixture());
     const secondFrames = [...host.querySelectorAll<HTMLElement>("[data-slide-object]")];
     act(() => secondFrames[0].click());
