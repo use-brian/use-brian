@@ -25,9 +25,19 @@ describe("[COMP:app-web/office-offline] Encrypted Office offline package", () =>
 
   it("encrypts journal operations before persistence", async () => {
     const secret = crypto.getRandomValues(new Uint8Array(32));
-    const entry = { artifactId: "10000000-0000-4000-8000-000000000001", seq: 7, kind: "comment" as const, anchor: { kind: "block", targetIds: ["10000000-0000-4000-8000-000000000002"] }, body: "Queued privately", createdAt: "2026-08-05T00:00:00.000Z" };
+    const entry = { artifactId: "10000000-0000-4000-8000-000000000001", seq: 7, kind: "comment" as const, anchor: { kind: "block", targetIds: ["10000000-0000-4000-8000-000000000002"] }, body: "Queued privately", mentions: ["10000000-0000-4000-8000-000000000003"], createdAt: "2026-08-05T00:00:00.000Z" };
     const encrypted = await encryptOfflineJournalEntry(entry, secret);
     expect(JSON.stringify(encrypted)).not.toContain(entry.body);
+    await expect(decryptOfflineJournalEntry(encrypted, secret)).resolves.toEqual(entry);
+  });
+
+  it("encrypts a queued suggestion without changing its command identity", async () => {
+    const secret = crypto.getRandomValues(new Uint8Array(32));
+    const snapshot = presentationFixture();
+    const command = { artifactId: snapshot.artifactId, baseVersion: 1, actor: { type: "user" as const, id: "00000000-0000-4000-8000-000000000090" }, origin: "offline" as const, commandId: "00000000-0000-4000-8000-000000000091", kind: "deleteObject" as const, targetId: snapshot.slides[0].objects[0].id };
+    const entry = { artifactId: snapshot.artifactId, seq: 9, kind: "suggestion" as const, expectedSeq: 8, command, createdAt: "2026-08-13T00:00:00.000Z" };
+    const encrypted = await encryptOfflineJournalEntry(entry, secret);
+    expect(JSON.stringify(encrypted)).not.toContain(command.commandId);
     await expect(decryptOfflineJournalEntry(encrypted, secret)).resolves.toEqual(entry);
   });
 

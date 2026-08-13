@@ -45,7 +45,7 @@ import { bridgeConnection } from './ws-bridge.js'
 import { createRunRegistry, type RunRegistry } from './run-registry.js'
 import { parseSyncDocumentName } from './document-router.js'
 import { loadOfficeUpdate, replaceLiveOfficeSnapshot, storeOfficeSnapshot } from './office-collab.js'
-import { OfficeArtifactSnapshotSchema } from '@use-brian/office-model'
+import { OfficeArtifactSnapshotSchema, OfficeCommandSchema, applyDocumentCommand } from '@use-brian/office-model'
 
 // Local dev: load the monorepo-root .env (the service runs from
 // apps/doc-sync, so the default cwd .env isn't where the shared
@@ -426,6 +426,30 @@ async function handleInternalOfficeReplace(
   }
 }
 
+/** Apply an accepted Document suggestion exactly once in the authoritative room. */
+async function handleInternalOfficeSuggestion(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (!isInternalAuthorized(req)) { res.writeHead(401); res.end(); return }
+  let payload: { artifactId?: unknown; suggestionId?: unknown; command?: unknown }
+  try { payload = (await readJsonBody(req)) as typeof payload } catch {
+    res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid json' })); return
+  }
+  const command = OfficeCommandSchema.safeParse(payload.command)
+  if (typeof payload.artifactId !== 'string' || typeof payload.suggestionId !== 'string' || !command.success || command.data.artifactId !== payload.artifactId) {
+    res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'invalid Office suggestion' })); return
+  }
+  const connection = await hocuspocus.openDirectConnection(`office:${payload.artifactId}`, { service: true })
+  try {
+    try {
+      await connection.transact((doc) => {
+        applyDocumentCommand(doc as unknown as Y.Doc, command.data, 'suggestion', payload.suggestionId as string)
+      })
+    } catch {
+      res.writeHead(409, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'suggestion_conflict' })); return
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true }))
+  } finally { await connection.disconnect() }
+}
+
 /** Shared `DOC_SYNC_SECRET` gate for the internal (server-to-server) routes. */
 function isInternalAuthorized(req: IncomingMessage): boolean {
   return (
@@ -530,6 +554,14 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
       console.error('[doc-sync] /internal/office/replace error', err)
       if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: 'Office replace failed' }))
+    })
+    return
+  }
+  if (req.method === 'POST' && req.url && req.url.startsWith('/internal/office/suggestion')) {
+    handleInternalOfficeSuggestion(req, res).catch((err) => {
+      console.error('[doc-sync] /internal/office/suggestion error', err)
+      if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'Office suggestion failed' }))
     })
     return
   }

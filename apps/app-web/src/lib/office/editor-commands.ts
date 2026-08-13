@@ -17,7 +17,6 @@ export function deleteCommand(artifactId: string, baseVersion: number, targetId:
   return { ...base(artifactId, baseVersion), kind: "deleteObject", targetId };
 }
 
-
 export function insertSlideObjectCommand(artifactId: string, baseVersion: number, slideId: string, index: number, object: PresentationObject): OfficeCommand {
   return { ...base(artifactId, baseVersion), kind: "insertSlideObject", slideId, index, object };
 }

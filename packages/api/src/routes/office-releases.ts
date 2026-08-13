@@ -6,7 +6,7 @@ import { prepareOfficeRelease, reviewOfficeRelease, type OfficeReleaseAcknowledg
 import type { OfficeArtifactRow } from '../db/office-artifacts.js'
 import type { ResolvedOfficeAccess } from '../office/access.js'
 import type { OfficeArtifactSnapshot } from '@use-brian/office-model'
-import { type OfficeResourceResolver, type PresentationPdfPort, type SpreadsheetPdfRequest } from '@use-brian/core'
+import { type DocumentPdfPort, type OfficeResourceResolver, type PresentationPdfPort, type SpreadsheetPdfRequest } from '@use-brian/core'
 import type { BrandClaim } from '@use-brian/shared'
 
 type Context = {
@@ -31,6 +31,7 @@ export type OfficeReleaseRouteDeps = {
   createRecord(params: { userId: string; artifactId: string; versionId: string; workspaceId: string; action: OfficeReleaseAction; destination: OfficeReleaseDestination; receipt: ReturnType<typeof reviewOfficeRelease>; acknowledgement?: OfficeReleaseAcknowledgement; releasedFileId: string }): Promise<{ id: string }>
   createDerivative(params: { userId: string; source: Context; title: string; sensitivity: 'public' | 'internal' | 'confidential'; selectedObjectIds: string[]; visibilityUserIds: string[] }): Promise<{ artifactId: string; version: number }>
   presentationPdfPort?: PresentationPdfPort
+  documentPdfPort?: DocumentPdfPort
 }
 
 const Action = z.enum(['export', 'share', 'present', 'send', 'publish'])
@@ -60,7 +61,7 @@ export function officeReleaseRoutes(deps: OfficeReleaseRouteDeps): Router {
     const artifactId = String(req.params.artifactId)
     const context = await load(userId, artifactId)
     if (!context) return void res.status(404).json({ error: 'Office artifact not found' })
-    const prepared = await prepareOfficeRelease({ snapshot: context.snapshot, expectedVersion: body.data.expectedVersion, currentVersion: context.artifact.headVersion, headVersionId: context.artifact.headVersionId, lifecycleState: context.artifact.lifecycleState, canEdit: context.access.canEdit, artifactSensitivity: context.artifact.sensitivity, action: body.data.action, destination: body.data.destination, claims: context.claims, brandClaims: context.brandClaims, media: context.media, acknowledgement: body.data.acknowledgement, format: body.data.format, spreadsheetPdf: body.data.spreadsheetPdf as SpreadsheetPdfRequest | undefined, resolveResource: deps.resolveResource(userId, context.artifact.workspaceId), presentationPdfPort: deps.presentationPdfPort })
+    const prepared = await prepareOfficeRelease({ snapshot: context.snapshot, expectedVersion: body.data.expectedVersion, currentVersion: context.artifact.headVersion, headVersionId: context.artifact.headVersionId, lifecycleState: context.artifact.lifecycleState, canEdit: context.access.canEdit, artifactSensitivity: context.artifact.sensitivity, action: body.data.action, destination: body.data.destination, claims: context.claims, brandClaims: context.brandClaims, media: context.media, acknowledgement: body.data.acknowledgement, format: body.data.format, spreadsheetPdf: body.data.spreadsheetPdf as SpreadsheetPdfRequest | undefined, resolveResource: deps.resolveResource(userId, context.artifact.workspaceId), documentPdfPort: deps.documentPdfPort, presentationPdfPort: deps.presentationPdfPort })
     if (prepared.receipt.status !== 'ready' || !prepared.bytes || !prepared.extension || !prepared.mime) return void res.status(409).json({ receipt: prepared.receipt })
     const releasedFileId = await deps.saveReleasedFile({ userId, workspaceId: context.artifact.workspaceId, artifactId, version: context.artifact.headVersion, action: body.data.action, extension: prepared.extension, mime: prepared.mime, bytes: prepared.bytes })
     const record = await deps.createRecord({ userId, artifactId, versionId: context.artifact.headVersionId!, workspaceId: context.artifact.workspaceId, action: body.data.action, destination: body.data.destination, receipt: prepared.receipt, acknowledgement: body.data.acknowledgement, releasedFileId })

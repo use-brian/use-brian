@@ -45,6 +45,25 @@ describe('[COMP:api/office-release] Office exact-head release', () => {
     expect(Array.from(native.bytes?.slice(0, 2) ?? [])).toEqual([80, 75])
   })
 
+  it('preflights and persists a Document PDF while native DOCX stays unchanged', async () => {
+    const snapshot = documentSnapshot()
+    expect(reviewOfficeRelease(input({ snapshot, format: 'pdf' }))).toMatchObject({ status: 'ready', blocks: [] })
+    const bytes = new Uint8Array([37, 80, 68, 70])
+    const expectedPageCount = 1
+    const pdf = await prepareOfficeRelease({ ...input({ snapshot, format: 'pdf' }), resolveResource: resolveFixtureResource, documentPdfPort: { convert: async () => bytes, pageCount: async () => expectedPageCount } })
+    expect(pdf).toMatchObject({ bytes, mime: 'application/pdf', extension: 'pdf', receipt: { status: 'ready', documentPdf: { expectedPageCount, actualPageCount: expectedPageCount, issues: [] } } })
+    const native = await prepareOfficeRelease({ ...input({ snapshot, format: 'native' }), resolveResource: resolveFixtureResource })
+    expect(native).toMatchObject({ mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', extension: 'docx' })
+    expect(Array.from(native.bytes?.slice(0, 2) ?? [])).toEqual([80, 75])
+  })
+
+  it('returns typed Document PDF failures', async () => {
+    const snapshot = documentSnapshot()
+    const result = await prepareOfficeRelease({ ...input({ snapshot, format: 'pdf' }), resolveResource: resolveFixtureResource, documentPdfPort: { convert: async () => new Uint8Array([1]), pageCount: async () => 2 } })
+    expect(result.bytes).toBeUndefined()
+    expect(result.receipt).toMatchObject({ status: 'blocked', blocks: [{ code: 'document.page_count_mismatch' }], documentPdf: { expectedPageCount: 1, actualPageCount: 2 } })
+  })
+
   it('returns typed Presentation PDF failures', async () => {
     const snapshot = completePresentationSnapshot()
     const result = await prepareOfficeRelease({ ...input({ snapshot, format: 'pdf' }), resolveResource: resolveFixtureResource, presentationPdfPort: { convert: async () => new Uint8Array([1]), pageCount: async () => 1 } })

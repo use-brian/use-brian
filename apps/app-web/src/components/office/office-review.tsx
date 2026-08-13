@@ -4,14 +4,19 @@ import { useId, useState } from "react";
 import { Download, Eye, MonitorPlay, Trash2, Undo2, X } from "lucide-react";
 import { columnIndexToName, parseCellAddress, type OfficeArtifactSnapshot, type SpreadsheetSnapshot } from "@use-brian/office-model";
 import type { OfficeArtifact } from "@/lib/office/api";
-import { readOfficeReleasedFile, releaseOfficeArtifact, reviewOfficeRelease, transitionOfficeLifecycle, type OfficeReleaseInput, type OfficeReleaseReceipt } from "@/lib/office/api";
+import { readOfficeReleasedFile, releaseOfficeArtifact, requestOfficeOfflinePackage, reviewOfficeRelease, transitionOfficeLifecycle, type OfficeReleaseInput, type OfficeReleaseReceipt } from "@/lib/office/api";
 import { useT } from "@/lib/i18n/client";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
+import { officeOfflineDeviceId, persistOfficeOfflinePackage } from "@/lib/office/offline";
 
 type OfficeCopy = Dictionary["office"];
 
 export function officeReleaseIssueMessage(issue: { code: string; message: string }, t: OfficeCopy): string {
   const messages: Record<string, string> = {
+    "document.converter_unavailable": t.documentPdfConverterUnavailable,
+    "document.timeout": t.documentPdfTimeout,
+    "document.invalid_pdf": t.documentPdfInvalid,
+    "document.page_count_mismatch": t.documentPdfPageCountMismatch,
     "presentation.converter_unavailable": t.presentationPdfConverterUnavailable,
     "presentation.timeout": t.presentationPdfTimeout,
     "presentation.invalid_pdf": t.presentationPdfInvalid,
@@ -28,6 +33,7 @@ export function OfficeReview({ artifact, artifactId, workspaceId, snapshot, onLi
   const [busy, setBusy] = useState(false);
   const [pendingFormat, setPendingFormat] = useState<"native" | "pdf">("native");
   const [pdfPreview, setPdfPreview] = useState<{ url: string; filename: string } | null>(null);
+  const [offlineSaved, setOfflineSaved] = useState(false);
   const [purgeConfirmation, setPurgeConfirmation] = useState("");
   const purgeInputId = useId();
   const purgeTitleId = `${purgeInputId}-title`;
@@ -68,14 +74,25 @@ export function OfficeReview({ artifact, artifactId, workspaceId, snapshot, onLi
     }
   }
 
+  async function saveOffline() {
+    setBusy(true);
+    try {
+      const response = await requestOfficeOfflinePackage(artifactId, await officeOfflineDeviceId(), artifact.version);
+      await persistOfficeOfflinePackage({ artifactId, version: artifact.version, manifest: response.manifest, payload: response.payload, signature: response.signature, pinned: true });
+      setOfflineSaved(true);
+    } finally { setBusy(false); }
+  }
+
   return <div className="space-y-5 p-4 text-sm">
     {offlineCopy ? <p className="rounded border border-amber-300 bg-amber-50 p-3 text-xs text-amber-950">{t.offlineWaiting}</p> : null}
     <section className="space-y-3">
       <div><h3 className="font-medium">{t.fileActions}</h3><p className="mt-1 text-xs text-muted-foreground">{t.fileActionsDescription}</p></div>
       <button type="button" disabled={busy || offlineCopy} onClick={() => void startRelease("native")} className="flex h-9 w-full items-center justify-center gap-2 rounded-md bg-action px-3 font-medium text-action-foreground disabled:opacity-50"><Download className="size-4" aria-hidden />{artifact.family === "spreadsheet" ? t.downloadXlsx : t.downloadFile}</button>
       {artifact.family === "spreadsheet" ? <button type="button" disabled={busy || offlineCopy || snapshot?.family !== "spreadsheet"} onClick={() => void startRelease("pdf")} className="flex h-9 w-full items-center justify-center gap-2 rounded-md border px-3 font-medium disabled:opacity-50"><Eye className="size-4" aria-hidden />{t.previewInvoicePdf}</button> : null}
+      {artifact.family === "document" ? <button type="button" disabled={busy || offlineCopy || snapshot?.family !== "document"} onClick={() => void startRelease("pdf")} className="flex h-9 w-full items-center justify-center gap-2 rounded-md border px-3 font-medium disabled:opacity-50"><Eye className="size-4" aria-hidden />{t.previewDocumentPdf}</button> : null}
       {artifact.family === "presentation" ? <button type="button" disabled={busy || offlineCopy || snapshot?.family !== "presentation"} onClick={() => void startRelease("pdf")} className="flex h-9 w-full items-center justify-center gap-2 rounded-md border px-3 font-medium disabled:opacity-50"><Eye className="size-4" aria-hidden />{t.previewPresentationPdf}</button> : null}
       {artifact.family === "presentation" ? <button type="button" disabled={offlineCopy} onClick={onPresent} className="flex h-9 w-full items-center justify-center gap-2 rounded-md border px-3 font-medium disabled:opacity-50"><MonitorPlay className="size-4" aria-hidden />{t.present}</button> : null}
+      <button type="button" disabled={busy || offlineCopy || offlineSaved || artifact.lifecycleState !== "active"} onClick={() => void saveOffline()} className="flex h-9 w-full items-center justify-center gap-2 rounded-md border px-3 font-medium disabled:opacity-50">{offlineSaved ? t.savedDevice : t.availableOffline}</button>
       {receipt ? <div className="space-y-2 rounded border p-3"><strong>{receipt.status === "blocked" ? t.releaseBlocked : receipt.status === "needs_ack" ? t.releaseWarnings : t.releaseReady}</strong>{[...receipt.blocks, ...receipt.warnings].map((issue) => <p key={`${issue.code}-${issue.subjectId ?? "artifact"}`} className="text-xs text-muted-foreground">{officeReleaseIssueMessage(issue, t)}</p>)}{receipt.status === "needs_ack" ? <button type="button" disabled={busy || offlineCopy} onClick={() => void completeRelease()} className="rounded bg-action px-3 py-2 text-action-foreground disabled:opacity-50">{t.acknowledgeRelease}</button> : null}</div> : null}
     </section>
     <section className="space-y-2 border-t pt-4">

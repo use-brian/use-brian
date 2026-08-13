@@ -6,6 +6,7 @@ import {
   applyOfficeUpdate,
   createOfficeUndoManager,
   documentSuggestionWasApplied,
+  documentRangePreimageHash,
   encodeOfficeState,
   ensureDocumentFragment,
   getDocumentFragment,
@@ -143,6 +144,17 @@ describe('[COMP:office/document-collab] Document fragment collaboration', () => 
     expect(documentSuggestionWasApplied(doc, id(122))).toBe(true)
     const edited = yDocToSnapshot(doc)
     expect(edited.family === 'document' && edited.sections[0].nodes[0]).toMatchObject({ alignment: 'center', styleName: 'Callout' })
+  })
+
+  it('uses real SHA-256 preimages and conflicts before mutating a stale range', () => {
+    expect(documentRangePreimageHash('abc')).toBe('ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad')
+    const snapshot = documentFixture()
+    const doc = snapshotToYDoc(snapshot)
+    const command = { artifactId: snapshot.artifactId, baseVersion: 0, actor: { type: 'user' as const, id: id(40) }, origin: 'manual' as const, commandId: id(125), kind: 'replaceTextRange' as const, targetId: id(6), from: 2, to: 10, preimageHash: documentRangePreimageHash('grounded'), runs: [{ id: id(126), text: 'verified', style: { fontFamily: 'Arial', fontSizePt: 11, bold: true, italic: false, underline: false, strike: false, color: '#111111' } }] }
+    applyDocumentCommand(doc, command)
+    const edited = yDocToSnapshot(doc)
+    expect(edited.family === 'document' && edited.sections[0].nodes[0].kind === 'paragraph' && edited.sections[0].nodes[0].runs.map((run) => run.text).join('')).toBe('A verified update.')
+    expect(() => applyDocumentCommand(snapshotToYDoc(snapshot), { ...command, preimageHash: '0'.repeat(64) })).toThrow(/preimage changed/)
   })
 
   it('keeps legacy updateText as generated compatibility without storing a Document command', () => {

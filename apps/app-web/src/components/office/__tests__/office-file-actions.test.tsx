@@ -38,11 +38,12 @@ describe("[COMP:app-web/office-iteration-panel] Office file actions", () => {
     const html = render("document");
     expect(html).toContain("Download");
     expect(html).toContain("Move to Trash");
+    expect(html).toContain("Preview document PDF");
     expect(html).not.toContain(">Present<");
     expect(html).not.toContain(">Share<");
     expect(html).not.toContain(">Publish<");
     expect(html).not.toContain("Create derivative");
-    expect(html).not.toContain("Available offline");
+    expect(html).toContain("Make available offline");
     expect(html).not.toContain(">Archive<");
   });
 
@@ -66,6 +67,20 @@ describe("[COMP:app-web/office-iteration-panel] Office file actions", () => {
       en.office.presentationPdfTimeout,
       en.office.presentationPdfInvalid,
       en.office.presentationPdfPageCountMismatch,
+    ]);
+  });
+
+  it("localizes every owned Document PDF failure code", () => {
+    expect([
+      "document.converter_unavailable",
+      "document.timeout",
+      "document.invalid_pdf",
+      "document.page_count_mismatch",
+    ].map((code) => officeReleaseIssueMessage({ code, message: "vendor text" }, en.office))).toEqual([
+      en.office.documentPdfConverterUnavailable,
+      en.office.documentPdfTimeout,
+      en.office.documentPdfInvalid,
+      en.office.documentPdfPageCountMismatch,
     ]);
   });
 

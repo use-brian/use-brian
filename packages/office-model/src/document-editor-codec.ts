@@ -88,6 +88,10 @@ function without<T extends Record<string, unknown>, K extends keyof T>(value: T,
   return copy
 }
 
+function defined<T extends Record<string, unknown>>(value: T | undefined): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(value ?? {}).filter(([, field]) => field !== null && field !== undefined))
+}
+
 function runsToEditor(runs: OfficeRichTextRun[]): OfficeEditorJsonNode[] {
   return runs.map((run) => run.text.length === 0
     ? { type: 'officeEmptyRun', attrs: without(run, ['text']) }
@@ -134,21 +138,21 @@ function flowNodeToEditor(node: DocumentSnapshot['sections'][number]['nodes'][nu
 function flowNodeFromEditor(input: OfficeEditorJsonNode): DocumentSnapshot['sections'][number]['nodes'][number] {
   const node = FlowNodeSchema.parse(input)
   if (node.type === 'paragraph' || node.type === 'heading') return DocumentFlowNodeSchema.parse({
-    ...node.attrs,
+    ...defined(node.attrs),
     kind: node.type,
     runs: runsFromEditor(node.content ?? []),
   })
   if (node.type === 'officeList') return DocumentFlowNodeSchema.parse({
-    ...node.attrs,
+    ...defined(node.attrs),
     kind: 'list',
-    items: (node.content ?? []).map((item) => ({ id: item.attrs?.id, runs: runsFromEditor(item.content ?? []) })),
+    items: (node.content ?? []).map((item) => ({ id: defined(item.attrs).id, runs: runsFromEditor(item.content ?? []) })),
   })
   if (node.type === 'officeTable') return DocumentFlowNodeSchema.parse({
-    ...node.attrs,
+    ...defined(node.attrs),
     kind: 'table',
     rows: (node.content ?? []).map((row) => ({
-      ...row.attrs,
-      cells: (row.content ?? []).map((cell) => ({ ...cell.attrs, runs: runsFromEditor(cell.content?.[0]?.content ?? []) })),
+      ...defined(row.attrs),
+      cells: (row.content ?? []).map((cell) => ({ ...defined(cell.attrs), runs: runsFromEditor(cell.content?.[0]?.content ?? []) })),
     })),
   })
   const kindByType = {
@@ -160,7 +164,7 @@ function flowNodeFromEditor(input: OfficeEditorJsonNode): DocumentSnapshot['sect
   } as const
   const kind = kindByType[node.type as keyof typeof kindByType]
   if (!kind) throw new Error(`Unsupported Office editor node: ${node.type}`)
-  return DocumentFlowNodeSchema.parse({ ...node.attrs, kind })
+  return DocumentFlowNodeSchema.parse({ ...defined(node.attrs), kind })
 }
 
 export function documentSnapshotToEditorJson(snapshot: DocumentSnapshot): OfficeEditorJsonNode {
@@ -185,7 +189,7 @@ export function editorJsonToDocumentSnapshot(input: OfficeEditorJsonNode): Docum
   return DocumentSnapshotSchema.parse({
     ...doc.attrs,
     sections: (doc.content ?? []).map((section) => DocumentSectionSchema.parse({
-      ...section.attrs,
+      ...defined(section.attrs),
       header: runsFromEditor(section.content![0].content ?? []),
       nodes: (section.content![1].content ?? []).map(flowNodeFromEditor),
       footer: runsFromEditor(section.content![2].content ?? []),

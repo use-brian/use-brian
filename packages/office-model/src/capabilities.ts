@@ -50,11 +50,11 @@ const rejected = (id: string, family: OfficeFamily | 'shared', reason: string): 
 export const officeCapabilityManifest = {
   version: 1,
   capabilities: [
-    implemented('richText', 'shared', 'manual'), implemented('hyperlink', 'shared', 'manual'), implemented('table', 'shared', 'projection-only'),
-    implemented('image', 'shared', 'projection-only'), implemented('chart', 'shared', 'projection-only'), implemented('video', 'shared', 'projection-only'),
-    implemented('namedStyles', 'document', 'projection-only'), implemented('heading', 'document', 'projection-only'), implemented('nestedList', 'document', 'projection-only'),
-    implemented('pageSetup', 'document', 'projection-only'), implemented('pageBreak', 'document', 'projection-only'), implemented('sectionBreak', 'document', 'projection-only'),
-    implemented('headerFooter', 'document', 'manual'), implemented('pageNumber', 'document', 'projection-only'),
+    implemented('richText', 'shared', 'manual'), implemented('hyperlink', 'shared', 'manual'), implemented('table', 'shared', 'manual'),
+    implemented('image', 'shared', 'manual'), implemented('chart', 'shared', 'projection-only'), implemented('video', 'shared', 'projection-only'),
+    implemented('namedStyles', 'document', 'manual'), implemented('heading', 'document', 'manual'), implemented('nestedList', 'document', 'manual'),
+    implemented('pageSetup', 'document', 'manual'), implemented('pageBreak', 'document', 'manual'), implemented('sectionBreak', 'document', 'manual'),
+    implemented('headerFooter', 'document', 'manual'), implemented('pageNumber', 'document', 'manual'),
     implemented('theme', 'presentation'), implemented('master', 'presentation'), implemented('layout', 'presentation'),
     implemented('placeholder', 'presentation'), implemented('textBox', 'presentation'), implemented('basicShape', 'presentation'),
     implemented('connector', 'presentation'), implemented('zOrder', 'presentation'), implemented('speakerNotes', 'presentation'),

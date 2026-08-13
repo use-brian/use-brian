@@ -445,7 +445,7 @@ import { createOfficeRevisionWorker } from './office/revision-worker.js'
 import { generateDocumentFromTemplate, reviseDocumentTargets } from './office/document-generation.js'
 import { generatePresentationFromTemplate, materializeOfficeTemplateBundleForGeneration, revisePresentationTargets } from './office/presentation-generation.js'
 import { generateSpreadsheetFromTemplate, reviseSpreadsheetTargets } from './office/spreadsheet-generation.js'
-import { replaceLiveOfficeSnapshot } from './office/live-sync.js'
+import { applyLiveOfficeSuggestion, replaceLiveOfficeSnapshot } from './office/live-sync.js'
 import { officeReleaseRoutes } from './routes/office-releases.js'
 import { officeLifecycleRoutes } from './routes/office-lifecycle.js'
 import { officeOfflineRoutes } from './routes/office-offline.js'
@@ -4959,6 +4959,18 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       getInboxRetentionDays: getWorkspaceInboxRetentionDays,
     }),
   )
+  const readOfficeVersionSnapshot = async (userId: string, artifactId: string, versionId: string) => {
+    if (!filesApi) return null
+    const source = await officeArtifactStore.getVersionSource(userId, artifactId, versionId)
+    if (!source) return null
+    const read = await filesApi.readBytes({ workspaceId: source.workspaceId, userId, assistantKind: 'standard', clearance: 'confidential' }, source.snapshotFileId)
+    if (!read.ok) throw new Error(`Office version snapshot unavailable: ${read.error.kind}`)
+    const actualHash = createHash('sha256').update(read.value.bytes).digest('hex')
+    if (actualHash !== source.snapshotHash) throw new Error('Office version snapshot hash mismatch')
+    const snapshot = assertOfficeArtifactSnapshot(JSON.parse(new TextDecoder().decode(read.value.bytes)))
+    if (snapshot.artifactId !== artifactId) throw new Error('Office version snapshot artifact mismatch')
+    return { snapshot, source }
+  }
   app.use('/api/office', requireAuth(env.JWT_SECRET), officeArtifactRoutes({
     service: officeService,
     generationAvailable: officeGenerationAvailable,
@@ -4968,25 +4980,68 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       return visible.filter((artifact): artifact is NonNullable<typeof artifact> => artifact !== null)
     },
     async restoreVersion(params) {
-      if (!filesApi) return null
-      const source = await officeArtifactStore.getVersionSource(params.userId, params.artifactId, params.targetVersionId)
-      if (!source) return null
-      const read = await filesApi.readBytes({ workspaceId: source.workspaceId, userId: params.userId, assistantKind: 'standard', clearance: 'confidential' }, source.snapshotFileId)
-      if (!read.ok) throw new Error(`Office restore snapshot unavailable: ${read.error.kind}`)
-      const actualHash = createHash('sha256').update(read.value.bytes).digest('hex')
-      if (actualHash !== source.snapshotHash) throw new Error('Office restore snapshot hash mismatch')
-      const snapshot = assertOfficeArtifactSnapshot(JSON.parse(new TextDecoder().decode(read.value.bytes)))
-      if (snapshot.artifactId !== params.artifactId) throw new Error('Office restore snapshot artifact mismatch')
-      const doc = snapshotToYDoc(snapshot)
-      return officeArtifactStore.restoreVersion({
+      const loaded = await readOfficeVersionSnapshot(params.userId, params.artifactId, params.targetVersionId)
+      if (!loaded) return null
+      const doc = snapshotToYDoc(loaded.snapshot)
+      const restored = await officeArtifactStore.restoreVersion({
         ...params,
         liveUpdate: encodeOfficeState(doc),
         liveStateVector: officeStateVector(doc),
-        liveCanonicalHash: source.snapshotHash,
+        liveCanonicalHash: loaded.source.snapshotHash,
       })
+      if (restored) await replaceLiveOfficeSnapshot(loaded.snapshot)
+      return restored
     },
     getArtifact: officeArtifactStore.get,
+    resolveAccess: resolveOfficeAccess,
     listVersions: officeArtifactStore.listVersions,
+    async previewVersion({ userId, artifactId, versionId }) {
+      return (await readOfficeVersionSnapshot(userId, artifactId, versionId))?.snapshot ?? null
+    },
+    nameVersion: officeArtifactStore.nameVersion,
+    async copyVersion({ userId, artifactId, versionId, title }) {
+      if (!filesApi) return null
+      const [artifact, loaded] = await Promise.all([
+        officeArtifactStore.get(userId, artifactId),
+        readOfficeVersionSnapshot(userId, artifactId, versionId),
+      ])
+      if (!artifact || !loaded) return null
+      const shell = await officeArtifactStore.createShell({ userId, workspaceId: artifact.workspaceId, family: artifact.family, title, templateVersionId: artifact.templateVersionId, capabilityVersion: artifact.capabilityVersion, sensitivity: artifact.sensitivity })
+      const snapshot = deriveOfficeSnapshot({ source: loaded.snapshot, artifactId: shell.id, title })
+      const bytes = new TextEncoder().encode(JSON.stringify(snapshot))
+      const hash = createHash('sha256').update(bytes).digest('hex')
+      const saved = await filesApi.writeBytes({ workspaceId: shell.workspaceId, userId, assistantKind: 'standard', clearance: 'confidential' }, { path: `/office/artifacts/${shell.id}/versions/1-${hash}.json`, bytes, mime: 'application/json', sensitivity: shell.sensitivity })
+      if (!saved.ok) throw new Error(`Office version copy save failed: ${saved.error.kind}`)
+      const doc = snapshotToYDoc(snapshot)
+      const version = await officeArtifactStore.commitVersion({ userId, artifactId: shell.id, expectedVersion: 0, snapshotFileId: saved.value.id, snapshotHash: hash, operationClock: officeStateVector(doc), schemaVersion: snapshot.schemaVersion, capabilityVersion: snapshot.capabilityVersion, origin: 'manual', authorType: 'user', authorUserId: userId, summary: `Copied from version ${versionId}`, checkpointKind: 'named' })
+      if (!version) throw new Error('Office version copy conflict')
+      await Promise.all([
+        officeLiveStore.initialize({ userId, artifactId: shell.id, snapshot }),
+        officeArtifactStore.addSource({ userId, artifactId: shell.id, artifactVersionId: version.id, workspaceId: shell.workspaceId, sourceArtifactId: artifactId, sourceVersion: versionId, sensitivity: artifact.sensitivity }),
+      ])
+      return { artifactId: shell.id, version: version.version }
+    },
+    async listSharing(userId, artifactId) {
+      const artifact = await officeArtifactStore.get(userId, artifactId)
+      if (!artifact) return null
+      const [grants, members] = await Promise.all([officeArtifactStore.listGrants(userId, artifactId), workspaceStore.listMembers(userId, artifact.workspaceId)])
+      return { defaultWorkspaceRole: artifact.defaultWorkspaceRole, grants, members: members.map(({ userId: memberUserId, userName, email }) => ({ userId: memberUserId, userName, email, isOwner: artifact.ownerUserId === memberUserId })) }
+    },
+    async setGrant({ userId, artifactId, targetUserId, role, reason }) {
+      const artifact = await officeArtifactStore.get(userId, artifactId)
+      if (!artifact) return false
+      if (artifact.ownerUserId === targetUserId) return false
+      const members = await workspaceStore.listMembers(userId, artifact.workspaceId)
+      if (!members.some((member) => member.userId === targetUserId)) return false
+      await officeArtifactStore.setGrant({ userId, artifactId, workspaceId: artifact.workspaceId, targetUserId, role, reason })
+      return true
+    },
+    async revokeGrant({ userId, artifactId, targetUserId }) {
+      const artifact = await officeArtifactStore.get(userId, artifactId)
+      if (!artifact || artifact.ownerUserId === targetUserId) return false
+      return officeArtifactStore.revokeGrant({ userId, artifactId, targetUserId })
+    },
+    setDefaultWorkspaceRole: officeArtifactStore.setDefaultWorkspaceRole,
     async canRestoreVersion(userId, artifactId) {
       return (await resolveOfficeAccess(userId, artifactId))?.canEdit ?? false
     },
@@ -5275,11 +5330,23 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     getSnapshot: officeLiveStore.get,
     appendCommand: officeLiveStore.appendCommand,
     listThreads: officeCommentStore.listThreads,
+    getThreadContext: officeCommentStore.getThreadContext,
+    getMessageContext: officeCommentStore.getMessageContext,
     createThread: officeCommentStore.createThread,
     reply: officeCommentStore.reply,
     resolve: officeCommentStore.resolve,
+    updateThread: officeCommentStore.updateThread,
+    react: officeCommentStore.react,
+    detachMissingTargets: officeCommentStore.detachMissingTargets,
+    listSuggestions: officeCommentStore.listSuggestions,
+    getSuggestion: officeCommentStore.getSuggestion,
     createSuggestion: officeCommentStore.createSuggestion,
     decideSuggestion: officeCommentStore.decideSuggestion,
+    async applySuggestion({ artifactId, suggestionId, command }) {
+      const result = await applyLiveOfficeSuggestion(artifactId, suggestionId, command)
+      if (result === 'disabled') throw new Error('Office suggestion application requires doc-sync')
+      return result
+    },
     service: officeService,
   }))
   app.use('/api/office', requireAuth(env.JWT_SECRET), officeImportRoutes({

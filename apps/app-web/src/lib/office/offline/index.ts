@@ -20,7 +20,8 @@ type OfficeOfflinePackage = { manifest: Record<string, unknown>; signature: stri
 export type LoadedOfficeOfflinePackage = OfficeOfflinePackage & { savedAt: string };
 export type OfflineJournalEntry =
   | { artifactId: string; seq: number; kind: "command"; expectedSeq: number; command: OfficeCommand; createdAt: string }
-  | { artifactId: string; seq: number; kind: "comment"; anchor: { kind: string; targetIds: string[] }; body: string; invokeBrian?: { assistantId: string; expectedVersion: number; idempotencyKey: string }; createdAt: string };
+  | { artifactId: string; seq: number; kind: "suggestion"; expectedSeq: number; command: OfficeCommand; createdAt: string }
+  | { artifactId: string; seq: number; kind: "comment"; anchor: { kind: string; targetIds: string[] }; body: string; mentions?: string[]; invokeBrian?: { assistantId: string; expectedVersion: number; idempotencyKey: string }; createdAt: string };
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -152,6 +153,31 @@ export async function removeOfflinePackage(artifactId: string): Promise<void> {
   const db = await openDb();
   const transaction = db.transaction(PACKAGE_STORE, "readwrite");
   transaction.objectStore(PACKAGE_STORE).delete(artifactId);
+  await transactionDone(transaction);
+  db.close();
+}
+
+export async function officeOfflineDeviceId(): Promise<string> {
+  const db = await openDb();
+  const request = db.transaction(KEY_STORE, "readonly").objectStore(KEY_STORE).get("device-id");
+  const existing = await new Promise<string | undefined>((resolve, reject) => {
+    request.onsuccess = () => resolve(typeof request.result === "string" ? request.result : undefined);
+    request.onerror = () => reject(request.error ?? new Error("office_offline_device_id_read_failed"));
+  });
+  if (existing) { db.close(); return existing; }
+  const deviceId = crypto.randomUUID();
+  const transaction = db.transaction(KEY_STORE, "readwrite");
+  transaction.objectStore(KEY_STORE).put(deviceId, "device-id");
+  await transactionDone(transaction);
+  db.close();
+  return deviceId;
+}
+
+export async function persistOfficeOfflinePackage(params: { artifactId: string; version: number; manifest: unknown; payload: unknown; signature: string; pinned: boolean }): Promise<void> {
+  const encrypted = await encryptOfficePackage({ ...params, deviceSecret: await getOrCreateOfficeDeviceKey() });
+  const db = await openDb();
+  const transaction = db.transaction(PACKAGE_STORE, "readwrite");
+  transaction.objectStore(PACKAGE_STORE).put(encrypted);
   await transactionDone(transaction);
   db.close();
 }

@@ -1,25 +1,30 @@
 "use client";
 
 /** One character-collaborative Tiptap editor for canonical Office Document. [COMP:app-web/office-document-editor] */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import * as Y from "yjs";
-import { Bold, Italic, Redo2, Strikethrough, Underline, Undo2 } from "lucide-react";
 import { EditorContent, useEditor, type Editor } from "@tiptap/react";
 import { Collaboration } from "@tiptap/extension-collaboration";
 import { CollaborationCursor } from "@tiptap/extension-collaboration-cursor";
 import type { HocuspocusProvider } from "@hocuspocus/provider";
 import {
   ensureDocumentFragment,
+  attachDocumentResource,
   getDocumentFragment,
   snapshotToYDoc,
   type DocumentSnapshot,
   type OfficeCommand,
-  type OfficeRichTextRun,
+  type OfficeResourceRef,
 } from "@use-brian/office-model";
 import { useT } from "@/lib/i18n/client";
 import type { UserInfo } from "@/lib/user";
-import { cn } from "@/lib/utils";
+import { admitOfficeImageResource, type OfficeCommentThread, type OfficeSuggestion } from "@/lib/office/api";
+import { getOfficeResourceObjectUrl } from "@/lib/office/api";
 import { officeDocumentEditorExtensions } from "./document/editor-schema";
+import { DocumentToolbar, type DocumentToolbarController } from "./document/document-toolbar";
+import { changeDocumentListLevel, convertDocumentList, insertDocumentImage, moveDocumentTableCell, toggleDocumentRunStyle, updateSelectedDocumentNode } from "./document/editor-actions";
+import { captureDocumentCommentAnchor, captureDocumentSuggestionRange, type DocumentCommentAnchor, type DocumentSuggestionRange } from "./document/comment-anchor";
+import { updateDocumentReviewDecorations } from "./document/comment-decorations";
 
 type DocumentEditorProps = {
   snapshot: DocumentSnapshot;
@@ -32,7 +37,14 @@ type DocumentEditorProps = {
   synced?: boolean;
   onCommand(command: OfficeCommand): void;
   onSelectTargets?(ids: string[]): void;
+  onSelectCommentAnchor?(anchor: DocumentCommentAnchor | null): void;
+  onSelectSuggestionRange?(range: DocumentSuggestionRange | null): void;
+  commentThreads?: OfficeCommentThread[];
+  suggestions?: OfficeSuggestion[];
 };
+
+const NO_COMMENT_THREADS: OfficeCommentThread[] = [];
+const NO_SUGGESTIONS: OfficeSuggestion[] = [];
 
 function collaboratorColor(id: string): string {
   const palette = ["#2563EB", "#7C3AED", "#DB2777", "#0F766E", "#B45309", "#DC2626"];
@@ -41,11 +53,13 @@ function collaboratorColor(id: string): string {
   return palette[value % palette.length];
 }
 
-export function DocumentEditor({ snapshot, role, suggestMode, doc, provider, currentUser, synced = true, onSelectTargets }: DocumentEditorProps) {
+export function DocumentEditor({ snapshot, role, suggestMode, doc, provider, currentUser, synced = true, onSelectTargets, onSelectCommentAnchor, onSelectSuggestionRange, commentThreads = NO_COMMENT_THREADS, suggestions = NO_SUGGESTIONS }: DocumentEditorProps) {
   const t = useT().office;
   const localDoc = useMemo(() => snapshotToYDoc(snapshot), [snapshot.artifactId]);
   const activeDoc = doc ?? localDoc;
   const [fragmentReady, setFragmentReady] = useState(() => !doc);
+  const [status, setStatus] = useState<string | null>(null);
+  const toolbarRef = useRef<DocumentToolbarController | null>(null);
 
   useEffect(() => {
     if (!doc) { setFragmentReady(true); return; }
@@ -88,6 +102,20 @@ export function DocumentEditor({ snapshot, role, suggestMode, doc, provider, cur
         spellcheck: "true",
       },
       transformPastedText: (text) => text.replace(/\r\n?/g, "\n"),
+      handlePaste: (_view, event) => {
+        const html = event.clipboardData?.getData("text/html") ?? "";
+        const plain = event.clipboardData?.getData("text/plain") ?? "";
+        if (!html) return false;
+        if (!/<(figure|iframe|svg|canvas|math|form|input|button|video|audio)\b/i.test(html)) return false;
+        event.preventDefault();
+        if (!plain.trim()) {
+          setStatus(t.pasteRefused);
+          return true;
+        }
+        editor?.commands.insertContent(plain.replace(/\r\n?/g, "\n"));
+        setStatus(t.formattingRemoved);
+        return true;
+      },
     },
     onSelectionUpdate: ({ editor: current }) => {
       const ids: string[] = [];
@@ -96,90 +124,145 @@ export function DocumentEditor({ snapshot, role, suggestMode, doc, provider, cur
         if (typeof id === "string" && /^[0-9a-f-]{36}$/i.test(id)) { ids.push(id); break; }
       }
       onSelectTargets?.(ids);
+      onSelectCommentAnchor?.(captureDocumentCommentAnchor(current));
+      onSelectSuggestionRange?.(captureDocumentSuggestionRange(current));
     },
   }, [activeDoc.clientID, fragmentReady, provider]);
 
   useEffect(() => { editor?.setEditable(editable); }, [editable, editor]);
+  useEffect(() => { if (editor) updateDocumentReviewDecorations(editor, commentThreads, suggestions); }, [commentThreads, editor, suggestions]);
   useEffect(() => () => localDoc.destroy(), [localDoc]);
+
+  useEffect(() => {
+    if (!editor) return;
+    let generation = 0;
+    const refresh = () => {
+      const activeGeneration = ++generation;
+      editor.state.doc.descendants((node) => {
+        if (node.type.name !== "officeSection" || typeof node.attrs.id !== "string") return;
+        const section = editor.view.dom.querySelector<HTMLElement>(`section[id="${node.attrs.id}"]`);
+        const header = section?.querySelector<HTMLElement>(".office-document-header");
+        if (!header) return;
+        const headerImage = node.attrs.headerImage as Record<string, unknown> | null;
+        header.style.backgroundImage = "";
+        header.removeAttribute("aria-label");
+        header.removeAttribute("role");
+        if (!headerImage || typeof headerImage.resourceId !== "string") return;
+        const alt = headerImage.decorative ? "" : String(headerImage.altText ?? "");
+        if (alt) { header.setAttribute("role", "img"); header.setAttribute("aria-label", alt); }
+        header.style.backgroundSize = `${Number(headerImage.widthPt ?? 96)}pt ${Number(headerImage.heightPt ?? 48)}pt`;
+        void getOfficeResourceObjectUrl(snapshot.artifactId, headerImage.resourceId).then((url) => {
+          if (activeGeneration === generation) header.style.backgroundImage = `url("${url.replaceAll('"', '%22')}")`;
+        }).catch(() => undefined);
+      });
+    };
+    refresh();
+    editor.on("transaction", refresh);
+    return () => { generation += 1; editor.off("transaction", refresh); };
+  }, [editor, snapshot.artifactId]);
+
+  useEffect(() => {
+    if (!editor) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Tab" && editable) {
+        if (moveDocumentTableCell(editor, event.shiftKey ? -1 : 1)) {
+          event.preventDefault();
+          return;
+        }
+        if (selectedList(editor)) {
+          event.preventDefault();
+          changeDocumentListLevel(editor, event.shiftKey ? -1 : 1);
+          return;
+        }
+      }
+      if (!(event.metaKey || event.ctrlKey)) return;
+      const key = event.key.toLowerCase();
+      if (key === "f") {
+        event.preventDefault();
+        toolbarRef.current?.openFind();
+      } else if (key === "k" && !editor.state.selection.empty && editable) {
+        event.preventDefault();
+        toolbarRef.current?.editLink();
+      } else if (event.shiftKey && key === "7" && editable) {
+        event.preventDefault();
+        convertDocumentList(editor, true);
+      } else if (event.shiftKey && key === "8" && editable) {
+        event.preventDefault();
+        convertDocumentList(editor, false);
+      }
+    };
+    const element = editor.view.dom;
+    element.addEventListener("keydown", onKeyDown);
+    return () => element.removeEventListener("keydown", onKeyDown);
+  }, [editable, editor]);
+
+  useEffect(() => {
+    if (!status) return;
+    const timeout = window.setTimeout(() => setStatus(null), 4_000);
+    return () => window.clearTimeout(timeout);
+  }, [status]);
 
   if (!fragmentReady) return <div className="m-auto text-sm text-muted-foreground" role="status">{t.editorLoading}</div>;
 
-  return <div className="flex min-h-0 flex-1 flex-col" data-office-editor="document" data-office-structured-editor="true">
-    <DocumentToolbar editor={editor} editable={editable} />
+  async function addImage(file: File, placement: "body" | "header" = "body") {
+    if (!editable || !editor) return;
+    try {
+      const uploaded = await admitOfficeImageResource(snapshot.artifactId, snapshot.workspaceId, file);
+      attachDocumentResource(activeDoc, uploaded.resource, "manual");
+      if (placement === "header") {
+        setDocumentHeaderImage(editor, {
+          resourceId: uploaded.resource.id,
+          altText: file.name.replace(/\.[^.]+$/, ""),
+          decorative: false,
+          widthPt: Math.max(1, uploaded.widthPx * 0.75),
+          heightPt: Math.max(1, uploaded.heightPx * 0.75),
+        });
+        return;
+      }
+      const selected = updateImageResource(editor, uploaded.resource);
+      if (!selected) insertDocumentImage(editor, {
+        resourceId: uploaded.resource.id,
+        altText: file.name.replace(/\.[^.]+$/, ""),
+        decorative: false,
+        widthPt: Math.max(1, uploaded.widthPx * 0.75),
+        heightPt: Math.max(1, uploaded.heightPx * 0.75),
+      });
+    } catch {
+      setStatus(t.documentImageUploadFailed);
+    }
+  }
+
+  return <div className="relative flex min-h-0 flex-1 flex-col" data-office-editor="document" data-office-artifact-id={snapshot.artifactId} data-office-structured-editor="true">
+    <DocumentToolbar editor={editor} editable={editable} onInsertImage={addImage} controllerRef={toolbarRef} />
     {suggestMode ? <div className="border-b bg-amber-50 px-3 py-1 text-xs font-medium text-amber-950" role="status">{t.suggesting}</div> : null}
-    <div data-office-document-scroll="true" className="min-h-0 flex-1 overflow-auto bg-muted/30 px-2 py-4 sm:px-4">
+    {status ? <div className="absolute bottom-16 left-1/2 z-50 max-w-sm -translate-x-1/2 rounded-lg bg-foreground px-3 py-2 text-xs text-background shadow-lg sm:bottom-4" role="status">{status}</div> : null}
+    <div data-office-document-scroll="true" className="min-h-0 flex-1 overflow-auto bg-muted/30 px-2 pb-20 pt-4 sm:px-4 sm:pb-4">
       <EditorContent editor={editor} className="mx-auto max-w-full" />
     </div>
   </div>;
 }
 
-function DocumentToolbar({ editor, editable }: { editor: Editor | null; editable: boolean }) {
-  const t = useT().office;
-  const [revision, setRevision] = useState(0);
-  useEffect(() => {
-    if (!editor) return;
-    const refresh = () => setRevision((value) => value + 1);
-    editor.on("selectionUpdate", refresh);
-    editor.on("transaction", refresh);
-    return () => { editor.off("selectionUpdate", refresh); editor.off("transaction", refresh); };
-  }, [editor]);
-  void revision;
-  const canFormat = editable && Boolean(editor && !editor.state.selection.empty);
-
-  return <div className="sticky top-0 z-10 flex flex-wrap items-center gap-1 border-b bg-background/95 p-2 backdrop-blur" role="toolbar" aria-label={t.editorToolbar}>
-    <ToolbarButton label={t.undo} disabled={!editable || !editor?.can().undo()} pressed={false} onClick={() => editor?.chain().focus().undo().run()} icon={<Undo2 className="size-4" />} />
-    <ToolbarButton label={t.redo} disabled={!editable || !editor?.can().redo()} pressed={false} onClick={() => editor?.chain().focus().redo().run()} icon={<Redo2 className="size-4" />} />
-    <span className="mx-1 h-5 border-l" aria-hidden />
-    <ToolbarButton label={t.bold} disabled={!canFormat} pressed={selectionHasStyle(editor, "bold")} onClick={() => toggleDocumentRunStyle(editor, "bold")} icon={<Bold className="size-4" />} />
-    <ToolbarButton label={t.italic} disabled={!canFormat} pressed={selectionHasStyle(editor, "italic")} onClick={() => toggleDocumentRunStyle(editor, "italic")} icon={<Italic className="size-4" />} />
-    <ToolbarButton label={t.underline} disabled={!canFormat} pressed={selectionHasStyle(editor, "underline")} onClick={() => toggleDocumentRunStyle(editor, "underline")} icon={<Underline className="size-4" />} />
-    <ToolbarButton label={t.strike} disabled={!canFormat} pressed={selectionHasStyle(editor, "strike")} onClick={() => toggleDocumentRunStyle(editor, "strike")} icon={<Strikethrough className="size-4" />} />
-  </div>;
+function selectedList(editor: Editor): boolean {
+  const $from = editor.state.selection.$from;
+  for (let depth = $from.depth; depth > 0; depth -= 1) if ($from.node(depth).type.name === "officeList") return true;
+  return false;
 }
 
-type BooleanRunStyle = "bold" | "italic" | "underline" | "strike";
+export { toggleDocumentRunStyle };
 
-function selectedRunStyles(editor: Editor | null): OfficeRichTextRun["style"][] {
-  if (!editor || editor.state.selection.empty) return [];
-  const styles: OfficeRichTextRun["style"][] = [];
-  const { from, to } = editor.state.selection;
-  editor.state.doc.nodesBetween(from, to, (node) => {
-    if (!node.isText) return;
-    const mark = node.marks.find((candidate) => candidate.type.name === "officeRun");
-    if (mark?.attrs.style) styles.push(mark.attrs.style as OfficeRichTextRun["style"]);
-  });
-  return styles;
+function updateImageResource(editor: Editor, resource: OfficeResourceRef): boolean {
+  const selected = editor.state.selection.$from.nodeAfter?.type.name === "officeImage" || editor.state.selection.$from.node(editor.state.selection.$from.depth).type.name === "officeImage";
+  if (!selected) return false;
+  updateSelectedDocumentNode(editor, "officeImage", { resourceId: resource.id });
+  return true;
 }
 
-function selectionHasStyle(editor: Editor | null, field: BooleanRunStyle): boolean {
-  const styles = selectedRunStyles(editor);
-  return styles.length > 0 && styles.every((style) => style[field]);
-}
-
-export function toggleDocumentRunStyle(editor: Editor | null, field: BooleanRunStyle): void {
-  if (!editor || editor.state.selection.empty) return;
-  const nextValue = !selectionHasStyle(editor, field);
-  const { from, to } = editor.state.selection;
-  const transaction = editor.state.tr;
-  editor.state.doc.nodesBetween(from, to, (node, position) => {
-    if (!node.isText) return;
-    const mark = node.marks.find((candidate) => candidate.type.name === "officeRun");
-    if (!mark) return;
-    const start = Math.max(from, position);
-    const end = Math.min(to, position + node.nodeSize);
-    if (start >= end) return;
-    const { href, ...markAttrs } = mark.attrs;
-    transaction.addMark(start, end, editor.schema.marks.officeRun.create({
-      ...markAttrs,
-      ...(href ? { href } : {}),
-      id: crypto.randomUUID(),
-      style: { ...(mark.attrs.style as OfficeRichTextRun["style"]), [field]: nextValue },
-    }));
-  });
-  editor.view.dispatch(transaction.scrollIntoView());
-  editor.commands.focus();
-}
-
-function ToolbarButton({ label, icon, disabled, pressed, onClick }: { label: string; icon: React.ReactNode; disabled: boolean; pressed: boolean; onClick(): void }) {
-  return <button type="button" aria-label={label} aria-pressed={pressed} disabled={disabled} onClick={onClick} className={cn("rounded p-2 hover:bg-muted disabled:opacity-40", pressed && "bg-muted text-primary")}>{icon}</button>;
+function setDocumentHeaderImage(editor: Editor, headerImage: Record<string, unknown>): void {
+  const $from = editor.state.selection.$from;
+  for (let depth = $from.depth; depth > 0; depth -= 1) {
+    if ($from.node(depth).type.name !== "officeSection") continue;
+    editor.view.dispatch(editor.state.tr.setNodeMarkup($from.before(depth), undefined, { ...$from.node(depth).attrs, headerImage }).scrollIntoView());
+    editor.commands.focus();
+    return;
+  }
 }
