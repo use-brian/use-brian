@@ -37,3 +37,16 @@ and type failures therefore report that the referenced accessibility node has no
 editable target after structural resolution; they do not claim that the control is not visible on the
 page. Native option refs continue to act through their owning rendered select because Chromium's
 native option popup nodes do not have independent page-layout boxes.
+
+## Snapshot modes
+
+`browserSnapshot` defaults to an `interactive` accessibility view: actionable controls receive refs
+and static page text is omitted to keep action loops concise. For read-oriented work the caller may
+request `full`, which adds headings, table semantics, labels, and static accessibility text. Static
+nodes never receive refs and therefore cannot be passed to click or type. Full snapshots remain
+read-only and use the same offset pagination with a maximum of 150 returned nodes per call.
+
+The full view is a curated accessibility snapshot, not a raw protocol dump or screenshot. Ignored
+nodes and empty structural noise stay excluded, and Chromium `InlineTextBox` fragments are omitted
+when their `StaticText` representation carries the readable content. Visual-only canvas, image, and
+CSS-generated content may still require the watched browser view.

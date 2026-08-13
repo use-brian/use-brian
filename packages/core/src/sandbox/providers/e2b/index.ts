@@ -183,13 +183,17 @@ export function createE2bCloudProvider(
         const current = (parts[2] ?? '').trim()
         return { url: current || url }
       },
-      snapshot: async (): Promise<BrowserSnapshot> => {
+      snapshot: async (options): Promise<BrowserSnapshot> => {
         const out = await runBrowserCommand(
           sandboxId,
-          chainCommands(cli.snapshot(), cli.getUrl(), cli.getTitle()),
+          chainCommands(cli.snapshot(options?.mode), cli.getUrl(), cli.getTitle()),
         )
         const [raw, url, title] = splitCommandParts(out)
-        return parseSnapshotOutput(raw ?? '', { url: (url ?? '').trim(), title: (title ?? '').trim() })
+        return parseSnapshotOutput(
+          raw ?? '',
+          { url: (url ?? '').trim(), title: (title ?? '').trim() },
+          options?.mode,
+        )
       },
       click: async (ref) => {
         await runBrowserCommand(sandboxId, cli.click(ref))

@@ -76,8 +76,8 @@ export function createCloudBrowserProvider(deps: {
       }
       return result
     },
-    async snapshot(ctx) {
-      return (await browserFor(ctx)).snapshot()
+    async snapshot(ctx, options) {
+      return (await browserFor(ctx)).snapshot(options)
     },
     async click(ctx, ref) {
       await (await browserFor(ctx)).click(ref)

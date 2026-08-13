@@ -236,7 +236,7 @@ async function dispatch(
     case 'navigate':
       return executor.navigate(String(args.url ?? ''))
     case 'snapshot':
-      return executor.snapshot()
+      return executor.snapshot(args.mode === 'full' ? 'full' : 'interactive')
     case 'click':
       await executor.click(String(args.ref ?? ''))
       return { clicked: true }

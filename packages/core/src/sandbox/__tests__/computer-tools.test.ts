@@ -30,8 +30,8 @@ function fakeProvider(kind: 'local' | 'cloud'): BrowserProvider & { calls: strin
       calls.push(`navigate:${url}`)
       return { url }
     },
-    async snapshot() {
-      calls.push('snapshot')
+    async snapshot(_ctx, options) {
+      calls.push(options?.mode === 'full' ? 'snapshot:full' : 'snapshot')
       return {
         url: 'https://www.linkedin.com/messaging/',
         title: 'Messaging',
@@ -393,6 +393,34 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
     expect(String(res.data)).toContain('call browserSnapshot with offset 300')
     expect(res.meta).toMatchObject({ nodes: 320, offset: 150, shown: 150, nextOffset: 300 })
     expect(() => tools.browserSnapshot.inputSchema.parse({ limit: 151 })).toThrow()
+  })
+
+  it('returns paginated static accessibility information in full mode without inventing refs', async () => {
+    const local = fakeProvider('local')
+    local.snapshot = async (_ctx, options) => ({
+      url: 'https://www.mtr.com.hk/en/customer/jp/index.php',
+      title: 'MTR > Route Suggestion',
+      nodes: [
+        { ref: '@e1', role: 'button', name: 'Hide' },
+        ...Array.from({ length: 160 }, (_, index) => ({
+          role: index % 2 === 0 ? 'cell' : 'statictext',
+          name: index === 150 ? 'Adult fare 5.9' : `Fare text ${index + 1}`,
+        })),
+      ],
+      ...(options?.mode === 'full' ? {} : { nodes: [] }),
+    })
+    const tools = createComputerTools({ local, cloud: fakeProvider('cloud') })
+
+    const first = await run(tools.browserSnapshot, { mode: 'full' })
+    const second = await run(tools.browserSnapshot, { mode: 'full', offset: 150 })
+
+    expect(String(first.data)).toContain('@e1 button "Hide"')
+    expect(String(first.data)).toContain('cell "Fare text 1"')
+    expect(String(first.data)).toContain('Showing accessibility nodes 1-150 of 161')
+    expect(String(first.data)).toContain('mode "full" and offset 150')
+    expect(String(second.data)).toContain('cell "Adult fare 5.9"')
+    expect(String(second.data)).not.toContain('undefined cell')
+    expect(second.meta).toMatchObject({ mode: 'full', nodes: 161, offset: 150, shown: 11 })
   })
 
   describe('send gate (P1.7 / §8 no unattended state-change)', () => {

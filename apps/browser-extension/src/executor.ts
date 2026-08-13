@@ -468,10 +468,10 @@ export class TabExecutor {
     return { url: tab.url ?? url }
   }
 
-  async snapshot(): Promise<{ url: string; title: string; nodes: BuiltSnapshot['nodes'] }> {
+  async snapshot(mode: 'interactive' | 'full' = 'interactive'): Promise<{ url: string; title: string; nodes: BuiltSnapshot['nodes'] }> {
     const tabId = this.mustTab()
     const res = await this.cdp<{ nodes: CdpAXNode[] }>(tabId, 'Accessibility.getFullAXTree')
-    this.lastSnapshot = buildSnapshot(res.nodes ?? [])
+    this.lastSnapshot = buildSnapshot(res.nodes ?? [], mode)
     const tab = await chrome.tabs.get(tabId)
     return { url: tab.url ?? '', title: tab.title ?? '', nodes: this.lastSnapshot.nodes }
   }

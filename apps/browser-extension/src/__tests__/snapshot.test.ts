@@ -58,4 +58,31 @@ describe('[COMP:ext/agent] Ref-based accessibility snapshot builder (P1.5)', () 
     ])
     expect(nodes[0]).toMatchObject({ name: 'Send', disabled: true })
   })
+
+  it('adds static fare information without refs in full mode and omits InlineTextBox duplicates', () => {
+    const { nodes, refToBackendNodeId } = buildSnapshot([
+      ax({ nodeId: '1', role: { value: 'heading' }, name: { value: 'FARE INFO' }, backendDOMNodeId: 50 }),
+      ax({ nodeId: '2', role: { value: 'StaticText' }, name: { value: 'Adult' }, backendDOMNodeId: 51 }),
+      ax({ nodeId: '3', role: { value: 'InlineTextBox' }, name: { value: 'Adult' } }),
+      ax({ nodeId: '4', role: { value: 'cell' }, name: { value: '5.9' }, backendDOMNodeId: 52 }),
+      ax({ nodeId: '5', role: { value: 'button' }, name: { value: 'Show details' }, backendDOMNodeId: 53 }),
+    ], 'full')
+
+    expect(nodes).toEqual([
+      { role: 'heading', name: 'FARE INFO' },
+      { role: 'statictext', name: 'Adult' },
+      { role: 'cell', name: '5.9' },
+      { ref: '@e1', role: 'button', name: 'Show details' },
+    ])
+    expect(refToBackendNodeId.get('@e1')).toBe(53)
+  })
+
+  it('keeps the default interactive snapshot unchanged', () => {
+    const { nodes } = buildSnapshot([
+      ax({ nodeId: '1', role: { value: 'StaticText' }, name: { value: '5.9' }, backendDOMNodeId: 60 }),
+      ax({ nodeId: '2', role: { value: 'button' }, name: { value: 'Show details' }, backendDOMNodeId: 61 }),
+    ])
+
+    expect(nodes).toEqual([{ ref: '@e1', role: 'button', name: 'Show details' }])
+  })
 })
