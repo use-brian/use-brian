@@ -3,7 +3,6 @@
 /** Constrained Tiptap schema for the canonical Office Document subset. */
 import { Mark, Node, mergeAttributes, type AnyExtension } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
-import type { OfficeEditorJsonNode } from "@use-brian/office-model";
 
 const attr = { default: null };
 const attrs = (...names: string[]) => Object.fromEntries(names.map((name) => [name, attr]));
@@ -77,10 +76,4 @@ export function officeDocumentEditorExtensions(): AnyExtension[] {
     atom("officePageBreak", "page-break"), atom("officeSectionBreak", "section-break"),
     StarterKit.configure({ document: false, paragraph: false, heading: false, bulletList: false, orderedList: false, listItem: false, history: false, blockquote: false, codeBlock: false, horizontalRule: false }),
   ];
-}
-
-export function editorPlainText(node: OfficeEditorJsonNode): string {
-  if (node.type === "text") return node.text ?? "";
-  if (["officeImage", "officeChart", "officeVideo", "officePageBreak", "officeSectionBreak", "officeEmptyRun"].includes(node.type)) return "";
-  return (node.content ?? []).map(editorPlainText).join(["paragraph", "heading", "officeListItem", "officeTableCellText"].includes(node.type) ? "" : "\n");
 }
