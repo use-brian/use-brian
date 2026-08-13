@@ -22,3 +22,18 @@ Pre-approval does not widen browser access:
 Turning pre-approval off revokes the current idle approval so the next command asks again. Pairing
 credentials and the pre-approval preference are independent; disconnecting does not silently change
 the user's preference.
+
+## Accessibility refs and rendered controls
+
+The local browser backend discovers controls through Chromium's accessibility tree and keeps each
+ref bound to that accessibility node's DOM identity. Composite widgets may expose a hidden textbox
+and a separate rendered combobox for one visible control. An interaction must try the referenced DOM
+node first, then may fall back only to a rendered control structurally associated with that node,
+such as its labelled control or a containing combobox. It must not search globally by accessible name,
+because duplicate labels could redirect an approved action to an unrelated control.
+
+A missing box model does not by itself prove that the user-visible composite control is absent. Click
+and type failures therefore report that the referenced accessibility node has no usable rendered or
+editable target after structural resolution; they do not claim that the control is not visible on the
+page. Native option refs continue to act through their owning rendered select because Chromium's
+native option popup nodes do not have independent page-layout boxes.

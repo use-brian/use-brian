@@ -288,6 +288,96 @@ export class TabExecutor {
     })
   }
 
+  /**
+   * Composite widgets can expose a hidden AX implementation node beside the
+   * rendered control. Resolve only through DOM structure so duplicate labels
+   * elsewhere on the page cannot redirect an action.
+   */
+  private async resolveAssociatedTarget(
+    tabId: number,
+    backendNodeId: number,
+    intent: 'click' | 'type',
+  ): Promise<number | null> {
+    const objectGroup = 'use-brian-associated-target'
+    try {
+      const resolved = await this.cdp<{ object?: { objectId?: string } }>(tabId, 'DOM.resolveNode', {
+        backendNodeId,
+        objectGroup,
+      })
+      const objectId = resolved.object?.objectId
+      if (!objectId) return null
+      const associated = await this.cdp<{ result?: { objectId?: string } }>(tabId, 'Runtime.callFunctionOn', {
+        objectId,
+        objectGroup,
+        arguments: [{ value: intent }],
+        functionDeclaration: `function (intent) {
+          if (!(this instanceof Element)) return null;
+          const visible = (element) => {
+            const style = getComputedStyle(element);
+            const rect = element.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' &&
+              style.visibility !== 'collapse' && rect.width > 0 && rect.height > 0 &&
+              element.getClientRects().length > 0;
+          };
+          const usable = (element) => {
+            if (!visible(element) || element.matches(':disabled, [aria-disabled="true"]')) return false;
+            if (intent === 'click') return true;
+            return element.matches('input:not([type="hidden"]), textarea, [contenteditable="true"], [role="textbox"], [role="combobox"]') &&
+              !element.matches('[readonly], [aria-readonly="true"]');
+          };
+          const selector = intent === 'type'
+            ? 'input:not([type="hidden"]), textarea, [contenteditable="true"], [role="textbox"], [role="combobox"]'
+            : 'input:not([type="hidden"]), textarea, select, button, [contenteditable="true"], [role="textbox"], [role="combobox"], [role="button"]';
+          const labels = this.labels ? Array.from(this.labels) : [];
+          for (const label of labels) {
+            const candidates = Array.from(label.querySelectorAll(selector)).filter((candidate) =>
+              candidate !== this && usable(candidate)
+            );
+            if (candidates.length === 1) return candidates[0];
+            if (candidates.length > 1) return null;
+          }
+          let ancestor = this.parentElement;
+          for (let depth = 0; ancestor && depth < 5; depth += 1, ancestor = ancestor.parentElement) {
+            const candidates = Array.from(ancestor.querySelectorAll(selector)).filter((candidate) =>
+              candidate !== this && usable(candidate)
+            );
+            if (ancestor.matches(selector) && usable(ancestor)) candidates.unshift(ancestor);
+            if (candidates.length === 1) return candidates[0];
+            if (candidates.length > 1) return null;
+          }
+          return null;
+        }`,
+      })
+      const associatedObjectId = associated.result?.objectId
+      if (!associatedObjectId) return null
+      const described = await this.cdp<{ node?: { backendNodeId?: number } }>(tabId, 'DOM.describeNode', {
+        objectId: associatedObjectId,
+      })
+      return typeof described.node?.backendNodeId === 'number' ? described.node.backendNodeId : null
+    } catch (err) {
+      if (isDetachedError(err)) throw err
+      return null
+    } finally {
+      await this.cdp(tabId, 'Runtime.releaseObjectGroup', { objectGroup }).catch(() => undefined)
+    }
+  }
+
+  private async targetBox(tabId: number, backendNodeId: number): Promise<number[] | null> {
+    try {
+      await this.cdp(tabId, 'DOM.scrollIntoViewIfNeeded', { backendNodeId })
+    } catch (err) {
+      if (isDetachedError(err)) throw err
+    }
+    try {
+      const box = await this.cdp<{ model?: { content?: number[] } }>(tabId, 'DOM.getBoxModel', { backendNodeId })
+      const quad = box.model?.content
+      return quad && quad.length >= 8 ? quad : null
+    } catch (err) {
+      if (isDetachedError(err)) throw err
+      return null
+    }
+  }
+
   /** Native option popups have no page-layout box of their own in Chromium. */
   private async clickNativeOption(tabId: number, backendNodeId: number, ref: string): Promise<void> {
     const resolved = await this.cdp<{ object?: { objectId?: string } }>(tabId, 'DOM.resolveNode', {
@@ -343,13 +433,12 @@ export class TabExecutor {
         throw new ExecutorError(`Ref ${ref} has no selectable dropdown. Take a fresh browserSnapshot.`, 'stale_ref')
       }
 
-      await this.cdp(tabId, 'DOM.scrollIntoViewIfNeeded', { backendNodeId: selectBackendNodeId })
-      const box = await this.cdp<{ model?: { content?: number[] } }>(tabId, 'DOM.getBoxModel', {
-        backendNodeId: selectBackendNodeId,
-      })
-      const quad = box.model?.content
-      if (!quad || quad.length < 8) {
-        throw new ExecutorError(`The dropdown for ref ${ref} is not visible on the page.`, 'backend_error')
+      const quad = await this.targetBox(tabId, selectBackendNodeId)
+      if (!quad) {
+        throw new ExecutorError(
+          `The dropdown for ref ${ref} has no usable rendered target. Take a fresh browserSnapshot and use the ref for the visible control.`,
+          'backend_error',
+        )
       }
       const x = (quad[0] + quad[4]) / 2
       const y = (quad[1] + quad[5]) / 2
@@ -391,29 +480,20 @@ export class TabExecutor {
     const tabId = this.mustTab()
     const backendNodeId = this.resolveRef(ref)
     const role = this.lastSnapshot?.nodes.find((node) => node.ref === ref)?.role
-    try {
-      await sendCdp(tabId, 'DOM.scrollIntoViewIfNeeded', { backendNodeId })
-    } catch {
-      // Best effort — some nodes reject it; the click may still land.
+    let quad = await this.targetBox(tabId, backendNodeId)
+    if (!quad && (role === 'option' || role === 'listboxoption')) {
+      await this.clickNativeOption(tabId, backendNodeId, ref)
+      return
     }
-    let quad: number[] | undefined
-    try {
-      const box = await this.cdp<{ model?: { content?: number[] } }>(tabId, 'DOM.getBoxModel', { backendNodeId })
-      quad = box.model?.content
-    } catch (err) {
-      if (isDetachedError(err)) throw err
-      if (role === 'option' || role === 'listboxoption') {
-        await this.clickNativeOption(tabId, backendNodeId, ref)
-        return
-      }
-      throw new ExecutorError(`Ref ${ref} is not visible on the page.`, 'backend_error', { cause: err })
+    if (!quad) {
+      const associated = await this.resolveAssociatedTarget(tabId, backendNodeId, 'click')
+      if (associated != null) quad = await this.targetBox(tabId, associated)
     }
-    if (!quad || quad.length < 8) {
-      if (role === 'option' || role === 'listboxoption') {
-        await this.clickNativeOption(tabId, backendNodeId, ref)
-        return
-      }
-      throw new ExecutorError(`Ref ${ref} is not visible on the page.`, 'backend_error')
+    if (!quad) {
+      throw new ExecutorError(
+        `Ref ${ref} has no usable rendered target. Take a fresh browserSnapshot and use the ref for the visible control.`,
+        'backend_error',
+      )
     }
     const x = (quad[0] + quad[4]) / 2
     const y = (quad[1] + quad[5]) / 2
@@ -426,7 +506,29 @@ export class TabExecutor {
   async type(ref: string, text: string): Promise<void> {
     const tabId = this.mustTab()
     const backendNodeId = this.resolveRef(ref)
-    await this.cdp(tabId, 'DOM.focus', { backendNodeId })
+    try {
+      await this.cdp(tabId, 'DOM.focus', { backendNodeId })
+    } catch (err) {
+      if (isDetachedError(err)) throw err
+      const associated = await this.resolveAssociatedTarget(tabId, backendNodeId, 'type')
+      if (associated == null) {
+        throw new ExecutorError(
+          `Ref ${ref} has no usable editable target. Take a fresh browserSnapshot and use the ref for the visible control.`,
+          'backend_error',
+          { cause: err },
+        )
+      }
+      try {
+        await this.cdp(tabId, 'DOM.focus', { backendNodeId: associated })
+      } catch (associatedErr) {
+        if (isDetachedError(associatedErr)) throw associatedErr
+        throw new ExecutorError(
+          `Ref ${ref} has no usable editable target. Take a fresh browserSnapshot and use the ref for the visible control.`,
+          'backend_error',
+          { cause: associatedErr },
+        )
+      }
+    }
     await this.cdp(tabId, 'Input.insertText', { text })
   }
 
