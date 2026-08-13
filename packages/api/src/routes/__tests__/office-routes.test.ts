@@ -7,6 +7,7 @@ import { officeJobRoutes } from '../office-jobs.js'
 import { officeTemplateRoutes } from '../office-templates.js'
 import { internalOfficeCheckpointRoutes } from '../internal-office-checkpoint.js'
 import { officeOfflineRoutes } from '../office-offline.js'
+import { officeResourceRoutes } from '../office-resources.js'
 import { OfficeGenerationUnavailableError } from '../../office/service.js'
 import { guidedTemplateSnapshot } from '../office-templates.js'
 import { OfficeArtifactSnapshotSchema, preflightOfficeCandidate } from '@use-brian/office-model'
@@ -185,14 +186,11 @@ describe('[COMP:api/office-routes] Office artifact resources', () => {
     const readResource = vi.fn(async () => ({ bytes, hash, mime: 'image/png' }))
     const server = express()
     server.use((req, _res, next) => { (req as { userId?: string }).userId = USER; next() })
-    server.use('/api/office', officeOfflineRoutes({
-      signingSecret: 'offline-secret',
+    server.use('/api/office', officeResourceRoutes({
       load,
       readResource,
-      savePackage: vi.fn(),
-      upsert: vi.fn(),
-      resolveAccess: vi.fn(),
-      appendCommand: vi.fn(),
+      readUpload: vi.fn(),
+      persistImage: vi.fn(),
     } as never))
 
     const response = await request(server).get(`/api/office/artifacts/${ARTIFACT}/resources/${RESOURCE}`).expect(200)
@@ -209,14 +207,11 @@ describe('[COMP:api/office-routes] Office artifact resources', () => {
     const expectedHash = createHash('sha256').update(new Uint8Array([1, 2, 3])).digest('hex')
     const server = express()
     server.use((req, _res, next) => { (req as { userId?: string }).userId = USER; next() })
-    server.use('/api/office', officeOfflineRoutes({
-      signingSecret: 'offline-secret',
+    server.use('/api/office', officeResourceRoutes({
       load: vi.fn(async () => ({ artifact: { workspaceId: WORKSPACE }, snapshot: { resources: [{ id: RESOURCE, hash: expectedHash, mime: 'image/png' }] } } as never)),
       readResource: vi.fn(async () => ({ bytes: new Uint8Array([9]), hash: expectedHash, mime: 'image/png' })),
-      savePackage: vi.fn(),
-      upsert: vi.fn(),
-      resolveAccess: vi.fn(),
-      appendCommand: vi.fn(),
+      readUpload: vi.fn(),
+      persistImage: vi.fn(),
     } as never))
 
     await request(server).get(`/api/office/artifacts/${ARTIFACT}/resources/${RESOURCE}`).expect(409, { error: 'office_resource_incomplete', resourceId: RESOURCE })

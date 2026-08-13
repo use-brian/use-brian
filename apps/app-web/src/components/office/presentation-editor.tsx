@@ -2,7 +2,7 @@
 
 /** Adaptive slide and multi-object editing over canonical commands. [COMP:app-web/office-presentation-editor] */
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { ChevronDown, ChevronUp, Copy, MoreHorizontal, Plus, Shapes, Table2, Trash2, Type, ChartColumn, Workflow } from "lucide-react";
+import { ChevronDown, ChevronUp, Copy, ImagePlus, MoreHorizontal, Plus, Shapes, Table2, Trash2, Type, ChartColumn, Workflow } from "lucide-react";
 import {
   arrangePresentationObjects,
   clonePresentationObjects,
@@ -17,6 +17,7 @@ import {
 } from "@use-brian/office-model";
 import {
   addSlideCommand,
+  attachResourceCommand,
   batchCommand,
   defaultRun,
   deleteCommand,
@@ -35,8 +36,10 @@ import {
   togglePresentationSelection,
 } from "@/lib/office/presentation-selection";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
+import { Checkbox } from "@/components/ui/checkbox";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { useT } from "@/lib/i18n/client";
+import { admitOfficeImageResource } from "@/lib/office/api";
 import { cn } from "@/lib/utils";
 import { PresentationGeometryToolbar, PresentationObjectFrame } from "./presentation-object-frame";
 import { PresentationFormattingToolbar } from "./presentation-formatting-toolbar";
@@ -55,6 +58,7 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
   const canChange = role === "edit" || role === "comment" && suggestMode;
   const rootRef = useRef<HTMLDivElement | null>(null);
   const railRef = useRef<HTMLElement | null>(null);
+  const imageInputRef = useRef<HTMLInputElement | null>(null);
   const [slideId, setSlideId] = useState(snapshot.slides[0].id);
   const [selectedObjectIds, setSelectedObjectIds] = useState<string[]>([]);
   const [geometryPreview, setGeometryPreview] = useState<Map<string, Geometry>>(new Map());
@@ -63,6 +67,8 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
   const [dragSlideId, setDragSlideId] = useState<string | null>(null);
   const [dragSlideIndex, setDragSlideIndex] = useState<number | null>(null);
   const [dataDialog, setDataDialog] = useState<"table" | "chart" | null>(null);
+  const [imageBusy, setImageBusy] = useState(false);
+  const [imageError, setImageError] = useState("");
   const slide = snapshot.slides.find((candidate) => candidate.id === slideId) ?? snapshot.slides[0];
   const selectedObjects = useMemo(() => selectedObjectIds.map((id) => slide.objects.find((object) => object.id === id)).filter((object): object is PresentationObject => Boolean(object)), [selectedObjectIds, slide.objects]);
   const selectionHasLocked = selectedObjects.some((object) => object.locked);
@@ -135,6 +141,43 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
     const object: PresentationObject = { id: crypto.randomUUID(), kind: "connector", geometry: { xPt: 120, yPt: 180, widthPt: 240, heightPt: 100, rotationDeg: 0 }, locked: false, connector, stroke: "#334155" };
     emit(insertSlideObjectCommand(snapshot.artifactId, baseVersion, slide.id, slide.objects.length, object));
     setSelectedObjectIds([object.id]);
+  }
+
+  async function addImage(file: File) {
+    if (!canChange || imageBusy) return;
+    setImageBusy(true); setImageError("");
+    try {
+      const admitted = await admitOfficeImageResource(snapshot.artifactId, snapshot.workspaceId, file);
+      const maxWidth = snapshot.slideSize.widthPt * 0.6;
+      const maxHeight = snapshot.slideSize.heightPt * 0.6;
+      const scale = Math.min(maxWidth / admitted.widthPx, maxHeight / admitted.heightPx);
+      const widthPt = admitted.widthPx * scale;
+      const heightPt = admitted.heightPx * scale;
+      const object: PresentationObject = { id: crypto.randomUUID(), kind: "image", geometry: { xPt: (snapshot.slideSize.widthPt - widthPt) / 2, yPt: (snapshot.slideSize.heightPt - heightPt) / 2, widthPt, heightPt, rotationDeg: 0 }, locked: false, resourceId: admitted.resource.id, altText: "", decorative: true };
+      emit(batchCommand(snapshot.artifactId, baseVersion, [attachResourceCommand(snapshot.artifactId, baseVersion, admitted.resource), insertSlideObjectCommand(snapshot.artifactId, baseVersion, slide.id, slide.objects.length, object)]));
+      setSelectedObjectIds([object.id]);
+    } catch { setImageError(t.presentationImageAdmissionFailed); }
+    finally { setImageBusy(false); if (imageInputRef.current) imageInputRef.current.value = ""; }
+  }
+
+  function moveReadingOrder(delta: -1 | 1) {
+    if (selectedObjects.length !== 1 || selectionHasLocked) return;
+    const index = slide.readingOrder.indexOf(selectedObjects[0].id);
+    const next = Math.max(0, Math.min(slide.readingOrder.length - 1, index + delta));
+    if (index === next) return;
+    const readingOrder = [...slide.readingOrder];
+    const [id] = readingOrder.splice(index, 1); readingOrder.splice(next, 0, id);
+    emit(propertyCommand(snapshot.artifactId, baseVersion, slide.id, ["readingOrder"], readingOrder));
+  }
+
+  function updateAccessibility(path: "altText" | "decorative", value: string | boolean) {
+    if (selectedObjects.length !== 1 || selectionHasLocked) return;
+    const object = selectedObjects[0];
+    if (path === "altText" && typeof value === "string" && !value.trim() && (object.kind === "chart" || object.kind === "image" && !object.decorative)) return;
+    if (object.kind === "image" && path === "decorative" && value === false && !object.altText.trim()) return;
+    const commands: OfficeCommand[] = [propertyCommand(snapshot.artifactId, baseVersion, object.id, [path], value)];
+    if (object.kind === "image" && path === "decorative" && value === true) commands.push(propertyCommand(snapshot.artifactId, baseVersion, object.id, ["altText"], ""));
+    emit(commands.length === 1 ? commands[0] : batchCommand(snapshot.artifactId, baseVersion, commands));
   }
 
   function applyDataObject(object: PresentationObject) {
@@ -347,6 +390,8 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
           <DropdownMenu><DropdownMenuTrigger render={<button type="button" disabled={!canChange} className="inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs hover:bg-muted disabled:opacity-40"><Workflow className="size-4" />{t.addConnector}</button>} /><DropdownMenuContent align="start"><DropdownMenuItem onClick={() => addConnector("straight")}>{t.straightConnector}</DropdownMenuItem><DropdownMenuItem onClick={() => addConnector("elbow")}>{t.elbowConnector}</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
           <button type="button" onClick={() => setDataDialog("table")} disabled={!canChange} className="inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs hover:bg-muted disabled:opacity-40"><Table2 className="size-4" />{primary?.kind === "table" ? t.editTable : t.insertTable}</button>
           <button type="button" onClick={() => setDataDialog("chart")} disabled={!canChange} className="inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs hover:bg-muted disabled:opacity-40"><ChartColumn className="size-4" />{primary?.kind === "chart" ? t.editChart : t.insertChart}</button>
+          <input ref={imageInputRef} type="file" accept="image/png,image/jpeg" className="sr-only" aria-label={t.insertPresentationImage} onChange={(event) => { const file = event.target.files?.[0]; if (file) void addImage(file); }} />
+          <button type="button" onClick={() => imageInputRef.current?.click()} disabled={!canChange || imageBusy} className="inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs hover:bg-muted disabled:opacity-40"><ImagePlus className="size-4" />{imageBusy ? t.uploadingImage : t.insertPresentationImage}</button>
           <button type="button" aria-label={t.moveSlideUp} disabled={!canChange || snapshot.slides.indexOf(slide) === 0} onClick={() => emit(reorderSlideCommand(snapshot.artifactId, baseVersion, slide.id, Math.max(0, snapshot.slides.indexOf(slide) - 1)))} className="rounded p-2 disabled:opacity-30"><ChevronUp className="size-4" /></button>
           <button type="button" aria-label={t.moveSlideDown} disabled={!canChange || snapshot.slides.indexOf(slide) === snapshot.slides.length - 1} onClick={() => emit(reorderSlideCommand(snapshot.artifactId, baseVersion, slide.id, snapshot.slides.indexOf(slide) + 1))} className="rounded p-2 disabled:opacity-30"><ChevronDown className="size-4" /></button>
           <button type="button" onClick={duplicateSlide} disabled={!canChange} className="inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs hover:bg-muted disabled:opacity-40"><Copy className="size-3.5" />{t.duplicateSlide}</button>
@@ -358,7 +403,14 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
           <span className="ml-auto text-xs text-muted-foreground" aria-live="polite">{selectedObjects.length ? t.objectsSelected.replace("{count}", String(selectedObjects.length)) : t.slideSelected.replace("{slide}", slide.title)}</span>
           {suggestMode ? <span className="rounded-full bg-amber-100 px-2 py-1 text-xs text-amber-900">{t.suggesting}</span> : null}
         </div>
+        {imageError ? <p role="alert" className="border-b bg-destructive/5 px-3 py-2 text-xs text-destructive">{imageError}</p> : null}
         {selectedObjects.length ? <PresentationFormattingToolbar objects={selectedObjects} disabled={!canChange || selectionHasLocked} onTextFormat={formatSelectedText} onProperty={formatSelectedProperty} /> : null}
+        {primary && (primary.kind === "image" || primary.kind === "chart" || primary.kind === "shape") ? <div role="toolbar" aria-label={t.accessibilityControls} className="flex flex-wrap items-center gap-2 border-b bg-background px-2 py-1.5">
+          {primary.kind === "image" ? <label className="flex items-center gap-1 text-xs"><Checkbox checked={primary.decorative} disabled={!canChange || selectionHasLocked} onCheckedChange={(checked) => updateAccessibility("decorative", checked)} aria-label={t.decorativeImage} />{t.decorativeImage}</label> : null}
+          {primary.kind !== "image" || !primary.decorative ? <label className="flex items-center gap-1 text-xs">{t.altText}<input aria-label={t.altText} value={primary.altText ?? ""} disabled={!canChange || selectionHasLocked} onChange={(event) => updateAccessibility("altText", event.target.value)} className="h-7 min-w-48 rounded border px-2" /></label> : null}
+          <button type="button" disabled={!canChange || selectionHasLocked || slide.readingOrder.indexOf(primary.id) <= 0} title={slide.readingOrder.indexOf(primary.id) <= 0 ? t.readingOrderFirst : undefined} onClick={() => moveReadingOrder(-1)} className="rounded px-2 py-1 text-xs disabled:opacity-40">{t.readingOrderEarlier}</button>
+          <button type="button" disabled={!canChange || selectionHasLocked || slide.readingOrder.indexOf(primary.id) >= slide.readingOrder.length - 1} title={slide.readingOrder.indexOf(primary.id) >= slide.readingOrder.length - 1 ? t.readingOrderLast : undefined} onClick={() => moveReadingOrder(1)} className="rounded px-2 py-1 text-xs disabled:opacity-40">{t.readingOrderLater}</button>
+        </div> : null}
         {selectedForToolbar ? <PresentationGeometryToolbar object={selectedForToolbar} disabled={!canChange || selectionHasLocked} onProperty={updateSelectedGeometry} onDelete={deleteSelectedObjects} /> : null}
         <div className="flex flex-1 items-center justify-center p-4 lg:p-8">
           <div data-slide-canvas="true" data-slide-preview-canvas="true" className="relative w-full max-w-5xl overflow-hidden bg-white text-slate-950 shadow" style={{ aspectRatio: slideAspectRatio, containerType: "inline-size" }} onPointerDown={startMarquee} onPointerMove={updateMarquee} onPointerUp={finishMarquee}>

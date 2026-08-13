@@ -1,6 +1,6 @@
 /** Client-safe Office REST SDK. [COMP:app-web/office-home] */
 import { authFetch } from "@/lib/auth-fetch";
-import type { OfficeArtifactSnapshot, OfficeCommand, OfficeTemplateRoutingDraft, OfficeTemplateSlideRole } from "@use-brian/office-model";
+import type { OfficeArtifactSnapshot, OfficeCommand, OfficeResourceRef, OfficeTemplateRoutingDraft, OfficeTemplateSlideRole } from "@use-brian/office-model";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 const officeResourceObjectUrls = new Map<string, Promise<string>>();
@@ -156,6 +156,16 @@ export function getOfficeResourceObjectUrl(artifactId: string, resourceId: strin
     });
   officeResourceObjectUrls.set(key, pending);
   return pending;
+}
+
+export async function admitOfficeImageResource(artifactId: string, workspaceId: string, file: File): Promise<{ resource: OfficeResourceRef; widthPx: number; heightPx: number }> {
+  if (!['image/png', 'image/jpeg'].includes(file.type) || file.size > 20 * 1024 * 1024) throw new Error('office_image_invalid');
+  const form = new FormData();
+  form.append('files', file);
+  const upload = await json<{ files: Array<{ id?: string; error?: string }> }>(await authFetch(`${API_URL}/api/doc-files/${encodeURIComponent(workspaceId)}/upload`, { method: 'POST', body: form }), 'office_image_upload_failed');
+  const source = upload.files[0];
+  if (!source?.id || source.error) throw new Error(source?.error ?? 'office_image_upload_failed');
+  return json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/resources`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ fileId: source.id, kind: 'image' }) }), 'office_image_admission_failed');
 }
 
 export async function submitOfficeCommand(artifactId: string, expectedSeq: number, command: OfficeCommand, mode: "apply" | "suggest"): Promise<OfficeLiveSnapshot | { mode: "suggestion" }> {

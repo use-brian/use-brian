@@ -7,10 +7,12 @@ import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
 import { clearPresentationClipboardForTest } from "@/lib/office/presentation-clipboard";
+import { admitOfficeImageResource } from "@/lib/office/api";
 import { PresentationEditor } from "../presentation-editor";
 import { presentationFixture } from "./editor-fixtures";
 
 vi.mock("@/components/ui/confirm-dialog", () => ({ confirmDialog: vi.fn(async () => true) }));
+vi.mock("@/lib/office/api", async (importOriginal) => ({ ...await importOriginal<typeof import("@/lib/office/api")>(), admitOfficeImageResource: vi.fn() }));
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -238,5 +240,51 @@ describe("[COMP:app-web/office-presentation-editor] Presentation interaction loo
     const cancel = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent === en.office.cancelWorksheetAction)!;
     act(() => cancel.click());
     expect(onCommand).not.toHaveBeenCalled();
+  });
+
+  it("admits an uploaded image then attaches and inserts it in one batch", async () => {
+    vi.mocked(admitOfficeImageResource).mockResolvedValue({ resource: { id: "00000000-0000-4000-8000-000000000250", kind: "image", hash: "c".repeat(64), mime: "image/png", sensitivity: "internal" }, widthPx: 1200, heightPx: 600 });
+    const { onCommand } = mount();
+    const input = host.querySelector<HTMLInputElement>(`input[aria-label="${en.office.insertPresentationImage}"]`)!;
+    const file = new File([new Uint8Array([137, 80, 78, 71])], "chart.png", { type: "image/png" });
+    Object.defineProperty(input, "files", { configurable: true, value: [file] });
+    await act(async () => { input.dispatchEvent(new Event("change", { bubbles: true })); await Promise.resolve(); });
+    const command = onCommand.mock.lastCall?.[0];
+    expect(command).toMatchObject({ kind: "batch", commands: [expect.objectContaining({ kind: "attachResource" }), expect.objectContaining({ kind: "insertSlideObject", object: expect.objectContaining({ kind: "image", resourceId: "00000000-0000-4000-8000-000000000250", decorative: true }) })] });
+    if (!command || command.kind !== "batch" || command.commands[1].kind !== "insertSlideObject") throw new Error("image insertion batch required");
+    expect(command.commands[1].object.geometry.widthPt / command.commands[1].object.geometry.heightPt).toBe(2);
+  });
+
+  it("edits accessibility and reading order without changing visual stacking", () => {
+    const snapshot = presentationFixture();
+    snapshot.slides[0].objects[2] = snapshot.slides[0].objects[3];
+    snapshot.slides[0].readingOrder = snapshot.slides[0].objects.slice(0, 3).map((object) => object.id);
+    const { onCommand } = mount(snapshot);
+    const image = host.querySelectorAll<HTMLElement>("[data-slide-object]")[2];
+    act(() => image.click());
+    const alt = [...host.querySelectorAll<HTMLLabelElement>("label")].find((candidate) => candidate.textContent?.startsWith(en.office.altText))!.querySelector<HTMLInputElement>("input")!;
+    act(() => enter(alt, "Accessible chart image"));
+    expect(onCommand).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "setObjectProperty", targetId: snapshot.slides[0].objects[2].id, path: ["altText"], value: "Accessible chart image" }));
+    const earlier = [...host.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent === en.office.readingOrderEarlier)!;
+    act(() => earlier.click());
+    expect(onCommand).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "setObjectProperty", targetId: snapshot.slides[0].id, path: ["readingOrder"], value: [snapshot.slides[0].objects[0].id, snapshot.slides[0].objects[2].id, snapshot.slides[0].objects[1].id] }));
+  });
+
+  it("cannot make an empty-alt image non-decorative and exposes reading-order boundary reasons", () => {
+    const snapshot = presentationFixture();
+    const image = structuredClone(snapshot.slides[0].objects[3]);
+    if (image.kind !== "image") throw new Error("image fixture required");
+    image.altText = "";
+    image.decorative = true;
+    snapshot.slides[0].objects = [image];
+    snapshot.slides[0].readingOrder = [image.id];
+    const { onCommand } = mount(snapshot);
+    act(() => host.querySelector<HTMLElement>("[data-slide-object]")!.click());
+    const decorative = host.querySelector<HTMLElement>(`[role="checkbox"][aria-label="${en.office.decorativeImage}"]`)!;
+    act(() => decorative.click());
+    expect(onCommand).not.toHaveBeenCalled();
+    expect(host.querySelector<HTMLInputElement>(`input[aria-label="${en.office.altText}"]`)).toBeNull();
+    const readingButtons = [...host.querySelectorAll<HTMLButtonElement>("button")].filter((button) => [en.office.readingOrderEarlier, en.office.readingOrderLater].includes(button.textContent ?? ""));
+    expect(readingButtons.map((button) => button.title)).toEqual([en.office.readingOrderFirst, en.office.readingOrderLast]);
   });
 });

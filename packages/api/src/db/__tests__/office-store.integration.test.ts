@@ -94,10 +94,12 @@ describe('[COMP:api/office-store] Office stores', () => {
   })
 
   it('creates immutable template versions and declarative resources', async () => {
-    const db = fakeDb({ 'WITH next': [{ id: 'tv1', version: 1 }], 'INSERT INTO office_resources': [{ id: 'r1' }] })
+    const db = fakeDb({ 'WITH next': [{ id: 'tv1', version: 1 }], 'INSERT INTO office_resources': [{ id: 'r1', sensitivity: 'internal' }] })
     const store = createOfficeTemplateStore(db.query)
     expect(await store.addVersion({ userId: 'u1', templateId: 't1', workspaceId: 'w1', bundleFileId: 'f1', bundleHash: 'c'.repeat(64), capabilityVersion: 1, locales: ['en-US'], tags: [], whenToUse: ['reports'], whenNotToUse: ['slides'], exampleRequests: ['make a report'], fieldSchema: {}, admissionReceipt: {}, provenance: {}, status: 'admitted' })).toEqual({ id: 'tv1', version: 1 })
-    expect(await store.addResource({ userId: 'u1', workspaceId: 'w1', kind: 'font', name: 'Brand', fileId: 'f2', hash: 'd'.repeat(64), mime: 'font/otf', licence: {}, embeddingRights: 'allowed', sensitivity: 'internal' })).toEqual({ id: 'r1' })
+    expect(await store.addResource({ userId: 'u1', workspaceId: 'w1', kind: 'font', name: 'Brand', fileId: 'f2', hash: 'd'.repeat(64), mime: 'font/otf', licence: {}, provenance: { source: 'workspace-upload' }, embeddingRights: 'allowed', sensitivity: 'internal' })).toEqual({ id: 'r1', sensitivity: 'internal' })
+    expect(db.calls.at(-1)?.sql).toContain('ON CONFLICT (workspace_id, kind, content_hash)')
+    expect(db.calls.at(-1)?.sql).toContain('WHEN office_resources.sensitivity')
   })
 
   it('links a scratch template to its draft artifact and only deletes an empty draft', async () => {

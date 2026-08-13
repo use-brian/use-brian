@@ -449,6 +449,7 @@ import { replaceLiveOfficeSnapshot } from './office/live-sync.js'
 import { officeReleaseRoutes } from './routes/office-releases.js'
 import { officeLifecycleRoutes } from './routes/office-lifecycle.js'
 import { officeOfflineRoutes } from './routes/office-offline.js'
+import { officeResourceRoutes } from './routes/office-resources.js'
 import { internalOfficeCheckpointRoutes } from './routes/internal-office-checkpoint.js'
 import { assertOfficeArtifactSnapshot, encodeOfficeState, officeStateVector, snapshotToYDoc, type OfficeArtifactSnapshot } from '@use-brian/office-model'
 import { publicShareRoutes } from './routes/public-share.js'
@@ -5346,6 +5347,48 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     const read = await filesApi.readBytes({ workspaceId, userId, assistantKind: 'standard', clearance }, resource.fileId)
     return read.ok ? { bytes: read.value.bytes, mime: resource.mime, hash: resource.hash } : null
   }
+  if (filesApi) app.use('/api/office', requireAuth(env.JWT_SECRET), officeResourceRoutes({
+    async load(userId, artifactId) {
+      const [artifact, access, live] = await Promise.all([
+        officeArtifactStore.get(userId, artifactId),
+        resolveOfficeAccess(userId, artifactId),
+        officeLiveStore.get(userId, artifactId),
+      ])
+      return artifact && access && live ? { artifact, access, snapshot: live.snapshot } : null
+    },
+    async readUpload(userId, workspaceId, fileId) {
+      const membership = await getWorkspaceMembershipWithClearanceSystem(userId, workspaceId)
+      if (!membership) return null
+      const read = await filesApi!.readBytes({ workspaceId, userId, assistantKind: 'standard', clearance: membership.clearance }, fileId)
+      return read.ok && read.value.file.workspaceId === workspaceId ? { bytes: read.value.bytes, sensitivity: read.value.file.sensitivity } : null
+    },
+    async persistImage({ userId, workspaceId, sensitivity, image }) {
+      const path = `/office/resources/${image.hash}`
+      const membership = await getWorkspaceMembershipWithClearanceSystem(userId, workspaceId)
+      if (!membership) throw new Error('Office resource membership unavailable')
+      const ctx = { workspaceId, userId, assistantKind: 'standard' as const, clearance: membership.clearance }
+      const existing = await filesApi!.stat(ctx, path)
+      const fileId = existing.ok ? existing.value.id : await (async () => {
+        const saved = await filesApi!.writeBytes(ctx, { path, bytes: image.bytes, mime: image.mime, sensitivity })
+        if (!saved.ok) throw new Error(`Office resource save failed: ${saved.error.kind}`)
+        return saved.value.id
+      })()
+      return officeTemplateStore.addResource({
+        userId,
+        workspaceId,
+        kind: 'brand_media',
+        name: `Uploaded image ${image.hash.slice(0, 12)}`,
+        fileId,
+        hash: image.hash,
+        mime: image.mime,
+        licence: { name: 'Workspace-uploaded image', provenance: 'workspace-upload' },
+        provenance: { source: 'workspace-upload', normalized: true },
+        embeddingRights: 'allowed',
+        sensitivity,
+      })
+    },
+    readResource: readOfficeResource,
+  }))
   const loadOfficeReleaseContext = async (userId: string, artifactId: string) => {
     const [artifact, access, live, head] = await Promise.all([officeArtifactStore.get(userId, artifactId), resolveOfficeAccess(userId, artifactId), officeLiveStore.get(userId, artifactId), officeArtifactStore.getHeadVersion(userId, artifactId)])
     if (!artifact || !access || !live) return null

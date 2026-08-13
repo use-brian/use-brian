@@ -1,4 +1,5 @@
 import JSZip from 'jszip'
+import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import { fitOfficeArtifact } from '@use-brian/office-renderer'
 import { exportOfficePresentation, importOfficePresentation, reparseOfficePresentation } from '../pptx/index.js'
@@ -35,10 +36,22 @@ describe('[COMP:office/pptx-engine] PPTX engine', () => {
     table.rows[0].cells[0].runs[0].text = 'Edited metric'; table.rows[0].cells[0].fill = '#FDE68A'
     chart.chartType = 'doughnut'; chart.title = 'Edited growth'; chart.altText = 'Edited growth chart'
 
+    const image = source.slides[0].objects.find((object) => object.kind === 'image')
+    if (!image || image.kind !== 'image') throw new Error('image fixture drift')
+    const admitted = await resolveFixtureResource(image.resourceId)
+    if (!admitted) throw new Error('image resource fixture drift')
+    const admittedHash = createHash('sha256').update(admitted.bytes).digest('hex')
+    const imageRef = source.resources.find((resource) => resource.id === image.resourceId)
+    if (!imageRef) throw new Error('image resource ref fixture drift')
+    imageRef.hash = admittedHash
+
     const exported = await exportOfficePresentation(source, resolveFixtureResource)
     const reopened = await reparseOfficePresentation(exported.bytes)
     expect(reopened.snapshot).toEqual(source)
     expect(reopened.layoutSerialization).toBe(exported.layoutSerialization)
+    const zip = await JSZip.loadAsync(exported.bytes)
+    const media = await Promise.all(Object.values(zip.files).filter((entry) => !entry.dir && entry.name.startsWith('ppt/media/')).map(async (entry) => new Uint8Array(await entry.async('uint8array'))))
+    expect(media.some((bytes) => createHash('sha256').update(bytes).digest('hex') === admittedHash)).toBe(true)
   })
 
   it('normalizes a conventional external PPTX and rejects external media relationships', async () => {
