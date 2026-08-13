@@ -67,7 +67,7 @@ async function writeObject(slide: Slide, object: PresentationObject, resolveReso
     return
   }
   if (object.kind === 'connector') {
-    slide.addShape('line' as ShapeName, { ...box, line: { color: hex(object.stroke), width: 1 } })
+    slide.addShape((object.connector === 'elbow' ? 'bentConnector3' : 'line') as ShapeName, { ...box, line: { color: hex(object.stroke), width: 1 } })
     return
   }
   if (object.kind === 'image') {
@@ -77,7 +77,7 @@ async function writeObject(slide: Slide, object: PresentationObject, resolveReso
     return
   }
   if (object.kind === 'table') {
-    slide.addTable(object.rows.map((row) => row.cells.map((cell) => ({ text: cell.runs.map((run) => run.text).join('') }))), { ...box, border: { color: '888888', pt: 1 }, fontSize: 11 })
+    slide.addTable(object.rows.map((row) => row.cells.map((cell) => ({ text: richText(cell.runs), options: { fill: cell.fill ? { color: hex(cell.fill) } : undefined, align: cell.alignment === 'start' ? 'left' : cell.alignment === 'end' ? 'right' : cell.alignment, valign: cell.verticalAlignment } }))), { ...box, border: { color: '888888', pt: 1 }, fontSize: 11 })
     return
   }
   if (object.kind === 'chart') {

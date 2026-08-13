@@ -6,6 +6,8 @@ import {
   clonePresentationSlide,
   createPresentationChartObject,
   createPresentationTableObject,
+  commonPresentationTextFormatting,
+  formatPresentationTextObject,
   presentationSelectionBounds,
   presentationZOrderIndex,
   snapPresentationGeometry,
@@ -99,5 +101,17 @@ describe('[COMP:office/presentation-editing] Presentation editing semantics', ()
     expect(chart.series[0].values).toEqual([1, 2])
     expect(() => createPresentationChartObject({ id: id(68), chartType: 'bar', title: 'Bad', altText: 'Bad data', categories: ['Q1'], series: [{ name: 'Revenue', values: [1, 2] }], geometry, createId: ids(170) })).toThrow(/finite value/)
     expect(() => createPresentationChartObject({ id: id(69), chartType: 'scatter', title: 'Bad', altText: 'Bad data', categories: ['Q1'], series: [{ name: 'Revenue', values: [1] }], geometry, createId: ids(180) })).toThrow(/numeric/)
+  })
+
+  it('formats complete rich runs while preserving IDs, text, language, and safe-link policy', () => {
+    const source = presentationFixture().slides[0].objects[0]
+    if (source.kind !== 'text') throw new Error('text fixture required')
+    source.runs[0].style.language = 'en-US'
+    const formatted = formatPresentationTextObject(source, { fontFamily: 'Aptos', fontSizePt: 24, bold: true, color: '#123456', href: 'https://example.com', alignment: 'center', verticalAlignment: 'middle' })
+    if (formatted.kind !== 'text') throw new Error('formatted text required')
+    expect(formatted.runs[0]).toMatchObject({ id: source.runs[0].id, text: source.runs[0].text, href: 'https://example.com', style: { fontFamily: 'Aptos', fontSizePt: 24, bold: true, color: '#123456', language: 'en-US' } })
+    expect(formatted).toMatchObject({ alignment: 'center', verticalAlignment: 'middle' })
+    expect(commonPresentationTextFormatting([formatted])).toMatchObject({ fontFamily: 'Aptos', bold: true, alignment: 'center' })
+    expect(() => formatPresentationTextObject(source, { href: 'javascript:alert(1)' })).toThrow(/HTTPS or mailto/)
   })
 })

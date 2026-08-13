@@ -20,6 +20,27 @@ describe('[COMP:office/pptx-engine] PPTX engine', () => {
     expect(zip.file('customXml/brian-office.json')).not.toBeNull()
   })
 
+  it('preserves the complete manually editable Presentation fixture', async () => {
+    const source = completePresentationSnapshot()
+    const text = source.slides[0].objects.find((object) => object.kind === 'text')
+    const shape = source.slides[0].objects.find((object) => object.kind === 'shape')
+    const connector = source.slides[0].objects.find((object) => object.kind === 'connector')
+    const table = source.slides[0].objects.find((object) => object.kind === 'table')
+    const chart = source.slides[0].objects.find((object) => object.kind === 'chart')
+    if (!text || text.kind !== 'text' || !shape || shape.kind !== 'shape' || !connector || connector.kind !== 'connector' || !table || table.kind !== 'table' || !chart || chart.kind !== 'chart') throw new Error('complete Presentation fixture drift')
+    text.runs[0].style = { ...text.runs[0].style, fontFamily: 'Aptos', fontSizePt: 30, italic: true, underline: true, strike: true, color: '#123456' }
+    text.alignment = 'center'; text.verticalAlignment = 'middle'
+    shape.shape = 'ellipse'; shape.fill = '#ABCDEF'; shape.stroke = '#654321'; shape.strokeWidthPt = 3
+    connector.connector = 'elbow'; connector.stroke = '#C2410C'
+    table.rows[0].cells[0].runs[0].text = 'Edited metric'; table.rows[0].cells[0].fill = '#FDE68A'
+    chart.chartType = 'doughnut'; chart.title = 'Edited growth'; chart.altText = 'Edited growth chart'
+
+    const exported = await exportOfficePresentation(source, resolveFixtureResource)
+    const reopened = await reparseOfficePresentation(exported.bytes)
+    expect(reopened.snapshot).toEqual(source)
+    expect(reopened.layoutSerialization).toBe(exported.layoutSerialization)
+  })
+
   it('normalizes a conventional external PPTX and rejects external media relationships', async () => {
     const zip = new JSZip()
     zip.file('[Content_Types].xml', '<Types><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/></Types>')

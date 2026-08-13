@@ -37,6 +37,12 @@ describe("[COMP:app-web/office-presentation-editor] Presentation interaction loo
     return { root, onCommand, onSelectTargets };
   }
 
+  function enter(field: HTMLInputElement | HTMLTextAreaElement, value: string) {
+    const setter = Object.getOwnPropertyDescriptor(field instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype, "value")?.set;
+    setter?.call(field, value);
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
   it("shift-selects exact object targets and deletes them in one batch", () => {
     const snapshot = presentationFixture();
     const { onCommand, onSelectTargets } = mount(snapshot);
@@ -142,5 +148,95 @@ describe("[COMP:app-web/office-presentation-editor] Presentation interaction loo
     act(() => adjacent.dispatchEvent(new KeyboardEvent("keydown", { key: "c", ctrlKey: true, bubbles: true, cancelable: true })));
     expect(onCommand).not.toHaveBeenCalled();
     adjacent.remove();
+  });
+
+  it("inserts every canonical shape and connector through adaptive menus", () => {
+    const { onCommand } = mount();
+    const shapeButton = [...host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes(en.office.addShape))!;
+    act(() => shapeButton.click());
+    const triangle = [...document.body.querySelectorAll<HTMLElement>("[role='menuitem']")].find((item) => item.textContent === en.office.triangle)!;
+    act(() => triangle.click());
+    expect(onCommand).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "insertSlideObject", object: expect.objectContaining({ kind: "shape", shape: "triangle" }) }));
+    const connectorButton = [...host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes(en.office.addConnector))!;
+    act(() => connectorButton.click());
+    const elbow = [...document.body.querySelectorAll<HTMLElement>("[role='menuitem']")].find((item) => item.textContent === en.office.elbowConnector)!;
+    act(() => elbow.click());
+    expect(onCommand).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "insertSlideObject", object: expect.objectContaining({ kind: "connector", connector: "elbow" }) }));
+  });
+
+  it("formats whole text runs in one atomic multi-object command", () => {
+    const snapshot = presentationFixture();
+    const { onCommand } = mount(snapshot);
+    const frames = [...host.querySelectorAll<HTMLElement>("[data-slide-object]")];
+    act(() => frames[0].dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    act(() => frames[1].dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: true })));
+    const bold = host.querySelector<HTMLButtonElement>(`button[aria-label="${en.office.bold}"]`)!;
+    act(() => bold.click());
+    const command = onCommand.mock.lastCall?.[0];
+    expect(command).toMatchObject({ kind: "batch" });
+    if (!command || command.kind !== "batch") throw new Error("format batch required");
+    expect(command.commands).toHaveLength(2);
+    expect(command.commands).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "setObjectProperty", targetId: snapshot.slides[0].objects[0].id, path: ["runs"] }),
+      expect.objectContaining({ kind: "setObjectProperty", targetId: snapshot.slides[0].objects[1].id, path: ["text"] }),
+    ]));
+  });
+
+  it("keeps mixed shape controls unset and applies canonical fill to all selected shapes", () => {
+    const snapshot = presentationFixture();
+    const secondShape = structuredClone(snapshot.slides[0].objects[1]);
+    secondShape.id = "00000000-0000-4000-8000-000000000299";
+    if (secondShape.kind !== "shape") throw new Error("shape fixture required");
+    secondShape.fill = "#FF0000";
+    snapshot.slides[0].objects[2] = secondShape;
+    const { onCommand } = mount(snapshot);
+    const frames = [...host.querySelectorAll<HTMLElement>("[data-slide-object]")];
+    act(() => frames[1].dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    act(() => frames[2].dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: true })));
+    const fill = host.querySelector<HTMLInputElement>(`input[aria-label="${en.office.fillColor}"]`)!;
+    expect(fill.value).toBe("");
+    act(() => enter(fill, "#123456"));
+    expect(onCommand).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "batch", commands: [expect.objectContaining({ path: ["fill"], value: "#123456" }), expect.objectContaining({ path: ["fill"], value: "#123456" })] }));
+  });
+
+  it("inserts a bounded table with stable row, cell, and run IDs from Apply", () => {
+    const { onCommand } = mount();
+    const button = [...host.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent?.includes(en.office.insertTable))!;
+    act(() => button.click());
+    const text = [...document.body.querySelectorAll<HTMLLabelElement>("label")].find((candidate) => candidate.textContent?.startsWith(en.office.tableData))!.querySelector<HTMLTextAreaElement>("textarea")!;
+    act(() => enter(text, "Name\tValue\nARR\t42"));
+    const apply = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent === en.office.apply)!;
+    act(() => apply.click());
+    const command = onCommand.mock.lastCall?.[0];
+    expect(command).toMatchObject({ kind: "insertSlideObject", object: { kind: "table", rows: [{ cells: [{ runs: [{ text: "Name" }] }, { runs: [{ text: "Value" }] }] }, { cells: [{ runs: [{ text: "ARR" }] }, { runs: [{ text: "42" }] }] }] } });
+    if (!command || command.kind !== "insertSlideObject" || command.object.kind !== "table") throw new Error("table insertion required");
+    expect(new Set([command.object.id, ...command.object.rows.flatMap((row) => [row.id, ...row.cells.flatMap((cell) => [cell.id, ...cell.runs.map((run) => run.id)])])]).size).toBe(11);
+  });
+
+  it("rejects invalid chart data and inserts a titled accessible chart after correction", () => {
+    const { onCommand } = mount();
+    const button = [...host.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent?.includes(en.office.insertChart))!;
+    act(() => button.click());
+    const labels = [...document.body.querySelectorAll<HTMLLabelElement>("label")];
+    const field = (label: string) => labels.find((candidate) => candidate.textContent?.startsWith(label))!.querySelector<HTMLInputElement | HTMLTextAreaElement>("input, textarea")!;
+    act(() => enter(field(en.office.chartTitle), "Revenue"));
+    act(() => enter(field(en.office.altText), "Revenue by quarter"));
+    act(() => enter(field(en.office.chartData), "Category,ARR\nQ1,nope"));
+    const apply = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent === en.office.apply)!;
+    act(() => apply.click());
+    expect(document.body.querySelector("[role='alert']")?.textContent).toBeTruthy();
+    expect(onCommand).not.toHaveBeenCalled();
+    act(() => enter(field(en.office.chartData), "Category,ARR\nQ1,42"));
+    act(() => apply.click());
+    expect(onCommand).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "insertSlideObject", object: expect.objectContaining({ kind: "chart", title: "Revenue", altText: "Revenue by quarter", categories: ["Q1"], series: [{ name: "ARR", values: [42] }] }) }));
+  });
+
+  it("cancels table insertion without emitting a command", () => {
+    const { onCommand } = mount();
+    const button = [...host.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent?.includes(en.office.insertTable))!;
+    act(() => button.click());
+    const cancel = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent === en.office.cancelWorksheetAction)!;
+    act(() => cancel.click());
+    expect(onCommand).not.toHaveBeenCalled();
   });
 });

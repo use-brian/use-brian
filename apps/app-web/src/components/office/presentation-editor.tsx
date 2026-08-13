@@ -2,16 +2,18 @@
 
 /** Adaptive slide and multi-object editing over canonical commands. [COMP:app-web/office-presentation-editor] */
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { ChevronDown, ChevronUp, Copy, MoreHorizontal, Plus, Shapes, Trash2, Type } from "lucide-react";
+import { ChevronDown, ChevronUp, Copy, MoreHorizontal, Plus, Shapes, Table2, Trash2, Type, ChartColumn, Workflow } from "lucide-react";
 import {
   arrangePresentationObjects,
   clonePresentationObjects,
   clonePresentationSlide,
+  formatPresentationTextObject,
   type OfficeCommand,
   type OfficeRichTextRun,
   type PresentationObject,
   type PresentationSnapGuide,
   type PresentationSnapshot,
+  type PresentationTextFormatting,
 } from "@use-brian/office-model";
 import {
   addSlideCommand,
@@ -37,6 +39,8 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 import { PresentationGeometryToolbar, PresentationObjectFrame } from "./presentation-object-frame";
+import { PresentationFormattingToolbar } from "./presentation-formatting-toolbar";
+import { PresentationDataDialog } from "./presentation-data-dialog";
 import { PresentationSlideVisual } from "./presentation-slide-visual";
 
 type Geometry = PresentationObject["geometry"];
@@ -58,6 +62,7 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
   const [marquee, setMarquee] = useState<Marquee | null>(null);
   const [dragSlideId, setDragSlideId] = useState<string | null>(null);
   const [dragSlideIndex, setDragSlideIndex] = useState<number | null>(null);
+  const [dataDialog, setDataDialog] = useState<"table" | "chart" | null>(null);
   const slide = snapshot.slides.find((candidate) => candidate.id === slideId) ?? snapshot.slides[0];
   const selectedObjects = useMemo(() => selectedObjectIds.map((id) => slide.objects.find((object) => object.id === id)).filter((object): object is PresentationObject => Boolean(object)), [selectedObjectIds, slide.objects]);
   const selectionHasLocked = selectedObjects.some((object) => object.locked);
@@ -120,10 +125,49 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
     setSelectedObjectIds([object.id]);
   }
 
-  function addShape() {
-    const object: PresentationObject = { id: crypto.randomUUID(), kind: "shape", geometry: { xPt: 90, yPt: 110, widthPt: 180, heightPt: 90, rotationDeg: 0 }, locked: false, shape: "roundedRectangle", fill: "#E2E8F0", stroke: "#64748B", strokeWidthPt: 1, text: [], altText: "" };
+  function addShape(shape: Extract<PresentationObject, { kind: "shape" }>["shape"]) {
+    const object: PresentationObject = { id: crypto.randomUUID(), kind: "shape", geometry: { xPt: 90, yPt: 110, widthPt: 180, heightPt: 90, rotationDeg: 0 }, locked: false, shape, fill: shape === "line" ? undefined : "#E2E8F0", stroke: "#64748B", strokeWidthPt: 1, text: [], altText: "" };
     emit(insertSlideObjectCommand(snapshot.artifactId, baseVersion, slide.id, slide.objects.length, object));
     setSelectedObjectIds([object.id]);
+  }
+
+  function addConnector(connector: "straight" | "elbow") {
+    const object: PresentationObject = { id: crypto.randomUUID(), kind: "connector", geometry: { xPt: 120, yPt: 180, widthPt: 240, heightPt: 100, rotationDeg: 0 }, locked: false, connector, stroke: "#334155" };
+    emit(insertSlideObjectCommand(snapshot.artifactId, baseVersion, slide.id, slide.objects.length, object));
+    setSelectedObjectIds([object.id]);
+  }
+
+  function applyDataObject(object: PresentationObject) {
+    const previous = slide.objects.find((candidate) => candidate.id === object.id);
+    if (previous && object.kind === "table") {
+      const commands = [propertyCommand(snapshot.artifactId, baseVersion, previous.id, ["rows"], object.rows), propertyCommand(snapshot.artifactId, baseVersion, previous.id, ["columnWidthsPt"], object.columnWidthsPt)];
+      emit(batchCommand(snapshot.artifactId, baseVersion, commands));
+    }
+    else if (previous && object.kind === "chart") {
+      const commands = (["chartType", "title", "categories", "series", "altText"] as const).map((key) => propertyCommand(snapshot.artifactId, baseVersion, previous.id, [key], object[key]));
+      emit(batchCommand(snapshot.artifactId, baseVersion, commands));
+    } else emit(insertSlideObjectCommand(snapshot.artifactId, baseVersion, slide.id, slide.objects.length, object));
+    setSelectedObjectIds([object.id]);
+  }
+
+  function formatSelectedText(formatting: PresentationTextFormatting) {
+    if (!selectedObjects.length || selectionHasLocked) return;
+    const commands = selectedObjects.map((object) => {
+      const next = formatPresentationTextObject(object, formatting);
+      const path = next.kind === "text" ? ["runs"] : ["text"];
+      const values = next.kind === "text" ? next.runs : next.kind === "shape" ? next.text : [];
+      const parts: OfficeCommand[] = [propertyCommand(snapshot.artifactId, baseVersion, next.id, path, values)];
+      if (formatting.alignment !== undefined) parts.push(propertyCommand(snapshot.artifactId, baseVersion, next.id, ["alignment"], formatting.alignment));
+      if (formatting.verticalAlignment !== undefined) parts.push(propertyCommand(snapshot.artifactId, baseVersion, next.id, ["verticalAlignment"], formatting.verticalAlignment));
+      return parts;
+    }).flat();
+    emit(commands.length === 1 ? commands[0] : batchCommand(snapshot.artifactId, baseVersion, commands));
+  }
+
+  function formatSelectedProperty(path: string[], value: unknown) {
+    if (!selectedObjects.length || selectionHasLocked) return;
+    const commands = selectedObjects.map((object) => propertyCommand(snapshot.artifactId, baseVersion, object.id, path, value));
+    emit(commands.length === 1 ? commands[0] : batchCommand(snapshot.artifactId, baseVersion, commands));
   }
 
   function addSlide() {
@@ -299,7 +343,10 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
       <div className="flex min-h-0 flex-col overflow-auto bg-muted/40">
         <div className="flex flex-wrap items-center gap-1 border-b bg-background p-2" role="toolbar" aria-label={t.editorToolbar}>
           <button type="button" onClick={addText} disabled={!canChange} className="inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs hover:bg-muted disabled:opacity-40"><Type className="size-4" />{t.addText}</button>
-          <button type="button" onClick={addShape} disabled={!canChange} className="inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs hover:bg-muted disabled:opacity-40"><Shapes className="size-4" />{t.addShape}</button>
+          <DropdownMenu><DropdownMenuTrigger render={<button type="button" disabled={!canChange} className="inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs hover:bg-muted disabled:opacity-40"><Shapes className="size-4" />{t.addShape}</button>} /><DropdownMenuContent align="start">{(["rectangle", "roundedRectangle", "ellipse", "triangle", "line"] as const).map((shape) => <DropdownMenuItem key={shape} onClick={() => addShape(shape)}>{t[shape]}</DropdownMenuItem>)}</DropdownMenuContent></DropdownMenu>
+          <DropdownMenu><DropdownMenuTrigger render={<button type="button" disabled={!canChange} className="inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs hover:bg-muted disabled:opacity-40"><Workflow className="size-4" />{t.addConnector}</button>} /><DropdownMenuContent align="start"><DropdownMenuItem onClick={() => addConnector("straight")}>{t.straightConnector}</DropdownMenuItem><DropdownMenuItem onClick={() => addConnector("elbow")}>{t.elbowConnector}</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
+          <button type="button" onClick={() => setDataDialog("table")} disabled={!canChange} className="inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs hover:bg-muted disabled:opacity-40"><Table2 className="size-4" />{primary?.kind === "table" ? t.editTable : t.insertTable}</button>
+          <button type="button" onClick={() => setDataDialog("chart")} disabled={!canChange} className="inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs hover:bg-muted disabled:opacity-40"><ChartColumn className="size-4" />{primary?.kind === "chart" ? t.editChart : t.insertChart}</button>
           <button type="button" aria-label={t.moveSlideUp} disabled={!canChange || snapshot.slides.indexOf(slide) === 0} onClick={() => emit(reorderSlideCommand(snapshot.artifactId, baseVersion, slide.id, Math.max(0, snapshot.slides.indexOf(slide) - 1)))} className="rounded p-2 disabled:opacity-30"><ChevronUp className="size-4" /></button>
           <button type="button" aria-label={t.moveSlideDown} disabled={!canChange || snapshot.slides.indexOf(slide) === snapshot.slides.length - 1} onClick={() => emit(reorderSlideCommand(snapshot.artifactId, baseVersion, slide.id, snapshot.slides.indexOf(slide) + 1))} className="rounded p-2 disabled:opacity-30"><ChevronDown className="size-4" /></button>
           <button type="button" onClick={duplicateSlide} disabled={!canChange} className="inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs hover:bg-muted disabled:opacity-40"><Copy className="size-3.5" />{t.duplicateSlide}</button>
@@ -311,6 +358,7 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
           <span className="ml-auto text-xs text-muted-foreground" aria-live="polite">{selectedObjects.length ? t.objectsSelected.replace("{count}", String(selectedObjects.length)) : t.slideSelected.replace("{slide}", slide.title)}</span>
           {suggestMode ? <span className="rounded-full bg-amber-100 px-2 py-1 text-xs text-amber-900">{t.suggesting}</span> : null}
         </div>
+        {selectedObjects.length ? <PresentationFormattingToolbar objects={selectedObjects} disabled={!canChange || selectionHasLocked} onTextFormat={formatSelectedText} onProperty={formatSelectedProperty} /> : null}
         {selectedForToolbar ? <PresentationGeometryToolbar object={selectedForToolbar} disabled={!canChange || selectionHasLocked} onProperty={updateSelectedGeometry} onDelete={deleteSelectedObjects} /> : null}
         <div className="flex flex-1 items-center justify-center p-4 lg:p-8">
           <div data-slide-canvas="true" data-slide-preview-canvas="true" className="relative w-full max-w-5xl overflow-hidden bg-white text-slate-950 shadow" style={{ aspectRatio: slideAspectRatio, containerType: "inline-size" }} onPointerDown={startMarquee} onPointerMove={updateMarquee} onPointerUp={finishMarquee}>
@@ -321,6 +369,7 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
         </div>
         <label className="border-t bg-background p-3 text-xs font-medium">{t.speakerNotes}<textarea disabled={!canChange} value={slide.notes.map((run) => run.text).join("")} onChange={(event) => emit(propertyCommand(snapshot.artifactId, baseVersion, slide.id, ["notes"], runsWithText(slide.notes, event.target.value)))} className="mt-1 min-h-16 w-full resize-y rounded border p-2 font-normal" /></label>
       </div>
+      <PresentationDataDialog mode={dataDialog ?? "table"} open={dataDialog !== null} object={dataDialog === "table" && primary?.kind === "table" ? primary : dataDialog === "chart" && primary?.kind === "chart" ? primary : null} onClose={() => setDataDialog(null)} onApply={applyDataObject} />
     </div>
   );
 }

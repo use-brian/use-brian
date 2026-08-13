@@ -5,6 +5,7 @@ import {
   PresentationTableSchema,
   type PresentationObject,
   type PresentationSlide,
+  type OfficeRichTextRun,
 } from './model.js'
 
 export type PresentationIdFactory = () => string
@@ -23,9 +24,62 @@ export type PresentationArrangeOperation =
   | 'centerOnSlideVertical'
 export type PresentationZOrderOperation = 'bringForward' | 'sendBackward' | 'bringToFront' | 'sendToBack'
 export type PresentationSnapGuide = { axis: 'x' | 'y'; positionPt: number; source: 'slide-center' | 'slide-edge' | 'object-center' | 'object-edge' }
+export type PresentationTextFormatting = Partial<{
+  fontFamily: string
+  fontSizePt: number
+  bold: boolean
+  italic: boolean
+  underline: boolean
+  strike: boolean
+  color: string
+  href: string | null
+  alignment: 'start' | 'center' | 'end' | 'justify'
+  verticalAlignment: 'top' | 'middle' | 'bottom'
+}>
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T
+}
+
+function textRuns(object: PresentationObject): OfficeRichTextRun[] | null {
+  return object.kind === 'text' ? object.runs : object.kind === 'shape' ? object.text : null
+}
+
+/** Whole-object/whole-run formatting with stable run identity. */
+export function formatPresentationTextObject(object: PresentationObject, formatting: PresentationTextFormatting): PresentationObject {
+  const runs = textRuns(object)
+  if (!runs) throw new Error('Presentation object does not support text formatting')
+  if (formatting.href !== undefined && formatting.href !== null && !/^(https:|mailto:)/.test(formatting.href)) throw new Error('Presentation links must use HTTPS or mailto')
+  const stylePatch = Object.fromEntries(Object.entries(formatting).filter(([key, value]) => !['href', 'alignment', 'verticalAlignment'].includes(key) && value !== undefined))
+  const nextRuns = runs.map((run) => ({
+    ...run,
+    style: { ...run.style, ...stylePatch },
+    ...(formatting.href === undefined ? {} : formatting.href === null || formatting.href === '' ? { href: undefined } : { href: formatting.href }),
+  }))
+  const next = clone(object)
+  if (next.kind === 'text') next.runs = nextRuns
+  else if (next.kind === 'shape') next.text = nextRuns
+  if ((next.kind === 'text' || next.kind === 'shape') && formatting.alignment !== undefined) next.alignment = formatting.alignment
+  if ((next.kind === 'text' || next.kind === 'shape') && formatting.verticalAlignment !== undefined) next.verticalAlignment = formatting.verticalAlignment
+  return PresentationObjectSchema.parse(next)
+}
+
+export function commonPresentationTextFormatting(objects: readonly PresentationObject[]): Partial<Record<keyof PresentationTextFormatting, unknown>> | null {
+  if (!objects.length || objects.some((object) => !textRuns(object))) return null
+  const values = objects.map((object) => {
+    const runs = textRuns(object)!
+    const first = runs[0]
+    const commonRun = <T>(read: (run: OfficeRichTextRun) => T): T | undefined => first && runs.every((run) => read(run) === read(first)) ? read(first) : undefined
+    return {
+      fontFamily: commonRun((run) => run.style.fontFamily), fontSizePt: commonRun((run) => run.style.fontSizePt),
+      bold: commonRun((run) => run.style.bold), italic: commonRun((run) => run.style.italic), underline: commonRun((run) => run.style.underline),
+      strike: commonRun((run) => run.style.strike), color: commonRun((run) => run.style.color), href: commonRun((run) => run.href),
+      alignment: object.kind === 'text' || object.kind === 'shape' ? object.alignment : undefined,
+      verticalAlignment: object.kind === 'text' || object.kind === 'shape' ? object.verticalAlignment : undefined,
+    }
+  })
+  const keys = Object.keys(values[0]) as Array<keyof PresentationTextFormatting>
+  return Object.fromEntries(keys.map((key) => [key, values.every((value) => value[key] === values[0][key]) ? values[0][key] : undefined]))
 }
 
 function visitIds(value: unknown, visit: (record: Record<string, unknown>) => void): void {
