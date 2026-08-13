@@ -60,6 +60,7 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
   const railRef = useRef<HTMLElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const [slideId, setSlideId] = useState(snapshot.slides[0].id);
+  const [selectedSlideIds, setSelectedSlideIds] = useState<string[]>([snapshot.slides[0].id]);
   const [selectedObjectIds, setSelectedObjectIds] = useState<string[]>([]);
   const [geometryPreview, setGeometryPreview] = useState<Map<string, Geometry>>(new Map());
   const [snapGuides, setSnapGuides] = useState<PresentationSnapGuide[]>([]);
@@ -82,8 +83,17 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
   }, [slide.id, slide.objects]);
 
   useEffect(() => {
-    onSelectTargets?.(selectedObjectIds.length ? selectedObjectIds : [slide.id]);
-  }, [onSelectTargets, selectedObjectIds, slide.id]);
+    const live = new Set(snapshot.slides.map((item) => item.id));
+    setSelectedSlideIds((current) => {
+      const repaired = current.filter((id) => live.has(id));
+      return repaired.length ? repaired : [slide.id];
+    });
+    if (!live.has(slideId)) setSlideId(snapshot.slides[0].id);
+  }, [slide.id, slideId, snapshot.slides]);
+
+  useEffect(() => {
+    onSelectTargets?.(selectedObjectIds.length ? selectedObjectIds : selectedSlideIds.length ? selectedSlideIds : [slide.id]);
+  }, [onSelectTargets, selectedObjectIds, selectedSlideIds, slide.id]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -106,15 +116,18 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
       if ((event.key === "Delete" || event.key === "Backspace") && canChange) {
         event.preventDefault();
         if (selectedObjects.length) deleteSelectedObjects();
-        else void deleteCurrentSlide();
+        else void deleteSelectedSlides();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   });
 
-  function selectSlide(nextSlideId: string) {
+  function selectSlide(nextSlideId: string, additive = false) {
     setSlideId(nextSlideId);
+    setSelectedSlideIds((current) => additive
+      ? current.includes(nextSlideId) ? current.length === 1 ? current : current.filter((id) => id !== nextSlideId) : [...current, nextSlideId]
+      : [nextSlideId]);
     setSelectedObjectIds([]);
     setGeometryPreview(new Map());
     setSnapGuides([]);
@@ -170,6 +183,15 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
     emit(propertyCommand(snapshot.artifactId, baseVersion, slide.id, ["readingOrder"], readingOrder));
   }
 
+  function readingOrderDisabledReason(delta: -1 | 1): string | undefined {
+    if (selectedObjects.length !== 1) return t.readingOrderSingleSelection;
+    if (selectionHasLocked) return t.readingOrderLocked;
+    const index = slide.readingOrder.indexOf(selectedObjects[0].id);
+    if (delta < 0 && index <= 0) return t.readingOrderFirst;
+    if (delta > 0 && index >= slide.readingOrder.length - 1) return t.readingOrderLast;
+    return undefined;
+  }
+
   function updateAccessibility(path: "altText" | "decorative", value: string | boolean) {
     if (selectedObjects.length !== 1 || selectionHasLocked) return;
     const object = selectedObjects[0];
@@ -217,6 +239,7 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
     const newId = crypto.randomUUID();
     emit(addSlideCommand(snapshot.artifactId, baseVersion, snapshot.slides.length, { id: newId, title: t.newSlide, masterId: snapshot.masters[0].id, layoutId: snapshot.layouts[0].id, objects: [], readingOrder: [], notes: [] }));
     setSlideId(newId);
+    setSelectedSlideIds([newId]);
     setSelectedObjectIds([]);
   }
 
@@ -227,17 +250,23 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
     const index = snapshot.slides.indexOf(slide) + 1;
     emit(addSlideCommand(snapshot.artifactId, baseVersion, index, duplicated));
     setSlideId(duplicated.id);
+    setSelectedSlideIds([duplicated.id]);
     setSelectedObjectIds([]);
   }
 
-  async function deleteCurrentSlide() {
-    if (!canChange || snapshot.slides.length === 1) return;
+  async function deleteSelectedSlides() {
+    const selected = snapshot.slides.filter((item) => selectedSlideIds.includes(item.id));
+    if (!canChange || !selected.length || selected.length >= snapshot.slides.length) return;
     const confirmed = await confirmDialog({ title: t.deleteSlide, description: t.deleteSlideDescription.replace("{slide}", slide.title), confirmLabel: t.deleteSlide, cancelLabel: t.cancelWorksheetAction, variant: "destructive" });
     if (!confirmed) return;
     const index = snapshot.slides.indexOf(slide);
-    const next = snapshot.slides[Math.min(index + 1, snapshot.slides.length - 1)] ?? snapshot.slides[Math.max(0, index - 1)];
-    emit(deleteSlideCommand(snapshot.artifactId, baseVersion, slide.id));
-    if (next.id !== slide.id) setSlideId(next.id);
+    const selectedSet = new Set(selected.map((item) => item.id));
+    const survivors = snapshot.slides.filter((item) => !selectedSet.has(item.id));
+    const next = survivors.find((item) => snapshot.slides.indexOf(item) >= index) ?? survivors.at(-1)!;
+    const commands = selected.map((item) => deleteSlideCommand(snapshot.artifactId, baseVersion, item.id));
+    emit(commands.length === 1 ? commands[0] : batchCommand(snapshot.artifactId, baseVersion, commands));
+    setSlideId(next.id);
+    setSelectedSlideIds([next.id]);
     setSelectedObjectIds([]);
   }
 
@@ -254,8 +283,9 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
       if (cut && canChange) deleteSelectedObjects();
       return;
     }
-    await writePresentationClipboard({ version: 1, artifactId: snapshot.artifactId, scope: "slides", slides: [slide] });
-    if (cut) await deleteCurrentSlide();
+    const slides = snapshot.slides.filter((item) => selectedSlideIds.includes(item.id));
+    await writePresentationClipboard({ version: 1, artifactId: snapshot.artifactId, scope: "slides", slides: slides.length ? slides : [slide] });
+    if (cut) await deleteSelectedSlides();
   }
 
   async function paste() {
@@ -266,7 +296,9 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
       let index = snapshot.slides.indexOf(slide) + 1;
       const commands = payload.slides.map((source) => addSlideCommand(snapshot.artifactId, baseVersion, index++, clonePresentationSlide(source, () => crypto.randomUUID()).slide));
       emit(commands.length === 1 ? commands[0] : batchCommand(snapshot.artifactId, baseVersion, commands));
-      setSlideId((commands[0] as Extract<OfficeCommand, { kind: "addSlide" }>).slide.id);
+      const pastedIds = commands.map((command) => (command as Extract<OfficeCommand, { kind: "addSlide" }>).slide.id);
+      setSlideId(pastedIds[0]);
+      setSelectedSlideIds(pastedIds);
       return;
     }
     const cloned = clonePresentationObjects(payload.objects, () => crypto.randomUUID());
@@ -314,7 +346,7 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
     if (selectionHasLocked) return;
     const arranged = arrangePresentationObjects(selectedObjects, operation, snapshot.slideSize);
     const commands = arranged.filter((object, index) => JSON.stringify(object.geometry) !== JSON.stringify(selectedObjects[index].geometry)).map((object) => propertyCommand(snapshot.artifactId, baseVersion, object.id, ["geometry"], object.geometry));
-    if (commands.length) emit(commands.length === 1 ? commands[0] : batchCommand(snapshot.artifactId, baseVersion, commands));
+    if (commands.length) emit(selectedObjects.length > 1 ? batchCommand(snapshot.artifactId, baseVersion, commands) : commands[0]);
   }
 
   function reorderObject(operation: "bringForward" | "bringToFront" | "sendBackward" | "sendToBack") {
@@ -330,7 +362,7 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
       working.splice(from, 1);
       working.splice(index, 0, objectId);
     });
-    if (commands.length) emit(commands.length === 1 ? commands[0] : batchCommand(snapshot.artifactId, baseVersion, commands));
+    if (commands.length) emit(selectedObjects.length > 1 ? batchCommand(snapshot.artifactId, baseVersion, commands) : commands[0]);
   }
 
   function marqueePoint(event: ReactPointerEvent<HTMLDivElement>) {
@@ -376,10 +408,10 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
   return (
     <div ref={rootRef} className="grid min-h-0 flex-1 grid-cols-[6.5rem_minmax(0,1fr)] lg:grid-cols-[10rem_minmax(0,1fr)]" data-office-editor="presentation" data-properties-open={primary ? "true" : "false"} tabIndex={-1}>
       <nav ref={railRef} className="overflow-y-auto border-r bg-muted/30 p-2" aria-label={t.slideRail} onPointerMove={(event) => { if (!dragSlideId || !railRef.current) return; const rect = railRef.current.getBoundingClientRect(); if (event.clientY < rect.top + 32) railRef.current.scrollTop -= 16; if (event.clientY > rect.bottom - 32) railRef.current.scrollTop += 16; }} onPointerUp={finishSlideDrag}>
-        {snapshot.slides.map((item, index) => <div key={item.id} data-slide-thumbnail="true" data-slide-insertion={dragSlideIndex === index ? "before" : undefined} style={{ aspectRatio: slideAspectRatio }} className={cn("relative mb-2 w-full overflow-hidden rounded border bg-white text-slate-900", item.id === slide.id && "ring-2 ring-primary", dragSlideIndex === index && "border-t-4 border-t-primary")} onPointerEnter={() => hoverSlide(index)}>
+        {snapshot.slides.map((item, index) => <div key={item.id} data-slide-thumbnail="true" data-slide-insertion={dragSlideIndex === index ? "before" : undefined} style={{ aspectRatio: slideAspectRatio }} className={cn("relative mb-2 w-full overflow-hidden rounded border bg-white text-slate-900", selectedSlideIds.includes(item.id) && "ring-2 ring-primary", dragSlideIndex === index && "border-t-4 border-t-primary")} onPointerEnter={() => hoverSlide(index)}>
           <PresentationSlideVisual artifactId={snapshot.artifactId} slide={item} slideSize={snapshot.slideSize} className="pointer-events-none h-full w-full" />
           <span aria-hidden className="absolute left-1 top-1 z-20 rounded bg-background/80 px-1 text-[9px] leading-4 text-foreground shadow-sm">{index + 1}</span>
-          <button type="button" aria-label={`${index + 1}: ${item.title}`} onPointerDown={(event) => { if (event.button !== 0) return; selectSlide(item.id); setDragSlideId(item.id); setDragSlideIndex(index); event.currentTarget.setPointerCapture?.(event.pointerId); }} onPointerUp={finishSlideDrag} className="absolute inset-0 z-30"><span className="sr-only">{item.title}</span></button>
+          <button type="button" aria-label={`${index + 1}: ${item.title}`} aria-pressed={selectedSlideIds.includes(item.id)} onPointerDown={(event) => { if (event.button !== 0) return; selectSlide(item.id, event.shiftKey); if (!event.shiftKey) { setDragSlideId(item.id); setDragSlideIndex(index); event.currentTarget.setPointerCapture?.(event.pointerId); } }} onPointerUp={finishSlideDrag} className="absolute inset-0 z-30"><span className="sr-only">{item.title}</span></button>
         </div>)}
         <button type="button" onClick={addSlide} disabled={!canChange} className="flex w-full items-center justify-center gap-1 rounded border border-dashed p-2 text-xs disabled:opacity-40"><Plus className="size-3" />{t.newSlide}</button>
       </nav>
@@ -395,7 +427,7 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
           <button type="button" aria-label={t.moveSlideUp} disabled={!canChange || snapshot.slides.indexOf(slide) === 0} onClick={() => emit(reorderSlideCommand(snapshot.artifactId, baseVersion, slide.id, Math.max(0, snapshot.slides.indexOf(slide) - 1)))} className="rounded p-2 disabled:opacity-30"><ChevronUp className="size-4" /></button>
           <button type="button" aria-label={t.moveSlideDown} disabled={!canChange || snapshot.slides.indexOf(slide) === snapshot.slides.length - 1} onClick={() => emit(reorderSlideCommand(snapshot.artifactId, baseVersion, slide.id, snapshot.slides.indexOf(slide) + 1))} className="rounded p-2 disabled:opacity-30"><ChevronDown className="size-4" /></button>
           <button type="button" onClick={duplicateSlide} disabled={!canChange} className="inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs hover:bg-muted disabled:opacity-40"><Copy className="size-3.5" />{t.duplicateSlide}</button>
-          <button type="button" onClick={() => void deleteCurrentSlide()} disabled={!canChange || snapshot.slides.length === 1} title={snapshot.slides.length === 1 ? t.cannotDeleteFinalSlide : undefined} className="rounded p-2 text-destructive hover:bg-destructive/10 disabled:opacity-30" aria-label={t.deleteSlide}><Trash2 className="size-4" /></button>
+          <button type="button" onClick={() => void deleteSelectedSlides()} disabled={!canChange || selectedSlideIds.length >= snapshot.slides.length} title={selectedSlideIds.length >= snapshot.slides.length ? t.cannotDeleteFinalSlide : undefined} className="rounded p-2 text-destructive hover:bg-destructive/10 disabled:opacity-30" aria-label={t.deleteSlide}><Trash2 className="size-4" /></button>
           {selectedObjects.length ? <DropdownMenu><DropdownMenuTrigger render={<button type="button" className="inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs hover:bg-muted"><MoreHorizontal className="size-4" />{t.arrange}</button>} /><DropdownMenuContent align="start">
             <DropdownMenuItem disabled={selectionHasLocked} onClick={() => reorderObject("bringToFront")}>{t.bringToFront}</DropdownMenuItem><DropdownMenuItem disabled={selectionHasLocked} onClick={() => reorderObject("bringForward")}>{t.bringForward}</DropdownMenuItem><DropdownMenuItem disabled={selectionHasLocked} onClick={() => reorderObject("sendBackward")}>{t.sendBackward}</DropdownMenuItem><DropdownMenuItem disabled={selectionHasLocked} onClick={() => reorderObject("sendToBack")}>{t.sendToBack}</DropdownMenuItem><DropdownMenuSeparator />
             {(["alignLeft", "alignCenter", "alignRight", "alignTop", "alignMiddle", "alignBottom", "distributeHorizontal", "distributeVertical", "centerOnSlide"] as const).map((operation) => <DropdownMenuItem key={operation} disabled={selectionHasLocked || operation.startsWith("distribute") && selectedObjects.length < 3} onClick={() => arrange(operation)}>{t[operation]}</DropdownMenuItem>)}
@@ -405,11 +437,11 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
         </div>
         {imageError ? <p role="alert" className="border-b bg-destructive/5 px-3 py-2 text-xs text-destructive">{imageError}</p> : null}
         {selectedObjects.length ? <PresentationFormattingToolbar objects={selectedObjects} disabled={!canChange || selectionHasLocked} onTextFormat={formatSelectedText} onProperty={formatSelectedProperty} /> : null}
-        {primary && (primary.kind === "image" || primary.kind === "chart" || primary.kind === "shape") ? <div role="toolbar" aria-label={t.accessibilityControls} className="flex flex-wrap items-center gap-2 border-b bg-background px-2 py-1.5">
+        {primary ? <div role="toolbar" aria-label={t.accessibilityControls} className="flex flex-wrap items-center gap-2 border-b bg-background px-2 py-1.5">
           {primary.kind === "image" ? <label className="flex items-center gap-1 text-xs"><Checkbox checked={primary.decorative} disabled={!canChange || selectionHasLocked} onCheckedChange={(checked) => updateAccessibility("decorative", checked)} aria-label={t.decorativeImage} />{t.decorativeImage}</label> : null}
-          {primary.kind !== "image" || !primary.decorative ? <label className="flex items-center gap-1 text-xs">{t.altText}<input aria-label={t.altText} value={primary.altText ?? ""} disabled={!canChange || selectionHasLocked} onChange={(event) => updateAccessibility("altText", event.target.value)} className="h-7 min-w-48 rounded border px-2" /></label> : null}
-          <button type="button" disabled={!canChange || selectionHasLocked || slide.readingOrder.indexOf(primary.id) <= 0} title={slide.readingOrder.indexOf(primary.id) <= 0 ? t.readingOrderFirst : undefined} onClick={() => moveReadingOrder(-1)} className="rounded px-2 py-1 text-xs disabled:opacity-40">{t.readingOrderEarlier}</button>
-          <button type="button" disabled={!canChange || selectionHasLocked || slide.readingOrder.indexOf(primary.id) >= slide.readingOrder.length - 1} title={slide.readingOrder.indexOf(primary.id) >= slide.readingOrder.length - 1 ? t.readingOrderLast : undefined} onClick={() => moveReadingOrder(1)} className="rounded px-2 py-1 text-xs disabled:opacity-40">{t.readingOrderLater}</button>
+          {(primary.kind === "image" && !primary.decorative) || primary.kind === "shape" || primary.kind === "chart" ? <label className="flex items-center gap-1 text-xs">{t.altText}<input aria-label={t.altText} value={primary.altText ?? ""} disabled={!canChange || selectionHasLocked} onChange={(event) => updateAccessibility("altText", event.target.value)} className="h-7 min-w-48 rounded border px-2" /></label> : null}
+          <button type="button" disabled={!canChange || Boolean(readingOrderDisabledReason(-1))} title={readingOrderDisabledReason(-1)} onClick={() => moveReadingOrder(-1)} className="rounded px-2 py-1 text-xs disabled:opacity-40">{t.readingOrderEarlier}</button>
+          <button type="button" disabled={!canChange || Boolean(readingOrderDisabledReason(1))} title={readingOrderDisabledReason(1)} onClick={() => moveReadingOrder(1)} className="rounded px-2 py-1 text-xs disabled:opacity-40">{t.readingOrderLater}</button>
         </div> : null}
         {selectedForToolbar ? <PresentationGeometryToolbar object={selectedForToolbar} disabled={!canChange || selectionHasLocked} onProperty={updateSelectedGeometry} onDelete={deleteSelectedObjects} /> : null}
         <div className="flex flex-1 items-center justify-center p-4 lg:p-8">

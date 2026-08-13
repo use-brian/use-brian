@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { applyOfficeCommand } from "@use-brian/office-model";
 import { classifyOfficeReconnect, decryptOfficePackage, decryptOfflineJournalEntry, encryptOfficePackage, encryptOfflineJournalEntry, officeManifestHash } from "../offline";
 import { presentationFixture } from "../../../components/office/__tests__/editor-fixtures";
+import { formattedPresentationSnapshot } from "../../../../../../packages/core/src/office/__tests__/fixtures";
 
 const digest = async (value: Uint8Array | string) => {
   const bytes = typeof value === "string" ? new TextEncoder().encode(value) : value;
@@ -32,7 +33,7 @@ describe("[COMP:app-web/office-offline] Encrypted Office offline package", () =>
 
   it("round-trips and replays an atomic presentation command batch", async () => {
     const secret = crypto.getRandomValues(new Uint8Array(32));
-    const snapshot = presentationFixture();
+    const snapshot = formattedPresentationSnapshot();
     const common = { artifactId: snapshot.artifactId, baseVersion: 0, actor: { type: "user" as const, id: "00000000-0000-4000-8000-000000000090" }, origin: "offline" as const };
     const entry = {
       artifactId: snapshot.artifactId,
@@ -57,13 +58,39 @@ describe("[COMP:app-web/office-offline] Encrypted Office offline package", () =>
     expect(next.family === "presentation" && next.slides[0].objects[0].geometry).toMatchObject({ xPt: 120, yPt: 140 });
   });
 
+  it("encrypts and replays every Presentation substrate command", async () => {
+    const secret = crypto.getRandomValues(new Uint8Array(32));
+    let snapshot = presentationFixture();
+    const secondObject = { ...structuredClone(snapshot.slides[0].objects[0]), id: "00000000-0000-4000-8000-000000000094", runs: [] };
+    snapshot.slides[0].objects.push(secondObject);
+    snapshot.slides[0].readingOrder.push(secondObject.id);
+    snapshot.slides.push({ ...structuredClone(snapshot.slides[0]), id: "00000000-0000-4000-8000-000000000095", title: "Disposable" });
+    const common = { artifactId: snapshot.artifactId, baseVersion: 0, actor: { type: "user" as const, id: "00000000-0000-4000-8000-000000000090" }, origin: "offline" as const };
+    const commands = [
+      { ...common, commandId: "00000000-0000-4000-8000-000000000096", kind: "reorderSlideObject" as const, slideId: snapshot.slides[0].id, objectId: snapshot.slides[0].objects[0].id, index: 1 },
+      { ...common, commandId: "00000000-0000-4000-8000-000000000097", kind: "deleteSlide" as const, slideId: snapshot.slides[1].id },
+      { ...common, commandId: "00000000-0000-4000-8000-000000000098", kind: "attachResource" as const, resource: { id: "00000000-0000-4000-8000-000000000099", kind: "image" as const, hash: "d".repeat(64), mime: "image/png", sensitivity: "internal" as const } },
+    ];
+    for (const [index, command] of commands.entries()) {
+      const encrypted = await encryptOfflineJournalEntry({ artifactId: snapshot.artifactId, seq: 20 + index, kind: "command", expectedSeq: 19 + index, command, createdAt: `2026-08-13T00:00:0${index}.000Z` }, secret);
+      const restored = await decryptOfflineJournalEntry(encrypted, secret);
+      if (restored.kind !== "command") throw new Error("command journal fixture required");
+      snapshot = applyOfficeCommand(snapshot, restored.command) as typeof snapshot;
+    }
+    expect(snapshot.slides).toHaveLength(1);
+    expect(snapshot.slides[0].objects.map((object) => object.id).slice(0, 2)).toEqual(["00000000-0000-4000-8000-000000000072", "00000000-0000-4000-8000-000000000070"]);
+    expect(snapshot.slides[0].objects.at(-1)?.id).toBe(secondObject.id);
+    expect(snapshot.slides[0].readingOrder).toEqual(["00000000-0000-4000-8000-000000000070", "00000000-0000-4000-8000-000000000072", "00000000-0000-4000-8000-000000000074", "00000000-0000-4000-8000-000000000075", "00000000-0000-4000-8000-000000000076", "00000000-0000-4000-8000-000000000077", "00000000-0000-4000-8000-000000000081", secondObject.id]);
+    expect(snapshot.resources).toContainEqual(expect.objectContaining({ id: "00000000-0000-4000-8000-000000000099", hash: "d".repeat(64) }));
+  });
+
   it("preserves an admitted image hash across the snapshot ref and encrypted package bytes", async () => {
     const secret = crypto.getRandomValues(new Uint8Array(32));
-    const snapshot = presentationFixture();
+    const snapshot = formattedPresentationSnapshot();
     const resource = snapshot.resources[0];
-    const bytes = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10]);
+    const bytes = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="), (character) => character.charCodeAt(0));
     const hash = await digest(bytes);
-    snapshot.resources = [{ ...resource, hash }];
+    expect(resource.hash).toBe(hash);
     const update = new Uint8Array([7, 8, 9]);
     const renderedFallback = "<svg/>";
     const payload = {

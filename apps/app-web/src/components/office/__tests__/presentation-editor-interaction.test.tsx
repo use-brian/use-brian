@@ -56,6 +56,19 @@ describe("[COMP:app-web/office-presentation-editor] Presentation interaction loo
     expect(onCommand).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "batch", commands: [expect.objectContaining({ kind: "deleteObject" }), expect.objectContaining({ kind: "deleteObject" })] }));
   });
 
+  it("marquee-selects every intersecting object and reports the exact Brian targets", () => {
+    const snapshot = presentationFixture();
+    const { onSelectTargets } = mount(snapshot);
+    const canvas = host.querySelector<HTMLElement>("[data-slide-canvas]")!;
+    Object.defineProperty(canvas, "getBoundingClientRect", { value: () => ({ left: 0, top: 0, width: 960, height: 540, right: 960, bottom: 540, x: 0, y: 0, toJSON: () => ({}) }) });
+    act(() => canvas.dispatchEvent(new PointerEvent("pointerdown", { pointerId: 1, button: 0, clientX: 0, clientY: 0, bubbles: true })));
+    act(() => canvas.dispatchEvent(new PointerEvent("pointermove", { pointerId: 1, clientX: 230, clientY: 125, bubbles: true })));
+    expect(host.querySelector("[data-selection-marquee]")).not.toBeNull();
+    expect(onSelectTargets).toHaveBeenLastCalledWith(snapshot.slides[0].objects.slice(0, 3).map((object) => object.id));
+    act(() => canvas.dispatchEvent(new PointerEvent("pointerup", { pointerId: 1, clientX: 230, clientY: 125, bubbles: true })));
+    expect(host.querySelector("[data-selection-marquee]")).toBeNull();
+  });
+
   it("selects every unlocked object with Mod+A while editor focus is owned", () => {
     const snapshot = presentationFixture();
     snapshot.slides[0].objects[1].locked = true;
@@ -106,6 +119,29 @@ describe("[COMP:app-web/office-presentation-editor] Presentation interaction loo
     expect(onCommand).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "batch", commands: [expect.objectContaining({ kind: "insertSlideObject" }), expect.objectContaining({ kind: "insertSlideObject" })] }));
   });
 
+  it("shift-selects and copies multiple slides through one remapped paste batch", async () => {
+    const snapshot = presentationFixture();
+    snapshot.slides.push(
+      { ...structuredClone(snapshot.slides[0]), id: "00000000-0000-4000-8000-000000000260", title: "Second" },
+      { ...structuredClone(snapshot.slides[0]), id: "00000000-0000-4000-8000-000000000261", title: "Third" },
+    );
+    const { onCommand } = mount(snapshot);
+    const thumbnails = [...host.querySelectorAll<HTMLElement>("[data-slide-thumbnail] button")];
+    act(() => thumbnails[1].dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, shiftKey: true })));
+    await act(async () => { thumbnails[1].dispatchEvent(new KeyboardEvent("keydown", { key: "c", ctrlKey: true, bubbles: true, cancelable: true })); await Promise.resolve(); });
+    await act(async () => { thumbnails[1].dispatchEvent(new KeyboardEvent("keydown", { key: "v", ctrlKey: true, bubbles: true, cancelable: true })); await Promise.resolve(); });
+    const paste = onCommand.mock.lastCall?.[0];
+    expect(paste).toMatchObject({ kind: "batch", commands: [expect.objectContaining({ kind: "addSlide" }), expect.objectContaining({ kind: "addSlide" })] });
+    if (!paste || paste.kind !== "batch" || paste.commands[0].kind !== "addSlide" || paste.commands[1].kind !== "addSlide") throw new Error("multi-slide paste batch required");
+    expect(paste.commands.map((command) => command.kind === "addSlide" && command.slide.id)).not.toContain(snapshot.slides[0].id);
+    expect(paste.commands[0].slide.objects[0].id).not.toBe(snapshot.slides[0].objects[0].id);
+
+    onCommand.mockClear();
+    act(() => thumbnails[1].dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, shiftKey: true })));
+    await act(async () => { thumbnails[1].dispatchEvent(new KeyboardEvent("keydown", { key: "x", ctrlKey: true, bubbles: true, cancelable: true })); await Promise.resolve(); });
+    expect(onCommand).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "batch", commands: [expect.objectContaining({ kind: "deleteSlide" }), expect.objectContaining({ kind: "deleteSlide" })] }));
+  });
+
   it("nudges every selected object in one batch and refuses a partly locked mutation", () => {
     const snapshot = presentationFixture();
     const { onCommand } = mount(snapshot);
@@ -130,14 +166,58 @@ describe("[COMP:app-web/office-presentation-editor] Presentation interaction loo
     secondHost.remove();
   });
 
+  it("drags every selected object by one atomic delta", () => {
+    const snapshot = presentationFixture();
+    const { onCommand } = mount(snapshot);
+    const canvas = host.querySelector<HTMLElement>("[data-slide-canvas]")!;
+    Object.defineProperty(canvas, "getBoundingClientRect", { value: () => ({ left: 0, top: 0, width: 960, height: 540, right: 960, bottom: 540, x: 0, y: 0, toJSON: () => ({}) }) });
+    const frames = [...host.querySelectorAll<HTMLElement>("[data-slide-object]")];
+    act(() => frames[0].click());
+    act(() => frames[1].dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: true })));
+    act(() => frames[0].dispatchEvent(new PointerEvent("pointerdown", { pointerId: 2, button: 0, clientX: 10, clientY: 10, bubbles: true })));
+    act(() => frames[0].dispatchEvent(new PointerEvent("pointermove", { pointerId: 2, clientX: 30, clientY: 40, altKey: true, bubbles: true })));
+    act(() => frames[0].dispatchEvent(new PointerEvent("pointerup", { pointerId: 2, clientX: 30, clientY: 40, bubbles: true })));
+    expect(onCommand).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "batch", commands: [
+      expect.objectContaining({ targetId: snapshot.slides[0].objects[0].id, path: ["geometry"], value: expect.objectContaining({ xPt: 30, yPt: 40 }) }),
+      expect.objectContaining({ targetId: snapshot.slides[0].objects[1].id, path: ["geometry"], value: expect.objectContaining({ xPt: 30, yPt: 100 }) }),
+    ] }));
+  });
+
+  it("shows transient snap guides and Alt bypasses the four-point threshold", () => {
+    const snapshot = presentationFixture();
+    const { onCommand } = mount(snapshot);
+    const canvas = host.querySelector<HTMLElement>("[data-slide-canvas]")!;
+    Object.defineProperty(canvas, "getBoundingClientRect", { value: () => ({ left: 0, top: 0, width: 960, height: 540, right: 960, bottom: 540, x: 0, y: 0, toJSON: () => ({}) }) });
+    const frame = host.querySelector<HTMLElement>("[data-slide-object]")!;
+    act(() => frame.dispatchEvent(new PointerEvent("pointerdown", { pointerId: 3, button: 0, clientX: 10, clientY: 10, bubbles: true })));
+    act(() => frame.dispatchEvent(new PointerEvent("pointermove", { pointerId: 3, clientX: 378, clientY: 10, bubbles: true })));
+    expect(host.querySelector('[data-snap-guide="slide-center"]')).not.toBeNull();
+    act(() => frame.dispatchEvent(new PointerEvent("pointerup", { pointerId: 3, clientX: 378, clientY: 10, bubbles: true })));
+    expect(onCommand).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "setObjectProperty", path: ["geometry"], value: expect.objectContaining({ xPt: 380 }) }));
+    expect(host.querySelector("[data-snap-guide]")).toBeNull();
+
+    onCommand.mockClear();
+    act(() => frame.dispatchEvent(new PointerEvent("pointerdown", { pointerId: 4, button: 0, clientX: 10, clientY: 10, bubbles: true })));
+    act(() => frame.dispatchEvent(new PointerEvent("pointermove", { pointerId: 4, clientX: 378, clientY: 10, altKey: true, bubbles: true })));
+    expect(host.querySelector("[data-snap-guide]")).toBeNull();
+    act(() => frame.dispatchEvent(new PointerEvent("pointerup", { pointerId: 4, clientX: 378, clientY: 10, altKey: true, bubbles: true })));
+    expect(onCommand).toHaveBeenLastCalledWith(expect.objectContaining({ value: expect.objectContaining({ xPt: 748 }) }));
+  });
+
   it("emits a single reorder command after pointer filmstrip drag", () => {
     const snapshot = presentationFixture();
     snapshot.slides.push({ ...structuredClone(snapshot.slides[0]), id: crypto.randomUUID(), title: "Second" });
     const { onCommand } = mount(snapshot);
+    const rail = host.querySelector<HTMLElement>("nav")!;
+    Object.defineProperty(rail, "getBoundingClientRect", { value: () => ({ left: 0, top: 0, width: 160, height: 200, right: 160, bottom: 200, x: 0, y: 0, toJSON: () => ({}) }) });
+    rail.scrollTop = 100;
     const thumbnails = [...host.querySelectorAll<HTMLElement>("[data-slide-thumbnail]")];
     const handle = thumbnails[0].querySelector("button")!;
-    act(() => handle.dispatchEvent(new PointerEvent("pointerdown", { pointerId: 1, button: 0, bubbles: true })));
+    act(() => handle.dispatchEvent(new PointerEvent("pointerdown", { pointerId: 1, pointerType: "touch", button: 0, bubbles: true })));
     act(() => thumbnails[1].dispatchEvent(new PointerEvent("pointerover", { pointerId: 1, bubbles: true })));
+    expect(thumbnails[1].dataset.slideInsertion).toBe("before");
+    act(() => rail.dispatchEvent(new PointerEvent("pointermove", { pointerId: 1, clientY: 195, bubbles: true })));
+    expect(rail.scrollTop).toBe(116);
     act(() => handle.dispatchEvent(new PointerEvent("pointerup", { pointerId: 1, bubbles: true })));
     expect(onCommand).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "reorderSlide", slideId: snapshot.slides[0].id, index: 1 }));
   });
@@ -150,6 +230,44 @@ describe("[COMP:app-web/office-presentation-editor] Presentation interaction loo
     act(() => adjacent.dispatchEvent(new KeyboardEvent("keydown", { key: "c", ctrlKey: true, bubbles: true, cancelable: true })));
     expect(onCommand).not.toHaveBeenCalled();
     adjacent.remove();
+  });
+
+  it("leaves clipboard and delete shortcuts to the active text editor", () => {
+    const { onCommand } = mount();
+    const frame = host.querySelector<HTMLElement>("[data-slide-object]")!;
+    act(() => frame.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })));
+    const editor = host.querySelector<HTMLTextAreaElement>("[data-slide-text-editor]")!;
+    onCommand.mockClear();
+    act(() => editor.dispatchEvent(new KeyboardEvent("keydown", { key: "c", ctrlKey: true, bubbles: true, cancelable: true })));
+    act(() => editor.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true, cancelable: true })));
+    expect(onCommand).not.toHaveBeenCalled();
+  });
+
+  it("exposes every arrange operation and emits canonical z-order and geometry commands", () => {
+    const snapshot = presentationFixture();
+    const first = mount(snapshot);
+    const { onCommand } = first;
+    const frames = [...host.querySelectorAll<HTMLElement>("[data-slide-object]")];
+    act(() => frames[0].click());
+    act(() => frames[1].dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: true })));
+    const arrange = [...host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes(en.office.arrange))!;
+    act(() => arrange.click());
+    const expected = [en.office.bringToFront, en.office.bringForward, en.office.sendBackward, en.office.sendToBack, en.office.alignLeft, en.office.alignCenter, en.office.alignRight, en.office.alignTop, en.office.alignMiddle, en.office.alignBottom, en.office.distributeHorizontal, en.office.distributeVertical, en.office.centerOnSlide];
+    const items = [...document.body.querySelectorAll<HTMLElement>("[role='menuitem']")];
+    expect(items.map((item) => item.textContent)).toEqual(expect.arrayContaining(expected));
+    act(() => items.find((item) => item.textContent === en.office.bringToFront)!.click());
+    expect(onCommand).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "batch", commands: expect.arrayContaining([expect.objectContaining({ kind: "reorderSlideObject" })]) }));
+
+    act(() => first.root.unmount());
+    const second = mount(presentationFixture());
+    const secondFrames = [...host.querySelectorAll<HTMLElement>("[data-slide-object]")];
+    act(() => secondFrames[0].click());
+    act(() => secondFrames[1].dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: true })));
+    const secondArrange = [...host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes(en.office.arrange))!;
+    act(() => secondArrange.click());
+    const alignRight = [...document.body.querySelectorAll<HTMLElement>("[role='menuitem']")].find((item) => item.textContent === en.office.alignRight)!;
+    act(() => alignRight.click());
+    expect(second.onCommand).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "batch", commands: expect.arrayContaining([expect.objectContaining({ kind: "setObjectProperty", path: ["geometry"] })]) }));
   });
 
   it("inserts every canonical shape and connector through adaptive menus", () => {
@@ -270,6 +388,17 @@ describe("[COMP:app-web/office-presentation-editor] Presentation interaction loo
     expect(onCommand).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "setObjectProperty", targetId: snapshot.slides[0].id, path: ["readingOrder"], value: [snapshot.slides[0].objects[0].id, snapshot.slides[0].objects[2].id, snapshot.slides[0].objects[1].id] }));
   });
 
+  it("moves text later in reading order without moving its visual z-order", () => {
+    const snapshot = presentationFixture();
+    const { onCommand } = mount(snapshot);
+    const visualOrder = snapshot.slides[0].objects.map((object) => object.id);
+    act(() => host.querySelector<HTMLElement>("[data-slide-object]")!.click());
+    const later = [...host.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent === en.office.readingOrderLater)!;
+    act(() => later.click());
+    expect(onCommand).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "setObjectProperty", targetId: snapshot.slides[0].id, path: ["readingOrder"], value: [snapshot.slides[0].objects[1].id, snapshot.slides[0].objects[0].id, snapshot.slides[0].objects[2].id] }));
+    expect(snapshot.slides[0].objects.map((object) => object.id)).toEqual(visualOrder);
+  });
+
   it("cannot make an empty-alt image non-decorative and exposes reading-order boundary reasons", () => {
     const snapshot = presentationFixture();
     const image = structuredClone(snapshot.slides[0].objects[3]);
@@ -286,5 +415,16 @@ describe("[COMP:app-web/office-presentation-editor] Presentation interaction loo
     expect(host.querySelector<HTMLInputElement>(`input[aria-label="${en.office.altText}"]`)).toBeNull();
     const readingButtons = [...host.querySelectorAll<HTMLButtonElement>("button")].filter((button) => [en.office.readingOrderEarlier, en.office.readingOrderLater].includes(button.textContent ?? ""));
     expect(readingButtons.map((button) => button.title)).toEqual([en.office.readingOrderFirst, en.office.readingOrderLast]);
+  });
+
+  it("announces why reading-order changes are disabled for a multi-selection", () => {
+    const { onCommand } = mount();
+    const frames = [...host.querySelectorAll<HTMLElement>("[data-slide-object]")];
+    act(() => frames[0].click());
+    act(() => frames[1].dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: true })));
+    const readingButtons = [...host.querySelectorAll<HTMLButtonElement>("button")].filter((button) => [en.office.readingOrderEarlier, en.office.readingOrderLater].includes(button.textContent ?? ""));
+    expect(readingButtons).toHaveLength(2);
+    expect(readingButtons.every((button) => button.disabled && button.title === en.office.readingOrderSingleSelection)).toBe(true);
+    expect(onCommand).not.toHaveBeenCalled();
   });
 });

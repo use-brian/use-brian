@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import * as Y from 'yjs'
 import {
   OfficeArtifactSnapshotSchema,
   appendOfficeCommand,
@@ -16,7 +17,7 @@ import { layoutOfficeArtifact, renderOfficePreviewSvg } from '@use-brian/office-
 import { exportOfficeDocument, importOfficeDocument, reparseOfficeDocument } from '../docx/index.js'
 import { exportOfficePresentation, importOfficePresentation, reparseOfficePresentation } from '../pptx/index.js'
 import { exportOfficeSpreadsheet, importOfficeSpreadsheet, reparseOfficeSpreadsheet } from '../xlsx/index.js'
-import { completeDocumentSnapshot, completePresentationSnapshot, completeSpreadsheetSnapshot, id, resolveFixtureResource } from './fixtures.js'
+import { completeDocumentSnapshot, completePresentationSnapshot, completeSpreadsheetSnapshot, formattedPresentationSnapshot, id, resolveFixtureResource } from './fixtures.js'
 
 const actorId = id(98)
 const editable = officeCapabilityManifest.capabilities.filter((capability) => capability.disposition === 'editable')
@@ -120,7 +121,7 @@ describe('[COMP:office/capabilities] Matrix-driven Office capability conformance
     expect(preflightOfficeCandidate(applied).diagnostics.filter((diagnostic) => diagnostic.severity === 'error')).toEqual([])
 
     const writer = snapshotToYDoc(snapshot)
-    const reader = snapshotToYDoc(snapshot)
+    const reader = new Y.Doc()
     appendOfficeCommand(writer, command)
     applyOfficeUpdate(reader, encodeOfficeState(writer))
     expect(yDocToSnapshot(writer)).toEqual(applied)
@@ -149,6 +150,24 @@ describe('[COMP:office/capabilities] Matrix-driven Office capability conformance
     const importedSpreadsheet = await importOfficeSpreadsheet(xlsx.bytes, { artifactId: spreadsheet.artifactId, workspaceId: spreadsheet.workspaceId, templateVersionId: spreadsheet.templateVersionId, locale: spreadsheet.locale, defaultLanguage: spreadsheet.defaultLanguage, title: spreadsheet.title })
     expect(importedSpreadsheet.snapshot).toEqual(spreadsheet)
     expect((await reparseOfficeSpreadsheet(xlsx.bytes)).snapshot).toEqual(spreadsheet)
+  })
+
+  it('binds the shared formatted Presentation fixture to layout and PPTX conformance', async () => {
+    const presentation = formattedPresentationSnapshot()
+    const writer = snapshotToYDoc(presentation)
+    const reader = new Y.Doc()
+    applyOfficeUpdate(reader, encodeOfficeState(writer))
+    expect(yDocToSnapshot(reader)).toEqual(presentation)
+
+    const layout = layoutOfficeArtifact(presentation)
+    expect(layout.pages).toHaveLength(presentation.slides.length)
+    expect(layout.serialization).toContain('Edited growth')
+    expect(renderOfficePreviewSvg(layout.pages[0])).toContain('Edited metric')
+
+    const pptx = await exportOfficePresentation(presentation, resolveFixtureResource)
+    const reopened = await reparseOfficePresentation(pptx.bytes)
+    expect(reopened.snapshot).toEqual(presentation)
+    expect(reopened.layoutSerialization).toBe(layout.serialization)
   })
 
   it('lays out 100-page and 100-slide fixtures within a bounded test budget', () => {

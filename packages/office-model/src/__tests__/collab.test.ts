@@ -189,4 +189,52 @@ describe('[COMP:office/collab-codec] Office Yjs codec', () => {
     expect(redone.slides[0].objects[0].geometry).toMatchObject({ xPt: 100, yPt: 110 })
     history.destroy()
   })
+
+  it('converges slide deletion, object reordering, and resource attachment authored by two clients', () => {
+    const snapshot = presentationFixture()
+    const clonedObject = { ...structuredClone(snapshot.slides[0].objects[0]), id: id(65), runs: [] }
+    snapshot.slides[0].objects.push(clonedObject)
+    snapshot.slides[0].readingOrder.push(clonedObject.id)
+    snapshot.slides.push({ ...structuredClone(snapshot.slides[0]), id: id(66), title: 'Disposable' })
+    const first = snapshotToYDoc(snapshot)
+    const second = new Y.Doc()
+    applyOfficeUpdate(second, encodeOfficeState(first))
+    const common = { artifactId: snapshot.artifactId, baseVersion: 0, actor: { type: 'user' as const, id: id(40) }, origin: 'manual' as const }
+
+    appendOfficeCommand(first, { ...common, commandId: id(67), kind: 'reorderSlideObject', slideId: id(16), objectId: id(17), index: 1 })
+    appendOfficeCommand(second, { ...common, commandId: id(68), kind: 'deleteSlide', slideId: id(66) })
+    appendOfficeCommand(second, { ...common, commandId: id(69), kind: 'attachResource', resource: { id: id(70), kind: 'image', hash: 'c'.repeat(64), mime: 'image/png', sensitivity: 'internal' } })
+    applyOfficeUpdate(first, encodeOfficeState(second))
+    applyOfficeUpdate(second, encodeOfficeState(first))
+
+    const converged = yDocToSnapshot(first)
+    expect(converged).toEqual(yDocToSnapshot(second))
+    if (converged.family !== 'presentation') throw new Error('presentation fixture required')
+    expect(converged.slides).toHaveLength(1)
+    expect(converged.slides[0].objects.map((object) => object.id)).toEqual([id(65), id(17)])
+    expect(converged.slides[0].readingOrder).toEqual([id(17), id(65)])
+    expect(converged.resources).toContainEqual(expect.objectContaining({ id: id(70), hash: 'c'.repeat(64) }))
+  })
+
+  it('undoes and redoes a slide deletion atomically without touching a remote resource', () => {
+    const snapshot = presentationFixture()
+    snapshot.slides.push({ ...structuredClone(snapshot.slides[0]), id: id(71), title: 'Second' })
+    const local = snapshotToYDoc(snapshot)
+    const remote = new Y.Doc()
+    applyOfficeUpdate(remote, encodeOfficeState(local))
+    const history = createOfficeUndoManager(local)
+    const common = { artifactId: snapshot.artifactId, baseVersion: 0, actor: { type: 'user' as const, id: id(40) }, origin: 'manual' as const }
+    appendOfficeCommand(local, { ...common, commandId: id(72), kind: 'deleteSlide', slideId: id(16) })
+    appendOfficeCommand(remote, { ...common, commandId: id(73), kind: 'attachResource', resource: { id: id(74), kind: 'image', hash: 'e'.repeat(64), mime: 'image/png', sensitivity: 'internal' } })
+    applyOfficeUpdate(local, encodeOfficeState(remote))
+    history.undo()
+    let current = yDocToSnapshot(local)
+    expect(current.family === 'presentation' && current.slides).toHaveLength(2)
+    expect(current.resources).toContainEqual(expect.objectContaining({ id: id(74) }))
+    history.redo()
+    current = yDocToSnapshot(local)
+    expect(current.family === 'presentation' && current.slides).toHaveLength(1)
+    expect(current.resources).toContainEqual(expect.objectContaining({ id: id(74) }))
+    history.destroy()
+  })
 })

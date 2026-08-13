@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import { fitOfficeArtifact } from '@use-brian/office-renderer'
 import { exportOfficePresentation, importOfficePresentation, reparseOfficePresentation } from '../pptx/index.js'
-import { completePresentationSnapshot, id, resolveFixtureResource } from './fixtures.js'
+import { completePresentationSnapshot, formattedPresentationSnapshot, id, resolveFixtureResource } from './fixtures.js'
 
 describe('[COMP:office/pptx-engine] PPTX engine', () => {
   it('exports, safely reparses, and preserves canonical semantics plus layout', async () => {
@@ -22,19 +22,7 @@ describe('[COMP:office/pptx-engine] PPTX engine', () => {
   })
 
   it('preserves the complete manually editable Presentation fixture', async () => {
-    const source = completePresentationSnapshot()
-    const text = source.slides[0].objects.find((object) => object.kind === 'text')
-    const shape = source.slides[0].objects.find((object) => object.kind === 'shape')
-    const connector = source.slides[0].objects.find((object) => object.kind === 'connector')
-    const table = source.slides[0].objects.find((object) => object.kind === 'table')
-    const chart = source.slides[0].objects.find((object) => object.kind === 'chart')
-    if (!text || text.kind !== 'text' || !shape || shape.kind !== 'shape' || !connector || connector.kind !== 'connector' || !table || table.kind !== 'table' || !chart || chart.kind !== 'chart') throw new Error('complete Presentation fixture drift')
-    text.runs[0].style = { ...text.runs[0].style, fontFamily: 'Aptos', fontSizePt: 30, italic: true, underline: true, strike: true, color: '#123456' }
-    text.alignment = 'center'; text.verticalAlignment = 'middle'
-    shape.shape = 'ellipse'; shape.fill = '#ABCDEF'; shape.stroke = '#654321'; shape.strokeWidthPt = 3
-    connector.connector = 'elbow'; connector.stroke = '#C2410C'
-    table.rows[0].cells[0].runs[0].text = 'Edited metric'; table.rows[0].cells[0].fill = '#FDE68A'
-    chart.chartType = 'doughnut'; chart.title = 'Edited growth'; chart.altText = 'Edited growth chart'
+    const source = formattedPresentationSnapshot()
 
     const image = source.slides[0].objects.find((object) => object.kind === 'image')
     if (!image || image.kind !== 'image') throw new Error('image fixture drift')
@@ -43,7 +31,7 @@ describe('[COMP:office/pptx-engine] PPTX engine', () => {
     const admittedHash = createHash('sha256').update(admitted.bytes).digest('hex')
     const imageRef = source.resources.find((resource) => resource.id === image.resourceId)
     if (!imageRef) throw new Error('image resource ref fixture drift')
-    imageRef.hash = admittedHash
+    expect(imageRef.hash).toBe(admittedHash)
 
     const exported = await exportOfficePresentation(source, resolveFixtureResource)
     const reopened = await reparseOfficePresentation(exported.bytes)
