@@ -26,8 +26,19 @@ describe('[COMP:office/tools] Office tools', () => {
     const tools = new Map(createOfficeTools({ port }).map((tool) => [tool.name, tool]))
     const read = await tools.get('getOfficeArtifact')!.execute({ artifactId: id(1) }, context)
     expect(read.data).toMatchObject({ role: 'comment', version: 2 })
-    const revised = await tools.get('reviseOfficeArtifact')!.execute({ artifactId: id(1), instruction: 'Tighten this', targetIds: [], expectedVersion: 2, idempotencyKey: 'revise-12345678' }, context)
+    const revised = await tools.get('reviseOfficeArtifact')!.execute({ artifactId: id(1), instruction: 'Tighten this', targetIds: [id(9)], expectedVersion: 2, idempotencyKey: 'revise-12345678' }, context)
     expect(revised.data).toEqual({ jobId: id(91), mode: 'proposal' })
+  })
+
+  it('forwards semantic target pagination for large artifacts', async () => {
+    const port: OfficeToolPort = {
+      create: vi.fn(async () => ({ artifactId: id(1), jobId: id(90) })),
+      get: vi.fn(async () => ({ artifactId: id(1), family: 'spreadsheet' as const, title: 'Ledger', version: 2, lifecycleState: 'active' as const, role: 'edit' as const, targets: [], targetsTruncated: false })),
+      revise: vi.fn(async () => null),
+    }
+    const tools = new Map(createOfficeTools({ port }).map((tool) => [tool.name, tool]))
+    await tools.get('getOfficeArtifact')!.execute({ artifactId: id(1), targetOffset: 1_000 }, context)
+    expect(port.get).toHaveBeenCalledWith({ userId: id(80), artifactId: id(1), targetOffset: 1_000 })
   })
 })
 
@@ -60,7 +71,7 @@ describe('[COMP:office/tools] Office governance', () => {
       }).map((tool) => [tool.name, tool]),
     )
     const res = await tools.get('reviseOfficeArtifact')!.execute(
-      { artifactId: id(1), instruction: 'Tighten this', targetIds: [], expectedVersion: 2, idempotencyKey: 'revise-12345678' },
+      { artifactId: id(1), instruction: 'Tighten this', targetIds: [id(9)], expectedVersion: 2, idempotencyKey: 'revise-12345678' },
       context,
     )
     expect(res.isError).toBe(true)

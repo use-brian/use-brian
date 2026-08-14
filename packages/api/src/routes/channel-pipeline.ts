@@ -1182,7 +1182,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   if (externalGuest) {
     privateRuntimeContextParts.push(
       '# External guest boundary\n\n' +
-      'You are talking with a Telegram guest explicitly allowed by the bot owner. ' +
+      `You are talking with an external guest through ${channelType}. ` +
       'They are not a workspace member. Keep the conversation within the information they provide in this isolated chat, and do not claim access to workspace memory, files, or private company context.' +
       (externalGuestConnectorTools
         ? ' You may use the connected tools available in this turn.'

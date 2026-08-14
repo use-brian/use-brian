@@ -560,7 +560,7 @@ export default function StudioChannelsPage() {
  * Header (platform mark, name, status pill), clearance + capabilities, the
  * per-platform bot-behavior config, assistant routing, and disconnect.
  */
-function ChannelDetail({
+export function ChannelDetail({
   workspaceId,
   channel,
   routing,
@@ -844,10 +844,16 @@ function ChannelDetail({
           workspaceId={workspaceId}
           channel={channel}
           inbox={emailInbox}
-          onChanged={onEmailChanged}
+          assistants={assistants}
+          onChannelUpdated={onUpdated}
+          onChanged={async () => {
+            await onEmailChanged?.();
+            onRoutingChanged();
+          }}
         />
       )}
 
+      {channel.channelType !== "email" && (
       <div className="flex flex-col gap-2 rounded-lg border border-border px-4 py-3">
         <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
           {t.studioPage.channels.routingTitle}
@@ -930,6 +936,7 @@ function ChannelDetail({
           <p className="text-xs text-destructive">{attachError}</p>
         )}
       </div>
+      )}
 
       {/* Disconnect — destructive, confirmed via the shared confirmDialog. */}
       <div className="flex flex-col gap-2 border-t border-border pt-3">
@@ -1750,6 +1757,10 @@ export function AddChannelForm({
     }),
     [assistants, add.defaultAssistantNone],
   );
+  const requiredAssistantItems = useMemo(
+    () => Object.fromEntries(assistants.map((a) => [a.id, a.name])),
+    [assistants],
+  );
 
   function copyManifest(): void {
     void navigator.clipboard.writeText(manifest).then(() => {
@@ -2283,20 +2294,40 @@ export function AddChannelForm({
 
       {platform !== "whatsapp" && platform !== "telegram" && (
         <label className="flex flex-col gap-1">
-          <span className="text-xs font-medium">{add.defaultAssistantLabel}</span>
+          <span className="text-xs font-medium">
+            {platform === "email"
+              ? add.emailHandlerLabel
+              : add.defaultAssistantLabel}
+          </span>
           <Select
-            value={defaultAssistantId || "__none__"}
+            value={
+              platform === "email"
+                ? defaultAssistantId
+                : defaultAssistantId || "__none__"
+            }
             onValueChange={(v) =>
               setDefaultAssistantId(v && v !== "__none__" ? v : "")
             }
-            items={defaultAssistantItems}
+            items={
+              platform === "email"
+                ? requiredAssistantItems
+                : defaultAssistantItems
+            }
             disabled={submitting || !!success}
           >
             <SelectTrigger size="sm" className="text-sm">
-              <SelectValue />
+              <SelectValue
+                placeholder={
+                  platform === "email"
+                    ? add.emailHandlerPlaceholder
+                    : undefined
+                }
+              />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="__none__">{add.defaultAssistantNone}</SelectItem>
+              {platform !== "email" && (
+                <SelectItem value="__none__">{add.defaultAssistantNone}</SelectItem>
+              )}
               {assistants.map((a) => (
                 <SelectItem key={a.id} value={a.id}>
                   {a.name}
@@ -2305,7 +2336,9 @@ export function AddChannelForm({
             </SelectContent>
           </Select>
           <span className="text-xs text-muted-foreground">
-            {add.defaultAssistantHint}
+            {platform === "email"
+              ? add.emailHandlerHint
+              : add.defaultAssistantHint}
           </span>
         </label>
       )}
@@ -3448,30 +3481,106 @@ function WhatsappCardSection({ workspaceId }: { workspaceId: string }) {
 
 /**
  * Assistant inbox management — the email channel's detail section: the
- * address (copyable) and the sender allowlist. The gate is fail-closed:
- * workspace members' emails always converse; these extra contacts join them;
- * every other sender files into the brain and surfaces as an attention card
- * with an "allowlist this sender" action (Approvals).
+ * address, incoming access mode, exact sender routing, and mailbox authority.
+ * Non-members always use the isolated external-guest lane, even when the
+ * operator opens the inbox to anyone.
  */
-function EmailInboxSection({
+const AGENTMAIL_SEND_ACTION = "agentmailSendMessage";
+const AGENTMAIL_DRAFT_ACTION = "agentmailCreateDraft";
+
+type AssistantConnectorGrant = {
+  connectorId: string;
+  allowedActions: string[];
+};
+
+export function EmailInboxSection({
   workspaceId,
   channel,
   inbox,
+  assistants,
+  onChannelUpdated,
   onChanged,
 }: {
   workspaceId: string;
   channel: Channel;
   inbox: EmailInbox | null;
+  assistants: StudioAssistantSummary[];
+  onChannelUpdated?: (channel: Channel) => void;
   onChanged?: () => void | Promise<void>;
 }) {
   const t = useT();
   const em = t.studioPage.channels.email;
   const address = inbox?.address ?? channel.displayName;
   const allowlist = useMemo(() => inbox?.allowlist ?? [], [inbox]);
+  const senderRoutes = useMemo(() => inbox?.senderRoutes ?? [], [inbox]);
   const [newContact, setNewContact] = useState("");
   const [saving, setSaving] = useState(false);
+  const [accessSaving, setAccessSaving] = useState(false);
+  const [handlerSaving, setHandlerSaving] = useState(false);
+  const [ingestSaving, setIngestSaving] = useState(false);
+  const [grantsLoading, setGrantsLoading] = useState(false);
+  const [grantsSaving, setGrantsSaving] = useState(false);
+  const [selectedHandlerId, setSelectedHandlerId] = useState(
+    inbox?.assistantId ?? "",
+  );
+  const [selectedAccessMode, setSelectedAccessMode] = useState<
+    "allowlist" | "allow_all"
+  >(inbox?.accessMode ?? "allowlist");
+  const [allowedActions, setAllowedActions] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const governanceId = inbox?.connectorInstanceId
+    ? `agentmail:${inbox.connectorInstanceId}`
+    : null;
+  const assistantItems = useMemo(
+    () => Object.fromEntries(assistants.map((assistant) => [assistant.id, assistant.name])),
+    [assistants],
+  );
+  const senderRoutingItems = useMemo(
+    () => ({ __default__: em.defaultHandlerOption, ...assistantItems }),
+    [assistantItems, em.defaultHandlerOption],
+  );
+
+  useEffect(() => {
+    setSelectedHandlerId(inbox?.assistantId ?? "");
+  }, [inbox?.assistantId]);
+
+  useEffect(() => {
+    setSelectedAccessMode(inbox?.accessMode ?? "allowlist");
+  }, [inbox?.accessMode]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!selectedHandlerId || !governanceId) {
+      setAllowedActions(new Set());
+      setGrantsLoading(false);
+      return;
+    }
+    setGrantsLoading(true);
+    authFetch(
+      `${API_URL}/api/assistant-connector-grants/${encodeURIComponent(selectedHandlerId)}`,
+    )
+      .then(async (res) => {
+        if (!res.ok) throw new Error(em.saveError);
+        return (await res.json()) as { grants?: AssistantConnectorGrant[] };
+      })
+      .then((data) => {
+        if (cancelled) return;
+        const exact = data.grants?.find(
+          (grant) => grant.connectorId === governanceId,
+        );
+        setAllowedActions(new Set(exact?.allowedActions ?? []));
+      })
+      .catch(() => {
+        if (!cancelled) setAllowedActions(new Set());
+      })
+      .finally(() => {
+        if (!cancelled) setGrantsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedHandlerId, governanceId, em.saveError]);
 
   function copyAddress(): void {
     void navigator.clipboard.writeText(address).then(() => {
@@ -3490,6 +3599,123 @@ function EmailInboxSection({
       setError((e as Error).message);
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function saveAccessMode(next: "allowlist" | "allow_all"): Promise<void> {
+    const previous = selectedAccessMode;
+    setSelectedAccessMode(next);
+    setAccessSaving(true);
+    setError(null);
+    try {
+      await updateEmailInbox({ workspaceId, channelId: channel.id, accessMode: next });
+      await onChanged?.();
+    } catch {
+      setSelectedAccessMode(previous);
+      setError(em.saveError);
+    } finally {
+      setAccessSaving(false);
+    }
+  }
+
+  async function saveSenderRoute(email: string, assistantId: string | null): Promise<void> {
+    const next = senderRoutes.filter((route) => route.email !== email);
+    if (assistantId) next.push({ email, assistantId });
+    setSaving(true);
+    setError(null);
+    try {
+      await updateEmailInbox({ workspaceId, channelId: channel.id, senderRoutes: next });
+      await onChanged?.();
+    } catch {
+      setError(em.saveError);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function removeContact(email: string): Promise<void> {
+    setSaving(true);
+    setError(null);
+    try {
+      await updateEmailInbox({
+        workspaceId,
+        channelId: channel.id,
+        allowlist: allowlist.filter((entry) => entry !== email),
+        senderRoutes: senderRoutes.filter((route) => route.email !== email),
+      });
+      await onChanged?.();
+    } catch {
+      setError(em.saveError);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function saveHandler(nextAssistantId: string): Promise<void> {
+    if (!nextAssistantId || nextAssistantId === selectedHandlerId) return;
+    const previous = selectedHandlerId;
+    setSelectedHandlerId(nextAssistantId);
+    setHandlerSaving(true);
+    setError(null);
+    try {
+      await updateEmailInbox({
+        workspaceId,
+        channelId: channel.id,
+        assistantId: nextAssistantId,
+      });
+      await onChanged?.();
+    } catch {
+      setSelectedHandlerId(previous);
+      setError(em.saveError);
+    } finally {
+      setHandlerSaving(false);
+    }
+  }
+
+  async function saveIngest(next: boolean): Promise<void> {
+    setIngestSaving(true);
+    setError(null);
+    try {
+      const updated = await updateChannel(workspaceId, channel.id, {
+        enabledCapabilities: next
+          ? [...new Set([...channel.enabledCapabilities, "ingest" as const])]
+          : channel.enabledCapabilities.filter((capability) => capability !== "ingest"),
+      });
+      onChannelUpdated?.(updated);
+    } catch {
+      setError(em.saveError);
+    } finally {
+      setIngestSaving(false);
+    }
+  }
+
+  async function toggleAction(action: string): Promise<void> {
+    if (!selectedHandlerId || !governanceId) return;
+    const previous = allowedActions;
+    const next = new Set(previous);
+    if (next.has(action)) next.delete(action);
+    else next.add(action);
+    setAllowedActions(next);
+    setGrantsSaving(true);
+    setError(null);
+    try {
+      const res = await authFetch(
+        `${API_URL}/api/assistant-connector-grants/${encodeURIComponent(selectedHandlerId)}/${encodeURIComponent(governanceId)}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            readAllowed: true,
+            allowedActions: Array.from(next),
+          }),
+        },
+      );
+      if (!res.ok) throw new Error(em.saveError);
+    } catch {
+      setAllowedActions(previous);
+      setError(em.saveError);
+    } finally {
+      setGrantsSaving(false);
     }
   }
 
@@ -3523,28 +3749,153 @@ function EmailInboxSection({
         </button>
       </div>
 
-      <div className="flex flex-col gap-1.5">
-        <span className="text-xs font-medium">{em.allowlistLabel}</span>
-        <p className="text-xs text-muted-foreground">{em.allowlistHint}</p>
-        {allowlist.length > 0 && (
-          <ul className="flex flex-wrap gap-1.5">
-            {allowlist.map((entry) => (
-              <li
-                key={entry}
-                className="flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs"
-              >
-                <span className="font-mono">{entry}</span>
-                <button
-                  type="button"
-                  aria-label={em.removeContact}
-                  disabled={saving}
-                  onClick={() => void saveAllowlist(allowlist.filter((a) => a !== entry))}
-                  className="text-muted-foreground hover:text-foreground disabled:opacity-50"
-                >
-                  ×
-                </button>
-              </li>
+      <div className="flex flex-col gap-1.5 border-t border-border pt-3">
+        <span className="text-xs font-medium">{em.handledByLabel}</span>
+        <Select
+          value={selectedHandlerId}
+          items={assistantItems}
+          disabled={handlerSaving || assistants.length === 0}
+          onValueChange={(value) => {
+            if (value) void saveHandler(value);
+          }}
+        >
+          <SelectTrigger size="sm" className="w-fit min-w-48 text-sm">
+            <SelectValue placeholder={em.handledByPlaceholder} />
+          </SelectTrigger>
+          <SelectContent>
+            {assistants.map((assistant) => (
+              <SelectItem key={assistant.id} value={assistant.id}>
+                {assistant.name}
+              </SelectItem>
             ))}
+          </SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground">{em.handledByHint}</p>
+      </div>
+
+      <div className="flex flex-col gap-1.5 border-t border-border pt-3">
+        <span className="text-xs font-medium">{em.accessModeLabel}</span>
+        <Select
+          value={selectedAccessMode}
+          items={{
+            allowlist: em.accessModeApprovedOnly,
+            allow_all: em.accessModeAnyone,
+          }}
+          disabled={accessSaving}
+          onValueChange={(value) => {
+            if (value === "allowlist" || value === "allow_all") {
+              void saveAccessMode(value);
+            }
+          }}
+        >
+          <SelectTrigger size="sm" className="w-fit min-w-56 text-sm">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="allowlist">{em.accessModeApprovedOnly}</SelectItem>
+            <SelectItem value="allow_all">{em.accessModeAnyone}</SelectItem>
+          </SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground">
+          {selectedAccessMode === "allow_all"
+            ? em.accessModeAnyoneHint
+            : em.accessModeApprovedHint}
+        </p>
+      </div>
+
+      <label className="flex items-start gap-2 border-t border-border pt-3 text-sm">
+        <input
+          type="checkbox"
+          checked={channel.enabledCapabilities.includes("ingest")}
+          disabled={ingestSaving}
+          onChange={(event) => void saveIngest(event.target.checked)}
+          className="mt-0.5"
+        />
+        <span className="flex flex-col gap-0.5">
+          <span className="text-xs font-medium">{em.brainIngestLabel}</span>
+          <span className="text-xs text-muted-foreground">{em.brainIngestHint}</span>
+        </span>
+      </label>
+
+      <div className="flex flex-col gap-2 border-t border-border pt-3">
+        <div>
+          <div className="text-xs font-medium">{em.outboundActionsLabel}</div>
+          <p className="text-xs text-muted-foreground">{em.outboundActionsHint}</p>
+        </div>
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={allowedActions.has(AGENTMAIL_SEND_ACTION)}
+            disabled={grantsLoading || grantsSaving || !governanceId || !selectedHandlerId}
+            onChange={() => void toggleAction(AGENTMAIL_SEND_ACTION)}
+          />
+          <span>{em.sendEmailAction}</span>
+        </label>
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={allowedActions.has(AGENTMAIL_DRAFT_ACTION)}
+            disabled={grantsLoading || grantsSaving || !governanceId || !selectedHandlerId}
+            onChange={() => void toggleAction(AGENTMAIL_DRAFT_ACTION)}
+          />
+          <span>{em.createDraftAction}</span>
+        </label>
+      </div>
+
+      <div className="flex flex-col gap-1.5 border-t border-border pt-3">
+        <span className="text-xs font-medium">{em.senderRoutingLabel}</span>
+        <p className="text-xs text-muted-foreground">
+          {selectedAccessMode === "allow_all"
+            ? em.senderRoutingAnyoneHint
+            : em.senderRoutingApprovedHint}
+        </p>
+        {allowlist.length > 0 && (
+          <ul className="flex flex-col gap-1.5">
+            {allowlist.map((entry) => {
+              const route = senderRoutes.find((candidate) => candidate.email === entry);
+              return (
+                <li
+                  key={entry}
+                  className="flex flex-wrap items-center gap-2 rounded-md border border-border px-2 py-1.5"
+                >
+                  <span className="min-w-52 flex-1 break-all font-mono text-xs">{entry}</span>
+                  <Select
+                    value={route?.assistantId ?? "__default__"}
+                    items={senderRoutingItems}
+                    disabled={saving}
+                    onValueChange={(value) => {
+                      if (value) {
+                        void saveSenderRoute(
+                          entry,
+                          value === "__default__" ? null : value,
+                        );
+                      }
+                    }}
+                  >
+                    <SelectTrigger size="sm" className="w-fit min-w-48 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__default__">{em.defaultHandlerOption}</SelectItem>
+                      {assistants.map((assistant) => (
+                        <SelectItem key={assistant.id} value={assistant.id}>
+                          {assistant.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <button
+                    type="button"
+                    aria-label={em.removeContact}
+                    disabled={saving}
+                    onClick={() => void removeContact(entry)}
+                    className="text-muted-foreground hover:text-foreground disabled:opacity-50"
+                  >
+                    ×
+                  </button>
+                </li>
+              );
+            })}
           </ul>
         )}
         <div className="flex items-center gap-2">
@@ -3555,7 +3906,7 @@ function EmailInboxSection({
             onKeyDown={(e) => {
               if (e.key === "Enter") void addContact();
             }}
-            placeholder="partner@example.com"
+            placeholder={em.contactPlaceholder}
             disabled={saving}
             className="text-sm rounded-md border border-border bg-background px-2 py-1.5 font-mono disabled:opacity-50 min-w-[220px]"
           />
@@ -3568,8 +3919,14 @@ function EmailInboxSection({
             {saving ? em.saving : em.addContact}
           </button>
         </div>
-        {error && <span className="text-xs text-destructive">{error}</span>}
       </div>
+
+      <div className="rounded-md bg-muted/50 px-3 py-2">
+        <div className="text-xs font-medium">{em.guestSafetyLabel}</div>
+        <p className="mt-0.5 text-xs text-muted-foreground">{em.guestSafetyHint}</p>
+      </div>
+
+      {error && <span className="text-xs text-destructive">{error}</span>}
     </div>
   );
 }

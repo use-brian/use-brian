@@ -196,6 +196,7 @@ export function officeCollaborationRoutes(deps: OfficeCollaborationRouteDeps): R
 
 function commandTargets(command: z.infer<typeof OfficeCommandSchema>): string[] {
   if ('targetId' in command) return [command.targetId]
+  if ('imageId' in command) return [command.imageId]
   if ('slideId' in command) return [command.slideId]
   if (command.kind === 'batch') return [...new Set(command.commands.flatMap((child) => {
     const parsed = OfficeCommandSchema.safeParse(child)

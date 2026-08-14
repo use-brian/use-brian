@@ -41,6 +41,15 @@ const AtomicOfficeCommandSchema = z.discriminatedUnion('kind', [
   CommandBaseSchema.extend({ kind: z.literal('reorderSlideObject'), slideId: OfficeUuidSchema, objectId: OfficeUuidSchema, index: z.number().int().min(0) }).strict(),
   CommandBaseSchema.extend({ kind: z.literal('attachResource'), resource: OfficeResourceRefSchema }).strict(),
   CommandBaseSchema.extend({
+    kind: z.literal('updateSpreadsheetImage'),
+    sheetId: OfficeUuidSchema,
+    imageId: OfficeUuidSchema,
+    from: z.object({ row: z.number().min(0).max(1_048_576), column: z.number().min(0).max(16_384) }).strict(),
+    to: z.object({ row: z.number().min(0).max(1_048_576), column: z.number().min(0).max(16_384) }).strict(),
+    altText: z.string().max(2_000),
+    decorative: z.boolean(),
+  }).strict(),
+  CommandBaseSchema.extend({
     kind: z.literal('setSpreadsheetCell'),
     sheetId: OfficeUuidSchema,
     cellId: OfficeUuidSchema,
@@ -48,6 +57,13 @@ const AtomicOfficeCommandSchema = z.discriminatedUnion('kind', [
     valueType: z.enum(['blank', 'string', 'number', 'boolean', 'date']),
     value: SpreadsheetCellValueSchema,
     formula: z.string().min(1).max(32_000).optional(),
+  }).strict(),
+  CommandBaseSchema.extend({
+    kind: z.literal('setSpreadsheetDimension'),
+    sheetId: OfficeUuidSchema,
+    axis: z.enum(['row', 'column']),
+    index: z.number().int().min(1).max(1_048_576),
+    size: z.number().positive().max(4_096),
   }).strict(),
   CommandBaseSchema.extend({ kind: z.literal('addWorksheet'), index: z.number().int().min(0), worksheet: SpreadsheetWorksheetSchema }).strict(),
   CommandBaseSchema.extend({ kind: z.literal('renameWorksheet'), sheetId: OfficeUuidSchema, name: z.string().min(1).max(31) }).strict(),
@@ -163,6 +179,14 @@ function applySingleMutable(next: OfficeArtifactSnapshot, command: AtomicOfficeC
       const existing = byId ?? byHash!
       if (JSON.stringify(existing) !== JSON.stringify(command.resource)) throw new Error('Office resource identity or hash collision')
     } else next.resources.push(command.resource)
+  } else if (command.kind === 'updateSpreadsheetImage') {
+    if (next.family !== 'spreadsheet') throw new Error('updateSpreadsheetImage requires a spreadsheet')
+    const sheet = next.worksheets.find((candidate) => candidate.id === command.sheetId)
+    if (!sheet) throw new Error(`Worksheet ${command.sheetId} was not found`)
+    const image = sheet.images.find((candidate) => candidate.id === command.imageId)
+    if (!image) throw new Error(`Worksheet image ${command.imageId} was not found`)
+    if (command.from.row >= command.to.row || command.from.column >= command.to.column) throw new Error('Worksheet image extent must have positive width and height')
+    Object.assign(image, { from: command.from, to: command.to, altText: command.decorative ? '' : command.altText, decorative: command.decorative })
   } else if (command.kind === 'setSpreadsheetCell') {
     if (next.family !== 'spreadsheet') throw new Error('setSpreadsheetCell requires a spreadsheet')
     const sheet = next.worksheets.find((candidate) => candidate.id === command.sheetId)
@@ -181,6 +205,23 @@ function applySingleMutable(next: OfficeArtifactSnapshot, command: AtomicOfficeC
     else delete cell.formula
     delete cell.calculatedValue
     delete cell.error
+  } else if (command.kind === 'setSpreadsheetDimension') {
+    if (next.family !== 'spreadsheet') throw new Error('setSpreadsheetDimension requires a spreadsheet')
+    const sheet = next.worksheets.find((candidate) => candidate.id === command.sheetId)
+    if (!sheet) throw new Error(`Worksheet ${command.sheetId} was not found`)
+    if (command.axis === 'column' && command.index > 16_384) throw new Error('Spreadsheet column dimension index exceeds the XLSX limit')
+    if (command.axis === 'column' && command.size > 255) throw new Error('Spreadsheet column width exceeds the XLSX limit')
+    if (command.axis === 'row') {
+      const dimension = sheet.rowDimensions.find((candidate) => candidate.index === command.index)
+      if (dimension) Object.assign(dimension, { heightPt: command.size, hidden: false })
+      else sheet.rowDimensions.push({ index: command.index, heightPt: command.size, hidden: false })
+      sheet.rowDimensions.sort((left, right) => left.index - right.index)
+    } else {
+      const dimension = sheet.columnDimensions.find((candidate) => candidate.index === command.index)
+      if (dimension) Object.assign(dimension, { widthChars: command.size, hidden: false })
+      else sheet.columnDimensions.push({ index: command.index, widthChars: command.size, hidden: false })
+      sheet.columnDimensions.sort((left, right) => left.index - right.index)
+    }
   } else if (command.kind === 'addWorksheet') {
     if (next.family !== 'spreadsheet') throw new Error('addWorksheet requires a spreadsheet')
     next.worksheets.splice(Math.min(command.index, next.worksheets.length), 0, command.worksheet)

@@ -1,8 +1,25 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
-import { handleOfficeHistoryShortcut, observeOfficeHistory, officeHistoryShortcutAction } from "../editor-history";
+import * as Y from "yjs";
+import { handleOfficeHistoryShortcut, observeOfficeHistory, observeOfficeHistoryReadiness, officeHistoryShortcutAction } from "../editor-history";
 
 describe("[COMP:app-web/office-history] Office editor history shortcuts", () => {
+  it("waits for a collaboration base and installs history exactly once", () => {
+    const doc = new Y.Doc();
+    const start = vi.fn();
+    const stop = observeOfficeHistoryReadiness(doc, start);
+
+    expect(start).not.toHaveBeenCalled();
+    doc.transact(() => doc.getMap<string>("office").set("baseSnapshot", "{}"), "provider");
+    expect(start).toHaveBeenCalledOnce();
+    doc.transact(() => doc.getMap<string>("commands").set("command-id", "{}"), "provider");
+    expect(start).toHaveBeenCalledOnce();
+
+    stop();
+    doc.transact(() => doc.getMap<string>("commands").set("later-command-id", "{}"), "provider");
+    expect(start).toHaveBeenCalledOnce();
+  });
+
   it("maps the platform undo and redo shortcuts", () => {
     const event = (key: string, patch: Partial<KeyboardEvent> = {}) => ({ key, altKey: false, ctrlKey: true, metaKey: false, shiftKey: false, ...patch });
     expect(officeHistoryShortcutAction(event("z"))).toBe("undo");

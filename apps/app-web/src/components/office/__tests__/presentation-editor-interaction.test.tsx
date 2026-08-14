@@ -222,14 +222,42 @@ describe("[COMP:app-web/office-presentation-editor] Presentation interaction loo
     Object.defineProperty(rail, "getBoundingClientRect", { value: () => ({ left: 0, top: 0, width: 160, height: 200, right: 160, bottom: 200, x: 0, y: 0, toJSON: () => ({}) }) });
     rail.scrollTop = 100;
     const thumbnails = [...host.querySelectorAll<HTMLElement>("[data-slide-thumbnail]")];
+    Object.defineProperty(thumbnails[0], "getBoundingClientRect", { value: () => ({ left: 0, top: 8, width: 160, height: 80, right: 160, bottom: 88, x: 0, y: 8, toJSON: () => ({}) }) });
+    Object.defineProperty(thumbnails[1], "getBoundingClientRect", { value: () => ({ left: 0, top: 100, width: 160, height: 80, right: 160, bottom: 180, x: 0, y: 100, toJSON: () => ({}) }) });
     const handle = thumbnails[0].querySelector("button")!;
     act(() => handle.dispatchEvent(new PointerEvent("pointerdown", { pointerId: 1, pointerType: "touch", button: 0, bubbles: true })));
-    act(() => thumbnails[1].dispatchEvent(new PointerEvent("pointerover", { pointerId: 1, bubbles: true })));
-    expect(thumbnails[1].dataset.slideInsertion).toBe("before");
     act(() => rail.dispatchEvent(new PointerEvent("pointermove", { pointerId: 1, clientY: 195, bubbles: true })));
+    expect(thumbnails[1].dataset.slideInsertion).toBe("after");
     expect(rail.scrollTop).toBe(116);
     act(() => handle.dispatchEvent(new PointerEvent("pointerup", { pointerId: 1, bubbles: true })));
     expect(onCommand).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "reorderSlide", slideId: snapshot.slides[0].id, index: 1 }));
+    expect(onCommand).toHaveBeenCalledTimes(1);
+
+    const secondHandle = thumbnails[1].querySelector("button")!;
+    act(() => secondHandle.dispatchEvent(new PointerEvent("pointerdown", { pointerId: 2, pointerType: "touch", button: 0, bubbles: true })));
+    act(() => secondHandle.dispatchEvent(new PointerEvent("pointerup", { pointerId: 2, bubbles: true })));
+    expect(onCommand).toHaveBeenCalledTimes(1);
+  });
+
+  it("resizes the slide rail by pointer and keyboard within accessible limits", () => {
+    mount();
+    const editor = host.querySelector<HTMLElement>('[data-office-editor="presentation"]')!;
+    const resizer = host.querySelector<HTMLElement>("[data-slide-rail-resizer]")!;
+    expect(editor.style.getPropertyValue("--presentation-slide-rail-width")).toBe("160px");
+    expect(resizer.getAttribute("aria-valuenow")).toBe("160");
+
+    act(() => resizer.dispatchEvent(new PointerEvent("pointerdown", { pointerId: 7, button: 0, clientX: 160, bubbles: true })));
+    act(() => resizer.dispatchEvent(new PointerEvent("pointermove", { pointerId: 7, clientX: 250, bubbles: true })));
+    expect(editor.style.getPropertyValue("--presentation-slide-rail-width")).toBe("250px");
+    expect(resizer.getAttribute("aria-valuenow")).toBe("250");
+    act(() => resizer.dispatchEvent(new PointerEvent("pointerup", { pointerId: 7, clientX: 250, bubbles: true })));
+
+    act(() => resizer.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true })));
+    expect(resizer.getAttribute("aria-valuenow")).toBe("266");
+    act(() => resizer.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true, cancelable: true })));
+    expect(resizer.getAttribute("aria-valuenow")).toBe("112");
+    act(() => resizer.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true, cancelable: true })));
+    expect(resizer.getAttribute("aria-valuenow")).toBe("360");
   });
 
   it("leaves neighboring text input clipboard and delete shortcuts untouched", () => {
@@ -246,11 +274,68 @@ describe("[COMP:app-web/office-presentation-editor] Presentation interaction loo
     const { onCommand } = mount();
     const frame = host.querySelector<HTMLElement>("[data-slide-object]")!;
     act(() => frame.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })));
-    const editor = host.querySelector<HTMLTextAreaElement>("[data-slide-text-editor]")!;
+    const editor = host.querySelector<HTMLElement>("[data-slide-text-editor]")!;
     onCommand.mockClear();
     act(() => editor.dispatchEvent(new KeyboardEvent("keydown", { key: "c", ctrlKey: true, bubbles: true, cancelable: true })));
     act(() => editor.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true, cancelable: true })));
     expect(onCommand).not.toHaveBeenCalled();
+  });
+
+  it("keeps rich-run formatting and clipping when inline text editing starts", () => {
+    const snapshot = presentationFixture();
+    const object = snapshot.slides[0].objects[0];
+    if (object.kind !== "text") throw new Error("text fixture required");
+    object.runs = [
+      { ...object.runs[0], text: "Use Brian\n", style: { ...object.runs[0].style, bold: true, color: "#EAF8FF" } },
+      { ...object.runs[0], id: "00000000-0000-4000-8000-000000000099", text: "Brand presentation template", style: { ...object.runs[0].style, bold: true, color: "#34D3FF" } },
+    ];
+    const { onCommand } = mount(snapshot);
+    const frame = host.querySelector<HTMLElement>("[data-slide-object]")!;
+    act(() => frame.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })));
+    const editor = host.querySelector<HTMLElement>("[data-slide-text-editor]")!;
+    const spans = [...editor.querySelectorAll<HTMLSpanElement>("span")];
+    expect(editor.tagName).toBe("DIV");
+    expect(editor.getAttribute("contenteditable")).toBe("true");
+    expect(editor.className).toContain("overflow-hidden");
+    expect(host.querySelector("textarea[data-slide-text-editor]")).toBeNull();
+    expect(spans.map((span) => [span.textContent, span.style.color, span.style.fontWeight])).toEqual([
+      ["Use Brian\n", "rgb(234, 248, 255)", "700"],
+      ["Brand presentation template", "rgb(52, 211, 255)", "700"],
+    ]);
+    expect(onCommand).not.toHaveBeenCalled();
+
+    editor.textContent = "Use Brian\nBrand presentation template!";
+    act(() => editor.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: "!" })));
+    expect(onCommand).toHaveBeenLastCalledWith(expect.objectContaining({
+      kind: "updateText",
+      runs: [
+        expect.objectContaining({ id: object.runs[0].id, text: "Use Brian\n", style: expect.objectContaining({ color: "#EAF8FF", bold: true }) }),
+        expect.objectContaining({ id: object.runs[1].id, text: "Brand presentation template!", style: expect.objectContaining({ color: "#34D3FF", bold: true }) }),
+      ],
+    }));
+  });
+
+  it("makes slide, object, formatting, reading-order, and delete scopes visible", () => {
+    mount();
+    const insertGroup = host.querySelector<HTMLElement>('[data-toolbar-group="insert"]')!;
+    const slideGroup = host.querySelector<HTMLElement>('[data-toolbar-group="slides"]')!;
+    expect(insertGroup.textContent).toContain(en.office.insert);
+    expect(slideGroup.textContent).toContain(en.office.slideRail);
+    expect(slideGroup.textContent).toContain(en.office.moveSlideUp);
+    expect(slideGroup.textContent).toContain(en.office.moveSlideDown);
+    expect(slideGroup.textContent).toContain(en.office.deleteSlide);
+
+    const frame = host.querySelector<HTMLElement>("[data-slide-object]")!;
+    act(() => frame.click());
+    expect(host.querySelector<HTMLElement>('[data-toolbar-group="object"]')?.textContent).toContain(en.office.objectActions);
+    const formatting = host.querySelector<HTMLElement>("[data-presentation-formatting-toolbar]")!;
+    for (const label of [en.office.presentationFormatting, en.office.fontFamily, en.office.fontSize, en.office.textColor, en.office.hyperlink, en.office.horizontalAlignment, en.office.verticalAlignment]) expect(formatting.textContent).toContain(label);
+    expect(host.querySelector<HTMLElement>(`[role="toolbar"][aria-label="${en.office.accessibilityControls}"]`)?.textContent).toContain(en.office.accessibilityControls);
+    const properties = host.querySelector<HTMLElement>("[data-properties-toolbar]")!;
+    expect(properties.textContent).toContain(en.office.deleteObject);
+    expect(properties.classList).toContain("flex-wrap");
+    expect(properties.classList).not.toContain("overflow-x-auto");
+    expect(en.office.deleteSlide).not.toBe(en.office.deleteObject);
   });
 
   it("exposes every arrange operation and emits canonical z-order and geometry commands", () => {

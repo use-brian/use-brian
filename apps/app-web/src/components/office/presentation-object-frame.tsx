@@ -151,7 +151,6 @@ export function PresentationObjectFrame({
   const [draftGeometry, setDraftGeometry] = useState<PresentationGeometry | null>(null);
   const [editingText, setEditingText] = useState(false);
   const interaction = useRef<Interaction | null>(null);
-  const textAreaRef = useRef<HTMLTextAreaElement | null>(null);
   const geometry = draftGeometry ?? externalGeometry ?? object.geometry;
 
   useEffect(() => {
@@ -162,12 +161,6 @@ export function PresentationObjectFrame({
   useEffect(() => {
     if (!selected || object.kind !== "text") setEditingText(false);
   }, [object.kind, selected]);
-
-  useEffect(() => {
-    if (!editingText) return;
-    textAreaRef.current?.focus();
-    textAreaRef.current?.select();
-  }, [editingText]);
 
   const style: CSSProperties = {
     left: `${geometry.xPt / slideSize.widthPt * 100}%`,
@@ -310,17 +303,7 @@ export function PresentationObjectFrame({
     >
       <div className="h-full w-full overflow-hidden">
         {editingText && object.kind === "text"
-          ? <textarea
-              ref={textAreaRef}
-              data-slide-text-editor="true"
-              value={objectText}
-              style={{ ...richTextRunStyle(object.runs[0], slideSize), textAlign: object.alignment }}
-              onPointerDown={(event) => event.stopPropagation()}
-              onChange={(event) => onText(object.id, runsWithText(object.runs, event.target.value))}
-              onBlur={() => setEditingText(false)}
-              onKeyDown={(event) => { if (event.key === "Escape") event.currentTarget.blur(); }}
-              className="h-full w-full resize-none bg-transparent outline-none"
-            />
+          ? <PresentationRichTextEditor object={object} slideSize={slideSize} onText={onText} onBlur={() => setEditingText(false)} />
           : <PresentationObjectVisual artifactId={artifactId} object={object} slideSize={slideSize} />}
       </div>
       {selected && primary && editable && !editingText ? <>
@@ -377,6 +360,51 @@ function richTextRunStyle(run: OfficeRichTextRun | undefined, slideSize: SlideSi
 
 function RichTextRuns({ runs, slideSize, renderScale }: { runs: OfficeRichTextRun[]; slideSize: SlideSize; renderScale: PresentationRenderScale }) {
   return <>{runs.map((run) => <span key={run.id} style={richTextRunStyle(run, slideSize, renderScale)}>{run.text}</span>)}</>;
+}
+
+function PresentationRichTextEditor({ object, slideSize, onText, onBlur }: { object: Extract<PresentationObject, { kind: "text" }>; slideSize: SlideSize; onText(id: string, runs: OfficeRichTextRun[]): void; onBlur(): void }) {
+  const editorRef = useRef<HTMLDivElement | null>(null);
+  const initialRuns = useRef(object.runs);
+  const liveRuns = useRef(object.runs);
+  const justifyContent = object.verticalAlignment === "middle" ? "center" : object.verticalAlignment === "bottom" ? "flex-end" : "flex-start";
+
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    editor.focus();
+    const selection = window.getSelection();
+    if (!selection) return;
+    const range = document.createRange();
+    range.selectNodeContents(editor);
+    range.collapse(false);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }, []);
+
+  return <div className="flex h-full w-full flex-col overflow-hidden whitespace-pre-wrap" style={{ justifyContent, textAlign: object.alignment, overflowWrap: "break-word", lineHeight: 1.05 }}>
+    <div
+      ref={editorRef}
+      data-slide-text-editor="true"
+      role="textbox"
+      aria-multiline="true"
+      contentEditable
+      suppressContentEditableWarning
+      spellCheck
+      className="w-full overflow-hidden bg-transparent outline-none"
+      onPointerDown={(event) => event.stopPropagation()}
+      onInput={(event) => {
+        const editor = event.currentTarget;
+        const nextText = typeof editor.innerText === "string" ? editor.innerText.replace(/\r\n?/g, "\n") : editor.textContent ?? "";
+        const nextRuns = updatePresentationRunsText(liveRuns.current, nextText);
+        liveRuns.current = nextRuns;
+        onText(object.id, nextRuns);
+      }}
+      onBlur={onBlur}
+      onKeyDown={(event) => { if (event.key === "Escape") event.currentTarget.blur(); }}
+    >
+      <RichTextRuns runs={initialRuns.current} slideSize={slideSize} renderScale="responsive" />
+    </div>
+  </div>;
 }
 
 function OfficeResourceImage({ artifactId, resourceId, alt, fallback }: { artifactId: string; resourceId: string; alt: string; fallback: string }) {
@@ -477,13 +505,51 @@ export function PresentationGeometryToolbar({
 }) {
   const t = useT().office;
   const fields = [["xPt", t.x], ["yPt", t.y], ["widthPt", t.width], ["heightPt", t.height], ["rotationDeg", t.rotation]] as const;
-  return <div data-properties-toolbar="true" role="toolbar" aria-label={t.properties} className="flex min-h-11 items-center gap-3 overflow-x-auto border-b bg-background px-3 py-1.5">
+  return <div data-properties-toolbar="true" role="toolbar" aria-label={t.properties} className="flex min-h-11 flex-wrap items-center gap-x-3 gap-y-1.5 border-b bg-background px-3 py-1.5">
     <strong className="shrink-0 text-xs font-semibold">{t.properties}</strong>
     {fields.map(([key, label]) => <label key={key} className="flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground">{label}<input type="number" disabled={disabled} value={object.geometry[key]} onChange={(event) => onProperty(["geometry", key], Number(event.target.value))} className="h-7 w-[4.5rem] rounded border bg-background px-2 text-xs text-foreground disabled:opacity-50" /></label>)}
     <button type="button" disabled={disabled} onClick={onDelete} className="ml-auto shrink-0 rounded px-2 py-1 text-xs text-destructive hover:bg-destructive/10 disabled:opacity-40">{t.deleteObject}</button>
   </div>;
 }
 
-function runsWithText(runs: OfficeRichTextRun[], text: string): OfficeRichTextRun[] {
-  return runs.length ? [{ ...runs[0], text }] : [];
+export function updatePresentationRunsText(runs: OfficeRichTextRun[], nextText: string): OfficeRichTextRun[] {
+  const currentText = runs.map((run) => run.text).join("");
+  if (!runs.length || currentText === nextText) return runs;
+  let prefixLength = 0;
+  while (prefixLength < currentText.length && prefixLength < nextText.length && currentText[prefixLength] === nextText[prefixLength]) prefixLength += 1;
+  let suffixLength = 0;
+  while (suffixLength < currentText.length - prefixLength && suffixLength < nextText.length - prefixLength && currentText[currentText.length - suffixLength - 1] === nextText[nextText.length - suffixLength - 1]) suffixLength += 1;
+  const changeEnd = currentText.length - suffixLength;
+  const inserted = nextText.slice(prefixLength, nextText.length - suffixLength);
+
+  if (prefixLength === changeEnd) {
+    let offset = 0;
+    const donor = Math.max(0, runs.findIndex((run) => {
+      offset += run.text.length;
+      return prefixLength <= offset;
+    }));
+    const donorStart = runs.slice(0, donor).reduce((sum, run) => sum + run.text.length, 0);
+    return runs.map((run, index) => index === donor ? { ...run, text: `${run.text.slice(0, prefixLength - donorStart)}${inserted}${run.text.slice(prefixLength - donorStart)}` } : run);
+  }
+
+  const result: OfficeRichTextRun[] = [];
+  let offset = 0;
+  let insertedApplied = false;
+  runs.forEach((run) => {
+    const start = offset;
+    const end = start + run.text.length;
+    offset = end;
+    if (end <= prefixLength || start >= changeEnd) {
+      result.push(run);
+      return;
+    }
+    const prefix = run.text.slice(0, Math.max(0, prefixLength - start));
+    const suffix = run.text.slice(Math.min(run.text.length, Math.max(0, changeEnd - start)));
+    if (!insertedApplied) {
+      const text = `${prefix}${inserted}${changeEnd <= end ? suffix : ""}`;
+      if (text) result.push({ ...run, text });
+      insertedApplied = true;
+    } else if (suffix) result.push({ ...run, text: suffix });
+  });
+  return result.length ? result : [{ ...runs[0], text: "" }];
 }

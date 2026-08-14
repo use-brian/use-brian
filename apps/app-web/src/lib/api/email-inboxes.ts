@@ -19,7 +19,9 @@ export type EmailInbox = {
   displayName: string;
   status: string;
   assistantId: string | null;
+  accessMode: "allowlist" | "allow_all";
   allowlist: string[];
+  senderRoutes: Array<{ email: string; assistantId: string }>;
   connectorInstanceId: string | null;
   lastEventAt: string | null;
   createdAt: string;
@@ -78,7 +80,9 @@ export async function updateEmailInbox(params: {
   workspaceId: string;
   channelId: string;
   assistantId?: string;
+  accessMode?: "allowlist" | "allow_all";
   allowlist?: string[];
+  senderRoutes?: Array<{ email: string; assistantId: string }>;
   displayName?: string;
 }): Promise<void> {
   const { channelId, ...body } = params;

@@ -78,6 +78,12 @@ import type { GcsServiceAccountCredentials } from '../files/gcs-client.js'
 import { validateS3ByoBinding } from '../files/s3-byo-validate.js'
 import type { S3Credentials } from '../files/s3-client.js'
 import { normalizeShopDomain, packShopifyTokens, packShopifyAppCredentials, unpackShopifyAppCredentials, getShopIdentity, verifyShopifyOAuthQueryHmac, exchangeShopifyAuthorizationCode } from '../shopify/client.js'
+import {
+  getWordPressSiteIdentity,
+  normalizeWordPressSiteUrl,
+  packWordPressCredentials,
+  WordPressConnectorError,
+} from '../wordpress/client.js'
 import type { ConnectorAppCredentialStore } from '../db/connector-app-credential-store.js'
 import { ConnectorAppCredentialAuthError } from '../db/connector-app-credential-store.js'
 import { getConnectorAppConfigStatus, resolveConnectorAppConfig } from '../connectors/app-credentials.js'
@@ -209,6 +215,8 @@ type ConnectorRouteOptions = {
    * → "Auth model".
    */
   shopifyVerifyToken?: typeof getShopIdentity
+  /** Verify-before-store seam for the fixed Use Brian WordPress Bridge site probe. */
+  wordpressVerifyConnection?: typeof getWordPressSiteIdentity
   /**
    * Enables the workspace-owned OAuth *app* credential endpoints
    * (`GET/PUT/DELETE /:provider/app-credentials`) and the server-side
@@ -2323,6 +2331,8 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
        * docs/architecture/integrations/shopify.md → "Per-merchant app credentials".
        */
       shopifyApp?: { clientId?: string; clientSecret?: string }
+      /** WordPress Application Password tuple. Stored only after bridge verification. */
+      wordpressCredentials?: { siteUrl?: string; username?: string; applicationPassword?: string }
       /**
        * Microsoft Graph's rotating tuple (docs/architecture/integrations/msgraph.md).
        * Graph replaces the refresh token on every use, so access + refresh +
@@ -2415,6 +2425,35 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
       email = verifiedDomain ?? email ?? storedDomain
       label = label ?? storedDomain
       configPatch = { shopDomain: storedDomain }
+    } else if (provider === 'wordpress') {
+      const candidate = body.wordpressCredentials
+      const siteUrl = normalizeWordPressSiteUrl(candidate?.siteUrl ?? '')
+      const username = candidate?.username?.trim()
+      const applicationPassword = candidate?.applicationPassword?.trim()
+      if (!siteUrl || !username || !applicationPassword) {
+        res.status(400).json({ error: 'invalid_site_url' })
+        return
+      }
+      try {
+        const tuple = { siteUrl, username, applicationPassword }
+        const identity = await (opts.wordpressVerifyConnection ?? getWordPressSiteIdentity)(tuple)
+        credentials = {
+          type: 'oauth',
+          client_id: 'wordpress_application_password',
+          client_secret: packWordPressCredentials({ ...tuple, siteUrl: identity.siteUrl }),
+        }
+        email = identity.siteUrl
+        label = label ?? identity.name
+        configPatch = {
+          siteUrl: identity.siteUrl,
+          bridgeVersion: identity.bridgeVersion,
+        }
+      } catch (err) {
+        const code = err instanceof WordPressConnectorError ? err.code : 'verification_failed'
+        console.warn(`[connectors] wordpress verification failed for ${siteUrl}:`, code)
+        res.status(400).json({ error: code })
+        return
+      }
     } else if (provider === 'msgraph') {
       const t = body.msgraphTokens
       if (

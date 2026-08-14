@@ -369,6 +369,8 @@ import { createGcsFilesClient, type GcsFilesClient } from './files/gcs-client.js
 import { createLocalFilesClient, resolveLocalFilesBaseDir } from './files/local-files-client.js'
 import { localFilesTransferRoutes } from './routes/local-files-transfer.js'
 import { openRecordingsRoutes } from './routes/recordings.js'
+import { recordingLiveRoutes } from './routes/recording-live.js'
+import { createDocGateway } from './doc/doc-gateway.js'
 import { createFilesApi, createSingletonFilesClientResolver, type FilesClientResolver } from './files/files-api.js'
 import { createChunkedFileUploadService, type ChunkedFileUploadService } from './files/chunked-upload.js'
 import { createSearchFileContentTool } from './files/file-artifact-tools.js'
@@ -442,9 +444,11 @@ import { createOfficeImportWorker } from './office/import-worker.js'
 import { createOfficeTemplateCompileWorker } from './office/template-compile-worker.js'
 import { createOfficeGenerationWorker } from './office/generation-worker.js'
 import { createOfficeRevisionWorker } from './office/revision-worker.js'
-import { generateDocumentFromTemplate, reviseDocumentTargets } from './office/document-generation.js'
-import { generatePresentationFromTemplate, materializeOfficeTemplateBundleForGeneration, revisePresentationTargets } from './office/presentation-generation.js'
-import { generateSpreadsheetFromTemplate, reviseSpreadsheetTargets } from './office/spreadsheet-generation.js'
+import { generateDocumentFromTemplate } from './office/document-generation.js'
+import { generatePresentationFromTemplate, materializeOfficeTemplateBundleForGeneration } from './office/presentation-generation.js'
+import { generateSpreadsheetFromTemplate } from './office/spreadsheet-generation.js'
+import { generateAssistantOfficeCommands } from './office/command-revision.js'
+import { runOfficeEdit } from '@use-brian/core'
 import { applyLiveOfficeSuggestion, replaceLiveOfficeSnapshot } from './office/live-sync.js'
 import { officeReleaseRoutes } from './routes/office-releases.js'
 import { officeLifecycleRoutes } from './routes/office-lifecycle.js'
@@ -1009,6 +1013,12 @@ export interface ChannelHostHooks {
 export interface BootContext {
   app: Express
   provider: LLMProvider
+  /** Boot-resolved servable model for background synthesis lanes. */
+  backgroundModel: string
+  /** Collaborative page bridge shared by server-side page writers. */
+  docGateway: ReturnType<typeof createDocGateway>
+  /** Version-CAS fallback when the collaborative gateway is unavailable. */
+  docPageStore: ReturnType<typeof createDbDocPageStore>
   allTools: Map<string, Tool>
   analytics: AnalyticsLogger
   env: OpenApiEnv
@@ -1608,6 +1618,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     backend: mediaBackend,
     model: env.VOICE_TRANSCRIPTION_MODEL,
   }
+  const docGateway = createDocGateway()
+  const docPageStore = createDbDocPageStore()
   const jobStore = createDbJobStore()
   const sessionResumeStore = createDbSessionResumeStore()
   const workerRunsStore = createDbWorkerRunsStore()
@@ -2087,6 +2099,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     resolveAccess: resolveOfficeAccess,
     createJob: officeGenerationStore.create,
     latestJob: officeGenerationStore.latestForArtifact,
+    getSnapshot: officeLiveStore.get,
     wakeGeneration(userId) { wakeOfficeGeneration?.(userId) },
   })
   // Effective allow/ask/block for an Office tool — the same L1 (app-level
@@ -4287,6 +4300,16 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       resolvePageWorkspace: async (userId, pageId) =>
         (await savedViewStore.getById(userId, pageId))?.workspaceId ?? null,
     }))
+    app.use('/api/recordings', requireAuth(env.JWT_SECRET), recordingLiveRoutes({
+      getRole: (userId, workspaceId) => workspaceStore.getRole(userId, workspaceId),
+      savedViewStore,
+      docGateway,
+      docPageStore,
+      provider,
+      backgroundModel,
+      voiceTranscription,
+      usageStore,
+    }))
   }
 
   if (filesBlobClient && filesResolver) {
@@ -5279,14 +5302,55 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const officeRevisionWorker = filesApi ? createOfficeRevisionWorker({
     claim: officeGenerationStore.claim,
     getSnapshot: officeLiveStore.get,
-    async revise({ snapshot, targetIds, instruction, job }) {
+    async revise({ snapshot, targetIds, instruction, currentVersion, versionDrifted, job }) {
       const brandVoice = await resolveBrandVoice(job.initiatedByUserId, job.workspaceId)
-      if (snapshot.family === 'document') return reviseDocumentTargets({ provider, model: backgroundModel, snapshot, targetIds, instruction, brandVoice })
-      if (snapshot.family === 'presentation') return revisePresentationTargets({ provider, model: backgroundModel, snapshot, targetIds, instruction, brandVoice })
-      return reviseSpreadsheetTargets({ provider, model: backgroundModel, snapshot, targetIds, instruction, brandVoice })
+      const role = (job.authorityProjection as { role?: unknown }).role === 'comment' ? 'comment' as const : 'edit' as const
+      const assistantId = job.assistantId ?? APP_LEVEL_ASSISTANT_ID
+      return runOfficeEdit({
+        artifactId: job.artifactId,
+        assistantId,
+        baseVersion: currentVersion,
+        currentVersion,
+        role,
+        instruction,
+        targetIds,
+        changedObjectIdsSinceBase: versionDrifted ? targetIds : [],
+        threadExcerpt: [],
+        templateConstraints: [],
+        evidencePacket: [],
+        snapshot,
+      }, ({ instruction: nextInstruction, targetIds: nextTargetIds, snapshot: nextSnapshot }) => generateAssistantOfficeCommands({
+        provider,
+        model: backgroundModel,
+        snapshot: nextSnapshot,
+        baseVersion: currentVersion,
+        assistantId,
+        targetIds: nextTargetIds,
+        instruction: nextInstruction,
+        brandVoice,
+      }))
     },
     async commit({ job, snapshot, expectedVersion }) {
       return (await commitGeneratedOfficeSnapshot({ job, snapshot, expectedVersion, kind: 'revision' })).version
+    },
+    async propose({ job, baseVersion, commands, affectedObjectIds }) {
+      const head = await officeArtifactStore.getHeadVersion(job.initiatedByUserId, job.artifactId)
+      if (!head || head.version !== baseVersion) throw new Error('Office revision proposal version conflict')
+      const commandBatch = commands.length === 1 ? commands[0]! : {
+        commandId: randomUUID(), artifactId: job.artifactId, baseVersion,
+        actor: { type: 'assistant' as const, id: job.assistantId ?? APP_LEVEL_ASSISTANT_ID }, origin: 'ai' as const,
+        kind: 'batch' as const, commands,
+      }
+      await officeCommentStore.createSuggestion({
+        userId: job.initiatedByUserId,
+        workspaceId: job.workspaceId,
+        artifactId: job.artifactId,
+        baseVersionId: head.id,
+        proposedByType: 'assistant',
+        proposedByAssistantId: job.assistantId ?? undefined,
+        commandBatch,
+        affectedObjectIds,
+      })
     },
     appendEvent: officeGenerationStore.appendEvent,
     finish: officeGenerationStore.finish,
@@ -6646,6 +6710,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const ctx: BootContext = {
     app,
     provider,
+    backgroundModel,
+    docGateway,
+    docPageStore,
     allTools,
     analytics,
     env,

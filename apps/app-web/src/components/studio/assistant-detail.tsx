@@ -16,7 +16,6 @@ import { SensitivityBadge, type Sensitivity } from "@/components/sensitivity-bad
 import { ConnectorIcon } from "@/components/connectors/connector-icon";
 import { type ToolPolicy } from "@/components/connectors/connector-tool-list";
 import { ConnectorToolGovernance } from "@/components/connectors/connector-tool-governance";
-import { RecordingUploadButton } from "@/components/recordings/recording-upload-button";
 import { useT } from "@/lib/i18n/client";
 import type { Dictionary } from "@/lib/i18n";
 import { format } from "@/lib/i18n";
@@ -400,26 +399,6 @@ function BrainTab({ assistantId, workspaceId }: { assistantId: string; workspace
           </button>
         ))}
       </div>
-
-      {workspaceId ? (
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-muted/30 p-3">
-          <div className="min-w-0">
-            <p className="text-sm text-muted-foreground">{t.recordings.uploadHint}</p>
-            {/* The board's entry point. Upload is the only place a user thinks
-                about recordings, so "where did mine go?" is answered here
-                rather than from a nav row the panel deliberately has no slot
-                for. Panels open under the doc shell (`/p?panel=…`), so the tab
-                strip and chat dock persist around it. */}
-            <Link
-              href={`/w/${workspaceId}/p?panel=recordings`}
-              className="mt-1 inline-block text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
-            >
-              {t.recordings.viewAllLink}
-            </Link>
-          </div>
-          <RecordingUploadButton workspaceId={workspaceId} assistantId={assistantId} />
-        </div>
-      ) : null}
 
       {subTab === "memory" ? (
         <MemoryTab assistantId={assistantId} workspaceId={workspaceId} />
@@ -1242,6 +1221,8 @@ type UserConnector = {
   /** Canonical registry id when `id` is an instance governance key. */
   providerId?: string;
   name: string;
+  /** Non-secret identity for the connected account, when known. */
+  connectedEmail?: string;
   connected: boolean;  // Layer 1: user has authenticated/connected
   enabled: boolean;    // Layer 2: enabled for this assistant
   custom?: boolean;
@@ -1626,6 +1607,11 @@ function ConnectorsTab({ assistantId, workspaceId }: { assistantId: string; work
                     </div>
                     {c.custom && c.url && (
                       <div className="text-[11px] text-muted-foreground truncate">{c.url}</div>
+                    )}
+                    {c.connectedEmail && c.connectedEmail !== c.name && (
+                      <div className="text-[11px] text-muted-foreground truncate">
+                        {c.connectedEmail}
+                      </div>
                     )}
                   </div>
                 </button>

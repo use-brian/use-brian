@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { applyOfficeCommand } from "@use-brian/office-model";
 import { classifyOfficeReconnect, decryptOfficePackage, decryptOfflineJournalEntry, encryptOfficePackage, encryptOfflineJournalEntry, officeManifestHash } from "../offline";
-import { presentationFixture } from "../../../components/office/__tests__/editor-fixtures";
+import { presentationFixture, spreadsheetFixture } from "../../../components/office/__tests__/editor-fixtures";
 import { formattedPresentationSnapshot } from "../../../../../../packages/core/src/office/__tests__/fixtures";
 
 const digest = async (value: Uint8Array | string) => {
@@ -66,6 +66,17 @@ describe("[COMP:app-web/office-offline] Encrypted Office offline package", () =>
     if (restored.kind !== "command") throw new Error("command journal fixture required");
     const next = applyOfficeCommand(snapshot, restored.command);
     expect(next.family === "presentation" && next.slides[0].objects[0].geometry).toMatchObject({ xPt: 120, yPt: 140 });
+  });
+
+  it("encrypts and replays a spreadsheet dimension command", async () => {
+    const secret = crypto.getRandomValues(new Uint8Array(32));
+    const snapshot = spreadsheetFixture();
+    const command = { artifactId: snapshot.artifactId, baseVersion: 1, actor: { type: "user" as const, id: "00000000-0000-4000-8000-000000000090" }, origin: "offline" as const, commandId: "00000000-0000-4000-8000-000000000091", kind: "setSpreadsheetDimension" as const, sheetId: snapshot.worksheets[0].id, axis: "column" as const, index: 2, size: 31 };
+    const encrypted = await encryptOfflineJournalEntry({ artifactId: snapshot.artifactId, seq: 10, kind: "command", expectedSeq: 9, command, createdAt: "2026-08-13T00:00:00.000Z" }, secret);
+    const restored = await decryptOfflineJournalEntry(encrypted, secret);
+    if (restored.kind !== "command") throw new Error("command journal fixture required");
+    const next = applyOfficeCommand(snapshot, restored.command);
+    expect(next.family === "spreadsheet" && next.worksheets[0].columnDimensions).toContainEqual({ index: 2, widthChars: 31, hidden: false });
   });
 
   it("encrypts and replays every Presentation substrate command", async () => {

@@ -2,12 +2,14 @@
 
 /** Constrained Tiptap schema for the canonical Office Document subset. */
 import { Mark, Node, mergeAttributes, type AnyExtension } from "@tiptap/core";
-import { NodeViewWrapper, ReactNodeViewRenderer } from "@tiptap/react";
-import { createElement, useEffect, useState } from "react";
+import { NodeViewContent, NodeViewWrapper, ReactNodeViewRenderer, useEditorState, type NodeViewProps } from "@tiptap/react";
+import { createElement, useEffect, useState, type CSSProperties } from "react";
 import StarterKit from "@tiptap/starter-kit";
 import type { OfficeEditorJsonNode } from "@use-brian/office-model";
 import { getOfficeResourceObjectUrl } from "@/lib/office/api";
 import { DocumentCommentDecorations } from "./comment-decorations";
+import { DocumentPaginationDecorations } from "./pagination-decorations";
+import { findDocumentHeaderImage } from "./header-image-projection";
 
 const attr = { default: null };
 const attrs = (...names: string[]) => Object.fromEntries(names.map((name) => [name, attr]));
@@ -33,9 +35,41 @@ const OfficeHeader = Node.create({
   name: "officeHeader", content: "inline*", group: "block", addAttributes: () => attrs("id"),
   parseHTML: () => [{ tag: "header[data-office-header]" }],
   renderHTML: ({ HTMLAttributes }) => ["header", mergeAttributes(HTMLAttributes, { class: "office-document-header", "data-office-header": "true" }), 0],
+  addNodeView: () => ReactNodeViewRenderer(OfficeHeaderView),
 });
 const OfficeBody = Node.create({ name: "officeBody", content: "officeFlow*", group: "block", addAttributes: () => attrs("id"), parseHTML: () => [{ tag: "main[data-office-body]" }], renderHTML: render("main", "office-document-body") });
 const OfficeFooter = Node.create({ name: "officeFooter", content: "inline*", group: "block", addAttributes: () => attrs("id"), parseHTML: () => [{ tag: "footer[data-office-footer]" }], renderHTML: ({ HTMLAttributes }) => ["footer", mergeAttributes(HTMLAttributes, { class: "office-document-footer", "data-office-footer": "true" }), 0] });
+
+function OfficeHeaderView({ node, editor }: NodeViewProps) {
+  const sectionId = typeof node.attrs.id === "string" ? node.attrs.id.split(":header")[0] : "";
+  const headerImage = useEditorState({
+    editor,
+    selector: ({ editor: current }) => findDocumentHeaderImage(current, sectionId),
+  });
+  const [src, setSrc] = useState<string | null>(null);
+  useEffect(() => {
+    let active = true;
+    setSrc(null);
+    const artifactId = document.querySelector<HTMLElement>("[data-office-editor='document']")?.dataset.officeArtifactId;
+    if (!artifactId || !headerImage) return () => { active = false; };
+    void getOfficeResourceObjectUrl(artifactId, headerImage.resourceId).then((url) => { if (active) setSrc(url); }).catch(() => undefined);
+    return () => { active = false; };
+  }, [headerImage?.resourceId]);
+  const style = headerImage ? {
+    "--office-header-image-width": `${headerImage.widthPt}pt`,
+    "--office-header-image-height": `${headerImage.heightPt}pt`,
+    backgroundImage: src ? `url("${src.replaceAll('"', '%22')}")` : undefined,
+  } as CSSProperties : undefined;
+  return createElement(NodeViewWrapper, {
+    as: "header",
+    className: "office-document-header",
+    "data-office-header": "true",
+    "data-office-header-image": headerImage ? "true" : undefined,
+    role: headerImage?.altText ? "img" : undefined,
+    "aria-label": headerImage?.altText || undefined,
+    style,
+  }, createElement(NodeViewContent));
+}
 
 const Paragraph = Node.create({
   name: "paragraph", content: "inline*", group: "officeFlow", defining: true,
@@ -141,6 +175,7 @@ export function officeDocumentEditorExtensions(): AnyExtension[] {
     projectionAtom("officeVideo", "video", ["altText", "transcript", "recipientAccessibleUrl"], ["resourceId", "posterResourceId", "altText", "captionsResourceId", "transcript", "recipientAccessibleUrl"]),
     atom("officePageBreak", "page-break"), atom("officeSectionBreak", "section-break"),
     StarterKit.configure({ document: false, paragraph: false, heading: false, bulletList: false, orderedList: false, listItem: false, history: false, blockquote: false, codeBlock: false, horizontalRule: false }),
+    DocumentPaginationDecorations,
   ];
 }
 

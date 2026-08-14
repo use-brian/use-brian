@@ -85,11 +85,11 @@ function commandFor(capabilityId: EditableId, snapshot: OfficeArtifactSnapshot, 
       cellFormula: { ...base, kind: 'setSpreadsheetCell', sheetId: sheet.id, cellId: id(76), address: 'C2', valueType: 'number', value: null, formula: 'ROUND(A2*B2,2)' },
       cellStyle: { ...base, kind: 'setObjectProperty', targetId: id(74), path: ['style', 'fill'], value: '#ECFDF5' },
       mergedCell: { ...base, kind: 'setObjectProperty', targetId: sheet.id, path: ['merges'], value: ['A1:C1'] },
-      rowColumnDimensions: { ...base, kind: 'setObjectProperty', targetId: sheet.id, path: ['columnDimensions'], value: [{ index: 1, widthChars: 26, hidden: false }] },
+      rowColumnDimensions: { ...base, kind: 'setSpreadsheetDimension', sheetId: sheet.id, axis: 'column', index: 1, size: 26 },
       freezePane: { ...base, kind: 'setObjectProperty', targetId: sheet.id, path: ['freeze'], value: { rows: 1, columns: 1 } },
       dataValidation: { ...base, kind: 'setObjectProperty', targetId: sheet.id, path: ['validations'], value: sheet.validations },
       conditionalFormatting: { ...base, kind: 'setObjectProperty', targetId: sheet.id, path: ['conditionalFormats'], value: sheet.conditionalFormats },
-      worksheetImage: { ...base, kind: 'setObjectProperty', targetId: id(77), path: ['altText'], value: 'Updated company logo' },
+      worksheetImage: { ...base, kind: 'updateSpreadsheetImage', sheetId: sheet.id, imageId: id(77), from: { row: 0, column: 1 }, to: { row: 1.5, column: 3 }, altText: 'Updated company logo', decorative: false },
       spreadsheetPrintSetup: { ...base, kind: 'setObjectProperty', targetId: sheet.id, path: ['print', 'horizontalCentered'], value: false },
       spreadsheetPdf: { ...base, kind: 'setObjectProperty', targetId: sheet.id, path: ['print', 'printArea'], value: 'A1:C20' },
     }
@@ -103,6 +103,17 @@ describe('[COMP:office/capabilities] Matrix-driven Office capability conformance
   it('maps every editable manifest row to a concrete command fixture', () => {
     expect(editable).toHaveLength(36)
     for (const [ordinal, capability] of editable.entries()) {
+      const snapshot = capability.family === 'presentation' ? completePresentationSnapshot() : capability.family === 'spreadsheet' ? completeSpreadsheetSnapshot() : completeDocumentSnapshot()
+      expect(() => commandFor(capability.id, snapshot, ordinal)).not.toThrow()
+    }
+  })
+
+  it('classifies every semantic editable row as Brian command-native and only release as action-only', () => {
+    const commandNative = editable.filter((capability) => capability.assistantAuthoring === 'command')
+    expect(commandNative).toHaveLength(35)
+    expect(commandNative.map((capability) => capability.id)).not.toContain('spreadsheetPdf')
+    expect(editable.filter((capability) => capability.assistantAuthoring === 'action-only').map((capability) => capability.id)).toEqual(['spreadsheetPdf'])
+    for (const [ordinal, capability] of commandNative.entries()) {
       const snapshot = capability.family === 'presentation' ? completePresentationSnapshot() : capability.family === 'spreadsheet' ? completeSpreadsheetSnapshot() : completeDocumentSnapshot()
       expect(() => commandFor(capability.id, snapshot, ordinal)).not.toThrow()
     }

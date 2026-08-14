@@ -25,6 +25,10 @@ const navigation = vi.hoisted(() => ({
   replace: vi.fn(),
 }));
 
+const filterBar = vi.hoisted(() => ({
+  props: null as null | { search: string; onSearch: (value: string) => void },
+}));
+
 vi.mock("next/navigation", () => ({
   usePathname: () => "/w/workspace-1/tasks",
   useRouter: () => ({ replace: navigation.replace }),
@@ -91,7 +95,10 @@ vi.mock("@/components/operator/operator-topbar", () => ({
 }));
 
 vi.mock("@/components/operator/filter-bar", () => ({
-  FilterBar: () => <div data-testid="filter-bar" />,
+  FilterBar: (props: { search: string; onSearch: (value: string) => void }) => {
+    filterBar.props = props;
+    return <div data-testid="filter-bar" />;
+  },
   ViewOptionRow: () => null,
   ViewOptionSection: ({ children }: { children?: React.ReactNode }) => (
     <>{children}</>
@@ -172,6 +179,8 @@ function buttonNamed(name: string): HTMLButtonElement {
 beforeEach(() => {
   navigation.search = "";
   navigation.replace.mockReset();
+  window.history.replaceState(null, "", "/w/workspace-1/tasks");
+  filterBar.props = null;
   taskApi.fetchWorkspaceTasks.mockReset();
   taskApi.fetchWorkspaceTasks.mockResolvedValue(rows);
   taskApi.bulkTasks.mockReset();
@@ -202,6 +211,22 @@ afterEach(() => {
 });
 
 describe("[COMP:app-web/tasks-surface] current-filter select all", () => {
+  it("keeps rapid search input local while mirroring the complete query into the URL", async () => {
+    await renderSurface();
+
+    for (const value of ["U", "Un", "Una", "Unas", "Unassigned"]) {
+      await act(async () => {
+        filterBar.props!.onSearch(value);
+      });
+    }
+
+    expect(filterBar.props?.search).toBe("Unassigned");
+    expect(container!.textContent).toContain("Unassigned task");
+    expect(container!.textContent).not.toContain("Assigned task");
+    expect(window.location.search).toBe("?q=Unassigned");
+    expect(navigation.replace).not.toHaveBeenCalled();
+  });
+
   it("renders an assigned icon immediately before the task title", async () => {
     await renderSurface();
 

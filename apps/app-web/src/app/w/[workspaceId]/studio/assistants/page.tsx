@@ -252,6 +252,11 @@ function CreateAssistantModal({
     return known ?? { title: p.fallbackTitle, tagline: p.fallbackTagline };
   }
 
+  const selectedProfile = profileId ? assistantProfileById(profileId) : null;
+  const selectedProfileTagline = selectedProfile
+    ? profileCard(selectedProfile).tagline
+    : t.studioPage.assistants.profileBlankTagline;
+
   async function submit() {
     const trimmed = name.trim();
     if (!trimmed || creating) return;
@@ -277,9 +282,9 @@ function CreateAssistantModal({
   return (
     <>
       <div className="fixed inset-0 z-40 bg-black/40" onClick={onClose} />
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4">
         <div
-          className="bg-popover border border-border rounded-2xl shadow-2xl w-full max-w-sm p-6 space-y-4"
+          className="bg-popover border border-border rounded-2xl shadow-2xl w-full max-w-lg p-4 sm:p-6 space-y-3"
           onClick={(e) => e.stopPropagation()}
         >
           <h3 className="text-base font-semibold">
@@ -293,17 +298,18 @@ function CreateAssistantModal({
             <div className="text-[12px] font-medium text-muted-foreground mb-1.5">
               {t.studioPage.assistants.profilePickerLabel}
             </div>
-            <div className="grid grid-cols-2 gap-1.5 max-h-48 overflow-y-auto pr-0.5">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
               <button
                 type="button"
                 onClick={() => setProfileId(null)}
-                className={`text-left border rounded-lg px-2.5 py-2 transition-colors ${
+                aria-pressed={profileId === null}
+                title={t.studioPage.assistants.profileBlankTitle}
+                className={`min-w-0 min-h-11 text-left border rounded-lg px-2.5 py-2 transition-colors ${
                   profileId === null ? "border-primary bg-primary/5" : "border-border hover:bg-muted/50"
                 }`}
               >
-                <div className="text-[13px] font-medium">✨ {t.studioPage.assistants.profileBlankTitle}</div>
-                <div className="text-[11px] text-muted-foreground line-clamp-2">
-                  {t.studioPage.assistants.profileBlankTagline}
+                <div className="truncate whitespace-nowrap text-[12px] sm:text-[13px] font-medium leading-tight">
+                  ✨ {t.studioPage.assistants.profileBlankTitle}
                 </div>
               </button>
               {ASSISTANT_PROFILES.map((p) => {
@@ -313,16 +319,26 @@ function CreateAssistantModal({
                     key={p.id}
                     type="button"
                     onClick={() => setProfileId(p.id)}
-                    className={`text-left border rounded-lg px-2.5 py-2 transition-colors ${
+                    aria-pressed={profileId === p.id}
+                    title={card.title}
+                    className={`min-w-0 min-h-11 text-left border rounded-lg px-2.5 py-2 transition-colors ${
                       profileId === p.id ? "border-primary bg-primary/5" : "border-border hover:bg-muted/50"
                     }`}
                   >
-                    <div className="text-[13px] font-medium">{p.emoji} {card.title}</div>
-                    <div className="text-[11px] text-muted-foreground line-clamp-2">{card.tagline}</div>
+                    <div className="truncate whitespace-nowrap text-[12px] sm:text-[13px] font-medium leading-tight">
+                      {p.emoji} {card.title}
+                    </div>
                   </button>
                 );
               })}
             </div>
+            <p
+              data-assistant-profile-description
+              aria-live="polite"
+              className="mt-1.5 min-h-8 text-[11px] leading-4 text-muted-foreground"
+            >
+              {selectedProfileTagline}
+            </p>
           </div>
           <input
             type="text"

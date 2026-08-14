@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { APP_LEVEL_ASSISTANT_ID } from "@use-brian/shared";
 import { FileCheck2, FileSpreadsheet, FileText, History, ListChecks, MessageSquare, PanelRightClose, PanelRightOpen, Presentation, Route, Share2, Sparkles } from "lucide-react";
 import type { OfficeCommand } from "@use-brian/office-model";
 import { PresenceAvatars } from "@/components/doc/presence-avatars";
@@ -16,13 +17,13 @@ import type { DocumentCommentAnchor, DocumentSuggestionRange } from "./document/
 import { OfficeReview } from "./office-review";
 import { OfficeStartRecovery } from "./office-start-recovery";
 import { useT } from "@/lib/i18n/client";
-import { compileOfficeTemplateDraft, detachMissingOfficeComments, getOfficeArtifact, getOfficeSnapshot, initializeOfficeTemplateDraft, isOfficeStartFailed, listOfficeComments, listOfficeSuggestions, OfficeApiError, submitOfficeCommand, syncOfficeOfflineCommands, transitionOfficeLifecycle, waitForOfficeJob, type OfficeArtifact, type OfficeCommentThread, type OfficeLiveSnapshot, type OfficeSuggestion } from "@/lib/office/api";
+import { compileOfficeTemplateDraft, createOfficeComment, detachMissingOfficeComments, getOfficeArtifact, getOfficeSnapshot, initializeOfficeTemplateDraft, isOfficeStartFailed, listOfficeComments, listOfficeSuggestions, OfficeApiError, submitOfficeCommand, syncOfficeOfflineCommands, transitionOfficeLifecycle, waitForOfficeJob, type OfficeArtifact, type OfficeCommentThread, type OfficeLiveSnapshot, type OfficeSuggestion } from "@/lib/office/api";
 import { useCollabProvider } from "@/lib/collab/use-collab-provider";
 import { usePresence, usePublishPresenceActivity, usePublishPresenceIdentity } from "@/lib/collab/use-presence";
 import { getUserInfo } from "@/lib/user";
 import { appendOfficeCommand, applyOfficeUpdate, createOfficeUndoManager, officeCommandIds, yDocToSnapshot } from "@use-brian/office-model";
 import { appendOfflineCommand, classifyOfficeReconnect, listOfflineJournal, loadOfflinePackage, removeOfflineJournalEntry, removeOfflinePackage, type OfficeOfflineStatus, type OfflineJournalEntry } from "@/lib/office/offline";
-import { handleOfficeHistoryShortcut, observeOfficeHistory } from "@/lib/office/editor-history";
+import { handleOfficeHistoryShortcut, observeOfficeHistory, observeOfficeHistoryReadiness } from "@/lib/office/editor-history";
 import { OfficeTopbar } from "./office-topbar";
 import { cn } from "@/lib/utils";
 import { TemplateRoutingInspector, type TemplateRoutingInspectorState } from "./template-routing-inspector";
@@ -189,23 +190,29 @@ export function OfficeEditorShell({ workspaceId, artifactId }: { workspaceId: st
   useEffect(() => {
     const doc = collab.doc;
     if (!doc || artifact?.lifecycleState !== "active" || artifact.role !== "edit" || suggestMode) return;
-    const history = createOfficeUndoManager(doc);
-    historyRef.current = history;
-    const stopObserving = observeOfficeHistory(history, setHistoryState);
+    let history: ReturnType<typeof createOfficeUndoManager> | null = null;
+    let stopObserving: (() => void) | null = null;
     const onKeyDown = (event: KeyboardEvent) => {
+      if (!history) return;
       const before = new Set(officeCommandIds(doc));
       const action = handleOfficeHistoryShortcut(event, history, editorRootRef.current);
       if (!action) return;
       const after = new Set(officeCommandIds(doc));
       reconcileHistoryRef.current(action, before, after);
     };
-    window.addEventListener("keydown", onKeyDown);
+    const stopWaiting = observeOfficeHistoryReadiness(doc, () => {
+      history = createOfficeUndoManager(doc);
+      historyRef.current = history;
+      stopObserving = observeOfficeHistory(history, setHistoryState);
+      window.addEventListener("keydown", onKeyDown);
+    });
     return () => {
+      stopWaiting();
       window.removeEventListener("keydown", onKeyDown);
-      stopObserving();
       if (historyRef.current === history) historyRef.current = null;
       setHistoryState({ canUndo: false, canRedo: false });
-      history.destroy();
+      stopObserving?.();
+      history?.destroy();
     };
   }, [artifact?.lifecycleState, artifact?.role, artifactId, collab.doc, suggestMode]);
 
@@ -269,6 +276,29 @@ export function OfficeEditorShell({ workspaceId, artifactId }: { workspaceId: st
     setArtifact(nextArtifact);
     setLive(nextLive);
   }
+  async function requestBrianRevision(instruction: string, requestedTargetIds = targets, anchorOverride?: OfficeCommentThread["anchor"]) {
+    if (!artifact || !live || artifact.lifecycleState !== "active" || artifact.role === "view" || offlineCopyAt || collab.status === "disconnected" || requestedTargetIds.length === 0) return null;
+    const targetSet = new Set(requestedTargetIds);
+    const anchor: OfficeCommentThread["anchor"] = anchorOverride ?? (artifact.family === "document" && commentAnchor
+      ? commentAnchor
+      : artifact.family === "presentation"
+        ? { kind: live.snapshot.family === "presentation" && requestedTargetIds.every((id) => live.snapshot.family === "presentation" && live.snapshot.slides.some((slide) => slide.id === id)) ? "slide" : "object", targetIds: requestedTargetIds }
+        : live.snapshot.family === "spreadsheet" && live.snapshot.worksheets.some((sheet) => sheet.images.some((image) => targetSet.has(image.id)))
+          ? { kind: "object", targetIds: requestedTargetIds }
+          : { kind: artifact.family === "spreadsheet" ? "table_cell" : "block", targetIds: requestedTargetIds });
+    const created = await createOfficeComment({ artifactId, anchor, body: `@Brian ${instruction.trim()}`, invokeBrian: { assistantId: APP_LEVEL_ASSISTANT_ID, expectedVersion: artifact.version, idempotencyKey: crypto.randomUUID() } });
+    return created.revision ?? null;
+  }
+  async function editSpreadsheetImageWithBrian(imageId: string, instruction: string) {
+    if (!artifact || !live) return;
+    const revision = await requestBrianRevision(instruction, [imageId], { kind: "object", targetIds: [imageId] });
+    setPanel("activity");
+    setPanelOpen(true);
+    if (!revision || revision === "version_conflict") throw new Error("Worksheet image revision could not start");
+    const job = await waitForOfficeJob(revision.jobId);
+    if (job.status !== "completed") throw new Error("Worksheet image revision did not complete");
+    await refreshArtifact();
+  }
   async function publishTemplate() {
     if (!templateId) return;
     setTemplateCompileState("queued");
@@ -281,9 +311,15 @@ export function OfficeEditorShell({ workspaceId, artifactId }: { workspaceId: st
     }
   }
   const editorRole = artifact.lifecycleState === "active" ? artifact.role : "view" as const;
-  const editor = live?.snapshot.family === "document" ? <DocumentEditor snapshot={live.snapshot} baseVersion={live.baseVersion} role={editorRole} suggestMode={suggestMode} doc={collab.doc} provider={collab.provider} currentUser={currentUser} synced={collab.synced || Boolean(offlineCopyAt)} onCommand={(command) => void apply(command)} onSelectTargets={setTargets} onSelectCommentAnchor={setCommentAnchor} onSelectSuggestionRange={setSuggestionRange} commentThreads={commentThreads} suggestions={suggestions} /> : live?.snapshot.family === "presentation" ? <PresentationEditor snapshot={live.snapshot} baseVersion={live.baseVersion} role={editorRole} suggestMode={suggestMode} onCommand={(command) => void apply(command)} onSelectTargets={setTargets} /> : live?.snapshot.family === "spreadsheet" ? <SpreadsheetEditor snapshot={live.snapshot} baseVersion={live.baseVersion} role={editorRole} suggestMode={suggestMode} onCommand={(command) => void apply(command)} onSelectTargets={setTargets} /> : <p className="m-auto text-sm text-muted-foreground">{t.running}</p>;
+  const editor = live?.snapshot.family === "document" ? <DocumentEditor snapshot={live.snapshot} baseVersion={live.baseVersion} role={editorRole} suggestMode={suggestMode} doc={collab.doc} provider={collab.provider} currentUser={currentUser} synced={collab.synced || Boolean(offlineCopyAt)} onCommand={(command) => void apply(command)} onSelectTargets={setTargets} onSelectCommentAnchor={setCommentAnchor} onSelectSuggestionRange={setSuggestionRange} commentThreads={commentThreads} suggestions={suggestions} /> : live?.snapshot.family === "presentation" ? <PresentationEditor snapshot={live.snapshot} baseVersion={live.baseVersion} role={editorRole} suggestMode={suggestMode} onCommand={(command) => void apply(command)} onSelectTargets={setTargets} /> : live?.snapshot.family === "spreadsheet" ? <SpreadsheetEditor snapshot={live.snapshot} baseVersion={live.baseVersion} role={editorRole} suggestMode={suggestMode} onCommand={(command) => void apply(command)} onSelectTargets={setTargets} onEditImageWithBrian={artifact.role !== "view" && artifact.lifecycleState === "active" && !offlineCopyAt && collab.status !== "disconnected" ? editSpreadsheetImageWithBrian : undefined} /> : <p className="m-auto text-sm text-muted-foreground">{t.running}</p>;
   const showTemplateRouting = artifact.mode === "template" && live?.snapshot.family === "presentation" && Boolean(templateId);
   const templateRoutingBlocked = showTemplateRouting && (!templateRoutingState.ready || templateRoutingState.dirty || templateRoutingState.saving);
+  const brianRevisionDisabledReason = targets.length === 0 ? t.brianSelectionRequired
+    : artifact.role === "view" ? t.brianViewUnavailable
+    : artifact.lifecycleState !== "active" ? t.brianInactiveUnavailable
+    : offlineCopyAt || collab.status === "disconnected" ? t.brianOfflineUnavailable
+    : undefined;
+  const canRequestBrianRevision = !brianRevisionDisabledReason && Boolean(live);
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <OfficeTopbar workspaceId={workspaceId} breadcrumbs={[{ label: artifact.title }]} right={<div className="flex items-center gap-2">{artifact.family === "document" && artifact.role === "edit" && artifact.lifecycleState === "active" ? <button type="button" aria-pressed={suggestMode} onClick={() => { const next = !suggestMode; setSuggestMode(next); if (next) { setPanel("suggestions"); setPanelOpen(true); } }} className="rounded border px-2 py-1 text-xs aria-pressed:bg-amber-50 aria-pressed:text-amber-950">{suggestMode ? t.editMode : t.suggestMode}</button> : null}<OfficeHistoryControls canUndo={historyState.canUndo} canRedo={historyState.canRedo} onUndo={() => runHistory("undo")} onRedo={() => runHistory("redo")} /><Icon className="size-4 shrink-0 text-muted-foreground" aria-hidden /><PresenceAvatars users={presence} /></div>} />
@@ -307,7 +343,7 @@ export function OfficeEditorShell({ workspaceId, artifactId }: { workspaceId: st
               <PanelButton active={panel === "review"} label={t.fileActions} icon={<FileCheck2 className="size-3" />} onClick={() => setPanel("review")} />
             </div>
             {showTemplateRouting && live?.snapshot.family === "presentation" && templateId ? <div className={panel === "routing" ? "block" : "hidden"}><TemplateRoutingInspector templateId={templateId} snapshot={live.snapshot} selectedTargetIds={targets} onStateChange={setTemplateRoutingState} /></div> : null}
-            {panel === "activity" ? <OfficeJobActivity jobId={artifact.job?.id} onOpenComments={() => setPanel("comments")} /> : null}
+            {panel === "activity" ? <OfficeJobActivity jobId={artifact.job?.id} snapshot={live?.snapshot} targetIds={targets} canRequestRevision={canRequestBrianRevision} requestDisabledReason={brianRevisionDisabledReason} onRequestRevision={requestBrianRevision} onRevisionCompleted={refreshArtifact} /> : null}
             {panel === "comments" ? <div className="p-3"><OfficeComments artifactId={artifactId} workspaceId={workspaceId} version={artifact.version} targetIds={targets} selectionAnchor={artifact.family === "document" ? commentAnchor : null} anchorKind={artifact.family === "document" ? "block" : artifact.family === "spreadsheet" ? "table_cell" : "object"} canComment={artifact.role !== "view"} offline={collab.status === "disconnected" || Boolean(offlineCopyAt)} initialThreads={cachedComments ?? undefined} onRevisionCompleted={refreshArtifact} onThreadsChange={setCommentThreads} /></div> : null}
             {panel === "suggestions" ? <div className="p-3"><OfficeSuggestions artifactId={artifactId} canDecide={artifact.role === "edit" && artifact.lifecycleState === "active" && !offlineCopyAt} canSuggest={artifact.family === "document" && artifact.role !== "view" && artifact.lifecycleState === "active" && suggestMode} actorId={currentUser?.id} baseVersion={live?.baseVersion} expectedSeq={live?.seq} proposal={suggestionRange} offline={collab.status === "disconnected" || Boolean(offlineCopyAt)} onApplied={refreshArtifact} onSuggestionsChange={setSuggestions} /></div> : null}
             {panel === "history" ? <div className="p-3"><OfficeHistory artifactId={artifactId} artifactTitle={artifact.title} currentVersion={artifact.version} canEdit={artifact.role === "edit" && artifact.lifecycleState === "active" && !offlineCopyAt} onRestored={refreshArtifact} onCopied={(copiedId) => router.push(`/w/${workspaceId}/office/${copiedId}`)} /></div> : null}

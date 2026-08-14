@@ -1,3 +1,6 @@
+import { hasOfficeBaseSnapshot } from "@use-brian/office-model";
+import type * as Y from "yjs";
+
 /** Keyboard routing for client-local Office command history. [COMP:app-web/office-history] */
 export type OfficeHistoryAction = "undo" | "redo";
 export type OfficeHistoryController = { redo(): unknown; undo(): unknown };
@@ -8,6 +11,22 @@ type ObservableOfficeHistoryController = OfficeHistoryController & {
   off(event: "stack-item-added" | "stack-item-popped" | "stack-cleared", listener: () => void): unknown;
 };
 export type OfficeHistoryState = { canUndo: boolean; canRedo: boolean };
+
+/**
+ * Wait for provider or cached state to materialize the Office base before
+ * installing history. An allocated Y.Doc is observable before it is usable.
+ */
+export function observeOfficeHistoryReadiness(doc: Y.Doc, listener: () => void): () => void {
+  let started = false;
+  const startWhenReady = () => {
+    if (started || !hasOfficeBaseSnapshot(doc)) return;
+    started = true;
+    listener();
+  };
+  doc.on("update", startWhenReady);
+  startWhenReady();
+  return () => doc.off("update", startWhenReady);
+}
 
 export function officeHistoryShortcutAction(event: Pick<KeyboardEvent, "altKey" | "ctrlKey" | "key" | "metaKey" | "shiftKey">): OfficeHistoryAction | null {
   if (event.altKey || !(event.metaKey || event.ctrlKey)) return null;

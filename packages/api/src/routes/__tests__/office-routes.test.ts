@@ -159,6 +159,14 @@ describe('[COMP:api/office-routes] Office API routes', () => {
     expect(preflightOfficeCandidate(presentation).ok).toBe(true)
     expect(presentation.family).toBe('presentation')
     if (presentation.family === 'presentation') expect(presentation.slides.map((slide) => slide.title)).toEqual(['Title', 'Content'])
+
+    const spreadsheet = guidedTemplateSnapshot({ artifactId: ARTIFACT, workspaceId: WORKSPACE, family: 'spreadsheet', title: 'Operating tracker', guidance: 'Use for recurring company operations.' })
+    expect(() => OfficeArtifactSnapshotSchema.parse(spreadsheet)).not.toThrow()
+    expect(preflightOfficeCandidate(spreadsheet).ok).toBe(true)
+    expect(spreadsheet.family).toBe('spreadsheet')
+    if (spreadsheet.family === 'spreadsheet') {
+      expect(spreadsheet.worksheets[0].cells).toContainEqual(expect.objectContaining({ address: 'B6', value: '{{CONTENT}}', locked: false }))
+    }
   })
 
   it('accepts an explicit no-website choice during guided template setup', async () => {

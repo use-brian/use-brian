@@ -17,6 +17,7 @@ export type OfficeCapability = {
   family: OfficeFamily | 'shared'
   disposition: OfficeCapabilityDisposition
   browserAuthoring?: 'manual' | 'projection-only' | 'action-only'
+  assistantAuthoring?: 'command' | 'action-only'
   implementation?: OfficeCapabilityImplementation
   reason?: string
 }
@@ -26,6 +27,7 @@ const implemented = (id: string, family: OfficeFamily | 'shared', browserAuthori
   family,
   disposition: 'editable',
   browserAuthoring,
+  assistantAuthoring: browserAuthoring === 'action-only' ? 'action-only' : 'command',
   implementation: {
     schema: `model:${id}`,
     command: `command:${id}`,
@@ -60,9 +62,9 @@ export const officeCapabilityManifest = {
     implemented('connector', 'presentation'), implemented('zOrder', 'presentation'), implemented('speakerNotes', 'presentation'),
     implemented('slideReorder', 'presentation'),
     implemented('worksheet', 'spreadsheet', 'manual'), implemented('cellValue', 'spreadsheet', 'manual'), implemented('cellFormula', 'spreadsheet', 'manual'),
-    implemented('cellStyle', 'spreadsheet', 'projection-only'), implemented('mergedCell', 'spreadsheet', 'projection-only'), implemented('rowColumnDimensions', 'spreadsheet', 'projection-only'),
+    implemented('cellStyle', 'spreadsheet', 'projection-only'), implemented('mergedCell', 'spreadsheet', 'projection-only'), implemented('rowColumnDimensions', 'spreadsheet', 'manual'),
     implemented('freezePane', 'spreadsheet', 'projection-only'), implemented('dataValidation', 'spreadsheet', 'projection-only'), implemented('conditionalFormatting', 'spreadsheet', 'projection-only'),
-    implemented('worksheetImage', 'spreadsheet', 'projection-only'), implemented('spreadsheetPrintSetup', 'spreadsheet', 'projection-only'), implemented('spreadsheetPdf', 'spreadsheet', 'action-only'),
+    implemented('worksheetImage', 'spreadsheet', 'manual'), implemented('spreadsheetPrintSetup', 'spreadsheet', 'projection-only'), implemented('spreadsheetPdf', 'spreadsheet', 'action-only'),
     rejected('macro', 'shared', 'Macros and executable package content are not supported'),
     rejected('externalRelationship', 'shared', 'External data/media relationships are not fetched or preserved'),
     rejected('animation', 'presentation', 'Animations, transitions, and timing trees are not supported'),
@@ -117,6 +119,7 @@ export function validateOfficeCapabilityManifest(): string[] {
     if (capability.disposition === 'editable') {
       const implementation = capability.implementation
       if (!implementation || Object.values(implementation).some((value) => !value)) errors.push(`Editable capability ${capability.id} is missing an implementation path`)
+      if (!capability.assistantAuthoring) errors.push(`Editable capability ${capability.id} is missing Brian-authoring status`)
       if (capability.family === 'spreadsheet' && !capability.browserAuthoring) errors.push(`Spreadsheet capability ${capability.id} is missing browser-authoring status`)
       if ((capability.family === 'document' || capability.family === 'shared') && !capability.browserAuthoring) errors.push(`Document-relevant capability ${capability.id} is missing browser-authoring status`)
     } else if (!capability.reason) {

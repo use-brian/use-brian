@@ -50,6 +50,14 @@ export function setSpreadsheetCellCommand(params: { artifactId: string; baseVers
   return { ...base(params.artifactId, params.baseVersion), kind: "setSpreadsheetCell", sheetId: params.sheetId, cellId: params.cellId, address: params.address, valueType: params.valueType, value: params.value, formula: params.formula };
 }
 
+export function setSpreadsheetDimensionCommand(params: { artifactId: string; baseVersion: number; sheetId: string; axis: "row" | "column"; index: number; size: number }): OfficeCommand {
+  return { ...base(params.artifactId, params.baseVersion), kind: "setSpreadsheetDimension", sheetId: params.sheetId, axis: params.axis, index: params.index, size: params.size };
+}
+
+export function updateSpreadsheetImageCommand(params: { artifactId: string; baseVersion: number; sheetId: string; imageId: string; from: { row: number; column: number }; to: { row: number; column: number }; altText: string; decorative: boolean }): OfficeCommand {
+  return { ...base(params.artifactId, params.baseVersion), kind: "updateSpreadsheetImage", sheetId: params.sheetId, imageId: params.imageId, from: params.from, to: params.to, altText: params.decorative ? "" : params.altText, decorative: params.decorative };
+}
+
 export function addWorksheetCommand(artifactId: string, baseVersion: number, index: number, worksheet: SpreadsheetWorksheet): OfficeCommand { return { ...base(artifactId, baseVersion), kind: "addWorksheet", index, worksheet }; }
 export function renameWorksheetCommand(artifactId: string, baseVersion: number, sheetId: string, name: string): OfficeCommand { return { ...base(artifactId, baseVersion), kind: "renameWorksheet", sheetId, name }; }
 export function reorderWorksheetCommand(artifactId: string, baseVersion: number, sheetId: string, index: number): OfficeCommand { return { ...base(artifactId, baseVersion), kind: "reorderWorksheet", sheetId, index }; }

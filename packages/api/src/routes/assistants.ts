@@ -833,6 +833,8 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
         id: string
         providerId?: string
         name: string
+        /** Non-secret identity for the connected account, when known. */
+        connectedEmail?: string
         url?: string
         custom: boolean
         connected: boolean
@@ -874,6 +876,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
               id: governanceId,
               providerId: inst.provider,
               name: inst.connectedEmail ?? inst.label,
+              connectedEmail: inst.connectedEmail ?? undefined,
               custom: false,
               connected: inst.connected,
               enabled: settingsMap.get(governanceId) ?? settingsMap.get(inst.provider) ?? true,
@@ -896,6 +899,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
             id: governanceId,
             ...(MULTI_INSTANCE_CONNECTOR_IDS.has(inst.provider) ? { providerId: inst.provider } : {}),
             name: inst.label,
+            connectedEmail: inst.connectedEmail ?? undefined,
             url: inst.url ?? undefined,
             custom: inst.custom,
             connected: inst.connected,
@@ -944,6 +948,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
               id: governanceId,
               providerId: g.instance.provider,
               name: g.instance.connectedEmail ?? g.instance.label,
+              connectedEmail: g.instance.connectedEmail ?? undefined,
               custom: false,
               connected: g.instance.connected,
               enabled: settingsMap.get(governanceId) ?? settingsMap.get(g.instance.provider) ?? true,
@@ -967,6 +972,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
             id: governanceId,
             ...(MULTI_INSTANCE_CONNECTOR_IDS.has(g.instance.provider) ? { providerId: g.instance.provider } : {}),
             name: g.instance.label,
+            connectedEmail: g.instance.connectedEmail ?? undefined,
             url: g.instance.url ?? undefined,
             custom: g.instance.custom,
             connected: g.instance.connected,
@@ -1008,6 +1014,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
             ? { providerId: c.connectorId, instanceId: c.id }
             : {}),
           name: c.connectedEmail ?? c.name,
+          connectedEmail: c.connectedEmail ?? undefined,
           url: c.url ?? undefined,
           custom: c.custom,
           connected: c.connected,
@@ -1057,6 +1064,10 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
       }
 
       const connectors = Array.from(byKey.values())
+        // AgentMail is an email Channel, not an assistant-level connection.
+        // Its handler and mailbox actions are configured on the inbox in
+        // Studio → Channels; rendering it here would create a second authority.
+        .filter((connector) => (connector.providerId ?? connector.id) !== 'agentmail')
         .sort((a, b) => {
           if (a.sortProvider !== b.sortProvider) return 0
           return (a.sortCreatedAt?.getTime() ?? 0) - (b.sortCreatedAt?.getTime() ?? 0)

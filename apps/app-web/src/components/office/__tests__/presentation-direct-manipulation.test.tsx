@@ -9,6 +9,7 @@ import {
   PresentationGeometryToolbar,
   PresentationObjectFrame,
   rotatePresentationGeometry,
+  updatePresentationRunsText,
 } from "../presentation-object-frame";
 import { presentationFixture } from "./editor-fixtures";
 
@@ -23,6 +24,22 @@ describe("[COMP:app-web/office-presentation-editor] Presentation direct manipula
     expect(rotatePresentationGeometry(start, 300, 80, true).rotationDeg).toBe(60);
     expect(nudgePresentationGeometry(start, "ArrowRight", false).xPt).toBe(101);
     expect(nudgePresentationGeometry(start, "ArrowUp", true).yPt).toBe(70);
+  });
+
+  it("preserves unaffected rich-text runs and applies edits to the active run", () => {
+    const snapshot = presentationFixture();
+    const object = snapshot.slides[0].objects[0];
+    if (object.kind !== "text") throw new Error("text fixture required");
+    const white = { ...object.runs[0], text: "Use Brian\n", style: { ...object.runs[0].style, bold: true, color: "#EAF8FF" } };
+    const cyan = { ...object.runs[0], id: "00000000-0000-4000-8000-000000000099", text: "Brand presentation template", style: { ...object.runs[0].style, bold: true, color: "#34D3FF" } };
+    const appended = updatePresentationRunsText([white, cyan], "Use Brian\nBrand presentation template!");
+    expect(appended).toEqual([white, { ...cyan, text: "Brand presentation template!" }]);
+    const replaced = updatePresentationRunsText([white, cyan], "Use Brian\nBrand deck template");
+    expect(replaced[0]).toBe(white);
+    expect(replaced[1]).toMatchObject({ id: cyan.id, text: "Brand deck template", style: cyan.style });
+    const cleared = updatePresentationRunsText([white, cyan], "");
+    expect(cleared).toEqual([{ ...white, text: "" }]);
+    expect(updatePresentationRunsText(cleared, "Replacement")).toEqual([{ ...white, text: "Replacement" }]);
   });
 
   it("renders eight resize handles, rotation, and the in-flow numeric toolbar", () => {

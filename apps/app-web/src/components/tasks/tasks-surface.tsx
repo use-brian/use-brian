@@ -11,9 +11,11 @@
  * filter row for the bulk bar: Status / Assign / Priority / Project /
  * Archive / Delete over the whole selection.
  *
- * State model: the URL is the single source of truth for the view
+ * State model: the URL is the durable source of truth for the view
  * (`tasks-view.ts` codec) — the sidebar panel and the Home dock card
- * (`?filter=stale`) deep-link into it. Mutations ride the existing
+ * (`?filter=stale`) deep-link into it. Search keeps an optimistic local mirror
+ * and writes through `history.replaceState`, so typing filters immediately
+ * without starting an RSC navigation per character. Mutations ride the existing
  * brain-inbox wire (`adjustBrainRow` / `deleteBrainRow`, supersession-aware:
  * every edit mints a new row id). Small non-destructive selections keep the
  * per-row retry loop; every multi-delete uses `bulkTasks`, removes the complete
@@ -187,9 +189,27 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
   }, [workspaceId]);
 
   // ── View state (URL is the source of truth) ───────────────────────────
-  const view = useMemo(
+  const urlView = useMemo(
     () => viewStateFromSearch(searchParams),
     [searchParams],
+  );
+  // Search is a rapid, client-only filter over rows already in memory. Keeping
+  // the input controlled directly by `useSearchParams` made each keystroke
+  // start a Next RSC navigation; the URL response then fed one stale character
+  // back into the field and overwrote everything typed after it. The local
+  // mirror paints and filters synchronously, while the native History API keeps
+  // deep-link state current without a server navigation. Incoming URL changes
+  // (saved views, sidebar links, back/forward) still reconcile the mirror.
+  const [searchDraft, setSearchDraft] = useState(urlView.q);
+  useEffect(() => {
+    setSearchDraft(urlView.q);
+  }, [urlView.q]);
+  const view = useMemo(
+    () =>
+      urlView.q === searchDraft
+        ? urlView
+        : { ...urlView, q: searchDraft },
+    [searchDraft, urlView],
   );
   const setView = useCallback(
     (patch: Partial<TasksViewState>) => {
@@ -200,6 +220,15 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
       });
     },
     [view, router, pathname],
+  );
+  const setSearch = useCallback(
+    (q: string) => {
+      setSearchDraft(q);
+      const search = searchFromViewState({ ...urlView, q });
+      const href = search ? `${pathname}?${search}` : pathname;
+      window.history.replaceState(window.history.state, "", href);
+    },
+    [pathname, urlView],
   );
 
   // ── Derived ───────────────────────────────────────────────────────────
@@ -270,6 +299,17 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
   const openTask = useMemo(
     () => (rows ?? []).find((r) => r.id === openTaskId) ?? null,
     [rows, openTaskId],
+  );
+
+  const handleSuggestionAccepted = useCallback(
+    (task: TaskRow, openEditor: boolean) => {
+      // The accept endpoint returns the canonical created row, so paint it
+      // immediately instead of making Add-and-edit wait for a list round trip.
+      setRows((current) => [task, ...current.filter((row) => row.id !== task.id)]);
+      if (openEditor) setOpenTaskId(task.id);
+      void refreshTasks();
+    },
+    [setRows, refreshTasks],
   );
 
   const setTaskRulesOpen = useCallback(
@@ -946,8 +986,8 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
               else if (key === "project") setView({ project: values });
               else if (key === "due") setView({ due: values as TasksViewState["due"] });
             }}
-            search={view.q}
-            onSearch={(q) => setView({ q })}
+            search={searchDraft}
+            onSearch={setSearch}
             searchPlaceholder={t.searchPlaceholder}
             viewOptions={
               <>
@@ -996,7 +1036,7 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
       {view.view === "suggestions" ? (
         <TaskSuggestionsView
           workspaceId={workspaceId}
-          onAccepted={reload}
+          onAccepted={handleSuggestionAccepted}
           onCountChange={setSuggestionCount}
         />
       ) : (

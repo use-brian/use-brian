@@ -1,9 +1,16 @@
 import * as Y from 'yjs'
 import { describe, expect, it } from 'vitest'
-import { appendOfficeCommand, applyOfficeUpdate, createOfficeUndoManager, encodeOfficeState, observeOfficeHistory, officeCommandIds, replaceOfficeSnapshot, snapshotToYDoc, yDocToSnapshot } from '../collab.js'
-import { documentFixture, id, presentationFixture } from './fixtures.js'
+import { appendOfficeCommand, applyOfficeUpdate, createOfficeUndoManager, encodeOfficeState, hasOfficeBaseSnapshot, observeOfficeHistory, officeCommandIds, replaceOfficeSnapshot, snapshotToYDoc, yDocToSnapshot } from '../collab.js'
+import { documentFixture, id, presentationFixture, spreadsheetFixture } from './fixtures.js'
 
 describe('[COMP:office/collab-codec] Office Yjs codec', () => {
+  it('distinguishes an allocated Y.Doc from a materialized Office artifact', () => {
+    const connecting = new Y.Doc()
+    expect(hasOfficeBaseSnapshot(connecting)).toBe(false)
+    applyOfficeUpdate(connecting, encodeOfficeState(snapshotToYDoc(presentationFixture())))
+    expect(hasOfficeBaseSnapshot(connecting)).toBe(true)
+  })
+
   it('round-trips a canonical snapshot exactly', () => {
     const snapshot = documentFixture()
     expect(yDocToSnapshot(snapshotToYDoc(snapshot))).toEqual(snapshot)
@@ -128,6 +135,52 @@ describe('[COMP:office/collab-codec] Office Yjs codec', () => {
 
     history.undo()
     expect(officeCommandIds(doc)).toEqual([])
+    history.destroy()
+  })
+
+  it('converges row and column resizing while undoing only the local dimension', () => {
+    const snapshot = spreadsheetFixture()
+    const local = snapshotToYDoc(snapshot)
+    const remote = new Y.Doc()
+    applyOfficeUpdate(remote, encodeOfficeState(local))
+    const history = createOfficeUndoManager(local)
+    const common = { artifactId: snapshot.artifactId, baseVersion: 0, actor: { type: 'user' as const, id: id(40) }, origin: 'manual' as const, sheetId: snapshot.worksheets[0].id }
+    appendOfficeCommand(local, { ...common, commandId: id(80), kind: 'setSpreadsheetDimension', axis: 'column', index: 2, size: 31 })
+    appendOfficeCommand(remote, { ...common, commandId: id(81), kind: 'setSpreadsheetDimension', axis: 'row', index: 4, size: 27 })
+    applyOfficeUpdate(local, encodeOfficeState(remote))
+    applyOfficeUpdate(remote, encodeOfficeState(local))
+    expect(yDocToSnapshot(local)).toEqual(yDocToSnapshot(remote))
+
+    history.undo()
+    let current = yDocToSnapshot(local)
+    if (current.family !== 'spreadsheet') throw new Error('spreadsheet fixture required')
+    expect(current.worksheets[0].columnDimensions).toEqual([])
+    expect(current.worksheets[0].rowDimensions).toContainEqual({ index: 4, heightPt: 27, hidden: false })
+    history.redo()
+    current = yDocToSnapshot(local)
+    if (current.family !== 'spreadsheet') throw new Error('spreadsheet fixture required')
+    expect(current.worksheets[0].columnDimensions).toContainEqual({ index: 2, widthChars: 31, hidden: false })
+    expect(current.worksheets[0].rowDimensions).toContainEqual({ index: 4, heightPt: 27, hidden: false })
+    history.destroy()
+  })
+
+  it('converges a worksheet image edit and keeps it locally undoable', () => {
+    const snapshot = spreadsheetFixture()
+    snapshot.worksheets[0].images = [{ id: id(90), resourceId: id(91), altText: 'Logo', decorative: false, from: { row: 1, column: 1 }, to: { row: 2, column: 2 } }]
+    const local = snapshotToYDoc(snapshot)
+    const remote = new Y.Doc()
+    applyOfficeUpdate(remote, encodeOfficeState(local))
+    const history = createOfficeUndoManager(local)
+    appendOfficeCommand(local, { artifactId: snapshot.artifactId, baseVersion: 0, actor: { type: 'user', id: id(40) }, origin: 'manual', commandId: id(92), kind: 'updateSpreadsheetImage', sheetId: snapshot.worksheets[0].id, imageId: id(90), from: { row: 1, column: 1 }, to: { row: 2, column: 3 }, altText: '', decorative: true })
+    applyOfficeUpdate(remote, encodeOfficeState(local))
+    expect(yDocToSnapshot(remote)).toEqual(yDocToSnapshot(local))
+    let current = yDocToSnapshot(local)
+    if (current.family !== 'spreadsheet') throw new Error('spreadsheet fixture required')
+    expect(current.worksheets[0].images[0]).toMatchObject({ to: { row: 2, column: 3 }, decorative: true })
+    history.undo()
+    current = yDocToSnapshot(local)
+    if (current.family !== 'spreadsheet') throw new Error('spreadsheet fixture required')
+    expect(current.worksheets[0].images[0]).toMatchObject({ to: { row: 2, column: 2 }, altText: 'Logo', decorative: false })
     history.destroy()
   })
 

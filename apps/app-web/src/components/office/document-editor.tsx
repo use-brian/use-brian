@@ -19,12 +19,12 @@ import {
 import { useT } from "@/lib/i18n/client";
 import type { UserInfo } from "@/lib/user";
 import { admitOfficeImageResource, type OfficeCommentThread, type OfficeSuggestion } from "@/lib/office/api";
-import { getOfficeResourceObjectUrl } from "@/lib/office/api";
 import { officeDocumentEditorExtensions } from "./document/editor-schema";
 import { DocumentToolbar, type DocumentToolbarController } from "./document/document-toolbar";
 import { changeDocumentListLevel, convertDocumentList, insertDocumentImage, moveDocumentTableCell, toggleDocumentRunStyle, updateSelectedDocumentNode } from "./document/editor-actions";
 import { captureDocumentCommentAnchor, captureDocumentSuggestionRange, type DocumentCommentAnchor, type DocumentSuggestionRange } from "./document/comment-anchor";
 import { updateDocumentReviewDecorations } from "./document/comment-decorations";
+import { refreshDocumentPagination } from "./document/pagination-decorations";
 
 type DocumentEditorProps = {
   snapshot: DocumentSnapshot;
@@ -131,35 +131,14 @@ export function DocumentEditor({ snapshot, role, suggestMode, doc, provider, cur
 
   useEffect(() => { editor?.setEditable(editable); }, [editable, editor]);
   useEffect(() => { if (editor) updateDocumentReviewDecorations(editor, commentThreads, suggestions); }, [commentThreads, editor, suggestions]);
-  useEffect(() => () => localDoc.destroy(), [localDoc]);
-
   useEffect(() => {
     if (!editor) return;
-    let generation = 0;
-    const refresh = () => {
-      const activeGeneration = ++generation;
-      editor.state.doc.descendants((node) => {
-        if (node.type.name !== "officeSection" || typeof node.attrs.id !== "string") return;
-        const section = editor.view.dom.querySelector<HTMLElement>(`section[id="${node.attrs.id}"]`);
-        const header = section?.querySelector<HTMLElement>(".office-document-header");
-        if (!header) return;
-        const headerImage = node.attrs.headerImage as Record<string, unknown> | null;
-        header.style.backgroundImage = "";
-        header.removeAttribute("aria-label");
-        header.removeAttribute("role");
-        if (!headerImage || typeof headerImage.resourceId !== "string") return;
-        const alt = headerImage.decorative ? "" : String(headerImage.altText ?? "");
-        if (alt) { header.setAttribute("role", "img"); header.setAttribute("aria-label", alt); }
-        header.style.backgroundSize = `${Number(headerImage.widthPt ?? 96)}pt ${Number(headerImage.heightPt ?? 48)}pt`;
-        void getOfficeResourceObjectUrl(snapshot.artifactId, headerImage.resourceId).then((url) => {
-          if (activeGeneration === generation) header.style.backgroundImage = `url("${url.replaceAll('"', '%22')}")`;
-        }).catch(() => undefined);
-      });
-    };
+    const refresh = () => refreshDocumentPagination(editor);
     refresh();
-    editor.on("transaction", refresh);
-    return () => { generation += 1; editor.off("transaction", refresh); };
-  }, [editor, snapshot.artifactId]);
+    editor.on("update", refresh);
+    return () => { editor.off("update", refresh); };
+  }, [editor]);
+  useEffect(() => () => localDoc.destroy(), [localDoc]);
 
   useEffect(() => {
     if (!editor) return;
@@ -236,8 +215,10 @@ export function DocumentEditor({ snapshot, role, suggestMode, doc, provider, cur
     <DocumentToolbar editor={editor} editable={editable} onInsertImage={addImage} controllerRef={toolbarRef} />
     {suggestMode ? <div className="border-b bg-amber-50 px-3 py-1 text-xs font-medium text-amber-950" role="status">{t.suggesting}</div> : null}
     {status ? <div className="absolute bottom-16 left-1/2 z-50 max-w-sm -translate-x-1/2 rounded-lg bg-foreground px-3 py-2 text-xs text-background shadow-lg sm:bottom-4" role="status">{status}</div> : null}
-    <div data-office-document-scroll="true" className="min-h-0 flex-1 overflow-auto bg-muted/30 px-2 pb-20 pt-4 sm:px-4 sm:pb-4">
-      <EditorContent editor={editor} className="mx-auto max-w-full" />
+    <div data-office-document-scroll="true" className="min-h-0 flex-1 overflow-auto bg-muted/55 px-2 pb-20 pt-4 sm:px-4 sm:pb-6 sm:pt-6">
+      <div data-office-document-stage="true" className="office-document-stage">
+        <EditorContent editor={editor} className="w-full" />
+      </div>
     </div>
   </div>;
 }

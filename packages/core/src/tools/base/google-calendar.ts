@@ -30,6 +30,24 @@ export type CalendarAttachmentInput = {
   mimeType?: string
 }
 
+export type CalendarEventLabel = {
+  id: string
+  name?: string
+  backgroundColor: string
+}
+
+export type CalendarEventPaletteColor = {
+  colorId: string
+  background: string
+  foreground: string
+}
+
+export type CalendarEventColorOptions = {
+  calendarId: string
+  eventLabels: CalendarEventLabel[]
+  palette: CalendarEventPaletteColor[]
+}
+
 export type CalendarRemindersInput = {
   useDefault: boolean
   overrides?: Array<{ method: 'email' | 'popup'; minutes: number }>
@@ -83,6 +101,8 @@ export type CalendarEventCreateInput = {
   visibility?: CalendarVisibility
   guestPermissions?: CalendarGuestPermissionsInput
   attachments?: CalendarAttachmentInput[]
+  eventLabelId?: string
+  colorId?: string
   eventType?: 'default' | 'focusTime' | 'outOfOffice' | 'workingLocation'
   focusTimeProperties?: CalendarFocusTimeProperties
   outOfOfficeProperties?: CalendarOutOfOfficeProperties
@@ -110,6 +130,8 @@ export type CalendarEventUpdateInput = {
   visibility?: CalendarVisibility
   guestPermissions?: CalendarGuestPermissionsInput
   attachmentChanges?: { add?: CalendarAttachmentInput[]; removeFileUrls?: string[] }
+  eventLabelId?: string
+  colorId?: string
   focusTimeProperties?: CalendarFocusTimeProperties
   outOfOfficeProperties?: CalendarOutOfOfficeProperties
   workingLocationProperties?: CalendarWorkingLocationProperties
@@ -117,6 +139,8 @@ export type CalendarEventUpdateInput = {
 
 export type GoogleCalendarApi = {
   listCalendars(): Promise<unknown>
+
+  listEventColors(calendarId?: string): Promise<CalendarEventColorOptions>
 
   listEvents(params: {
     timeMin?: string
@@ -195,6 +219,8 @@ function projectEvent(evt: Json, tz: string, full = false): Json {
     localOriginalStart: formatEventTime(e.originalStartTime?.dateTime, tz) ?? e.originalStartTime?.date,
     availability: transparency === 'transparent' ? 'free' : 'busy',
     visibility: str(evt, 'visibility'),
+    eventLabelId: str(evt, 'eventLabelId'),
+    colorId: str(evt, 'colorId'),
     attendees: asRows(evt.attendees).map((a) => ({
       email: str(a, 'email'),
       displayName: str(a, 'displayName'),
@@ -322,6 +348,36 @@ const calendarError = (err: unknown) => ({
   isError: true as const,
 })
 
+async function validateEventMark(
+  api: GoogleCalendarApi,
+  input: Pick<CalendarEventCreateInput, 'calendarId' | 'eventLabelId' | 'colorId'>,
+): Promise<void> {
+  if (input.eventLabelId !== undefined && input.colorId !== undefined) {
+    throw new Error('Use eventLabelId or colorId, not both')
+  }
+  if (!input.eventLabelId && !input.colorId) return
+
+  const options = await api.listEventColors(input.calendarId)
+  if (input.eventLabelId && !options.eventLabels.some((label) => label.id === input.eventLabelId)) {
+    const valid = options.eventLabels.length
+      ? options.eventLabels.map((label) => `${label.name ?? 'unnamed'} (${label.id}, ${label.backgroundColor})`).join(', ')
+      : 'none'
+    throw new Error(
+      `Unknown eventLabelId "${input.eventLabelId}" for calendar ${options.calendarId}. ` +
+      `Valid event labels: ${valid}. Call googleCalendarListEventColors before retrying.`,
+    )
+  }
+  if (input.colorId && !options.palette.some((color) => color.colorId === input.colorId)) {
+    const valid = options.palette.length
+      ? options.palette.map((color) => `${color.colorId} (${color.background})`).join(', ')
+      : 'none'
+    throw new Error(
+      `Unknown colorId "${input.colorId}". Valid legacy event colors: ${valid}. ` +
+      'Call googleCalendarListEventColors before retrying.',
+    )
+  }
+}
+
 export function createGoogleCalendarTools(api: GoogleCalendarApi, userTimezone?: string): Tool[] {
   const listCalendars = buildTool({
     name: 'googleCalendarListCalendars',
@@ -332,6 +388,22 @@ export function createGoogleCalendarTools(api: GoogleCalendarApi, userTimezone?:
     timeoutMs: 10_000,
     async execute() {
       try { return { data: await api.listCalendars() } } catch (err) { return calendarError(err) }
+    },
+  })
+
+  const listEventColors = buildTool({
+    name: 'googleCalendarListEventColors',
+    description:
+      'List the exact named event labels and legacy event colours available for one Google calendar. ' +
+      'Call this before setting eventLabelId or colorId; never guess an id. eventLabelId is preferred when named labels are available.',
+    inputSchema: z.object({
+      calendarId: z.string().optional().describe('Calendar ID; defaults to primary.'),
+    }),
+    isConcurrencySafe: true,
+    isReadOnly: true,
+    timeoutMs: 10_000,
+    async execute(input) {
+      try { return { data: await api.listEventColors(input.calendarId) } } catch (err) { return calendarError(err) }
     },
   })
 
@@ -430,6 +502,8 @@ export function createGoogleCalendarTools(api: GoogleCalendarApi, userTimezone?:
       visibility: z.enum(['default', 'public', 'private', 'confidential']).optional(),
       guestPermissions: guestPermissionsSchema.optional(),
       attachments: z.array(attachmentSchema).optional().describe('Google Drive attachments.'),
+      eventLabelId: z.string().min(1).optional().describe('Exact named event-label ID returned by googleCalendarListEventColors. Preferred over colorId.'),
+      colorId: z.string().min(1).optional().describe('Exact legacy palette ID returned by googleCalendarListEventColors. Use only when no suitable named event label exists.'),
       eventType: z.enum(['default', 'focusTime', 'outOfOffice', 'workingLocation']).optional(),
       focusTimeProperties: focusTimePropertiesSchema.optional(),
       outOfOfficeProperties: outOfOfficePropertiesSchema.optional(),
@@ -442,6 +516,7 @@ export function createGoogleCalendarTools(api: GoogleCalendarApi, userTimezone?:
     async execute(input) {
       try {
         const event: CalendarEventCreateInput = { ...input }
+        await validateEventMark(api, event)
         if (input.recurrence?.length && !input.allDay) event.timeZone = userTimezone ?? 'UTC'
         const data = await api.createEvent(event)
         return { data: enrichEventWithLocalTime(data, userTimezone ?? 'UTC') }
@@ -483,6 +558,8 @@ export function createGoogleCalendarTools(api: GoogleCalendarApi, userTimezone?:
         add: z.array(attachmentSchema).optional(),
         removeFileUrls: z.array(z.string().url()).optional(),
       }).optional().describe('Safely add/remove Drive attachments.'),
+      eventLabelId: z.string().optional().describe('Exact named event-label ID returned by googleCalendarListEventColors; empty string clears the label.'),
+      colorId: z.string().optional().describe('Exact legacy palette ID returned by googleCalendarListEventColors; empty string clears the legacy colour.'),
       focusTimeProperties: focusTimePropertiesSchema.optional(),
       outOfOfficeProperties: outOfOfficePropertiesSchema.optional(),
       workingLocationProperties: workingLocationPropertiesSchema.optional(),
@@ -506,6 +583,7 @@ export function createGoogleCalendarTools(api: GoogleCalendarApi, userTimezone?:
           ...updates
         } = input
         const payload: CalendarEventUpdateInput = { ...updates }
+        await validateEventMark(api, payload)
         if ((input.recurrence?.length || input.recurringScope === 'series' || input.recurringScope === 'following') && !input.allDay) {
           payload.timeZone = userTimezone ?? 'UTC'
         }
@@ -539,5 +617,5 @@ export function createGoogleCalendarTools(api: GoogleCalendarApi, userTimezone?:
     },
   })
 
-  return [listCalendars, listEvents, getEvent, queryFreeBusy, createEvent, updateEvent, deleteEvent]
+  return [listCalendars, listEventColors, listEvents, getEvent, queryFreeBusy, createEvent, updateEvent, deleteEvent]
 }

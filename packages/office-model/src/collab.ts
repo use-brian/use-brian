@@ -37,6 +37,11 @@ export function snapshotToYDoc(snapshot: OfficeArtifactSnapshot): Y.Doc {
   return doc
 }
 
+/** Whether provider/offline state has materialized the canonical Office base. */
+export function hasOfficeBaseSnapshot(doc: Y.Doc): boolean {
+  return typeof doc.getMap<string>(ROOT).get(BASE) === 'string'
+}
+
 export function appendOfficeCommand(doc: Y.Doc, input: OfficeCommand): void {
   const command = OfficeCommandSchema.parse(input)
   const base = baseSnapshot(doc)

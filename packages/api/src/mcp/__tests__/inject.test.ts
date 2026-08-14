@@ -769,7 +769,7 @@ describe('[COMP:api/mcp-inject] INJECTED_BUILTIN_TOOLS_BY_CONNECTOR', () => {
   it('maps each built-in connector to a non-empty, duplicate-free tool list', () => {
     const connectors = Object.keys(INJECTED_BUILTIN_TOOLS_BY_CONNECTOR)
     expect(connectors).toEqual(
-      expect.arrayContaining(['gcal', 'gmail', 'gdrive', 'github', 'notion', 'fathom', 'msgraph']),
+      expect.arrayContaining(['gcal', 'gmail', 'gdrive', 'github', 'notion', 'fathom', 'wordpress', 'msgraph']),
     )
     for (const [connector, toolNames] of Object.entries(INJECTED_BUILTIN_TOOLS_BY_CONNECTOR)) {
       expect(toolNames.length, connector).toBeGreaterThan(0)
@@ -880,6 +880,56 @@ describe('[COMP:api/mcp-inject] multi-instance built-ins', () => {
     const names = [...tools.keys()]
     expect(names).toContain('githubSearchRepositories')
     expect(names.some((n) => n.includes('__'))).toBe(false)
+  })
+
+  it('injects canonical WordPress tools for the primary site and labelled variants for an extra site', async () => {
+    const primaryCredentials = JSON.stringify({
+      siteUrl: 'https://primary.example',
+      username: 'site_editor',
+      applicationPassword: 'primary app password',
+    })
+    const extraCredentials = JSON.stringify({
+      siteUrl: 'https://docs.example',
+      username: 'site_editor',
+      applicationPassword: 'docs app password',
+    })
+    const tools = new Map()
+    const connectorStore = {
+      list: vi.fn().mockResolvedValue([
+        { id: 'ci-wp1', connectorId: 'wordpress', name: 'Primary site', connected: true, url: null, custom: false, createdAt: new Date('2026-01-01T00:00:00Z') },
+        { id: 'ci-wp2', connectorId: 'wordpress', name: 'Docs site', connected: true, url: null, custom: false, createdAt: new Date('2026-02-01T00:00:00Z') },
+      ]),
+      getCredentials: vi.fn().mockResolvedValue({
+        client_id: 'wordpress_application_password',
+        client_secret: primaryCredentials,
+      }),
+    }
+    const connectorInstanceStore = {
+      getCredentialsSystem: vi.fn().mockResolvedValue({
+        client_id: 'wordpress_application_password',
+        client_secret: extraCredentials,
+      }),
+      markHealth: vi.fn(),
+    }
+
+    await injectMcpTools({
+      userId: 'u-1',
+      assistantId: 'a-1',
+      tools,
+      connectorStore: connectorStore as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorInstanceStore: connectorInstanceStore as never,
+      keepBuiltinsDirect: true,
+    })
+
+    const names = [...tools.keys()]
+    expect(names).toContain('wordpressGetManagedPage')
+    expect(names).toContain('wordpressUpdatePageText')
+    expect(names).toContain('wordpressReplacePageImage')
+    const variant = names.find((name) => name.startsWith('wordpressGetManagedPage__'))
+    expect(variant).toBeTruthy()
+    expect((tools.get(variant!) as { description: string }).description).toMatch(/^\[Docs site\]/)
+    expect(names.filter((name) => name.startsWith('wordpressGetManagedPage')).length).toBe(2)
   })
 })
 

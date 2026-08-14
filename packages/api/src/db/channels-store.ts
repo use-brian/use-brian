@@ -181,6 +181,34 @@ export function pickAssistantForSurface(
   return pickRoutingForSurface(rows, externalSurfaceId)?.assistantId ?? null
 }
 
+/** Exact, channel-scoped routing key for one email sender. */
+export function emailSenderSurfaceId(sender: string): string {
+  return `sender:${sender.trim().toLowerCase()}`
+}
+
+/** Hidden continuity key for one provider email thread. */
+export function emailThreadSurfaceId(threadId: string): string {
+  return `thread:${threadId}`
+}
+
+/**
+ * Email routing precedence: a hidden thread pin wins, then an exact sender
+ * rule, then the inbox default. The legacy raw-thread lookup preserves any
+ * routing rows created before email keys gained explicit prefixes.
+ */
+export function pickRoutingForEmail(
+  rows: ChannelAssistant[],
+  sender: string,
+  threadId: string,
+): ChannelAssistant | null {
+  const threadKey = emailThreadSurfaceId(threadId)
+  return rows.find((row) => row.externalSurfaceId === threadKey)
+    ?? rows.find((row) => row.externalSurfaceId === threadId)
+    ?? rows.find((row) => row.externalSurfaceId === emailSenderSurfaceId(sender))
+    ?? rows.find((row) => row.externalSurfaceId === null)
+    ?? null
+}
+
 /**
  * Webhook routing resolution: load a channel's `channel_assistants` rows and
  * pick the routing row for `externalSurfaceId`. System-level (no RLS) — runs
@@ -207,6 +235,137 @@ export async function resolveAssistantForSurface(
     [channelId],
   )
   return pickAssistantForSurface(result.rows, externalSurfaceId)
+}
+
+/**
+ * Resolve an email thread's assistant and optionally pin a new thread to the
+ * selected sender/default route. The pin copies both assistant and model tier.
+ * `DO NOTHING` makes concurrent first deliveries converge on the first pin;
+ * the follow-up read returns that winner instead of overwriting it.
+ */
+export async function resolveEmailRoutingForWebhook(
+  channelId: string,
+  sender: string,
+  threadId: string,
+  pinThread: boolean,
+): Promise<ChannelAssistant | null> {
+  const result = await query<ChannelAssistant>(
+    `SELECT ${CHANNEL_ASSISTANT_COLS} FROM channel_assistants WHERE channel_id = $1`,
+    [channelId],
+  )
+  const rows = result.rows
+  const threadKey = emailThreadSurfaceId(threadId)
+  const existingThread = rows.find((row) =>
+    row.externalSurfaceId === threadKey || row.externalSurfaceId === threadId,
+  )
+  if (existingThread) return existingThread
+
+  const selected = pickRoutingForEmail(rows, sender, threadId)
+  if (!selected || !pinThread) return selected
+
+  const inserted = await query<ChannelAssistant>(
+    `INSERT INTO channel_assistants
+       (channel_id, assistant_id, external_surface_id, model_alias)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (channel_id, external_surface_id)
+       WHERE external_surface_id IS NOT NULL
+     DO NOTHING
+     RETURNING ${CHANNEL_ASSISTANT_COLS}`,
+    [channelId, selected.assistantId, threadKey, selected.modelAlias],
+  )
+  if (inserted.rows[0]) return inserted.rows[0]
+
+  const winner = await query<ChannelAssistant>(
+    `SELECT ${CHANNEL_ASSISTANT_COLS}
+       FROM channel_assistants
+      WHERE channel_id = $1 AND external_surface_id = $2
+      LIMIT 1`,
+    [channelId, threadKey],
+  )
+  return winner.rows[0] ?? selected
+}
+
+/**
+ * Resolve a workspace member by their exact normalized email for the inbound
+ * email webhook. System-level because the signed webhook arrives before a
+ * Brian user principal exists. Returning only the user id keeps membership
+ * lookup separate from assistant access and makes this the sole trust-
+ * elevation seam for email senders.
+ */
+export async function findWorkspaceMemberUserIdByEmailSystem(
+  workspaceId: string,
+  sender: string,
+): Promise<string | null> {
+  const result = await query<{ id: string }>(
+    `SELECT u.id
+       FROM workspace_members wm
+       JOIN users u ON u.id = wm.user_id
+      WHERE wm.workspace_id = $1
+        AND lower(u.email) = $2
+      LIMIT 1`,
+    [workspaceId, sender.trim().toLowerCase()],
+  )
+  return result.rows[0]?.id ?? null
+}
+
+/**
+ * Count recent replies to non-member email sessions pinned under one inbox.
+ * This persistent system-level count is shared across API instances and stops
+ * an open inbox from bypassing its guest ceiling with fresh provider threads.
+ */
+export async function countRecentEmailInboxGuestRepliesSystem(
+  channelId: string,
+  workspaceId: string,
+): Promise<number> {
+  const result = await query<{ count: string }>(
+    `SELECT COUNT(*)::text AS count
+       FROM session_messages sm
+       JOIN sessions s ON s.id = sm.session_id
+       JOIN channel_assistants ca
+         ON ca.channel_id = $1
+        AND ca.assistant_id = s.assistant_id
+        AND ca.external_surface_id = 'thread:' || s.channel_id
+       LEFT JOIN workspace_members wm
+         ON wm.workspace_id = $2
+        AND wm.user_id = s.user_id
+      WHERE s.channel_type = 'email'
+        AND wm.user_id IS NULL
+        AND sm.role = 'assistant'
+        AND sm.created_at > now() - interval '1 hour'`,
+    [channelId, workspaceId],
+  )
+  return Number(result.rows[0]?.count ?? 0)
+}
+
+/**
+ * Resolve the AgentMail connector instances whose email Channels are handled
+ * by one assistant. This is the runtime mailbox-access boundary: an inbox is
+ * usable only while its default (NULL-surface) channel routing row points at
+ * the acting assistant. System-level because tool injection runs for channel,
+ * workflow, and API callers where the message author is not necessarily the
+ * workspace owner.
+ */
+export async function listAgentmailConnectorInstanceIdsForAssistantSystem(
+  workspaceId: string,
+  assistantId: string,
+): Promise<string[]> {
+  const result = await query<{ connectorInstanceId: string }>(
+    `SELECT ci.connector_instance_id AS "connectorInstanceId"
+       FROM channels c
+       JOIN channel_integrations ci
+         ON ci.channel_id = c.id
+        AND ci.channel_type = 'email'
+       JOIN channel_assistants ca
+         ON ca.channel_id = c.id
+        AND ca.external_surface_id IS NULL
+      WHERE c.workspace_id = $1
+        AND c.channel_type = 'email'
+        AND ca.assistant_id = $2
+        AND ci.connector_instance_id IS NOT NULL
+      ORDER BY c.created_at ASC, ci.connector_instance_id ASC`,
+    [workspaceId, assistantId],
+  )
+  return result.rows.map((row) => row.connectorInstanceId)
 }
 
 // ── Channel reads (RLS-gated) ──────────────────────────────────

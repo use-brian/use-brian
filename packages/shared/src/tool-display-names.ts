@@ -16,6 +16,7 @@
 export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   // Google Calendar
   googleCalendarListCalendars: 'List calendars',
+  googleCalendarListEventColors: 'List calendar event colours',
   googleCalendarListEvents: 'List calendar events',
   googleCalendarGetEvent: 'View calendar event',
   googleCalendarQueryFreeBusy: 'Check calendar availability',
@@ -145,6 +146,11 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   shopifyCancelOrder: 'Cancel order',
   shopifyRefundOrder: 'Refund order',
   shopifyCompleteDraftOrder: 'Complete draft order',
+
+  // WordPress managed content
+  wordpressGetManagedPage: 'View managed WordPress page',
+  wordpressUpdatePageText: 'Update WordPress page text',
+  wordpressReplacePageImage: 'Replace WordPress page image',
 
   // Assistant Email (AgentMail) — the assistant's own mailbox
   agentmailSendMessage: 'Send email as the assistant',

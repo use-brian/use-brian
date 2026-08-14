@@ -5,8 +5,7 @@
  * (confirmDialog `content` slot). The pre-flight-confirm invariant requires
  * confirming cost AND the shape of the output before the expensive
  * transcription runs (docs/architecture/engine/preflight-confirmation.md), so
- * this panel rides the same dialog on every web surface - the Studio upload
- * button, the chat dock, and the new-page landing.
+ * this panel rides the chat dock's live-capture processing dialog.
  *
  * Two choices, in dependency order:
  *

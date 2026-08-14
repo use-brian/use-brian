@@ -17,7 +17,6 @@ import {
   BUILTIN_BLUEPRINT_SLUGS,
   filterBlueprints,
   hasNoBlueprints,
-  initialRecordingBlueprint,
   isBlueprint,
   recordingBlueprintToSlug,
   starterInstallInput,
@@ -123,17 +122,6 @@ describe("[COMP:web/blueprints-library] Blueprint library helpers", () => {
   });
 
   describe("recording upload selection ladder (migration 291)", () => {
-    describe("initialRecordingBlueprint (pre-select vs ask)", () => {
-      it("pre-selects the workspace default when one is configured (auto-apply)", () => {
-        expect(initialRecordingBlueprint("tpl-default")).toBe("tpl-default");
-      });
-
-      it("leaves the picker UNSET when no default is set (prompt a choice, not a silent ingest-only)", () => {
-        expect(initialRecordingBlueprint(null)).toBe(RECORDING_UNSET);
-        expect(initialRecordingBlueprint(null)).not.toBe(RECORDING_INGEST_ONLY);
-      });
-    });
-
     describe("recordingBlueprintToSlug (submit mapping)", () => {
       it("submits a real blueprint id verbatim", () => {
         expect(recordingBlueprintToSlug("tpl-1")).toBe("tpl-1");
@@ -157,26 +145,12 @@ describe("[COMP:web/blueprints-library] Blueprint library helpers", () => {
     });
 
     describe("seedRecordingBlueprint (confirm-dialog picker seed)", () => {
-      it("an explicit surface pick wins over the workspace default", () => {
-        expect(seedRecordingBlueprint("tpl-picked", "tpl-default")).toBe("tpl-picked");
+      it("starts from the workspace default when one is configured", () => {
+        expect(seedRecordingBlueprint("tpl-default")).toBe("tpl-default");
       });
 
-      it("an explicit ingest-only pick is preserved (not overridden by the default)", () => {
-        expect(seedRecordingBlueprint(RECORDING_INGEST_ONLY, "tpl-default")).toBe(
-          RECORDING_INGEST_ONLY,
-        );
-      });
-
-      it("no surface pick falls to the workspace default (chat dock / landing)", () => {
-        expect(seedRecordingBlueprint(undefined, "tpl-default")).toBe("tpl-default");
-      });
-
-      it("an UNSET surface pick also falls to the workspace default", () => {
-        expect(seedRecordingBlueprint(RECORDING_UNSET, "tpl-default")).toBe("tpl-default");
-      });
-
-      it("no pick and no default leaves the picker UNSET (prompt a choice)", () => {
-        expect(seedRecordingBlueprint(undefined, null)).toBe(RECORDING_UNSET);
+      it("leaves the picker UNSET without a default so the user must choose", () => {
+        expect(seedRecordingBlueprint(null)).toBe(RECORDING_UNSET);
       });
     });
   });

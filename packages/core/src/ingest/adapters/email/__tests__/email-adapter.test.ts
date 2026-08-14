@@ -79,6 +79,7 @@ describe('[COMP:brain/source-adapters/email] Email ingest adapter', () => {
     it('gate_match keys off the webhook sender-gate verdict', () => {
       const gm = emailFilterImplementations.gate_match
       expect(gm(event({ gate: 'allowlisted' }), { values: ['allowlisted'] })).toBe(true)
+      expect(gm(event({ gate: 'external_guest' }), { values: ['allowlisted'] })).toBe(false)
       expect(gm(event({ gate: 'stranger' }), { values: ['allowlisted'] })).toBe(false)
       expect(gm(event({}), { values: ['allowlisted'] })).toBe(false)
       expect(gm(event({ gate: 'allowlisted' }), {})).toBe(false)

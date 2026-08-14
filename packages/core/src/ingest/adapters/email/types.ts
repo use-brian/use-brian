@@ -40,7 +40,7 @@ export type EmailMessageInput = {
    * `gate_match` rules key off it (realtime for allowlisted senders is the
    * seeded default).
    */
-  gate: 'allowlisted' | 'stranger' | 'noreply' | 'at_cap' | 'rate_capped'
+  gate: 'allowlisted' | 'external_guest' | 'stranger' | 'noreply' | 'at_cap' | 'rate_capped'
 }
 
 /**

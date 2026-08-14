@@ -2735,12 +2735,23 @@ button.doc-comment-card:hover {
 /* Office Document is a semantic ProseMirror projection of canonical page
    settings. The outer scroller owns overflow; every section stays reachable
    on phone without shrinking the canonical printable width. */
+.office-document-stage {
+  box-sizing: border-box;
+  min-width: 100%;
+  width: max-content;
+}
 .office-document-prosemirror {
   display: flex;
+  width: 100%;
   min-width: min-content;
   flex-direction: column;
   align-items: center;
   gap: 1.25rem;
+}
+.office-document-prosemirror:focus-visible,
+.office-document-prosemirror:focus {
+  outline: none !important;
+  box-shadow: none !important;
 }
 .office-document-section {
   box-sizing: border-box;
@@ -2750,8 +2761,9 @@ button.doc-comment-card:hover {
   min-height: var(--office-page-height, 792pt);
   padding: var(--office-margin-top, 72pt) var(--office-margin-right, 72pt) var(--office-margin-bottom, 72pt) var(--office-margin-left, 72pt);
   background: var(--background);
+  border: 1px solid color-mix(in srgb, var(--border) 88%, var(--foreground) 12%);
   color: var(--foreground);
-  box-shadow: 0 1px 4px rgb(0 0 0 / 0.16);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.12), 0 8px 24px rgb(0 0 0 / 0.10);
 }
 .office-document-header,
 .office-document-footer {
@@ -2759,7 +2771,15 @@ button.doc-comment-card:hover {
   color: var(--muted-foreground);
   outline-offset: 3px;
 }
-.office-document-header { background-position: left top; background-repeat: no-repeat; }
+.office-document-header {
+  background-position: left top;
+  background-repeat: no-repeat;
+}
+.office-document-header[data-office-header-image="true"] {
+  min-height: max(1.5rem, var(--office-header-image-height));
+  padding-inline-start: calc(var(--office-header-image-width) + 8pt);
+  background-size: var(--office-header-image-width) var(--office-header-image-height);
+}
 .office-document-section[data-header-alignment="center"] .office-document-header,
 .office-document-section[data-footer-alignment="center"] .office-document-footer { text-align: center; }
 .office-document-section[data-header-alignment="end"] .office-document-header,
@@ -2775,6 +2795,23 @@ button.doc-comment-card:hover {
 .office-document-section { counter-increment: office-page; }
 .office-document-body { min-width: 0; }
 .office-document-body > * + * { margin-top: 0.65rem; }
+.office-document-page-start {
+  position: relative;
+  margin-top: calc(var(--office-margin-bottom, 72pt) + 1.5rem + var(--office-margin-top, 72pt)) !important;
+}
+.office-document-page-start::before {
+  position: absolute;
+  top: calc(-1 * (var(--office-margin-top, 72pt) + 1.5rem));
+  right: calc(-1 * var(--office-margin-right, 72pt) - 1px);
+  left: calc(-1 * var(--office-margin-left, 72pt) - 1px);
+  height: 1.5rem;
+  border-top: 1px solid color-mix(in srgb, var(--border) 88%, var(--foreground) 12%);
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 88%, var(--foreground) 12%);
+  background: var(--muted);
+  box-shadow: 0 -6px 16px rgb(0 0 0 / 0.07), 0 6px 16px rgb(0 0 0 / 0.07);
+  content: "";
+  pointer-events: none;
+}
 .office-document-prosemirror p { white-space: pre-wrap; }
 .office-document-prosemirror h1 { font-size: 2rem; font-weight: 700; }
 .office-document-prosemirror h2 { font-size: 1.5rem; font-weight: 650; }
@@ -2799,7 +2836,7 @@ button.doc-comment-card:hover {
 .office-document-suggestion { background: color-mix(in srgb, #22c55e 24%, transparent); border-bottom: 2px solid #15803d; text-decoration: underline; }
 .office-document-suggestion-conflicted { background: color-mix(in srgb, #f97316 24%, transparent); border-bottom-color: #c2410c; text-decoration-style: wavy; }
 @media (max-width: 639px) {
-  .office-document-section { box-shadow: none; }
+  .office-document-section { box-shadow: 0 1px 3px rgb(0 0 0 / 0.14); }
 }
 @media (prefers-reduced-motion: reduce) {
   [data-document-toolbar-surface], [data-document-find-replace], [data-document-outline], [data-document-word-count] { animation: none !important; transition: none !important; }

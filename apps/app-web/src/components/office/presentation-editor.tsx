@@ -1,7 +1,7 @@
 "use client";
 
 /** Adaptive slide and multi-object editing over canonical commands. [COMP:app-web/office-presentation-editor] */
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { ChevronDown, ChevronUp, Copy, ImagePlus, MoreHorizontal, Plus, Shapes, Table2, Trash2, Type, ChartColumn, Workflow } from "lucide-react";
 import {
   arrangePresentationObjects,
@@ -48,6 +48,27 @@ import { PresentationSlideVisual } from "./presentation-slide-visual";
 
 type Geometry = PresentationObject["geometry"];
 type Marquee = { startX: number; startY: number; x: number; y: number; width: number; height: number; baseIds: string[] };
+type RailResize = { pointerId: number; startX: number; startWidth: number };
+
+const PRESENTATION_SLIDE_RAIL_MIN_WIDTH = 112;
+const PRESENTATION_SLIDE_RAIL_DEFAULT_WIDTH = 160;
+const PRESENTATION_SLIDE_RAIL_MAX_WIDTH = 360;
+const PRESENTATION_SLIDE_RAIL_KEYBOARD_STEP = 16;
+
+function clampPresentationSlideRailWidth(width: number): number {
+  return Math.max(PRESENTATION_SLIDE_RAIL_MIN_WIDTH, Math.min(PRESENTATION_SLIDE_RAIL_MAX_WIDTH, Math.round(width)));
+}
+
+function presentationSlideDropIndex(clientY: number, bounds: Array<{ top: number; height: number }>): number {
+  if (!bounds.length) return 0;
+  let nearest = 0;
+  let distance = Number.POSITIVE_INFINITY;
+  bounds.forEach((bound, index) => {
+    const candidate = Math.abs(clientY - (bound.top + bound.height / 2));
+    if (candidate < distance) { distance = candidate; nearest = index; }
+  });
+  return nearest;
+}
 
 function commandTargetIsTextInput(target: EventTarget | null): boolean {
   return target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLElement && target.isContentEditable;
@@ -58,6 +79,7 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
   const canChange = role === "edit" || role === "comment" && suggestMode;
   const rootRef = useRef<HTMLDivElement | null>(null);
   const railRef = useRef<HTMLElement | null>(null);
+  const railResizeRef = useRef<RailResize | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const [slideId, setSlideId] = useState(snapshot.slides[0].id);
   const [selectedSlideIds, setSelectedSlideIds] = useState<string[]>([snapshot.slides[0].id]);
@@ -67,6 +89,8 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
   const [marquee, setMarquee] = useState<Marquee | null>(null);
   const [dragSlideId, setDragSlideId] = useState<string | null>(null);
   const [dragSlideIndex, setDragSlideIndex] = useState<number | null>(null);
+  const [railWidth, setRailWidth] = useState(PRESENTATION_SLIDE_RAIL_DEFAULT_WIDTH);
+  const [railResizing, setRailResizing] = useState(false);
   const [dataDialog, setDataDialog] = useState<"table" | "chart" | null>(null);
   const [imageBusy, setImageBusy] = useState(false);
   const [imageError, setImageError] = useState("");
@@ -394,50 +418,116 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
     setMarquee(null);
   }
 
-  function hoverSlide(index: number) {
-    if (!dragSlideId) return;
-    setDragSlideIndex(index);
+  function updateSlideDrag(event: ReactPointerEvent<HTMLElement>) {
+    if (!dragSlideId || !railRef.current) return;
+    const thumbnails = [...railRef.current.querySelectorAll<HTMLElement>("[data-slide-thumbnail]")];
+    setDragSlideIndex(presentationSlideDropIndex(event.clientY, thumbnails.map((thumbnail) => {
+      const rect = thumbnail.getBoundingClientRect();
+      return { top: rect.top, height: rect.height };
+    })));
+    const rect = railRef.current.getBoundingClientRect();
+    if (event.clientY < rect.top + 32) railRef.current.scrollTop -= 16;
+    if (event.clientY > rect.bottom - 32) railRef.current.scrollTop += 16;
   }
 
-  function finishSlideDrag() {
-    if (dragSlideId && dragSlideIndex !== null) emit(reorderSlideCommand(snapshot.artifactId, baseVersion, dragSlideId, dragSlideIndex));
+  function finishSlideDrag(event: ReactPointerEvent<HTMLElement>) {
+    const sourceIndex = dragSlideId ? snapshot.slides.findIndex((item) => item.id === dragSlideId) : -1;
+    if (dragSlideId && dragSlideIndex !== null && sourceIndex >= 0 && sourceIndex !== dragSlideIndex) emit(reorderSlideCommand(snapshot.artifactId, baseVersion, dragSlideId, dragSlideIndex));
+    const captureTarget = event.target as HTMLElement;
+    if (captureTarget.hasPointerCapture?.(event.pointerId)) captureTarget.releasePointerCapture?.(event.pointerId);
     setDragSlideId(null);
     setDragSlideIndex(null);
   }
 
+  function cancelSlideDrag() {
+    setDragSlideId(null);
+    setDragSlideIndex(null);
+  }
+
+  function startRailResize(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) return;
+    railResizeRef.current = { pointerId: event.pointerId, startX: event.clientX, startWidth: railWidth };
+    setRailResizing(true);
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    event.preventDefault();
+  }
+
+  function updateRailResize(event: ReactPointerEvent<HTMLDivElement>) {
+    const resize = railResizeRef.current;
+    if (!resize || resize.pointerId !== event.pointerId) return;
+    setRailWidth(clampPresentationSlideRailWidth(resize.startWidth + event.clientX - resize.startX));
+  }
+
+  function finishRailResize(event: ReactPointerEvent<HTMLDivElement>) {
+    const resize = railResizeRef.current;
+    if (!resize || resize.pointerId !== event.pointerId) return;
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) event.currentTarget.releasePointerCapture?.(event.pointerId);
+    railResizeRef.current = null;
+    setRailResizing(false);
+  }
+
+  function resizeRailByKeyboard(event: ReactKeyboardEvent<HTMLDivElement>) {
+    let next: number | null = null;
+    if (event.key === "ArrowLeft") next = railWidth - PRESENTATION_SLIDE_RAIL_KEYBOARD_STEP;
+    if (event.key === "ArrowRight") next = railWidth + PRESENTATION_SLIDE_RAIL_KEYBOARD_STEP;
+    if (event.key === "Home") next = PRESENTATION_SLIDE_RAIL_MIN_WIDTH;
+    if (event.key === "End") next = PRESENTATION_SLIDE_RAIL_MAX_WIDTH;
+    if (next === null) return;
+    event.preventDefault();
+    setRailWidth(clampPresentationSlideRailWidth(next));
+  }
+
   return (
-    <div ref={rootRef} className="grid min-h-0 flex-1 grid-cols-[6.5rem_minmax(0,1fr)] lg:grid-cols-[10rem_minmax(0,1fr)]" data-office-editor="presentation" data-properties-open={primary ? "true" : "false"} tabIndex={-1}>
-      <nav ref={railRef} className="overflow-y-auto border-r bg-muted/30 p-2" aria-label={t.slideRail} onPointerMove={(event) => { if (!dragSlideId || !railRef.current) return; const rect = railRef.current.getBoundingClientRect(); if (event.clientY < rect.top + 32) railRef.current.scrollTop -= 16; if (event.clientY > rect.bottom - 32) railRef.current.scrollTop += 16; }} onPointerUp={finishSlideDrag}>
-        {snapshot.slides.map((item, index) => <div key={item.id} data-slide-thumbnail="true" data-slide-insertion={dragSlideIndex === index ? "before" : undefined} style={{ aspectRatio: slideAspectRatio }} className={cn("relative mb-2 w-full overflow-hidden rounded border bg-white text-slate-900", selectedSlideIds.includes(item.id) && "ring-2 ring-primary", dragSlideIndex === index && "border-t-4 border-t-primary")} onPointerEnter={() => hoverSlide(index)}>
+    <div ref={rootRef} className={cn("grid min-h-0 flex-1 grid-cols-[6.5rem_0_minmax(0,1fr)] md:grid-cols-[var(--presentation-slide-rail-width)_0.5rem_minmax(0,1fr)]", railResizing && "select-none")} style={{ "--presentation-slide-rail-width": `${railWidth}px` } as CSSProperties} data-office-editor="presentation" data-properties-open={primary ? "true" : "false"} tabIndex={-1}>
+      <nav ref={railRef} data-slide-rail="true" className="overflow-y-auto border-r bg-muted/30 p-2 md:border-r-0" aria-label={t.slideRail} onPointerMove={updateSlideDrag} onPointerUp={finishSlideDrag} onPointerCancel={cancelSlideDrag}>
+        {snapshot.slides.map((item, index) => {
+          const sourceIndex = dragSlideId ? snapshot.slides.findIndex((candidate) => candidate.id === dragSlideId) : -1;
+          const insertion = dragSlideIndex === index && sourceIndex !== index ? index < sourceIndex ? "before" : "after" : undefined;
+          return <div key={item.id} data-slide-thumbnail="true" data-slide-index={index} data-slide-insertion={insertion} data-slide-dragging={dragSlideId === item.id ? "true" : undefined} style={{ aspectRatio: slideAspectRatio }} className={cn("relative mb-2 w-full overflow-hidden rounded border bg-white text-slate-900 transition-opacity", selectedSlideIds.includes(item.id) && "ring-2 ring-primary", dragSlideId === item.id && "opacity-55")}>
           <PresentationSlideVisual artifactId={snapshot.artifactId} slide={item} slideSize={snapshot.slideSize} className="pointer-events-none h-full w-full" />
           <span aria-hidden className="absolute left-1 top-1 z-20 rounded bg-background/80 px-1 text-[9px] leading-4 text-foreground shadow-sm">{index + 1}</span>
-          <button type="button" aria-label={`${index + 1}: ${item.title}`} aria-pressed={selectedSlideIds.includes(item.id)} onPointerDown={(event) => { if (event.button !== 0) return; selectSlide(item.id, event.shiftKey); if (!event.shiftKey) { setDragSlideId(item.id); setDragSlideIndex(index); event.currentTarget.setPointerCapture?.(event.pointerId); } }} onPointerUp={finishSlideDrag} className="absolute inset-0 z-30"><span className="sr-only">{item.title}</span></button>
-        </div>)}
+          {insertion ? <span aria-hidden data-slide-drop-indicator={insertion} className={cn("pointer-events-none absolute inset-x-0 z-40 h-1 bg-primary shadow-[0_0_0_1px_hsl(var(--background))]", insertion === "before" ? "top-0" : "bottom-0")} /> : null}
+          <button type="button" aria-label={`${index + 1}: ${item.title}`} aria-pressed={selectedSlideIds.includes(item.id)} onPointerDown={(event) => { if (event.button !== 0) return; selectSlide(item.id, event.shiftKey); if (!event.shiftKey) { setDragSlideId(item.id); setDragSlideIndex(index); event.currentTarget.setPointerCapture?.(event.pointerId); event.preventDefault(); } }} className="absolute inset-0 z-30 cursor-grab touch-none active:cursor-grabbing"><span className="sr-only">{item.title}</span></button>
+        </div>;
+        })}
         <button type="button" onClick={addSlide} disabled={!canChange} className="flex w-full items-center justify-center gap-1 rounded border border-dashed p-2 text-xs disabled:opacity-40"><Plus className="size-3" />{t.newSlide}</button>
       </nav>
+      <div role="separator" aria-label={t.resizeSlideRail} title={t.resizeSlideRail} aria-orientation="vertical" aria-valuemin={PRESENTATION_SLIDE_RAIL_MIN_WIDTH} aria-valuemax={PRESENTATION_SLIDE_RAIL_MAX_WIDTH} aria-valuenow={railWidth} tabIndex={0} data-slide-rail-resizer="true" data-resizing={railResizing ? "true" : "false"} onPointerDown={startRailResize} onPointerMove={updateRailResize} onPointerUp={finishRailResize} onPointerCancel={finishRailResize} onKeyDown={resizeRailByKeyboard} className="group hidden cursor-col-resize touch-none items-center justify-center border-r bg-muted/20 outline-none hover:bg-primary/10 focus-visible:bg-primary/10 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary md:flex">
+        <span aria-hidden className="h-12 w-0.5 rounded-full bg-border transition-colors group-hover:bg-primary group-focus-visible:bg-primary" />
+      </div>
       <div className="flex min-h-0 flex-col overflow-auto bg-muted/40">
-        <div className="flex flex-wrap items-center gap-1 border-b bg-background p-2" role="toolbar" aria-label={t.editorToolbar}>
-          <button type="button" onClick={addText} disabled={!canChange} className="inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs hover:bg-muted disabled:opacity-40"><Type className="size-4" />{t.addText}</button>
-          <DropdownMenu><DropdownMenuTrigger render={<button type="button" disabled={!canChange} className="inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs hover:bg-muted disabled:opacity-40"><Shapes className="size-4" />{t.addShape}</button>} /><DropdownMenuContent align="start">{(["rectangle", "roundedRectangle", "ellipse", "triangle", "line"] as const).map((shape) => <DropdownMenuItem key={shape} onClick={() => addShape(shape)}>{t[shape]}</DropdownMenuItem>)}</DropdownMenuContent></DropdownMenu>
-          <DropdownMenu><DropdownMenuTrigger render={<button type="button" disabled={!canChange} className="inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs hover:bg-muted disabled:opacity-40"><Workflow className="size-4" />{t.addConnector}</button>} /><DropdownMenuContent align="start"><DropdownMenuItem onClick={() => addConnector("straight")}>{t.straightConnector}</DropdownMenuItem><DropdownMenuItem onClick={() => addConnector("elbow")}>{t.elbowConnector}</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
-          <button type="button" onClick={() => setDataDialog("table")} disabled={!canChange} className="inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs hover:bg-muted disabled:opacity-40"><Table2 className="size-4" />{primary?.kind === "table" ? t.editTable : t.insertTable}</button>
-          <button type="button" onClick={() => setDataDialog("chart")} disabled={!canChange} className="inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs hover:bg-muted disabled:opacity-40"><ChartColumn className="size-4" />{primary?.kind === "chart" ? t.editChart : t.insertChart}</button>
-          <input ref={imageInputRef} type="file" accept="image/png,image/jpeg" className="sr-only" aria-label={t.insertPresentationImage} onChange={(event) => { const file = event.target.files?.[0]; if (file) void addImage(file); }} />
-          <button type="button" onClick={() => imageInputRef.current?.click()} disabled={!canChange || imageBusy} className="inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs hover:bg-muted disabled:opacity-40"><ImagePlus className="size-4" />{imageBusy ? t.uploadingImage : t.insertPresentationImage}</button>
-          <button type="button" aria-label={t.moveSlideUp} disabled={!canChange || snapshot.slides.indexOf(slide) === 0} onClick={() => emit(reorderSlideCommand(snapshot.artifactId, baseVersion, slide.id, Math.max(0, snapshot.slides.indexOf(slide) - 1)))} className="rounded p-2 disabled:opacity-30"><ChevronUp className="size-4" /></button>
-          <button type="button" aria-label={t.moveSlideDown} disabled={!canChange || snapshot.slides.indexOf(slide) === snapshot.slides.length - 1} onClick={() => emit(reorderSlideCommand(snapshot.artifactId, baseVersion, slide.id, snapshot.slides.indexOf(slide) + 1))} className="rounded p-2 disabled:opacity-30"><ChevronDown className="size-4" /></button>
-          <button type="button" onClick={duplicateSlide} disabled={!canChange} className="inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs hover:bg-muted disabled:opacity-40"><Copy className="size-3.5" />{t.duplicateSlide}</button>
-          <button type="button" onClick={() => void deleteSelectedSlides()} disabled={!canChange || selectedSlideIds.length >= snapshot.slides.length} title={selectedSlideIds.length >= snapshot.slides.length ? t.cannotDeleteFinalSlide : undefined} className="rounded p-2 text-destructive hover:bg-destructive/10 disabled:opacity-30" aria-label={t.deleteSlide}><Trash2 className="size-4" /></button>
-          {selectedObjects.length ? <DropdownMenu><DropdownMenuTrigger render={<button type="button" className="inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs hover:bg-muted"><MoreHorizontal className="size-4" />{t.arrange}</button>} /><DropdownMenuContent align="start">
-            <DropdownMenuItem disabled={selectionHasLocked} onClick={() => reorderObject("bringToFront")}>{t.bringToFront}</DropdownMenuItem><DropdownMenuItem disabled={selectionHasLocked} onClick={() => reorderObject("bringForward")}>{t.bringForward}</DropdownMenuItem><DropdownMenuItem disabled={selectionHasLocked} onClick={() => reorderObject("sendBackward")}>{t.sendBackward}</DropdownMenuItem><DropdownMenuItem disabled={selectionHasLocked} onClick={() => reorderObject("sendToBack")}>{t.sendToBack}</DropdownMenuItem><DropdownMenuSeparator />
-            {(["alignLeft", "alignCenter", "alignRight", "alignTop", "alignMiddle", "alignBottom", "distributeHorizontal", "distributeVertical", "centerOnSlide"] as const).map((operation) => <DropdownMenuItem key={operation} disabled={selectionHasLocked || operation.startsWith("distribute") && selectedObjects.length < 3} onClick={() => arrange(operation)}>{t[operation]}</DropdownMenuItem>)}
-          </DropdownMenuContent></DropdownMenu> : null}
+        <div className="flex flex-wrap items-center gap-2 border-b bg-background p-1.5" role="toolbar" aria-label={t.editorToolbar}>
+          <div role="group" aria-label={t.insert} data-toolbar-group="insert" className="flex max-w-full flex-wrap items-center gap-0.5 rounded-md border bg-muted/20 p-1">
+            <strong className="shrink-0 px-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{t.insert}</strong>
+            <button type="button" onClick={addText} disabled={!canChange} className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-1.5 text-xs hover:bg-muted disabled:opacity-40"><Type className="size-4" />{t.addText}</button>
+            <DropdownMenu><DropdownMenuTrigger render={<button type="button" disabled={!canChange} className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-1.5 text-xs hover:bg-muted disabled:opacity-40"><Shapes className="size-4" />{t.addShape}</button>} /><DropdownMenuContent align="start">{(["rectangle", "roundedRectangle", "ellipse", "triangle", "line"] as const).map((shape) => <DropdownMenuItem key={shape} onClick={() => addShape(shape)}>{t[shape]}</DropdownMenuItem>)}</DropdownMenuContent></DropdownMenu>
+            <DropdownMenu><DropdownMenuTrigger render={<button type="button" disabled={!canChange} className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-1.5 text-xs hover:bg-muted disabled:opacity-40"><Workflow className="size-4" />{t.addConnector}</button>} /><DropdownMenuContent align="start"><DropdownMenuItem onClick={() => addConnector("straight")}>{t.straightConnector}</DropdownMenuItem><DropdownMenuItem onClick={() => addConnector("elbow")}>{t.elbowConnector}</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
+            <button type="button" onClick={() => setDataDialog("table")} disabled={!canChange} className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-1.5 text-xs hover:bg-muted disabled:opacity-40"><Table2 className="size-4" />{primary?.kind === "table" ? t.editTable : t.insertTable}</button>
+            <button type="button" onClick={() => setDataDialog("chart")} disabled={!canChange} className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-1.5 text-xs hover:bg-muted disabled:opacity-40"><ChartColumn className="size-4" />{primary?.kind === "chart" ? t.editChart : t.insertChart}</button>
+            <input ref={imageInputRef} type="file" accept="image/png,image/jpeg" className="sr-only" aria-label={t.insertPresentationImage} onChange={(event) => { const file = event.target.files?.[0]; if (file) void addImage(file); }} />
+            <button type="button" onClick={() => imageInputRef.current?.click()} disabled={!canChange || imageBusy} className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-1.5 text-xs hover:bg-muted disabled:opacity-40"><ImagePlus className="size-4" />{imageBusy ? t.uploadingImage : t.insertPresentationImage}</button>
+          </div>
+          <div role="group" aria-label={t.slideRail} data-toolbar-group="slides" className="flex max-w-full flex-wrap items-center gap-0.5 rounded-md border bg-muted/20 p-1">
+            <strong className="shrink-0 px-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{t.slideRail}</strong>
+            <button type="button" aria-label={t.moveSlideUp} title={t.moveSlideUp} disabled={!canChange || snapshot.slides.indexOf(slide) === 0} onClick={() => emit(reorderSlideCommand(snapshot.artifactId, baseVersion, slide.id, Math.max(0, snapshot.slides.indexOf(slide) - 1)))} className="inline-flex shrink-0 items-center gap-1 rounded px-2 py-1.5 text-xs hover:bg-muted disabled:opacity-30"><ChevronUp className="size-3.5" />{t.moveSlideUp}</button>
+            <button type="button" aria-label={t.moveSlideDown} title={t.moveSlideDown} disabled={!canChange || snapshot.slides.indexOf(slide) === snapshot.slides.length - 1} onClick={() => emit(reorderSlideCommand(snapshot.artifactId, baseVersion, slide.id, snapshot.slides.indexOf(slide) + 1))} className="inline-flex shrink-0 items-center gap-1 rounded px-2 py-1.5 text-xs hover:bg-muted disabled:opacity-30"><ChevronDown className="size-3.5" />{t.moveSlideDown}</button>
+            <button type="button" onClick={duplicateSlide} disabled={!canChange} className="inline-flex shrink-0 items-center gap-1 rounded px-2 py-1.5 text-xs hover:bg-muted disabled:opacity-40"><Copy className="size-3.5" />{t.duplicateSlide}</button>
+            <button type="button" onClick={() => void deleteSelectedSlides()} disabled={!canChange || selectedSlideIds.length >= snapshot.slides.length} title={selectedSlideIds.length >= snapshot.slides.length ? t.cannotDeleteFinalSlide : t.deleteSlide} className="inline-flex shrink-0 items-center gap-1 rounded px-2 py-1.5 text-xs text-destructive hover:bg-destructive/10 disabled:opacity-30" aria-label={t.deleteSlide}><Trash2 className="size-3.5" />{t.deleteSlide}</button>
+          </div>
+          {selectedObjects.length ? <div role="group" aria-label={t.objectActions} data-toolbar-group="object" className="flex items-center gap-1 rounded-md border bg-muted/20 p-1">
+            <strong className="shrink-0 px-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{t.objectActions}</strong>
+            <DropdownMenu><DropdownMenuTrigger render={<button type="button" className="inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs hover:bg-muted"><MoreHorizontal className="size-4" />{t.arrange}</button>} /><DropdownMenuContent align="start">
+              <DropdownMenuItem disabled={selectionHasLocked} onClick={() => reorderObject("bringToFront")}>{t.bringToFront}</DropdownMenuItem><DropdownMenuItem disabled={selectionHasLocked} onClick={() => reorderObject("bringForward")}>{t.bringForward}</DropdownMenuItem><DropdownMenuItem disabled={selectionHasLocked} onClick={() => reorderObject("sendBackward")}>{t.sendBackward}</DropdownMenuItem><DropdownMenuItem disabled={selectionHasLocked} onClick={() => reorderObject("sendToBack")}>{t.sendToBack}</DropdownMenuItem><DropdownMenuSeparator />
+              {(["alignLeft", "alignCenter", "alignRight", "alignTop", "alignMiddle", "alignBottom", "distributeHorizontal", "distributeVertical", "centerOnSlide"] as const).map((operation) => <DropdownMenuItem key={operation} disabled={selectionHasLocked || operation.startsWith("distribute") && selectedObjects.length < 3} onClick={() => arrange(operation)}>{t[operation]}</DropdownMenuItem>)}
+            </DropdownMenuContent></DropdownMenu>
+          </div> : null}
           <span className="ml-auto text-xs text-muted-foreground" aria-live="polite">{selectedObjects.length ? t.objectsSelected.replace("{count}", String(selectedObjects.length)) : t.slideSelected.replace("{slide}", slide.title)}</span>
           {suggestMode ? <span className="rounded-full bg-amber-100 px-2 py-1 text-xs text-amber-900">{t.suggesting}</span> : null}
         </div>
         {imageError ? <p role="alert" className="border-b bg-destructive/5 px-3 py-2 text-xs text-destructive">{imageError}</p> : null}
         {selectedObjects.length ? <PresentationFormattingToolbar objects={selectedObjects} disabled={!canChange || selectionHasLocked} onTextFormat={formatSelectedText} onProperty={formatSelectedProperty} /> : null}
         {primary ? <div role="toolbar" aria-label={t.accessibilityControls} className="flex flex-wrap items-center gap-2 border-b bg-background px-2 py-1.5">
+          <strong className="shrink-0 text-xs font-semibold">{t.accessibilityControls}</strong>
           {primary.kind === "image" ? <label className="flex items-center gap-1 text-xs"><Checkbox checked={primary.decorative} disabled={!canChange || selectionHasLocked} onCheckedChange={(checked) => updateAccessibility("decorative", checked)} aria-label={t.decorativeImage} />{t.decorativeImage}</label> : null}
           {(primary.kind === "image" && !primary.decorative) || primary.kind === "shape" || primary.kind === "chart" ? <label className="flex items-center gap-1 text-xs">{t.altText}<input aria-label={t.altText} value={primary.altText ?? ""} disabled={!canChange || selectionHasLocked} onChange={(event) => updateAccessibility("altText", event.target.value)} className="h-7 min-w-48 rounded border px-2" /></label> : null}
           <button type="button" disabled={!canChange || Boolean(readingOrderDisabledReason(-1))} title={readingOrderDisabledReason(-1)} onClick={() => moveReadingOrder(-1)} className="rounded px-2 py-1 text-xs disabled:opacity-40">{t.readingOrderEarlier}</button>

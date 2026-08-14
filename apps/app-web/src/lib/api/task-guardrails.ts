@@ -7,6 +7,7 @@
  */
 
 import { authFetch } from "@/lib/auth-fetch";
+import type { TaskRow } from "@/lib/api/tasks";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -143,7 +144,7 @@ export async function acceptTaskCandidate(
   workspaceId: string,
   candidateId: string,
   opts: { title?: string; always?: boolean } = {},
-): Promise<{ allowRuleId: string | null }> {
+): Promise<{ task: TaskRow; allowRuleId: string | null }> {
   const res = await authFetch(
     `${API_URL}/api/task-guardrails/${workspaceId}/candidates/${candidateId}/accept`,
     {
@@ -155,11 +156,11 @@ export async function acceptTaskCandidate(
       }),
     },
   );
-  const body = await json<{ allowRuleId?: string | null }>(
+  const body = await json<{ task: TaskRow; allowRuleId?: string | null }>(
     res,
     "accept suggestion",
   );
-  return { allowRuleId: body.allowRuleId ?? null };
+  return { task: body.task, allowRuleId: body.allowRuleId ?? null };
 }
 
 /**
