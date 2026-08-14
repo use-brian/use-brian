@@ -99,8 +99,17 @@ describe('[COMP:office/generation] Explicit Office revision lane', () => {
     const snapshot = documentSnapshot()
     const targetId = snapshot.sections[0].nodes[0].id
     const command = { commandId: id(90), artifactId: snapshot.artifactId, baseVersion: 1, actor: { type: 'assistant' as const, id: id(91) }, origin: 'ai' as const, kind: 'deleteObject' as const, targetId }
-    const base = { artifactId: snapshot.artifactId, baseVersion: 1, currentVersion: 2, instruction: 'Remove it', targetIds: [targetId], threadExcerpt: [], templateConstraints: [], evidencePacket: [], snapshot }
+    const base = { artifactId: snapshot.artifactId, assistantId: id(91), baseVersion: 1, currentVersion: 2, instruction: 'Remove it', targetIds: [targetId], threadExcerpt: [], templateConstraints: [], evidencePacket: [], snapshot }
     await expect(runOfficeEdit({ ...base, role: 'comment', changedObjectIdsSinceBase: [] }, async () => [command])).resolves.toMatchObject({ mode: 'proposal', reason: 'comment_role' })
     await expect(runOfficeEdit({ ...base, role: 'edit', changedObjectIdsSinceBase: [targetId] }, async () => [command])).resolves.toMatchObject({ mode: 'proposal', reason: 'overlap_conflict' })
+  })
+
+  it('applies only commands attributed to the authorized Brian assistant', async () => {
+    const snapshot = documentSnapshot()
+    const targetId = snapshot.sections[0].nodes[0].id
+    const base = { artifactId: snapshot.artifactId, assistantId: id(91), baseVersion: 1, currentVersion: 1, role: 'edit' as const, instruction: 'Remove it', targetIds: [targetId], changedObjectIdsSinceBase: [], threadExcerpt: [], templateConstraints: [], evidencePacket: [], snapshot }
+    const valid = { commandId: id(90), artifactId: snapshot.artifactId, baseVersion: 1, actor: { type: 'assistant' as const, id: id(91) }, origin: 'ai' as const, kind: 'deleteObject' as const, targetId }
+    await expect(runOfficeEdit(base, async () => [valid])).resolves.toMatchObject({ mode: 'direct', reason: 'applied', affectedObjectIds: [targetId] })
+    await expect(runOfficeEdit(base, async () => [{ ...valid, actor: { type: 'assistant' as const, id: id(92) } }])).rejects.toThrow('actor does not match')
   })
 })

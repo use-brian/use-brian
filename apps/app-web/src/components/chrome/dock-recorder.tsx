@@ -91,6 +91,7 @@ export function DockRecorderButton({
   const t = useT().recorder;
   const outsideRef = useRef(false);
   const computerAudioId = useId();
+  const livePageId = useId();
 
   // While a press-gesture is unresolved, resolve release from ANYWHERE in
   // the document — a finger sliding off the button must still stop.
@@ -108,7 +109,7 @@ export function DockRecorderButton({
 
   if (rec.phase.kind === "latched" || rec.phase.kind === "finishing") return null;
   const floating = variant === "floating";
-  const canChooseComputerAudio = rec.computerAudioAvailable;
+  const canChooseOptions = true;
   return (
     <div
       className={cn(
@@ -140,7 +141,7 @@ export function DockRecorderButton({
             "inline-flex h-full items-center justify-center",
             "transition-colors disabled:pointer-events-none disabled:opacity-50",
             floating ? "w-10" : "w-9",
-            canChooseComputerAudio
+            canChooseOptions
               ? floating
                 ? "rounded-l-full"
                 : "rounded-l-md"
@@ -157,7 +158,7 @@ export function DockRecorderButton({
           <RecordDot className="size-[18px]" />
         </button>
       </Tooltip>
-      {canChooseComputerAudio ? (
+      {canChooseOptions ? (
         <Popover>
           <PopoverTrigger
             render={
@@ -183,19 +184,37 @@ export function DockRecorderButton({
             sideOffset={6}
             className="w-[240px] p-3"
           >
-            <div className="flex items-center justify-between gap-4">
-              <label
-                htmlFor={computerAudioId}
-                className="min-w-0 cursor-pointer text-sm text-foreground"
-              >
-                {t.includeComputerAudio}
-              </label>
-              <Switch
-                id={computerAudioId}
-                checked={rec.includeComputerAudio}
-                onCheckedChange={rec.setIncludeComputerAudio}
-                aria-label={t.includeComputerAudio}
-              />
+            <div className="flex flex-col gap-3">
+              {rec.computerAudioAvailable ? (
+                <div className="flex items-center justify-between gap-4">
+                  <label
+                    htmlFor={computerAudioId}
+                    className="min-w-0 cursor-pointer text-sm text-foreground"
+                  >
+                    {t.includeComputerAudio}
+                  </label>
+                  <Switch
+                    id={computerAudioId}
+                    checked={rec.includeComputerAudio}
+                    onCheckedChange={rec.setIncludeComputerAudio}
+                    aria-label={t.includeComputerAudio}
+                  />
+                </div>
+              ) : null}
+              <div className="flex items-center justify-between gap-4">
+                <label
+                  htmlFor={livePageId}
+                  className="min-w-0 cursor-pointer text-sm text-foreground"
+                >
+                  {t.streamToPage}
+                </label>
+                <Switch
+                  id={livePageId}
+                  checked={rec.livePageEnabled}
+                  onCheckedChange={rec.setLivePageEnabled}
+                  aria-label={t.streamToPage}
+                />
+              </div>
             </div>
           </PopoverContent>
         </Popover>
@@ -227,7 +246,7 @@ export function DockRecorderStrip({ rec, className }: { rec: DockRecorderApi; cl
   const latched = rec.phase.kind === "latched";
   const label = finishing
     ? t.finishing
-    : captureLabelLane(elapsed) === "recording"
+    : rec.livePageEnabled || captureLabelLane(elapsed) === "recording"
       ? t.meetingRecording
       : t.voiceMessage;
   return (

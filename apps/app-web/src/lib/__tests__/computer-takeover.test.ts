@@ -10,9 +10,11 @@
 import { describe, expect, it } from "vitest";
 import {
   LOCAL_ONLY_KEYS,
+  canSwitchSessionBackend,
   createFrameGate,
   createWheelForwarder,
   mapClickToFrame,
+  normalizeCaptureSite,
   normalizeNavigateUrl,
   takeoverStartsPolled,
 } from "../computer-takeover";
@@ -21,6 +23,22 @@ describe("[COMP:app-web/sandbox-takeover] Backend transport", () => {
   it("starts local sessions on frame polling and keeps cloud eligible for streaming", () => {
     expect(takeoverStartsPolled("local")).toBe(true);
     expect(takeoverStartsPolled("cloud")).toBe(false);
+  });
+
+  it("offers session routing only for profile-bound non-login tasks", () => {
+    expect(canSwitchSessionBackend({ profileId: "profile-1" }, false)).toBe(true);
+    expect(canSwitchSessionBackend({ profileId: null }, false)).toBe(false);
+    expect(canSwitchSessionBackend({ profileId: "profile-1" }, true)).toBe(false);
+  });
+});
+
+describe("[COMP:app-web/sandbox-takeover] Capture site input", () => {
+  it("accepts one explicit domain and rejects URLs, paths, and hostless input", () => {
+    expect(normalizeCaptureSite(" Instagram.COM ")).toBe("instagram.com");
+    expect(normalizeCaptureSite("accounts.example.co.uk")).toBe("accounts.example.co.uk");
+    expect(normalizeCaptureSite("https://instagram.com/login")).toBeNull();
+    expect(normalizeCaptureSite("instagram.com/login")).toBeNull();
+    expect(normalizeCaptureSite("localhost")).toBeNull();
   });
 });
 

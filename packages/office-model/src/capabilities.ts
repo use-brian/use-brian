@@ -16,14 +16,18 @@ export type OfficeCapability = {
   id: string
   family: OfficeFamily | 'shared'
   disposition: OfficeCapabilityDisposition
+  browserAuthoring?: 'manual' | 'projection-only' | 'action-only'
+  assistantAuthoring?: 'command' | 'action-only'
   implementation?: OfficeCapabilityImplementation
   reason?: string
 }
 
-const implemented = (id: string, family: OfficeFamily | 'shared'): OfficeCapability => ({
+const implemented = (id: string, family: OfficeFamily | 'shared', browserAuthoring?: OfficeCapability['browserAuthoring']): OfficeCapability => ({
   id,
   family,
   disposition: 'editable',
+  browserAuthoring,
+  assistantAuthoring: browserAuthoring === 'action-only' ? 'action-only' : 'command',
   implementation: {
     schema: `model:${id}`,
     command: `command:${id}`,
@@ -48,19 +52,19 @@ const rejected = (id: string, family: OfficeFamily | 'shared', reason: string): 
 export const officeCapabilityManifest = {
   version: 1,
   capabilities: [
-    implemented('richText', 'shared'), implemented('hyperlink', 'shared'), implemented('table', 'shared'),
-    implemented('image', 'shared'), implemented('chart', 'shared'), implemented('video', 'shared'),
-    implemented('namedStyles', 'document'), implemented('heading', 'document'), implemented('nestedList', 'document'),
-    implemented('pageSetup', 'document'), implemented('pageBreak', 'document'), implemented('sectionBreak', 'document'),
-    implemented('headerFooter', 'document'), implemented('pageNumber', 'document'),
+    implemented('richText', 'shared', 'manual'), implemented('hyperlink', 'shared', 'manual'), implemented('table', 'shared', 'manual'),
+    implemented('image', 'shared', 'manual'), implemented('chart', 'shared', 'projection-only'), implemented('video', 'shared', 'projection-only'),
+    implemented('namedStyles', 'document', 'manual'), implemented('heading', 'document', 'manual'), implemented('nestedList', 'document', 'manual'),
+    implemented('pageSetup', 'document', 'manual'), implemented('pageBreak', 'document', 'manual'), implemented('sectionBreak', 'document', 'manual'),
+    implemented('headerFooter', 'document', 'manual'), implemented('pageNumber', 'document', 'manual'),
     implemented('theme', 'presentation'), implemented('master', 'presentation'), implemented('layout', 'presentation'),
     implemented('placeholder', 'presentation'), implemented('textBox', 'presentation'), implemented('basicShape', 'presentation'),
     implemented('connector', 'presentation'), implemented('zOrder', 'presentation'), implemented('speakerNotes', 'presentation'),
     implemented('slideReorder', 'presentation'),
-    implemented('worksheet', 'spreadsheet'), implemented('cellValue', 'spreadsheet'), implemented('cellFormula', 'spreadsheet'),
-    implemented('cellStyle', 'spreadsheet'), implemented('mergedCell', 'spreadsheet'), implemented('rowColumnDimensions', 'spreadsheet'),
-    implemented('freezePane', 'spreadsheet'), implemented('dataValidation', 'spreadsheet'), implemented('conditionalFormatting', 'spreadsheet'),
-    implemented('worksheetImage', 'spreadsheet'), implemented('spreadsheetPrintSetup', 'spreadsheet'), implemented('spreadsheetPdf', 'spreadsheet'),
+    implemented('worksheet', 'spreadsheet', 'manual'), implemented('cellValue', 'spreadsheet', 'manual'), implemented('cellFormula', 'spreadsheet', 'manual'),
+    implemented('cellStyle', 'spreadsheet', 'projection-only'), implemented('mergedCell', 'spreadsheet', 'projection-only'), implemented('rowColumnDimensions', 'spreadsheet', 'manual'),
+    implemented('freezePane', 'spreadsheet', 'projection-only'), implemented('dataValidation', 'spreadsheet', 'projection-only'), implemented('conditionalFormatting', 'spreadsheet', 'projection-only'),
+    implemented('worksheetImage', 'spreadsheet', 'manual'), implemented('spreadsheetPrintSetup', 'spreadsheet', 'projection-only'), implemented('spreadsheetPdf', 'spreadsheet', 'action-only'),
     rejected('macro', 'shared', 'Macros and executable package content are not supported'),
     rejected('externalRelationship', 'shared', 'External data/media relationships are not fetched or preserved'),
     rejected('animation', 'presentation', 'Animations, transitions, and timing trees are not supported'),
@@ -79,6 +83,17 @@ export const officeCapabilityManifest = {
     rejected('workbookExternalLink', 'spreadsheet', 'External workbook links and connections are not fetched or preserved'),
     rejected('pivotTable', 'spreadsheet', 'Pivot tables and data models are not supported'),
     rejected('powerQuery', 'spreadsheet', 'Power Query and external data refresh are not supported'),
+    rejected('spreadsheetChart', 'spreadsheet', 'Spreadsheet charts are rejected until the canonical workbook can preserve them'),
+    rejected('spreadsheetTable', 'spreadsheet', 'Spreadsheet tables are rejected until the canonical workbook can preserve them'),
+    rejected('spreadsheetNote', 'spreadsheet', 'Spreadsheet notes and threaded comments are not preserved'),
+    rejected('spreadsheetHyperlink', 'spreadsheet', 'Spreadsheet cell hyperlinks are not preserved'),
+    rejected('spreadsheetRichText', 'spreadsheet', 'Rich text within one spreadsheet cell is not preserved'),
+    rejected('spreadsheetFilter', 'spreadsheet', 'Filters, filter views, and slicers are not preserved'),
+    rejected('spreadsheetProtection', 'spreadsheet', 'Workbook and worksheet protection is not preserved'),
+    rejected('spreadsheetName', 'spreadsheet', 'Defined names other than the print area are not preserved'),
+    rejected('spreadsheetSparkline', 'spreadsheet', 'Sparklines are not preserved'),
+    rejected('spreadsheetArrayFormula', 'spreadsheet', 'Array and data-table formulas are not supported'),
+    rejected('spreadsheetDrawing', 'spreadsheet', 'Spreadsheet shapes and legacy drawings are not preserved'),
   ] satisfies OfficeCapability[],
 } as const
 
@@ -104,6 +119,9 @@ export function validateOfficeCapabilityManifest(): string[] {
     if (capability.disposition === 'editable') {
       const implementation = capability.implementation
       if (!implementation || Object.values(implementation).some((value) => !value)) errors.push(`Editable capability ${capability.id} is missing an implementation path`)
+      if (!capability.assistantAuthoring) errors.push(`Editable capability ${capability.id} is missing Brian-authoring status`)
+      if (capability.family === 'spreadsheet' && !capability.browserAuthoring) errors.push(`Spreadsheet capability ${capability.id} is missing browser-authoring status`)
+      if ((capability.family === 'document' || capability.family === 'shared') && !capability.browserAuthoring) errors.push(`Document-relevant capability ${capability.id} is missing browser-authoring status`)
     } else if (!capability.reason) {
       errors.push(`Rejected capability ${capability.id} has no remediation reason`)
     }

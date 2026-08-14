@@ -1155,6 +1155,14 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     }
 
     const fullSystemPrompt = `${systemPrompt}${docAnchorBlock}${priorRunMemoryBlock}${workflowGuardBlock}${recordCreationGuardBlock}${directExecutionBlock}${askPolicyDropBlock}${unavailableBlock}${skillPromptFragment}${blueprintPromptFragment}\n\n# Context\nCurrent date and time: ${currentDateTime}\nTimezone: ${calleeOwner.timezone}\n\n${memoryContext}`
+    const backgroundLlmRuntime = calleeAssistant.workspaceId && options.resolveWorkspaceCustomLlm
+      ? await options.resolveWorkspaceCustomLlm({
+          workspaceId: calleeAssistant.workspaceId,
+          requestedTier: 'standard',
+          allowDefault: true,
+          allowAnyDefault: true,
+        })
+      : null
 
     // 6. Build messages and run the query loop.
     //
@@ -1186,7 +1194,11 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         channelClass: 'cron',
         profile: 'multi-topic',
         unconditional: true,
-        provider: options.provider,
+        provider: backgroundLlmRuntime?.provider ?? options.provider,
+        model: backgroundLlmRuntime?.selector,
+        inputTokenLimit: backgroundLlmRuntime?.inputTokenLimit,
+        modelTier: 'standard',
+        providerKeySource: backgroundLlmRuntime ? 'user' : 'platform',
         systemPrompt: fullSystemPrompt,
         assistantId: params.calleeAssistantId,
         userId: calleeActorUserId,
@@ -1290,6 +1302,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         })
       : null
     const loopProvider = customLlmRuntime?.provider ?? options.provider
+    const preflightLlmRuntime = customLlmRuntime ?? backgroundLlmRuntime
 
     // Run the parallel research pass before the synthesis loop. Best-effort:
     // a fan-out failure must never fail the step — the synthesis loop still
@@ -1299,8 +1312,8 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     if (isResearchFanout) {
       try {
         const pre = await runPreflight({
-          provider: options.provider,
-          model,
+          provider: preflightLlmRuntime?.provider ?? options.provider,
+          model: preflightLlmRuntime?.selector ?? model,
           message: params.question,
           tools: finalTools,
           context: {
@@ -1339,13 +1352,15 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
               assistantId: params.calleeAssistantId,
               sessionId: session.id,
               model: pre.model,
+              modelTier: preflightLlmRuntime?.modelTier ?? tierForModel(model),
               inputTokens: pre.usage.inputTokens,
               outputTokens: pre.usage.outputTokens,
               cacheReadTokens: pre.usage.cacheReadTokens,
               cacheWriteTokens: pre.usage.cacheWriteTokens,
-              actualCostUsd: calculateCost(pre.model, pre.usage),
+              actualCostUsd: preflightLlmRuntime ? 0 : calculateCost(pre.model, pre.usage),
               source: 'overhead:splitter',
               triggerKey: 'parallel_split_classifier',
+              providerKeySource: preflightLlmRuntime ? 'user' : 'platform',
             })
             .catch((err) => console.error('[inter-assistant] splitter usage tracking failed:', err))
         }
@@ -1483,6 +1498,16 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
             params.pageAnchorId || includeWorkspaceMemories || retrievalReadCeilings
               ? (calleeAssistant.workspaceId ?? undefined)
               : undefined,
+          workerRuntime: customLlmRuntime
+            ? {
+                provider: customLlmRuntime.provider,
+                model: customLlmRuntime.selector,
+                modelTier: customLlmRuntime.modelTier,
+                providerKeySource: customLlmRuntime.providerKeySource,
+                inputTokenLimit: customLlmRuntime.inputTokenLimit,
+                maxTokens: customLlmRuntime.maxTokens,
+              }
+            : undefined,
           assistantKind: calleeAssistant.kind,
           // Read ceilings for the brain retrieval actor — the `min(member,
           // assistant)` clearance + compartment grant. Set only when retrieval
@@ -1692,6 +1717,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
                 assistantId: params.calleeAssistantId,
                 sessionId: session.id,
                 model: event.response.model,
+                modelTier: customLlmRuntime?.modelTier ?? tierForModel(model),
                 inputTokens: usage.inputTokens,
                 outputTokens: usage.outputTokens,
                 cacheReadTokens: usage.cacheReadTokens,

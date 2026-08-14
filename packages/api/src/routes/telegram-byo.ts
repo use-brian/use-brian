@@ -1709,8 +1709,15 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
           await adapter.deleteMessage?.(incoming.channelId, statusMessageId).catch(() => {})
           statusMessageId = null
         }
+        // Custom endpoints are deliberately text/tool-only until a vision
+        // capability probe exists. The pipeline's rejection is server-authored
+        // and actionable, so preserve it; masking it as a generic outage made
+        // the 2026-08-12 SDR screenshot album look like an unexplained crash.
+        // Arbitrary provider/runtime wording remains hidden.
+        const isCustomModelImageRejection = err.message ===
+          'Custom model endpoints currently support text and tools only. Remove the inline image or use the web app to choose a built-in model.'
         await adapter.sendMessage(incoming.channelId, {
-          text: err.message.includes('usage limit')
+          text: err.message.includes('usage limit') || isCustomModelImageRejection
             ? err.message
             : 'Something went wrong. Please try again.',
         })

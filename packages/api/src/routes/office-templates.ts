@@ -261,9 +261,11 @@ export function guidedTemplateSnapshot(params: { artifactId: string; workspaceId
           { id: randomUUID(), address: 'A1', valueType: 'string', value: params.title, style: { font: { family: 'Arial', sizePt: 18, bold: true, italic: false, underline: false, strike: false, color: '#131A24' } }, locked: false },
           { id: randomUUID(), address: 'A3', valueType: 'string', value: guidance, style: { font: { family: 'Arial', sizePt: 10, bold: false, italic: false, underline: false, strike: false, color: '#526577' }, alignment: { wrapText: true, textRotation: 0, indent: 0 } }, locked: false },
           ...(website ? [{ id: randomUUID(), address: 'A4', valueType: 'string' as const, value: website, style: { font: { family: 'Arial', sizePt: 9, bold: false, italic: false, underline: false, strike: false, color: '#526577' } }, locked: true }] : []),
+          { id: randomUUID(), address: 'A6', valueType: 'string', value: 'Content', style: { font: { family: 'Arial', sizePt: 10, bold: true, italic: false, underline: false, strike: false, color: '#131A24' } }, locked: true },
+          { id: randomUUID(), address: 'B6', valueType: 'string', value: '{{CONTENT}}', style: { font: { family: 'Arial', sizePt: 10, bold: false, italic: false, underline: false, strike: false, color: '#131A24' }, alignment: { wrapText: true, textRotation: 0, indent: 0 } }, locked: false },
         ],
-        columnDimensions: [{ index: 1, widthChars: 42, hidden: false }],
-        rowDimensions: [{ index: 1, heightPt: 28, hidden: false }, { index: 3, heightPt: 42, hidden: false }, ...(website ? [{ index: 4, heightPt: 18, hidden: false }] : [])],
+        columnDimensions: [{ index: 1, widthChars: 18, hidden: false }, { index: 2, widthChars: 42, hidden: false }],
+        rowDimensions: [{ index: 1, heightPt: 28, hidden: false }, { index: 3, heightPt: 42, hidden: false }, ...(website ? [{ index: 4, heightPt: 18, hidden: false }] : []), { index: 6, heightPt: 42, hidden: false }],
       }],
     }
   }

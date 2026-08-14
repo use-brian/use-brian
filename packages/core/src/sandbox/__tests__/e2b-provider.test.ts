@@ -559,6 +559,21 @@ describe('[COMP:sandbox/browser-driver] agent-browser snapshot parsing', () => {
     expect(out.nodes).toEqual([{ ref: '@e1', role: 'button', name: 'Send', disabled: true }])
   })
 
+  it('parses full static accessibility rows without making them actionable', () => {
+    const out = parseSnapshotOutput(
+      `- heading "FARE INFO" [level=2, ref=e1]\n- cell "Adult" [ref=e2]\n- text: 5.9\n- button "Show details" [ref=e3]\n`,
+      page,
+      'full',
+    )
+
+    expect(out.nodes).toEqual([
+      { role: 'heading', name: 'FARE INFO' },
+      { role: 'cell', name: 'Adult' },
+      { role: 'text', name: '5.9' },
+      { ref: '@e3', role: 'button', name: 'Show details' },
+    ])
+  })
+
   it('never throws on garbage output', () => {
     expect(parseSnapshotOutput('', page).nodes).toEqual([])
     expect(parseSnapshotOutput('{broken json', page).nodes).toEqual([])

@@ -3,6 +3,7 @@ import { exportOfficePresentation, type Message } from '@use-brian/core'
 import type { DocumentSnapshot, PresentationSnapshot, SpreadsheetSnapshot } from '@use-brian/office-model'
 import { createOfficeGenerationWorker } from '../generation-worker.js'
 import { createOfficeImportWorker } from '../import-worker.js'
+import { createOfficeRevisionWorker } from '../revision-worker.js'
 import { createOfficeService } from '../service.js'
 import { createOfficeTemplateCompileWorker } from '../template-compile-worker.js'
 import { generateDocumentFromTemplate, reviseDocumentTargets } from '../document-generation.js'
@@ -200,6 +201,22 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
     expect(modelRequests[1]?.messages?.[0]?.content).toContain('Office spreadsheet revision returned no changes')
   })
 
+  it('revises one selected worksheet image through the bounded layout contract', async () => {
+    const uid = (n: number) => `37100000-0000-4000-8000-${String(n).padStart(12, '0')}`
+    const imageId = uid(20)
+    const snapshot: SpreadsheetSnapshot = {
+      schemaVersion: 1, capabilityVersion: 1, artifactId: uid(1), workspaceId: uid(2), family: 'spreadsheet', locale: 'en-US', defaultLanguage: 'en-US', templateVersionId: null, rootId: uid(3), title: 'Invoice', resources: [{ id: uid(30), kind: 'image', hash: 'a'.repeat(64), mime: 'image/png', sensitivity: 'internal' }], accessibility: { title: 'Invoice' }, activeSheetId: uid(10), calculationMode: 'automatic',
+      worksheets: [{ id: uid(10), name: 'Invoice', visibility: 'visible', cells: [], merges: [], rowDimensions: [], columnDimensions: [], freeze: { rows: 0, columns: 0 }, images: [{ id: imageId, resourceId: uid(30), altText: 'Company logo', decorative: false, from: { row: 1, column: 1 }, to: { row: 2, column: 2 } }], validations: [], conditionalFormats: [], print: { paperSize: 'A4', orientation: 'portrait', fitToWidth: 1, fitToHeight: 1, margins: { leftIn: 0.7, rightIn: 0.7, topIn: 0.75, bottomIn: 0.75, headerIn: 0.3, footerIn: 0.3 }, horizontalCentered: false, verticalCentered: false, showGridLines: false, showHeadings: false } }],
+    }
+    const payload = JSON.stringify({ targetId: imageId, from: { row: 1, column: 1 }, to: { row: 2, column: 3 }, altText: '', decorative: true })
+    let request: { systemPrompt?: string; messages?: Message[] } | undefined
+    const provider = { async *stream(next: { systemPrompt?: string; messages?: Message[] }) { request = next; yield { type: 'message_start' as const, model: 'test' }; yield { type: 'text_delta' as const, text: payload }; yield { type: 'message_end' as const, stopReason: 'end_turn' as const, usage: { inputTokens: 1, outputTokens: 1 } } } }
+    const revised = await reviseSpreadsheetTargets({ provider: provider as never, model: 'test', snapshot, targetIds: [imageId], instruction: '@Brian make this logo twice as wide and decorative' })
+    expect(revised.worksheets[0].images[0]).toMatchObject({ to: { row: 2, column: 3 }, altText: '', decorative: true })
+    expect(request?.systemPrompt).toContain('fractional zero-based cell coordinates')
+    expect(request?.messages?.[0]?.content).not.toContain('@Brian')
+  })
+
   it('constructs and revises a presentation through admitted recipes without changing its visual system', async () => {
     const uid = (n: number) => `31000000-0000-4000-8000-${String(n).padStart(12, '0')}`
     const style = { fontFamily: 'Arial', fontSizePt: 32, bold: true, italic: false, underline: false, strike: false, color: '#111111' }
@@ -296,7 +313,7 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
       createShell: vi.fn(async () => ({ id: 'artifact-1' } as never)),
       deleteEmptyShell: vi.fn(async () => true),
       createJob: vi.fn(async () => { throw failure }),
-      getArtifact: vi.fn(), resolveAccess: vi.fn(), latestJob: vi.fn(),
+      getArtifact: vi.fn(), resolveAccess: vi.fn(), latestJob: vi.fn(), getSnapshot: vi.fn(async () => null),
     }
     const service = createOfficeService(deps)
     await expect(service.create({
@@ -312,7 +329,7 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
     const deps = {
       generationAvailable: vi.fn(() => false),
       createShell: vi.fn(), deleteEmptyShell: vi.fn(), createJob: vi.fn(),
-      getArtifact: vi.fn(), resolveAccess: vi.fn(), latestJob: vi.fn(),
+      getArtifact: vi.fn(), resolveAccess: vi.fn(), latestJob: vi.fn(), getSnapshot: vi.fn(async () => null),
     }
     const service = createOfficeService(deps as never)
     await expect(service.create({
@@ -330,7 +347,7 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
       createShell: vi.fn(async () => ({ id: 'new-shell' } as never)),
       deleteEmptyShell: vi.fn(async () => true),
       createJob: vi.fn(async () => ({ id: 'original-job', artifactId: 'original-artifact' } as never)),
-      getArtifact: vi.fn(), resolveAccess: vi.fn(), latestJob: vi.fn(),
+      getArtifact: vi.fn(), resolveAccess: vi.fn(), latestJob: vi.fn(), getSnapshot: vi.fn(async () => null),
     }
     const service = createOfficeService(deps)
     await expect(service.create({
@@ -348,6 +365,7 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
       getArtifact: vi.fn(async () => ({ id: 'artifact-1', family: 'presentation', mode: 'artifact', title: 'Company introduction', headVersion: 0, lifecycleState: 'active' } as never)),
       resolveAccess: vi.fn(async () => ({ role: 'edit' } as never)),
       latestJob: vi.fn(async () => ({ id: 'job-1', status: 'failed', stage: 'failed', errorCode: 'presentation_fit_failed', errorDetail: 'Internal fit diagnostics' } as never)),
+      getSnapshot: vi.fn(async () => null),
     }
     const service = createOfficeService(deps)
 
@@ -357,17 +375,84 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
     })
   })
 
+  it('projects bounded semantic target IDs for Brian-native revisions', async () => {
+    const snapshot = { schemaVersion: 1, capabilityVersion: 1, artifactId: 'artifact-1', workspaceId: 'workspace-1', family: 'document', locale: 'en-US', defaultLanguage: 'en-US', templateVersionId: null, rootId: 'root-1', title: 'Report', resources: [], accessibility: { title: 'Report' }, sections: [{ id: 'section-1', page: { widthPt: 612, heightPt: 792, marginTopPt: 72, marginRightPt: 72, marginBottomPt: 72, marginLeftPt: 72, orientation: 'portrait' }, header: [], footer: [], showPageNumber: true, nodes: [{ id: 'paragraph-1', kind: 'paragraph', styleName: 'Body', alignment: 'start', runs: [{ id: 'run-1', text: 'Quarterly summary', style: { fontFamily: 'Arial', fontSizePt: 11, bold: false, italic: false, underline: false, strike: false, color: '#111111' } }] }] }] } as never
+    const deps = {
+      generationAvailable: vi.fn(() => true), createShell: vi.fn(), deleteEmptyShell: vi.fn(), createJob: vi.fn(),
+      getArtifact: vi.fn(async () => ({ id: 'artifact-1', family: 'document', mode: 'artifact', title: 'Report', headVersion: 2, lifecycleState: 'active' } as never)),
+      resolveAccess: vi.fn(async () => ({ role: 'edit' } as never)), latestJob: vi.fn(async () => null),
+      getSnapshot: vi.fn(async () => ({ snapshot })),
+    }
+    const service = createOfficeService(deps)
+    await expect(service.get({ userId: 'user-1', artifactId: 'artifact-1' })).resolves.toMatchObject({
+      targets: [
+        { id: 'section-1', kind: 'section', label: 'Section 1' },
+        { id: 'paragraph-1', kind: 'paragraph', label: 'Quarterly summary', parentId: 'section-1' },
+      ],
+      targetsTruncated: false,
+    })
+  })
+
+  it('pages the bounded semantic target outline so later targets remain Brian-reachable', async () => {
+    const nodes = Array.from({ length: 1_005 }, (_, index) => ({ id: `paragraph-${index + 1}`, kind: 'paragraph', styleName: 'Body', alignment: 'start', runs: [{ id: `run-${index + 1}`, text: `Paragraph ${index + 1}`, style: { fontFamily: 'Arial', fontSizePt: 11, bold: false, italic: false, underline: false, strike: false, color: '#111111' } }] }))
+    const snapshot = { schemaVersion: 1, capabilityVersion: 1, artifactId: 'artifact-1', workspaceId: 'workspace-1', family: 'document', locale: 'en-US', defaultLanguage: 'en-US', templateVersionId: null, rootId: 'root-1', title: 'Report', resources: [], accessibility: { title: 'Report' }, sections: [{ id: 'section-1', page: { widthPt: 612, heightPt: 792, marginTopPt: 72, marginRightPt: 72, marginBottomPt: 72, marginLeftPt: 72, orientation: 'portrait' }, header: [], footer: [], showPageNumber: true, nodes }] } as never
+    const deps = {
+      generationAvailable: vi.fn(() => true), createShell: vi.fn(), deleteEmptyShell: vi.fn(), createJob: vi.fn(),
+      getArtifact: vi.fn(async () => ({ id: 'artifact-1', family: 'document', mode: 'artifact', title: 'Report', headVersion: 2, lifecycleState: 'active' } as never)),
+      resolveAccess: vi.fn(async () => ({ role: 'edit' } as never)), latestJob: vi.fn(async () => null), getSnapshot: vi.fn(async () => ({ snapshot })),
+    }
+    const service = createOfficeService(deps)
+    const first = await service.get({ userId: 'user-1', artifactId: 'artifact-1' })
+    expect(first).toMatchObject({ targetsTruncated: true, nextTargetOffset: 1_000 })
+    expect(first?.targets).toHaveLength(1_000)
+    const second = await service.get({ userId: 'user-1', artifactId: 'artifact-1', targetOffset: first?.nextTargetOffset })
+    expect(second).toMatchObject({ targetsTruncated: false })
+    expect(second?.targets?.at(-1)).toMatchObject({ id: 'paragraph-1005', label: 'Paragraph 1005' })
+  })
+
   it('wakes the durable worker after an explicit @Brian revision is admitted', async () => {
     const wakeGeneration = vi.fn()
     const deps = {
       generationAvailable: vi.fn(() => true), createShell: vi.fn(), deleteEmptyShell: vi.fn(),
       getArtifact: vi.fn(async () => ({ id: 'artifact-1', workspaceId: 'workspace-1', headVersion: 2 } as never)),
       resolveAccess: vi.fn(async () => ({ canComment: true, canEdit: true } as never)),
-      createJob: vi.fn(async () => ({ id: 'revision-job' } as never)), latestJob: vi.fn(), wakeGeneration,
+      createJob: vi.fn(async () => ({ id: 'revision-job' } as never)), latestJob: vi.fn(), getSnapshot: vi.fn(async () => null), wakeGeneration,
     }
     const service = createOfficeService(deps)
     await expect(service.revise({ userId: 'user-1', assistantId: 'assistant-1', artifactId: 'artifact-1', instruction: '@Brian shorten this', targetIds: ['target-1'], expectedVersion: 2, idempotencyKey: 'revision-12345678' })).resolves.toEqual({ jobId: 'revision-job', mode: 'direct' })
     expect(wakeGeneration).toHaveBeenCalledWith('user-1')
+  })
+
+  it('stores comment-role Brian commands as a proposal instead of committing them', async () => {
+    const uid = (n: number) => `39000000-0000-4000-8000-${String(n).padStart(12, '0')}`
+    const job = { id: uid(500), workspaceId: uid(501), artifactId: uid(502), initiatedByUserId: uid(503), assistantId: uid(504), jobKind: 'revise', status: 'queued', stage: 'queued', brief: { instruction: 'Tighten this', targetIds: [uid(505)], expectedVersion: 2 }, authorityProjection: { role: 'comment' }, templateVersionId: null, baseArtifactVersion: 2, checkpoint: {}, checkpointVersion: 0, leaseToken: null, leaseExpiresAt: null, cancelRequestedAt: null, errorCode: null, createdAt: new Date(), updatedAt: new Date() } as OfficeGenerationJobRow
+    const command = { commandId: uid(506), artifactId: job.artifactId, baseVersion: 2, actor: { type: 'assistant' as const, id: job.assistantId! }, origin: 'ai' as const, kind: 'deleteObject' as const, targetId: uid(505) }
+    const deps = {
+      claim: vi.fn(async () => job),
+      getSnapshot: vi.fn(async () => ({ snapshot: {} as never, baseVersion: 2 })),
+      revise: vi.fn(async () => ({ mode: 'proposal' as const, commands: [command], affectedObjectIds: [uid(505)] })),
+      commit: vi.fn(), propose: vi.fn(async () => undefined), appendEvent: vi.fn(async () => ({})), finish: vi.fn(async () => true),
+    }
+    await expect(createOfficeRevisionWorker(deps)(job.initiatedByUserId)).resolves.toBe(true)
+    expect(deps.propose).toHaveBeenCalledWith({ job, baseVersion: 2, commands: [command], affectedObjectIds: [uid(505)] })
+    expect(deps.commit).not.toHaveBeenCalled()
+    expect(deps.appendEvent).toHaveBeenCalledWith(expect.objectContaining({ safeNarration: 'Revision proposed' }))
+  })
+
+  it('turns a revision whose queued base advanced into a proposal', async () => {
+    const uid = (n: number) => `39100000-0000-4000-8000-${String(n).padStart(12, '0')}`
+    const job = { id: uid(500), workspaceId: uid(501), artifactId: uid(502), initiatedByUserId: uid(503), assistantId: uid(504), jobKind: 'revise', status: 'queued', stage: 'queued', brief: { instruction: 'Make this a heading', targetIds: [uid(505)], expectedVersion: 3 }, authorityProjection: { role: 'edit' }, templateVersionId: null, baseArtifactVersion: 3, checkpoint: {}, checkpointVersion: 0, leaseToken: null, leaseExpiresAt: null, cancelRequestedAt: null, errorCode: null, createdAt: new Date(), updatedAt: new Date() } as OfficeGenerationJobRow
+    const command = { commandId: uid(506), artifactId: job.artifactId, baseVersion: 4, actor: { type: 'assistant' as const, id: job.assistantId! }, origin: 'ai' as const, kind: 'setObjectProperty' as const, targetId: uid(505), path: ['styleName'], value: 'Heading' }
+    const deps = {
+      claim: vi.fn(async () => job),
+      getSnapshot: vi.fn(async () => ({ snapshot: {} as never, baseVersion: 4 })),
+      revise: vi.fn(async () => ({ mode: 'proposal' as const, commands: [command], affectedObjectIds: [uid(505)] })),
+      commit: vi.fn(), propose: vi.fn(async () => undefined), appendEvent: vi.fn(async () => ({})), finish: vi.fn(async () => true),
+    }
+    await expect(createOfficeRevisionWorker(deps)(job.initiatedByUserId)).resolves.toBe(true)
+    expect(deps.revise).toHaveBeenCalledWith(expect.objectContaining({ currentVersion: 4, versionDrifted: true }))
+    expect(deps.propose).toHaveBeenCalledWith({ job, baseVersion: 4, commands: [command], affectedObjectIds: [uid(505)] })
+    expect(deps.commit).not.toHaveBeenCalled()
   })
 
   it('claims work, persists localized events, and records a terminal failure', async () => {

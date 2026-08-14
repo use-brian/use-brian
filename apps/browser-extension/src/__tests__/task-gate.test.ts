@@ -6,6 +6,17 @@ import {
 } from '../task-gate.js'
 
 describe('[COMP:ext/agent] Per-task consent gate (P1.7)', () => {
+  it('allows the prompt layer to use pre-approval for a normal task', async () => {
+    const gate = new TaskGate({
+      prompt: async ({ allowPreApproval }) => ({
+        allowed: true,
+        tabId: allowPreApproval ? 7 : 8,
+      }),
+    })
+
+    expect(await gate.requireTab()).toBe(7)
+  })
+
   it('prompts once, then reuses consent within the idle window', async () => {
     let prompts = 0
     let now = 1_000_000
@@ -171,6 +182,23 @@ describe('[COMP:ext/agent] Per-task consent gate (P1.7)', () => {
     expect(gate.isStopped()).toBe(false)
   })
 
+  it('suppresses pre-approval after Stop until a manual Allow resumes control', async () => {
+    const preapprovalStates: boolean[] = []
+    const gate = new TaskGate({
+      prompt: async ({ allowPreApproval }) => {
+        preapprovalStates.push(allowPreApproval)
+        return { allowed: true, tabId: 5 }
+      },
+    })
+
+    await gate.requireTab()
+    gate.stop()
+    await gate.requireTab()
+
+    expect(preapprovalStates).toEqual([true, false])
+    expect(gate.isStopped()).toBe(false)
+  })
+
   it('a DECLINED prompt leaves Stop latched (declining is not a release)', async () => {
     const gate = new TaskGate({ prompt: async () => ({ allowed: false, reason: 'denied' }) })
     gate.stop()
@@ -199,6 +227,22 @@ describe('[COMP:ext/agent] Per-task consent gate (P1.7)', () => {
 
     expect(await gate.requireTab()).toBe(5)
     expect(prompts).toBe(2)
+  })
+
+  it('requires a manual Allow after the browser explicitly revokes control', async () => {
+    const preapprovalStates: boolean[] = []
+    const gate = new TaskGate({
+      prompt: async ({ allowPreApproval }) => {
+        preapprovalStates.push(allowPreApproval)
+        return { allowed: true, tabId: 5 }
+      },
+    })
+
+    await gate.requireTab()
+    gate.revokeConsent({ requireManualApproval: true })
+    await gate.requireTab()
+
+    expect(preapprovalStates).toEqual([true, false])
   })
 
   it('clears the controlled tab when it closes', async () => {

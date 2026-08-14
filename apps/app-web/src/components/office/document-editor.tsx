@@ -1,186 +1,249 @@
 "use client";
 
-/** Adaptive canonical Document editor; every mutation emits OfficeCommand. [COMP:app-web/office-document-editor] */
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
-import { Bold, Italic, List, Plus, Table2, Underline } from "lucide-react";
+/** One character-collaborative Tiptap editor for canonical Office Document. [COMP:app-web/office-document-editor] */
+import { useEffect, useMemo, useRef, useState } from "react";
+import * as Y from "yjs";
+import { EditorContent, useEditor, type Editor } from "@tiptap/react";
+import { Collaboration } from "@tiptap/extension-collaboration";
+import { CollaborationCursor } from "@tiptap/extension-collaboration-cursor";
+import type { HocuspocusProvider } from "@hocuspocus/provider";
 import {
-  officeTableCellPlacements,
-  officeTableResolvedColumnWidthsPt,
-  type DocumentFlowNode,
+  ensureDocumentFragment,
+  attachDocumentResource,
+  getDocumentFragment,
+  snapshotToYDoc,
   type DocumentSnapshot,
   type OfficeCommand,
-  type OfficeRichTextRun,
-  type OfficeTable,
-  type OfficeTableBorder,
-  type OfficeTableCell,
+  type OfficeResourceRef,
 } from "@use-brian/office-model";
-import { defaultRun, deleteCommand, insertDocumentCommand, propertyCommand, textCommand } from "@/lib/office/editor-commands";
 import { useT } from "@/lib/i18n/client";
-import { cn } from "@/lib/utils";
-import { getOfficeResourceObjectUrl } from "@/lib/office/api";
+import type { UserInfo } from "@/lib/user";
+import { admitOfficeImageResource, type OfficeCommentThread, type OfficeSuggestion } from "@/lib/office/api";
+import { officeDocumentEditorExtensions } from "./document/editor-schema";
+import { DocumentToolbar, type DocumentToolbarController } from "./document/document-toolbar";
+import { changeDocumentListLevel, convertDocumentList, insertDocumentImage, moveDocumentTableCell, toggleDocumentRunStyle, updateSelectedDocumentNode } from "./document/editor-actions";
+import { captureDocumentCommentAnchor, captureDocumentSuggestionRange, type DocumentCommentAnchor, type DocumentSuggestionRange } from "./document/comment-anchor";
+import { updateDocumentReviewDecorations } from "./document/comment-decorations";
+import { refreshDocumentPagination } from "./document/pagination-decorations";
 
-export function DocumentEditor({ snapshot, baseVersion, role, suggestMode, onCommand, onSelectTargets }: { snapshot: DocumentSnapshot; baseVersion: number; role: "view" | "comment" | "edit"; suggestMode: boolean; onCommand(command: OfficeCommand): void; onSelectTargets?(ids: string[]): void }) {
+type DocumentEditorProps = {
+  snapshot: DocumentSnapshot;
+  baseVersion: number;
+  role: "view" | "comment" | "edit";
+  suggestMode: boolean;
+  doc?: Y.Doc | null;
+  provider?: HocuspocusProvider | null;
+  currentUser?: UserInfo | null;
+  synced?: boolean;
+  onCommand(command: OfficeCommand): void;
+  onSelectTargets?(ids: string[]): void;
+  onSelectCommentAnchor?(anchor: DocumentCommentAnchor | null): void;
+  onSelectSuggestionRange?(range: DocumentSuggestionRange | null): void;
+  commentThreads?: OfficeCommentThread[];
+  suggestions?: OfficeSuggestion[];
+};
+
+const NO_COMMENT_THREADS: OfficeCommentThread[] = [];
+const NO_SUGGESTIONS: OfficeSuggestion[] = [];
+
+function collaboratorColor(id: string): string {
+  const palette = ["#2563EB", "#7C3AED", "#DB2777", "#0F766E", "#B45309", "#DC2626"];
+  let value = 0;
+  for (const character of id) value = (value * 31 + character.charCodeAt(0)) >>> 0;
+  return palette[value % palette.length];
+}
+
+export function DocumentEditor({ snapshot, role, suggestMode, doc, provider, currentUser, synced = true, onSelectTargets, onSelectCommentAnchor, onSelectSuggestionRange, commentThreads = NO_COMMENT_THREADS, suggestions = NO_SUGGESTIONS }: DocumentEditorProps) {
   const t = useT().office;
-  const canChange = role === "edit" || role === "comment" && suggestMode;
-  const section = snapshot.sections[0];
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const selected = useMemo(() => section.nodes.find((node) => node.id === selectedId), [section.nodes, selectedId]);
-  const emit = (command: OfficeCommand) => { if (canChange) onCommand(command); };
-  const select = (id: string) => { setSelectedId(id); onSelectTargets?.([id]); };
+  const localDoc = useMemo(() => snapshotToYDoc(snapshot), [snapshot.artifactId]);
+  const activeDoc = doc ?? localDoc;
+  const [fragmentReady, setFragmentReady] = useState(() => !doc);
+  const [status, setStatus] = useState<string | null>(null);
+  const toolbarRef = useRef<DocumentToolbarController | null>(null);
 
-  function add(kind: "paragraph" | "heading" | "table" | "pageBreak") {
-    const id = crypto.randomUUID();
-    const node: DocumentFlowNode = kind === "paragraph" ? { id, kind, runs: [defaultRun()], styleName: "Body", alignment: "start" }
-      : kind === "heading" ? { id, kind, level: 2, runs: [defaultRun()], styleName: "Heading 2" }
-      : kind === "table" ? { id, kind, headerRows: 1, rows: [{ id: crypto.randomUUID(), cells: [{ id: crypto.randomUUID(), runs: [defaultRun()], rowSpan: 1, colSpan: 1 }] }] }
-      : { id, kind };
-    emit(insertDocumentCommand(snapshot.artifactId, baseVersion, section.id, section.nodes.length, node));
+  useEffect(() => {
+    if (!doc) { setFragmentReady(true); return; }
+    try {
+      ensureDocumentFragment(doc);
+      setFragmentReady(true);
+    } catch {
+      setFragmentReady(false);
+    }
+  }, [doc, synced]);
+
+  const fragment = fragmentReady ? getDocumentFragment(activeDoc) : getDocumentFragment(localDoc);
+  const extensions = useMemo(() => {
+    const configured = [
+      ...officeDocumentEditorExtensions(),
+      Collaboration.configure({ fragment }),
+    ];
+    if (provider) configured.push(CollaborationCursor.configure({
+      provider,
+      user: {
+        id: currentUser?.id ?? "guest",
+        name: currentUser?.name || currentUser?.email || t.collaborator,
+        color: collaboratorColor(currentUser?.id ?? currentUser?.email ?? "guest"),
+      },
+    }));
+    return configured;
+  }, [currentUser?.email, currentUser?.id, currentUser?.name, fragment, provider, t.collaborator]);
+
+  const editable = fragmentReady && role === "edit" && !suggestMode;
+  const editor = useEditor({
+    extensions,
+    editable,
+    immediatelyRender: false,
+    editorProps: {
+      attributes: {
+        class: "office-document-prosemirror outline-none",
+        role: "textbox",
+        "aria-label": t.documentEditor,
+        "aria-multiline": "true",
+        spellcheck: "true",
+      },
+      transformPastedText: (text) => text.replace(/\r\n?/g, "\n"),
+      handlePaste: (_view, event) => {
+        const html = event.clipboardData?.getData("text/html") ?? "";
+        const plain = event.clipboardData?.getData("text/plain") ?? "";
+        if (!html) return false;
+        if (!/<(figure|iframe|svg|canvas|math|form|input|button|video|audio)\b/i.test(html)) return false;
+        event.preventDefault();
+        if (!plain.trim()) {
+          setStatus(t.pasteRefused);
+          return true;
+        }
+        editor?.commands.insertContent(plain.replace(/\r\n?/g, "\n"));
+        setStatus(t.formattingRemoved);
+        return true;
+      },
+    },
+    onSelectionUpdate: ({ editor: current }) => {
+      const ids: string[] = [];
+      for (let depth = current.state.selection.$from.depth; depth >= 0; depth -= 1) {
+        const id = current.state.selection.$from.node(depth).attrs.id;
+        if (typeof id === "string" && /^[0-9a-f-]{36}$/i.test(id)) { ids.push(id); break; }
+      }
+      onSelectTargets?.(ids);
+      onSelectCommentAnchor?.(captureDocumentCommentAnchor(current));
+      onSelectSuggestionRange?.(captureDocumentSuggestionRange(current));
+    },
+  }, [activeDoc.clientID, fragmentReady, provider]);
+
+  useEffect(() => { editor?.setEditable(editable); }, [editable, editor]);
+  useEffect(() => { if (editor) updateDocumentReviewDecorations(editor, commentThreads, suggestions); }, [commentThreads, editor, suggestions]);
+  useEffect(() => {
+    if (!editor) return;
+    const refresh = () => refreshDocumentPagination(editor);
+    refresh();
+    editor.on("update", refresh);
+    return () => { editor.off("update", refresh); };
+  }, [editor]);
+  useEffect(() => () => localDoc.destroy(), [localDoc]);
+
+  useEffect(() => {
+    if (!editor) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Tab" && editable) {
+        if (moveDocumentTableCell(editor, event.shiftKey ? -1 : 1)) {
+          event.preventDefault();
+          return;
+        }
+        if (selectedList(editor)) {
+          event.preventDefault();
+          changeDocumentListLevel(editor, event.shiftKey ? -1 : 1);
+          return;
+        }
+      }
+      if (!(event.metaKey || event.ctrlKey)) return;
+      const key = event.key.toLowerCase();
+      if (key === "f") {
+        event.preventDefault();
+        toolbarRef.current?.openFind();
+      } else if (key === "k" && !editor.state.selection.empty && editable) {
+        event.preventDefault();
+        toolbarRef.current?.editLink();
+      } else if (event.shiftKey && key === "7" && editable) {
+        event.preventDefault();
+        convertDocumentList(editor, true);
+      } else if (event.shiftKey && key === "8" && editable) {
+        event.preventDefault();
+        convertDocumentList(editor, false);
+      }
+    };
+    const element = editor.view.dom;
+    element.addEventListener("keydown", onKeyDown);
+    return () => element.removeEventListener("keydown", onKeyDown);
+  }, [editable, editor]);
+
+  useEffect(() => {
+    if (!status) return;
+    const timeout = window.setTimeout(() => setStatus(null), 4_000);
+    return () => window.clearTimeout(timeout);
+  }, [status]);
+
+  if (!fragmentReady) return <div className="m-auto text-sm text-muted-foreground" role="status">{t.editorLoading}</div>;
+
+  async function addImage(file: File, placement: "body" | "header" = "body") {
+    if (!editable || !editor) return;
+    try {
+      const uploaded = await admitOfficeImageResource(snapshot.artifactId, snapshot.workspaceId, file);
+      attachDocumentResource(activeDoc, uploaded.resource, "manual");
+      if (placement === "header") {
+        setDocumentHeaderImage(editor, {
+          resourceId: uploaded.resource.id,
+          altText: file.name.replace(/\.[^.]+$/, ""),
+          decorative: false,
+          widthPt: Math.max(1, uploaded.widthPx * 0.75),
+          heightPt: Math.max(1, uploaded.heightPx * 0.75),
+        });
+        return;
+      }
+      const selected = updateImageResource(editor, uploaded.resource);
+      if (!selected) insertDocumentImage(editor, {
+        resourceId: uploaded.resource.id,
+        altText: file.name.replace(/\.[^.]+$/, ""),
+        decorative: false,
+        widthPt: Math.max(1, uploaded.widthPx * 0.75),
+        heightPt: Math.max(1, uploaded.heightPx * 0.75),
+      });
+    } catch {
+      setStatus(t.documentImageUploadFailed);
+    }
   }
 
-  function toggleStyle(field: "bold" | "italic" | "underline") {
-    if (!selected || !("runs" in selected)) return;
-    const runs = selected.runs.map((run) => ({ ...run, style: { ...run.style, [field]: !run.style[field] } }));
-    emit(textCommand(snapshot.artifactId, baseVersion, selected.id, runs));
-  }
-
-  return (
-    <div className="flex min-h-0 flex-1 flex-col" data-office-editor="document">
-      <div className="sticky top-0 z-10 flex flex-wrap items-center gap-1 border-b bg-background/95 p-2 backdrop-blur" role="toolbar" aria-label={t.editorToolbar}>
-        <button type="button" aria-label={t.bold} disabled={!canChange || !selected} onClick={() => toggleStyle("bold")} className="rounded p-2 hover:bg-muted disabled:opacity-40"><Bold className="size-4" /></button>
-        <button type="button" aria-label={t.italic} disabled={!canChange || !selected} onClick={() => toggleStyle("italic")} className="rounded p-2 hover:bg-muted disabled:opacity-40"><Italic className="size-4" /></button>
-        <button type="button" aria-label={t.underline} disabled={!canChange || !selected} onClick={() => toggleStyle("underline")} className="rounded p-2 hover:bg-muted disabled:opacity-40"><Underline className="size-4" /></button>
-        <span className="mx-1 h-5 border-l" />
-        <EditorButton label={t.addParagraph} disabled={!canChange} onClick={() => add("paragraph")} icon={<Plus className="size-4" />} />
-        <EditorButton label={t.addHeading} disabled={!canChange} onClick={() => add("heading")} icon={<List className="size-4" />} />
-        <EditorButton label={t.addTable} disabled={!canChange} onClick={() => add("table")} icon={<Table2 className="size-4" />} />
-        <EditorButton label={t.addPageBreak} disabled={!canChange} onClick={() => add("pageBreak")} />
-        {suggestMode ? <span className="ml-auto rounded-full bg-amber-100 px-2 py-1 text-xs text-amber-900">{t.suggesting}</span> : null}
-      </div>
-      <div data-office-document-scroll="true" className="min-h-0 flex-1 overflow-auto">
-        <div className="mx-auto my-4 bg-white text-slate-950 shadow-sm" style={{ width: `min(${section.page.widthPt}px, calc(100% - 2rem))`, minHeight: `${section.page.heightPt}px`, paddingLeft: `${section.page.marginLeftPt}px`, paddingRight: `${section.page.marginRightPt}px`, paddingTop: "24px", paddingBottom: "24px", boxSizing: "border-box" }}>
-          <div className="mb-10 flex items-center gap-2 pb-2" style={{ borderBottom: section.headerBorderBottom ? `${section.headerBorderBottom.widthPt}px solid ${section.headerBorderBottom.color}` : undefined }}>
-            {section.headerImage ? <DocumentResourceImage artifactId={snapshot.artifactId} resourceId={section.headerImage.resourceId} alt={section.headerImage.altText} widthPt={section.headerImage.widthPt} heightPt={section.headerImage.heightPt} /> : null}
-            <input aria-label={t.header} disabled={!canChange} value={section.header.map((run) => run.text).join("")} onChange={(event) => emit(propertyCommand(snapshot.artifactId, baseVersion, section.id, ["header"], runsWithText(section.header, event.target.value)))} style={richTextCss(section.header, section.headerAlignment)} className="w-full border-b border-transparent bg-transparent hover:border-slate-200 disabled:opacity-80" />
-          </div>
-          <div>
-            {section.nodes.map((node) => <DocumentNode key={node.id} node={node} selected={selectedId === node.id} canChange={canChange} onSelect={() => select(node.id)} onText={(targetId, runs) => emit(textCommand(snapshot.artifactId, baseVersion, targetId, runs))} onProperty={(targetId, path, value) => emit(propertyCommand(snapshot.artifactId, baseVersion, targetId, path, value))} onDelete={() => emit(deleteCommand(snapshot.artifactId, baseVersion, node.id))} />)}
-          </div>
-          <div className="mt-12 pt-2" style={{ borderTop: section.footerBorderTop ? `${section.footerBorderTop.widthPt}px solid ${section.footerBorderTop.color}` : undefined }}><input aria-label={t.footer} disabled={!canChange} value={section.footer.map((run) => run.text).join("")} onChange={(event) => emit(propertyCommand(snapshot.artifactId, baseVersion, section.id, ["footer"], runsWithText(section.footer, event.target.value)))} style={richTextCss(section.footer, section.footerAlignment)} className="w-full border-t border-transparent bg-transparent pt-1 hover:border-slate-200 disabled:opacity-80" /></div>
-        </div>
+  return <div className="relative flex min-h-0 flex-1 flex-col" data-office-editor="document" data-office-artifact-id={snapshot.artifactId} data-office-structured-editor="true">
+    <DocumentToolbar editor={editor} editable={editable} onInsertImage={addImage} controllerRef={toolbarRef} />
+    {suggestMode ? <div className="border-b bg-amber-50 px-3 py-1 text-xs font-medium text-amber-950" role="status">{t.suggesting}</div> : null}
+    {status ? <div className="absolute bottom-16 left-1/2 z-50 max-w-sm -translate-x-1/2 rounded-lg bg-foreground px-3 py-2 text-xs text-background shadow-lg sm:bottom-4" role="status">{status}</div> : null}
+    <div data-office-document-scroll="true" className="min-h-0 flex-1 overflow-auto bg-muted/55 px-2 pb-20 pt-4 sm:px-4 sm:pb-6 sm:pt-6">
+      <div data-office-document-stage="true" className="office-document-stage">
+        <EditorContent editor={editor} className="w-full" />
       </div>
     </div>
-  );
+  </div>;
 }
 
-function DocumentResourceImage({ artifactId, resourceId, alt, widthPt, heightPt }: { artifactId: string; resourceId: string; alt: string; widthPt: number; heightPt: number }) {
-  const [src, setSrc] = useState<string | null>(null);
-  useEffect(() => {
-    let active = true;
-    void getOfficeResourceObjectUrl(artifactId, resourceId).then((url) => { if (active) setSrc(url); }).catch(() => undefined);
-    return () => { active = false; };
-  }, [artifactId, resourceId]);
-  return src ? <img src={src} alt={alt} width={widthPt} height={heightPt} className="shrink-0 object-contain" style={{ width: `${widthPt}px`, height: `${heightPt}px` }} /> : <span aria-label={alt} className="shrink-0 rounded bg-slate-100" style={{ width: `${widthPt}px`, height: `${heightPt}px` }} />;
+function selectedList(editor: Editor): boolean {
+  const $from = editor.state.selection.$from;
+  for (let depth = $from.depth; depth > 0; depth -= 1) if ($from.node(depth).type.name === "officeList") return true;
+  return false;
 }
 
-function DocumentNode({ node, selected, canChange, onSelect, onText, onProperty, onDelete }: { node: DocumentFlowNode; selected: boolean; canChange: boolean; onSelect(): void; onText(id: string, runs: OfficeRichTextRun[]): void; onProperty(id: string, path: string[], value: unknown): void; onDelete(): void }) {
-  const t = useT().office;
-  const frame = cn("relative rounded-sm outline outline-1 outline-transparent", selected && "outline-primary");
-  if (node.kind === "paragraph" || node.kind === "heading") return <div className={frame} style={{ marginTop: `${node.spacingBeforePt ?? 0}pt`, marginBottom: `${node.spacingAfterPt ?? 8}pt` }} onClick={onSelect}><TextInput runs={node.runs} disabled={!canChange} style={richTextCss(node.runs, node.alignment, node.lineSpacingPt)} className={node.kind === "heading" ? "font-semibold" : undefined} onChange={(runs) => onText(node.id, runs)} /><DeleteButton show={selected && canChange} label={t.deleteObject} onClick={onDelete} /></div>;
-  if (node.kind === "list") return <ol className={cn(frame, node.ordered ? "list-decimal" : "list-disc", "pl-6")} onClick={onSelect}>{node.items.map((item) => <li key={item.id}><TextInput runs={item.runs} disabled={!canChange} onChange={(runs) => onText(item.id, runs)} /></li>)}</ol>;
-  if (node.kind === "table") return <div className={frame} onClick={onSelect}><DocumentTable node={node} canChange={canChange} onText={onText} /></div>;
-  if (node.kind === "image") return <ObjectCard selected={selected} label={node.decorative ? t.decorativeImage : node.altText || t.image} onSelect={onSelect}><input aria-label={t.altText} disabled={!canChange} value={node.altText} onChange={(event) => onProperty(node.id, ["altText"], event.target.value)} className="w-full bg-transparent text-sm" /></ObjectCard>;
-  if (node.kind === "chart") return <ObjectCard selected={selected} label={node.title} onSelect={onSelect}><p className="text-xs text-slate-500">{node.chartType} · {node.categories.length}</p></ObjectCard>;
-  if (node.kind === "video") return <ObjectCard selected={selected} label={node.altText} onSelect={onSelect}><p className="text-xs text-slate-500">{t.video}</p></ObjectCard>;
-  return <button type="button" onClick={onSelect} className={cn("my-6 flex w-full items-center gap-3 text-xs text-slate-400", selected && "text-primary")}><span className="h-px flex-1 bg-current" />{node.kind === "pageBreak" ? t.pageBreak : t.sectionBreak}<span className="h-px flex-1 bg-current" /></button>;
+export { toggleDocumentRunStyle };
+
+function updateImageResource(editor: Editor, resource: OfficeResourceRef): boolean {
+  const selected = editor.state.selection.$from.nodeAfter?.type.name === "officeImage" || editor.state.selection.$from.node(editor.state.selection.$from.depth).type.name === "officeImage";
+  if (!selected) return false;
+  updateSelectedDocumentNode(editor, "officeImage", { resourceId: resource.id });
+  return true;
 }
 
-function tableBorderCss(border: OfficeTableBorder | undefined, fallback: string): string {
-  if (!border) return fallback;
-  if (border.style === "none" || border.widthPt === 0) return "none";
-  const style = border.style === "dotted" ? "dotted" : border.style === "dashed" ? "dashed" : border.style === "double" ? "double" : "solid";
-  return `${Math.max(0.5, border.widthPt)}px ${style} ${border.color}`;
+function setDocumentHeaderImage(editor: Editor, headerImage: Record<string, unknown>): void {
+  const $from = editor.state.selection.$from;
+  for (let depth = $from.depth; depth > 0; depth -= 1) {
+    if ($from.node(depth).type.name !== "officeSection") continue;
+    editor.view.dispatch(editor.state.tr.setNodeMarkup($from.before(depth), undefined, { ...$from.node(depth).attrs, headerImage }).scrollIntoView());
+    editor.commands.focus();
+    return;
+  }
 }
-
-function tableCellBorder(node: OfficeTable, cell: OfficeTableCell, placement: ReturnType<typeof officeTableCellPlacements>[number], edge: "top" | "right" | "bottom" | "left", columnCount: number): OfficeTableBorder | undefined {
-  const direct = cell.borders?.[edge];
-  if (direct) return direct;
-  if (edge === "top") return placement.rowIndex === 0 ? node.borders?.top : node.borders?.insideHorizontal;
-  if (edge === "bottom") return placement.rowIndex + cell.rowSpan >= node.rows.length ? node.borders?.bottom : node.borders?.insideHorizontal;
-  if (edge === "left") return placement.startColumn === 0 ? node.borders?.left : node.borders?.insideVertical;
-  return placement.endColumn >= columnCount ? node.borders?.right : node.borders?.insideVertical;
-}
-
-function DocumentTable({ node, canChange, onText }: { node: OfficeTable; canChange: boolean; onText(id: string, runs: OfficeRichTextRun[]): void }) {
-  const availableWidth = node.widthPt ?? node.columnWidthsPt?.reduce((sum, width) => sum + width, 0) ?? 470;
-  const widths = officeTableResolvedColumnWidthsPt(node, availableWidth);
-  const placements = officeTableCellPlacements(node);
-  const placementByCell = new Map(placements.map((placement) => [placement.cell.id, placement]));
-  const canonicalBorders = Boolean(node.borders || node.rows.some((row) => row.cells.some((cell) => cell.borders)));
-  const borderFallback = canonicalBorders ? "none" : "1px solid #cbd5e1";
-  const alignmentStyle: CSSProperties = node.alignment === "center"
-    ? { marginLeft: "auto", marginRight: "auto" }
-    : node.alignment === "end"
-      ? { marginLeft: "auto", marginRight: 0 }
-      : { marginLeft: `${Math.max(0, node.indentPt ?? 0)}px`, marginRight: 0 };
-  return (
-    <table
-      data-office-document-table={node.id}
-      className="max-w-full border-collapse"
-      style={{ width: node.widthPt || node.columnWidthsPt ? `${availableWidth}px` : "100%", tableLayout: node.layout === "autofit" && !node.columnWidthsPt ? "auto" : "fixed", ...alignmentStyle }}
-    >
-      <colgroup>{widths.map((width, index) => <col key={`${node.id}:column:${index}`} style={{ width: `${width}px` }} />)}</colgroup>
-      <tbody>{node.rows.map((row, rowIndex) => <tr key={row.id} style={{ height: row.minHeightPt ? `${row.minHeightPt}px` : undefined }}>{row.cells.map((cell) => {
-        const placement = placementByCell.get(cell.id);
-        if (!placement) return null;
-        const margins = cell.margins ?? node.margins;
-        const header = rowIndex < node.headerRows;
-        const inputStyle = richTextCss(cell.runs, cell.alignment);
-        if (header && !cell.runs.some((run) => run.style.bold)) inputStyle.fontWeight = 700;
-        inputStyle.overflowWrap = "anywhere";
-        inputStyle.wordBreak = "break-word";
-        inputStyle.whiteSpace = cell.wrapText === false ? "pre" : "pre-wrap";
-        return <td
-          key={cell.id}
-          data-office-table-cell={cell.id}
-          rowSpan={cell.rowSpan}
-          colSpan={cell.colSpan}
-          style={{
-            borderTop: tableBorderCss(tableCellBorder(node, cell, placement, "top", widths.length), borderFallback),
-            borderRight: tableBorderCss(tableCellBorder(node, cell, placement, "right", widths.length), borderFallback),
-            borderBottom: tableBorderCss(tableCellBorder(node, cell, placement, "bottom", widths.length), borderFallback),
-            borderLeft: tableBorderCss(tableCellBorder(node, cell, placement, "left", widths.length), borderFallback),
-            backgroundColor: cell.fill ?? (header ? "#f8fafc" : "transparent"),
-            verticalAlign: cell.verticalAlignment === "middle" ? "middle" : cell.verticalAlignment === "bottom" ? "bottom" : "top",
-            paddingTop: `${margins?.topPt ?? 2}px`,
-            paddingRight: `${margins?.rightPt ?? 2}px`,
-            paddingBottom: `${margins?.bottomPt ?? 2}px`,
-            paddingLeft: `${margins?.leftPt ?? 2}px`,
-            minWidth: 0,
-            overflow: "hidden",
-          }}
-        ><TextInput runs={cell.runs} disabled={!canChange} style={inputStyle} className="box-border min-w-0 max-w-full p-0" onChange={(runs) => onText(cell.id, runs)} /></td>;
-      })}</tr>)}</tbody>
-    </table>
-  );
-}
-
-function TextInput({ runs, disabled, className, style, onChange }: { runs: OfficeRichTextRun[]; disabled: boolean; className?: string; style?: CSSProperties; onChange(runs: OfficeRichTextRun[]): void }) {
-  return <textarea data-office-text-input rows={1} disabled={disabled} value={runs.map((run) => run.text).join("")} onChange={(event) => onChange(runsWithText(runs, event.target.value))} style={style} className={cn("block min-h-4 w-full resize-none overflow-hidden whitespace-pre-wrap bg-transparent outline-none [field-sizing:content]", className)} />;
-}
-function runsWithText(runs: OfficeRichTextRun[], text: string): OfficeRichTextRun[] { return runs.length ? [{ ...runs[0], text }] : [defaultRun(text)]; }
-function richTextCss(runs: OfficeRichTextRun[], alignment: "start" | "center" | "end" | "justify" = "start", lineSpacingPt?: number): CSSProperties {
-  const style = runs[0]?.style;
-  return {
-    color: style?.color,
-    fontFamily: style?.fontFamily,
-    fontSize: style ? `${style.fontSizePt}pt` : undefined,
-    fontStyle: style?.italic ? "italic" : undefined,
-    fontWeight: style?.bold ? 700 : 400,
-    lineHeight: lineSpacingPt ? `${lineSpacingPt}pt` : 1.15,
-    textAlign: alignment === "end" ? "right" : alignment === "center" ? "center" : alignment === "justify" ? "justify" : "left",
-    textDecoration: [style?.underline ? "underline" : "", style?.strike ? "line-through" : ""].filter(Boolean).join(" ") || undefined,
-  };
-}
-function EditorButton({ label, icon, disabled, onClick }: { label: string; icon?: React.ReactNode; disabled: boolean; onClick(): void }) { return <button type="button" disabled={disabled} onClick={onClick} className="inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs hover:bg-muted disabled:opacity-40">{icon}{label}</button>; }
-function DeleteButton({ show, label, onClick }: { show: boolean; label: string; onClick(): void }) { return show ? <button type="button" onClick={(event) => { event.stopPropagation(); onClick(); }} className="absolute -right-8 top-0 text-xs text-destructive">{label}</button> : null; }
-function ObjectCard({ selected, label, onSelect, children }: { selected: boolean; label: string; onSelect(): void; children: React.ReactNode }) { return <div onClick={onSelect} className={cn("rounded border bg-slate-50 p-4", selected && "ring-2 ring-primary")}><p className="mb-2 font-medium">{label}</p>{children}</div>; }

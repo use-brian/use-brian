@@ -26,6 +26,24 @@ describe('[COMP:office/layout] Deterministic Office layout', () => {
     expect(layoutOfficeArtifact(snapshot).issues).not.toContainEqual(expect.objectContaining({ code: 'collision' }))
   })
 
+  it('projects canonical Presentation formatting, tables, and charts into the shared display list', () => {
+    const snapshot: PresentationSnapshot = { schemaVersion: 1, capabilityVersion: 1, artifactId: id(121), workspaceId: id(2), family: 'presentation', locale: 'en-US', defaultLanguage: 'en-US', templateVersionId: id(3), rootId: id(122), title: 'Deck', resources: [], accessibility: { title: 'Deck' }, slideSize: { widthPt: 300, heightPt: 200 }, themeId: id(123), masters: [{ id: id(124), name: 'Master', lockedObjectIds: [] }], layouts: [{ id: id(125), masterId: id(124), name: 'Layout', placeholderIds: [] }], slides: [{ id: id(126), title: 'Slide', masterId: id(124), layoutId: id(125), notes: [], objects: [
+      { id: id(127), kind: 'text', geometry: { xPt: 10, yPt: 10, widthPt: 100, heightPt: 30, rotationDeg: 0 }, locked: false, alignment: 'center', verticalAlignment: 'middle', runs: [{ id: id(128), text: 'Formatted', style: { ...style, bold: true, color: '#123456' } }] },
+      { id: id(129), kind: 'shape', shape: 'ellipse', geometry: { xPt: 10, yPt: 50, widthPt: 80, heightPt: 30, rotationDeg: 0 }, locked: false, fill: '#ABCDEF', stroke: '#654321', strokeWidthPt: 3, text: [{ id: id(130), text: 'Shape', style }] },
+      { id: id(131), kind: 'table', headerRows: 1, rows: [{ id: id(132), cells: [{ id: id(133), runs: [{ id: id(134), text: 'Metric', style }], rowSpan: 1, colSpan: 1, fill: '#FDE68A' }] }], geometry: { xPt: 100, yPt: 50, widthPt: 80, heightPt: 30, rotationDeg: 0 }, locked: false },
+      { id: id(135), kind: 'chart', chartType: 'doughnut', title: 'Growth', altText: 'Growth chart', categories: ['A'], series: [{ name: 'Series', values: [42] }], geometry: { xPt: 190, yPt: 50, widthPt: 90, heightPt: 80, rotationDeg: 0 }, locked: false },
+    ], readingOrder: [id(127), id(129), id(131), id(135)] }] }
+
+    const layout = layoutOfficeArtifact(snapshot)
+    expect(layout.pages[0].primitives).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: id(127), runs: [expect.objectContaining({ text: 'Formatted' })], alignment: 'center', verticalAlignment: 'middle' }),
+      expect.objectContaining({ id: id(129), shapeKind: 'ellipse', fillColor: '#ABCDEF', strokeColor: '#654321', strokeWidthPt: 3 }),
+      expect.objectContaining({ id: id(131), tableRows: [[expect.objectContaining({ fill: '#FDE68A' })]] }),
+      expect.objectContaining({ id: id(135), chartType: 'doughnut', chartCategories: ['A'], chartSeries: [{ name: 'Series', values: [42] }] }),
+    ]))
+    expect(renderOfficePreviewSvg(layout.pages[0])).toContain('Metric')
+  })
+
   it('uses the display list for browser preview/goldens and refuses degraded fit', () => {
     const snapshot: DocumentSnapshot = { schemaVersion: 1, capabilityVersion: 1, artifactId: id(61), workspaceId: id(2), family: 'document', locale: 'en-US', defaultLanguage: 'en-US', templateVersionId: id(3), rootId: id(62), title: 'Fit', resources: [], accessibility: { title: 'Fit' }, sections: [{ id: id(63), page: { widthPt: 300, heightPt: 200, marginTopPt: 20, marginRightPt: 20, marginBottomPt: 20, marginLeftPt: 20, orientation: 'portrait' }, header: [], footer: [], showPageNumber: false, nodes: [{ id: id(64), kind: 'paragraph', styleName: 'Body', alignment: 'start', runs: [{ id: id(65), text: 'Long enough to violate a compiled field budget', style }] }] }] }
     const fit = fitOfficeArtifact(snapshot, { maxPages: 1, maxTextCharsByObject: { [id(65)]: 10 }, minimumFontSizePt: 10 })

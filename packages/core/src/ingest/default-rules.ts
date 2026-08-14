@@ -132,10 +132,10 @@ export const DEFAULT_INGEST_RULES: Readonly<
   // adapters/whatsapp/default-rules.ts and the BYO-number plan §"The gate".
   whatsapp: [],
   // Assistant inboxes (agentmail.md): mail from allowlisted senders (the
-  // conversational path) files realtime; everything else — strangers,
-  // newsletters/noreply, at-cap and rate-capped overflow — lands in a daily
-  // digest for Pipeline B to sift. `gate_match` reads the webhook route's
-  // sender-gate verdict off the event.
+  // workspace-member conversational path) files realtime; everything else —
+  // isolated external guests, strangers, newsletters/noreply, at-cap and
+  // rate-capped overflow — lands in a daily digest for Pipeline B to sift.
+  // `gate_match` reads the webhook route's sender-gate verdict off the event.
   email: [
     {
       filter_type: 'gate_match',

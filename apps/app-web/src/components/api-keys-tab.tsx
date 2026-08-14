@@ -700,74 +700,76 @@ function CreateKeyForm({
   }
 
   return (
-    <form onSubmit={submit} className="space-y-4 max-w-md">
+    <form onSubmit={submit} className="w-full max-w-5xl space-y-5">
       <header>
         <h2 className="text-[15px] font-semibold tracking-tight">{t.apiKeys.create.title}</h2>
-        <p className="text-[13px] text-muted-foreground mt-1">{t.apiKeys.create.description}</p>
+        <p className="text-[13px] text-muted-foreground mt-1 max-w-prose">{t.apiKeys.create.description}</p>
       </header>
 
-      <div role="radiogroup" aria-label={t.apiKeys.scopeLabel} className="space-y-2">
-        <span className="text-[13px] text-muted-foreground">{t.apiKeys.scopeLabel}</span>
-        <ScopeCard
-          selected={scope === "chat"}
-          label={t.apiKeys.scopeChatLabel}
-          description={t.apiKeys.scopeChatDesc}
-          disabled={submitting}
-          onSelect={() => setScope("chat")}
-        />
-        <ScopeCard
-          selected={scope === "agent"}
-          label={t.apiKeys.scopeAgentLabel}
-          description={t.apiKeys.scopeAgentDesc}
-          disabled={submitting}
-          onSelect={() => setScope("agent")}
-        />
-      </div>
-
-      <div role="radiogroup" aria-label={t.apiKeys.audienceLabel} className="space-y-2">
-        <span className="text-[13px] text-muted-foreground">{t.apiKeys.audienceLabel}</span>
-        <ScopeCard
-          selected={audience === "external"}
-          label={t.apiKeys.audienceExternalLabel}
-          description={t.apiKeys.audienceExternalDesc}
-          disabled={submitting}
-          onSelect={() => setAudience("external")}
-        />
-        <ScopeCard
-          selected={audience === "internal"}
-          label={t.apiKeys.audienceInternalLabel}
-          description={t.apiKeys.audienceInternalDesc}
-          disabled={submitting}
-          onSelect={() => setAudience("internal")}
-        />
-      </div>
-
-      {audience === "external" && (
-        <div role="radiogroup" aria-label={t.apiKeys.anonContextLabel} className="space-y-2">
-          <span className="text-[13px] text-muted-foreground">{t.apiKeys.anonContextLabel}</span>
+      <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
+        <div role="radiogroup" aria-label={t.apiKeys.scopeLabel} className="space-y-2">
+          <span className="text-[13px] text-muted-foreground">{t.apiKeys.scopeLabel}</span>
           <ScopeCard
-            selected={anonContext === "thin"}
-            label={t.apiKeys.anonContextThinLabel}
-            description={t.apiKeys.anonContextThinDesc}
+            selected={scope === "chat"}
+            label={t.apiKeys.scopeChatLabel}
+            description={t.apiKeys.scopeChatDesc}
             disabled={submitting}
-            onSelect={() => setAnonContext("thin")}
+            onSelect={() => setScope("chat")}
           />
           <ScopeCard
-            selected={anonContext === "full"}
-            label={t.apiKeys.anonContextFullLabel}
-            description={t.apiKeys.anonContextFullDesc}
+            selected={scope === "agent"}
+            label={t.apiKeys.scopeAgentLabel}
+            description={t.apiKeys.scopeAgentDesc}
             disabled={submitting}
-            onSelect={() => setAnonContext("full")}
+            onSelect={() => setScope("agent")}
           />
-          {anonContext === "full" && (
-            <p className="text-[12px] text-amber-600 dark:text-amber-500 border border-amber-500/30 rounded-lg px-3 py-2">
-              {t.apiKeys.anonContextFullWarning}
-            </p>
-          )}
         </div>
-      )}
 
-      <label className="block">
+        <div role="radiogroup" aria-label={t.apiKeys.audienceLabel} className="space-y-2">
+          <span className="text-[13px] text-muted-foreground">{t.apiKeys.audienceLabel}</span>
+          <ScopeCard
+            selected={audience === "external"}
+            label={t.apiKeys.audienceExternalLabel}
+            description={t.apiKeys.audienceExternalDesc}
+            disabled={submitting}
+            onSelect={() => setAudience("external")}
+          />
+          <ScopeCard
+            selected={audience === "internal"}
+            label={t.apiKeys.audienceInternalLabel}
+            description={t.apiKeys.audienceInternalDesc}
+            disabled={submitting}
+            onSelect={() => setAudience("internal")}
+          />
+        </div>
+
+        {audience === "external" && (
+          <div role="radiogroup" aria-label={t.apiKeys.anonContextLabel} className="space-y-2">
+            <span className="text-[13px] text-muted-foreground">{t.apiKeys.anonContextLabel}</span>
+            <ScopeCard
+              selected={anonContext === "thin"}
+              label={t.apiKeys.anonContextThinLabel}
+              description={t.apiKeys.anonContextThinDesc}
+              disabled={submitting}
+              onSelect={() => setAnonContext("thin")}
+            />
+            <ScopeCard
+              selected={anonContext === "full"}
+              label={t.apiKeys.anonContextFullLabel}
+              description={t.apiKeys.anonContextFullDesc}
+              disabled={submitting}
+              onSelect={() => setAnonContext("full")}
+            />
+            {anonContext === "full" && (
+              <p className="text-[12px] text-amber-600 dark:text-amber-500 border border-amber-500/30 rounded-lg px-3 py-2">
+                {t.apiKeys.anonContextFullWarning}
+              </p>
+            )}
+          </div>
+        )}
+      </div>
+
+      <label className="block max-w-xl">
         <span className="text-[13px] text-muted-foreground">{t.apiKeys.create.nameLabel}</span>
         <input
           autoFocus

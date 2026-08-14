@@ -2731,3 +2731,113 @@ button.doc-comment-card:hover {
   color: var(--foreground);
 }
 .chat-markdown tr:nth-child(even) td { background: color-mix(in srgb, var(--muted) 35%, transparent); }
+
+/* Office Document is a semantic ProseMirror projection of canonical page
+   settings. The outer scroller owns overflow; every section stays reachable
+   on phone without shrinking the canonical printable width. */
+.office-document-stage {
+  box-sizing: border-box;
+  min-width: 100%;
+  width: max-content;
+}
+.office-document-prosemirror {
+  display: flex;
+  width: 100%;
+  min-width: min-content;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.25rem;
+}
+.office-document-prosemirror:focus-visible,
+.office-document-prosemirror:focus {
+  outline: none !important;
+  box-shadow: none !important;
+}
+.office-document-section {
+  box-sizing: border-box;
+  display: grid;
+  grid-template-rows: minmax(2rem, auto) 1fr minmax(2rem, auto);
+  width: var(--office-page-width, 612pt);
+  min-height: var(--office-page-height, 792pt);
+  padding: var(--office-margin-top, 72pt) var(--office-margin-right, 72pt) var(--office-margin-bottom, 72pt) var(--office-margin-left, 72pt);
+  background: var(--background);
+  border: 1px solid color-mix(in srgb, var(--border) 88%, var(--foreground) 12%);
+  color: var(--foreground);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.12), 0 8px 24px rgb(0 0 0 / 0.10);
+}
+.office-document-header,
+.office-document-footer {
+  min-height: 1.5rem;
+  color: var(--muted-foreground);
+  outline-offset: 3px;
+}
+.office-document-header {
+  background-position: left top;
+  background-repeat: no-repeat;
+}
+.office-document-header[data-office-header-image="true"] {
+  min-height: max(1.5rem, var(--office-header-image-height));
+  padding-inline-start: calc(var(--office-header-image-width) + 8pt);
+  background-size: var(--office-header-image-width) var(--office-header-image-height);
+}
+.office-document-section[data-header-alignment="center"] .office-document-header,
+.office-document-section[data-footer-alignment="center"] .office-document-footer { text-align: center; }
+.office-document-section[data-header-alignment="end"] .office-document-header,
+.office-document-section[data-footer-alignment="end"] .office-document-footer { text-align: right; }
+.office-document-section[data-header-border="true"] .office-document-header { border-bottom: 1px solid var(--border); }
+.office-document-section[data-footer-border="true"] .office-document-footer { border-top: 1px solid var(--border); }
+.office-document-section[data-office-page-number="true"] .office-document-footer::after {
+  content: counter(office-page);
+  float: right;
+  font-size: 0.75rem;
+  color: var(--muted-foreground);
+}
+.office-document-section { counter-increment: office-page; }
+.office-document-body { min-width: 0; }
+.office-document-body > * + * { margin-top: 0.65rem; }
+.office-document-page-start {
+  position: relative;
+  margin-top: calc(var(--office-margin-bottom, 72pt) + 1.5rem + var(--office-margin-top, 72pt)) !important;
+}
+.office-document-page-start::before {
+  position: absolute;
+  top: calc(-1 * (var(--office-margin-top, 72pt) + 1.5rem));
+  right: calc(-1 * var(--office-margin-right, 72pt) - 1px);
+  left: calc(-1 * var(--office-margin-left, 72pt) - 1px);
+  height: 1.5rem;
+  border-top: 1px solid color-mix(in srgb, var(--border) 88%, var(--foreground) 12%);
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 88%, var(--foreground) 12%);
+  background: var(--muted);
+  box-shadow: 0 -6px 16px rgb(0 0 0 / 0.07), 0 6px 16px rgb(0 0 0 / 0.07);
+  content: "";
+  pointer-events: none;
+}
+.office-document-prosemirror p { white-space: pre-wrap; }
+.office-document-prosemirror h1 { font-size: 2rem; font-weight: 700; }
+.office-document-prosemirror h2 { font-size: 1.5rem; font-weight: 650; }
+.office-document-prosemirror h3 { font-size: 1.25rem; font-weight: 650; }
+.office-document-prosemirror :is(h4, h5, h6) { font-size: 1rem; font-weight: 650; }
+.office-document-prosemirror :is(ul, ol) { padding-inline-start: calc(1.5rem + (var(--office-list-level, 0) * 1.25rem)); }
+.office-document-prosemirror ul { list-style: disc; }
+.office-document-prosemirror ol { list-style: decimal; }
+.office-document-table { width: 100%; table-layout: fixed; border-collapse: collapse; }
+.office-document-table td { min-width: 3rem; border: 1px solid var(--border); padding: 0.35rem; vertical-align: top; }
+.office-document-image { display: block; margin-inline: auto; }
+.office-document-page-break { display: block; border-top: 2px dashed var(--border); }
+.office-document-section-break { display: block; border-top: 2px double var(--muted-foreground); }
+.office-document-chart::after,
+.office-document-video::after { display: block; padding: 1rem; border: 1px dashed var(--border); color: var(--muted-foreground); font-size: 0.75rem; }
+.office-document-chart::after,
+.office-document-video::after { content: attr(data-office-label); }
+.office-document-prosemirror .collaboration-cursor__caret { border-left: 2px solid currentColor; margin-left: -1px; pointer-events: none; position: relative; }
+.office-document-prosemirror .collaboration-cursor__label { border-radius: 3px 3px 3px 0; color: white; font-size: 0.65rem; left: -1px; padding: 0.1rem 0.25rem; position: absolute; top: -1.2em; white-space: nowrap; }
+.office-document-comment { background: color-mix(in srgb, #facc15 34%, transparent); border-bottom: 2px solid #ca8a04; }
+.office-document-comment-resolved { background: color-mix(in srgb, var(--muted) 50%, transparent); border-bottom-color: var(--muted-foreground); text-decoration: underline dotted; }
+.office-document-suggestion { background: color-mix(in srgb, #22c55e 24%, transparent); border-bottom: 2px solid #15803d; text-decoration: underline; }
+.office-document-suggestion-conflicted { background: color-mix(in srgb, #f97316 24%, transparent); border-bottom-color: #c2410c; text-decoration-style: wavy; }
+@media (max-width: 639px) {
+  .office-document-section { box-shadow: 0 1px 3px rgb(0 0 0 / 0.14); }
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-document-toolbar-surface], [data-document-find-replace], [data-document-outline], [data-document-word-count] { animation: none !important; transition: none !important; }
+}

@@ -354,8 +354,20 @@ export async function runREMConsolidation(
   const inputMemories = index.filter((m) => !isRemOutput(m))
   const existingPatterns = index.filter((m) => isRemOutput(m))
 
+  const skipIneligibleREM = async (summary: string): Promise<ConsolidationResult> => {
+    const memoriesAffected: string[] = []
+    await store.logConsolidation({
+      assistantId,
+      userId,
+      phase: 'rem',
+      summary,
+      memoriesAffected,
+    })
+    return { phase: 'rem', memoriesAffected, summary }
+  }
+
   if (inputMemories.length < REM_MIN_MEMORIES) {
-    return { phase: 'rem', memoriesAffected: [], summary: 'Too few memories for pattern recognition' }
+    return skipIneligibleREM('Too few memories for pattern recognition')
   }
 
   // Post-Phase-4 (retire-memory-type): the legacy "distinct memory
@@ -367,7 +379,7 @@ export async function runREMConsolidation(
     inputMemories.map((m) => (m.tags.length > 0 ? m.tags[0] : 'untagged')),
   )
   if (distinctTagClusters.size < REM_MIN_TYPES) {
-    return { phase: 'rem', memoriesAffected: [], summary: 'Too few memory clusters for pattern recognition' }
+    return skipIneligibleREM('Too few memory clusters for pattern recognition')
   }
   const memorySummaries = inputMemories.map((m) => {
     const tagPrefix = m.tags.length > 0 ? `${m.tags[0]}: ` : ''

@@ -15,6 +15,17 @@
  */
 import type { BrowserSnapshot, BrowserSnapshotNode } from '../../types.js'
 
+const ACTIONABLE_ROLES = new Set([
+  'button', 'link', 'textbox', 'textfield', 'textfieldwithcombobox', 'searchbox',
+  'combobox', 'checkbox', 'radio', 'menuitem', 'menuitemcheckbox', 'menuitemradio',
+  'tab', 'switch', 'slider', 'spinbutton', 'option', 'listboxoption', 'popupbutton',
+])
+const SNAPSHOT_ROLES = new Set([
+  ...ACTIONABLE_ROLES,
+  'caption', 'cell', 'columnheader', 'definition', 'heading', 'labeltext', 'legend',
+  'listitem', 'paragraph', 'row', 'rowheader', 'statictext', 'table', 'term', 'text',
+])
+
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`
 }
@@ -69,9 +80,9 @@ export const cli = {
   setViewport(width: number, height: number): string {
     return `${AGENT_BROWSER_BIN} set viewport ${Math.round(width)} ${Math.round(height)}`
   },
-  snapshot(): string {
-    // -i = interactive elements with @e refs (the token-cheap a11y list).
-    return `${AGENT_BROWSER_BIN} snapshot -i`
+  snapshot(mode: 'interactive' | 'full' = 'interactive'): string {
+    // -i = interactive elements with @e refs; no flag = full ariaSnapshot.
+    return `${AGENT_BROWSER_BIN} snapshot${mode === 'interactive' ? ' -i' : ''}`
   },
   click(ref: string): string {
     return `${AGENT_BROWSER_BIN} click ${shellQuote(ref)}`
@@ -126,7 +137,11 @@ export const cli = {
  *       `- heading "Example Domain" [level=1, ref=e1]` / `- link "Learn more" [ref=e2]`
  * Unknown lines are skipped — the parser must never throw on real pages.
  */
-export function parseSnapshotOutput(raw: string, page: { url: string; title: string }): BrowserSnapshot {
+export function parseSnapshotOutput(
+  raw: string,
+  page: { url: string; title: string },
+  mode: 'interactive' | 'full' = 'interactive',
+): BrowserSnapshot {
   const trimmed = raw.trim()
   if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
     try {
@@ -139,11 +154,15 @@ export function parseSnapshotOutput(raw: string, page: { url: string; title: str
       const nodes: BrowserSnapshotNode[] = []
       for (const item of list) {
         const o = item as { ref?: unknown; role?: unknown; name?: unknown; label?: unknown; value?: unknown; disabled?: unknown }
-        if (typeof o.ref !== 'string' || o.ref.length === 0) continue
+        const role = typeof o.role === 'string' ? o.role : 'node'
+        const candidateRef = typeof o.ref === 'string' && o.ref.length > 0 ? o.ref : undefined
+        const ref = mode === 'full' && !ACTIONABLE_ROLES.has(role.toLowerCase()) ? undefined : candidateRef
+        const name = typeof o.name === 'string' ? o.name : typeof o.label === 'string' ? o.label : ''
+        if (!ref && !name) continue
         nodes.push({
-          ref: o.ref.startsWith('@') ? o.ref : `@${o.ref}`,
-          role: typeof o.role === 'string' ? o.role : 'node',
-          name: typeof o.name === 'string' ? o.name : typeof o.label === 'string' ? o.label : '',
+          ...(ref ? { ref: ref.startsWith('@') ? ref : `@${ref}` } : {}),
+          role,
+          name,
           ...(typeof o.value === 'string' && o.value ? { value: o.value } : {}),
           ...(o.disabled === true ? { disabled: true } : {}),
         })
@@ -157,7 +176,7 @@ export function parseSnapshotOutput(raw: string, page: { url: string; title: str
   const LINE = /^[-*\s]*(@e\d+)\s+([\w-]+)\s+"((?:[^"\\]|\\.)*)"(?:\s+value="((?:[^"\\]|\\.)*)")?(.*)$/
   // ariaSnapshot YAML: role first, optional quoted name, ref inside a
   // trailing [attr, attr] group — `- link "Learn more" [ref=e2]`.
-  const ARIA_LINE = /^[-*\s]*([\w-]+)(?:\s+"((?:[^"\\]|\\.)*)")?[^[]*\[([^\]]*\bref=e\d+[^\]]*)\]/
+  const ARIA_LINE = /^[-*\s]*([\w-]+)(?:\s+"((?:[^"\\]|\\.)*)")?(?:\s*:\s*(.+?))?(?:\s+\[([^\]]*)\])?\s*$/
   const nodes: BrowserSnapshotNode[] = []
   for (const line of trimmed.split('\n')) {
     const m = LINE.exec(line.trim())
@@ -174,13 +193,16 @@ export function parseSnapshotOutput(raw: string, page: { url: string; title: str
     }
     const a = ARIA_LINE.exec(line.trim())
     if (!a) continue
-    const [, role, name, attrs] = a
-    const ref = /\bref=(e\d+)\b/.exec(attrs)
-    if (!ref) continue
+    const [, role, quotedName, plainName, attrs = ''] = a
+    if (!SNAPSHOT_ROLES.has(role.toLowerCase())) continue
+    const candidateRef = /\bref=(e\d+)\b/.exec(attrs)
+    const ref = mode === 'full' && !ACTIONABLE_ROLES.has(role.toLowerCase()) ? null : candidateRef
+    const name = (quotedName ?? plainName ?? '').trim().replace(/\\"/g, '"')
+    if (!ref && !name) continue
     nodes.push({
-      ref: `@${ref[1]}`,
+      ...(ref ? { ref: `@${ref[1]}` } : {}),
       role,
-      name: (name ?? '').replace(/\\"/g, '"'),
+      name,
       ...(/\bdisabled\b/.test(attrs) ? { disabled: true } : {}),
     })
   }

@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc && node scripts/assemble.mjs",
-    "build:firefox": "tsc && node scripts/assemble-firefox.mjs",
+    "build": "rm -rf dist && tsc -p tsconfig.chromium.json && node scripts/assemble.mjs",
+    "build:firefox": "rm -rf dist-firefox && tsc -p tsconfig.firefox.json && node scripts/assemble-firefox.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

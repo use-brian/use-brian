@@ -34,12 +34,10 @@ export default async function DesktopSignedInPage(props: {
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-4 text-center">
       <div className="w-full max-w-sm space-y-5 animate-rise-in">
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src="/icon.png"
-          alt=""
-          className="mx-auto h-14 w-14"
-        />
+        <div className="mx-auto flex h-14 w-14 items-center justify-center overflow-hidden rounded-2xl bg-[#080d15] ring-1 ring-primary/30 shadow-[0_8px_30px_-10px_color-mix(in_srgb,var(--primary)_50%,transparent)]">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/icon.png" alt="" className="h-11 w-11" />
+        </div>
         <h1
           className="text-2xl font-bold tracking-tight"
           style={{ fontFamily: "var(--font-display)" }}

@@ -1,6 +1,6 @@
 /** Client-safe Office REST SDK. [COMP:app-web/office-home] */
 import { authFetch } from "@/lib/auth-fetch";
-import type { OfficeArtifactSnapshot, OfficeCommand, OfficeTemplateRoutingDraft, OfficeTemplateSlideRole } from "@use-brian/office-model";
+import type { OfficeArtifactSnapshot, OfficeCommand, OfficeResourceRef, OfficeTemplateRoutingDraft, OfficeTemplateSlideRole } from "@use-brian/office-model";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 const officeResourceObjectUrls = new Map<string, Promise<string>>();
@@ -68,9 +68,20 @@ export type OfficeCommentThread = {
   id: string;
   artifactVersionId: string;
   anchorKind: string;
-  anchor: { kind: string; targetIds: string[]; range?: { from: number; to: number }; geometry?: { x: number; y: number; width?: number; height?: number } };
+  anchor: { kind: string; targetIds: string[]; range?: { from: number; to: number }; relative?: { from: Record<string, unknown>; to: Record<string, unknown> }; geometry?: { x: number; y: number; width?: number; height?: number } };
   status: "open" | "resolved" | "detached";
-  messages: Array<{ id: string; authorType: string; body: string; brianRunStatus?: string; createdAt: string }>;
+  assignedUserId?: string | null;
+  assignedToBrian?: boolean;
+  dueAt?: string | null;
+  messages: Array<{ id: string; authorType: string; body: string; mentions?: string[]; reactions?: Record<string, string[]>; brianRunStatus?: string; createdAt: string }>;
+};
+export type OfficeSuggestion = { id: string; artifactId: string; threadId?: string | null; baseVersionId: string; proposedByType: "user" | "assistant"; proposedByUserId?: string | null; proposedByAssistantId?: string | null; commandBatch: OfficeCommand; affectedObjectIds: string[]; status: "open" | "accepted" | "rejected" | "superseded" | "conflicted"; createdAt: string };
+export type OfficeVersion = { id: string; version: number; parentVersionId: string | null; snapshotHash: string; origin: string; authorType: string; summary: string; checkpointKind: string | null; createdAt: string };
+export type OfficeSharing = {
+  defaultWorkspaceRole: "view" | "comment" | "edit";
+  canManage: boolean;
+  grants: Array<{ userId: string; role: "view" | "comment" | "edit" | "deny"; revokedAt: string | null }>;
+  members: Array<{ userId: string; userName?: string | null; email?: string | null; isOwner: boolean }>;
 };
 
 export class OfficeApiError extends Error {
@@ -158,6 +169,16 @@ export function getOfficeResourceObjectUrl(artifactId: string, resourceId: strin
   return pending;
 }
 
+export async function admitOfficeImageResource(artifactId: string, workspaceId: string, file: File): Promise<{ resource: OfficeResourceRef; widthPx: number; heightPx: number }> {
+  if (!['image/png', 'image/jpeg'].includes(file.type) || file.size > 20 * 1024 * 1024) throw new Error('office_image_invalid');
+  const form = new FormData();
+  form.append('files', file);
+  const upload = await json<{ files: Array<{ id?: string; error?: string }> }>(await authFetch(`${API_URL}/api/doc-files/${encodeURIComponent(workspaceId)}/upload`, { method: 'POST', body: form }), 'office_image_upload_failed');
+  const source = upload.files[0];
+  if (!source?.id || source.error) throw new Error(source?.error ?? 'office_image_upload_failed');
+  return json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/resources`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ fileId: source.id, kind: 'image' }) }), 'office_image_admission_failed');
+}
+
 export async function submitOfficeCommand(artifactId: string, expectedSeq: number, command: OfficeCommand, mode: "apply" | "suggest"): Promise<OfficeLiveSnapshot | { mode: "suggestion" }> {
   return json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/commands`, {
     method: "POST",
@@ -169,6 +190,15 @@ export async function submitOfficeCommand(artifactId: string, expectedSeq: numbe
 export async function listOfficeComments(artifactId: string): Promise<OfficeCommentThread[]> {
   const body = await json<{ threads: OfficeCommentThread[] }>(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/comments`), "office_comments_failed");
   return body.threads;
+}
+
+export async function detachMissingOfficeComments(artifactId: string): Promise<number> {
+  const body = await json<{ detached: number }>(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/comments/detach-missing`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  }), "office_comments_detach_failed");
+  return body.detached;
 }
 
 export async function createOfficeComment(input: { artifactId: string; anchor: OfficeCommentThread["anchor"]; body: string; mentions?: string[]; invokeBrian?: { assistantId: string; expectedVersion: number; idempotencyKey: string } }): Promise<{ revision?: { jobId: string; mode: "direct" | "proposal" } | "version_conflict" | null }> {
@@ -185,6 +215,66 @@ export async function resolveOfficeComment(threadId: string, resolved: boolean):
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ resolved }),
   }), "office_comment_resolve_failed");
+}
+
+export async function replyOfficeComment(threadId: string, body: string, mentions: string[] = []): Promise<void> {
+  await json(await authFetch(`${API_URL}/api/office/comment-threads/${encodeURIComponent(threadId)}/replies`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ body, mentions }) }), "office_comment_reply_failed");
+}
+
+export async function updateOfficeCommentThread(threadId: string, input: { assignedUserId: string | null; assignedToBrian: boolean; dueAt: string | null }): Promise<void> {
+  await json(await authFetch(`${API_URL}/api/office/comment-threads/${encodeURIComponent(threadId)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) }), "office_comment_update_failed");
+}
+
+export async function reactOfficeComment(messageId: string, reaction: "thumbs_up" | "heart" | "check", active: boolean): Promise<void> {
+  await json(await authFetch(`${API_URL}/api/office/comment-messages/${encodeURIComponent(messageId)}/reactions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reaction, active }) }), "office_comment_reaction_failed");
+}
+
+export async function listOfficeSuggestions(artifactId: string): Promise<OfficeSuggestion[]> {
+  const body = await json<{ suggestions: OfficeSuggestion[] }>(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/suggestions`), "office_suggestions_failed");
+  return body.suggestions;
+}
+
+export async function decideOfficeSuggestion(suggestionId: string, decision: "accepted" | "rejected"): Promise<void> {
+  await json(await authFetch(`${API_URL}/api/office/suggestions/${encodeURIComponent(suggestionId)}/decision`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ decision }) }), "office_suggestion_decision_failed");
+}
+
+export async function listOfficeVersions(artifactId: string): Promise<OfficeVersion[]> {
+  const body = await json<{ versions: OfficeVersion[] }>(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/versions`), "office_versions_failed");
+  return body.versions;
+}
+
+export async function previewOfficeVersion(artifactId: string, versionId: string): Promise<OfficeArtifactSnapshot> {
+  const body = await json<{ snapshot: OfficeArtifactSnapshot }>(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/versions/${encodeURIComponent(versionId)}/preview`), "office_version_preview_failed");
+  return body.snapshot;
+}
+
+export async function nameOfficeVersion(artifactId: string, versionId: string, summary: string): Promise<void> {
+  await json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/versions/${encodeURIComponent(versionId)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ summary }) }), "office_version_name_failed");
+}
+
+export async function copyOfficeVersion(artifactId: string, versionId: string, title: string): Promise<{ artifactId: string; version: number }> {
+  return json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/versions/${encodeURIComponent(versionId)}/copy`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title }) }), "office_version_copy_failed");
+}
+
+export async function restoreOfficeVersion(artifactId: string, targetVersionId: string, expectedVersion: number, summary: string): Promise<{ id: string; version: number }> {
+  const body = await json<{ version: { id: string; version: number } }>(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/restore`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ targetVersionId, expectedVersion, summary }) }), "office_version_restore_failed");
+  return body.version;
+}
+
+export async function getOfficeSharing(artifactId: string): Promise<OfficeSharing> {
+  return json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/sharing`), "office_sharing_failed");
+}
+
+export async function setOfficeGrant(artifactId: string, userId: string, role: "view" | "comment" | "edit"): Promise<void> {
+  await json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/sharing/${encodeURIComponent(userId)}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role }) }), "office_sharing_update_failed");
+}
+
+export async function revokeOfficeGrant(artifactId: string, userId: string): Promise<void> {
+  await json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/sharing/${encodeURIComponent(userId)}`, { method: "DELETE" }), "office_sharing_revoke_failed");
+}
+
+export async function setOfficeDefaultRole(artifactId: string, defaultWorkspaceRole: "view" | "comment" | "edit"): Promise<void> {
+  await json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/sharing`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ defaultWorkspaceRole }) }), "office_sharing_default_failed");
 }
 
 export async function getOfficeJob(jobId: string): Promise<OfficeJob> {
@@ -297,7 +387,7 @@ export async function uploadOfficeSource(workspaceId: string, file: File): Promi
 }
 
 type SpreadsheetPdfRequest = { sheetId: string; printArea: string; calculationMode: "automatic" | "stored"; expectedPageCount: number; preset: "invoice" | "worksheet" };
-export type OfficeReleaseReceipt = { status: "blocked" | "needs_ack" | "ready"; version: number; action: string; blocks: Array<{ code: string; message: string; subjectId?: string }>; warnings: Array<{ code: string; message: string; subjectId?: string }>; acknowledgedCodes: string[]; spreadsheetPdf?: { sheetId: string; printArea: string; expectedPageCount: number; actualPageCount?: number; issues: Array<{ code: string; message: string; severity: "warning" | "error"; address?: string }> } };
+export type OfficeReleaseReceipt = { status: "blocked" | "needs_ack" | "ready"; version: number; action: string; blocks: Array<{ code: string; message: string; subjectId?: string }>; warnings: Array<{ code: string; message: string; subjectId?: string }>; acknowledgedCodes: string[]; spreadsheetPdf?: { sheetId: string; printArea: string; expectedPageCount: number; actualPageCount?: number; issues: Array<{ code: string; message: string; severity: "warning" | "error"; address?: string }> }; documentPdf?: { expectedPageCount: number; actualPageCount?: number; renderer: "libreoffice"; issues: Array<{ code: string; message: string; severity: "error" }> }; presentationPdf?: { expectedPageCount: number; actualPageCount?: number; renderer: "libreoffice"; issues: Array<{ code: string; message: string; severity: "error" }> } };
 export type OfficeReleaseInput = { expectedVersion: number; action: "export" | "share" | "present" | "send" | "publish"; destination: { sensitivity: "public" | "internal" | "confidential"; external: boolean; disclosureSatisfied?: boolean }; format?: "native" | "pdf"; spreadsheetPdf?: SpreadsheetPdfRequest; acknowledgement?: { version: number; action: "export" | "share" | "present" | "send" | "publish"; codes: string[] } };
 
 export async function reviewOfficeRelease(artifactId: string, input: OfficeReleaseInput): Promise<OfficeReleaseReceipt> {
@@ -305,8 +395,15 @@ export async function reviewOfficeRelease(artifactId: string, input: OfficeRelea
   return body.receipt;
 }
 
-export async function releaseOfficeArtifact(artifactId: string, input: OfficeReleaseInput): Promise<{ releaseId: string; fileId: string; receipt: OfficeReleaseReceipt }> {
-  return json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/releases`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) }), "office_release_failed");
+export type OfficeReleaseResult = { releaseId?: string; fileId?: string; receipt: OfficeReleaseReceipt };
+
+export async function releaseOfficeArtifact(artifactId: string, input: OfficeReleaseInput): Promise<OfficeReleaseResult> {
+  const response = await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/releases`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
+  if (response.status === 409) {
+    const body = await response.clone().json().catch(() => null) as { receipt?: OfficeReleaseReceipt } | null;
+    if (body?.receipt) return { receipt: body.receipt };
+  }
+  return json(response, "office_release_failed");
 }
 
 export async function readOfficeReleasedFile(workspaceId: string, fileId: string): Promise<Blob> {
@@ -325,4 +422,8 @@ export async function syncOfficeOfflineCommands(artifactId: string, expectedSeq:
   const body = await response.json() as { status: string; reason?: string; quarantine?: boolean; seq?: number; snapshot?: OfficeArtifactSnapshot };
   if (!response.ok && response.status !== 409) throw new Error("office_offline_sync_failed");
   return body;
+}
+
+export async function requestOfficeOfflinePackage(artifactId: string, deviceId: string, expectedVersion: number): Promise<{ manifest: Record<string, unknown>; signature: string; payload: unknown }> {
+  return json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/offline-packages`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ deviceId, pinned: true, expectedVersion }) }), "office_offline_package_failed");
 }

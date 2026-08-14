@@ -1,9 +1,9 @@
 /**
  * [COMP:app-web/profile-management] Which surfaces a profile shows.
  *
- * A Remote profile leads to the live sign-in + vault flow. A Local profile
- * leads to extension pairing + local-control scope. Mixing those surfaces
- * makes both profile types read as half-configured.
+ * A Remote profile leads to live sign-in, vault, and optional real-browser
+ * capture. A Local profile uses extension pairing + local-control scope and
+ * does not pretend its real-browser cookies are vault sessions.
  *
  * Pure decision table so it is testable in this package's no-DOM vitest; the
  * JSX wiring itself stays web-QA.
@@ -39,22 +39,31 @@ function profile(overrides: Partial<BrowserProfile> = {}): BrowserProfile {
 
 describe("[COMP:app-web/profile-management] Profile surfaces by backend", () => {
   it("offers live sign-in and the vault on a Remote profile", () => {
-    expect(profileSurfaces(profile({ defaultBackend: "cloud" }))).toEqual({
+    expect(profileSurfaces(profile({ defaultBackend: "cloud", canManage: true }))).toEqual({
       signIn: true,
       vaultSessions: true,
-      pairBrowser: false,
-      localControl: false,
+      pairBrowser: true,
+      captureFromBrowser: true,
+      localControl: true,
       ownBrowserNote: false,
     });
   });
 
   it("offers pairing and local control on a Local profile", () => {
-    expect(profileSurfaces(profile({ defaultBackend: "local" }))).toEqual({
+    expect(profileSurfaces(profile({ defaultBackend: "local", canManage: true }))).toEqual({
       signIn: false,
       vaultSessions: false,
       pairBrowser: true,
+      captureFromBrowser: false,
       localControl: true,
       ownBrowserNote: true,
+    });
+  });
+
+  it("keeps pairing and capture owner-only", () => {
+    expect(profileSurfaces(profile({ defaultBackend: "cloud", canManage: false }))).toMatchObject({
+      pairBrowser: false,
+      captureFromBrowser: false,
     });
   });
 

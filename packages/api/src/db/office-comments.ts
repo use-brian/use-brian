@@ -5,6 +5,7 @@ export type OfficeCommentAnchor = {
   kind: 'text_range' | 'block' | 'table_cell' | 'slide' | 'object' | 'chart_datum' | 'note_range' | 'point' | 'region'
   targetIds: string[]
   range?: { from: number; to: number }
+  relative?: { from: Record<string, unknown>; to: Record<string, unknown> }
   geometry?: { x: number; y: number; width?: number; height?: number }
 }
 
@@ -19,7 +20,8 @@ export function createOfficeCommentStore(db: OfficeDbQuery = defaultOfficeDbQuer
                COALESCE(jsonb_agg(jsonb_build_object(
                  'id', m.id, 'authorType', m.author_type, 'authorUserId', m.author_user_id,
                  'authorAssistantId', m.author_assistant_id, 'body', m.body,
-                 'mentions', m.mentions, 'brianRunStatus', m.brian_run_status,
+                 'mentions', m.mentions, 'reactions', m.reactions,
+                 'brianRunStatus', m.brian_run_status,
                  'createdAt', m.created_at
                ) ORDER BY m.created_at) FILTER (WHERE m.id IS NOT NULL), '[]'::jsonb) AS messages
           FROM office_comment_threads t
@@ -30,6 +32,24 @@ export function createOfficeCommentStore(db: OfficeDbQuery = defaultOfficeDbQuer
          LIMIT 500
       `, [artifactId])
       return result.rows
+    },
+
+    async getThreadContext(userId: string, threadId: string): Promise<{ artifactId: string; workspaceId: string; status: 'open' | 'resolved' | 'detached' } | null> {
+      const result = await db<{ artifactId: string; workspaceId: string; status: 'open' | 'resolved' | 'detached' }>(userId, `
+        SELECT artifact_id AS "artifactId", workspace_id AS "workspaceId", status
+          FROM office_comment_threads WHERE id=$1
+      `, [threadId])
+      return result.rows[0] ?? null
+    },
+
+    async getMessageContext(userId: string, messageId: string): Promise<{ artifactId: string; workspaceId: string } | null> {
+      const result = await db<{ artifactId: string; workspaceId: string }>(userId, `
+        SELECT t.artifact_id AS "artifactId", t.workspace_id AS "workspaceId"
+          FROM office_comment_messages m
+          JOIN office_comment_threads t ON t.id=m.thread_id
+         WHERE m.id=$1
+      `, [messageId])
+      return result.rows[0] ?? null
     },
 
     async createThread(params: { userId: string; workspaceId: string; artifactId: string; artifactVersionId: string; anchor: OfficeCommentAnchor; snapshotFileId?: string; body: string; mentions?: string[]; brianTriggerKey?: string }): Promise<{ threadId: string; messageId: string }> {
@@ -82,6 +102,39 @@ export function createOfficeCommentStore(db: OfficeDbQuery = defaultOfficeDbQuer
       return result.rows.length === 1
     },
 
+    async updateThread(params: { userId: string; threadId: string; assignedUserId: string | null; assignedToBrian: boolean; dueAt: string | null }): Promise<boolean> {
+      const result = await db<{ id: string }>(params.userId, `
+        UPDATE office_comment_threads
+           SET assigned_user_id=$2,assigned_to_brian=$3,due_at=$4::timestamptz,updated_at=now()
+         WHERE id=$1 AND status <> 'detached'
+           AND ($2::uuid IS NULL OR EXISTS (
+             SELECT 1 FROM workspace_members wm
+              WHERE wm.workspace_id=office_comment_threads.workspace_id AND wm.user_id=$2::uuid
+           ))
+         RETURNING id
+      `, [params.threadId, params.assignedUserId, params.assignedToBrian, params.dueAt])
+      return result.rows.length === 1
+    },
+
+    async react(params: { userId: string; messageId: string; reaction: 'thumbs_up' | 'heart' | 'check'; active: boolean }): Promise<boolean> {
+      const result = await db<{ id: string }>(params.userId, `
+        UPDATE office_comment_messages
+           SET reactions = CASE WHEN $4 THEN
+             jsonb_set(reactions,$3::text[],to_jsonb(ARRAY(
+               SELECT DISTINCT value::uuid FROM (
+                 SELECT jsonb_array_elements_text(COALESCE(reactions #> $3::text[],'[]'::jsonb)) AS value
+                 UNION ALL SELECT $2::text
+               ) members
+             )),true)
+           ELSE jsonb_set(reactions,$3::text[],to_jsonb(ARRAY(
+             SELECT value::uuid FROM jsonb_array_elements_text(COALESCE(reactions #> $3::text[],'[]'::jsonb)) value
+              WHERE value <> $2::text
+           )),true) END
+         WHERE id=$1 RETURNING id
+      `, [params.messageId, params.userId, [params.reaction], params.active])
+      return result.rows.length === 1
+    },
+
     async detachMissingTargets(params: { userId: string; artifactId: string; validTargetIds: string[] }): Promise<number> {
       const result = await db<{ id: string }>(params.userId, `
         UPDATE office_comment_threads
@@ -109,7 +162,27 @@ export function createOfficeCommentStore(db: OfficeDbQuery = defaultOfficeDbQuer
       return result.rows[0]
     },
 
-    async decideSuggestion(params: { userId: string; suggestionId: string; decision: 'accepted' | 'rejected'; expectedStatus?: 'open' | 'conflicted' }): Promise<boolean> {
+    async listSuggestions(userId: string, artifactId: string): Promise<Array<Record<string, unknown>>> {
+      const result = await db<Record<string, unknown>>(userId, `
+        SELECT id,artifact_id AS "artifactId",thread_id AS "threadId",base_version_id AS "baseVersionId",
+               proposed_by_type AS "proposedByType",proposed_by_user_id AS "proposedByUserId",
+               proposed_by_assistant_id AS "proposedByAssistantId",command_batch AS "commandBatch",
+               affected_object_ids AS "affectedObjectIds",status,decided_by AS "decidedBy",
+               decided_at AS "decidedAt",created_at AS "createdAt"
+          FROM office_suggestions WHERE artifact_id=$1 ORDER BY created_at DESC LIMIT 500
+      `, [artifactId])
+      return result.rows
+    },
+
+    async getSuggestion(userId: string, suggestionId: string): Promise<{ id: string; artifactId: string; status: 'open' | 'accepted' | 'rejected' | 'superseded' | 'conflicted'; commandBatch: unknown } | null> {
+      const result = await db<{ id: string; artifactId: string; status: 'open' | 'accepted' | 'rejected' | 'superseded' | 'conflicted'; commandBatch: unknown }>(userId, `
+        SELECT id,artifact_id AS "artifactId",status,command_batch AS "commandBatch"
+          FROM office_suggestions WHERE id=$1
+      `, [suggestionId])
+      return result.rows[0] ?? null
+    },
+
+    async decideSuggestion(params: { userId: string; suggestionId: string; decision: 'accepted' | 'rejected' | 'conflicted'; expectedStatus?: 'open' | 'conflicted' }): Promise<boolean> {
       const result = await db<{ id: string }>(params.userId, `
         UPDATE office_suggestions SET status=$2,decided_by=$3,decided_at=now()
          WHERE id=$1 AND status=$4 RETURNING id

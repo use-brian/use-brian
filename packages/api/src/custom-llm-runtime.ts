@@ -9,7 +9,7 @@ import type {
   WorkspaceCustomLlmProfileRuntime,
   WorkspaceCustomLlmEndpointStore,
 } from './db/workspace-custom-llm-endpoints.js'
-import { isCustomLlmTier } from './db/workspace-custom-llm-endpoints.js'
+import { CUSTOM_LLM_TIERS, isCustomLlmTier } from './db/workspace-custom-llm-endpoints.js'
 import {
   createPublicCustomLlmFetch,
   CustomLlmPublicEndpointError,
@@ -96,6 +96,18 @@ function providerFor(
   fetchFn: typeof fetch = fetch,
 ): LLMProvider {
   const recordedModel = customLlmAlias(profile.profileId)
+  const usageCompatibleFetch: typeof fetch = async (input, init) => {
+    const response = await fetchFn(input, init)
+    if (response.status !== 400 || typeof init?.body !== 'string') return response
+    try {
+      const body = JSON.parse(init.body) as Record<string, unknown>
+      if (!('stream_options' in body)) return response
+      delete body.stream_options
+      return fetchFn(input, { ...init, body: JSON.stringify(body) })
+    } catch {
+      return response
+    }
+  }
   return createOpenAICompatProvider({
     apiKey: profile.apiKey?.trim() || undefined,
     baseURL: profile.baseUrl,
@@ -103,8 +115,8 @@ function providerFor(
     wireModel: profile.modelId,
     recordedModel,
     models: [recordedModel],
-    fetchFn,
-    includeStreamUsage: false,
+    fetchFn: usageCompatibleFetch,
+    includeStreamUsage: true,
     enableThinkingField: false,
     supportsJsonMode: false,
     supportsVision: false,
@@ -198,9 +210,17 @@ export type ResolvedWorkspaceCustomLlm = {
   provider: LLMProvider
   selector: string
   profileId: string
+  modelTier: import('./db/workspace-custom-llm-endpoints.js').CustomLlmTier
   inputTokenLimit: number
   maxTokens: number
   providerKeySource: 'user'
+  /** Per-run connection for the isolated browser-use process. Never serialize. */
+  browserUse: {
+    apiKeyEnvName: 'OPENAI_API_KEY'
+    apiKey: string
+    model: string
+    baseUrl: string
+  }
 }
 
 export type WorkspaceCustomLlmResolver = (params: {
@@ -208,6 +228,7 @@ export type WorkspaceCustomLlmResolver = (params: {
   requestedModel?: string
   requestedTier?: string
   allowDefault?: boolean
+  allowAnyDefault?: boolean
 }) => Promise<ResolvedWorkspaceCustomLlm | null>
 
 export function createWorkspaceCustomLlmResolver(
@@ -218,28 +239,57 @@ export function createWorkspaceCustomLlmResolver(
   },
 ): WorkspaceCustomLlmResolver {
   const networkPolicy = options?.networkPolicy ?? 'private-network'
-  return async ({ workspaceId, requestedModel, requestedTier, allowDefault = true }) => {
+  return async ({ workspaceId, requestedModel, requestedTier, allowDefault = true, allowAnyDefault = false }) => {
     const explicitId = customLlmEndpointIdFromAlias(requestedModel)
-    const profile: WorkspaceCustomLlmProfileRuntime | null = explicitId
+    let profile: WorkspaceCustomLlmProfileRuntime | null = explicitId
       ? await store.getRuntimeSystem({ workspaceId, profileId: explicitId })
       : allowDefault && requestedTier && isCustomLlmTier(requestedTier)
         ? await store.getTierRuntimeSystem({ workspaceId, tier: requestedTier })
         : null
+    if (!profile && allowDefault && allowAnyDefault) {
+      for (const tier of CUSTOM_LLM_TIERS) {
+        if (tier === requestedTier) continue
+        profile = await store.getTierRuntimeSystem({ workspaceId, tier })
+        if (profile) break
+      }
+    }
     if (!profile) return null
+    const modelTier = requestedTier && isCustomLlmTier(requestedTier) ? requestedTier : 'standard'
     const selector = customLlmAlias(profile.id)
     const fetchFn = options?.fetchFn ?? (networkPolicy === 'public-only' ? createPublicCustomLlmFetch() : fetch)
+    const provider = wrapProvider(providerFor({
+      profileId: profile.id,
+      baseUrl: profile.baseUrl,
+      apiKey: profile.apiKey,
+      modelId: profile.modelId,
+    }, fetchFn))
+    const limitedProvider: LLMProvider = {
+      ...provider,
+      stream: (request) => provider.stream({
+        ...request,
+        maxTokens: Math.min(request.maxTokens ?? profile.maxOutputTokens, profile.maxOutputTokens),
+        inputTokenLimit: Math.min(request.inputTokenLimit ?? profile.contextWindow, profile.contextWindow),
+      }),
+      createSession: (sessionOptions) => provider.createSession({
+        ...sessionOptions,
+        maxTokens: Math.min(sessionOptions.maxTokens ?? profile.maxOutputTokens, profile.maxOutputTokens),
+        inputTokenLimit: Math.min(sessionOptions.inputTokenLimit ?? profile.contextWindow, profile.contextWindow),
+      }),
+    }
     return {
-      provider: wrapProvider(providerFor({
-        profileId: profile.id,
-        baseUrl: profile.baseUrl,
-        apiKey: profile.apiKey,
-        modelId: profile.modelId,
-      }, fetchFn)),
+      provider: limitedProvider,
       selector,
       profileId: profile.id,
+      modelTier,
       inputTokenLimit: profile.contextWindow,
       maxTokens: profile.maxOutputTokens,
       providerKeySource: 'user',
+      browserUse: {
+        apiKeyEnvName: 'OPENAI_API_KEY',
+        apiKey: profile.apiKey?.trim() || 'not-required',
+        model: profile.modelId,
+        baseUrl: profile.baseUrl,
+      },
     }
   }
 }

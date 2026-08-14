@@ -18,6 +18,11 @@ const ctx = {
 function mockApi(overrides?: Partial<GoogleCalendarApi>): GoogleCalendarApi {
   return {
     listCalendars: vi.fn().mockResolvedValue([]),
+    listEventColors: vi.fn().mockResolvedValue({
+      calendarId: 'primary',
+      eventLabels: [{ id: 'label-blue', name: 'Client', backgroundColor: '#039be5' }],
+      palette: [{ colorId: '11', background: '#dc2127', foreground: '#ffffff' }],
+    }),
     listEvents: vi.fn().mockResolvedValue([]),
     getEvent: vi.fn().mockResolvedValue({ id: 'evt1', summary: 'Test Event' }),
     queryFreeBusy: vi.fn().mockResolvedValue({ calendars: {}, available: [] }),
@@ -93,18 +98,75 @@ function zodFieldToJsonSchema(field: { _def: Record<string, unknown> }): Record<
 // ── Tests ────────────────────────────────────────────────────
 
 describe('[COMP:tools/google-calendar] Google Calendar tools', () => {
-  it('creates all 7 calendar tools', () => {
+  it('creates all 8 calendar tools', () => {
     const tools = createGoogleCalendarTools(mockApi())
-    expect(tools).toHaveLength(7)
+    expect(tools).toHaveLength(8)
     expect(tools.map((t) => t.name).sort()).toEqual([
       'googleCalendarCreateEvent',
       'googleCalendarDeleteEvent',
       'googleCalendarGetEvent',
       'googleCalendarListCalendars',
+      'googleCalendarListEventColors',
       'googleCalendarListEvents',
       'googleCalendarQueryFreeBusy',
       'googleCalendarUpdateEvent',
     ])
+  })
+
+  it('lists the exact event-label and legacy-colour vocabulary for a calendar', async () => {
+    const api = mockApi()
+    const tools = createGoogleCalendarTools(api)
+
+    const result = await tools.find((t) => t.name === 'googleCalendarListEventColors')!
+      .execute({ calendarId: 'team@example.com' }, ctx)
+
+    expect(api.listEventColors).toHaveBeenCalledWith('team@example.com')
+    expect(result.data).toMatchObject({
+      eventLabels: [{ id: 'label-blue', name: 'Client' }],
+      palette: [{ colorId: '11', background: '#dc2127' }],
+    })
+  })
+
+  it('validates event marks against the live calendar vocabulary before create/update', async () => {
+    const api = mockApi()
+    const tools = createGoogleCalendarTools(api)
+    const createTool = tools.find((t) => t.name === 'googleCalendarCreateEvent')!
+    const updateTool = tools.find((t) => t.name === 'googleCalendarUpdateEvent')!
+
+    const created = await createTool.execute({
+      summary: 'Client call',
+      start: '2026-08-15T09:00:00+08:00',
+      end: '2026-08-15T10:00:00+08:00',
+      eventLabelId: 'label-blue',
+    }, ctx)
+    expect(created.isError).not.toBe(true)
+    expect(api.createEvent).toHaveBeenCalledWith(expect.objectContaining({ eventLabelId: 'label-blue' }))
+
+    const invalid = await updateTool.execute({ eventId: 'evt1', colorId: '999' }, ctx)
+    expect(invalid).toMatchObject({ isError: true })
+    expect(invalid.data).toMatch(/Valid legacy event colors: 11/)
+    expect(api.updateEvent).not.toHaveBeenCalled()
+
+    await updateTool.execute({ eventId: 'evt1', eventLabelId: '' }, ctx)
+    expect(api.updateEvent).toHaveBeenCalledWith('evt1', { eventLabelId: '' })
+  })
+
+  it('refuses ambiguous eventLabelId plus colorId input before mutation', async () => {
+    const api = mockApi()
+    const createTool = createGoogleCalendarTools(api)
+      .find((t) => t.name === 'googleCalendarCreateEvent')!
+
+    const result = await createTool.execute({
+      summary: 'Ambiguous',
+      start: '2026-08-15T09:00:00+08:00',
+      end: '2026-08-15T10:00:00+08:00',
+      eventLabelId: 'label-blue',
+      colorId: '11',
+    }, ctx)
+
+    expect(result).toMatchObject({ isError: true })
+    expect(result.data).toMatch(/not both/)
+    expect(api.createEvent).not.toHaveBeenCalled()
   })
 
   // ── RSVP schema visibility ──────────────────────────────────
@@ -559,6 +621,8 @@ describe('[COMP:tools/google-calendar] Google Calendar tools', () => {
         {
           id: 'evt1',
           summary: 'Test Meeting',
+          eventLabelId: 'label-blue',
+          colorId: '9',
           start: { dateTime: '2026-04-17T08:15:00Z' },
           end: { dateTime: '2026-04-17T09:15:00Z' },
         },
@@ -573,6 +637,7 @@ describe('[COMP:tools/google-calendar] Google Calendar tools', () => {
     // 08:15 UTC = 16:15 HKT
     expect(events[0].localStart).toMatch(/4:15\s*PM/)
     expect(events[0].localEnd).toMatch(/5:15\s*PM/)
+    expect(events[0]).toMatchObject({ eventLabelId: 'label-blue', colorId: '9' })
   })
 
   it('keeps recurring parent identity and original occurrence time in list results', async () => {

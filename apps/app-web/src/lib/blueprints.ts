@@ -1,6 +1,6 @@
 /**
  * Pure logic behind the Brain's Blueprints library + the blueprint pickers
- * (recording upload, workflow step). A BLUEPRINT is a page template that
+ * (recording live capture, workflow step). A BLUEPRINT is a page template that
  * carries an `extraction` spec — the synthesis engine can fill it from a
  * source (a recording, the brain, a research gather). A template with no
  * extraction spec is a plain skeleton, not a blueprint.
@@ -11,7 +11,7 @@
  * `lib/skills-view.ts`).
  *
  * Spec: docs/architecture/brain/structural-synthesis.md -> "The blueprint
- * object" / "One SearchableSelect picker appears in three places".
+ * object" / "The blueprint selection ladder".
  *
  * [COMP:web/blueprints-library]
  */
@@ -71,8 +71,9 @@ export function blueprintSectionCount(
  * are no built-in blueprints — the gallery is workspace-authored only. The
  * caller prepends its own "ingest only / no page" sentinel item.
  *
- * Appears in all three picker sites (recording upload, workflow step, chat),
- * so it lives here once. See structural-synthesis.md.
+ * Shared by the live-capture confirm and workflow picker; conversational
+ * selection resolves the same workspace rows by name. See
+ * structural-synthesis.md.
  */
 export function buildBlueprintPickerItems(
   workspaceBlueprints: CustomPageTemplateSummary[],
@@ -83,11 +84,12 @@ export function buildBlueprintPickerItems(
   }));
 }
 
-// ── Recording upload picker: workspace-default selection ladder (migration 291) ──
+// ── Recording live-capture picker: workspace-default ladder (migration 291) ──
 //
-// The upload picker (recording-upload-button) follows
-// `explicit pick ?? workspace default ?? none` (decision D3). These pure
-// helpers carry that logic so they unit-test without a component render harness.
+// The pre-flight picker follows `workspace default ?? none` (decision D3).
+// Picked-file recording intake belongs to chat and has no parallel inline
+// picker. These pure helpers carry the confirm-dialog mapping so it unit-tests
+// without a component render harness.
 //
 // Two sentinels mirror the component: `RECORDING_INGEST_ONLY` is an explicit
 // "no page" pick (submitted as omit); the empty string is the UNSET placeholder
@@ -109,32 +111,15 @@ export const RECORDING_UNSET = "";
 export const RECORDING_INSTALL_STARTER = "__install_starter__";
 
 /**
- * The picker's initial selection given the workspace default. A non-null
- * default pre-selects that blueprint id (auto-apply, §1.1); a null default
- * leaves the picker UNSET so a placeholder prompts an explicit choice (§1.2,
- * never a silent ingest-only default).
+ * The live-capture confirm-dialog picker's seed. A non-null workspace default
+ * pre-selects that blueprint id; a null default leaves the picker UNSET so the
+ * user must choose a blueprint or ingest-only. See
+ * docs/architecture/engine/preflight-confirmation.md.
  */
-export function initialRecordingBlueprint(
+export function seedRecordingBlueprint(
   workspaceDefault: string | null,
 ): string {
   return workspaceDefault ?? RECORDING_UNSET;
-}
-
-/**
- * The confirm-dialog picker's seed: the surface's explicit pick when it made
- * one (the Studio upload button's inline picker — including an explicit
- * "ingest only"), else the workspace-default ladder. The pre-flight confirm
- * shows the blueprint picker on EVERY recording surface (chat dock, new-page
- * landing, Studio) per the pre-flight-confirm invariant — a surface that made
- * no choice seeds from the workspace default, and the user can still change
- * it in the dialog. See docs/architecture/engine/preflight-confirmation.md.
- */
-export function seedRecordingBlueprint(
-  explicit: string | undefined,
-  workspaceDefault: string | null,
-): string {
-  if (explicit !== undefined && explicit !== RECORDING_UNSET) return explicit;
-  return initialRecordingBlueprint(workspaceDefault);
 }
 
 /**
@@ -165,8 +150,8 @@ export function recordingBlueprintToSlug(
 //
 // A workspace with zero blueprints cannot synthesize anything: the picker has
 // only "ingest only", so a recording lands as brain rows with no brief page —
-// hence no citations and no player. Offering the starter at the upload confirm
-// is the one moment the user has demonstrated intent; auto-seeding it at
+// hence no citations and no player. Offering the starter at the live-capture
+// confirm is the one moment the user has demonstrated intent; auto-seeding it at
 // workspace creation is how you get 400 identical dead templates nobody edits.
 
 /** True when the workspace has nothing the synthesis engine could fill. */

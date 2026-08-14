@@ -433,6 +433,48 @@ describe('[COMP:workers/manager] createWorkerManager', () => {
     expect(seenModels[4]).toBe('gemini-flash')
   })
 
+  it('captures a custom provider lane from the spawning turn', async () => {
+    const seen: Array<{ provider: string; model: string }> = []
+    const provider = (name: string): LLMProvider => ({
+      name,
+      models: ['model'],
+      async *stream(req) {
+        seen.push({ provider: name, model: req.model })
+        yield { type: 'message_start', model: req.model }
+        yield { type: 'text_delta', text: 'ok' }
+        yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 2, outputTokens: 1 } }
+      },
+      createSession(): ProviderSession {
+        throw new Error('not used')
+      },
+    })
+    const usage: WorkerUsageEvent[] = []
+    const manager = createWorkerManager({
+      provider: provider('platform'),
+      model: 'gemini-flash',
+      tools: new Map(),
+      onUsage: (event) => usage.push(event),
+    })
+
+    manager.spawn('custom task', {
+      ...ctx,
+      workspaceId: 'ws-1',
+      workerRuntime: {
+        provider: provider('custom'),
+        model: 'custom:00000000-0000-4000-8000-000000000001',
+        modelTier: 'pro',
+        providerKeySource: 'user',
+      },
+    })
+    await manager.waitAll()
+
+    expect(seen).toEqual([{
+      provider: 'custom',
+      model: 'custom:00000000-0000-4000-8000-000000000001',
+    }])
+    expect(usage[0]).toMatchObject({ modelTier: 'pro', providerKeySource: 'user' })
+  })
+
   it('returns a graceful failed (not crashed) result when the provider errors inside the stream', async () => {
     const manager = createWorkerManager({
       provider: makeThrowingProvider(),

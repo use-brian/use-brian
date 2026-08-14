@@ -19,7 +19,7 @@
  */
 
 import type { AccessContext, CachedFile } from '@use-brian/core'
-import { promoteCachedFile, wrapMcpTools, buildToolIndex, createMcpSearchTools, createGoogleCalendarTools, createGmailTools, createGoogleTasksTools, createGoogleDriveTools, createGoogleDocsTools, createGoogleSheetsTools, createGoogleSlidesTools, createGDriveFilesTools, createGitHubTools, createNotionTools, createFathomTools, createShopifyTools, createMsGraphTools, createKnowledgeTools, createAgentmailTools, createMailboxTools, workspaceFilesCtxFor, workspaceFilesErrorMessage, workspaceFilesGate } from '@use-brian/core'
+import { promoteCachedFile, wrapMcpTools, buildToolIndex, createMcpSearchTools, createGoogleCalendarTools, createGmailTools, createGoogleTasksTools, createGoogleDriveTools, createGoogleDocsTools, createGoogleSheetsTools, createGoogleSlidesTools, createGDriveFilesTools, createGitHubTools, createNotionTools, createFathomTools, createShopifyTools, createWordPressTools, createMsGraphTools, createKnowledgeTools, createAgentmailTools, createMailboxTools, workspaceFilesCtxFor, workspaceFilesErrorMessage, workspaceFilesGate } from '@use-brian/core'
 import type { Tool, McpSettingsStore, McpServerConfig, KnowledgeStoreInterface, KnowledgeRepoWriter, AuthorizedFile, GDriveFilesStore, GDriveFileKind, LocalSource, RemoteSource, EngineHooks, FilesApi, AgentmailToolApi, MailboxApi, MailboxAccountRouter } from '@use-brian/core'
 import { getGlobalEmailInboxProvider, type EmailInboxProvider } from '../agentmail/provider.js'
 import { renderEmailBody } from '@use-brian/channels'
@@ -36,6 +36,7 @@ import {
 } from '../db/gdrive-catalog-store.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
+import { listAgentmailConnectorInstanceIdsForAssistantSystem } from '../db/channels-store.js'
 import type { ConnectorActionAudit, ConnectorActionPreflight } from '../connector-action-port.js'
 import { workspacePolicyAsSettingsStore } from '../db/workspace-tool-policy-store.js'
 import { discoverMcpServer, callRemoteMcpTool } from './client.js'
@@ -49,7 +50,7 @@ import { buildConnectorAuthHeaders, mergeValidatedHeaders, preflightHeadersToRec
 import {
   refreshGoogleAccessToken,
   unpackGoogleRefreshCredential,
-  listCalendarList, listCalendarEvents, getCalendarEvent, queryCalendarFreeBusy,
+  listCalendarList, listCalendarEventColors, listCalendarEvents, getCalendarEvent, queryCalendarFreeBusy,
   createCalendarEvent, updateCalendarEvent, deleteCalendarEvent,
   listGmailMessages, getGmailMessage, sendGmailMessage,
   listTaskLists, listGoogleTasks, getGoogleTask, createGoogleTask, updateGoogleTask, deleteGoogleTask,
@@ -128,6 +129,7 @@ import {
   createProductTemplate as createShopifyProductTemplate,
   setProductTemplate as setShopifyProductTemplate,
 } from '../shopify/client.js'
+import { createWordPressApi, unpackWordPressCredentials, type WordPressCredentials } from '../wordpress/client.js'
 import { createMsGraphClient } from '../msgraph/client.js'
 import {
   createMsGraphTokenManager,
@@ -211,6 +213,7 @@ export function _getMcpDiscoveryCacheSize(): number {
 export const INJECTED_BUILTIN_TOOLS_BY_CONNECTOR: Record<string, readonly string[]> = {
   gcal: [
     'googleCalendarListCalendars',
+    'googleCalendarListEventColors',
     'googleCalendarListEvents',
     'googleCalendarGetEvent',
     'googleCalendarQueryFreeBusy',
@@ -334,6 +337,11 @@ export const INJECTED_BUILTIN_TOOLS_BY_CONNECTOR: Record<string, readonly string
     'shopifyCancelOrder',
     'shopifyRefundOrder',
     'shopifyCompleteDraftOrder',
+  ],
+  wordpress: [
+    'wordpressGetManagedPage',
+    'wordpressUpdatePageText',
+    'wordpressReplacePageImage',
   ],
   msgraph: [
     'msTeamsListTeams',
@@ -944,6 +952,7 @@ export async function injectMcpTools(params: {
   await injectNotionTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, extrasByProvider.get('notion'), resolveInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore)
   await injectFathomTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, undefined, extrasByProvider.get('fathom'), resolveInstanceCreds, persistInstanceCreds)
   await injectShopifyTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, undefined, extrasByProvider.get('shopify'), resolveInstanceCreds, persistInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore, filesApi, readCachedFile)
+  await injectWordPressTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, extrasByProvider.get('wordpress'), resolveInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore, filesApi, readCachedFile)
   // No extras argument: `msgraph` is `single_instance` in OFFICIAL_CONNECTORS
   // (one Microsoft identity per user), so it is never in
   // MULTI_INSTANCE_CONNECTOR_IDS and `extrasByProvider` never holds it.
@@ -1142,6 +1151,13 @@ export async function injectMcpTools(params: {
             { report: reportHealth, instanceId: g.instance.id },
             assistantConnectorGrantsStore,
             filesApi,
+          )
+        } else if (p === 'wordpress') {
+          await injectWordPressTools(
+            grantorConnectors, connectorStore, settingsStore, g.grantedByUserId, assistantId,
+            assistantConnectorStore, tools, undefined, boundGrantCreds, extraInstances,
+            resolveGrantedInstanceCreds, { report: reportHealth, instanceId: g.instance.id },
+            assistantConnectorGrantsStore, filesApi,
           )
         } else if (p === 'msgraph') {
           // Read-only Teams over a rotating refresh token. The synthetic
@@ -1421,6 +1437,18 @@ export async function injectMcpTools(params: {
             assistantConnectorGrantsStore,
             filesApi,
           )
+        } else if (p === 'wordpress') {
+          await injectWordPressTools(
+            syntheticConnectors, connectorStore, teamPolicyStore, userId, assistantId,
+            assistantConnectorStore, tools, undefined,
+            async () => {
+              const creds = await connectorInstanceStore.getCredentialsSystem(inst.id)
+              return creds?.client_secret ?? null
+            },
+            extraInstances, resolveTeamInstanceCreds,
+            { report: reportHealth, instanceId: inst.id },
+            assistantConnectorGrantsStore, filesApi,
+          )
         } else if (p === 'msgraph') {
           // A workspace-owned Microsoft identity. Reads and the rotated tuple
           // both bind to this team-scoped row; the shared workspace policy
@@ -1487,24 +1515,35 @@ export async function injectMcpTools(params: {
         console.debug(`[mcp-inject] team-native overlay: re-injected ${overlaidByTeam.size} provider(s) from team-scoped connector_instance rows`)
       }
 
-      // ── Assistant Email (agentmail) — one tool set over ALL inboxes ──
+      // ── Assistant Email (agentmail) — Channel-owned handler scope ──
       // Instances are one-per-inbox (decision D1); the tools take an
-      // optional `fromInbox` instead of per-instance variant suffixes. Dark
-      // without the provider (no AGENTMAIL_API_KEY) — nothing is announced.
+      // optional `fromInbox` instead of per-instance variant suffixes. Only
+      // inboxes whose Channel default points at this assistant are exposed.
+      // Dark without the provider (no AGENTMAIL_API_KEY) — nothing is announced.
       // Explicit param wins; otherwise the boot-bound global (the late-bound
       // seam — see provider.ts).
       const effectiveEmailProvider = emailInboxProvider ?? getGlobalEmailInboxProvider()
       if (effectiveEmailProvider) {
+        const handledInstanceIds = new Set(
+          await listAgentmailConnectorInstanceIdsForAssistantSystem(
+            assistantTeamId,
+            assistantId,
+          ),
+        )
         const inboxInstances = teamNative
-          .filter((i) => i.provider === 'agentmail' && i.connected && i.healthStatus !== 'auth_failed')
+          .filter((i) =>
+            i.provider === 'agentmail'
+            && i.connected
+            && i.healthStatus !== 'auth_failed'
+            && handledInstanceIds.has(i.id),
+          )
           .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
-        const agentmailEnabled =
-          !assistantConnectorStore || await assistantConnectorStore.isEnabled(assistantId, 'agentmail')
-        if (inboxInstances.length > 0 && agentmailEnabled) {
+        if (inboxInstances.length > 0) {
           await injectAgentmailTools({
             provider: effectiveEmailProvider,
             inboxes: inboxInstances.map((i) => ({
               address: (i.connectedEmail ?? i.label).toLowerCase(),
+              governanceId: connectorInstanceGovernanceId('agentmail', i.id),
             })),
             settingsStore: workspaceToolPolicyStore
               ? workspacePolicyAsSettingsStore(workspaceToolPolicyStore, assistantTeamId)
@@ -1516,9 +1555,9 @@ export async function injectMcpTools(params: {
             connectorActionAudit,
             assistantConnectorGrantsStore,
           })
-        } else if (inboxInstances.length === 0) {
+        } else {
           unavailable.push(
-            'Assistant Email (no assistant inbox provisioned in this workspace) — if the user wants the assistant to have its own email address, point them to Studio → Channels → Add channel → Email.',
+            'Assistant Email (this assistant does not handle an inbox) - assign an inbox to it in Studio → Channels, or create one with Add channel → Email.',
           )
         }
       }
@@ -1951,6 +1990,7 @@ export const NOT_CONNECTED_DISPLAY_NAMES: Record<string, string> = {
   notion: 'Notion',
   fathom: 'Fathom',
   shopify: 'Shopify',
+  wordpress: 'WordPress',
 }
 
 /**
@@ -2012,6 +2052,7 @@ const NOT_CONNECTED_DISPLAY_NAME: Record<string, string> = {
   notion: 'Notion',
   fathom: 'Fathom',
   shopify: 'Shopify',
+  wordpress: 'WordPress',
   msgraph: 'Microsoft Teams',
   imap: 'Company email (IMAP)',
 }
@@ -2292,6 +2333,8 @@ async function injectGoogleTools(
         focusTimeProperties?: unknown
         outOfOfficeProperties?: unknown
         workingLocationProperties?: unknown
+        eventLabelId?: string
+        colorId?: string
         start?: { dateTime?: string; date?: string }
         end?: { dateTime?: string; date?: string }
       }
@@ -2335,6 +2378,10 @@ async function injectGoogleTools(
         listCalendars: async () => {
           const token = await getToken()
           return listCalendarList(token)
+        },
+        listEventColors: async (calendarId) => {
+          const token = await getToken()
+          return listCalendarEventColors(token, calendarId)
         },
         listEvents: async (params) => {
           const token = await getToken()
@@ -2435,6 +2482,8 @@ async function injectGoogleTools(
                   focus_time_properties: snapshot.focusTimeProperties,
                   out_of_office_properties: snapshot.outOfOfficeProperties,
                   working_location_properties: snapshot.workingLocationProperties,
+                  event_label_id: snapshot.eventLabelId,
+                  color_id: snapshot.colorId,
                 }
               : null,
           }
@@ -3775,6 +3824,136 @@ async function injectShopifyTools(
   }
 }
 
+// ── Built-in WordPress managed-content connector ────────────
+// Three fixed tools over the OSS Use Brian Bridge. The bridge's registered
+// page/slot catalog is the write boundary; credentials are a static WordPress
+// Application Password tuple, one independently-bound tuple per site.
+
+async function injectWordPressTools(
+  connectors: Array<{ connectorId: string; connected: boolean; url?: string | null }>,
+  connectorStore: ConnectorStore,
+  settingsStore: McpSettingsStore,
+  userId: string,
+  assistantId: string,
+  assistantConnectorStore: AssistantConnectorStore | undefined,
+  tools: Map<string, Tool>,
+  unavailable?: string[],
+  /** Exact-instance credential override for a grant/team-native overlay. */
+  credsOverride?: () => Promise<string | null>,
+  /** Additional connected WordPress sites for the personal base load. */
+  extraInstances?: ConnectorInstanceRef[],
+  resolveInstanceCreds?: (instanceId: string) => Promise<string | null>,
+  healthProbe?: { report: HealthReporter; instanceId?: string | null },
+  assistantConnectorGrantsStore?: import('../db/assistant-connector-grants-store.js').AssistantConnectorGrantsStore,
+  filesApi?: FilesApi,
+  readCachedFile?: (id: string, ctx: AccessContext) => Promise<CachedFile | null>,
+): Promise<void> {
+  const wordpress = connectors.find((c) => c.connectorId === 'wordpress' && c.connected)
+  const wordpressEnabled = wordpress && (!assistantConnectorStore || await assistantConnectorStore.isEnabled(assistantId, 'wordpress'))
+
+  if (!wordpress) {
+    unavailable?.push(notConnectedNotice('WordPress', 'managed page text and images'))
+    return
+  }
+
+  const primaryCredentials = async (): Promise<string | null> => {
+    if (credsOverride) return credsOverride()
+    return (await connectorStore.getCredentials(userId, 'wordpress'))?.client_secret ?? null
+  }
+
+  const resolveTuple = async (load: () => Promise<string | null>): Promise<WordPressCredentials> => {
+    const encoded = await load()
+    const tuple = encoded ? unpackWordPressCredentials(encoded) : null
+    if (!tuple) throw new Error('WordPress connector credentials are missing or invalid')
+    return tuple
+  }
+
+  function buildTools(
+    load: () => Promise<string | null>,
+    governanceId: string = 'wordpress',
+  ): Tool[] {
+    const withApi = async <T>(call: (api: ReturnType<typeof createWordPressApi>) => Promise<T>): Promise<T> => {
+      return call(createWordPressApi(await resolveTuple(load)))
+    }
+    return gateToolsOnActionGrants(createWordPressTools({
+      getManagedPage: (page) => withApi((api) => api.getManagedPage(page)),
+      updatePageText: (params) => withApi((api) => api.updatePageText(params)),
+      replacePageImage: (params) => withApi((api) => api.replacePageImage(params)),
+    }, {
+      readFileBytes: filesApi
+        ? async (context, idOrPath) => {
+            const gate = workspaceFilesGate(context.workspaceId)
+            if (gate) return { error: gate.data }
+            const ctx = workspaceFilesCtxFor(context)
+            let result = await filesApi.readBytes(ctx, idOrPath)
+            if (!result.ok && result.error.kind === 'not_found' && readCachedFile) {
+              const cached = await readCachedFile(idOrPath, {
+                workspaceId: context.workspaceId!,
+                userId: context.userId,
+                assistantId: context.assistantId,
+                assistantKind: context.assistantKind ?? 'standard',
+                clearance: context.clearance,
+                compartments: context.compartments,
+              })
+              if (cached) {
+                const promoted = await promoteCachedFile(filesApi, ctx, cached)
+                if (!promoted.ok) return { error: workspaceFilesErrorMessage(promoted.error) }
+                result = await filesApi.readBytes(ctx, promoted.value.id)
+              }
+            }
+            if (!result.ok) {
+              return {
+                error: workspaceFilesErrorMessage(result.error),
+                notFound: result.error.kind === 'not_found',
+              }
+            }
+            return {
+              bytes: result.value.bytes,
+              fileName: result.value.file.name,
+              mimeType: result.value.file.mime,
+            }
+          }
+        : undefined,
+    }), 'wordpress', assistantConnectorGrantsStore, assistantId, governanceId)
+  }
+
+  const primaryInstanceId = healthProbe?.instanceId ?? (wordpress as { id?: string }).id ?? null
+  try {
+    if (wordpressEnabled) {
+      const encoded = await primaryCredentials()
+      if (!encoded || !unpackWordPressCredentials(encoded)) {
+        unavailable?.push(expiredCredentialsNotice('WordPress'))
+      } else {
+        const built = buildTools(primaryCredentials)
+        const wordpressTools = healthProbe && primaryInstanceId
+          ? wrapToolsWithHealthProbe(built, primaryInstanceId, healthProbe.report)
+          : built
+        for (const tool of wordpressTools) {
+          if (await applyPolicyOrSkip(tool, 'wordpress', settingsStore, assistantId, userId, unavailable) === 'include') {
+            tools.set(tool.name, tool)
+          }
+        }
+      }
+    }
+
+    if (extraInstances?.length && resolveInstanceCreds) {
+      await injectInstanceVariants({
+        provider: 'wordpress',
+        extras: extraInstances,
+        settingsStore, assistantId, userId, assistantConnectorStore, tools,
+        buildToolsForInstance: (instance, governanceId) => {
+          const variant = buildTools(() => resolveInstanceCreds(instance.id), governanceId)
+          return healthProbe ? wrapToolsWithHealthProbe(variant, instance.id, healthProbe.report) : variant
+        },
+      })
+    }
+
+    console.debug(`[mcp-inject] WordPress: injected tools${extraInstances?.length ? ` (+${extraInstances.length} extra site(s))` : ''}`)
+  } catch (err) {
+    console.error('[mcp-inject] WordPress injection failed:', err)
+  }
+}
+
 // ── Built-in Microsoft Graph (Teams) connector ─────────────
 //
 // READ-ONLY Teams access (docs/architecture/integrations/msgraph.md). Two
@@ -4231,8 +4410,8 @@ async function injectMailboxTools(params: {
 // ── Assistant Email (agentmail) injection ─────────────────────
 //
 // The assistant's OWN mailbox tools (agentmail.md → "Connector tools").
-// One tool set covers every workspace inbox (decision D1): the tools take an
-// optional `fromInbox` and default to the workspace's first (oldest) inbox.
+// One tool set covers every inbox handled by this assistant (decision D1): the
+// tools take an optional `fromInbox` and default to its first (oldest) inbox.
 // Sends and drafts reuse the Gmail governance chain — `ask` classification
 // (OFFICIAL_CONNECTOR_TOOLS), the connector_actions audit + payload
 // classifier preflight here, and the confidential-turn egress refusal inside
@@ -4240,15 +4419,15 @@ async function injectMailboxTools(params: {
 
 async function injectAgentmailTools(params: {
   provider: EmailInboxProvider
-  /** Workspace inboxes, oldest first — the first is the default sender. */
-  inboxes: Array<{ address: string }>
+  /** Handled inboxes, oldest first — the first is the default sender. */
+  inboxes: Array<{ address: string; governanceId: string }>
   settingsStore: McpSettingsStore
   userId: string
   assistantId: string
   tools: Map<string, Tool>
   unavailable?: string[]
   connectorActionAudit?: ConnectorActionAudit
-  /** Per-assistant write-grant gate — see `gateToolsOnActionGrants`. */
+  /** Exact per-inbox write grants, edited from Studio → Channels. */
   assistantConnectorGrantsStore?: import('../db/assistant-connector-grants-store.js').AssistantConnectorGrantsStore
 }): Promise<void> {
   const { provider, inboxes, settingsStore, userId, assistantId, tools, unavailable, connectorActionAudit, assistantConnectorGrantsStore } = params
@@ -4308,11 +4487,35 @@ async function injectAgentmailTools(params: {
     }
   }
 
+  const governanceByAddress = new Map(
+    inboxes.map((inbox) => [inbox.address.toLowerCase(), inbox.governanceId]),
+  )
+  const assertInboxAction = async (
+    inboxAddress: string,
+    action: 'agentmailSendMessage' | 'agentmailCreateDraft',
+  ): Promise<void> => {
+    if (!assistantConnectorGrantsStore) return
+    const governanceId = governanceByAddress.get(inboxAddress.toLowerCase())
+    if (!governanceId) {
+      throw new Error(`This assistant does not handle ${inboxAddress}.`)
+    }
+    const grant = await assistantConnectorGrantsStore.getForAssistantSystem(
+      assistantId,
+      governanceId,
+    )
+    if (!grant?.allowedActions.includes(action)) {
+      throw new Error(
+        `This assistant is not allowed to use ${action} for ${inboxAddress}. Enable it from the inbox in Studio → Channels.`,
+      )
+    }
+  }
+
   const api: AgentmailToolApi = {
     async listInboxes() {
       return inboxes.map((inbox, i) => ({ address: inbox.address, isDefault: i === 0 }))
     },
     async send(p) {
+      await assertInboxAction(p.inboxAddress, 'agentmailSendMessage')
       const payload = {
         from: p.inboxAddress,
         to: p.to,
@@ -4361,6 +4564,7 @@ async function injectAgentmailTools(params: {
       }))
     },
     async createDraft(p) {
+      await assertInboxAction(p.inboxAddress, 'agentmailCreateDraft')
       const payload = {
         from: p.inboxAddress,
         to: p.to,
@@ -4396,7 +4600,28 @@ async function injectAgentmailTools(params: {
   }
 
   try {
-    for (const tool of gateToolsOnActionGrants(createAgentmailTools(api), 'agentmail', assistantConnectorGrantsStore, assistantId)) {
+    const grantedActions = new Set<string>()
+    if (assistantConnectorGrantsStore) {
+      const grants = await Promise.all(
+        inboxes.map((inbox) =>
+          assistantConnectorGrantsStore.getForAssistantSystem(
+            assistantId,
+            inbox.governanceId,
+          ),
+        ),
+      )
+      for (const grant of grants) {
+        for (const action of grant?.allowedActions ?? []) grantedActions.add(action)
+      }
+    }
+    for (const tool of createAgentmailTools(api)) {
+      if (
+        assistantConnectorGrantsStore
+        && (tool.name === 'agentmailSendMessage' || tool.name === 'agentmailCreateDraft')
+        && !grantedActions.has(tool.name)
+      ) {
+        continue
+      }
       if (await applyPolicyOrSkip(tool, 'agentmail', settingsStore, assistantId, userId, unavailable) === 'include') {
         tools.set(tool.name, tool)
       }

@@ -127,6 +127,8 @@ function renderDock(profiles: FeedProfile[]): string {
     computerAudioAvailable: false,
     includeComputerAudio: false,
     setIncludeComputerAudio: vi.fn(),
+    livePageEnabled: false,
+    setLivePageEnabled: vi.fn(),
     includesSystemAudio: () => false,
     recovery: [],
     saveRecovery: vi.fn(),

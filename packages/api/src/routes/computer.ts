@@ -225,7 +225,7 @@ export function computerRoutes(deps: {
     terminalEvent: 'stopped' | 'tab_closed' | null
   } | null>) | null
   vault: SessionVault | null
-  /** Closed store; null → the Profile-Management surface reports unconfigured. */
+  /** Open DB store in normal compositions; null leaves profiles unconfigured. */
   profileStore: BrowserProfileStore | null
   /** Metadata/write/revoke only. This route object has no decrypt method. */
   credentials?: BrowserCredentialAdminStore | null
@@ -869,8 +869,9 @@ export function computerRoutes(deps: {
       return
     }
     // A BARE uuid, never a decorated one: this id is persisted as
-    // `sandbox_tasks.session_id`, which is `uuid NOT NULL` (closed migration
-    // 315). The original synthetic `plogin_<uuid>` made every insert throw
+    // `sandbox_tasks.session_id`, which is `uuid NOT NULL` (open migration
+    // 438; historical hosted migration 315). The original synthetic
+    // `plogin_<uuid>` made every insert throw
     // `invalid input syntax for type uuid`, so this route 502'd on every call
     // from the day it shipped — the in-memory task store used in tests takes
     // any string, so the suite stayed green. Nothing reads the prefix; the
