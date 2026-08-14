@@ -285,7 +285,7 @@ import { chatArchiveMediaRoutes } from './chat-archive/media-routes.js'
 import { createChatArchiveMediaService, type ChatArchiveMediaService } from './chat-archive/media-service.js'
 import { createChatArchiveMediaWorker, type ChatArchiveMediaWorker } from './chat-archive/media-worker.js'
 import { createWorkspaceToolPolicyStore } from './db/workspace-tool-policy-store.js'
-import { buildOpenSyncCredentials } from './build-sync-credentials.js'
+import { createSyncCredentialProvider } from './knowledge/sync-credentials.js'
 import { createDbAssistantConnectorStore } from './db/assistant-connector-store.js'
 import { createDbAssistantConnectorGrantsStore } from './db/assistant-connector-grants-store.js'
 import { createDbSkillStore, createDbWorkspaceSkillStore, type WorkspaceSkill } from './db/skill-store.js'
@@ -537,6 +537,8 @@ import {
 } from './db/channel-integrations.js'
 import { createDbApiKeyStore } from './db/api-key-store.js'
 import { publicApiRoutes } from './routes/public-api.js'
+import { apiKeyRoutes } from './routes/api-keys.js'
+import { generateSynthesisRoutes, type GenerateSynthesisBilling } from './routes/generate-synthesis.js'
 import { assistantMcpRoutes } from './routes/assistant-mcp.js'
 import { createControlPlaneReader } from './agent-surface/control-plane-reader.js'
 import { buildAgentToolset } from './agent-surface/toolset.js'
@@ -575,7 +577,7 @@ import {
   supportDiagnosticRoutes,
 } from './support-diagnostics/index.js'
 
-import type { ChatEpisodeIngestor, BrainEpisodeIngestor } from './ingest-port.js'
+import type { ChatEpisodeIngestor, BrainEpisodeIngestor, ChatEpisodeInput } from './ingest-port.js'
 import type { BuildConnectorActionAudit } from './connector-action-port.js'
 import type { InjectExtraTools, ResolveAppSoul } from './tool-injection-port.js'
 import type { CreditBudgetGate } from './routes/route-helpers.js'
@@ -734,6 +736,8 @@ export interface OpenApiEnv {
  */
 export interface EpisodeIngestorDeps {
   provider: LLMProvider
+  /** Resolve the workspace-owned Standard lane at episode execution time. */
+  resolveWorkspaceLlm?: (workspaceId: string) => Promise<ChatEpisodeInput['llm'] | null>
   /**
    * The background lane's servable model id, resolved once at boot against the
    * configured providers. Absent = the caller had no boot context (tests, the
@@ -784,6 +788,11 @@ export interface OpenApiPorts {
   ingestCharge?: (episode: { id: string; workspaceId: string; sourceKind: string; createdByUserId: string }) => Promise<void>
   /** Hosted recording-duration credit quote; absent in OSS/self-hosted. */
   recordingSurchargeCredits?: (durationSeconds: number) => number
+  /**
+   * Hosted standalone Generate-from-Brain pricing + success charge. The open
+   * route remains fully usable without it and reports zero credits in OSS.
+   */
+  generateBilling?: GenerateSynthesisBilling
   /**
    * Metered model lane billing (model-registry.md L8/L15) — the closed
    * `5 + ceil(cost/$0.040)` estimate / spend-cap / charge seams. Default
@@ -868,20 +877,6 @@ export interface OpenApiPorts {
   pendingClassificationStore?: PendingClassificationStore
   /** Google-Drive knowledge-file store; absent → gdrive files unavailable to chat/workflow. */
   gdriveFilesStore?: GDriveFilesStore
-  /**
-   * Builds the closed GitHub-PAT resolver for the knowledge sync worker over
-   * boot's connector stores (the same stores the knowledge route resolves edit
-   * proposals through). Open default: unset → the worker ticks but every GitHub
-   * source fails resolution with a clear "not configured" error rather than
-   * syncing.
-   */
-  buildSyncCredentials?: (deps: {
-    connectorInstanceStore: ReturnType<typeof createConnectorInstanceStore>
-    connectorGrantStore: Awaited<
-      ReturnType<typeof import('./db/connector-grant-store.js').createConnectorGrantStore>
-    >
-  }) => SyncCredentials
-
   // ── Closed first-party tool factories — open default: omitted ──
   /** Capability-gated triage/sentiment/analytics-query tools (platform-only). */
   buildClosedTools?: () => Tool[]
@@ -1687,6 +1682,30 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const resolveWorkspaceCustomLlm = createWorkspaceCustomLlmResolver(customLlmEndpointStore, {
     networkPolicy: customLlmNetworkPolicy,
   })
+  const resolveBackgroundRuntime = async (workspaceId: string | null | undefined) =>
+    workspaceId
+      ? resolveWorkspaceCustomLlm({
+          workspaceId,
+          requestedTier: 'standard',
+          allowDefault: true,
+          allowAnyDefault: true,
+        })
+      : null
+  const workspaceForAssistant = async (assistantId: string): Promise<string | null> => {
+    if (!assistantId) return null
+    const result = await query<{ workspaceId: string }>(
+      `SELECT workspace_id AS "workspaceId" FROM assistants WHERE id = $1`,
+      [assistantId],
+    )
+    return result.rows[0]?.workspaceId ?? null
+  }
+  const ownerForWorkspace = async (workspaceId: string): Promise<string | null> => {
+    const result = await query<{ ownerUserId: string }>(
+      `SELECT owner_user_id AS "ownerUserId" FROM workspaces WHERE id = $1`,
+      [workspaceId],
+    )
+    return result.rows[0]?.ownerUserId ?? null
+  }
   const compartmentStore = createDbCompartmentStore()
   const oauthClientStore = createDbOAuthClientStore()
   const oauthAuthorizationStore = createDbOAuthAuthorizationStore()
@@ -1780,16 +1799,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const modelDefaultsStore = createWorkspaceModelDefaultsStore()
 
   // ── KB sync-credential resolver ──
-  // Resolves the GitHub PAT a synced knowledge source operates through, by
-  // `(workspaceId, connectorInstanceId)`. The platform passes a closed factory
-  // via `ports.buildSyncCredentials`; the open build falls back to a resolver
-  // over the same connector stores (available in OSS since migration
-  // 280_oss_connectors). Both the edit-proposal routes and the sync worker use
-  // this single instance. See build-sync-credentials.ts.
-  const syncCredentials: SyncCredentials = ports.buildSyncCredentials?.({
+  // One open resolver serves the sync worker, knowledge routes, Home apps, and
+  // repo writer in both editions. Hosted supplies no override or duplicate.
+  const syncCredentials: SyncCredentials = createSyncCredentialProvider(
     connectorInstanceStore,
     connectorGrantStore,
-  }) ?? buildOpenSyncCredentials({ connectorInstanceStore, connectorGrantStore })
+  )
 
   const workspaceDirectoryStore: WorkspaceDirectoryStore = {
     async listMembers(userId, workspaceId) {
@@ -1881,13 +1896,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
                 assistantId: u.assistantId,
                 sessionId: u.sessionId,
                 model: u.model,
+                modelTier: u.modelTier,
                 inputTokens: u.usage.inputTokens,
                 outputTokens: u.usage.outputTokens,
                 cacheReadTokens: u.usage.cacheReadTokens,
                 cacheWriteTokens: u.usage.cacheWriteTokens,
-                actualCostUsd: calculateCost(u.model, u.usage),
+                actualCostUsd: u.providerKeySource === 'user' ? 0 : calculateCost(u.model, u.usage),
                 source: 'included',
                 triggerKey: 'worker_run',
+                providerKeySource: u.providerKeySource,
               })
               .catch((err) => console.error('[workers] usage tracking failed:', err))
           }
@@ -2144,6 +2161,19 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   //    (open default: no-op chat ingest, undefined brain ingest). ──
   const builtIngestors = ports.buildEpisodeIngestors?.({
     provider, crmStore, entitiesStore, entityLinksStore, memoryStore, taskStore, episodesStore, analytics,
+    resolveWorkspaceLlm: async (workspaceId) => {
+      const runtime = await resolveBackgroundRuntime(workspaceId)
+      return runtime
+        ? {
+            provider: runtime.provider,
+            model: runtime.selector,
+            modelTier: 'standard',
+            providerKeySource: 'user' as const,
+            inputTokenLimit: runtime.inputTokenLimit,
+            maxTokens: runtime.maxTokens,
+          }
+        : null
+    },
     usageStore,
     backgroundModel,
     extractionModel,
@@ -3796,6 +3826,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     resolvePolicy: resolveComputerToolPolicy,
     unattendedEnabled: unattendedComputerUse,
     getWorkspacePlan,
+    // Hosted custom fetches enforce public-only DNS/IP checks per request.
+    // E2B cannot reuse that host-side transport, so do not bypass it by
+    // handing a hosted endpoint directly to the sandbox process.
+    resolveLlm: customLlmNetworkPolicy === 'private-network'
+      ? async (workspaceId) => (await resolveBackgroundRuntime(workspaceId))?.browserUse ?? null
+      : undefined,
     onEvent: (evt, ctx) => {
       analytics.logEvent({
         userId: ctx.userId,
@@ -3983,6 +4019,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     capabilityStore,
     agentTools: { reads: agentToolset.reads, writes: agentToolset.writes },
   }))
+
+  app.use(
+    '/api/assistants/:assistantId/integrations/api-keys',
+    requireAuth(env.JWT_SECRET),
+    apiKeyRoutes(apiKeyStore),
+  )
 
   // ── Shopify store access, shared by BOTH surfaces that have it ──────────
   //
@@ -4934,6 +4976,22 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       ? ({ userId, pageId }) => ingestPageRunner({ userId, pageId })
       : undefined,
   }))
+
+  // Standalone Generate from Brain is open in both editions. Hosted injects
+  // quote/gate/charge billing policy; OSS confirms the long-lived run but is
+  // unmetered because the operator pays the configured model provider directly.
+  app.use(
+    '/api/workspaces/:workspaceId/blueprints',
+    requireAuth(env.JWT_SECRET),
+    generateSynthesisRoutes({
+      getRole: (userId, workspaceId) => workspaceStore.getRole(userId, workspaceId),
+      generateSynthesize,
+      resolvePrimaryAssistantForWorkspace,
+      pageTemplateStore,
+      checkCreditBudget: ports.generateBilling ? ports.checkCreditBudget : undefined,
+      billing: ports.generateBilling,
+    }),
+  )
 
   // Teamspaces (migration 313) — Notion-style page containers above the doc
   // page tree. Visibility rides RLS; sensitivity gates live in the routes.
@@ -5938,25 +5996,33 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     prompt: string,
     ctx: { assistantId: string; userId: string | null; workspaceId: string | null; phase: string },
   ): Promise<string> => {
-    const response = await collectStream(provider.stream({
-      model: CONSOLIDATION_MODEL,
+    const workspaceId = ctx.workspaceId ?? await workspaceForAssistant(ctx.assistantId)
+    const customRuntime = await resolveBackgroundRuntime(workspaceId)
+    const callProvider = customRuntime?.provider ?? provider
+    const callModel = customRuntime?.selector ?? CONSOLIDATION_MODEL
+    const response = await collectStream(callProvider.stream({
+      model: callModel,
       messages: [{ role: 'user', content: prompt }],
       systemPrompt: 'You are a memory consolidation assistant. Follow the user instructions exactly. Output plain text only.',
       maxTokens: 4096,
     }))
-    if (response.usage && ctx.userId && usageStore) {
-      const cost = calculateCost(CONSOLIDATION_MODEL, response.usage)
+    const attributionUserId = ctx.userId ?? (workspaceId ? await ownerForWorkspace(workspaceId) : null)
+    if (response.usage && attributionUserId && usageStore) {
+      const cost = customRuntime ? 0 : calculateCost(callModel, response.usage)
       usageStore.recordUsage({
-        userId: ctx.userId,
+        userId: attributionUserId,
         assistantId: ctx.assistantId,
+        workspaceId: workspaceId ?? undefined,
         sessionId: null,
-        model: CONSOLIDATION_MODEL,
+        model: response.model || callModel,
+        modelTier: 'standard',
         inputTokens: response.usage.inputTokens,
         outputTokens: response.usage.outputTokens,
         cacheReadTokens: response.usage.cacheReadTokens,
         cacheWriteTokens: response.usage.cacheWriteTokens,
         actualCostUsd: cost,
         source: 'overhead:consolidation',
+        providerKeySource: customRuntime ? 'user' : 'platform',
       }).catch((err) => console.error('[consolidation] usage tracking failed:', err))
     }
     return response.content
@@ -6007,6 +6073,41 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           candidates: brainCandidateStore,
           provider,
           model: 'gemini-flash',
+          resolveLlm: async (workspaceId: string) => {
+            const runtime = await resolveBackgroundRuntime(workspaceId)
+            return runtime
+              ? {
+                  provider: runtime.provider,
+                  model: runtime.selector,
+                  modelTier: 'standard',
+                  providerKeySource: 'user' as const,
+                }
+              : {
+                  provider,
+                  model: 'gemini-flash',
+                  modelTier: 'pro',
+                  providerKeySource: 'platform' as const,
+                }
+          },
+          onUsage: ({ workspaceId, userId, assistantId, model, modelTier, providerKeySource, usage }) => {
+            if (!usageStore) return
+            void usageStore.recordUsage({
+              workspaceId,
+              userId,
+              assistantId,
+              sessionId: null,
+              model,
+              modelTier,
+              inputTokens: usage.inputTokens,
+              outputTokens: usage.outputTokens,
+              cacheReadTokens: usage.cacheReadTokens,
+              cacheWriteTokens: usage.cacheWriteTokens,
+              actualCostUsd: providerKeySource === 'user' ? 0 : calculateCost(model, usage),
+              source: 'overhead:consolidation',
+              triggerKey: 'memory_reclassification',
+              providerKeySource,
+            }).catch((err) => console.error('[reclassifier] usage tracking failed:', err))
+          },
           resolveWorkspaceId: async (assistantId: string) => {
             const r = await query<{ workspaceId: string }>(
               `SELECT workspace_id AS "workspaceId" FROM assistants WHERE id = $1`,
@@ -6055,25 +6156,31 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const SKILL_REVIEW_MODEL = backgroundModel
   const skillReviewLLM = createGeminiSkillReviewLLM(
     async ({ systemPrompt, prompt, maxTokens, attribution }) => {
-      const response = await collectStream(provider.stream({
-        model: SKILL_REVIEW_MODEL,
+      const workspaceId = await workspaceForAssistant(attribution.assistantId)
+      const customRuntime = await resolveBackgroundRuntime(workspaceId)
+      const callProvider = customRuntime?.provider ?? provider
+      const callModel = customRuntime?.selector ?? SKILL_REVIEW_MODEL
+      const response = await collectStream(callProvider.stream({
+        model: callModel,
         messages: [{ role: 'user', content: prompt }],
         systemPrompt,
         maxTokens,
       }))
       if (response.usage && usageStore) {
-        const cost = calculateCost(SKILL_REVIEW_MODEL, response.usage)
+        const cost = customRuntime ? 0 : calculateCost(callModel, response.usage)
         usageStore.recordUsage({
           userId: attribution.userId,
           assistantId: attribution.assistantId,
           sessionId: null,
-          model: SKILL_REVIEW_MODEL,
+          model: response.model || callModel,
+          modelTier: 'standard',
           inputTokens: response.usage.inputTokens,
           outputTokens: response.usage.outputTokens,
           cacheReadTokens: response.usage.cacheReadTokens,
           cacheWriteTokens: response.usage.cacheWriteTokens,
           actualCostUsd: cost,
           source: 'overhead:skill-review',
+          providerKeySource: customRuntime ? 'user' : 'platform',
         }).catch((err) => console.error('[skill-review] usage tracking failed:', err))
       }
       return response.content
@@ -6129,25 +6236,31 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // docs/architecture/context-engine/assistant-playbook.md.
   const playbookReflectionWorker = createPlaybookReflectionWorker({
     modelCall: async ({ systemPrompt, prompt, maxTokens, attribution }) => {
-      const response = await collectStream(provider.stream({
-        model: backgroundModel,
+      const workspaceId = await workspaceForAssistant(attribution.assistantId)
+      const customRuntime = await resolveBackgroundRuntime(workspaceId)
+      const callProvider = customRuntime?.provider ?? provider
+      const callModel = customRuntime?.selector ?? backgroundModel
+      const response = await collectStream(callProvider.stream({
+        model: callModel,
         messages: [{ role: 'user', content: prompt }],
         systemPrompt,
         maxTokens,
       }))
       if (response.usage && usageStore) {
-        const cost = calculateCost(backgroundModel, response.usage)
+        const cost = customRuntime ? 0 : calculateCost(callModel, response.usage)
         usageStore.recordUsage({
           userId: attribution.userId,
           assistantId: attribution.assistantId,
           sessionId: null,
-          model: backgroundModel,
+          model: response.model || callModel,
+          modelTier: 'standard',
           inputTokens: response.usage.inputTokens,
           outputTokens: response.usage.outputTokens,
           cacheReadTokens: response.usage.cacheReadTokens,
           cacheWriteTokens: response.usage.cacheWriteTokens,
           actualCostUsd: cost,
           source: 'overhead:playbook-reflection',
+          providerKeySource: customRuntime ? 'user' : 'platform',
         }).catch((err) => console.error('[playbook-reflection] usage tracking failed:', err))
       }
       return response.content

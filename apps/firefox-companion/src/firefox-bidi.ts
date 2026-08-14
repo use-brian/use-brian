@@ -28,7 +28,7 @@ type BidiSocketFactory = (url: string) => BidiSocket;
 type BidiResponse = { id?: number; result?: unknown; error?: string; message?: string };
 type BrowsingContextInfo = { context: string; url?: string; children?: BrowsingContextInfo[] | null };
 type SnapshotNode = {
-  ref: string;
+  ref?: string;
   role: string;
   name: string;
   value?: string;
@@ -38,7 +38,7 @@ type SnapshotNode = {
 type StoredRef = { context: string; sharedId: string };
 const BIDI_COMMAND_TIMEOUT_MS = 30_000;
 
-const SNAPSHOT_FUNCTION = String.raw`() => {
+const SNAPSHOT_FUNCTION = String.raw`(mode) => {
   const roles = new Set([
     "button", "link", "textbox", "searchbox", "combobox", "checkbox", "radio",
     "menuitem", "menuitemcheckbox", "menuitemradio", "tab", "switch", "slider",
@@ -82,22 +82,49 @@ const SNAPSHOT_FUNCTION = String.raw`() => {
     return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
   };
   const nodes = [];
-  for (const el of document.querySelectorAll("a,button,input,textarea,select,[role],[tabindex],[contenteditable='true']")) {
+  const full = mode === "full";
+  const semanticRole = (el) => {
+    const tag = el.tagName.toLowerCase();
+    if (/^h[1-6]$/.test(tag)) return "heading";
+    if (tag === "table") return "table";
+    if (tag === "caption") return "caption";
+    if (tag === "th") return el.getAttribute("scope") === "row" ? "rowheader" : "columnheader";
+    if (tag === "td") return "cell";
+    if (tag === "p") return "paragraph";
+    if (tag === "li") return "listitem";
+    if (tag === "label") return "labeltext";
+    if (tag === "legend") return "legend";
+    if (tag === "dt") return "term";
+    if (tag === "dd") return "definition";
+    return "";
+  };
+  const capturedContainer = "a,button,input,textarea,select,[role],[tabindex],[contenteditable='true'],h1,h2,h3,h4,h5,h6,table,caption,th,td,p,li,label,legend,dt,dd";
+  const selector = full
+    ? "body *"
+    : "a,button,input,textarea,select,[role],[tabindex],[contenteditable='true']";
+  for (const el of document.querySelectorAll(selector)) {
     if (nodes.length >= 1000) break;
     if (!visible(el)) continue;
     const role = (el.getAttribute("role") || implicitRole(el) || (el.isContentEditable ? "textbox" : "")).toLowerCase();
     const focusable = el.tabIndex >= 0 || el.isContentEditable;
-    if (!roles.has(role) && !focusable) continue;
+    const interactive = roles.has(role) || focusable;
+    const semantic = semanticRole(el);
+    const infoRole = semantic || (
+      full && el.children.length === 0 && !el.parentElement?.closest(capturedContainer)
+        ? "statictext"
+        : ""
+    );
+    if (!interactive && (!full || !infoRole)) continue;
     const name = nameOf(el);
     if (!name && !roles.has(role)) continue;
     const isPassword = el instanceof HTMLInputElement && el.type.toLowerCase() === "password";
     const value = !isPassword && "value" in el && typeof el.value === "string" ? el.value.slice(0, 500) : "";
     nodes.push({
-      role: role || "node",
+      role: role || infoRole || "node",
       name,
       ...(value ? { value } : {}),
       ...(el.matches(":disabled,[aria-disabled='true']") ? { disabled: true } : {}),
-      element: el
+      ...(interactive ? { element: el } : {})
     });
   }
   return { url: location.href, title: document.title, nodes };
@@ -280,7 +307,7 @@ export class FirefoxBidiExecutor {
       case "navigate":
         return this.navigate(String(args.url ?? ""));
       case "snapshot":
-        return this.snapshot();
+        return this.snapshot(args.mode === "full" ? "full" : "interactive");
       case "click":
         await this.click(String(args.ref ?? ""));
         return { clicked: true };
@@ -312,9 +339,9 @@ export class FirefoxBidiExecutor {
     return { url: typeof result.url === "string" ? result.url : url };
   }
 
-  private async snapshot(): Promise<{ url: string; title: string; nodes: SnapshotNode[] }> {
+  private async snapshot(mode: "interactive" | "full" = "interactive"): Promise<{ url: string; title: string; nodes: SnapshotNode[] }> {
     const context = this.mustContext();
-    const response = await this.callFunction(SNAPSHOT_FUNCTION);
+    const response = await this.callFunction(SNAPSHOT_FUNCTION, [mode]);
     if (response.type !== "success") {
       throw new FirefoxBidiError("Firefox could not read this page.", "backend_error");
     }
@@ -326,12 +353,12 @@ export class FirefoxBidiExecutor {
     this.refs.clear();
     const nodes: SnapshotNode[] = [];
     for (const raw of Array.isArray(decoded?.nodes) ? decoded.nodes : []) {
+      if (typeof raw.role !== "string" || typeof raw.name !== "string") continue;
       const sharedId = (raw.element as { $sharedId?: unknown } | undefined)?.$sharedId;
-      if (typeof sharedId !== "string" || typeof raw.role !== "string" || typeof raw.name !== "string") continue;
-      const ref = `@e${nodes.length + 1}`;
-      this.refs.set(ref, { context, sharedId });
+      const ref = typeof sharedId === "string" ? `@e${this.refs.size + 1}` : undefined;
+      if (ref && typeof sharedId === "string") this.refs.set(ref, { context, sharedId });
       nodes.push({
-        ref,
+        ...(ref ? { ref } : {}),
         role: raw.role,
         name: raw.name,
         ...(typeof raw.value === "string" && raw.value ? { value: raw.value } : {}),

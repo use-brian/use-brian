@@ -8166,6 +8166,11 @@ export const en = {
     inputFailed: "Input failed to reach the browser",
     streamLive: "Live",
     streamDelayed: "Delayed view",
+    backendSwitchLabel: "Assistant browser",
+    backendSwitchHint:
+      "Choose where the assistant's next browser action runs for this session. This live view stays on the current browser until then.",
+    backendSwitchSaved: "The next assistant browser action will use {browser}.",
+    backendSwitchFailed: "Could not switch the browser for this session. Please try again.",
     navBack: "Back",
     navForward: "Forward",
     navReload: "Reload",
@@ -8364,14 +8369,15 @@ export const en = {
       loginHint:
         "Opens a live remote browser you control. Sign in there, then save its cookies into this profile. Your password goes only to the site, never through us.",
       captureLabel: "Save this login from my browser",
-      capturePlaceholder: "instagram.com or a full URL",
+      capturePlaceholder: "instagram.com",
       captureAction: "Save this login",
       captureSaving: "Saving...",
       captureHint:
-        "Captures the cookies for the site you name from your connected browser and saves them here, so a cloud browse under this profile starts already signed in.",
+        "With this profile's paired browser open on that site, this explicit action asks you to approve the tab, then copies only that site's cookies into the profile's cloud vault. Your password is never copied.",
       captureNoSession: "Connect My Browser for this profile first, then come back here to save the login.",
-      captureFailed: "Could not save the session from your browser. Please try again.",
+      captureFailed: "Could not save this login. Keep the approved tab open on the named site, then try again.",
       captureSuccess: "Saved {site} on {date}.",
+      captureSuccessNoDate: "Saved {site}.",
       proxyLabel: "Proxy URL",
       proxyPlaceholder: "http://user:pass@proxy.example:8080",
       proxyHint:

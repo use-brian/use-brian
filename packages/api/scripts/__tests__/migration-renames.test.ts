@@ -9,6 +9,10 @@ describe('[COMP:api/migration-order] Migration filename compatibility', () => {
         '394_office_artifacts.sql',
         '395_office_templates_resources.sql',
         '3943_office_collaboration.sql',
+        '395_chat_message_archive.sql',
+        '396_local_chat_archive_sink.sql',
+        '397_chat_archive_enrichment.sql',
+        '398_chat_archive_owner_cascade.sql',
       ]),
     )
 
@@ -24,6 +28,22 @@ describe('[COMP:api/migration-order] Migration filename compatibility', () => {
       {
         previousName: '395_office_templates_resources.sql',
         currentName: '3942_office_templates_resources.sql',
+      },
+      {
+        previousName: '395_chat_message_archive.sql',
+        currentName: '405_chat_message_archive.sql',
+      },
+      {
+        previousName: '396_local_chat_archive_sink.sql',
+        currentName: '406_local_chat_archive_sink.sql',
+      },
+      {
+        previousName: '397_chat_archive_enrichment.sql',
+        currentName: '407_chat_archive_enrichment.sql',
+      },
+      {
+        previousName: '398_chat_archive_owner_cascade.sql',
+        currentName: '408_chat_archive_owner_cascade.sql',
       },
     ])
   })

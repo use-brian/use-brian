@@ -695,6 +695,20 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       await clearDowngradeNotice(session.id)
     }
   }
+  const backgroundLlmRuntime = assistant.workspaceId && params.resolveWorkspaceCustomLlm
+    ? await params.resolveWorkspaceCustomLlm({
+        workspaceId: assistant.workspaceId,
+        requestedTier: 'standard',
+        allowDefault: true,
+        allowAnyDefault: true,
+      })
+    : null
+  const backgroundProvider = backgroundLlmRuntime?.provider ?? provider
+  const backgroundLaneModel = backgroundLlmRuntime?.selector ?? laneModel
+  const backgroundUsageAttribution = {
+    modelTier: 'standard',
+    providerKeySource: backgroundLlmRuntime ? 'user' as const : 'platform' as const,
+  }
   // ── Large-paste promotion (large-content-artifacts §Phase 3.2) ──
   // Runs before the message is classified, persisted, or fed to the model, so
   // a giant paste never reaches the classifier or the query loop as a blob.
@@ -760,9 +774,9 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     try {
       const { classifyResearchIntent } = await import('@use-brian/core')
       const adaptive = await classifyResearchIntent({
-        provider,
+        provider: backgroundProvider,
         message: messageText,
-        model: laneModel,
+        model: backgroundLaneModel,
         recentConversation: adaptiveRecentConversation,
       })
       if (adaptive.research) {
@@ -837,11 +851,11 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   let classification: TopicClassification | null = null
   try {
     classification = await classifyTopic({
-      provider,
+      provider: backgroundProvider,
       // Background lane (see the chat.ts counterpart) — Flash Lite per
       // cost-and-pricing.md → "Standard-tier routing", not the Flash 3
       // chat alias this had drifted onto.
-      model: laneModel,
+      model: backgroundLaneModel,
       recentUserTurns,
       replyToText: replyResolved?.text ?? null,
       currentMessage: messageText,
@@ -905,6 +919,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     model: classification?.model ?? null,
     usage: classification?.usage,
     source: 'overhead:classifier',
+    ...backgroundUsageAttribution,
   })
 
   // Voice transcription ran in the channel handler before the pipeline —
@@ -948,7 +963,10 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     tier: modelToCompactionTier(model),
     channelClass: 'messaging',
     profile: 'multi-topic',
-    provider,
+    provider: backgroundProvider,
+    model: backgroundLaneModel,
+    inputTokenLimit: backgroundLlmRuntime?.inputTokenLimit,
+    ...backgroundUsageAttribution,
     systemPrompt,
     assistantId: assistant.id,
     userId,
@@ -1495,7 +1513,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   if (!externalGuest && messageText.length > 40) {
     try {
       const preflight = await runPreflight({
-        provider, model, message: messageText, tools: allTools,
+        provider: backgroundProvider, model: backgroundLaneModel, message: messageText, tools: allTools,
         context: {
           userId, assistantId: assistant.id, sessionId: session.id,
           appId: 'Use Brian', channelType, channelId,
@@ -1591,6 +1609,16 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         userId, assistantId: assistant.id, sessionId: session.id,
         appId: 'Use Brian', channelType, channelId,
         workspaceId: assistant.workspaceId ?? undefined,
+        workerRuntime: customLlmRuntime
+          ? {
+              provider: customLlmRuntime.provider,
+              model: customLlmRuntime.selector,
+              modelTier: customLlmRuntime.modelTier,
+              providerKeySource: customLlmRuntime.providerKeySource,
+              inputTokenLimit: customLlmRuntime.inputTokenLimit,
+              maxTokens: customLlmRuntime.maxTokens,
+            }
+          : undefined,
         assistantKind: assistant.kind,
         preferredChannel,
         userTimezone,
@@ -1808,6 +1836,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
             usageStore.recordUsage({
               userId: billingUserId, actorUserId: userId, assistantId: assistant.id, sessionId: session.id,
               model: event.response.model,
+              modelTier: customLlmRuntime?.modelTier ?? tierForModel(model),
               inputTokens: usage.inputTokens,
               outputTokens: usage.outputTokens,
               cacheReadTokens: usage.cacheReadTokens,
@@ -1868,10 +1897,10 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         .listOpenBySession(session.id)
         .then((open: SessionStateRecord[]) =>
           runSessionStateDiff({
-            provider,
+            provider: backgroundProvider,
             // Standard tier per docs/architecture/platform/cost-and-pricing.md
             // → Model routing (extraction / classification / structured-output bucket).
-            model: laneModel,
+            model: backgroundLaneModel,
             sessionId: session.id,
             userId,
             assistantId: assistant.id,
@@ -1901,6 +1930,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
             usage: result.usage,
             source: 'overhead:session-state-diff',
             triggerKey: 'session_state_diff',
+            ...backgroundUsageAttribution,
           })
         })
         .catch((err) => console.debug(`[${channelType}] session-state diff failed:`, err))
@@ -1915,8 +1945,8 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       runMemoryNudge({
         turns: pendingAssistantTurns,
         callModel: async (prompt) => {
-          const resp = await collectStream(provider.stream({
-            model: laneModel,
+          const resp = await collectStream(backgroundProvider.stream({
+            model: backgroundLaneModel,
             messages: [{ role: 'user', content: prompt }],
             systemPrompt: 'You are a memory utility judge. Follow instructions exactly.',
             maxTokens: 256,
@@ -1927,7 +1957,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
               .map((b) => b.text)
               .join(''),
             usage: resp.usage,
-            model: laneModel,
+            model: backgroundLaneModel,
           }
         },
         store: memoryStore,
@@ -1942,6 +1972,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
           usage: result.usage,
           source: 'overhead:nudge',
           triggerKey: 'memory_nudge',
+          ...backgroundUsageAttribution,
         }))
         .catch((err) => console.debug(`[${channelType}] memory nudge failed:`, err))
     }
@@ -1964,7 +1995,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     // calendar updates, two Threads replies). Falls back to the
     // generic `hooks.sendError` when no tools ran or Flash hiccups.
     const recovered = await composeRecoveryMessage({
-      provider,
+      provider: backgroundProvider,
       pendingAssistantTurns,
       userText: messageText,
       channelType,
@@ -1984,6 +2015,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         usage: recovered.usage,
         source: 'overhead:recovery-message',
         triggerKey: 'recovery_message',
+        ...backgroundUsageAttribution,
       })
       // Surface the recovery text via the same channel-native path the
       // normal turn would have used. Kept on `sendResponse` rather than

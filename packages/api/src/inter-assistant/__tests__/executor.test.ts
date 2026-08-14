@@ -816,6 +816,7 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
       assistantId: 'callee-1',
       sessionId: 'sess-1',
       model: 'gemini-3-flash-preview',
+      modelTier: 'pro',
       inputTokens: 1000,
       outputTokens: 200,
       cacheReadTokens: 5000,

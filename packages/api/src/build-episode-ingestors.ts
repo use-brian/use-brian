@@ -29,7 +29,7 @@ import {
 } from '@use-brian/core'
 import type { EpisodeIngestorDeps } from './boot.js'
 import type { EpisodeSensitivity } from './db/episodes-store.js'
-import type { BrainEpisodeIngestor, ChatEpisodeIngestor } from './ingest-port.js'
+import type { BrainEpisodeIngestor, ChatEpisodeIngestor, ChatEpisodeInput } from './ingest-port.js'
 
 // Extraction runs on the Standard tier (model-routing.md Trigger #11); the
 // optional drift/kind classifier on the Background-Standard lite model.
@@ -75,14 +75,18 @@ export function buildEpisodeIngestors(deps: EpisodeIngestorDeps): {
 } {
   // Pipeline B deps are a 1:1 projection of the boot store graph. Built fresh
   // per call so the closure stays stateless (the stores themselves are shared).
-  const pipelineDeps = (): PipelineBDeps => ({
-    provider: deps.provider,
+  const pipelineDeps = (llm?: ChatEpisodeInput['llm']): PipelineBDeps => ({
+    provider: llm?.provider ?? deps.provider,
     // Both fall back to their literals when boot supplied nothing (tests, a
     // platform factory that predates the injection). Boot passes ids it has
     // already checked are servable, so a Google-free deploy extracts instead
     // of throwing on every episode.
-    model: deps.extractionModel ?? EXTRACTION_MODEL,
-    classifierModel: deps.backgroundModel ?? CLASSIFIER_MODEL,
+    model: llm?.model ?? deps.extractionModel ?? EXTRACTION_MODEL,
+    classifierModel: llm?.model ?? deps.backgroundModel ?? CLASSIFIER_MODEL,
+    modelTier: llm?.modelTier,
+    providerKeySource: llm?.providerKeySource,
+    inputTokenLimit: llm?.inputTokenLimit,
+    maxTokens: llm?.maxTokens,
     crm: deps.crmStore,
     entities: deps.entitiesStore,
     entityLinks: deps.entityLinksStore,
@@ -97,6 +101,7 @@ export function buildEpisodeIngestors(deps: EpisodeIngestorDeps): {
   })
 
   const brainEpisodeIngestor: BrainEpisodeIngestor = async (input) => {
+    const llm = input.llm ?? await deps.resolveWorkspaceLlm?.(input.workspaceId) ?? undefined
     const sourceKind = input.sourceKind ?? DEFAULT_BRAIN_SOURCE_KIND
     const sensitivity: EpisodeSensitivity = input.sensitivity ?? 'internal'
 
@@ -138,10 +143,11 @@ export function buildEpisodeIngestors(deps: EpisodeIngestorDeps): {
       createdByUserId: input.userId,
       createdByAssistantId: input.assistantId,
     }
-    return processEpisode(pbEpisode, input.content, pipelineDeps())
+    return processEpisode(pbEpisode, input.content, pipelineDeps(llm))
   }
 
   const chatEpisodeIngestor: ChatEpisodeIngestor = async (input) => {
+    const llm = input.llm ?? await deps.resolveWorkspaceLlm?.(input.workspaceId) ?? undefined
     // A compacted chat window → one `web_chat` Episode carrying the session +
     // message range as its back-edge, then the same extraction pipeline.
     // `contentRef` mirrors the hosted twin (`api-platform` pipeline-b-processor
@@ -181,7 +187,7 @@ export function buildEpisodeIngestors(deps: EpisodeIngestorDeps): {
       createdByUserId: input.userId,
       createdByAssistantId: input.assistantId,
     }
-    await processEpisode(pbEpisode, input.content, pipelineDeps())
+    await processEpisode(pbEpisode, input.content, pipelineDeps(llm))
   }
 
   return { chatEpisodeIngestor, brainEpisodeIngestor }

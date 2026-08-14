@@ -49,8 +49,8 @@
  * `./custom-connectors.ts` — the same factory the closed edition mounts, so the
  * feature has one implementation across both editions.
  *
- * Out of scope for the open edition (handled by the closed route): Google Drive
- * authorized-files (`/gdrive/*`).
+ * Google Drive Picker authorization mounts from the open shared
+ * `gdrive-authorized-files.ts` factory; hosted consumes the same router.
  *
  * Component tag: [COMP:api/connectors-route].
  */
@@ -92,8 +92,6 @@ import { decodeMsGraphIdToken } from '../msgraph/oauth.js'
 import {
   exchangeGoogleAuthorizationCode,
   packGoogleRefreshCredential,
-  refreshGoogleAccessToken,
-  unpackGoogleRefreshCredential,
 } from '../google/client.js'
 import { parseGDriveOfflineEnrichmentBundle } from '../google/enrichment-bundle.js'
 import {
@@ -112,7 +110,7 @@ import {
   getGDriveCatalogStatus,
   listGDriveCatalogArtifactsOutsideGeneration,
 } from '../db/gdrive-catalog-store.js'
-import { getConnectorConfig } from '../connector-config.js'
+import { gdriveAuthorizedFilesRoutes } from './gdrive-authorized-files.js'
 import { resolveShopifyDomain, type ShopifyDomainResolution } from '../shopify/resolve-domain.js'
 import { DESKTOP_OAUTH_EXCHANGERS, type DesktopOAuthExchangeResult } from '../connectors/desktop-oauth-exchange.js'
 import { resolveMailboxPreset } from '../mailbox/presets.js'
@@ -360,6 +358,7 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
   // `/custom/:id` paths resolve before the `/:provider` catch-all routes below
   // (otherwise `/custom/:id` would be captured by `DELETE /:provider`).
   router.use(customConnectorRoutes({ connectorStore }))
+  router.use('/gdrive', gdriveAuthorizedFilesRoutes({ connectorStore, connectorInstanceStore }))
 
   // ── Bring-your-own GCS storage (workspace-scoped) ──────────────
   //
@@ -2149,45 +2148,6 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
       }
       console.error('[connectors] Drive catalog status failed:', err)
       res.status(500).json({ error: 'catalog_status_failed' })
-    }
-  })
-
-  // Short-lived token for either the managed file Picker or the BYO folder
-  // Picker. An explicit instance id prevents multi-account token ambiguity.
-  router.get('/gdrive/access-token', async (req, res) => {
-    const userId = req.userId
-    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
-    const connectorInstanceId = typeof req.query.connectorInstanceId === 'string'
-      ? req.query.connectorInstanceId
-      : ''
-    if (connectorInstanceId && !UUID_RE.test(connectorInstanceId)) {
-      res.status(400).json({ error: 'Invalid connectorInstanceId' }); return
-    }
-    try {
-      const creds = connectorInstanceId
-        ? await connectorInstanceStore.getCredentials(userId, connectorInstanceId)
-        : await connectorStore.getCredentials(userId, 'gdrive')
-      if (!creds || creds.client_id !== 'google_refresh' || !creds.client_secret) {
-        res.status(409).json({ error: 'gdrive not connected' }); return
-      }
-      const grant = unpackGoogleRefreshCredential(creds.client_secret)
-      const deployment = getConnectorConfig('google')
-      const clientId = grant.appClientId ?? deployment?.clientId
-      const clientSecret = grant.appClientSecret ?? deployment?.clientSecret
-      if (!clientId || !clientSecret) {
-        res.status(500).json({ error: 'Google OAuth not configured' }); return
-      }
-      const accessToken = await refreshGoogleAccessToken(grant.refreshToken, clientId, clientSecret)
-      res.json({
-        accessToken,
-        expiresIn: 3000,
-        ...(grant.pickerAppId && grant.pickerApiKey
-          ? { pickerAppId: grant.pickerAppId, pickerApiKey: grant.pickerApiKey }
-          : {}),
-      })
-    } catch (err) {
-      console.error('[connectors] gdrive access-token failed:', err)
-      res.status(500).json({ error: 'Failed to mint access token' })
     }
   })
 
