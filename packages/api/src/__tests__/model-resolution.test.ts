@@ -16,6 +16,9 @@ import {
   backgroundModelFor,
   BACKGROUND_MODEL,
   backgroundLatencyBudgetMs,
+  resolveChatModelSelection,
+  isExplicitMeteredModelSelection,
+  providerVisionModelFor,
 } from '../model-resolution.js'
 
 // Research became its own billing tier on 2026-06-02 (10 credits, above Max's
@@ -324,6 +327,37 @@ describe('[COMP:api/model-resolution] ensureServableModel — default falls to a
     expect(ensureServableModel('gpt-5.6-terra', mixed)).toBe('gpt-5.6-terra')
   })
 
+  it('routes auto chat tiers to preferred DashScope while preserving direct picks', () => {
+    const mixed = new MutableProviderAvailability()
+    mixed.setStaticProvider('gemini', true)
+    mixed.setStaticProvider('openai-compat:dashscope-intl', true)
+    mixed.setPreferredProvider('dashscope-intl')
+
+    expect(ensureServableModel('gemini-flash-3', mixed)).toBe('qwen3.7-plus')
+    expect(ensureServableModel('qwen3.7-plus', mixed)).toBe('qwen3.7-plus')
+    expect(ensureServableModel('gemini-3.1-flash-lite', mixed)).toBe('gemini-3.1-flash-lite')
+  })
+
+  it('preserves all four logical tiers while DashScope serves the invocation', () => {
+    const mixed = new MutableProviderAvailability()
+    mixed.setStaticProvider('gemini', true)
+    mixed.setStaticProvider('openai-compat:dashscope-intl', true)
+    mixed.setPreferredProvider('dashscope-intl')
+
+    for (const [requested, logicalTier] of [
+      ['standard', 'standard'],
+      ['pro', 'pro'],
+      ['max', 'max'],
+      ['research', 'research'],
+    ] as const) {
+      const selection = resolveChatModelSelection(requested, 'max_5x', 'ok', mixed)
+      expect(selection.logicalTier).toBe(logicalTier)
+      expect(tierForModel(selection.logicalModel)).toBe(logicalTier)
+      expect(selection.servingModel).toBe('qwen3.7-plus')
+      expect(isExplicitMeteredModelSelection(requested)).toBe(false)
+    }
+  })
+
   it('never substitutes a Codex model absent from the current account catalog', () => {
     const codex = new MutableProviderAvailability()
     codex.setModelCatalog('openai-codex', new Set(['gpt-5.6-terra']))
@@ -391,6 +425,27 @@ describe('[COMP:api/model-resolution] backgroundModelFor — the lane seam boot 
     // The lane is hardcoded at ~17 call sites; this is the single seam that
     // keeps them alive when the routing provider has no Gemini entry.
     expect(backgroundModelFor(QWEN)).toBe('qwen3.5-flash')
+  })
+
+  it('honors preferred DashScope for background work in a mixed deployment', () => {
+    const mixed = new MutableProviderAvailability()
+    mixed.setStaticProvider('gemini', true)
+    mixed.setStaticProvider('openai-compat:dashscope-intl', true)
+    mixed.setPreferredProvider('dashscope-intl')
+    expect(backgroundModelFor(mixed)).toBe('qwen3.5-flash')
+    mixed.setPreferredProvider('gemini')
+    expect(backgroundModelFor(mixed)).toBe(BACKGROUND_MODEL)
+    mixed.setPreferredProvider('dashscope-intl')
+    expect(backgroundModelFor(mixed)).toBe('qwen3.5-flash')
+  })
+
+  it('uses the Standard Codex subscription model when Codex is preferred', () => {
+    const mixed = new MutableProviderAvailability()
+    mixed.setStaticProvider('gemini', true)
+    mixed.setModelCatalog('openai-codex', new Set(['gpt-5.6-luna', 'gpt-5.6-terra']))
+    mixed.setPreferredProvider('openai-codex')
+    expect(backgroundModelFor(mixed)).toBe('gpt-5.6-luna')
+    expect(providerVisionModelFor(mixed, 'openai-codex')).toBe('gpt-5.6-luna')
   })
 
   it('falls back to the literal when the caller has no boot context', () => {

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { createGoalVerifier, parseVerifyVerdict } from '../verify.js'
 import type { LLMProvider, StreamChunk } from '../../providers/types.js'
 
@@ -59,7 +59,7 @@ describe('[COMP:goals/verifier] parseVerifyVerdict (fail-closed)', () => {
 
 describe('[COMP:goals/verifier] createGoalVerifier', () => {
   it('verifies a well-supported claim', async () => {
-    const verify = createGoalVerifier({ provider: mockProvider('{"verified":true}'), model: 'mock' })
+    const verify = createGoalVerifier({ provider: mockProvider('{"verified":true}'), model: 'mock', modelTier: 'standard', resolveLlm: null })
     const v = await verify({
       outcome: 'Email the Q3 report to Acme',
       because: 'Sent the report PDF to billing@acme.com',
@@ -72,6 +72,8 @@ describe('[COMP:goals/verifier] createGoalVerifier', () => {
     const verify = createGoalVerifier({
       provider: mockProvider('{"verified":false,"refutation":"no evidence the email was actually sent"}'),
       model: 'mock',
+      modelTier: 'standard',
+      resolveLlm: null,
     })
     const v = await verify({ outcome: 'Email the Q3 report to Acme', because: 'I think it is done' })
     expect(v.verified).toBe(false)
@@ -79,7 +81,7 @@ describe('[COMP:goals/verifier] createGoalVerifier', () => {
   })
 
   it('fails CLOSED (not verified) when the model errors', async () => {
-    const verify = createGoalVerifier({ provider: throwingProvider(), model: 'mock' })
+    const verify = createGoalVerifier({ provider: throwingProvider(), model: 'mock', modelTier: 'standard', resolveLlm: null })
     const v = await verify({ outcome: 'x', because: 'done' })
     expect(v.verified).toBe(false)
     expect(v.refutation).toBeTruthy()
@@ -90,11 +92,21 @@ describe('[COMP:goals/verifier] createGoalVerifier', () => {
     const verify = createGoalVerifier({
       provider: mockProvider('{"verified":true}'),
       model: 'mock',
-      onUsage: (_usage, userId) => {
-        seenUser = userId
+      modelTier: 'standard',
+      resolveLlm: null,
+      onUsage: (_usage, context) => {
+        seenUser = context.userId
       },
     })
     await verify({ outcome: 'x', because: 'y', userId: 'u1' })
     expect(seenUser).toBe('u1')
+  })
+
+  it('uses the workspace runtime instead of a throwing platform provider', async () => {
+    const resolveLlm = vi.fn().mockResolvedValue({ provider: mockProvider('{"verified":true}'), model: 'custom:model', modelTier: 'max', providerKeySource: 'user', inputTokenLimit: 8192, maxTokens: 1024 })
+    const verify = createGoalVerifier({ provider: throwingProvider(), model: 'platform', modelTier: 'standard', resolveLlm })
+    const result = await verify({ outcome: 'x', because: 'done', workspaceId: 'w1' })
+    expect(resolveLlm).toHaveBeenCalledWith('w1')
+    expect(result.verified).toBe(true)
   })
 })

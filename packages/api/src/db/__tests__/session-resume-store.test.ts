@@ -43,7 +43,10 @@ describe('[COMP:api/session-resume-store] create', () => {
       'sess-1',
       'app-1',
       'gmailSendMessage',
-      JSON.stringify({ to: 'user@example.com', subject: 'hi' }),
+      JSON.stringify({
+        __useBrianResumeVersion: 1,
+        toolInput: { to: 'user@example.com', subject: 'hi' },
+      }),
       3,
     ])
   })
@@ -67,6 +70,39 @@ describe('[COMP:api/session-resume-store] create', () => {
     const [reselect] = mockQuery.mock.calls[1]
     expect(reselect).toContain('SELECT')
     expect(reselect).toContain('WHERE session_id = $1')
+  })
+
+  it('stores and decodes the selected profile and logical tier in JSONB', async () => {
+    const storedInput = {
+      __useBrianResumeVersion: 1,
+      toolInput: { to: 'user@example.com' },
+      selectedCustomModel: 'custom:profile-1',
+      selectedTier: 'max',
+      selectedLegacyByo: false,
+    }
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ ...SAMPLE_ROW, suspendedToolInput: storedInput }],
+      rowCount: 1,
+    } as never)
+
+    const row = await store.create({
+      sessionId: 'sess-1',
+      approvalId: 'app-1',
+      suspendedToolName: 'gmailSendMessage',
+      suspendedToolInput: { to: 'user@example.com' },
+      loopStepIndex: 3,
+      selectedCustomModel: 'custom:profile-1',
+      selectedTier: 'max',
+      selectedLegacyByo: false,
+    })
+
+    expect(row).toMatchObject({
+      suspendedToolInput: { to: 'user@example.com' },
+      selectedCustomModel: 'custom:profile-1',
+      selectedTier: 'max',
+      selectedLegacyByo: false,
+    })
+    expect(mockQuery.mock.calls[0][1]?.[3]).toBe(JSON.stringify(storedInput))
   })
 })
 

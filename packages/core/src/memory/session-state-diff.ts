@@ -158,8 +158,11 @@ export async function runSessionStateDiff(
   async function callAndParse(): Promise<{
     parsed: DiffOutput | null
     usage: TokenUsage | null
+    model: string | null
     errorMessage?: string
   }> {
+    let attemptUsage: TokenUsage | null = null
+    let attemptModel: string | null = null
     try {
       const response = await collectStream(
         opts.provider.stream({
@@ -173,6 +176,8 @@ export async function runSessionStateDiff(
           temperature: 0.1,
         }),
       )
+      attemptUsage = response.usage
+      attemptModel = response.model || opts.model
 
       const text = response.content
         .filter((b) => b.type === 'text')
@@ -182,16 +187,18 @@ export async function runSessionStateDiff(
       const cleaned = text.replace(/^```(?:json)?\s*|\s*```$/g, '').trim()
       const match = cleaned.match(/\{[\s\S]*\}/)
       if (!match) {
-        return { parsed: null, usage: response.usage, errorMessage: 'no-json' }
+        return { parsed: null, usage: attemptUsage, model: attemptModel, errorMessage: 'no-json' }
       }
       return {
         parsed: JSON.parse(match[0]) as DiffOutput,
-        usage: response.usage,
+        usage: attemptUsage,
+        model: attemptModel,
       }
     } catch (err) {
       return {
         parsed: null,
-        usage: null,
+        usage: attemptUsage,
+        model: attemptModel,
         errorMessage: err instanceof Error ? err.message : 'unknown',
       }
     }
@@ -218,7 +225,7 @@ export async function runSessionStateDiff(
       upserts: 0,
       resolves: 0,
       usage,
-      model: usage ? opts.model : null,
+      model: usage ? result.model ?? opts.model : null,
       errorMessage,
     }
   }
@@ -286,7 +293,7 @@ export async function runSessionStateDiff(
     upserts: upsertCount,
     resolves: resolveCount,
     usage,
-    model: usage ? opts.model : null,
+    model: usage ? result.model ?? opts.model : null,
     errorMessage,
   }
 }

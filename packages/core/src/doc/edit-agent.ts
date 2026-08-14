@@ -237,7 +237,7 @@ async function runAttempt(
       } else if (event.type === 'turn_complete') {
         const text = textFromContent(event.response.content)
         if (text) latestText = text
-        await options.onUsage?.({ model, usage: event.totalUsage, attempt })
+        await options.onUsage?.({ model: event.response.model, usage: event.totalUsage, attempt })
       } else if (event.type === 'error') {
         lastError = event.error.message
       }

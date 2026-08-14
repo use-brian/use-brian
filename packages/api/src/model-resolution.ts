@@ -98,6 +98,19 @@ export function ensureServableModel(
       (candidate) => candidate.provider === preferredProvider,
     )
     if (preferredClass) return preferredClass.alias
+
+    // Some application providers intentionally expose a different class
+    // shape (DashScope is metered-first). An auto chat tier still follows the
+    // application preference; direct model selections do not reach this path
+    // because only registry chat defaults carry `chatTierKey`.
+    if (row.chatTierKey) {
+      for (const cls of ['standard-pro', 'max', 'research', 'metered'] as const) {
+        const preferred = menuForClass(cls, configuredProviders).find(
+          (candidate) => candidate.provider === preferredProvider,
+        )
+        if (preferred) return preferred.alias
+      }
+    }
   }
   const sameTier = sameClass.find((candidate) => candidate.tier === row.tier)
   if (sameTier) return sameTier.alias
@@ -124,6 +137,44 @@ export function ensureServableModel(
   return model
 }
 
+export type LogicalChatTier = 'standard' | 'pro' | 'max' | 'research'
+
+export type ChatModelSelection = {
+  /** Plan/budget-resolved model before application-provider substitution. */
+  logicalModel: string
+  /** Billing, budget, and workspace-default tier. Never derive this from servingModel. */
+  logicalTier: LogicalChatTier
+  /** Provider-facing alias after applying live application preference. */
+  servingModel: string
+}
+
+/** Resolve policy and serving concerns without losing the requested chat tier. */
+export function resolveChatModelSelection(
+  requestedAlias: string | undefined,
+  plan: string,
+  budgetStatus: 'ok' | 'downgraded' | 'blocked' = 'ok',
+  configuredProviders?: ProviderAvailability,
+): ChatModelSelection {
+  const logicalModel = resolveModel(requestedAlias, plan, budgetStatus)
+  const tier = tierForModel(logicalModel)
+  const logicalTier: LogicalChatTier =
+    tier === 'pro' || tier === 'max' || tier === 'research' ? tier : 'standard'
+  return {
+    logicalModel,
+    logicalTier,
+    servingModel: configuredProviders
+      ? ensureServableModel(logicalModel, configuredProviders)
+      : logicalModel,
+  }
+}
+
+/** Metered confirmation/surcharge is only for a model alias the caller sent. */
+export function isExplicitMeteredModelSelection(requestedModel: string | undefined): boolean {
+  if (!requestedModel) return false
+  const row = registryRow(requestedModel)
+  return row?.class === 'metered' && row.status === 'active'
+}
+
 function normalizePreferredProvider(provider: string | null | undefined): string | null {
   if (!provider || provider === 'auto') return null
   if (provider === 'dashscope-intl') return 'openai-compat:dashscope-intl'
@@ -136,7 +187,36 @@ function normalizePreferredProvider(provider: string | null | undefined): string
  * literal, which is what the pre-substitution code did.
  */
 export function backgroundModelFor(configuredProviders?: ProviderAvailability): string {
-  return configuredProviders ? ensureServableModel(BACKGROUND_MODEL, configuredProviders) : BACKGROUND_MODEL
+  if (!configuredProviders) return BACKGROUND_MODEL
+  const preferredProvider = normalizePreferredProvider(configuredProviders.preferredProvider)
+  if (preferredProvider && configuredProviders.has(preferredProvider)) {
+    const preferredBackground = activeForClass('background', configuredProviders).find(
+      (candidate) => candidate.provider === preferredProvider && candidate.tier === 'standard',
+    )
+    if (preferredBackground) return preferredBackground.alias
+
+    // Codex has no internal-only background row. Its Standard subscription
+    // model is the corresponding cheap lane when Codex is application-default.
+    const preferredStandard = menuForClass('standard-pro', configuredProviders).find(
+      (candidate) => candidate.provider === preferredProvider && candidate.tier === 'standard',
+    )
+    if (preferredStandard) return preferredStandard.alias
+  }
+  return ensureServableModel(BACKGROUND_MODEL, configuredProviders)
+}
+
+/** Cheapest live menu model for provider-backed document vision. */
+export function providerVisionModelFor(
+  configuredProviders: ProviderAvailability,
+  provider: string,
+): string | null {
+  for (const cls of ['standard-pro', 'max', 'research', 'metered'] as const) {
+    const row = menuForClass(cls, configuredProviders).find(
+      (candidate) => candidate.provider === provider && candidate.capabilities.vision,
+    )
+    if (row) return row.alias
+  }
+  return null
 }
 
 /**

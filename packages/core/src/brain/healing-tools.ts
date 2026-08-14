@@ -101,6 +101,7 @@ export interface HealingToolsDeps {
   provider: LLMProvider
   /** Model id used by the reclassifier LLM call (Flash-class is fine). */
   reclassifierModel: string
+  resolveLlm?: (workspaceId: string) => Promise<{ provider: LLMProvider; model: string } | null>
   /**
    * Rate limit for `healMemories` — defaults to 5 invocations per user
    * per 24h per Q10. Tests can override.
@@ -737,6 +738,7 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
 
         const entityRows = await deps.entities.listForWorkspace(ctx, { limit: 200 })
 
+        const runtime = await deps.resolveLlm?.(ctx.workspaceId)
         const result: ReclassificationResult = await runReclassification({
           memories: filtered,
           entities: entityRows,
@@ -747,8 +749,8 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
           taskStore: deps.tasks,
           entityLinks: deps.entityLinks,
           candidates: deps.candidates,
-          provider: deps.provider,
-          model: deps.reclassifierModel,
+          provider: runtime?.provider ?? deps.provider,
+          model: runtime?.model ?? deps.reclassifierModel,
         } satisfies ReclassificationDeps)
 
         return {
@@ -941,6 +943,7 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
             isError: true,
           }
         }
+        const runtime = input.cluster_by_llm ? await deps.resolveLlm?.(workspaceId) : null
         const result: EntityDedupeResult = await runEntityDedupe({
           entities: deps.entities,
           merge: deps.entityMerge,
@@ -953,7 +956,10 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
           kind: input.kind,
           clusterByLlm: input.cluster_by_llm,
           llmClusterer: input.cluster_by_llm
-            ? { provider: deps.provider, model: deps.reclassifierModel }
+            ? {
+                provider: runtime?.provider ?? deps.provider,
+                model: runtime?.model ?? deps.reclassifierModel,
+              }
             : undefined,
         })
         const totalPairsMerged =

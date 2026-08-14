@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { z } from 'zod'
 import { buildTool, type Tool, type ToolContext } from '@use-brian/core'
-import { resolveResumeOutcomeNote } from '../session-resume-replay.js'
+import { resolveDurableResumePolicy, resolveResumeOutcomeNote } from '../session-resume-replay.js'
 
 // ─────────────────────────────────────────────────────────────────────
 // `resolveResumeOutcomeNote` (WU-6.4 — Path B durable chat resume).
@@ -256,5 +256,22 @@ describe('[COMP:brain/session-resume-worker] resolveResumeOutcomeNote', () => {
       context,
     )
     expect(note).toMatch(/empty answer/i)
+  })
+})
+
+describe('[COMP:brain/session-resume-worker] durable execution policy', () => {
+  it('restores the logical tier budget without pinning a serving alias', () => {
+    expect(resolveDurableResumePolicy({ selectedTier: 'max' }, 'gemini-flash')).toMatchObject({
+      logicalModel: 'gemini-3.6-flash',
+      logicalTier: 'max',
+      budget: { maxTurns: 100, maxToolCalls: 100 },
+    })
+  })
+
+  it('fails closed for explicit metered replay instead of silently switching tier', () => {
+    expect(() => resolveDurableResumePolicy({
+      selectedTier: 'pro',
+      selectedMeteredModel: 'qwen3.7-plus',
+    }, 'gemini-flash')).toThrow(/does not support explicit metered model/)
   })
 })

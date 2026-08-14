@@ -89,18 +89,22 @@ export function createGoalWorkTools(
     async execute(input, context) {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
+      const existing = await getGoalByIdSystem(input.goal_id)
+      if (!existing || existing.workspaceId !== context.workspaceId) {
+        return goalNotFound(input.goal_id, 'Nothing was confirmed.')
+      }
       // Clarity gate (§12, widened §8) — don't arm a goal an agent couldn't
       // recognise as done. Assess the would-be configuration: the outcome (the
       // refinement, or the current one) plus the triage brief when present.
       if (deps.assessClarity) {
-        const existing = await getGoalByIdSystem(input.goal_id)
-        if (!existing) return goalNotFound(input.goal_id, 'Nothing was confirmed.')
         const outcome = input.outcome?.trim() || existing.outcome
         const verdict = await deps.assessClarity({
           outcome,
           verification: existing.brief?.verification,
           approach: existing.brief?.approach,
           userId: context.userId,
+          workspaceId: context.workspaceId!,
+          assistantId: context.assistantId,
         })
         if (!verdict.clear) {
           return {
@@ -137,7 +141,7 @@ export function createGoalWorkTools(
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
       const goal = await getGoalByIdSystem(input.goal_id)
-      if (!goal) return goalNotFound(input.goal_id, 'No work was started.')
+      if (!goal || goal.workspaceId !== context.workspaceId) return goalNotFound(input.goal_id, 'No work was started.')
       if (!goal.confirmedAt) {
         // Do NOT start autonomous work on an unconfirmed goal — clarify with the
         // user first (autopilot enforcement).
@@ -185,6 +189,10 @@ export function createGoalWorkTools(
     async execute(input, context) {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
+      const goal = await getGoalByIdSystem(input.goal_id)
+      if (!goal || goal.workspaceId !== context.workspaceId) {
+        return goalNotFound(input.goal_id, 'Nothing was verified and nothing was stamped complete.')
+      }
       if (!deps.verify) {
         // No verifier wired → cannot verify → do NOT stamp (fail-safe: a goal
         // reaches done only via a verifier pass).
@@ -197,8 +205,6 @@ export function createGoalWorkTools(
           isError: true,
         }
       }
-      const goal = await getGoalByIdSystem(input.goal_id)
-      if (!goal) return goalNotFound(input.goal_id, 'Nothing was verified and nothing was stamped complete.')
       // Gather read-only host evidence so the verifier checks the claim against
       // reality. Best-effort — a failure never blocks the verify path (the
       // gatherer itself fails soft; the `.catch` guards a throwing dep too).
@@ -210,6 +216,8 @@ export function createGoalWorkTools(
         because: input.because,
         evidence,
         userId: context.userId,
+        workspaceId: context.workspaceId!,
+        assistantId: context.assistantId,
       })
       if (!verdict.verified) {
         // Refuted → feed the refutation back; do NOT stamp. The agent continues.
@@ -260,7 +268,9 @@ export function createGoalWorkTools(
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
       const goal = await getGoalByIdSystem(input.goal_id)
-      if (!goal) return goalNotFound(input.goal_id, 'The goal was not parked and no event subscription was written.')
+      if (!goal || goal.workspaceId !== context.workspaceId) {
+        return goalNotFound(input.goal_id, 'The goal was not parked and no event subscription was written.')
+      }
       // Write just the subscriptions; the driver's re-arm overwrites this with
       // `{ subscriptions, state }` so the loop-state handoff survives the wait.
       await setGoalAwaitingEventSystem(input.goal_id, { subscriptions: [input.event] })

@@ -51,7 +51,7 @@ import { recordExternalCostFromMeta } from '../billing-external.js'
 // no-op/false/null/unset defaults in chatRoutes(). See oss §12.5.
 import type { Message, LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, FileStore, ContentBlock, CacheStore, McpSettingsStore, ConfirmationDecision, ConfirmationResolver, TopicClassification, ClassifierRecentTurn, EpisodicStore, CapabilityStore, RetrievalStore, TranscribeResult, TokenUsage, WorkerResult, EngineHooks } from '@use-brian/core'
 
-import { resolveModel, ensureServableModel, backgroundLatencyBudgetMs, backgroundModelFor, isStandardTier, chatTierBudget, planNudgeCap, tierForModel } from '../model-resolution.js'
+import { resolveModel, ensureServableModel, backgroundLatencyBudgetMs, backgroundModelFor, isStandardTier, chatTierBudget, planNudgeCap, tierForModel, isExplicitMeteredModelSelection } from '../model-resolution.js'
 import { registryRow } from '@use-brian/shared/model-registry'
 import type { ConnectorStore } from '../db/connector-store.js'
 import { getToolDisplayName, stripFollowUps, stripCommentThreadReplyTag, resolveCharter, charterMission } from '@use-brian/shared'
@@ -294,6 +294,8 @@ type WebChatOptions = {
    * LLM_PROVIDER_KEY_ENCRYPTION_KEY is unconfigured — chat uses `provider`.
    */
   llmProviderSettingsStore?: import('../db/workspace-llm-provider-settings.js').WorkspaceLlmProviderSettingsStore
+  /** Lookup that also detects an encrypted legacy row when decryption is unavailable. */
+  resolveWorkspaceByoGeminiKey?: (workspaceId: string) => Promise<string | null>
   /**
    * Factory that builds a per-request LLM provider from a raw API key, applying
    * the same wrapping middleware as the platform `provider`. Supplied by the API
@@ -403,7 +405,7 @@ type WebChatOptions = {
    * deployment with no Google credential (Qwen-only) then serves chat by
    * default instead of erroring. See `ensureServableModel`.
    */
-  configuredProviders?: ReadonlySet<string>
+  configuredProviders?: import('@use-brian/shared/model-registry').ProviderAvailability
   estimateMeteredTurn?: (modelAlias: string, toolRounds: number) => { modelAlias: string; toolRounds: number; minCredits: number; maxCredits: number } | null
   checkMeteredSpendCap?: (workspaceId: string) => Promise<{ allowed: boolean; usedCredits: number; capCredits: number }>
   chargeMeteredSurcharge?: (params: { workspaceId: string; requestId: string; modelAlias: string; profileId?: string | null; toolRounds?: number | null; modelCostUsd: number; chargedByUserId?: string | null }) => Promise<{ charged: boolean; credits: number }>
@@ -625,6 +627,67 @@ type WebChatOptions = {
    * "Recall-outcome tagging".
    */
   memoryRecallEventsStore?: import('../db/memory-recall-events-store.js').MemoryRecallEventsStore
+}
+
+export async function resolveWorkspaceTurnLlm(params: {
+  workspaceId: string
+  requestedModel?: string
+  requestedTier: string
+  platformProvider: LLMProvider
+  resolveWorkspaceCustomLlm: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver | null
+  resolveLegacyByoKey: (() => Promise<string | null>) | null
+  buildLegacyByoProvider: ((apiKey: string) => LLMProvider) | null
+}): Promise<{
+  customRuntime: import('../custom-llm-runtime.js').ResolvedWorkspaceCustomLlm | null
+  provider: LLMProvider
+  providerKeySource: 'user' | 'platform'
+  usedLegacyByoKey: boolean
+}> {
+  const customRuntime = params.resolveWorkspaceCustomLlm
+    ? await params.resolveWorkspaceCustomLlm({
+        workspaceId: params.workspaceId,
+        requestedModel: params.requestedModel,
+        requestedTier: params.requestedTier,
+        allowDefault: true,
+      })
+    : null
+  if (customRuntime) {
+    return {
+      customRuntime,
+      provider: customRuntime.provider,
+      providerKeySource: 'user',
+      usedLegacyByoKey: false,
+    }
+  }
+  if (params.requestedModel) {
+    return {
+      customRuntime: null,
+      provider: params.platformProvider,
+      providerKeySource: 'platform',
+      usedLegacyByoKey: false,
+    }
+  }
+
+  // Legacy Gemini settings are consulted only when no workspace custom
+  // endpoint applies. A stale encrypted legacy row must not block a valid
+  // custom selection, while legacy decrypt failures remain fail-closed here.
+  if (params.resolveLegacyByoKey && params.buildLegacyByoProvider) {
+    const byoKey = await params.resolveLegacyByoKey()
+    if (byoKey) {
+      return {
+        customRuntime: null,
+        provider: params.buildLegacyByoProvider(byoKey),
+        providerKeySource: 'user',
+        usedLegacyByoKey: true,
+      }
+    }
+  }
+  return {
+    customRuntime: null,
+    provider: params.platformProvider,
+    providerKeySource: 'platform',
+    usedLegacyByoKey: false,
+  }
 }
 
 /**
@@ -1598,6 +1661,7 @@ async function generateTitle(provider: LLMProvider, messages: Message[], model: 
 
   let rawTitle = ''
   let usage: TokenUsage | null = null
+  let servedModel = model
   for await (const chunk of provider.stream({
     model,
     systemPrompt:
@@ -1607,6 +1671,7 @@ async function generateTitle(provider: LLMProvider, messages: Message[], model: 
     temperature: 0.2,
   })) {
     if (chunk.type === 'text_delta') rawTitle += chunk.text
+    if (chunk.type === 'message_start') servedModel = chunk.model
     if (chunk.type === 'message_end') usage = chunk.usage
   }
 
@@ -1618,13 +1683,13 @@ async function generateTitle(provider: LLMProvider, messages: Message[], model: 
     const firstUserText = filteredMessages.find((m) => m.role === 'user')?.text ?? ''
     const fallback = sanitizeTitle(firstUserText)
     if (fallback.split(/\s+/).length >= 2) {
-      return { title: fallback.charAt(0).toUpperCase() + fallback.slice(1), usage, model }
+      return { title: fallback.charAt(0).toUpperCase() + fallback.slice(1), usage, model: servedModel }
     }
   }
   return {
     title: cleaned.length > 0 ? cleaned : null,
     usage,
-    model,
+    model: servedModel,
   }
 }
 
@@ -1663,6 +1728,10 @@ export type ResumeReplayParams = {
   suspendedToolInput: unknown
   /** Resume worker position marker — useful for analytics + assertions. */
   loopStepIndex: number
+  selectedCustomModel?: string
+  selectedTier?: string
+  selectedLegacyByo?: boolean
+  selectedMeteredModel?: string
   approvalStatus: ResumeReplayApprovalStatus
   rejectReason: string | null
   /**
@@ -1775,6 +1844,10 @@ export async function runSessionResume(
       suspendedToolName: point.suspendedToolName,
       suspendedToolInput: point.suspendedToolInput,
       loopStepIndex: point.loopStepIndex,
+      ...(point.selectedCustomModel ? { selectedCustomModel: point.selectedCustomModel } : {}),
+      ...(point.selectedTier ? { selectedTier: point.selectedTier } : {}),
+      ...(point.selectedLegacyByo !== undefined ? { selectedLegacyByo: point.selectedLegacyByo } : {}),
+      ...(point.selectedMeteredModel ? { selectedMeteredModel: point.selectedMeteredModel } : {}),
       approvalStatus: approval.status,
       rejectReason: approval.rejectReason,
       answerText: approval.answerText,
@@ -2205,30 +2278,8 @@ export function chatRoutes(options: WebChatOptions): Router {
       // platform key, which would silently charge them.
       let turnProvider: LLMProvider = options.provider
       let usedByoKey = false
+      let usedLegacyByoKey = false
       let customLlmRuntime: import('../custom-llm-runtime.js').ResolvedWorkspaceCustomLlm | null = null
-      if (
-        assistant.workspaceId &&
-        options.llmProviderSettingsStore &&
-        options.buildWorkspaceProvider
-      ) {
-        try {
-          const byoKey = await options.llmProviderSettingsStore.getPlaintextKeySystem({
-            workspaceId: assistant.workspaceId,
-            provider: 'gemini',
-          })
-          if (byoKey) {
-            turnProvider = options.buildWorkspaceProvider(byoKey)
-            usedByoKey = true
-          }
-        } catch (err) {
-          // A decrypt/store failure must not silently downgrade a BYO workspace
-          // to platform billing — but it also must not crash the turn. Log
-          // (without the key) and keep the platform provider; billing stays as
-          // platform, which is the safe (non-undercharging) default.
-          console.error('[chat] BYO LLM key resolution failed:', (err as Error).message)
-        }
-      }
-
       // Resolve workspace-attributable auxiliary work independently from the
       // final response tier. Background work is logically Standard; if that
       // tier has no custom default, one configured custom endpoint still stays
@@ -5115,9 +5166,9 @@ export function chatRoutes(options: WebChatOptions): Router {
       // text-only pick silently serves via the tier default instead).
       // Research mode wins over a metered pick (it forces its own model).
       let meteredTurn: { alias: string; profileId: string | null; toolRounds: number; thinking: boolean | null } | null = null
-      if (requestedModel && !researchMode) {
-        const meteredRow = registryRow(requestedModel)
-        if (meteredRow?.class === 'metered' && meteredRow.status === 'active') {
+      if (isExplicitMeteredModelSelection(requestedModel) && !researchMode) {
+        const meteredRow = registryRow(requestedModel!)
+        if (meteredRow?.class === 'metered') {
           if (options.meteredModelsAvailable && !options.meteredModelsAvailable.has(meteredRow.alias)) {
             res.status(400).json({ error: 'model_unavailable', message: 'This model is not available on this deployment.' })
             return
@@ -5179,25 +5230,40 @@ export function chatRoutes(options: WebChatOptions): Router {
         ? requestedModel
         : undefined
       const policyRequestedModel = explicitCustomSelector ? undefined : requestedModel
-      const resolvedModel = meteredTurn
+      const logicalModel = meteredTurn
         ? meteredTurn.alias
         : researchMode && budgetStatus !== 'downgraded'
           ? resolveModel('research', 'max_5x', budgetStatus)
           : resolveModel(policyRequestedModel, userPlan, budgetStatus)
+      const logicalTier = tierForModel(logicalModel)
       // Substitute a configured model when the default (Gemini) has no key —
       // lets a Qwen-only deployment serve chat by default. No-op when Gemini
       // is configured, or when the caller doesn't pass configuredProviders.
       const model = options.configuredProviders
-        ? ensureServableModel(resolvedModel, options.configuredProviders)
-        : resolvedModel
+        ? ensureServableModel(logicalModel, options.configuredProviders)
+        : logicalModel
 
-      if (assistant.workspaceId && options.resolveWorkspaceCustomLlm && !meteredTurn) {
-        customLlmRuntime = await options.resolveWorkspaceCustomLlm({
+      if (assistant.workspaceId && !meteredTurn) {
+        const resolvedTurnLlm = await resolveWorkspaceTurnLlm({
           workspaceId: assistant.workspaceId,
           requestedModel: explicitCustomSelector,
-          requestedTier: tierForModel(model),
-          allowDefault: true,
+          requestedTier: logicalTier,
+          platformProvider: options.provider,
+          resolveWorkspaceCustomLlm: options.resolveWorkspaceCustomLlm ?? null,
+          resolveLegacyByoKey: options.buildWorkspaceProvider && (options.resolveWorkspaceByoGeminiKey || options.llmProviderSettingsStore)
+            ? () => options.resolveWorkspaceByoGeminiKey
+                ? options.resolveWorkspaceByoGeminiKey(assistant.workspaceId!)
+                : options.llmProviderSettingsStore!.getPlaintextKeySystem({
+                    workspaceId: assistant.workspaceId!,
+                    provider: 'gemini',
+                  })
+            : null,
+          buildLegacyByoProvider: options.buildWorkspaceProvider ?? null,
         })
+        customLlmRuntime = resolvedTurnLlm.customRuntime
+        turnProvider = resolvedTurnLlm.provider
+        usedByoKey = resolvedTurnLlm.providerKeySource === 'user'
+        usedLegacyByoKey = resolvedTurnLlm.usedLegacyByoKey
         if (explicitCustomSelector && !customLlmRuntime) {
           res.status(400).json({
             error: 'custom_model_unavailable',
@@ -5244,7 +5310,11 @@ export function chatRoutes(options: WebChatOptions): Router {
       // run on boot-time Flash, which treats "Search for X" prompts as one-shot
       // and skips urlReader entirely — defeating the deep-research wedge.
       if (researchMode) {
-        options.workerManager?.setResearchModel(model)
+        // Persist the logical Research model, not today's serving alias. The
+        // routing provider reapplies the live application preference on spawn
+        // and durable rehydrate. Explicit custom selectors still ride
+        // workerRuntime and remain pinned authoritatively.
+        options.workerManager?.setResearchModel(logicalModel)
         // Cap concurrent workers at 5 for the research session. Lowered
         // from 10 after sustained 4GB OOM crashes — 10 concurrent worker
         // queryLoops at HIGH thinking + their statelessHistory growth +
@@ -5267,7 +5337,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // Research mode forces coordinator regardless of the classifier — the
       // user explicitly asked for deep research, so we skip the splitter
       // call (saves a Gemini round-trip) and seed coordinator immediately.
-      const isProMode = !isStandardTier(model)
+      const isProMode = !isStandardTier(logicalModel)
       let preflightContext = ''
       // App assistants (doc + feed) never enter coordinator mode — it
       // strips their authoring tools. So a doc research turn (researchMode
@@ -6222,6 +6292,10 @@ export function chatRoutes(options: WebChatOptions): Router {
                   approvalId: event.approvalId,
                   suspendedToolName: event.toolName,
                   suspendedToolInput: event.toolInput,
+                  selectedCustomModel: customLlmRuntime?.selector,
+                  selectedTier: logicalTier,
+                  selectedLegacyByo: usedLegacyByoKey,
+                  selectedMeteredModel: meteredTurn?.alias,
                   // `mcp_call` is the loop step being executed; replay
                   // re-enters that same step and the dispatcher's fast
                   // path picks up the resolved approval.
@@ -6272,7 +6346,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           // user confirmed the estimate at exactly this depth.
           ...(meteredTurn
             ? { maxTurns: meteredTurn.toolRounds, maxToolCalls: meteredTurn.toolRounds }
-            : chatTierBudget({ model, researchMode }) ?? {}),
+            : chatTierBudget({ model: logicalModel, researchMode }) ?? {}),
           // Execution-plan completeness gate: when the session has an active
           // plan with open steps, a tool-less turn keeps working them instead
           // of stalling half-done; budget exhaustion fires one model-generated
@@ -6715,6 +6789,10 @@ export function chatRoutes(options: WebChatOptions): Router {
                   approvalId: event.approvalId,
                   suspendedToolName: event.toolName,
                   suspendedToolInput: event.toolInput,
+                  selectedCustomModel: customLlmRuntime?.selector,
+                  selectedTier: logicalTier,
+                  selectedLegacyByo: usedLegacyByoKey,
+                  selectedMeteredModel: meteredTurn?.alias,
                   loopStepIndex: event.loopStepIndex,
                 })
               } catch (err) {
@@ -6751,7 +6829,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                 assistantId: assistant.id,
                 sessionId: session.id,
                 model: event.response.model,
-                modelTier: customLlmRuntime?.modelTier ?? tierForModel(model),
+                modelTier: logicalTier,
                 inputTokens: usage.inputTokens,
                 outputTokens: usage.outputTokens,
                 cacheReadTokens: usage.cacheReadTokens,

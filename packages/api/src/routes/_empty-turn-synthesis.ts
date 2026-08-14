@@ -63,7 +63,7 @@ export type EmptyTurnSynthesisParams = {
 export type EmptyTurnSynthesisResult = {
   text: string
   usage: TokenUsage | null
-  model: 'gemini-flash'
+  model: string
 }
 
 const SYNTHESIS_MODEL = 'gemini-flash' as const
@@ -229,7 +229,7 @@ export async function composeEmptyTurnSynthesis(
       .join('')
       .trim()
     if (text.length === 0) return null
-    return { text, usage: response.usage, model: SYNTHESIS_MODEL }
+    return { text, usage: response.usage, model: response.model || SYNTHESIS_MODEL }
   } catch (err) {
     console.warn(
       `[${params.channelType}] composeEmptyTurnSynthesis failed; falling back to canned banner:`,

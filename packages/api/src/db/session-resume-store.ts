@@ -30,6 +30,10 @@ export type SessionResumePoint = {
   suspendedToolName: string
   suspendedToolInput: unknown
   loopStepIndex: number
+  selectedCustomModel?: string
+  selectedTier?: string
+  selectedLegacyByo?: boolean
+  selectedMeteredModel?: string
   createdAt: Date
 }
 
@@ -39,6 +43,10 @@ export type CreateSessionResumePointParams = {
   suspendedToolName: string
   suspendedToolInput: unknown
   loopStepIndex: number
+  selectedCustomModel?: string
+  selectedTier?: string
+  selectedLegacyByo?: boolean
+  selectedMeteredModel?: string
 }
 
 const COLS = `
@@ -75,12 +83,35 @@ export type SessionResumeStore = {
 }
 
 function rowToPoint(row: Record<string, unknown>): SessionResumePoint {
+  const storedInput = row.suspendedToolInput
+  const envelope = storedInput && typeof storedInput === 'object'
+    && (storedInput as Record<string, unknown>).__useBrianResumeVersion === 1
+    ? storedInput as {
+        toolInput?: unknown
+        selectedCustomModel?: unknown
+        selectedTier?: unknown
+        selectedLegacyByo?: unknown
+        selectedMeteredModel?: unknown
+      }
+    : null
   return {
     sessionId: row.sessionId as string,
     approvalId: row.approvalId as string,
     suspendedToolName: row.suspendedToolName as string,
-    suspendedToolInput: row.suspendedToolInput,
+    suspendedToolInput: envelope ? envelope.toolInput : storedInput,
     loopStepIndex: row.loopStepIndex as number,
+    ...(typeof envelope?.selectedCustomModel === 'string'
+      ? { selectedCustomModel: envelope.selectedCustomModel }
+      : {}),
+    ...(typeof envelope?.selectedTier === 'string'
+      ? { selectedTier: envelope.selectedTier }
+      : {}),
+    ...(typeof envelope?.selectedLegacyByo === 'boolean'
+      ? { selectedLegacyByo: envelope.selectedLegacyByo }
+      : {}),
+    ...(typeof envelope?.selectedMeteredModel === 'string'
+      ? { selectedMeteredModel: envelope.selectedMeteredModel }
+      : {}),
     createdAt: row.createdAt as Date,
   }
 }
@@ -103,7 +134,14 @@ export function createDbSessionResumeStore(): SessionResumeStore {
           params.sessionId,
           params.approvalId,
           params.suspendedToolName,
-          JSON.stringify(params.suspendedToolInput),
+          JSON.stringify({
+            __useBrianResumeVersion: 1,
+            toolInput: params.suspendedToolInput,
+            selectedCustomModel: params.selectedCustomModel,
+            selectedTier: params.selectedTier,
+            selectedLegacyByo: params.selectedLegacyByo,
+            selectedMeteredModel: params.selectedMeteredModel,
+          }),
           params.loopStepIndex,
         ],
       )

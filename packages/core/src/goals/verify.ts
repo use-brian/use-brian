@@ -14,6 +14,7 @@
  */
 import type { LLMProvider, TokenUsage } from '../providers/types.js'
 import { collectStream } from '../providers/accumulator.js'
+import type { GoalLlmRuntime, GoalLlmUsageContext } from './clarity.js'
 
 export type GoalVerifyVerdict = {
   verified: boolean
@@ -30,6 +31,8 @@ export type VerifyGoalInput = {
   evidence?: string
   /** Confirming user, for COGS attribution only; the verdict ignores it. */
   userId?: string
+  workspaceId?: string
+  assistantId?: string
 }
 
 export type GoalVerifier = (input: VerifyGoalInput) => Promise<GoalVerifyVerdict>
@@ -45,21 +48,32 @@ const VERIFY_SYSTEM_PROMPT = [
 export function createGoalVerifier(deps: {
   provider: LLMProvider
   model: string
+  modelTier: string
   /** Optional COGS sink — boot records this under an `overhead:goal-verify` source. */
-  onUsage?: (usage: TokenUsage, userId?: string) => void
+  onUsage?: (usage: TokenUsage, context: GoalLlmUsageContext) => void
+  resolveLlm: ((workspaceId: string) => Promise<GoalLlmRuntime | null>) | null
 }): GoalVerifier {
-  return async ({ outcome, because, evidence, userId }) => {
+  return async ({ outcome, because, evidence, userId, workspaceId, assistantId }) => {
     try {
+      const runtime = workspaceId && deps.resolveLlm ? await deps.resolveLlm(workspaceId) : null
       const response = await collectStream(
-        deps.provider.stream({
-          model: deps.model,
+        (runtime?.provider ?? deps.provider).stream({
+          model: runtime?.model ?? deps.model,
           systemPrompt: VERIFY_SYSTEM_PROMPT,
           messages: [{ role: 'user', content: buildVerifyPrompt(outcome, because, evidence) }],
-          maxTokens: 600,
+          maxTokens: Math.min(600, runtime?.maxTokens ?? 600),
+          inputTokenLimit: runtime?.inputTokenLimit,
           temperature: 0.1,
         }),
       )
-      if (response.usage) deps.onUsage?.(response.usage, userId)
+      if (response.usage) deps.onUsage?.(response.usage, {
+        userId,
+        workspaceId,
+        assistantId,
+        model: response.model || runtime?.model || deps.model,
+        modelTier: runtime?.modelTier ?? deps.modelTier,
+        providerKeySource: runtime?.providerKeySource ?? 'platform',
+      })
       const text = response.content.map((b) => (b.type === 'text' ? b.text : '')).join('')
       return parseVerifyVerdict(text)
     } catch (err) {

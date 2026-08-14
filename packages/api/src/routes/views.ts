@@ -127,6 +127,9 @@ export type ViewsRouteOptions = {
    */
   provider?: LLMProvider
   docPageStore?: DocPageStore
+  /** Workspace-owned background runtime for standalone auto-title calls. */
+  resolveBackgroundRuntime?: import('../custom-llm-runtime.js').BackgroundRuntimeResolver
+  backgroundModel?: string
   /**
    * PDF spoke for `GET /views/:id/export?format=pdf` (doc-conversion.md →
    * "PDF spoke"). Defaults to the real LibreOffice-backed renderer; tests
@@ -381,6 +384,30 @@ function pageOf(view: SavedView): Page {
 
 export function viewsRoutes(opts: ViewsRouteOptions): Router {
   const router = Router()
+
+  router.post('/saved-views/:id/auto-title', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) return unauthorized(res)
+    if (!opts.provider || !opts.docPageStore) {
+      return res.status(503).json({ error: 'Auto-title is not configured' })
+    }
+    let runtime: Awaited<ReturnType<NonNullable<ViewsRouteOptions['resolveBackgroundRuntime']>>> | null = null
+    if (opts.resolveBackgroundRuntime) {
+      const view = await opts.savedViewStore.getById(userId, req.params.id)
+      if (!view) return notFound(res, 'View not found')
+      runtime = await opts.resolveBackgroundRuntime(view.workspaceId)
+    }
+    const result = await runDocAutoTitle({
+      userId,
+      pageId: req.params.id,
+      provider: runtime?.provider ?? opts.provider,
+      backgroundModel: runtime?.selector ?? opts.backgroundModel,
+      docPageStore: opts.docPageStore,
+      savedViewStore: opts.savedViewStore,
+      minChars: AUTO_TITLE_MIN_CHARS,
+    })
+    res.json({ applied: result.applied, title: result.title, icon: result.icon })
+  })
 
   // ── Custom page templates (migration 281) ────────────────────────────
   // Workspace-shared, user-authored templates. The gallery merges these with

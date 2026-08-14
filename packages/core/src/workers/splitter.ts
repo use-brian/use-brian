@@ -94,15 +94,15 @@ export async function classifySplit(options: SplitOptions): Promise<SplitResult>
 
     const jsonMatch = text.match(/\{[\s\S]*\}/)
     if (!jsonMatch) {
-      return { tasks: null, usage: response.usage, model: model }
+      return { tasks: null, usage: response.usage, model: response.model || model }
     }
 
     const parsed = JSON.parse(jsonMatch[0])
     if (!parsed.split || !Array.isArray(parsed.tasks) || parsed.tasks.length < 2) {
-      return { tasks: null, usage: response.usage, model: model }
+      return { tasks: null, usage: response.usage, model: response.model || model }
     }
 
-    return { tasks: parsed.tasks as string[], usage: response.usage, model: model }
+    return { tasks: parsed.tasks as string[], usage: response.usage, model: response.model || model }
   } catch {
     // Any failure in classification → safe default, no split. Usage is lost
     // because the stream didn't complete — caller records nothing.

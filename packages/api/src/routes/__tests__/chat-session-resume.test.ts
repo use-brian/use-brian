@@ -24,6 +24,8 @@ const SAMPLE_POINT: SessionResumePoint = {
   suspendedToolName: 'gmailSendMessage',
   suspendedToolInput: { to: 'user@example.com' },
   loopStepIndex: 2,
+  selectedCustomModel: 'custom:profile-1',
+  selectedTier: 'max',
   createdAt: new Date('2026-05-14T00:00:00Z'),
 }
 
@@ -174,6 +176,8 @@ describe('[COMP:brain/session-resume-worker] runSessionResume', () => {
       suspendedToolName: 'gmailSendMessage',
       suspendedToolInput: { to: 'user@example.com' },
       loopStepIndex: 2,
+      selectedCustomModel: 'custom:profile-1',
+      selectedTier: 'max',
       approvalStatus: 'approved',
       rejectReason: null,
       answerText: null,

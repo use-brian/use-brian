@@ -234,6 +234,10 @@ export type WorkspaceCustomLlmResolver = (params: {
   allowManagedRoutes?: boolean
 }) => Promise<ResolvedWorkspaceCustomLlm | null>
 
+export type BackgroundRuntimeResolver = (
+  workspaceId: string | null | undefined,
+) => Promise<ResolvedWorkspaceCustomLlm | null>
+
 export function createWorkspaceCustomLlmResolver(
   store: WorkspaceCustomLlmEndpointStore,
   options?: {
