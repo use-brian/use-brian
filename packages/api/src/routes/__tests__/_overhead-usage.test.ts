@@ -41,6 +41,20 @@ describe('[COMP:api/route-helpers] recordOverheadUsage', () => {
     expect(args.actorUserId).toBe('shadow-visitor-id')
   })
 
+  it('records custom endpoint overhead as user-paid with its logical tier', async () => {
+    await recordOverheadUsage({
+      ...baseParams,
+      model: 'custom:00000000-0000-4000-8000-000000000001',
+      modelTier: 'standard',
+      providerKeySource: 'user',
+    })
+    expect(mockRecord).toHaveBeenCalledWith(expect.objectContaining({
+      modelTier: 'standard',
+      providerKeySource: 'user',
+      actualCostUsd: 0,
+    }))
+  })
+
   it('attributes classifier and voice overhead to the channel actor while billing the owner', () => {
     const source = readFileSync(new URL('../channel-pipeline.ts', import.meta.url), 'utf8')
 

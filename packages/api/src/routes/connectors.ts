@@ -49,8 +49,8 @@
  * `./custom-connectors.ts` — the same factory the closed edition mounts, so the
  * feature has one implementation across both editions.
  *
- * Out of scope for the open edition (handled by the closed route): Google Drive
- * authorized-files (`/gdrive/*`).
+ * Google Drive Picker authorization mounts from the open shared
+ * `gdrive-authorized-files.ts` factory; hosted consumes the same router.
  *
  * Component tag: [COMP:api/connectors-route].
  */

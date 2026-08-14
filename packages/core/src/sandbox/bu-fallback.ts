@@ -32,7 +32,7 @@ import type { SandboxTaskBinding } from './cloud-browser-provider.js'
 import { registrableSiteOf } from './orchestrator.js'
 import { distillTrace, skillNameFromGoal } from './self-heal.js'
 import type { ResolveComputerToolPolicy } from './tools.js'
-import type { SandboxProvider, SessionVault } from './types.js'
+import type { BrowserUseLlmConfig, SandboxProvider, SessionVault } from './types.js'
 
 export type BuFallbackEvent = {
   type: 'browser_explore'
@@ -55,6 +55,7 @@ export type CreateBuFallbackToolOptions = {
   resolvePolicy?: ResolveComputerToolPolicy
   unattendedEnabled?: () => boolean
   getWorkspacePlan?: (workspaceId: string) => Promise<string>
+  resolveLlm?: (workspaceId: string) => Promise<BrowserUseLlmConfig | null>
   onEvent?: (event: BuFallbackEvent, context: ToolContext) => void
   maxSteps?: number
   timeoutMs?: number
@@ -216,10 +217,12 @@ export function createBuFallbackTool(opts: CreateBuFallbackToolOptions): { brows
           { url: input.url, browser: true },
         )
         const goal = `Start at ${input.url}. ${input.goal}`
+        const llm = await opts.resolveLlm?.(context.workspaceId)
         const { trace, output } = await opts.provider.runBrowserUse(sandboxId, {
           goal,
           maxSteps: opts.maxSteps ?? DEFAULT_MAX_STEPS,
           timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+          ...(llm ? { llm } : {}),
         })
 
         // Self-heal is ALWAYS automatic (R2-5): distill the watched run into
