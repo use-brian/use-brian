@@ -37,6 +37,7 @@ describe('[COMP:api/billing-external] external tool cost recording', () => {
       cacheWriteTokens: 0,
       source: 'included',
       userMessageId: 'msg-1',
+      triggerKey: 'web_search_external_tool',
     })
     expect(recordUsage.mock.calls[0][0].actualCostUsd).toBeCloseTo(flatSearchCostUsd('brave'))
   })
@@ -71,7 +72,7 @@ describe('[COMP:api/billing-external] external tool cost recording', () => {
     expect(recordUsage.mock.calls[0][0].source).toBe('free')
   })
 
-  it('stamps a trigger key when the caller supplies one, and none otherwise', async () => {
+  it('uses a supplied trigger key and otherwise stamps an explicit background trigger', async () => {
     const recordUsage = vi.fn().mockResolvedValue(undefined)
     await recordExternalCostFromMeta({
       ...base,
@@ -87,7 +88,7 @@ describe('[COMP:api/billing-external] external tool cost recording', () => {
       toolMeta: braveMeta,
       usageStore: { recordUsage } as never,
     })
-    expect(recordUsage.mock.calls[0][0].triggerKey).toBeUndefined()
+    expect(recordUsage.mock.calls[0][0].triggerKey).toBe('web_search_external_tool')
   })
 
   it('no-ops on a tool result that carries no cost meta, and with no store wired', async () => {
