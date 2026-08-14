@@ -158,6 +158,11 @@ export type PipelineBDeps = {
   provider: LLMProvider
   /** Extraction model id (Standard tier per model-routing.md Trigger #11). */
   model: string
+  /** Logical tier and key ownership for dynamic workspace custom models. */
+  modelTier?: string
+  providerKeySource?: 'user' | 'platform'
+  inputTokenLimit?: number
+  maxTokens?: number
   crm: CrmStore
   entities: EntityStore
   entityLinks: EntityLinksStore
@@ -1261,13 +1266,17 @@ async function recordExtractionUsage(
       workspaceId: episode.workspaceId,
       sessionId: null,
       model: over.model ?? deps.model,
+      modelTier: deps.modelTier,
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,
       cacheReadTokens: usage.cacheReadTokens,
       cacheWriteTokens: usage.cacheWriteTokens,
-      actualCostUsd: calculateCost(over.model ?? deps.model, usage),
+      actualCostUsd: deps.providerKeySource === 'user'
+        ? 0
+        : calculateCost(over.model ?? deps.model, usage),
       source: over.source ?? 'overhead:extraction',
       triggerKey: over.triggerKey ?? 'pipeline_b_extraction',
+      providerKeySource: deps.providerKeySource,
       // The episode itself, NOT its parent. Rolling up to the originating
       // recording is `COALESCE(parent_episode_id, id)` at query time — cheap
       // at the current depth of 1, and it keeps which child drove the spend,
@@ -1319,13 +1328,15 @@ async function recordResolverUsage(
       workspaceId: episode.workspaceId,
       sessionId: null,
       model: usageModel,
+      modelTier: deps.modelTier,
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,
       cacheReadTokens: usage.cacheReadTokens,
       cacheWriteTokens: usage.cacheWriteTokens,
-      actualCostUsd: calculateCost(usageModel, usage),
+      actualCostUsd: deps.providerKeySource === 'user' ? 0 : calculateCost(usageModel, usage),
       source: 'overhead:extraction',
       triggerKey: 'pipeline_b_entity_resolution',
+      providerKeySource: deps.providerKeySource,
     })
   } catch (err) {
     console.warn(
@@ -1446,7 +1457,11 @@ export async function processEpisode(
       )
     }
   }
-  const windows = splitContentByTokenLimit(extractableContent, EXTRACTION_TOKEN_LIMIT)
+  // Leave prompt/schema headroom inside a custom profile's declared context.
+  const extractionTokenLimit = deps.inputTokenLimit
+    ? Math.max(256, Math.min(EXTRACTION_TOKEN_LIMIT, Math.floor(deps.inputTokenLimit * 0.75)))
+    : EXTRACTION_TOKEN_LIMIT
+  const windows = splitContentByTokenLimit(extractableContent, extractionTokenLimit)
   const windowPayloads: ExtractionOutput[] = []
   for (let wi = 0; wi < windows.length; wi++) {
     const extractionMessages: Message[] = [
@@ -1462,7 +1477,7 @@ export async function processEpisode(
             model: deps.model,
             systemPrompt: SYSTEM_PROMPT,
             messages: extractionMessages,
-            maxTokens: EXTRACTION_MAX_OUTPUT_TOKENS,
+            maxTokens: Math.min(deps.maxTokens ?? EXTRACTION_MAX_OUTPUT_TOKENS, EXTRACTION_MAX_OUTPUT_TOKENS),
             temperature: 0.1,
             responseFormat: 'json',
             // The actual decoder constraint (the mime type alone is only a

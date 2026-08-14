@@ -6,6 +6,7 @@ import type { Sensitivity, SensitivityAccumulator } from '../security/sensitivit
 import type { CompartmentAccumulator } from '../security/compartments.js'
 import type { EvidenceAccumulator } from '../security/evidence.js'
 import type { AttachmentCollector } from '../workspace-files/attachments.js'
+import type { LLMProvider } from '../providers/types.js'
 
 // ── Tool context ───────────────────────────────────────────────
 
@@ -18,6 +19,15 @@ export type ToolContext = {
   channelId: string
   /** Team ID when the assistant is team-owned. Used by saveMemory for team scope. */
   workspaceId?: string | null
+  /** Immutable provider lane captured by workers spawned from this turn. */
+  workerRuntime?: {
+    provider: LLMProvider
+    model: string
+    modelTier?: string
+    providerKeySource?: 'user' | 'platform'
+    inputTokenLimit?: number
+    maxTokens?: number
+  }
   /**
    * The calling assistant's kind. When 'app' (team-owned distribution
    * assistants), saveMemory defaults scope to 'team' instead of 'user' so

@@ -650,6 +650,14 @@ export async function executePublicTurn(
         allowDefault: true,
       })
     : null
+  const backgroundLlmRuntime = assistant.workspaceId && deps.resolveWorkspaceCustomLlm
+    ? await deps.resolveWorkspaceCustomLlm({
+        workspaceId: assistant.workspaceId,
+        requestedTier: 'standard',
+        allowDefault: true,
+        allowAnyDefault: true,
+      })
+    : null
   const turnProvider = customLlmRuntime?.provider ?? deps.provider
 
   // ── 7. Persist user message ──────────────────────────────
@@ -1025,7 +1033,11 @@ export async function executePublicTurn(
     tier: modelToCompactionTier(model),
     channelClass: 'web',
     profile: 'linear',
-    provider: deps.provider,
+    provider: backgroundLlmRuntime?.provider ?? deps.provider,
+    model: backgroundLlmRuntime?.selector,
+    inputTokenLimit: backgroundLlmRuntime?.inputTokenLimit,
+    modelTier: 'standard',
+    providerKeySource: backgroundLlmRuntime ? 'user' : 'platform',
     systemPrompt: fullSystemPrompt,
     assistantId: assistant.id,
     userId: user.id,
@@ -1124,6 +1136,16 @@ export async function executePublicTurn(
           accrual.compartments,
         ),
         workspaceId: assistant.workspaceId ?? undefined,
+        workerRuntime: customLlmRuntime
+          ? {
+              provider: customLlmRuntime.provider,
+              model: customLlmRuntime.selector,
+              modelTier: customLlmRuntime.modelTier,
+              providerKeySource: customLlmRuntime.providerKeySource,
+              inputTokenLimit: customLlmRuntime.inputTokenLimit,
+              maxTokens: customLlmRuntime.maxTokens,
+            }
+          : undefined,
         assistantKind: assistant.kind,
         // `assistant-full` runs as a synthetic non-member principal, so member
         // RLS hid every brain row before `clearance` was ever consulted — the
@@ -1217,6 +1239,7 @@ export async function executePublicTurn(
       assistantId: assistant.id,
       sessionId: session.id,
       model: responseModel,
+      modelTier: customLlmRuntime?.modelTier ?? tierForModel(model),
       inputTokens: totalUsage.inputTokens,
       outputTokens: totalUsage.outputTokens,
       cacheReadTokens: totalUsage.cacheReadTokens,
@@ -1224,6 +1247,7 @@ export async function executePublicTurn(
       actualCostUsd: cost,
       source: 'api',
       userMessageId: storedUserMsg.id,
+      triggerKey: 'main_response',
       providerKeySource: customLlmRuntime ? 'user' : 'platform',
     }).catch((err) => {
       // Mirror chat.ts: log AND surface to analytics so the
