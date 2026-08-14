@@ -450,7 +450,14 @@ export interface SandboxProvider {
    */
   runBrowserUse(
     sandboxId: string,
-    req: { goal: string; maxSteps?: number; timeoutMs?: number },
+    req: { goal: string; maxSteps?: number; timeoutMs?: number; llm?: BrowserUseLlmConfig },
   ): Promise<BrowserUseRunResult>
   bridge: SandboxBridge
+}
+
+export type BrowserUseLlmConfig = {
+  apiKeyEnvName: 'ANTHROPIC_API_KEY' | 'GOOGLE_API_KEY' | 'OPENAI_API_KEY'
+  apiKey: string
+  model: string
+  baseUrl?: string
 }

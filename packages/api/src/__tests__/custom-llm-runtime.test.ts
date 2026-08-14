@@ -100,6 +100,7 @@ describe('[COMP:api/custom-llm-endpoints] custom endpoint runtime', () => {
       selector: customLlmAlias(endpointId),
       inputTokenLimit: 32768,
       maxTokens: 4096,
+      modelTier: 'standard',
       providerKeySource: 'user',
     })
     expect(store.getRuntimeSystem).toHaveBeenCalledWith({ workspaceId: runtime.workspaceId, profileId: endpointId })
@@ -120,9 +121,11 @@ describe('[COMP:api/custom-llm-endpoints] custom endpoint runtime', () => {
       // Drain the stream so the request body can be inspected below.
     }
     const [, init] = fetchFn.mock.calls[0] as [string, RequestInit]
-    const requestBody = JSON.parse(init.body as string) as { messages: unknown }
+    const requestBody = JSON.parse(init.body as string) as { messages: unknown; stream_options?: unknown; max_tokens?: number }
     expect(JSON.stringify(requestBody.messages)).not.toContain('image_url')
     expect(JSON.stringify(requestBody.messages)).toContain('text-only model cannot inspect it')
+    expect(requestBody.stream_options).toEqual({ include_usage: true })
+    expect(requestBody.max_tokens).toBe(4096)
   })
 
   it('resolves the assigned profile for the already-resolved Brian tier', async () => {
@@ -151,7 +154,63 @@ describe('[COMP:api/custom-llm-endpoints] custom endpoint runtime', () => {
       workspaceId: runtime.workspaceId,
       requestedTier: 'max',
     })
-    expect(resolved).toMatchObject({ selector: customLlmAlias(profileId), maxTokens: 32768 })
+    expect(resolved).toMatchObject({ selector: customLlmAlias(profileId), maxTokens: 32768, modelTier: 'max' })
     expect(store.getTierRuntimeSystem).toHaveBeenCalledWith({ workspaceId: runtime.workspaceId, tier: 'max' })
+  })
+
+  it('retries once without streamed usage for older compatible endpoints', async () => {
+    const profileId = '00000000-0000-4000-8000-000000000004'
+    const runtime = {
+      id: profileId, endpointId: profileId,
+      workspaceId: '00000000-0000-4000-8000-000000000010',
+      name: 'Legacy', endpointName: 'Gateway', baseUrl: 'https://model.example/v1',
+      apiKey: null, modelId: 'legacy-model', contextWindow: 32768, maxOutputTokens: 4096,
+      supportsTools: true, verifiedAt: new Date(), createdAt: new Date(), updatedAt: new Date(),
+    }
+    const store = {
+      getRuntimeSystem: vi.fn().mockResolvedValue(runtime),
+      getTierRuntimeSystem: vi.fn(),
+    } as unknown as WorkspaceCustomLlmEndpointStore
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(new Response('unsupported stream_options', { status: 400 }))
+      .mockResolvedValueOnce(textSse())
+    const resolved = await createWorkspaceCustomLlmResolver(store, { fetchFn })({
+      workspaceId: runtime.workspaceId,
+      requestedModel: customLlmAlias(profileId),
+    })
+    if (!resolved) throw new Error('expected runtime')
+
+    for await (const _chunk of resolved.provider.stream({
+      model: resolved.selector,
+      systemPrompt: '',
+      messages: [{ role: 'user', content: 'hello' }],
+    })) { /* drain */ }
+
+    expect(fetchFn).toHaveBeenCalledTimes(2)
+    expect(JSON.parse((fetchFn.mock.calls[0]![1] as RequestInit).body as string)).toHaveProperty('stream_options')
+    expect(JSON.parse((fetchFn.mock.calls[1]![1] as RequestInit).body as string)).not.toHaveProperty('stream_options')
+  })
+
+  it('uses another configured tier default for background work when Standard is unset', async () => {
+    const profileId = '00000000-0000-4000-8000-000000000003'
+    const runtime = {
+      id: profileId,
+      endpointId: profileId,
+      workspaceId: '00000000-0000-4000-8000-000000000010',
+      name: 'Pro gateway', endpointName: 'Gateway', baseUrl: 'https://model.example/v1',
+      apiKey: null, modelId: 'pro-model', contextWindow: 100000, maxOutputTokens: 8192,
+      supportsTools: true, verifiedAt: new Date(), createdAt: new Date(), updatedAt: new Date(),
+    }
+    const getTierRuntimeSystem = vi.fn(async ({ tier }: { tier: string }) => tier === 'pro' ? runtime : null)
+    const store = { getRuntimeSystem: vi.fn(), getTierRuntimeSystem } as unknown as WorkspaceCustomLlmEndpointStore
+
+    const resolved = await createWorkspaceCustomLlmResolver(store)({
+      workspaceId: runtime.workspaceId,
+      requestedTier: 'standard',
+      allowAnyDefault: true,
+    })
+
+    expect(resolved).toMatchObject({ selector: customLlmAlias(profileId), modelTier: 'standard' })
+    expect(getTierRuntimeSystem.mock.calls.map(([arg]) => arg.tier)).toEqual(['standard', 'pro'])
   })
 })
