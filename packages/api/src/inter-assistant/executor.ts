@@ -507,11 +507,9 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         // that were never on its surface (2026-07-20) and, the day before,
         // simply INVENTED their results: a single turn with zero tool calls
         // asserting "No events were found on your Google Calendar" for a
-        // connector it had no grant for. The unavailable entries carry the
-        // user-actionable fix too (e.g. "Type /connect gcal to authorize"), so
-        // the callee can report something the user can act on instead of
-        // improvising. See docs/architecture/integrations/mcp.md →
-        // "Connecting from Telegram" (Nudges + Closed-world wrapper) and
+        // connector it had no grant for. Entries are compact facts; the shared
+        // wrapper supplies the behavioral and remediation guidance once. See
+        // docs/architecture/integrations/mcp.md → "Unavailable capabilities" and
         // docs/architecture/channels/inter-assistant.md → "Unavailable
         // capabilities on the callee path".
         unavailableCapabilities = mcpInjection.unavailable
@@ -575,85 +573,12 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       })
     }
 
-    // Confirmation lanes — three, by consult origin:
-    //
-    // 1. Scheduled-origin (`deliverTarget` set): `ask`-policy confirmations
-    //    stay LIVE and surface to the user's delivery channel (deferred
-    //    confirmations — see the query loop below).
-    // 2. Workflow-origin, no deliver (`callerChannelType === 'workflow'`):
-    //    `ask`-policy tools are DROPPED from the surface entirely and the
-    //    callee is told which and why (see `askPolicyDropBlock`). There is no
-    //    interactive approver mid-run, and silently auto-allowing them let a
-    //    workflow fire user-approval-gated side-effects with no approval
-    //    anywhere — while the Approve/Deny language in tool descriptions made
-    //    the model refuse anyway (the 2026-07-07 send-step incident). The
-    //    approved path for ask-policy actions in workflows is a `tool_call`
-    //    step, which pauses the run in the unified Approvals queue. `allow`-
-    //    policy tools keep executing directly (the user pre-authorized them).
-    // 3. Ordinary A2A (askAssistant, no deliver): strip confirmations — the
-    //    inter-assistant approval was already granted (free-mode acceptance,
-    //    or the require_approval flow resolving an input_required Task).
-    //    NOTE: this lane still silent-allows ask-policy tools (pre-existing
-    //    semantics, caller's user is interactively present); tracked in
-    //    docs/architecture/channels/inter-assistant.md → "Callee Execution".
+    // Confirmation policy is applied below only after every direct tool source
+    // (base, connectors, docs, memory, retrieval, blueprints) has been merged.
+    // Filtering here would let a later-injected ask tool bypass the workflow
+    // approval gate.
     const deferredConfirmations = params.deliverTarget != null
     const droppedAskTools: string[] = []
-    if (!deferredConfirmations && params.callerChannelType === 'workflow') {
-      // Resolve each tool's effective policy the same way dispatch would
-      // (dynamic resolvers re-read mcp_tool_settings; synthetic ToolContext —
-      // only identity fields are read, mirroring the workflow executor's
-      // tool_call policy gate). Fail-closed: a resolver throw = treat as ask.
-      const policyCtx = {
-        userId: calleeActorUserId,
-        assistantId: params.calleeAssistantId,
-        sessionId: session.id,
-        appId: 'Use Brian',
-        channelType: 'workflow',
-        channelId: session.id,
-        workspaceId: calleeAssistant.workspaceId ?? undefined,
-        abortSignal: new AbortController().signal,
-      }
-      await Promise.all(
-        Array.from(calleeTools.entries()).map(async ([name, tool]) => {
-          let needsConfirmation = !!tool.requiresConfirmation
-          if (tool.resolveConfirmation) {
-            try {
-              needsConfirmation = await tool.resolveConfirmation(
-                policyCtx as Parameters<NonNullable<typeof tool.resolveConfirmation>>[0],
-                undefined,
-              )
-            } catch {
-              needsConfirmation = true
-            }
-          }
-          if (needsConfirmation) {
-            droppedAskTools.push(name)
-            calleeTools.delete(name)
-          } else {
-            // Policy snapshot: the tool resolved `allow` at consult start, so
-            // it executes directly for the whole consult. Clearing the flags
-            // also closes the mid-consult policy-flip edge — this lane has no
-            // confirmation resolver to service a late `ask` event.
-            //
-            // Strip on a SHALLOW CLONE, never the shared object: `options.tools`
-            // holds the boot-time singletons every surface shares, and an
-            // in-place `tool.resolveConfirmation = undefined` here would
-            // permanently disarm the interactive chat's confirmation gates
-            // (browserClick's send gate, saveToWorkspace's ask default, every
-            // policy-'ask' resolver) after the first workflow consult.
-            calleeTools.set(name, { ...tool, requiresConfirmation: false, resolveConfirmation: undefined })
-          }
-        }),
-      )
-      droppedAskTools.sort()
-    } else if (!deferredConfirmations) {
-      // Same clone rule as the workflow lane above: the strip applies to THIS
-      // consult's surface only — mutating the shared singletons would disarm
-      // every other surface's confirmation gates process-wide.
-      for (const [name, tool] of calleeTools) {
-        calleeTools.set(name, { ...tool, requiresConfirmation: false, resolveConfirmation: undefined })
-      }
-    }
 
     // 4. The callee's consult tool surface (full caller-visible set — the
     // destination-side mode filter was retired 2026-07-24).
@@ -739,6 +664,62 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       }
     }
 
+    // Confirmation lanes — applied to the COMPLETE direct surface:
+    // 1. Scheduled-origin (`deliverTarget` set): ask-policy confirmations stay
+    //    live and surface to the user's delivery channel.
+    // 2. Workflow-origin without delivery: ask-policy tools are removed. There
+    //    is no interactive approver; the approved path is a `tool_call` step.
+    // 3. Ordinary A2A: confirmation metadata is stripped on per-consult clones
+    //    because the interactive caller already approved the delegation.
+    if (!deferredConfirmations && params.callerChannelType === 'workflow') {
+      const policyCtx = {
+        userId: calleeActorUserId,
+        assistantId: params.calleeAssistantId,
+        sessionId: session.id,
+        appId: 'Use Brian',
+        channelType: 'workflow',
+        channelId: session.id,
+        workspaceId: calleeAssistant.workspaceId ?? undefined,
+        abortSignal: new AbortController().signal,
+      }
+      await Promise.all(
+        Array.from(modeTools.entries()).map(async ([name, tool]) => {
+          let needsConfirmation = !!tool.requiresConfirmation
+          if (tool.resolveConfirmation) {
+            try {
+              needsConfirmation = await tool.resolveConfirmation(
+                policyCtx as Parameters<NonNullable<typeof tool.resolveConfirmation>>[0],
+                undefined,
+              )
+            } catch {
+              needsConfirmation = true
+            }
+          }
+          if (needsConfirmation) {
+            droppedAskTools.push(name)
+            modeTools.delete(name)
+          } else {
+            // Clone before clearing policy metadata: boot owns shared tool
+            // singletons used by interactive surfaces.
+            modeTools.set(name, {
+              ...tool,
+              requiresConfirmation: false,
+              resolveConfirmation: undefined,
+            })
+          }
+        }),
+      )
+      droppedAskTools.sort()
+    } else if (!deferredConfirmations) {
+      for (const [name, tool] of modeTools) {
+        modeTools.set(name, {
+          ...tool,
+          requiresConfirmation: false,
+          resolveConfirmation: undefined,
+        })
+      }
+    }
+
     // Blueprint-bound enforcement (half 1 of 2): on a bound consult, wrap the
     // save tool so a successful record write is OBSERVED in-process. The
     // post-consult check below fails the step when a bound consult finishes
@@ -790,35 +771,6 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         : params.allowedTools
     const finalTools = filterToolsByAllowList(modeTools, effectiveAllowedTools)
 
-    // Fail fast when a pinned allow-list survives as NOTHING — the step's
-    // authored intent (those exact tools) cannot execute, and running the
-    // turn anyway produced a toolless model collapsing into empty responses
-    // (the 2026-07-07 send-step incident, run 0477b50d: allow-list of one
-    // ask-policy tool → zero-tool surface → "did not produce a response"
-    // recorded as a completed step). The typed reason is hoisted into the
-    // step-run error; the message says WHICH pin failed and WHY.
-    if (params.allowedTools?.length && finalTools.size === 0) {
-      const dropped = params.allowedTools.filter((t) => droppedAskTools.includes(t))
-      const unknown = params.allowedTools.filter((t) => !droppedAskTools.includes(t))
-      const parts: string[] = []
-      if (dropped.length) {
-        parts.push(
-          `${dropped.join(', ')}: ask-policy (requires per-use user approval) — not callable inside an automated assistant_call step; use a tool_call step, which pauses the run in the Approvals queue`,
-        )
-      }
-      if (unknown.length) {
-        parts.push(
-          `${unknown.join(', ')}: not available to this assistant (not injected — check the connector is connected and exposed)`,
-        )
-      }
-      throw Object.assign(
-        new Error(
-          `None of the step's pinned tools are available to the callee. ${parts.join('; ')}.`,
-        ),
-        { reason: 'tools_unavailable' },
-      )
-    }
-
     // 4c. Leaf invariant — a delegated callee is a terminal node in the
     // consult tree: strip the inter-assistant delegation tools so it can never
     // initiate a *further* consult. Multi-hop composition is expressed through
@@ -857,6 +809,58 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     finalTools.delete('spawnWorker')
     finalTools.delete('sendWorkerMessage')
     finalTools.delete('stopWorker')
+
+    // A callee is also terminal with respect to workflow orchestration. An
+    // unpinned assistant_call intentionally keeps the callee's normal effective
+    // tools for compatibility, but it must not author or launch a nested
+    // workflow from inside the current DAG. Read-only workflow inspection can
+    // remain available.
+    finalTools.delete('proposeWorkflow')
+    finalTools.delete('createWorkflow')
+    finalTools.delete('updateWorkflow')
+    finalTools.delete('runWorkflow')
+
+    // Fail fast only after every governance filter, including terminal-node
+    // strips. A pin that names only a forbidden orchestration tool must not run
+    // a tool-less model turn.
+    if (params.allowedTools?.length && finalTools.size === 0) {
+      const orchestrationTools = new Set([
+        'askAssistant',
+        'listConnectedAssistants',
+        'spawnWorker',
+        'sendWorkerMessage',
+        'stopWorker',
+        'proposeWorkflow',
+        'createWorkflow',
+        'updateWorkflow',
+        'runWorkflow',
+      ])
+      const dropped = params.allowedTools.filter((t) => droppedAskTools.includes(t))
+      const forbidden = params.allowedTools.filter((t) => orchestrationTools.has(t))
+      const unknown = params.allowedTools.filter(
+        (t) => !droppedAskTools.includes(t) && !orchestrationTools.has(t),
+      )
+      const parts: string[] = []
+      if (dropped.length) {
+        parts.push(
+          `${dropped.join(', ')}: ask-policy (requires per-use user approval) — use a tool_call step, which pauses the run in the Approvals queue`,
+        )
+      }
+      if (forbidden.length) {
+        parts.push(`${forbidden.join(', ')}: orchestration tools are not available inside a terminal assistant_call`)
+      }
+      if (unknown.length) {
+        parts.push(
+          `${unknown.join(', ')}: not available to this assistant (check connector connection and exposure)`,
+        )
+      }
+      throw Object.assign(
+        new Error(
+          `None of the step's pinned tools are available to the callee. ${parts.join('; ')}.`,
+        ),
+        { reason: 'tools_unavailable' },
+      )
+    }
 
     // 4d. Brain-skill surface. A workflow `assistant_call` step can carry two
     // skill lists: `skills` (DISCOVERY — offered via `useSkill`, the model
@@ -992,20 +996,45 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
 
     let workspaceIdentityMemories: Awaited<ReturnType<typeof options.memoryStore.getWorkspaceIdentity>> = []
     let teamMemoryIndex: Awaited<ReturnType<typeof options.memoryStore.getWorkspaceIndex>> = []
+    let priorRunMemories: Awaited<ReturnType<typeof options.memoryStore.getWorkspaceMemoriesByCategory>> = []
 
     if (includeWorkspaceMemories && calleeAssistant.workspaceId) {
-      ;[workspaceIdentityMemories, teamMemoryIndex] = await Promise.all([
+      ;[workspaceIdentityMemories, teamMemoryIndex, priorRunMemories] = await Promise.all([
         options.memoryStore.getWorkspaceIdentity(calleeCtx),
         options.memoryStore.getWorkspaceIndex(calleeCtx),
+        params.workflowId
+          ? options.memoryStore
+              .getWorkspaceMemoriesByCategory(calleeCtx, `workflow:${params.workflowId}`)
+              .catch((err) => {
+                console.warn('[inter-assistant] prior-run memory fetch failed:', err)
+                return []
+              })
+          : Promise.resolve([]),
       ])
     }
+
+    // The workflow-specific section is the authoritative rendering for its
+    // prior rows. Exclude those ids from the general personal/team indexes so
+    // the same summary is not injected two or three times.
+    const priorRunIds = new Set(priorRunMemories.map((m) => m.id))
+    const priorRunMemoryBlock = priorRunMemories.length > 0
+      ? `\n\n## Already recorded by this workflow\n` +
+        `Previous runs of this workflow saved the facts below. Call \`saveMemory\` ONLY for genuinely new or materially changed facts — do not re-save anything already covered here. If a fact below needs refining, update it by its id rather than creating a duplicate.\n` +
+        priorRunMemories.map((m) => `- [id:${m.id.slice(0, 8)}] ${m.summary}`).join('\n')
+      : ''
 
     const memoryContext = buildMemoryContext({
       soul,
       identityMemories: identityMemories.map((m) => ({ id: m.id, summary: m.summary, detail: m.detail })),
-      memoryIndex: memoryIndex.map((m) => ({ ...m, appId: null })),
-      workspaceIdentityMemories: workspaceIdentityMemories.map((m) => ({ id: m.id, summary: m.summary, detail: m.detail })),
-      teamMemoryIndex: teamMemoryIndex.map((m) => ({ ...m, appId: null })),
+      memoryIndex: memoryIndex
+        .filter((m) => !priorRunIds.has(m.id))
+        .map((m) => ({ ...m, appId: null })),
+      workspaceIdentityMemories: workspaceIdentityMemories
+        .filter((m) => !priorRunIds.has(m.id))
+        .map((m) => ({ id: m.id, summary: m.summary, detail: m.detail })),
+      teamMemoryIndex: teamMemoryIndex
+        .filter((m) => !priorRunIds.has(m.id))
+        .map((m) => ({ ...m, appId: null })),
       assistantName: calleeAssistant.name,
     })
 
@@ -1015,30 +1044,6 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     const docAnchorBlock = params.pageAnchorId
       ? `\n\n${buildDocSupervisorSkillBlock({ mode: 'page' })}\n## Anchored page\nThis session is anchored to page \`${params.pageAnchorId}\`. Read it with \`getCurrentPage\` when needed, then submit one in-place edit brief through \`delegateDocEdit\`. Do not request a new page unless the request explicitly asks for one.`
       : ''
-
-    // Memory continuity for recurring workflows: surface the facts previous
-    // runs of THIS workflow already saved (tagged `workflow:<id>`) so the step
-    // saves only genuinely new ones instead of re-inserting the same fact every
-    // fire. Visibility-and-judgment, not a hard write-time dedupe. Best-effort:
-    // a fetch failure never fails the consult. See
-    // docs/architecture/features/workflow.md → "assistant_call memory continuity".
-    let priorRunMemoryBlock = ''
-    if (params.workflowId && calleeAssistant.workspaceId) {
-      try {
-        const prior = await options.memoryStore.getWorkspaceMemoriesByCategory(
-          calleeCtx,
-          `workflow:${params.workflowId}`,
-        )
-        if (prior.length > 0) {
-          priorRunMemoryBlock =
-            `\n\n## Already recorded by this workflow\n` +
-            `Previous runs of this workflow saved the facts below. Call \`saveMemory\` ONLY for genuinely new or materially changed facts — do not re-save anything already covered here. If a fact below needs refining, update it by its id rather than creating a duplicate.\n` +
-            prior.map((m) => `- [id:${m.id.slice(0, 8)}] ${m.summary}`).join('\n')
-        }
-      } catch (err) {
-        console.warn('[inter-assistant] prior-run memory fetch failed:', err)
-      }
-    }
 
     // Anti-fabrication guard for workflow-origin callees (fix C). A workflow
     // step runs unattended — if a tool it needs fails (auth error, connector
@@ -1071,7 +1076,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // clutter). This is the task analog of the `priorRunMemoryBlock` above.
     // Conditioned on "unless the instruction explicitly asks" so action steps
     // (a step whose job IS to create a task) are unaffected, and it never
-    // contradicts `directExecutionBlock` (which forbids REFUSING an asked-for
+    // contradicts `automatedToolPolicyBlock` (which forbids REFUSING an asked-for
     // action). See docs/architecture/features/workflow.md → "assistant_call
     // record-creation restraint".
     const recordCreationGuardBlock =
@@ -1079,29 +1084,17 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         ? `\n\n## Produce this step's output, do not restate it as a record\nDo NOT create, update, or retract tasks, memories, contacts, deals, or other workspace records unless THIS step's instruction explicitly asks you to create or change one. When the instruction is to summarize, review, list, report on, or give an overview of existing items, the message you write IS the complete deliverable: do not also open a task that merely echoes the instruction. A recurring run that creates such a task mints a near-duplicate every fire.`
         : ''
 
-    // Direct-execution framing for confirmation-stripped consults. The
-    // confirmation strip above sets `requiresConfirmation = false` on every
-    // tool, but base prompts + tool descriptions still describe an
-    // Approve/Deny confirmation UI — in this UI-less context the model has
-    // inferred "manual confirmation is not available here" and REFUSED to
-    // call a tool it was explicitly granted (the 2026-07-07 send-step
-    // incident: callee session with zero tool_use, honest refusal text,
-    // step recorded completed). Tool-agnostic by design (tool-awareness rule).
-    const directExecutionBlock = !deferredConfirmations
-      ? `\n\n## Automated context — tools execute directly\nThere is no Approve/Deny or confirmation interface in this context; any interactive-approval flow described elsewhere does not apply here. Every tool available to you has already been authorized for this consult — calling it executes the action immediately. If the request asks you to perform an action and you have a tool for it, call the tool. Do not decline because manual confirmation is unavailable, and never describe an action as done without having called the tool. If you cannot perform the action (no suitable tool, or the tool errors), state that plainly as your outcome.`
-      : ''
-
-    // Approval-gated tools dropped from this workflow consult (lane 2 above).
-    // Scoped to the step's pinned list when one exists, so the note names only
-    // tools the step could plausibly reach for. Telling the callee exactly
-    // which tools are missing AND why is what turns the 2026-07-07 failure
-    // shape (model guesses, refuses, or narrates a phantom send) into an
-    // honest one-line outcome the step trail surfaces.
+    // One compact policy block carries both sides of the UI-less lane: visible
+    // tools execute directly, while removed ask-policy tools did not execute
+    // and require an approval-gated workflow tool_call step.
     const relevantDroppedAskTools = params.allowedTools?.length
       ? droppedAskTools.filter((t) => params.allowedTools!.includes(t))
       : droppedAskTools
-    const askPolicyDropBlock = relevantDroppedAskTools.length
-      ? `\n\n## Approval-gated tools are NOT available in this step\nThese tools require per-use user approval (ask policy) and are not callable inside an automated workflow step: ${relevantDroppedAskTools.join(', ')}. Do not attempt to call them, do not simulate their effect, and never state or imply their action happened. If the request depends on one of them, state plainly that the action was not performed and that it needs an approval-gated \`tool_call\` workflow step (it pauses the run in the Approvals queue until the user approves).`
+    const automatedToolPolicyBlock = !deferredConfirmations
+      ? `\n\n## Automated tool policy\nThere is no Approve/Deny interface in this consult. Call an available tool directly when the request requires it. If a tool reports that its underlying action still requires approval, treat the action as not performed. Never claim an action without a successful tool result.` +
+        (relevantDroppedAskTools.length
+          ? `\nRemoved approval-gated tools: ${relevantDroppedAskTools.join(', ')}. They are not callable here. If the request depends on one, report that it was not performed and requires an approval-gated \`tool_call\` workflow step.`
+          : '')
       : ''
 
     // Dynamic workspace-blueprints section — chat parity (closed-world; empty
@@ -1154,7 +1147,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       }
     }
 
-    const fullSystemPrompt = `${systemPrompt}${docAnchorBlock}${priorRunMemoryBlock}${workflowGuardBlock}${recordCreationGuardBlock}${directExecutionBlock}${askPolicyDropBlock}${unavailableBlock}${skillPromptFragment}${blueprintPromptFragment}\n\n# Context\nCurrent date and time: ${currentDateTime}\nTimezone: ${calleeOwner.timezone}\n\n${memoryContext}`
+    const fullSystemPrompt = `${systemPrompt}${docAnchorBlock}${priorRunMemoryBlock}${workflowGuardBlock}${recordCreationGuardBlock}${automatedToolPolicyBlock}${unavailableBlock}${skillPromptFragment}${blueprintPromptFragment}\n\n# Context\nCurrent date and time: ${currentDateTime}\nTimezone: ${calleeOwner.timezone}\n\n${memoryContext}`
     const backgroundLlmRuntime = calleeAssistant.workspaceId && options.resolveWorkspaceCustomLlm
       ? await options.resolveWorkspaceCustomLlm({
           workspaceId: calleeAssistant.workspaceId,

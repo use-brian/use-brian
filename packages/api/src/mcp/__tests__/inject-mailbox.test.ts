@@ -154,13 +154,12 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
     expect(tools.get('imapSendMessage')?.description).toMatch(/ordinary email sending/i)
 
     // Gmail OAuth is absent in this fixture, but email is available through
-    // the injected IMAP/SMTP mailbox. Its notice must not turn a missing
-    // service into a false claim that the broader capability is missing.
+    // the injected IMAP/SMTP mailbox. The connector entry stays a compact fact;
+    // the shared prompt wrapper carries the use-another-available-tool policy.
     const gmailNotice = result.unavailable.find((line) => line.startsWith('Gmail: not connected'))
     expect(gmailNotice).toBeDefined()
-    expect(gmailNotice).toMatch(/another available tool can fulfill/i)
-    expect(gmailNotice).toMatch(/do not mention this missing service/i)
-    expect(gmailNotice).not.toMatch(/so sending and reading email are unavailable/i)
+    expect(gmailNotice).toBe('Gmail: not connected for this assistant (sending and reading email)')
+    expect(gmailNotice).not.toMatch(/unavailable this turn/i)
   })
 
   it('announces the capability as unavailable when no mailbox is connected', async () => {
