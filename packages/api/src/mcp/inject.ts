@@ -1986,13 +1986,7 @@ export function clearStaleNotConnectedNotices(
 }
 
 function notConnectedNotice(displayName: string, capabilities: string): string {
-  return (
-    `${displayName}: not connected for this assistant, so only this connector's ${capabilities} are unavailable this turn. ` +
-    'Another connected service may still provide the broader capability. Use an available tool that matches the requested account and identity; ' +
-    'do not mention this missing service when another available tool can fulfill the task. ' +
-    'If the task truly requires this service and no available tool can fulfill it, say so plainly in your own words and point the user to Studio then Connectors to connect it. ' +
-    'Do not quote this notice back to them, and do not claim a tool call failed.'
-  )
+  return `${displayName}: not connected for this assistant (${capabilities})`
 }
 
 /**
@@ -2022,10 +2016,7 @@ const NOT_CONNECTED_DISPLAY_NAME: Record<string, string> = {
  * reconnecting genuinely is the remedy.
  */
 function expiredCredentialsNotice(displayName: string): string {
-  return (
-    `${displayName}: connected, but its stored credentials expired or were revoked, so its tools are not loaded this turn. ` +
-    'Tell the user it needs reconnecting in Studio then Connectors. Do not offer any other cause.'
-  )
+  return `${displayName}: reconnect required (credentials expired or revoked; Studio → Connectors)`
 }
 
 async function injectGoogleTools(

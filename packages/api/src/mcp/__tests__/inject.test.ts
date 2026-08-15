@@ -1620,7 +1620,7 @@ describe('[COMP:integrations/connector-health] team-native connector health gate
       keepBuiltinsDirect: true,
     })
     expect([...tools.keys()].some((n) => n.startsWith('githubSearchRepositories'))).toBe(false)
-    expect(result.unavailable.some((u) => /stopped working/i.test(u) && /github/i.test(u))).toBe(true)
+    expect(result.unavailable.some((u) => /reconnect required/i.test(u) && /github/i.test(u))).toBe(true)
   })
 })
 
@@ -1977,7 +1977,7 @@ describe('[COMP:api/mcp-inject] msgraph workspace overlays', () => {
     // The reconnect wording specifically — a bare "Microsoft Teams" match also
     // passes on the not-connected notice the suppressed base load emits, which
     // is what this suite exists to distinguish.
-    expect(result.unavailable.join('\n')).toMatch(/Microsoft Teams .*credentials failed/)
+    expect(result.unavailable.join('\n')).toMatch(/Microsoft Teams .*reconnect required/)
   })
 
   it('retracts the base pass\'s not-connected advert once the grant overlay injects', async () => {

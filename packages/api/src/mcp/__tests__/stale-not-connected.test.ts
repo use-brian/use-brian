@@ -21,9 +21,7 @@ const tool = (name: string) => [name, { name } as Tool] as const
 
 /** The exact wording `notConnectedNotice` produces. */
 const notice = (displayName: string) =>
-  `${displayName}: not connected for this assistant, so things are unavailable this turn. ` +
-  'If the user asks for one, say so plainly in your own words and point them to Studio then Connectors to connect it. ' +
-  'Do not quote this notice back to them, and do not claim a tool call failed.'
+  `${displayName}: not connected for this assistant (things)`
 
 describe('[COMP:api/mcp-inject] stale not-connected notice retraction', () => {
   it('retracts the notice for a provider whose tools were injected by an overlay', () => {
@@ -50,7 +48,7 @@ describe('[COMP:api/mcp-inject] stale not-connected notice retraction', () => {
   })
 
   it('leaves unrelated notices untouched', () => {
-    const other = 'Company email (IMAP): not connected for this assistant, so mail is unavailable this turn.'
+    const other = 'Company email (IMAP): not connected for this assistant (mail)'
     const tools = new Map([tool('shopifyGetShop')])
     const unavailable = [other]
     clearStaleNotConnectedNotices(tools, unavailable)
