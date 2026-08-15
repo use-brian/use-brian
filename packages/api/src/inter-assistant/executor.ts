@@ -1198,7 +1198,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         model: backgroundLlmRuntime?.selector,
         inputTokenLimit: backgroundLlmRuntime?.inputTokenLimit,
         modelTier: 'standard',
-        providerKeySource: backgroundLlmRuntime ? 'user' : 'platform',
+        providerKeySource: backgroundLlmRuntime?.providerKeySource ?? 'platform',
         systemPrompt: fullSystemPrompt,
         assistantId: params.calleeAssistantId,
         userId: calleeActorUserId,
@@ -1357,10 +1357,12 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
               outputTokens: pre.usage.outputTokens,
               cacheReadTokens: pre.usage.cacheReadTokens,
               cacheWriteTokens: pre.usage.cacheWriteTokens,
-              actualCostUsd: preflightLlmRuntime ? 0 : calculateCost(pre.model, pre.usage),
+              actualCostUsd: preflightLlmRuntime?.providerKeySource === 'user'
+                ? 0
+                : calculateCost(pre.model, pre.usage),
               source: 'overhead:splitter',
               triggerKey: 'parallel_split_classifier',
-              providerKeySource: preflightLlmRuntime ? 'user' : 'platform',
+              providerKeySource: preflightLlmRuntime?.providerKeySource ?? 'platform',
             })
             .catch((err) => console.error('[inter-assistant] splitter usage tracking failed:', err))
         }
@@ -1722,10 +1724,12 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
                 outputTokens: usage.outputTokens,
                 cacheReadTokens: usage.cacheReadTokens,
                 cacheWriteTokens: usage.cacheWriteTokens,
-                actualCostUsd: customLlmRuntime ? 0 : calculateCost(event.response.model, usage),
+                actualCostUsd: customLlmRuntime?.providerKeySource === 'user'
+                  ? 0
+                  : calculateCost(event.response.model, usage),
                 source: 'included',
                 triggerKey,
-                providerKeySource: customLlmRuntime ? 'user' : 'platform',
+                providerKeySource: customLlmRuntime?.providerKeySource ?? 'platform',
               })
               .catch((err) => {
                 console.error('[inter-assistant] usage tracking failed:', err)

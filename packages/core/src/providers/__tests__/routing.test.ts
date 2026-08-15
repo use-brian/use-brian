@@ -120,6 +120,32 @@ describe('[COMP:providers/routing-provider] dispatch', () => {
     ).resolves.toBe('from-codex')
     expect(codex.seen[0]?.model).toBe('gpt-5.6-terra')
   })
+
+  it('bypasses soft model substitution for an exact workspace route', async () => {
+    const codex = stubProvider('openai-codex', 'from-codex')
+    const gemini = stubProvider('gemini', 'from-gemini')
+    const availability = new MutableProviderAvailability()
+    availability.setStaticProvider('gemini', true)
+    availability.setModelCatalog('openai-codex', new Set(['gpt-5.6-sol']))
+    const resolveModel = vi.fn(() => 'gemini-3.6-flash')
+    const routing = createRoutingProvider(
+      { gemini, 'openai-codex': codex },
+      { availability, resolveModel },
+    )
+
+    await expect(text(routing.stream({
+      model: 'gpt-5.6-sol',
+      allowProviderFallback: false,
+      systemPrompt: '',
+      messages: [],
+    }))).resolves.toBe('from-codex')
+    expect(resolveModel).not.toHaveBeenCalled()
+    expect(codex.seen[0]).toMatchObject({
+      model: 'gpt-5.6-sol',
+      allowProviderFallback: false,
+    })
+    expect(gemini.seen).toHaveLength(0)
+  })
 })
 
 describe('[COMP:providers/routing-provider] same-class fallback (L2)', () => {
@@ -139,6 +165,22 @@ describe('[COMP:providers/routing-provider] same-class fallback (L2)', () => {
       primaryModel: 'gemini-flash-3',
       fallbackModel: 'claude-haiku-4-5',
     }))
+  })
+
+  it('does not use an outage fallback for an exact workspace route', async () => {
+    const anthropic = stubProvider('anthropic', 'from-haiku')
+    const routing = createRoutingProvider({
+      gemini: failingProvider('gemini', 503),
+      anthropic,
+    })
+
+    await expect(text(routing.stream({
+      model: 'gemini-flash-3',
+      allowProviderFallback: false,
+      systemPrompt: '',
+      messages: [],
+    }))).rejects.toThrow(/gemini down/)
+    expect(anthropic.seen).toHaveLength(0)
   })
 
   it('a class with no same-class fallback surfaces the outage (never swaps class)', async () => {

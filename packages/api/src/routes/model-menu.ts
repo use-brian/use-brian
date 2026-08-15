@@ -24,11 +24,20 @@
  */
 import { Router } from 'express'
 import { z } from 'zod'
-import { menuForClass, type ModelClass, type ModelRegistryRow } from '@use-brian/shared/model-registry'
+import {
+  MODEL_REGISTRY,
+  isRegistryModelAvailable,
+  menuForClass,
+  registryRow,
+  type ModelClass,
+  type ModelRegistryRow,
+  type ProviderAvailability,
+} from '@use-brian/shared/model-registry'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 import type { MeteredProfileStore } from '../db/metered-profile-store.js'
 import { isDefaultableClass, type WorkspaceModelDefaultsStore } from '../db/workspace-model-defaults-store.js'
 import type { WorkspaceCustomLlmEndpointStore } from '../db/workspace-custom-llm-endpoints.js'
+import { CUSTOM_LLM_TIERS, isCustomLlmTier } from '../db/workspace-custom-llm-endpoints.js'
 import { customLlmAlias } from '../custom-llm-runtime.js'
 
 export type ModelMenuRouteOptions = {
@@ -37,7 +46,7 @@ export type ModelMenuRouteOptions = {
   modelDefaultsStore: WorkspaceModelDefaultsStore
   customLlmEndpointStore?: WorkspaceCustomLlmEndpointStore
   /** Provider keys configured at boot (the routing table's keys). */
-  configuredProviders: ReadonlySet<string>
+  configuredProviders: ProviderAvailability
   /** Closed billing seam; absent on the open build (menus still work,
    * estimates return null and the UI hides credit figures). */
   estimateMeteredTurn?: (modelAlias: string, toolRounds: number) => { modelAlias: string; toolRounds: number; minCredits: number; maxCredits: number } | null
@@ -55,6 +64,7 @@ function serializeRow(row: ModelRegistryRow) {
     // model (standard-pro's two tier labels) instead of listing fake choices.
     apiModelId: row.apiModelId,
     class: row.class,
+    tier: row.tier,
     provider: row.provider,
     contextWindow: row.contextWindow,
     capabilities: row.capabilities,
@@ -88,6 +98,15 @@ const setDefaultSchema = z.union([
   z.object({ meteredProfileId: z.string().uuid() }),
 ])
 
+const setModelRouteSchema = z.union([
+  z.object({ modelAlias: z.string().min(1) }).strict(),
+  z.object({ profileId: z.string().uuid() }).strict(),
+])
+
+function configuredProviderForPreference(preference: string): string {
+  return preference === 'dashscope-intl' ? 'openai-compat:dashscope-intl' : preference
+}
+
 export function modelMenuRoutes(opts: ModelMenuRouteOptions): Router {
   const router = Router()
 
@@ -114,7 +133,7 @@ export function modelMenuRoutes(opts: ModelMenuRouteOptions): Router {
     for (const cls of MENU_CLASSES) {
       classes[cls] = menuForClass(cls, opts.configuredProviders).map(serializeRow)
     }
-    const [profiles, defaults, customConnections, customTierDefaults] = await Promise.all([
+    const [profiles, defaults, customConnections, customTierDefaults, storedRoutes] = await Promise.all([
       opts.meteredProfileStore.list(workspaceId),
       opts.modelDefaultsStore.list(workspaceId),
       opts.customLlmEndpointStore
@@ -123,7 +142,42 @@ export function modelMenuRoutes(opts: ModelMenuRouteOptions): Router {
       opts.customLlmEndpointStore
         ? opts.customLlmEndpointStore.listTierDefaults({ actingUserId: req.userId!, workspaceId })
         : Promise.resolve([]),
+      opts.customLlmEndpointStore
+        ? opts.customLlmEndpointStore.listModelRoutes({ actingUserId: req.userId!, workspaceId })
+        : Promise.resolve([]),
     ])
+    let modelRoutes = storedRoutes
+    const legacyPreference = opts.configuredProviders.preferredProvider
+    if (
+      opts.customLlmEndpointStore &&
+      modelRoutes.length === 0 &&
+      legacyPreference &&
+      legacyPreference !== 'auto'
+    ) {
+      const role = await opts.workspaceStore.getRole(req.userId!, workspaceId)
+      if (role === 'owner' || role === 'admin') {
+        const provider = configuredProviderForPreference(legacyPreference)
+        for (const tier of CUSTOM_LLM_TIERS) {
+          const row = MODEL_REGISTRY.find((candidate) =>
+            candidate.provider === provider &&
+            candidate.tier === tier &&
+            candidate.status === 'active' &&
+            candidate.menu === true,
+          )
+          if (!row) continue
+          await opts.customLlmEndpointStore.setManagedTierRoute({
+            actingUserId: req.userId!,
+            workspaceId,
+            tier,
+            modelAlias: row.alias,
+          })
+        }
+        modelRoutes = await opts.customLlmEndpointStore.listModelRoutes({
+          actingUserId: req.userId!,
+          workspaceId,
+        })
+      }
+    }
     // Profiles and curated pins over models whose key is gone are hidden with
     // their models (L12) — kept in the DB so a re-keyed deployment restores
     // them. A legacy curated pin (for example Flash 3.5 after the 3.6
@@ -161,6 +215,14 @@ export function modelMenuRoutes(opts: ModelMenuRouteOptions): Router {
         })),
       ),
       customTierDefaults,
+      modelRoutes: modelRoutes.map((route) => {
+        const row = route.modelAlias ? registryRow(route.modelAlias) : undefined
+        return {
+          ...route,
+          modelDisplayName: row?.displayName ?? null,
+          provider: row?.provider ?? null,
+        }
+      }),
       meteredBillingAvailable: Boolean(opts.estimateMeteredTurn),
     })
   })
@@ -282,6 +344,63 @@ export function modelMenuRoutes(opts: ModelMenuRouteOptions): Router {
     if (!isDefaultableClass(cls)) return void res.status(400).json({ error: 'Unknown model class' })
     if (!(await adminOr403(req as { userId?: string }, res, req.params.wid))) return
     await opts.modelDefaultsStore.clear(req.params.wid, cls)
+    res.json({ ok: true })
+  })
+
+  router.put('/workspaces/:wid/model-routes/:tier', async (req, res) => {
+    const tier = req.params.tier
+    if (!isCustomLlmTier(tier)) return void res.status(400).json({ error: 'Unknown model tier' })
+    if (!(await adminOr403(req as { userId?: string }, res, req.params.wid))) return
+    if (!opts.customLlmEndpointStore) return void res.status(503).json({ error: 'Model routing is unavailable' })
+    const parsed = setModelRouteSchema.safeParse(req.body)
+    if (!parsed.success) return void res.status(400).json({ error: 'Invalid model route' })
+    const actingUserId = (req as { userId?: string }).userId!
+
+    if ('modelAlias' in parsed.data) {
+      const row = registryRow(parsed.data.modelAlias)
+      if (
+        !row ||
+        row.status !== 'active' ||
+        row.menu !== true ||
+        row.tier !== tier ||
+        !isRegistryModelAvailable(row, opts.configuredProviders)
+      ) {
+        return void res.status(400).json({ error: 'Model is not available for this tier' })
+      }
+      const route = await opts.customLlmEndpointStore.setManagedTierRoute({
+        actingUserId,
+        workspaceId: req.params.wid,
+        tier,
+        modelAlias: row.alias,
+      })
+      return void res.json({ route })
+    }
+
+    const setting = await opts.customLlmEndpointStore.setTierDefault({
+      actingUserId,
+      workspaceId: req.params.wid,
+      tier,
+      profileId: parsed.data.profileId,
+    })
+    if (!setting) return void res.status(404).json({ error: 'Profile not found' })
+    res.json({
+      route: {
+        ...setting,
+        modelAlias: null,
+      },
+    })
+  })
+
+  router.delete('/workspaces/:wid/model-routes/:tier', async (req, res) => {
+    const tier = req.params.tier
+    if (!isCustomLlmTier(tier)) return void res.status(400).json({ error: 'Unknown model tier' })
+    if (!(await adminOr403(req as { userId?: string }, res, req.params.wid))) return
+    if (!opts.customLlmEndpointStore) return void res.status(503).json({ error: 'Model routing is unavailable' })
+    await opts.customLlmEndpointStore.clearTierDefault({
+      actingUserId: (req as { userId?: string }).userId!,
+      workspaceId: req.params.wid,
+      tier,
+    })
     res.json({ ok: true })
   })
 

@@ -193,4 +193,29 @@ describe('[COMP:api/custom-llm-endpoints] custom connection/profile store', () =
     })).resolves.toEqual(setting)
     expect(mockQueryWithRLS.mock.calls[0]![2]).toEqual([workspaceId, 'max', profileRow.id, 'user-1'])
   })
+
+  it('replaces a tier route with an exact managed alias', async () => {
+    const store = createDbWorkspaceCustomLlmEndpointStore()
+    const route = {
+      workspaceId,
+      tier: 'max',
+      profileId: null,
+      modelAlias: 'gpt-5.6-sol',
+      updatedAt: new Date(),
+    }
+    mockQueryWithRLS.mockResolvedValueOnce({ rows: [route], rowCount: 1 } as never)
+    await expect(store.setManagedTierRoute({
+      actingUserId: 'user-1',
+      workspaceId,
+      tier: 'max',
+      modelAlias: 'gpt-5.6-sol',
+    })).resolves.toEqual(route)
+    expect(mockQueryWithRLS.mock.calls[0]![1]).toContain('profile_id = NULL')
+    expect(mockQueryWithRLS.mock.calls[0]![2]).toEqual([
+      workspaceId,
+      'max',
+      'gpt-5.6-sol',
+      'user-1',
+    ])
+  })
 })

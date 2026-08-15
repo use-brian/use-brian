@@ -32,8 +32,6 @@ import {
   type ChangeEvent,
 } from "react";
 import { authFetch } from "@/lib/auth-fetch";
-import { WorkspaceLlmKeyBlock } from "./sections/llm-key-block";
-import { CodexProviderCard } from "./sections/codex-provider-card";
 import {
   setWorkspaceDefaultBlueprint,
   setWorkspaceInboxRetention,
@@ -1546,25 +1544,6 @@ export function WorkspaceMembersSection() {
           ))}
         </div>
       </div>
-    </div>
-  );
-}
-
-// ── ws-llm-key ──────────────────────────────────────────────
-//
-// Bring-your-own Gemini API key for the active workspace. The block itself
-// lives in `sections/llm-key-block.tsx`; this standalone section wraps it
-// for the OSS edition's nav, which has no Models section to host it (hosted
-// embeds the same block in `sections/models-section.tsx` instead).
-
-export function WorkspaceLlmKeySection() {
-  const t = useT();
-
-  return (
-    <div className="space-y-6">
-      <h2 className="text-lg font-semibold">{t.chrome.settingsModal.workspace.llmKey}</h2>
-      <CodexProviderCard />
-      <WorkspaceLlmKeyBlock />
     </div>
   );
 }

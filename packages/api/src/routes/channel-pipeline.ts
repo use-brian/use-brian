@@ -707,7 +707,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   const backgroundLaneModel = backgroundLlmRuntime?.selector ?? laneModel
   const backgroundUsageAttribution = {
     modelTier: 'standard',
-    providerKeySource: backgroundLlmRuntime ? 'user' as const : 'platform' as const,
+    providerKeySource: backgroundLlmRuntime?.providerKeySource ?? 'platform' as const,
   }
   // ── Large-paste promotion (large-content-artifacts §Phase 3.2) ──
   // Runs before the message is classified, persisted, or fed to the model, so
@@ -795,7 +795,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         allowDefault: true,
       })
     : null
-  if (customLlmRuntime && userContentBlocks.some((block) => block.type === 'image')) {
+  if (customLlmRuntime?.routeKind === 'custom' && userContentBlocks.some((block) => block.type === 'image')) {
     await hooks.sendError(new Error('Custom model endpoints currently support text and tools only. Remove the inline image or use the web app to choose a built-in model.'))
     return
   }
@@ -1831,28 +1831,32 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
           // docs/architecture/integrations/mcp.md and
           // docs/architecture/channels/channel-user-identity.md → "Billing split".
           const usage = event.totalUsage
-          if (usageStore && usage) {
-            const cost = customLlmRuntime ? 0 : calculateCost(event.response.model, usage)
-            usageStore.recordUsage({
-              userId: billingUserId, actorUserId: userId, assistantId: assistant.id, sessionId: session.id,
-              model: event.response.model,
-              modelTier: customLlmRuntime?.modelTier ?? tierForModel(model),
-              inputTokens: usage.inputTokens,
-              outputTokens: usage.outputTokens,
-              cacheReadTokens: usage.cacheReadTokens,
-              cacheWriteTokens: usage.cacheWriteTokens,
-              actualCostUsd: cost,
-              // This is the credit-bearing row. The credit derivation
-              // (getPeriodCredits → `user_message_id IS NOT NULL`) skips any
-              // main_response row missing this id, so omitting it makes every
-              // channel turn debit ZERO credits. The web route stamps it on its
-              // main_response too — keep parity. See cost-and-pricing.md →
-              // "Credit accounting".
-              userMessageId: userMessageRow.id,
-              source: workspacePlan === 'free' ? 'free' : 'included',
-              triggerKey: 'main_response',
-              providerKeySource: customLlmRuntime ? 'user' : 'platform',
-            }).catch((err) => console.error(`[${channelType}] Usage tracking failed:`, err))
+          if (usage) {
+            const cost = customLlmRuntime?.providerKeySource === 'user'
+              ? 0
+              : calculateCost(event.response.model, usage)
+            if (usageStore) {
+              usageStore.recordUsage({
+                userId: billingUserId, actorUserId: userId, assistantId: assistant.id, sessionId: session.id,
+                model: event.response.model,
+                modelTier: customLlmRuntime?.modelTier ?? tierForModel(model),
+                inputTokens: usage.inputTokens,
+                outputTokens: usage.outputTokens,
+                cacheReadTokens: usage.cacheReadTokens,
+                cacheWriteTokens: usage.cacheWriteTokens,
+                actualCostUsd: cost,
+                // This is the credit-bearing row. The credit derivation
+                // (getPeriodCredits → `user_message_id IS NOT NULL`) skips any
+                // main_response row missing this id, so omitting it makes every
+                // channel turn debit ZERO credits. The web route stamps it on its
+                // main_response too — keep parity. See cost-and-pricing.md →
+                // "Credit accounting".
+                userMessageId: userMessageRow.id,
+                source: workspacePlan === 'free' ? 'free' : 'included',
+                triggerKey: 'main_response',
+                providerKeySource: customLlmRuntime?.providerKeySource ?? 'platform',
+              }).catch((err) => console.error(`[${channelType}] Usage tracking failed:`, err))
+            }
 
             analytics?.logEvent({
               userId, assistantId: assistant.id, sessionId: session.id,

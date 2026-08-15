@@ -48,7 +48,7 @@ export type RoutingProviderOptions = {
    * becomes available after OAuth can serve boot-selected background lanes
    * without restarting the process. Explicit unavailable Codex ids remain
    * unchanged by `ensureServableModel` and still fail closed. */
-  resolveModel?: (model: string) => string
+  resolveModel?: (model: string, options?: { allowProviderFallback?: boolean }) => string
   /**
    * Ports for `wrapDocumentAdaptation`. Wired here rather than at each call
    * site because this is the only place that knows the CONCRETE model — and
@@ -66,11 +66,11 @@ export function createRoutingProvider(
   providers: Record<string, LLMProvider>,
   options?: RoutingProviderOptions,
 ): LLMProvider {
-  // Effective provider per registry row (fallback-wrapped where the row asks
-  // for it), memoized per model alias — wrapFallback allocation happens once.
-  const effectiveByAlias = new Map<string, LLMProvider>()
+  // Effective provider per registry row and routing mode. Exact routes omit
+  // the outage fallback; Auto routes keep the row's fallback policy.
+  const effectiveByRoute = new Map<string, LLMProvider>()
 
-  function effectiveFor(model: string): LLMProvider {
+  function effectiveFor(model: string, allowProviderFallback = true): LLMProvider {
     const row = registryRow(model)
     if (!row) {
       throw new Error(
@@ -84,7 +84,8 @@ export function createRoutingProvider(
         `(the account may need to reconnect or choose another model).`,
       )
     }
-    const cached = effectiveByAlias.get(row.alias)
+    const cacheKey = `${row.alias}:${allowProviderFallback ? 'fallback' : 'exact'}`
+    const cached = effectiveByRoute.get(cacheKey)
     if (cached) return cached
 
     const base = providers[row.provider]
@@ -95,8 +96,9 @@ export function createRoutingProvider(
       )
     }
 
-    const effective = withFallback(row, withDocumentAdaptation(row, base))
-    effectiveByAlias.set(row.alias, effective)
+    const adapted = withDocumentAdaptation(row, base)
+    const effective = allowProviderFallback ? withFallback(row, adapted) : adapted
+    effectiveByRoute.set(cacheKey, effective)
     return effective
   }
 
@@ -144,15 +146,23 @@ export function createRoutingProvider(
     models: Object.values(providers).flatMap((p) => p.models),
 
     stream(request: ProviderRequest): AsyncIterable<StreamChunk> {
-      const model = options?.resolveModel?.(request.model) ?? request.model
-      return effectiveFor(model).stream(
+      const model = request.allowProviderFallback === false
+        ? request.model
+        : options?.resolveModel?.(request.model, {
+            allowProviderFallback: request.allowProviderFallback,
+          }) ?? request.model
+      return effectiveFor(model, request.allowProviderFallback !== false).stream(
         model === request.model ? request : { ...request, model },
       )
     },
 
     createSession(sessionOpts: SessionOptions): ProviderSession {
-      const model = options?.resolveModel?.(sessionOpts.model) ?? sessionOpts.model
-      return effectiveFor(model).createSession(
+      const model = sessionOpts.allowProviderFallback === false
+        ? sessionOpts.model
+        : options?.resolveModel?.(sessionOpts.model, {
+            allowProviderFallback: sessionOpts.allowProviderFallback,
+          }) ?? sessionOpts.model
+      return effectiveFor(model, sessionOpts.allowProviderFallback !== false).createSession(
         model === sessionOpts.model ? sessionOpts : { ...sessionOpts, model },
       )
     },

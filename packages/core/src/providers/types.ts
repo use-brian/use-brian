@@ -119,6 +119,12 @@ export type ThinkingLevel = 'low' | 'high'
 
 export type SessionOptions = {
   model: string
+  /**
+   * `false` makes this exact registry alias authoritative. The routing
+   * provider skips its availability-aware model substitution and fails closed
+   * if that alias cannot be served. Omitted means Auto routing may substitute.
+   */
+  allowProviderFallback?: boolean
   systemPrompt: string
   tools?: ToolDefinition[]
   maxTokens?: number
@@ -158,6 +164,8 @@ export type ProviderSession = {
 /** Legacy stateless interface — still useful for single-turn calls */
 export type ProviderRequest = {
   model: string
+  /** See `SessionOptions.allowProviderFallback`. */
+  allowProviderFallback?: boolean
   messages: Message[]
   systemPrompt: string
   tools?: ToolDefinition[]

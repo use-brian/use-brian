@@ -23,6 +23,14 @@ const modelDefaults = {
   setProfile: vi.fn(),
   clear: vi.fn(),
 }
+const endpointStore = {
+  list: vi.fn(),
+  listTierDefaults: vi.fn(),
+  listModelRoutes: vi.fn(),
+  setManagedTierRoute: vi.fn(),
+  setTierDefault: vi.fn(),
+  clearTierDefault: vi.fn(),
+}
 
 function makeApp(overrides?: Partial<ModelMenuRouteOptions>) {
   const app = express()
@@ -44,6 +52,9 @@ beforeEach(() => {
   getRole.mockResolvedValue('member')
   profiles.list.mockResolvedValue([])
   modelDefaults.list.mockResolvedValue([])
+  endpointStore.list.mockResolvedValue([])
+  endpointStore.listTierDefaults.mockResolvedValue([])
+  endpointStore.listModelRoutes.mockResolvedValue([])
 })
 
 describe('[COMP:api/model-menu] GET /models/menu', () => {
@@ -190,5 +201,75 @@ describe('[COMP:api/model-menu] workspace model defaults', () => {
     modelDefaults.clear.mockResolvedValue(true)
     await request(makeApp()).delete(`/api/workspaces/${WID}/model-defaults/research`).expect(200)
     expect(modelDefaults.clear).toHaveBeenCalledWith(WID, 'research')
+  })
+})
+
+describe('[COMP:api/model-menu] workspace tier routes', () => {
+  const WID = '00000000-0000-0000-0000-000000000001'
+
+  it('stores an exact available managed model for its matching tier', async () => {
+    getRole.mockResolvedValue('admin')
+    const availability = new MutableProviderAvailability()
+    availability.setModelCatalog('openai-codex', new Set(['gpt-5.6-sol']))
+    endpointStore.setManagedTierRoute.mockResolvedValue({
+      workspaceId: WID,
+      tier: 'max',
+      profileId: null,
+      modelAlias: 'gpt-5.6-sol',
+      updatedAt: new Date(),
+    })
+
+    const res = await request(makeApp({
+      configuredProviders: availability,
+      customLlmEndpointStore: endpointStore as never,
+    }))
+      .put(`/api/workspaces/${WID}/model-routes/max`)
+      .send({ modelAlias: 'gpt-5.6-sol' })
+      .expect(200)
+
+    expect(res.body.route.modelAlias).toBe('gpt-5.6-sol')
+    expect(endpointStore.setManagedTierRoute).toHaveBeenCalledWith({
+      actingUserId: 'u1',
+      workspaceId: WID,
+      tier: 'max',
+      modelAlias: 'gpt-5.6-sol',
+    })
+  })
+
+  it('rejects a cross-tier or unavailable managed alias', async () => {
+    getRole.mockResolvedValue('admin')
+    const availability = new MutableProviderAvailability()
+    availability.setModelCatalog('openai-codex', new Set(['gpt-5.6-sol']))
+    await request(makeApp({
+      configuredProviders: availability,
+      customLlmEndpointStore: endpointStore as never,
+    }))
+      .put(`/api/workspaces/${WID}/model-routes/pro`)
+      .send({ modelAlias: 'gpt-5.6-sol' })
+      .expect(400)
+    expect(endpointStore.setManagedTierRoute).not.toHaveBeenCalled()
+  })
+
+  it('promotes the legacy Codex preference once when no workspace routes exist', async () => {
+    getRole.mockResolvedValue('owner')
+    const availability = new MutableProviderAvailability()
+    availability.setPreferredProvider('openai-codex')
+    endpointStore.listModelRoutes
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        { workspaceId: WID, tier: 'max', profileId: null, modelAlias: 'gpt-5.6-sol', updatedAt: new Date() },
+      ])
+
+    const res = await request(makeApp({
+      configuredProviders: availability,
+      customLlmEndpointStore: endpointStore as never,
+    })).get(`/api/models/menu?workspaceId=${WID}`).expect(200)
+
+    expect(endpointStore.setManagedTierRoute).toHaveBeenCalledTimes(4)
+    expect(endpointStore.setManagedTierRoute).toHaveBeenCalledWith(expect.objectContaining({
+      tier: 'max',
+      modelAlias: 'gpt-5.6-sol',
+    }))
+    expect(res.body.modelRoutes).toHaveLength(1)
   })
 })

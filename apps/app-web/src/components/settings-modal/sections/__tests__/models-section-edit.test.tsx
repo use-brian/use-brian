@@ -30,11 +30,13 @@ vi.mock("@/components/ui/prompt-dialog", () => ({
 }));
 vi.mock("@/lib/api/models", () => ({
   clearWorkspaceModelDefault: vi.fn(),
+  clearWorkspaceModelRoute: vi.fn(),
   createMeteredProfile: vi.fn(),
   deleteMeteredProfile: vi.fn(),
   fetchMeteredEstimate: vi.fn(),
   fetchModelMenu,
   setWorkspaceModelDefault: vi.fn(),
+  setWorkspaceModelRoute: vi.fn(),
   updateMeteredProfile: vi.fn(),
 }));
 vi.mock("@/lib/api/custom-llm-endpoints", () => ({
@@ -100,6 +102,7 @@ beforeEach(() => {
     classes: {},
     defaults: [],
     profiles: [],
+    modelRoutes: [],
     meteredBillingAvailable: false,
   });
   getCustomLlmConfiguration.mockResolvedValue({ endpoints: [endpoint], tierDefaults: [] });
@@ -120,7 +123,7 @@ describe("[COMP:app-web/models-settings] custom profile editing", () => {
     });
 
     await act(async () => {
-      click(container, (button) => button.textContent === en.chrome.settingsModal.models.viewCustom);
+      click(container, (button) => button.textContent === en.chrome.settingsModal.models.viewProviders);
     });
     await act(async () => {
       click(container, (button) => button.getAttribute("aria-label") === en.chrome.settingsModal.models.editProfileCta);

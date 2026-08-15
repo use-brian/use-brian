@@ -68,6 +68,7 @@ describe("[COMP:app-web/codex-provider] ChatGPT subscription settings card", () 
     expect(container.textContent).toContain(t.connect);
     expect(container.textContent).toContain(t.deviceCode);
     expect(container.textContent).toContain(t.refresh);
+    expect(container.textContent).not.toContain(t.preferredProviderLabel);
 
     await act(async () => root.unmount());
   });

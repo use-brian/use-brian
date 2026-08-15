@@ -9,10 +9,12 @@ vi.mock("@/lib/auth-fetch", () => ({ authFetch: vi.fn() }));
 import { authFetch } from "@/lib/auth-fetch";
 import {
   clearWorkspaceModelDefault,
+  clearWorkspaceModelRoute,
   createMeteredProfile,
   fetchMeteredEstimate,
   fetchModelMenu,
   setWorkspaceModelDefault,
+  setWorkspaceModelRoute,
   updateMeteredProfile,
   deleteMeteredProfile,
 } from "../models";
@@ -77,5 +79,24 @@ describe("[COMP:app-web/models-sdk] model menu SDK", () => {
     mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ error: "Owner or admin role required" }), { status: 403 }));
     await expect(setWorkspaceModelDefault("ws-1", "max", { modelAlias: "gemini-3.6-flash" }))
       .rejects.toThrow("Owner or admin role required");
+  });
+
+  it("sets an exact tier route and clears it back to Auto", async () => {
+    mockFetch.mockImplementation(async () => ok({
+      route: {
+        workspaceId: "ws-1",
+        tier: "max",
+        modelAlias: "gpt-5.6-sol",
+        profileId: null,
+        updatedAt: "now",
+      },
+    }));
+    const route = await setWorkspaceModelRoute("ws-1", "max", { modelAlias: "gpt-5.6-sol" });
+    await clearWorkspaceModelRoute("ws-1", "max");
+    const [url, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain("/api/workspaces/ws-1/model-routes/max");
+    expect(JSON.parse(init.body as string)).toEqual({ modelAlias: "gpt-5.6-sol" });
+    expect(route.modelAlias).toBe("gpt-5.6-sol");
+    expect((mockFetch.mock.calls[1][1] as RequestInit).method).toBe("DELETE");
   });
 });

@@ -1681,6 +1681,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const customLlmEndpointStore = createDbWorkspaceCustomLlmEndpointStore(llmProviderEncryptionKey ?? undefined)
   const resolveWorkspaceCustomLlm = createWorkspaceCustomLlmResolver(customLlmEndpointStore, {
     networkPolicy: customLlmNetworkPolicy,
+    managedProvider: provider,
   })
   const resolveBackgroundRuntime = async (workspaceId: string | null | undefined) =>
     workspaceId
@@ -1689,6 +1690,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           requestedTier: 'standard',
           allowDefault: true,
           allowAnyDefault: true,
+          // Exact managed routes are a user-facing tier choice. Preserve the
+          // existing internal/background lane; custom BYO defaults keep their
+          // historical behavior here.
+          allowManagedRoutes: false,
         })
       : null
   const workspaceForAssistant = async (assistantId: string): Promise<string | null> => {
@@ -6008,7 +6013,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     }))
     const attributionUserId = ctx.userId ?? (workspaceId ? await ownerForWorkspace(workspaceId) : null)
     if (response.usage && attributionUserId && usageStore) {
-      const cost = customRuntime ? 0 : calculateCost(callModel, response.usage)
+      const cost = customRuntime?.providerKeySource === 'user'
+        ? 0
+        : calculateCost(callModel, response.usage)
       usageStore.recordUsage({
         userId: attributionUserId,
         assistantId: ctx.assistantId,
@@ -6022,7 +6029,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         cacheWriteTokens: response.usage.cacheWriteTokens,
         actualCostUsd: cost,
         source: 'overhead:consolidation',
-        providerKeySource: customRuntime ? 'user' : 'platform',
+        providerKeySource: customRuntime?.providerKeySource ?? 'platform',
       }).catch((err) => console.error('[consolidation] usage tracking failed:', err))
     }
     return response.content
@@ -6167,7 +6174,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         maxTokens,
       }))
       if (response.usage && usageStore) {
-        const cost = customRuntime ? 0 : calculateCost(callModel, response.usage)
+        const cost = customRuntime?.providerKeySource === 'user'
+          ? 0
+          : calculateCost(callModel, response.usage)
         usageStore.recordUsage({
           userId: attribution.userId,
           assistantId: attribution.assistantId,
@@ -6180,7 +6189,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           cacheWriteTokens: response.usage.cacheWriteTokens,
           actualCostUsd: cost,
           source: 'overhead:skill-review',
-          providerKeySource: customRuntime ? 'user' : 'platform',
+          providerKeySource: customRuntime?.providerKeySource ?? 'platform',
         }).catch((err) => console.error('[skill-review] usage tracking failed:', err))
       }
       return response.content
@@ -6247,7 +6256,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         maxTokens,
       }))
       if (response.usage && usageStore) {
-        const cost = customRuntime ? 0 : calculateCost(callModel, response.usage)
+        const cost = customRuntime?.providerKeySource === 'user'
+          ? 0
+          : calculateCost(callModel, response.usage)
         usageStore.recordUsage({
           userId: attribution.userId,
           assistantId: attribution.assistantId,
@@ -6260,7 +6271,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           cacheWriteTokens: response.usage.cacheWriteTokens,
           actualCostUsd: cost,
           source: 'overhead:playbook-reflection',
-          providerKeySource: customRuntime ? 'user' : 'platform',
+          providerKeySource: customRuntime?.providerKeySource ?? 'platform',
         }).catch((err) => console.error('[playbook-reflection] usage tracking failed:', err))
       }
       return response.content

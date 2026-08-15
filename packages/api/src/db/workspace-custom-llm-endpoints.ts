@@ -53,6 +53,14 @@ export type WorkspaceCustomLlmTierDefault = {
   updatedAt: Date
 }
 
+export type WorkspaceModelTierRoute = {
+  workspaceId: string
+  tier: CustomLlmTier
+  profileId: string | null
+  modelAlias: string | null
+  updatedAt: Date
+}
+
 export type VerifiedCustomLlmProfileInput = {
   name: string
   modelId: string
@@ -71,16 +79,19 @@ export type WorkspaceCustomLlmEndpointStore = {
   list(params: { actingUserId: string; workspaceId: string }): Promise<WorkspaceCustomLlmEndpoint[]>
   listProfiles(params: { actingUserId: string; workspaceId: string }): Promise<WorkspaceCustomLlmProfile[]>
   listTierDefaults(params: { actingUserId: string; workspaceId: string }): Promise<WorkspaceCustomLlmTierDefault[]>
+  listModelRoutes(params: { actingUserId: string; workspaceId: string }): Promise<WorkspaceModelTierRoute[]>
   create(params: { actingUserId: string; workspaceId: string; input: VerifiedCustomLlmEndpointInput }): Promise<WorkspaceCustomLlmEndpoint>
   createProfile(params: { actingUserId: string; workspaceId: string; endpointId: string; input: VerifiedCustomLlmProfileInput }): Promise<WorkspaceCustomLlmProfile | null>
   updateProfile(params: { actingUserId: string; workspaceId: string; endpointId: string; profileId: string; input: VerifiedCustomLlmProfileInput }): Promise<WorkspaceCustomLlmProfile | null>
   delete(params: { actingUserId: string; workspaceId: string; endpointId: string }): Promise<boolean>
   deleteProfile(params: { actingUserId: string; workspaceId: string; endpointId: string; profileId: string }): Promise<boolean>
   setTierDefault(params: { actingUserId: string; workspaceId: string; tier: CustomLlmTier; profileId: string }): Promise<WorkspaceCustomLlmTierDefault | null>
+  setManagedTierRoute(params: { actingUserId: string; workspaceId: string; tier: CustomLlmTier; modelAlias: string }): Promise<WorkspaceModelTierRoute>
   clearTierDefault(params: { actingUserId: string; workspaceId: string; tier: CustomLlmTier }): Promise<void>
   getEndpointRuntimeSystem(params: { workspaceId: string; endpointId: string }): Promise<WorkspaceCustomLlmEndpointRuntime | null>
   getRuntimeSystem(params: { workspaceId: string; profileId: string }): Promise<WorkspaceCustomLlmProfileRuntime | null>
   getTierRuntimeSystem(params: { workspaceId: string; tier: CustomLlmTier }): Promise<WorkspaceCustomLlmProfileRuntime | null>
+  getTierRouteSystem(params: { workspaceId: string; tier: CustomLlmTier }): Promise<WorkspaceModelTierRoute | null>
 }
 
 const ENDPOINT_COLS = `
@@ -207,12 +218,26 @@ export function createDbWorkspaceCustomLlmEndpointStore(
         actingUserId,
         `SELECT workspace_id AS "workspaceId", tier,
                 profile_id AS "profileId", updated_at AS "updatedAt"
-           FROM workspace_custom_llm_tier_defaults
-          WHERE workspace_id = $1
+           FROM workspace_model_tier_routes
+          WHERE workspace_id = $1 AND profile_id IS NOT NULL
           ORDER BY tier`,
         [workspaceId],
       )
       return result.rows.map(tierDefaultFromRow)
+    },
+
+    async listModelRoutes({ actingUserId, workspaceId }) {
+      const result = await queryWithRLS<WorkspaceModelTierRoute>(
+        actingUserId,
+        `SELECT workspace_id AS "workspaceId", tier,
+                profile_id AS "profileId", model_alias AS "modelAlias",
+                updated_at AS "updatedAt"
+           FROM workspace_model_tier_routes
+          WHERE workspace_id = $1
+          ORDER BY tier`,
+        [workspaceId],
+      )
+      return result.rows
     },
 
     async create({ actingUserId, workspaceId, input }) {
@@ -299,13 +324,14 @@ export function createDbWorkspaceCustomLlmEndpointStore(
     async setTierDefault({ actingUserId, workspaceId, tier, profileId }) {
       const result = await queryWithRLS<WorkspaceCustomLlmTierDefault>(
         actingUserId,
-        `INSERT INTO workspace_custom_llm_tier_defaults
-           (workspace_id, tier, profile_id, updated_by_user_id)
-         SELECT p.workspace_id, $2, p.id, $4
+        `INSERT INTO workspace_model_tier_routes
+           (workspace_id, tier, profile_id, model_alias, updated_by_user_id)
+         SELECT p.workspace_id, $2, p.id, NULL, $4
            FROM workspace_custom_llm_profiles p
           WHERE p.workspace_id = $1 AND p.id = $3
          ON CONFLICT (workspace_id, tier)
          DO UPDATE SET profile_id = EXCLUDED.profile_id,
+                       model_alias = NULL,
                        updated_by_user_id = EXCLUDED.updated_by_user_id,
                        updated_at = now()
          RETURNING workspace_id AS "workspaceId", tier,
@@ -315,10 +341,29 @@ export function createDbWorkspaceCustomLlmEndpointStore(
       return result.rows[0] ?? null
     },
 
+    async setManagedTierRoute({ actingUserId, workspaceId, tier, modelAlias }) {
+      const result = await queryWithRLS<WorkspaceModelTierRoute>(
+        actingUserId,
+        `INSERT INTO workspace_model_tier_routes
+           (workspace_id, tier, profile_id, model_alias, updated_by_user_id)
+         VALUES ($1, $2, NULL, $3, $4)
+         ON CONFLICT (workspace_id, tier)
+         DO UPDATE SET profile_id = NULL,
+                       model_alias = EXCLUDED.model_alias,
+                       updated_by_user_id = EXCLUDED.updated_by_user_id,
+                       updated_at = now()
+         RETURNING workspace_id AS "workspaceId", tier,
+                   profile_id AS "profileId", model_alias AS "modelAlias",
+                   updated_at AS "updatedAt"`,
+        [workspaceId, tier, modelAlias, actingUserId],
+      )
+      return result.rows[0]!
+    },
+
     async clearTierDefault({ actingUserId, workspaceId, tier }) {
       await queryWithRLS(
         actingUserId,
-        `DELETE FROM workspace_custom_llm_tier_defaults WHERE workspace_id = $1 AND tier = $2`,
+        `DELETE FROM workspace_model_tier_routes WHERE workspace_id = $1 AND tier = $2`,
         [workspaceId, tier],
       )
     },
@@ -354,7 +399,7 @@ export function createDbWorkspaceCustomLlmEndpointStore(
     async getTierRuntimeSystem({ workspaceId, tier }) {
       const result = await query<RuntimeProfileRow>(
         `SELECT ${RUNTIME_PROFILE_COLS}
-           FROM workspace_custom_llm_tier_defaults d
+           FROM workspace_model_tier_routes d
            JOIN workspace_custom_llm_profiles p
              ON p.id = d.profile_id AND p.workspace_id = d.workspace_id
            JOIN workspace_custom_llm_endpoints e
@@ -365,6 +410,19 @@ export function createDbWorkspaceCustomLlmEndpointStore(
         [workspaceId, tier],
       )
       return runtimeProfileFromRow(result.rows[0])
+    },
+
+    async getTierRouteSystem({ workspaceId, tier }) {
+      const result = await query<WorkspaceModelTierRoute>(
+        `SELECT workspace_id AS "workspaceId", tier,
+                profile_id AS "profileId", model_alias AS "modelAlias",
+                updated_at AS "updatedAt"
+           FROM workspace_model_tier_routes
+          WHERE workspace_id = $1 AND tier = $2
+          LIMIT 1`,
+        [workspaceId, tier],
+      )
+      return result.rows[0] ?? null
     },
   }
 }

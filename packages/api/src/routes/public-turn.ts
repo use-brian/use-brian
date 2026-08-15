@@ -1037,7 +1037,7 @@ export async function executePublicTurn(
     model: backgroundLlmRuntime?.selector,
     inputTokenLimit: backgroundLlmRuntime?.inputTokenLimit,
     modelTier: 'standard',
-    providerKeySource: backgroundLlmRuntime ? 'user' : 'platform',
+    providerKeySource: backgroundLlmRuntime?.providerKeySource ?? 'platform',
     systemPrompt: fullSystemPrompt,
     assistantId: assistant.id,
     userId: user.id,
@@ -1232,7 +1232,9 @@ export async function executePublicTurn(
   // pivot to the shadow. See migration 100 and
   // docs/architecture/platform/analytics.md → "Actor vs billing party".
   if (deps.usageStore && totalUsage && responseModel) {
-    const cost = customLlmRuntime ? 0 : calculateCost(responseModel, totalUsage)
+    const cost = customLlmRuntime?.providerKeySource === 'user'
+      ? 0
+      : calculateCost(responseModel, totalUsage)
     deps.usageStore.recordUsage({
       userId: ownerId,
       actorUserId: user.id,
@@ -1248,7 +1250,7 @@ export async function executePublicTurn(
       source: 'api',
       userMessageId: storedUserMsg.id,
       triggerKey: 'main_response',
-      providerKeySource: customLlmRuntime ? 'user' : 'platform',
+      providerKeySource: customLlmRuntime?.providerKeySource ?? 'platform',
     }).catch((err) => {
       // Mirror chat.ts: log AND surface to analytics so the
       // failure isn't silent. The previous version only console

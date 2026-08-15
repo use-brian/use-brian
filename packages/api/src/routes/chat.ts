@@ -2203,7 +2203,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         ?? backgroundModelFor(options.configuredProviders)
       const backgroundUsageAttribution = {
         modelTier: 'standard',
-        providerKeySource: backgroundLlmRuntime ? 'user' as const : 'platform' as const,
+        providerKeySource: backgroundLlmRuntime?.providerKeySource ?? 'platform' as const,
       }
 
       // ── Giant-paste promotion (large-content-artifacts §Phase 3.1) ──
@@ -5162,7 +5162,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           return
         }
         if (customLlmRuntime) {
-          if (userContentBlocks.some((block) => block.type === 'image')) {
+          if (customLlmRuntime.routeKind === 'custom' && userContentBlocks.some((block) => block.type === 'image')) {
             res.status(400).json({
               error: 'custom_model_media_unsupported',
               message: 'Custom model endpoints currently support text and tools only. Remove the inline image or choose a built-in model.',
@@ -5173,7 +5173,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           // the platform provider and a workspace Gemini key, and never falls
           // back to either if its request fails.
           turnProvider = customLlmRuntime.provider
-          usedByoKey = true
+          usedByoKey = customLlmRuntime.providerKeySource === 'user'
         }
       }
 
