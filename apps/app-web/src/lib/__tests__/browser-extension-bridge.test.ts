@@ -16,11 +16,18 @@ import {
 describe("[COMP:app-web/connect-browser] Extension pairing bridge", () => {
   const CREDS = { relayUrl: "wss://relay.example/ext", pairingToken: "pair-xyz" };
   const ID = "abcdefghijklmnopabcdefghijklmnop";
+  const WEB_STORE_ID = "nnmbbacnkekaoccmkmlfaghjaamgdpjn";
 
   it("pairs when the extension accepts", async () => {
     const send: ExtensionMessenger = vi.fn(async () => ({ ok: true }));
     expect(await pairViaExtension({ extensionId: ID, ...CREDS, send })).toBe("paired");
     expect(send).toHaveBeenCalledWith(ID, { type: "pair", ...CREDS });
+  });
+
+  it("pairs with the published Web Store extension by default", async () => {
+    const send: ExtensionMessenger = vi.fn(async () => ({ ok: true }));
+    expect(await pairViaExtension({ ...CREDS, send })).toBe("paired");
+    expect(send).toHaveBeenCalledWith(WEB_STORE_ID, { type: "pair", ...CREDS });
   });
 
   it("reports not_installed when nothing answers", async () => {

@@ -58,14 +58,11 @@ describe("[COMP:app-web/connect-browser] My Browser connect surface", () => {
     expect(html).toContain("chromewebstore.google.com");
   });
 
-  it("still points at a SEARCH, because the extension is not published yet", () => {
-    // Asserts the gap rather than hiding it. The previous version of this test
-    // was named "never a bare or dead link" but only checked the hostname, so
-    // a search URL that returns no Use Brian extension satisfied it - and that
-    // dead link is step 1 of the product's own onboarding. When P2 publishes
-    // the listing, replace this with an assertion on the /detail/<id> URL.
+  it("points directly at the published Use Brian listing", () => {
     const html = render();
-    expect(html).toContain("chromewebstore.google.com/search");
+    expect(html).toContain(
+      "chromewebstore.google.com/detail/use-brian-browser-agent/nnmbbacnkekaoccmkmlfaghjaamgdpjn",
+    );
   });
 
   it("offers the copy-paste flow when no extension answers the probe", () => {
