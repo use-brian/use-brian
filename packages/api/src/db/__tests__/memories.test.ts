@@ -13,6 +13,8 @@ import {
   searchMemories,
   getIdentityMemories,
   getMemoryIndex,
+  getWorkspaceIdentityMemories,
+  getWorkspaceMemoryIndex,
   listMemoriesWithMetrics,
   updateMemory,
 } from '../memories.js'
@@ -160,6 +162,17 @@ describe('[COMP:memory/bi-temporal-reads] reads filter valid_to IS NULL (SQL sha
   it('getMemoryIndex', async () => {
     await getMemoryIndex(CTX)
     expect(mockQuery.mock.calls[0][0]).toContain('valid_to IS NULL')
+    expect(mockQuery.mock.calls[0][0]).toContain("scope <> 'workspace'")
+  })
+
+  it('workspace prompt reads select only workspace-scoped memories', async () => {
+    await getWorkspaceIdentityMemories(CTX)
+    expect(mockQuery.mock.calls[0][0]).toContain("scope = 'workspace'")
+
+    mockQuery.mockClear()
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    await getWorkspaceMemoryIndex(CTX)
+    expect(mockQuery.mock.calls[0][0]).toContain("scope = 'workspace'")
   })
 
   it('listMemoriesWithMetrics', async () => {
