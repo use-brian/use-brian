@@ -186,12 +186,7 @@ export function wrapToolsWithHealthProbe(
 export function connectorReconnectNotice(provider: string, label: string): string {
   const name = providerDisplayName(provider)
   const nick = label && label.toLowerCase() !== provider.toLowerCase() ? ` "${label}"` : ''
-  return (
-    `${name}${nick} (credentials failed - the connector needs reconnecting) - ` +
-    `if the user asks for anything requiring ${name}, tell them: ` +
-    `"The ${name} connector stopped working (its credentials expired or were revoked). ` +
-    `Reconnect it in Studio then Connectors and try again."`
-  )
+  return `${name}${nick}: reconnect required (credentials expired or revoked; Studio → Connectors)`
 }
 
 function providerDisplayName(provider: string): string {
