@@ -188,6 +188,12 @@ describe("[COMP:app-web/workflow-tools] connected connector loading", () => {
         teamNative: [
           { id: "gmail-instance", provider: "gmail", label: "Inbox", connected: true },
           { id: "gcal-instance", provider: "gcal", label: "Calendar", connected: false },
+          {
+            id: "cli-instance",
+            provider: "cli",
+            label: "Local tools",
+            connected: true,
+          },
         ],
         granted: [{
           instance: {
@@ -199,6 +205,14 @@ describe("[COMP:app-web/workflow-tools] connected connector loading", () => {
         }],
       }))
       .mockResolvedValueOnce(json({
+        serverName: "Local tools",
+        tools: [{
+          name: "localStatus",
+          description: "Read local status",
+          classification: "read",
+        }],
+      }))
+      .mockResolvedValueOnce(json({
         serverName: "Acme",
         tools: [{
           name: "acmeLookup",
@@ -207,13 +221,23 @@ describe("[COMP:app-web/workflow-tools] connected connector loading", () => {
         }],
       }));
 
-    const sources = await listConnectedWorkflowToolSources("workspace-1");
+    const sources = await listConnectedWorkflowToolSources("workspace-1", "assistant-1");
 
     expect(sources).toEqual([
       {
         id: "gmail-instance",
         connectorId: "gmail",
         label: "Inbox",
+      },
+      {
+        id: "cli-instance",
+        connectorId: "cli",
+        label: "Local tools",
+        items: [{
+          name: "localStatus",
+          description: "Read local status",
+          classification: "read",
+        }],
       },
       {
         id: "custom-instance",
@@ -226,9 +250,27 @@ describe("[COMP:app-web/workflow-tools] connected connector loading", () => {
         }],
       },
     ]);
-    expect(mockAuthFetch).toHaveBeenCalledTimes(2);
-    expect(mockAuthFetch).toHaveBeenLastCalledWith(
+    expect(mockAuthFetch).toHaveBeenCalledTimes(3);
+    expect(mockAuthFetch).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining(
+        "/api/assistants/assistant-1/connectors/cli%3Acli-instance/tools",
+      ),
+    );
+    expect(mockAuthFetch).toHaveBeenNthCalledWith(
+      3,
       expect.stringContaining("/api/connectors/11111111-1111-4111-8111-111111111111/tools"),
     );
+
+    const groups = buildToolCatalog(sources);
+    expect(groups.find((group) => group.id === "cli-instance")).toEqual({
+      id: "cli-instance",
+      label: "Local tools",
+      items: [{
+        name: "localStatus",
+        description: "Read local status",
+        classification: "read",
+      }],
+    });
   });
 });
