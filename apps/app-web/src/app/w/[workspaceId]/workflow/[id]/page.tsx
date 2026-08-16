@@ -162,7 +162,7 @@ export default function WorkflowDetailPage({
     let cancelled = false;
     void (async () => {
       try {
-        const sources = await listConnectedWorkflowToolSources(activeId);
+        const sources = await listConnectedWorkflowToolSources(activeId, assistants[0]?.id);
         if (!cancelled) setToolGroups(buildToolCatalog(sources));
       } catch {
         if (!cancelled) setToolGroups(buildToolCatalog([]));
@@ -171,7 +171,7 @@ export default function WorkflowDetailPage({
     return () => {
       cancelled = true;
     };
-  }, [activeId]);
+  }, [activeId, assistants]);
 
   // Load recent chat destinations for the per-step `deliver.channelId` dropdown.
   useEffect(() => {
