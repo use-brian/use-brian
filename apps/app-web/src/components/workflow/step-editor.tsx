@@ -63,12 +63,12 @@ import {
   SwitchRow,
 } from "@/components/workflow/field";
 import {
-  buildToolCatalog,
   catalogToolNames,
   filterToolGroups,
   normalizeToolName,
   BUILTIN_GROUP_ID,
   MAX_TOOLS,
+  type ToolGroup,
 } from "@/lib/workflow-tools";
 import {
   fieldUnderlineCls,
@@ -125,6 +125,8 @@ type Props = {
    * hides itself and any already-selected slugs are preserved.
    */
   skills: WorkspaceSkillSummary[];
+  /** Connected workspace connector tools for the Restrict tools picker. */
+  toolGroups: ToolGroup[];
   /**
    * All steps in the draft definition — backs the page-anchor "from
    * earlier step" picker (steps with `page.create` other than this one).
@@ -148,6 +150,7 @@ export function StepEditor({
   pages,
   blueprints,
   skills,
+  toolGroups,
   steps,
   onChange,
   onMoveUp,
@@ -359,6 +362,7 @@ export function StepEditor({
               <RailCard title={b.stepRailExecutionHeading}>
                 <ExecutionFields
                   step={step}
+                  toolGroups={toolGroups}
                   onChange={onChange}
                   disabled={disabled}
                   t={t}
@@ -473,11 +477,13 @@ function InstructionBody({
 
 function ExecutionFields({
   step,
+  toolGroups,
   onChange,
   disabled,
   t,
 }: {
   step: Extract<WorkflowStep, { type: "assistant_call" }>;
+  toolGroups: ToolGroup[];
   onChange: (s: WorkflowStep) => void;
   disabled?: boolean;
   t: Dictionary;
@@ -650,7 +656,13 @@ function ExecutionFields({
 
       <div className="flex flex-col gap-1.5">
         <FieldLabel label={b.toolsFilterLabel} hint={b.toolsFilterHint} />
-        <ToolsField step={step} onChange={onChange} disabled={disabled} t={t} />
+        <ToolsField
+          step={step}
+          toolGroups={toolGroups}
+          onChange={onChange}
+          disabled={disabled}
+          t={t}
+        />
       </div>
     </div>
   );
@@ -672,11 +684,13 @@ function ExecutionFields({
  */
 function ToolsField({
   step,
+  toolGroups,
   onChange,
   disabled,
   t,
 }: {
   step: Extract<WorkflowStep, { type: "assistant_call" }>;
+  toolGroups: ToolGroup[];
   onChange: (s: WorkflowStep) => void;
   disabled?: boolean;
   t: Dictionary;
@@ -687,9 +701,9 @@ function ToolsField({
   const count = selected.length;
   const atMax = count >= MAX_TOOLS;
 
-  // Catalog is static; translate only the Built-in group label (connector
-  // labels are registry data, English — same as the connector-grants surface).
-  const catalog = useMemo(() => buildToolCatalog(), []);
+  // Translate only the Built-in group label. Connector labels come from the
+  // shared registry or the connected custom instance.
+  const catalog = toolGroups;
   const groups = useMemo(
     () =>
       catalog.map((g) =>
@@ -896,7 +910,7 @@ function ToolsField({
 
 /** Initial collapse set: a group is collapsed unless it holds a selected tool. */
 function collapseFor(
-  groups: ReturnType<typeof buildToolCatalog>,
+  groups: ToolGroup[],
   selectedSet: Set<string>,
 ): Set<string> {
   const set = new Set<string>();

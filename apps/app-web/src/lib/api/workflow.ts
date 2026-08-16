@@ -25,6 +25,8 @@
 
 import { authFetch } from "@/lib/auth-fetch";
 import { DISPLAY_API_URL } from "@/lib/display-api-url";
+import { OFFICIAL_CONNECTOR_TOOLS } from "@use-brian/shared/builtin-connectors";
+import type { ConnectedToolSource, ToolCatalogItem } from "@/lib/workflow-tools";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -773,6 +775,80 @@ export async function listWorkspaceConnectorOptions(
     label: r.label || r.provider,
     connected: !!r.connected,
   }));
+}
+
+/**
+ * Connected connector tool sources available to this workspace. The workspace
+ * connector route is the same inventory runtime sharing uses: workspace-owned
+ * instances plus connector grants. Official catalogs stay local and static;
+ * only custom/dynamic providers need the existing live tool-discovery route.
+ */
+export async function listConnectedWorkflowToolSources(
+  workspaceId: string,
+  assistantId?: string,
+): Promise<ConnectedToolSource[]> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/connectors`,
+  );
+  if (!res.ok) return [];
+
+  type Instance = {
+    id: string;
+    provider: string;
+    label: string;
+    connected: boolean;
+  };
+  const data = (await res.json()) as {
+    teamNative?: Instance[];
+    granted?: Array<{ instance?: Instance }>;
+  } | null;
+  const instances = [
+    ...(Array.isArray(data?.teamNative) ? data.teamNative : []),
+    ...(Array.isArray(data?.granted)
+      ? data.granted.flatMap((grant) => (grant.instance ? [grant.instance] : []))
+      : []),
+  ];
+  const connected = [...new Map(
+    instances.filter((instance) => instance.connected).map((instance) => [instance.id, instance]),
+  ).values()];
+
+  return Promise.all(
+    connected.map(async (instance): Promise<ConnectedToolSource> => {
+      const staticTools = OFFICIAL_CONNECTOR_TOOLS[instance.provider];
+      if (staticTools?.length) {
+        return {
+          id: instance.id,
+          connectorId: instance.provider,
+          label: instance.label || instance.provider,
+        };
+      }
+
+      // Custom MCP providers are addressed by their generated provider UUID.
+      // CLI catalogs need the assistant-scoped route: unlike the personal
+      // connector endpoint, it resolves workspace-owned and granted instances.
+      const discoveryUrl = instance.provider === "cli" && assistantId
+        ? `${API_URL}/api/assistants/${encodeURIComponent(assistantId)}/connectors/${encodeURIComponent(`cli:${instance.id}`)}/tools`
+        : `${API_URL}/api/connectors/${encodeURIComponent(instance.provider === "cli" ? instance.id : instance.provider)}/tools`;
+      try {
+        const toolRes = await authFetch(discoveryUrl);
+        if (!toolRes.ok) {
+          return { id: instance.id, connectorId: instance.provider, label: instance.label };
+        }
+        const toolData = (await toolRes.json()) as {
+          serverName?: string;
+          tools?: ToolCatalogItem[];
+        };
+        return {
+          id: instance.id,
+          connectorId: instance.provider,
+          label: instance.label || toolData.serverName || instance.provider,
+          items: Array.isArray(toolData.tools) ? toolData.tools : [],
+        };
+      } catch {
+        return { id: instance.id, connectorId: instance.provider, label: instance.label };
+      }
+    }),
+  );
 }
 
 export type WorkspaceChannelOption = {
