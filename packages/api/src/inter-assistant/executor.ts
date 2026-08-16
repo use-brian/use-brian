@@ -461,6 +461,8 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     const calleeTools = filterToolsByCapabilities(new Map(options.tools), calleeCapabilities)
     /** Capabilities MCP injection could not provide — see the assignment below. */
     let unavailableCapabilities: string[] = []
+    /** Pinned custom/CLI names retained behind the restricted MCP gateway. */
+    let restrictedSearchToolNames: string[] = []
 
     if (options.connectorStore && options.mcpSettingsStore) {
       try {
@@ -482,6 +484,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           // caller pins tools preserves the token saving on every unpinned callee,
           // which reaches connectors through `mcp_search` exactly as before.
           keepBuiltinsDirect: (params.allowedTools?.length ?? 0) > 0,
+          restrictSearchToToolNames: params.allowedTools,
           connectorStore: options.connectorStore,
           settingsStore: options.mcpSettingsStore,
           assistantConnectorStore: options.assistantConnectorStore,
@@ -513,6 +516,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         // docs/architecture/channels/inter-assistant.md → "Unavailable
         // capabilities on the callee path".
         unavailableCapabilities = mcpInjection.unavailable
+        restrictedSearchToolNames = mcpInjection.restrictedSearchToolNames ?? []
       } catch (err) {
         console.error('[inter-assistant] MCP injection failed for callee:', err)
         // MCP failure is non-fatal; continue with base + capability-filtered tools.
@@ -763,12 +767,18 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // (a workflow `assistant_call.tools` restriction), the callee is narrowed
     // to exactly that set — applied last so it overrides the default consult
     // surface and the memory default. Absent → unchanged.
-    const effectiveAllowedTools =
+    const pageAwareAllowedTools =
       params.pageAnchorId
       && params.allowedTools
       && params.allowedTools.some((name) => DOC_MUTATION_TOOLS.has(name))
         ? [...new Set([...params.allowedTools, 'delegateDocEdit'])]
         : params.allowedTools
+    // Custom HTTP and CLI tools remain folded to preserve remote hooks and MCP
+    // policy dispatch. Their index was restricted during injection, so keeping
+    // the two gateways here cannot broaden the workflow's allow-list.
+    const effectiveAllowedTools = restrictedSearchToolNames.length > 0
+      ? [...new Set([...(pageAwareAllowedTools ?? []), 'mcp_search', 'mcp_call'])]
+      : pageAwareAllowedTools
     const finalTools = filterToolsByAllowList(modeTools, effectiveAllowedTools)
 
     // 4c. Leaf invariant — a delegated callee is a terminal node in the

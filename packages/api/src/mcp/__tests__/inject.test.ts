@@ -351,6 +351,50 @@ describe('[COMP:api/mcp-inject] granted custom MCP overlay', () => {
     expect(tools.has('mcp_call')).toBe(true)
   })
 
+  it('restricts a custom MCP search index to pinned workflow tool names', async () => {
+    callRemoteMcpTool.mockResolvedValueOnce('customer found')
+    discoverMcpServer.mockResolvedValueOnce({
+      name: 'CRM MCP',
+      tools: [
+        { name: 'readCustomer', description: 'Read a customer', inputSchema: { type: 'object' } },
+        { name: 'deleteCustomer', description: 'Delete a customer', inputSchema: { type: 'object' } },
+      ],
+    })
+    const tools = new Map()
+    const result = await injectMcpTools({
+      userId: 'owner-1',
+      assistantId: 'a-1',
+      tools,
+      connectorStore: { list: vi.fn().mockResolvedValue([]) } as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorGrantStore: {
+        listForTargetSystem: vi.fn().mockResolvedValue([{
+          grantedByUserId: 'grantor-1',
+          instance: {
+            id: 'ci-crm', provider: 'mcp-crm', label: 'CRM MCP',
+            url: 'http://localhost:8772/mcp', custom: true, connected: true, config: {},
+          },
+        }]),
+      } as never,
+      assistantTeamId: 'ws-shared',
+      restrictSearchToToolNames: ['readCustomer'],
+    })
+
+    expect(result.restrictedSearchToolNames).toEqual(['readCustomer'])
+    const search = tools.get('mcp_search') as { execute: (i: unknown, c: unknown) => Promise<{ data: unknown }> }
+    const hits = await search.execute({ query: 'customer', limit: 8 }, {} as never)
+    expect(JSON.stringify(hits.data)).toContain('readCustomer')
+    expect(JSON.stringify(hits.data)).not.toContain('deleteCustomer')
+    const call = tools.get('mcp_call') as { execute: (i: unknown, c: unknown) => Promise<unknown> }
+    await call.execute({ server: 'CRM MCP', tool: 'readCustomer', args: { id: 'cust-1' } }, {} as never)
+    expect(callRemoteMcpTool).toHaveBeenCalledWith(
+      'http://localhost:8772/mcp',
+      'readCustomer',
+      { id: 'cust-1' },
+      undefined,
+    )
+  })
+
   it('skips a disconnected granted custom MCP', async () => {
     const tools = new Map()
     const connectorGrantStore = {
@@ -415,6 +459,54 @@ describe('[COMP:api/mcp-inject] granted CLI MCP overlay', () => {
     expect(discoverCliServer).toHaveBeenCalledWith(expect.anything(), 'Project Filesystem')
     expect(tools.has('mcp_search')).toBe(true)
     expect(tools.has('mcp_call')).toBe(true)
+  })
+
+  it('matches pinned CLI tools by their canonical MCP names', async () => {
+    callCliMcpTool.mockResolvedValueOnce('local customer found')
+    discoverCliServer.mockResolvedValueOnce({
+      name: 'Local CRM',
+      url: 'stdio://Local CRM',
+      tools: [
+        { name: 'readLocalCustomer', description: 'Read a local customer', inputSchema: { type: 'object' } },
+        { name: 'deleteLocalCustomer', description: 'Delete a local customer', inputSchema: { type: 'object' } },
+      ],
+    })
+    const tools = new Map()
+    const result = await injectMcpTools({
+      userId: 'owner-1', assistantId: 'a-1', tools,
+      connectorStore: { list: vi.fn().mockResolvedValue([]) } as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorGrantStore: {
+        listForTargetSystem: vi.fn().mockResolvedValue([{
+          grantedByUserId: 'grantor-1',
+          instance: {
+            id: 'cli-local', provider: 'cli', label: 'Local CRM',
+            connected: true, config: {}, updatedAt: new Date(0),
+          },
+        }]),
+      } as never,
+      connectorInstanceStore: {
+        listByWorkspaceSystem: vi.fn().mockResolvedValue([]),
+        getAuthCredentialsSystem: vi.fn().mockResolvedValue({
+          type: 'cli', binaryPath: '/usr/bin/node', args: ['/tmp/local-crm.js'],
+        }),
+      } as never,
+      assistantTeamId: 'ws-shared',
+      restrictSearchToToolNames: ['readLocalCustomer'],
+    })
+
+    expect(result.restrictedSearchToolNames).toEqual(['readLocalCustomer'])
+    const search = tools.get('mcp_search') as { execute: (i: unknown, c: unknown) => Promise<{ data: unknown }> }
+    const hits = await search.execute({ query: 'local customer', limit: 8 }, {} as never)
+    expect(JSON.stringify(hits.data)).toContain('readLocalCustomer')
+    expect(JSON.stringify(hits.data)).not.toContain('deleteLocalCustomer')
+    const call = tools.get('mcp_call') as { execute: (i: unknown, c: unknown) => Promise<unknown> }
+    await call.execute({ server: 'Local CRM', tool: 'readLocalCustomer', args: { id: 'cust-2' } }, {} as never)
+    expect(callCliMcpTool).toHaveBeenCalledWith(
+      expect.objectContaining({ binaryPath: '/usr/bin/node' }),
+      'readLocalCustomer',
+      { id: 'cust-2' },
+    )
   })
 
   it('skips only the CLI instance disabled for this assistant', async () => {

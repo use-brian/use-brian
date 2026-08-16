@@ -51,7 +51,11 @@ vi.mock('../../db/workspace-store.js', () => ({
     .mockResolvedValue({ clearance: 'confidential', compartments: null }),
 }))
 vi.mock('../../mcp/inject.js', () => ({
-  injectMcpTools: vi.fn().mockResolvedValue({ enrichConfirmation: async (_t: string, i: unknown) => i, unavailable: [] }),
+  injectMcpTools: vi.fn().mockResolvedValue({
+    enrichConfirmation: async (_t: string, i: unknown) => i,
+    unavailable: [],
+    restrictedSearchToolNames: [],
+  }),
 }))
 vi.mock('../../routes/proactive-compaction.js', () => ({
   runProactiveCompaction: vi.fn().mockResolvedValue({ messages: [], compacted: false, episodes: [] }),
@@ -796,6 +800,29 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     yieldsText()
     await injectingExecutor(new Map([['searchThings', plainTool()]]))(baseParams)
     expect(mockInjectMcp.mock.calls[0][0].keepBuiltinsDirect).toBe(false)
+  })
+
+  it('keeps a restricted MCP gateway when a custom or CLI tool is pinned', async () => {
+    yieldsText()
+    mockInjectMcp.mockImplementationOnce(async (params) => {
+      params.tools.set('mcp_search', plainTool('mcp_search') as never)
+      params.tools.set('mcp_call', plainTool('mcp_call') as never)
+      return {
+        enrichConfirmation: async (_toolName: string, input: Record<string, unknown>) => input,
+        unavailable: [],
+        restrictedSearchToolNames: ['lookupCustomer'],
+      }
+    })
+
+    await injectingExecutor(new Map())({
+      ...baseParams,
+      callerChannelType: 'workflow',
+      allowedTools: ['lookupCustomer'],
+    })
+
+    expect(mockInjectMcp.mock.calls[0][0].restrictSearchToToolNames).toEqual(['lookupCustomer'])
+    const passed = mockQueryLoop.mock.calls[0][0].tools as Map<string, unknown>
+    expect([...passed.keys()].sort()).toEqual(['mcp_call', 'mcp_search'])
   })
 
   it('persists the assistant turn on turn_complete', async () => {
