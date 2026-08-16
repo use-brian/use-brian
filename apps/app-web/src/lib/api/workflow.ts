@@ -781,6 +781,7 @@ export async function listWorkspaceConnectorOptions(
  */
 export async function listConnectedWorkflowToolSources(
   workspaceId: string,
+  assistantId?: string,
 ): Promise<ConnectedToolSource[]> {
   const res = await authFetch(
     `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/connectors`,
@@ -819,12 +820,13 @@ export async function listConnectedWorkflowToolSources(
       }
 
       // Custom MCP providers are addressed by their generated provider UUID.
-      // CLI catalogs are instance-specific and use the connector-instance id.
-      const discoveryId = instance.provider === "cli" ? instance.id : instance.provider;
+      // CLI catalogs need the assistant-scoped route: unlike the personal
+      // connector endpoint, it resolves workspace-owned and granted instances.
+      const discoveryUrl = instance.provider === "cli" && assistantId
+        ? `${API_URL}/api/assistants/${encodeURIComponent(assistantId)}/connectors/${encodeURIComponent(`cli:${instance.id}`)}/tools`
+        : `${API_URL}/api/connectors/${encodeURIComponent(instance.provider === "cli" ? instance.id : instance.provider)}/tools`;
       try {
-        const toolRes = await authFetch(
-          `${API_URL}/api/connectors/${encodeURIComponent(discoveryId)}/tools`,
-        );
+        const toolRes = await authFetch(discoveryUrl);
         if (!toolRes.ok) {
           return { id: instance.id, connectorId: instance.provider, label: instance.label };
         }
