@@ -130,7 +130,10 @@ export function buildToolCatalog(sources: ConnectedToolSource[]): ToolGroup[] {
     // Official connectors with a static catalog were emitted above. Official
     // dynamic connectors (currently CLI) fall through with their discovered
     // items, as do custom MCP providers whose id is not in the registry.
-    if (officialIds.has(source.connectorId) && OFFICIAL_CONNECTOR_TOOLS[source.connectorId]) {
+    if (
+      officialIds.has(source.connectorId) &&
+      (OFFICIAL_CONNECTOR_TOOLS[source.connectorId]?.length ?? 0) > 0
+    ) {
       continue;
     }
     if (!source.items?.length) continue;

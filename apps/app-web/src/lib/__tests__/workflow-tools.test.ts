@@ -261,5 +261,16 @@ describe("[COMP:app-web/workflow-tools] connected connector loading", () => {
       3,
       expect.stringContaining("/api/connectors/11111111-1111-4111-8111-111111111111/tools"),
     );
+
+    const groups = buildToolCatalog(sources);
+    expect(groups.find((group) => group.id === "cli-instance")).toEqual({
+      id: "cli-instance",
+      label: "Local tools",
+      items: [{
+        name: "localStatus",
+        description: "Read local status",
+        classification: "read",
+      }],
+    });
   });
 });
