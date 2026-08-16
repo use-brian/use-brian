@@ -19,22 +19,28 @@ vi.mock('../../db/client.js', () => ({
   query: vi.fn(async () => ({ rows: [] })),
 }))
 
-const sendMessage = vi.fn(
-  async (_channelId: string, _msg: unknown, _opts?: { threadTs?: string }) => '1751970000.111111',
-)
+const { sendMessage, createTelegramAdapter } = vi.hoisted(() => {
+  const send = vi.fn()
+  return { sendMessage: send, createTelegramAdapter: vi.fn(() => ({ sendMessage: send })) }
+})
 vi.mock('@use-brian/channels', () => ({
   createSlackAdapter: vi.fn(() => ({ sendMessage })),
-  createTelegramAdapter: vi.fn(() => ({ sendMessage })),
+  createTelegramAdapter,
   createWhatsAppAdapter: vi.fn(() => ({ sendMessage })),
 }))
 
 import { createWorkflowChannelDelivery } from '../channel-delivery.js'
+import { createTelegramAdapter as mockedCreateTelegramAdapter } from '@use-brian/channels'
 import type { ChannelIntegrationStore } from '../../db/channel-integrations.js'
 
 const integrationStore = {
   getCredentialsForAssistantSystem: vi.fn(async () => ({
     credentials: { bot_token: 'xoxb-test' },
     botUserId: 'B1',
+  })),
+  getCredentialsForAssistantIntegrationSystem: vi.fn(async () => ({
+    credentials: { bot_token: 'selected-token' },
+    botUserId: 'B2',
   })),
 } as unknown as ChannelIntegrationStore
 
@@ -49,7 +55,11 @@ function baseParams() {
 }
 
 beforeEach(() => {
-  sendMessage.mockClear()
+  sendMessage.mockReset()
+  sendMessage.mockResolvedValue('1751970000.111111')
+  vi.mocked(mockedCreateTelegramAdapter).mockClear()
+  vi.mocked(integrationStore.getCredentialsForAssistantSystem).mockClear()
+  vi.mocked(integrationStore.getCredentialsForAssistantIntegrationSystem).mockClear()
 })
 
 describe('[COMP:workflow/channel-delivery] thread-reply pass-through', () => {
@@ -101,5 +111,53 @@ describe('[COMP:workflow/channel-delivery] thread-reply pass-through', () => {
       { threadTs: '778899' },
     )
     expect(outcome).toMatchObject({ status: 'delivered', messageId: '1751970000.111111' })
+  })
+
+  it('telegram: retries the shared bot when the assistant BYO bot cannot see the chat', async () => {
+    sendMessage
+      .mockRejectedValueOnce(new Error('Telegram API sendMessage: Bad Request: chat not found'))
+      .mockResolvedValueOnce('778900')
+    const deliver = createWorkflowChannelDelivery({
+      integrationStore,
+      defaultTelegramBotToken: 'shared-token',
+    })
+
+    const outcome = await deliver({
+      ...baseParams(),
+      channelType: 'telegram',
+      channelId: '-100555:topic:42',
+    })
+
+    expect(vi.mocked(mockedCreateTelegramAdapter).mock.calls.map(([options]) => options.token)).toEqual([
+      'xoxb-test',
+      'shared-token',
+    ])
+    expect(sendMessage).toHaveBeenCalledTimes(2)
+    expect(outcome).toMatchObject({ status: 'delivered', messageId: '778900' })
+  })
+
+  it('telegram: sends only through the explicitly selected integration', async () => {
+    const deliver = createWorkflowChannelDelivery({
+      integrationStore,
+      defaultTelegramBotToken: 'shared-token',
+    })
+
+    const outcome = await deliver({
+      ...baseParams(),
+      channelType: 'telegram',
+      channelId: '-100555:topic:42',
+      channelIntegrationId: '00000000-0000-4000-8000-000000000001',
+    })
+
+    expect(vi.mocked(mockedCreateTelegramAdapter).mock.calls.map(([options]) => options.token)).toEqual([
+      'selected-token',
+    ])
+    expect(integrationStore.getCredentialsForAssistantIntegrationSystem).toHaveBeenCalledWith(
+      'asst-1',
+      '00000000-0000-4000-8000-000000000001',
+      'telegram',
+      '-100555:topic:42',
+    )
+    expect(outcome).toMatchObject({ status: 'delivered' })
   })
 })

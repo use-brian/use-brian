@@ -178,6 +178,7 @@ export type WorkflowToolDeps = {
     assistantId: string
     channelType: 'telegram' | 'slack' | 'whatsapp'
     channelId: string
+    channelIntegrationId?: string
   }) => Promise<{ ok: boolean; reason?: string }>
   /**
    * Authoring-time connector preflight (the GitHub `Bad credentials` incident).
@@ -713,6 +714,7 @@ async function dependencyIssues(
       assistantTarget: AssistantCallStep['target']['assistantId']
       channelType: 'telegram' | 'slack' | 'whatsapp'
       channelId: string
+      channelIntegrationId?: string
     }> = []
     for (const step of def.steps) {
       if (
@@ -729,6 +731,7 @@ async function dependencyIssues(
           assistantTarget: step.target.assistantId,
           channelType: step.deliver.channelType,
           channelId: step.deliver.channelId,
+          channelIntegrationId: step.deliver.channelIntegrationId,
         })
       }
     }
@@ -775,6 +778,7 @@ async function dependencyIssues(
           assistantId,
           channelType: t.channelType,
           channelId: t.channelId,
+          channelIntegrationId: t.channelIntegrationId,
         })
         if (!res.ok) {
           errors.push(

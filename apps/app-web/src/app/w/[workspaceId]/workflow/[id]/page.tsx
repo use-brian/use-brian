@@ -40,11 +40,13 @@ import {
   deleteWorkflow,
   getWorkflowFull,
   listChannelDestinations,
+  listWorkspaceChannelOptions,
   listWorkspaceSlackChannels,
   runWorkflowNow,
   updateWorkflow,
   type ChannelDestination,
   type SlackChannelOption,
+  type WorkspaceChannelOption,
   type WorkflowFull,
   type WorkflowIssue,
   type WorkflowStep,
@@ -87,6 +89,7 @@ export default function WorkflowDetailPage({
   const [draft, setDraft] = useState<WorkflowFull | null>(null);
   const [assistants, setAssistants] = useState<StudioAssistantSummary[]>([]);
   const [destinations, setDestinations] = useState<ChannelDestination[]>([]);
+  const [channelOptions, setChannelOptions] = useState<WorkspaceChannelOption[]>([]);
   const [slackChannels, setSlackChannels] = useState<SlackChannelOption[]>([]);
   const [pages, setPages] = useState<ViewListRow[]>([]);
   const [blueprints, setBlueprints] = useState<CustomPageTemplateSummary[]>([]);
@@ -150,8 +153,14 @@ export default function WorkflowDetailPage({
     if (!activeId) return;
     let cancelled = false;
     void (async () => {
-      const list = await listChannelDestinations(activeId);
-      if (!cancelled) setDestinations(list);
+      const [destinationList, channelList] = await Promise.all([
+        listChannelDestinations(activeId),
+        listWorkspaceChannelOptions(activeId),
+      ]);
+      if (!cancelled) {
+        setDestinations(destinationList);
+        setChannelOptions(channelList);
+      }
     })();
     return () => {
       cancelled = true;
@@ -854,6 +863,7 @@ export default function WorkflowDetailPage({
                 step={selectedStep}
                 assistants={assistants}
                 destinations={destinations}
+                channelOptions={channelOptions}
                 slackChannels={slackChannels}
                 pages={pages}
                 blueprints={blueprints}

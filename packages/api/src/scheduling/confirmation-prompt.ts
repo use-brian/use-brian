@@ -27,6 +27,7 @@ export type ConfirmationPromptTarget = {
   assistantId: string
   channelType: string
   channelId: string
+  channelIntegrationId?: string
 }
 
 export type ConfirmationPromptDeps = {
@@ -44,16 +45,23 @@ export type ConfirmationPromptDeps = {
 export async function resolveTelegramBotToken(
   assistantId: string,
   deps: ConfirmationPromptDeps,
+  channelIntegrationId?: string,
+  channelId?: string,
 ): Promise<string | undefined> {
   if (deps.integrationStore) {
-    const integration = await deps.integrationStore.getCredentialsForAssistantSystem(
-      assistantId,
-      'telegram',
-    )
+    const integration = channelIntegrationId && channelId
+      ? await deps.integrationStore.getCredentialsForAssistantIntegrationSystem(
+          assistantId,
+          channelIntegrationId,
+          'telegram',
+          channelId,
+        )
+      : await deps.integrationStore.getCredentialsForAssistantSystem(assistantId, 'telegram')
     if (integration) {
       return (integration.credentials as { bot_token: string }).bot_token
     }
   }
+  if (channelIntegrationId) return undefined
   return deps.defaultTelegramBotToken
 }
 
@@ -76,7 +84,12 @@ export async function sendConfirmationPrompt(
 
   try {
     if (target.channelType === 'telegram') {
-      const botToken = await resolveTelegramBotToken(target.assistantId, deps)
+      const botToken = await resolveTelegramBotToken(
+        target.assistantId,
+        deps,
+        target.channelIntegrationId,
+        target.channelId,
+      )
       if (botToken) {
         const adapter = createTelegramAdapter({ token: botToken })
         const actions = [

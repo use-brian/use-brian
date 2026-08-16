@@ -15,6 +15,12 @@ function integrationStoreWith(
   return {
     getCredentialsForAssistantSystem: async (_assistantId: string, channelType: string) =>
       creds[channelType] ?? null,
+    getCredentialsForAssistantIntegrationSystem: async (
+      _assistantId: string,
+      _integrationId: string,
+      channelType: string,
+      _channelId: string,
+    ) => creds[channelType] ?? null,
   } as unknown as ChannelIntegrationStore
 }
 
@@ -101,13 +107,101 @@ describe('[COMP:workflow/dependency-preflight] validateDeliveryTarget', () => {
     expect(r.ok).toBe(true)
   })
 
-  it('accepts Telegram with the shared default bot token; rejects when neither BYO nor default exists', async () => {
+  it('accepts Telegram when the shared default bot can see the chat; rejects when no bot exists', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ ok: true, result: { id: 42, type: 'private' } }), { status: 200 })),
+    )
     const withDefault = createWorkflowDependencyPreflight({ defaultTelegramBotToken: 'bot-token' })
     expect((await withDefault.validateDeliveryTarget({ assistantId: ASSISTANT_ID, channelType: 'telegram', channelId: '42' })).ok).toBe(true)
 
     const without = createWorkflowDependencyPreflight({ integrationStore: integrationStoreWith({}) })
     const r = await without.validateDeliveryTarget({ assistantId: ASSISTANT_ID, channelType: 'telegram', channelId: '42' })
     expect(r.ok).toBe(false)
+  })
+
+  it('checks a Telegram topic against its base chat and falls back from BYO to the shared bot', async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input)
+      const body = JSON.parse(String(init?.body)) as { chat_id: string }
+      expect(body.chat_id).toBe('-100555')
+      return url.includes('botbyo-token/')
+        ? new Response(JSON.stringify({ ok: false, error_code: 400, description: 'Bad Request: chat not found' }), { status: 400 })
+        : new Response(JSON.stringify({ ok: true, result: { id: -100555, type: 'supergroup' } }), { status: 200 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const { validateDeliveryTarget } = createWorkflowDependencyPreflight({
+      integrationStore: integrationStoreWith({ telegram: { credentials: { bot_token: 'byo-token' } } }),
+      defaultTelegramBotToken: 'shared-token',
+    })
+
+    const result = await validateDeliveryTarget({
+      assistantId: ASSISTANT_ID,
+      channelType: 'telegram',
+      channelId: '-100555:topic:42',
+    })
+
+    expect(result.ok).toBe(true)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('rejects a Telegram target that no configured bot can see', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(
+        JSON.stringify({ ok: false, error_code: 400, description: 'Bad Request: chat not found' }),
+        { status: 400 },
+      )),
+    )
+    const { validateDeliveryTarget } = createWorkflowDependencyPreflight({
+      integrationStore: integrationStoreWith({ telegram: { credentials: { bot_token: 'byo-token' } } }),
+      defaultTelegramBotToken: 'shared-token',
+    })
+
+    const result = await validateDeliveryTarget({
+      assistantId: ASSISTANT_ID,
+      channelType: 'telegram',
+      channelId: '-100555:topic:42',
+    })
+
+    expect(result).toEqual({ ok: false, reason: 'Telegram: chat not found (-100555)' })
+  })
+
+  it('probes only the explicitly selected Telegram integration', async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      expect(String(input)).toContain('botselected-token/getChat')
+      return new Response(JSON.stringify({ ok: true, result: { id: -100555, type: 'supergroup' } }), { status: 200 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const { validateDeliveryTarget } = createWorkflowDependencyPreflight({
+      integrationStore: integrationStoreWith({ telegram: { credentials: { bot_token: 'selected-token' } } }),
+      defaultTelegramBotToken: 'shared-token',
+    })
+
+    const result = await validateDeliveryTarget({
+      assistantId: ASSISTANT_ID,
+      channelType: 'telegram',
+      channelId: '-100555:topic:42',
+      channelIntegrationId: '00000000-0000-4000-8000-000000000001',
+    })
+
+    expect(result.ok).toBe(true)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not block Telegram authoring on a transient getChat failure', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('network unavailable') }))
+    const { validateDeliveryTarget } = createWorkflowDependencyPreflight({
+      defaultTelegramBotToken: 'shared-token',
+    })
+
+    const result = await validateDeliveryTarget({
+      assistantId: ASSISTANT_ID,
+      channelType: 'telegram',
+      channelId: '-100555:topic:42',
+    })
+
+    expect(result.ok).toBe(true)
   })
 
   it('accepts WhatsApp only when the connector is configured', async () => {

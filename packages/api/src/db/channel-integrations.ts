@@ -362,6 +362,14 @@ export type ChannelIntegrationStore = {
     channelType: string,
   ): Promise<ChannelIntegrationWithCredentials | null>
 
+  /** Resolve one exact integration, proving its routing covers this assistant + surface. */
+  getCredentialsForAssistantIntegrationSystem(
+    assistantId: string,
+    integrationId: string,
+    channelType: string,
+    externalSurfaceId: string,
+  ): Promise<ChannelIntegrationWithCredentials | null>
+
   /**
    * Lookup by bot username. Used by the Mini App verify route to resolve
    * which BYO bot's token should verify an `initData` HMAC when the
@@ -590,6 +598,57 @@ export function createDbChannelIntegrationStore(key: Buffer): ChannelIntegration
            LIMIT 1
          )`,
         [assistantId, channelType],
+      )
+      if (result.rows.length === 0) return null
+      const row = result.rows[0]
+      const credentials = decryptCredentials(row.credentials, key)
+      return {
+        id: row.id,
+        channelId: row.channelId,
+        channelType: row.channelType,
+        teamId: row.teamId,
+        teamName: row.teamName,
+        botUserId: row.botUserId,
+        botUsername: row.botUsername,
+        config: row.config ?? {},
+        status: row.status,
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt,
+        lastEventAt: row.lastEventAt,
+        connectorInstanceId: row.connectorInstanceId,
+        credentials,
+      }
+    },
+
+    async getCredentialsForAssistantIntegrationSystem(
+      assistantId,
+      integrationId,
+      channelType,
+      externalSurfaceId,
+    ) {
+      const result = await query<CiRow & { credentials: Buffer }>(
+        `SELECT ${CI_PUBLIC_COLS}, credentials
+         FROM channel_integrations
+         WHERE id = (
+           SELECT ci.id FROM channel_integrations ci
+           JOIN channels c ON c.id = ci.channel_id
+           JOIN channel_assistants ca ON ca.channel_id = ci.channel_id
+           WHERE ca.assistant_id = $1
+             AND ci.id = $2
+             AND ci.channel_type = $3
+             AND ci.status = 'active'
+             AND c.status = 'active'
+             AND ca.id = (
+               SELECT winning.id
+               FROM channel_assistants winning
+               WHERE winning.channel_id = ci.channel_id
+                 AND (winning.external_surface_id IS NULL OR winning.external_surface_id = $4)
+               ORDER BY (winning.external_surface_id IS NOT NULL) DESC
+               LIMIT 1
+             )
+           LIMIT 1
+         )`,
+        [assistantId, integrationId, channelType, externalSurfaceId],
       )
       if (result.rows.length === 0) return null
       const row = result.rows[0]

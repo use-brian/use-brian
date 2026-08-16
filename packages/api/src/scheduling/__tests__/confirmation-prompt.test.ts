@@ -40,6 +40,11 @@ function fakeIntegrationStore(botToken: string | null): ChannelIntegrationStore 
         ? null
         : ({ credentials: { bot_token: botToken }, botUserId: 'U1' } as never),
     ),
+    getCredentialsForAssistantIntegrationSystem: vi.fn(async () =>
+      botToken === null
+        ? null
+        : ({ credentials: { bot_token: botToken }, botUserId: 'U1' } as never),
+    ),
   } as unknown as ChannelIntegrationStore
 }
 
@@ -80,6 +85,34 @@ describe('[COMP:scheduling/confirmation-prompt] resolveTelegramBotToken', () => 
     const token = await resolveTelegramBotToken('a_1', {
       integrationStore: fakeIntegrationStore(null),
     })
+    expect(token).toBeUndefined()
+  })
+
+  it('resolves an explicitly selected integration without shared-bot fallback', async () => {
+    const store = fakeIntegrationStore('selected-tok')
+    const token = await resolveTelegramBotToken(
+      'a_1',
+      { integrationStore: store, defaultTelegramBotToken: 'shared-tok' },
+      '00000000-0000-4000-8000-000000000001',
+      '-100555:topic:42',
+    )
+
+    expect(token).toBe('selected-tok')
+    expect(store.getCredentialsForAssistantIntegrationSystem).toHaveBeenCalledWith(
+      'a_1',
+      '00000000-0000-4000-8000-000000000001',
+      'telegram',
+      '-100555:topic:42',
+    )
+  })
+
+  it('does not fall back when an explicitly selected integration is unavailable', async () => {
+    const token = await resolveTelegramBotToken(
+      'a_1',
+      { integrationStore: fakeIntegrationStore(null), defaultTelegramBotToken: 'shared-tok' },
+      '00000000-0000-4000-8000-000000000001',
+      '-100555',
+    )
     expect(token).toBeUndefined()
   })
 })

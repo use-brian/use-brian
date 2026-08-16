@@ -50,7 +50,15 @@ export type WorkflowChannelDeliveryOptions = {
 export function createWorkflowChannelDelivery(
   options: WorkflowChannelDeliveryOptions,
 ): DeliverToChannel {
-  return async ({ assistantId, userId, channelType, channelId, text, threadRef }): Promise<DeliveryOutcome> => {
+  return async ({
+    assistantId,
+    userId,
+    channelType,
+    channelId,
+    channelIntegrationId,
+    text,
+    threadRef,
+  }): Promise<DeliveryOutcome> => {
     // Strip any model scaffolding / meta-commentary before it is persisted to
     // the delivery session OR pushed to the channel — a cron-framed turn can
     // echo a "Message body:" planning preamble and a duplicated body (see
@@ -82,24 +90,42 @@ export function createWorkflowChannelDelivery(
     })
 
     if (channelType === 'telegram') {
-      let token = options.defaultTelegramBotToken
+      const tokens: string[] = []
       if (options.integrationStore) {
-        const integ = await options.integrationStore.getCredentialsForAssistantSystem(
-          assistantId,
-          'telegram',
-        )
-        if (integ) token = (integ.credentials as { bot_token: string }).bot_token
+        const integ = channelIntegrationId
+          ? await options.integrationStore.getCredentialsForAssistantIntegrationSystem(
+              assistantId,
+              channelIntegrationId,
+              'telegram',
+              channelId,
+            )
+          : await options.integrationStore.getCredentialsForAssistantSystem(assistantId, 'telegram')
+        const byoToken = integ && (integ.credentials as { bot_token?: string }).bot_token
+        if (byoToken) tokens.push(byoToken)
       }
-      if (!token) return { status: 'skipped', channelType, reason: 'no_integration' }
+      if (!channelIntegrationId && options.defaultTelegramBotToken && !tokens.includes(options.defaultTelegramBotToken)) {
+        tokens.push(options.defaultTelegramBotToken)
+      }
+      if (tokens.length === 0) return { status: 'skipped', channelType, reason: 'no_integration' }
       // `threadRef` (an earlier delivery's message id) posts this one as a
       // reply; the returned message id lets a later `deliver.thread` step
       // reply under THIS message. See workflow.md → deliver `thread`.
-      const tgMessageId = await createTelegramAdapter({ token }).sendMessage(
-        channelId,
-        { text: deliverable, format: 'markdown' },
-        threadRef ? { threadTs: threadRef } : undefined,
-      )
-      return { status: 'delivered', channelType, channelId, messageId: tgMessageId || undefined }
+      for (const [index, token] of tokens.entries()) {
+        try {
+          const tgMessageId = await createTelegramAdapter({ token }).sendMessage(
+            channelId,
+            { text: deliverable, format: 'markdown' },
+            threadRef ? { threadTs: threadRef } : undefined,
+          )
+          return { status: 'delivered', channelType, channelId, messageId: tgMessageId || undefined }
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          const canTryNext = index < tokens.length - 1
+            && /Telegram API sendMessage:.*chat not found/i.test(message)
+          if (!canTryNext) throw err
+        }
+      }
+      throw new Error('Telegram delivery exhausted all configured bots')
     }
 
     if (channelType === 'slack') {

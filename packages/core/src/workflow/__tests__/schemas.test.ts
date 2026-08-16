@@ -369,7 +369,12 @@ describe('[COMP:workflow/schemas] WorkflowDefinitionSchema', () => {
 
   function deliverStep(
     id: string,
-    deliver?: { channelType: string; channelId: string; thread?: { fromStep: string } },
+    deliver?: {
+      channelType: string
+      channelId: string
+      channelIntegrationId?: string
+      thread?: { fromStep: string }
+    },
   ) {
     return {
       id,
@@ -400,6 +405,50 @@ describe('[COMP:workflow/schemas] WorkflowDefinitionSchema', () => {
       ],
     }
     expect(WorkflowDefinitionSchema.safeParse(def).success).toBe(true)
+  })
+
+  it('accepts a Telegram destination pinned to one channel integration', () => {
+    const def = {
+      startStepId: 'send',
+      steps: [deliverStep('send', {
+        channelType: 'telegram',
+        channelId: '-100555:topic:42',
+        channelIntegrationId: '00000000-0000-4000-8000-000000000001',
+      })],
+    }
+    expect(WorkflowDefinitionSchema.safeParse(def).success).toBe(true)
+  })
+
+  it('rejects channelIntegrationId on a non-Telegram destination', () => {
+    const def = {
+      startStepId: 'send',
+      steps: [deliverStep('send', {
+        channelType: 'slack',
+        channelId: 'C123',
+        channelIntegrationId: '00000000-0000-4000-8000-000000000001',
+      })],
+    }
+    expect(WorkflowDefinitionSchema.safeParse(def).success).toBe(false)
+  })
+
+  it('rejects a threaded reply pinned to a different channel integration', () => {
+    const def = {
+      startStepId: 'parent',
+      steps: [
+        deliverStep('parent', {
+          channelType: 'telegram',
+          channelId: '-100555:topic:42',
+          channelIntegrationId: '00000000-0000-4000-8000-000000000001',
+        }),
+        deliverStep('reply', {
+          channelType: 'telegram',
+          channelId: '-100555:topic:42',
+          channelIntegrationId: '00000000-0000-4000-8000-000000000002',
+          thread: { fromStep: 'parent' },
+        }),
+      ],
+    }
+    expect(WorkflowDefinitionSchema.safeParse(def).success).toBe(false)
   })
 
   it('rejects deliver.thread on a whatsapp delivery (no threaded replies)', () => {

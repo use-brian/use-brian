@@ -241,6 +241,10 @@ function serializeChannel(
     // Per-integration behavior config. `null` when the channel has no
     // `channel_integrations` row — the UI then renders no config section.
     integrationId: integration?.id ?? null,
+    integrationStatus: integration?.status ?? null,
+    integrationLabel: integration?.botUsername
+      ? `@${integration.botUsername}`
+      : integration?.teamName ?? null,
     config: integration?.config ?? null,
   }
 }
@@ -426,15 +430,41 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
         .map((r) => r.channelId),
     )]
     const telegramNames = await resolveTelegramTitles(userId, workspaceId, telegramIdsToResolve)
+    let telegramIntegrations: ChannelIntegration[] = []
+    if (opts.integrationStore) {
+      try {
+        telegramIntegrations = (await opts.integrationStore.listForWorkspace(userId, workspaceId))
+          .filter((integration) => integration.channelType === 'telegram' && integration.status === 'active')
+      } catch {
+        // Destination discovery stays best-effort; unresolved rows remain usable
+        // through the shared/default bot path.
+      }
+    }
     res.json({
-      destinations: rows.map((r) => ({
-        channelType: r.channelType,
-        channelId: r.channelId,
-        title: parseTelegramDestinationId(r.channelId)?.topicId != null
+      destinations: rows.flatMap((r) => {
+        const title = parseTelegramDestinationId(r.channelId)?.topicId != null
           ? telegramNames.get(r.channelId) ?? r.title
-          : r.title ?? telegramNames.get(r.channelId) ?? null,
-        lastActiveAt: r.lastActiveAt.toISOString(),
-      })),
+          : r.title ?? telegramNames.get(r.channelId) ?? null
+        const base = {
+          channelType: r.channelType,
+          channelId: r.channelId,
+          title,
+          lastActiveAt: r.lastActiveAt.toISOString(),
+        }
+        if (r.channelType !== 'telegram') return [base]
+        const parsed = parseTelegramDestinationId(r.channelId)
+        const owners = parsed
+          ? telegramIntegrations.filter((integration) =>
+              integration.config.seenChats?.some((chat) => chat.chatId === parsed.chatId),
+            )
+          : []
+        if (owners.length === 0) return [{ ...base, channelIntegrationId: null, integrationLabel: null }]
+        return owners.map((integration) => ({
+          ...base,
+          channelIntegrationId: integration.id,
+          integrationLabel: integration.botUsername ? `@${integration.botUsername}` : integration.teamName,
+        }))
+      }),
     })
   })
 

@@ -286,6 +286,7 @@ describe('[COMP:api/channels-route] channel config', () => {
     )
     expect(res.status).toBe(200)
     expect(res.body.channels[0].integrationId).toBe('int-1')
+    expect(res.body.channels[0].integrationStatus).toBe('active')
     expect(res.body.channels[0].config).toEqual({ requireMention: false })
   })
 
@@ -295,6 +296,7 @@ describe('[COMP:api/channels-route] channel config', () => {
     expect(res.status).toBe(200)
     expect(res.body.channels[0].config).toBeNull()
     expect(res.body.channels[0].integrationId).toBeNull()
+    expect(res.body.channels[0].integrationStatus).toBeNull()
   })
 
   it('PATCH config 503s when no integration store is configured', async () => {
@@ -867,6 +869,7 @@ describe('[COMP:api/channel-destinations-route] GET channel-destinations', () =>
       listForWorkspace: vi.fn().mockResolvedValue([
         makeIntegration({
           channelType: 'telegram',
+          botUsername: 'project_bot',
           config: {
             seenChats: [{
               chatId: '-100555',
@@ -887,8 +890,54 @@ describe('[COMP:api/channel-destinations-route] GET channel-destinations', () =>
     expect(res.body.destinations[0]).toMatchObject({
       channelId: '-100555:topic:42',
       title: 'Project Forum › Standups',
+      channelIntegrationId: 'int-1',
+      integrationLabel: '@project_bot',
     })
     expect(vi.mocked(createTelegramApi)).not.toHaveBeenCalled()
+  })
+
+  it('returns one destination per Telegram channel that can reach the chat', async () => {
+    mockRows([destRow({ channelId: '-100555' })])
+    const seenChat = {
+      chatId: '-100555',
+      chatTitle: 'Project Forum',
+      isForum: false,
+      topics: [],
+      lastSeenAt: '2026-06-29T09:45:15Z',
+    }
+    const integrationStore = {
+      listForWorkspace: vi.fn().mockResolvedValue([
+        makeIntegration({
+          id: 'int-project',
+          channelType: 'telegram',
+          botUsername: 'project_bot',
+          config: { seenChats: [seenChat] },
+        }),
+        makeIntegration({
+          id: 'int-ops',
+          channelType: 'telegram',
+          botUsername: 'ops_bot',
+          config: { seenChats: [seenChat] },
+        }),
+      ]),
+    } as unknown as ChannelIntegrationStore
+
+    const res = await request(buildApp({ integrationStore }))
+      .get('/api/workspaces/ws-1/channel-destinations')
+
+    expect(res.status).toBe(200)
+    expect(res.body.destinations).toEqual([
+      expect.objectContaining({
+        channelId: '-100555',
+        channelIntegrationId: 'int-project',
+        integrationLabel: '@project_bot',
+      }),
+      expect.objectContaining({
+        channelId: '-100555',
+        channelIntegrationId: 'int-ops',
+        integrationLabel: '@ops_bot',
+      }),
+    ])
   })
 
   it('resolves a topic group by its base chat id and falls back to the topic number', async () => {

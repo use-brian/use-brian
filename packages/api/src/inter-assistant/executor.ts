@@ -287,7 +287,11 @@ export type CalleeQueryParams = {
    * to this channel and waits in-process (5-min timeout). Absent → ordinary
    * A2A; confirmations are stripped (the approval was already granted).
    */
-  deliverTarget?: { channelType: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams'; channelId: string }
+  deliverTarget?: {
+    channelType: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams'
+    channelId: string
+    channelIntegrationId?: string
+  }
   /**
    * Page anchor — a concrete `saved_views` id resolved by the workflow
    * executor from the step's `page` binding. When set, the callee runs
@@ -1665,6 +1669,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
                 assistantId: params.calleeAssistantId,
                 channelType: params.deliverTarget.channelType,
                 channelId: params.deliverTarget.channelId,
+                channelIntegrationId: params.deliverTarget.channelIntegrationId,
               },
               req,
               {

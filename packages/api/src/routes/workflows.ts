@@ -303,6 +303,7 @@ async function dependencyIssues(
           assistantId,
           channelType: step.deliver.channelType,
           channelId: step.deliver.channelId,
+          channelIntegrationId: step.deliver.channelIntegrationId,
         })
         if (!res.ok) {
           issues.push({
