@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { z } from 'zod'
 import { buildTool, type Tool, type ToolContext } from '@use-brian/core'
 import { resolveDurableResumePolicy, resolveResumeOutcomeNote } from '../session-resume-replay.js'
+import { MODEL_MAP } from '../../model-resolution.js'
 
 // ─────────────────────────────────────────────────────────────────────
 // `resolveResumeOutcomeNote` (WU-6.4 — Path B durable chat resume).
@@ -262,7 +263,7 @@ describe('[COMP:brain/session-resume-worker] resolveResumeOutcomeNote', () => {
 describe('[COMP:brain/session-resume-worker] durable execution policy', () => {
   it('restores the logical tier budget without pinning a serving alias', () => {
     expect(resolveDurableResumePolicy({ selectedTier: 'max' }, 'gemini-flash')).toMatchObject({
-      logicalModel: 'gemini-3.6-flash',
+      logicalModel: MODEL_MAP.max,
       logicalTier: 'max',
       budget: { maxTurns: 100, maxToolCalls: 100 },
     })
