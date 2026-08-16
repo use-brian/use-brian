@@ -2985,8 +2985,8 @@ export const ja: Dictionary = {
       deliverDestinationSlackEmpty: "Slackチャンネルが見つかりません。Slackは接続されていますか？",
       deliverDestinationEmpty: "このチャンネルの最近のチャットはありません。下の欄でIDを直接指定してください。",
       deliverDestinationCustomOption: "IDを直接入力…",
-      deliverDestinationCustomLabel: "チャンネルまたはチャットID",
-      deliverDestinationCustomHint: "Telegram のチャットID、Slack のチャンネルID をそのまま貼り付けます。",
+      deliverDestinationCustomLabel: "チャンネル、チャット、トピックID",
+      deliverDestinationCustomHint: "Telegram のチャットIDまたはトピック送信先（<chat-id>:topic:<topic-id>）、あるいは Slack のチャンネルIDを貼り付けます。",
       // ── 手動トリガー ────────────────────────────────────────────────
       manualEndpointLabel: "実行エンドポイント",
       manualEndpointHint:

@@ -3184,8 +3184,8 @@ export const en = {
       deliverDestinationSlackEmpty: "No Slack channels found. Is Slack connected?",
       deliverDestinationEmpty: "No recent chats with this channel yet. Use a custom ID below.",
       deliverDestinationCustomOption: "Use a custom ID…",
-      deliverDestinationCustomLabel: "Channel or chat ID",
-      deliverDestinationCustomHint: "Paste the Telegram chat ID or Slack channel ID directly.",
+      deliverDestinationCustomLabel: "Channel, chat, or topic ID",
+      deliverDestinationCustomHint: "Paste a Telegram chat ID or topic destination (<chat-id>:topic:<topic-id>), or a Slack channel ID.",
       // ── Manual trigger UI ────────────────────────────────────────────
       manualEndpointLabel: "Run endpoint",
       manualEndpointHint:
