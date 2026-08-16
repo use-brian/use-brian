@@ -18,7 +18,7 @@
  * [COMP:workflow/mcp-bridge]
  */
 
-import type { Tool, KnowledgeStoreInterface, KnowledgeRepoWriter, GDriveFilesStore, McpSettingsStore, FilesApi } from '@use-brian/core'
+import type { Tool, KnowledgeStoreInterface, KnowledgeRepoWriter, GDriveFilesStore, McpSettingsStore, FilesApi, EngineHooks } from '@use-brian/core'
 import { injectMcpTools } from '../mcp/inject.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
@@ -47,6 +47,28 @@ export type WorkflowToolRegistryDeps = {
   /** Workspace-files byte layer — `gmailSendMessage` attachments on workflow
    *  `tool_call` steps (`docs/architecture/integrations/gmail.md`). */
   filesApi?: FilesApi
+  engineHooks?: EngineHooks
+  assistantConnectorGrantsStore?: import('../db/assistant-connector-grants-store.js').AssistantConnectorGrantsStore
+}
+
+const FORBIDDEN_WORKFLOW_REGISTRY_TOOLS = [
+  'askAssistant',
+  'listConnectedAssistants',
+  'spawnWorker',
+  'sendWorkerMessage',
+  'stopWorker',
+  'proposeWorkflow',
+  'createWorkflow',
+  'updateWorkflow',
+  'runWorkflow',
+  'scheduleWorkflow',
+  'createScheduledJob',
+  'updateScheduledJob',
+  'deleteScheduledJob',
+] as const
+
+function stripOrchestrationTools(tools: Map<string, Tool>): void {
+  for (const name of FORBIDDEN_WORKFLOW_REGISTRY_TOOLS) tools.delete(name)
 }
 
 /**
@@ -78,6 +100,7 @@ export async function buildWorkflowToolRegistry(
     // keyed by user). Skip MCP entirely; first-party tools still work.
     // Phase B's scheduled trigger always passes the workflow.created_by
     // here so this branch is a defensive no-op.
+    stripOrchestrationTools(tools)
     return tools
   }
 
@@ -134,7 +157,10 @@ export async function buildWorkflowToolRegistry(
     allowKnowledgeWrites: true,
     knowledgeRepoWriter: deps.knowledgeRepoWriter,
     filesApi: deps.filesApi,
+    engineHooks: deps.engineHooks,
+    assistantConnectorGrantsStore: deps.assistantConnectorGrantsStore,
   })
 
+  stripOrchestrationTools(tools)
   return tools
 }

@@ -201,6 +201,14 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     await expect(executor()(baseParams)).rejects.toThrow('Callee assistant not found')
   })
 
+  it('rejects a callee outside the transport-authorized workspace', async () => {
+    await expect(executor()({
+      ...baseParams,
+      expectedWorkspaceId: 'ws-expected',
+    })).rejects.toMatchObject({ reason: 'assistant_workspace_mismatch' })
+    expect(mockSession).not.toHaveBeenCalled()
+  })
+
   it('throws when the callee owner cannot be resolved', async () => {
     mockFindUser.mockResolvedValueOnce(null as never)
     await expect(executor()(baseParams)).rejects.toThrow('Callee owner not found')
@@ -1209,6 +1217,8 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
         stub('createWorkflow'),
         stub('updateWorkflow'),
         stub('runWorkflow'),
+        stub('scheduleWorkflow'),
+        stub('createScheduledJob'),
         stub('getWorkflow'),
       ]) as never,
       memoryStore: memoryStore() as never,
@@ -1222,10 +1232,12 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     expect(passedTools.has('createWorkflow')).toBe(false)
     expect(passedTools.has('updateWorkflow')).toBe(false)
     expect(passedTools.has('runWorkflow')).toBe(false)
+    expect(passedTools.has('scheduleWorkflow')).toBe(false)
+    expect(passedTools.has('createScheduledJob')).toBe(false)
     expect(passedTools.has('getWorkflow')).toBe(true)
 
     await expect(
-      callee({ ...baseParams, allowedTools: ['runWorkflow'] }),
+      callee({ ...baseParams, allowedTools: ['createScheduledJob'] }),
     ).rejects.toMatchObject({ reason: 'tools_unavailable' })
     expect(mockQueryLoop).toHaveBeenCalledTimes(1)
   })

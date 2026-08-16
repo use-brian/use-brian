@@ -841,7 +841,7 @@ export async function advanceWorkflowRun(
         runId,
         stepRunId,
         workspaceId: run.workspaceId,
-        triggeredBy: run.triggeredBy,
+        triggeredBy: run.triggeredBy ?? workflow.createdBy,
         dueAt: result.dueAt,
       })
       await deps.runStore.updateRun(runId, {

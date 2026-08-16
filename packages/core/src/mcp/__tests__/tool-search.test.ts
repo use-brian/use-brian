@@ -214,6 +214,120 @@ describe('[COMP:mcp/tool-search] createMcpSearchTools', () => {
     expect(callMcpTool).not.toHaveBeenCalled()
   })
 
+  it('uses a remote source policy authority instead of the caller store', async () => {
+    const sourcePolicies = new Map<string, McpToolSetting>()
+    sourcePolicies.set('workspace-custom:search_pages', {
+      id: 'set-workspace',
+      assistantId: 'workspace-policy',
+      userId: 'workspace-user',
+      serverName: 'workspace-custom',
+      toolName: 'search_pages',
+      policy: 'block',
+      classification: 'read',
+      timesAllowed: 0,
+      timesDenied: 0,
+    })
+    const callMcpTool = vi.fn(async () => ({ result: 'should not run' }))
+    const tools = createMcpSearchTools({
+      index: buildToolIndex([{
+        kind: 'remote',
+        server: notionServer,
+        serverUrl: notionServer.url,
+        callMcpTool: async () => ({}),
+        policy: {
+          settingsStore: makeFakeSettingsStore(sourcePolicies),
+          userId: 'workspace-user',
+          serverName: 'workspace-custom',
+          appLevelAssistantId: 'workspace-policy',
+        },
+      }]),
+      settingsStore: makeFakeSettingsStore(),
+      assistantId: 'a1',
+      userId: 'caller-user',
+      callMcpTool,
+      keepDynamicToolsDirect: true,
+    })
+
+    const direct = tools.find((tool) => tool.name === 'search_pages')!
+    const result = await direct.execute({ query: 'private' }, ctx as never)
+    expect(result.isError).toBe(true)
+    expect(String(result.data)).toContain('blocked by policy')
+    expect(callMcpTool).not.toHaveBeenCalled()
+  })
+
+  it('omits an ambiguous canonical alias and keeps unique server-qualified aliases', () => {
+    const makeServer = (name: string): McpServerConfig => ({
+      name,
+      url: `https://${name.toLowerCase()}.example.com/mcp`,
+      tools: [{ name: 'list_events', description: 'List events.', inputSchema: { type: 'object' } }],
+    })
+    const primary = makeServer('Primary calendar')
+    const archive = makeServer('Archive calendar')
+    const tools = createMcpSearchTools({
+      index: buildToolIndex([
+        { kind: 'remote', server: primary, serverUrl: primary.url, callMcpTool: async () => ({}) },
+        { kind: 'remote', server: archive, serverUrl: archive.url, callMcpTool: async () => ({}) },
+      ]),
+      settingsStore: makeFakeSettingsStore(),
+      assistantId: 'a1', userId: 'u1',
+      callMcpTool: vi.fn(async () => ({})),
+      keepDynamicToolsDirect: true,
+    })
+
+    expect(tools.some((tool) => tool.name === 'list_events')).toBe(false)
+    expect(tools.some((tool) => tool.name === 'mcp_Primary_calendar_list_events')).toBe(true)
+    expect(tools.some((tool) => tool.name === 'mcp_Archive_calendar_list_events')).toBe(true)
+  })
+
+  it('removes duplicate full server/tool keys from search and direct dispatch', async () => {
+    const duplicate: McpServerConfig = {
+      name: 'Calendar',
+      url: 'https://calendar.example.com/mcp',
+      tools: [{ name: 'list_events', description: 'List events.', inputSchema: { type: 'object' } }],
+    }
+    const tools = createMcpSearchTools({
+      index: buildToolIndex([
+        { kind: 'remote', server: duplicate, serverUrl: duplicate.url, callMcpTool: async () => ({}) },
+        { kind: 'remote', server: { ...duplicate, url: 'https://other.example.com/mcp' }, serverUrl: 'https://other.example.com/mcp', callMcpTool: async () => ({}) },
+      ]),
+      settingsStore: makeFakeSettingsStore(),
+      assistantId: 'a1', userId: 'u1',
+      callMcpTool: vi.fn(async () => ({})),
+      keepDynamicToolsDirect: true,
+    })
+
+    expect(tools.map((tool) => tool.name)).toEqual(['mcp_search', 'mcp_call'])
+    const search = await tools[0].execute({ query: 'list events' }, ctx as never)
+    expect(String(search.data)).toContain('No tools found')
+    const call = await tools[1].execute({ server: 'Calendar', tool: 'list_events', args: {} }, ctx as never)
+    expect(call.isError).toBe(true)
+    expect(String(call.data)).toContain('unknown tool')
+  })
+
+  it('fails closed when one canonical name collides with another legacy alias', () => {
+    const server = (name: string, toolName: string): McpServerConfig => ({
+      name,
+      url: `https://collision.example.com/${name}`,
+      tools: [{ name: toolName, description: 'Collision probe.', inputSchema: { type: 'object' } }],
+    })
+    const legacyOwner = server('Bar', 'do')
+    const canonicalOwner = server('Other', 'mcp_Bar_do')
+    const tools = createMcpSearchTools({
+      index: buildToolIndex([
+        { kind: 'remote', server: legacyOwner, serverUrl: legacyOwner.url, callMcpTool: async () => ({}) },
+        { kind: 'remote', server: canonicalOwner, serverUrl: canonicalOwner.url, callMcpTool: async () => ({}) },
+      ]),
+      settingsStore: makeFakeSettingsStore(),
+      assistantId: 'a1', userId: 'u1',
+      callMcpTool: vi.fn(async () => ({})),
+      keepDynamicToolsDirect: true,
+    })
+
+    expect(tools.some((tool) => tool.name === 'mcp_Bar_do')).toBe(false)
+    expect(tools.some((tool) => tool.name === 'do')).toBe(true)
+    expect(tools.some((tool) => tool.name === 'mcp_Other_mcp_Bar_do')).toBe(true)
+  })
+
   it('mcp_search description mentions total tool count and connector names', () => {
     const { tools } = makeSearchTools()
     expect(tools[0].description).toContain('11 tools')

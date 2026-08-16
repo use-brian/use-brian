@@ -48,6 +48,13 @@ export type RemoteSource = {
   server: McpServerConfig
   serverUrl: string
   callMcpTool: (serverUrl: string, toolName: string, input: Record<string, unknown>, headerOverrides?: Record<string, string>) => Promise<unknown>
+  /** Source-specific policy authority for workspace-owned/granted connectors. */
+  policy?: {
+    settingsStore: McpSettingsStore
+    userId: string
+    serverName?: string
+    appLevelAssistantId?: string
+  }
 }
 
 /**
@@ -97,6 +104,7 @@ type RemoteIndexedTool = IndexedToolBase & {
   serverUrl: string
   /** Original MCP metadata (kept for any code that legacy-typed on `.tool`). */
   toolInfo: McpToolInfo
+  policy?: RemoteSource['policy']
 }
 
 type LocalIndexedTool = IndexedToolBase & {
@@ -151,6 +159,7 @@ export function buildToolIndex(sources: ToolSource[]): McpToolIndex {
           description: tool.description,
           inputSchema: (tool.inputSchema ?? {}) as Record<string, unknown>,
           toolInfo: tool,
+          policy: source.policy,
           tokens: tokenize(tool.name, tool.description),
         })
       }
@@ -358,8 +367,15 @@ export function createMcpSearchTools(params: {
 
   // ── Lookup: server:toolName → IndexedTool ─────────────────────
   const entryByKey = new Map<string, IndexedTool>()
+  const ambiguousEntryKeys = new Set<string>()
   for (const entry of index.entries) {
-    entryByKey.set(`${entry.server}:${entry.toolName}`, entry)
+    const key = `${entry.server}:${entry.toolName}`
+    if (entryByKey.has(key)) {
+      entryByKey.delete(key)
+      ambiguousEntryKeys.add(key)
+    } else if (!ambiguousEntryKeys.has(key)) {
+      entryByKey.set(key, entry)
+    }
   }
 
   // ── Session-level policy tracking ─────────────────────────────
@@ -402,7 +418,10 @@ export function createMcpSearchTools(params: {
         index,
         query,
         limit,
-        (entry) => !blockedTools.has(`${entry.server}:${entry.toolName}`),
+        (entry) => {
+          const key = `${entry.server}:${entry.toolName}`
+          return !blockedTools.has(key) && !ambiguousEntryKeys.has(key)
+        },
       )
 
       if (results.length === 0) {
@@ -510,11 +529,17 @@ export function createMcpSearchTools(params: {
   // hooks, result conversion, and local capability wrappers remain intact.
   const directTools: Tool[] = []
   const claimedNames = new Set(['mcp_search', 'mcp_call'])
+  const aliasCounts = new Map<string, number>()
   for (const entry of index.entries) {
-    const aliases = [
-      entry.toolName,
-      sanitizeMcpToolName(`mcp_${entry.server}_${entry.toolName}`).slice(0, 128),
-    ]
+    const legacyName = legacyMcpToolName(entry.server, entry.toolName)
+    for (const alias of new Set([entry.toolName, legacyName])) {
+      aliasCounts.set(alias, (aliasCounts.get(alias) ?? 0) + 1)
+    }
+  }
+  for (const entry of index.entries) {
+    const legacyName = legacyMcpToolName(entry.server, entry.toolName)
+    const aliases = [...new Set([entry.toolName, legacyName])]
+      .filter((alias) => aliasCounts.get(alias) === 1)
     for (const name of aliases) {
       if (claimedNames.has(name)) continue
       claimedNames.add(name)
@@ -560,6 +585,7 @@ export function createMcpSearchTools(params: {
             assistantId,
             appLevelAssistantId,
             userId,
+            policy: entry.policy,
           }) === 'ask'
         },
         async execute(input, context) {
@@ -590,8 +616,8 @@ export function createMcpSearchTools(params: {
 
 // ── Dispatch: remote source ───────────────────────────────────
 
-function sanitizeMcpToolName(raw: string): string {
-  return raw.replace(/[^a-zA-Z0-9_.\-:]/g, '_')
+export function legacyMcpToolName(serverName: string, toolName: string): string {
+  return `mcp_${serverName}_${toolName}`.replace(/[^a-zA-Z0-9_.\-:]/g, '_').slice(0, 128)
 }
 
 async function resolveRemoteEffectivePolicy(params: {
@@ -602,19 +628,30 @@ async function resolveRemoteEffectivePolicy(params: {
   assistantId: string
   appLevelAssistantId?: string
   userId: string
+  policy?: RemoteSource['policy']
 }): Promise<'allow' | 'ask' | 'block'> {
   const {
     server, tool, description, settingsStore, assistantId,
-    appLevelAssistantId, userId,
+    appLevelAssistantId, userId, policy,
   } = params
+  const effectiveStore = policy?.settingsStore ?? settingsStore
+  const effectiveUserId = policy?.userId ?? userId
+  const effectiveServer = policy?.serverName ?? server
+  const effectiveAppLevelAssistantId = policy?.appLevelAssistantId ?? appLevelAssistantId
   const fallbackPolicy = defaultPolicy(classifyTool(tool, description))
 
-  if (appLevelAssistantId) {
-    const l1 = await settingsStore.getPolicy({
-      assistantId: appLevelAssistantId, userId, serverName: server, toolName: tool,
+  if (effectiveAppLevelAssistantId) {
+    const l1 = await effectiveStore.getPolicy({
+      assistantId: effectiveAppLevelAssistantId,
+      userId: effectiveUserId,
+      serverName: effectiveServer,
+      toolName: tool,
     })
-    const l2 = await settingsStore.getPolicy({
-      assistantId, userId, serverName: server, toolName: tool,
+    const l2 = await effectiveStore.getPolicy({
+      assistantId,
+      userId: effectiveUserId,
+      serverName: effectiveServer,
+      toolName: tool,
     })
     const appPolicy = l1?.policy ?? fallbackPolicy
     const asstPolicy = l2?.policy ?? fallbackPolicy
@@ -624,8 +661,11 @@ async function resolveRemoteEffectivePolicy(params: {
       : asstPolicy
   }
 
-  const setting = await settingsStore.getPolicy({
-    assistantId, userId, serverName: server, toolName: tool,
+  const setting = await effectiveStore.getPolicy({
+    assistantId,
+    userId: effectiveUserId,
+    serverName: effectiveServer,
+    toolName: tool,
   })
   return setting?.policy ?? fallbackPolicy
 }
@@ -658,8 +698,11 @@ async function dispatchRemote(params: {
   const classification = classifyTool(tool, entry.description)
   const effectivePolicy = await resolveRemoteEffectivePolicy({
     server, tool, description: entry.description, settingsStore,
-    assistantId, appLevelAssistantId, userId,
+    assistantId, appLevelAssistantId, userId, policy: entry.policy,
   })
+  const policyStore = entry.policy?.settingsStore ?? settingsStore
+  const policyUserId = entry.policy?.userId ?? userId
+  const policyServerName = entry.policy?.serverName ?? server
 
   if (effectivePolicy === 'block') {
     blockedTools.add(toolKey)
@@ -711,9 +754,9 @@ async function dispatchRemote(params: {
 
         if (decision === 'always_deny') {
           blockedTools.add(toolKey)
-          settingsStore.setPolicy({
-            assistantId, userId,
-            serverName: server, toolName: tool,
+          policyStore.setPolicy({
+            assistantId, userId: policyUserId,
+            serverName: policyServerName, toolName: tool,
             policy: 'block', classification,
           }).catch((err) => console.debug('Failed to persist always_deny:', err))
           return {
@@ -724,9 +767,9 @@ async function dispatchRemote(params: {
 
         if (decision === 'always_allow') {
           allowedTools.add(toolKey)
-          settingsStore.setPolicy({
-            assistantId, userId,
-            serverName: server, toolName: tool,
+          policyStore.setPolicy({
+            assistantId, userId: policyUserId,
+            serverName: policyServerName, toolName: tool,
             policy: 'allow', classification,
           }).catch((err) => console.debug('Failed to persist always_allow:', err))
           // Fall through to execution
@@ -803,9 +846,9 @@ async function dispatchRemote(params: {
       : await callMcpTool(entry.serverUrl, tool, effInput)
 
     // Track usage
-    settingsStore.recordUsage({
-      assistantId, userId,
-      serverName: server,
+    policyStore.recordUsage({
+      assistantId, userId: policyUserId,
+      serverName: policyServerName,
       toolName: tool,
       allowed: true,
     }).catch((err) => console.debug('MCP usage tracking failed:', err))

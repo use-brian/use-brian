@@ -819,11 +819,11 @@ export async function listConnectedWorkflowToolSources(
         };
       }
 
-      // Custom MCP providers are addressed by their generated provider UUID.
-      // CLI catalogs need the assistant-scoped route: unlike the personal
-      // connector endpoint, it resolves workspace-owned and granted instances.
-      const discoveryUrl = instance.provider === "cli" && assistantId
-        ? `${API_URL}/api/assistants/${encodeURIComponent(assistantId)}/connectors/${encodeURIComponent(`cli:${instance.id}`)}/tools`
+      // Dynamic catalogs use the assistant-scoped exact-instance route so
+      // workspace-owned and granted custom HTTP/CLI instances resolve through
+      // the same exposure and assistant-membership boundary as runtime.
+      const discoveryUrl = assistantId
+        ? `${API_URL}/api/assistants/${encodeURIComponent(assistantId)}/connectors/${encodeURIComponent(`${instance.provider}:${instance.id}`)}/tools`
         : `${API_URL}/api/connectors/${encodeURIComponent(instance.provider === "cli" ? instance.id : instance.provider)}/tools`;
       try {
         const toolRes = await authFetch(discoveryUrl);
