@@ -89,11 +89,14 @@ export async function buildWorkflowToolRegistry(
   // ability to inspect each built-in's `requiresConfirmation` and route
   // ask-policy pauses through the `kind='workflow_step'` unified-approvals
   // surface + per-step permission grants. Routing built-ins through
-  // `mcp_call` would hide those flags from the executor. Custom MCP
-  // still goes through `mcp_search` / `mcp_call` here for the token
-  // win. See docs/architecture/integrations/mcp.md → "Tool search
-  // pattern" and docs/architecture/features/workflow.md → "Unified
-  // approvals".
+  // `mcp_call` would hide those flags from the executor.
+  //
+  // `keepDynamicToolsDirect: true` adds server-side registry adapters for
+  // custom HTTP/CLI tools. A deterministic tool_call cannot perform a model
+  // search/call sequence, and the adapter keeps policy + hooks intact while
+  // exposing the metadata the workflow approval gate needs. See
+  // docs/architecture/integrations/mcp.md → "Tool search pattern" and
+  // docs/architecture/features/workflow.md → "Unified approvals".
   await injectMcpTools({
     userId: scope.userId,
     assistantId: scope.assistantId,
@@ -109,6 +112,7 @@ export async function buildWorkflowToolRegistry(
     workspaceToolPolicyStore: deps.workspaceToolPolicyStore,
     assistantTeamId: scope.workspaceId,
     keepBuiltinsDirect: true,
+    keepDynamicToolsDirect: true,
     // KB writes ARE exposed here, and are governed by the executor's own
     // approval pause rather than a chat Approve/Deny card. Both write tools
     // carry `requiresConfirmation: true`, and `keepBuiltinsDirect` (above) is

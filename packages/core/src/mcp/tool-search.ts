@@ -345,8 +345,16 @@ export function createMcpSearchTools(params: {
    * See `docs/architecture/engine/tool-hooks.md`.
    */
   hooks?: EngineHooks
+  /**
+   * Add direct aliases for deterministic workflow `tool_call` registry
+   * lookups. Other surfaces keep the token-saving search/call pair only.
+   */
+  keepDynamicToolsDirect?: boolean
 }): Tool[] {
-  const { index, settingsStore, assistantId, appLevelAssistantId, userId, callMcpTool, hooks } = params
+  const {
+    index, settingsStore, assistantId, appLevelAssistantId, userId, callMcpTool,
+    hooks, keepDynamicToolsDirect = false,
+  } = params
 
   // ── Lookup: server:toolName → IndexedTool ─────────────────────
   const entryByKey = new Map<string, IndexedTool>()
@@ -493,10 +501,134 @@ export function createMcpSearchTools(params: {
     },
   })
 
-  return [searchTool, callTool]
+  if (!keepDynamicToolsDirect) return [searchTool, callTool]
+
+  // A workflow tool_call performs one exact registry lookup and cannot run a
+  // model-driven mcp_search -> mcp_call sequence. Expose adapters under both
+  // canonical names and the legacy wrapMcpTools name persisted by older
+  // workflow definitions. The adapters reuse the dispatchers below so policy,
+  // hooks, result conversion, and local capability wrappers remain intact.
+  const directTools: Tool[] = []
+  const claimedNames = new Set(['mcp_search', 'mcp_call'])
+  for (const entry of index.entries) {
+    const aliases = [
+      entry.toolName,
+      sanitizeMcpToolName(`mcp_${entry.server}_${entry.toolName}`).slice(0, 128),
+    ]
+    for (const name of aliases) {
+      if (claimedNames.has(name)) continue
+      claimedNames.add(name)
+      const toolKey = `${entry.server}:${entry.toolName}`
+
+      if (entry.kind === 'local') {
+        directTools.push({
+          ...entry.tool,
+          name,
+          async execute(input, context) {
+            return dispatchLocal({
+              entry,
+              server: entry.server,
+              tool: entry.toolName,
+              toolKey,
+              args: input as Record<string, unknown>,
+              context,
+              blockedTools,
+              allowedTools,
+              skipConfirmation: true,
+            })
+          },
+        })
+        continue
+      }
+
+      const classification = classifyTool(entry.toolName, entry.description)
+      const fallbackPolicy = defaultPolicy(classification)
+      directTools.push(buildTool({
+        name,
+        description: `[${entry.server}] ${entry.description}`,
+        inputSchema: z.record(z.unknown()),
+        isConcurrencySafe: classification === 'read',
+        isReadOnly: classification === 'read',
+        requiresConfirmation: fallbackPolicy === 'ask',
+        allowPersistentApproval: true,
+        async resolveConfirmation() {
+          return await resolveRemoteEffectivePolicy({
+            server: entry.server,
+            tool: entry.toolName,
+            description: entry.description,
+            settingsStore,
+            assistantId,
+            appLevelAssistantId,
+            userId,
+          }) === 'ask'
+        },
+        async execute(input, context) {
+          return dispatchRemote({
+            entry,
+            server: entry.server,
+            tool: entry.toolName,
+            toolKey,
+            args: input as Record<string, unknown>,
+            context,
+            blockedTools,
+            allowedTools,
+            settingsStore,
+            assistantId,
+            appLevelAssistantId,
+            userId,
+            callMcpTool,
+            hooks,
+            skipConfirmation: true,
+          })
+        },
+      }))
+    }
+  }
+
+  return [searchTool, callTool, ...directTools]
 }
 
 // ── Dispatch: remote source ───────────────────────────────────
+
+function sanitizeMcpToolName(raw: string): string {
+  return raw.replace(/[^a-zA-Z0-9_.\-:]/g, '_')
+}
+
+async function resolveRemoteEffectivePolicy(params: {
+  server: string
+  tool: string
+  description: string
+  settingsStore: McpSettingsStore
+  assistantId: string
+  appLevelAssistantId?: string
+  userId: string
+}): Promise<'allow' | 'ask' | 'block'> {
+  const {
+    server, tool, description, settingsStore, assistantId,
+    appLevelAssistantId, userId,
+  } = params
+  const fallbackPolicy = defaultPolicy(classifyTool(tool, description))
+
+  if (appLevelAssistantId) {
+    const l1 = await settingsStore.getPolicy({
+      assistantId: appLevelAssistantId, userId, serverName: server, toolName: tool,
+    })
+    const l2 = await settingsStore.getPolicy({
+      assistantId, userId, serverName: server, toolName: tool,
+    })
+    const appPolicy = l1?.policy ?? fallbackPolicy
+    const asstPolicy = l2?.policy ?? fallbackPolicy
+    const strictness: Record<string, number> = { allow: 0, ask: 1, block: 2 }
+    return (strictness[appPolicy] ?? 0) >= (strictness[asstPolicy] ?? 0)
+      ? appPolicy
+      : asstPolicy
+  }
+
+  const setting = await settingsStore.getPolicy({
+    assistantId, userId, serverName: server, toolName: tool,
+  })
+  return setting?.policy ?? fallbackPolicy
+}
 
 async function dispatchRemote(params: {
   entry: RemoteIndexedTool
@@ -513,39 +645,21 @@ async function dispatchRemote(params: {
   userId: string
   callMcpTool: (serverUrl: string, toolName: string, input: Record<string, unknown>, headerOverrides?: Record<string, string>) => Promise<unknown>
   hooks?: EngineHooks
+  skipConfirmation?: boolean
 }) {
   const {
     entry, server, tool, toolKey, args, context,
     blockedTools, allowedTools,
     settingsStore, assistantId, appLevelAssistantId, userId, callMcpTool, hooks,
+    skipConfirmation = false,
   } = params
 
   // Check classification + policy (strictest of L1 app-level + L2 assistant-level)
   const classification = classifyTool(tool, entry.description)
-  const fallbackPolicy = defaultPolicy(classification)
-
-  let effectivePolicy = fallbackPolicy
-
-  if (appLevelAssistantId) {
-    const l1 = await settingsStore.getPolicy({
-      assistantId: appLevelAssistantId, userId,
-      serverName: server, toolName: tool,
-    })
-    const l2 = await settingsStore.getPolicy({
-      assistantId, userId,
-      serverName: server, toolName: tool,
-    })
-    const appPolicy = l1?.policy ?? fallbackPolicy
-    const asstPolicy = l2?.policy ?? fallbackPolicy
-    const STRICTNESS: Record<string, number> = { allow: 0, ask: 1, block: 2 }
-    effectivePolicy = (STRICTNESS[appPolicy] ?? 0) >= (STRICTNESS[asstPolicy] ?? 0) ? appPolicy : asstPolicy
-  } else {
-    const setting = await settingsStore.getPolicy({
-      assistantId, userId,
-      serverName: server, toolName: tool,
-    })
-    effectivePolicy = setting?.policy ?? fallbackPolicy
-  }
+  const effectivePolicy = await resolveRemoteEffectivePolicy({
+    server, tool, description: entry.description, settingsStore,
+    assistantId, appLevelAssistantId, userId,
+  })
 
   if (effectivePolicy === 'block') {
     blockedTools.add(toolKey)
@@ -561,7 +675,7 @@ async function dispatchRemote(params: {
   // notifyConfirmationRequired from ToolContext (threaded from query
   // loop → tool executor → execute()). Decisions persist for the
   // session (allow/deny) or permanently (always_allow/always_deny).
-  if (effectivePolicy === 'ask' && !allowedTools.has(toolKey)) {
+  if (effectivePolicy === 'ask' && !skipConfirmation && !allowedTools.has(toolKey)) {
     const resolver = context?.confirmationResolver
     const notify = context?.notifyConfirmationRequired
     if (resolver && notify) {
@@ -756,6 +870,7 @@ async function dispatchLocal(params: {
   context: import('../tools/types.js').ToolContext
   blockedTools: Set<string>
   allowedTools: Set<string>
+  skipConfirmation?: boolean
 }) {
   const { entry, server, tool, toolKey, context, blockedTools, allowedTools } = params
   const targetTool = entry.tool
@@ -799,7 +914,7 @@ async function dispatchLocal(params: {
     needsConfirmation = false
   }
 
-  if (needsConfirmation) {
+  if (needsConfirmation && !params.skipConfirmation) {
     const resolver = context?.confirmationResolver
     const notify = context?.notifyConfirmationRequired
 

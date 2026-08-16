@@ -86,6 +86,8 @@ describe('[COMP:workflow/mcp-bridge] buildWorkflowToolRegistry', () => {
     // The executor can only see `requiresConfirmation` on a built-in that was
     // left directly in the map; routing it behind mcp_call would hide it.
     expect(mockInject.mock.calls[0][0].keepBuiltinsDirect).toBe(true)
+    // Deterministic tool_call steps also need exact custom/CLI registry names.
+    expect(mockInject.mock.calls[0][0].keepDynamicToolsDirect).toBe(true)
   })
 
   it('exposes no repo write path when the writer port is absent (open standalone boot)', async () => {

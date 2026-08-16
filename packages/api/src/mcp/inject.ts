@@ -471,6 +471,8 @@ export async function injectMcpTools(params: {
    * See `docs/architecture/integrations/mcp.md` → "Tool search pattern".
    */
   keepBuiltinsDirect?: boolean
+  /** Emit canonical + legacy dynamic aliases for workflow tool_call lookup. */
+  keepDynamicToolsDirect?: boolean
   /**
    * Restrict folded custom/CLI sources to these canonical tool names. The
    * workflow callee uses this with a pinned allow-list so retaining
@@ -542,7 +544,7 @@ export async function injectMcpTools(params: {
     gdriveFilesStore,
     connectorGrantStore, connectorInstanceStore, workspaceToolPolicyStore, assistantTeamId,
     connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain,
-    keepBuiltinsDirect = false, restrictSearchToToolNames,
+    keepBuiltinsDirect = false, keepDynamicToolsDirect = false, restrictSearchToToolNames,
     engineHooks, actorIdentity, filesApi, readCachedFile,
     introspectionTools, emailInboxProvider,
   } = params
@@ -1798,8 +1800,20 @@ export async function injectMcpTools(params: {
       callMcpTool: (serverUrl, toolName, input, overrides) =>
         callRemoteMcpTool(serverUrl, toolName, input, mergeValidatedHeaders(headersByUrl.get(serverUrl), overrides)),
       hooks: engineHooks,
+      keepDynamicToolsDirect,
     })
     for (const tool of searchTools) {
+      // A dynamic MCP can choose a generic canonical name such as `search`.
+      // Never let that replace an existing first-party registry entry; its
+      // server-prefixed compatibility alias remains available to tool_call.
+      if (
+        keepDynamicToolsDirect
+        && tool.name !== 'mcp_search'
+        && tool.name !== 'mcp_call'
+        && tools.has(tool.name)
+      ) {
+        continue
+      }
       tools.set(tool.name, tool)
     }
 

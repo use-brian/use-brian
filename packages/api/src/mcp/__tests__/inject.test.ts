@@ -493,6 +493,7 @@ describe('[COMP:api/mcp-inject] granted CLI MCP overlay', () => {
       } as never,
       assistantTeamId: 'ws-shared',
       restrictSearchToToolNames: ['readLocalCustomer'],
+      keepDynamicToolsDirect: true,
     })
 
     expect(result.restrictedSearchToolNames).toEqual(['readLocalCustomer'])
@@ -500,12 +501,23 @@ describe('[COMP:api/mcp-inject] granted CLI MCP overlay', () => {
     const hits = await search.execute({ query: 'local customer', limit: 8 }, {} as never)
     expect(JSON.stringify(hits.data)).toContain('readLocalCustomer')
     expect(JSON.stringify(hits.data)).not.toContain('deleteLocalCustomer')
+    expect(tools.has('readLocalCustomer')).toBe(true)
+    expect(tools.has('mcp_Local_CRM_readLocalCustomer')).toBe(true)
     const call = tools.get('mcp_call') as { execute: (i: unknown, c: unknown) => Promise<unknown> }
     await call.execute({ server: 'Local CRM', tool: 'readLocalCustomer', args: { id: 'cust-2' } }, {} as never)
     expect(callCliMcpTool).toHaveBeenCalledWith(
       expect.objectContaining({ binaryPath: '/usr/bin/node' }),
       'readLocalCustomer',
       { id: 'cust-2' },
+    )
+    const legacy = tools.get('mcp_Local_CRM_readLocalCustomer') as {
+      execute: (i: unknown, c: unknown) => Promise<unknown>
+    }
+    await legacy.execute({ id: 'cust-3' }, {} as never)
+    expect(callCliMcpTool).toHaveBeenLastCalledWith(
+      expect.objectContaining({ binaryPath: '/usr/bin/node' }),
+      'readLocalCustomer',
+      { id: 'cust-3' },
     )
   })
 
