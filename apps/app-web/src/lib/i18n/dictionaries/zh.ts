@@ -2972,8 +2972,8 @@ export const zh: Dictionary = {
       deliverDestinationSlackEmpty: "找不到 Slack 頻道，Slack 是否已連接？",
       deliverDestinationEmpty: "此管道尚無近期聊天記錄，請於下方直接輸入 ID。",
       deliverDestinationCustomOption: "改用自訂 ID…",
-      deliverDestinationCustomLabel: "管道或聊天 ID",
-      deliverDestinationCustomHint: "直接貼上 Telegram 聊天 ID 或 Slack 管道 ID。",
+      deliverDestinationCustomLabel: "管道、聊天或主題 ID",
+      deliverDestinationCustomHint: "貼上 Telegram 聊天 ID 或主題目的地（<chat-id>:topic:<topic-id>），或 Slack 管道 ID。",
       // ── 手動觸發 ─────────────────────────────────────────────────
       manualEndpointLabel: "執行端點",
       manualEndpointHint:

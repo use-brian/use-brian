@@ -382,6 +382,8 @@ export type McpInjectionResult = {
   enrichConfirmation: ConfirmationEnricher
   /** Capabilities that are unavailable (not connected, disabled, or blocked). Injected into the system prompt so the model doesn't waste turns searching for them. */
   unavailable: string[]
+  /** Names from `restrictSearchToToolNames` that survived connector discovery and policy scoping. */
+  restrictedSearchToolNames?: string[]
 }
 
 export async function injectMcpTools(params: {
@@ -470,6 +472,12 @@ export async function injectMcpTools(params: {
    */
   keepBuiltinsDirect?: boolean
   /**
+   * Restrict folded custom/CLI sources to these canonical tool names. The
+   * workflow callee uses this with a pinned allow-list so retaining
+   * `mcp_search`/`mcp_call` cannot expose unpinned connector tools.
+   */
+  restrictSearchToToolNames?: readonly string[]
+  /**
    * Tool-use interception port (remote MCP only). Threaded into
    * `createMcpSearchTools` so `preToolUse` can inject/overwrite outbound
    * headers (merged over the connector's stored-credential headers),
@@ -534,7 +542,8 @@ export async function injectMcpTools(params: {
     gdriveFilesStore,
     connectorGrantStore, connectorInstanceStore, workspaceToolPolicyStore, assistantTeamId,
     connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain,
-    keepBuiltinsDirect = false, engineHooks, actorIdentity, filesApi, readCachedFile,
+    keepBuiltinsDirect = false, restrictSearchToToolNames,
+    engineHooks, actorIdentity, filesApi, readCachedFile,
     introspectionTools, emailInboxProvider,
   } = params
 
@@ -889,7 +898,15 @@ export async function injectMcpTools(params: {
               callCliMcpTool(serverParams, toolName, input),
           })
 
-          return { label: inst.name, tools: wrappedTools }
+          // The search gateway already scopes tools by server, so expose the
+          // MCP server's canonical names. `wrapMcpTools` prefixes names for
+          // legacy direct injection, which does not match workflow catalog ids.
+          const searchableTools = wrappedTools.map((tool, index) => ({
+            ...tool,
+            name: server.tools[index]?.name ?? tool.name,
+          }))
+
+          return { label: inst.name, tools: searchableTools }
         }),
       )
 
@@ -1745,8 +1762,28 @@ export async function injectMcpTools(params: {
   // Build + inject the search pair whenever **any** source is present.
   // Direct-injection-only paths (workflow, smoke tests with no custom MCP)
   // still skip when both lists are empty.
-  if (remoteSources.length > 0 || localSources.length > 0) {
-    const index = buildToolIndex([...remoteSources, ...localSources])
+  const restrictedSearchToolNames = new Set<string>()
+  const searchAllowList = restrictSearchToToolNames
+    ? new Set(restrictSearchToToolNames)
+    : null
+  const searchSources = [...remoteSources, ...localSources].flatMap((source) => {
+    if (!searchAllowList) return [source]
+
+    if (source.kind === 'remote') {
+      const matchedTools = source.server.tools.filter((tool) => searchAllowList.has(tool.name))
+      for (const tool of matchedTools) restrictedSearchToolNames.add(tool.name)
+      if (matchedTools.length === 0) return []
+      return [{ ...source, server: { ...source.server, tools: matchedTools } }]
+    }
+
+    const matchedTools = source.tools.filter((tool) => searchAllowList.has(tool.name))
+    for (const tool of matchedTools) restrictedSearchToolNames.add(tool.name)
+    if (matchedTools.length === 0) return []
+    return [{ ...source, tools: matchedTools }]
+  })
+
+  if (searchSources.length > 0) {
+    const index = buildToolIndex(searchSources)
     const searchTools = createMcpSearchTools({
       index,
       settingsStore,
@@ -1766,14 +1803,24 @@ export async function injectMcpTools(params: {
       tools.set(tool.name, tool)
     }
 
-    const remoteCount = remoteSources.reduce((sum, s) => sum + s.server.tools.length, 0)
-    const localCount = localSources.reduce((sum, s) => sum + s.tools.length, 0)
+    const remoteCount = searchSources.reduce(
+      (sum, source) => sum + (source.kind === 'remote' ? source.server.tools.length : 0),
+      0,
+    )
+    const localCount = searchSources.reduce(
+      (sum, source) => sum + (source.kind === 'local' ? source.tools.length : 0),
+      0,
+    )
     console.debug(
-      `[mcp-inject] tool search: ${remoteCount} remote + ${localCount} local across ${remoteSources.length + localSources.length} sources → mcp_search + mcp_call`,
+      `[mcp-inject] tool search: ${remoteCount} remote + ${localCount} local across ${searchSources.length} sources → mcp_search + mcp_call`,
     )
   }
 
-  return { enrichConfirmation: enricher, unavailable }
+  return {
+    enrichConfirmation: enricher,
+    unavailable,
+    restrictedSearchToolNames: [...restrictedSearchToolNames],
+  }
 }
 
 /**
@@ -2026,13 +2073,7 @@ export function clearStaleNotConnectedNotices(
 }
 
 function notConnectedNotice(displayName: string, capabilities: string): string {
-  return (
-    `${displayName}: not connected for this assistant, so only this connector's ${capabilities} are unavailable this turn. ` +
-    'Another connected service may still provide the broader capability. Use an available tool that matches the requested account and identity; ' +
-    'do not mention this missing service when another available tool can fulfill the task. ' +
-    'If the task truly requires this service and no available tool can fulfill it, say so plainly in your own words and point the user to Studio then Connectors to connect it. ' +
-    'Do not quote this notice back to them, and do not claim a tool call failed.'
-  )
+  return `${displayName}: not connected for this assistant (${capabilities})`
 }
 
 /**
@@ -2063,10 +2104,7 @@ const NOT_CONNECTED_DISPLAY_NAME: Record<string, string> = {
  * reconnecting genuinely is the remedy.
  */
 function expiredCredentialsNotice(displayName: string): string {
-  return (
-    `${displayName}: connected, but its stored credentials expired or were revoked, so its tools are not loaded this turn. ` +
-    'Tell the user it needs reconnecting in Studio then Connectors. Do not offer any other cause.'
-  )
+  return `${displayName}: reconnect required (credentials expired or revoked; Studio → Connectors)`
 }
 
 async function injectGoogleTools(

@@ -659,6 +659,7 @@ export async function getMemoryIndex(
     `SELECT id, summary, tags, app_id as "appId", sensitivity
      FROM memories
      WHERE ${ap.sql}
+       AND scope <> 'workspace'
        AND valid_to IS NULL
        AND confidence > 0
      ORDER BY updated_at DESC`,
@@ -1594,6 +1595,7 @@ export async function getWorkspaceIdentityMemories(ctx: AccessContext): Promise<
   const result = await query<Memory>(
     `SELECT ${MEMORY_SELECT} FROM memories
      WHERE ${ap.sql}
+       AND scope = 'workspace'
        AND 'self-profile' = ANY(tags)
        AND valid_to IS NULL
      ORDER BY confidence DESC, updated_at DESC`,
@@ -1614,6 +1616,7 @@ export async function getWorkspaceMemoryIndex(
     `SELECT id, summary, tags, app_id as "appId", sensitivity
      FROM memories
      WHERE ${ap.sql}
+       AND scope = 'workspace'
        AND valid_to IS NULL
        AND confidence > 0
      ORDER BY updated_at DESC`,
