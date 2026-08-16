@@ -227,7 +227,7 @@ const toolCallStepSchema = z.object({
     .string()
     .min(1)
     .max(128)
-    .regex(/^[a-zA-Z_][a-zA-Z0-9_]*$/, 'toolName must be a valid identifier.'),
+    .regex(/^[a-zA-Z0-9_.:-]+$/, 'toolName contains unsupported characters.'),
   arguments: z.record(z.unknown()),
   approval: approvalSchema.optional(),
 })

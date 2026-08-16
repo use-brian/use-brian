@@ -65,11 +65,38 @@ describe('[COMP:workflow/mcp-bridge] buildWorkflowToolRegistry', () => {
   })
 
   it('forwards the run scope to injectMcpTools', async () => {
-    await buildWorkflowToolRegistry(makeDeps(new Map<string, Tool>()), scope)
+    const engineHooks = { preToolUse: vi.fn() }
+    const assistantConnectorGrantsStore = { listForAssistant: vi.fn() }
+    await buildWorkflowToolRegistry({
+      ...makeDeps(new Map<string, Tool>()),
+      engineHooks,
+      assistantConnectorGrantsStore,
+    } as never, scope)
     const arg = mockInject.mock.calls[0][0]
     expect(arg.userId).toBe('u-1')
     expect(arg.assistantId).toBe('a-1')
     expect(arg.assistantTeamId).toBe('ws-1')
+    expect(arg.engineHooks).toBe(engineHooks)
+    expect(arg.assistantConnectorGrantsStore).toBe(assistantConnectorGrantsStore)
+  })
+
+  it('strips recursive orchestration tools from the deterministic registry', async () => {
+    mockInject.mockImplementationOnce(async (params) => {
+      params.tools.set('mcp_safe', {} as Tool)
+      return { enrichConfirmation: () => undefined, unavailable: [] } as unknown as McpInjectionResult
+    })
+    const firstParty = new Map<string, Tool>([
+      ['runWorkflow', {} as Tool],
+      ['createWorkflow', {} as Tool],
+      ['askAssistant', {} as Tool],
+      ['createScheduledJob', {} as Tool],
+      ['scheduleWorkflow', {} as Tool],
+      ['listTasks', {} as Tool],
+    ])
+    const out = await buildWorkflowToolRegistry(makeDeps(firstParty), scope)
+
+    expect([...out.keys()].sort()).toEqual(['listTasks', 'mcp_safe'])
+    expect(firstParty.has('runWorkflow')).toBe(true)
   })
 
   it('enables KB writes and forwards the repo writer — the executor approval pause is the gate', async () => {
@@ -86,6 +113,8 @@ describe('[COMP:workflow/mcp-bridge] buildWorkflowToolRegistry', () => {
     // The executor can only see `requiresConfirmation` on a built-in that was
     // left directly in the map; routing it behind mcp_call would hide it.
     expect(mockInject.mock.calls[0][0].keepBuiltinsDirect).toBe(true)
+    // Deterministic tool_call steps also need exact custom/CLI registry names.
+    expect(mockInject.mock.calls[0][0].keepDynamicToolsDirect).toBe(true)
   })
 
   it('exposes no repo write path when the writer port is absent (open standalone boot)', async () => {

@@ -48,6 +48,13 @@ export type RemoteSource = {
   server: McpServerConfig
   serverUrl: string
   callMcpTool: (serverUrl: string, toolName: string, input: Record<string, unknown>, headerOverrides?: Record<string, string>) => Promise<unknown>
+  /** Source-specific policy authority for workspace-owned/granted connectors. */
+  policy?: {
+    settingsStore: McpSettingsStore
+    userId: string
+    serverName?: string
+    appLevelAssistantId?: string
+  }
 }
 
 /**
@@ -97,6 +104,7 @@ type RemoteIndexedTool = IndexedToolBase & {
   serverUrl: string
   /** Original MCP metadata (kept for any code that legacy-typed on `.tool`). */
   toolInfo: McpToolInfo
+  policy?: RemoteSource['policy']
 }
 
 type LocalIndexedTool = IndexedToolBase & {
@@ -151,6 +159,7 @@ export function buildToolIndex(sources: ToolSource[]): McpToolIndex {
           description: tool.description,
           inputSchema: (tool.inputSchema ?? {}) as Record<string, unknown>,
           toolInfo: tool,
+          policy: source.policy,
           tokens: tokenize(tool.name, tool.description),
         })
       }
@@ -345,13 +354,28 @@ export function createMcpSearchTools(params: {
    * See `docs/architecture/engine/tool-hooks.md`.
    */
   hooks?: EngineHooks
+  /**
+   * Add direct aliases for deterministic workflow `tool_call` registry
+   * lookups. Other surfaces keep the token-saving search/call pair only.
+   */
+  keepDynamicToolsDirect?: boolean
 }): Tool[] {
-  const { index, settingsStore, assistantId, appLevelAssistantId, userId, callMcpTool, hooks } = params
+  const {
+    index, settingsStore, assistantId, appLevelAssistantId, userId, callMcpTool,
+    hooks, keepDynamicToolsDirect = false,
+  } = params
 
   // ── Lookup: server:toolName → IndexedTool ─────────────────────
   const entryByKey = new Map<string, IndexedTool>()
+  const ambiguousEntryKeys = new Set<string>()
   for (const entry of index.entries) {
-    entryByKey.set(`${entry.server}:${entry.toolName}`, entry)
+    const key = `${entry.server}:${entry.toolName}`
+    if (entryByKey.has(key)) {
+      entryByKey.delete(key)
+      ambiguousEntryKeys.add(key)
+    } else if (!ambiguousEntryKeys.has(key)) {
+      entryByKey.set(key, entry)
+    }
   }
 
   // ── Session-level policy tracking ─────────────────────────────
@@ -394,7 +418,10 @@ export function createMcpSearchTools(params: {
         index,
         query,
         limit,
-        (entry) => !blockedTools.has(`${entry.server}:${entry.toolName}`),
+        (entry) => {
+          const key = `${entry.server}:${entry.toolName}`
+          return !blockedTools.has(key) && !ambiguousEntryKeys.has(key)
+        },
       )
 
       if (results.length === 0) {
@@ -493,10 +520,155 @@ export function createMcpSearchTools(params: {
     },
   })
 
-  return [searchTool, callTool]
+  if (!keepDynamicToolsDirect) return [searchTool, callTool]
+
+  // A workflow tool_call performs one exact registry lookup and cannot run a
+  // model-driven mcp_search -> mcp_call sequence. Expose adapters under both
+  // canonical names and the legacy wrapMcpTools name persisted by older
+  // workflow definitions. The adapters reuse the dispatchers below so policy,
+  // hooks, result conversion, and local capability wrappers remain intact.
+  const directTools: Tool[] = []
+  const claimedNames = new Set(['mcp_search', 'mcp_call'])
+  const aliasCounts = new Map<string, number>()
+  for (const entry of index.entries) {
+    const legacyName = legacyMcpToolName(entry.server, entry.toolName)
+    for (const alias of new Set([entry.toolName, legacyName])) {
+      aliasCounts.set(alias, (aliasCounts.get(alias) ?? 0) + 1)
+    }
+  }
+  for (const entry of index.entries) {
+    const legacyName = legacyMcpToolName(entry.server, entry.toolName)
+    const aliases = [...new Set([entry.toolName, legacyName])]
+      .filter((alias) => aliasCounts.get(alias) === 1)
+    for (const name of aliases) {
+      if (claimedNames.has(name)) continue
+      claimedNames.add(name)
+      const toolKey = `${entry.server}:${entry.toolName}`
+
+      if (entry.kind === 'local') {
+        directTools.push({
+          ...entry.tool,
+          name,
+          async execute(input, context) {
+            return dispatchLocal({
+              entry,
+              server: entry.server,
+              tool: entry.toolName,
+              toolKey,
+              args: input as Record<string, unknown>,
+              context,
+              blockedTools,
+              allowedTools,
+              skipConfirmation: true,
+            })
+          },
+        })
+        continue
+      }
+
+      const classification = classifyTool(entry.toolName, entry.description)
+      const fallbackPolicy = defaultPolicy(classification)
+      directTools.push(buildTool({
+        name,
+        description: `[${entry.server}] ${entry.description}`,
+        inputSchema: z.record(z.unknown()),
+        isConcurrencySafe: classification === 'read',
+        isReadOnly: classification === 'read',
+        requiresConfirmation: fallbackPolicy === 'ask',
+        allowPersistentApproval: true,
+        async resolveConfirmation() {
+          return await resolveRemoteEffectivePolicy({
+            server: entry.server,
+            tool: entry.toolName,
+            description: entry.description,
+            settingsStore,
+            assistantId,
+            appLevelAssistantId,
+            userId,
+            policy: entry.policy,
+          }) === 'ask'
+        },
+        async execute(input, context) {
+          return dispatchRemote({
+            entry,
+            server: entry.server,
+            tool: entry.toolName,
+            toolKey,
+            args: input as Record<string, unknown>,
+            context,
+            blockedTools,
+            allowedTools,
+            settingsStore,
+            assistantId,
+            appLevelAssistantId,
+            userId,
+            callMcpTool,
+            hooks,
+            skipConfirmation: true,
+          })
+        },
+      }))
+    }
+  }
+
+  return [searchTool, callTool, ...directTools]
 }
 
 // ── Dispatch: remote source ───────────────────────────────────
+
+export function legacyMcpToolName(serverName: string, toolName: string): string {
+  return `mcp_${serverName}_${toolName}`.replace(/[^a-zA-Z0-9_.\-:]/g, '_').slice(0, 128)
+}
+
+async function resolveRemoteEffectivePolicy(params: {
+  server: string
+  tool: string
+  description: string
+  settingsStore: McpSettingsStore
+  assistantId: string
+  appLevelAssistantId?: string
+  userId: string
+  policy?: RemoteSource['policy']
+}): Promise<'allow' | 'ask' | 'block'> {
+  const {
+    server, tool, description, settingsStore, assistantId,
+    appLevelAssistantId, userId, policy,
+  } = params
+  const effectiveStore = policy?.settingsStore ?? settingsStore
+  const effectiveUserId = policy?.userId ?? userId
+  const effectiveServer = policy?.serverName ?? server
+  const effectiveAppLevelAssistantId = policy?.appLevelAssistantId ?? appLevelAssistantId
+  const fallbackPolicy = defaultPolicy(classifyTool(tool, description))
+
+  if (effectiveAppLevelAssistantId) {
+    const l1 = await effectiveStore.getPolicy({
+      assistantId: effectiveAppLevelAssistantId,
+      userId: effectiveUserId,
+      serverName: effectiveServer,
+      toolName: tool,
+    })
+    const l2 = await effectiveStore.getPolicy({
+      assistantId,
+      userId: effectiveUserId,
+      serverName: effectiveServer,
+      toolName: tool,
+    })
+    const appPolicy = l1?.policy ?? fallbackPolicy
+    const asstPolicy = l2?.policy ?? fallbackPolicy
+    const strictness: Record<string, number> = { allow: 0, ask: 1, block: 2 }
+    return (strictness[appPolicy] ?? 0) >= (strictness[asstPolicy] ?? 0)
+      ? appPolicy
+      : asstPolicy
+  }
+
+  const setting = await effectiveStore.getPolicy({
+    assistantId,
+    userId: effectiveUserId,
+    serverName: effectiveServer,
+    toolName: tool,
+  })
+  return setting?.policy ?? fallbackPolicy
+}
 
 async function dispatchRemote(params: {
   entry: RemoteIndexedTool
@@ -513,39 +685,24 @@ async function dispatchRemote(params: {
   userId: string
   callMcpTool: (serverUrl: string, toolName: string, input: Record<string, unknown>, headerOverrides?: Record<string, string>) => Promise<unknown>
   hooks?: EngineHooks
+  skipConfirmation?: boolean
 }) {
   const {
     entry, server, tool, toolKey, args, context,
     blockedTools, allowedTools,
     settingsStore, assistantId, appLevelAssistantId, userId, callMcpTool, hooks,
+    skipConfirmation = false,
   } = params
 
   // Check classification + policy (strictest of L1 app-level + L2 assistant-level)
   const classification = classifyTool(tool, entry.description)
-  const fallbackPolicy = defaultPolicy(classification)
-
-  let effectivePolicy = fallbackPolicy
-
-  if (appLevelAssistantId) {
-    const l1 = await settingsStore.getPolicy({
-      assistantId: appLevelAssistantId, userId,
-      serverName: server, toolName: tool,
-    })
-    const l2 = await settingsStore.getPolicy({
-      assistantId, userId,
-      serverName: server, toolName: tool,
-    })
-    const appPolicy = l1?.policy ?? fallbackPolicy
-    const asstPolicy = l2?.policy ?? fallbackPolicy
-    const STRICTNESS: Record<string, number> = { allow: 0, ask: 1, block: 2 }
-    effectivePolicy = (STRICTNESS[appPolicy] ?? 0) >= (STRICTNESS[asstPolicy] ?? 0) ? appPolicy : asstPolicy
-  } else {
-    const setting = await settingsStore.getPolicy({
-      assistantId, userId,
-      serverName: server, toolName: tool,
-    })
-    effectivePolicy = setting?.policy ?? fallbackPolicy
-  }
+  const effectivePolicy = await resolveRemoteEffectivePolicy({
+    server, tool, description: entry.description, settingsStore,
+    assistantId, appLevelAssistantId, userId, policy: entry.policy,
+  })
+  const policyStore = entry.policy?.settingsStore ?? settingsStore
+  const policyUserId = entry.policy?.userId ?? userId
+  const policyServerName = entry.policy?.serverName ?? server
 
   if (effectivePolicy === 'block') {
     blockedTools.add(toolKey)
@@ -561,7 +718,7 @@ async function dispatchRemote(params: {
   // notifyConfirmationRequired from ToolContext (threaded from query
   // loop → tool executor → execute()). Decisions persist for the
   // session (allow/deny) or permanently (always_allow/always_deny).
-  if (effectivePolicy === 'ask' && !allowedTools.has(toolKey)) {
+  if (effectivePolicy === 'ask' && !skipConfirmation && !allowedTools.has(toolKey)) {
     const resolver = context?.confirmationResolver
     const notify = context?.notifyConfirmationRequired
     if (resolver && notify) {
@@ -597,9 +754,9 @@ async function dispatchRemote(params: {
 
         if (decision === 'always_deny') {
           blockedTools.add(toolKey)
-          settingsStore.setPolicy({
-            assistantId, userId,
-            serverName: server, toolName: tool,
+          policyStore.setPolicy({
+            assistantId, userId: policyUserId,
+            serverName: policyServerName, toolName: tool,
             policy: 'block', classification,
           }).catch((err) => console.debug('Failed to persist always_deny:', err))
           return {
@@ -610,9 +767,9 @@ async function dispatchRemote(params: {
 
         if (decision === 'always_allow') {
           allowedTools.add(toolKey)
-          settingsStore.setPolicy({
-            assistantId, userId,
-            serverName: server, toolName: tool,
+          policyStore.setPolicy({
+            assistantId, userId: policyUserId,
+            serverName: policyServerName, toolName: tool,
             policy: 'allow', classification,
           }).catch((err) => console.debug('Failed to persist always_allow:', err))
           // Fall through to execution
@@ -689,9 +846,9 @@ async function dispatchRemote(params: {
       : await callMcpTool(entry.serverUrl, tool, effInput)
 
     // Track usage
-    settingsStore.recordUsage({
-      assistantId, userId,
-      serverName: server,
+    policyStore.recordUsage({
+      assistantId, userId: policyUserId,
+      serverName: policyServerName,
       toolName: tool,
       allowed: true,
     }).catch((err) => console.debug('MCP usage tracking failed:', err))
@@ -756,6 +913,7 @@ async function dispatchLocal(params: {
   context: import('../tools/types.js').ToolContext
   blockedTools: Set<string>
   allowedTools: Set<string>
+  skipConfirmation?: boolean
 }) {
   const { entry, server, tool, toolKey, context, blockedTools, allowedTools } = params
   const targetTool = entry.tool
@@ -799,7 +957,7 @@ async function dispatchLocal(params: {
     needsConfirmation = false
   }
 
-  if (needsConfirmation) {
+  if (needsConfirmation && !params.skipConfirmation) {
     const resolver = context?.confirmationResolver
     const notify = context?.notifyConfirmationRequired
 

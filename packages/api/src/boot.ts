@@ -2333,6 +2333,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     connectorGrantStore,
     connectorInstanceStore,
     workspaceToolPolicyStore,
+    assistantConnectorGrantsStore,
     knowledgeStore,
     gdriveFilesStore,
     capabilityStore,
@@ -2379,6 +2380,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       const text = await calleeExecutor({
         callerAssistantId: request.caller.assistantId,
         calleeAssistantId: request.target.assistantId,
+        expectedWorkspaceId: request.target.workspaceId,
         question: request.message.parts
           .filter((p): p is { kind: 'text'; text: string } => p.kind === 'text')
           .map((p) => p.text)
@@ -2488,6 +2490,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         // Evaluated per-run (this closure fires post-boot), so the late
         // `filesApi` initialization below is already done.
         filesApi: filesApi ?? undefined,
+        engineHooks: ports.engineHooks,
+        assistantConnectorGrantsStore,
       },
       { workspaceId, assistantId, userId },
     ),
@@ -4575,6 +4579,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     connectorInstanceStore,
     connectorGrantStore,
     mcpSettingsStore,
+    workspaceToolPolicyStore,
+    workspaceStore,
     registry: connectorRegistry,
     jobStore,
     skillStore,

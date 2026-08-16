@@ -332,6 +332,7 @@ describe('[COMP:api/mcp-inject] granted custom MCP overlay', () => {
         },
       ]),
     }
+    const isEnabled = vi.fn().mockResolvedValue(true)
 
     await injectMcpTools({
       userId: 'owner-1',
@@ -340,6 +341,7 @@ describe('[COMP:api/mcp-inject] granted custom MCP overlay', () => {
       connectorStore: { list: vi.fn().mockResolvedValue([]) } as never,
       settingsStore: settingsStoreStub() as never,
       connectorGrantStore: connectorGrantStore as never,
+      assistantConnectorStore: { isEnabled } as never,
       assistantTeamId: 'ws-shared',
     })
 
@@ -349,6 +351,7 @@ describe('[COMP:api/mcp-inject] granted custom MCP overlay', () => {
     // the grant were dropped — no other source exists for this workspace.)
     expect(tools.has('mcp_search')).toBe(true)
     expect(tools.has('mcp_call')).toBe(true)
+    expect(isEnabled).toHaveBeenCalledWith('a-1', 'mcp-uuid-123:ci-mcp', 'mcp-uuid-123')
   })
 
   it('restricts a custom MCP search index to pinned workflow tool names', async () => {
@@ -461,7 +464,7 @@ describe('[COMP:api/mcp-inject] granted CLI MCP overlay', () => {
     expect(tools.has('mcp_call')).toBe(true)
   })
 
-  it('matches pinned CLI tools by their canonical MCP names', async () => {
+  it('matches pinned CLI tools by persisted legacy MCP names', async () => {
     callCliMcpTool.mockResolvedValueOnce('local customer found')
     discoverCliServer.mockResolvedValueOnce({
       name: 'Local CRM',
@@ -492,20 +495,32 @@ describe('[COMP:api/mcp-inject] granted CLI MCP overlay', () => {
         }),
       } as never,
       assistantTeamId: 'ws-shared',
-      restrictSearchToToolNames: ['readLocalCustomer'],
+      restrictSearchToToolNames: ['mcp_Local_CRM_readLocalCustomer'],
+      keepDynamicToolsDirect: true,
     })
 
-    expect(result.restrictedSearchToolNames).toEqual(['readLocalCustomer'])
+    expect(result.restrictedSearchToolNames).toEqual(['mcp_Local_CRM_readLocalCustomer'])
     const search = tools.get('mcp_search') as { execute: (i: unknown, c: unknown) => Promise<{ data: unknown }> }
     const hits = await search.execute({ query: 'local customer', limit: 8 }, {} as never)
     expect(JSON.stringify(hits.data)).toContain('readLocalCustomer')
     expect(JSON.stringify(hits.data)).not.toContain('deleteLocalCustomer')
+    expect(tools.has('readLocalCustomer')).toBe(true)
+    expect(tools.has('mcp_Local_CRM_readLocalCustomer')).toBe(true)
     const call = tools.get('mcp_call') as { execute: (i: unknown, c: unknown) => Promise<unknown> }
     await call.execute({ server: 'Local CRM', tool: 'readLocalCustomer', args: { id: 'cust-2' } }, {} as never)
     expect(callCliMcpTool).toHaveBeenCalledWith(
       expect.objectContaining({ binaryPath: '/usr/bin/node' }),
       'readLocalCustomer',
       { id: 'cust-2' },
+    )
+    const legacy = tools.get('mcp_Local_CRM_readLocalCustomer') as {
+      execute: (i: unknown, c: unknown) => Promise<unknown>
+    }
+    await legacy.execute({ id: 'cust-3' }, {} as never)
+    expect(callCliMcpTool).toHaveBeenLastCalledWith(
+      expect.objectContaining({ binaryPath: '/usr/bin/node' }),
+      'readLocalCustomer',
+      { id: 'cust-3' },
     )
   })
 
@@ -545,6 +560,41 @@ describe('[COMP:api/mcp-inject] granted CLI MCP overlay', () => {
     expect(isEnabled).toHaveBeenCalledWith('a-1', 'cli:cli-enabled-2', 'cli')
     expect(discoverCliServer).toHaveBeenCalledTimes(1)
     expect(discoverCliServer).toHaveBeenCalledWith(expect.anything(), 'Two')
+  })
+
+  it('does not broaden a restricted legacy name across duplicate CLI labels', async () => {
+    discoverCliServer.mockImplementation(async (_params, name) => ({
+      name,
+      url: `stdio://${name}`,
+      tools: [{ name: 'readEvents', description: 'Read events', inputSchema: { type: 'object' } }],
+    }))
+    const instances = ['cli-a', 'cli-b'].map((id) => ({
+      id, provider: 'cli', label: 'Calendar', connected: true, config: {}, updatedAt: new Date(0),
+    }))
+    const tools = new Map()
+    const result = await injectMcpTools({
+      userId: 'owner-1', assistantId: 'a-1', tools,
+      connectorStore: { list: vi.fn().mockResolvedValue([]) } as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorGrantStore: {
+        listForTargetSystem: vi.fn().mockResolvedValue(instances.map((instance) => ({
+          grantedByUserId: 'grantor-1', instance,
+        }))),
+      } as never,
+      connectorInstanceStore: {
+        listByWorkspaceSystem: vi.fn().mockResolvedValue([]),
+        getAuthCredentialsSystem: vi.fn().mockResolvedValue({
+          type: 'cli', binaryPath: '/usr/bin/node', args: ['/tmp/calendar.js'],
+        }),
+      } as never,
+      assistantTeamId: 'ws-shared',
+      keepBuiltinsDirect: true,
+      restrictSearchToToolNames: ['mcp_Calendar_readEvents'],
+    })
+
+    expect(result.restrictedSearchToolNames).toEqual([])
+    expect(tools.has('mcp_search')).toBe(false)
+    expect(tools.has('mcp_call')).toBe(false)
   })
 })
 

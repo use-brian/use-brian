@@ -259,7 +259,9 @@ describe("[COMP:app-web/workflow-tools] connected connector loading", () => {
     );
     expect(mockAuthFetch).toHaveBeenNthCalledWith(
       3,
-      expect.stringContaining("/api/connectors/11111111-1111-4111-8111-111111111111/tools"),
+      expect.stringContaining(
+        "/api/assistants/assistant-1/connectors/11111111-1111-4111-8111-111111111111%3Acustom-instance/tools",
+      ),
     );
 
     const groups = buildToolCatalog(sources);

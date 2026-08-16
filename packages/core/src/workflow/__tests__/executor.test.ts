@@ -1048,21 +1048,21 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
 
   it('Phase B (simulated): pauses the run on a `wait` step', async () => {
     const stores = makeFakeStores()
-    let pauseCall: { runId: string; stepRunId: string; dueAt: Date } | null = null
+    let pauseCall: { runId: string; stepRunId: string; triggeredBy: string | null; dueAt: Date } | null = null
     const deps: ExecutorDeps = {
       workflowStore: stores.workflowStore,
       runStore: stores.runStore,
       consultTransport: makeConsultTransport(),
       resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
       buildToolRegistry: async () => new Map(),
-      pauseRunForWait: async ({ runId, stepRunId, dueAt }) => {
-        pauseCall = { runId, stepRunId, dueAt }
+      pauseRunForWait: async ({ runId, stepRunId, triggeredBy, dueAt }) => {
+        pauseCall = { runId, stepRunId, triggeredBy, dueAt }
       },
     }
     const { run } = await seedWorkflowAndRun(deps, {
       startStepId: 'sleep',
       steps: [{ id: 'sleep', type: 'wait', until: { duration: { minutes: 5 } } }],
-    })
+    }, 'schedule')
     const outcome = await advanceWorkflowRun(deps, run.id)
     expect(outcome.kind).toBe('paused')
     if (outcome.kind === 'paused') {
@@ -1071,6 +1071,7 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
     }
     expect(pauseCall).not.toBeNull()
     expect(pauseCall!.runId).toBe(run.id)
+    expect(pauseCall!.triggeredBy).toBe(USER_ID)
     expect(stores.runs.get(run.id)!.status).toBe('awaiting_wait')
   })
 

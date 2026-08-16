@@ -4,5 +4,5 @@ export type { McpToolSetting, McpSettingsStore, McpServerConfig, McpToolInfo, Co
 export { AUTO_PROMOTE_THRESHOLD, createConfirmationResolver } from './types.js'
 export { wrapMcpTools } from './connector.js'
 export { createMcpGateway } from './gateway.js'
-export { buildToolIndex, createMcpSearchTools } from './tool-search.js'
+export { buildToolIndex, createMcpSearchTools, legacyMcpToolName } from './tool-search.js'
 export type { McpToolIndex, ToolSource, RemoteSource, LocalSource } from './tool-search.js'

@@ -179,6 +179,19 @@ describe('[COMP:workflow/schemas] WorkflowDefinitionSchema', () => {
     expect(WorkflowDefinitionSchema.safeParse(def).success).toBe(false)
   })
 
+  it('accepts MCP tool names containing dot, dash, and colon', () => {
+    const def = {
+      startStepId: 'a',
+      steps: [{
+        id: 'a',
+        type: 'tool_call',
+        toolName: 'mcp_Proton-calendar_list.events:v2',
+        arguments: {},
+      }],
+    }
+    expect(WorkflowDefinitionSchema.safeParse(def).success).toBe(true)
+  })
+
   it('accepts an assistant_call step with a research-depth config', () => {
     const def = {
       startStepId: 'research',
