@@ -3,24 +3,49 @@
  * Component tag: [COMP:app-web/workflow-tools].
  */
 
-import { describe, it, expect } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
+
+vi.mock("@/lib/auth-fetch", () => ({ authFetch: vi.fn() }));
 import {
   OFFICIAL_CONNECTOR_TOOLS,
 } from "@use-brian/shared/builtin-connectors";
-import { OFFICIAL_CONNECTORS } from "@use-brian/shared/connector-registry";
+import { BUILTIN_PRIMITIVE_CONNECTOR_IDS } from "@use-brian/shared/connector-registry";
 import {
   buildToolCatalog,
   catalogToolNames,
   filterToolGroups,
   normalizeToolName,
   BUILTIN_GROUP_ID,
-  BUILTIN_TOOL_CATALOG,
   MAX_TOOL_NAME_LEN,
+  type ConnectedToolSource,
 } from "../workflow-tools";
+import { authFetch } from "@/lib/auth-fetch";
+import { listConnectedWorkflowToolSources } from "../api/workflow";
+
+const mockAuthFetch = vi.mocked(authFetch);
+
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+function source(
+  connectorId: string,
+  overrides: Partial<ConnectedToolSource> = {},
+): ConnectedToolSource {
+  return {
+    id: `instance-${connectorId}`,
+    connectorId,
+    label: connectorId,
+    ...overrides,
+  };
+}
 
 describe("[COMP:app-web/workflow-tools] tool catalog", () => {
   it("puts the Built-in group first with the curated base tools", () => {
-    const groups = buildToolCatalog();
+    const groups = buildToolCatalog([]);
     expect(groups[0].id).toBe(BUILTIN_GROUP_ID);
     const names = groups[0].items.map((i) => i.name);
     // Verified against createBaseTools + the free-mode memory surface.
@@ -33,19 +58,24 @@ describe("[COMP:app-web/workflow-tools] tool catalog", () => {
     expect(names).not.toContain("useSkill");
   });
 
-  it("derives one group per official connector that exposes tools, in registry order", () => {
-    const groups = buildToolCatalog();
-    const connectorGroups = groups.filter((g) => g.id !== BUILTIN_GROUP_ID);
-    const expected = OFFICIAL_CONNECTORS.filter(
-      (c) => (OFFICIAL_CONNECTOR_TOOLS[c.id] ?? []).length > 0,
-    ).map((c) => c.id);
-    expect(connectorGroups.map((g) => g.id)).toEqual(expected);
-    // gcs has no tools — it must be skipped.
-    expect(groups.some((g) => g.id === "gcs")).toBe(false);
+  it("shows connected official connectors and omits disconnected ones", () => {
+    const groups = buildToolCatalog([source("gmail")]);
+    expect(groups.some((g) => g.id === "gmail")).toBe(true);
+    expect(groups.some((g) => g.id === "gcal")).toBe(false);
+    expect(groups.some((g) => g.id === "github")).toBe(false);
   });
 
-  it("labels connector groups from the registry and mirrors their tool lists", () => {
-    const groups = buildToolCatalog();
+  it("keeps always-on workspace primitives without connector instances", () => {
+    const groups = buildToolCatalog([]);
+    for (const id of BUILTIN_PRIMITIVE_CONNECTOR_IDS) {
+      if ((OFFICIAL_CONNECTOR_TOOLS[id] ?? []).length > 0) {
+        expect(groups.some((group) => group.id === id)).toBe(true);
+      }
+    }
+  });
+
+  it("labels connected official groups from the registry and mirrors their tool lists", () => {
+    const groups = buildToolCatalog([source("gmail", { label: "Work inbox" })]);
     const gmail = groups.find((g) => g.id === "gmail");
     expect(gmail?.label).toBe("Gmail");
     expect(gmail?.items.map((i) => i.name)).toEqual(
@@ -53,23 +83,55 @@ describe("[COMP:app-web/workflow-tools] tool catalog", () => {
     );
   });
 
-  it("collects every catalog tool name across all groups", () => {
-    const groups = buildToolCatalog();
+  it("adds live-discovered custom connector tools under the instance label", () => {
+    const groups = buildToolCatalog([
+      source("custom-provider", {
+        id: "custom-instance",
+        label: "Acme MCP",
+        items: [
+          {
+            name: "acmeLookup",
+            description: "Look up an Acme record",
+            classification: "read",
+          },
+        ],
+      }),
+    ]);
+    expect(groups.find((group) => group.id === "custom-instance")).toEqual({
+      id: "custom-instance",
+      label: "Acme MCP",
+      items: [
+        {
+          name: "acmeLookup",
+          description: "Look up an Acme record",
+          classification: "read",
+        },
+      ],
+    });
+  });
+
+  it("omits a dynamic connector when discovery returns no tools", () => {
+    const groups = buildToolCatalog([source("custom-provider", { items: [] })]);
+    expect(groups.some((group) => group.id === "instance-custom-provider")).toBe(false);
+  });
+
+  it("collects catalog tool names across built-in, connected, and custom groups", () => {
+    const groups = buildToolCatalog([
+      source("gmail"),
+      source("custom-provider", {
+        items: [{ name: "customRead", description: "Read custom data", classification: "read" }],
+      }),
+    ]);
     const names = catalogToolNames(groups);
     expect(names.has("webSearch")).toBe(true);
     expect(names.has("gmailSendMessage")).toBe(true);
-    expect(names.has("googleCalendarCreateEvent")).toBe(true);
-    // Size = built-in + every non-empty connector's tools.
-    const connectorTotal = OFFICIAL_CONNECTORS.reduce(
-      (n, c) => n + (OFFICIAL_CONNECTOR_TOOLS[c.id] ?? []).length,
-      0,
-    );
-    expect(names.size).toBe(BUILTIN_TOOL_CATALOG.length + connectorTotal);
+    expect(names.has("customRead")).toBe(true);
+    expect(names.has("googleCalendarCreateEvent")).toBe(false);
   });
 });
 
 describe("[COMP:app-web/workflow-tools] filterToolGroups", () => {
-  const groups = buildToolCatalog();
+  const groups = buildToolCatalog([source("gmail")]);
 
   it("returns every group unchanged for an empty query", () => {
     expect(filterToolGroups(groups, "")).toBe(groups);
@@ -112,5 +174,61 @@ describe("[COMP:app-web/workflow-tools] normalizeToolName", () => {
   it("rejects a name past the schema length cap", () => {
     expect(normalizeToolName("a".repeat(MAX_TOOL_NAME_LEN))).not.toBeNull();
     expect(normalizeToolName("a".repeat(MAX_TOOL_NAME_LEN + 1))).toBeNull();
+  });
+});
+
+describe("[COMP:app-web/workflow-tools] connected connector loading", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it("loads custom tools and drops disconnected workspace connectors", async () => {
+    mockAuthFetch
+      .mockResolvedValueOnce(json({
+        teamNative: [
+          { id: "gmail-instance", provider: "gmail", label: "Inbox", connected: true },
+          { id: "gcal-instance", provider: "gcal", label: "Calendar", connected: false },
+        ],
+        granted: [{
+          instance: {
+            id: "custom-instance",
+            provider: "11111111-1111-4111-8111-111111111111",
+            label: "Acme MCP",
+            connected: true,
+          },
+        }],
+      }))
+      .mockResolvedValueOnce(json({
+        serverName: "Acme",
+        tools: [{
+          name: "acmeLookup",
+          description: "Look up an Acme record",
+          classification: "read",
+        }],
+      }));
+
+    const sources = await listConnectedWorkflowToolSources("workspace-1");
+
+    expect(sources).toEqual([
+      {
+        id: "gmail-instance",
+        connectorId: "gmail",
+        label: "Inbox",
+      },
+      {
+        id: "custom-instance",
+        connectorId: "11111111-1111-4111-8111-111111111111",
+        label: "Acme MCP",
+        items: [{
+          name: "acmeLookup",
+          description: "Look up an Acme record",
+          classification: "read",
+        }],
+      },
+    ]);
+    expect(mockAuthFetch).toHaveBeenCalledTimes(2);
+    expect(mockAuthFetch).toHaveBeenLastCalledWith(
+      expect.stringContaining("/api/connectors/11111111-1111-4111-8111-111111111111/tools"),
+    );
   });
 });
