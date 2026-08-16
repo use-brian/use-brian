@@ -1,6 +1,6 @@
 /**
- * Document adaptation — the one seam where a PDF becomes readable text for a
- * model that cannot read PDFs.
+ * Document adaptation — the one seam where inline media becomes readable text
+ * for a model that cannot read it natively.
  *
  * ## Why it lives at the provider boundary
  *
@@ -14,8 +14,8 @@
  *
  * The rule belongs where the decision is actually knowable — at dispatch, when
  * the concrete model is known. `wrapDocumentAdaptation` sits in front of a
- * provider and swaps every PDF block for its distillate before the request
- * reaches the adapter. So web chat, all four channel adapters, the outage
+ * provider and swaps every unsupported PDF or image block for its distillate
+ * before the request reaches the adapter. So web chat, all four channel adapters, the outage
  * fallback firing mid-turn, and replayed history all inherit one behaviour
  * with zero per-route wiring.
  *
@@ -89,72 +89,100 @@ export type DistillateCachePort = {
 }
 
 export type DocumentAdaptationOptions = {
-  /** From the dispatched model's registry row. `true` = pass through. */
+  /** From the dispatched model's registry row. `true` = PDFs pass through. */
   nativePdf: boolean
+  /** From the dispatched model's registry row. `true` = images pass through. */
+  vision: boolean
   distill?: DocumentDistillPort
   cache?: DistillateCachePort
 }
 
-function documentTag(name: string | undefined, body: string, distilled: boolean): string {
+function attachmentTag(
+  name: string | undefined,
+  mime: string,
+  body: string,
+  distilled: boolean,
+): string {
   const attrs = [
     ...(name ? [`name="${name.replace(/"/g, "'")}"`] : []),
-    `type="${PDF_MIME}"`,
+    `type="${mime}"`,
     ...(distilled ? ['distilled="true"'] : []),
   ].join(' ')
   return `<attached_file ${attrs}>\n${body}\n</attached_file>`
 }
 
 /**
- * What the model sees when a document could not be read. Deliberately
+ * What the model sees when an attachment could not be read. Deliberately
  * instructive: the failure mode being designed out is the model inventing
  * contents or promising to retry, both of which read to a user as success.
  */
 function failureBody(reason: string): string {
   return (
-    `[This PDF could not be read: ${reason}. Tell the user plainly that you could not read it; ` +
+    `[This attachment could not be read: ${reason}. Tell the user plainly that you could not read it; ` +
     `do NOT guess at its contents, summarize it, or say you will try again.]`
   )
 }
 
-function isPdfBlock(block: ContentBlock): block is Extract<ContentBlock, { type: 'image' }> {
-  return block.type === 'image' && block.mimeType === PDF_MIME
-}
+type InlineMediaBlock = Extract<ContentBlock, { type: 'image' }>
 
-function hasPdf(messages: readonly Message[]): boolean {
-  return messages.some(
-    (m) => typeof m.content !== 'string' && m.content.some(isPdfBlock),
+function shouldAdaptBlock(
+  block: ContentBlock,
+  options: DocumentAdaptationOptions,
+): block is InlineMediaBlock {
+  return block.type === 'image' && (
+    (block.mimeType === PDF_MIME && !options.nativePdf) ||
+    (block.mimeType.startsWith('image/') && !options.vision)
   )
 }
 
+function hasUnsupportedMedia(
+  messages: readonly Message[],
+  options: DocumentAdaptationOptions,
+): boolean {
+  return messages.some(
+    (m) => typeof m.content !== 'string' && m.content.some((block) => shouldAdaptBlock(block, options)),
+  )
+}
+
+function requestKey(block: InlineMediaBlock): string {
+  return `${block.mimeType}\x00${block.data}`
+}
+
 /**
- * Resolve every distinct PDF in the request to text, once per document.
+ * Resolve every distinct unsupported attachment in the request to text once.
  *
- * Deduplicated by content hash: the same attachment usually appears both in
- * the current turn and in replayed history, and a cache miss must not pay for
- * it twice within a single request.
+ * Deduplicated by MIME and data: the same attachment usually appears both in
+ * the current turn and in replayed history, while identical bytes presented
+ * as different media types still require distinct distillation.
  */
 async function resolveDistillates(
   messages: readonly Message[],
   options: DocumentAdaptationOptions,
 ): Promise<Map<string, string>> {
-  const byData = new Map<string, string>()
+  const byAttachment = new Map<string, string>()
   const pending = new Map<string, Promise<string>>()
 
   for (const message of messages) {
     if (typeof message.content === 'string') continue
     for (const block of message.content) {
-      if (!isPdfBlock(block) || pending.has(block.data)) continue
-      pending.set(block.data, resolveOne(block.data, options))
+      if (!shouldAdaptBlock(block, options)) continue
+      const key = requestKey(block)
+      if (pending.has(key)) continue
+      pending.set(key, resolveOne(block.data, block.mimeType, options))
     }
   }
 
-  for (const [data, promise] of pending) byData.set(data, await promise)
-  return byData
+  for (const [key, promise] of pending) byAttachment.set(key, await promise)
+  return byAttachment
 }
 
-async function resolveOne(base64: string, options: DocumentAdaptationOptions): Promise<string> {
+async function resolveOne(
+  base64: string,
+  mime: string,
+  options: DocumentAdaptationOptions,
+): Promise<string> {
   if (!options.distill) {
-    return failureBody('this deployment has no document-distillation backend configured')
+    return failureBody('this deployment has no attachment-distillation backend configured')
   }
   let buffer: Buffer
   try {
@@ -175,7 +203,7 @@ async function resolveOne(base64: string, options: DocumentAdaptationOptions): P
 
   let result: DocumentDistillResult
   try {
-    result = await options.distill.distill({ buffer, mime: PDF_MIME })
+    result = await options.distill.distill({ buffer, mime })
   } catch (err) {
     return failureBody(err instanceof Error ? err.message : String(err))
   }
@@ -198,40 +226,46 @@ async function resolveOne(base64: string, options: DocumentAdaptationOptions): P
 }
 
 /**
- * Swap PDF blocks for text. Returns a NEW message array — session history is
- * shared state and must not be mutated by a dispatch.
+ * Swap unsupported media blocks for text. Returns a NEW message array —
+ * session history is shared state and must not be mutated by a dispatch.
  */
-function swapPdfBlocks(messages: readonly Message[], texts: Map<string, string>): Message[] {
+function swapUnsupportedMedia(
+  messages: readonly Message[],
+  texts: Map<string, string>,
+  options: DocumentAdaptationOptions,
+): Message[] {
   return messages.map((message) => {
     if (typeof message.content === 'string') return message
-    if (!message.content.some(isPdfBlock)) return message
+    if (!message.content.some((block) => shouldAdaptBlock(block, options))) return message
     return {
       ...message,
       content: message.content.map((block): ContentBlock => {
-        if (!isPdfBlock(block)) return block
-        const text = texts.get(block.data) ?? failureBody('it could not be resolved')
-        const distilled = !text.startsWith('[This PDF could not be read')
-        return { type: 'text', text: documentTag(block.name, text, distilled) }
+        if (!shouldAdaptBlock(block, options)) return block
+        const text = texts.get(requestKey(block)) ?? failureBody('it could not be resolved')
+        const distilled = !text.startsWith('[This attachment could not be read')
+        return {
+          type: 'text',
+          text: attachmentTag(block.name, block.mimeType, text, distilled),
+        }
       }),
     }
   })
 }
 
 /**
- * Wrap a provider so PDFs it cannot read natively arrive as distilled text.
+ * Wrap a provider so inline media it cannot read arrives as distilled text.
  *
- * `nativePdf: true` returns the provider untouched — the Gemini path pays
- * nothing, not even a scan.
+ * A provider with both capabilities returns untouched and pays no scan cost.
  */
 export function wrapDocumentAdaptation(
   provider: LLMProvider,
   options: DocumentAdaptationOptions,
 ): LLMProvider {
-  if (options.nativePdf) return provider
+  if (options.nativePdf && options.vision) return provider
 
   async function adapt(messages: readonly Message[]): Promise<Message[]> {
-    if (!hasPdf(messages)) return messages as Message[]
-    return swapPdfBlocks(messages, await resolveDistillates(messages, options))
+    if (!hasUnsupportedMedia(messages, options)) return messages as Message[]
+    return swapUnsupportedMedia(messages, await resolveDistillates(messages, options), options)
   }
 
   return {

@@ -38,7 +38,9 @@ function transcriptText(body: QwenAsrResponse): string {
 }
 
 export function qwenAsrTranscriber(opts: QwenAsrOptions): RecordingTranscriber {
-  const base = (opts.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, '')
+  const base = (opts.baseUrl ?? DEFAULT_BASE_URL)
+    .replace(/\/+$/, '')
+    .replace(/\/compatible-mode\/v1$/, '')
   const model = opts.model ?? DEFAULT_MODEL
   const name = `dashscope:${model}`
 

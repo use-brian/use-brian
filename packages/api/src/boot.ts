@@ -661,6 +661,8 @@ export interface OpenApiEnv {
   DASHSCOPE_VISION_MODEL?: string
   DASHSCOPE_ASR_MODEL?: string
   DASHSCOPE_LONG_MODEL?: string
+  /** Long-recording async transcription model; separate from short-audio ASR. */
+  DASHSCOPE_FILETRANS_MODEL?: string
   // Optional connector / channel config (closed-secret gated; open passes none).
   GOOGLE_CLIENT_ID?: string
   /**
@@ -1382,16 +1384,22 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   let providerMediaBackend: MediaBackend | undefined
   // Read MutableProviderAvailability on every operation so a hot preference
   // change reorders Codex/Google/DashScope without restarting the API.
-  const selectMediaBackend = (): MediaBackend => {
+  const selectKeyedMediaBackend = (): MediaBackend | undefined => {
     const preferred = configuredProviders.preferredProvider
-    if (preferred === 'openai-codex') {
+    return preferred === 'dashscope-intl' || preferred === 'openai-compat:dashscope-intl'
+      ? dashscopeMediaBackend ?? googleMediaBackend
+      : googleMediaBackend ?? dashscopeMediaBackend
+  }
+  const selectMediaBackend = (mime: string): MediaBackend => {
+    const preferred = configuredProviders.preferredProvider
+    if (
+      preferred === 'openai-codex' &&
+      (mime === 'application/pdf' || mime.startsWith('image/'))
+    ) {
       const model = providerVisionModelFor(configuredProviders, preferred)
       if (model) return { kind: 'provider', provider, model }
     }
-    const keyed = preferred === 'dashscope-intl' || preferred === 'openai-compat:dashscope-intl'
-      ? dashscopeMediaBackend ?? googleMediaBackend
-      : googleMediaBackend ?? dashscopeMediaBackend
-    return keyed ?? providerMediaBackend ?? unavailableMediaBackend
+    return selectKeyedMediaBackend() ?? providerMediaBackend ?? unavailableMediaBackend
   }
 
   const memoryStore = createDbMemoryStore()
@@ -1546,7 +1554,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   if (env.DASHSCOPE_API_KEY) {
     const dashscopeProviderId = `openai-compat:${DASHSCOPE_INTL_LABEL}`
     providerInstances[dashscopeProviderId] = wrapProvider(
-      createOpenAICompatProvider({ apiKey: env.DASHSCOPE_API_KEY, baseURL: dashscopeBaseUrl, label: DASHSCOPE_INTL_LABEL }),
+      createOpenAICompatProvider({
+        apiKey: env.DASHSCOPE_API_KEY,
+        baseURL: dashscopeBaseUrl,
+        label: DASHSCOPE_INTL_LABEL,
+        // Curated DashScope chat rows are text-only. Inline images are
+        // distilled through the separate Qwen-VL media backend at dispatch.
+        supportsVision: false,
+      }),
     )
     configuredProviders.setStaticProvider(dashscopeProviderId, true)
   }
@@ -1603,15 +1618,18 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // rung is resolved AFTER this provider exists (it needs `provider` itself).
   const documentDistill: DocumentDistillPort = {
     get configKey() {
-      const mediaBackend = selectMediaBackend()
+      const backend = selectMediaBackend('application/pdf')
       return distillConfigKey({
-        renderWidth: mediaBackend.kind === 'dashscope' ? DASHSCOPE_RENDER_WIDTH : PROVIDER_RENDER_WIDTH,
-        chunkPages: mediaBackend.kind === 'dashscope' ? DASHSCOPE_CHUNK_PAGES : PROVIDER_CHUNK_PAGES,
-        model: mediaBackend.kind === 'provider' ? mediaBackend.model : mediaBackend.kind,
+        renderWidth: backend.kind === 'dashscope' ? DASHSCOPE_RENDER_WIDTH : PROVIDER_RENDER_WIDTH,
+        chunkPages: backend.kind === 'dashscope' ? DASHSCOPE_CHUNK_PAGES : PROVIDER_CHUNK_PAGES,
+        model: backend.kind === 'provider' ? backend.model : backend.kind,
       })
     },
     distill: async ({ buffer, mime }) => {
-      const result = await distillFileToText({ buffer, mime }, { backend: selectMediaBackend() })
+      const result = await distillFileToText(
+        { buffer, mime },
+        { backend: selectMediaBackend(mime) },
+      )
       return { text: result.text, model: result.model, usage: result.usage }
     },
   }
@@ -1626,9 +1644,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
    * provider-backed rung is resolved after this point.
    */
   const mediaBackendIsFreeRated = (): boolean => {
-    const mediaBackend = selectMediaBackend()
-    if (mediaBackend.kind !== 'provider') return false
-    const rates = modelRates(mediaBackend.model)
+    const backend = selectMediaBackend('application/pdf')
+    if (backend.kind !== 'provider') return false
+    const rates = modelRates(backend.model)
     return !!rates && rates.brackets.every((b) => b.inPerMTok === 0 && b.outPerMTok === 0)
   }
 
@@ -1683,7 +1701,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const voiceTranscription = {
     enabled: env.VOICE_TRANSCRIPTION_ENABLED ?? false,
     apiKey: env.GEMINI_API_KEY ?? '',
-    get backend() { return selectMediaBackend() },
+    get backend() { return selectKeyedMediaBackend() ?? unavailableMediaBackend },
     model: env.VOICE_TRANSCRIPTION_MODEL,
   }
   const docGateway = createDocGateway()
@@ -2365,8 +2383,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   // Structural-synthesis GENERATE fill (brain → blueprint) + the in-chat /
   // in-workflow tool that wraps it. Built HERE (before the executor + chat route
-  // consume it) with the embedder for brain vector search. Undefined without a
-  // tool-capable application provider. The standalone Blueprints-UI route meters its own credit
+  // consume it) with the provider-neutral embedder for brain vector search.
+  // The standalone Blueprints-UI route meters its own credit
   // (synthesis_surcharge); the tool rides the chat turn's per-message credit.
   const generateSynthesize: GenerateSynthesizeFn = createGenerateSynthesizer({
         provider,
@@ -3577,7 +3595,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         filesApi,
         ingest: brainEpisodeIngestor,
         distill: async ({ buffer, mime }) =>
-          (await distillFileToText({ buffer, mime }, { backend: selectMediaBackend() })).text,
+          (await distillFileToText({ buffer, mime }, { backend: selectMediaBackend(mime) })).text,
       })
     }
   }
@@ -3615,8 +3633,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // The watched exploration's LLM (browserExplore → provider runBrowserUse)
   // threads from HERE — no model id lives in the sandbox tree (§4.14). The
   // browser-grounding leg rides a cheap tier: Haiku when the Anthropic key
-  // exists, else the platform Gemini key on Flash. Without either config the
-  // provider refuses the lane honestly instead of argparse-dying in the VM.
+  // exists, else Gemini Flash, else DashScope through its OpenAI-compatible
+  // endpoint. Qwen chat rows are text-only, so that last path uses the DOM /
+  // accessibility state without screenshot vision.
   const browserUseLlm = env.ANTHROPIC_API_KEY
     ? {
         apiKeyEnvName: 'ANTHROPIC_API_KEY' as const,
@@ -3631,7 +3650,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           // so no alias resolution) — Flash 3, the cheap-leg tier.
           model: env.BROWSER_USE_MODEL || 'gemini-3-flash-preview',
         }
-      : undefined
+      : env.DASHSCOPE_API_KEY
+        ? {
+            apiKeyEnvName: 'OPENAI_API_KEY' as const,
+            apiKey: env.DASHSCOPE_API_KEY,
+            baseUrl: dashscopeBaseUrl,
+            model: env.BROWSER_USE_MODEL || 'qwen3.5-flash',
+            useVision: false,
+          }
+        : undefined
   const sandboxProvider: SandboxProvider | null = env.E2B_API_KEY
     ? createE2bCloudProvider(
         createE2bRuntime({ apiKey: env.E2B_API_KEY, defaultTemplateId: env.E2B_TEMPLATE_ID }),
@@ -6717,7 +6744,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         // explicit POST /ingest path, which distilled PDFs/images back when it
         // ran inline. Silent promotion stays store-only (worker gates on mode).
         distill: async ({ buffer, mime }) =>
-          (await distillFileToText({ buffer, mime }, { backend: selectMediaBackend() })).text,
+          (await distillFileToText({ buffer, mime }, { backend: selectMediaBackend(mime) })).text,
         ...(brainEpisodeIngestor ? { brainIngest: brainEpisodeIngestor } : {}),
       })
     : null
@@ -6733,7 +6760,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         filesApi,
         connectorInstanceStore,
         distill: async ({ buffer, mime }) =>
-          (await distillFileToText({ buffer, mime }, { backend: selectMediaBackend() })).text,
+          (await distillFileToText({ buffer, mime }, { backend: selectMediaBackend(mime) })).text,
         ...(brainEpisodeIngestor ? { brainIngest: brainEpisodeIngestor } : {}),
       })
     : null
@@ -6814,10 +6841,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     dashscopeRecordingTranscribers.push(qwenAsrTranscriber({
       apiKey: env.DASHSCOPE_API_KEY,
       baseUrl: dashscopeBaseUrl,
+      ...(env.DASHSCOPE_ASR_MODEL ? { model: env.DASHSCOPE_ASR_MODEL } : {}),
     }))
     dashscopeRecordingTranscribers.push(qwenFiletransTranscriber({
       apiKey: env.DASHSCOPE_API_KEY,
       baseUrl: dashscopeBaseUrl,
+      ...(env.DASHSCOPE_FILETRANS_MODEL ? { model: env.DASHSCOPE_FILETRANS_MODEL } : {}),
     }))
   }
   const selectRecordingTranscriber = (): RecordingTranscriber | undefined => {
@@ -6848,7 +6877,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       service: createExtractService({
         transcriber: recordingTranscriber,
         distill: async ({ buffer, mime, prompt }) =>
-          (await distillFileToText({ buffer, mime }, { backend: selectMediaBackend(), prompt })).text,
+          (await distillFileToText(
+            { buffer, mime },
+            { backend: selectMediaBackend(mime), prompt },
+          )).text,
       }),
       secret: env.BRIAN_MESSAGE_STORE_HMAC_SECRET,
       allowRemote: env.BRIAN_MESSAGE_STORE_ALLOW_REMOTE === 'true',

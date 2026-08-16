@@ -335,7 +335,7 @@ describe('[COMP:api/model-resolution] ensureServableModel — default falls to a
 
     expect(ensureServableModel('gemini-flash-3', mixed)).toBe('qwen3.7-plus')
     expect(ensureServableModel('qwen3.7-plus', mixed)).toBe('qwen3.7-plus')
-    expect(ensureServableModel('gemini-3.1-flash-lite', mixed)).toBe('gemini-3.1-flash-lite')
+    expect(ensureServableModel('gemini-3.1-flash-lite', mixed)).toBe('qwen3.5-flash')
   })
 
   it('preserves all four logical tiers while DashScope serves the invocation', () => {
@@ -378,6 +378,42 @@ describe('[COMP:api/model-resolution] ensureServableModel — default falls to a
   it('keeps the Gemini background model when Gemini is configured', () => {
     expect(ensureServableModel('gemini-3.1-flash-lite', GEMINI)).toBe('gemini-3.1-flash-lite')
     expect(ensureServableModel('gemini-3.1-flash-lite', BOTH)).toBe('gemini-3.1-flash-lite')
+  })
+
+  it('uses the preferred provider background row in a mixed deployment', () => {
+    const mixed = new MutableProviderAvailability()
+    mixed.setStaticProvider('gemini', true)
+    mixed.setStaticProvider('openai-compat:dashscope-intl', true)
+    mixed.setPreferredProvider('dashscope-intl')
+
+    expect(ensureServableModel('gemini-3.1-flash-lite', mixed)).toBe('qwen3.5-flash')
+
+    mixed.setPreferredProvider('gemini')
+    expect(ensureServableModel('gemini-3.1-flash-lite', mixed)).toBe('gemini-3.1-flash-lite')
+  })
+
+  it('uses Luna rather than a higher Codex tier for preferred-provider background work', () => {
+    const mixed = new MutableProviderAvailability()
+    mixed.setStaticProvider('gemini', true)
+    mixed.setModelCatalog('openai-codex', new Set(['gpt-5.6-luna', 'gpt-5.6-sol']))
+    mixed.setPreferredProvider('openai-codex')
+
+    expect(ensureServableModel('gemini-3.1-flash-lite', mixed)).toBe('gpt-5.6-luna')
+  })
+
+  it('tracks live Codex catalog changes and keeps available Gemini when Luna is absent', () => {
+    const mixed = new MutableProviderAvailability()
+    mixed.setStaticProvider('gemini', true)
+    mixed.setPreferredProvider('openai-codex')
+
+    mixed.setModelCatalog('openai-codex', new Set(['gpt-5.6-luna', 'gpt-5.6-sol']))
+    expect(ensureServableModel('gemini-3.1-flash-lite', mixed)).toBe('gpt-5.6-luna')
+
+    mixed.setModelCatalog('openai-codex', new Set(['gpt-5.6-sol']))
+    expect(ensureServableModel('gemini-3.1-flash-lite', mixed)).toBe('gemini-3.1-flash-lite')
+
+    mixed.setModelCatalog('openai-codex', null)
+    expect(ensureServableModel('gemini-3.1-flash-lite', mixed)).toBe('gemini-3.1-flash-lite')
   })
 
   it('is a no-op for a background model when nothing is configured', () => {

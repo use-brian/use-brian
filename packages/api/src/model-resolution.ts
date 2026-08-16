@@ -67,6 +67,24 @@ export function ensureServableModel(
   if (!row) return model
   const rowAvailable = isRegistryModelAvailable(row, configuredProviders)
   const preferredProvider = normalizePreferredProvider(configuredProviders.preferredProvider)
+  if (row.class === 'background' && preferredProvider && configuredProviders.has(preferredProvider)) {
+    const preferredBackground = activeForClass('background', configuredProviders).find(
+      (candidate) => candidate.provider === preferredProvider,
+    )
+    if (preferredBackground) return preferredBackground.alias
+
+    // Codex has no background-class row. Luna is its Standard, tool-capable
+    // substitute; do not spend background work on Sol or another higher tier.
+    if (preferredProvider === 'openai-codex') {
+      const preferredStandard = menuForClass('standard-pro', configuredProviders).find(
+        (candidate) =>
+          candidate.provider === preferredProvider &&
+          candidate.tier === 'standard' &&
+          candidate.capabilities.tools,
+      )
+      if (preferredStandard) return preferredStandard.alias
+    }
+  }
   if (
     rowAvailable &&
     (
