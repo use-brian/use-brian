@@ -23,6 +23,7 @@ import {
   encryptCredentials as _encryptCredentials,
   decryptCredentials as _decryptCredentials,
 } from './credential-crypto.js'
+import { parseTopicChannelId } from '@use-brian/channels'
 import { query, queryWithRLS } from './client.js'
 
 // ── Types ──────────────────────────────────────────────────────
@@ -626,6 +627,10 @@ export function createDbChannelIntegrationStore(key: Buffer): ChannelIntegration
       channelType,
       externalSurfaceId,
     ) {
+      const parsedSurface = parseTopicChannelId(externalSurfaceId)
+      const parentSurfaceId = parsedSurface.messageThreadId == null
+        ? externalSurfaceId
+        : parsedSurface.chatId
       const result = await query<CiRow & { credentials: Buffer }>(
         `SELECT ${CI_PUBLIC_COLS}, credentials
          FROM channel_integrations
@@ -642,13 +647,21 @@ export function createDbChannelIntegrationStore(key: Buffer): ChannelIntegration
                SELECT winning.id
                FROM channel_assistants winning
                WHERE winning.channel_id = ci.channel_id
-                 AND (winning.external_surface_id IS NULL OR winning.external_surface_id = $4)
-               ORDER BY (winning.external_surface_id IS NOT NULL) DESC
+                 AND (
+                   winning.external_surface_id IS NULL
+                   OR winning.external_surface_id = $4
+                   OR winning.external_surface_id = $5
+                 )
+               ORDER BY CASE
+                 WHEN winning.external_surface_id = $4 THEN 0
+                 WHEN winning.external_surface_id = $5 THEN 1
+                 ELSE 2
+               END
                LIMIT 1
              )
            LIMIT 1
          )`,
-        [assistantId, integrationId, channelType, externalSurfaceId],
+        [assistantId, integrationId, channelType, externalSurfaceId, parentSurfaceId],
       )
       if (result.rows.length === 0) return null
       const row = result.rows[0]

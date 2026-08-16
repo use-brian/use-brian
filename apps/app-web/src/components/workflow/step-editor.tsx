@@ -1491,7 +1491,11 @@ function DeliverField({
   const allRelevant = destinations.filter((d) => d.channelType === channelType);
   const telegramChannels = channelOptions.filter((channel) => channel.channelType === "telegram");
   const relevant = channelType === "telegram" && channelIntegrationId
-    ? allRelevant.filter((d) => d.channelIntegrationId === channelIntegrationId)
+    ? allRelevant.filter(
+        (d) =>
+          d.channelIntegrationId === channelIntegrationId ||
+          d.channelIntegrationId == null,
+      )
     : allRelevant;
   const destinationValue = (d: ChannelDestination) =>
     d.channelIntegrationId
@@ -1510,7 +1514,8 @@ function DeliverField({
   const selectedDestination = relevant.find(
     (d) =>
       d.channelId === channelId &&
-      (d.channelIntegrationId ?? undefined) === channelIntegrationId,
+      ((d.channelIntegrationId ?? undefined) === channelIntegrationId ||
+        (channelType === "telegram" && d.channelIntegrationId == null)),
   ) ?? (
     channelIntegrationId === undefined
       ? allRelevant.filter((d) => d.channelId === channelId).length === 1
@@ -1604,17 +1609,19 @@ function DeliverField({
                 onValueChange={(v) => {
                   if (!v) return;
                   const currentIsKnown = allRelevant.some((d) => d.channelId === channelId);
-                  const nextChannelOwnsDestination = allRelevant.some(
-                    (d) => d.channelId === channelId && d.channelIntegrationId === v,
+                  const nextChannelCanUseDestination = allRelevant.some(
+                    (d) =>
+                      d.channelId === channelId &&
+                      (d.channelIntegrationId === v || d.channelIntegrationId == null),
                   );
-                  if (currentIsKnown && !nextChannelOwnsDestination) setStickyCustom(false);
+                  if (currentIsKnown && !nextChannelCanUseDestination) setStickyCustom(false);
                   onChange({
                     ...step,
                     deliver: {
                       ...step.deliver,
                       channelType,
                       channelId:
-                        currentIsKnown && !nextChannelOwnsDestination ? "" : channelId,
+                        currentIsKnown && !nextChannelCanUseDestination ? "" : channelId,
                       channelIntegrationId: v,
                     },
                   });
@@ -1667,7 +1674,8 @@ function DeliverField({
                     ...step.deliver,
                     channelType,
                     channelId: destination?.channelId ?? v,
-                    channelIntegrationId: destination?.channelIntegrationId ?? undefined,
+                    channelIntegrationId:
+                      destination?.channelIntegrationId ?? channelIntegrationId,
                   },
                 });
               }}

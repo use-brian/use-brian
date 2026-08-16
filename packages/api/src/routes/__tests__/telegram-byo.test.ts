@@ -201,6 +201,22 @@ vi.mock('../../db/channels-store.js', () => ({
     modelAlias: 'standard',
     createdAt: new Date('2026-05-18T00:00:00Z'),
   })),
+  resolveTelegramRoutingForSurface: vi.fn(async () => ({
+    id: 'ca_1',
+    channelId: 'channel_1',
+    assistantId: 'assistant_1',
+    externalSurfaceId: null,
+    modelAlias: 'standard',
+    createdAt: new Date('2026-05-18T00:00:00Z'),
+  })),
+  resolveAnyRoutingForChannel: vi.fn(async () => ({
+    id: 'ca_1',
+    channelId: 'channel_1',
+    assistantId: 'assistant_1',
+    externalSurfaceId: null,
+    modelAlias: 'standard',
+    createdAt: new Date('2026-05-18T00:00:00Z'),
+  })),
 }))
 
 vi.mock('../../db/channel-user-store.js', async () => {
@@ -245,8 +261,14 @@ import {
   shouldUseUniversalTelegramIntake,
 } from '../telegram-byo.js'
 import { findOrCreateSession } from '../../db/sessions.js'
+import {
+  resolveAnyRoutingForChannel,
+  resolveTelegramRoutingForSurface,
+} from '../../db/channels-store.js'
 
 const mockFindOrCreateSession = vi.mocked(findOrCreateSession)
+const mockResolveAnyRouting = vi.mocked(resolveAnyRoutingForChannel)
+const mockResolveTelegramRouting = vi.mocked(resolveTelegramRoutingForSurface)
 
 // ── Test setup ──────────────────────────────────────────────────
 
@@ -697,6 +719,55 @@ describe('[COMP:api/telegram-byo-route] forum-topic routing', () => {
     expect(chatLockCalls).toEqual(['tg-byo:-1001234567890'])
     expect(pipelineCalls).toHaveLength(1)
     expect(pipelineCalls[0]).toMatchObject({ channelId: '-1001234567890', isGroupChat: true })
+  })
+
+  it('boots from a surface route when the channel has no default assistant', async () => {
+    const app = createTestApp(
+      '/webhook/telegram-byo',
+      telegramByoRoutes({
+        provider: {} as never,
+        systemPrompt: '',
+        tools: new Map(),
+        memoryStore: {} as never,
+        integrationStore: makeIntegrationStore() as never,
+        capabilityStore: {} as never,
+        apiUrl: 'http://test',
+      }),
+    )
+    mockResolveTelegramRouting.mockResolvedValueOnce(null)
+
+    await postUpdate(app, buildForumUpdate({ updateId: 51, messageId: 501, threadId: 42 }))
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    expect(mockResolveAnyRouting).toHaveBeenCalledWith('channel_1')
+    expect(pipelineCalls).toHaveLength(1)
+    expect(pipelineCalls[0]).toMatchObject({ channelId: '-1001234567890:topic:42' })
+  })
+
+  it('drops an unmatched topic when a surface-only channel has no default', async () => {
+    const app = createTestApp(
+      '/webhook/telegram-byo',
+      telegramByoRoutes({
+        provider: {} as never,
+        systemPrompt: '',
+        tools: new Map(),
+        memoryStore: {} as never,
+        integrationStore: makeIntegrationStore() as never,
+        capabilityStore: {} as never,
+        apiUrl: 'http://test',
+      }),
+    )
+    mockResolveTelegramRouting
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null)
+
+    await postUpdate(app, buildForumUpdate({ updateId: 52, messageId: 502, threadId: 99 }))
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    expect(mockResolveAnyRouting).toHaveBeenCalledWith('channel_1')
+    expect(pipelineCalls).toHaveLength(0)
   })
 })
 

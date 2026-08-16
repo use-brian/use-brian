@@ -249,4 +249,22 @@ describeIf('[COMP:api/channel-integrations-store] getByChannelForWebhook', () =>
     expect(defaultAssistant).toBeNull()
     expect(surfaceAssistant?.id).toBe(seeded.integrationId)
   })
+
+  it('lets a base-chat route authorize delivery to one of its topics', async () => {
+    const seeded = await seedChannelWithIntegration({ channelType: 'telegram' })
+    await channelsStore.attachAssistant(seeded.ownerId, {
+      channelId: seeded.channelId,
+      assistantId: seeded.assistantId,
+      externalSurfaceId: '-100555',
+    })
+
+    const found = await seeded.store.getCredentialsForAssistantIntegrationSystem(
+      seeded.assistantId,
+      seeded.integrationId,
+      'telegram',
+      '-100555:topic:42',
+    )
+
+    expect(found?.id).toBe(seeded.integrationId)
+  })
 })
