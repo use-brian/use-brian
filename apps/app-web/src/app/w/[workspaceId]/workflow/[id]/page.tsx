@@ -40,7 +40,6 @@ import {
   deleteWorkflow,
   getWorkflowFull,
   listChannelDestinations,
-  listConnectedWorkflowToolSources,
   listWorkspaceSlackChannels,
   runWorkflowNow,
   updateWorkflow,
@@ -62,7 +61,6 @@ import type { CustomPageTemplateSummary } from "@use-brian/doc-model";
 import { listWorkspaceSkills, type WorkspaceSkillSummary } from "@/lib/api/skills";
 import { WorkflowBoard } from "@/components/workflow/workflow-board";
 import { pruneLayout } from "@/lib/workflow-canvas";
-import { buildToolCatalog } from "@/lib/workflow-tools";
 import { StepEditor } from "@/components/workflow/step-editor";
 import { TriggerEditor } from "@/components/workflow/trigger-editor";
 import { ButtonBindingsList, TriggerJobsList } from "@/components/workflow/trigger-jobs-list";
@@ -93,7 +91,6 @@ export default function WorkflowDetailPage({
   const [pages, setPages] = useState<ViewListRow[]>([]);
   const [blueprints, setBlueprints] = useState<CustomPageTemplateSummary[]>([]);
   const [skills, setSkills] = useState<WorkspaceSkillSummary[]>([]);
-  const [toolGroups, setToolGroups] = useState(() => buildToolCatalog([]));
   // Origin-aware induction: skills distilled from THIS workflow's runs —
   // derived from the same workspace-skills list the SkillsField uses.
   const learnedSkills = useMemo(
@@ -141,31 +138,6 @@ export default function WorkflowDetailPage({
       const list = await listAssistants(activeId);
       if (!cancelled) {
         setAssistants(list.filter((a) => a.workspaceId === activeId));
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [activeId]);
-
-  // Load only connector tools actually available to this workspace. Official
-  // catalogs are static; custom MCP catalogs are discovered live by the API
-  // helper. Built-in first-party tools remain available if this fetch fails.
-  useEffect(() => {
-    if (!activeId) {
-      setToolGroups(buildToolCatalog([]));
-      return;
-    }
-    // Clear the prior workspace immediately; never flash its connector names
-    // while the next workspace inventory is loading.
-    setToolGroups(buildToolCatalog([]));
-    let cancelled = false;
-    void (async () => {
-      try {
-        const sources = await listConnectedWorkflowToolSources(activeId);
-        if (!cancelled) setToolGroups(buildToolCatalog(sources));
-      } catch {
-        if (!cancelled) setToolGroups(buildToolCatalog([]));
       }
     })();
     return () => {
@@ -886,7 +858,6 @@ export default function WorkflowDetailPage({
                 pages={pages}
                 blueprints={blueprints}
                 skills={skills}
-                toolGroups={toolGroups}
                 steps={draft.definition.steps}
                 onChange={(next) => updateStep(selectedStepIdx, next)}
                 onMoveUp={() => moveStep(selectedStepIdx, -1)}
