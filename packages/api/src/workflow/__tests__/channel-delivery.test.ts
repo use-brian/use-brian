@@ -153,6 +153,7 @@ describe('[COMP:workflow/channel-delivery] thread-reply pass-through', () => {
       'selected-token',
     ])
     expect(integrationStore.getCredentialsForAssistantIntegrationSystem).toHaveBeenCalledWith(
+      'ws-1',
       'asst-1',
       '00000000-0000-4000-8000-000000000001',
       'telegram',

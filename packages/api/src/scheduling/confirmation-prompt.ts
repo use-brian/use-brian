@@ -23,6 +23,7 @@ import { query } from '../db/client.js'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 
 export type ConfirmationPromptTarget = {
+  workspaceId?: string
   /** Assistant whose channel credentials resolve the outbound adapter. */
   assistantId: string
   channelType: string
@@ -47,21 +48,25 @@ export async function resolveTelegramBotToken(
   deps: ConfirmationPromptDeps,
   channelIntegrationId?: string,
   channelId?: string,
+  workspaceId?: string,
 ): Promise<string | undefined> {
-  if (deps.integrationStore) {
-    const integration = channelIntegrationId && channelId
-      ? await deps.integrationStore.getCredentialsForAssistantIntegrationSystem(
-          assistantId,
-          channelIntegrationId,
-          'telegram',
-          channelId,
-        )
-      : await deps.integrationStore.getCredentialsForAssistantSystem(assistantId, 'telegram')
-    if (integration) {
-      return (integration.credentials as { bot_token: string }).bot_token
-    }
+  if (channelIntegrationId) {
+    if (!deps.integrationStore || !channelId || !workspaceId) return undefined
+    const integration = await deps.integrationStore.getCredentialsForAssistantIntegrationSystem(
+      workspaceId,
+      assistantId,
+      channelIntegrationId,
+      'telegram',
+      channelId,
+    )
+    return integration
+      ? (integration.credentials as { bot_token: string }).bot_token
+      : undefined
   }
-  if (channelIntegrationId) return undefined
+  if (deps.integrationStore) {
+    const integration = await deps.integrationStore.getCredentialsForAssistantSystem(assistantId, 'telegram')
+    if (integration) return (integration.credentials as { bot_token: string }).bot_token
+  }
   return deps.defaultTelegramBotToken
 }
 
@@ -89,6 +94,7 @@ export async function sendConfirmationPrompt(
         deps,
         target.channelIntegrationId,
         target.channelId,
+        target.workspaceId,
       )
       if (botToken) {
         const adapter = createTelegramAdapter({ token: botToken })

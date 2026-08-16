@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { createWorkflowDependencyPreflight } from '../dependency-preflight.js'
 import type { ChannelIntegrationStore } from '../../db/channel-integrations.js'
+import type { AssistantIntegrationRoutingDiagnostic } from '../../db/channel-integrations.js'
 import type { ConnectorStore } from '../../db/connector-store.js'
 import type { ConnectorInstanceStore } from '../../db/connector-instance-store.js'
 import type { ConnectorGrantStore } from '../../db/connector-grant-store.js'
@@ -16,11 +17,26 @@ function integrationStoreWith(
     getCredentialsForAssistantSystem: async (_assistantId: string, channelType: string) =>
       creds[channelType] ?? null,
     getCredentialsForAssistantIntegrationSystem: async (
+      _workspaceId: string,
       _assistantId: string,
       _integrationId: string,
       channelType: string,
       _channelId: string,
     ) => creds[channelType] ?? null,
+    diagnoseAssistantIntegrationRoutingSystem: async () => ({
+      status: 'integration_unavailable',
+      channelLabel: null,
+    }),
+  } as unknown as ChannelIntegrationStore
+}
+
+function integrationStoreWithDiagnostic(
+  diagnostic: AssistantIntegrationRoutingDiagnostic,
+): ChannelIntegrationStore {
+  return {
+    getCredentialsForAssistantSystem: vi.fn(async () => null),
+    getCredentialsForAssistantIntegrationSystem: vi.fn(async () => null),
+    diagnoseAssistantIntegrationRoutingSystem: vi.fn(async () => diagnostic),
   } as unknown as ChannelIntegrationStore
 }
 
@@ -136,6 +152,7 @@ describe('[COMP:workflow/dependency-preflight] validateDeliveryTarget', () => {
     })
 
     const result = await validateDeliveryTarget({
+      workspaceId: WORKSPACE_ID,
       assistantId: ASSISTANT_ID,
       channelType: 'telegram',
       channelId: '-100555:topic:42',
@@ -159,6 +176,7 @@ describe('[COMP:workflow/dependency-preflight] validateDeliveryTarget', () => {
     })
 
     const result = await validateDeliveryTarget({
+      workspaceId: WORKSPACE_ID,
       assistantId: ASSISTANT_ID,
       channelType: 'telegram',
       channelId: '-100555:topic:42',
@@ -179,6 +197,7 @@ describe('[COMP:workflow/dependency-preflight] validateDeliveryTarget', () => {
     })
 
     const result = await validateDeliveryTarget({
+      workspaceId: WORKSPACE_ID,
       assistantId: ASSISTANT_ID,
       channelType: 'telegram',
       channelId: '-100555:topic:42',
@@ -187,6 +206,96 @@ describe('[COMP:workflow/dependency-preflight] validateDeliveryTarget', () => {
 
     expect(result.ok).toBe(true)
     expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('explains when the destination is routed to a different assistant', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const store = integrationStoreWithDiagnostic({
+      status: 'assistant_mismatch',
+      channelLabel: '@operations_bot',
+      requestedAssistantName: 'Research Assistant',
+      routedAssistantName: 'Operations Assistant',
+    })
+    const { validateDeliveryTarget } = createWorkflowDependencyPreflight({
+      integrationStore: store,
+      defaultTelegramBotToken: 'shared-token',
+    })
+
+    const result = await validateDeliveryTarget({
+      workspaceId: WORKSPACE_ID,
+      assistantId: ASSISTANT_ID,
+      channelType: 'telegram',
+      channelId: '-100555:topic:42',
+      channelIntegrationId: '00000000-0000-4000-8000-000000000001',
+    })
+
+    expect(result.ok).toBe(false)
+    expect(result.reason).toContain('routes this destination to assistant "Operations Assistant"')
+    expect(result.reason).toContain('workflow step uses assistant "Research Assistant"')
+    expect(result.reason).toContain('Studio > Channels')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('explains when the selected channel has no route for the destination', async () => {
+    const { validateDeliveryTarget } = createWorkflowDependencyPreflight({
+      integrationStore: integrationStoreWithDiagnostic({
+        status: 'destination_unassigned',
+        channelLabel: '@project_bot',
+        requestedAssistantName: 'Research Assistant',
+      }),
+    })
+
+    const result = await validateDeliveryTarget({
+      workspaceId: WORKSPACE_ID,
+      assistantId: ASSISTANT_ID,
+      channelType: 'telegram',
+      channelId: '-100555:topic:42',
+      channelIntegrationId: '00000000-0000-4000-8000-000000000001',
+    })
+
+    expect(result.reason).toContain('has no assistant assigned')
+    expect(result.reason).toContain('set "Research Assistant" as the channel default')
+  })
+
+  it('explains when the selected Telegram integration is inactive', async () => {
+    const { validateDeliveryTarget } = createWorkflowDependencyPreflight({
+      integrationStore: integrationStoreWithDiagnostic({
+        status: 'integration_unavailable',
+        channelLabel: '@retired_bot',
+      }),
+    })
+
+    const result = await validateDeliveryTarget({
+      workspaceId: WORKSPACE_ID,
+      assistantId: ASSISTANT_ID,
+      channelType: 'telegram',
+      channelId: '-100555',
+      channelIntegrationId: '00000000-0000-4000-8000-000000000001',
+    })
+
+    expect(result.reason).toContain('"@retired_bot" is disconnected, inactive, or no longer available')
+    expect(result.reason).toContain('Reconnect it in Studio > Channels')
+  })
+
+  it('does not suggest routing a missing or foreign assistant', async () => {
+    const { validateDeliveryTarget } = createWorkflowDependencyPreflight({
+      integrationStore: integrationStoreWithDiagnostic({
+        status: 'assistant_unavailable',
+        channelLabel: '@project_bot',
+      }),
+    })
+
+    const result = await validateDeliveryTarget({
+      workspaceId: WORKSPACE_ID,
+      assistantId: ASSISTANT_ID,
+      channelType: 'telegram',
+      channelId: '-100555',
+      channelIntegrationId: '00000000-0000-4000-8000-000000000001',
+    })
+
+    expect(result.reason).toContain('workflow step assistant is not available in this workspace')
+    expect(result.reason).not.toContain(ASSISTANT_ID)
   })
 
   it('does not block Telegram authoring on a transient getChat failure', async () => {

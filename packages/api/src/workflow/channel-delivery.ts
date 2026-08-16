@@ -51,6 +51,7 @@ export function createWorkflowChannelDelivery(
   options: WorkflowChannelDeliveryOptions,
 ): DeliverToChannel {
   return async ({
+    workspaceId,
     assistantId,
     userId,
     channelType,
@@ -94,6 +95,7 @@ export function createWorkflowChannelDelivery(
       if (options.integrationStore) {
         const integ = channelIntegrationId
           ? await options.integrationStore.getCredentialsForAssistantIntegrationSystem(
+              workspaceId,
               assistantId,
               channelIntegrationId,
               'telegram',

@@ -230,6 +230,8 @@ export type CalleeExecutorOptions = {
 }
 
 export type CalleeQueryParams = {
+  /** Originating workflow workspace; authoritative for delivery integration scope. */
+  workspaceId?: string
   callerAssistantId: string
   calleeAssistantId: string
   question: string
@@ -1666,6 +1668,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           if (params.deliverTarget) {
             await sendConfirmationPrompt(
               {
+                workspaceId: params.workspaceId,
                 assistantId: params.calleeAssistantId,
                 channelType: params.deliverTarget.channelType,
                 channelId: params.deliverTarget.channelId,

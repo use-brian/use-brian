@@ -234,12 +234,14 @@ describeIf('[COMP:api/channel-integrations-store] getByChannelForWebhook', () =>
     })
 
     const defaultAssistant = await seeded.store.getCredentialsForAssistantIntegrationSystem(
+      seeded.workspaceId,
       seeded.assistantId,
       seeded.integrationId,
       'telegram',
       '-100555:topic:42',
     )
     const surfaceAssistant = await seeded.store.getCredentialsForAssistantIntegrationSystem(
+      seeded.workspaceId,
       surfaceAssistantId,
       seeded.integrationId,
       'telegram',
@@ -259,6 +261,7 @@ describeIf('[COMP:api/channel-integrations-store] getByChannelForWebhook', () =>
     })
 
     const found = await seeded.store.getCredentialsForAssistantIntegrationSystem(
+      seeded.workspaceId,
       seeded.assistantId,
       seeded.integrationId,
       'telegram',
@@ -266,5 +269,56 @@ describeIf('[COMP:api/channel-integrations-store] getByChannelForWebhook', () =>
     )
 
     expect(found?.id).toBe(seeded.integrationId)
+  })
+
+  it('diagnoses when the destination routes to a different assistant', async () => {
+    const seeded = await seedChannelWithIntegration({ channelType: 'telegram' })
+    const client = await pool!.connect()
+    let otherAssistantId: string
+    try {
+      otherAssistantId = await makeAssistant(client, seeded.ownerId, seeded.workspaceId)
+    } finally {
+      client.release()
+    }
+
+    const diagnostic = await seeded.store.diagnoseAssistantIntegrationRoutingSystem(
+      seeded.workspaceId,
+      otherAssistantId,
+      seeded.integrationId,
+      'telegram',
+      '-100555:topic:42',
+    )
+
+    expect(diagnostic).toMatchObject({
+      status: 'assistant_mismatch',
+      requestedAssistantName: 'ci-test-assistant',
+      routedAssistantName: 'ci-test-assistant',
+    })
+  })
+
+  it('hides a valid assistant/integration pair from a foreign workspace', async () => {
+    const seeded = await seedChannelWithIntegration({ channelType: 'telegram' })
+    const foreignWorkspaceId = randomUUID()
+
+    const credentials = await seeded.store.getCredentialsForAssistantIntegrationSystem(
+      foreignWorkspaceId,
+      seeded.assistantId,
+      seeded.integrationId,
+      'telegram',
+      '-100555',
+    )
+    const diagnostic = await seeded.store.diagnoseAssistantIntegrationRoutingSystem(
+      foreignWorkspaceId,
+      seeded.assistantId,
+      seeded.integrationId,
+      'telegram',
+      '-100555',
+    )
+
+    expect(credentials).toBeNull()
+    expect(diagnostic).toEqual({
+      status: 'integration_unavailable',
+      channelLabel: null,
+    })
   })
 })

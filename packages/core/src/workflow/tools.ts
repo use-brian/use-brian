@@ -175,6 +175,7 @@ export type WorkflowToolDeps = {
    * docs/architecture/engine/scheduled-jobs.md → "Channel delivery".
    */
   validateDeliveryTarget?: (args: {
+    workspaceId?: string
     assistantId: string
     channelType: 'telegram' | 'slack' | 'whatsapp'
     channelId: string
@@ -775,20 +776,24 @@ async function dependencyIssues(
         const assistantId = t.assistantTarget === 'primary' ? primaryAssistantId : t.assistantTarget
         if (!assistantId) continue
         const res = await deps.validateDeliveryTarget({
+          workspaceId: context.workspaceId ?? undefined,
           assistantId,
           channelType: t.channelType,
           channelId: t.channelId,
           channelIntegrationId: t.channelIntegrationId,
         })
         if (!res.ok) {
+          const guidance = t.channelType === 'slack'
+            ? ' Call `listSlackChannels` to get a real channel id and set it on the terminal step\'s `deliver` as `{ "channelType": "slack", "channelId": "<id>" }` (the internal id from `listChannels` is not a Slack channel id). Or author the workflow from inside the Slack channel you want the result posted to.'
+            : t.channelType === 'telegram'
+              ? /chat not found/i.test(res.reason ?? '')
+                ? ' Author from inside the Telegram chat you want the result delivered to so the correct destination is captured.'
+                : ''
+              : ' Author from inside the chat you want the result delivered to so the correct channel is captured.'
           errors.push(
             `Step "${t.stepId}" delivers to the ${t.channelType} channel "${t.channelId}", which is not reachable: ${
               res.reason ?? 'channel check failed'
-            }. ${
-              t.channelType === 'slack'
-                ? 'Call `listSlackChannels` to get a real channel id and set it on the terminal step\'s `deliver` as `{ "channelType": "slack", "channelId": "<id>" }` (the internal id from `listChannels` is not a Slack channel id). Or author the workflow from inside the Slack channel you want the result posted to.'
-                : 'Author from inside the chat you want the result delivered to so the correct channel is captured.'
-            }`,
+            }.${guidance}`,
           )
         }
       } catch (err) {

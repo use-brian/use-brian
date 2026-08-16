@@ -95,10 +95,12 @@ describe('[COMP:scheduling/confirmation-prompt] resolveTelegramBotToken', () => 
       { integrationStore: store, defaultTelegramBotToken: 'shared-tok' },
       '00000000-0000-4000-8000-000000000001',
       '-100555:topic:42',
+      'ws-1',
     )
 
     expect(token).toBe('selected-tok')
     expect(store.getCredentialsForAssistantIntegrationSystem).toHaveBeenCalledWith(
+      'ws-1',
       'a_1',
       '00000000-0000-4000-8000-000000000001',
       'telegram',
@@ -106,14 +108,17 @@ describe('[COMP:scheduling/confirmation-prompt] resolveTelegramBotToken', () => 
     )
   })
 
-  it('does not fall back when an explicitly selected integration is unavailable', async () => {
+  it('fails closed when an explicit integration has no authoritative workspace scope', async () => {
+    const store = fakeIntegrationStore('foreign-tok')
     const token = await resolveTelegramBotToken(
       'a_1',
-      { integrationStore: fakeIntegrationStore(null), defaultTelegramBotToken: 'shared-tok' },
+      { integrationStore: store, defaultTelegramBotToken: 'shared-tok' },
       '00000000-0000-4000-8000-000000000001',
       '-100555',
     )
     expect(token).toBeUndefined()
+    expect(store.getCredentialsForAssistantSystem).not.toHaveBeenCalled()
+    expect(store.getCredentialsForAssistantIntegrationSystem).not.toHaveBeenCalled()
   })
 })
 
