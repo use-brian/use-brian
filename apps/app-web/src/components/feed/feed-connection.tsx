@@ -23,6 +23,7 @@ import { feedPath, isConnectableFeedPlatform } from "@/lib/feed-nav";
 import type { FeedPlatform } from "@/lib/feed-nav";
 import { useConnectAccount } from "@/components/feed/connect-account-dialog";
 import { PlatformIcon } from "@/components/feed/platform-icon";
+import { FeedCloudLinkCard } from "@/components/feed/feed-cloud-link-card";
 import { Button } from "@/components/ui/button";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { useT } from "@/lib/i18n/client";
@@ -48,6 +49,8 @@ export function FeedConnection({ embedded = false }: { embedded?: boolean }) {
     isAdmin: canConnect,
   } = useConnectAccount();
   const isAdmin = team.role === "admin" || team.role === "owner";
+  const cloudState = team.cloudLink?.state ?? "native";
+  const managedReady = cloudState === "native" || cloudState === "linked";
 
   // Coming-soon targets already participate in drafting but have no OAuth
   // integration. Settings still explains that state in the same account card.
@@ -151,6 +154,7 @@ export function FeedConnection({ embedded = false }: { embedded?: boolean }) {
     const content = (
       <>
         {connectDialog}
+        <FeedCloudLinkCard assistantId={team.assistants[0]?.id} />
         <section className="rounded-xl border border-border/60 bg-card p-4 shadow-xs">
           <div className="flex items-start gap-3">
             <PlatformMark platform={platform} muted />
@@ -166,7 +170,7 @@ export function FeedConnection({ embedded = false }: { embedded?: boolean }) {
                 })}
               </p>
               <div className="mt-3">
-                {canConnect ? (
+                {canConnect && managedReady ? (
                   <Button
                     type="button"
                     variant="outline"
@@ -175,11 +179,11 @@ export function FeedConnection({ embedded = false }: { embedded?: boolean }) {
                   >
                     {t.connection.connectCta}
                   </Button>
-                ) : (
+                ) : !canConnect ? (
                   <p className="text-xs text-muted-foreground">
                     {t.connection.adminOnlyConnect}
                   </p>
-                )}
+                ) : null}
               </div>
             </div>
           </div>
@@ -196,6 +200,7 @@ export function FeedConnection({ embedded = false }: { embedded?: boolean }) {
 
   const content = (
     <>
+      <FeedCloudLinkCard assistantId={profile.assistantId} />
       {error ? (
         <div className="animate-pop-in rounded-xl border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
           {error}

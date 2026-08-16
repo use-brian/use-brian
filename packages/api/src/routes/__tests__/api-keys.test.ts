@@ -22,14 +22,16 @@ describe('[COMP:api/integrations-api-keys] API key management', () => {
   it('returns plaintext once and defaults scope to chat', async () => {
     store.create.mockResolvedValueOnce({
       id: 'key-1', name: 'CI', plaintext: 'sk_live_secret', prefix: 'sk_live_ab',
-      scope: 'chat', status: 'active', createdAt: '2026-05-16T00:00:00Z', lastUsedAt: null,
+      scope: 'chat', audience: 'external', anonymousContext: 'thin', toolPolicy: 'public_research',
+      status: 'active', createdAt: '2026-05-16T00:00:00Z', lastUsedAt: null,
     })
     const res = await request(app('u-1')).post('/api/assistants/a-1/integrations/api-keys').send({ name: 'CI' })
     expect(res.body.key).toBe('sk_live_secret')
     expect(store.create).toHaveBeenCalledWith({
       assistantId: 'a-1', name: 'CI', actingUserId: 'u-1', scope: 'chat',
-      audience: 'external', anonymousContext: 'thin',
+      audience: 'external', anonymousContext: 'thin', toolPolicy: 'public_research',
     })
+    expect(res.body.toolPolicy).toBe('public_research')
   })
 
   it('lists and revokes keys', async () => {
@@ -49,12 +51,31 @@ describe('[COMP:api/integrations-api-keys] API key management', () => {
   it('preserves audience and anonymous-context behavior', async () => {
     store.create.mockResolvedValueOnce({
       id: 'key-2', name: 'Embed', plaintext: 'sk_live_full', prefix: 'sk_live_fu', scope: 'chat',
-      audience: 'external', anonymousContext: 'full', status: 'active', createdAt: new Date(), lastUsedAt: null,
+      audience: 'external', anonymousContext: 'full', toolPolicy: 'assistant',
+      status: 'active', createdAt: new Date(), lastUsedAt: null,
     })
     const full = await request(app('u-1')).post('/api/assistants/a-1/integrations/api-keys')
-      .send({ name: 'Embed', anonymousContext: 'full' })
-    expect(full.body).toMatchObject({ audience: 'external', anonymousContext: 'full' })
+      .send({ name: 'Embed', anonymousContext: 'full', toolPolicy: 'assistant' })
+    expect(full.body).toMatchObject({
+      audience: 'external', anonymousContext: 'full', toolPolicy: 'assistant',
+    })
     expect((await request(app('u-1')).post('/api/assistants/a-1/integrations/api-keys')
       .send({ name: 'Bad', audience: 'internal', anonymousContext: 'full' })).status).toBe(400)
+  })
+
+  it('rejects public-research tools on an internal key', async () => {
+    const res = await request(app('u-1')).post('/api/assistants/a-1/integrations/api-keys')
+      .send({ name: 'Bad', audience: 'internal', toolPolicy: 'public_research' })
+    expect(res.status).toBe(400)
+    expect(res.body.detail).toContain('external-audience')
+    expect(store.create).not.toHaveBeenCalled()
+  })
+
+  it('rejects public-research tools on an agent-scope key', async () => {
+    const res = await request(app('u-1')).post('/api/assistants/a-1/integrations/api-keys')
+      .send({ name: 'Bad', scope: 'agent', toolPolicy: 'public_research' })
+    expect(res.status).toBe(400)
+    expect(res.body.detail).toContain('chat-scope')
+    expect(store.create).not.toHaveBeenCalled()
   })
 })

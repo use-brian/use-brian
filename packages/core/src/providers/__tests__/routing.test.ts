@@ -49,8 +49,8 @@ describe('[COMP:providers/routing-provider] dispatch', () => {
   it('routes each model id to its registry row provider', async () => {
     const gemini = stubProvider('gemini', 'from-gemini')
     const routing = createRoutingProvider({ gemini })
-    await text(routing.stream({ model: 'gemini-3.6-flash', systemPrompt: '', messages: [] }))
-    expect(gemini.seen[0]?.model).toBe('gemini-3.6-flash')
+    await text(routing.stream({ model: 'gemini-3.7-flash', systemPrompt: '', messages: [] }))
+    expect(gemini.seen[0]?.model).toBe('gemini-3.7-flash')
   })
 
   it('createSession dispatches on the session model', async () => {
@@ -188,7 +188,7 @@ describe('[COMP:providers/routing-provider] same-class fallback (L2)', () => {
     const routing = createRoutingProvider({ gemini: failingProvider('gemini', 503), anthropic })
     // Max class: no fallbackAlias on the registry row — the 503 must surface
     // rather than silently serving a Max-billed turn on a standard-pro model.
-    await expect(text(routing.stream({ model: 'gemini-3.6-flash', systemPrompt: '', messages: [] })))
+    await expect(text(routing.stream({ model: 'gemini-3.7-flash', systemPrompt: '', messages: [] })))
       .rejects.toThrow(/gemini down/)
     expect(anthropic.seen).toHaveLength(0)
   })

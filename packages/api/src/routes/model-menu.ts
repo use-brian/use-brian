@@ -180,7 +180,7 @@ export function modelMenuRoutes(opts: ModelMenuRouteOptions): Router {
     }
     // Profiles and curated pins over models whose key is gone are hidden with
     // their models (L12) — kept in the DB so a re-keyed deployment restores
-    // them. A legacy curated pin (for example Flash 3.5 after the 3.6
+    // them. A legacy curated pin (for example Flash 3.6 after the 3.7
     // cutover) is likewise hidden, making selection fall through to the
     // registry class default without destructive data migration.
     const available = new Set(classes['metered']!.map((m) => m.alias))

@@ -172,16 +172,23 @@ const claimsSchema = z.object({
   roles: z.array(z.string().min(1).max(64)).max(16).optional(),
 }).strict()
 
+const clientMemorySchema = z.object({
+  key: z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/),
+  summary: z.string().min(1).max(500),
+  detail: z.string().min(1).max(12_000).optional(),
+  tags: z.array(z.string().min(1).max(64)).max(16).optional(),
+}).strict()
+
 const messageSchema = z.object({
   externalUserId: z.string().min(1).max(256),
   externalUserName: z.string().min(1).max(120).optional(),
   externalUserEmail: z.string().email().max(256).optional(),
   /**
    * Opt-in: treat this externalUserId as a stable, real human (Tier 1) so
-   * memory tools are exposed and consolidation runs. Default false. Email
-   * present implies `identified: true` automatically — passing email is
-   * the only way to also enable auto-merge if the same human later signs
-   * up via OAuth.
+   * self-scoped memory is enabled. External shadows remain excluded from
+   * automatic background consolidation. Email present implies
+   * `identified: true` automatically; passing email is the only way to also
+   * enable auto-merge if the same human later signs up via OAuth.
    */
   identified: z.boolean().optional(),
   claims: claimsSchema.optional(),
@@ -191,6 +198,13 @@ const messageSchema = z.object({
    * consumer-attested. Turn-scoped: never persisted, never consolidated.
    */
   endUserContext: z.string().max(4000).optional(),
+  /**
+   * Deterministic internal self-memory upsert for an identified external
+   * client. Sensitivity and compartments are server-owned.
+   */
+  clientMemory: clientMemorySchema.optional(),
+  /** Explicit per-turn consent gate for a public_research key's web tools. */
+  allowPublicResearch: z.boolean().optional(),
   /**
    * Internal-audience keys only (docs/plans/api-chat-modes.md §3 D4): the
    * workspace member this turn acts as. Omitted → the key's creator. Must
@@ -326,12 +340,18 @@ export function publicApiRoutes(options: PublicApiRouteOptions): Router {
       // `wantsIdentified` derivation. `actorEmail` on an external key is a
       // 400 — attribution is not a per-request escalation.
       if (keyRow.audience === 'internal') {
-        if (body.identified !== undefined || body.claims !== undefined || body.externalUserEmail !== undefined) {
+        if (
+          body.identified !== undefined
+          || body.claims !== undefined
+          || body.externalUserEmail !== undefined
+          || body.clientMemory !== undefined
+          || body.allowPublicResearch !== undefined
+        ) {
           return fail(
             res,
             400,
             'invalid_input',
-            'identified/claims/externalUserEmail are external-lane fields and not valid with an internal-audience key',
+            'identified/claims/externalUserEmail/clientMemory/allowPublicResearch are external-lane fields and not valid with an internal-audience key',
           )
         }
         await executePublicTurn(
@@ -344,6 +364,7 @@ export function publicApiRoutes(options: PublicApiRouteOptions): Router {
             internalActor: { email: body.actorEmail ?? null, defaultUserId: keyRow.createdBy },
             delivery: acceptsPublicAssistantSse(req.headers.accept) ? 'sse' : 'json',
             analyticsMeta: { api_key_id: keyRow.id, context_scope: 'internal-member' },
+            toolPolicy: keyRow.toolPolicy,
           },
           req,
           res,
@@ -358,6 +379,14 @@ export function publicApiRoutes(options: PublicApiRouteOptions): Router {
           'actorEmail requires an internal-audience key',
         )
       }
+      if (body.allowPublicResearch !== undefined && keyRow.toolPolicy !== 'public_research') {
+        return fail(
+          res,
+          400,
+          'invalid_input',
+          'allowPublicResearch requires a public_research key',
+        )
+      }
       const wantsIdentified =
         body.identified === true || !!(body.claims?.email ?? body.externalUserEmail)
       const fullAnonymousLane =
@@ -369,6 +398,7 @@ export function publicApiRoutes(options: PublicApiRouteOptions): Router {
           identityNamespace: `api:${keyRow.id}`,
           body,
           contextScope: fullAnonymousLane ? 'assistant-full' : undefined,
+          toolPolicy: keyRow.toolPolicy,
           delivery: acceptsPublicAssistantSse(req.headers.accept) ? 'sse' : 'json',
           analyticsMeta: { api_key_id: keyRow.id, context_scope: fullAnonymousLane ? 'assistant-full' : 'external-client' },
         },

@@ -16,6 +16,7 @@ vi.mock("@/lib/auth-fetch", () => ({ authFetch: vi.fn() }));
 // sidebar state don't exist under bare SSR, so mock the hooks it reads.
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ back: vi.fn(), forward: vi.fn() }),
+  usePathname: () => "/w/ws-1/feed",
 }));
 vi.mock("@/components/doc/doc-sidebar-data", () => ({
   useSidebarData: () => ({

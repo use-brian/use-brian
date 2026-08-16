@@ -9,8 +9,9 @@
  * Why a custom event instead of a shared ref: the feed floating chat is
  * mounted once by `FeedSurfaceShell` as chrome, so a callsite deep in a
  * page (Voice, inbox, …) would otherwise need a global context just to
- * talk to it. A one-shot CustomEvent keeps the coupling loose — anyone can
- * `requestFeedChatSeed()`, only the shell's dock subscribes.
+ * talk to it. One-shot CustomEvents keep the coupling loose — the shell can
+ * open the master chat as-is, while contextual surfaces can also seed its
+ * composer.
  *
  * NAME COLLISION NOTE: app-web already has `src/lib/chat-seed.ts` — the DOC
  * chat's seed bus (`doc:chat-seed`, richer payload). This file is the feed
@@ -31,6 +32,13 @@ export type FeedChatSeed = {
 };
 
 export const FEED_CHAT_SEED_EVENT = "feed:chat-seed";
+export const FEED_CHAT_OPEN_EVENT = "feed:chat-open";
+
+/** Open the persistent Feed control conversation without changing its composer. */
+export function requestFeedChatOpen(): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent(FEED_CHAT_OPEN_EVENT));
+}
 
 /**
  * Ask the feed floating chat to expand and drop the given text into its

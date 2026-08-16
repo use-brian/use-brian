@@ -72,7 +72,7 @@ describe('[COMP:providers/model-registry] derivations match the pre-registry lit
     expect(chatTierDefaults()).toEqual({
       standard: 'gemini-3-flash-standard',
       pro: 'gemini-flash-3',
-      max: 'gemini-3.6-flash',
+      max: 'gemini-3.7-flash',
       research: 'gemini-3-pro-research',
     })
   })
@@ -92,7 +92,7 @@ describe('[COMP:providers/model-registry] derivations match the pre-registry lit
       'gpt-5.6-terra',
     ].sort())
     expect([...tierModelIds('max')].sort()).toEqual([
-      'max', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.1-pro-preview', 'gpt-5.6-sol',
+      'max', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.1-pro-preview', 'gpt-5.6-sol',
     ].sort())
     expect([...tierModelIds('research')].sort()).toEqual([
       'research', 'gemini-3-pro-research', 'gpt-5.5', 'gpt-5.2',
@@ -147,10 +147,12 @@ describe('[COMP:providers/model-registry] pricing lookups', () => {
     expect(modelRates('gemini-3-pro-research')).toBe(modelRates('gemini-3.1-pro-preview'))
   })
 
-  it('prices the active Flash 3.6 default without repricing legacy Flash 3.5', () => {
+  it('prices the active Flash 3.7 default without repricing legacy Flash models', () => {
+    expect(modelRates('gemini-3.7-flash')?.brackets[0]?.outPerMTok).toBe(7.50)
     expect(modelRates('gemini-3.6-flash')?.brackets[0]?.outPerMTok).toBe(7.50)
     expect(modelRates('gemini-3.5-flash')?.brackets[0]?.outPerMTok).toBe(9.00)
-    expect(registryRow('gemini-3.6-flash')?.status).toBe('active')
+    expect(registryRow('gemini-3.7-flash')?.status).toBe('active')
+    expect(registryRow('gemini-3.6-flash')?.status).toBe('legacy')
     expect(registryRow('gemini-3.5-flash')?.status).toBe('legacy')
   })
 
@@ -185,6 +187,7 @@ describe('[COMP:providers/model-registry] provider derivations', () => {
     expect(map['gemini-3.1-flash-lite-preview']).toBe('gemini-3.1-flash-lite')
     // Ids equal to their wire id never appear.
     expect(map['gemini-3-flash-preview']).toBeUndefined()
+    expect(map['gemini-3.7-flash']).toBeUndefined()
     expect(map['gemini-3.6-flash']).toBeUndefined()
     expect(map['gemini-3.5-flash']).toBeUndefined()
   })
@@ -203,13 +206,14 @@ describe('[COMP:providers/model-registry] provider derivations', () => {
   it('providerModelIds lists active callable ids without bare tier keys or embeddings', () => {
     const gemini = providerModelIds('gemini')
     expect(gemini).toContain('gemini-3-flash-standard')
-    expect(gemini).toContain('gemini-3.6-flash')
+    expect(gemini).toContain('gemini-3.7-flash')
     expect(gemini).toContain('gemini-3.1-flash-lite')
     expect(gemini).not.toContain('pro')
     expect(gemini).not.toContain('max')
     expect(gemini).not.toContain('research')
     expect(gemini).not.toContain('gemini-embedding-001')
     expect(gemini).not.toContain('gemini-2.5-flash') // legacy
+    expect(gemini).not.toContain('gemini-3.6-flash') // legacy
     expect(gemini).not.toContain('gemini-3.5-flash') // legacy
     expect(providerModelIds('anthropic')).toEqual(['claude-haiku-4-5'])
     expect(providerModelIds('openai-codex')).toEqual([
@@ -264,7 +268,7 @@ describe('[COMP:providers/model-registry] wave-1 slate + menus (plan §5.1)', ()
       'gpt-5.6-terra',
     ])
     expect(menuForClass('max').map((r) => r.alias)).toEqual([
-      'gemini-3.6-flash',
+      'gemini-3.7-flash',
       'gpt-5.6-sol',
     ])
     expect(menuForClass('research').map((r) => r.alias)).toEqual([
@@ -296,7 +300,7 @@ describe('[COMP:providers/model-registry] wave-1 slate + menus (plan §5.1)', ()
       'gpt-5.6-terra',
     ])
     expect(menuForClass('max', availability).map((r) => r.alias)).toEqual([
-      'gemini-3.6-flash',
+      'gemini-3.7-flash',
       'gpt-5.6-sol',
     ])
     expect(menuForClass('research', availability).map((r) => r.alias)).toEqual([
@@ -305,7 +309,7 @@ describe('[COMP:providers/model-registry] wave-1 slate + menus (plan §5.1)', ()
 
     availability.setModelCatalog('openai-codex', null)
     expect(menuForClass('max', availability).map((r) => r.alias)).toEqual([
-      'gemini-3.6-flash',
+      'gemini-3.7-flash',
     ])
   })
 })

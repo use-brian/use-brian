@@ -256,6 +256,25 @@ describe('[COMP:memory/tools] saveMemory', () => {
     expect(store.rows[0].sensitivity).toBe('confidential')
   })
 
+  it('keeps authenticated client memory internal during public research', async () => {
+    const store = makeFakeStore()
+    const create = vi.spyOn(store, 'create')
+    const { saveMemory } = createMemoryTools(store)
+    await saveMemory.execute(
+      { summary: 'Visitor discussed the public Acme launch' },
+      {
+        ...ctx,
+        researchMode: true,
+        memoryWriteSensitivityFloor: 'internal',
+        memoryWriteCompartments: ['client:studio-client:alice'],
+      },
+    )
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({
+      sensitivity: 'internal',
+      compartments: ['client:studio-client:alice'],
+    }))
+  })
+
   it('inherits the accumulator max on a normal (non-research) turn', async () => {
     const { SensitivityAccumulator } = await import('../../security/sensitivity.js')
     const accumulator = new SensitivityAccumulator()
@@ -530,6 +549,29 @@ describe('[COMP:memory/tools] saveMemory', () => {
 })
 
 describe('[COMP:memory/tools] getMemory', () => {
+  it('threads the authenticated-client branch only into the memory store context', async () => {
+    const store = makeFakeStore()
+    const getById = vi.spyOn(store, 'getById')
+    const { getMemory } = createMemoryTools(store)
+    await getMemory.execute(
+      { id: 'mem_missing' },
+      {
+        ...ctx,
+        clearance: 'public',
+        compartments: [],
+        clientSelfMemory: { compartment: 'client:studio-client:alice' },
+      },
+    )
+    expect(getById).toHaveBeenCalledWith(
+      expect.objectContaining({
+        clearance: 'public',
+        compartments: [],
+        clientSelfMemory: { compartment: 'client:studio-client:alice' },
+      }),
+      'mem_missing',
+    )
+  })
+
   it('fetches a memory by full id', async () => {
     const store = makeFakeStore()
     const created = await store.create({

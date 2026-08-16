@@ -576,6 +576,9 @@ function PostPane({
         setError(result.error ?? te.actionFailed);
         return;
       }
+      if ("error" in result && typeof result.error === "string") {
+        setError(result.error);
+      }
       notifyFeedPostsChanged();
       await load();
     } finally {

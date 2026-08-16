@@ -1,5 +1,6 @@
 import type { AccessContext, EntityLinksStore, Sensitivity } from '@use-brian/core'
 import { buildAccessPredicate } from './access-predicate.js'
+import { buildMemoryAccessPredicate } from './memory-access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
 import { getPool, query } from './client.js'
 import { emitMentionedEdges } from './edge-hooks.js'
@@ -300,7 +301,7 @@ export async function updateMemory(
       // memory the caller can't read (the write sibling of getMemoryById's
       // projection). Omitting `access` keeps the system-wide path for trusted
       // background workers. WS3 memory read/write-asymmetry fix, 2026-07-07.
-      const ap = access ? buildAccessPredicate(access, { startIdx: 2 }) : null
+      const ap = access ? buildMemoryAccessPredicate(access, { startIdx: 2 }) : null
       const lockResult = await client.query<Memory>(
         `SELECT ${MEMORY_SELECT} FROM memories
          WHERE id = $1 AND valid_to IS NULL${ap ? ` AND ${ap.sql}` : ''}
@@ -387,7 +388,7 @@ export async function getMemoryById(ctx: AccessContext, id: string): Promise<Mem
   // WU-4.2b: universal projection (workspace + visibility-double +
   // optional clearance ceiling) keeps cross-workspace ID lookups
   // from leaking rows.
-  const ap = buildAccessPredicate(ctx, { startIdx: 2 })
+  const ap = buildMemoryAccessPredicate(ctx, { startIdx: 2 })
   const result = await query<Memory>(
     `SELECT ${MEMORY_SELECT} FROM memories WHERE id = $1 AND ${ap.sql} AND valid_to IS NULL`,
     [id, ...ap.params],
@@ -434,7 +435,7 @@ export async function searchMemories(
 
   // Try FTS prefix match first
   if (prefixTerms) {
-    const ap = buildAccessPredicate(ctx)
+    const ap = buildMemoryAccessPredicate(ctx)
     const tsqIdx = ap.nextIdx
     const limIdx = ap.nextIdx + 1
     const result = await query<Memory>(
@@ -452,7 +453,7 @@ export async function searchMemories(
   }
 
   // Fallback: ILIKE on summary + detail (handles CJK, short queries)
-  const ap = buildAccessPredicate(ctx)
+  const ap = buildMemoryAccessPredicate(ctx)
   const likeIdx = ap.nextIdx
   const tagIdx = ap.nextIdx + 1
   const limIdx = ap.nextIdx + 2
@@ -478,7 +479,7 @@ export async function searchMemoriesByIdPrefix(
   params: { idPrefix: string; limit?: number },
 ): Promise<Memory[]> {
   const limit = params.limit ?? 1
-  const ap = buildAccessPredicate(ctx)
+  const ap = buildMemoryAccessPredicate(ctx)
   const pfxIdx = ap.nextIdx
   const limIdx = ap.nextIdx + 1
   const result = await query<Memory>(
@@ -653,7 +654,7 @@ export async function getMemoryIndex(
 ): Promise<Array<{
   id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity
 }>> {
-  const ap = buildAccessPredicate(ctx)
+  const ap = buildMemoryAccessPredicate(ctx)
   const result = await query<{ id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity }>(
     `SELECT id, summary, tags, app_id as "appId", sensitivity
      FROM memories
@@ -748,7 +749,7 @@ export async function getMemoryIndexRanked(
   rows: Array<{ id: string; summary: string; tags: string[]; sensitivity: Sensitivity; createdAt: Date }>
   totalCount: number
 }> {
-  const ap = buildAccessPredicate(ctx)
+  const ap = buildMemoryAccessPredicate(ctx)
   const limIdx = ap.nextIdx
   const result = await query<{
     id: string; summary: string; tags: string[]; sensitivity: Sensitivity; createdAt: Date; total: string
@@ -817,7 +818,7 @@ export async function listMemories(
 ): Promise<{ memories: Memory[]; total: number }> {
   const limit = params.limit ?? 20
   const offset = params.offset ?? 0
-  const ap = buildAccessPredicate(ctx)
+  const ap = buildMemoryAccessPredicate(ctx)
   const conditions: string[] = [ap.sql, 'valid_to IS NULL']
   const values: unknown[] = [...ap.params]
   let idx = ap.nextIdx
@@ -1090,7 +1091,7 @@ export async function listCronContextCandidatesForPrune(
  * See docs/architecture/platform/cost-and-pricing.md.
  */
 export async function countMemories(ctx: AccessContext): Promise<number> {
-  const ap = buildAccessPredicate(ctx)
+  const ap = buildMemoryAccessPredicate(ctx)
   const result = await query<{ count: string }>(
     `SELECT count(*)::text FROM memories
      WHERE ${ap.sql} AND valid_to IS NULL`,
@@ -1110,7 +1111,7 @@ export async function getMemoryStats(ctx: AccessContext): Promise<{
   total: number
   totalRecalls: number
 }> {
-  const ap = buildAccessPredicate(ctx)
+  const ap = buildMemoryAccessPredicate(ctx)
   const result = await query<{ count: string; recalls: string }>(
     `SELECT count(*)::text, coalesce(sum(recall_count), 0)::text as recalls
      FROM memories

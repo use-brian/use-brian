@@ -57,7 +57,7 @@ describe("[COMP:app-web/models-sdk] model menu SDK", () => {
 
   it("surfaces the server's error body on a failed create", async () => {
     mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ error: "Not a metered model" }), { status: 400 }));
-    await expect(createMeteredProfile("ws-1", { name: "x", modelAlias: "gemini-3.6-flash", toolRounds: 10 }))
+    await expect(createMeteredProfile("ws-1", { name: "x", modelAlias: "gemini-3.7-flash", toolRounds: 10 }))
       .rejects.toThrow("Not a metered model");
   });
 
@@ -77,7 +77,7 @@ describe("[COMP:app-web/models-sdk] model menu SDK", () => {
 
   it("surfaces the role error on a member's default write", async () => {
     mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ error: "Owner or admin role required" }), { status: 403 }));
-    await expect(setWorkspaceModelDefault("ws-1", "max", { modelAlias: "gemini-3.6-flash" }))
+    await expect(setWorkspaceModelDefault("ws-1", "max", { modelAlias: "gemini-3.7-flash" }))
       .rejects.toThrow("Owner or admin role required");
   });
 
