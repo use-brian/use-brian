@@ -7,6 +7,7 @@ import type { CompartmentAccumulator } from '../security/compartments.js'
 import type { EvidenceAccumulator } from '../security/evidence.js'
 import type { AttachmentCollector } from '../workspace-files/attachments.js'
 import type { LLMProvider } from '../providers/types.js'
+import type { AccessContext } from '../security/access-context.js'
 
 // ── Tool context ───────────────────────────────────────────────
 
@@ -270,6 +271,20 @@ export type ToolContext = {
    * The read-side analogue of `clearance`. See docs/plans/compartment-axis.md.
    */
   compartments?: string[] | null
+  /**
+   * Authenticated external-client self-memory projection. Memory tools alone
+   * thread this onto their AccessContext; every other tool continues to see
+   * the ordinary public clearance + empty compartment grant.
+   */
+  clientSelfMemory?: AccessContext['clientSelfMemory']
+  /** Minimum sensitivity for memory creates on this turn. */
+  memoryWriteSensitivityFloor?: Sensitivity
+  /**
+   * Memory-specific compartment stamp. When present it replaces the
+   * assistant default source for saveMemory (the read high-water accumulator
+   * is still unioned), keeping client self-memory exactly client-scoped.
+   */
+  memoryWriteCompartments?: string[]
   /**
    * Threaded onto `AccessContext.systemRead` for this turn's brain READS.
    * Set only where `userId` is a synthetic principal that holds no

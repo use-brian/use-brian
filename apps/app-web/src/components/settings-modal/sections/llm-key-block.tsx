@@ -8,11 +8,9 @@
  * or 403 (not owner/admin) degrades to a disabled "not available" state
  * instead of erroring.
  *
- * Extracted from `workspace-sections.tsx` so it can render in two homes:
- * hosted embeds it in the Advanced view of Models
- * (`sections/models-section.tsx`), while OSS keeps it in the standalone
- * `ws-llm-key` section. The custom endpoint block can be omitted when Models
- * renders it separately in its Custom models view.
+ * Extracted from `workspace-sections.tsx` so the Models Providers view can
+ * compose credential and endpoint controls without duplicating their state.
+ * The custom endpoint block can be omitted when Models renders it separately.
  */
 
 import { useCallback, useEffect, useState } from "react";

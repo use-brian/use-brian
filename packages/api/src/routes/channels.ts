@@ -34,7 +34,11 @@ import type { LinkCodeStore } from '../db/link-codes.js'
 import type { DiscordConnectorClient } from '../discord/connector-client.js'
 import type { WhatsappConnectorClient } from '../whatsapp/connector-client.js'
 import type { WechatConnectorClient } from '../wechat/connector-client.js'
-import type { ChannelIntegration, ChannelIntegrationStore } from '../db/channel-integrations.js'
+import type {
+  ChannelIntegration,
+  ChannelIntegrationStore,
+  SeenChat,
+} from '../db/channel-integrations.js'
 import {
   listChannelsForWorkspace,
   getChannelForUser,
@@ -195,9 +199,20 @@ const wechatVerifyCodeSchema = z.object({
  * server-side keeps them out of every consumer, including stale clients.
  * WhatsApp JID shapes vary too much to police — they pass through unfiltered.
  */
+const TELEGRAM_DESTINATION_ID_PATTERN = /^(-?\d+)(?::topic:([1-9]\d*))?$/
+
 const DESTINATION_ID_SHAPE: Record<string, RegExp> = {
-  telegram: /^-?\d+$/,
+  telegram: TELEGRAM_DESTINATION_ID_PATTERN,
   slack: /^[CDG][A-Z0-9]+$/,
+}
+
+function parseTelegramDestinationId(channelId: string): {
+  chatId: string
+  topicId: number | null
+} | null {
+  const match = TELEGRAM_DESTINATION_ID_PATTERN.exec(channelId)
+  if (!match) return null
+  return { chatId: match[1], topicId: match[2] ? Number(match[2]) : null }
 }
 
 /** Per-`getChat` budget — naming is a nicety, never worth a slow editor load. */
@@ -230,6 +245,10 @@ function serializeChannel(
     // Per-integration behavior config. `null` when the channel has no
     // `channel_integrations` row — the UI then renders no config section.
     integrationId: integration?.id ?? null,
+    integrationStatus: integration?.status ?? null,
+    integrationLabel: integration?.botUsername
+      ? `@${integration.botUsername}`
+      : integration?.teamName ?? null,
     config: integration?.config ?? null,
   }
 }
@@ -283,53 +302,119 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
   }
 
   /**
-   * Resolve display names for telegram destination chat ids via Bot API
-   * `getChat`. A chat is only visible to a bot that is in it, so the
-   * workspace's BYO bot is tried first, the hosted default bot second.
-   * Best-effort throughout: any failure (wrong bot, deleted chat, API down,
-   * timeout) leaves that id unnamed and the client falls back to the raw id.
-   * Tokens are used server-side only and never returned.
+   * Resolve display names for Telegram destinations. Forum-topic channel ids
+   * are split before `getChat` (Telegram only accepts the base chat id), then
+   * enriched with topic names from the webhook-populated `seenChats` inventory.
+   * A chat is only visible to a bot that is in it, so the workspace's BYO bot
+   * is tried first, the hosted default bot second. Best-effort throughout;
+   * tokens are used server-side only and never returned.
    */
   async function resolveTelegramTitles(
     userId: string,
     workspaceId: string,
-    chatIds: string[],
+    destinationIds: string[],
   ): Promise<Map<string, string>> {
     const names = new Map<string, string>()
-    if (chatIds.length === 0) return names
+    const parsed = destinationIds.flatMap((channelId) => {
+      const destination = parseTelegramDestinationId(channelId)
+      return destination ? [{ channelId, ...destination }] : []
+    })
+    if (parsed.length === 0) return names
 
+    let integrations: ChannelIntegration[] = []
     const tokens: string[] = []
     if (opts.integrationStore) {
       try {
-        const rows = await opts.integrationStore.listForWorkspace(userId, workspaceId)
-        const telegram = rows.find((r) => r.channelType === 'telegram')
-        if (telegram) {
-          const withCreds = await opts.integrationStore.getForUserWithCredentials(userId, telegram.id)
-          const byoToken = withCreds && (withCreds.credentials as { bot_token?: string }).bot_token
-          if (byoToken) tokens.push(byoToken)
-        }
+        integrations = await opts.integrationStore.listForWorkspace(userId, workspaceId)
       } catch (err) {
         console.warn('[channels/channel-destinations] BYO telegram lookup failed:', err instanceof Error ? err.message : err)
       }
     }
-    if (opts.telegramBotToken && !tokens.includes(opts.telegramBotToken)) {
-      tokens.push(opts.telegramBotToken)
-    }
-    if (tokens.length === 0) return names
 
-    const apis = tokens.map((token) => createTelegramApi({ token }))
-    await Promise.all(chatIds.map(async (chatId) => {
-      for (const api of apis) {
+    const seenByChatId = new Map<string, SeenChat>()
+    for (const integration of integrations.filter((r) => r.channelType === 'telegram')) {
+      for (const chat of integration.config.seenChats ?? []) {
+        const current = seenByChatId.get(chat.chatId)
+        if (!current) {
+          seenByChatId.set(chat.chatId, chat)
+          continue
+        }
+        const topics = new Map(current.topics.map((topic) => [topic.topicId, topic]))
+        for (const topic of chat.topics) {
+          const existing = topics.get(topic.topicId)
+          if (!existing) {
+            topics.set(topic.topicId, topic)
+            continue
+          }
+          const incomingIsNewer = topic.lastSeenAt >= existing.lastSeenAt
+          topics.set(topic.topicId, incomingIsNewer
+            ? { ...topic, name: topic.name ?? existing.name }
+            : { ...existing, name: existing.name ?? topic.name })
+        }
+        const incomingIsNewer = chat.lastSeenAt >= current.lastSeenAt
+        seenByChatId.set(chat.chatId, {
+          ...current,
+          chatTitle: incomingIsNewer
+            ? chat.chatTitle ?? current.chatTitle
+            : current.chatTitle ?? chat.chatTitle,
+          isForum: current.isForum || chat.isForum,
+          topics: [...topics.values()],
+          lastSeenAt: incomingIsNewer ? chat.lastSeenAt : current.lastSeenAt,
+        })
+      }
+    }
+    const unresolvedChatIds = [...new Set(
+      parsed
+        .filter(({ chatId }) => !seenByChatId.get(chatId)?.chatTitle)
+        .map(({ chatId }) => chatId),
+    )]
+
+    if (unresolvedChatIds.length > 0 && opts.integrationStore) {
+      const telegramIntegrations = integrations.filter(
+        (r) => r.channelType === 'telegram' && r.status === 'active',
+      )
+      const byoTokens = await Promise.all(telegramIntegrations.map(async (telegram) => {
         try {
+          const withCreds = await opts.integrationStore!.getForUserWithCredentials(userId, telegram.id)
+          return withCreds && (withCreds.credentials as { bot_token?: string }).bot_token
+        } catch (err) {
+          console.warn('[channels/channel-destinations] BYO telegram credential lookup failed:', err instanceof Error ? err.message : err)
+          return undefined
+        }
+      }))
+      for (const byoToken of byoTokens) {
+        if (byoToken && !tokens.includes(byoToken)) tokens.push(byoToken)
+      }
+    }
+    if (opts.telegramBotToken && !tokens.includes(opts.telegramBotToken)) tokens.push(opts.telegramBotToken)
+
+    const chatNames = new Map<string, string>()
+    const apis = tokens.map((token) => createTelegramApi({ token }))
+    await Promise.all(unresolvedChatIds.map(async (chatId) => {
+      try {
+        const name = await Promise.any(apis.map(async (api) => {
           const chat = await withTimeout(api.getChat(chatId), TELEGRAM_GETCHAT_TIMEOUT_MS)
           const personal = [chat.first_name, chat.last_name].filter(Boolean).join(' ')
           const name = chat.title ?? (personal || (chat.username ? `@${chat.username}` : ''))
-          if (name) { names.set(chatId, name); return }
-        } catch {
-          // Not this bot's chat (or transient failure) — try the next token.
-        }
+          if (!name) throw new Error('Telegram chat has no display name')
+          return name
+        }))
+        chatNames.set(chatId, name)
+      } catch {
+        // No configured bot could resolve this chat within the shared timeout.
       }
     }))
+
+    for (const { channelId, chatId, topicId } of parsed) {
+      const seen = seenByChatId.get(chatId)
+      const chatTitle = seen?.chatTitle ?? chatNames.get(chatId) ?? null
+      if (topicId == null) {
+        if (chatTitle) names.set(channelId, chatTitle)
+        continue
+      }
+      const topicName = seen?.topics.find((topic) => topic.topicId === topicId)?.name
+      names.set(channelId, `${chatTitle ?? chatId} › ${topicName ?? `#${topicId}`}`)
+    }
     return names
   }
 
@@ -339,7 +424,7 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
   // picker so authors can pick a known chat the assistant has spoken in.
   // Excludes the `notifications` placeholder channel id. Rows failing the
   // per-type id-shape check are dropped (see DESTINATION_ID_SHAPE), and
-  // telegram ids are resolved to display names via `getChat` — both
+  // Telegram chat/topic ids are resolved via `getChat` + `seenChats` — both
   // documented in docs/architecture/features/workflow.md → "Deliver
   // destination picker (web builder)".
   // [COMP:api/channel-destinations-route]
@@ -375,17 +460,48 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
       const shape = DESTINATION_ID_SHAPE[r.channelType]
       return !shape || shape.test(r.channelId)
     })
-    const unnamedTelegramIds = [...new Set(
-      rows.filter((r) => r.channelType === 'telegram' && !r.title).map((r) => r.channelId),
+    const telegramIdsToResolve = [...new Set(
+      rows
+        .filter((r) => r.channelType === 'telegram'
+          && (!r.title || parseTelegramDestinationId(r.channelId)?.topicId != null))
+        .map((r) => r.channelId),
     )]
-    const telegramNames = await resolveTelegramTitles(userId, workspaceId, unnamedTelegramIds)
+    const telegramNames = await resolveTelegramTitles(userId, workspaceId, telegramIdsToResolve)
+    let telegramIntegrations: ChannelIntegration[] = []
+    if (opts.integrationStore) {
+      try {
+        telegramIntegrations = (await opts.integrationStore.listForWorkspace(userId, workspaceId))
+          .filter((integration) => integration.channelType === 'telegram' && integration.status === 'active')
+      } catch {
+        // Destination discovery stays best-effort; unresolved rows remain usable
+        // through the shared/default bot path.
+      }
+    }
     res.json({
-      destinations: rows.map((r) => ({
-        channelType: r.channelType,
-        channelId: r.channelId,
-        title: r.title ?? telegramNames.get(r.channelId) ?? null,
-        lastActiveAt: r.lastActiveAt.toISOString(),
-      })),
+      destinations: rows.flatMap((r) => {
+        const title = parseTelegramDestinationId(r.channelId)?.topicId != null
+          ? telegramNames.get(r.channelId) ?? r.title
+          : r.title ?? telegramNames.get(r.channelId) ?? null
+        const base = {
+          channelType: r.channelType,
+          channelId: r.channelId,
+          title,
+          lastActiveAt: r.lastActiveAt.toISOString(),
+        }
+        if (r.channelType !== 'telegram') return [base]
+        const parsed = parseTelegramDestinationId(r.channelId)
+        const owners = parsed
+          ? telegramIntegrations.filter((integration) =>
+              integration.config.seenChats?.some((chat) => chat.chatId === parsed.chatId),
+            )
+          : []
+        if (owners.length === 0) return [{ ...base, channelIntegrationId: null, integrationLabel: null }]
+        return owners.map((integration) => ({
+          ...base,
+          channelIntegrationId: integration.id,
+          integrationLabel: integration.botUsername ? `@${integration.botUsername}` : integration.teamName,
+        }))
+      }),
     })
   })
 

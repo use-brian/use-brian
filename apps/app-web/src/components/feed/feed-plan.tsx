@@ -5,13 +5,9 @@
  * it (feed-revamp.md §3.1). Owns the bare `/feed` index (D5), so it also
  * renders the first-run onboarding when the workspace has no brand voice.
  *
- * Layout is calendar + one right rail. The rail shows the month brief by
- * default and swaps to the selected slot's editor, rather than opening a
- * third pane: the operator is always looking at either "what is this month
- * about" or "what is this one post", never both at once.
- *
- * The pipeline counts that used to be the retired home dashboard's stat cards
- * live at the top of the rail, where they annotate the calendar they describe.
+ * Layout is calendar + one contextual right rail. Its reusable overview is
+ * the default; the once-per-month brief and selected-slot editor open on
+ * demand and return to that overview, rather than becoming permanent chrome.
  *
  * [COMP:app-web/feed-plan-surface]
  */
@@ -69,12 +65,12 @@ import {
 import { requestFeedChatSeed } from "@/lib/feed-chat-seed";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
-import { isHostedEdition } from "@/lib/edition";
 
 export function FeedPlan() {
   const team = useFeedWorkspace();
   const { openConnect, dialog, isAdmin } = useConnectAccount();
-  const canConnect = isAdmin && isHostedEdition();
+  const router = useRouter();
+  const canConnect = isAdmin;
   const [onboarded, setOnboarded] = useState(false);
   const handleReady = useCallback(() => setOnboarded(true), []);
 
@@ -87,7 +83,18 @@ export function FeedPlan() {
         <FeedOnboarding
           canCreateBrand={isAdmin}
           canConnect={canConnect}
-          onConnect={() => void openConnect()}
+          onConnect={() => {
+            const cloudState = team.cloudLink?.state ?? "native";
+            if (cloudState === "native" || cloudState === "linked") {
+              void openConnect();
+              return;
+            }
+            const platform = defaultFeedPlatform(
+              team.workspaceId,
+              team.profiles.map((profile) => profile.platform),
+            );
+            router.push(feedPath(team.workspaceId, { platform, segment: "settings" }));
+          }}
           onReady={handleReady}
         />
       ) : (
@@ -97,7 +104,10 @@ export function FeedPlan() {
   );
 }
 
-type RailView = { kind: "brief" } | { kind: "slot"; draft: PlanSlotDraft };
+type RailView =
+  | { kind: "overview" }
+  | { kind: "brief" }
+  | { kind: "slot"; draft: PlanSlotDraft };
 
 function PlanBoard({ assistantId }: { assistantId: string }) {
   const team = useFeedWorkspace();
@@ -133,7 +143,7 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [rail, setRail] = useState<RailView>({ kind: "brief" });
+  const [rail, setRail] = useState<RailView>({ kind: "overview" });
   // Bumped when the operator asks for a plan; the rail then watches for the
   // assistant's `proposePlan` cardboard instead of polling all the time.
   const [watchToken, setWatchToken] = useState(0);
@@ -173,6 +183,13 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // A month change resets the contextual detail. Carrying an editor from the
+  // previous month into a new calendar is surprising and makes the rail feel
+  // permanent rather than tied to what the operator is viewing now.
+  useEffect(() => {
+    setRail({ kind: "overview" });
+  }, [month]);
 
   // Keep `?month=` in the URL so a month is linkable and survives a reload,
   // without pushing a history entry per arrow click.
@@ -362,7 +379,7 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
         return;
       }
       setSlots((prev) => prev.filter((s) => s.id !== slot.id));
-      setRail({ kind: "brief" });
+      setRail({ kind: "overview" });
     } finally {
       setBusy(false);
     }
@@ -460,6 +477,7 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
         return;
       }
       setBrief(result.brief);
+      setRail({ kind: "overview" });
     } finally {
       setBusy(false);
     }
@@ -667,10 +685,11 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
                 }),
               })
             }
-            onBack={() => setRail({ kind: "brief" })}
+            onBack={() => setRail({ kind: "overview" })}
           />
         ) : (
           <PlanBriefRail
+            view={rail.kind}
             month={month}
             brief={brief}
             counts={counts}
@@ -685,6 +704,8 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
             onAddIdea={addIdea}
             onDiscardIdea={(idea) => void discardIdea(idea)}
             onPlanIdea={planIdea}
+            onOpenBrief={() => setRail({ kind: "brief" })}
+            onCloseBrief={() => setRail({ kind: "overview" })}
           />
         )}
       </aside>

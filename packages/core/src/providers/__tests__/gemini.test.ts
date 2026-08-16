@@ -218,6 +218,9 @@ describe('[COMP:providers/gemini-input-parts] stripNonInputParts', () => {
 
   it('trims trailing model-prefill turns for Gemini 3.6+ only', () => {
     const history = [userText('translate this'), modelText('Translation:')]
+    expect(normalizeGeminiRequestContents(history, 'gemini-3.7-flash')).toEqual([
+      userText('translate this'),
+    ])
     expect(normalizeGeminiRequestContents(history, 'gemini-3.6-flash')).toEqual([
       userText('translate this'),
     ])
@@ -415,13 +418,13 @@ describe('[COMP:providers/gemini-json-mode] responseFormat json → responseMime
     expect(body.generationConfig?.responseSchema).toEqual(schema)
   })
 
-  it('omits deprecated sampling parameters for Gemini 3.6 while preserving older-model behavior', async () => {
+  it('omits deprecated sampling parameters for Gemini 3.6+ while preserving older-model behavior', async () => {
     fetchMock.mockResolvedValueOnce(sseOk()).mockResolvedValueOnce(sseOk())
     const { createGeminiProvider } = await import('../gemini.js')
 
     await drain(
       createGeminiProvider('test-key').stream({
-        model: 'gemini-3.6-flash',
+        model: 'gemini-3.7-flash',
         systemPrompt: 'sys',
         messages: [{ role: 'user', content: 'chat' }],
         temperature: 0.7,

@@ -178,6 +178,7 @@ const assistantCallStepSchema = z.object({
     .object({
       channelType: z.enum(['web', 'telegram', 'slack', 'whatsapp', 'msteams']),
       channelId: z.string().min(1).max(256),
+      channelIntegrationId: z.string().uuid().optional(),
       thread: z.object({ fromStep: stepIdSchema }).strict().optional(),
     })
     .optional(),
@@ -227,7 +228,7 @@ const toolCallStepSchema = z.object({
     .string()
     .min(1)
     .max(128)
-    .regex(/^[a-zA-Z_][a-zA-Z0-9_]*$/, 'toolName must be a valid identifier.'),
+    .regex(/^[a-zA-Z0-9_.:-]+$/, 'toolName contains unsupported characters.'),
   arguments: z.record(z.unknown()),
   approval: approvalSchema.optional(),
 })
@@ -544,6 +545,23 @@ export const WorkflowDefinitionSchema = z
       }
     }
 
+    // Bot integrations are currently an explicit part of Telegram delivery
+    // identity only. Reject inert ids on other channel types instead of
+    // persisting a selection runtime would ignore.
+    for (const [i, step] of def.steps.entries()) {
+      if (
+        step.type === 'assistant_call' &&
+        step.deliver?.channelIntegrationId &&
+        step.deliver.channelType !== 'telegram'
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `step "${step.id}".deliver.channelIntegrationId is only supported for telegram delivery.`,
+          path: ['steps', i, 'deliver', 'channelIntegrationId'],
+        })
+      }
+    }
+
     // `deliver.thread.fromStep` must reference a DIFFERENT assistant_call step
     // that delivers to the SAME channel — the thread parent is the message
     // that step posted this run. Also platform-gated: only Slack (thread_ts)
@@ -553,7 +571,11 @@ export const WorkflowDefinitionSchema = z
     const deliverSteps = new Map(
       def.steps
         .filter((s) => s.type === 'assistant_call' && s.deliver !== undefined)
-        .map((s) => [s.id, (s as { deliver: { channelType: string; channelId: string } }).deliver]),
+        .map((s) => [s.id, (s as { deliver: {
+          channelType: string
+          channelId: string
+          channelIntegrationId?: string
+        } }).deliver]),
     )
     for (const [i, step] of def.steps.entries()) {
       if (step.type !== 'assistant_call' || !step.deliver?.thread) continue
@@ -583,7 +605,8 @@ export const WorkflowDefinitionSchema = z
         })
       } else if (
         parent.channelType !== step.deliver.channelType ||
-        parent.channelId !== step.deliver.channelId
+        parent.channelId !== step.deliver.channelId ||
+        parent.channelIntegrationId !== step.deliver.channelIntegrationId
       ) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,

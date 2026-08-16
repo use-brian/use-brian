@@ -97,6 +97,10 @@ const env: OpenApiEnv = {
   // bot credentials (channel_integrations) — with it set, Studio → Channels
   // connect + the Telegram/Slack webhooks work locally.
   CHANNEL_CREDENTIAL_KEY: process.env.CHANNEL_CREDENTIAL_KEY,
+  // Optional paid managed Feed plane. Point this at the hosted API origin;
+  // leaving it unset preserves the complete local manual-posting path.
+  MANAGED_FEED_CLOUD_URL:
+    process.env.MANAGED_FEED_CLOUD_URL ?? 'https://api.usebrian.ai',
   // Optional self-hosted Discord Gateway bridge (see .env.example). Both set →
   // the Discord connect endpoint + /internal/discord inbound are live; unset →
   // Discord connect returns 503, Telegram/Slack unaffected.

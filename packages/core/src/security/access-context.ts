@@ -76,6 +76,20 @@ export type AccessContext = {
    * database is what refuses them.
    */
   systemRead?: boolean
+  /**
+   * Memory-only alternate projection for an authenticated external client.
+   * `packages/api/src/db/memory-access-predicate.ts` consumes this field;
+   * the universal `buildAccessPredicate` deliberately ignores it so the
+   * exception can never widen entities, knowledge, files, connectors, or any
+   * other resource family.
+   *
+   * A matching memory must still be exact on workspace, non-NULL user,
+   * non-NULL assistant, sensitivity <= internal, and this single compartment.
+   * Only the external Tier-1 public-turn path may populate the field.
+   */
+  clientSelfMemory?: {
+    compartment: string
+  }
 }
 
 export type AssistantKind = 'primary' | 'standard' | 'app'

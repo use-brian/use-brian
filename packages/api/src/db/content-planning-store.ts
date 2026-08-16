@@ -306,6 +306,7 @@ export interface ContentPlanningStore {
   listSessionDrafts(assistantId: string, sessionId: string): Promise<SavedContentDraft[]>
   listPending(assistantId: string, limit: number): Promise<SavedContentDraft[]>
   listReady(assistantId: string): Promise<SavedContentDraft[]>
+  getDraft(assistantId: string, draftId: string): Promise<SavedContentDraft | null>
   approve(params: {
     assistantId: string
     draftId: string
@@ -644,6 +645,17 @@ export function createContentPlanningStore(): ContentPlanningStore {
         [assistantId],
       )
       return result.rows.map(mapDraftRow)
+    },
+
+    async getDraft(assistantId, draftId) {
+      const result = await query<Parameters<typeof mapDraftRow>[0]>(
+        `${DRAFT_SELECT}
+          WHERE d.assistant_id = $1
+            AND d.id = $2
+            AND d.removed_at IS NULL`,
+        [assistantId, draftId],
+      )
+      return result.rows[0] ? mapDraftRow(result.rows[0]) : null
     },
 
     async approve(params) {

@@ -35,9 +35,12 @@ import {
 import { authFetch } from "@/lib/auth-fetch";
 import {
   fetchFeedDistributionAssistants,
+  fetchFeedCloudLink,
   fetchFeedTeamProfiles,
+  type FeedCloudLink,
   type FeedProfile,
 } from "@/lib/api/feed";
+import { isHostedEdition } from "@/lib/edition";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -76,6 +79,8 @@ export type FeedWorkspaceValue = {
    * brand existed" -- no consumer may hard-depend on it.
    */
   brand: BrandRecord | null;
+  /** Native hosted capability or verified paid Cloud Link state in OSS. */
+  cloudLink?: FeedCloudLink;
   /** Re-fetch profiles + membership (after an OAuth connect / disconnect). */
   refresh: () => Promise<void>;
 };
@@ -146,7 +151,7 @@ export function FeedProfilesProvider(props: {
   });
 
   const load = useCallback(async (): Promise<void> => {
-    const [team, profiles, assistants, brand] = await Promise.all([
+    const [team, profiles, assistants, brand, cloudLink] = await Promise.all([
       loadWorkspace(workspaceId),
       // Profiles failure ≠ surface failure: connections are optional to
       // planning, so render the zero-profile onboarding state instead.
@@ -159,6 +164,11 @@ export function FeedProfilesProvider(props: {
       // same degrade as profiles: null, and every consumer renders its
       // pre-brand shape.
       fetchWorkspaceBrand(workspaceId).catch(() => null),
+      isHostedEdition()
+        ? Promise.resolve({ state: "native" as const })
+        : fetchFeedCloudLink(workspaceId).catch(
+            () => ({ state: "unlinked" as const }),
+          ),
     ]);
     setState({
       status: "ready",
@@ -171,6 +181,7 @@ export function FeedProfilesProvider(props: {
         profiles,
         assistants,
         brand,
+        cloudLink,
         refresh: async () => {
           await load();
         },

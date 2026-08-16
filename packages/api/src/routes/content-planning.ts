@@ -61,6 +61,13 @@ export interface ContentPlanningRouteOptions {
     userId: string,
     workspaceId: string,
   ) => Promise<boolean>
+  /** Optional managed delivery after local approval. Unsupported drafts stay ready. */
+  publishApproved?: (
+    draft: SavedContentDraft,
+  ) => Promise<
+    | { status: 'posted'; permalink?: string }
+    | { status: 'manual'; reason?: string }
+  >
 }
 
 export function contentPlanningRoutes(
@@ -288,6 +295,35 @@ export function contentPlanningRoutes(
           code: 'DRAFT_NOT_PENDING',
         })
         return
+      }
+      const draft = options.publishApproved
+        ? await store.getDraft(req.params.assistantId, req.params.eventId)
+        : null
+      if (draft && options.publishApproved) {
+        try {
+          const delivery = await options.publishApproved(draft)
+          if (delivery.status === 'posted') {
+            await store.markPosted({
+              assistantId: req.params.assistantId,
+              draftId: req.params.eventId,
+              userId: ctx.userId,
+              permalink: delivery.permalink,
+            })
+            res.json({ ok: true, status: 'posted', permalink: delivery.permalink ?? null })
+            return
+          }
+          res.json({ ok: true, status: 'ready', delivery: delivery.reason ?? 'manual_posting' })
+          return
+        } catch (error) {
+          console.error('[content-planning] managed publish failed:', error)
+          res.json({
+            ok: true,
+            status: 'ready',
+            delivery: 'managed_publish_failed',
+            error: error instanceof Error ? error.message : 'Managed publish failed',
+          })
+          return
+        }
       }
       res.json({ ok: true, status: 'ready' })
     },

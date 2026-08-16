@@ -2203,7 +2203,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         ?? backgroundModelFor(options.configuredProviders)
       const backgroundUsageAttribution = {
         modelTier: 'standard',
-        providerKeySource: backgroundLlmRuntime ? 'user' as const : 'platform' as const,
+        providerKeySource: backgroundLlmRuntime?.providerKeySource ?? 'platform' as const,
       }
 
       // ── Giant-paste promotion (large-content-artifacts §Phase 3.1) ──
@@ -5052,10 +5052,10 @@ export function chatRoutes(options: WebChatOptions): Router {
       // That's the "5 free researches give a real taste of the deep mode"
       // wedge — once exhausted the user upgrades to keep using it.
       //
-      // Why Pro 3.1 specifically (vs the default Max model, Flash 3.6):
+      // Why Pro 3.1 specifically (vs the default Max model, Flash 3.7):
       // Research is reasoning-bound — multi-hop synthesis across web sources
       // is where Pro 3.1 keeps its 3–8 pp lead on GPQA / ARC-AGI-2 / MMLU-Pro.
-      // The default Max model (Flash 3.6) wins on agentic / coding / tool-use
+      // The default Max model (Flash 3.7) wins on agentic / coding / tool-use
       // but underperforms on this specific axis. The `research` alias forces
       // the resolver to Pro 3.1 regardless of the session's requested tier.
       //
@@ -5162,7 +5162,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           return
         }
         if (customLlmRuntime) {
-          if (userContentBlocks.some((block) => block.type === 'image')) {
+          if (customLlmRuntime.routeKind === 'custom' && userContentBlocks.some((block) => block.type === 'image')) {
             res.status(400).json({
               error: 'custom_model_media_unsupported',
               message: 'Custom model endpoints currently support text and tools only. Remove the inline image or choose a built-in model.',
@@ -5173,7 +5173,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           // the platform provider and a workspace Gemini key, and never falls
           // back to either if its request fails.
           turnProvider = customLlmRuntime.provider
-          usedByoKey = true
+          usedByoKey = customLlmRuntime.providerKeySource === 'user'
         }
       }
 

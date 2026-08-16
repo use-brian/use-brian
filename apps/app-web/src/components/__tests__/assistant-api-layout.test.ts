@@ -16,6 +16,19 @@ describe("[COMP:app-web/api-keys-tab] assistant API create layout", () => {
     expect(apiKeysSource).toContain('className="grid gap-5 md:grid-cols-2 xl:grid-cols-3"');
     expect(apiKeysSource).not.toContain('className="space-y-4 max-w-md"');
   });
+
+  it("defaults external chat keys to the immutable research-only ceiling", () => {
+    expect(apiKeysSource).toContain(
+      'useState<ApiKeyToolPolicy>("public_research")',
+    );
+    expect(apiKeysSource).toContain(
+      'audience === "external" && scope === "chat" ? toolPolicy : "assistant"',
+    );
+    expect(apiKeysSource).toContain(
+      'audience === "external" && scope === "chat"',
+    );
+    expect(apiKeysSource).toContain('setToolPolicy("assistant")');
+  });
 });
 
 describe("[COMP:app-web/assistant-detail] assistant tab strip", () => {

@@ -154,9 +154,19 @@ import { createWorkspaceChatHandoffStore } from './db/workspace-chat-handoff-sto
 import { authRoutes } from './routes/auth.js'
 import { devAuthRoutes, isLocalDevEnv } from './routes/dev-auth.js'
 import { localSessionRoutes, isOssEdition, isSelfHostedOssEnv } from './routes/local-session.js'
-import { contentPlanningRoutes } from './routes/content-planning.js'
+import {
+  contentPlanningRoutes,
+  type ContentPlanningRouteOptions,
+} from './routes/content-planning.js'
 import { contentPlanRoutes } from './routes/content-plan.js'
 import { contentIdeasRoutes } from './routes/content-ideas.js'
+import {
+  selfHostFeedCloudRoutes,
+  selfHostFeedManagedDistributionRoutes,
+  selfHostFeedOAuthRelayRoutes,
+  createSelfHostFeedCloudPublisher,
+} from './routes/self-host-feed-cloud.js'
+import { createSelfHostFeedCloudLinkStore } from './db/self-host-feed-cloud-link-store.js'
 import {
   injectContentPlanningTools,
   resolveContentPlanningPrompt,
@@ -612,6 +622,12 @@ export interface OpenApiEnv {
   APP_URL: string
   AUTHED_APP_URL?: string
   FEED_URL?: string
+  /**
+   * Optional hosted Use Brian origin for paid OSS Feed capabilities. The
+   * local API remains authoritative for planning and sends only scoped Feed
+   * requests through the Cloud Link.
+   */
+  MANAGED_FEED_CLOUD_URL?: string
   /** OSS-only, local support-capsule capture. Hosted compositions leave unset. */
   SUPPORT_DIAGNOSTICS_ENABLED?: boolean
   /** Optional Cloud Run injected port; falls back to API_URL port / 4000. */
@@ -1681,6 +1697,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const customLlmEndpointStore = createDbWorkspaceCustomLlmEndpointStore(llmProviderEncryptionKey ?? undefined)
   const resolveWorkspaceCustomLlm = createWorkspaceCustomLlmResolver(customLlmEndpointStore, {
     networkPolicy: customLlmNetworkPolicy,
+    managedProvider: provider,
   })
   const resolveBackgroundRuntime = async (workspaceId: string | null | undefined) =>
     workspaceId
@@ -1689,6 +1706,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           requestedTier: 'standard',
           allowDefault: true,
           allowAnyDefault: true,
+          // Exact managed routes are a user-facing tier choice. Preserve the
+          // existing internal/background lane; custom BYO defaults keep their
+          // historical behavior here.
+          allowManagedRoutes: false,
         })
       : null
   const workspaceForAssistant = async (assistantId: string): Promise<string | null> => {
@@ -2312,6 +2333,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     connectorGrantStore,
     connectorInstanceStore,
     workspaceToolPolicyStore,
+    assistantConnectorGrantsStore,
     knowledgeStore,
     gdriveFilesStore,
     capabilityStore,
@@ -2356,8 +2378,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const consultTransport = createInProcessTransport({
     runConsult: async ({ request }) => {
       const text = await calleeExecutor({
+        workspaceId: request.target.workspaceId,
         callerAssistantId: request.caller.assistantId,
         calleeAssistantId: request.target.assistantId,
+        expectedWorkspaceId: request.target.workspaceId,
         question: request.message.parts
           .filter((p): p is { kind: 'text'; text: string } => p.kind === 'text')
           .map((p) => p.text)
@@ -2467,6 +2491,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         // Evaluated per-run (this closure fires post-boot), so the late
         // `filesApi` initialization below is already done.
         filesApi: filesApi ?? undefined,
+        engineHooks: ports.engineHooks,
+        assistantConnectorGrantsStore,
       },
       { workspaceId, assistantId, userId },
     ),
@@ -4225,6 +4251,40 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     )
   }
 
+  // A self-hosted deployment may opt into the hosted provider plane through
+  // a paid Cloud Link. Mount its exact managed routes before the open planning
+  // routers so connected profiles/settings resolve remotely while drafts,
+  // plans, ideas, and approvals keep falling through to local storage.
+  let feedCloudPublisher: ContentPlanningRouteOptions['publishApproved']
+  if (isOssEdition() && env.MANAGED_FEED_CLOUD_URL && credKey) {
+    const feedCloudStore = createSelfHostFeedCloudLinkStore(credKey)
+    feedCloudPublisher = createSelfHostFeedCloudPublisher({ store: feedCloudStore })
+    app.use(
+      '/api/self-host-feed',
+      requireAuth(env.JWT_SECRET),
+      selfHostFeedCloudRoutes({
+        cloudBaseUrl: env.MANAGED_FEED_CLOUD_URL,
+        localAppUrl: env.APP_URL,
+        store: feedCloudStore,
+      }),
+    )
+    app.use(
+      '/api/threads-oauth',
+      requireAuth(env.JWT_SECRET),
+      selfHostFeedOAuthRelayRoutes('threads', { store: feedCloudStore }),
+    )
+    app.use(
+      '/api/twitter-oauth',
+      requireAuth(env.JWT_SECRET),
+      selfHostFeedOAuthRelayRoutes('twitter', { store: feedCloudStore }),
+    )
+    app.use(
+      '/api/distribution',
+      requireAuth(env.JWT_SECRET),
+      selfHostFeedManagedDistributionRoutes({ store: feedCloudStore }),
+    )
+  }
+
   // Marketing plan (slots + month brief) is open in BOTH editions: it needs
   // no credential and no distribution profile, so it must not join the
   // `/api/distribution` fork that already 404s edition-specific routes.
@@ -4243,7 +4303,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     app.use(
       '/api/distribution',
       requireAuth(env.JWT_SECRET),
-      contentPlanningRoutes(),
+      contentPlanningRoutes({ publishApproved: feedCloudPublisher }),
     )
   }
 
@@ -4520,6 +4580,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     connectorInstanceStore,
     connectorGrantStore,
     mcpSettingsStore,
+    workspaceToolPolicyStore,
+    workspaceStore,
     registry: connectorRegistry,
     jobStore,
     skillStore,
@@ -6008,7 +6070,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     }))
     const attributionUserId = ctx.userId ?? (workspaceId ? await ownerForWorkspace(workspaceId) : null)
     if (response.usage && attributionUserId && usageStore) {
-      const cost = customRuntime ? 0 : calculateCost(callModel, response.usage)
+      const cost = customRuntime?.providerKeySource === 'user'
+        ? 0
+        : calculateCost(callModel, response.usage)
       usageStore.recordUsage({
         userId: attributionUserId,
         assistantId: ctx.assistantId,
@@ -6022,7 +6086,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         cacheWriteTokens: response.usage.cacheWriteTokens,
         actualCostUsd: cost,
         source: 'overhead:consolidation',
-        providerKeySource: customRuntime ? 'user' : 'platform',
+        providerKeySource: customRuntime?.providerKeySource ?? 'platform',
       }).catch((err) => console.error('[consolidation] usage tracking failed:', err))
     }
     return response.content
@@ -6167,7 +6231,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         maxTokens,
       }))
       if (response.usage && usageStore) {
-        const cost = customRuntime ? 0 : calculateCost(callModel, response.usage)
+        const cost = customRuntime?.providerKeySource === 'user'
+          ? 0
+          : calculateCost(callModel, response.usage)
         usageStore.recordUsage({
           userId: attribution.userId,
           assistantId: attribution.assistantId,
@@ -6180,7 +6246,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           cacheWriteTokens: response.usage.cacheWriteTokens,
           actualCostUsd: cost,
           source: 'overhead:skill-review',
-          providerKeySource: customRuntime ? 'user' : 'platform',
+          providerKeySource: customRuntime?.providerKeySource ?? 'platform',
         }).catch((err) => console.error('[skill-review] usage tracking failed:', err))
       }
       return response.content
@@ -6247,7 +6313,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         maxTokens,
       }))
       if (response.usage && usageStore) {
-        const cost = customRuntime ? 0 : calculateCost(callModel, response.usage)
+        const cost = customRuntime?.providerKeySource === 'user'
+          ? 0
+          : calculateCost(callModel, response.usage)
         usageStore.recordUsage({
           userId: attribution.userId,
           assistantId: attribution.assistantId,
@@ -6260,7 +6328,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           cacheWriteTokens: response.usage.cacheWriteTokens,
           actualCostUsd: cost,
           source: 'overhead:playbook-reflection',
-          providerKeySource: customRuntime ? 'user' : 'platform',
+          providerKeySource: customRuntime?.providerKeySource ?? 'platform',
         }).catch((err) => console.error('[playbook-reflection] usage tracking failed:', err))
       }
       return response.content

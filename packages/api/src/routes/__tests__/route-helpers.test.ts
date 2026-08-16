@@ -88,7 +88,8 @@ describe('[COMP:api/route-helpers] Route helpers', () => {
       const result = buildUnavailableCapabilitiesPrompt(['Gmail', 'Google Calendar'], noSearch)
       expect(result).toContain('Gmail')
       expect(result).toContain('Google Calendar')
-      expect(result).toContain('NOT available')
+      expect(result).toContain('not available')
+      expect(result.match(/Studio → Connectors/g)).toHaveLength(1)
     })
 
     it('scopes the Settings suggestion to the listed services (closed world)', () => {
@@ -96,8 +97,8 @@ describe('[COMP:api/route-helpers] Route helpers', () => {
       // The template must be scoped to the list, not a general habit the
       // model extends to arbitrary services (the invented-Jira-connector
       // class caught by the WS2 probe battery).
-      expect(result).toContain('listed above')
-      expect(result).toContain('Never point the user to a Settings toggle or connector for a service that is not listed here')
+      expect(result).toContain('For any other service')
+      expect(result).toContain('Do not suggest a connector setting for an unlisted service')
       expect(result).not.toContain('an unavailable service')
     })
 
@@ -112,7 +113,7 @@ describe('[COMP:api/route-helpers] Route helpers', () => {
 
     it('does NOT claim the visible tools are the whole surface when mcp_search is present', () => {
       const result = buildUnavailableCapabilitiesPrompt(['Gmail'], withSearch)
-      expect(result).not.toContain('This list plus your tools is the complete integration surface')
+      expect(result).not.toContain('The list and visible tools are the complete integration surface')
     })
 
     it('orders a search before any denial when mcp_search is present', () => {
@@ -120,7 +121,7 @@ describe('[COMP:api/route-helpers] Route helpers', () => {
       expect(result).toContain('mcp_search')
       expect(result).toMatch(/before .{0,60}unavailable/i)
       // The listed services stay closed-world — searching for them is still banned.
-      expect(result).toContain('Never point the user to a Settings toggle or connector for a service that is not listed here')
+      expect(result).toContain('Do not suggest a connector setting for an unlisted service')
     })
 
     it('emits the search guidance even when nothing is unavailable', () => {
@@ -137,7 +138,7 @@ describe('[COMP:api/route-helpers] Route helpers', () => {
       expect(buildUnavailableCapabilitiesPrompt([], new Map())).toBe('')
       const result = buildUnavailableCapabilitiesPrompt(['Gmail'], new Map())
       expect(result).not.toContain('mcp_search')
-      expect(result).toContain('This list plus your tools is the complete integration surface')
+      expect(result).toContain('The list and visible tools are the complete integration surface')
     })
   })
 

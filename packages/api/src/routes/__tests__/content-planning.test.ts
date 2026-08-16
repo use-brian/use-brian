@@ -55,6 +55,7 @@ function fakeStore(overrides: Partial<ContentPlanningStore> = {}): ContentPlanni
     listSessionDrafts: vi.fn(async () => []),
     listPending: vi.fn(async () => []),
     listReady: vi.fn(async () => []),
+    getDraft: vi.fn(async () => null),
     approve: vi.fn(async () => true),
     reject: vi.fn(async () => true),
     markPosted: vi.fn(async () => true),
@@ -64,7 +65,10 @@ function fakeStore(overrides: Partial<ContentPlanningStore> = {}): ContentPlanni
   }
 }
 
-function app(store: ContentPlanningStore) {
+function app(
+  store: ContentPlanningStore,
+  options: { publishApproved?: (draft: SavedContentDraft) => Promise<{ status: 'posted'; permalink?: string } | { status: 'manual'; reason?: string }> } = {},
+) {
   const server = express()
   server.use(express.json())
   server.use((req, _res, next) => {
@@ -75,6 +79,7 @@ function app(store: ContentPlanningStore) {
     store,
     resolveAccess: async () => ACCESS,
     resolveWorkspaceAccess: async () => true,
+    publishApproved: options.publishApproved,
   }))
   return server
 }
@@ -100,6 +105,39 @@ describe('[COMP:feed/content-planning-routes] OSS planning wire contract', () =>
       draftId: 'draft-1',
       userId: 'user-1',
       finalText: 'Edited caption.',
+    })
+  })
+
+  it('marks a locally approved draft posted only after managed delivery succeeds', async () => {
+    const approvedDraft = draft({
+      platform: 'threads',
+      status: 'ready',
+      finalText: 'Approved copy.',
+    })
+    const markPosted = vi.fn(async () => true)
+    const publishApproved = vi.fn(async () => ({
+      status: 'posted' as const,
+      permalink: 'https://threads.example/post-1',
+    }))
+    const store = fakeStore({
+      approve: vi.fn(async () => true),
+      getDraft: vi.fn(async () => approvedDraft),
+      markPosted,
+    })
+    const response = await request(app(store, { publishApproved }))
+      .post('/api/distribution/assistant-1/approvals/draft-1/approve')
+      .send({ text: 'Approved copy.' })
+      .expect(200)
+    expect(response.body).toEqual({
+      ok: true,
+      status: 'posted',
+      permalink: 'https://threads.example/post-1',
+    })
+    expect(markPosted).toHaveBeenCalledWith({
+      assistantId: 'assistant-1',
+      draftId: 'draft-1',
+      userId: 'user-1',
+      permalink: 'https://threads.example/post-1',
     })
   })
 

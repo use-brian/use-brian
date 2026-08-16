@@ -1,10 +1,10 @@
 "use client";
 
 /**
- * Tuning chat panel — ported faithfully from
+ * Feed chat panel — evolved from
  * `apps/feed-web/src/components/tuning-chat-panel.tsx`
  * (docs/plans/feed-web-consolidation.md §7.3): the chat surface where the
- * operator teaches the assistant voice rules over `@use-brian/chat-ui` +
+ * operator directs planning, ideation, writing, and voice work over `@use-brian/chat-ui` +
  * `POST /api/chat` SSE, with session resume (`channelId='tuning'`), the shared
  * dock recorder, copy/retry, a model-tier picker gated by the workspace plan, and
  * the research-mode toggle gated by the free-research quota.
@@ -124,6 +124,8 @@ export const TuningChatPanel = forwardRef<
     onClose?: () => void;
     /** Sticky channel to resume. Defaults to the tuning conversation. */
     channelId?: string;
+    /** Hard-lock sending while the host provisions a required fixed session. */
+    ready?: boolean;
     /**
      * Resume THIS session instead of looking one up by channel. The post
      * editor hosts a per-post refine chat, which is a session id, not a
@@ -161,6 +163,7 @@ export const TuningChatPanel = forwardRef<
     emptySuggestionsLabel,
     onClose,
     channelId = TUNING_CHANNEL_ID,
+    ready = true,
     sessionId: fixedSessionId,
     onTurnComplete,
     renderPlanGate,
@@ -367,6 +370,7 @@ export const TuningChatPanel = forwardRef<
 
   const sendMessage = useCallback(
     async (text: string, fileIds: string[], truncateFromMessageId?: string) => {
+      if (!ready) return false;
       const trimmed = text.trim();
       if (!trimmed && fileIds.length === 0) return false;
 
@@ -532,7 +536,7 @@ export const TuningChatPanel = forwardRef<
       });
       return true;
     },
-    [assistantId, session, stream, model, researchMode, workspaceId, t, applyQueuedInput, flushQueuedInputs],
+    [assistantId, session, stream, model, researchMode, workspaceId, t, applyQueuedInput, flushQueuedInputs, ready],
   );
 
   useEffect(() => {
@@ -540,6 +544,7 @@ export const TuningChatPanel = forwardRef<
   }, [sendMessage]);
 
   const onSend = useCallback(async (steer = false) => {
+    if (!ready) return;
     if (!input.trim()) return;
     // A turn is already running: hand this to it rather than starting a
     // second one. See docs/architecture/engine/mid-turn-input.md.
@@ -548,7 +553,7 @@ export const TuningChatPanel = forwardRef<
       return;
     }
     await sendMessage(input, []);
-  }, [input, midTurn, sendMessage, stream]);
+  }, [input, midTurn, ready, sendMessage, stream]);
 
   // Feed hides the global chat chrome but keeps its recorder controller alive.
   // While this floating tuning panel owns the replacement dock, short captures
@@ -605,7 +610,10 @@ export const TuningChatPanel = forwardRef<
   const showEmpty = messages.length === 0 && !isStreaming;
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-border bg-popover shadow-2xl">
+    <div
+      aria-busy={!ready}
+      className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-border bg-popover shadow-2xl"
+    >
       <div className="relative shrink-0 border-b border-border/60 px-4 py-3">
         <div className="flex items-center gap-2.5">
           <span className="relative shrink-0" aria-hidden>
@@ -782,6 +790,7 @@ export const TuningChatPanel = forwardRef<
               // `stream.inFlight()`, so Enter can't double-send; the message
               // list carries the thinking indicator.
               placeholder={composerPlaceholder ?? t.composerPlaceholder}
+              disabled={!ready}
               rows={1}
               className="w-full bg-transparent text-[14px] text-foreground placeholder:text-muted-foreground/60 resize-none outline-none focus-visible:shadow-none min-h-[24px] max-h-[140px] py-0.5 leading-relaxed"
               style={{ fieldSizing: "content" } as React.CSSProperties}
@@ -848,7 +857,7 @@ export const TuningChatPanel = forwardRef<
                 (muted to mark the difference). See mid-turn-input.md. */}
             <button
               onClick={() => void onSend()}
-              disabled={!input.trim()}
+              disabled={!ready || !input.trim()}
               className={cn(
                 "p-2 rounded-xl transition-colors shadow-sm shrink-0",
                 "disabled:opacity-30 disabled:cursor-not-allowed",
@@ -896,15 +905,7 @@ function EmptyState({
               {title ?? t.tuningChat.emptyTitle}
             </p>
             <p className="text-[12px] leading-relaxed text-muted-foreground">
-              {body ? (
-                body
-              ) : (
-                <>
-                  {t.tuningChat.emptyBodyBefore}{" "}
-                  <span className="font-medium text-foreground">{t.voice.discuss}</span>{" "}
-                  {t.tuningChat.emptyBodyAfter}
-                </>
-              )}
+              {body ?? t.tuningChat.emptyBody}
             </p>
           </div>
         </div>

@@ -13,6 +13,7 @@ const createSchema = z.object({
   scope: z.enum(['chat', 'agent']).default('chat'),
   audience: z.enum(['external', 'internal']).default('external'),
   anonymousContext: z.enum(['thin', 'full']).default('thin'),
+  toolPolicy: z.enum(['assistant', 'public_research']).optional(),
 }).strict()
 
 export function apiKeyRoutes(store: ApiKeyStore): Router {
@@ -30,6 +31,24 @@ export function apiKeyRoutes(store: ApiKeyStore): Router {
       })
       return
     }
+    const toolPolicy = parsed.data.toolPolicy
+      ?? (
+        parsed.data.audience === 'internal' || parsed.data.scope === 'agent'
+          ? 'assistant'
+          : 'public_research'
+      )
+    if (parsed.data.audience === 'internal' && toolPolicy !== 'assistant') {
+      return res.status(400).json({
+        error: 'invalid_input',
+        detail: 'toolPolicy "public_research" applies to external-audience keys only',
+      })
+    }
+    if (parsed.data.scope === 'agent' && toolPolicy !== 'assistant') {
+      return res.status(400).json({
+        error: 'invalid_input',
+        detail: 'toolPolicy "public_research" applies to chat-scope keys only',
+      })
+    }
     try {
       const created = await store.create({
         assistantId: req.params.assistantId,
@@ -38,6 +57,7 @@ export function apiKeyRoutes(store: ApiKeyStore): Router {
         scope: parsed.data.scope,
         audience: parsed.data.audience,
         anonymousContext: parsed.data.anonymousContext,
+        toolPolicy,
       })
       res.json({
         id: created.id,
@@ -47,6 +67,7 @@ export function apiKeyRoutes(store: ApiKeyStore): Router {
         scope: created.scope,
         audience: created.audience,
         anonymousContext: created.anonymousContext,
+        toolPolicy: created.toolPolicy,
         status: created.status,
         createdAt: created.createdAt,
         lastUsedAt: created.lastUsedAt,

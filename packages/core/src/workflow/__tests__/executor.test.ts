@@ -518,6 +518,7 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
       assistantId: string
       channelType: string
       channelId: string
+      channelIntegrationId?: string
       text: string
     }> = []
     const deps: ExecutorDeps = {
@@ -531,6 +532,7 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
           assistantId: p.assistantId,
           channelType: p.channelType,
           channelId: p.channelId,
+          channelIntegrationId: p.channelIntegrationId,
           text: p.text,
         })
         return { status: 'delivered' as const, channelType: p.channelType, channelId: p.channelId }
@@ -545,7 +547,11 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
           type: 'assistant_call',
           target: { assistantId: 'primary' },
           prompt: 'brief me',
-          deliver: { channelType: 'telegram', channelId: 'chat-42' },
+          deliver: {
+            channelType: 'telegram',
+            channelId: 'chat-42',
+            channelIntegrationId: '00000000-0000-4000-8000-000000000001',
+          },
         },
       ],
     }
@@ -560,6 +566,7 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
         assistantId: PRIMARY_ASSISTANT_ID,
         channelType: 'telegram',
         channelId: 'chat-42',
+        channelIntegrationId: '00000000-0000-4000-8000-000000000001',
         text: 'your morning briefing',
       },
     ])
@@ -1048,21 +1055,21 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
 
   it('Phase B (simulated): pauses the run on a `wait` step', async () => {
     const stores = makeFakeStores()
-    let pauseCall: { runId: string; stepRunId: string; dueAt: Date } | null = null
+    let pauseCall: { runId: string; stepRunId: string; triggeredBy: string | null; dueAt: Date } | null = null
     const deps: ExecutorDeps = {
       workflowStore: stores.workflowStore,
       runStore: stores.runStore,
       consultTransport: makeConsultTransport(),
       resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
       buildToolRegistry: async () => new Map(),
-      pauseRunForWait: async ({ runId, stepRunId, dueAt }) => {
-        pauseCall = { runId, stepRunId, dueAt }
+      pauseRunForWait: async ({ runId, stepRunId, triggeredBy, dueAt }) => {
+        pauseCall = { runId, stepRunId, triggeredBy, dueAt }
       },
     }
     const { run } = await seedWorkflowAndRun(deps, {
       startStepId: 'sleep',
       steps: [{ id: 'sleep', type: 'wait', until: { duration: { minutes: 5 } } }],
-    })
+    }, 'schedule')
     const outcome = await advanceWorkflowRun(deps, run.id)
     expect(outcome.kind).toBe('paused')
     if (outcome.kind === 'paused') {
@@ -1071,6 +1078,7 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
     }
     expect(pauseCall).not.toBeNull()
     expect(pauseCall!.runId).toBe(run.id)
+    expect(pauseCall!.triggeredBy).toBe(USER_ID)
     expect(stores.runs.get(run.id)!.status).toBe('awaiting_wait')
   })
 

@@ -11,13 +11,6 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { useT } from "@/lib/i18n/client";
 import {
@@ -25,8 +18,6 @@ import {
   getCodexProviderStatus,
   startCodexBrowserLogin,
   startCodexDeviceLogin,
-  setPreferredProvider as savePreferredProvider,
-  type CodexPreferredProvider,
   type BrowserLogin,
   type CodexProviderStatus,
   type DeviceCodeLogin,
@@ -112,19 +103,6 @@ export function CodexProviderCard() {
       setBrowserLogin(null);
       setDeviceLogin(null);
       await refresh();
-    } catch {
-      setError(t.error);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function updatePreference(preferredProvider: CodexPreferredProvider) {
-    setBusy(true);
-    setError("");
-    try {
-      await savePreferredProvider(preferredProvider);
-      setStatus((current) => current ? { ...current, preferredProvider } : current);
     } catch {
       setError(t.error);
     } finally {
@@ -260,32 +238,6 @@ export function CodexProviderCard() {
           ) : null}
         </>
       )}
-
-      {!loading ? (
-        <div className="space-y-1.5">
-          <label className="block text-[12px] font-medium text-muted-foreground">
-            {t.preferredProviderLabel}
-          </label>
-          <Select
-            value={status?.preferredProvider ?? "auto"}
-            onValueChange={(value) =>
-              void updatePreference(value as CodexPreferredProvider)
-            }
-            disabled={busy}
-          >
-            <SelectTrigger className="w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="auto">{t.preferredAuto}</SelectItem>
-              <SelectItem value="openai-codex">{t.preferredChatGpt}</SelectItem>
-              <SelectItem value="gemini">{t.preferredGemini}</SelectItem>
-              <SelectItem value="dashscope-intl">{t.preferredDashScope}</SelectItem>
-            </SelectContent>
-          </Select>
-          <p className="text-[11px] text-muted-foreground">{t.preferredProviderHint}</p>
-        </div>
-      ) : null}
 
       {error ? <div className="text-xs text-red-400">{error}</div> : null}
     </div>

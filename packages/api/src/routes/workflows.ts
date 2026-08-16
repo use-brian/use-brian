@@ -300,14 +300,24 @@ async function dependencyIssues(
       if (!assistantId) continue
       try {
         const res = await opts.validateDeliveryTarget({
+          workspaceId: ctx.workspaceId,
           assistantId,
           channelType: step.deliver.channelType,
           channelId: step.deliver.channelId,
+          channelIntegrationId: step.deliver.channelIntegrationId,
         })
         if (!res.ok) {
           issues.push({
-            path: ['definition', 'steps', i, 'deliver', 'channelId'],
-            message: `${step.deliver.channelType} channel not reachable: ${res.reason ?? 'channel check failed'}`,
+            path: [
+              'definition',
+              'steps',
+              i,
+              'deliver',
+              step.deliver.channelIntegrationId && !/chat not found/i.test(res.reason ?? '')
+                ? 'channelIntegrationId'
+                : 'channelId',
+            ],
+            message: `${step.deliver.channelType} delivery configuration is invalid: ${res.reason ?? 'channel check failed'}`,
           })
         }
       } catch (err) {

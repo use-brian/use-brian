@@ -1687,6 +1687,7 @@ describe('[COMP:workflow/tools] external-dependency authoring checks', () => {
     expect(data.ok).toBe(false)
     expect(data.errors.join(' ')).toContain('channel_not_found')
     expect(validateDeliveryTarget).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE_ID,
       assistantId: PRIMARY_ASSISTANT_ID,
       channelType: 'slack',
       channelId: 'web-session-123',
@@ -1702,6 +1703,7 @@ describe('[COMP:workflow/tools] external-dependency authoring checks', () => {
     )
     expect(r.isError).toBeFalsy()
     expect(validateDeliveryTarget).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE_ID,
       assistantId: DELIVERING_ASSISTANT_ID,
       channelType: 'slack',
       channelId: 'C_TARGET',
@@ -1743,6 +1745,7 @@ describe('[COMP:workflow/tools] external-dependency authoring checks', () => {
     )
     expect(r.isError).toBe(true)
     expect(validateDeliveryTarget).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE_ID,
       assistantId: PRIMARY_ASSISTANT_ID,
       channelType: 'slack',
       channelId: 'C_STALE',

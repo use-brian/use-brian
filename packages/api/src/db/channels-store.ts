@@ -31,6 +31,7 @@
  */
 
 import type { PoolClient } from 'pg'
+import { parseTopicChannelId } from '@use-brian/channels'
 import { getPool, query, queryWithRLS } from './client.js'
 
 // ── Types ──────────────────────────────────────────────────────
@@ -154,10 +155,9 @@ export async function getChannelForWebhook(channelId: string): Promise<Channel |
 /**
  * Resolve which routing row answers on a given external surface.
  *
- * Surface-specific routing wins; the `external_surface_id IS NULL` row is
- * the channel's catch-all default. Returns null when neither a matching
- * surface row nor a default exists — i.e. the channel has no chat routing
- * (a broadcast-only channel, or one not yet configured).
+ * Surface-specific routing wins; the `external_surface_id IS NULL` row is the
+ * catch-all default. Returns null when no candidate exists — i.e. the channel
+ * has no chat routing (a broadcast-only channel, or one not yet configured).
  *
  * Pure so the routing rule can be unit-tested without a database. The
  * `pickAssistantForSurface` shim below preserves the older "just the
@@ -170,6 +170,23 @@ export function pickRoutingForSurface(
   if (externalSurfaceId !== null) {
     const surfaceMatch = rows.find((r) => r.externalSurfaceId === externalSurfaceId)
     if (surfaceMatch) return surfaceMatch
+  }
+  return rows.find((r) => r.externalSurfaceId === null) ?? null
+}
+
+/** Telegram routing adds forum inheritance: exact topic → base chat → default. */
+export function pickTelegramRoutingForSurface(
+  rows: ChannelAssistant[],
+  externalSurfaceId: string | null,
+): ChannelAssistant | null {
+  if (externalSurfaceId !== null) {
+    const surfaceMatch = rows.find((r) => r.externalSurfaceId === externalSurfaceId)
+    if (surfaceMatch) return surfaceMatch
+    const parsed = parseTopicChannelId(externalSurfaceId)
+    if (parsed.messageThreadId != null) {
+      const baseChatMatch = rows.find((r) => r.externalSurfaceId === parsed.chatId)
+      if (baseChatMatch) return baseChatMatch
+    }
   }
   return rows.find((r) => r.externalSurfaceId === null) ?? null
 }
@@ -224,6 +241,34 @@ export async function resolveRoutingForSurface(
     [channelId],
   )
   return pickRoutingForSurface(result.rows, externalSurfaceId)
+}
+
+export async function resolveTelegramRoutingForSurface(
+  channelId: string,
+  externalSurfaceId: string | null,
+): Promise<ChannelAssistant | null> {
+  const result = await query<ChannelAssistant>(
+    `SELECT ${CHANNEL_ASSISTANT_COLS} FROM channel_assistants WHERE channel_id = $1`,
+    [channelId],
+  )
+  return pickTelegramRoutingForSurface(result.rows, externalSurfaceId)
+}
+
+/**
+ * Bootstrap a channel webhook that has surface routes but no catch-all.
+ * Message handling must still resolve the actual external surface before use.
+ */
+export async function resolveAnyRoutingForChannel(
+  channelId: string,
+): Promise<ChannelAssistant | null> {
+  const result = await query<ChannelAssistant>(
+    `SELECT ${CHANNEL_ASSISTANT_COLS} FROM channel_assistants
+     WHERE channel_id = $1
+     ORDER BY external_surface_id NULLS FIRST, created_at ASC
+     LIMIT 1`,
+    [channelId],
+  )
+  return result.rows[0] ?? null
 }
 
 export async function resolveAssistantForSurface(

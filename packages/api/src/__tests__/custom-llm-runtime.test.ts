@@ -7,6 +7,7 @@ import {
   probeCustomLlmEndpoint,
 } from '../custom-llm-runtime.js'
 import type { WorkspaceCustomLlmEndpointStore } from '../db/workspace-custom-llm-endpoints.js'
+import type { LLMProvider, ProviderRequest } from '@use-brian/core'
 
 function toolSse(): Response {
   const events = [
@@ -90,6 +91,7 @@ describe('[COMP:api/custom-llm-endpoints] custom endpoint runtime', () => {
     const store = {
       getRuntimeSystem: vi.fn().mockResolvedValue(runtime),
       getTierRuntimeSystem: vi.fn(),
+      getTierRouteSystem: vi.fn(),
     } as unknown as WorkspaceCustomLlmEndpointStore
     const fetchFn = vi.fn().mockResolvedValue(textSse())
     const resolved = await createWorkspaceCustomLlmResolver(store, { fetchFn })({
@@ -102,6 +104,7 @@ describe('[COMP:api/custom-llm-endpoints] custom endpoint runtime', () => {
       maxTokens: 4096,
       modelTier: 'standard',
       providerKeySource: 'user',
+      routeKind: 'custom',
     })
     expect(store.getRuntimeSystem).toHaveBeenCalledWith({ workspaceId: runtime.workspaceId, profileId: endpointId })
     expect(store.getTierRuntimeSystem).not.toHaveBeenCalled()
@@ -147,15 +150,22 @@ describe('[COMP:api/custom-llm-endpoints] custom endpoint runtime', () => {
       updatedAt: new Date(),
     }
     const store = {
-      getRuntimeSystem: vi.fn(),
-      getTierRuntimeSystem: vi.fn().mockResolvedValue(runtime),
+      getRuntimeSystem: vi.fn().mockResolvedValue(runtime),
+      getTierRuntimeSystem: vi.fn(),
+      getTierRouteSystem: vi.fn().mockResolvedValue({
+        workspaceId: runtime.workspaceId,
+        tier: 'max',
+        profileId,
+        modelAlias: null,
+        updatedAt: new Date(),
+      }),
     } as unknown as WorkspaceCustomLlmEndpointStore
     const resolved = await createWorkspaceCustomLlmResolver(store)({
       workspaceId: runtime.workspaceId,
       requestedTier: 'max',
     })
     expect(resolved).toMatchObject({ selector: customLlmAlias(profileId), maxTokens: 32768, modelTier: 'max' })
-    expect(store.getTierRuntimeSystem).toHaveBeenCalledWith({ workspaceId: runtime.workspaceId, tier: 'max' })
+    expect(store.getTierRouteSystem).toHaveBeenCalledWith({ workspaceId: runtime.workspaceId, tier: 'max' })
   })
 
   it('retries once without streamed usage for older compatible endpoints', async () => {
@@ -170,6 +180,7 @@ describe('[COMP:api/custom-llm-endpoints] custom endpoint runtime', () => {
     const store = {
       getRuntimeSystem: vi.fn().mockResolvedValue(runtime),
       getTierRuntimeSystem: vi.fn(),
+      getTierRouteSystem: vi.fn(),
     } as unknown as WorkspaceCustomLlmEndpointStore
     const fetchFn = vi.fn()
       .mockResolvedValueOnce(new Response('unsupported stream_options', { status: 400 }))
@@ -201,8 +212,14 @@ describe('[COMP:api/custom-llm-endpoints] custom endpoint runtime', () => {
       apiKey: null, modelId: 'pro-model', contextWindow: 100000, maxOutputTokens: 8192,
       supportsTools: true, verifiedAt: new Date(), createdAt: new Date(), updatedAt: new Date(),
     }
-    const getTierRuntimeSystem = vi.fn(async ({ tier }: { tier: string }) => tier === 'pro' ? runtime : null)
-    const store = { getRuntimeSystem: vi.fn(), getTierRuntimeSystem } as unknown as WorkspaceCustomLlmEndpointStore
+    const getTierRouteSystem = vi.fn(async ({ tier }: { tier: string }) => tier === 'pro'
+      ? { workspaceId: runtime.workspaceId, tier: 'pro', profileId, modelAlias: null, updatedAt: new Date() }
+      : null)
+    const store = {
+      getRuntimeSystem: vi.fn().mockResolvedValue(runtime),
+      getTierRuntimeSystem: vi.fn(),
+      getTierRouteSystem,
+    } as unknown as WorkspaceCustomLlmEndpointStore
 
     const resolved = await createWorkspaceCustomLlmResolver(store)({
       workspaceId: runtime.workspaceId,
@@ -211,6 +228,71 @@ describe('[COMP:api/custom-llm-endpoints] custom endpoint runtime', () => {
     })
 
     expect(resolved).toMatchObject({ selector: customLlmAlias(profileId), modelTier: 'standard' })
-    expect(getTierRuntimeSystem.mock.calls.map(([arg]) => arg.tier)).toEqual(['standard', 'pro'])
+    expect(getTierRouteSystem.mock.calls.map(([arg]) => arg.tier)).toEqual(['standard', 'pro'])
+  })
+
+  it('forces an exact managed route and disables provider substitution', async () => {
+    const requests: ProviderRequest[] = []
+    const managedProvider: LLMProvider = {
+      name: 'routing',
+      models: [],
+      async *stream(request) {
+        requests.push(request)
+      },
+      createSession(options) {
+        return { send: (messages) => this.stream({ ...options, messages }) }
+      },
+    }
+    const store = {
+      getRuntimeSystem: vi.fn(),
+      getTierRuntimeSystem: vi.fn(),
+      getTierRouteSystem: vi.fn().mockResolvedValue({
+        workspaceId: '00000000-0000-4000-8000-000000000010',
+        tier: 'max',
+        profileId: null,
+        modelAlias: 'gpt-5.6-sol',
+        updatedAt: new Date(),
+      }),
+    } as unknown as WorkspaceCustomLlmEndpointStore
+    const resolved = await createWorkspaceCustomLlmResolver(store, { managedProvider })({
+      workspaceId: '00000000-0000-4000-8000-000000000010',
+      requestedTier: 'max',
+    })
+    expect(resolved).toMatchObject({
+      selector: 'gpt-5.6-sol',
+      modelTier: 'max',
+      providerKeySource: 'platform',
+      routeKind: 'managed',
+    })
+    if (!resolved) throw new Error('expected a managed route')
+    for await (const _chunk of resolved.provider.stream({
+      model: 'gemini-3.6-flash',
+      systemPrompt: '',
+      messages: [],
+    })) { /* drain */ }
+    expect(requests[0]).toMatchObject({
+      model: 'gpt-5.6-sol',
+      allowProviderFallback: false,
+    })
+  })
+
+  it('leaves the internal background lane alone when managed routes are disabled', async () => {
+    const store = {
+      getRuntimeSystem: vi.fn(),
+      getTierRuntimeSystem: vi.fn(),
+      getTierRouteSystem: vi.fn().mockResolvedValue({
+        workspaceId: '00000000-0000-4000-8000-000000000010',
+        tier: 'standard',
+        profileId: null,
+        modelAlias: 'gpt-5.6-luna',
+        updatedAt: new Date(),
+      }),
+    } as unknown as WorkspaceCustomLlmEndpointStore
+
+    await expect(createWorkspaceCustomLlmResolver(store)({
+      workspaceId: '00000000-0000-4000-8000-000000000010',
+      requestedTier: 'standard',
+      allowManagedRoutes: false,
+    })).resolves.toBeNull()
   })
 })
