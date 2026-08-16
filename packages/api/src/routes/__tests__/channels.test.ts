@@ -286,6 +286,7 @@ describe('[COMP:api/channels-route] channel config', () => {
     )
     expect(res.status).toBe(200)
     expect(res.body.channels[0].integrationId).toBe('int-1')
+    expect(res.body.channels[0].integrationStatus).toBe('active')
     expect(res.body.channels[0].config).toEqual({ requireMention: false })
   })
 
@@ -295,6 +296,7 @@ describe('[COMP:api/channels-route] channel config', () => {
     expect(res.status).toBe(200)
     expect(res.body.channels[0].config).toBeNull()
     expect(res.body.channels[0].integrationId).toBeNull()
+    expect(res.body.channels[0].integrationStatus).toBeNull()
   })
 
   it('PATCH config 503s when no integration store is configured', async () => {
@@ -867,6 +869,7 @@ describe('[COMP:api/channel-destinations-route] GET channel-destinations', () =>
       listForWorkspace: vi.fn().mockResolvedValue([
         makeIntegration({
           channelType: 'telegram',
+          botUsername: 'project_bot',
           config: {
             seenChats: [{
               chatId: '-100555',
@@ -887,8 +890,100 @@ describe('[COMP:api/channel-destinations-route] GET channel-destinations', () =>
     expect(res.body.destinations[0]).toMatchObject({
       channelId: '-100555:topic:42',
       title: 'Project Forum › Standups',
+      channelIntegrationId: 'int-1',
+      integrationLabel: '@project_bot',
     })
     expect(vi.mocked(createTelegramApi)).not.toHaveBeenCalled()
+  })
+
+  it('preserves a topic name when a newer bot has only seen the base group', async () => {
+    mockRows([destRow({ channelId: '-100555:topic:42' })])
+    const integrationStore = {
+      listForWorkspace: vi.fn().mockResolvedValue([
+        makeIntegration({
+          id: 'int-project',
+          channelType: 'telegram',
+          botUsername: 'project_bot',
+          config: {
+            seenChats: [{
+              chatId: '-100555',
+              chatTitle: 'Project Forum',
+              isForum: true,
+              topics: [{ topicId: 42, name: 'Standups', lastSeenAt: '2026-06-29T09:45:15Z' }],
+              lastSeenAt: '2026-06-29T09:45:15Z',
+            }],
+          },
+        }),
+        makeIntegration({
+          id: 'int-new',
+          channelType: 'telegram',
+          botUsername: 'new_bot',
+          config: {
+            seenChats: [{
+              chatId: '-100555',
+              chatTitle: 'Project Forum',
+              isForum: true,
+              topics: [],
+              lastSeenAt: '2026-08-16T09:45:15Z',
+            }],
+          },
+        }),
+      ]),
+    } as unknown as ChannelIntegrationStore
+
+    const res = await request(buildApp({ integrationStore }))
+      .get('/api/workspaces/ws-1/channel-destinations')
+
+    expect(res.status).toBe(200)
+    expect(res.body.destinations).toHaveLength(2)
+    expect(res.body.destinations.map((d: { title: string }) => d.title)).toEqual([
+      'Project Forum › Standups',
+      'Project Forum › Standups',
+    ])
+  })
+
+  it('returns one destination per Telegram channel that can reach the chat', async () => {
+    mockRows([destRow({ channelId: '-100555' })])
+    const seenChat = {
+      chatId: '-100555',
+      chatTitle: 'Project Forum',
+      isForum: false,
+      topics: [],
+      lastSeenAt: '2026-06-29T09:45:15Z',
+    }
+    const integrationStore = {
+      listForWorkspace: vi.fn().mockResolvedValue([
+        makeIntegration({
+          id: 'int-project',
+          channelType: 'telegram',
+          botUsername: 'project_bot',
+          config: { seenChats: [seenChat] },
+        }),
+        makeIntegration({
+          id: 'int-ops',
+          channelType: 'telegram',
+          botUsername: 'ops_bot',
+          config: { seenChats: [seenChat] },
+        }),
+      ]),
+    } as unknown as ChannelIntegrationStore
+
+    const res = await request(buildApp({ integrationStore }))
+      .get('/api/workspaces/ws-1/channel-destinations')
+
+    expect(res.status).toBe(200)
+    expect(res.body.destinations).toEqual([
+      expect.objectContaining({
+        channelId: '-100555',
+        channelIntegrationId: 'int-project',
+        integrationLabel: '@project_bot',
+      }),
+      expect.objectContaining({
+        channelId: '-100555',
+        channelIntegrationId: 'int-ops',
+        integrationLabel: '@ops_bot',
+      }),
+    ])
   })
 
   it('resolves a topic group by its base chat id and falls back to the topic number', async () => {
@@ -904,7 +999,7 @@ describe('[COMP:api/channel-destinations-route] GET channel-destinations', () =>
     expect(res.body.destinations[0].title).toBe('Project Forum › #42')
   })
 
-  it('resolves a telegram group title via the BYO bot without consulting the default bot', async () => {
+  it('resolves a telegram group title while probing configured bots concurrently', async () => {
     mockRows([destRow({ channelId: '-100555' })])
     const getChat = vi.fn().mockResolvedValue({ id: -100555, type: 'supergroup', title: 'Dev Work' })
     vi.mocked(createTelegramApi).mockReturnValue(telegramApi(getChat))
@@ -913,9 +1008,9 @@ describe('[COMP:api/channel-destinations-route] GET channel-destinations', () =>
     ).get('/api/workspaces/ws-1/channel-destinations')
     expect(res.status).toBe(200)
     expect(res.body.destinations[0]).toMatchObject({ channelId: '-100555', title: 'Dev Work' })
-    // BYO token is tried first; the hit short-circuits the default bot.
+    // Both candidates start together so lookup stays within one timeout window.
     expect(vi.mocked(createTelegramApi).mock.calls[0][0]).toEqual({ token: 'byo-token' })
-    expect(getChat).toHaveBeenCalledTimes(1)
+    expect(getChat).toHaveBeenCalledTimes(2)
   })
 
   it('falls back to the hosted default bot when the BYO bot cannot see the chat', async () => {
@@ -934,6 +1029,29 @@ describe('[COMP:api/channel-destinations-route] GET channel-destinations', () =>
     expect(vi.mocked(createTelegramApi).mock.calls.map((c) => c[0])).toEqual([
       { token: 'byo-token' },
       { token: 'default-token' },
+    ])
+  })
+
+  it('keeps a private DM available when it cannot be attributed through seenChats', async () => {
+    mockRows([destRow({ channelId: '880211324' })])
+    const getChat = vi.fn().mockResolvedValue({
+      id: 880211324,
+      type: 'private',
+      first_name: 'Hinson',
+      last_name: 'Wong',
+    })
+    vi.mocked(createTelegramApi).mockReturnValue(telegramApi(getChat))
+
+    const res = await request(
+      buildApp({ integrationStore: telegramIntegrationStore() }),
+    ).get('/api/workspaces/ws-1/channel-destinations')
+
+    expect(res.body.destinations).toEqual([
+      expect.objectContaining({
+        channelId: '880211324',
+        title: 'Hinson Wong',
+        channelIntegrationId: null,
+      }),
     ])
   })
 

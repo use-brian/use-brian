@@ -8,7 +8,11 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { pickAssistantForSurface, type ChannelAssistant } from '../channels-store.js'
+import {
+  pickAssistantForSurface,
+  pickTelegramRoutingForSurface,
+  type ChannelAssistant,
+} from '../channels-store.js'
 
 function row(assistantId: string, externalSurfaceId: string | null): ChannelAssistant {
   return {
@@ -51,5 +55,21 @@ describe('[COMP:channels/store] pickAssistantForSurface', () => {
   it('routes a mapped surface even when the channel has no default', () => {
     const rows = [row('asst-eng', 'C-ENG'), row('asst-sales', 'C-SALES')]
     expect(pickAssistantForSurface(rows, 'C-SALES')).toBe('asst-sales')
+  })
+
+  it('inherits a Telegram topic from its base-chat route', () => {
+    const rows = [row('asst-default', null), row('asst-forum', '-100555')]
+    expect(pickTelegramRoutingForSurface(rows, '-100555:topic:42')?.assistantId)
+      .toBe('asst-forum')
+  })
+
+  it('prefers an exact Telegram topic route over base-chat and default routes', () => {
+    const rows = [
+      row('asst-default', null),
+      row('asst-forum', '-100555'),
+      row('asst-topic', '-100555:topic:42'),
+    ]
+    expect(pickTelegramRoutingForSurface(rows, '-100555:topic:42')?.assistantId)
+      .toBe('asst-topic')
   })
 })

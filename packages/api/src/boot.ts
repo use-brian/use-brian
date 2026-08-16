@@ -2378,6 +2378,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const consultTransport = createInProcessTransport({
     runConsult: async ({ request }) => {
       const text = await calleeExecutor({
+        workspaceId: request.target.workspaceId,
         callerAssistantId: request.caller.assistantId,
         calleeAssistantId: request.target.assistantId,
         expectedWorkspaceId: request.target.workspaceId,

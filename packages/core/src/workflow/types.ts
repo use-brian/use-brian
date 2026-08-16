@@ -148,6 +148,7 @@ export type AssistantCallStep = WorkflowStepCommon & {
   deliver?: {
     channelType: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams'
     channelId: string
+    channelIntegrationId?: string
     thread?: { fromStep: string }
   }
   /**

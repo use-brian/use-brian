@@ -2947,6 +2947,9 @@ export const ja: Dictionary = {
       deliverChannelIdPlaceholder: "チャンネルまたはチャットID",
       deliverHint:
         "このステップが完了すると、テキスト出力がこのチャンネルに送信されます。配信はベストエフォートで、送信に失敗してもステップは失敗しません。",
+      deliverTelegramChannelLabel: "Telegramチャンネル",
+      deliverTelegramChannelPlaceholder: "Telegramチャンネルを選択…",
+      deliverTelegramChannelHint: "このワークフローのメッセージ送信に使う接続済みBotを選択します。",
       storeOutputAsLabel: "出力を変数として保存（任意）",
       storeOutputAsHint: "後続のステップで {{vars.NAME}} として参照できます。",
       removeStepBtn: "削除",

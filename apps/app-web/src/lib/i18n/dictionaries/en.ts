@@ -3197,6 +3197,9 @@ export const en = {
       deliverDestinationCustomOption: "Use a custom ID…",
       deliverDestinationCustomLabel: "Channel, chat, or topic ID",
       deliverDestinationCustomHint: "Paste a Telegram chat ID or topic destination (<chat-id>:topic:<topic-id>), or a Slack channel ID.",
+      deliverTelegramChannelLabel: "Telegram channel",
+      deliverTelegramChannelPlaceholder: "Choose a Telegram channel…",
+      deliverTelegramChannelHint: "Select the connected bot that will send this workflow's messages.",
       // ── Manual trigger UI ────────────────────────────────────────────
       manualEndpointLabel: "Run endpoint",
       manualEndpointHint:

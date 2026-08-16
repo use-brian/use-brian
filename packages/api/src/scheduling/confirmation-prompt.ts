@@ -23,10 +23,12 @@ import { query } from '../db/client.js'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 
 export type ConfirmationPromptTarget = {
+  workspaceId?: string
   /** Assistant whose channel credentials resolve the outbound adapter. */
   assistantId: string
   channelType: string
   channelId: string
+  channelIntegrationId?: string
 }
 
 export type ConfirmationPromptDeps = {
@@ -44,15 +46,26 @@ export type ConfirmationPromptDeps = {
 export async function resolveTelegramBotToken(
   assistantId: string,
   deps: ConfirmationPromptDeps,
+  channelIntegrationId?: string,
+  channelId?: string,
+  workspaceId?: string,
 ): Promise<string | undefined> {
-  if (deps.integrationStore) {
-    const integration = await deps.integrationStore.getCredentialsForAssistantSystem(
+  if (channelIntegrationId) {
+    if (!deps.integrationStore || !channelId || !workspaceId) return undefined
+    const integration = await deps.integrationStore.getCredentialsForAssistantIntegrationSystem(
+      workspaceId,
       assistantId,
+      channelIntegrationId,
       'telegram',
+      channelId,
     )
-    if (integration) {
-      return (integration.credentials as { bot_token: string }).bot_token
-    }
+    return integration
+      ? (integration.credentials as { bot_token: string }).bot_token
+      : undefined
+  }
+  if (deps.integrationStore) {
+    const integration = await deps.integrationStore.getCredentialsForAssistantSystem(assistantId, 'telegram')
+    if (integration) return (integration.credentials as { bot_token: string }).bot_token
   }
   return deps.defaultTelegramBotToken
 }
@@ -76,7 +89,13 @@ export async function sendConfirmationPrompt(
 
   try {
     if (target.channelType === 'telegram') {
-      const botToken = await resolveTelegramBotToken(target.assistantId, deps)
+      const botToken = await resolveTelegramBotToken(
+        target.assistantId,
+        deps,
+        target.channelIntegrationId,
+        target.channelId,
+        target.workspaceId,
+      )
       if (botToken) {
         const adapter = createTelegramAdapter({ token: botToken })
         const actions = [

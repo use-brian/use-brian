@@ -518,6 +518,7 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
       assistantId: string
       channelType: string
       channelId: string
+      channelIntegrationId?: string
       text: string
     }> = []
     const deps: ExecutorDeps = {
@@ -531,6 +532,7 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
           assistantId: p.assistantId,
           channelType: p.channelType,
           channelId: p.channelId,
+          channelIntegrationId: p.channelIntegrationId,
           text: p.text,
         })
         return { status: 'delivered' as const, channelType: p.channelType, channelId: p.channelId }
@@ -545,7 +547,11 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
           type: 'assistant_call',
           target: { assistantId: 'primary' },
           prompt: 'brief me',
-          deliver: { channelType: 'telegram', channelId: 'chat-42' },
+          deliver: {
+            channelType: 'telegram',
+            channelId: 'chat-42',
+            channelIntegrationId: '00000000-0000-4000-8000-000000000001',
+          },
         },
       ],
     }
@@ -560,6 +566,7 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
         assistantId: PRIMARY_ASSISTANT_ID,
         channelType: 'telegram',
         channelId: 'chat-42',
+        channelIntegrationId: '00000000-0000-4000-8000-000000000001',
         text: 'your morning briefing',
       },
     ])

@@ -34,7 +34,11 @@ import type { LinkCodeStore } from '../db/link-codes.js'
 import type { DiscordConnectorClient } from '../discord/connector-client.js'
 import type { WhatsappConnectorClient } from '../whatsapp/connector-client.js'
 import type { WechatConnectorClient } from '../wechat/connector-client.js'
-import type { ChannelIntegration, ChannelIntegrationStore } from '../db/channel-integrations.js'
+import type {
+  ChannelIntegration,
+  ChannelIntegrationStore,
+  SeenChat,
+} from '../db/channel-integrations.js'
 import {
   listChannelsForWorkspace,
   getChannelForUser,
@@ -241,6 +245,10 @@ function serializeChannel(
     // Per-integration behavior config. `null` when the channel has no
     // `channel_integrations` row — the UI then renders no config section.
     integrationId: integration?.id ?? null,
+    integrationStatus: integration?.status ?? null,
+    integrationLabel: integration?.botUsername
+      ? `@${integration.botUsername}`
+      : integration?.teamName ?? null,
     config: integration?.config ?? null,
   }
 }
@@ -323,12 +331,38 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
       }
     }
 
-    const seenByChatId = new Map(
-      integrations
-        .filter((r) => r.channelType === 'telegram')
-        .flatMap((r) => r.config.seenChats ?? [])
-        .map((chat) => [chat.chatId, chat] as const),
-    )
+    const seenByChatId = new Map<string, SeenChat>()
+    for (const integration of integrations.filter((r) => r.channelType === 'telegram')) {
+      for (const chat of integration.config.seenChats ?? []) {
+        const current = seenByChatId.get(chat.chatId)
+        if (!current) {
+          seenByChatId.set(chat.chatId, chat)
+          continue
+        }
+        const topics = new Map(current.topics.map((topic) => [topic.topicId, topic]))
+        for (const topic of chat.topics) {
+          const existing = topics.get(topic.topicId)
+          if (!existing) {
+            topics.set(topic.topicId, topic)
+            continue
+          }
+          const incomingIsNewer = topic.lastSeenAt >= existing.lastSeenAt
+          topics.set(topic.topicId, incomingIsNewer
+            ? { ...topic, name: topic.name ?? existing.name }
+            : { ...existing, name: existing.name ?? topic.name })
+        }
+        const incomingIsNewer = chat.lastSeenAt >= current.lastSeenAt
+        seenByChatId.set(chat.chatId, {
+          ...current,
+          chatTitle: incomingIsNewer
+            ? chat.chatTitle ?? current.chatTitle
+            : current.chatTitle ?? chat.chatTitle,
+          isForum: current.isForum || chat.isForum,
+          topics: [...topics.values()],
+          lastSeenAt: incomingIsNewer ? chat.lastSeenAt : current.lastSeenAt,
+        })
+      }
+    }
     const unresolvedChatIds = [...new Set(
       parsed
         .filter(({ chatId }) => !seenByChatId.get(chatId)?.chatTitle)
@@ -336,15 +370,20 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
     )]
 
     if (unresolvedChatIds.length > 0 && opts.integrationStore) {
-      const telegram = integrations.find((r) => r.channelType === 'telegram')
-      if (telegram) {
+      const telegramIntegrations = integrations.filter(
+        (r) => r.channelType === 'telegram' && r.status === 'active',
+      )
+      const byoTokens = await Promise.all(telegramIntegrations.map(async (telegram) => {
         try {
-          const withCreds = await opts.integrationStore.getForUserWithCredentials(userId, telegram.id)
-          const byoToken = withCreds && (withCreds.credentials as { bot_token?: string }).bot_token
-          if (byoToken) tokens.push(byoToken)
+          const withCreds = await opts.integrationStore!.getForUserWithCredentials(userId, telegram.id)
+          return withCreds && (withCreds.credentials as { bot_token?: string }).bot_token
         } catch (err) {
           console.warn('[channels/channel-destinations] BYO telegram credential lookup failed:', err instanceof Error ? err.message : err)
+          return undefined
         }
+      }))
+      for (const byoToken of byoTokens) {
+        if (byoToken && !tokens.includes(byoToken)) tokens.push(byoToken)
       }
     }
     if (opts.telegramBotToken && !tokens.includes(opts.telegramBotToken)) tokens.push(opts.telegramBotToken)
@@ -352,15 +391,17 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
     const chatNames = new Map<string, string>()
     const apis = tokens.map((token) => createTelegramApi({ token }))
     await Promise.all(unresolvedChatIds.map(async (chatId) => {
-      for (const api of apis) {
-        try {
+      try {
+        const name = await Promise.any(apis.map(async (api) => {
           const chat = await withTimeout(api.getChat(chatId), TELEGRAM_GETCHAT_TIMEOUT_MS)
           const personal = [chat.first_name, chat.last_name].filter(Boolean).join(' ')
           const name = chat.title ?? (personal || (chat.username ? `@${chat.username}` : ''))
-          if (name) { chatNames.set(chatId, name); return }
-        } catch {
-          // Not this bot's chat (or transient failure) — try the next token.
-        }
+          if (!name) throw new Error('Telegram chat has no display name')
+          return name
+        }))
+        chatNames.set(chatId, name)
+      } catch {
+        // No configured bot could resolve this chat within the shared timeout.
       }
     }))
 
@@ -426,15 +467,41 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
         .map((r) => r.channelId),
     )]
     const telegramNames = await resolveTelegramTitles(userId, workspaceId, telegramIdsToResolve)
+    let telegramIntegrations: ChannelIntegration[] = []
+    if (opts.integrationStore) {
+      try {
+        telegramIntegrations = (await opts.integrationStore.listForWorkspace(userId, workspaceId))
+          .filter((integration) => integration.channelType === 'telegram' && integration.status === 'active')
+      } catch {
+        // Destination discovery stays best-effort; unresolved rows remain usable
+        // through the shared/default bot path.
+      }
+    }
     res.json({
-      destinations: rows.map((r) => ({
-        channelType: r.channelType,
-        channelId: r.channelId,
-        title: parseTelegramDestinationId(r.channelId)?.topicId != null
+      destinations: rows.flatMap((r) => {
+        const title = parseTelegramDestinationId(r.channelId)?.topicId != null
           ? telegramNames.get(r.channelId) ?? r.title
-          : r.title ?? telegramNames.get(r.channelId) ?? null,
-        lastActiveAt: r.lastActiveAt.toISOString(),
-      })),
+          : r.title ?? telegramNames.get(r.channelId) ?? null
+        const base = {
+          channelType: r.channelType,
+          channelId: r.channelId,
+          title,
+          lastActiveAt: r.lastActiveAt.toISOString(),
+        }
+        if (r.channelType !== 'telegram') return [base]
+        const parsed = parseTelegramDestinationId(r.channelId)
+        const owners = parsed
+          ? telegramIntegrations.filter((integration) =>
+              integration.config.seenChats?.some((chat) => chat.chatId === parsed.chatId),
+            )
+          : []
+        if (owners.length === 0) return [{ ...base, channelIntegrationId: null, integrationLabel: null }]
+        return owners.map((integration) => ({
+          ...base,
+          channelIntegrationId: integration.id,
+          integrationLabel: integration.botUsername ? `@${integration.botUsername}` : integration.teamName,
+        }))
+      }),
     })
   })
 

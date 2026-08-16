@@ -2923,6 +2923,9 @@ export const zh: Dictionary = {
       deliverChannelIdPlaceholder: "管道或聊天 ID",
       deliverHint:
         "此步驟完成後，會將其文字輸出推送至這個管道。傳送採盡力而為；即使傳送失敗也不會導致步驟失敗。",
+      deliverTelegramChannelLabel: "Telegram 管道",
+      deliverTelegramChannelPlaceholder: "選擇 Telegram 管道…",
+      deliverTelegramChannelHint: "選擇用來傳送此工作流程訊息的已連接機器人。",
       storeOutputAsLabel: "將輸出儲存為（選填）",
       storeOutputAsHint: "後續步驟可透過 {{vars.NAME}} 參照此值。",
       removeStepBtn: "移除",

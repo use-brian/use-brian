@@ -170,6 +170,7 @@ export type DeliverToChannel = (params: {
   userId: string
   channelType: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams'
   channelId: string
+  channelIntegrationId?: string
   text: string
   /**
    * Platform message id to reply under (Slack thread_ts / Telegram
@@ -1303,6 +1304,7 @@ async function dispatchAssistantCall(
               userId: ctx.run.triggeredBy ?? ctx.workflow.createdBy,
               channelType,
               channelId: step.deliver.channelId,
+              channelIntegrationId: step.deliver.channelIntegrationId,
               text: deliveredText,
               threadRef,
             })
@@ -1877,10 +1879,13 @@ async function surfaceConnectorHealth(
         try {
           await deps.deliverToChannel({
             workspaceId: run.workspaceId,
-            assistantId: primaryAssistantId,
+            assistantId: deliverStep.target.assistantId === 'primary'
+              ? primaryAssistantId
+              : deliverStep.target.assistantId,
             userId,
             channelType: deliverStep.deliver.channelType,
             channelId: deliverStep.deliver.channelId,
+            channelIntegrationId: deliverStep.deliver.channelIntegrationId,
             text:
               `Heads up: workflow "${workflow.name}" couldn't use a connector because its ` +
               `credentials stopped working (${dead.map((c) => c.label).join(', ')}). ` +
@@ -1997,10 +2002,13 @@ async function maybeDisableForDeadAnchor(
         try {
           await deps.deliverToChannel({
             workspaceId: run.workspaceId,
-            assistantId: primaryAssistantId,
+            assistantId: deliverStep.target.assistantId === 'primary'
+              ? primaryAssistantId
+              : deliverStep.target.assistantId,
             userId,
             channelType: deliverStep.deliver.channelType,
             channelId: deliverStep.deliver.channelId,
+            channelIntegrationId: deliverStep.deliver.channelIntegrationId,
             text:
               `Workflow "${workflow.name}" was disabled after ${DEAD_ANCHOR_DISABLE_STREAK} runs in a row failed: ` +
               `its page anchor points to a page that no longer exists. ` +
