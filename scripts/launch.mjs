@@ -403,14 +403,46 @@ if (useEmbedded) {
 
 if (messageStoreLaunch.enabled) {
   console.log(`[launch] starting local chat message store (:${PORTS.messageStore}, ${messageStoreLaunch.source}) ...`)
+  // The archive runs against its OWN database, not the brain's. Two reasons it
+  // cannot simply inherit DATABASE_URL:
+  //
+  //  - it would migrate its schema into the platform's database, which is
+  //    exactly the coupling migration 3946 removed; and
+  //  - the brain commonly connects as a superuser, and the archive refuses to
+  //    start as one — superusers bypass row-level security even when FORCED,
+  //    which would silently expose every owner's messages to every query.
+  //
+  // Point BRIAN_MESSAGE_STORE_DATABASE_URL at a database owned by a dedicated
+  // NOSUPERUSER role. Unset, the archive is skipped rather than started against
+  // the wrong database.
+  const messageStoreDbUrl = process.env.BRIAN_MESSAGE_STORE_DATABASE_URL
+  if (!messageStoreDbUrl) {
+    console.log(
+      '[launch] chat message store skipped: set BRIAN_MESSAGE_STORE_DATABASE_URL to its own\n'
+      + '         database (a NOSUPERUSER role, with pgvector + pg_trgm installed).',
+    )
+  } else {
   run(
     'message-store',
     messageStoreLaunch.cmd,
     messageStoreLaunch.args,
-    {},
+    {
+      DATABASE_URL: messageStoreDbUrl,
+      BRIAN_MESSAGE_STORE_MEDIA_ROOT:
+        process.env.BRIAN_MESSAGE_STORE_MEDIA_ROOT || join(CONFIG_DIR, 'chat-archive-media'),
+      // Forward whichever embedding credential is configured. The archive uses
+      // the same first-match-wins order as the brain, so a stale GEMINI_API_KEY
+      // here would shadow a valid DashScope key and silently pick the wrong
+      // provider — pass through only what is actually set.
+      ...(process.env.GEMINI_API_KEY ? { GEMINI_API_KEY: process.env.GEMINI_API_KEY } : {}),
+      ...(process.env.DASHSCOPE_API_KEY ? { DASHSCOPE_API_KEY: process.env.DASHSCOPE_API_KEY } : {}),
+      ...(process.env.DASHSCOPE_BASE_URL ? { DASHSCOPE_BASE_URL: process.env.DASHSCOPE_BASE_URL } : {}),
+      BRIAN_PLATFORM_URL: `http://127.0.0.1:${PORTS.api}`,
+    },
     messageStoreLaunch.cwd,
   )
   await waitForPort(PORTS.messageStore, 'chat message store')
+  }
 } else if (messageStoreLaunch.reason === 'not_found') {
   console.log('[launch] chat message store checkout not found — local chat archive is disabled for this session.')
 }
