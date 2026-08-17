@@ -477,6 +477,25 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
       return
     }
 
+    // Renaming is a team-admin right. `display_name` is the one field on this
+    // row that every member reads — the Studio rail, the workflow deliver
+    // picker and the assistant's own channel list all label the channel by it,
+    // so a rename is a workspace-wide edit, not a personal preference. RLS
+    // cannot express this (its channels policy is membership + clearance), so
+    // the gate lives here; clearance and capabilities stay open to any member
+    // exactly as before.
+    if (
+      parsed.data.displayName !== undefined &&
+      role !== 'owner' &&
+      role !== 'admin'
+    ) {
+      res.status(403).json({
+        error: 'rename_requires_admin',
+        detail: 'Only the workspace owner or an admin can rename a channel.',
+      })
+      return
+    }
+
     const channel = await loadChannel(userId, workspaceId, channelId, res)
     if (!channel) return
 

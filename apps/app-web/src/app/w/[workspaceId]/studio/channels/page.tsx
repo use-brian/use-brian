@@ -5,9 +5,9 @@
  *
  * The workspace-channels operator surface (Phase D of
  * docs/architecture/channels/adapter-pattern.md → "Workspace channels").
- * Channels are owned by the workspace — this page lists them, edits each
- * one's clearance and enabled capabilities, and wires per-surface assistant
- * routing. Channels are *created* by connecting a bot from the inline
+ * Channels are owned by the workspace — this page lists them, renames them,
+ * edits each one's clearance and enabled capabilities, and wires per-surface
+ * assistant routing. Channels are *created* by connecting a bot from the inline
  * "+ Add channel" form; there is no separate "new channel" page.
  *
  * Mirrors Studio → Connectors / Events: a left rail groups every channel by
@@ -94,6 +94,7 @@ import {
   type UserAccessMode,
 } from "@/lib/api/channels";
 import { listAssistants, type StudioAssistantSummary } from "@/lib/api/studio";
+import type { WorkspaceRole } from "@/lib/api/workspaces";
 import {
   probeEmailInboxes,
   createEmailInbox,
@@ -121,6 +122,7 @@ import {
   ExternalLink,
   KeyRound,
   MessageCircle,
+  Pencil,
   SmilePlus,
   UsersRound,
 } from "lucide-react";
@@ -222,29 +224,42 @@ function clearanceRank(c: ChannelClearance): number {
 }
 
 /**
- * Pull the caller's `workspace_members.clearance` for `workspaceId` off the
+ * Pull the caller's own `workspace_members` row for `workspaceId` off the
  * existing `GET /workspaces/:id` endpoint. The endpoint returns `members[]`
  * with one row per workspace member; we match on `me.id` to find ours.
- * Returns null on any failure so the UI keeps its safe 'internal' default.
+ *
+ * Two fields are read from it. `clearance` filters the clearance dropdown to
+ * the caller's own tier (RLS would reject a higher one anyway). `role` gates
+ * the rename affordance — the PATCH route refuses `displayName` from a plain
+ * member, so showing the pencil to one would only produce a 403.
+ *
+ * Returns nulls on any failure: the UI then keeps its safe 'internal' default
+ * and treats the caller as a non-admin, so a failed probe never *grants* an
+ * affordance the server would reject.
  */
-async function fetchWorkspaceClearance(
-  workspaceId: string,
-): Promise<ChannelClearance | null> {
+async function fetchWorkspaceMembership(workspaceId: string): Promise<{
+  clearance: ChannelClearance | null;
+  role: WorkspaceRole | null;
+}> {
   try {
     const res = await authFetch(
       `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}`,
     );
-    if (!res.ok) return null;
+    if (!res.ok) return { clearance: null, role: null };
     const data = (await res.json()) as {
       me?: { id?: string };
-      members?: { userId: string; clearance?: ChannelClearance }[];
+      members?: {
+        userId: string;
+        clearance?: ChannelClearance;
+        role?: WorkspaceRole;
+      }[];
     };
     const meId = data.me?.id;
-    if (!meId || !Array.isArray(data.members)) return null;
+    if (!meId || !Array.isArray(data.members)) return { clearance: null, role: null };
     const mine = data.members.find((m) => m.userId === meId);
-    return mine?.clearance ?? null;
+    return { clearance: mine?.clearance ?? null, role: mine?.role ?? null };
   } catch {
-    return null;
+    return { clearance: null, role: null };
   }
 }
 
@@ -260,6 +275,10 @@ export default function StudioChannelsPage() {
   // dropdown to options at or below the user's own tier, mirroring the RLS
   // WITH CHECK on `channels`.
   const [myClearance, setMyClearance] = useState<ChannelClearance>("internal");
+  // The caller's workspace role, from the same GET /workspaces/:id read.
+  // Null until it resolves (and on failure) — rename stays hidden until we
+  // positively know the caller is an owner or admin.
+  const [myRole, setMyRole] = useState<WorkspaceRole | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   // Master-detail selection — a rail row key (channel UUID or "official");
@@ -307,15 +326,16 @@ export default function StudioChannelsPage() {
     setError(null);
     void (async () => {
       try {
-        const [chans, asts, ws] = await Promise.all([
+        const [chans, asts, me] = await Promise.all([
           listChannels(activeId),
           listAssistants(activeId),
-          fetchWorkspaceClearance(activeId),
+          fetchWorkspaceMembership(activeId),
         ]);
         if (cancelled) return;
         setAssistants(asts);
         setChannels(chans);
-        if (ws) setMyClearance(ws);
+        if (me.clearance) setMyClearance(me.clearance);
+        setMyRole(me.role);
         const entries = await Promise.all(
           chans.map(
             async (c) =>
@@ -537,6 +557,7 @@ export default function StudioChannelsPage() {
                 routing={routing[sel.channel.id] ?? []}
                 assistants={assistants}
                 myClearance={myClearance}
+                canRename={myRole === "owner" || myRole === "admin"}
                 onUpdated={onChannelUpdated}
                 onRoutingChanged={() => refreshRouting(sel.channel.id)}
                 onDeleted={onChannelDeleted}
@@ -557,15 +578,22 @@ export default function StudioChannelsPage() {
 
 /**
  * The selected channel's management panel — the master-detail right pane.
- * Header (platform mark, name, status pill), clearance + capabilities, the
- * per-platform bot-behavior config, assistant routing, and disconnect.
+ * Header (platform mark, click-to-edit name, status pill), clearance +
+ * capabilities, the per-platform bot-behavior config, assistant routing, and
+ * disconnect.
+ *
+ * The name is `channels.display_name` — the workspace's own label, seeded from
+ * the platform on connect (Slack team name, Telegram bot username, …). It is
+ * editable here through the same `PATCH .../channels/:id` that carries
+ * clearance and capabilities; the platform-side bot name is untouched.
  */
-function ChannelDetail({
+export function ChannelDetail({
   workspaceId,
   channel,
   routing,
   assistants,
   myClearance,
+  canRename,
   onUpdated,
   onRoutingChanged,
   onDeleted,
@@ -577,6 +605,12 @@ function ChannelDetail({
   routing: ChannelAssistant[];
   assistants: StudioAssistantSummary[];
   myClearance: ChannelClearance;
+  /**
+   * Whether the caller may rename the channel — workspace owner or admin only,
+   * mirroring the `rename_requires_admin` gate on the PATCH route. Everything
+   * else in this panel stays open to any member.
+   */
+  canRename: boolean;
   onUpdated: (c: Channel) => void;
   onRoutingChanged: () => void;
   onDeleted: (channelId: string) => void;
@@ -589,7 +623,15 @@ function ChannelDetail({
   // case so the inline message can explain *why* a save was rejected. The
   // server returns `error: 'clearance_exceeds_member_tier'` for this; any
   // other failure falls back to the generic saveError copy.
-  const [saveError, setSaveError] = useState<boolean | "clearanceTooHigh">(false);
+  const [saveError, setSaveError] = useState<
+    boolean | "clearanceTooHigh" | "renameNotAllowed"
+  >(false);
+  // Header rename. The panel is keyed by channel id upstream, so this state is
+  // per-channel by construction; the draft is seeded when the user opens the
+  // editor rather than mirrored from the prop, so an in-flight edit survives
+  // an unrelated refresh of the channel row.
+  const [renaming, setRenaming] = useState(false);
+  const [nameDraft, setNameDraft] = useState("");
   const [attachAssistantId, setAttachAssistantId] = useState("");
   const [attachSurface, setAttachSurface] = useState("");
   const [attaching, setAttaching] = useState(false);
@@ -638,23 +680,52 @@ function ChannelDetail({
   );
 
   async function patch(
-    p: Partial<Pick<Channel, "clearance" | "enabledCapabilities">>,
-  ): Promise<void> {
+    p: Partial<Pick<Channel, "clearance" | "enabledCapabilities" | "displayName">>,
+  ): Promise<boolean> {
     setSaving(true);
     setSaveError(false);
     try {
       onUpdated(await updateChannel(workspaceId, channel.id, p));
+      return true;
     } catch (e) {
       // The route now translates RLS clearance rejections into a 403 with
       // `error: 'clearance_exceeds_member_tier'`; pick that up so we can
       // explain *why* it failed instead of the generic "couldn't save".
       const msg = (e as Error).message;
       setSaveError(
-        msg.includes("clearance_exceeds_member_tier") ? "clearanceTooHigh" : true,
+        msg.includes("clearance_exceeds_member_tier")
+          ? "clearanceTooHigh"
+          : // Belt-and-braces: the pencil is hidden for non-admins, so this
+            // only fires for a role that changed under a stale page.
+            msg.includes("rename_requires_admin")
+            ? "renameNotAllowed"
+            : true,
       );
+      return false;
     } finally {
       setSaving(false);
     }
+  }
+
+  /**
+   * Commit the header rename. The name is the workspace's own label for the
+   * channel (`channels.display_name`), seeded from the platform on connect —
+   * renaming here never touches the bot or team name on the platform side.
+   * Owner / admin only, matching the route's `rename_requires_admin` gate.
+   * Empty / unchanged drafts are dropped rather than sent: the route's zod
+   * `displayName` is `min(1)`, so a blank submit would 400.
+   */
+  async function onRename(): Promise<void> {
+    if (!canRename) {
+      setRenaming(false);
+      return;
+    }
+    const next = nameDraft.trim();
+    if (!next || next === channel.displayName) {
+      setRenaming(false);
+      return;
+    }
+    if (await patch({ displayName: next })) setRenaming(false);
   }
 
   async function onAttach(): Promise<void> {
@@ -701,13 +772,85 @@ function ChannelDetail({
           <ChannelTypeIcon type={channel.channelType} />
         </div>
         <div className="min-w-0 flex-1">
-          <h2 className="truncate text-[15px] font-semibold tracking-tight">
-            {channel.displayName}
-          </h2>
-          <p className="truncate text-[12px] text-muted-foreground">
-            {(t.studioPage.channels.platforms as Partial<Record<Channel["channelType"], string>>)[
-              channel.channelType
-            ] ?? channel.channelType}
+          {renaming ? (
+            <form
+              className="flex items-center gap-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void onRename();
+              }}
+            >
+              <input
+                type="text"
+                autoFocus
+                value={nameDraft}
+                onChange={(e) => setNameDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") {
+                    e.preventDefault();
+                    setRenaming(false);
+                  }
+                }}
+                disabled={saving}
+                // Matches the route's zod cap (displayName: max 200).
+                maxLength={200}
+                placeholder={t.studioPage.channels.rename.placeholder}
+                aria-label={t.studioPage.channels.rename.placeholder}
+                className="min-w-0 flex-1 rounded-md border border-border bg-muted/50 px-2 py-1 text-[15px] font-semibold tracking-tight text-foreground placeholder:font-normal placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
+              />
+              <button
+                type="submit"
+                disabled={saving || !nameDraft.trim()}
+                className="shrink-0 rounded-md bg-action px-2.5 py-1 text-[12px] font-medium text-action-foreground transition-colors hover:bg-action/80 disabled:pointer-events-none disabled:opacity-50"
+              >
+                {saving
+                  ? t.studioPage.channels.saving
+                  : t.studioPage.channels.rename.save}
+              </button>
+              <button
+                type="button"
+                onClick={() => setRenaming(false)}
+                disabled={saving}
+                className="shrink-0 rounded-md px-2 py-1 text-[12px] text-muted-foreground transition-colors hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+              >
+                {t.studioPage.channels.rename.cancel}
+              </button>
+            </form>
+          ) : (
+            <div className="flex min-w-0 items-center gap-1.5">
+              <h2 className="truncate text-[15px] font-semibold tracking-tight">
+                {channel.displayName}
+              </h2>
+              {canRename && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setNameDraft(channel.displayName);
+                    setSaveError(false);
+                    setRenaming(true);
+                  }}
+                  aria-label={t.studioPage.channels.rename.action}
+                  title={t.studioPage.channels.rename.action}
+                  className="shrink-0 rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                >
+                  <Pencil className="h-3.5 w-3.5" aria-hidden />
+                </button>
+              )}
+            </div>
+          )}
+          <p
+            className={cn(
+              "text-[12px] text-muted-foreground",
+              // The platform line is one word; the rename hint is a sentence
+              // and must wrap rather than clip.
+              renaming ? "mt-1" : "truncate",
+            )}
+          >
+            {renaming
+              ? t.studioPage.channels.rename.hint
+              : (t.studioPage.channels.platforms as Partial<Record<Channel["channelType"], string>>)[
+                  channel.channelType
+                ] ?? channel.channelType}
           </p>
         </div>
         <span className={pillCls(statusActive ? "on" : "attention")}>
@@ -776,6 +919,10 @@ function ChannelDetail({
         {saveError === "clearanceTooHigh" ? (
           <span className="text-xs text-destructive">
             {t.studioPage.channels.clearanceTooHighError}
+          </span>
+        ) : saveError === "renameNotAllowed" ? (
+          <span className="text-xs text-destructive">
+            {t.studioPage.channels.rename.notAllowedError}
           </span>
         ) : saveError ? (
           <span className="text-xs text-destructive">
