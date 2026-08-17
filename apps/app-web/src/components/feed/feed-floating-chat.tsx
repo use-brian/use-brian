@@ -45,6 +45,7 @@ import { feedPostIdFromPathname } from "@/lib/feed-nav";
 import { cn } from "@/lib/utils";
 import {
   TuningChatPanel,
+  type TuningChatActivity,
   type TuningChatPanelHandle,
 } from "@/components/feed/tuning-chat-panel";
 import {
@@ -81,6 +82,38 @@ const MIN_CHAT_H = 420;
 const FEED_CONTROL_CHANNEL_ID = "plan";
 
 type ChatSize = { w: number; h: number };
+
+const IDLE_CHAT_ACTIVITY: TuningChatActivity = {
+  isStreaming: false,
+  streamingText: "",
+  activeLabel: null,
+};
+
+/** Label priority shared with the global dock's collapsed pill. */
+export function feedChatLauncherLabel(
+  activity: TuningChatActivity,
+  idleLabel: string,
+  thinkingLabel: string,
+): string {
+  if (!activity.isStreaming) return idleLabel;
+  return (
+    activity.activeLabel ??
+    collapseFeedActivityText(activity.streamingText) ??
+    thinkingLabel
+  );
+}
+
+/** Squash a streamed Markdown reply into one compact launcher line. */
+function collapseFeedActivityText(text: string): string | undefined {
+  const trimmed = text
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/^\s*[#>\-*+]+\s*/gm, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!trimmed) return undefined;
+  const max = 80;
+  return trimmed.length > max ? trimmed.slice(-max) : trimmed;
+}
 
 /** Keep the floating panel usable and entirely inside the live viewport. */
 function clampChatSize(size: ChatSize): ChatSize {
@@ -136,6 +169,7 @@ export function FeedFloatingChat() {
   const postEditorOwnsChat = feedPostIdFromPathname(pathname) !== null;
 
   const [expanded, setExpanded] = useState(false);
+  const [activity, setActivity] = useState<TuningChatActivity>(IDLE_CHAT_ACTIVITY);
   const [activeAssistantId, setActiveAssistantId] = useState<string | null>(null);
   const [controlSession, setControlSession] = useState<{
     assistantId: string;
@@ -246,6 +280,13 @@ export function FeedFloatingChat() {
   const recorderOwnsPill =
     dockRecorder?.phase.kind === "latched" ||
     dockRecorder?.phase.kind === "finishing";
+  const isActive = activity.isStreaming;
+  const idleLauncherLabel = format(t.launcher, { name: activeAssistant?.name ?? "" });
+  const launcherLabel = feedChatLauncherLabel(
+    activity,
+    idleLauncherLabel,
+    tChat.thinking,
+  );
 
   // Provision the mode='plan' row before the master composer can send. The
   // route name stays /plan-session for wire compatibility, but this one row
@@ -431,6 +472,7 @@ export function FeedFloatingChat() {
             sessionId={controlSessionId ?? undefined}
             ready={controlSessionId !== null}
             onClose={() => setExpanded(false)}
+            onActivityChange={setActivity}
             dockRecorder={expanded ? dockRecorder ?? undefined : undefined}
             ownsDockRecorderTarget
           />
@@ -455,12 +497,15 @@ export function FeedFloatingChat() {
             type="button"
             onClick={() => setExpanded(true)}
             aria-hidden={expanded}
+            aria-live={isActive ? "polite" : undefined}
             aria-label={t.openAria}
             tabIndex={expanded ? -1 : 0}
             className={cn(
               "inline-flex items-center gap-2 rounded-full py-1.5 pl-1.5 pr-3.5 shadow-lg backdrop-blur",
               "max-w-[min(260px,calc(100vw-3rem))] text-left text-sm",
-              "border border-border bg-background/90 text-foreground/80 hover:bg-accent hover:text-foreground",
+              isActive
+                ? "border border-primary/40 bg-primary/10 text-foreground ring-2 ring-primary/20"
+                : "border border-border bg-background/90 text-foreground/80 hover:bg-accent hover:text-foreground",
               "transition-[opacity,transform,background-color,box-shadow] duration-200 ease-out",
               expanded ? "opacity-0 scale-95 pointer-events-none" : "opacity-100 scale-100",
             )}
@@ -476,8 +521,13 @@ export function FeedFloatingChat() {
                 size="sm"
               />
             </span>
-            <span className="min-w-0 truncate text-muted-foreground">
-              {format(t.launcher, { name: activeAssistant.name })}
+            <span
+              className={cn(
+                "min-w-0 truncate",
+                isActive ? "text-foreground" : "text-muted-foreground",
+              )}
+            >
+              {launcherLabel}
             </span>
           </button>
           {dockRecorder ? (

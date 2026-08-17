@@ -8,10 +8,11 @@
  *   - Feed chat open + seed buses: distinct event names, seed payload, and
  *     the empty-prefill drop.
  *   - The collapsed dock's static render: the launcher pill (open aria-label
- *     + explicit creation copy — the app-standard pill idiom, not a
- *     FAB) AND the always-mounted (hidden) panel — header title, empty-state
- *     suggestions, and the global dock's top/left/corner resize chrome — plus
- *     the zero-assistant null render.
+ *     + explicit idle creation copy — the app-standard pill idiom, not a
+ *     FAB), live tool/text/thinking label priority, AND the always-mounted
+ *     (hidden) panel — header title, empty-state suggestions, and the global
+ *     dock's top/left/corner resize chrome — plus the zero-assistant null
+ *     render.
  *   - `FeedSurfaceShell` READY state mounts the feed dock alongside the
  *     children (the dock-swap contract; the `chatDockSuppression` hold is
  *     an effect, so its counter semantics are covered by
@@ -77,7 +78,14 @@ import {
   requestFeedChatSeed,
 } from "@/lib/feed-chat-seed";
 import { CHAT_SEED_EVENT as DOC_CHAT_SEED_EVENT } from "@/lib/chat-seed";
-import { FeedFloatingChat } from "../feed-floating-chat";
+import {
+  FeedFloatingChat,
+  feedChatLauncherLabel,
+} from "../feed-floating-chat";
+import {
+  reduceTuningToolActivity,
+  type TuningChatActivity,
+} from "../tuning-chat-panel";
 import { FeedSurfaceShell } from "../feed-surface-shell";
 
 const dict = en as unknown as Dictionary;
@@ -187,6 +195,86 @@ describe("[COMP:app-web/feed-tuning-chat] feed chat buses", () => {
 });
 
 describe("[COMP:app-web/feed-tuning-chat] FeedFloatingChat", () => {
+  it("replaces the idle launcher copy with live tool, text, then thinking activity", () => {
+    const activity = (
+      patch: Partial<TuningChatActivity>,
+    ): TuningChatActivity => ({
+      isStreaming: true,
+      streamingText: "",
+      activeLabel: null,
+      ...patch,
+    });
+
+    expect(
+      feedChatLauncherLabel(
+        { isStreaming: false, streamingText: "", activeLabel: null },
+        "Create with Acme",
+        "Thinking...",
+      ),
+    ).toBe("Create with Acme");
+    expect(
+      feedChatLauncherLabel(
+        activity({
+          streamingText: "A reply that should lose to the tool",
+          activeLabel: "Searching launch notes",
+        }),
+        "Create with Acme",
+        "Thinking...",
+      ),
+    ).toBe("Searching launch notes");
+    expect(
+      feedChatLauncherLabel(
+        activity({ streamingText: "## Draft\n\nWriting the launch recap" }),
+        "Create with Acme",
+        "Thinking...",
+      ),
+    ).toBe("Draft Writing the launch recap");
+    expect(
+      feedChatLauncherLabel(
+        activity({}),
+        "Create with Acme",
+        "Thinking...",
+      ),
+    ).toBe("Thinking...");
+  });
+
+  it("reduces tool events into input-aware launcher narration", () => {
+    const started = reduceTuningToolActivity(
+      [],
+      "tool_start",
+      { id: "tool-1", name: "webSearch" },
+      en.chat.toolNarration,
+    );
+    expect(started).toEqual([
+      {
+        id: "tool-1",
+        name: "webSearch",
+        description: en.chat.toolNarration.webSearch,
+        status: "running",
+      },
+    ]);
+
+    const described = reduceTuningToolActivity(
+      started ?? [],
+      "tool_input",
+      {
+        id: "tool-1",
+        name: "webSearch",
+        input: { query: "August launch notes" },
+      },
+      en.chat.toolNarration,
+    );
+    expect(described?.[0]?.description).toContain("August launch notes");
+    expect(
+      reduceTuningToolActivity(
+        described ?? [],
+        "tool_result",
+        { id: "tool-1" },
+        en.chat.toolNarration,
+      )?.[0]?.status,
+    ).toBe("done");
+  });
+
   it("collapsed dock: renders the launcher pill and the always-mounted (hidden) panel", () => {
     const html = renderDock([profile("acme")]);
     // Launcher pill carries the open aria-label and says what Feed controls.
