@@ -20,6 +20,7 @@ import type {
   MemoryStore,
   Tool,
   UsageStore,
+  WorkflowEventDispatcher,
 } from '@use-brian/core'
 import { formatConfirmationInput, getToolDisplayName } from '@use-brian/shared'
 import type {
@@ -71,6 +72,8 @@ export type WhatsAppCloudRouteOptions = {
   episodicStore?: import('@use-brian/core').EpisodicStore
   sessionStateStore?: import('@use-brian/core').SessionStateStore
   capabilityStore: import('@use-brian/core').CapabilityStore
+  /** Best-effort producer for workflows triggered by this channel integration. */
+  workflowEventDispatcher?: WorkflowEventDispatcher
 }
 
 function isCloudCredentials(credentials: unknown): credentials is WhatsAppCloudCredentials {
@@ -105,6 +108,39 @@ export function whatsappCloudExternalConnectorToolsAllowed(
 ): boolean {
   return !isIdentified
     && config.userAccessMode === 'allowlist'
+}
+
+export async function dispatchWhatsAppCloudWorkflowEvent(input: {
+  dispatcher: WorkflowEventDispatcher
+  workspaceId: string
+  channelIntegrationId: string
+  config: ChannelIntegrationConfig
+  incoming: IncomingMessage
+}): Promise<void> {
+  const { dispatcher, workspaceId, channelIntegrationId, config, incoming } = input
+  if (!whatsappCloudUserAllowed(config, incoming.userId)) return
+
+  const raw = incoming.raw as {
+    message?: { type?: unknown }
+    phoneNumberId?: unknown
+  } | null
+  await dispatcher.dispatch({
+    workspaceId,
+    source: { type: 'channel', channelIntegrationId, channel: 'whatsapp' },
+    text: incoming.text,
+    actorId: incoming.userId,
+    channelId: incoming.channelId,
+    mentions: [],
+    isBot: false,
+    payload: {
+      text: incoming.text,
+      message_id: incoming.messageId,
+      from: incoming.userId,
+      phone_number_id: typeof raw?.phoneNumberId === 'string' ? raw.phoneNumberId : null,
+      message_type: typeof raw?.message?.type === 'string' ? raw.message.type : null,
+      media_type: incoming.mediaType ?? null,
+    },
+  })
 }
 
 export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router {
@@ -173,7 +209,7 @@ export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router 
         const cutoff = Date.now() - 10 * 60_000
         for (const [key, at] of seen) if (at < cutoff) seen.delete(key)
       }
-      void handleMessage(channelId, integration.config ?? {}, credentials, incoming).catch((err) => {
+      void handleMessage(channelId, integration.id, integration.config ?? {}, credentials, incoming).catch((err) => {
         console.error(`[whatsapp-cloud] failed to process ${incoming.messageId}:`, err)
       })
     }
@@ -181,51 +217,65 @@ export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router 
 
   async function handleMessage(
     channelId: string,
+    channelIntegrationId: string,
     config: ChannelIntegrationConfig,
     credentials: WhatsAppCloudCredentials,
     incoming: IncomingMessage,
   ): Promise<void> {
     const channel = await getChannelForWebhook(channelId)
-    if (!channel || channel.status !== 'active' || !channel.enabledCapabilities.includes('chat')) return
+    if (!channel || channel.status !== 'active') return
     if (!whatsappCloudUserAllowed(config, incoming.userId)) return
-    const routing = await resolveRoutingForSurface(channelId, incoming.channelId)
-    if (!routing) return
-    const assistant = await findAssistantById(routing.assistantId)
-    if (!assistant) return
-    const ownerId = await billingPartyForAssistant({
-      id: assistant.id,
-      ownerUserId: assistant.ownerUserId ?? null,
-      workspaceId: assistant.workspaceId ?? null,
-    })
+    try {
+      if (!channel.enabledCapabilities.includes('chat')) return
+      const routing = await resolveRoutingForSurface(channelId, incoming.channelId)
+      if (!routing) return
+      const assistant = await findAssistantById(routing.assistantId)
+      if (!assistant) return
+      const ownerId = await billingPartyForAssistant({
+        id: assistant.id,
+        ownerUserId: assistant.ownerUserId ?? null,
+        workspaceId: assistant.workspaceId ?? null,
+      })
 
-    let channelUserId = ownerId
-    let isIdentified = false
-    if (options.channelUserStore) {
-      const resolved = await resolveChannelUser(
-        options.channelUserStore,
-        'whatsapp',
-        incoming.userId,
-        routing.assistantId,
-        async () => ({ providerUserId: incoming.userId, email: null, displayName: senderName(incoming) }),
-      )
-      channelUserId = resolved.user.id
-      isIdentified = resolved.isIdentified
+      let channelUserId = ownerId
+      let isIdentified = false
+      if (options.channelUserStore) {
+        const resolved = await resolveChannelUser(
+          options.channelUserStore,
+          'whatsapp',
+          incoming.userId,
+          routing.assistantId,
+          async () => ({ providerUserId: incoming.userId, email: null, displayName: senderName(incoming) }),
+        )
+        channelUserId = resolved.user.id
+        isIdentified = resolved.isIdentified
+      }
+
+      const confirmKey = `${channelId}:${incoming.channelId}`
+      const parked = pending.get(confirmKey)
+      if (parked) {
+        const decision = DECISIONS[incoming.text.trim().toLowerCase()]
+        pending.delete(confirmKey)
+        parked.resolver.resolve(parked.toolCallId, decision ?? 'deny')
+        if (decision) return
+      }
+
+      await withChatLock(`whatsapp-cloud:${confirmKey}`, () => processMessage({
+        credentials, incoming, assistant, ownerId, channelUserId, isIdentified,
+        externalConnectorToolsAllowed: whatsappCloudExternalConnectorToolsAllowed(config, isIdentified),
+        routing, confirmKey,
+      }))
+    } finally {
+      if (options.workflowEventDispatcher) {
+        await dispatchWhatsAppCloudWorkflowEvent({
+          dispatcher: options.workflowEventDispatcher,
+          workspaceId: channel.workspaceId,
+          channelIntegrationId,
+          config,
+          incoming,
+        }).catch((err) => console.error('[whatsapp-cloud] workflow event dispatch failed:', err))
+      }
     }
-
-    const confirmKey = `${channelId}:${incoming.channelId}`
-    const parked = pending.get(confirmKey)
-    if (parked) {
-      const decision = DECISIONS[incoming.text.trim().toLowerCase()]
-      pending.delete(confirmKey)
-      parked.resolver.resolve(parked.toolCallId, decision ?? 'deny')
-      if (decision) return
-    }
-
-    await withChatLock(`whatsapp-cloud:${confirmKey}`, () => processMessage({
-      credentials, incoming, assistant, ownerId, channelUserId, isIdentified,
-      externalConnectorToolsAllowed: whatsappCloudExternalConnectorToolsAllowed(config, isIdentified),
-      routing, confirmKey,
-    }))
   }
 
   async function processMessage(params: {

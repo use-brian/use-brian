@@ -7185,7 +7185,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
         connectorInstanceStore, workspaceToolPolicyStore, knowledgeStore, gdriveFilesStore, workspaceFilesStore,
         filesApi: filesApi ?? undefined, analytics, skillStore,
-        episodicStore, sessionStateStore, artifactPromoter, fileStore,
+        episodicStore, sessionStateStore, artifactPromoter, fileStore, workflowEventDispatcher,
       }))
       // Microsoft Teams — public Bot Framework messaging endpoint, per-channel
       // JWT-verified. No connector app (webhook transport). See

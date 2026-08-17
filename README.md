@@ -193,8 +193,9 @@ permitted sender numbers to the channel allowlist before they can invoke the
 assistant or its configured connectors. Their chats and memory remain isolated
 from the workspace owner's account. Studio normalizes common international phone
 formatting in that allowlist and shows a `wa.me` QR code for starting a chat with
-the connected business number. Free-form outbound replies are subject to Meta's
-24-hour
+the connected business number. Authorized inbound messages can also trigger
+workflows that watch this channel integration. Free-form outbound replies are
+subject to Meta's 24-hour
 customer-service window; proactive workflow delivery is disabled until approved
 template-message support is available.
 
