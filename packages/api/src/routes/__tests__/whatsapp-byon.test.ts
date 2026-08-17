@@ -97,9 +97,33 @@ describe('[COMP:api/whatsapp-byon-route] internal routing', () => {
     expect(response.body).toEqual({ ok: true })
   })
 
-  it('does not archive a directly-uploaded asset, but still dispatches the message', async () => {
-    const captured: Array<Record<string, unknown>> = []
-    const archiveIncoming = vi.fn(async () => {})
+  /**
+   * A streamed attachment must reach the archive.
+   *
+   * The connector streams video and audio files straight to workspace storage
+   * regardless of size and relays only a reference, so for a long time these
+   * were archived as a message row with no asset and no segments — a video was
+   * recorded as having happened but nothing about its contents was searchable.
+   * The bytes are durably written by the time /inbound runs, so the platform
+   * reads them back and forwards them under its own signature.
+   */
+  function streamedApp(overrides: {
+    statBytes?: number
+    fallback?: boolean
+    captured?: Array<Record<string, unknown>>
+    storeBuffer?: ReturnType<typeof vi.fn>
+    readBlob?: ReturnType<typeof vi.fn>
+  } = {}) {
+    const captured = overrides.captured ?? []
+    const readBlob = overrides.readBlob
+      ?? vi.fn(async () => ({ bytes: Buffer.from('mp4 bytes'), mime: 'video/mp4', metadata: {} }))
+    const storeBuffer = overrides.storeBuffer ?? vi.fn(async () => ({
+      assetId: '4a1e6bd8-0000-4000-8000-000000000001',
+      sha256: 'a'.repeat(64),
+      filename: 'clip.mp4',
+      mime: 'video/mp4',
+      sizeBytes: 9,
+    }))
     const app = express()
     app.use(express.json())
     app.use('/internal/whatsapp', whatsappByonRoutes({
@@ -114,69 +138,89 @@ describe('[COMP:api/whatsapp-byon-route] internal routing', () => {
           return { kind: 'bot' as const, handle: vi.fn(async () => {}) }
         }),
       },
-      archiveMedia: {
-        resolveBinding: vi.fn(async () => 'instance-1'),
-        complete: vi.fn(async () => ({
-          id: '4a1e6bd8-0000-4000-8000-000000000001',
-          workspaceId: 'workspace-1',
-          instanceId: 'instance-1',
-          ownerUserId: 'owner-1',
-          messageId: null,
-          source: 'whatsapp',
-          providerMessageId: 'm1',
-          kind: 'video',
-          filename: 'clip.mp4',
-          mime: 'video/mp4',
-          sizeBytes: 123,
-          expectedSha256: null,
-          sha256: 'a'.repeat(64),
-          storageKey: 'workspace-1/chat-archive-asset',
-          storageUri: 'file://workspace-1/chat-archive-asset',
-          uploadStatus: 'stored',
-          extractionStatus: 'pending',
-          lastError: null,
-          createdAt: new Date(),
-          updatedAt: new Date(),
+      filesResolver: {
+        forWorkspace: vi.fn(async () => ({
+          gcs: {
+            statBlob: vi.fn(async () => ({
+              sizeBytes: overrides.statBytes ?? 9,
+              mime: 'video/mp4',
+              updatedAt: null,
+            })),
+            readBlob,
+          },
+          bucket: '/data/files',
+          uriScheme: 'file' as const,
         })),
       } as never,
-      archiveIncoming,
+      archiveMedia: { storeBuffer } as never,
+      archiveIncoming: vi.fn(async () => {}),
       getChannel: vi.fn(async () => ({ workspaceId: 'workspace-1' })) as never,
       getWorkspaceOwnerUserId: vi.fn(async () => 'owner-1'),
+      passUnknownToFallback: overrides.fallback ?? false,
     }))
+    app.post('/internal/whatsapp/inbound', (_req, res) => res.status(418).json({ official: true }))
+    return { app, captured, storeBuffer, readBlob }
+  }
+
+  const streamedBody = {
+    ...payload,
+    text: '<media:video>',
+    mediaMimeType: 'video/mp4',
+    mediaRef: {
+      gcsKey: 'workspace-1/channel-media/abc',
+      mimeType: 'video/mp4',
+      sizeBytes: 9,
+    },
+  }
+
+  it('archives a streamed attachment by reading the uploaded bytes back', async () => {
+    const { app, captured, storeBuffer } = streamedApp()
 
     const response = await request(app)
       .post('/internal/whatsapp/inbound')
       .set('X-Connector-Secret', 'secret')
-      .send({
-        ...payload,
-        text: '<media:video>',
-        mediaMimeType: 'video/mp4',
-        mediaRef: {
-          assetId: '4a1e6bd8-0000-4000-8000-000000000001',
-          gcsKey: 'workspace-1/chat-archive-asset',
-          mimeType: 'video/mp4',
-          fileName: 'clip.mp4',
-          sizeBytes: 123,
-        },
-      })
+      .send(streamedBody)
 
     expect(response.status).toBe(200)
-    expect(archiveIncoming).toHaveBeenCalledOnce()
+    expect(storeBuffer).toHaveBeenCalledOnce()
+    expect(captured[0]).toMatchObject({ archiveMediaType: 'video', archiveInboundPersisted: true })
+    expect(captured[0]!.archiveMediaRef).toMatchObject({ sha256: 'a'.repeat(64) })
+    // Baileys reports no filename for video, so one is synthesized rather than
+    // archiving the attachment under '' — which would leave it with no
+    // segment 0 and unfindable until extraction produced frame text.
+    expect(storeBuffer.mock.calls[0]![0].filename).toBe('video-m1.mp4')
+  })
 
-    // KNOWN GAP, asserted deliberately. The BYON connector uploads bytes
-    // straight to storage through a pre-signed URL, in a two-phase
-    // init-then-upload flow. The archive's contract is single-shot — metadata
-    // and bytes together, signed with a secret the connector does not hold —
-    // so there is nothing to complete against and no archive reference is
-    // produced.
-    //
-    // What must NOT regress is message delivery: the inbound still dispatches
-    // and is still persisted, it simply carries no archived attachment. Media
-    // that passes through the platform (mediaBase64) is unaffected.
-    expect(captured[0]).toMatchObject({
-      archiveInboundPersisted: true,
-      archiveMediaType: 'video',
-    })
-    expect(captured[0]!.archiveMediaRef).toBeUndefined()
+  it('still hands a streamed reference to the hosted intake after archiving', async () => {
+    // Archiving must not consume the reference: the closed router still owns
+    // turning it into a recording episode.
+    const { app, storeBuffer } = streamedApp({ fallback: true })
+
+    const response = await request(app)
+      .post('/internal/whatsapp/inbound')
+      .set('X-Connector-Secret', 'secret')
+      .send(streamedBody)
+
+    expect(storeBuffer).toHaveBeenCalledOnce()
+    expect(response.status).toBe(418)
+    expect(response.body).toEqual({ official: true })
+  })
+
+  it('skips an oversized streamed attachment rather than buffering it', async () => {
+    // storeBuffer takes a Buffer, so the size is checked with statBlob first —
+    // reading before looking would let one attachment set the memory ceiling.
+    const { app, captured, storeBuffer, readBlob } = streamedApp({ statBytes: 5 * 1024 * 1024 * 1024 })
+
+    const response = await request(app)
+      .post('/internal/whatsapp/inbound')
+      .set('X-Connector-Secret', 'secret')
+      .send(streamedBody)
+
+    expect(response.status).toBe(200)
+    expect(readBlob).not.toHaveBeenCalled()
+    expect(storeBuffer).not.toHaveBeenCalled()
+    // The message itself is still archived and dispatched; only its attachment
+    // is unavailable.
+    expect(captured[0]).toMatchObject({ archiveMediaAvailability: 'failed' })
   })
 })

@@ -1,7 +1,7 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto'
 import { Router } from 'express'
 import type { ChatArchiveLiveMedia } from '../chat-archive/live-media.js'
-import { archiveMediaRef } from '../chat-archive/live-media.js'
+import { archiveMediaRef, mediaByteLimit } from '../chat-archive/live-media.js'
 import { resolveChatArchiveInstanceId } from '../chat-archive/live-writer.js'
 import { z } from 'zod'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
@@ -80,6 +80,65 @@ export type WhatsappByonRoutesOptions = {
 export function whatsappByonRoutes(opts: WhatsappByonRoutesOptions): Router {
   const router = Router()
 
+  /**
+   * Read back media the connector streamed straight to workspace storage.
+   *
+   * Size is checked with `statBlob` first, which does not download: the archive
+   * accepts video up to 512MB and `storeBuffer` takes a Buffer, so reading
+   * before looking would let one oversized attachment decide the process's
+   * memory ceiling. WhatsApp caps sent video far below this in practice, so the
+   * skip is a guard rather than a routine path — but it is the difference
+   * between declining an attachment and losing the API.
+   *
+   * Returns null when the object is missing or too large; the caller records
+   * the media as unavailable and the message itself is archived regardless.
+   */
+  async function readStreamedMedia(
+    workspaceId: string,
+    ref: { gcsKey: string; storageUri?: string },
+    kind: 'image' | 'video' | 'voice' | 'file',
+  ): Promise<Buffer | null> {
+    if (!opts.filesResolver) return null
+    // Prefer the URI the connector echoed back with the bytes: it names the
+    // exact bucket they were PUT to, where recomputing the workspace default
+    // could resolve elsewhere. `forUri` hands back the client itself;
+    // `forWorkspace` wraps it.
+    const client = ref.storageUri
+      ? await opts.filesResolver.forUri(workspaceId, ref.storageUri)
+      : (await opts.filesResolver.forWorkspace(workspaceId)).gcs
+    const limit = mediaByteLimit(kind)
+    const stat = await client.statBlob(ref.gcsKey)
+    if (stat && stat.sizeBytes > limit) {
+      console.warn(
+        `[whatsapp] streamed ${kind} is ${stat.sizeBytes} bytes, over the ${limit} archive limit — not archived`,
+      )
+      return null
+    }
+    const blob = await client.readBlob(ref.gcsKey)
+    return blob?.bytes ?? null
+  }
+
+  /**
+   * A name for the archived attachment.
+   *
+   * Baileys reports no filename for video or audio messages, so a streamed
+   * video would otherwise be archived as `''` — and an attachment with neither
+   * caption nor filename gets no segment 0 at all, leaving it findable only
+   * once extraction produces frame text. Synthesizing from the provider message
+   * id keeps it identifiable in the meantime.
+   */
+  function archiveFilename(
+    input: { mediaFileName?: string; mediaRef?: { fileName?: string }; messageId: string },
+    kind: string,
+    mime: string,
+  ): string {
+    const given = input.mediaFileName ?? input.mediaRef?.fileName
+    if (given && given.trim()) return given.trim()
+    const subtype = mime.split('/')[1]?.split(';')[0]?.trim()
+    const extension = subtype && /^[a-z0-9]{1,8}$/i.test(subtype) ? `.${subtype}` : ''
+    return `${kind}-${input.messageId}${extension}`
+  }
+
   router.post('/media-upload-url', async (req, res, next) => {
     if (!secretMatches(req.headers['x-connector-secret'], opts.connectorSecret)) {
       res.status(401).end()
@@ -109,21 +168,17 @@ export function whatsappByonRoutes(opts: WhatsappByonRoutesOptions): Router {
       return
     }
 
-    // KNOWN GAP — live BYON WhatsApp media no longer reaches the archive.
+    // The connector uploads bytes here through a pre-signed URL, so they never
+    // pass through this process. The archive's contract is single-shot —
+    // metadata and bytes together, signed with a secret the connector must
+    // never hold — which for a while meant streamed media was simply not
+    // archived: a video landed as a message row with `availability: 'missing'`,
+    // no asset and no segments.
     //
-    // This route handed the external connector a pre-signed URL so it could
-    // upload bytes directly, in a two-phase init-then-upload flow. The archive's
-    // contract is single-shot: metadata and bytes arrive together, signed with a
-    // secret the connector does not hold and should not be given.
-    //
-    // Bridging the two needs a decision rather than a guess — either the store
-    // issues its own signed upload URLs, or the platform proxies the bytes on
-    // the connector's behalf. Until then BYON media falls through to generic
-    // workspace storage below: messages and attachments are unaffected, but the
-    // attachment is not archived and so is not searchable by its contents.
-    //
-    // Media on the managed WhatsApp and WeChat paths is unaffected; those
-    // proxy bytes through the platform and go straight to the archive.
+    // Resolved by the platform reading the object back at /inbound and
+    // forwarding it under its own signature, rather than by issuing the
+    // connector an upload URL into the store. The secret stays here, and the
+    // upload path below is unchanged.
 
     const fileId = `channel-media/${randomUUID()}`
     const key = buildStorageKey(channel.workspaceId, fileId)
@@ -179,18 +234,24 @@ export function whatsappByonRoutes(opts: WhatsappByonRoutesOptions): Router {
       input.archiveMediaSizeBytes = input.mediaRef?.sizeBytes ?? 0
       input.archiveMediaAvailability = input.mediaBase64 || input.mediaRef ? 'missing' : 'failed'
     }
-    // Hosted media intake is mounted as the later closed router. Let it own
-    // streamed references; otherwise this BYON router ACKs first and the bytes
-    // are uploaded successfully but never become a recording/document artifact.
-    if (input.mediaRef && !input.mediaRef.assetId && opts.passUnknownToFallback) {
-      next()
-      return
-    }
-
-    // Bytes that pass through the platform still reach the archive. Only the
-    // pre-signed direct-upload path above lost that, because the connector
-    // cannot hold the archive's secret.
-    if (opts.archiveMedia && input.mediaBase64) {
+    // Stage attachment bytes into the archive.
+    //
+    // Two ways bytes arrive. Small media with a live-turn consumer is inlined as
+    // base64 and is simply in hand. Everything else — video and audio files
+    // always, anything over the connector's 10MB inline cap — is streamed
+    // straight to workspace storage, and only a reference reaches us.
+    //
+    // The streamed half used to be dropped: the archive's contract is
+    // single-shot (metadata and bytes together, signed with a secret the
+    // connector must never hold), so a reference had nothing to stage and video
+    // was archived as a message row with `availability: 'missing'`, no asset and
+    // no segments. The platform can simply read the object back — the connector
+    // awaits its PUT before relaying, so the bytes are durably written by the
+    // time we run — and forward them under its own signature.
+    //
+    // This must happen BEFORE the hosted-intake handoff below: that returns from
+    // the handler, and anything staged after it never runs.
+    if (opts.archiveMedia && (input.mediaBase64 || input.mediaRef)) {
       try {
         const integration = await opts.integrationStore.getByChannelForWebhook(input.channelId, 'whatsapp')
         const channel = await (opts.getChannel ?? getChannelForWebhook)(input.channelId)
@@ -216,6 +277,10 @@ export function whatsappByonRoutes(opts: WhatsappByonRoutesOptions): Router {
               conversationId: input.chatJid ?? input.channelId,
             })
           if (!instanceId) throw new Error('whatsapp archive instance could not be resolved')
+          const bytes = input.mediaBase64
+            ? Buffer.from(input.mediaBase64, 'base64')
+            : await readStreamedMedia(channel.workspaceId, input.mediaRef!, kind)
+          if (!bytes) throw new Error('streamed media could not be read back for the archive')
           const asset = await opts.archiveMedia.storeBuffer({
             workspaceId: channel.workspaceId,
             instanceId,
@@ -223,9 +288,9 @@ export function whatsappByonRoutes(opts: WhatsappByonRoutesOptions): Router {
             source: 'whatsapp',
             providerMessageId: input.messageId,
             kind,
-            filename: input.mediaFileName ?? '',
+            filename: archiveFilename(input, kind, mime),
             mime,
-            bytes: Buffer.from(input.mediaBase64!, 'base64'),
+            bytes,
           })
           const ref = archiveMediaRef(asset)
           input.archiveMediaRef = {
@@ -242,6 +307,15 @@ export function whatsappByonRoutes(opts: WhatsappByonRoutesOptions): Router {
         input.archiveMediaAvailability = 'failed'
         console.error('[whatsapp] archive media completion failed:', err)
       }
+    }
+
+    // Hosted media intake is mounted as the later closed router. Let it own
+    // streamed references; otherwise this BYON router ACKs first and the bytes
+    // are uploaded successfully but never become a recording/document artifact.
+    // Staging above has already run, so the archive keeps its copy either way.
+    if (input.mediaRef && !input.mediaRef.assetId && opts.passUnknownToFallback) {
+      next()
+      return
     }
 
     if (!input.text.trim() && !input.mediaBase64 && !input.mediaRef) {
