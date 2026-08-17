@@ -80,7 +80,7 @@ import {
 import { billingPartyForAssistant } from '../billing-party.js'
 import { promotePastedText, shouldPromotePaste } from '../files/paste-promotion.js'
 import type { ArtifactPromoter } from '../files/artifact-promote.js'
-import { appendOutboundChatArchive, persistInboundChatArchive } from '../chat-archive/live-writer.js'
+import { appendInboundChatArchive, appendOutboundChatArchive, persistInboundChatArchive } from '../chat-archive/live-writer.js'
 
 /**
  * Per-turn memory index cap — see chat.ts for the rationale and
@@ -797,6 +797,35 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       })
     : null
   if (customLlmRuntime?.routeKind === 'custom' && userContentBlocks.some((block) => block.type === 'image')) {
+    // Archive BEFORE refusing. This return used to happen first, so an image
+    // sent to a workspace on a custom endpoint left no message row and no
+    // bytes — the user saw only "Something went wrong" and the content was
+    // gone for good. Provider media is not re-fetchable (WeChat's iLink CDN
+    // copy is short-lived and AES-encrypted), so a MODEL capability limit
+    // must never decide whether the archive keeps the message: an assistant
+    // that cannot look at an attachment is a different thing from a record
+    // that no longer exists. Same rule the store applies to embedding and
+    // extraction failures — see brian-message-store docs/architecture.md
+    // → "Failure behavior".
+    if (params.archiveIncoming && !params.archiveInboundAlreadyPersisted) {
+      try {
+        await appendInboundChatArchive({
+          source: channelType,
+          ownerUserId: ownerId,
+          workspaceId: assistant.workspaceId,
+          connectorInstanceId: params.archiveConnectorInstanceId,
+          assistantId: assistant.id,
+          assistantName: assistant.name,
+          conversationId: channelId,
+          message: params.archiveIncoming,
+        })
+      } catch (err) {
+        // Losing the archive row is bad, but failing the whole turn here
+        // would replace one silent loss with a worse one: the user would
+        // not even get the explanation below.
+        console.warn(`[${channelType}] archive-on-refusal failed:`, err)
+      }
+    }
     await hooks.sendError(new Error('Custom model endpoints currently support text and tools only. Remove the inline image or use the web app to choose a built-in model.'))
     return
   }

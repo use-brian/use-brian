@@ -281,8 +281,6 @@ import { createConnectorInstanceStore } from './db/connector-instance-store.js'
 import { createConnectorAppCredentialStore } from './db/connector-app-credential-store.js'
 import { createIngestSinkStore } from './db/ingest-sink-store.js'
 import { createIngestOutboxStore } from './db/ingest-outbox-store.js'
-import { createChatArchiveEnrichmentStore } from './db/chat-archive-enrichment-store.js'
-import { createChatArchiveMediaStore } from './db/chat-archive-media-store.js'
 import { createExternalSinkFanout } from './ingest/external-sink-fanout.js'
 import { createExternalSinkRelay } from './ingest/external-sink-relay.js'
 import {
@@ -291,9 +289,10 @@ import {
   setGlobalLiveChatArchiveWriter,
 } from './chat-archive/live-writer.js'
 import { createChatArchiveEnrichmentWorker } from './chat-archive/enrichment-worker.js'
-import { chatArchiveMediaRoutes } from './chat-archive/media-routes.js'
-import { createChatArchiveMediaService, type ChatArchiveMediaService } from './chat-archive/media-service.js'
-import { createChatArchiveMediaWorker, type ChatArchiveMediaWorker } from './chat-archive/media-worker.js'
+import { chatArchiveExtractRoutes } from './chat-archive/extract-routes.js'
+import { createExtractService } from './chat-archive/extract-service.js'
+import { createMessageStoreClient, type MessageStoreClient } from './chat-archive/message-store-client.js'
+import { createChatArchiveLiveMedia } from './chat-archive/live-media.js'
 import { createWorkspaceToolPolicyStore } from './db/workspace-tool-policy-store.js'
 import { createSyncCredentialProvider } from './knowledge/sync-credentials.js'
 import { createDbAssistantConnectorStore } from './db/assistant-connector-store.js'
@@ -692,6 +691,12 @@ export interface OpenApiEnv {
   WECHAT_CONNECTOR_SECRET?: string
   /** Local-only chat archive sidecar. Both values are required together. */
   BRIAN_MESSAGE_STORE_URL?: string
+  /**
+   * Set when the archive runs on another host in the deployment rather than
+   * beside the platform. Extraction is loopback-only by default because it
+   * accepts raw personal attachments.
+   */
+  BRIAN_MESSAGE_STORE_ALLOW_REMOTE?: string
   BRIAN_MESSAGE_STORE_HMAC_SECRET?: string
   LLM_PROVIDER_KEY_ENCRYPTION_KEY?: string
   // Blob storage. GCS wins when set; LOCAL_FILES_DIR enables durable
@@ -1185,6 +1190,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   const app = express()
   const port = parseInt(env.PORT || new URL(env.API_URL).port || '4000')
+
+  // The archive runs against its own database, so every interaction with it is
+  // an HTTP contract. Null when it is not deployed: chat history is simply
+  // absent rather than the platform failing to boot.
+  const messageStoreClient: MessageStoreClient | null = createMessageStoreClient(env)
+  const chatArchiveLiveMedia = messageStoreClient ? createChatArchiveLiveMedia(messageStoreClient) : undefined
 
   // ── Middleware: raw-body capture + JSON ──
   // 15mb ceiling: the WhatsApp connector forwards inbound media inline as
@@ -2017,8 +2028,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // than connector API tools: the archive remains available when a live
     // WhatsApp / WeChat connection is offline, and every call owner-binds from
     // ToolContext. The same instances are bridged into native agent surfaces.
-    for (const tool of createChatArchiveTools({ embedder: sharedEmbedder })) {
-      tools.set(tool.name, tool)
+    // Raw query text crosses the wire, never a vector: the store embeds the
+    // query with the same client that embedded the stored segments, so both
+    // sides of every cosine comparison come from one implementation.
+    if (messageStoreClient) {
+      for (const tool of createChatArchiveTools({ client: messageStoreClient })) {
+        tools.set(tool.name, tool)
+      }
     }
 
     // Bug report tool — the create sink is a port; open default returns a
@@ -2231,9 +2247,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const chatEpisodeIngestor: ChatEpisodeIngestor =
     builtIngestors?.chatEpisodeIngestor ?? (async () => {})
   const brainEpisodeIngestor: BrainEpisodeIngestor | undefined = builtIngestors?.brainEpisodeIngestor
-  const chatArchiveEnrichmentWorker = brainEpisodeIngestor
+  // The message store owns the enrichment ledger — it builds and leases the
+  // windows — so this worker pulls work rather than discovering it. That leaves
+  // one owner of "which messages have been enriched", and a consumer that dies
+  // mid-window strands nothing: the lease expires and the window is reclaimable.
+  const chatArchiveEnrichmentWorker = brainEpisodeIngestor && messageStoreClient
     ? createChatArchiveEnrichmentWorker({
-        store: createChatArchiveEnrichmentStore(),
+        client: messageStoreClient,
         ingest: brainEpisodeIngestor,
         resolveAssistantId: resolvePrimaryAssistantForWorkspace,
       })
@@ -2339,8 +2359,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   let filesApi: ReturnType<typeof createFilesApi> | null = null
   let filesResolver: FilesClientResolver | null = null
   let chunkedFileUploads: ChunkedFileUploadService | null = null
-  let chatArchiveMediaService: ChatArchiveMediaService | null = null
-  let chatArchiveMediaWorker: ChatArchiveMediaWorker | null = null
 
   const calleeExecutor = createCalleeExecutor({
     provider,
@@ -6637,24 +6655,20 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       ? recordingTranscribers[0]
       : withTranscriberFallback(recordingTranscribers[0], ...recordingTranscribers.slice(1))
 
-  if (filesResolver && env.BRIAN_MESSAGE_STORE_HMAC_SECRET) {
-    const mediaStore = createChatArchiveMediaStore()
-    chatArchiveMediaService = createChatArchiveMediaService({ store: mediaStore, filesResolver })
-    chatArchiveMediaWorker = createChatArchiveMediaWorker({
-      store: mediaStore,
-      filesResolver,
-      transcriber: recordingTranscriber,
-      resolveTranscriptionLanguage: async (workspaceId) =>
-        (await getWorkspaceTranscriptionPrefs(workspaceId)).languageCode,
-      distill: async ({ buffer, mime, prompt }) =>
-        (await distillFileToText({ buffer, mime }, { backend: mediaBackend, prompt })).text,
-    })
-    app.use('/internal/chat-archive', chatArchiveMediaRoutes({
-      service: chatArchiveMediaService,
-      hmacSecret: env.BRIAN_MESSAGE_STORE_HMAC_SECRET,
-      baseUrl: `http://127.0.0.1:${port}`,
+  // Extraction is a toolchain — ffmpeg, a SILK decoder, a cloud ASR fallback
+  // chain, Office/PDF parsing, a vision model — so it stays here. Only the
+  // control moved: the store owns the bytes and the queue and calls this as a
+  // stateless function, which is why there is no worker and no job table left.
+  if (env.BRIAN_MESSAGE_STORE_HMAC_SECRET) {
+    app.use('/internal', chatArchiveExtractRoutes({
+      service: createExtractService({
+        transcriber: recordingTranscriber,
+        distill: async ({ buffer, mime, prompt }) =>
+          (await distillFileToText({ buffer, mime }, { backend: mediaBackend, prompt })).text,
+      }),
+      secret: env.BRIAN_MESSAGE_STORE_HMAC_SECRET,
+      allowRemote: env.BRIAN_MESSAGE_STORE_ALLOW_REMOTE === 'true',
     }))
-    if (runWorkers) chatArchiveMediaWorker.start()
   }
 
   const recordingProcessWorker = filesResolver && filesBlobClient && filesApi
@@ -7155,9 +7169,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         ingestor: whatsapp.ingestor,
         bot: whatsapp.bot,
         filesResolver: filesResolver ?? undefined,
-        archiveMedia: chatArchiveMediaService ?? undefined,
-        archiveMediaHmacSecret: env.BRIAN_MESSAGE_STORE_HMAC_SECRET,
-        archiveMediaBaseUrl: `http://127.0.0.1:${port}`,
         archiveIncoming: (input) => appendInboundChatArchive({
           source: 'whatsapp',
           workspaceId: input.workspaceId,
@@ -7169,6 +7180,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           message: input.message,
         }),
         passUnknownToFallback: ports.whatsappOfficialFallback,
+        archiveMedia: chatArchiveLiveMedia,
       }))
     }
 
@@ -7263,8 +7275,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
           connectorInstanceStore, knowledgeStore, gdriveFilesStore, workspaceFilesStore, analytics,
           skillStore, episodicStore, sessionStateStore, fileStore,
-          archiveMedia: chatArchiveMediaService ?? undefined,
-        }))
+          // Without this the route's staging block is unreachable and every
+          // inbound attachment archives as `availability: 'missing'` — the
+          // message row lands, the bytes are lost, and nothing says so. iLink
+          // CDN media is short-lived and AES-encrypted, so it cannot be
+          // re-fetched later; this is the only moment those bytes exist.
+          archiveMedia: chatArchiveLiveMedia,
+          }))
       }
     }
   }
@@ -7304,7 +7321,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     mailboxSyncWorker.stop()
     externalSinkRelay.stop()
     chatArchiveEnrichmentWorker?.stop()
-    chatArchiveMediaWorker?.stop()
     stuckSessionSweeper.stop()
     fileIngestWorker?.stop()
     gdriveEnrichmentWorker?.stop()

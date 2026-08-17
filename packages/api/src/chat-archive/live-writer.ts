@@ -25,6 +25,19 @@ export type LiveArchiveContext = {
 }
 
 export type LiveChatArchiveWriter = {
+  /**
+   * The archive instance id this context resolves to, creating the managed
+   * binding if it does not exist yet.
+   *
+   * Attachment staging happens BEFORE the append, because the media reference
+   * is part of the appended message — but the instance id is minted lazily by
+   * `resolveBinding` during that append. A route that only had the channel
+   * integration's `connector_instance_id` (often null) would either throw or,
+   * worse, stage bytes under a different instance than the message row, which
+   * keys assets by `(instance_id, provider_message_id)` and orphans them
+   * silently. Exposing the same memoized resolver keeps both halves on one id.
+   */
+  resolveInstanceId(input: LiveArchiveContext): Promise<string | null>
   appendInbound(input: LiveArchiveContext & { message: IncomingMessage }): Promise<void>
   persistInbound<T>(
     input: LiveArchiveContext & { message: IncomingMessage },
@@ -140,6 +153,11 @@ export function createLiveChatArchiveWriter(deps: {
   }
 
   return {
+    async resolveInstanceId(input) {
+      const binding = await resolveBinding(input)
+      return binding?.instanceId ?? null
+    },
+
     async appendInbound(input) {
       const binding = await resolveBinding(input)
       if (!binding) return
@@ -219,6 +237,13 @@ export async function persistInboundChatArchive<T>(
   persist: (client?: Queryable) => Promise<T>,
 ): Promise<T> {
   return globalWriter ? globalWriter.persistInbound(input, persist) : persist()
+}
+
+export async function resolveChatArchiveInstanceId(
+  input: LiveArchiveContext,
+): Promise<string | null> {
+  if (!globalWriter) return null
+  return globalWriter.resolveInstanceId(input)
 }
 
 export async function appendInboundChatArchive(
