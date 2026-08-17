@@ -99,7 +99,7 @@ export function CreateWorkspaceForm({
         maxLength={100}
         className={cn(
           "w-full text-sm bg-muted/50 border border-border rounded-md",
-          "px-3 py-2 outline-none focus:border-primary/60",
+          "px-3 py-2 outline-none",
         )}
       />
       <textarea
@@ -113,7 +113,7 @@ export function CreateWorkspaceForm({
         maxLength={500}
         className={cn(
           "w-full text-sm bg-muted/50 border border-border rounded-md",
-          "px-3 py-2 outline-none focus:border-primary/60 resize-none",
+          "px-3 py-2 outline-none resize-none",
         )}
       />
       <div className="text-[11px] text-muted-foreground px-0.5">

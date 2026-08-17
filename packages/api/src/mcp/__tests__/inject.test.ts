@@ -114,7 +114,7 @@ import {
   INJECTED_BUILTIN_TOOLS_BY_CONNECTOR,
   _getMcpDiscoveryCacheSize,
 } from '../inject.js'
-import { createGmailTools, createGoogleDriveTools } from '@use-brian/core'
+import { createGmailTools, createGoogleDriveTools, createGoogleMapsTools } from '@use-brian/core'
 import { OFFICIAL_CONNECTOR_TOOLS } from '@use-brian/shared/builtin-connectors'
 import { buildUnavailableCapabilitiesPrompt } from '../../routes/route-helpers.js'
 import { packMsGraphTokens } from '../../msgraph/token.js'
@@ -2181,6 +2181,58 @@ describe('[COMP:api/mcp-inject] _getMcpDiscoveryCacheSize', () => {
     const size = _getMcpDiscoveryCacheSize()
     expect(typeof size).toBe('number')
     expect(size).toBeGreaterThanOrEqual(0)
+  })
+})
+
+describe('[COMP:tools/google-maps] built-in Maps discovery', () => {
+  const ctx = {
+    userId: 'u-1', assistantId: 'a-1', sessionId: 's-1', appId: 'test',
+    channelType: 'web', channelId: 'c-1', abortSignal: new AbortController().signal,
+  }
+
+  async function injectMaps(keepBuiltinsDirect: boolean) {
+    const callTool = vi.fn().mockResolvedValue({ weather: 'sunny' })
+    const tools = new Map(createGoogleMapsTools({ callTool }).map((tool) => [tool.name, tool]))
+    await injectMcpTools({
+      userId: 'u-1', assistantId: 'a-1', tools,
+      connectorStore: { list: vi.fn().mockResolvedValue([]) } as never,
+      settingsStore: settingsStoreStub() as never,
+      keepBuiltinsDirect,
+    })
+    return { tools, callTool }
+  }
+
+  it('folds Maps behind mcp_search and preserves underlying result metadata', async () => {
+    const { tools, callTool } = await injectMaps(false)
+    expect(tools.has('googleMapsSearchPlaces')).toBe(false)
+    expect(tools.has('googleMapsLookupWeather')).toBe(false)
+    expect(tools.has('googleMapsComputeRoute')).toBe(false)
+
+    const search = tools.get('mcp_search')!
+    const hits = await search.execute({ query: 'Google Maps weather' }, ctx)
+    expect(JSON.stringify(hits.data)).toContain('googleMapsLookupWeather')
+
+    const call = tools.get('mcp_call')!
+    const result = await call.execute({
+      server: 'google-maps',
+      tool: 'googleMapsLookupWeather',
+      args: { location: { address: 'Hong Kong' } },
+    }, ctx)
+    expect(callTool).toHaveBeenCalledWith(
+      'lookup_weather',
+      { location: { address: 'Hong Kong' } },
+      ctx.abortSignal,
+    )
+    expect(result.meta?.transientProviderContent).toBe(true)
+  })
+
+  it('keeps canonical Maps names direct for workflow allow-lists', async () => {
+    const { tools } = await injectMaps(true)
+    expect([...tools.keys()]).toEqual(expect.arrayContaining([
+      'googleMapsSearchPlaces',
+      'googleMapsLookupWeather',
+      'googleMapsComputeRoute',
+    ]))
   })
 })
 

@@ -776,7 +776,7 @@ export function WorkspaceGeneralSection({ onWorkspaceDeleted }: { onWorkspaceDel
               rows={4}
               maxLength={500}
               autoFocus
-              className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 resize-none outline-none focus:border-primary/60"
+              className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 resize-none outline-none"
             />
             <div className="flex items-center justify-between gap-2">
               <div className="text-[11px] text-muted-foreground">
@@ -1374,7 +1374,7 @@ export function WorkspaceMembersSection() {
             placeholder={t.workspaceDetailInline.inviteEmailsPlaceholder}
             rows={2}
             autoFocus
-            className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 resize-none outline-none focus:border-primary/60"
+            className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 resize-none outline-none"
           />
           <div className="flex items-center gap-2">
             <Select
@@ -1396,7 +1396,7 @@ export function WorkspaceMembersSection() {
             placeholder={t.workspaceDetailInline.inviteMessagePlaceholder}
             rows={2}
             maxLength={1000}
-            className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 resize-none outline-none focus:border-primary/60"
+            className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 resize-none outline-none"
           />
           <button
             onClick={sendInvites}

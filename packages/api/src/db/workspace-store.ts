@@ -80,6 +80,15 @@ export type Workspace = {
    * absent as 1 (solo).
    */
   memberCount?: number
+  /** The requesting member's role. Projected by `list()` only. */
+  role?: 'owner' | 'admin' | 'member'
+  /**
+   * Per-member picker organization (migration 443). These are navigation
+   * preferences, not workspace lifecycle, and are projected by `list()` only.
+   */
+  pickerPinnedAt?: Date | null
+  pickerHiddenAt?: Date | null
+  pickerLastOpenedAt?: Date | null
   /**
    * Workspace billing plan — the authoritative tier for this workspace
    * after the per-workspace billing migration (143). Surfaced on the list
@@ -266,9 +275,31 @@ export type TransferOwnershipResult =
   | 'not_a_member'
   | 'recipient_free_cap'
 
+export type WorkspacePickerPreferences = {
+  pickerPinnedAt: Date | null
+  pickerHiddenAt: Date | null
+  pickerLastOpenedAt: Date | null
+}
+
+export type WorkspacePickerPreferenceUpdate = {
+  pinned?: boolean
+  hidden?: boolean
+  opened?: true
+}
+
 export type WorkspaceStore = {
   create(userId: string, name: string, purpose: string): Promise<Workspace>
   list(userId: string): Promise<Workspace[]>
+  /**
+   * Update only the acting member's picker preferences. Pinning restores a
+   * hidden row; hiding clears its pin. Returns null when the membership row
+   * is absent under the caller's RLS context.
+   */
+  updatePickerPreferences(
+    userId: string,
+    workspaceId: string,
+    updates: WorkspacePickerPreferenceUpdate,
+  ): Promise<WorkspacePickerPreferences | null>
   get(userId: string, workspaceId: string): Promise<Workspace | null>
   update(userId: string, workspaceId: string, updates: { name?: string; purpose?: string }): Promise<Workspace | null>
   /**
@@ -1356,9 +1387,22 @@ export function createWorkspaceStore(cascades: WorkspaceStoreCascades = {}): Wor
     async list(userId) {
       const result = await queryWithRLS<Workspace>(
         userId,
-        `SELECT ${WORKSPACE_COLUMNS} FROM workspaces
-         WHERE id IN (SELECT workspace_id FROM workspace_members WHERE user_id = $1)
-         ORDER BY is_personal DESC, created_at DESC`,
+        `SELECT ws.*,
+                wm.role,
+                wm.picker_pinned_at AS "pickerPinnedAt",
+                wm.picker_hidden_at AS "pickerHiddenAt",
+                wm.picker_last_opened_at AS "pickerLastOpenedAt"
+           FROM (
+             SELECT ${WORKSPACE_COLUMNS}
+               FROM workspaces
+              WHERE id IN (
+                SELECT workspace_id FROM workspace_members WHERE user_id = $1
+              )
+           ) ws
+           JOIN workspace_members wm
+             ON wm.workspace_id = ws.id
+            AND wm.user_id = $1
+          ORDER BY ws."isPersonal" DESC, ws."createdAt" DESC`,
         [userId],
       )
       // memberCount is filled from the owner pool: under RLS the count would
@@ -1366,6 +1410,39 @@ export function createWorkspaceStore(cascades: WorkspaceStoreCascades = {}): Wor
       // absent from the count map (a workspace with zero members is impossible).
       const counts = await memberCountsSystem(result.rows.map((w) => w.id))
       return result.rows.map((w) => ({ ...w, memberCount: counts.get(w.id) ?? 1 }))
+    },
+
+    async updatePickerPreferences(userId, workspaceId, updates) {
+      const sets: string[] = []
+
+      // Resolve the mutually-exclusive pair before building SQL so even a
+      // non-route caller cannot assign the same column twice. Hidden wins if a
+      // malformed direct call asks for both; the HTTP schema rejects that shape.
+      const conflicting = updates.pinned === true && updates.hidden === true
+      const pinned = conflicting || updates.hidden === true ? false : updates.pinned
+      const hidden = conflicting ? true : updates.pinned === true ? false : updates.hidden
+      if (pinned !== undefined) {
+        sets.push(`picker_pinned_at = ${pinned ? 'now()' : 'NULL'}`)
+      }
+      if (hidden !== undefined) {
+        sets.push(`picker_hidden_at = ${hidden ? 'now()' : 'NULL'}`)
+      }
+      if (updates.opened) sets.push('picker_last_opened_at = now()')
+
+      if (sets.length === 0) return null
+
+      const result = await queryWithRLS<WorkspacePickerPreferences>(
+        userId,
+        `UPDATE workspace_members
+            SET ${sets.join(', ')}
+          WHERE workspace_id = $1
+            AND user_id = $2
+        RETURNING picker_pinned_at AS "pickerPinnedAt",
+                  picker_hidden_at AS "pickerHiddenAt",
+                  picker_last_opened_at AS "pickerLastOpenedAt"`,
+        [workspaceId, userId],
+      )
+      return result.rows[0] ?? null
     },
 
     async get(userId, workspaceId) {

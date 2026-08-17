@@ -86,7 +86,7 @@ export function WhatsappGroupManager({ workspaceId }: { workspaceId: string }) {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder={wa.groupSearchPlaceholder}
-            className="w-full rounded-md border border-border bg-background py-2 pl-9 pr-3 text-sm placeholder:text-muted-foreground focus:border-primary/40 focus:outline-none focus:ring-2 focus:ring-primary/30"
+            className="w-full rounded-md border border-border bg-background py-2 pl-9 pr-3 text-sm placeholder:text-muted-foreground focus:outline-none"
           />
         </div>
       )}

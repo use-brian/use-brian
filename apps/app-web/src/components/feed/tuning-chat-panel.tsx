@@ -917,7 +917,7 @@ export const TuningChatPanel = forwardRef<
           </>
         ) : null}
 
-        <div className="rounded-xl border border-border/70 bg-background/60 shadow-sm focus-within:border-primary/50 focus-within:ring-2 focus-within:ring-primary/15 transition-all">
+        <div className="rounded-xl border border-border/70 bg-background/60 shadow-sm focus-within:border-primary/50 focus-within:ring-2 focus-within:ring-primary/15 transition-all [&_:focus-visible]:shadow-none">
           <div className="px-3.5 pt-2.5">
             <textarea
               ref={inputRef}

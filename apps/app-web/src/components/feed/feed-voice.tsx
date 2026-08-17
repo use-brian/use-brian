@@ -1074,7 +1074,7 @@ function ImportHandleContent({
         autoFocus
         placeholder={t.importHandlePlaceholder}
         onChange={(e) => onHandleChange(e.target.value)}
-        className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:border-primary/50"
+        className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none"
       />
       <div className="space-y-1">
         <div className="text-xs text-muted-foreground">{t.importSamplesPlatformLabel}</div>
@@ -1121,7 +1121,7 @@ function ImportSamplesContent({
         rows={8}
         placeholder={t.importSamplesPlaceholder}
         onChange={(e) => onSamplesChange(e.target.value)}
-        className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:border-primary/50 resize-y"
+        className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none resize-y"
       />
       <div className="space-y-1">
         <div className="text-xs text-muted-foreground">{t.importSamplesPlatformLabel}</div>

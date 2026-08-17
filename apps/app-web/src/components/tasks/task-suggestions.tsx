@@ -276,7 +276,7 @@ export function TaskSuggestionsView({
                           value={editTitle}
                           onChange={(e) => setEditTitle(e.target.value)}
                           autoFocus
-                          className="h-9 w-full rounded-lg border border-border bg-background px-3 text-sm font-medium text-foreground outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40"
+                          className="h-9 w-full rounded-lg border border-border bg-background px-3 text-sm font-medium text-foreground outline-none"
                           aria-label={t.editTitleLabel}
                         />
                       ) : (
@@ -473,7 +473,7 @@ export function TaskSuggestionsView({
                         onChange={(e) => setReason(e.target.value)}
                         placeholder={t.dismissPlaceholder}
                         rows={3}
-                        className="mt-3 w-full resize-y rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40"
+                        className="mt-3 w-full resize-y rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground outline-none placeholder:text-muted-foreground"
                       />
                       <div className="mt-3 flex flex-wrap items-center gap-2">
                         <Button

@@ -19,7 +19,7 @@
  */
 
 import type { AccessContext, CachedFile } from '@use-brian/core'
-import { promoteCachedFile, wrapMcpTools, buildToolIndex, createMcpSearchTools, createGoogleCalendarTools, createGmailTools, createGoogleTasksTools, createGoogleDriveTools, createGoogleDocsTools, createGoogleSheetsTools, createGoogleSlidesTools, createGDriveFilesTools, createGitHubTools, createNotionTools, createFathomTools, createShopifyTools, createWordPressTools, createMsGraphTools, createKnowledgeTools, createAgentmailTools, createMailboxTools, workspaceFilesCtxFor, workspaceFilesErrorMessage, workspaceFilesGate } from '@use-brian/core'
+import { promoteCachedFile, wrapMcpTools, buildToolIndex, createMcpSearchTools, createGoogleCalendarTools, createGmailTools, createGoogleTasksTools, createGoogleDriveTools, createGoogleDocsTools, createGoogleSheetsTools, createGoogleSlidesTools, createGDriveFilesTools, createGitHubTools, createNotionTools, createFathomTools, createShopifyTools, createWordPressTools, createMsGraphTools, createKnowledgeTools, createAgentmailTools, createMailboxTools, workspaceFilesCtxFor, workspaceFilesErrorMessage, workspaceFilesGate, GOOGLE_MAPS_TOOL_NAMES } from '@use-brian/core'
 import type { Tool, McpSettingsStore, McpServerConfig, KnowledgeStoreInterface, KnowledgeRepoWriter, AuthorizedFile, GDriveFilesStore, GDriveFileKind, LocalSource, RemoteSource, EngineHooks, FilesApi, AgentmailToolApi, MailboxApi, MailboxAccountRouter } from '@use-brian/core'
 import { getGlobalEmailInboxProvider, type EmailInboxProvider } from '../agentmail/provider.js'
 import { renderEmailBody } from '@use-brian/channels'
@@ -1720,6 +1720,23 @@ export async function injectMcpTools(params: {
       if (localTools.length > 0) {
         localSources.push({ kind: 'local', serverName: connectorId, tools: localTools })
       }
+    }
+
+    // Google Maps is a deployment-keyed first-party read capability rather
+    // than a connector instance, so it deliberately does not appear in
+    // OFFICIAL_CONNECTOR_TOOLS / INJECTED_BUILTIN_TOOLS_BY_CONNECTOR. Fold its
+    // env-gated tools into the same on-demand index under their own source.
+    // `keepBuiltinsDirect=true` skips this block, preserving exact canonical
+    // names for workflow allow-lists.
+    const googleMapsTools: Tool[] = []
+    for (const name of GOOGLE_MAPS_TOOL_NAMES) {
+      const tool = tools.get(name)
+      if (!tool) continue
+      googleMapsTools.push(tool)
+      tools.delete(name)
+    }
+    if (googleMapsTools.length > 0) {
+      localSources.push({ kind: 'local', serverName: 'google-maps', tools: googleMapsTools })
     }
 
     // KB tools — separate bucket; the assistant-scoped enablement check

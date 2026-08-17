@@ -110,7 +110,7 @@ export function SaveAsTemplateDialog({
               onChange={(e) => setName(e.target.value)}
               placeholder={t.namePlaceholder}
               maxLength={256}
-              className="rounded-md border border-border bg-muted/40 px-2.5 py-1.5 text-sm text-foreground outline-none focus:border-ring placeholder:text-muted-foreground"
+              className="rounded-md border border-border bg-muted/40 px-2.5 py-1.5 text-sm text-foreground outline-none placeholder:text-muted-foreground"
             />
           </label>
 
@@ -122,7 +122,7 @@ export function SaveAsTemplateDialog({
               placeholder={t.descriptionPlaceholder}
               maxLength={2000}
               rows={2}
-              className="resize-none rounded-md border border-border bg-muted/40 px-2.5 py-1.5 text-sm text-foreground outline-none focus:border-ring placeholder:text-muted-foreground"
+              className="resize-none rounded-md border border-border bg-muted/40 px-2.5 py-1.5 text-sm text-foreground outline-none placeholder:text-muted-foreground"
             />
           </label>
 

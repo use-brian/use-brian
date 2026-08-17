@@ -272,7 +272,6 @@ describe('[COMP:providers/model-registry] wave-1 slate + menus (plan §5.1)', ()
       'gpt-5.6-sol',
     ])
     expect(menuForClass('research').map((r) => r.alias)).toEqual([
-      'gemini-3-pro-research',
       'gpt-5.5',
       'gpt-5.2',
     ])
@@ -303,9 +302,7 @@ describe('[COMP:providers/model-registry] wave-1 slate + menus (plan §5.1)', ()
       'gemini-3.7-flash',
       'gpt-5.6-sol',
     ])
-    expect(menuForClass('research', availability).map((r) => r.alias)).toEqual([
-      'gemini-3-pro-research',
-    ])
+    expect(menuForClass('research', availability)).toEqual([])
 
     availability.setModelCatalog('openai-codex', null)
     expect(menuForClass('max', availability).map((r) => r.alias)).toEqual([

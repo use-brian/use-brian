@@ -388,7 +388,7 @@ export function useConnectAccount() {
                     value={newName}
                     onChange={(e) => setNewName(e.target.value)}
                     placeholder={t.connect.voiceNamePlaceholder}
-                    className="h-9 w-full rounded-lg border border-border bg-background px-3 text-sm outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40"
+                    className="h-9 w-full rounded-lg border border-border bg-background px-3 text-sm outline-none placeholder:text-muted-foreground"
                   />
                 )}
               </div>

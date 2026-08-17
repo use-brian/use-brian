@@ -54,6 +54,7 @@ const workspaceStore = {
   getRole: vi.fn(),
   create: vi.fn(),
   list: vi.fn(),
+  updatePickerPreferences: vi.fn(),
   get: vi.fn(),
   listMembers: vi.fn(),
   update: vi.fn(),
@@ -198,6 +199,50 @@ describe('[COMP:api/workspaces-route] GET / and GET /:workspaceId', () => {
     expect(res.status).toBe(200)
     expect(res.body.role).toBe('member')
     expect(res.body.primaryAssistantId).toBe('a-1')
+  })
+})
+
+describe('[COMP:api/workspaces-route] PATCH /:workspaceId/picker-preferences', () => {
+  it('requires at least one preference and rejects pinned plus hidden', async () => {
+    expect(
+      (await request(app('u-1'))
+        .patch('/api/workspaces/ws-1/picker-preferences')
+        .send({})).status,
+    ).toBe(400)
+    expect(
+      (await request(app('u-1'))
+        .patch('/api/workspaces/ws-1/picker-preferences')
+        .send({ pinned: true, hidden: true })).status,
+    ).toBe(400)
+    expect(workspaceStore.updatePickerPreferences).not.toHaveBeenCalled()
+  })
+
+  it('lets a member update only their own picker row', async () => {
+    workspaceStore.updatePickerPreferences.mockResolvedValueOnce({
+      pickerPinnedAt: '2026-08-17T00:00:00.000Z',
+      pickerHiddenAt: null,
+      pickerLastOpenedAt: null,
+    })
+
+    const res = await request(app('u-1'))
+      .patch('/api/workspaces/ws-1/picker-preferences')
+      .send({ pinned: true })
+
+    expect(res.status).toBe(200)
+    expect(res.body.pickerPinnedAt).toBe('2026-08-17T00:00:00.000Z')
+    expect(workspaceStore.updatePickerPreferences).toHaveBeenCalledWith(
+      'u-1',
+      'ws-1',
+      { pinned: true },
+    )
+  })
+
+  it('returns 404 when the caller has no membership row', async () => {
+    workspaceStore.updatePickerPreferences.mockResolvedValueOnce(null)
+    const res = await request(app('u-1'))
+      .patch('/api/workspaces/ws-missing/picker-preferences')
+      .send({ opened: true })
+    expect(res.status).toBe(404)
   })
 })
 
