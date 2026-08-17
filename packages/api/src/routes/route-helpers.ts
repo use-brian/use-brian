@@ -459,9 +459,17 @@ const SENSITIVITY_RANK: Record<'public' | 'internal' | 'confidential', number> =
  * `sensitivity_rank(S.sensitivity) <= sensitivity_rank(A.clearance)`
  * (the public(1) < internal(2) < confidential(3) ordering).
  *
- * Offering SCOPE is owned entirely by the `workspace_skill_enablement`
- * allowlist (rule 1, applied in `injectSkills` alongside this helper, with
- * the requiresConnectors + appType gating). Suggested skills get their
+ * Offering SCOPE for a workspace skill is GRANTED by the
+ * `workspace_skill_enablement` allowlist (rule 1, applied in `injectSkills`
+ * alongside this helper, with the requiresConnectors + appType gating) — but
+ * the allowlist is not the only input. `assistant_skill_settings` is keyed by
+ * SLUG, and `SkillContent.id` is the slug for workspace skills too, so a row
+ * there enables a workspace skill with no allowlist row (`enabledSlugs`, OR'd
+ * below) and vetoes one that has it (`disabledSlugs`, checked first,
+ * regardless of `source`). Do not read this comment as "the allowlist is the
+ * single source of truth" — it said exactly that until 2026-08-17 and misled
+ * two separate investigations. See skill-system.md → "How the two tables
+ * actually combine at runtime". Suggested skills get their
  * originating assistant's enablement row seeded at creation (mig 264), so
  * the proposer-first default lives in data the Access matrix shows and
  * edits — there is no longer an activation/originating override here.
