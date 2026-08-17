@@ -236,7 +236,7 @@ export function PlanSlotPeek({
                 // string that means nothing; show what is actually stored.
                 setTimeText(formatSlotMinute(draft.scheduledMinute) ?? "");
               }}
-              className="h-7 w-20 rounded-md border border-border bg-background px-2 text-[12.5px] tabular-nums outline-none focus-visible:border-foreground/40 disabled:opacity-60"
+              className="h-7 w-20 rounded-md border border-border bg-background px-2 text-[12.5px] tabular-nums outline-none disabled:opacity-60"
             />
             {draft.scheduledMinute !== null && canEdit ? (
               <button
@@ -263,7 +263,7 @@ export function PlanSlotPeek({
             onChange={(e) => onChange({ ...draft, brief: e.target.value })}
             placeholder={tp.slotBriefPlaceholder}
             rows={5}
-            className="w-full resize-y rounded-lg border border-border/60 bg-background px-2.5 py-2 text-[12.5px] leading-relaxed placeholder:text-muted-foreground/60 focus:border-primary/40 focus:outline-none disabled:opacity-70"
+            className="w-full resize-y rounded-lg border border-border/60 bg-background px-2.5 py-2 text-[12.5px] leading-relaxed placeholder:text-muted-foreground/60 focus:outline-none disabled:opacity-70"
           />
           <p className="text-[11px] text-muted-foreground">{tp.briefHint}</p>
         </div>

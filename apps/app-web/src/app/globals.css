@@ -444,8 +444,10 @@
      WITH sibling controls (e.g. a comment composer = textarea + attach/mention/
      send buttons in one box), the ring belongs on the BOX, not the inner
      control. The box draws it with `focus-within:border-ring
-     focus-within:ring-2 focus-within:ring-ring/35`, and each inner focusable
-     element opts OUT of this global ring with `focus-visible:shadow-none`.
+     focus-within:ring-2 focus-within:ring-ring/35`, and its class suppresses
+     every nested halo with `[&_:focus-visible]:shadow-none` (an individual
+     inner control may use `focus-visible:shadow-none` when the wrapper cannot
+     own that selector).
      References: page-comments.tsx, comment-thread-body.tsx, and the
      ChatComposer usage in empty-page-landing.tsx. */
   :focus-visible {

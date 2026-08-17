@@ -5,6 +5,20 @@
 // functional only for pre-existing integrations, never extended. See
 // docs/architecture/channels/whatsapp.md (§Read-only group ingest).
 export { createWhatsAppAdapter, type WhatsAppAdapterOptions, type WhatsAppIncomingPayload } from './adapter.js'
+export {
+  createWhatsAppCloudAdapter,
+  createWhatsAppCloudApi,
+  parseWhatsAppCloudMessages,
+  subscribeWhatsAppCloudApp,
+  whatsappCloudMediaId,
+  validateWhatsAppCloudCredentials,
+  verifyWhatsAppCloudSignature,
+  DEFAULT_WHATSAPP_GRAPH_API_VERSION,
+  type WhatsAppCloudApiOptions,
+  type WhatsAppCloudMedia,
+  type WhatsAppCloudPhoneNumber,
+  type WhatsAppCloudWebhookPayload,
+} from './cloud-api.js'
 
 /**
  * Lifecycle marker for the WhatsApp channel, mirroring the

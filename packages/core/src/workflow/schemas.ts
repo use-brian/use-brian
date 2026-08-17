@@ -174,14 +174,18 @@ const assistantCallStepSchema = z.object({
    * outcome records `thread: 'parent_missing'`.
    * See docs/architecture/engine/scheduled-jobs.md → "Channel delivery".
    */
-  deliver: z
-    .object({
+  deliver: z.union([
+    z.object({
       channelType: z.enum(['web', 'telegram', 'slack', 'whatsapp', 'msteams']),
       channelId: z.string().min(1).max(256),
       channelIntegrationId: z.string().uuid().optional(),
       thread: z.object({ fromStep: stepIdSchema }).strict().optional(),
-    })
-    .optional(),
+    }).strict(),
+    z.object({
+      channelType: z.literal('whatsapp'),
+      replyToTrigger: z.literal(true),
+    }).strict(),
+  ]).optional(),
   /**
    * Session continuity. `per_run` (default) — each fire is a fresh consult.
    * `persistent` — the callee reuses one durable session keyed on the
@@ -551,7 +555,9 @@ export const WorkflowDefinitionSchema = z
     for (const [i, step] of def.steps.entries()) {
       if (
         step.type === 'assistant_call' &&
-        step.deliver?.channelIntegrationId &&
+        step.deliver &&
+        'channelIntegrationId' in step.deliver &&
+        step.deliver.channelIntegrationId &&
         step.deliver.channelType !== 'telegram'
       ) {
         ctx.addIssue({
@@ -570,7 +576,11 @@ export const WorkflowDefinitionSchema = z
     // silent top-level fallback on every run.
     const deliverSteps = new Map(
       def.steps
-        .filter((s) => s.type === 'assistant_call' && s.deliver !== undefined)
+        .filter((s) =>
+          s.type === 'assistant_call' &&
+          s.deliver !== undefined &&
+          'channelId' in s.deliver,
+        )
         .map((s) => [s.id, (s as { deliver: {
           channelType: string
           channelId: string
@@ -578,7 +588,12 @@ export const WorkflowDefinitionSchema = z
         } }).deliver]),
     )
     for (const [i, step] of def.steps.entries()) {
-      if (step.type !== 'assistant_call' || !step.deliver?.thread) continue
+      if (
+        step.type !== 'assistant_call' ||
+        !step.deliver ||
+        !('thread' in step.deliver) ||
+        !step.deliver.thread
+      ) continue
       const ref = step.deliver.thread.fromStep
       if (step.deliver.channelType !== 'slack' && step.deliver.channelType !== 'telegram') {
         ctx.addIssue({

@@ -384,9 +384,10 @@ describe('[COMP:workflow/schemas] WorkflowDefinitionSchema', () => {
     id: string,
     deliver?: {
       channelType: string
-      channelId: string
+      channelId?: string
       channelIntegrationId?: string
       thread?: { fromStep: string }
+      replyToTrigger?: true
     },
   ) {
     return {
@@ -430,6 +431,29 @@ describe('[COMP:workflow/schemas] WorkflowDefinitionSchema', () => {
       })],
     }
     expect(WorkflowDefinitionSchema.safeParse(def).success).toBe(true)
+  })
+
+  it('accepts a source-bound WhatsApp trigger reply with no authored recipient', () => {
+    const def = {
+      startStepId: 'reply',
+      steps: [deliverStep('reply', {
+        channelType: 'whatsapp',
+        replyToTrigger: true,
+      })],
+    }
+    expect(WorkflowDefinitionSchema.safeParse(def).success).toBe(true)
+  })
+
+  it('rejects a WhatsApp trigger reply mixed with an authored recipient', () => {
+    const def = {
+      startStepId: 'reply',
+      steps: [deliverStep('reply', {
+        channelType: 'whatsapp',
+        replyToTrigger: true,
+        channelId: '15551234567',
+      })],
+    }
+    expect(WorkflowDefinitionSchema.safeParse(def).success).toBe(false)
   })
 
   it('rejects channelIntegrationId on a non-Telegram destination', () => {

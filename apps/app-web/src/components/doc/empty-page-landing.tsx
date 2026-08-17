@@ -227,7 +227,7 @@ export function EmptyPageLanding({
         <div
           className={cn(
             "relative mt-6 w-full rounded-[1.05rem] border border-border bg-card p-2 shadow-sm",
-            "transition-[border-color,box-shadow] focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/35",
+            "transition-[border-color,box-shadow] focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/35 [&_:focus-visible]:shadow-none",
           )}
           {...drop.dropProps}
         >

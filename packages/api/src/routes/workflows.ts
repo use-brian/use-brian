@@ -287,6 +287,7 @@ async function dependencyIssues(
       if (
         step.type !== 'assistant_call' ||
         !step.deliver ||
+        !('channelId' in step.deliver) ||
         step.deliver.channelType === 'web' ||
         step.deliver.channelType === 'msteams'
       ) continue

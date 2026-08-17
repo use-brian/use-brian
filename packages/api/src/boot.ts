@@ -36,7 +36,7 @@ import {
   distillConfigKey, DASHSCOPE_RENDER_WIDTH, DASHSCOPE_CHUNK_PAGES, PROVIDER_RENDER_WIDTH, PROVIDER_CHUNK_PAGES,
   type DocumentDistillPort, type DistillateCachePort,
   DASHSCOPE_INTL_BASE_URL, DASHSCOPE_INTL_LABEL, wrapProvider,
-  createBaseTools, LAYER_1_SYSTEM_PROMPT,
+  createBaseTools, createGoogleMapsTools, GOOGLE_MAPS_GROUNDING_MCP_URL, LAYER_1_SYSTEM_PROMPT,
   createWorkerManager, createWorkerTools,
   createSchedulingTools, createPollWorker,
   startJitteredInterval, stopJitteredInterval,
@@ -321,6 +321,7 @@ import { chatLinkRoutes } from './routes/chat-links.js'
 import { createChatLinkStore } from './db/chat-link-store.js'
 import { channelsRoutes } from './routes/channels.js'
 import { whatsappByonRoutes } from './routes/whatsapp-byon.js'
+import { whatsappCloudRoutes } from './routes/whatsapp-cloud.js'
 import { whatsappIngestAdminRoutes } from './routes/whatsapp-byon-admin.js'
 import { telegramByoRoutes } from './routes/telegram-byo.js'
 import { slackRoutes } from './routes/slack.js'
@@ -409,6 +410,7 @@ import {
   pauseWorkflowSystem,
 } from './db/workflow-store.js'
 import { buildWorkflowToolRegistry } from './workflow/mcp-bridge.js'
+import { callRemoteMcpTool } from './mcp/client.js'
 import { createPendingApprovalsStore } from './db/pending-approvals-store.js'
 import {
   makeRequestApproval,
@@ -660,6 +662,11 @@ export interface OpenApiEnv {
   DASHSCOPE_LONG_MODEL?: string
   // Optional connector / channel config (closed-secret gated; open passes none).
   GOOGLE_CLIENT_ID?: string
+  /**
+   * Dedicated server-only key for Google Maps Grounding Lite MCP. When absent,
+   * the three Maps tools do not register. Never reuse the browser Picker key.
+   */
+  GOOGLE_MAPS_SERVER_API_KEY?: string
   CHANNEL_CREDENTIAL_KEY?: string
   TELEGRAM_BOT_TOKEN?: string
   GMAIL_SMTP_USER?: string
@@ -732,7 +739,8 @@ export interface OpenApiEnv {
   // platform-subdomains.md). Customer subdomains → CUSTOMER_SUBDOMAIN_APEX;
   // first-party workspaces (FIRST_PARTY_SUBDOMAIN_WORKSPACE_IDS, comma list) →
   // PLATFORM_SUBDOMAIN_APEX. Either apex unset = that half dark.
-  // PLATFORM_SUBDOMAIN_RESERVED adds reserved labels (comma list).
+  // PLATFORM_SUBDOMAIN_RESERVED adds reserved labels (comma list). Hosted also
+  // reuses the product apex + allowlist to reserve AgentMail domains.
   CUSTOMER_SUBDOMAIN_APEX?: string
   PLATFORM_SUBDOMAIN_APEX?: string
   FIRST_PARTY_SUBDOMAIN_WORKSPACE_IDS?: string
@@ -1900,6 +1908,26 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   function buildAllTools(): Map<string, Tool> {
     const tools = createBaseTools()
 
+    // Google Maps is an env-gated first-party read capability, not a personal
+    // Google connector. Core owns the typed tool contract; this API seam owns
+    // the MCP SDK and the secret-bearing transport. Interactive turns fold
+    // these tools into mcp_search later; workflows keep their canonical names.
+    // See docs/architecture/integrations/google-maps.md.
+    const googleMapsApiKey = env.GOOGLE_MAPS_SERVER_API_KEY?.trim()
+    if (googleMapsApiKey) {
+      for (const tool of createGoogleMapsTools({
+        callTool: (providerTool, input) =>
+          callRemoteMcpTool(
+            GOOGLE_MAPS_GROUNDING_MCP_URL,
+            providerTool,
+            input,
+            { 'X-Goog-Api-Key': googleMapsApiKey },
+          ),
+      })) {
+        tools.set(tool.name, tool)
+      }
+    }
+
     workerManager = createWorkerManager({
       provider,
       model: 'gemini-flash',
@@ -2867,6 +2895,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
     listTriggerJobs: (workflowId) => jobStore.listFiringJobsForWorkflowSystem(workflowId),
     isKnownTool: (name) => allTools.has(name),
+    resolveKnownWorkflowTools: async ({ userId, workspaceId, assistantId, toolNames }) => {
+      const registry = await workflowExecutorDeps.buildToolRegistry({
+        userId,
+        workspaceId,
+        assistantId,
+      })
+      return toolNames.filter((toolName) => registry.has(toolName))
+    },
     jobStore,
     resolvePrimary: resolvePrimaryAssistantForWorkspace,
     resolveDeliveryTarget: createDeliveryTargetResolver(integrationStore ?? undefined),
@@ -3883,6 +3919,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     connectorInstanceStore,
     connectorGrantStore,
     workspaceSkillStore,
+    channelIntegrationStore: integrationStore ?? undefined,
   })
   const resolveAgentApprover = async (ctx: { channelType: string; channelId: string; userId: string }) => {
     try {
@@ -7175,6 +7212,16 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         slackWebhookIngestor: channelHosts.slackWebhookIngestor, connectorActionStore, episodesStore,
         buildConnectorActionAudit: ports.buildConnectorActionAudit,
         fileStore,
+      }))
+      app.use('/webhook/whatsapp', whatsappCloudRoutes({
+        backgroundModel,
+        provider, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
+        memoryStore, usageStore, checkCreditBudget: ports.checkCreditBudget,
+        integrationStore, channelUserStore,
+        workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
+        connectorInstanceStore, workspaceToolPolicyStore, knowledgeStore, gdriveFilesStore, workspaceFilesStore,
+        filesApi: filesApi ?? undefined, analytics, skillStore,
+        episodicStore, sessionStateStore, artifactPromoter, fileStore, workflowEventDispatcher,
       }))
       // Microsoft Teams — public Bot Framework messaging endpoint, per-channel
       // JWT-verified. No connector app (webhook transport). See

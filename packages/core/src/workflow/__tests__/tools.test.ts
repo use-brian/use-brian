@@ -262,6 +262,12 @@ function makeJobStore(overrides: Partial<JobStore> = {}): JobStore & { rows: Sch
 
 function makeAllTools(opts?: {
   isKnownTool?: (name: string) => boolean
+  resolveKnownWorkflowTools?: (args: {
+    userId: string
+    workspaceId: string
+    assistantId: string
+    toolNames: string[]
+  }) => Promise<string[]>
   resolvePageAnchor?: (
     userId: string,
     pageId: string,
@@ -310,6 +316,7 @@ function makeAllTools(opts?: {
     onEvent: (e) => events.push(e),
     resolvePageAnchor: opts?.resolvePageAnchor,
     isKnownTool: opts?.isKnownTool,
+    resolveKnownWorkflowTools: opts?.resolveKnownWorkflowTools,
     // Scheduling substrate (scheduling-authoring-unification).
     jobStore,
     resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
@@ -905,6 +912,114 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     const r = await tools.proposeWorkflow.execute({ name: 'X', definition: SIMPLE_DEF }, makeContext())
     const warnings = (r.data as Record<string, unknown>).warnings as string[]
     expect(warnings.some((w) => w.includes('tool_not_found'))).toBe(false)
+  })
+
+  it('proposeWorkflow accepts a connected dynamic CLI tool from the runtime registry', async () => {
+    const resolveKnownWorkflowTools = vi.fn(async ({ toolNames }: { toolNames: string[] }) => (
+      toolNames.filter((toolName) => toolName === 'list_events')
+    ))
+    const { tools } = makeAllTools({
+      isKnownTool: () => false,
+      resolveKnownWorkflowTools,
+      preflightConnectorTool: async () => null,
+    })
+    const r = await tools.proposeWorkflow.execute({
+      name: 'Calendar events',
+      definition: {
+        startStepId: 'events',
+        steps: [{
+          id: 'events',
+          type: 'tool_call',
+          toolName: 'list_events',
+          arguments: {},
+        }],
+      },
+    }, makeContext())
+
+    expect(r.isError).toBeFalsy()
+    const warnings = (r.data as Record<string, unknown>).warnings as string[]
+    expect(warnings.some((w) => w.includes('tool_not_found'))).toBe(false)
+    expect(resolveKnownWorkflowTools).toHaveBeenCalledWith({
+      userId: USER_ID,
+      workspaceId: WORKSPACE_ID,
+      assistantId: PRIMARY_ASSISTANT_ID,
+      toolNames: ['list_events'],
+    })
+  })
+
+  it('batches deterministic tool lookups and does not mix assistant_call scope', async () => {
+    const resolveKnownWorkflowTools = vi.fn(async ({ toolNames }: { toolNames: string[] }) => (
+      toolNames.filter((toolName) => toolName === 'list_events')
+    ))
+    const { tools } = makeAllTools({
+      isKnownTool: () => false,
+      resolveKnownWorkflowTools,
+    })
+    const r = await tools.proposeWorkflow.execute({
+      name: 'Scoped tools',
+      definition: {
+        startStepId: 'events',
+        steps: [
+          { id: 'events', type: 'tool_call', toolName: 'list_events', arguments: {}, nextStepId: 'missing' },
+          { id: 'missing', type: 'tool_call', toolName: 'missing_action', arguments: {}, nextStepId: 'summarize' },
+          {
+            id: 'summarize',
+            type: 'assistant_call',
+            target: { assistantId: '00000000-0000-0000-0000-000000000099' },
+            prompt: 'Summarize.',
+            tools: ['assistant_only'],
+          },
+        ],
+      },
+    }, makeContext())
+
+    expect(r.isError).toBeFalsy()
+    const warnings = (r.data as Record<string, unknown>).warnings as string[]
+    expect(warnings.some((w) => w.includes('list_events') && w.includes('tool_not_found'))).toBe(false)
+    expect(warnings.some((w) => w.includes('missing_action') && w.includes('tool_not_found'))).toBe(true)
+    expect(resolveKnownWorkflowTools).toHaveBeenCalledTimes(1)
+    expect(resolveKnownWorkflowTools).toHaveBeenCalledWith(expect.objectContaining({
+      assistantId: PRIMARY_ASSISTANT_ID,
+      toolNames: ['list_events', 'missing_action'],
+    }))
+  })
+
+  it('keeps the unknown warning when exact runtime lookup fails or disagrees with preflight', async () => {
+    const resolveKnownWorkflowTools = vi.fn(async () => [])
+    const { tools } = makeAllTools({
+      isKnownTool: () => false,
+      resolveKnownWorkflowTools,
+      preflightConnectorTool: async () => ({ ok: true, provider: 'CLI', policy: 'allow' }),
+    })
+    const r = await tools.proposeWorkflow.execute({
+      name: 'Missing dynamic tool',
+      definition: {
+        startStepId: 'missing',
+        steps: [{ id: 'missing', type: 'tool_call', toolName: 'missing_action', arguments: {} }],
+      },
+    }, makeContext())
+
+    expect(r.isError).toBeFalsy()
+    const warnings = (r.data as Record<string, unknown>).warnings as string[]
+    expect(warnings.some((w) => w.includes('missing_action') && w.includes('tool_not_found'))).toBe(true)
+  })
+
+  it('does not build the runtime tool registry during createWorkflow', async () => {
+    const resolveKnownWorkflowTools = vi.fn(async () => ['list_events'])
+    const { tools } = makeAllTools({
+      isKnownTool: () => false,
+      resolveKnownWorkflowTools,
+    })
+    const r = await tools.createWorkflow.execute({
+      name: 'Calendar events',
+      definition: {
+        startStepId: 'events',
+        steps: [{ id: 'events', type: 'tool_call', toolName: 'list_events', arguments: {} }],
+      },
+    }, makeContext())
+
+    expect(r.isError).toBeFalsy()
+    expect(resolveKnownWorkflowTools).not.toHaveBeenCalled()
   })
 
   it('proposeWorkflow rejects malformed definitions', async () => {
@@ -1957,6 +2072,72 @@ describe('[COMP:workflow/tools] trigger capability surface (closed-world, derive
     expect(data.triggerKind).toBe('event')
     const persisted = await stores.workflowStore.getById(USER_ID, data.id as string)
     expect(persisted?.trigger.kind).toBe('event')
+  })
+
+  it('proposes a source-bound reply for a WhatsApp channel event', async () => {
+    const { tools } = makeAllTools({
+      validateDeliveryTarget: async () => {
+        throw new Error('static delivery preflight must not run')
+      },
+    })
+    const definition = {
+      startStepId: 'reply',
+      steps: [{
+        id: 'reply',
+        type: 'assistant_call',
+        target: { assistantId: 'primary' },
+        prompt: 'Answer {{input.event.text}}',
+        deliver: { channelType: 'whatsapp', replyToTrigger: true },
+      }],
+    }
+    const trigger = {
+      kind: 'event',
+      event: {
+        sources: [{
+          source: {
+            type: 'channel',
+            channelIntegrationId: '00000000-0000-4000-8000-000000000001',
+            channel: 'whatsapp',
+          },
+        }],
+      },
+    }
+
+    const result = await tools.proposeWorkflow.execute(
+      { name: 'WhatsApp availability', definition, trigger },
+      makeContext(),
+    )
+
+    expect(result.isError).toBeFalsy()
+    expect((result.data as { summary: string }).summary).toContain(
+      'replies to the originating WhatsApp conversation',
+    )
+  })
+
+  it('rejects replyToTrigger without a WhatsApp-only channel event trigger', async () => {
+    const { tools } = makeAllTools({})
+    const result = await tools.proposeWorkflow.execute(
+      {
+        name: 'Invalid reply',
+        definition: {
+          startStepId: 'reply',
+          steps: [{
+            id: 'reply',
+            type: 'assistant_call',
+            target: { assistantId: 'primary' },
+            prompt: 'Reply',
+            deliver: { channelType: 'whatsapp', replyToTrigger: true },
+          }],
+        },
+        trigger: { kind: 'manual' },
+      },
+      makeContext(),
+    )
+
+    expect(result.isError).toBe(true)
+    expect((result.data as { errors: string[] }).errors.join(' ')).toContain(
+      'requires an event trigger containing only WhatsApp channel sources',
+    )
   })
 
   it('proposeWorkflow warns that a chat-authored webhook trigger starts unprovisioned', async () => {

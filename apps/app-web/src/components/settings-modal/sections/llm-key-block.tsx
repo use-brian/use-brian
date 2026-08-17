@@ -162,7 +162,7 @@ export function WorkspaceLlmKeyBlock({
               placeholder={tk.inputPlaceholder}
               autoComplete="off"
               spellCheck={false}
-              className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 outline-none focus:border-primary/60"
+              className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 outline-none"
             />
             <div className="flex items-center gap-2">
               <button

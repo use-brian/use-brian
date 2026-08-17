@@ -522,7 +522,7 @@ export function IngestRuleEditor({ instanceId, source, rules, onChange }: Props)
               min={0}
               value={current.ruleOrder}
               onChange={(e) => update({ ...current, ruleOrder: e.target.value })}
-              className="bg-muted px-2 py-1 rounded border border-border focus:outline-none focus:border-primary/50"
+              className="bg-muted px-2 py-1 rounded border border-border focus:outline-none"
             />
           </label>
           <label className="flex flex-col gap-1">
@@ -554,7 +554,7 @@ export function IngestRuleEditor({ instanceId, source, rules, onChange }: Props)
             placeholder={paramsHint(current.filterType)}
             spellCheck={false}
             rows={3}
-            className="bg-muted px-2 py-1 rounded border border-border font-mono text-[11px] focus:outline-none focus:border-primary/50"
+            className="bg-muted px-2 py-1 rounded border border-border font-mono text-[11px] focus:outline-none"
           />
           <span className="text-[10px] text-muted-foreground/70">
             {copy.labels.filterParamsHint.replace("{example}", paramsHint(current.filterType))}
@@ -623,7 +623,7 @@ export function IngestRuleEditor({ instanceId, source, rules, onChange }: Props)
                 value={current.routingSchedule}
                 onChange={(e) => update({ ...current, routingSchedule: e.target.value })}
                 placeholder="0 9 * * 1-5"
-                className="bg-muted px-2 py-1 rounded border border-border font-mono text-[11px] focus:outline-none focus:border-primary/50"
+                className="bg-muted px-2 py-1 rounded border border-border font-mono text-[11px] focus:outline-none"
               />
             </label>
             <label className="flex flex-col gap-1">
@@ -633,7 +633,7 @@ export function IngestRuleEditor({ instanceId, source, rules, onChange }: Props)
                 value={current.routingTimezone}
                 onChange={(e) => update({ ...current, routingTimezone: e.target.value })}
                 placeholder="UTC"
-                className="bg-muted px-2 py-1 rounded border border-border focus:outline-none focus:border-primary/50"
+                className="bg-muted px-2 py-1 rounded border border-border focus:outline-none"
               />
             </label>
           </div>

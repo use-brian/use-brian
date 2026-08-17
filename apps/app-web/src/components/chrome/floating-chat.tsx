@@ -3313,7 +3313,6 @@ export function FloatingChat({
               "flex-1 min-w-0 min-h-[36px] max-h-[240px] resize-none overflow-y-auto rounded-md border border-border bg-background",
               "px-3 py-2 text-sm leading-relaxed outline-none",
               "placeholder:text-muted-foreground",
-              "focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40",
               "disabled:opacity-60",
             )}
           />

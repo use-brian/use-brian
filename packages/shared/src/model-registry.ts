@@ -298,8 +298,10 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     capabilities: { tools: true, vision: true, thinking: true, nativePdf: true },
   },
   {
-    // Research tier — Pro 3.1 on the deep budget. Synthetic id keeps it
-    // billable-distinct from Max and from historical Pro-3.1-as-Max rows.
+    // Research tier automatic default — Pro 3.1 on the deep budget. It is
+    // intentionally absent from the curated picker while its list-price
+    // effective rate exceeds the frozen research anchor. The synthetic id
+    // keeps it billable-distinct from Max and historical Pro-3.1-as-Max rows.
     alias: 'gemini-3-pro-research',
     displayName: 'Gemini 3.1 Pro',
     provider: 'gemini',
@@ -308,7 +310,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     tier: 'research',
     status: 'active',
     chatTierKey: 'research',
-    menu: true,
+    menu: false,
     idAliases: ['research'],
     recordAlias: true,
     rates: PRO31_RATES,

@@ -14,7 +14,7 @@ import {
   type CustomLlmEndpoint,
 } from "@/lib/api/custom-llm-endpoints";
 
-const inputClass = "w-full rounded-lg border border-border bg-muted/30 px-3 py-2 text-sm outline-none focus:border-primary/60";
+const inputClass = "w-full rounded-lg border border-border bg-muted/30 px-3 py-2 text-sm outline-none";
 
 export function CustomLlmEndpointsBlock({
   onChanged,

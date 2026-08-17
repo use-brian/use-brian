@@ -287,7 +287,7 @@ function NewPost({
                 onChange={(e) => setTitle(e.target.value)}
                 placeholder={te.newPostTitlePlaceholder}
                 disabled={busy}
-                className="h-10 w-full rounded-xl border border-border/70 bg-background px-3.5 text-sm shadow-xs focus:border-ring disabled:opacity-50"
+                className="h-10 w-full rounded-xl border border-border/70 bg-background px-3.5 text-sm shadow-xs disabled:opacity-50"
               />
             </div>
 
@@ -313,7 +313,7 @@ function NewPost({
                 placeholder={te.newPostBriefPlaceholder}
                 disabled={busy}
                 rows={6}
-                className="w-full resize-y rounded-xl border border-border/70 bg-background px-3.5 py-3 text-sm leading-relaxed shadow-xs focus:border-ring disabled:opacity-50"
+                className="w-full resize-y rounded-xl border border-border/70 bg-background px-3.5 py-3 text-sm leading-relaxed shadow-xs disabled:opacity-50"
               />
             </div>
 
@@ -552,7 +552,7 @@ function PostPane({
             onChange={(e) => {
               permalink = e.target.value;
             }}
-            className="h-9 w-full rounded-lg border border-border bg-background px-3 text-sm focus:border-primary/50 focus:outline-none"
+            className="h-9 w-full rounded-lg border border-border bg-background px-3 text-sm focus:outline-none"
           />
         ),
       });
@@ -787,7 +787,7 @@ function PostPane({
                     onChange={setThreadSegments}
                   />
                 ) : (
-                  <div className="rounded-xl border border-border/60 bg-card p-5 shadow-xs transition focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/25">
+                  <div className="rounded-xl border border-border/60 bg-card p-5 shadow-xs transition focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/25 [&_:focus-visible]:shadow-none">
                     <CaptionEditor
                       value={selected?.text ?? ""}
                       platform={platform}
@@ -1046,7 +1046,7 @@ function ThreadComposer({
       {segments.map((segment, index) => {
         const counter = counterState(segment, "twitter");
         return (
-          <div key={index} className="relative rounded-xl border border-border/60 bg-card p-4 shadow-xs focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/25">
+          <div key={index} className="relative rounded-xl border border-border/60 bg-card p-4 shadow-xs focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/25 [&_:focus-visible]:shadow-none">
             <div className="mb-3 flex items-center justify-between gap-3">
               <span className="text-[11px] font-medium text-muted-foreground">
                 {format(te.threadPostLabel, { n: String(index + 1) })}

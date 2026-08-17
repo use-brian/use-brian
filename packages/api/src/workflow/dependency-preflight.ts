@@ -396,6 +396,9 @@ export function createWorkflowDependencyPreflight(options: WorkflowDependencyPre
     }
 
     if (channelType === 'whatsapp') {
+      if (!channelId.includes('@')) {
+        return { ok: false, reason: 'Proactive WhatsApp Cloud API delivery requires an approved template and is not supported yet' }
+      }
       return options.waConnectorUrl && options.waConnectorSecret
         ? { ok: true }
         : { ok: false, reason: 'WhatsApp is not connected' }

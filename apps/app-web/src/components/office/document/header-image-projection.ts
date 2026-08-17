@@ -13,7 +13,7 @@ function positivePointValue(value: unknown, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-export function readDocumentHeaderImage(value: unknown): DocumentHeaderImage | null {
+function readDocumentHeaderImage(value: unknown): DocumentHeaderImage | null {
   if (!value || typeof value !== "object") return null;
   const image = value as Record<string, unknown>;
   if (typeof image.resourceId !== "string") return null;

@@ -2,6 +2,21 @@ export type { Tool, ToolContext, ToolResult, ToolResultMeta } from './types.js'
 export { buildTool } from './types.js'
 export { filterToolsByCapabilities, isAutonomousToolContext, INTERACTIVE_CHANNEL_TYPES } from './capability-gate.js'
 export { createBaseTools, createEngineBaseTools, urlReaderTool, webSearchTool, askQuestionTool, createTaskTool, updateTaskTool, getTimeTool, _getSessionTasksSize } from './base/index.js'
+export {
+  createGoogleMapsTools,
+  extractGoogleMapsSources,
+  classifyGoogleMapsError,
+  GOOGLE_MAPS_GROUNDING_MCP_URL,
+  GOOGLE_MAPS_GROUNDING_COST_USD,
+  GOOGLE_MAPS_TOOL_NAMES,
+} from './base/google-maps.js'
+export type {
+  GoogleMapsGroundingApi,
+  GoogleMapsProviderToolName,
+  GoogleMapsSource,
+  GoogleMapsToolName,
+  GoogleMapsErrorCode,
+} from './base/google-maps.js'
 export { createGoogleCalendarTools } from './base/google-calendar.js'
 export type {
   GoogleCalendarApi,

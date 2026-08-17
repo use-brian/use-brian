@@ -78,9 +78,9 @@ export function SearchableSelect({
         disabled={disabled}
         className={cn(
           "group flex h-9 w-full items-center justify-between gap-2 rounded-lg border border-border bg-muted/50 px-3 text-sm text-left transition-colors outline-none",
-          "hover:bg-muted focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/50",
+          "hover:bg-muted",
           "disabled:cursor-not-allowed disabled:opacity-50",
-          "data-[popup-open]:border-ring data-[popup-open]:ring-2 data-[popup-open]:ring-ring/40",
+          "data-[popup-open]:ring-2 data-[popup-open]:ring-ring/40",
           className,
         )}
       >

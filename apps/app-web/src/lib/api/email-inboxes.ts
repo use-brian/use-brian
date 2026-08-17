@@ -76,6 +76,59 @@ export async function createEmailInbox(params: {
   return { channelId: data.channelId, address: data.address };
 }
 
+/** Register a workspace-owned mail domain and return AgentMail's DNS records. */
+export async function connectEmailDomain(params: {
+  workspaceId: string;
+  domain: string;
+}): Promise<EmailDomainSummary> {
+  const res = await authFetch(`${API_URL}/api/email-inboxes/domains`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+  const data = (await res.json().catch(() => ({}))) as Partial<EmailDomainSummary> & {
+    error?: string;
+  };
+  if (!res.ok || !data.id || !data.domain || !data.status || !Array.isArray(data.records)) {
+    throw new Error(data.error ?? `Failed to connect email domain (${res.status})`);
+  }
+  return data as EmailDomainSummary;
+}
+
+/** Ask AgentMail to re-check every required DNS record for a mail domain. */
+export async function verifyEmailDomain(params: {
+  workspaceId: string;
+  domainId: string;
+}): Promise<void> {
+  const res = await authFetch(
+    `${API_URL}/api/email-inboxes/domains/${encodeURIComponent(params.domainId)}/verify`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspaceId: params.workspaceId }),
+    },
+  );
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data.error ?? `Failed to verify email domain (${res.status})`);
+  }
+}
+
+/** Remove a mail domain from this workspace and the configured provider. */
+export async function removeEmailDomain(params: {
+  workspaceId: string;
+  domainId: string;
+}): Promise<void> {
+  const res = await authFetch(
+    `${API_URL}/api/email-inboxes/domains/${encodeURIComponent(params.domainId)}?workspaceId=${encodeURIComponent(params.workspaceId)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data.error ?? `Failed to remove email domain (${res.status})`);
+  }
+}
+
 export async function updateEmailInbox(params: {
   workspaceId: string;
   channelId: string;

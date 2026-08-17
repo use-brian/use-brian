@@ -401,7 +401,7 @@ function SecretInput({
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
         disabled={disabled}
-        className="flex-1 min-w-0 text-[12px] font-mono px-2.5 py-1.5 rounded-lg bg-background border border-border text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary transition-colors disabled:opacity-50"
+        className="flex-1 min-w-0 text-[12px] font-mono px-2.5 py-1.5 rounded-lg bg-background border border-border text-foreground placeholder:text-muted-foreground focus:outline-none transition-colors disabled:opacity-50"
       />
       <Button
         type="button"
