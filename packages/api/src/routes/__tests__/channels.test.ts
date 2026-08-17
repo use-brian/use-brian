@@ -70,7 +70,7 @@ import {
   createTelegramApi,
   createSlackApi,
 } from '@use-brian/channels'
-import { channelsRoutes } from '../channels.js'
+import { channelsRoutes, normalizeWhatsAppPhoneNumber } from '../channels.js'
 import { queryWithRLS } from '../../db/client.js'
 import type { WorkspaceStore } from '../../db/workspace-store.js'
 import type { ChannelIntegrationStore } from '../../db/channel-integrations.js'
@@ -278,6 +278,15 @@ describe('[COMP:api/channels-route] DELETE channel', () => {
 })
 
 describe('[COMP:api/channels-route] channel config', () => {
+  it('normalizes common WhatsApp phone formatting without guessing a country code', () => {
+    expect(normalizeWhatsAppPhoneNumber('+1 (555) 123-4567')).toBe('15551234567')
+    expect(normalizeWhatsAppPhoneNumber('44 20 7946 0958')).toBe('442079460958')
+    expect(normalizeWhatsAppPhoneNumber('0044 20 7946 0958')).toBe('442079460958')
+    expect(normalizeWhatsAppPhoneNumber('09123 45678')).toBeNull()
+    expect(normalizeWhatsAppPhoneNumber('555-1234')).toBeNull()
+    expect(normalizeWhatsAppPhoneNumber('call-me')).toBeNull()
+  })
+
   it('GET enriches each channel with its integration config + integrationId', async () => {
     vi.mocked(listChannelsForWorkspace).mockResolvedValue([makeChannel()])
     const integrationStore = {
@@ -293,6 +302,35 @@ describe('[COMP:api/channels-route] channel config', () => {
     expect(res.body.channels[0].integrationId).toBe('int-1')
     expect(res.body.channels[0].integrationStatus).toBe('active')
     expect(res.body.channels[0].config).toEqual({ requireMention: false })
+  })
+
+  it('GET projects the public WhatsApp number from legacy Cloud credentials', async () => {
+    vi.mocked(listChannelsForWorkspace).mockResolvedValue([
+      makeChannel({ channelType: 'whatsapp' }),
+    ])
+    const integration = makeIntegration({
+      channelType: 'whatsapp',
+      teamId: 'waba-1',
+      botUserId: 'phone-1',
+      config: {},
+    })
+    const integrationStore = {
+      listForWorkspace: vi.fn().mockResolvedValue([integration]),
+      getForUserWithCredentials: vi.fn().mockResolvedValue({
+        ...integration,
+        credentials: {
+          provider: 'cloud_api',
+          display_phone_number: '+1 555 123 4567',
+        },
+      }),
+    } as unknown as ChannelIntegrationStore
+
+    const res = await request(buildApp({ integrationStore })).get(
+      '/api/workspaces/ws-1/channels',
+    )
+
+    expect(res.status).toBe(200)
+    expect(res.body.channels[0].config.whatsappDisplayPhoneNumber).toBe('+1 555 123 4567')
   })
 
   it('GET returns null config when no integration store is configured', async () => {
@@ -364,6 +402,35 @@ describe('[COMP:api/channels-route] channel config', () => {
     expect(res.body.channel.config).toEqual({
       ackReaction: 'eyes',
       requireMention: false,
+    })
+  })
+
+  it('PATCH config normalizes WhatsApp Cloud allowlist phone numbers', async () => {
+    vi.mocked(getChannelForUser).mockResolvedValue(makeChannel({ channelType: 'whatsapp' }))
+    const integration = makeIntegration({
+      channelType: 'whatsapp',
+      teamId: 'waba-1',
+      botUserId: 'phone-1',
+      config: { whatsappDisplayPhoneNumber: '+1 555 000 0000' },
+    })
+    const updateConfig = vi.fn().mockImplementation(async ({ config }) => ({ ...integration, config }))
+    const integrationStore = {
+      listForWorkspace: vi.fn().mockResolvedValue([integration]),
+      updateConfig,
+    } as unknown as ChannelIntegrationStore
+
+    const res = await request(buildApp({ integrationStore }))
+      .patch('/api/workspaces/ws-1/channels/chan-1/config')
+      .send({ allowedUserIds: ['+1 (555) 123-4567', '15551234567'] })
+
+    expect(res.status).toBe(200)
+    expect(updateConfig).toHaveBeenCalledWith({
+      actingUserId: 'user-1',
+      id: 'int-1',
+      config: {
+        whatsappDisplayPhoneNumber: '+1 555 000 0000',
+        allowedUserIds: ['15551234567'],
+      },
     })
   })
 
@@ -445,7 +512,14 @@ describe('[COMP:api/channels-route] workspace-driven connect', () => {
     )
     const integration = makeIntegration({ id: 'int-wa', channelId: 'chan-wa', channelType: 'whatsapp', botUserId: '123456789' })
     const upsert = vi.fn().mockResolvedValue(integration)
-    const updateConfig = vi.fn().mockResolvedValue({ ...integration, config: { userAccessMode: 'allowlist', allowedUserIds: [] } })
+    const updateConfig = vi.fn().mockResolvedValue({
+      ...integration,
+      config: {
+        userAccessMode: 'allowlist',
+        allowedUserIds: [],
+        whatsappDisplayPhoneNumber: '+1 555 123 4567',
+      },
+    })
     const integrationStore = {
       upsert,
       updateConfig,
@@ -475,7 +549,11 @@ describe('[COMP:api/channels-route] workspace-driven connect', () => {
     }))
     expect(updateConfig).toHaveBeenCalledWith({
       actingUserId: 'user-1', id: 'int-wa',
-      config: { userAccessMode: 'allowlist', allowedUserIds: [] },
+      config: {
+        userAccessMode: 'allowlist',
+        allowedUserIds: [],
+        whatsappDisplayPhoneNumber: '+1 555 123 4567',
+      },
     })
   })
 

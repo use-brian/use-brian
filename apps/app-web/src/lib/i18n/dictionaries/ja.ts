@@ -7191,6 +7191,9 @@ export const ja: Dictionary = {
         whatsappCloudVerifyHint: "この検証トークンを使用してください。アプリは Business アカウントに購読済みです。Webhook 検証を完了し、messages フィールドを選択してください：",
         whatsappCloudCopySetup: "コールバックとトークンをコピー",
         whatsappCloudConnectedDetail: "Meta 公式 Cloud API トランスポートです。受信メッセージとアシスタントの返信には、設定した WhatsApp Business 電話番号が使われます。",
+        whatsappCloudChatTitle: "この番号とチャット",
+        whatsappCloudChatHint: "スマートフォンでこの QR コードを読み取るか WhatsApp を開いて、アシスタントとのカスタマー会話を開始します。",
+        whatsappCloudOpenChat: "WhatsApp チャットを開く",
         msteamsWebhookHint: "これを Azure Bot のメッセージングエンドポイントに設定してください:",
         msteamsUploadHint:
           "次に Teams でアプリパッケージをアップロードしてください: アプリ → アプリを管理 → カスタム アプリをアップロード",
@@ -7290,6 +7293,7 @@ export const ja: Dictionary = {
         userIdHintTelegram: "数値 ID を推奨。@userinfobot で確認できます。",
         userIdHintDiscord: "数値の Discord ユーザー ID を使用します。開発者モード(設定 > 詳細設定)をオンにし、プロフィールを開いて(左下の自分のアイコン、または相手の名前をクリック)「ユーザー ID をコピー」を選びます。",
         userIdHintWhatsApp: "送信者の WhatsApp 番号を E.164 形式で、数字のみ入力してください。",
+        userIdInvalidWhatsApp: "国番号を含む電話番号を入力してください。スペース、+、ハイフン、括弧を使用できます。",
         overridesLabel: "グループの例外",
         overridesEffectRequire: "@mention を必須にする",
         overridesEffectDontRequire: "@mention を不要にする",

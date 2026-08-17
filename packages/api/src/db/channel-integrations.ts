@@ -223,6 +223,8 @@ export type ChannelIntegrationConfig = {
   userAccessMode?: UserAccessMode // default: 'allow_all'
   // Slack sender filter; Telegram owner-plus-guest grants. @handle or numeric ID.
   allowedUserIds?: string[]
+  /** WhatsApp Cloud public business number, safe to expose for chat links. */
+  whatsappDisplayPhoneNumber?: string
   /**
    * Telegram BYO only. When true, explicitly allowlisted private-DM guests
    * may use connector tools enabled for the routed assistant. Their shadow

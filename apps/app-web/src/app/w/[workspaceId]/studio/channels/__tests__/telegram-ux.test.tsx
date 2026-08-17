@@ -9,7 +9,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { Channel } from "@/lib/api/channels";
-import { AddChannelForm, ChannelConfigSection } from "../page";
+import {
+  AddChannelForm,
+  ChannelConfigSection,
+  normalizeWhatsAppPhoneNumberInput,
+  WhatsAppCloudChatSection,
+} from "../page";
 
 vi.mock("@/lib/api/channels", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api/channels")>();
@@ -134,6 +139,31 @@ describe("[COMP:app-web/studio-channels] Telegram UX", () => {
 });
 
 describe("[COMP:app-web/studio-channels] WhatsApp Cloud access UX", () => {
+  it("normalizes allowlist input and renders a persistent chat QR", async () => {
+    expect(normalizeWhatsAppPhoneNumberInput("+1 (555) 123-4567")).toBe(
+      "15551234567",
+    );
+    expect(normalizeWhatsAppPhoneNumberInput("0044 20 7946 0958")).toBe(
+      "442079460958",
+    );
+    expect(normalizeWhatsAppPhoneNumberInput("09123 45678")).toBeNull();
+    expect(normalizeWhatsAppPhoneNumberInput("555-1234")).toBeNull();
+
+    await act(async () => {
+      root.render(
+        localized(<WhatsAppCloudChatSection phoneNumber="+1 555 123 4567" />),
+      );
+    });
+
+    expect(host.textContent).toContain("Chat with this number");
+    expect(host.querySelector("svg")).not.toBeNull();
+    expect(
+      host.querySelector<HTMLAnchorElement>(
+        'a[href="https://wa.me/15551234567"]',
+      ),
+    ).not.toBeNull();
+  });
+
   it("does not describe WhatsApp access as linked Telegram users", async () => {
     const channel: Channel = {
       id: "channel_1",

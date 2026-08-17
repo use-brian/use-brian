@@ -84,6 +84,26 @@ export const channelConfigSchema = z.object({
   blockedUserIds: z.array(z.string().max(50)).max(100).optional(),
 }).strict()
 
+const WHATSAPP_E164_DIGITS = /^[1-9]\d{7,14}$/
+
+export function normalizeWhatsAppPhoneNumber(value: string): string | null {
+  const trimmed = value.trim()
+  if (!/^\+?[\d\s().-]+$/.test(trimmed)) return null
+  const rawDigits = trimmed.replace(/\D/g, '')
+  const digits = trimmed.startsWith('00') ? rawDigits.slice(2) : rawDigits
+  return WHATSAPP_E164_DIGITS.test(digits) ? digits : null
+}
+
+function normalizeWhatsAppPhoneNumbers(values: string[]): string[] | null {
+  const normalized: string[] = []
+  for (const value of values) {
+    const phoneNumber = normalizeWhatsAppPhoneNumber(value)
+    if (!phoneNumber) return null
+    if (!normalized.includes(phoneNumber)) normalized.push(phoneNumber)
+  }
+  return normalized
+}
+
 export type ChannelsRouteOptions = {
   workspaceStore: WorkspaceStore
   /**
@@ -322,7 +342,35 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
   ): Promise<Map<string, ChannelIntegration>> {
     if (!opts.integrationStore) return new Map()
     const rows = await opts.integrationStore.listForWorkspace(userId, workspaceId)
-    return new Map(rows.map((r) => [r.channelId, r]))
+    const hydrated = await Promise.all(rows.map(async (row) => {
+      if (
+        row.channelType !== 'whatsapp'
+        || row.config.whatsappDisplayPhoneNumber
+        || !row.botUserId
+        || !row.teamId
+      ) return row
+
+      try {
+        const withCredentials = await opts.integrationStore!.getForUserWithCredentials(userId, row.id)
+        const credentials = withCredentials?.credentials as {
+          provider?: unknown
+          display_phone_number?: unknown
+        } | undefined
+        if (credentials?.provider !== 'cloud_api' || typeof credentials.display_phone_number !== 'string') {
+          return row
+        }
+        return {
+          ...row,
+          config: {
+            ...row.config,
+            whatsappDisplayPhoneNumber: credentials.display_phone_number,
+          },
+        }
+      } catch {
+        return row
+      }
+    }))
+    return new Map(hydrated.map((r) => [r.channelId, r]))
   }
 
   /**
@@ -682,7 +730,29 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
     // Merge into the existing config so webhook-only fields (e.g. `seenChats`,
     // populated opportunistically by the BYO webhook) survive a UI PATCH that
     // doesn't echo them back. Mirrors the legacy per-assistant endpoint.
-    const merged = { ...integration.config, ...parsed.data }
+    let patch = parsed.data
+    const isWhatsAppCloud = integration.channelType === 'whatsapp'
+      && integration.botUserId
+      && integration.teamId
+    if (isWhatsAppCloud) {
+      const allowedUserIds = parsed.data.allowedUserIds
+        ? normalizeWhatsAppPhoneNumbers(parsed.data.allowedUserIds)
+        : undefined
+      const blockedUserIds = parsed.data.blockedUserIds
+        ? normalizeWhatsAppPhoneNumbers(parsed.data.blockedUserIds)
+        : undefined
+      if (allowedUserIds === null || blockedUserIds === null) {
+        res.status(400).json({ error: 'WhatsApp phone numbers must include a country code and contain 8 to 15 digits' })
+        return
+      }
+      patch = {
+        ...parsed.data,
+        ...(allowedUserIds ? { allowedUserIds } : {}),
+        ...(blockedUserIds ? { blockedUserIds } : {}),
+      }
+    }
+
+    const merged = { ...integration.config, ...patch }
     try {
       const updated = await opts.integrationStore.updateConfig({
         actingUserId: userId,
@@ -1235,15 +1305,18 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
         },
         actingUserId: userId,
       })
-      if (!provisioned.reused) {
-        // A public business number is fail-closed. Operators explicitly add
-        // phone numbers (E.164 digits) before those callers can reach Brian.
-        await opts.integrationStore.updateConfig({
-          actingUserId: userId,
-          id: integration.id,
-          config: { userAccessMode: 'allowlist', allowedUserIds: [] },
-        })
-      }
+      // A public business number is fail-closed. Operators explicitly add
+      // phone numbers before those callers can reach Brian. Keep the public
+      // number in non-secret config so Studio can render a persistent chat QR.
+      await opts.integrationStore.updateConfig({
+        actingUserId: userId,
+        id: integration.id,
+        config: {
+          ...integration.config,
+          ...(!provisioned.reused ? { userAccessMode: 'allowlist' as const, allowedUserIds: [] } : {}),
+          whatsappDisplayPhoneNumber: info.displayPhoneNumber,
+        },
+      })
     } catch (err) {
       console.error('[channels] WhatsApp Cloud integration upsert failed:', err)
       res.status(500).json({ error: 'Failed to save integration' })

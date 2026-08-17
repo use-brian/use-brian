@@ -57,6 +57,8 @@ export type ChannelIntegrationConfig = {
   seenChats?: SeenChat[];
   userAccessMode?: UserAccessMode;
   allowedUserIds?: string[];
+  /** WhatsApp Cloud public business number used for wa.me chat links. */
+  whatsappDisplayPhoneNumber?: string;
   /** Telegram BYO: allow explicitly listed DM guests to use enabled connectors. */
   allowGuestConnectorTools?: boolean;
   blockedUserIds?: string[];

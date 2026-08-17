@@ -210,6 +210,14 @@ function discordInviteUrl(botId: string): string {
   return `https://discord.com/oauth2/authorize?client_id=${encodeURIComponent(botId)}&scope=bot&permissions=68672`;
 }
 
+export function normalizeWhatsAppPhoneNumberInput(value: string): string | null {
+  const trimmed = value.trim();
+  if (!/^\+?[\d\s().-]+$/.test(trimmed)) return null;
+  const rawDigits = trimmed.replace(/\D/g, "");
+  const digits = trimmed.startsWith("00") ? rawDigits.slice(2) : rawDigits;
+  return /^[1-9]\d{7,14}$/.test(digits) ? digits : null;
+}
+
 const CLEARANCES: ChannelClearance[] = ["public", "internal", "confidential"];
 const CAPABILITIES: ChannelCapability[] = ["chat", "broadcast", "ingest"];
 
@@ -823,9 +831,14 @@ export function ChannelDetail({
       )}
 
       {channel.channelType === "whatsapp" && channel.integrationProvider === "cloud_api" && (
-        <div className="rounded-lg border border-border px-4 py-3 text-xs text-muted-foreground">
-          {t.studioPage.channels.add.whatsappCloudConnectedDetail}
-        </div>
+        <>
+          <div className="rounded-lg border border-border px-4 py-3 text-xs text-muted-foreground">
+            {t.studioPage.channels.add.whatsappCloudConnectedDetail}
+          </div>
+          <WhatsAppCloudChatSection
+            phoneNumber={channel.config?.whatsappDisplayPhoneNumber ?? null}
+          />
+        </>
       )}
 
       {/* WeChat — the iLink bot limits, stated plainly on the connected card
@@ -1306,7 +1319,18 @@ export function ChannelConfigSection({
               const input = e.currentTarget.elements.namedItem(
                 "accessUserId",
               ) as HTMLInputElement;
-              addAccessId(input.value);
+              let value = input.value;
+              if (isWhatsAppCloud) {
+                const normalized = normalizeWhatsAppPhoneNumberInput(value);
+                if (!normalized) {
+                  input.setCustomValidity(cfg.userIdInvalidWhatsApp);
+                  input.reportValidity();
+                  return;
+                }
+                value = normalized;
+              }
+              input.setCustomValidity("");
+              addAccessId(value);
               input.value = "";
             }}
             className="flex items-center gap-2"
@@ -1314,7 +1338,9 @@ export function ChannelConfigSection({
             <input
               name="accessUserId"
               type="text"
+              inputMode={isWhatsAppCloud ? "tel" : undefined}
               disabled={saving}
+              onInput={(e) => e.currentTarget.setCustomValidity("")}
               placeholder={
                 isSlack
                   ? cfg.userIdPlaceholderSlack
@@ -1522,6 +1548,55 @@ export function ChannelConfigSection({
         </span>
       )}
     </div>
+  );
+}
+
+export function WhatsAppCloudChatSection({
+  phoneNumber,
+}: {
+  phoneNumber: string | null;
+}) {
+  const t = useT();
+  const add = t.studioPage.channels.add;
+  const normalized = phoneNumber
+    ? normalizeWhatsAppPhoneNumberInput(phoneNumber)
+    : null;
+  if (!normalized) return null;
+
+  const chatUrl = `https://wa.me/${normalized}`;
+  return (
+    <section className="flex flex-col gap-3 rounded-lg border border-border px-4 py-3">
+      <div>
+        <h3 className="text-sm font-semibold">{add.whatsappCloudChatTitle}</h3>
+        <p className="mt-1 text-xs text-muted-foreground">
+          {add.whatsappCloudChatHint}
+        </p>
+      </div>
+      <div className="flex flex-col items-start gap-4 sm:flex-row sm:items-center">
+        <a
+          href={chatUrl}
+          target="_blank"
+          rel="noreferrer"
+          aria-label={add.whatsappCloudOpenChat}
+          className="rounded-xl border border-border bg-white p-3"
+        >
+          <QRCodeSVG value={chatUrl} size={160} />
+        </a>
+        <div className="flex min-w-0 flex-col gap-2">
+          <code className="break-all rounded bg-muted px-2 py-1.5 text-xs">
+            +{normalized}
+          </code>
+          <a
+            href={chatUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="self-start rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-muted"
+          >
+            {add.whatsappCloudOpenChat}
+          </a>
+        </div>
+      </div>
+    </section>
   );
 }
 
