@@ -25,6 +25,8 @@
 
 import { authFetch } from "@/lib/auth-fetch";
 import { DISPLAY_API_URL } from "@/lib/display-api-url";
+import { OFFICIAL_CONNECTOR_TOOLS } from "@use-brian/shared/builtin-connectors";
+import type { ConnectedToolSource, ToolCatalogItem } from "@/lib/workflow-tools";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -189,7 +191,16 @@ export type AssistantCallStep = {
    */
   blueprintId?: string;
   /** When set, the step's text output is pushed to this channel after the consult. */
-  deliver?: { channelType: DeliverChannelType; channelId: string };
+  deliver?:
+    | {
+        channelType: DeliverChannelType;
+        channelId: string;
+        channelIntegrationId?: string;
+      }
+    | {
+        channelType: "whatsapp";
+        replyToTrigger: true;
+      };
   /** `persistent` reuses one callee session across runs; `per_run` (default) is fresh. */
   session?: "per_run" | "persistent";
   /** Per-step model alias. Backfilled from workflow-level on read for legacy rows. */
@@ -771,6 +782,80 @@ export async function listWorkspaceConnectorOptions(
   }));
 }
 
+/**
+ * Connected connector tool sources available to this workspace. The workspace
+ * connector route is the same inventory runtime sharing uses: workspace-owned
+ * instances plus connector grants. Official catalogs stay local and static;
+ * only custom/dynamic providers need the existing live tool-discovery route.
+ */
+export async function listConnectedWorkflowToolSources(
+  workspaceId: string,
+  assistantId?: string,
+): Promise<ConnectedToolSource[]> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/connectors`,
+  );
+  if (!res.ok) return [];
+
+  type Instance = {
+    id: string;
+    provider: string;
+    label: string;
+    connected: boolean;
+  };
+  const data = (await res.json()) as {
+    teamNative?: Instance[];
+    granted?: Array<{ instance?: Instance }>;
+  } | null;
+  const instances = [
+    ...(Array.isArray(data?.teamNative) ? data.teamNative : []),
+    ...(Array.isArray(data?.granted)
+      ? data.granted.flatMap((grant) => (grant.instance ? [grant.instance] : []))
+      : []),
+  ];
+  const connected = [...new Map(
+    instances.filter((instance) => instance.connected).map((instance) => [instance.id, instance]),
+  ).values()];
+
+  return Promise.all(
+    connected.map(async (instance): Promise<ConnectedToolSource> => {
+      const staticTools = OFFICIAL_CONNECTOR_TOOLS[instance.provider];
+      if (staticTools?.length) {
+        return {
+          id: instance.id,
+          connectorId: instance.provider,
+          label: instance.label || instance.provider,
+        };
+      }
+
+      // Dynamic catalogs use the assistant-scoped exact-instance route so
+      // workspace-owned and granted custom HTTP/CLI instances resolve through
+      // the same exposure and assistant-membership boundary as runtime.
+      const discoveryUrl = assistantId
+        ? `${API_URL}/api/assistants/${encodeURIComponent(assistantId)}/connectors/${encodeURIComponent(`${instance.provider}:${instance.id}`)}/tools`
+        : `${API_URL}/api/connectors/${encodeURIComponent(instance.provider === "cli" ? instance.id : instance.provider)}/tools`;
+      try {
+        const toolRes = await authFetch(discoveryUrl);
+        if (!toolRes.ok) {
+          return { id: instance.id, connectorId: instance.provider, label: instance.label };
+        }
+        const toolData = (await toolRes.json()) as {
+          serverName?: string;
+          tools?: ToolCatalogItem[];
+        };
+        return {
+          id: instance.id,
+          connectorId: instance.provider,
+          label: instance.label || toolData.serverName || instance.provider,
+          items: Array.isArray(toolData.tools) ? toolData.tools : [],
+        };
+      } catch {
+        return { id: instance.id, connectorId: instance.provider, label: instance.label };
+      }
+    }),
+  );
+}
+
 export type WorkspaceChannelOption = {
   id: string;
   channelType: "slack" | "telegram" | "whatsapp";
@@ -840,6 +925,8 @@ export async function listWorkspaceMemberOptions(
 export type ChannelDestination = {
   channelType: "telegram" | "slack" | "whatsapp";
   channelId: string;
+  channelIntegrationId?: string | null;
+  integrationLabel?: string | null;
   title: string | null;
   lastActiveAt: string;
 };
@@ -891,16 +978,26 @@ export async function listWorkspaceChannelOptions(
     displayName: string;
     status: "active" | "revoked" | "invalid";
     integrationId: string | null;
+    integrationStatus: "active" | "revoked" | "invalid" | null;
+    integrationLabel: string | null;
   };
   const data = (await res.json()) as { channels?: Row[] } | null;
   const rows = Array.isArray(data?.channels) ? data!.channels : [];
   // The event dispatcher routes through `channel_integrations.id`, so a
   // channel without an attached integration row is unselectable.
   return rows
-    .filter((r) => r.status === "active" && r.integrationId)
+    .filter(
+      (r) =>
+        r.status === "active" &&
+        r.integrationStatus === "active" &&
+        r.integrationId,
+    )
     .map((r) => ({
       id: r.integrationId!,
       channelType: r.channelType,
-      displayName: r.displayName,
+      displayName:
+        r.channelType === "telegram" && r.integrationLabel
+          ? `${r.displayName} (${r.integrationLabel})`
+          : r.displayName,
     }));
 }

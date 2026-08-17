@@ -19,6 +19,10 @@ const mockDiscoverCli = vi.fn()
 vi.mock('../../mcp/cli-transport.js', () => ({
   discoverCliServer: (...args: unknown[]) => mockDiscoverCli(...args),
 }))
+const mockDiscoverMcp = vi.fn()
+vi.mock('../../mcp/client.js', () => ({
+  discoverMcpServer: (...args: unknown[]) => mockDiscoverMcp(...args),
+}))
 
 import { assistantRoutes } from '../assistants.js'
 import { queryWithRLS } from '../../db/client.js'
@@ -40,6 +44,12 @@ const connectorInstanceStore = {
 }
 const connectorGrantStore = { listForTargetSystem: vi.fn() }
 const mcpSettingsStore = { getPolicy: vi.fn(), setPolicy: vi.fn() }
+const workspaceToolPolicyStore = {
+  getPolicy: vi.fn(),
+  setPolicy: vi.fn(),
+  listForWorkspace: vi.fn(),
+}
+const workspaceStore = { getRole: vi.fn() }
 const capabilityStore = { listActive: vi.fn<(id: string) => Promise<string[]>>() }
 
 beforeEach(() => {
@@ -51,9 +61,14 @@ beforeEach(() => {
   connectorInstanceStore.getAuthCredentialsSystem.mockReset().mockResolvedValue(null)
   connectorGrantStore.listForTargetSystem.mockReset().mockResolvedValue([])
   mockDiscoverCli.mockReset().mockResolvedValue({ name: 'CLI', tools: [] })
+  mockDiscoverMcp.mockReset().mockResolvedValue({ name: 'Custom MCP', tools: [] })
   capabilityStore.listActive.mockReset().mockResolvedValue([])
   mcpSettingsStore.getPolicy.mockReset().mockResolvedValue(null)
   mcpSettingsStore.setPolicy.mockReset().mockResolvedValue(undefined)
+  workspaceToolPolicyStore.getPolicy.mockReset().mockResolvedValue(null)
+  workspaceToolPolicyStore.setPolicy.mockReset().mockResolvedValue(undefined)
+  workspaceToolPolicyStore.listForWorkspace.mockReset().mockResolvedValue([])
+  workspaceStore.getRole.mockReset().mockResolvedValue('owner')
 })
 
 function makeApp(userId: string) {
@@ -71,6 +86,8 @@ function makeApp(userId: string) {
       connectorInstanceStore: connectorInstanceStore as never,
       connectorGrantStore: connectorGrantStore as never,
       mcpSettingsStore: mcpSettingsStore as never,
+      workspaceToolPolicyStore: workspaceToolPolicyStore as never,
+      workspaceStore: workspaceStore as never,
       // Built-in primitive rows report `enabled` from the capability grant
       // (docs/architecture/features/builtin-primitives.md), so this handler
       // reads the store — an empty stub object is no longer sufficient.
@@ -117,6 +134,27 @@ describe('[COMP:routes/assistants-connector-scoping] GET /:assistantId/connector
     expect(connectors[0].scope).toBe('team-native')
   })
 
+  it('lists workspace custom connectors under exact instance ids', async () => {
+    queueMembershipAndTeam('admin', 'ws-shared')
+    connectorInstanceStore.listByWorkspaceSystem.mockResolvedValueOnce([{
+      id: 'custom-1', provider: '11111111-1111-4111-8111-111111111111',
+      label: 'Team CRM', url: 'https://crm.example.com/mcp',
+      custom: true, connected: true,
+    }])
+
+    const res = await request(makeApp('u-admin')).get('/api/assistants/a-1/connectors')
+
+    expect(res.status).toBe(200)
+    expect(res.body.connectors).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: '11111111-1111-4111-8111-111111111111:custom-1',
+        providerId: '11111111-1111-4111-8111-111111111111',
+        custom: true,
+        instanceId: 'custom-1',
+      }),
+    ]))
+  })
+
   it('does not expose internal WhatsApp channel instances as tool connectors', async () => {
     queueMembershipAndTeam('admin', 'ws-shared')
     connectorInstanceStore.listByWorkspaceSystem.mockResolvedValueOnce([
@@ -130,6 +168,26 @@ describe('[COMP:routes/assistants-connector-scoping] GET /:assistantId/connector
     const ids = (res.body.connectors as Array<{ id: string }>).map((c) => c.id)
     expect(ids).toContain('github')
     expect(ids).not.toContain('whatsapp')
+  })
+
+  it('keeps AgentMail configuration on its owning Channel', async () => {
+    queueMembershipAndTeam('admin', 'ws-shared')
+    connectorInstanceStore.listByWorkspaceSystem.mockResolvedValueOnce([
+      {
+        id: 'inbox-1', provider: 'agentmail', label: 'hello@agentmail.to',
+        connectedEmail: 'hello@agentmail.to', url: null, custom: false,
+        connected: true, healthStatus: 'ok', createdAt: new Date('2026-08-14T00:00:00Z'),
+      },
+      { id: 'github-1', provider: 'github', label: 'Team Github', url: null, custom: false, connected: true },
+    ])
+
+    const res = await request(makeApp('u-admin')).get('/api/assistants/a-1/connectors')
+
+    expect(res.status).toBe(200)
+    const providers = (res.body.connectors as Array<{ id: string; providerId?: string }>)
+      .map((connector) => connector.providerId ?? connector.id)
+    expect(providers).toContain('github')
+    expect(providers).not.toContain('agentmail')
   })
 
   it('suppresses personal connectors for a SOLO workspace too — exposure is the boundary (2026-07-14)', async () => {
@@ -147,22 +205,31 @@ describe('[COMP:routes/assistants-connector-scoping] GET /:assistantId/connector
     expect(gmail).toBeUndefined()
   })
 
-  it('lists a connector exposed to the workspace via a grant (any member count)', async () => {
+  it('lists a connector exposed to the workspace with its connected account identity', async () => {
     queueMembershipAndTeam('owner', 'ws-personal')
     connectorGrantStore.listForTargetSystem.mockResolvedValueOnce([
       {
         grantedByUserId: 'u-owner',
-        instance: { provider: 'gmail', label: 'Gmail', url: null, custom: false, connected: true },
+        instance: {
+          provider: 'gcal', label: 'Google Calendar', connectedEmail: 'calendar.owner@example.com',
+          url: null, custom: false, connected: true,
+        },
       },
     ])
 
     const res = await request(makeApp('u-owner')).get('/api/assistants/a-1/connectors')
 
     expect(res.status).toBe(200)
-    const gmail = (res.body.connectors as Array<{ id: string; scope: string }>).find(
-      (c) => c.id === 'gmail',
+    const calendar = (res.body.connectors as Array<{
+      id: string; name: string; connectedEmail?: string; scope: string
+    }>).find(
+      (c) => c.id === 'gcal',
     )
-    expect(gmail?.scope).toBe('team-grant')
+    expect(calendar).toMatchObject({
+      name: 'Google Calendar',
+      connectedEmail: 'calendar.owner@example.com',
+      scope: 'team-grant',
+    })
   })
 
   it('projects every shared CLI instance as a separate connector card', async () => {
@@ -241,9 +308,10 @@ describe('[COMP:routes/assistants-connector-scoping] GET /:assistantId/connector
     ]))
   })
 
-  it('automatically projects two cards for every registry-declared multi-instance connector', async () => {
+  it('automatically projects two cards for every assistant-configured multi-instance connector', async () => {
     queueMembershipAndTeam('owner', 'ws-personal')
     const providers = [...MULTI_INSTANCE_CONNECTOR_IDS].sort()
+    const assistantConfiguredProviders = providers.filter((provider) => provider !== 'agentmail')
     connectorGrantStore.listForTargetSystem.mockResolvedValueOnce(
       providers.flatMap((provider) => [0, 1].map((index) => ({
         grantedByUserId: 'u-owner',
@@ -266,8 +334,8 @@ describe('[COMP:routes/assistants-connector-scoping] GET /:assistantId/connector
     expect(res.status).toBe(200)
     const rows = (res.body.connectors as Array<{ id: string; providerId?: string }>)
       .filter((connector) => connector.providerId && MULTI_INSTANCE_CONNECTOR_IDS.has(connector.providerId))
-    expect(rows).toHaveLength(providers.length * 2)
-    for (const provider of providers) {
+    expect(rows).toHaveLength(assistantConfiguredProviders.length * 2)
+    for (const provider of assistantConfiguredProviders) {
       const ids = rows
         .filter((connector) => connector.providerId === provider)
         .map((connector) => connector.id)
@@ -545,5 +613,104 @@ describe('[COMP:routes/assistants-connector-scoping] CLI instance governance rou
       toolName: 'listEvents',
       policy: 'ask',
     }))
+  })
+})
+
+describe('[COMP:routes/assistants-connector-scoping] custom instance tool discovery', () => {
+  it('discovers an exact custom HTTP instance granted to the workspace', async () => {
+    queueMembershipAndTeam('owner', 'ws-1')
+    const instance = {
+      id: 'mcp-1', scope: 'user', userId: 'u-grantor', workspaceId: null,
+      provider: '11111111-1111-4111-8111-111111111111',
+      label: 'Granted CRM', url: 'https://crm.example.com/mcp',
+      custom: true, connected: true, config: {},
+    }
+    connectorGrantStore.listForTargetSystem.mockResolvedValue([{ grantedByUserId: 'u-grantor', instance }])
+    connectorStore.list.mockResolvedValue([{
+      id: 'mcp-1', connectorId: instance.provider, name: 'Viewer copy',
+      url: 'https://wrong.example.com/mcp', custom: true, connected: true,
+    }])
+    connectorInstanceStore.getAuthCredentialsSystem.mockResolvedValue(null)
+    mockDiscoverMcp.mockResolvedValue({
+      name: 'Granted CRM',
+      tools: [{ name: 'read_customer', description: 'Read a customer record.' }],
+    })
+
+    const res = await request(makeApp('u-owner')).get(
+      '/api/assistants/a-1/connectors/11111111-1111-4111-8111-111111111111%3Amcp-1/tools',
+    )
+
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({
+      serverName: 'Granted CRM',
+      tools: [expect.objectContaining({ name: 'read_customer', classification: 'read' })],
+    })
+    expect(mockDiscoverMcp).toHaveBeenCalledWith(
+      'https://crm.example.com/mcp',
+      'Granted CRM',
+      {},
+    )
+    expect(connectorInstanceStore.getAuthCredentialsSystem).toHaveBeenCalledWith('mcp-1')
+
+    mockAccess.mockResolvedValueOnce({
+      assistant: { id: 'a-1', name: 'A', workspaceId: 'ws-1' },
+      role: 'owner',
+    } as never)
+    const updated = await request(makeApp('u-owner'))
+      .post('/api/assistants/a-1/connectors/11111111-1111-4111-8111-111111111111%3Amcp-1/tools/policy')
+      .send({ serverName: 'Granted CRM', toolName: 'read_customer', policy: 'block' })
+    expect(updated.status).toBe(200)
+    expect(mcpSettingsStore.setPolicy).toHaveBeenCalledWith(expect.objectContaining({
+      assistantId: 'a-1',
+      userId: 'u-grantor',
+      serverName: 'Granted CRM',
+      toolName: 'read_customer',
+      policy: 'block',
+    }))
+  })
+
+  it('writes workspace-owned CLI policy to the exact workspace governance id', async () => {
+    mockAccess.mockResolvedValue({
+      assistant: { id: 'a-1', name: 'A', workspaceId: 'ws-1' },
+      role: 'owner',
+    } as never)
+    connectorInstanceStore.listByWorkspaceSystem.mockResolvedValue([{
+      id: 'cli-team', scope: 'workspace', workspaceId: 'ws-1',
+      provider: 'cli', label: 'Team CLI', connected: true,
+    }])
+
+    const updated = await request(makeApp('u-owner'))
+      .post('/api/assistants/a-1/connectors/cli%3Acli-team/tools/policy')
+      .send({ serverName: 'Team CLI', toolName: 'read_data', policy: 'block' })
+
+    expect(updated.status).toBe(200)
+    expect(workspaceToolPolicyStore.setPolicy).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: 'ws-1',
+      serverName: 'cli:cli-team',
+      toolName: 'read_data',
+      policy: 'block',
+      updatedBy: 'u-owner',
+    }))
+    expect(mcpSettingsStore.setPolicy).not.toHaveBeenCalled()
+  })
+
+  it('rejects workspace-wide dynamic policy writes from ordinary members', async () => {
+    mockAccess.mockResolvedValue({
+      assistant: { id: 'a-1', name: 'A', workspaceId: 'ws-1' },
+      role: 'member',
+    } as never)
+    connectorInstanceStore.listByWorkspaceSystem.mockResolvedValue([{
+      id: 'cli-team', scope: 'workspace', workspaceId: 'ws-1',
+      provider: 'cli', label: 'Team CLI', connected: true,
+    }])
+    workspaceStore.getRole.mockResolvedValue('member')
+
+    const updated = await request(makeApp('u-member'))
+      .post('/api/assistants/a-1/connectors/cli%3Acli-team/tools/policy')
+      .send({ serverName: 'Team CLI', toolName: 'read_data', policy: 'allow' })
+
+    expect(updated.status).toBe(403)
+    expect(workspaceToolPolicyStore.setPolicy).not.toHaveBeenCalled()
+    expect(mcpSettingsStore.setPolicy).not.toHaveBeenCalled()
   })
 })

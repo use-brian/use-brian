@@ -347,6 +347,7 @@ export const PresentationSlideSchema = z
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['readingOrder'], message: 'Reading order must contain every slide object exactly once' })
     }
   })
+export type PresentationSlide = z.infer<typeof PresentationSlideSchema>
 
 const ArtifactCommonSchema = z.object({
   schemaVersion: z.literal(OFFICE_SCHEMA_VERSION),

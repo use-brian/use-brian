@@ -27,6 +27,8 @@ export type SpoolSessionMeta = {
   id: string;
   workspaceId: string;
   assistantId: string;
+  /** Chosen provisional page, retained so recovery finalizes to the same page. */
+  livePageId?: string;
   /** Epoch ms of capture start — the recovery banner's "from 2:14 PM". */
   startedAt: number;
   /** Capture mime (the assembled Blob's type). */

@@ -25,6 +25,27 @@ describe('[COMP:office/spreadsheet-model] Spreadsheet model and calculation', ()
     expect(next.family === 'spreadsheet' && next.worksheets[0].cells.find((cell) => cell.address === 'C1')?.calculatedValue).toBe(20)
   })
 
+  it('resizes one sparse row or column without replacing neighboring dimensions', () => {
+    const source = spreadsheetFixture()
+    const common = { artifactId: source.artifactId, baseVersion: 1, actor: { type: 'user' as const, id: id(81) }, origin: 'manual' as const, sheetId: id(23) }
+    const column = applyOfficeCommand(source, { ...common, commandId: id(82), kind: 'setSpreadsheetDimension', axis: 'column', index: 2, size: 31 })
+    const row = applyOfficeCommand(column, { ...common, commandId: id(83), kind: 'setSpreadsheetDimension', axis: 'row', index: 4, size: 27 })
+    if (row.family !== 'spreadsheet') throw new Error('spreadsheet fixture required')
+    expect(source.worksheets[0].columnDimensions).toEqual([])
+    expect(row.worksheets[0].columnDimensions).toContainEqual({ index: 2, widthChars: 31, hidden: false })
+    expect(row.worksheets[0].rowDimensions).toContainEqual({ index: 4, heightPt: 27, hidden: false })
+  })
+
+  it('updates worksheet image layout and accessibility through one bounded command', () => {
+    const source = spreadsheetFixture()
+    source.worksheets[0].images = [{ id: id(92), resourceId: id(93), altText: 'Logo', decorative: false, from: { row: 1, column: 1 }, to: { row: 2, column: 2 } }]
+    const next = applyOfficeCommand(source, { commandId: id(94), artifactId: source.artifactId, baseVersion: 1, actor: { type: 'user', id: id(81) }, origin: 'manual', kind: 'updateSpreadsheetImage', sheetId: source.worksheets[0].id, imageId: id(92), from: { row: 2, column: 0.5 }, to: { row: 3.5, column: 2.5 }, altText: 'Updated logo', decorative: false })
+    if (next.family !== 'spreadsheet') throw new Error('spreadsheet fixture required')
+    expect(next.worksheets[0].images[0]).toMatchObject({ from: { row: 2, column: 0.5 }, to: { row: 3.5, column: 2.5 }, altText: 'Updated logo', decorative: false })
+    expect(source.worksheets[0].images[0]).toMatchObject({ from: { row: 1, column: 1 }, altText: 'Logo' })
+    expect(() => applyOfficeCommand(source, { commandId: id(95), artifactId: source.artifactId, baseVersion: 1, actor: { type: 'user', id: id(81) }, origin: 'manual', kind: 'updateSpreadsheetImage', sheetId: source.worksheets[0].id, imageId: id(92), from: { row: 2, column: 2 }, to: { row: 1, column: 3 }, altText: '', decorative: true })).toThrow(/positive width and height/)
+  })
+
   it('surfaces formula errors instead of silently keeping stale values', () => {
     const source = spreadsheetFixture()
     source.worksheets[0].cells[2].formula = 'MISSING(A1)'

@@ -125,7 +125,7 @@ export function createSandboxMeter(deps: SandboxMeterDeps): SandboxMeter {
   }
 }
 
-/** In-memory spend accumulator for OSS/tests (the closed impl is `sandbox_tasks.spent_usd`). */
+/** In-memory spend accumulator for tests; the DB impl uses `sandbox_tasks.spent_usd`. */
 export function createInMemorySpendAccumulator(defaultBudgetUsd: number): {
   addSpend: (taskId: string, usd: number) => Promise<{ spentUsd: number; authorizedBudgetUsd: number }>
   spent: Map<string, number>

@@ -2,7 +2,9 @@
  * [COMP:api/office-release] */
 import {
   exportOfficeDocument,
+  exportOfficeDocumentPdf,
   exportOfficePresentation,
+  exportOfficePresentationPdf,
   exportOfficeSpreadsheet,
   exportOfficeSpreadsheetPdf,
   preflightSpreadsheetPdf,
@@ -12,6 +14,10 @@ import {
   type SpreadsheetPdfReceipt,
   type SpreadsheetPdfRequest,
   type OfficeResourceResolver,
+  type DocumentPdfPort,
+  type DocumentPdfReceipt,
+  type PresentationPdfPort,
+  type PresentationPdfReceipt,
 } from '@use-brian/core'
 import {
   preflightOfficeCandidate,
@@ -40,6 +46,8 @@ export type OfficeReleaseReceipt = {
   semanticHash?: string
   layoutSerialization?: string
   spreadsheetPdf?: SpreadsheetPdfReceipt
+  presentationPdf?: PresentationPdfReceipt
+  documentPdf?: DocumentPdfReceipt
 }
 
 const RANK = { public: 0, internal: 1, confidential: 2 } as const
@@ -81,7 +89,6 @@ export function reviewOfficeRelease(params: {
   const spreadsheetPdf = params.snapshot.family === 'spreadsheet' && params.format === 'pdf' && params.spreadsheetPdf
     ? preflightSpreadsheetPdf(params.snapshot, params.spreadsheetPdf).receipt
     : undefined
-  if (params.format === 'pdf' && params.snapshot.family !== 'spreadsheet') blocks.push({ code: 'format.pdf_spreadsheet_only', message: 'PDF release is available for spreadsheets only.' })
   if (params.snapshot.family === 'spreadsheet' && params.format === 'pdf' && !params.spreadsheetPdf) blocks.push({ code: 'format.pdf_request_required', message: 'Spreadsheet PDF release requires an explicit worksheet and print area.' })
   for (const issue of spreadsheetPdf?.issues ?? []) (issue.severity === 'error' ? blocks : warnings).push({ code: `spreadsheet.${issue.code}`, message: issue.message, subjectId: issue.address })
   for (const claim of params.claims) {
@@ -114,11 +121,19 @@ export function reviewOfficeRelease(params: {
   }
 }
 
-export async function prepareOfficeRelease(params: Parameters<typeof reviewOfficeRelease>[0] & { resolveResource?: OfficeResourceResolver }): Promise<{ receipt: OfficeReleaseReceipt; bytes?: Uint8Array; mime?: string; extension?: 'docx' | 'pptx' | 'xlsx' | 'pdf' }> {
+export async function prepareOfficeRelease(params: Parameters<typeof reviewOfficeRelease>[0] & { resolveResource?: OfficeResourceResolver; documentPdfPort?: DocumentPdfPort; presentationPdfPort?: PresentationPdfPort }): Promise<{ receipt: OfficeReleaseReceipt; bytes?: Uint8Array; mime?: string; extension?: 'docx' | 'pptx' | 'xlsx' | 'pdf' }> {
   const receipt = reviewOfficeRelease(params)
   if (receipt.status !== 'ready') return { receipt }
   const resolveResource = params.resolveResource ?? (async () => null)
   try {
+    if (params.snapshot.family === 'document' && params.format === 'pdf') {
+      const exportedPdf = await exportOfficeDocumentPdf(params.snapshot, resolveResource, params.documentPdfPort)
+      const documentPdf = exportedPdf.receipt
+      if (!exportedPdf.bytes || documentPdf.issues.length) {
+        return { receipt: { ...receipt, status: 'blocked', documentPdf, blocks: [...receipt.blocks, ...documentPdf.issues.map((issue) => ({ code: `document.${issue.code}`, message: issue.message }))] } }
+      }
+      return { receipt: { ...receipt, documentPdf }, bytes: exportedPdf.bytes, mime: exportedPdf.mime, extension: 'pdf' }
+    }
     if (params.snapshot.family === 'spreadsheet' && params.format === 'pdf' && params.spreadsheetPdf) {
       const exportedPdf = await exportOfficeSpreadsheetPdf(params.snapshot, params.spreadsheetPdf, resolveResource)
       const spreadsheetPdf = exportedPdf.receipt
@@ -126,6 +141,14 @@ export async function prepareOfficeRelease(params: Parameters<typeof reviewOffic
         return { receipt: { ...receipt, status: 'blocked', spreadsheetPdf, blocks: [...receipt.blocks, ...spreadsheetPdf.issues.filter((issue) => issue.severity === 'error').map((issue) => ({ code: `spreadsheet.${issue.code}`, message: issue.message, subjectId: issue.address }))] } }
       }
       return { receipt: { ...receipt, spreadsheetPdf }, bytes: exportedPdf.bytes, mime: exportedPdf.mime, extension: 'pdf' }
+    }
+    if (params.snapshot.family === 'presentation' && params.format === 'pdf') {
+      const exportedPdf = await exportOfficePresentationPdf(params.snapshot, resolveResource, params.presentationPdfPort)
+      const presentationPdf = exportedPdf.receipt
+      if (!exportedPdf.bytes || presentationPdf.issues.length) {
+        return { receipt: { ...receipt, status: 'blocked', presentationPdf, blocks: [...receipt.blocks, ...presentationPdf.issues.map((issue) => ({ code: `presentation.${issue.code}`, message: issue.message }))] } }
+      }
+      return { receipt: { ...receipt, presentationPdf }, bytes: exportedPdf.bytes, mime: exportedPdf.mime, extension: 'pdf' }
     }
     const exported = params.snapshot.family === 'document'
       ? await exportOfficeDocument(params.snapshot, resolveResource)

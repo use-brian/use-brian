@@ -22,6 +22,7 @@ import {
   BrowserBackendError,
   type BlockRunHandle,
   type BrowserUseRunResult,
+  type BrowserUseLlmConfig,
   type BrowserSnapshot,
   type BuTraceStep,
   type RunPythonRequest,
@@ -82,11 +83,7 @@ export type E2bCloudProviderConfig = {
    * exploration's agentic loop runs inside the VM and must reach its LLM.
    * Absent → `runBrowserUse` refuses with an honest configuration error.
    */
-  browserUse?: {
-    apiKeyEnvName: 'ANTHROPIC_API_KEY' | 'GOOGLE_API_KEY' | 'OPENAI_API_KEY'
-    apiKey: string
-    model: string
-  }
+  browserUse?: BrowserUseLlmConfig
 }
 
 type PerSandbox = {
@@ -183,13 +180,17 @@ export function createE2bCloudProvider(
         const current = (parts[2] ?? '').trim()
         return { url: current || url }
       },
-      snapshot: async (): Promise<BrowserSnapshot> => {
+      snapshot: async (options): Promise<BrowserSnapshot> => {
         const out = await runBrowserCommand(
           sandboxId,
-          chainCommands(cli.snapshot(), cli.getUrl(), cli.getTitle()),
+          chainCommands(cli.snapshot(options?.mode), cli.getUrl(), cli.getTitle()),
         )
         const [raw, url, title] = splitCommandParts(out)
-        return parseSnapshotOutput(raw ?? '', { url: (url ?? '').trim(), title: (title ?? '').trim() })
+        return parseSnapshotOutput(
+          raw ?? '',
+          { url: (url ?? '').trim(), title: (title ?? '').trim() },
+          options?.mode,
+        )
       },
       click: async (ref) => {
         await runBrowserCommand(sandboxId, cli.click(ref))
@@ -485,7 +486,7 @@ export function createE2bCloudProvider(
       // `mapBrowserUseHistory` turns into the distiller's trace. The old
       // one-shot `browser-use run --task-file` CLI never existed in 0.13 —
       // every prod run argparse-died with exit 2 (2026-07-21 incident).
-      const bu = config.browserUse
+      const bu = req.llm ?? config.browserUse
       if (!bu) {
         throw new Error(
           'browser-use is not configured on this deployment: the sandbox provider has no LLM key for the exploration agent, so agentic browsing cannot run. The flat browser tools still work.',
@@ -517,6 +518,7 @@ export function createE2bCloudProvider(
           BU_OUT_PATH: outPath,
           BU_MAX_STEPS: String(req.maxSteps ?? 40),
           BU_MODEL: bu.model,
+          ...(bu.baseUrl ? { OPENAI_BASE_URL: bu.baseUrl } : {}),
           // Per-run key injection — the documented no-ambient-secrets
           // exception (see E2bCloudProviderConfig.browserUse).
           [bu.apiKeyEnvName]: bu.apiKey,

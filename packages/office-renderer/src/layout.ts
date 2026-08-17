@@ -30,13 +30,19 @@ export type OfficeDisplayPrimitive = {
   text?: string
   runs?: OfficeRichTextRun[]
   alignment?: 'start' | 'center' | 'end' | 'justify'
+  verticalAlignment?: 'top' | 'middle' | 'bottom'
   lineSpacingPt?: number
   resourceId?: string
-  tableRows?: Array<Array<{ runs: OfficeRichTextRun[]; rowSpan: number; colSpan: number }>>
+  tableRows?: Array<Array<{ runs: OfficeRichTextRun[]; rowSpan: number; colSpan: number; fill?: string }>>
   tableHeaderRows?: number
   documentTable?: OfficeTable
+  fillColor?: string
   strokeColor?: string
   strokeWidthPt?: number
+  shapeKind?: 'rectangle' | 'roundedRectangle' | 'ellipse' | 'triangle' | 'line'
+  chartType?: string
+  chartCategories?: string[]
+  chartSeries?: Array<{ name: string; values: number[] }>
   spreadsheetStyle?: SpreadsheetCellStyle
   numberFormat?: string
   sourceKind?: string
@@ -222,12 +228,12 @@ function layoutDocument(snapshot: DocumentSnapshot): OfficeLayoutResult {
 function slidePrimitive(object: PresentationObject, z: number): OfficeDisplayPrimitive {
   const geometry = object.geometry
   const common = { id: object.id, xPt: geometry.xPt, yPt: geometry.yPt, widthPt: geometry.widthPt, heightPt: geometry.heightPt, sourceKind: object.kind, z }
-  if (object.kind === 'text') return { ...common, kind: 'text', text: textOf(object.runs) }
+  if (object.kind === 'text') return { ...common, kind: 'text', text: textOf(object.runs), runs: object.runs, alignment: object.alignment, verticalAlignment: object.verticalAlignment }
   if (object.kind === 'image') return { ...common, kind: 'image', resourceId: object.resourceId }
-  if (object.kind === 'shape') return { ...common, kind: object.shape === 'line' ? 'line' : 'rect', text: textOf(object.text) }
-  if (object.kind === 'connector') return { ...common, kind: 'line' }
-  if (object.kind === 'table') return { ...common, kind: 'table' }
-  if (object.kind === 'chart') return { ...common, kind: 'chart', text: object.title }
+  if (object.kind === 'shape') return { ...common, kind: object.shape === 'line' ? 'line' : 'rect', text: textOf(object.text), runs: object.text, alignment: object.alignment, verticalAlignment: object.verticalAlignment, fillColor: object.fill, strokeColor: object.stroke, strokeWidthPt: object.strokeWidthPt, shapeKind: object.shape }
+  if (object.kind === 'connector') return { ...common, kind: 'line', strokeColor: object.stroke }
+  if (object.kind === 'table') return { ...common, kind: 'table', tableHeaderRows: object.headerRows, tableRows: object.rows.map((row) => row.cells.map((cell) => ({ runs: cell.runs, rowSpan: cell.rowSpan, colSpan: cell.colSpan, fill: cell.fill }))) }
+  if (object.kind === 'chart') return { ...common, kind: 'chart', text: object.title, chartType: object.chartType, chartCategories: object.categories, chartSeries: object.series.map((series) => ({ name: series.name, values: series.values })) }
   return { ...common, kind: 'video', resourceId: object.resourceId }
 }
 
@@ -485,7 +491,7 @@ function renderTableHtml(primitive: OfficeDisplayPrimitive): string {
   const rows = primitive.tableRows ?? []
   const body = rows.map((row, rowIndex) => `<tr>${row.map((cell) => {
     const header = rowIndex < (primitive.tableHeaderRows ?? 0)
-    return `<td rowspan="${cell.rowSpan}" colspan="${cell.colSpan}" style="border:1px solid #cbd5e1;padding:2px;vertical-align:top;overflow:hidden;${header ? 'font-weight:700;background:#f8fafc' : ''}">${richTextHtml(cell.runs, '')}</td>`
+    return `<td rowspan="${cell.rowSpan}" colspan="${cell.colSpan}" style="border:1px solid #cbd5e1;padding:2px;vertical-align:top;overflow:hidden;${header ? 'font-weight:700;' : ''}background:${cell.fill ?? (header ? '#f8fafc' : 'transparent')}">${richTextHtml(cell.runs, '')}</td>`
   }).join('')}</tr>`).join('')
   return `<table xmlns="http://www.w3.org/1999/xhtml" style="box-sizing:border-box;width:100%;height:100%;border-collapse:collapse;table-layout:fixed;font-family:Arial,sans-serif;font-size:10px;line-height:1.15;color:#0f172a"><tbody>${body}</tbody></table>`
 }
@@ -550,7 +556,7 @@ export function renderOfficePreviewSvg(page: OfficeDisplayPage, options: OfficeP
         : `<rect ${common} fill="transparent" stroke="none"/>`
     }
     if (primitive.kind === 'line') return `<line data-office-object="${escapeXml(primitive.id)}" x1="${primitive.xPt}" y1="${primitive.yPt}" x2="${primitive.xPt + primitive.widthPt}" y2="${primitive.yPt + primitive.heightPt}" style="stroke:${primitive.strokeColor ?? '#64748b'};stroke-width:${primitive.strokeWidthPt ?? 1}"/>`
-    if (primitive.kind === 'rect') return `<rect ${common}/>`
+    if (primitive.kind === 'rect') return `<g data-office-object="${escapeXml(primitive.id)}"><rect x="${primitive.xPt}" y="${primitive.yPt}" width="${primitive.widthPt}" height="${primitive.heightPt}" fill="${primitive.fillColor ?? 'transparent'}" stroke="${primitive.strokeColor ?? 'transparent'}" stroke-width="${primitive.strokeWidthPt ?? 0}"/><foreignObject x="${primitive.xPt}" y="${primitive.yPt}" width="${primitive.widthPt}" height="${primitive.heightPt}"><div xmlns="http://www.w3.org/1999/xhtml" style="box-sizing:border-box;width:100%;height:100%;overflow:hidden;white-space:pre-wrap;text-align:${cssAlignment(primitive.alignment)}">${richTextHtml(primitive.runs, primitive.text ?? '')}</div></foreignObject></g>`
     const label = primitive.kind === 'chart' ? `Chart: ${primitive.text ?? ''}` : 'Video'
     return `<g data-office-object="${escapeXml(primitive.id)}"><rect x="${primitive.xPt}" y="${primitive.yPt}" width="${primitive.widthPt}" height="${primitive.heightPt}"/><text x="${primitive.xPt + 4}" y="${primitive.yPt + 16}">${escapeXml(label)}</text></g>`
   }).join('')

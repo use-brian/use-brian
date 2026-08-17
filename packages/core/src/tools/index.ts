@@ -2,6 +2,21 @@ export type { Tool, ToolContext, ToolResult, ToolResultMeta } from './types.js'
 export { buildTool } from './types.js'
 export { filterToolsByCapabilities, isAutonomousToolContext, INTERACTIVE_CHANNEL_TYPES } from './capability-gate.js'
 export { createBaseTools, createEngineBaseTools, urlReaderTool, webSearchTool, askQuestionTool, createTaskTool, updateTaskTool, getTimeTool, _getSessionTasksSize } from './base/index.js'
+export {
+  createGoogleMapsTools,
+  extractGoogleMapsSources,
+  classifyGoogleMapsError,
+  GOOGLE_MAPS_GROUNDING_MCP_URL,
+  GOOGLE_MAPS_GROUNDING_COST_USD,
+  GOOGLE_MAPS_TOOL_NAMES,
+} from './base/google-maps.js'
+export type {
+  GoogleMapsGroundingApi,
+  GoogleMapsProviderToolName,
+  GoogleMapsSource,
+  GoogleMapsToolName,
+  GoogleMapsErrorCode,
+} from './base/google-maps.js'
 export { createGoogleCalendarTools } from './base/google-calendar.js'
 export type {
   GoogleCalendarApi,
@@ -11,6 +26,9 @@ export type {
   CalendarConference,
   CalendarAttendeeInput,
   CalendarAttachmentInput,
+  CalendarEventLabel,
+  CalendarEventPaletteColor,
+  CalendarEventColorOptions,
   CalendarRemindersInput,
   CalendarGuestPermissionsInput,
   CalendarFocusTimeProperties,
@@ -43,6 +61,8 @@ export { createFathomTools } from './base/fathom.js'
 export type { FathomApi } from './base/fathom.js'
 export { createShopifyTools } from './base/shopify.js'
 export type { ShopifyApi } from './base/shopify.js'
+export { createWordPressTools, WORDPRESS_IMAGE_MIME_TYPES, WORDPRESS_MAX_IMAGE_BYTES } from './base/wordpress.js'
+export type { WordPressApi, WordPressFileBytesReader } from './base/wordpress.js'
 export { createAgentmailTools } from './base/agentmail.js'
 export type { AgentmailToolApi, AgentmailInboxRef, AgentmailThreadSummary } from './base/agentmail.js'
 export {

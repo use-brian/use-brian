@@ -23,12 +23,15 @@ vi.mock('../../db/sessions.js', () => ({
 }))
 
 import {
+  applyPublicResearchToolCeiling,
   buildEndUserIdentityContext,
   extractText,
   handlePublicHistory,
   laneReadsSystemSide,
   openPublicTurnSse,
+  resolveClientSelfMemory,
   resolvePublicContextBlock,
+  upsertClientMemory,
 } from '../public-turn.js'
 import { formatPrivateRuntimeContext } from '../_prompt-builder.js'
 import { findUserByAuthProvider } from '../../db/users.js'
@@ -166,6 +169,147 @@ describe('[COMP:api/public-turn] Shared public turn pipeline', () => {
     it('fails closed when no scope is declared', () => {
       // Undefined means the keyed default (`external-client`).
       expect(laneReadsSystemSide(undefined)).toBe(false)
+    })
+  })
+
+  describe('authenticated client self-memory', () => {
+    it('requires current identity, an external principal, and an internal non-primary assistant', () => {
+      const base = {
+        isExternal: true,
+        isIdentified: true,
+        assistantKind: 'standard' as const,
+        assistantClearance: 'internal' as const,
+        workspaceId: 'ws-1',
+        externalUserId: 'studio-client:alice',
+      }
+      expect(resolveClientSelfMemory(base)).toEqual({
+        compartment: 'client:studio-client:alice',
+      })
+      expect(resolveClientSelfMemory({ ...base, isIdentified: false })).toBeNull()
+      expect(resolveClientSelfMemory({ ...base, isExternal: false })).toBeNull()
+      expect(resolveClientSelfMemory({ ...base, assistantClearance: 'public' })).toBeNull()
+      expect(resolveClientSelfMemory({ ...base, assistantKind: 'primary' })).toBeNull()
+    })
+
+    it('deterministically creates an internal, exact-compartment memory', async () => {
+      const store = {
+        getIndex: vi.fn(async () => []),
+        create: vi.fn(async (value) => ({ id: 'm-1', ...value })),
+        update: vi.fn(),
+      }
+      await upsertClientMemory({
+        store: store as never,
+        access: {
+          workspaceId: 'ws-1',
+          userId: 'user-a',
+          assistantId: 'assistant-studio',
+          assistantKind: 'standard',
+          clearance: 'public',
+          compartments: [],
+          clientSelfMemory: { compartment: 'client:studio-client:alice' },
+        },
+        sessionId: 'session-1',
+        value: {
+          key: 'consultation-1',
+          summary: 'Alice leads operations at Acme',
+          detail: 'Visitor-supplied context',
+          tags: ['consultation'],
+        },
+      })
+      expect(store.create).toHaveBeenCalledWith(expect.objectContaining({
+        userId: 'user-a',
+        assistantId: 'assistant-studio',
+        sensitivity: 'internal',
+        compartments: ['client:studio-client:alice'],
+        tags: ['client-self', 'client-memory:consultation-1', 'consultation'],
+      }))
+    })
+
+    it('supersedes the same consumer key instead of creating another memory', async () => {
+      const store = {
+        getIndex: vi.fn(async () => [{
+          id: 'm-1',
+          summary: 'old',
+          tags: ['client-memory:consultation-1'],
+          sensitivity: 'internal',
+        }]),
+        create: vi.fn(),
+        update: vi.fn(async () => ({ id: 'm-2' })),
+      }
+      const access = {
+        workspaceId: 'ws-1',
+        userId: 'user-a',
+        assistantId: 'assistant-studio',
+        assistantKind: 'standard' as const,
+        clearance: 'public' as const,
+        compartments: [] as string[],
+        clientSelfMemory: { compartment: 'client:studio-client:alice' },
+      }
+      await upsertClientMemory({
+        store: store as never,
+        access,
+        sessionId: 'session-2',
+        value: { key: 'consultation-1', summary: 'new' },
+      })
+      expect(store.update).toHaveBeenCalledWith(
+        'm-1',
+        expect.objectContaining({ summary: 'new' }),
+        access,
+      )
+      expect(store.create).not.toHaveBeenCalled()
+    })
+
+    it('prevents caller tags from forging another deterministic memory key', async () => {
+      const store = {
+        getIndex: vi.fn(async () => []),
+        create: vi.fn(async (value) => ({ id: 'm-1', ...value })),
+        update: vi.fn(),
+      }
+      await upsertClientMemory({
+        store: store as never,
+        access: {
+          workspaceId: 'ws-1', userId: 'user-a', assistantId: 'assistant-studio',
+          assistantKind: 'standard', clearance: 'public', compartments: [],
+          clientSelfMemory: { compartment: 'client:studio-client:alice' },
+        },
+        sessionId: 'session-1',
+        value: {
+          key: 'profile', summary: 'Own profile',
+          tags: ['client-memory:other', 'client-self', 'consultation'],
+        },
+      })
+      expect(store.create).toHaveBeenCalledWith(expect.objectContaining({
+        tags: ['client-self', 'client-memory:profile', 'consultation'],
+      }))
+    })
+  })
+
+  describe('public research tool ceiling', () => {
+    it('withholds web tools until the embedding app attests consent', () => {
+      const tools = new Map([['webSearch', 1], ['urlReader', 2], ['calendar', 3]])
+      expect(applyPublicResearchToolCeiling({
+        tools, toolPolicy: 'public_research', internalScope: false,
+        allowPublicResearch: false,
+      })).toBe(true)
+      expect([...tools.keys()]).toEqual([])
+    })
+
+    it('allows only public web research after consent', () => {
+      const tools = new Map([['webSearch', 1], ['urlReader', 2], ['calendar', 3]])
+      expect(applyPublicResearchToolCeiling({
+        tools, toolPolicy: 'public_research', internalScope: false,
+        allowPublicResearch: true,
+      })).toBe(true)
+      expect([...tools.keys()]).toEqual(['webSearch', 'urlReader'])
+    })
+
+    it('does not alter the assistant policy', () => {
+      const tools = new Map([['webSearch', 1], ['calendar', 2]])
+      expect(applyPublicResearchToolCeiling({
+        tools, toolPolicy: 'assistant', internalScope: false,
+        allowPublicResearch: false,
+      })).toBe(false)
+      expect([...tools.keys()]).toEqual(['webSearch', 'calendar'])
     })
   })
 

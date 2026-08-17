@@ -630,3 +630,5 @@ export async function reparseOfficeDocument(bytes: Uint8Array): Promise<{ snapsh
 export function compareOfficeDocumentRoundTrip(source: DocumentSnapshot, reparsed: DocumentSnapshot): OfficePreflightDiagnostic[] {
   return officeSemanticHash(source) === officeSemanticHash(reparsed) ? [] : [{ severity: 'error', code: 'docx.semantic_mismatch', path: '', message: 'DOCX reparse does not match the canonical source snapshot' }]
 }
+
+export * from './pdf.js'

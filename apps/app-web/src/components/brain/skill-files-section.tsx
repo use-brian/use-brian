@@ -390,7 +390,7 @@ function DraftEditor({
             placeholder={copy.namePlaceholder}
             spellCheck={false}
             onChange={(e) => setDraft({ ...draft, name: e.target.value })}
-            className="mt-1.5 h-9 w-full rounded-md border border-border bg-background px-3 font-mono text-xs text-foreground outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40"
+            className="mt-1.5 h-9 w-full rounded-md border border-border bg-background px-3 font-mono text-xs text-foreground outline-none placeholder:text-muted-foreground"
           />
         </div>
       </div>
@@ -403,7 +403,7 @@ function DraftEditor({
           value={draft.description}
           placeholder={copy.descriptionPlaceholder}
           onChange={(e) => setDraft({ ...draft, description: e.target.value })}
-          className="mt-1.5 h-9 w-full rounded-md border border-border bg-background px-3 text-sm text-foreground outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40"
+          className="mt-1.5 h-9 w-full rounded-md border border-border bg-background px-3 text-sm text-foreground outline-none placeholder:text-muted-foreground"
         />
       </div>
       <textarea
@@ -412,7 +412,7 @@ function DraftEditor({
         rows={8}
         spellCheck={false}
         onChange={(e) => setDraft({ ...draft, content: e.target.value })}
-        className="mt-3 w-full resize-y rounded-md border border-border bg-background px-3 py-2 font-mono text-xs leading-relaxed text-foreground outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40"
+        className="mt-3 w-full resize-y rounded-md border border-border bg-background px-3 py-2 font-mono text-xs leading-relaxed text-foreground outline-none placeholder:text-muted-foreground"
       />
       <div className="mt-3 flex items-center justify-end gap-2">
         <Button variant="ghost" size="sm" disabled={busy} onClick={() => setDraft(null)}>

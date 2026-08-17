@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   createCalendarEvent,
   deleteCalendarEvent,
+  listCalendarEventColors,
   listCalendarList,
   queryCalendarFreeBusy,
   updateCalendarEvent,
@@ -30,6 +31,45 @@ afterEach(() => {
 })
 
 describe('[COMP:tools/google-calendar] createCalendarEvent transport', () => {
+  it('sends named event labels with eventLabelVersion=1', async () => {
+    await createCalendarEvent('tok', {
+      summary: 'Client call',
+      start: '2026-08-15T09:00:00+08:00',
+      end: '2026-08-15T10:00:00+08:00',
+      eventLabelId: 'label-client',
+    })
+
+    const [url, init] = mockFetch.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe(
+      'https://www.googleapis.com/calendar/v3/calendars/primary/events?sendUpdates=all&eventLabelVersion=1',
+    )
+    expect(JSON.parse(init.body as string)).toMatchObject({ eventLabelId: 'label-client' })
+  })
+
+  it('keeps legacy colorId on the version-0 compatibility path', async () => {
+    await createCalendarEvent('tok', {
+      summary: 'Deadline',
+      start: '2026-08-15T09:00:00+08:00',
+      end: '2026-08-15T10:00:00+08:00',
+      colorId: '11',
+    })
+
+    const [url, init] = mockFetch.mock.calls[0] as [string, RequestInit]
+    expect(url).not.toContain('eventLabelVersion')
+    expect(JSON.parse(init.body as string)).toMatchObject({ colorId: '11' })
+  })
+
+  it('rejects simultaneous eventLabelId and colorId before transport', async () => {
+    await expect(createCalendarEvent('tok', {
+      summary: 'Ambiguous',
+      start: '2026-08-15T09:00:00+08:00',
+      end: '2026-08-15T10:00:00+08:00',
+      eventLabelId: 'label-client',
+      colorId: '11',
+    })).rejects.toThrow('not both')
+    expect(mockFetch).not.toHaveBeenCalled()
+  })
+
   it('posts recurrence lines and the IANA timezone on both series boundaries', async () => {
     await createCalendarEvent('tok', {
       summary: 'Running',
@@ -217,6 +257,36 @@ describe('[COMP:tools/google-calendar] createCalendarEvent transport', () => {
 })
 
 describe('[COMP:tools/google-calendar] calendar discovery and availability transport', () => {
+  it('lists calendar-specific event labels and the live legacy palette', async () => {
+    mockFetch
+      .mockResolvedValueOnce(ok({
+        labelProperties: {
+          eventLabels: [
+            { id: 'label-client', name: 'Client', backgroundColor: '#039be5' },
+            { id: 'incomplete', name: 'Incomplete' },
+          ],
+        },
+      }))
+      .mockResolvedValueOnce(ok({
+        event: {
+          9: { background: '#5484ed', foreground: '#ffffff' },
+          broken: { background: '#000000' },
+        },
+      }))
+
+    await expect(listCalendarEventColors('tok', 'team@example.com')).resolves.toEqual({
+      calendarId: 'team@example.com',
+      eventLabels: [{ id: 'label-client', name: 'Client', backgroundColor: '#039be5' }],
+      palette: [{ colorId: '9', background: '#5484ed', foreground: '#ffffff' }],
+    })
+    expect(String(mockFetch.mock.calls[0]?.[0])).toBe(
+      'https://www.googleapis.com/calendar/v3/calendars/team%40example.com',
+    )
+    expect(String(mockFetch.mock.calls[1]?.[0])).toBe(
+      'https://www.googleapis.com/calendar/v3/colors',
+    )
+  })
+
   it('paginates the user calendar list', async () => {
     mockFetch
       .mockResolvedValueOnce(ok({ items: [{ id: 'primary', summary: 'Main' }], nextPageToken: 'next' }))
@@ -274,6 +344,41 @@ describe('[COMP:tools/google-calendar] calendar discovery and availability trans
 })
 
 describe('[COMP:tools/google-calendar] updateCalendarEvent transport', () => {
+  it('updates a named event label with eventLabelVersion=1', async () => {
+    mockFetch
+      .mockResolvedValueOnce(ok({
+        id: 'evt-label',
+        summary: 'Client call',
+        start: { dateTime: '2026-08-15T09:00:00+08:00' },
+        end: { dateTime: '2026-08-15T10:00:00+08:00' },
+      }))
+      .mockResolvedValueOnce(ok({ id: 'evt-label', eventLabelId: 'label-client' }))
+
+    await updateCalendarEvent('tok', 'evt-label', { eventLabelId: 'label-client' })
+
+    const [url, init] = mockFetch.mock.calls[1] as [string, RequestInit]
+    expect(url).toContain('eventLabelVersion=1')
+    expect(JSON.parse(init.body as string)).toEqual({ eventLabelId: 'label-client' })
+  })
+
+  it('clears a named event label with eventLabelVersion=1', async () => {
+    mockFetch
+      .mockResolvedValueOnce(ok({
+        id: 'evt-label',
+        eventLabelId: 'label-client',
+        summary: 'Client call',
+        start: { dateTime: '2026-08-15T09:00:00+08:00' },
+        end: { dateTime: '2026-08-15T10:00:00+08:00' },
+      }))
+      .mockResolvedValueOnce(ok({ id: 'evt-label' }))
+
+    await updateCalendarEvent('tok', 'evt-label', { eventLabelId: '' })
+
+    const [url, init] = mockFetch.mock.calls[1] as [string, RequestInit]
+    expect(url).toContain('eventLabelVersion=1')
+    expect(JSON.parse(init.body as string)).toEqual({ eventLabelId: '' })
+  })
+
   it('converts an all-day event to timed boundaries from an RFC 3339 pair without requiring allDay=false', async () => {
     mockFetch
       .mockResolvedValueOnce(ok({
@@ -473,6 +578,7 @@ describe('[COMP:tools/google-calendar] updateCalendarEvent transport', () => {
         id: 'series-1',
         summary: 'Weekly',
         location: 'Old room',
+        eventLabelId: 'label-client',
         recurrence: [
           'RRULE:FREQ=WEEKLY;COUNT=5',
           'RDATE:20260810T100000Z,20260825T100000Z',
@@ -501,6 +607,7 @@ describe('[COMP:tools/google-calendar] updateCalendarEvent transport', () => {
     expect(JSON.parse((mockFetch.mock.calls[4]?.[1] as RequestInit).body as string)).toMatchObject({
       summary: 'Weekly',
       location: 'New room',
+      eventLabelId: 'label-client',
       start: { dateTime: '2026-08-18T10:00:00Z' },
       end: { dateTime: '2026-08-18T11:00:00Z' },
       recurrence: [
@@ -509,6 +616,7 @@ describe('[COMP:tools/google-calendar] updateCalendarEvent transport', () => {
         'EXDATE:20260825T100000Z',
       ],
     })
+    expect(String(mockFetch.mock.calls[4]?.[0])).toContain('eventLabelVersion=1')
   })
 })
 

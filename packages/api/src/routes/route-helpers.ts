@@ -232,7 +232,7 @@ export function isValidDateString(date: string): boolean {
  * hold is the same tool-awareness violation in the opposite direction.
  */
 const SEARCH_BEFORE_DENIAL =
-  'Before you tell the user a capability is unavailable, run `mcp_search` for it.'
+  'For an unlisted capability, run `mcp_search` before denying it.'
 
 /**
  * Deliberately "may be folded", not "is folded": the workflow path runs with
@@ -241,7 +241,7 @@ const SEARCH_BEFORE_DENIAL =
  * hidden" would be a falsehood on that path.
  */
 const FOLDED_SURFACE =
-  'Your visible tools are not the whole integration surface: connector tools may be folded behind `mcp_search` and not appear by name until you search for them.'
+  'Connector tools may be folded behind `mcp_search` and absent by name.'
 
 export function buildUnavailableCapabilitiesPrompt(
   capabilities: string[],
@@ -256,13 +256,13 @@ export function buildUnavailableCapabilitiesPrompt(
     return `\n\n# Connector tools\n\n${FOLDED_SURFACE} ${SEARCH_BEFORE_DENIAL}`
   }
 
-  const head = `\n\n# Unavailable capabilities\n\nThe following services are NOT available. Do not attempt to use them or search for them:\n${capabilities.map((c) => `- ${c}`).join('\n')}\n\nIf the user asks for something that requires one of the services listed above, say it is not connected and suggest enabling it in Settings (when an entry includes its own connect phrase, use that instead).`
+  const head = `\n\n# Unavailable capabilities\n\nThese capabilities are not available in this run. Do not call, search for, or simulate them:\n${capabilities.map((c) => `- ${c}`).join('\n')}\n\nUse another available tool when it serves the requested account and identity. Otherwise report the limitation plainly and use any remediation stated above, or point the user to Studio → Connectors.`
 
   const closedWorld = searchable
-    ? ` This list, your visible tools, and every tool reachable through \`mcp_search\` together are the complete integration surface. ${FOLDED_SURFACE} ${SEARCH_BEFORE_DENIAL} Only a service listed above, or one \`mcp_search\` cannot find, has no integration to enable: say so plainly then and offer the nearest supported alternative.`
-    : ` This list plus your tools is the complete integration surface: for a service in neither, Use Brian has no integration to enable. Say so plainly and offer the nearest supported alternative.`
+    ? ` ${FOLDED_SURFACE} ${SEARCH_BEFORE_DENIAL} A listed capability remains unavailable even if searched.`
+    : ` The list and visible tools are the complete integration surface. For any other service, say Use Brian has no integration and offer the nearest supported alternative.`
 
-  return `${head}${closedWorld} Never point the user to a Settings toggle or connector for a service that is not listed here.`
+  return `${head}${closedWorld} Do not suggest a connector setting for an unlisted service.`
 }
 
 /**
@@ -459,9 +459,17 @@ const SENSITIVITY_RANK: Record<'public' | 'internal' | 'confidential', number> =
  * `sensitivity_rank(S.sensitivity) <= sensitivity_rank(A.clearance)`
  * (the public(1) < internal(2) < confidential(3) ordering).
  *
- * Offering SCOPE is owned entirely by the `workspace_skill_enablement`
- * allowlist (rule 1, applied in `injectSkills` alongside this helper, with
- * the requiresConnectors + appType gating). Suggested skills get their
+ * Offering SCOPE for a workspace skill is GRANTED by the
+ * `workspace_skill_enablement` allowlist (rule 1, applied in `injectSkills`
+ * alongside this helper, with the requiresConnectors + appType gating) — but
+ * the allowlist is not the only input. `assistant_skill_settings` is keyed by
+ * SLUG, and `SkillContent.id` is the slug for workspace skills too, so a row
+ * there enables a workspace skill with no allowlist row (`enabledSlugs`, OR'd
+ * below) and vetoes one that has it (`disabledSlugs`, checked first,
+ * regardless of `source`). Do not read this comment as "the allowlist is the
+ * single source of truth" — it said exactly that until 2026-08-17 and misled
+ * two separate investigations. See skill-system.md → "How the two tables
+ * actually combine at runtime". Suggested skills get their
  * originating assistant's enablement row seeded at creation (mig 264), so
  * the proposer-first default lives in data the Access matrix shows and
  * edits — there is no longer an activation/originating override here.

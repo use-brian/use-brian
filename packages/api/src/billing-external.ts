@@ -40,7 +40,8 @@ export type RecordExternalCostParams = {
   userPlan?: string
   /**
    * Stamps the row so callee-lane external spend is separable from chat's in
-   * the cost dashboard. The chat lane leaves it unset, as it always has.
+   * the cost dashboard. Chat defaults to an explicit external-tool trigger so
+   * linked tool-cost rows cannot be mistaken for legacy main responses.
    */
   triggerKey?: string
   /** Channel recorded on the failure analytics event. Defaults to `'web'`. */
@@ -83,7 +84,8 @@ export async function recordExternalCostFromMeta(params: RecordExternalCostParam
       actualCostUsd,
       source: params.userPlan === 'free' ? 'free' : 'included',
       userMessageId: params.userMessageId ?? undefined,
-      ...(params.triggerKey ? { triggerKey: params.triggerKey } : {}),
+      triggerKey: params.triggerKey
+        ?? (params.toolMeta?.searchProvider ? 'web_search_external_tool' : 'external_tool'),
     })
   } catch (err) {
     console.error('External cost tracking failed:', err)

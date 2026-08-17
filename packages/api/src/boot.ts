@@ -36,7 +36,7 @@ import {
   distillConfigKey, DASHSCOPE_RENDER_WIDTH, DASHSCOPE_CHUNK_PAGES, PROVIDER_RENDER_WIDTH, PROVIDER_CHUNK_PAGES,
   type DocumentDistillPort, type DistillateCachePort,
   DASHSCOPE_INTL_BASE_URL, DASHSCOPE_INTL_LABEL, wrapProvider,
-  createBaseTools, LAYER_1_SYSTEM_PROMPT,
+  createBaseTools, createGoogleMapsTools, GOOGLE_MAPS_GROUNDING_MCP_URL, LAYER_1_SYSTEM_PROMPT,
   createWorkerManager, createWorkerTools,
   createSchedulingTools, createPollWorker,
   startJitteredInterval, stopJitteredInterval,
@@ -154,9 +154,19 @@ import { createWorkspaceChatHandoffStore } from './db/workspace-chat-handoff-sto
 import { authRoutes } from './routes/auth.js'
 import { devAuthRoutes, isLocalDevEnv } from './routes/dev-auth.js'
 import { localSessionRoutes, isOssEdition, isSelfHostedOssEnv } from './routes/local-session.js'
-import { contentPlanningRoutes } from './routes/content-planning.js'
+import {
+  contentPlanningRoutes,
+  type ContentPlanningRouteOptions,
+} from './routes/content-planning.js'
 import { contentPlanRoutes } from './routes/content-plan.js'
 import { contentIdeasRoutes } from './routes/content-ideas.js'
+import {
+  selfHostFeedCloudRoutes,
+  selfHostFeedManagedDistributionRoutes,
+  selfHostFeedOAuthRelayRoutes,
+  createSelfHostFeedCloudPublisher,
+} from './routes/self-host-feed-cloud.js'
+import { createSelfHostFeedCloudLinkStore } from './db/self-host-feed-cloud-link-store.js'
 import {
   injectContentPlanningTools,
   resolveContentPlanningPrompt,
@@ -285,7 +295,7 @@ import { chatArchiveMediaRoutes } from './chat-archive/media-routes.js'
 import { createChatArchiveMediaService, type ChatArchiveMediaService } from './chat-archive/media-service.js'
 import { createChatArchiveMediaWorker, type ChatArchiveMediaWorker } from './chat-archive/media-worker.js'
 import { createWorkspaceToolPolicyStore } from './db/workspace-tool-policy-store.js'
-import { buildOpenSyncCredentials } from './build-sync-credentials.js'
+import { createSyncCredentialProvider } from './knowledge/sync-credentials.js'
 import { createDbAssistantConnectorStore } from './db/assistant-connector-store.js'
 import { createDbAssistantConnectorGrantsStore } from './db/assistant-connector-grants-store.js'
 import { createDbSkillStore, createDbWorkspaceSkillStore, type WorkspaceSkill } from './db/skill-store.js'
@@ -311,6 +321,7 @@ import { chatLinkRoutes } from './routes/chat-links.js'
 import { createChatLinkStore } from './db/chat-link-store.js'
 import { channelsRoutes } from './routes/channels.js'
 import { whatsappByonRoutes } from './routes/whatsapp-byon.js'
+import { whatsappCloudRoutes } from './routes/whatsapp-cloud.js'
 import { whatsappIngestAdminRoutes } from './routes/whatsapp-byon-admin.js'
 import { telegramByoRoutes } from './routes/telegram-byo.js'
 import { slackRoutes } from './routes/slack.js'
@@ -369,6 +380,8 @@ import { createGcsFilesClient, type GcsFilesClient } from './files/gcs-client.js
 import { createLocalFilesClient, resolveLocalFilesBaseDir } from './files/local-files-client.js'
 import { localFilesTransferRoutes } from './routes/local-files-transfer.js'
 import { openRecordingsRoutes } from './routes/recordings.js'
+import { recordingLiveRoutes } from './routes/recording-live.js'
+import { createDocGateway } from './doc/doc-gateway.js'
 import { createFilesApi, createSingletonFilesClientResolver, type FilesClientResolver } from './files/files-api.js'
 import { createChunkedFileUploadService, type ChunkedFileUploadService } from './files/chunked-upload.js'
 import { createSearchFileContentTool } from './files/file-artifact-tools.js'
@@ -397,6 +410,7 @@ import {
   pauseWorkflowSystem,
 } from './db/workflow-store.js'
 import { buildWorkflowToolRegistry } from './workflow/mcp-bridge.js'
+import { callRemoteMcpTool } from './mcp/client.js'
 import { createPendingApprovalsStore } from './db/pending-approvals-store.js'
 import {
   makeRequestApproval,
@@ -442,13 +456,16 @@ import { createOfficeImportWorker } from './office/import-worker.js'
 import { createOfficeTemplateCompileWorker } from './office/template-compile-worker.js'
 import { createOfficeGenerationWorker } from './office/generation-worker.js'
 import { createOfficeRevisionWorker } from './office/revision-worker.js'
-import { generateDocumentFromTemplate, reviseDocumentTargets } from './office/document-generation.js'
-import { generatePresentationFromTemplate, materializeOfficeTemplateBundleForGeneration, revisePresentationTargets } from './office/presentation-generation.js'
-import { generateSpreadsheetFromTemplate, reviseSpreadsheetTargets } from './office/spreadsheet-generation.js'
-import { replaceLiveOfficeSnapshot } from './office/live-sync.js'
+import { generateDocumentFromTemplate } from './office/document-generation.js'
+import { generatePresentationFromTemplate, materializeOfficeTemplateBundleForGeneration } from './office/presentation-generation.js'
+import { generateSpreadsheetFromTemplate } from './office/spreadsheet-generation.js'
+import { generateAssistantOfficeCommands } from './office/command-revision.js'
+import { runOfficeEdit } from '@use-brian/core'
+import { applyLiveOfficeSuggestion, replaceLiveOfficeSnapshot } from './office/live-sync.js'
 import { officeReleaseRoutes } from './routes/office-releases.js'
 import { officeLifecycleRoutes } from './routes/office-lifecycle.js'
 import { officeOfflineRoutes } from './routes/office-offline.js'
+import { officeResourceRoutes } from './routes/office-resources.js'
 import { internalOfficeCheckpointRoutes } from './routes/internal-office-checkpoint.js'
 import { assertOfficeArtifactSnapshot, encodeOfficeState, officeStateVector, snapshotToYDoc, type OfficeArtifactSnapshot } from '@use-brian/office-model'
 import { publicShareRoutes } from './routes/public-share.js'
@@ -532,6 +549,8 @@ import {
 } from './db/channel-integrations.js'
 import { createDbApiKeyStore } from './db/api-key-store.js'
 import { publicApiRoutes } from './routes/public-api.js'
+import { apiKeyRoutes } from './routes/api-keys.js'
+import { generateSynthesisRoutes, type GenerateSynthesisBilling } from './routes/generate-synthesis.js'
 import { assistantMcpRoutes } from './routes/assistant-mcp.js'
 import { createControlPlaneReader } from './agent-surface/control-plane-reader.js'
 import { buildAgentToolset } from './agent-surface/toolset.js'
@@ -570,7 +589,7 @@ import {
   supportDiagnosticRoutes,
 } from './support-diagnostics/index.js'
 
-import type { ChatEpisodeIngestor, BrainEpisodeIngestor } from './ingest-port.js'
+import type { ChatEpisodeIngestor, BrainEpisodeIngestor, ChatEpisodeInput } from './ingest-port.js'
 import type { BuildConnectorActionAudit } from './connector-action-port.js'
 import type { InjectExtraTools, ResolveAppSoul } from './tool-injection-port.js'
 import type { CreditBudgetGate } from './routes/route-helpers.js'
@@ -605,6 +624,12 @@ export interface OpenApiEnv {
   APP_URL: string
   AUTHED_APP_URL?: string
   FEED_URL?: string
+  /**
+   * Optional hosted Use Brian origin for paid OSS Feed capabilities. The
+   * local API remains authoritative for planning and sends only scoped Feed
+   * requests through the Cloud Link.
+   */
+  MANAGED_FEED_CLOUD_URL?: string
   /** OSS-only, local support-capsule capture. Hosted compositions leave unset. */
   SUPPORT_DIAGNOSTICS_ENABLED?: boolean
   /** Optional Cloud Run injected port; falls back to API_URL port / 4000. */
@@ -637,6 +662,11 @@ export interface OpenApiEnv {
   DASHSCOPE_LONG_MODEL?: string
   // Optional connector / channel config (closed-secret gated; open passes none).
   GOOGLE_CLIENT_ID?: string
+  /**
+   * Dedicated server-only key for Google Maps Grounding Lite MCP. When absent,
+   * the three Maps tools do not register. Never reuse the browser Picker key.
+   */
+  GOOGLE_MAPS_SERVER_API_KEY?: string
   CHANNEL_CREDENTIAL_KEY?: string
   TELEGRAM_BOT_TOKEN?: string
   GMAIL_SMTP_USER?: string
@@ -709,7 +739,8 @@ export interface OpenApiEnv {
   // platform-subdomains.md). Customer subdomains → CUSTOMER_SUBDOMAIN_APEX;
   // first-party workspaces (FIRST_PARTY_SUBDOMAIN_WORKSPACE_IDS, comma list) →
   // PLATFORM_SUBDOMAIN_APEX. Either apex unset = that half dark.
-  // PLATFORM_SUBDOMAIN_RESERVED adds reserved labels (comma list).
+  // PLATFORM_SUBDOMAIN_RESERVED adds reserved labels (comma list). Hosted also
+  // reuses the product apex + allowlist to reserve AgentMail domains.
   CUSTOMER_SUBDOMAIN_APEX?: string
   PLATFORM_SUBDOMAIN_APEX?: string
   FIRST_PARTY_SUBDOMAIN_WORKSPACE_IDS?: string
@@ -729,6 +760,8 @@ export interface OpenApiEnv {
  */
 export interface EpisodeIngestorDeps {
   provider: LLMProvider
+  /** Resolve the workspace-owned Standard lane at episode execution time. */
+  resolveWorkspaceLlm?: (workspaceId: string) => Promise<ChatEpisodeInput['llm'] | null>
   /**
    * The background lane's servable model id, resolved once at boot against the
    * configured providers. Absent = the caller had no boot context (tests, the
@@ -779,6 +812,11 @@ export interface OpenApiPorts {
   ingestCharge?: (episode: { id: string; workspaceId: string; sourceKind: string; createdByUserId: string }) => Promise<void>
   /** Hosted recording-duration credit quote; absent in OSS/self-hosted. */
   recordingSurchargeCredits?: (durationSeconds: number) => number
+  /**
+   * Hosted standalone Generate-from-Brain pricing + success charge. The open
+   * route remains fully usable without it and reports zero credits in OSS.
+   */
+  generateBilling?: GenerateSynthesisBilling
   /**
    * Metered model lane billing (model-registry.md L8/L15) — the closed
    * `5 + ceil(cost/$0.040)` estimate / spend-cap / charge seams. Default
@@ -863,20 +901,6 @@ export interface OpenApiPorts {
   pendingClassificationStore?: PendingClassificationStore
   /** Google-Drive knowledge-file store; absent → gdrive files unavailable to chat/workflow. */
   gdriveFilesStore?: GDriveFilesStore
-  /**
-   * Builds the closed GitHub-PAT resolver for the knowledge sync worker over
-   * boot's connector stores (the same stores the knowledge route resolves edit
-   * proposals through). Open default: unset → the worker ticks but every GitHub
-   * source fails resolution with a clear "not configured" error rather than
-   * syncing.
-   */
-  buildSyncCredentials?: (deps: {
-    connectorInstanceStore: ReturnType<typeof createConnectorInstanceStore>
-    connectorGrantStore: Awaited<
-      ReturnType<typeof import('./db/connector-grant-store.js').createConnectorGrantStore>
-    >
-  }) => SyncCredentials
-
   // ── Closed first-party tool factories — open default: omitted ──
   /** Capability-gated triage/sentiment/analytics-query tools (platform-only). */
   buildClosedTools?: () => Tool[]
@@ -1008,6 +1032,12 @@ export interface ChannelHostHooks {
 export interface BootContext {
   app: Express
   provider: LLMProvider
+  /** Boot-resolved servable model for background synthesis lanes. */
+  backgroundModel: string
+  /** Collaborative page bridge shared by server-side page writers. */
+  docGateway: ReturnType<typeof createDocGateway>
+  /** Version-CAS fallback when the collaborative gateway is unavailable. */
+  docPageStore: ReturnType<typeof createDbDocPageStore>
   allTools: Map<string, Tool>
   analytics: AnalyticsLogger
   env: OpenApiEnv
@@ -1607,6 +1637,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     backend: mediaBackend,
     model: env.VOICE_TRANSCRIPTION_MODEL,
   }
+  const docGateway = createDocGateway()
+  const docPageStore = createDbDocPageStore()
   const jobStore = createDbJobStore()
   const sessionResumeStore = createDbSessionResumeStore()
   const workerRunsStore = createDbWorkerRunsStore()
@@ -1673,7 +1705,36 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const customLlmEndpointStore = createDbWorkspaceCustomLlmEndpointStore(llmProviderEncryptionKey ?? undefined)
   const resolveWorkspaceCustomLlm = createWorkspaceCustomLlmResolver(customLlmEndpointStore, {
     networkPolicy: customLlmNetworkPolicy,
+    managedProvider: provider,
   })
+  const resolveBackgroundRuntime = async (workspaceId: string | null | undefined) =>
+    workspaceId
+      ? resolveWorkspaceCustomLlm({
+          workspaceId,
+          requestedTier: 'standard',
+          allowDefault: true,
+          allowAnyDefault: true,
+          // Exact managed routes are a user-facing tier choice. Preserve the
+          // existing internal/background lane; custom BYO defaults keep their
+          // historical behavior here.
+          allowManagedRoutes: false,
+        })
+      : null
+  const workspaceForAssistant = async (assistantId: string): Promise<string | null> => {
+    if (!assistantId) return null
+    const result = await query<{ workspaceId: string }>(
+      `SELECT workspace_id AS "workspaceId" FROM assistants WHERE id = $1`,
+      [assistantId],
+    )
+    return result.rows[0]?.workspaceId ?? null
+  }
+  const ownerForWorkspace = async (workspaceId: string): Promise<string | null> => {
+    const result = await query<{ ownerUserId: string }>(
+      `SELECT owner_user_id AS "ownerUserId" FROM workspaces WHERE id = $1`,
+      [workspaceId],
+    )
+    return result.rows[0]?.ownerUserId ?? null
+  }
   const compartmentStore = createDbCompartmentStore()
   const oauthClientStore = createDbOAuthClientStore()
   const oauthAuthorizationStore = createDbOAuthAuthorizationStore()
@@ -1767,16 +1828,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const modelDefaultsStore = createWorkspaceModelDefaultsStore()
 
   // ── KB sync-credential resolver ──
-  // Resolves the GitHub PAT a synced knowledge source operates through, by
-  // `(workspaceId, connectorInstanceId)`. The platform passes a closed factory
-  // via `ports.buildSyncCredentials`; the open build falls back to a resolver
-  // over the same connector stores (available in OSS since migration
-  // 280_oss_connectors). Both the edit-proposal routes and the sync worker use
-  // this single instance. See build-sync-credentials.ts.
-  const syncCredentials: SyncCredentials = ports.buildSyncCredentials?.({
+  // One open resolver serves the sync worker, knowledge routes, Home apps, and
+  // repo writer in both editions. Hosted supplies no override or duplicate.
+  const syncCredentials: SyncCredentials = createSyncCredentialProvider(
     connectorInstanceStore,
     connectorGrantStore,
-  }) ?? buildOpenSyncCredentials({ connectorInstanceStore, connectorGrantStore })
+  )
 
   const workspaceDirectoryStore: WorkspaceDirectoryStore = {
     async listMembers(userId, workspaceId) {
@@ -1851,6 +1908,26 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   function buildAllTools(): Map<string, Tool> {
     const tools = createBaseTools()
 
+    // Google Maps is an env-gated first-party read capability, not a personal
+    // Google connector. Core owns the typed tool contract; this API seam owns
+    // the MCP SDK and the secret-bearing transport. Interactive turns fold
+    // these tools into mcp_search later; workflows keep their canonical names.
+    // See docs/architecture/integrations/google-maps.md.
+    const googleMapsApiKey = env.GOOGLE_MAPS_SERVER_API_KEY?.trim()
+    if (googleMapsApiKey) {
+      for (const tool of createGoogleMapsTools({
+        callTool: (providerTool, input) =>
+          callRemoteMcpTool(
+            GOOGLE_MAPS_GROUNDING_MCP_URL,
+            providerTool,
+            input,
+            { 'X-Goog-Api-Key': googleMapsApiKey },
+          ),
+      })) {
+        tools.set(tool.name, tool)
+      }
+    }
+
     workerManager = createWorkerManager({
       provider,
       model: 'gemini-flash',
@@ -1868,13 +1945,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
                 assistantId: u.assistantId,
                 sessionId: u.sessionId,
                 model: u.model,
+                modelTier: u.modelTier,
                 inputTokens: u.usage.inputTokens,
                 outputTokens: u.usage.outputTokens,
                 cacheReadTokens: u.usage.cacheReadTokens,
                 cacheWriteTokens: u.usage.cacheWriteTokens,
-                actualCostUsd: calculateCost(u.model, u.usage),
+                actualCostUsd: u.providerKeySource === 'user' ? 0 : calculateCost(u.model, u.usage),
                 source: 'included',
                 triggerKey: 'worker_run',
+                providerKeySource: u.providerKeySource,
               })
               .catch((err) => console.error('[workers] usage tracking failed:', err))
           }
@@ -2086,6 +2165,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     resolveAccess: resolveOfficeAccess,
     createJob: officeGenerationStore.create,
     latestJob: officeGenerationStore.latestForArtifact,
+    getSnapshot: officeLiveStore.get,
     wakeGeneration(userId) { wakeOfficeGeneration?.(userId) },
   })
   // Effective allow/ask/block for an Office tool — the same L1 (app-level
@@ -2130,6 +2210,19 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   //    (open default: no-op chat ingest, undefined brain ingest). ──
   const builtIngestors = ports.buildEpisodeIngestors?.({
     provider, crmStore, entitiesStore, entityLinksStore, memoryStore, taskStore, episodesStore, analytics,
+    resolveWorkspaceLlm: async (workspaceId) => {
+      const runtime = await resolveBackgroundRuntime(workspaceId)
+      return runtime
+        ? {
+            provider: runtime.provider,
+            model: runtime.selector,
+            modelTier: 'standard',
+            providerKeySource: 'user' as const,
+            inputTokenLimit: runtime.inputTokenLimit,
+            maxTokens: runtime.maxTokens,
+          }
+        : null
+    },
     usageStore,
     backgroundModel,
     extractionModel,
@@ -2268,6 +2361,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     connectorGrantStore,
     connectorInstanceStore,
     workspaceToolPolicyStore,
+    assistantConnectorGrantsStore,
     knowledgeStore,
     gdriveFilesStore,
     capabilityStore,
@@ -2312,8 +2406,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const consultTransport = createInProcessTransport({
     runConsult: async ({ request }) => {
       const text = await calleeExecutor({
+        workspaceId: request.target.workspaceId,
         callerAssistantId: request.caller.assistantId,
         calleeAssistantId: request.target.assistantId,
+        expectedWorkspaceId: request.target.workspaceId,
         question: request.message.parts
           .filter((p): p is { kind: 'text'; text: string } => p.kind === 'text')
           .map((p) => p.text)
@@ -2423,6 +2519,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         // Evaluated per-run (this closure fires post-boot), so the late
         // `filesApi` initialization below is already done.
         filesApi: filesApi ?? undefined,
+        engineHooks: ports.engineHooks,
+        assistantConnectorGrantsStore,
       },
       { workspaceId, assistantId, userId },
     ),
@@ -2797,6 +2895,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
     listTriggerJobs: (workflowId) => jobStore.listFiringJobsForWorkflowSystem(workflowId),
     isKnownTool: (name) => allTools.has(name),
+    resolveKnownWorkflowTools: async ({ userId, workspaceId, assistantId, toolNames }) => {
+      const registry = await workflowExecutorDeps.buildToolRegistry({
+        userId,
+        workspaceId,
+        assistantId,
+      })
+      return toolNames.filter((toolName) => registry.has(toolName))
+    },
     jobStore,
     resolvePrimary: resolvePrimaryAssistantForWorkspace,
     resolveDeliveryTarget: createDeliveryTargetResolver(integrationStore ?? undefined),
@@ -3782,6 +3888,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     resolvePolicy: resolveComputerToolPolicy,
     unattendedEnabled: unattendedComputerUse,
     getWorkspacePlan,
+    // Hosted custom fetches enforce public-only DNS/IP checks per request.
+    // E2B cannot reuse that host-side transport, so do not bypass it by
+    // handing a hosted endpoint directly to the sandbox process.
+    resolveLlm: customLlmNetworkPolicy === 'private-network'
+      ? async (workspaceId) => (await resolveBackgroundRuntime(workspaceId))?.browserUse ?? null
+      : undefined,
     onEvent: (evt, ctx) => {
       analytics.logEvent({
         userId: ctx.userId,
@@ -3807,6 +3919,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     connectorInstanceStore,
     connectorGrantStore,
     workspaceSkillStore,
+    channelIntegrationStore: integrationStore ?? undefined,
   })
   const resolveAgentApprover = async (ctx: { channelType: string; channelId: string; userId: string }) => {
     try {
@@ -3969,6 +4082,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     capabilityStore,
     agentTools: { reads: agentToolset.reads, writes: agentToolset.writes },
   }))
+
+  app.use(
+    '/api/assistants/:assistantId/integrations/api-keys',
+    requireAuth(env.JWT_SECRET),
+    apiKeyRoutes(apiKeyStore),
+  )
 
   // ── Shopify store access, shared by BOTH surfaces that have it ──────────
   //
@@ -4169,6 +4288,40 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     )
   }
 
+  // A self-hosted deployment may opt into the hosted provider plane through
+  // a paid Cloud Link. Mount its exact managed routes before the open planning
+  // routers so connected profiles/settings resolve remotely while drafts,
+  // plans, ideas, and approvals keep falling through to local storage.
+  let feedCloudPublisher: ContentPlanningRouteOptions['publishApproved']
+  if (isOssEdition() && env.MANAGED_FEED_CLOUD_URL && credKey) {
+    const feedCloudStore = createSelfHostFeedCloudLinkStore(credKey)
+    feedCloudPublisher = createSelfHostFeedCloudPublisher({ store: feedCloudStore })
+    app.use(
+      '/api/self-host-feed',
+      requireAuth(env.JWT_SECRET),
+      selfHostFeedCloudRoutes({
+        cloudBaseUrl: env.MANAGED_FEED_CLOUD_URL,
+        localAppUrl: env.APP_URL,
+        store: feedCloudStore,
+      }),
+    )
+    app.use(
+      '/api/threads-oauth',
+      requireAuth(env.JWT_SECRET),
+      selfHostFeedOAuthRelayRoutes('threads', { store: feedCloudStore }),
+    )
+    app.use(
+      '/api/twitter-oauth',
+      requireAuth(env.JWT_SECRET),
+      selfHostFeedOAuthRelayRoutes('twitter', { store: feedCloudStore }),
+    )
+    app.use(
+      '/api/distribution',
+      requireAuth(env.JWT_SECRET),
+      selfHostFeedManagedDistributionRoutes({ store: feedCloudStore }),
+    )
+  }
+
   // Marketing plan (slots + month brief) is open in BOTH editions: it needs
   // no credential and no distribution profile, so it must not join the
   // `/api/distribution` fork that already 404s edition-specific routes.
@@ -4187,7 +4340,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     app.use(
       '/api/distribution',
       requireAuth(env.JWT_SECRET),
-      contentPlanningRoutes(),
+      contentPlanningRoutes({ publishApproved: feedCloudPublisher }),
     )
   }
 
@@ -4285,6 +4438,16 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       hasProcessed: hasCompletedRecordingJob,
       resolvePageWorkspace: async (userId, pageId) =>
         (await savedViewStore.getById(userId, pageId))?.workspaceId ?? null,
+    }))
+    app.use('/api/recordings', requireAuth(env.JWT_SECRET), recordingLiveRoutes({
+      getRole: (userId, workspaceId) => workspaceStore.getRole(userId, workspaceId),
+      savedViewStore,
+      docGateway,
+      docPageStore,
+      provider,
+      backgroundModel,
+      voiceTranscription,
+      usageStore,
     }))
   }
 
@@ -4454,10 +4617,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     connectorInstanceStore,
     connectorGrantStore,
     mcpSettingsStore,
+    workspaceToolPolicyStore,
+    workspaceStore,
     registry: connectorRegistry,
     jobStore,
     skillStore,
     communitySkills: communitySkillRegistry,
+    workspaceSkillStore,
+    workspaceSkillEnablementStore,
     capabilityStore,
     assistantConnectorGrantsStore,
   }))
@@ -4911,6 +5078,22 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       : undefined,
   }))
 
+  // Standalone Generate from Brain is open in both editions. Hosted injects
+  // quote/gate/charge billing policy; OSS confirms the long-lived run but is
+  // unmetered because the operator pays the configured model provider directly.
+  app.use(
+    '/api/workspaces/:workspaceId/blueprints',
+    requireAuth(env.JWT_SECRET),
+    generateSynthesisRoutes({
+      getRole: (userId, workspaceId) => workspaceStore.getRole(userId, workspaceId),
+      generateSynthesize,
+      resolvePrimaryAssistantForWorkspace,
+      pageTemplateStore,
+      checkCreditBudget: ports.generateBilling ? ports.checkCreditBudget : undefined,
+      billing: ports.generateBilling,
+    }),
+  )
+
   // Teamspaces (migration 313) — Notion-style page containers above the doc
   // page tree. Visibility rides RLS; sensitivity gates live in the routes.
   // See docs/architecture/features/teamspaces.md.
@@ -4958,6 +5141,18 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       getInboxRetentionDays: getWorkspaceInboxRetentionDays,
     }),
   )
+  const readOfficeVersionSnapshot = async (userId: string, artifactId: string, versionId: string) => {
+    if (!filesApi) return null
+    const source = await officeArtifactStore.getVersionSource(userId, artifactId, versionId)
+    if (!source) return null
+    const read = await filesApi.readBytes({ workspaceId: source.workspaceId, userId, assistantKind: 'standard', clearance: 'confidential' }, source.snapshotFileId)
+    if (!read.ok) throw new Error(`Office version snapshot unavailable: ${read.error.kind}`)
+    const actualHash = createHash('sha256').update(read.value.bytes).digest('hex')
+    if (actualHash !== source.snapshotHash) throw new Error('Office version snapshot hash mismatch')
+    const snapshot = assertOfficeArtifactSnapshot(JSON.parse(new TextDecoder().decode(read.value.bytes)))
+    if (snapshot.artifactId !== artifactId) throw new Error('Office version snapshot artifact mismatch')
+    return { snapshot, source }
+  }
   app.use('/api/office', requireAuth(env.JWT_SECRET), officeArtifactRoutes({
     service: officeService,
     generationAvailable: officeGenerationAvailable,
@@ -4967,25 +5162,68 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       return visible.filter((artifact): artifact is NonNullable<typeof artifact> => artifact !== null)
     },
     async restoreVersion(params) {
-      if (!filesApi) return null
-      const source = await officeArtifactStore.getVersionSource(params.userId, params.artifactId, params.targetVersionId)
-      if (!source) return null
-      const read = await filesApi.readBytes({ workspaceId: source.workspaceId, userId: params.userId, assistantKind: 'standard', clearance: 'confidential' }, source.snapshotFileId)
-      if (!read.ok) throw new Error(`Office restore snapshot unavailable: ${read.error.kind}`)
-      const actualHash = createHash('sha256').update(read.value.bytes).digest('hex')
-      if (actualHash !== source.snapshotHash) throw new Error('Office restore snapshot hash mismatch')
-      const snapshot = assertOfficeArtifactSnapshot(JSON.parse(new TextDecoder().decode(read.value.bytes)))
-      if (snapshot.artifactId !== params.artifactId) throw new Error('Office restore snapshot artifact mismatch')
-      const doc = snapshotToYDoc(snapshot)
-      return officeArtifactStore.restoreVersion({
+      const loaded = await readOfficeVersionSnapshot(params.userId, params.artifactId, params.targetVersionId)
+      if (!loaded) return null
+      const doc = snapshotToYDoc(loaded.snapshot)
+      const restored = await officeArtifactStore.restoreVersion({
         ...params,
         liveUpdate: encodeOfficeState(doc),
         liveStateVector: officeStateVector(doc),
-        liveCanonicalHash: source.snapshotHash,
+        liveCanonicalHash: loaded.source.snapshotHash,
       })
+      if (restored) await replaceLiveOfficeSnapshot(loaded.snapshot)
+      return restored
     },
     getArtifact: officeArtifactStore.get,
+    resolveAccess: resolveOfficeAccess,
     listVersions: officeArtifactStore.listVersions,
+    async previewVersion({ userId, artifactId, versionId }) {
+      return (await readOfficeVersionSnapshot(userId, artifactId, versionId))?.snapshot ?? null
+    },
+    nameVersion: officeArtifactStore.nameVersion,
+    async copyVersion({ userId, artifactId, versionId, title }) {
+      if (!filesApi) return null
+      const [artifact, loaded] = await Promise.all([
+        officeArtifactStore.get(userId, artifactId),
+        readOfficeVersionSnapshot(userId, artifactId, versionId),
+      ])
+      if (!artifact || !loaded) return null
+      const shell = await officeArtifactStore.createShell({ userId, workspaceId: artifact.workspaceId, family: artifact.family, title, templateVersionId: artifact.templateVersionId, capabilityVersion: artifact.capabilityVersion, sensitivity: artifact.sensitivity })
+      const snapshot = deriveOfficeSnapshot({ source: loaded.snapshot, artifactId: shell.id, title })
+      const bytes = new TextEncoder().encode(JSON.stringify(snapshot))
+      const hash = createHash('sha256').update(bytes).digest('hex')
+      const saved = await filesApi.writeBytes({ workspaceId: shell.workspaceId, userId, assistantKind: 'standard', clearance: 'confidential' }, { path: `/office/artifacts/${shell.id}/versions/1-${hash}.json`, bytes, mime: 'application/json', sensitivity: shell.sensitivity })
+      if (!saved.ok) throw new Error(`Office version copy save failed: ${saved.error.kind}`)
+      const doc = snapshotToYDoc(snapshot)
+      const version = await officeArtifactStore.commitVersion({ userId, artifactId: shell.id, expectedVersion: 0, snapshotFileId: saved.value.id, snapshotHash: hash, operationClock: officeStateVector(doc), schemaVersion: snapshot.schemaVersion, capabilityVersion: snapshot.capabilityVersion, origin: 'manual', authorType: 'user', authorUserId: userId, summary: `Copied from version ${versionId}`, checkpointKind: 'named' })
+      if (!version) throw new Error('Office version copy conflict')
+      await Promise.all([
+        officeLiveStore.initialize({ userId, artifactId: shell.id, snapshot }),
+        officeArtifactStore.addSource({ userId, artifactId: shell.id, artifactVersionId: version.id, workspaceId: shell.workspaceId, sourceArtifactId: artifactId, sourceVersion: versionId, sensitivity: artifact.sensitivity }),
+      ])
+      return { artifactId: shell.id, version: version.version }
+    },
+    async listSharing(userId, artifactId) {
+      const artifact = await officeArtifactStore.get(userId, artifactId)
+      if (!artifact) return null
+      const [grants, members] = await Promise.all([officeArtifactStore.listGrants(userId, artifactId), workspaceStore.listMembers(userId, artifact.workspaceId)])
+      return { defaultWorkspaceRole: artifact.defaultWorkspaceRole, grants, members: members.map(({ userId: memberUserId, userName, email }) => ({ userId: memberUserId, userName, email, isOwner: artifact.ownerUserId === memberUserId })) }
+    },
+    async setGrant({ userId, artifactId, targetUserId, role, reason }) {
+      const artifact = await officeArtifactStore.get(userId, artifactId)
+      if (!artifact) return false
+      if (artifact.ownerUserId === targetUserId) return false
+      const members = await workspaceStore.listMembers(userId, artifact.workspaceId)
+      if (!members.some((member) => member.userId === targetUserId)) return false
+      await officeArtifactStore.setGrant({ userId, artifactId, workspaceId: artifact.workspaceId, targetUserId, role, reason })
+      return true
+    },
+    async revokeGrant({ userId, artifactId, targetUserId }) {
+      const artifact = await officeArtifactStore.get(userId, artifactId)
+      if (!artifact || artifact.ownerUserId === targetUserId) return false
+      return officeArtifactStore.revokeGrant({ userId, artifactId, targetUserId })
+    },
+    setDefaultWorkspaceRole: officeArtifactStore.setDefaultWorkspaceRole,
     async canRestoreVersion(userId, artifactId) {
       return (await resolveOfficeAccess(userId, artifactId))?.canEdit ?? false
     },
@@ -5223,14 +5461,55 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const officeRevisionWorker = filesApi ? createOfficeRevisionWorker({
     claim: officeGenerationStore.claim,
     getSnapshot: officeLiveStore.get,
-    async revise({ snapshot, targetIds, instruction, job }) {
+    async revise({ snapshot, targetIds, instruction, currentVersion, versionDrifted, job }) {
       const brandVoice = await resolveBrandVoice(job.initiatedByUserId, job.workspaceId)
-      if (snapshot.family === 'document') return reviseDocumentTargets({ provider, model: backgroundModel, snapshot, targetIds, instruction, brandVoice })
-      if (snapshot.family === 'presentation') return revisePresentationTargets({ provider, model: backgroundModel, snapshot, targetIds, instruction, brandVoice })
-      return reviseSpreadsheetTargets({ provider, model: backgroundModel, snapshot, targetIds, instruction, brandVoice })
+      const role = (job.authorityProjection as { role?: unknown }).role === 'comment' ? 'comment' as const : 'edit' as const
+      const assistantId = job.assistantId ?? APP_LEVEL_ASSISTANT_ID
+      return runOfficeEdit({
+        artifactId: job.artifactId,
+        assistantId,
+        baseVersion: currentVersion,
+        currentVersion,
+        role,
+        instruction,
+        targetIds,
+        changedObjectIdsSinceBase: versionDrifted ? targetIds : [],
+        threadExcerpt: [],
+        templateConstraints: [],
+        evidencePacket: [],
+        snapshot,
+      }, ({ instruction: nextInstruction, targetIds: nextTargetIds, snapshot: nextSnapshot }) => generateAssistantOfficeCommands({
+        provider,
+        model: backgroundModel,
+        snapshot: nextSnapshot,
+        baseVersion: currentVersion,
+        assistantId,
+        targetIds: nextTargetIds,
+        instruction: nextInstruction,
+        brandVoice,
+      }))
     },
     async commit({ job, snapshot, expectedVersion }) {
       return (await commitGeneratedOfficeSnapshot({ job, snapshot, expectedVersion, kind: 'revision' })).version
+    },
+    async propose({ job, baseVersion, commands, affectedObjectIds }) {
+      const head = await officeArtifactStore.getHeadVersion(job.initiatedByUserId, job.artifactId)
+      if (!head || head.version !== baseVersion) throw new Error('Office revision proposal version conflict')
+      const commandBatch = commands.length === 1 ? commands[0]! : {
+        commandId: randomUUID(), artifactId: job.artifactId, baseVersion,
+        actor: { type: 'assistant' as const, id: job.assistantId ?? APP_LEVEL_ASSISTANT_ID }, origin: 'ai' as const,
+        kind: 'batch' as const, commands,
+      }
+      await officeCommentStore.createSuggestion({
+        userId: job.initiatedByUserId,
+        workspaceId: job.workspaceId,
+        artifactId: job.artifactId,
+        baseVersionId: head.id,
+        proposedByType: 'assistant',
+        proposedByAssistantId: job.assistantId ?? undefined,
+        commandBatch,
+        affectedObjectIds,
+      })
     },
     appendEvent: officeGenerationStore.appendEvent,
     finish: officeGenerationStore.finish,
@@ -5274,11 +5553,23 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     getSnapshot: officeLiveStore.get,
     appendCommand: officeLiveStore.appendCommand,
     listThreads: officeCommentStore.listThreads,
+    getThreadContext: officeCommentStore.getThreadContext,
+    getMessageContext: officeCommentStore.getMessageContext,
     createThread: officeCommentStore.createThread,
     reply: officeCommentStore.reply,
     resolve: officeCommentStore.resolve,
+    updateThread: officeCommentStore.updateThread,
+    react: officeCommentStore.react,
+    detachMissingTargets: officeCommentStore.detachMissingTargets,
+    listSuggestions: officeCommentStore.listSuggestions,
+    getSuggestion: officeCommentStore.getSuggestion,
     createSuggestion: officeCommentStore.createSuggestion,
     decideSuggestion: officeCommentStore.decideSuggestion,
+    async applySuggestion({ artifactId, suggestionId, command }) {
+      const result = await applyLiveOfficeSuggestion(artifactId, suggestionId, command)
+      if (result === 'disabled') throw new Error('Office suggestion application requires doc-sync')
+      return result
+    },
     service: officeService,
   }))
   app.use('/api/office', requireAuth(env.JWT_SECRET), officeImportRoutes({
@@ -5346,6 +5637,48 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     const read = await filesApi.readBytes({ workspaceId, userId, assistantKind: 'standard', clearance }, resource.fileId)
     return read.ok ? { bytes: read.value.bytes, mime: resource.mime, hash: resource.hash } : null
   }
+  if (filesApi) app.use('/api/office', requireAuth(env.JWT_SECRET), officeResourceRoutes({
+    async load(userId, artifactId) {
+      const [artifact, access, live] = await Promise.all([
+        officeArtifactStore.get(userId, artifactId),
+        resolveOfficeAccess(userId, artifactId),
+        officeLiveStore.get(userId, artifactId),
+      ])
+      return artifact && access && live ? { artifact, access, snapshot: live.snapshot } : null
+    },
+    async readUpload(userId, workspaceId, fileId) {
+      const membership = await getWorkspaceMembershipWithClearanceSystem(userId, workspaceId)
+      if (!membership) return null
+      const read = await filesApi!.readBytes({ workspaceId, userId, assistantKind: 'standard', clearance: membership.clearance }, fileId)
+      return read.ok && read.value.file.workspaceId === workspaceId ? { bytes: read.value.bytes, sensitivity: read.value.file.sensitivity } : null
+    },
+    async persistImage({ userId, workspaceId, sensitivity, image }) {
+      const path = `/office/resources/${image.hash}`
+      const membership = await getWorkspaceMembershipWithClearanceSystem(userId, workspaceId)
+      if (!membership) throw new Error('Office resource membership unavailable')
+      const ctx = { workspaceId, userId, assistantKind: 'standard' as const, clearance: membership.clearance }
+      const existing = await filesApi!.stat(ctx, path)
+      const fileId = existing.ok ? existing.value.id : await (async () => {
+        const saved = await filesApi!.writeBytes(ctx, { path, bytes: image.bytes, mime: image.mime, sensitivity })
+        if (!saved.ok) throw new Error(`Office resource save failed: ${saved.error.kind}`)
+        return saved.value.id
+      })()
+      return officeTemplateStore.addResource({
+        userId,
+        workspaceId,
+        kind: 'brand_media',
+        name: `Uploaded image ${image.hash.slice(0, 12)}`,
+        fileId,
+        hash: image.hash,
+        mime: image.mime,
+        licence: { name: 'Workspace-uploaded image', provenance: 'workspace-upload' },
+        provenance: { source: 'workspace-upload', normalized: true },
+        embeddingRights: 'allowed',
+        sensitivity,
+      })
+    },
+    readResource: readOfficeResource,
+  }))
   const loadOfficeReleaseContext = async (userId: string, artifactId: string) => {
     const [artifact, access, live, head] = await Promise.all([officeArtifactStore.get(userId, artifactId), resolveOfficeAccess(userId, artifactId), officeLiveStore.get(userId, artifactId), officeArtifactStore.getHeadVersion(userId, artifactId)])
     if (!artifact || !access || !live) return null
@@ -5764,25 +6097,35 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     prompt: string,
     ctx: { assistantId: string; userId: string | null; workspaceId: string | null; phase: string },
   ): Promise<string> => {
-    const response = await collectStream(provider.stream({
-      model: CONSOLIDATION_MODEL,
+    const workspaceId = ctx.workspaceId ?? await workspaceForAssistant(ctx.assistantId)
+    const customRuntime = await resolveBackgroundRuntime(workspaceId)
+    const callProvider = customRuntime?.provider ?? provider
+    const callModel = customRuntime?.selector ?? CONSOLIDATION_MODEL
+    const response = await collectStream(callProvider.stream({
+      model: callModel,
       messages: [{ role: 'user', content: prompt }],
       systemPrompt: 'You are a memory consolidation assistant. Follow the user instructions exactly. Output plain text only.',
       maxTokens: 4096,
     }))
-    if (response.usage && ctx.userId && usageStore) {
-      const cost = calculateCost(CONSOLIDATION_MODEL, response.usage)
+    const attributionUserId = ctx.userId ?? (workspaceId ? await ownerForWorkspace(workspaceId) : null)
+    if (response.usage && attributionUserId && usageStore) {
+      const cost = customRuntime?.providerKeySource === 'user'
+        ? 0
+        : calculateCost(callModel, response.usage)
       usageStore.recordUsage({
-        userId: ctx.userId,
+        userId: attributionUserId,
         assistantId: ctx.assistantId,
+        workspaceId: workspaceId ?? undefined,
         sessionId: null,
-        model: CONSOLIDATION_MODEL,
+        model: response.model || callModel,
+        modelTier: 'standard',
         inputTokens: response.usage.inputTokens,
         outputTokens: response.usage.outputTokens,
         cacheReadTokens: response.usage.cacheReadTokens,
         cacheWriteTokens: response.usage.cacheWriteTokens,
         actualCostUsd: cost,
         source: 'overhead:consolidation',
+        providerKeySource: customRuntime?.providerKeySource ?? 'platform',
       }).catch((err) => console.error('[consolidation] usage tracking failed:', err))
     }
     return response.content
@@ -5833,6 +6176,41 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           candidates: brainCandidateStore,
           provider,
           model: 'gemini-flash',
+          resolveLlm: async (workspaceId: string) => {
+            const runtime = await resolveBackgroundRuntime(workspaceId)
+            return runtime
+              ? {
+                  provider: runtime.provider,
+                  model: runtime.selector,
+                  modelTier: 'standard',
+                  providerKeySource: 'user' as const,
+                }
+              : {
+                  provider,
+                  model: 'gemini-flash',
+                  modelTier: 'pro',
+                  providerKeySource: 'platform' as const,
+                }
+          },
+          onUsage: ({ workspaceId, userId, assistantId, model, modelTier, providerKeySource, usage }) => {
+            if (!usageStore) return
+            void usageStore.recordUsage({
+              workspaceId,
+              userId,
+              assistantId,
+              sessionId: null,
+              model,
+              modelTier,
+              inputTokens: usage.inputTokens,
+              outputTokens: usage.outputTokens,
+              cacheReadTokens: usage.cacheReadTokens,
+              cacheWriteTokens: usage.cacheWriteTokens,
+              actualCostUsd: providerKeySource === 'user' ? 0 : calculateCost(model, usage),
+              source: 'overhead:consolidation',
+              triggerKey: 'memory_reclassification',
+              providerKeySource,
+            }).catch((err) => console.error('[reclassifier] usage tracking failed:', err))
+          },
           resolveWorkspaceId: async (assistantId: string) => {
             const r = await query<{ workspaceId: string }>(
               `SELECT workspace_id AS "workspaceId" FROM assistants WHERE id = $1`,
@@ -5881,25 +6259,33 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const SKILL_REVIEW_MODEL = backgroundModel
   const skillReviewLLM = createGeminiSkillReviewLLM(
     async ({ systemPrompt, prompt, maxTokens, attribution }) => {
-      const response = await collectStream(provider.stream({
-        model: SKILL_REVIEW_MODEL,
+      const workspaceId = await workspaceForAssistant(attribution.assistantId)
+      const customRuntime = await resolveBackgroundRuntime(workspaceId)
+      const callProvider = customRuntime?.provider ?? provider
+      const callModel = customRuntime?.selector ?? SKILL_REVIEW_MODEL
+      const response = await collectStream(callProvider.stream({
+        model: callModel,
         messages: [{ role: 'user', content: prompt }],
         systemPrompt,
         maxTokens,
       }))
       if (response.usage && usageStore) {
-        const cost = calculateCost(SKILL_REVIEW_MODEL, response.usage)
+        const cost = customRuntime?.providerKeySource === 'user'
+          ? 0
+          : calculateCost(callModel, response.usage)
         usageStore.recordUsage({
           userId: attribution.userId,
           assistantId: attribution.assistantId,
           sessionId: null,
-          model: SKILL_REVIEW_MODEL,
+          model: response.model || callModel,
+          modelTier: 'standard',
           inputTokens: response.usage.inputTokens,
           outputTokens: response.usage.outputTokens,
           cacheReadTokens: response.usage.cacheReadTokens,
           cacheWriteTokens: response.usage.cacheWriteTokens,
           actualCostUsd: cost,
           source: 'overhead:skill-review',
+          providerKeySource: customRuntime?.providerKeySource ?? 'platform',
         }).catch((err) => console.error('[skill-review] usage tracking failed:', err))
       }
       return response.content
@@ -5955,25 +6341,33 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // docs/architecture/context-engine/assistant-playbook.md.
   const playbookReflectionWorker = createPlaybookReflectionWorker({
     modelCall: async ({ systemPrompt, prompt, maxTokens, attribution }) => {
-      const response = await collectStream(provider.stream({
-        model: backgroundModel,
+      const workspaceId = await workspaceForAssistant(attribution.assistantId)
+      const customRuntime = await resolveBackgroundRuntime(workspaceId)
+      const callProvider = customRuntime?.provider ?? provider
+      const callModel = customRuntime?.selector ?? backgroundModel
+      const response = await collectStream(callProvider.stream({
+        model: callModel,
         messages: [{ role: 'user', content: prompt }],
         systemPrompt,
         maxTokens,
       }))
       if (response.usage && usageStore) {
-        const cost = calculateCost(backgroundModel, response.usage)
+        const cost = customRuntime?.providerKeySource === 'user'
+          ? 0
+          : calculateCost(callModel, response.usage)
         usageStore.recordUsage({
           userId: attribution.userId,
           assistantId: attribution.assistantId,
           sessionId: null,
-          model: backgroundModel,
+          model: response.model || callModel,
+          modelTier: 'standard',
           inputTokens: response.usage.inputTokens,
           outputTokens: response.usage.outputTokens,
           cacheReadTokens: response.usage.cacheReadTokens,
           cacheWriteTokens: response.usage.cacheWriteTokens,
           actualCostUsd: cost,
           source: 'overhead:playbook-reflection',
+          providerKeySource: customRuntime?.providerKeySource ?? 'platform',
         }).catch((err) => console.error('[playbook-reflection] usage tracking failed:', err))
       }
       return response.content
@@ -6536,6 +6930,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const ctx: BootContext = {
     app,
     provider,
+    backgroundModel,
+    docGateway,
+    docPageStore,
     allTools,
     analytics,
     env,
@@ -6817,6 +7214,16 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         slackWebhookIngestor: channelHosts.slackWebhookIngestor, connectorActionStore, episodesStore,
         buildConnectorActionAudit: ports.buildConnectorActionAudit,
         fileStore,
+      }))
+      app.use('/webhook/whatsapp', whatsappCloudRoutes({
+        backgroundModel,
+        provider, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
+        memoryStore, usageStore, checkCreditBudget: ports.checkCreditBudget,
+        integrationStore, channelUserStore,
+        workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
+        connectorInstanceStore, workspaceToolPolicyStore, knowledgeStore, gdriveFilesStore, workspaceFilesStore,
+        filesApi: filesApi ?? undefined, analytics, skillStore,
+        episodicStore, sessionStateStore, artifactPromoter, fileStore, workflowEventDispatcher,
       }))
       // Microsoft Teams — public Bot Framework messaging endpoint, per-channel
       // JWT-verified. No connector app (webhook transport). See

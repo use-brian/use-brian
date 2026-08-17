@@ -82,6 +82,9 @@ export type ApiKeyAudience = 'external' | 'internal'
  */
 export type ApiKeyAnonymousContext = 'thin' | 'full'
 
+/** Immutable capability ceiling for chat turns (migration 441). */
+export type ApiKeyToolPolicy = 'assistant' | 'public_research'
+
 export type ApiKeyRow = {
   id: string
   assistantId: string
@@ -90,6 +93,7 @@ export type ApiKeyRow = {
   scope: ApiKeyScope
   audience: ApiKeyAudience
   anonymousContext: ApiKeyAnonymousContext
+  toolPolicy: ApiKeyToolPolicy
   status: 'active' | 'revoked'
   createdBy: string | null
   createdAt: Date
@@ -196,6 +200,12 @@ export type ApiKeyStore = {
     audience?: ApiKeyAudience
     /** Omitted = 'thin' (the least-exposure default). */
     anonymousContext?: ApiKeyAnonymousContext
+    /**
+     * Omitted = public_research for external chat keys, assistant for agent
+     * or internal keys.
+     * Immutable post-issue: rotate to change capability exposure.
+     */
+    toolPolicy?: ApiKeyToolPolicy
   }): Promise<CreatedApiKey>
 
   /** List keys for an assistant. RLS-gated. Plaintext never returned. */
@@ -223,6 +233,7 @@ const COLS_PUBLIC = `
   scope,
   audience,
   anonymous_context as "anonymousContext",
+  tool_policy as "toolPolicy",
   status,
   created_by   as "createdBy",
   created_at   as "createdAt",
@@ -244,8 +255,8 @@ export function createDbApiKeyStore(): ApiKeyStore {
 
       const result = await queryWithRLS<ApiKeyRowWithHash>(
         params.actingUserId,
-        `INSERT INTO api_keys (id, assistant_id, name, key_hash, key_prefix, scope, audience, anonymous_context, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        `INSERT INTO api_keys (id, assistant_id, name, key_hash, key_prefix, scope, audience, anonymous_context, tool_policy, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          RETURNING ${COLS_PUBLIC}, key_hash as "keyHash"`,
         [
           id,
@@ -256,6 +267,12 @@ export function createDbApiKeyStore(): ApiKeyStore {
           params.scope ?? 'chat',
           params.audience ?? 'external',
           params.anonymousContext ?? 'thin',
+          params.toolPolicy
+            ?? (
+              (params.audience ?? 'external') === 'internal' || (params.scope ?? 'chat') === 'agent'
+                ? 'assistant'
+                : 'public_research'
+            ),
           params.actingUserId,
         ],
       )

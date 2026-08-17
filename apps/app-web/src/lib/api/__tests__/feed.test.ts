@@ -16,6 +16,7 @@ import {
   fetchFeedAssistantEvents,
   fetchFeedAssistantProfiles,
   fetchFeedDraftSessions,
+  fetchFeedCloudLink,
   fetchFeedExternalPost,
   fetchFeedInsights,
   fetchFeedInspiration,
@@ -31,6 +32,7 @@ import {
   runFeedInspirationScan,
   saveFeedInspirationConfig,
   saveFeedSessionDraft,
+  startFeedCloudLink,
   sendFeedDraftTypingPing,
   updateFeedMemberDraftPermission,
   updateFeedProfilePolicy,
@@ -50,6 +52,30 @@ afterEach(() => {
 });
 
 describe("[COMP:app-web/feed-sdk] feed SDK", () => {
+  describe("[COMP:app-web/feed-cloud-link] Cloud Link", () => {
+    it("reads and starts the paid OSS Feed Cloud Link", async () => {
+      authFetch
+        .mockResolvedValueOnce(jsonResponse({ state: "unlinked" }))
+        .mockResolvedValueOnce(jsonResponse({
+          state: "pending",
+          userCode: "ABCD-EFGH",
+          verificationUrl: "https://app.example/cloud-link?code=ABCD-EFGH",
+        }, true, 201));
+      await expect(fetchFeedCloudLink("ws-1")).resolves.toEqual({ state: "unlinked" });
+      await expect(startFeedCloudLink("ws-1", "a-1")).resolves.toMatchObject({
+        state: "pending",
+        userCode: "ABCD-EFGH",
+      });
+      expect(authFetch).toHaveBeenLastCalledWith(
+        expect.stringContaining("/api/self-host-feed/ws-1/start"),
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ assistantId: "a-1" }),
+        }),
+      );
+    });
+  });
+
   it("fetches and maps the workspace's connected profiles", async () => {
     authFetch.mockResolvedValueOnce(
       jsonResponse({
@@ -174,6 +200,21 @@ describe("[COMP:app-web/feed-sdk] feed SDK", () => {
       ok: false,
       error: "This draft has already been posted or rejected.",
       code: "DRAFT_NOT_PENDING",
+    });
+  });
+
+  it("approve: preserves a managed-delivery warning after local approval succeeds", async () => {
+    authFetch.mockResolvedValueOnce(
+      jsonResponse({
+        ok: true,
+        status: "ready",
+        error: "The provider could not confirm delivery.",
+      }),
+    );
+    await expect(approveFeedDraft("a-1", "ev-1")).resolves.toEqual({
+      ok: true,
+      status: "ready",
+      error: "The provider could not confirm delivery.",
     });
   });
 

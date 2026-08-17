@@ -8,14 +8,13 @@
  * (docs/architecture/features/doc.md §5a). Exports:
  *   - `<EmptyState />` — "Nothing matches" filter-mismatch message.
  *   - `<PristineBrainNudge />` — the pristine-brain hero. Its two CTA
- *     tiles seed the shared assistant chat dock via `requestBrainChatSeed()`
+ *     tiles seed the shared assistant chat dock via `requestSurfaceChatSeed()`
  *     (NOT doc's page-editing chat-seed — see surface-chat-seed.ts for why).
  *   - `<IngestionNudge />` — the right-column tabbed ingest/consume nudge.
  *
  * app-web ADAPTATIONS (flagged, not silent):
  *   - The "Tell me about you" / "Research my company" tiles use
- *     `requestBrainChatSeed` (an alias over the shared surface-chat seed
- *     bus), which the one `FloatingChat` dock — mounted once by
+ *     `requestSurfaceChatSeed`, which the one `FloatingChat` dock — mounted once by
  *     `WorkspaceChrome` across every surface — handles (its surface-seed
  *     listener is no longer origin-gated). apps/web routes these into the
  *     app-chrome FloatingChat; here the same one dock catches the seed.
@@ -31,7 +30,7 @@ import Link from "next/link";
 import { useT } from "@/lib/i18n/client";
 import { useWorkspaces } from "@/contexts/workspace-context";
 import { createBrainKey, BRAIN_MCP_URL, type CreatedBrainKey } from "@/lib/api/brain-keys";
-import { requestBrainChatSeed } from "@/lib/surface-chat-seed";
+import { requestSurfaceChatSeed } from "@/lib/surface-chat-seed";
 import {
   Bot,
   Building2,
@@ -124,7 +123,7 @@ export function PristineBrainNudge() {
           body={copy.self.body}
           cta={copy.self.cta}
           onClick={() =>
-            requestBrainChatSeed({
+            requestSurfaceChatSeed({
               prefill: copy.self.prefill,
             })
           }
@@ -136,7 +135,7 @@ export function PristineBrainNudge() {
           body={copy.company.body}
           cta={copy.company.cta}
           onClick={() =>
-            requestBrainChatSeed({
+            requestSurfaceChatSeed({
               prefill: copy.company.prefill,
               deferResearch: true,
             })

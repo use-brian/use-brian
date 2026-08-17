@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import * as Y from 'yjs'
 import type { DocumentSnapshot } from '@use-brian/office-model'
+import { applyDocumentCommand, getDocumentFragment, yDocToSnapshot } from '@use-brian/office-model'
 import { parseSyncDocumentName } from '../document-router.js'
 import { loadOfficeUpdate, officeSnapshotUpdate, replaceLiveOfficeSnapshot, storeOfficeSnapshot } from '../office-collab.js'
 import type { SysQuery } from '../persistence.js'
@@ -53,6 +54,56 @@ describe('[COMP:doc-sync/office-collab] Generic Office collaboration routing', (
     expect(calls[0].sql).toContain('a.head_version')
     expect(calls[0].params[2]).toBeInstanceOf(Buffer)
     expect(calls[0].params[3]).toBeInstanceOf(Buffer)
+  })
+
+  it('persists fragment edits as the exact canonical Document snapshot', async () => {
+    const doc = new Y.Doc()
+    Y.applyUpdate(doc, officeSnapshotUpdate(snapshot))
+    const section = getDocumentFragment(doc).get(0)
+    if (!(section instanceof Y.XmlElement)) throw new Error('section required')
+    const body = section.get(1)
+    if (!(body instanceof Y.XmlElement)) throw new Error('body required')
+    const paragraph = new Y.XmlElement('paragraph')
+    paragraph.setAttribute('id', id(8))
+    paragraph.setAttribute('styleName', 'Body')
+    paragraph.setAttribute('alignment', 'start')
+    const text = new Y.XmlText()
+    text.insert(0, 'Persisted characters', { officeRun: { id: id(9), style: { fontFamily: 'Arial', fontSizePt: 11, bold: false, italic: false, underline: false, strike: false, color: '#111111' } } })
+    paragraph.insert(0, [text])
+    doc.transact(() => body.insert(0, [paragraph]), 'manual')
+    const calls: { params: unknown[] }[] = []
+    const query: SysQuery = async (_sql, params) => { calls.push({ params }); return [{ baseVersion: 5 }] as never[] }
+
+    const stored = await storeOfficeSnapshot({ artifactId: snapshot.artifactId, ydoc: doc, query })
+
+    expect(stored.snapshot).toEqual(yDocToSnapshot(doc))
+    expect(stored.snapshot.family === 'document' && stored.snapshot.sections[0].nodes[0]).toMatchObject({ kind: 'paragraph' })
+    expect(stored.hash).toMatch(/^[a-f0-9]{64}$/)
+    expect(calls[0].params[2]).toEqual(Buffer.from(Y.encodeStateAsUpdate(doc)))
+  })
+
+  it('broadcasts an accepted generated batch to every connected state-vector peer', () => {
+    const authoritative = new Y.Doc()
+    Y.applyUpdate(authoritative, officeSnapshotUpdate(snapshot))
+    const firstClient = new Y.Doc()
+    const secondClient = new Y.Doc()
+    Y.applyUpdate(firstClient, Y.encodeStateAsUpdate(authoritative))
+    Y.applyUpdate(secondClient, Y.encodeStateAsUpdate(authoritative))
+    applyDocumentCommand(authoritative, {
+      artifactId: snapshot.artifactId,
+      baseVersion: 0,
+      actor: { type: 'assistant', id: id(20) },
+      origin: 'ai',
+      commandId: id(21),
+      kind: 'insertDocumentNode',
+      sectionId: id(5),
+      index: 0,
+      node: { id: id(22), kind: 'paragraph', styleName: 'Body', alignment: 'start', runs: [{ id: id(23), text: 'Accepted once', style: { fontFamily: 'Arial', fontSizePt: 11, bold: false, italic: false, underline: false, strike: false, color: '#111111' } }] },
+    }, 'suggestion', id(24))
+    Y.applyUpdate(firstClient, Y.encodeStateAsUpdate(authoritative, Y.encodeStateVector(firstClient)))
+    Y.applyUpdate(secondClient, Y.encodeStateAsUpdate(authoritative, Y.encodeStateVector(secondClient)))
+    expect(yDocToSnapshot(firstClient)).toEqual(yDocToSnapshot(authoritative))
+    expect(yDocToSnapshot(secondClient)).toEqual(yDocToSnapshot(authoritative))
   })
 
   it('rejects a snapshot whose canonical artifact id does not match the route', async () => {

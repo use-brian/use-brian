@@ -679,6 +679,16 @@ async function* queryLoopCore(options: QueryLoopOptions): AsyncGenerator<QueryEv
     // ── Phase 2: API call ──────────────────────────────────────
     const accumulator = createAccumulator()
     const allToolResults: ContentBlock[] = []
+    // Provider payloads whose terms prohibit durable raw-result storage still
+    // need to reach the live next model turn. Tools mark those calls through
+    // internal ToolResult.meta; assistant_turn persistence strips only the
+    // matching tool_use/tool_result pair. See google-maps.md.
+    const transientToolUseIds = new Set<string>()
+    const noteTransientResults = (metaByToolUseId: Record<string, ToolResultMeta>) => {
+      for (const [toolUseId, meta] of Object.entries(metaByToolUseId)) {
+        if (meta.transientProviderContent === true) transientToolUseIds.add(toolUseId)
+      }
+    }
     const toolNames = new Map<string, string>()
 
     const pendingConfirmations: ToolConfirmationRequest[] = []
@@ -847,6 +857,7 @@ async function* queryLoopCore(options: QueryLoopOptions): AsyncGenerator<QueryEv
         // Drain completed tool results during streaming
         const completed = toolExecutor.getCompletedResults()
         if (completed.blocks.length > 0) {
+          noteTransientResults(completed.metaByToolUseId)
           allToolResults.push(...completed.blocks)
           yield { type: 'tool_result', id: '', results: completed.blocks, metaByToolUseId: completed.metaByToolUseId }
           const citations = extractCitationsFromToolResults(completed.blocks)
@@ -1022,6 +1033,7 @@ async function* queryLoopCore(options: QueryLoopOptions): AsyncGenerator<QueryEv
         yield pendingAwaitingApprovals.shift()!
       }
       if (results.blocks.length > 0) {
+        noteTransientResults(results.metaByToolUseId)
         allToolResults.push(...results.blocks)
         yield { type: 'tool_result', id: '', results: results.blocks, metaByToolUseId: results.metaByToolUseId }
         const citations = extractCitationsFromToolResults(results.blocks)
@@ -1148,7 +1160,24 @@ async function* queryLoopCore(options: QueryLoopOptions): AsyncGenerator<QueryEv
     // for consumers that persist transcripts. This fires for EVERY turn
     // including intermediate tool-use turns — unlike `turn_complete` which
     // is reserved as the terminal "loop exited" marker.
-    yield { type: 'assistant_turn', response, toolResults: [...allToolResults] }
+    const persistedContent = transientToolUseIds.size === 0
+      ? response.content
+      : response.content.filter(
+          (block) => !(block.type === 'tool_use' && transientToolUseIds.has(block.id)),
+        )
+    const persistedToolResults = transientToolUseIds.size === 0
+      ? allToolResults
+      : allToolResults.filter(
+          (block) => !(block.type === 'tool_result' && transientToolUseIds.has(block.toolUseId)),
+        )
+    const persistedResponse = persistedContent === response.content
+      ? response
+      : { ...response, content: persistedContent }
+    yield {
+      type: 'assistant_turn',
+      response: persistedResponse,
+      toolResults: [...persistedToolResults],
+    }
 
     // Phase 3 of askQuestion suspend-resume — fire onTurnEnd here, BEFORE
     // the Phase 4 done-check that early-returns on a no-more-tools turn.
@@ -2100,10 +2129,12 @@ async function* finalizeTerminalResponse(params: {
 }
 
 /**
- * Extract citation sources from `webSearch` tool results. The tool returns
+ * Extract citation sources from grounded tool results. `webSearch` returns
  * `{ query, results: [{ title, url, snippet }] }` serialized as JSON in the
- * tool_result content; parse it back and pull the URLs/titles so consumers
- * can render them as footnotes.
+ * tool_result content. Google Maps returns a normalized
+ * `{ provider: 'google_maps_grounding_lite', sources }` envelope, either
+ * directly or through the local `mcp_call` dispatcher. Parse both into the
+ * same citation event shape so every client gets provider attribution.
  *
  * Silently returns [] on any parse failure or non-webSearch result — the
  * goal is surfacing citations when available, not validating tool output.
@@ -2113,14 +2144,29 @@ function extractCitationsFromToolResults(
 ): Array<{ url: string; title: string }> {
   const sources: Array<{ url: string; title: string }> = []
   for (const block of results) {
-    if (block.type !== 'tool_result' || block.name !== 'webSearch' || block.isError) continue
+    if (block.type !== 'tool_result' || block.isError) continue
     if (typeof block.content !== 'string') continue
     try {
-      const parsed = JSON.parse(block.content) as {
-        results?: Array<{ title?: string; url?: string }>
+      const parsed = JSON.parse(block.content) as Record<string, unknown>
+      if (block.name === 'webSearch') {
+        const webResults = parsed.results as Array<{ title?: string; url?: string }> | undefined
+        for (const r of webResults ?? []) {
+          if (r.url && r.title) sources.push({ url: r.url, title: r.title })
+        }
       }
-      for (const r of parsed.results ?? []) {
-        if (r.url && r.title) sources.push({ url: r.url, title: r.title })
+      if (parsed.provider === 'google_maps_grounding_lite' && Array.isArray(parsed.sources)) {
+        for (const source of parsed.sources) {
+          if (
+            source && typeof source === 'object'
+            && typeof (source as { url?: unknown }).url === 'string'
+            && typeof (source as { title?: unknown }).title === 'string'
+          ) {
+            sources.push({
+              url: (source as { url: string }).url,
+              title: (source as { title: string }).title,
+            })
+          }
+        }
       }
     } catch {
       // Non-JSON content (e.g. "No results found.") — nothing to cite.

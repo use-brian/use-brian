@@ -116,6 +116,7 @@ describe('[COMP:sandbox/local-browser] LocalBrowserProvider', () => {
     expect(sent.every((s) => s.userId === 'user-1')).toBe(true)
     expect(sent.every((s) => s.browserProfileId === 'profile-1')).toBe(true)
     expect(sent[0]?.args).toEqual({ url: 'https://example.com/' })
+    expect(sent[1]?.args).toEqual({ mode: 'interactive' })
     expect(sent[2]?.args).toEqual({ ref: '@e1' })
     expect(sent[3]?.args).toEqual({ ref: '@e2', text: 'hello there' })
     expect(sent[5]?.args).toEqual({ url: 'https://second.example/' })

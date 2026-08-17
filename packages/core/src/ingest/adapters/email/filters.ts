@@ -6,7 +6,8 @@
  * `keyword_match` over the body; these add the email-only axes:
  *
  *   - `gate_match`   — the webhook sender-gate verdict (`allowlisted` /
- *                      `stranger` / `noreply` / `at_cap` / `rate_capped`).
+ *                      `external_guest` / `stranger` / `noreply` / `at_cap` /
+ *                      `rate_capped`).
  *                      The seeded default routes `allowlisted` realtime.
  *   - `subject_match`— keyword match over the subject line only.
  *   - `domain_match` — sender domain (e.g. `acme.com`) for whole-org rules.

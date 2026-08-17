@@ -17,8 +17,7 @@
  *
  * This generalizes the former brain-only `brain-chat-seed.ts` (event
  * `doc:brain-chat-seed`) — any surface can seed the one shared dock. The brain
- * pristine-nudge CTAs still drive it; the `requestBrainChatSeed` alias is
- * preserved for those callsites.
+ * pristine-nudge CTAs use the same `requestSurfaceChatSeed` entry point.
  *
  * Spec: docs/architecture/features/doc.md → "One dock, every surface".
  *
@@ -28,6 +27,12 @@
 export type SurfaceChatSeed = {
   /** Composer prefill text. Required — empty seeds are dropped. */
   prefill: string;
+  /**
+   * Start the turn immediately instead of stopping at editable prefill.
+   * Callers may set this only after the user explicitly confirmed the full
+   * instruction (for example, Tasks "Add with instructions").
+   */
+  autoSend?: boolean;
   /**
    * Run this turn in research mode (routes to the deep-research
    * coordinator + max-tier model — the brain ingestion pipeline).
@@ -52,17 +57,10 @@ export const SURFACE_CHAT_SEED_EVENT = "doc:surface-chat-seed";
  * on SSR. Returns immediately — the panel handles the rest on the next
  * tick. An empty `prefill` is dropped.
  */
-function requestSurfaceChatSeed(seed: SurfaceChatSeed): void {
+export function requestSurfaceChatSeed(seed: SurfaceChatSeed): void {
   if (typeof window === "undefined") return;
   if (!seed.prefill.trim()) return;
   window.dispatchEvent(
     new CustomEvent<SurfaceChatSeed>(SURFACE_CHAT_SEED_EVENT, { detail: seed }),
   );
 }
-
-/**
- * Backwards-compatible alias for the brain pristine-nudge CTAs (and any
- * other former brain-bus callsite). The brain surface now shares the one
- * dock, so a brain seed is just a surface seed.
- */
-export const requestBrainChatSeed = requestSurfaceChatSeed;

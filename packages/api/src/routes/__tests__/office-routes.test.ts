@@ -7,6 +7,8 @@ import { officeJobRoutes } from '../office-jobs.js'
 import { officeTemplateRoutes } from '../office-templates.js'
 import { internalOfficeCheckpointRoutes } from '../internal-office-checkpoint.js'
 import { officeOfflineRoutes } from '../office-offline.js'
+import { officeResourceRoutes } from '../office-resources.js'
+import { officeCollaborationRoutes } from '../office-collaboration.js'
 import { OfficeGenerationUnavailableError } from '../../office/service.js'
 import { guidedTemplateSnapshot } from '../office-templates.js'
 import { OfficeArtifactSnapshotSchema, preflightOfficeCandidate } from '@use-brian/office-model'
@@ -29,7 +31,23 @@ function app() {
     revise: vi.fn(async () => ({ jobId: JOB, mode: 'direct' as const })),
   }
   const job = { id: JOB, workspaceId: WORKSPACE, artifactId: ARTIFACT, initiatedByUserId: USER, assistantId: ASSISTANT, jobKind: 'create' as const, status: 'running' as const, stage: 'grounding', brief: {}, authorityProjection: {}, templateVersionId: null, baseArtifactVersion: 0, checkpoint: {}, checkpointVersion: 2, leaseToken: null, leaseExpiresAt: null, cancelRequestedAt: null, errorCode: null, createdAt: new Date(), updatedAt: new Date() }
-  const artifacts = { service, generationAvailable: vi.fn(() => true), list: vi.fn(async () => [projection]), restoreVersion: vi.fn(async () => ({ id: 'v2', version: 2 })), getArtifact: vi.fn(async () => ({ id: ARTIFACT } as never)), listVersions: vi.fn(async () => []), canRestoreVersion: vi.fn(async () => true) }
+  const artifacts = {
+    service,
+    generationAvailable: vi.fn(() => true),
+    list: vi.fn(async () => [projection]),
+    restoreVersion: vi.fn(async () => ({ id: 'v2', version: 2 })),
+    getArtifact: vi.fn(async () => ({ id: ARTIFACT, workspaceId: WORKSPACE, defaultWorkspaceRole: 'comment' } as never)),
+    resolveAccess: vi.fn(async () => ({ canEdit: true, canManageSharing: true } as never)),
+    listVersions: vi.fn(async () => []),
+    previewVersion: vi.fn(async () => ({ artifactId: ARTIFACT, family: 'document' } as never)),
+    nameVersion: vi.fn(async () => true),
+    copyVersion: vi.fn(async () => ({ artifactId: JOB, version: 1 })),
+    listSharing: vi.fn(async () => ({ defaultWorkspaceRole: 'comment' as const, grants: [], members: [{ userId: ASSISTANT, userName: 'Ari Example', email: 'ari@example.com', isOwner: false }] })),
+    setGrant: vi.fn(async () => true),
+    revokeGrant: vi.fn(async () => true),
+    setDefaultWorkspaceRole: vi.fn(async () => true),
+    canRestoreVersion: vi.fn(async () => true),
+  }
   const jobs = { get: vi.fn(async () => job), events: vi.fn(async () => [{ seq: 1, code: 'office.job.queued' } as never]), steer: vi.fn(async () => ({ id: 'steer-1' })), cancel: vi.fn(async () => true) }
   const templates = {
     list: vi.fn(async () => []),
@@ -62,12 +80,36 @@ describe('[COMP:api/office-routes] Office API routes', () => {
     expect(read.body.artifact).toMatchObject({ artifactId: ARTIFACT, role: 'edit', job: { id: JOB, stage: 'queued', errorCode: null } })
   })
 
+  describe('[COMP:api/office-history-sharing] immutable history and managed sharing', () => {
   it('lets an active editor restore an earlier artifact version', async () => {
     const test = app()
     const response = await request(test.server).post(`/api/office/artifacts/${ARTIFACT}/restore`).send({ targetVersionId: RESOURCE, expectedVersion: 1, summary: 'Restore the previous revision' }).expect(200)
     expect(response.body).toEqual({ version: { id: 'v2', version: 2 } })
     expect(test.artifacts.canRestoreVersion).toHaveBeenCalledWith(USER, ARTIFACT)
     expect(test.artifacts.restoreVersion).toHaveBeenCalledWith({ userId: USER, artifactId: ARTIFACT, targetVersionId: RESOURCE, expectedVersion: 1, summary: 'Restore the previous revision' })
+  })
+
+  it('previews, names and copies immutable versions', async () => {
+    const test = app()
+    await request(test.server).get(`/api/office/artifacts/${ARTIFACT}/versions/${RESOURCE}/preview`).expect(200)
+    await request(test.server).patch(`/api/office/artifacts/${ARTIFACT}/versions/${RESOURCE}`).send({ summary: 'Board-approved draft' }).expect(200)
+    await request(test.server).post(`/api/office/artifacts/${ARTIFACT}/versions/${RESOURCE}/copy`).send({ title: 'Board report copy' }).expect(201, { artifactId: JOB, version: 1 })
+    expect(test.artifacts.nameVersion).toHaveBeenCalledWith({ userId: USER, artifactId: ARTIFACT, versionId: RESOURCE, summary: 'Board-approved draft' })
+    expect(test.artifacts.copyVersion).toHaveBeenCalledWith({ userId: USER, artifactId: ARTIFACT, versionId: RESOURCE, title: 'Board report copy' })
+  })
+
+  it('manages member grants and the workspace default only for sharing managers', async () => {
+    const test = app()
+    const sharing = await request(test.server).get(`/api/office/artifacts/${ARTIFACT}/sharing`).expect(200)
+    expect(sharing.body).toMatchObject({ defaultWorkspaceRole: 'comment', canManage: true })
+    await request(test.server).put(`/api/office/artifacts/${ARTIFACT}/sharing/${ASSISTANT}`).send({ role: 'edit', reason: 'Document owner approved' }).expect(200)
+    await request(test.server).delete(`/api/office/artifacts/${ARTIFACT}/sharing/${ASSISTANT}`).expect(200)
+    await request(test.server).patch(`/api/office/artifacts/${ARTIFACT}/sharing`).send({ defaultWorkspaceRole: 'view' }).expect(200)
+    expect(test.artifacts.setGrant).toHaveBeenCalledWith({ userId: USER, artifactId: ARTIFACT, targetUserId: ASSISTANT, role: 'edit', reason: 'Document owner approved' })
+    expect(test.artifacts.setDefaultWorkspaceRole).toHaveBeenCalledWith({ userId: USER, artifactId: ARTIFACT, role: 'view' })
+    test.artifacts.resolveAccess.mockResolvedValue({ canEdit: true, canManageSharing: false } as never)
+    await request(test.server).patch(`/api/office/artifacts/${ARTIFACT}/sharing`).send({ defaultWorkspaceRole: 'edit' }).expect(404)
+  })
   })
 
   it('supports late-join events, attributed steering, cancellation, and template drafts', async () => {
@@ -117,6 +159,14 @@ describe('[COMP:api/office-routes] Office API routes', () => {
     expect(preflightOfficeCandidate(presentation).ok).toBe(true)
     expect(presentation.family).toBe('presentation')
     if (presentation.family === 'presentation') expect(presentation.slides.map((slide) => slide.title)).toEqual(['Title', 'Content'])
+
+    const spreadsheet = guidedTemplateSnapshot({ artifactId: ARTIFACT, workspaceId: WORKSPACE, family: 'spreadsheet', title: 'Operating tracker', guidance: 'Use for recurring company operations.' })
+    expect(() => OfficeArtifactSnapshotSchema.parse(spreadsheet)).not.toThrow()
+    expect(preflightOfficeCandidate(spreadsheet).ok).toBe(true)
+    expect(spreadsheet.family).toBe('spreadsheet')
+    if (spreadsheet.family === 'spreadsheet') {
+      expect(spreadsheet.worksheets[0].cells).toContainEqual(expect.objectContaining({ address: 'B6', value: '{{CONTENT}}', locked: false }))
+    }
   })
 
   it('accepts an explicit no-website choice during guided template setup', async () => {
@@ -174,6 +224,76 @@ describe('[COMP:api/office-routes] Office checkpoint route', () => {
   })
 })
 
+describe('[COMP:api/office-suggestions] Office comment and suggestion workflow', () => {
+  function collaboration() {
+    const suggestion = { id: RESOURCE, artifactId: ARTIFACT, status: 'open' as const, commandBatch: { commandId: RESOURCE, artifactId: ARTIFACT, baseVersion: 1, actor: { type: 'user', id: USER }, origin: 'manual', kind: 'deleteObject', targetId: JOB } }
+    const deps = {
+      getArtifact: vi.fn(async () => ({ id: ARTIFACT, workspaceId: WORKSPACE, headVersionId: JOB } as never)),
+      resolveAccess: vi.fn(async () => ({ canComment: true, canEdit: true } as never)),
+      getSnapshot: vi.fn(async () => ({ snapshot: { id: JOB }, seq: 1, baseVersion: 1 })), appendCommand: vi.fn(), listThreads: vi.fn(async () => []),
+      getThreadContext: vi.fn(async () => ({ artifactId: ARTIFACT, workspaceId: WORKSPACE, status: 'open' as const })),
+      getMessageContext: vi.fn(async () => ({ artifactId: ARTIFACT, workspaceId: WORKSPACE })),
+      createThread: vi.fn(), reply: vi.fn(async () => ({ id: JOB })), resolve: vi.fn(async () => true),
+      updateThread: vi.fn(async () => true), react: vi.fn(async () => true), detachMissingTargets: vi.fn(async () => 0),
+      listSuggestions: vi.fn(async () => [suggestion]), getSuggestion: vi.fn(async () => suggestion),
+      createSuggestion: vi.fn(), decideSuggestion: vi.fn(async () => true), applySuggestion: vi.fn<() => Promise<'applied' | 'conflict'>>(async () => 'applied'),
+      service: { revise: vi.fn() },
+    }
+    const server = express(); server.use(express.json()); server.use((req, _res, next) => { (req as { userId?: string }).userId = USER; next() }); server.use('/api/office', officeCollaborationRoutes(deps as never))
+    return { server, deps, suggestion }
+  }
+
+  it('lists authorized proposals and applies an accepted batch before deciding it', async () => {
+    const test = collaboration()
+    const listed = await request(test.server).get(`/api/office/artifacts/${ARTIFACT}/suggestions`).expect(200)
+    expect(listed.body.suggestions).toHaveLength(1)
+    await request(test.server).post(`/api/office/suggestions/${RESOURCE}/decision`).send({ decision: 'accepted' }).expect(200, { ok: true })
+    expect(test.deps.applySuggestion).toHaveBeenCalledWith({ artifactId: ARTIFACT, suggestionId: RESOURCE, command: test.suggestion.commandBatch })
+    expect(test.deps.decideSuggestion).toHaveBeenCalledWith({ userId: USER, suggestionId: RESOURCE, decision: 'accepted', expectedStatus: 'open' })
+  })
+
+  it('marks a stale proposal conflicted without accepting it', async () => {
+    const test = collaboration(); test.deps.applySuggestion.mockResolvedValue('conflict')
+    await request(test.server).post(`/api/office/suggestions/${RESOURCE}/decision`).send({ decision: 'accepted' }).expect(409, { error: 'suggestion_conflict' })
+    expect(test.deps.decideSuggestion).toHaveBeenCalledWith({ userId: USER, suggestionId: RESOURCE, decision: 'conflicted', expectedStatus: 'open' })
+  })
+
+  it('enforces Viewer, Commenter and Editor command roles', async () => {
+    const commenter = collaboration()
+    commenter.deps.resolveAccess.mockResolvedValue({ canComment: true, canEdit: false } as never)
+    await request(commenter.server).post(`/api/office/artifacts/${ARTIFACT}/commands`).send({ expectedSeq: 1, mode: 'apply', command: commenter.suggestion.commandBatch }).expect(202)
+    expect(commenter.deps.createSuggestion).toHaveBeenCalledWith(expect.objectContaining({ userId: USER, artifactId: ARTIFACT, affectedObjectIds: [JOB] }))
+    expect(commenter.deps.appendCommand).not.toHaveBeenCalled()
+
+    const viewer = collaboration()
+    viewer.deps.resolveAccess.mockResolvedValue({ canComment: false, canEdit: false } as never)
+    await request(viewer.server).post(`/api/office/artifacts/${ARTIFACT}/commands`).send({ expectedSeq: 1, mode: 'apply', command: viewer.suggestion.commandBatch }).expect(403, { error: 'comment_access_required' })
+
+    const editor = collaboration()
+    editor.deps.appendCommand.mockResolvedValue({ snapshot: {}, seq: 2, baseVersion: 1 })
+    await request(editor.server).post(`/api/office/artifacts/${ARTIFACT}/commands`).send({ expectedSeq: 1, mode: 'apply', command: editor.suggestion.commandBatch }).expect(200)
+    expect(editor.deps.appendCommand).toHaveBeenCalledOnce()
+  })
+
+  it('requires Edit to accept or reject a suggestion', async () => {
+    const test = collaboration()
+    test.deps.resolveAccess.mockResolvedValue({ canComment: true, canEdit: false } as never)
+    await request(test.server).post(`/api/office/suggestions/${RESOURCE}/decision`).send({ decision: 'rejected' }).expect(404)
+    expect(test.deps.decideSuggestion).not.toHaveBeenCalled()
+  })
+
+  it('derives reply workspace from the protected thread and supports task fields and reactions', async () => {
+    const test = collaboration()
+    await request(test.server).post(`/api/office/comment-threads/${JOB}/replies`).send({ body: 'Looks good', mentions: [USER] }).expect(201)
+    expect(test.deps.reply).toHaveBeenCalledWith({ userId: USER, workspaceId: WORKSPACE, threadId: JOB, body: 'Looks good', mentions: [USER] })
+    await request(test.server).patch(`/api/office/comment-threads/${JOB}`).send({ assignedUserId: USER, assignedToBrian: false, dueAt: '2026-08-20T00:00:00.000Z' }).expect(200)
+    await request(test.server).post(`/api/office/comment-messages/${JOB}/reactions`).send({ reaction: 'check', active: true }).expect(200)
+    expect(test.deps.getMessageContext).toHaveBeenCalledWith(USER, JOB)
+    await request(test.server).post(`/api/office/artifacts/${ARTIFACT}/comments/detach-missing`).send({}).expect(200, { detached: 0 })
+    expect(test.deps.detachMissingTargets).toHaveBeenCalledWith({ userId: USER, artifactId: ARTIFACT, validTargetIds: [JOB] })
+  })
+})
+
 describe('[COMP:api/office-routes] Office artifact resources', () => {
   it('serves only a live snapshot resource whose bytes match its immutable hash', async () => {
     const bytes = new Uint8Array([137, 80, 78, 71])
@@ -185,14 +305,11 @@ describe('[COMP:api/office-routes] Office artifact resources', () => {
     const readResource = vi.fn(async () => ({ bytes, hash, mime: 'image/png' }))
     const server = express()
     server.use((req, _res, next) => { (req as { userId?: string }).userId = USER; next() })
-    server.use('/api/office', officeOfflineRoutes({
-      signingSecret: 'offline-secret',
+    server.use('/api/office', officeResourceRoutes({
       load,
       readResource,
-      savePackage: vi.fn(),
-      upsert: vi.fn(),
-      resolveAccess: vi.fn(),
-      appendCommand: vi.fn(),
+      readUpload: vi.fn(),
+      persistImage: vi.fn(),
     } as never))
 
     const response = await request(server).get(`/api/office/artifacts/${ARTIFACT}/resources/${RESOURCE}`).expect(200)
@@ -209,14 +326,11 @@ describe('[COMP:api/office-routes] Office artifact resources', () => {
     const expectedHash = createHash('sha256').update(new Uint8Array([1, 2, 3])).digest('hex')
     const server = express()
     server.use((req, _res, next) => { (req as { userId?: string }).userId = USER; next() })
-    server.use('/api/office', officeOfflineRoutes({
-      signingSecret: 'offline-secret',
+    server.use('/api/office', officeResourceRoutes({
       load: vi.fn(async () => ({ artifact: { workspaceId: WORKSPACE }, snapshot: { resources: [{ id: RESOURCE, hash: expectedHash, mime: 'image/png' }] } } as never)),
       readResource: vi.fn(async () => ({ bytes: new Uint8Array([9]), hash: expectedHash, mime: 'image/png' })),
-      savePackage: vi.fn(),
-      upsert: vi.fn(),
-      resolveAccess: vi.fn(),
-      appendCommand: vi.fn(),
+      readUpload: vi.fn(),
+      persistImage: vi.fn(),
     } as never))
 
     await request(server).get(`/api/office/artifacts/${ARTIFACT}/resources/${RESOURCE}`).expect(409, { error: 'office_resource_incomplete', resourceId: RESOURCE })

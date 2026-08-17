@@ -36,7 +36,6 @@ import { DomainsSection } from "./sections/domains-section";
 import {
   WorkspaceGeneralSection,
   WorkspaceMembersSection,
-  WorkspaceLlmKeySection,
 } from "./workspace-sections";
 
 export type SettingsSection =
@@ -90,9 +89,7 @@ const ACCOUNT_SECTIONS: SettingsSection[] = [
 const WORKSPACE_SECTIONS: SettingsSection[] = [
   "ws-general",
   "ws-members",
-  // ws-llm-key is absent here on purpose: hosted surfaces the BYO Gemini key
-  // block inside the Models section (everything model-related in one place).
-  // The OSS list below keeps the standalone section as well.
+  // Provider connections and model routing share the Models section.
   // Domains (custom-domains.md + platform-subdomains.md) — the workspace-level
   // manager for published-page hostnames. Open feature, so OSS keeps it too.
   "ws-domains",
@@ -110,7 +107,6 @@ const WORKSPACE_SECTIONS: SettingsSection[] = [
 const OSS_WORKSPACE_SECTIONS: SettingsSection[] = [
   "ws-general",
   "ws-members",
-  "ws-llm-key",
   "ws-models",
   "ws-domains",
 ];
@@ -372,7 +368,8 @@ function SectionBody({
       // Members section pitches the upgrade instead of the live manager.
       return isOssEdition() ? <HostedUpgradeSection /> : <WorkspaceMembersSection />;
     case "ws-llm-key":
-      return <WorkspaceLlmKeySection />;
+      // Compatibility for old deep links: provider setup now lives in Models.
+      return <ModelsSection />;
     case "ws-domains":
       // Domains work in both editions (open feature): the workspace-level
       // subdomain + custom-domain manager (platform-subdomains.md).

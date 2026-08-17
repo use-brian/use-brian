@@ -21,11 +21,12 @@
  */
 
 import { useMemo, useState } from "react";
-import { ChevronLeft, ChevronRight, Plus } from "lucide-react";
+import { ChevronLeft, ChevronRight, Plus, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import {
   IDEA_DRAG_TYPE,
+  PlanProposalChip,
   PlanSlotChip,
   SLOT_DRAG_TYPE,
 } from "@/components/feed/plan-slot-chip";
@@ -38,6 +39,7 @@ import {
   slotsByDay,
   type PlanSlot,
 } from "@/lib/feed-plan";
+import type { ProposedSlot } from "@/lib/feed-plan-proposal";
 
 /** Chips a day cell shows before collapsing the rest into a "+N" pill. */
 const MAX_CHIPS_PER_DAY = 3;
@@ -45,6 +47,7 @@ const MAX_CHIPS_PER_DAY = 3;
 export function PlanCalendar({
   month,
   slots,
+  proposals = [],
   today,
   selectedSlotId,
   canEdit,
@@ -56,10 +59,16 @@ export function PlanCalendar({
   onDuplicateSlot,
   onDeleteSlot,
   onDropIdea,
+  acceptingProposalIndex = null,
+  onAcceptProposal,
+  onAcceptAllProposals,
+  onDismissProposal,
 }: {
   /** `YYYY-MM`. */
   month: string;
   slots: readonly PlanSlot[];
+  /** Side-effect-free assistant previews, never included in `slots`. */
+  proposals?: readonly ProposedSlot[];
   /** Drives the dashed gap ghosts (D28). Null means no cadence, no ghosts. */
   cadencePerWeek?: number | null;
   onDuplicateSlot?: (slot: PlanSlot) => void;
@@ -70,6 +79,10 @@ export function PlanCalendar({
    * never schedule anything.
    */
   onDropIdea?: (ideaId: string, iso: string) => void;
+  acceptingProposalIndex?: number | null;
+  onAcceptProposal?: (proposal: ProposedSlot) => void;
+  onAcceptAllProposals?: () => void;
+  onDismissProposal?: (proposal: ProposedSlot) => void;
   /** Injected so the grid is deterministic in tests. */
   today: Date;
   selectedSlotId: string | null;
@@ -86,6 +99,15 @@ export function PlanCalendar({
 
   const days = useMemo(() => monthGridDays(month, today), [month, today]);
   const byDay = useMemo(() => slotsByDay(slots), [slots]);
+  const proposalsByDay = useMemo(() => {
+    const grouped = new Map<string, ProposedSlot[]>();
+    for (const proposal of proposals) {
+      const current = grouped.get(proposal.date) ?? [];
+      current.push(proposal);
+      grouped.set(proposal.date, current);
+    }
+    return grouped;
+  }, [proposals]);
   const ghosts = useMemo(
     () => new Set(ghostDays(month, slots, cadencePerWeek, today)),
     [month, slots, cadencePerWeek, today],
@@ -147,6 +169,28 @@ export function PlanCalendar({
         </div>
       </div>
 
+      {proposals.length > 0 ? (
+        <div
+          data-plan-proposal-summary
+          className="flex items-center justify-between gap-3 rounded-lg border border-dashed border-foreground/30 bg-muted/20 px-2.5 py-2"
+        >
+          <div className="flex min-w-0 items-center gap-1.5 text-[12px] text-muted-foreground">
+            <Sparkles className="size-3.5 shrink-0" aria-hidden />
+            <span className="truncate">{tp.proposedHeading}</span>
+            <span className="shrink-0 tabular-nums">{proposals.length}</span>
+          </div>
+          {canEdit && proposals.length > 1 && onAcceptAllProposals ? (
+            <button
+              type="button"
+              onClick={onAcceptAllProposals}
+              className="shrink-0 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground"
+            >
+              {tp.acceptAll}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
       <div className="overflow-hidden rounded-xl border border-border/60 shadow-xs">
         <div className="grid grid-cols-7 border-b border-border/60 bg-muted/30">
           {weekdayLabels.map((label) => (
@@ -164,8 +208,23 @@ export function PlanCalendar({
             const daySlots = [...(byDay.get(day.iso) ?? [])].sort(
               compareSlotsInDay,
             );
-            const shown = daySlots.slice(0, MAX_CHIPS_PER_DAY);
-            const overflow = daySlots.length - shown.length;
+            const dayProposals = proposalsByDay.get(day.iso) ?? [];
+            // Pending proposals are temporary and are the state this view is
+            // clarifying, so reserve the first visible rows for them. Real
+            // slots still participate in the same three-row density ceiling.
+            const shownProposals = dayProposals.slice(0, MAX_CHIPS_PER_DAY);
+            const shown = daySlots.slice(
+              0,
+              Math.max(0, MAX_CHIPS_PER_DAY - shownProposals.length),
+            );
+            const hiddenProposalCount =
+              dayProposals.length - shownProposals.length;
+            const overflow =
+              daySlots.length +
+              dayProposals.length -
+              shown.length -
+              shownProposals.length;
+            const firstHiddenSlot = daySlots[shown.length];
             const isDropTarget = dragOverDay === day.iso;
             return (
               <div
@@ -240,6 +299,16 @@ export function PlanCalendar({
                 </div>
 
                 <div className="flex min-h-0 flex-col gap-1">
+                  {shownProposals.map((proposal) => (
+                    <PlanProposalChip
+                      key={`proposal-${proposal.index}`}
+                      proposal={proposal}
+                      canEdit={canEdit}
+                      accepting={acceptingProposalIndex === proposal.index}
+                      onAccept={() => onAcceptProposal?.(proposal)}
+                      onDismiss={() => onDismissProposal?.(proposal)}
+                    />
+                  ))}
                   {shown.map((slot) => (
                     <PlanSlotChip
                       key={slot.id}
@@ -265,7 +334,10 @@ export function PlanCalendar({
                       }
                     />
                   ))}
-                  {daySlots.length === 0 && ghosts.has(day.iso) && canEdit ? (
+                  {daySlots.length === 0 &&
+                  dayProposals.length === 0 &&
+                  ghosts.has(day.iso) &&
+                  canEdit ? (
                     // A cadence suggestion, not a post: dashed, muted, and it
                     // writes nothing until clicked (D28).
                     <button
@@ -279,13 +351,19 @@ export function PlanCalendar({
                     </button>
                   ) : null}
                   {overflow > 0 ? (
-                    <button
-                      type="button"
-                      onClick={() => onSelectSlot(daySlots[MAX_CHIPS_PER_DAY])}
-                      className="rounded-md px-1.5 py-0.5 text-left text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                    >
-                      {tp.moreOnDay.replace("{count}", String(overflow))}
-                    </button>
+                    hiddenProposalCount === 0 && firstHiddenSlot ? (
+                      <button
+                        type="button"
+                        onClick={() => onSelectSlot(firstHiddenSlot)}
+                        className="rounded-md px-1.5 py-0.5 text-left text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                      >
+                        {tp.moreOnDay.replace("{count}", String(overflow))}
+                      </button>
+                    ) : (
+                      <span className="rounded-md px-1.5 py-0.5 text-left text-[11px] text-muted-foreground">
+                        {tp.moreOnDay.replace("{count}", String(overflow))}
+                      </span>
+                    )
                   ) : null}
                 </div>
               </div>

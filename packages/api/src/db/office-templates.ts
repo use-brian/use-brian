@@ -130,15 +130,21 @@ export function createOfficeTemplateStore(db: OfficeDbQuery = defaultOfficeDbQue
       return row
     },
 
-    async addResource(params: { userId: string; workspaceId: string; kind: 'font' | 'theme' | 'field_schema' | 'brand_media' | 'reusable_section' | 'reusable_slide'; name: string; fileId: string | null; hash: string; mime: string; licence: unknown; embeddingRights: 'allowed' | 'subset_only' | 'prohibited' | 'unknown'; sensitivity: 'public' | 'internal' | 'confidential' }): Promise<{ id: string }> {
-      const result = await db<{ id: string }>(params.userId, `
+    async addResource(params: { userId: string; workspaceId: string; kind: 'font' | 'theme' | 'field_schema' | 'brand_media' | 'reusable_section' | 'reusable_slide'; name: string; fileId: string | null; hash: string; mime: string; licence: unknown; provenance?: unknown; embeddingRights: 'allowed' | 'subset_only' | 'prohibited' | 'unknown'; sensitivity: 'public' | 'internal' | 'confidential' }): Promise<{ id: string; sensitivity: 'public' | 'internal' | 'confidential' }> {
+      const result = await db<{ id: string; sensitivity: 'public' | 'internal' | 'confidential' }>(params.userId, `
         INSERT INTO office_resources
           (workspace_id, kind, name, file_id, content_hash, mime, licence,
-           embedding_rights, sensitivity, created_by)
-        VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10)
-        ON CONFLICT (workspace_id, kind, content_hash) DO UPDATE SET updated_at = now()
-        RETURNING id
-      `, [params.workspaceId, params.kind, params.name, params.fileId, params.hash, params.mime, JSON.stringify(params.licence), params.embeddingRights, params.sensitivity, params.userId])
+           provenance, embedding_rights, sensitivity, created_by)
+        VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9,$10,$11)
+        ON CONFLICT (workspace_id, kind, content_hash) DO UPDATE SET
+          updated_at = now(),
+          sensitivity = CASE
+            WHEN office_resources.sensitivity = 'confidential' OR EXCLUDED.sensitivity = 'confidential' THEN 'confidential'
+            WHEN office_resources.sensitivity = 'internal' OR EXCLUDED.sensitivity = 'internal' THEN 'internal'
+            ELSE 'public'
+          END
+        RETURNING id, sensitivity
+      `, [params.workspaceId, params.kind, params.name, params.fileId, params.hash, params.mime, JSON.stringify(params.licence), JSON.stringify(params.provenance ?? {}), params.embeddingRights, params.sensitivity, params.userId])
       if (!result.rows[0]) throw new Error('Office resource insert returned no row')
       return result.rows[0]
     },

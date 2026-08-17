@@ -28,7 +28,6 @@ import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Check, ChevronDown, Plus } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
-import { isHostedEdition } from "@/lib/edition";
 import { cn } from "@/lib/utils";
 import {
   FEED_GROUPS,
@@ -75,7 +74,6 @@ export function FeedSidebarPanel({ workspaceId }: { workspaceId: string }) {
   const router = useRouter();
   const { feedProfiles } = useSidebarData();
   const profiles = useMemo(() => feedProfiles ?? [], [feedProfiles]);
-  const platformIntegrationsEnabled = isHostedEdition();
 
   // ── Current platform ────────────────────────────────────────────────────
   // The URL is authoritative AND available during render, so it resolves
@@ -218,13 +216,11 @@ export function FeedSidebarPanel({ workspaceId }: { workspaceId: string }) {
   const platformGroup = FEED_GROUPS[1];
   const hostedSections = FEED_GROUPS[2].sections;
   const currentProfile = profiles.find((p) => p.platform === platform);
-  const visibleHostedSections = platformIntegrationsEnabled
-    ? currentProfile
-      ? hostedSections
-      : isConnectableFeedPlatform(platform)
-        ? hostedSections.filter((section) => section.key === "settings")
-        : []
-    : [];
+  const visibleHostedSections = currentProfile
+    ? hostedSections
+    : isConnectableFeedPlatform(platform)
+      ? hostedSections.filter((section) => section.key === "settings")
+      : [];
 
   return (
     <nav

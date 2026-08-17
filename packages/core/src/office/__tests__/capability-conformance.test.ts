@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import * as Y from 'yjs'
 import {
   OfficeArtifactSnapshotSchema,
   appendOfficeCommand,
@@ -16,7 +17,7 @@ import { layoutOfficeArtifact, renderOfficePreviewSvg } from '@use-brian/office-
 import { exportOfficeDocument, importOfficeDocument, reparseOfficeDocument } from '../docx/index.js'
 import { exportOfficePresentation, importOfficePresentation, reparseOfficePresentation } from '../pptx/index.js'
 import { exportOfficeSpreadsheet, importOfficeSpreadsheet, reparseOfficeSpreadsheet } from '../xlsx/index.js'
-import { completeDocumentSnapshot, completePresentationSnapshot, completeSpreadsheetSnapshot, id, resolveFixtureResource } from './fixtures.js'
+import { completeDocumentSnapshot, completePresentationSnapshot, completeSpreadsheetSnapshot, formattedPresentationSnapshot, id, resolveFixtureResource } from './fixtures.js'
 
 const actorId = id(98)
 const editable = officeCapabilityManifest.capabilities.filter((capability) => capability.disposition === 'editable')
@@ -84,11 +85,11 @@ function commandFor(capabilityId: EditableId, snapshot: OfficeArtifactSnapshot, 
       cellFormula: { ...base, kind: 'setSpreadsheetCell', sheetId: sheet.id, cellId: id(76), address: 'C2', valueType: 'number', value: null, formula: 'ROUND(A2*B2,2)' },
       cellStyle: { ...base, kind: 'setObjectProperty', targetId: id(74), path: ['style', 'fill'], value: '#ECFDF5' },
       mergedCell: { ...base, kind: 'setObjectProperty', targetId: sheet.id, path: ['merges'], value: ['A1:C1'] },
-      rowColumnDimensions: { ...base, kind: 'setObjectProperty', targetId: sheet.id, path: ['columnDimensions'], value: [{ index: 1, widthChars: 26, hidden: false }] },
+      rowColumnDimensions: { ...base, kind: 'setSpreadsheetDimension', sheetId: sheet.id, axis: 'column', index: 1, size: 26 },
       freezePane: { ...base, kind: 'setObjectProperty', targetId: sheet.id, path: ['freeze'], value: { rows: 1, columns: 1 } },
       dataValidation: { ...base, kind: 'setObjectProperty', targetId: sheet.id, path: ['validations'], value: sheet.validations },
       conditionalFormatting: { ...base, kind: 'setObjectProperty', targetId: sheet.id, path: ['conditionalFormats'], value: sheet.conditionalFormats },
-      worksheetImage: { ...base, kind: 'setObjectProperty', targetId: id(77), path: ['altText'], value: 'Updated company logo' },
+      worksheetImage: { ...base, kind: 'updateSpreadsheetImage', sheetId: sheet.id, imageId: id(77), from: { row: 0, column: 1 }, to: { row: 1.5, column: 3 }, altText: 'Updated company logo', decorative: false },
       spreadsheetPrintSetup: { ...base, kind: 'setObjectProperty', targetId: sheet.id, path: ['print', 'horizontalCentered'], value: false },
       spreadsheetPdf: { ...base, kind: 'setObjectProperty', targetId: sheet.id, path: ['print', 'printArea'], value: 'A1:C20' },
     }
@@ -107,6 +108,17 @@ describe('[COMP:office/capabilities] Matrix-driven Office capability conformance
     }
   })
 
+  it('classifies every semantic editable row as Brian command-native and only release as action-only', () => {
+    const commandNative = editable.filter((capability) => capability.assistantAuthoring === 'command')
+    expect(commandNative).toHaveLength(35)
+    expect(commandNative.map((capability) => capability.id)).not.toContain('spreadsheetPdf')
+    expect(editable.filter((capability) => capability.assistantAuthoring === 'action-only').map((capability) => capability.id)).toEqual(['spreadsheetPdf'])
+    for (const [ordinal, capability] of commandNative.entries()) {
+      const snapshot = capability.family === 'presentation' ? completePresentationSnapshot() : capability.family === 'spreadsheet' ? completeSpreadsheetSnapshot() : completeDocumentSnapshot()
+      expect(() => commandFor(capability.id, snapshot, ordinal)).not.toThrow()
+    }
+  })
+
   it.each(editable)('$id covers model, command, collaboration, render, accessibility, and offline replay', (capability) => {
     const source = capability.family === 'presentation' ? completePresentationSnapshot() : capability.family === 'spreadsheet' ? completeSpreadsheetSnapshot() : completeDocumentSnapshot()
     const snapshot = OfficeArtifactSnapshotSchema.parse(source)
@@ -120,7 +132,7 @@ describe('[COMP:office/capabilities] Matrix-driven Office capability conformance
     expect(preflightOfficeCandidate(applied).diagnostics.filter((diagnostic) => diagnostic.severity === 'error')).toEqual([])
 
     const writer = snapshotToYDoc(snapshot)
-    const reader = snapshotToYDoc(snapshot)
+    const reader = new Y.Doc()
     appendOfficeCommand(writer, command)
     applyOfficeUpdate(reader, encodeOfficeState(writer))
     expect(yDocToSnapshot(writer)).toEqual(applied)
@@ -149,6 +161,24 @@ describe('[COMP:office/capabilities] Matrix-driven Office capability conformance
     const importedSpreadsheet = await importOfficeSpreadsheet(xlsx.bytes, { artifactId: spreadsheet.artifactId, workspaceId: spreadsheet.workspaceId, templateVersionId: spreadsheet.templateVersionId, locale: spreadsheet.locale, defaultLanguage: spreadsheet.defaultLanguage, title: spreadsheet.title })
     expect(importedSpreadsheet.snapshot).toEqual(spreadsheet)
     expect((await reparseOfficeSpreadsheet(xlsx.bytes)).snapshot).toEqual(spreadsheet)
+  })
+
+  it('binds the shared formatted Presentation fixture to layout and PPTX conformance', async () => {
+    const presentation = formattedPresentationSnapshot()
+    const writer = snapshotToYDoc(presentation)
+    const reader = new Y.Doc()
+    applyOfficeUpdate(reader, encodeOfficeState(writer))
+    expect(yDocToSnapshot(reader)).toEqual(presentation)
+
+    const layout = layoutOfficeArtifact(presentation)
+    expect(layout.pages).toHaveLength(presentation.slides.length)
+    expect(layout.serialization).toContain('Edited growth')
+    expect(renderOfficePreviewSvg(layout.pages[0])).toContain('Edited metric')
+
+    const pptx = await exportOfficePresentation(presentation, resolveFixtureResource)
+    const reopened = await reparseOfficePresentation(pptx.bytes)
+    expect(reopened.snapshot).toEqual(presentation)
+    expect(reopened.layoutSerialization).toBe(layout.serialization)
   })
 
   it('lays out 100-page and 100-slide fixtures within a bounded test budget', () => {

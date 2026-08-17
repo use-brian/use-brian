@@ -211,6 +211,7 @@ describe('[COMP:consolidation/phases] REM phase guards', () => {
     const result = await runREMConsolidation(store, 'a1', 'u1', async () => 'NO_PATTERNS')
     expect(result.summary).toContain('Too few memories')
     expect(store.created).toHaveLength(0)
+    expect(store.logs).toEqual([{ phase: 'rem', memoriesAffected: [] }])
   })
 
   it('skips when fewer than 3 distinct tag clusters', async () => {
@@ -221,6 +222,7 @@ describe('[COMP:consolidation/phases] REM phase guards', () => {
     const result = await runREMConsolidation(store, 'a1', 'u1', async () => 'NO_PATTERNS')
     expect(result.summary).toContain('Too few memory clusters')
     expect(store.created).toHaveLength(0)
+    expect(store.logs).toEqual([{ phase: 'rem', memoriesAffected: [] }])
   })
 
   it('creates at most 3 connection memories', async () => {

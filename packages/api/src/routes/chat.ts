@@ -2186,6 +2186,26 @@ export function chatRoutes(options: WebChatOptions): Router {
         }
       }
 
+      // Resolve workspace-attributable auxiliary work independently from the
+      // final response tier. Background work is logically Standard; if that
+      // tier has no custom default, one configured custom endpoint still stays
+      // authoritative for the workspace.
+      const backgroundLlmRuntime = assistant.workspaceId && options.resolveWorkspaceCustomLlm
+        ? await options.resolveWorkspaceCustomLlm({
+            workspaceId: assistant.workspaceId,
+            requestedTier: 'standard',
+            allowDefault: true,
+            allowAnyDefault: true,
+          })
+        : null
+      const backgroundProvider = backgroundLlmRuntime?.provider ?? options.provider
+      const backgroundModel = backgroundLlmRuntime?.selector
+        ?? backgroundModelFor(options.configuredProviders)
+      const backgroundUsageAttribution = {
+        modelTier: 'standard',
+        providerKeySource: backgroundLlmRuntime?.providerKeySource ?? 'platform' as const,
+      }
+
       // ── Giant-paste promotion (large-content-artifacts §Phase 3.1) ──
       // An over-threshold paste (8K tokens, CJK-aware) becomes a durable
       // artifact; the turn (and the persisted user row) carries the manifest
@@ -2297,9 +2317,9 @@ export function chatRoutes(options: WebChatOptions): Router {
       ) {
         const { classifyResearchIntent } = await import('@use-brian/core')
         const adaptive = await classifyResearchIntent({
-          provider: options.provider,
+          provider: backgroundProvider,
           message,
-          model: backgroundModelFor(options.configuredProviders),
+          model: backgroundModel,
           recentConversation: adaptiveRecentConversation,
         }).catch(() => ({ research: false, operateSite: false, reason: null, usage: null, model: null }))
         adaptiveResearchOverhead = {
@@ -3230,12 +3250,12 @@ export function chatRoutes(options: WebChatOptions): Router {
       let classification: TopicClassification | null = null
       try {
         classification = await classifyTopic({
-          provider: options.provider,
+          provider: backgroundProvider,
           // Background lane — a per-turn classifier is exactly the invisible
           // work cost-and-pricing.md → "Standard-tier routing" pins to Flash
           // Lite (its sibling classifiers already do). Had drifted onto the
           // Flash 3 chat alias at 2x the rate.
-          model: backgroundModelFor(options.configuredProviders),
+          model: backgroundModel,
           recentUserTurns,
           replyToText: replyResolved?.text ?? null,
           currentMessage: userMessageText,
@@ -3318,6 +3338,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           usage: adaptiveResearchOverhead.usage,
           source: 'overhead:classifier',
           triggerKey: 'adaptive_research_classifier',
+          ...backgroundUsageAttribution,
         })
       }
       // Mirror to the session-event bus so other watchers of a live shared
@@ -3355,6 +3376,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         model: classification?.model ?? null,
         usage: classification?.usage,
         source: 'overhead:classifier',
+        ...backgroundUsageAttribution,
       })
 
       // Attribute voice transcription tokens as overhead. One row per audio
@@ -3489,7 +3511,10 @@ export function chatRoutes(options: WebChatOptions): Router {
         tier: modelToCompactionTier(resolveModel(requestedModel, userPlan, 'ok')),
         channelClass: 'web',
         profile: 'linear',
-        provider: options.provider,
+        provider: backgroundProvider,
+        model: backgroundModel,
+        inputTokenLimit: backgroundLlmRuntime?.inputTokenLimit,
+        ...backgroundUsageAttribution,
         systemPrompt: options.systemPrompt,
         assistantId: assistant.id,
         userId: user.id,
@@ -4655,7 +4680,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           const standardDocEditModel = resolveModel('standard', userPlan, 'ok')
           await injectDocTools({
             tools: allTools,
-            backgroundModel: backgroundModelFor(options.configuredProviders),
+            backgroundModel,
             fallbackModel: options.configuredProviders
               ? ensureServableModel(standardDocEditModel, options.configuredProviders)
               : standardDocEditModel,
@@ -4696,7 +4721,7 @@ export function chatRoutes(options: WebChatOptions): Router {
               typeof requestedActiveThemeId === 'string' && requestedActiveThemeId
                 ? requestedActiveThemeId
                 : null,
-            provider: options.provider,
+            provider: backgroundProvider,
             onEditUsage: ({ model: editModel, usage }) => recordOverheadUsage({
               usageStore: options.usageStore,
               userId: user.id,
@@ -4707,6 +4732,7 @@ export function chatRoutes(options: WebChatOptions): Router {
               usage,
               source: 'overhead:doc-edit',
               triggerKey: 'doc_edit_worker',
+              ...backgroundUsageAttribution,
             }),
             onChildToolResult: (result) => {
               if (result.isError) return
@@ -5026,10 +5052,10 @@ export function chatRoutes(options: WebChatOptions): Router {
       // That's the "5 free researches give a real taste of the deep mode"
       // wedge — once exhausted the user upgrades to keep using it.
       //
-      // Why Pro 3.1 specifically (vs the default Max model, Flash 3.6):
+      // Why Pro 3.1 specifically (vs the default Max model, Flash 3.7):
       // Research is reasoning-bound — multi-hop synthesis across web sources
       // is where Pro 3.1 keeps its 3–8 pp lead on GPQA / ARC-AGI-2 / MMLU-Pro.
-      // The default Max model (Flash 3.6) wins on agentic / coding / tool-use
+      // The default Max model (Flash 3.7) wins on agentic / coding / tool-use
       // but underperforms on this specific axis. The `research` alias forces
       // the resolver to Pro 3.1 regardless of the session's requested tier.
       //
@@ -5136,7 +5162,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           return
         }
         if (customLlmRuntime) {
-          if (userContentBlocks.some((block) => block.type === 'image')) {
+          if (customLlmRuntime.routeKind === 'custom' && userContentBlocks.some((block) => block.type === 'image')) {
             res.status(400).json({
               error: 'custom_model_media_unsupported',
               message: 'Custom model endpoints currently support text and tools only. Remove the inline image or choose a built-in model.',
@@ -5147,7 +5173,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           // the platform provider and a workspace Gemini key, and never falls
           // back to either if its request fails.
           turnProvider = customLlmRuntime.provider
-          usedByoKey = true
+          usedByoKey = customLlmRuntime.providerKeySource === 'user'
         }
       }
 
@@ -5240,7 +5266,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           // being true here means the explicit toggle: splitter is moot.
           if (!researchMode && !operateSiteIntent) {
             const { classifySplit } = await import('@use-brian/core')
-            const splitResult = await classifySplit({ provider: options.provider, message, model: backgroundModelFor(options.configuredProviders) })
+            const splitResult = await classifySplit({ provider: backgroundProvider, message, model: backgroundModel })
               .catch(() => ({ tasks: null, usage: null, model: null }))
             // Attribute splitter tokens as overhead. Recorded regardless of
             // whether the classifier chose to split — the Gemini call happened.
@@ -5254,6 +5280,7 @@ export function chatRoutes(options: WebChatOptions): Router {
               usage: splitResult.usage,
               source: 'overhead:splitter',
               triggerKey: 'parallel_split_classifier',
+              ...backgroundUsageAttribution,
             })
             splitterDecidedCoordinator = !!splitResult.tasks
 
@@ -5377,8 +5404,8 @@ export function chatRoutes(options: WebChatOptions): Router {
           // snippets instead of the browse the user asked for.
           try {
             const preflight = await runPreflight({
-              provider: options.provider,
-              model,
+              provider: backgroundProvider,
+              model: backgroundModel,
               message,
               tools: allTools,
               context: {
@@ -5478,6 +5505,7 @@ export function chatRoutes(options: WebChatOptions): Router {
               usage: preflight.usage,
               source: 'overhead:splitter',
               triggerKey: 'parallel_split_classifier',
+              ...backgroundUsageAttribution,
             })
           } catch (err) {
             console.error('[chat] pre-flight failed, continuing without:', err)
@@ -6017,6 +6045,16 @@ export function chatRoutes(options: WebChatOptions): Router {
             channelType: session.channelType,
             channelId: session.channelId,
             workspaceId: assistant.workspaceId ?? undefined,
+            workerRuntime: customLlmRuntime
+              ? {
+                  provider: customLlmRuntime.provider,
+                  model: customLlmRuntime.selector,
+                  modelTier: customLlmRuntime.modelTier,
+                  providerKeySource: customLlmRuntime.providerKeySource,
+                  inputTokenLimit: customLlmRuntime.inputTokenLimit,
+                  maxTokens: customLlmRuntime.maxTokens,
+                }
+              : undefined,
             assistantKind: assistant.kind,
             preferredChannel,
             userTimezone: user.timezone ?? undefined,
@@ -6668,6 +6706,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                 assistantId: assistant.id,
                 sessionId: session.id,
                 model: event.response.model,
+                modelTier: customLlmRuntime?.modelTier ?? tierForModel(model),
                 inputTokens: usage.inputTokens,
                 outputTokens: usage.outputTokens,
                 cacheReadTokens: usage.cacheReadTokens,
@@ -6855,8 +6894,8 @@ export function chatRoutes(options: WebChatOptions): Router {
             .listOpenBySession(session.id)
             .then((open: SessionStateRecord[]) =>
               runSessionStateDiff({
-                provider: options.provider,
-                model: backgroundModelFor(options.configuredProviders),
+                provider: backgroundProvider,
+                model: backgroundModel,
                 sessionId: session.id,
                 userId: user.id,
                 assistantId: assistant.id,
@@ -6886,6 +6925,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                 usage: result.usage,
                 source: 'overhead:session-state-diff',
                 triggerKey: 'session_state_diff',
+                ...backgroundUsageAttribution,
               })
             })
             .catch((err) => console.debug('[chat] session-state diff failed:', err))
@@ -6895,11 +6935,11 @@ export function chatRoutes(options: WebChatOptions): Router {
         // Records usage as `overhead:nudge` once the judge call returns.
         // Standard tier per docs/architecture/platform/cost-and-pricing.md
         // → Model routing (extraction / classification / structured-output bucket).
-        const nudgeModel = backgroundModelFor(options.configuredProviders)
+        const nudgeModel = backgroundModel
         runMemoryNudge({
           turns: pendingAssistantTurns,
           callModel: async (prompt) => {
-            const resp = await collectStream(options.provider.stream({
+            const resp = await collectStream(backgroundProvider.stream({
               model: nudgeModel,
               messages: [{ role: 'user', content: prompt }],
               systemPrompt: 'You are a memory utility judge. Follow instructions exactly.',
@@ -6923,6 +6963,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             usage: result.usage,
             source: 'overhead:nudge',
             triggerKey: 'memory_nudge',
+            ...backgroundUsageAttribution,
           }))
           .catch((err) => console.debug('[chat] memory nudge failed:', err))
 
@@ -6991,7 +7032,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             let synthesised: string | null = null
             try {
               const result = await composeEmptyTurnSynthesis({
-                provider: options.provider,
+                provider: backgroundProvider,
                 pendingAssistantTurns,
                 userText: userMessageText,
                 conversationHistory: messages.slice(0, -1),
@@ -7009,6 +7050,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                   usage: result.usage,
                   source: 'overhead:empty-turn-synthesis',
                   triggerKey: 'empty_turn_synthesis',
+                  ...backgroundUsageAttribution,
                 })
               }
             } catch (synthErr) {
@@ -7068,7 +7110,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         // fall through to the outer catch's generic `error` event.
         try {
           const recovered = await composeRecoveryMessage({
-            provider: options.provider,
+            provider: backgroundProvider,
             pendingAssistantTurns,
             userText: userMessageText,
             channelType: 'web',
@@ -7096,6 +7138,7 @@ export function chatRoutes(options: WebChatOptions): Router {
               model: recovered.model,
               usage: recovered.usage,
               source: 'overhead:recovery-message',
+              ...backgroundUsageAttribution,
             })
             recoveryDelivered = true
           }
@@ -7183,7 +7226,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         // `title_update` event for this turn.
         // Resolved once: the same model drives the call and its latency budget,
         // so a slower serving provider can never be given the Gemini deadline.
-        const autoTitleModel = backgroundModelFor(options.configuredProviders)
+        const autoTitleModel = backgroundModel
         const AUTO_TITLE_TIMEOUT_MS = backgroundLatencyBudgetMs(autoTitleModel)
         const autoTitle = (async () => {
           try {
@@ -7194,7 +7237,7 @@ export function chatRoutes(options: WebChatOptions): Router {
               role: m.role as 'user' | 'assistant' | 'system',
               content: m.content as Message['content'],
             }))
-            const titleResult = await generateTitle(options.provider, freshMessages, autoTitleModel)
+            const titleResult = await generateTitle(backgroundProvider, freshMessages, autoTitleModel)
             // generateTitle returns `title: null` when it can't produce a
             // meaningful title (empty excerpt, model returned blank). Keep the
             // existing title in that case — overwriting with a generic fallback
@@ -7211,6 +7254,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                 usage: titleResult.usage,
                 source: 'overhead:title',
                 triggerKey: 'session_title',
+                ...backgroundUsageAttribution,
               })
               return
             }
@@ -7237,6 +7281,7 @@ export function chatRoutes(options: WebChatOptions): Router {
               usage: titleResult.usage,
               source: 'overhead:title',
               triggerKey: 'session_title',
+              ...backgroundUsageAttribution,
             })
           } catch (err) {
             console.error('Auto-title failed:', err)
@@ -7373,11 +7418,11 @@ export function chatRoutes(options: WebChatOptions): Router {
               const result = await runDocAutoTitle({
                 userId: user.id,
                 pageId,
-                provider: options.provider,
+                provider: backgroundProvider,
                 docPageStore,
                 savedViewStore,
                 minChars: AUTO_TITLE_AI_MIN_CHARS,
-                backgroundModel: backgroundModelFor(options.configuredProviders),
+                backgroundModel,
               })
               if (result.applied && result.title && !res.writableEnded) {
                 // `icon` is the emoji the generator suggested + the commit
@@ -7399,6 +7444,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                 usage: result.usage,
                 source: 'overhead:title',
                 triggerKey: 'doc_page_title',
+                ...backgroundUsageAttribution,
               })
             }
           } catch (err) {

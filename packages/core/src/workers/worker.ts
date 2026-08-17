@@ -157,6 +157,8 @@ export type WorkerUsageEvent = {
   sessionId: string
   workspaceId: string | null
   model: string
+  modelTier?: string
+  providerKeySource?: 'user' | 'platform'
   usage: TokenUsage
 }
 
@@ -462,7 +464,9 @@ export function createWorkerManager(options: WorkerOptions) {
     const userPrompt = isResearch
       ? `${RESEARCH_USER_PROMPT_PREAMBLE}${prompt}`
       : prompt
-    const model = isResearch && researchModel ? researchModel : options.model
+    const model = context.workerRuntime?.model
+      ?? (isResearch && researchModel ? researchModel : options.model)
+    const workerProvider = context.workerRuntime?.provider ?? options.provider
 
     // Capture per-spawn refs from the SPAWNING TURN's `context` (stable per
     // spawn), NOT the shared singleton's mutable persistence*/onEvent fields.
@@ -531,8 +535,10 @@ export function createWorkerManager(options: WorkerOptions) {
         let webSearchCalls = 0
 
         for await (const event of queryLoop({
-          provider: options.provider,
+          provider: workerProvider,
           model,
+          maxTokens: context.workerRuntime?.maxTokens,
+          inputTokenLimit: context.workerRuntime?.inputTokenLimit,
           systemPrompt,
           messages: messagesForLoop,
           tools: workerTools,
@@ -592,6 +598,8 @@ export function createWorkerManager(options: WorkerOptions) {
               sessionId: ownSessionId,
               workspaceId: ownWorkspaceId,
               model: event.response.model,
+              modelTier: context.workerRuntime?.modelTier,
+              providerKeySource: context.workerRuntime?.providerKeySource,
               usage: event.totalUsage,
             })
           }

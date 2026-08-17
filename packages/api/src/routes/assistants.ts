@@ -29,6 +29,7 @@ import {
   type ConnectorInstanceStore,
 } from '../db/connector-instance-store.js'
 import { buildConnectorAuthHeaders } from '../mcp/auth-headers.js'
+import { workspacePolicyAsSettingsStore } from '../db/workspace-tool-policy-store.js'
 import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
 import type { McpSettingsStore, JobStore, CapabilityStore } from '@use-brian/core'
 import {
@@ -55,7 +56,8 @@ import {
   MAX_ACTIVE_PLAYBOOK_RULES,
   type PlaybookDecision,
 } from '../db/playbook-store.js'
-import type { SkillStore } from '../db/skill-store.js'
+import type { SkillStore, WorkspaceSkillStore } from '../db/skill-store.js'
+import type { WorkspaceSkillEnablementStore } from '../db/workspace-skill-enablement-store.js'
 
 type AssistantParams = { assistantId: string }
 
@@ -65,10 +67,24 @@ type AssistantRouteOptions = {
   connectorInstanceStore?: ConnectorInstanceStore
   connectorGrantStore?: ConnectorGrantStore
   mcpSettingsStore?: McpSettingsStore
+  workspaceToolPolicyStore?: import('../db/workspace-tool-policy-store.js').WorkspaceToolPolicyStore
+  workspaceStore?: Pick<import('../db/workspace-store.js').WorkspaceStore, 'getRole'>
   registry?: ConnectorEntry[]
   jobStore?: JobStore
   skillStore?: SkillStore
   communitySkills?: SkillContent[]
+  /**
+   * Workspace-skill enablement allowlist. Powers the Workspace tab on the
+   * assistant detail page — the assistant-centric dual of the skill editor's
+   * Access tab. Absent in minimal open-build mounts / unit tests, in which
+   * case the Workspace group is reported empty rather than guessed at.
+   */
+  workspaceSkillEnablementStore?: WorkspaceSkillEnablementStore
+  /**
+   * Resolves a workspace skill row UUID to its owning workspace, for the
+   * cross-workspace guard on the workspace-skill toggle routes.
+   */
+  workspaceSkillStore?: Pick<WorkspaceSkillStore, 'getByIdSystem' | 'listForWorkspace'>
   capabilityStore: CapabilityStore
   /**
    * Per-assistant connector grants store. Reserved for future inline
@@ -833,6 +849,8 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
         id: string
         providerId?: string
         name: string
+        /** Non-secret identity for the connected account, when known. */
+        connectedEmail?: string
         url?: string
         custom: boolean
         connected: boolean
@@ -864,7 +882,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
           // WhatsApp channel infrastructure owns connector_instance rows for
           // credentials and attribution, but it exposes no assistant tools.
           if (inst.provider === 'whatsapp') continue
-          if (ALL_EXACT_INSTANCE_GOVERNANCE_CONNECTOR_IDS.has(inst.provider)) {
+          if (inst.custom || ALL_EXACT_INSTANCE_GOVERNANCE_CONNECTOR_IDS.has(inst.provider)) {
             // Exact-governance account routers expose only usable accounts in
             // Assistant Tools; disconnected/auth-failed rows stay manageable
             // on the workspace connector surface.
@@ -874,7 +892,8 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
               id: governanceId,
               providerId: inst.provider,
               name: inst.connectedEmail ?? inst.label,
-              custom: false,
+              connectedEmail: inst.connectedEmail ?? undefined,
+              custom: inst.custom,
               connected: inst.connected,
               enabled: settingsMap.get(governanceId) ?? settingsMap.get(inst.provider) ?? true,
               icon_url: entry?.icon_url,
@@ -896,6 +915,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
             id: governanceId,
             ...(MULTI_INSTANCE_CONNECTOR_IDS.has(inst.provider) ? { providerId: inst.provider } : {}),
             name: inst.label,
+            connectedEmail: inst.connectedEmail ?? undefined,
             url: inst.url ?? undefined,
             custom: inst.custom,
             connected: inst.connected,
@@ -936,7 +956,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
             if (winningGrantor && winningGrantor !== g.grantedByUserId) continue
             if (!winningGrantor) winningGrantorByProvider.set(g.instance.provider, g.grantedByUserId)
           }
-          if (ALL_EXACT_INSTANCE_GOVERNANCE_CONNECTOR_IDS.has(g.instance.provider)) {
+          if (g.instance.custom || ALL_EXACT_INSTANCE_GOVERNANCE_CONNECTOR_IDS.has(g.instance.provider)) {
             if (!g.instance.connected) continue
             if (g.instance.provider !== 'cli' && g.instance.healthStatus === 'auth_failed') continue
             const governanceId = connectorInstanceGovernanceId(g.instance.provider, g.instance.id)
@@ -944,7 +964,8 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
               id: governanceId,
               providerId: g.instance.provider,
               name: g.instance.connectedEmail ?? g.instance.label,
-              custom: false,
+              connectedEmail: g.instance.connectedEmail ?? undefined,
+              custom: g.instance.custom,
               connected: g.instance.connected,
               enabled: settingsMap.get(governanceId) ?? settingsMap.get(g.instance.provider) ?? true,
               icon_url: entry?.icon_url,
@@ -967,6 +988,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
             id: governanceId,
             ...(MULTI_INSTANCE_CONNECTOR_IDS.has(g.instance.provider) ? { providerId: g.instance.provider } : {}),
             name: g.instance.label,
+            connectedEmail: g.instance.connectedEmail ?? undefined,
             url: g.instance.url ?? undefined,
             custom: g.instance.custom,
             connected: g.instance.connected,
@@ -1008,6 +1030,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
             ? { providerId: c.connectorId, instanceId: c.id }
             : {}),
           name: c.connectedEmail ?? c.name,
+          connectedEmail: c.connectedEmail ?? undefined,
           url: c.url ?? undefined,
           custom: c.custom,
           connected: c.connected,
@@ -1057,6 +1080,10 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
       }
 
       const connectors = Array.from(byKey.values())
+        // AgentMail is an email Channel, not an assistant-level connection.
+        // Its handler and mailbox actions are configured on the inbox in
+        // Studio → Channels; rendering it here would create a second authority.
+        .filter((connector) => (connector.providerId ?? connector.id) !== 'agentmail')
         .sort((a, b) => {
           if (a.sortProvider !== b.sortProvider) return 0
           return (a.sortCreatedAt?.getTime() ?? 0) - (b.sortCreatedAt?.getTime() ?? 0)
@@ -1127,17 +1154,16 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
 
     const { assistantId, connectorId } = req.params as { assistantId: string; connectorId: string }
     const parsedGovernanceId = parseConnectorInstanceGovernanceId(connectorId)
-    const providerId = parsedGovernanceId && OFFICIAL_CONNECTOR_TOOLS[parsedGovernanceId.provider]
-      ? parsedGovernanceId.provider
-      : connectorId
-    const governanceId = parsedGovernanceId && providerId === parsedGovernanceId.provider
-      ? connectorId
-      : providerId
+    const providerId = parsedGovernanceId?.provider ?? connectorId
+    const governanceId = parsedGovernanceId ? connectorId : providerId
 
     try {
       if (providerId === 'cli' && parsedGovernanceId && options.connectorInstanceStore) {
         const instanceId = parsedGovernanceId.instanceId
         let instance: ConnectorInstance | null = null
+        let policyStore = options.mcpSettingsStore
+        let policyUserId = member.userId
+        let policyServerName: string | null = null
         if (member.workspaceId) {
           const [teamNative, grants] = await Promise.all([
             options.connectorInstanceStore.listByWorkspaceSystem(member.workspaceId),
@@ -1145,10 +1171,19 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
               ? options.connectorGrantStore.listForTargetSystem('workspace', member.workspaceId)
               : Promise.resolve([]),
           ])
-          instance = [
-            ...teamNative,
-            ...grants.map((grant) => grant.instance),
-          ].find((candidate) => candidate.id === instanceId && candidate.provider === 'cli') ?? null
+          const teamOwned = teamNative.find(
+            (candidate) => candidate.id === instanceId && candidate.provider === 'cli',
+          ) ?? null
+          const grant = grants.find(
+            (candidate) => candidate.instance.id === instanceId && candidate.instance.provider === 'cli',
+          ) ?? null
+          instance = teamOwned ?? grant?.instance ?? null
+          if (teamOwned && options.workspaceToolPolicyStore) {
+            policyStore = workspacePolicyAsSettingsStore(options.workspaceToolPolicyStore, member.workspaceId)
+            policyServerName = connectorId
+          } else if (grant) {
+            policyUserId = grant.grantedByUserId
+          }
         } else {
           instance = await options.connectorInstanceStore.get(member.userId, instanceId)
           if (instance?.provider !== 'cli' || instance.scope !== 'user' || instance.userId !== member.userId) {
@@ -1173,20 +1208,21 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
           cwd: typeof instance.config?.cwd === 'string' ? instance.config.cwd : undefined,
           timeoutMs: typeof instance.config?.timeoutMs === 'number' ? instance.config.timeoutMs : undefined,
         }, instance.label)
+        policyServerName ??= server.name
 
         const tools = await Promise.all(server.tools.map(async (tool) => {
           const classification = classifyTool(tool.name, tool.description)
           const fallback = defaultPolicy(classification)
-          const appOverride = await options.mcpSettingsStore!.getPolicy({
+          const appOverride = await policyStore!.getPolicy({
             assistantId: APP_LEVEL_ASSISTANT_ID,
-            userId: member.userId,
-            serverName: server.name,
+            userId: policyUserId,
+            serverName: policyServerName,
             toolName: tool.name,
           })
-          const assistantOverride = await options.mcpSettingsStore!.getPolicy({
+          const assistantOverride = await policyStore!.getPolicy({
             assistantId,
-            userId: member.userId,
-            serverName: server.name,
+            userId: policyUserId,
+            serverName: policyServerName,
             toolName: tool.name,
           })
           const appPolicy = appOverride?.policy ?? fallback
@@ -1248,7 +1284,11 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
       // MCPs use a UUID `provider` (set in connector-instances.ts) so
       // they can never collide with personal `connectorId`s here.
       const connectors = await options.connectorStore!.list(member.userId)
-      const personal = connectors.find((c) => c.connectorId === connectorId)
+      const personal = member.workspaceId
+        ? undefined
+        : connectors.find((c) => parsedGovernanceId
+          ? c.id === parsedGovernanceId.instanceId && c.connectorId === providerId
+          : c.connectorId === providerId)
       let mcpUrl: string | null = personal?.url ?? null
       let mcpName: string = personal?.name ?? connectorId
       // Outbound auth headers (bearer / custom header) for an auth-required
@@ -1256,9 +1296,12 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
       // isn't rejected (which would 500 this route and blank the L2 policy
       // editor). Mirrors GET /connectors/:id/tools + injectMcpTools.
       let authHeaders: Record<string, string> = {}
+      let policyStore = options.mcpSettingsStore
+      let policyUserId = member.userId
+      let policyServerName: string | null = null
       if (personal?.url) {
         authHeaders = buildConnectorAuthHeaders(
-          await options.connectorStore!.getAuthCredentials(member.userId, connectorId),
+          await options.connectorStore!.getAuthCredentials(member.userId, providerId),
         )
       }
 
@@ -1268,24 +1311,50 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
           `SELECT workspace_id FROM assistants WHERE id = $1`,
           [assistantId],
         )
-        const assistantTeamId = teamRow.rows[0]?.workspace_id ?? null
+        const assistantTeamId = member.workspaceId ?? teamRow.rows[0]?.workspace_id ?? null
         if (assistantTeamId) {
-          const teamInstances = await options.connectorInstanceStore.listByWorkspaceSystem(assistantTeamId)
-          const teamCustom = teamInstances.find((inst) => inst.provider === connectorId && inst.custom && inst.url)
-          if (teamCustom) {
-            mcpUrl = teamCustom.url
-            mcpName = teamCustom.label
+          const [teamInstances, grants] = await Promise.all([
+            options.connectorInstanceStore.listByWorkspaceSystem(assistantTeamId),
+            options.connectorGrantStore
+              ? options.connectorGrantStore.listForTargetSystem('workspace', assistantTeamId)
+              : Promise.resolve([]),
+          ])
+          const teamOwned = teamInstances.find((inst) => (
+            inst.provider === providerId
+            && (!parsedGovernanceId || inst.id === parsedGovernanceId.instanceId)
+            && inst.custom
+            && inst.connected
+            && inst.url
+          )) ?? null
+          const grant = grants.find(({ instance: inst }) => (
+            inst.provider === providerId
+            && (!parsedGovernanceId || inst.id === parsedGovernanceId.instanceId)
+            && inst.custom
+            && inst.connected
+            && inst.url
+          )) ?? null
+          const workspaceCustom = teamOwned ?? grant?.instance ?? null
+          if (workspaceCustom?.url) {
+            mcpUrl = workspaceCustom.url
+            mcpName = workspaceCustom.label
             authHeaders = buildConnectorAuthHeaders(
-              await options.connectorInstanceStore.getAuthCredentialsSystem(teamCustom.id),
+              await options.connectorInstanceStore.getAuthCredentialsSystem(workspaceCustom.id),
             )
+            if (teamOwned && options.workspaceToolPolicyStore) {
+              policyStore = workspacePolicyAsSettingsStore(options.workspaceToolPolicyStore, assistantTeamId)
+              policyServerName = providerId
+            } else if (grant) {
+              policyUserId = grant.grantedByUserId
+            }
           }
         }
       }
 
-      if (!mcpUrl) { res.json({ tools: [], serverName: connectorId }); return }
+      if (!mcpUrl) { res.json({ tools: [], serverName: providerId }); return }
 
       const { discoverMcpServer } = await import('../mcp/client.js')
       const server = await discoverMcpServer(mcpUrl, mcpName, authHeaders)
+      policyServerName ??= server.name
 
       const tools = await Promise.all(
         server.tools.map(async (t) => {
@@ -1294,17 +1363,17 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
 
           // L1: app-level (sentinel assistant ID)
           let appPolicy: string = defPolicy
-          const appOverride = await options.mcpSettingsStore!.getPolicy({
-            assistantId: APP_LEVEL_ASSISTANT_ID, userId: member.userId,
-            serverName: server.name, toolName: t.name,
+          const appOverride = await policyStore!.getPolicy({
+            assistantId: APP_LEVEL_ASSISTANT_ID, userId: policyUserId,
+            serverName: policyServerName, toolName: t.name,
           })
           if (appOverride) appPolicy = appOverride.policy
 
           // L2: assistant-level
           let assistantPolicy: string = defPolicy
-          const o = await options.mcpSettingsStore!.getPolicy({
-            assistantId, userId: member.userId,
-            serverName: server.name, toolName: t.name,
+          const o = await policyStore!.getPolicy({
+            assistantId, userId: policyUserId,
+            serverName: policyServerName, toolName: t.name,
           })
           if (o) assistantPolicy = o.policy
 
@@ -1346,9 +1415,53 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
     try {
       const classification = classifyTool(toolName)
       const parsedGovernanceId = parseConnectorInstanceGovernanceId(connectorId)
-      const providerId = parsedGovernanceId && OFFICIAL_CONNECTOR_TOOLS[parsedGovernanceId.provider]
-        ? parsedGovernanceId.provider
-        : connectorId
+      const providerId = parsedGovernanceId?.provider ?? connectorId
+      const dynamicInstance = !!parsedGovernanceId && (
+        providerId === 'cli' || !OFFICIAL_CONNECTOR_TOOLS[providerId]
+      )
+      let policyUserId = member.userId
+      if (dynamicInstance && member.workspaceId && options.connectorInstanceStore) {
+        const [teamNative, grants] = await Promise.all([
+          options.connectorInstanceStore.listByWorkspaceSystem(member.workspaceId),
+          options.connectorGrantStore
+            ? options.connectorGrantStore.listForTargetSystem('workspace', member.workspaceId)
+            : Promise.resolve([]),
+        ])
+        const teamOwned = teamNative.find((instance) => (
+          instance.id === parsedGovernanceId.instanceId && instance.provider === providerId
+        ))
+        const grant = grants.find(({ instance }) => (
+          instance.id === parsedGovernanceId.instanceId && instance.provider === providerId
+        ))
+        if (teamOwned) {
+          const workspaceRole = options.workspaceStore
+            ? await options.workspaceStore.getRole(member.userId, member.workspaceId)
+            : null
+          if (workspaceRole !== 'owner' && workspaceRole !== 'admin') {
+            res.status(403).json({ error: 'Workspace owner or admin role required' })
+            return
+          }
+          if (!options.workspaceToolPolicyStore) {
+            res.status(500).json({ error: 'Workspace policy store is not configured' })
+            return
+          }
+          await options.workspaceToolPolicyStore.setPolicy({
+            workspaceId: member.workspaceId,
+            serverName: providerId === 'cli' ? connectorId : providerId,
+            toolName,
+            policy: policy as 'allow' | 'ask' | 'block',
+            classification,
+            updatedBy: member.userId,
+          })
+          res.json({ ok: true })
+          return
+        }
+        if (!grant) {
+          res.status(404).json({ error: 'Connector instance not found' })
+          return
+        }
+        policyUserId = grant.grantedByUserId
+      }
       const persistedServerName = providerId === 'cli' && parsedGovernanceId
         ? serverName
         : OFFICIAL_CONNECTOR_TOOLS[providerId]
@@ -1357,7 +1470,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
 
       await options.mcpSettingsStore.setPolicy({
         assistantId,
-        userId: member.userId,
+        userId: policyUserId,
         serverName: persistedServerName,
         toolName,
         policy: policy as 'allow' | 'ask' | 'block',
@@ -1581,17 +1694,23 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
           appliesToAppType: s.appliesToAppType,
           source: s.source,
         }))
-      // DB queries may fail if migration hasn't run — gracefully degrade
-      let userSkills: Array<{ id: string; name: string; description: string; whenToUse?: string; category: string; requiresConnectors: string[]; source: string }> = []
+      // The slug-keyed override layer. Spans BOTH groups (see skill-system.md
+      // → "How the two tables actually combine at runtime"), so it is read
+      // once and applied to each. A failure here must not read as "no
+      // overrides" — that silently flips every opt-out built-in's displayed
+      // state — so it is logged and surfaced, never swallowed.
       let settings: Array<{ skillId: string; enabled: boolean }> = []
       let starred: string[] = []
       try {
-        userSkills = await options.skillStore.listOwned(member.userId)
         settings = await options.skillStore.listForAssistant(req.params.assistantId)
-      } catch {}
+      } catch (err) {
+        console.error('[assistants] legacy skill settings read failed:', err)
+      }
       try {
         starred = await options.skillStore.listStarred(member.userId)
-      } catch {}
+      } catch (err) {
+        console.error('[assistants] skill stars read failed:', err)
+      }
       const settingsMap = new Map(settings.map((s) => [s.skillId, s.enabled]))
       const starredSet = new Set(starred)
 
@@ -1599,23 +1718,86 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
         id: s.id, name: s.name, description: s.description, whenToUse: s.whenToUse,
         category: s.category, requiresConnectors: s.requiresConnectors, source: s.source,
       }))
-      const allSkills = [...builtin, ...communityMeta, ...userSkills.map((s) => ({
-        id: s.id,
-        name: s.name,
-        description: s.description,
-        whenToUse: s.whenToUse,
-        category: s.category,
-        requiresConnectors: s.requiresConnectors,
-        source: s.source,
-      }))]
+
+      // ── Workspace group ───────────────────────────────────────────
+      //
+      // The assistant's OWN workspace, every author, active/stale only.
+      // Deliberately NOT `listOwned(userId)`, which pins the caller's primary
+      // (personal) workspace and filters `author_id` — that is why a
+      // team-workspace assistant could never see its own skills here, and it
+      // is the same deprecated path incident 2026-06-01 removed from the
+      // injection pipeline.
+      const workspaceSkills: Array<{
+        rowId: string
+        slug: string
+        name: string
+        description: string
+        whenToUse?: string
+        category: string
+        requiresConnectors: string[]
+        source: string
+        enabled: boolean
+        starred: boolean
+      }> = []
+      if (member.workspaceId && options.workspaceSkillEnablementStore && options.workspaceSkillStore) {
+        try {
+          const [rows, enablement] = await Promise.all([
+            options.workspaceSkillStore.listForWorkspace(member.workspaceId, {
+              actingUserId: member.userId,
+            }),
+            options.workspaceSkillEnablementStore.listForAssistant(req.params.assistantId, {
+              actingUserId: member.userId,
+            }),
+          ])
+          // `listForWorkspace` carries BOTH keys on one row (`rowId` UUID for
+          // the allowlist, `slug` for the legacy override), so the two
+          // keyspaces meet without a second resolve query.
+          const allowed = new Set(enablement.map((e) => e.workspaceSkillId))
+          for (const s of rows) {
+            // Match the runtime resolver's state filter — an archived skill
+            // (including a curator-absorbed member) is never offered, so
+            // showing a toggle for it would promise something that cannot
+            // happen.
+            if (s.state === 'archived') continue
+            workspaceSkills.push({
+              rowId: s.rowId,
+              slug: s.slug,
+              name: s.name,
+              description: s.description,
+              whenToUse: s.whenToUse,
+              category: s.category,
+              requiresConnectors: s.requiresConnectors,
+              source: s.source,
+              // Mirror the runtime predicate in `injectSkills`, not just the
+              // allowlist: a legacy `enabled = true` row offers the skill even
+              // with no allowlist row, and a legacy `false` vetoes one that
+              // has it. Showing allowlist-presence alone would misreport every
+              // skill the old personal-workspace toggle enabled.
+              enabled: settingsMap.get(s.slug) === false
+                ? false
+                : allowed.has(s.rowId) || settingsMap.get(s.slug) === true,
+              starred: starredSet.has(s.slug),
+            })
+          }
+        } catch (err) {
+          // Never degrade to an empty Workspace tab silently — an empty tab is
+          // indistinguishable from "this workspace has no skills".
+          console.error('[assistants] workspace skill listing failed:', err)
+          res.status(500).json({ error: 'Failed to list skills' })
+          return
+        }
+      }
+
+      const allSkills = [...builtin, ...communityMeta]
 
       res.json({
         skills: allSkills.map((s) => ({
           ...s,
-          // Built-in: enabled by default (opt-out). Community/user: disabled by default (opt-in).
+          // Built-in: enabled by default (opt-out). Community: opt-in.
           enabled: settingsMap.get(s.id) ?? (s.source === 'builtin'),
           starred: starredSet.has(s.id),
         })),
+        workspaceSkills,
       })
     } catch (err) {
       console.error('[assistants] list skills failed:', err)
@@ -1649,6 +1831,109 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
       res.json({ ok: true })
     } catch (err) {
       console.error('[assistants] disable skill failed:', err)
+      res.status(500).json({ error: 'Failed to disable skill' })
+    }
+  })
+
+  // ── Workspace skills — the allowlist pair ──────────────────────────
+  //
+  // The assistant-centric dual of the skill editor's `GET/PUT
+  // /api/skills/:id/access`. Both write `workspace_skill_enablement`; this end
+  // takes one skill and one assistant, that end takes one skill and many.
+  //
+  // `:workspaceSkillId` is the workspace_skills ROW UUID, not the slug — the
+  // allowlist is UUID-keyed. Membership is the only gate, matching
+  // `resolveAccessContext` on the skill-centric route: an admin requirement
+  // here would make access editable from one end of the relation and not the
+  // other.
+  //
+  // Spec: docs/architecture/engine/skill-system.md → "Per-assistant enablement".
+
+  /**
+   * Resolve the workspace skill and prove it belongs to the same workspace as
+   * the assistant. The allowlist PK is `(workspace_skill_id, assistant_id)`
+   * and its FKs check existence, not workspace equality — so without this a
+   * member of two workspaces could attach workspace A's skill to workspace
+   * B's assistant. The skill-centric route gets this structurally by deriving
+   * its candidate assistants from the skill's own workspace; here it must be
+   * asserted. Mismatch is 404, not 403: the caller should not learn whether an
+   * id they cannot use exists.
+   */
+  async function resolveWorkspaceSkillForAssistant(
+    workspaceSkillId: string,
+    assistantWorkspaceId: string | null,
+    res: import('express').Response,
+  ): Promise<{ rowId: string; slug: string } | null> {
+    if (!options.workspaceSkillStore || !options.workspaceSkillEnablementStore) {
+      res.status(501).json({ error: 'Workspace skill access is not available' })
+      return null
+    }
+    const skill = await options.workspaceSkillStore.getByIdSystem(workspaceSkillId)
+    if (!skill || !assistantWorkspaceId || skill.workspaceId !== assistantWorkspaceId) {
+      res.status(404).json({ error: 'Skill not found' })
+      return null
+    }
+    return { rowId: skill.rowId, slug: skill.slug }
+  }
+
+  router.post('/:assistantId/workspace-skills/:workspaceSkillId/enable', async (req, res) => {
+    const member = await verifyMembership(req as any, res)
+    if (!member) return
+
+    try {
+      const { assistantId, workspaceSkillId } = req.params as {
+        assistantId: string; workspaceSkillId: string
+      }
+      const skill = await resolveWorkspaceSkillForAssistant(
+        workspaceSkillId, member.workspaceId, res,
+      )
+      if (!skill) return
+
+      await options.workspaceSkillEnablementStore!.enable(skill.rowId, assistantId, member.userId)
+      // Clear a stale slug-keyed veto so the toggle actually takes effect.
+      // DELETE, never `setEnabled(false)` on the disable path — see the store
+      // docstring and skill-system.md → "The Workspace toggle reconciles the
+      // legacy veto".
+      if (options.skillStore) {
+        const legacy = await options.skillStore.listForAssistant(assistantId)
+        if (legacy.some((r) => r.skillId === skill.slug && !r.enabled)) {
+          await options.skillStore.clearEnabled(assistantId, skill.slug)
+        }
+      }
+      res.json({ ok: true })
+    } catch (err) {
+      console.error('[assistants] enable workspace skill failed:', err)
+      res.status(500).json({ error: 'Failed to enable skill' })
+    }
+  })
+
+  router.post('/:assistantId/workspace-skills/:workspaceSkillId/disable', async (req, res) => {
+    const member = await verifyMembership(req as any, res)
+    if (!member) return
+
+    try {
+      const { assistantId, workspaceSkillId } = req.params as {
+        assistantId: string; workspaceSkillId: string
+      }
+      const skill = await resolveWorkspaceSkillForAssistant(
+        workspaceSkillId, member.workspaceId, res,
+      )
+      if (!skill) return
+
+      await options.workspaceSkillEnablementStore!.disable(skill.rowId, assistantId, member.userId)
+      // A legacy `enabled = true` row would keep offering the skill after the
+      // allowlist row is gone, so it has to go too. Deleting (rather than
+      // writing `false`) avoids minting a veto row that would silently defeat
+      // a later enable from the skill editor's allowlist-only Access tab.
+      if (options.skillStore) {
+        const legacy = await options.skillStore.listForAssistant(assistantId)
+        if (legacy.some((r) => r.skillId === skill.slug && r.enabled)) {
+          await options.skillStore.clearEnabled(assistantId, skill.slug)
+        }
+      }
+      res.json({ ok: true })
+    } catch (err) {
+      console.error('[assistants] disable workspace skill failed:', err)
       res.status(500).json({ error: 'Failed to disable skill' })
     }
   })

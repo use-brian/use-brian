@@ -555,7 +555,7 @@ function KnowledgeReader({
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               spellCheck={false}
-              className="min-h-[50vh] w-full resize-y rounded-md border border-border bg-background p-3 font-mono text-[13px] leading-relaxed text-foreground focus:outline-none focus-visible:border-ring"
+              className="min-h-[50vh] w-full resize-y rounded-md border border-border bg-background p-3 font-mono text-[13px] leading-relaxed text-foreground focus:outline-none"
             />
             {!isLocalSynced && <label className="flex flex-col gap-1">
               <span className="text-xs font-medium text-muted-foreground">
@@ -566,7 +566,7 @@ function KnowledgeReader({
                 onChange={(e) => setComment(e.target.value)}
                 placeholder={copy.commentPlaceholder}
                 rows={3}
-                className="w-full resize-y rounded-md border border-border bg-background p-2.5 text-sm text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus-visible:border-ring"
+                className="w-full resize-y rounded-md border border-border bg-background p-2.5 text-sm text-foreground placeholder:text-muted-foreground/50 focus:outline-none"
               />
             </label>}
             {submitError && (

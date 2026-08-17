@@ -25,7 +25,7 @@
  * [COMP:app-web/plan-slot-chip]
  */
 
-import { MoreHorizontal } from "lucide-react";
+import { Check, MoreHorizontal, Sparkles, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { PlatformIcon } from "@/components/feed/platform-icon";
@@ -37,6 +37,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { formatSlotMinute, type PlanSlot } from "@/lib/feed-plan";
+import type { ProposedSlot } from "@/lib/feed-plan-proposal";
 
 /** The drag payload types, so a slot drag and an idea drag never collide. */
 export const SLOT_DRAG_TYPE = "application/x-feed-slot";
@@ -151,6 +152,80 @@ export function PlanSlotChip({
             ) : null}
           </DropdownMenuContent>
         </DropdownMenu>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * A side-effect-free assistant proposal. It intentionally cannot be dragged
+ * and never borrows the solid/status-dot treatment of a persisted plan slot.
+ * The two compact actions repeat the rail's explicit write boundary.
+ */
+export function PlanProposalChip({
+  proposal,
+  canEdit,
+  accepting,
+  variant = "grid",
+  onAccept,
+  onDismiss,
+}: {
+  proposal: ProposedSlot;
+  canEdit: boolean;
+  accepting: boolean;
+  variant?: "grid" | "row";
+  onAccept: () => void;
+  onDismiss: () => void;
+}) {
+  const tp = useT().feedPage.plan;
+
+  return (
+    <div
+      data-plan-proposal-chip={proposal.index}
+      title={tp.proposedDescription}
+      className={cn(
+        "group/proposal flex min-w-0 items-center gap-1 rounded-md border border-dashed border-foreground/30 bg-muted/30 text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground",
+        variant === "grid"
+          ? "px-1.5 py-1 text-[11px]"
+          : "px-2 py-1.5 text-[12.5px]",
+        accepting && "opacity-60",
+      )}
+    >
+      <Sparkles
+        className={cn("shrink-0", variant === "grid" ? "size-3" : "size-3.5")}
+        aria-label={tp.proposedHeading}
+      />
+      <PlatformIcon
+        platform={proposal.platform}
+        className={cn("shrink-0", variant === "grid" ? "size-3" : "size-3.5")}
+      />
+      <span className="min-w-0 flex-1 truncate" title={proposal.title}>
+        {proposal.title}
+      </span>
+
+      {canEdit ? (
+        <span className="flex shrink-0 items-center gap-0.5">
+          <button
+            type="button"
+            onClick={onAccept}
+            disabled={accepting}
+            aria-label={`${tp.acceptSlot}: ${proposal.title}`}
+            title={tp.acceptSlot}
+            className="inline-flex size-4 items-center justify-center rounded transition-colors hover:bg-background disabled:opacity-50"
+          >
+            <Check className="size-3" aria-hidden />
+          </button>
+          <button
+            type="button"
+            onClick={onDismiss}
+            disabled={accepting}
+            aria-label={`${tp.dismissSlot}: ${proposal.title}`}
+            title={tp.dismissSlot}
+            className="inline-flex size-4 items-center justify-center rounded transition-colors hover:bg-background disabled:opacity-50"
+          >
+            <X className="size-3" aria-hidden />
+          </button>
+        </span>
       ) : null}
     </div>
   );

@@ -182,6 +182,176 @@ describe('[COMP:ext/agent] CDP attachment lifecycle', () => {
   })
 })
 
+describe('[COMP:ext/agent] Native dropdown option clicks', () => {
+  it('selects an option through its owning select when the option has no box model', async () => {
+    const executor = new TabExecutor()
+    await executor.attach(42)
+    dbg.sendCommand.mockImplementation(async (_target, method, params) => {
+      if (method === 'Accessibility.getFullAXTree') {
+        return {
+          nodes: [
+            {
+              nodeId: 'station-option',
+              backendDOMNodeId: 7,
+              role: { value: 'option' },
+              name: { value: 'Olympic' },
+              ignored: false,
+            },
+          ],
+        }
+      }
+      if (method === 'DOM.scrollIntoViewIfNeeded' && params?.backendNodeId === 7) {
+        throw new Error('Could not compute box model.')
+      }
+      if (method === 'DOM.getBoxModel' && params?.backendNodeId === 7) {
+        throw new Error('Could not compute box model.')
+      }
+      if (method === 'DOM.resolveNode') return { object: { objectId: 'option-object' } }
+      if (method === 'Runtime.callFunctionOn' && params?.returnByValue === true) {
+        // Disabled line-heading options are excluded, so Olympic is the third selectable item.
+        return { result: { value: { disabled: false, enabledIndex: 2, multiple: false } } }
+      }
+      if (method === 'Runtime.callFunctionOn') return { result: { objectId: 'select-object' } }
+      if (method === 'DOM.describeNode') return { node: { backendNodeId: 8 } }
+      if (method === 'DOM.getBoxModel' && params?.backendNodeId === 8) {
+        return { model: { content: [0, 0, 100, 0, 100, 20, 0, 20] } }
+      }
+      return {}
+    })
+
+    const snapshot = await executor.snapshot()
+    await expect(executor.click(snapshot.nodes[0]!.ref)).resolves.toBeUndefined()
+
+    const mouse = dbg.sendCommand.mock.calls.filter((call) => call[1] === 'Input.dispatchMouseEvent')
+    expect(mouse).toHaveLength(3)
+    expect(mouse[1]?.[2]).toMatchObject({ type: 'mousePressed', x: 50, y: 10 })
+    const keys = dbg.sendCommand.mock.calls
+      .filter((call) => call[1] === 'Input.dispatchKeyEvent' && call[2]?.type === 'keyDown')
+      .map((call) => call[2]?.key)
+    expect(keys).toEqual(['Home', 'ArrowDown', 'ArrowDown', 'Enter'])
+  })
+
+  it('keeps an unresolved box-model failure actionable without claiming the page control is hidden', async () => {
+    const executor = new TabExecutor()
+    await executor.attach(42)
+    dbg.sendCommand.mockImplementation(async (_target, method) => {
+      if (method === 'Accessibility.getFullAXTree') {
+        return {
+          nodes: [{
+            nodeId: 'button', backendDOMNodeId: 9, role: { value: 'button' },
+            name: { value: 'Search' }, ignored: false,
+          }],
+        }
+      }
+      if (method === 'DOM.getBoxModel') throw new Error('Could not compute box model.')
+      return {}
+    })
+    const snapshot = await executor.snapshot()
+
+    const err = (await executor.click(snapshot.nodes[0]!.ref).catch((error: unknown) => error)) as ExecutorError
+    expect(err.message).toBe(
+      `Ref ${snapshot.nodes[0]!.ref} has no usable rendered target. Take a fresh browserSnapshot and use the ref for the visible control.`,
+    )
+    expect(err.message).not.toMatch(/box model/i)
+    expect(err.message).not.toMatch(/not visible/i)
+  })
+
+  it('does not leak a box-model failure from the owning native select', async () => {
+    const executor = new TabExecutor()
+    await executor.attach(42)
+    dbg.sendCommand.mockImplementation(async (_target, method, params) => {
+      if (method === 'Accessibility.getFullAXTree') {
+        return {
+          nodes: [{
+            nodeId: 'station-option', backendDOMNodeId: 7, role: { value: 'option' },
+            name: { value: 'Olympic' }, ignored: false,
+          }],
+        }
+      }
+      if (method === 'DOM.getBoxModel') throw new Error('Could not compute box model.')
+      if (method === 'DOM.resolveNode') return { object: { objectId: 'option-object' } }
+      if (method === 'Runtime.callFunctionOn' && params?.returnByValue === true) {
+        return { result: { value: { disabled: false, enabledIndex: 0, multiple: false } } }
+      }
+      if (method === 'Runtime.callFunctionOn') return { result: { objectId: 'select-object' } }
+      if (method === 'DOM.describeNode') return { node: { backendNodeId: 8 } }
+      return {}
+    })
+
+    const snapshot = await executor.snapshot()
+    const err = (await executor.click(snapshot.nodes[0]!.ref).catch((error: unknown) => error)) as ExecutorError
+
+    expect(err.message).toMatch(/dropdown.*no usable rendered target/i)
+    expect(err.message).not.toMatch(/box model|not visible/i)
+  })
+})
+
+describe('[COMP:ext/agent] Composite accessibility control targeting', () => {
+  it('clicks the one rendered control associated with a hidden textbox ref', async () => {
+    const executor = new TabExecutor()
+    await executor.attach(42)
+    dbg.sendCommand.mockImplementation(async (_target, method, params) => {
+      if (method === 'Accessibility.getFullAXTree') {
+        return {
+          nodes: [{
+            nodeId: 'station-input', backendDOMNodeId: 74, role: { value: 'textbox' },
+            name: { value: 'Input From Station' }, ignored: false,
+          }],
+        }
+      }
+      if (method === 'DOM.getBoxModel' && params?.backendNodeId === 74) {
+        throw new Error('Could not compute box model.')
+      }
+      if (method === 'DOM.resolveNode') return { object: { objectId: 'hidden-input' } }
+      if (method === 'Runtime.callFunctionOn') return { result: { objectId: 'visible-combobox' } }
+      if (method === 'DOM.describeNode') return { node: { backendNodeId: 75 } }
+      if (method === 'DOM.getBoxModel' && params?.backendNodeId === 75) {
+        return { model: { content: [20, 30, 220, 30, 220, 70, 20, 70] } }
+      }
+      return {}
+    })
+
+    const snapshot = await executor.snapshot()
+    await expect(executor.click(snapshot.nodes[0]!.ref)).resolves.toBeUndefined()
+
+    const mouse = dbg.sendCommand.mock.calls.filter((call) => call[1] === 'Input.dispatchMouseEvent')
+    expect(mouse[1]?.[2]).toMatchObject({ type: 'mousePressed', x: 120, y: 50 })
+    expect(dbg.sendCommand).toHaveBeenCalledWith(
+      { tabId: 42 },
+      'DOM.getBoxModel',
+      { backendNodeId: 75 },
+    )
+  })
+
+  it('types into the one editable control associated with a non-focusable textbox ref', async () => {
+    const executor = new TabExecutor()
+    await executor.attach(42)
+    dbg.sendCommand.mockImplementation(async (_target, method, params) => {
+      if (method === 'Accessibility.getFullAXTree') {
+        return {
+          nodes: [{
+            nodeId: 'station-input', backendDOMNodeId: 74, role: { value: 'textbox' },
+            name: { value: 'Input From Station' }, ignored: false,
+          }],
+        }
+      }
+      if (method === 'DOM.focus' && params?.backendNodeId === 74) {
+        throw new Error('Element is not focusable')
+      }
+      if (method === 'DOM.resolveNode') return { object: { objectId: 'hidden-input' } }
+      if (method === 'Runtime.callFunctionOn') return { result: { objectId: 'visible-combobox' } }
+      if (method === 'DOM.describeNode') return { node: { backendNodeId: 75 } }
+      return {}
+    })
+
+    const snapshot = await executor.snapshot()
+    await expect(executor.type(snapshot.nodes[0]!.ref, 'Olympic')).resolves.toBeUndefined()
+
+    expect(dbg.sendCommand).toHaveBeenCalledWith({ tabId: 42 }, 'DOM.focus', { backendNodeId: 75 })
+    expect(dbg.sendCommand).toHaveBeenCalledWith({ tabId: 42 }, 'Input.insertText', { text: 'Olympic' })
+  })
+})
+
 describe('[COMP:ext/agent] Detach recovery policy', () => {
   it('recognises the Chrome detach message however it is phrased', () => {
     expect(isDetachedError(new Error('Debugger is not attached to the tab with id: 1.'))).toBe(true)

@@ -7,8 +7,8 @@
  * An assistant may browse as a profile only when it is explicitly enabled for
  * it AND its clearance covers the profile's rung.
  *
- * The store is a port: the platform backs it with `browser_profiles`
- * (closed migration 317); OSS/tests use the in-memory impl. Profile
+ * The store is a port: production backs it with `browser_profiles` (open
+ * migration 438); tests may use the in-memory impl. Profile
  * EXISTENCE is always workspace-visible (governance); only session
  * decryption is clearance-gated (the vault + RLS enforce that side).
  */
@@ -205,8 +205,8 @@ export function describeProfileResolution(res: Exclude<ProfileResolution, { kind
 }
 
 /**
- * In-memory session vault for OSS boots and tests (the closed impl is the
- * encrypted `browser_sessions` store) — same profile-scoped port (R2-6).
+ * In-memory session vault for tests (the DB impl is the encrypted open
+ * `browser_sessions` store) — same profile-scoped port (R2-6).
  */
 export function createInMemorySessionVault(): SessionVault & {
   bundles: Map<string, { site: string; cookies: unknown[]; capturedAt: string; status: 'active' | 'dead' }>
@@ -253,7 +253,7 @@ export function createInMemorySessionVault(): SessionVault & {
   }
 }
 
-/** In-memory store for OSS boots and tests (the closed impl is `browser_profiles`). */
+/** In-memory store for tests; production uses the open `browser_profiles` store. */
 export function createInMemoryBrowserProfileStore(): BrowserProfileStore & {
   profiles: Map<string, BrowserProfile>
 } {

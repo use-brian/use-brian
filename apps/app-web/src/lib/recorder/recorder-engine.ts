@@ -29,6 +29,9 @@ import type { SpoolSessionMeta, SpoolStore } from "./recorder-spool";
 /** MediaRecorder timeslice — one chunk (and one spool write) per interval. */
 const CAPTURE_TIMESLICE_MS = 5_000;
 
+/** Each live transcript upload is a complete, independently decodable file. */
+const LIVE_TRANSCRIPT_WINDOW_MS = 30_000;
+
 /**
  * Explicit speech bitrate. Chrome's MediaRecorder default is ~128 kbps —
  * sized for music, wasteful for a mic: a 2-hour sales call would be
@@ -83,6 +86,15 @@ export async function createRecorderEngine(opts?: {
   onUnexpectedEnd?: () => void;
   /** Advertised only by new macOS/Windows desktop shells. */
   includeSystemAudio?: boolean;
+  /** Optional provisional transcript lane; the durable recorder stays authoritative. */
+  onLiveWindow?: (window: {
+    blob: Blob;
+    mime: string;
+    startMs: number;
+    endMs: number;
+  }) => Promise<void> | void;
+  /** Injectable only for deterministic tests; production uses 30 seconds. */
+  liveWindowMs?: number;
 }): Promise<RecorderEngine> {
   const captureAudio = await acquireCaptureAudio({
     includeSystemAudio: opts?.includeSystemAudio === true,
@@ -143,6 +155,96 @@ export async function createRecorderEngine(opts?: {
   const elapsedMs = () =>
     (pausedSince ?? Date.now()) - startedAt - pausedTotal;
 
+  // ── independently decodable live windows ─────────────────────────────
+  // MediaRecorder timeslice blobs after the first are continuation chunks,
+  // so the API cannot decode them independently. A second recorder over the
+  // SAME final stream stops/restarts per window. The durable recorder above is
+  // untouched and remains the recovery/final-processing source of truth.
+  let liveRecorder: MediaRecorder | null = null;
+  let liveParts: Blob[] = [];
+  let liveWindowStartedAt = 0;
+  let liveTimer: ReturnType<typeof setTimeout> | null = null;
+  let liveTimerStartedAt = 0;
+  let liveRemainingMs = opts?.liveWindowMs ?? LIVE_TRANSCRIPT_WINDOW_MS;
+  let liveCancelled = false;
+  let liveQueue: Promise<void> = Promise.resolve();
+
+  const clearLiveTimer = () => {
+    if (liveTimer) clearTimeout(liveTimer);
+    liveTimer = null;
+  };
+
+  const enqueueLiveWindow = (blob: Blob, mime: string, startMs: number, endMs: number) => {
+    if (!opts?.onLiveWindow || liveCancelled || endMs <= startMs) return;
+    liveQueue = liveQueue
+      .then(() => opts.onLiveWindow!({ blob, mime, startMs, endMs }))
+      .catch(() => {});
+  };
+
+  const startLiveWindow = () => {
+    if (!opts?.onLiveWindow || closed || liveCancelled) return;
+    liveParts = [];
+    liveWindowStartedAt = elapsedMs();
+    liveRemainingMs = opts.liveWindowMs ?? LIVE_TRANSCRIPT_WINDOW_MS;
+    const rolling = new MediaRecorder(stream, {
+      ...(mimeType ? { mimeType } : {}),
+      audioBitsPerSecond: AUDIO_BITS_PER_SECOND,
+    });
+    liveRecorder = rolling;
+    rolling.ondataavailable = (event) => {
+      if (event.data.size > 0) liveParts.push(event.data);
+    };
+    rolling.onstop = () => {
+      const endMs = elapsedMs();
+      const mime = rolling.mimeType || mimeType || "audio/webm";
+      enqueueLiveWindow(new Blob(liveParts, { type: mime }), mime, liveWindowStartedAt, endMs);
+      liveParts = [];
+      if (!closed && !liveCancelled) startLiveWindow();
+    };
+    // A provisional encoder failure must never stop the durable recording.
+    // Stop this window; its empty/partial blob is reported as a missed window,
+    // and onstop starts a fresh container for the next one.
+    rolling.onerror = () => {
+      clearLiveTimer();
+      if (rolling.state !== "inactive") {
+        try {
+          rolling.stop();
+        } catch {
+          // The next full recording remains authoritative.
+          if (!closed && !liveCancelled) startLiveWindow();
+        }
+      } else if (!closed && !liveCancelled) {
+        startLiveWindow();
+      }
+    };
+    rolling.start();
+    liveTimerStartedAt = Date.now();
+    liveTimer = setTimeout(() => {
+      liveTimer = null;
+      if (rolling.state !== "inactive") rolling.stop();
+    }, liveRemainingMs);
+  };
+
+  const stopLiveWindow = (cancel: boolean): Promise<void> => {
+    clearLiveTimer();
+    if (cancel) liveCancelled = true;
+    const rolling = liveRecorder;
+    liveRecorder = null;
+    if (!rolling || rolling.state === "inactive") return liveQueue;
+    return new Promise<void>((resolve) => {
+      const previousStop = rolling.onstop;
+      rolling.onstop = (event) => {
+        if (!cancel) previousStop?.call(rolling, event);
+        resolve();
+      };
+      try {
+        rolling.stop();
+      } catch {
+        resolve();
+      }
+    }).then(() => liveQueue);
+  };
+
   // ── chunks + spool ───────────────────────────────────────────────────
   const chunks: Blob[] = [];
   let spool: SpoolStore | null = null;
@@ -180,6 +282,18 @@ export async function createRecorderEngine(opts?: {
   };
 
   recorder.start(CAPTURE_TIMESLICE_MS);
+  try {
+    startLiveWindow();
+  } catch (error) {
+    closed = true;
+    try {
+      recorder.stop();
+    } catch {
+      // The release below is the actual cleanup boundary.
+    }
+    release();
+    throw error;
+  }
 
   return {
     elapsedMs,
@@ -198,12 +312,26 @@ export async function createRecorderEngine(opts?: {
     pause() {
       if (recorder.state === "recording") {
         recorder.pause();
+        if (liveRecorder?.state === "recording") {
+          liveRemainingMs = Math.max(1, liveRemainingMs - (Date.now() - liveTimerStartedAt));
+          clearLiveTimer();
+          liveRecorder.pause();
+        }
         pausedSince = Date.now();
       }
     },
     resume() {
       if (recorder.state === "paused") {
         recorder.resume();
+        if (liveRecorder?.state === "paused") {
+          liveRecorder.resume();
+          liveTimerStartedAt = Date.now();
+          const rolling = liveRecorder;
+          liveTimer = setTimeout(() => {
+            liveTimer = null;
+            if (rolling.state !== "inactive") rolling.stop();
+          }, liveRemainingMs);
+        }
         if (pausedSince !== null) {
           pausedTotal += Date.now() - pausedSince;
           pausedSince = null;
@@ -225,8 +353,9 @@ export async function createRecorderEngine(opts?: {
       spoolFrom(0);
     },
     spoolSessionId: () => spoolId,
-    stop() {
+    async stop() {
       closed = true;
+      await stopLiveWindow(false);
       return new Promise<CaptureResult>((resolve) => {
         const durationMs = elapsedMs();
         const finish = () => {
@@ -249,6 +378,7 @@ export async function createRecorderEngine(opts?: {
     },
     cancel() {
       closed = true;
+      void stopLiveWindow(true);
       recorder.ondataavailable = null;
       if (recorder.state !== "inactive") {
         try {

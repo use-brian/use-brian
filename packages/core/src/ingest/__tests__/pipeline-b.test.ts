@@ -53,7 +53,7 @@ import type { PlatformEngagementMetrics } from '../types.js'
 
 // ── Mock provider (sequenced responses across multiple stream() calls) ──
 
-function sequencedProvider(responses: string[]): LLMProvider {
+function sequencedProvider(responses: string[], requests?: ProviderRequest[]): LLMProvider {
   let i = 0
   return {
     name: 'mock',
@@ -62,7 +62,8 @@ function sequencedProvider(responses: string[]): LLMProvider {
       return { thoughtSignature: undefined } as never
     },
     // eslint-disable-next-line require-yield
-    async *stream(): AsyncGenerator<StreamChunk> {
+    async *stream(request: ProviderRequest): AsyncGenerator<StreamChunk> {
+      requests?.push(request)
       const text = responses[Math.min(i, responses.length - 1)] ?? ''
       i++
       yield { type: 'text_delta', text } as StreamChunk
@@ -2043,6 +2044,34 @@ describe('[COMP:brain/pipeline-b] extraction usage attribution', () => {
     // Both rows carry the originating episode, so a recording's full cost
     // sums back to it (migration 354).
     for (const r of rows) expect(r.sourceEpisodeId).toBe('ep-1')
+  })
+
+  it('records workspace custom extraction as user-paid Standard overhead', async () => {
+    const usage = usageSpy()
+    const requests: ProviderRequest[] = []
+    const provider = sequencedProvider([
+      JSON.stringify({ summary: 'A note.', entities: [], edges: [], memories: [], tags: [] }),
+      JSON.stringify({ inferred_sensitivity: 'internal', brief_reason: 'routine' }),
+    ], requests)
+    await processEpisode(baseEpisode(), 'note', makeDeps({
+      provider,
+      model: 'custom:00000000-0000-4000-8000-000000000001',
+      classifierModel: 'custom:00000000-0000-4000-8000-000000000001',
+      modelTier: 'standard',
+      providerKeySource: 'user',
+      inputTokenLimit: 1024,
+      maxTokens: 64,
+      usage: usage.store,
+    }))
+
+    for (const [row] of usage.recordUsage.mock.calls) {
+      expect(row).toMatchObject({
+        modelTier: 'standard',
+        providerKeySource: 'user',
+        actualCostUsd: 0,
+      })
+    }
+    expect(requests[0]?.maxTokens).toBe(64)
   })
 
   it('still records when the model output fails to parse — the tokens were spent', async () => {

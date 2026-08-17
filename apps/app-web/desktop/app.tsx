@@ -55,6 +55,11 @@ import { DocSidebarDataProvider } from "@/components/doc/doc-sidebar-data";
 import { BrainSurfaceProvider } from "@/contexts/brain-surface-context";
 import { PrimaryAssistantProvider } from "@/contexts/primary-assistant";
 import { WorkspaceChrome } from "@/components/doc/workspace-chrome";
+import { WorkspacePicker } from "@/components/workspace-picker";
+import {
+  usesScalableWorkspacePicker,
+  type WorkspacePickerItem,
+} from "@/lib/workspace-picker";
 
 // Surface layouts + pages — reused verbatim from the Next route tree so the
 // desktop SPA renders the SAME surface under each `/w/[id]/*` path and the two
@@ -245,10 +250,7 @@ export function App() {
 
 // ── Boot / workspace picker ────────────────────────────────────
 
-interface WorkspaceRow {
-  id: string;
-  name: string;
-}
+type WorkspaceRow = WorkspacePickerItem;
 
 function Boot() {
   const navigate = useNavigate();
@@ -276,10 +278,30 @@ function Boot() {
             ? (data as { workspaces: unknown[] }).workspaces
             : [];
         const workspaces = arr
-          .map((w) => {
+          .map((w): WorkspaceRow | null => {
             const o = (w ?? {}) as Record<string, unknown>;
             const id = typeof o.id === "string" ? o.id : null;
-            return id ? { id, name: typeof o.name === "string" ? o.name : id } : null;
+            return id
+              ? {
+                  id,
+                  name: typeof o.name === "string" ? o.name : id,
+                  role:
+                    o.role === "owner" || o.role === "admin" || o.role === "member"
+                      ? o.role
+                      : undefined,
+                  iconSeed: typeof o.iconSeed === "number" ? o.iconSeed : null,
+                  iconUrl: typeof o.iconUrl === "string" ? o.iconUrl : null,
+                  plan: typeof o.plan === "string" ? o.plan : null,
+                  pickerPinnedAt:
+                    typeof o.pickerPinnedAt === "string" ? o.pickerPinnedAt : null,
+                  pickerHiddenAt:
+                    typeof o.pickerHiddenAt === "string" ? o.pickerHiddenAt : null,
+                  pickerLastOpenedAt:
+                    typeof o.pickerLastOpenedAt === "string"
+                      ? o.pickerLastOpenedAt
+                      : null,
+                }
+              : null;
           })
           .filter((w): w is WorkspaceRow => w !== null);
         setState({ k: "ready", workspaces });
@@ -303,7 +325,14 @@ function Boot() {
           </button>
         )}
         {state.k === "error" && <p style={dim}>Error: {state.detail}</p>}
-        {state.k === "ready" && (
+        {state.k === "ready" && usesScalableWorkspacePicker(state.workspaces.length) && (
+          <WorkspacePicker
+            initialWorkspaces={state.workspaces}
+            next="/p"
+            apiUrl={apiBase()}
+          />
+        )}
+        {state.k === "ready" && !usesScalableWorkspacePicker(state.workspaces.length) && (
           <ul style={{ padding: 0, listStyle: "none", margin: 0 }}>
             {state.workspaces.map((w) => (
               <li key={w.id}>
@@ -402,7 +431,7 @@ function WorkspaceShell() {
   // the active surface (the Outlet) — the doc page shell on `/p`, or a folded-in
   // surface (Brain / Studio / Workflow / …) on its own route.
   return (
-    <WorkspaceContextProvider value={ctx.value}>
+    <WorkspaceContextProvider value={ctx.value} apiUrl={apiBase()}>
       <CustomThemesProvider workspaceId={workspaceId}>
         <div className="flex h-screen w-full overflow-hidden bg-background">
           {/* Mirrors the Next workspace layout: one primary-assistant

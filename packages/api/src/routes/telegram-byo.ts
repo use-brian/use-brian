@@ -33,7 +33,11 @@ import { findAssistantById, findUserById } from '../db/users.js'
 import { getWorkspaceRoleSystem } from '../db/workspace-store.js'
 import { query } from '../db/client.js'
 import { resolveChannelUser, fetchTelegramProfile, type ChannelUserStore } from '../db/channel-user-store.js'
-import { resolveAssistantForSurface, resolveRoutingForSurface, getChannelForWebhook } from '../db/channels-store.js'
+import {
+  resolveAnyRoutingForChannel,
+  resolveTelegramRoutingForSurface,
+  getChannelForWebhook,
+} from '../db/channels-store.js'
 import { mergeShadowUser, type LinkedAccountStore } from '../db/linked-accounts.js'
 import type { LinkCodeStore } from '../db/link-codes.js'
 import { withChatLock } from '../db/chat-lock.js'
@@ -357,12 +361,14 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       console.warn(`[telegram-byo] channel ${integration.channelId} not accepting chat — ignoring inbound`)
       return
     }
-    const defaultRouting = await resolveRoutingForSurface(integration.channelId, null)
-    if (!defaultRouting) {
+    const defaultRouting = await resolveTelegramRoutingForSurface(integration.channelId, null)
+    const bootstrapRouting = defaultRouting
+      ?? await resolveAnyRoutingForChannel(integration.channelId)
+    if (!bootstrapRouting) {
       console.error(`[telegram-byo] channel ${integration.channelId} has no assistant routing — ignoring inbound`)
       return
     }
-    const defaultAssistantId = defaultRouting.assistantId
+    const defaultAssistantId = bootstrapRouting.assistantId
 
     const assistant = await findAssistantById(defaultAssistantId)
     if (!assistant) {
@@ -372,7 +378,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
     // Per-routing model alias overrides the per-assistant default
     // (migration 197). Re-resolved per-message below if a surface-specific
     // routing row matches.
-    assistant.defaultModelAlias = defaultRouting.modelAlias
+    assistant.defaultModelAlias = bootstrapRouting.modelAlias
     // Post-089 ownership XOR: team assistants have NULL owner_user_id and
     // team access flows through teams.owner_user_id. `billingPartyForAssistant`
     // is the single source of truth for "the authoritative user behind this
@@ -821,10 +827,15 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
         console.warn(`[telegram-byo] channel ${chatChannel.id} not accepting chat (status=${chatChannel.status}) — ignoring inbound`)
         return
       }
-      const routedRouting = await resolveRoutingForSurface(
+      const routedRouting = await resolveTelegramRoutingForSurface(
         boundIntegration.channelId,
         incoming.channelId,
       )
+      // `bootstrapRouting` only lets a surface-only channel construct its
+      // adapter. Without a default, every message still needs an exact topic
+      // or base-chat winner; never leak an unmatched surface to the arbitrary
+      // bootstrap assistant.
+      if (!routedRouting && !defaultRouting) return
       if (routedRouting && routedRouting.assistantId !== boundAssistant.id) {
         const found = await findAssistantById(routedRouting.assistantId)
         if (found) routedAssistant = found
@@ -1709,8 +1720,15 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
           await adapter.deleteMessage?.(incoming.channelId, statusMessageId).catch(() => {})
           statusMessageId = null
         }
+        // Custom endpoints are deliberately text/tool-only until a vision
+        // capability probe exists. The pipeline's rejection is server-authored
+        // and actionable, so preserve it; masking it as a generic outage made
+        // the 2026-08-12 SDR screenshot album look like an unexplained crash.
+        // Arbitrary provider/runtime wording remains hidden.
+        const isCustomModelImageRejection = err.message ===
+          'Custom model endpoints currently support text and tools only. Remove the inline image or use the web app to choose a built-in model.'
         await adapter.sendMessage(incoming.channelId, {
-          text: err.message.includes('usage limit')
+          text: err.message.includes('usage limit') || isCustomModelImageRejection
             ? err.message
             : 'Something went wrong. Please try again.',
         })

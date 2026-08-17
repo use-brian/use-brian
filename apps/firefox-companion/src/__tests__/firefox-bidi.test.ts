@@ -44,12 +44,16 @@ class FakeSocket {
       } else if (message.params.functionDeclaration === "() => document.title") {
         result = { type: "success", result: remote("Example") };
       } else {
+        const mode = (message.params.arguments as Array<{ value?: unknown }> | undefined)?.[0]?.value;
         result = {
           type: "success",
           result: remote({
             url: "https://example.com",
             title: "Example",
-            nodes: [{ role: "button", name: "Continue", element: { __node: true } }],
+            nodes: [
+              { role: "button", name: "Continue", element: { __node: true } },
+              ...(mode === "full" ? [{ role: "cell", name: "Adult fare 5.9" }] : []),
+            ],
           }),
         };
       }
@@ -110,6 +114,22 @@ describe("[COMP:ext/firefox-companion] Firefox BiDi executor", () => {
     });
   });
 
+  it("returns static information without refs in a full snapshot", async () => {
+    const socket = new FakeSocket();
+    const executor = new FirefoxBidiExecutor("ws://127.0.0.1:9222/session", () => socket);
+    await executor.connect();
+    await executor.bindFocusedContext();
+
+    const snapshot = await executor.execute("snapshot", { mode: "full" });
+
+    expect(snapshot).toMatchObject({
+      nodes: [
+        { ref: "@e1", role: "button", name: "Continue" },
+        { role: "cell", name: "Adult fare 5.9" },
+      ],
+    });
+  });
+
   it("keeps the BiDi pointer pressed until a separate pointer-up event", async () => {
     const socket = new FakeSocket();
     const executor = new FirefoxBidiExecutor("ws://127.0.0.1:9222/session", () => socket);
@@ -145,6 +165,7 @@ describe("[COMP:ext/firefox-companion] Firefox BiDi executor", () => {
   it("never serializes password values and bounds ordinary form values", () => {
     expect(firefoxBidiInternals.snapshotFunction).toContain('el.type.toLowerCase() === "password"')
     expect(firefoxBidiInternals.snapshotFunction).toContain('el.value.slice(0, 500)')
+    expect(firefoxBidiInternals.snapshotFunction).toContain('? "statictext"')
   });
 
   it("requires an approved focused context", async () => {

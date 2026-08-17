@@ -2,10 +2,10 @@
 
 /**
  * Workspace Models section (model-registry.md L15, §4.4). The page is split
- * by user intent: Routing shows the four runtime tier assignments, Custom
- * models owns OpenAI-compatible connections and their verified profiles, and
- * Advanced contains picker preferences, metered profiles, and the hosted
- * Gemini key. Creation forms stay collapsed until explicitly requested.
+ * by user intent: Routing shows the four runtime tier assignments, Providers
+ * owns OAuth/API/custom connections and their verified profiles, and Advanced
+ * contains picker preferences and metered profiles. Creation forms stay
+ * collapsed until explicitly requested.
  *
  * The two kinds of defaults remain deliberately separate. Custom tier
  * assignments change what serves a Brian tier at runtime; model-menu defaults
@@ -18,6 +18,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Gauge, Layers3, Pencil, Plus, Trash2 } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { useWorkspaceContext } from "@/lib/workspace-context";
+import { isOssEdition } from "@/lib/edition";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { promptDialog } from "@/components/ui/prompt-dialog";
 import { Button } from "@/components/ui/button";
@@ -33,23 +34,24 @@ import {
 } from "@/components/ui/searchable-select";
 import {
   clearWorkspaceModelDefault,
+  clearWorkspaceModelRoute,
   createMeteredProfile,
   deleteMeteredProfile,
   fetchMeteredEstimate,
   fetchModelMenu,
   setWorkspaceModelDefault,
+  setWorkspaceModelRoute,
   updateMeteredProfile,
   type MenuModel,
   type MeteredEstimate,
   type MeteredProfile,
   type WorkspaceModelDefault,
+  type WorkspaceModelRoute,
 } from "@/lib/api/models";
 import {
-  clearCustomLlmTierDefault,
   createCustomLlmProfile,
   deleteCustomLlmProfile,
   getCustomLlmConfiguration,
-  setCustomLlmTierDefault,
   updateCustomLlmProfile,
   type CustomLlmEndpoint,
   type CustomLlmProfile,
@@ -58,10 +60,11 @@ import {
 } from "@/lib/api/custom-llm-endpoints";
 import { CustomLlmEndpointsBlock } from "./custom-llm-endpoints-block";
 import { WorkspaceLlmKeyBlock } from "./llm-key-block";
+import { CodexProviderCard } from "./codex-provider-card";
 
 const DEFAULTABLE_CLASSES: WorkspaceModelDefault["modelClass"][] = ["standard-pro", "max", "research"];
 const CUSTOM_TIERS: CustomLlmTier[] = ["standard", "pro", "max", "research"];
-type ModelsView = "routing" | "custom" | "advanced";
+type ModelsView = "routing" | "providers" | "advanced";
 type CustomProfileDraft = {
   endpointId: string;
   profileId: string;
@@ -83,6 +86,7 @@ export function ModelsSection() {
   const [estimates, setEstimates] = useState<Record<string, MeteredEstimate | null>>({});
   const [customEndpoints, setCustomEndpoints] = useState<CustomLlmEndpoint[]>([]);
   const [customTierDefaults, setCustomTierDefaults] = useState<CustomLlmTierDefault[]>([]);
+  const [modelRoutes, setModelRoutes] = useState<WorkspaceModelRoute[]>([]);
   const [loading, setLoading] = useState(true);
   // Create form state.
   const [newModel, setNewModel] = useState<string>("");
@@ -114,6 +118,7 @@ export function ModelsSection() {
       setProfiles(menu.profiles);
       setCustomEndpoints(custom.endpoints);
       setCustomTierDefaults(custom.tierDefaults);
+      setModelRoutes(menu.modelRoutes ?? []);
       setBillingAvailable(menu.meteredBillingAvailable);
       if (menu.meteredBillingAvailable) {
         const pairs = await Promise.all(
@@ -126,6 +131,7 @@ export function ModelsSection() {
       setProfiles([]);
       setCustomEndpoints([]);
       setCustomTierDefaults([]);
+      setModelRoutes([]);
     } finally {
       setLoading(false);
     }
@@ -237,12 +243,16 @@ export function ModelsSection() {
     }
   }, [workspaceId, editingCustomProfile, reload, t]);
 
-  const onCustomTierChange = useCallback(async (tier: CustomLlmTier, value: string) => {
+  const onModelRouteChange = useCallback(async (tier: CustomLlmTier, value: string) => {
     if (!workspaceId) return;
     setError(null);
     try {
-      if (!value || value === "managed") await clearCustomLlmTierDefault(workspaceId, tier);
-      else await setCustomLlmTierDefault(workspaceId, tier, value);
+      if (!value || value === "auto") await clearWorkspaceModelRoute(workspaceId, tier);
+      else if (value.startsWith("managed:")) {
+        await setWorkspaceModelRoute(workspaceId, tier, { modelAlias: value.slice("managed:".length) });
+      } else if (value.startsWith("custom:")) {
+        await setWorkspaceModelRoute(workspaceId, tier, { profileId: value.slice("custom:".length) });
+      }
       await reload();
     } catch (err) {
       setError(err instanceof Error ? err.message : t.saveError);
@@ -310,8 +320,8 @@ export function ModelsSection() {
       </div>
 
       <div role="tablist" aria-label={t.viewsLabel} className="grid grid-cols-3 gap-1 rounded-xl bg-muted/55 p-1">
-        {(["routing", "custom", "advanced"] as ModelsView[]).map((view) => {
-          const label = view === "routing" ? t.viewRouting : view === "custom" ? t.viewCustom : t.viewAdvanced;
+        {(["routing", "providers", "advanced"] as ModelsView[]).map((view) => {
+          const label = view === "routing" ? t.viewRouting : view === "providers" ? t.viewProviders : t.viewAdvanced;
           const selected = activeView === view;
           return (
             <button
@@ -345,7 +355,7 @@ export function ModelsSection() {
             </div>
             <div className="grid gap-3 sm:grid-cols-2">
               {CUSTOM_TIERS.map((tier) => {
-                const current = customTierDefaults.find((setting) => setting.tier === tier);
+                const current = modelRoutes.find((setting) => setting.tier === tier);
                 const tierLabel = tier === "standard"
                   ? t.classStandard
                   : tier === "pro"
@@ -353,27 +363,60 @@ export function ModelsSection() {
                     : tier === "max"
                       ? t.classMax
                       : t.classResearch;
+                const managedModels = Object.values(menuClasses)
+                  .flat()
+                  .filter((model, index, all) =>
+                    model.tier === tier &&
+                    model.class !== "metered" &&
+                    all.findIndex((candidate) => candidate.alias === model.alias) === index,
+                  );
+                const providerName = (provider: string) => provider === "openai-codex"
+                  ? t.providerChatGpt
+                  : provider === "gemini"
+                    ? t.providerGemini
+                    : provider.startsWith("openai-compat:")
+                      ? t.providerOpenAiCompatible
+                      : provider;
                 const items: SearchableSelectItem[] = [
-                  { value: "managed", label: t.brianManaged, badge: t.defaultBadge },
+                  { value: "auto", label: t.autoRouting, hint: t.autoRoutingHint, badge: t.defaultBadge },
+                  ...managedModels.map((model) => ({
+                    value: `managed:${model.alias}`,
+                    label: model.displayName,
+                    hint: providerName(model.provider),
+                    badge: t.exactBadge,
+                  })),
                   ...customProfiles.map(({ endpoint, profile }) => ({
-                    value: profile.id,
+                    value: `custom:${profile.id}`,
                     label: customProfileLabel(endpoint, profile),
                     hint: profile.modelId,
                   })),
                 ];
+                if (current?.modelAlias && !managedModels.some((model) => model.alias === current.modelAlias)) {
+                  items.push({
+                    value: `managed:${current.modelAlias}`,
+                    label: t.unavailableModel.replace("{model}", current.modelDisplayName ?? t.unknownModel),
+                    hint: t.unavailableModelHint,
+                    badge: t.exactBadge,
+                  });
+                }
+                const value = current?.modelAlias
+                  ? `managed:${current.modelAlias}`
+                  : current?.profileId
+                    ? `custom:${current.profileId}`
+                    : "auto";
                 return (
                   <div key={tier} className="space-y-2 rounded-xl border border-border/70 bg-muted/15 p-3">
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-[12.5px] font-medium">{tierLabel}</span>
                       <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
-                        {current ? t.viewCustom : t.brianManaged}
+                        {current?.modelAlias ? t.exactBadge : current?.profileId ? t.customBadge : t.autoRouting}
                       </span>
                     </div>
                     <SearchableSelect
-                      value={current?.profileId ?? "managed"}
-                      onValueChange={(value) => void onCustomTierChange(tier, value)}
+                      value={value}
+                      onValueChange={(next) => void onModelRouteChange(tier, next)}
                       items={items}
-                      placeholder={t.brianManaged}
+                      placeholder={t.autoRouting}
                       aria-label={tierLabel}
                     />
                   </div>
@@ -383,18 +426,28 @@ export function ModelsSection() {
             {customProfiles.length === 0 ? (
               <div className="flex items-center justify-between gap-3 rounded-xl border border-dashed border-border px-3.5 py-3">
                 <p className="text-[11.5px] text-muted-foreground">{t.noCustomProfiles}</p>
-                <Button variant="outline" size="sm" onClick={() => setActiveView("custom")}>{t.routingEmptyCta}</Button>
+                <Button variant="outline" size="sm" onClick={() => setActiveView("providers")}>{t.routingEmptyCta}</Button>
               </div>
             ) : null}
           </section>
         )
       ) : null}
 
-      {activeView === "custom" ? (
+      {activeView === "providers" ? (
         loading ? (
           <p className="text-[12.5px] text-muted-foreground">{t.loading}</p>
         ) : (
           <div className="space-y-4" role="tabpanel">
+            {isOssEdition() ? (
+              <section className="rounded-xl border border-border/70 px-4 pb-4">
+                <CodexProviderCard />
+              </section>
+            ) : null}
+
+            <section className="rounded-xl border border-border/70 p-4">
+              <WorkspaceLlmKeyBlock embedded showCustomEndpoints={false} />
+            </section>
+
             <section className="rounded-xl border border-border/70 p-4">
               <CustomLlmEndpointsBlock embedded onChanged={reload} />
             </section>
@@ -664,9 +717,6 @@ export function ModelsSection() {
             </section>
           )}
 
-          <section className="rounded-xl border border-border/70 p-4">
-            <WorkspaceLlmKeyBlock embedded showCustomEndpoints={false} />
-          </section>
         </div>
       ) : null}
     </div>

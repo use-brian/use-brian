@@ -214,6 +214,7 @@ import {
   type StagedRecording,
 } from "@/lib/recordings/use-recording-upload";
 import { useDockRecorder } from "@/lib/recorder/use-dock-recorder";
+import { useLiveRecordingPage } from "@/lib/recordings/use-live-recording-page";
 import {
   getDockRecorderSessionId,
   publishDockRecorderController,
@@ -489,6 +490,9 @@ export function FloatingChat({
   const searchParams = useSearchParams();
   const [expanded, setExpanded] = useState(false);
   const [input, setInput] = useState("");
+  const [pendingSurfaceSeed, setPendingSurfaceSeed] =
+    useState<SurfaceChatSeed | null>(null);
+  const surfaceSeedAttemptRef = useRef<SurfaceChatSeed | null>(null);
 
   // ── Assistant switcher ───────────────────────────────────────────────────
   // The chat talks to the workspace PRIMARY by default (the `assistantId`
@@ -827,19 +831,26 @@ export function FloatingChat({
 
   // ── Surface chat seeds ───────────────────────────────────────────────────
   // Any surface can open + prefill this dock via the shared seed bus
-  // (`requestSurfaceChatSeed`; the brain pristine-nudge CTAs use the
-  // `requestBrainChatSeed` alias). A nudge means "start a new conversation
-  // about X" — reset the thread, expand, prefill, and arm research either for
-  // this turn (`researchMode`) or the one after the first reply
-  // (`deferResearch`). Listened for at every origin now that one unified dock
-  // serves all surfaces — a brain nudge must still reach it on the doc origin.
+  // (`requestSurfaceChatSeed`, including the brain pristine-nudge CTAs). A
+  // nudge means "start a new conversation
+  // about X" — reset the thread, expand, prefill (or queue the explicitly
+  // confirmed auto-send), and arm research either for this turn
+  // (`researchMode`) or the one after the first reply (`deferResearch`).
+  // Listened for at every origin now that one unified dock serves all surfaces
+  // — a brain nudge must still reach it on the doc origin.
   useEffect(() => {
     function onSeed(e: Event) {
       const seed = (e as CustomEvent<SurfaceChatSeed>).detail;
       if (!seed?.prefill?.trim()) return;
       resetThread();
       setExpanded(true);
-      setInput(seed.prefill);
+      if (seed.autoSend) {
+        setInput("");
+        setPendingSurfaceSeed(seed);
+      } else {
+        setPendingSurfaceSeed(null);
+        setInput(seed.prefill);
+      }
       deferResearchRef.current = !seed.researchMode && !!seed.deferResearch;
       setResearchMode(!!seed.researchMode);
     }
@@ -2442,6 +2453,25 @@ export function FloatingChat({
     sendMessageRef.current = sendMessage;
   }, [sendMessage]);
 
+  // Surface auto-send is intentionally a two-effect handoff: the event
+  // listener above first resets the thread and records the seed, then this
+  // effect runs on the settled render where `sendMessage` sees the fresh
+  // session ref. A failed start (for example, a suspended question) leaves the
+  // seed pending and retries when the chat state changes. The ref prevents a
+  // render during one async attempt from dispatching the same turn twice.
+  useEffect(() => {
+    const seed = pendingSurfaceSeed;
+    if (!seed?.autoSend || surfaceSeedAttemptRef.current === seed) return;
+    surfaceSeedAttemptRef.current = seed;
+    void sendMessage(seed.prefill, {
+      researchMode: !!seed.researchMode,
+    }).then((started) => {
+      surfaceSeedAttemptRef.current = null;
+      if (!started) return;
+      setPendingSurfaceSeed((current) => (current === seed ? null : current));
+    });
+  }, [pendingSurfaceSeed, sendMessage]);
+
   /**
    * Hand a message to the turn that is already running (mid-turn input), and
    * clear the composer as an ordinary send would.
@@ -2464,6 +2494,7 @@ export function FloatingChat({
   // the recording ingestion flow (`rec.run`, the full cost + blueprint +
   // destination confirm), stamped kind='meeting' — a recorder-originated
   // long capture is a meeting, and kind routes the transcriber ladder.
+  const liveRecording = useLiveRecordingPage(workspaceId, activeAssistantId);
   const recorder = useDockRecorder({
     enabled: !!workspaceId && !!activeAssistantId,
     workspaceId,
@@ -2476,7 +2507,13 @@ export function FloatingChat({
         fileId,
         (fallbackFileId) => sendMessage("", { fileIds: [fallbackFileId] }),
       ),
-    onMeetingCapture: (file: File) => rec.run(file, undefined, { kind: "meeting" }),
+    prepareLivePage: liveRecording.prepare,
+    streamLiveWindow: liveRecording.streamWindow,
+    onMeetingCapture: (file: File, livePageId?: string) =>
+      rec.run(file, {
+        kind: "meeting",
+        ...(livePageId ? { existingPageId: livePageId } : {}),
+      }),
   });
 
   // Feed replaces this dock's CHAT chrome, not its universal recorder. Publish
@@ -3276,7 +3313,6 @@ export function FloatingChat({
               "flex-1 min-w-0 min-h-[36px] max-h-[240px] resize-none overflow-y-auto rounded-md border border-border bg-background",
               "px-3 py-2 text-sm leading-relaxed outline-none",
               "placeholder:text-muted-foreground",
-              "focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40",
               "disabled:opacity-60",
             )}
           />

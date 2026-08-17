@@ -293,7 +293,7 @@ function GithubRepoPicker({
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder={copy.searchPlaceholder}
-                className="flex-1 min-w-0 text-xs bg-background border border-border rounded-md px-2.5 py-1.5 placeholder:text-muted-foreground/70 focus:outline-none focus:ring-1 focus:ring-primary/40 focus:border-primary/40"
+                className="flex-1 min-w-0 text-xs bg-background border border-border rounded-md px-2.5 py-1.5 placeholder:text-muted-foreground/70 focus:outline-none"
               />
               {filtered.length > 0 && (
                 <button

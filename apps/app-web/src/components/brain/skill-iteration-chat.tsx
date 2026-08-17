@@ -323,7 +323,7 @@ export function SkillIterationChat({
         {...dropProps}
         className={cn(
           "relative rounded-xl border border-border bg-card shadow-xs transition-[border-color,box-shadow]",
-          "focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/35",
+          "focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/35 [&_:focus-visible]:shadow-none",
         )}
       >
         <FileDropOverlay active={isDragging} />

@@ -1245,6 +1245,16 @@ function ConnectorsList() {
   const [shopifyResolving, setShopifyResolving] = useState(false);
   const [shopifyResolveFailed, setShopifyResolveFailed] = useState(false);
 
+  // WordPress managed-content connection. The server verifies both the
+  // Application Password and the fixed OSS bridge endpoint before storage.
+  const [showWordPressForm, setShowWordPressForm] = useState<string | null>(null);
+  const [wordpressSiteUrl, setWordpressSiteUrl] = useState("");
+  const [wordpressUsername, setWordpressUsername] = useState("");
+  const [wordpressApplicationPassword, setWordpressApplicationPassword] = useState("");
+  const [wordpressError, setWordpressError] = useState<string | null>(null);
+  const [wordpressShowHelp, setWordpressShowHelp] = useState(false);
+  const [wordpressConnectOpts, setWordpressConnectOpts] = useState<ConnectorConnectOptions | null>(null);
+
   // Microsoft Teams (msgraph) — the workspace's own Entra app registration.
   // Same two-hop shape as Shopify BYO: store the app pair server-side FIRST,
   // then redirect to consent against it. The secret is write-only by design;
@@ -1827,6 +1837,15 @@ function ConnectorsList() {
       return;
     }
 
+    if (id === "wordpress") {
+      setShowWordPressForm(rid);
+      revealConnectForm(rid);
+      setWordpressConnectOpts(opts ?? null);
+      setWordpressError(null);
+      setConnecting(null);
+      return;
+    }
+
     // Google OAuth connectors — build Google OAuth URL client-side. The
     // connector id + workspaceId ride in `state` (`gcal[:add]:<workspaceId>`,
     // the same `:add` intent Notion/Fathom carry — the callback creates a
@@ -1893,6 +1912,10 @@ function ConnectorsList() {
       // Company Email uses its existing inline credentials form. The connect
       // route keys on address: a new address adds an instance, while the same
       // address intentionally reconnects that mailbox.
+      await handleConnect(c, { addAnother: true });
+      return;
+    }
+    if (flow === "wordpress-form") {
       await handleConnect(c, { addAnother: true });
       return;
     }
@@ -2686,6 +2709,59 @@ function ConnectorsList() {
       }
     } catch {
       setShopifyError(tc.shopify.errSave);
+    }
+    setConnecting(null);
+  }
+
+  function closeWordPressForm() {
+    setShowWordPressForm(null);
+    setWordpressSiteUrl("");
+    setWordpressUsername("");
+    setWordpressApplicationPassword("");
+    setWordpressError(null);
+    setWordpressShowHelp(false);
+    setWordpressConnectOpts(null);
+  }
+
+  async function handleSaveWordPress(c: Connector) {
+    const siteUrl = wordpressSiteUrl.trim();
+    const username = wordpressUsername.trim();
+    const applicationPassword = wordpressApplicationPassword.trim();
+    if (!siteUrl || !username || !applicationPassword) return;
+    const rid = rowId(c);
+    const opts = wordpressConnectOpts;
+    setConnecting(rid);
+    setWordpressError(null);
+    try {
+      const instanceId = opts?.instanceId ?? c.connectorInstanceId;
+      const response = await authFetch(`${API_URL}/api/connectors/wordpress/store-credentials`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          wordpressCredentials: { siteUrl, username, applicationPassword },
+          ...(opts?.addAnother ? { createNew: true } : instanceId ? { instanceId } : {}),
+        }),
+      });
+      if (response.ok) {
+        const data = (await response.json().catch(() => ({}))) as { connectorInstanceId?: string };
+        setConnectors((prev) => prev.map((item) => (isSameRow(item, c) ? { ...item, connected: true } : item)));
+        closeWordPressForm();
+        setSelected(rid);
+        loadTools(c.id);
+        fetchConnectors();
+        setJustConnected({ slug: c.id, instanceId: data.connectorInstanceId ?? c.connectorInstanceId });
+      } else {
+        const body = (await response.json().catch(() => ({}))) as { error?: string };
+        setWordpressError(
+          body.error === "bridge_required" ? tc.wordpress.errBridge :
+          body.error === "invalid_credentials" ? tc.wordpress.errCredentials :
+          body.error === "forbidden" ? tc.wordpress.errForbidden :
+          body.error === "invalid_site_url" ? tc.wordpress.errSiteUrl :
+          tc.wordpress.errSave,
+        );
+      }
+    } catch {
+      setWordpressError(tc.wordpress.errSave);
     }
     setConnecting(null);
   }
@@ -4435,6 +4511,65 @@ function ConnectorsList() {
                 {/* Entra app registration - shared with the workspace-owned
                     panel so a transferred connector stays configurable. */}
                 {msGraphConfigForm(sel, rid)}
+                {showWordPressForm === rid && (
+                  <div className="space-y-2">
+                    <p className="text-xs text-muted-foreground">{tc.wordpress.formHelp}</p>
+                    <input
+                      type="url"
+                      placeholder={tc.wordpress.siteUrlPlaceholder}
+                      value={wordpressSiteUrl}
+                      onChange={(event) => { setWordpressSiteUrl(event.target.value); setWordpressError(null); }}
+                      autoComplete="url"
+                      autoFocus
+                      className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                    />
+                    <input
+                      type="text"
+                      placeholder={tc.wordpress.usernamePlaceholder}
+                      value={wordpressUsername}
+                      onChange={(event) => { setWordpressUsername(event.target.value); setWordpressError(null); }}
+                      autoComplete="username"
+                      className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                    />
+                    <input
+                      type="password"
+                      placeholder={tc.wordpress.applicationPasswordPlaceholder}
+                      value={wordpressApplicationPassword}
+                      onChange={(event) => { setWordpressApplicationPassword(event.target.value); setWordpressError(null); }}
+                      onKeyDown={(event) => { if (event.key === "Enter") handleSaveWordPress(sel); }}
+                      autoComplete="off"
+                      className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                    />
+                    <button
+                      onClick={() => setWordpressShowHelp((visible) => !visible)}
+                      className="text-[11px] text-muted-foreground underline underline-offset-2 hover:text-foreground transition-colors"
+                    >
+                      {tc.wordpress.helpTitle}
+                    </button>
+                    {wordpressShowHelp && (
+                      <div className="space-y-1 text-[11px] text-muted-foreground">
+                        <p>{tc.wordpress.helpBridge}</p>
+                        <p>{tc.wordpress.helpPassword}</p>
+                      </div>
+                    )}
+                    {wordpressError && <p className="text-xs text-destructive">{wordpressError}</p>}
+                    <div className="flex gap-2">
+                      <button
+                        onClick={closeWordPressForm}
+                        className="text-xs font-medium border border-border px-3 py-1 rounded-lg text-muted-foreground hover:bg-muted transition-colors"
+                      >
+                        {tc.cancel}
+                      </button>
+                      <button
+                        onClick={() => handleSaveWordPress(sel)}
+                        disabled={!wordpressSiteUrl.trim() || !wordpressUsername.trim() || !wordpressApplicationPassword.trim() || connecting === rid}
+                        className="text-xs font-medium bg-action text-action-foreground px-3 py-1 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
+                      >
+                        {connecting === rid ? tc.wordpress.verifyingBtn : tc.wordpress.connectBtn}
+                      </button>
+                    </div>
+                  </div>
+                )}
                 {showShopifyForm === rid && (
                   <div className="space-y-2">
                     <p className="text-xs text-muted-foreground">{tc.shopify.formHelp}</p>

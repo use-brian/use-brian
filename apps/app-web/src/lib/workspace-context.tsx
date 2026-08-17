@@ -13,6 +13,7 @@ import {
   WORKSPACE_IDENTITY_REFRESH_EVENT,
   type WorkspaceIdentityRefreshDetail,
 } from "@/lib/workspace-identity-events";
+import { updateWorkspacePickerPreferences } from "@/lib/api/workspaces";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -117,6 +118,8 @@ export function applyWorkspaceIcon(
 export function WorkspaceContextProvider(props: {
   value: WorkspaceContextValue;
   children: ReactNode;
+  /** Desktop may point at a user-selected API origin. */
+  apiUrl?: string;
 }) {
   // Latest rename observed on this mount. Kept as {id, name} so an override
   // for one workspace never leaks onto another after a route change (the
@@ -125,6 +128,17 @@ export function WorkspaceContextProvider(props: {
   const [renamed, setRenamed] = useState<WorkspaceRenamedDetail | null>(null);
   const [iconChanged, setIconChanged] =
     useState<WorkspaceIconChangedDetail | null>(null);
+
+  // Any real workspace open counts as recent, including a direct/deep link
+  // that never passed through picker chrome. This is a non-critical navigation
+  // preference write and never blocks the workspace shell.
+  useEffect(() => {
+    void updateWorkspacePickerPreferences(
+      props.value.workspaceId,
+      { opened: true },
+      props.apiUrl,
+    ).catch(() => {});
+  }, [props.apiUrl, props.value.workspaceId]);
 
   useEffect(() => {
     function onRenamed(e: Event) {

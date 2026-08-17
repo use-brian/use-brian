@@ -2,6 +2,7 @@ import { z } from 'zod'
 import {
   DocumentFlowNodeSchema,
   OfficeArtifactSnapshotSchema,
+  OfficeResourceRefSchema,
   OfficeRichTextRunSchema,
   OfficeUuidSchema,
   PresentationObjectSchema,
@@ -20,14 +21,34 @@ const CommandBaseSchema = z.object({
   origin: z.enum(['manual', 'ai', 'import', 'offline', 'restore']),
 })
 
-export const OfficeCommandSchema = z.discriminatedUnion('kind', [
+const AtomicOfficeCommandSchema = z.discriminatedUnion('kind', [
   CommandBaseSchema.extend({ kind: z.literal('updateText'), targetId: OfficeUuidSchema, runs: z.array(OfficeRichTextRunSchema) }).strict(),
+  CommandBaseSchema.extend({
+    kind: z.literal('replaceTextRange'),
+    targetId: OfficeUuidSchema,
+    from: z.number().int().min(0),
+    to: z.number().int().min(0),
+    runs: z.array(OfficeRichTextRunSchema),
+    preimageHash: z.string().regex(/^[a-f0-9]{64}$/),
+  }).strict(),
   CommandBaseSchema.extend({ kind: z.literal('insertDocumentNode'), sectionId: OfficeUuidSchema, index: z.number().int().min(0), node: DocumentFlowNodeSchema }).strict(),
   CommandBaseSchema.extend({ kind: z.literal('insertSlideObject'), slideId: OfficeUuidSchema, index: z.number().int().min(0), object: PresentationObjectSchema }).strict(),
   CommandBaseSchema.extend({ kind: z.literal('deleteObject'), targetId: OfficeUuidSchema }).strict(),
   CommandBaseSchema.extend({ kind: z.literal('setObjectProperty'), targetId: OfficeUuidSchema, path: z.array(z.string().regex(/^[A-Za-z][A-Za-z0-9]*$/)).min(1).max(8), value: z.unknown() }).strict(),
   CommandBaseSchema.extend({ kind: z.literal('addSlide'), index: z.number().int().min(0), slide: PresentationSlideSchema }).strict(),
   CommandBaseSchema.extend({ kind: z.literal('reorderSlide'), slideId: OfficeUuidSchema, index: z.number().int().min(0) }).strict(),
+  CommandBaseSchema.extend({ kind: z.literal('deleteSlide'), slideId: OfficeUuidSchema }).strict(),
+  CommandBaseSchema.extend({ kind: z.literal('reorderSlideObject'), slideId: OfficeUuidSchema, objectId: OfficeUuidSchema, index: z.number().int().min(0) }).strict(),
+  CommandBaseSchema.extend({ kind: z.literal('attachResource'), resource: OfficeResourceRefSchema }).strict(),
+  CommandBaseSchema.extend({
+    kind: z.literal('updateSpreadsheetImage'),
+    sheetId: OfficeUuidSchema,
+    imageId: OfficeUuidSchema,
+    from: z.object({ row: z.number().min(0).max(1_048_576), column: z.number().min(0).max(16_384) }).strict(),
+    to: z.object({ row: z.number().min(0).max(1_048_576), column: z.number().min(0).max(16_384) }).strict(),
+    altText: z.string().max(2_000),
+    decorative: z.boolean(),
+  }).strict(),
   CommandBaseSchema.extend({
     kind: z.literal('setSpreadsheetCell'),
     sheetId: OfficeUuidSchema,
@@ -37,13 +58,24 @@ export const OfficeCommandSchema = z.discriminatedUnion('kind', [
     value: SpreadsheetCellValueSchema,
     formula: z.string().min(1).max(32_000).optional(),
   }).strict(),
+  CommandBaseSchema.extend({
+    kind: z.literal('setSpreadsheetDimension'),
+    sheetId: OfficeUuidSchema,
+    axis: z.enum(['row', 'column']),
+    index: z.number().int().min(1).max(1_048_576),
+    size: z.number().positive().max(4_096),
+  }).strict(),
   CommandBaseSchema.extend({ kind: z.literal('addWorksheet'), index: z.number().int().min(0), worksheet: SpreadsheetWorksheetSchema }).strict(),
   CommandBaseSchema.extend({ kind: z.literal('renameWorksheet'), sheetId: OfficeUuidSchema, name: z.string().min(1).max(31) }).strict(),
   CommandBaseSchema.extend({ kind: z.literal('reorderWorksheet'), sheetId: OfficeUuidSchema, index: z.number().int().min(0) }).strict(),
   CommandBaseSchema.extend({ kind: z.literal('deleteWorksheet'), sheetId: OfficeUuidSchema }).strict(),
-  CommandBaseSchema.extend({ kind: z.literal('batch'), commands: z.array(z.unknown()).min(1).max(1_000) }).strict(),
+])
+export const OfficeCommandSchema = z.union([
+  AtomicOfficeCommandSchema,
+  CommandBaseSchema.extend({ kind: z.literal('batch'), commands: z.array(AtomicOfficeCommandSchema).min(1).max(1_000) }).strict(),
 ])
 export type OfficeCommand = z.infer<typeof OfficeCommandSchema>
+type AtomicOfficeCommand = z.infer<typeof AtomicOfficeCommandSchema>
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T
@@ -79,14 +111,15 @@ function deleteObject(value: unknown, id: string): boolean {
   return false
 }
 
-function applySingle(snapshot: OfficeArtifactSnapshot, command: Exclude<OfficeCommand, { kind: 'batch' }>): OfficeArtifactSnapshot {
-  const next = clone(snapshot) as OfficeArtifactSnapshot
+function applySingleMutable(next: OfficeArtifactSnapshot, command: AtomicOfficeCommand): void {
   if (next.artifactId !== command.artifactId) throw new Error('Command artifact does not match snapshot')
 
   if (command.kind === 'updateText') {
     const target = findObject(next, command.targetId)
     if (!target || !('runs' in target)) throw new Error(`Text target ${command.targetId} was not found`)
     target.runs = command.runs
+  } else if (command.kind === 'replaceTextRange') {
+    throw new Error('replaceTextRange requires the Document fragment adapter')
   } else if (command.kind === 'insertDocumentNode') {
     if (next.family !== 'document') throw new Error('insertDocumentNode requires a document')
     const section = next.sections.find((candidate) => candidate.id === command.sectionId)
@@ -125,6 +158,35 @@ function applySingle(snapshot: OfficeArtifactSnapshot, command: Exclude<OfficeCo
     if (from < 0) throw new Error(`Slide ${command.slideId} was not found`)
     const [slide] = next.slides.splice(from, 1)
     next.slides.splice(Math.min(command.index, next.slides.length), 0, slide)
+  } else if (command.kind === 'deleteSlide') {
+    if (next.family !== 'presentation') throw new Error('deleteSlide requires a presentation')
+    if (next.slides.length === 1) throw new Error('A presentation must contain at least one slide')
+    const index = next.slides.findIndex((slide) => slide.id === command.slideId)
+    if (index < 0) throw new Error(`Slide ${command.slideId} was not found`)
+    next.slides.splice(index, 1)
+  } else if (command.kind === 'reorderSlideObject') {
+    if (next.family !== 'presentation') throw new Error('reorderSlideObject requires a presentation')
+    const slide = next.slides.find((candidate) => candidate.id === command.slideId)
+    if (!slide) throw new Error(`Slide ${command.slideId} was not found`)
+    const from = slide.objects.findIndex((object) => object.id === command.objectId)
+    if (from < 0) throw new Error(`Object ${command.objectId} was not found`)
+    const [object] = slide.objects.splice(from, 1)
+    slide.objects.splice(Math.min(command.index, slide.objects.length), 0, object)
+  } else if (command.kind === 'attachResource') {
+    const byId = next.resources.find((resource) => resource.id === command.resource.id)
+    const byHash = next.resources.find((resource) => resource.hash === command.resource.hash)
+    if (byId || byHash) {
+      const existing = byId ?? byHash!
+      if (JSON.stringify(existing) !== JSON.stringify(command.resource)) throw new Error('Office resource identity or hash collision')
+    } else next.resources.push(command.resource)
+  } else if (command.kind === 'updateSpreadsheetImage') {
+    if (next.family !== 'spreadsheet') throw new Error('updateSpreadsheetImage requires a spreadsheet')
+    const sheet = next.worksheets.find((candidate) => candidate.id === command.sheetId)
+    if (!sheet) throw new Error(`Worksheet ${command.sheetId} was not found`)
+    const image = sheet.images.find((candidate) => candidate.id === command.imageId)
+    if (!image) throw new Error(`Worksheet image ${command.imageId} was not found`)
+    if (command.from.row >= command.to.row || command.from.column >= command.to.column) throw new Error('Worksheet image extent must have positive width and height')
+    Object.assign(image, { from: command.from, to: command.to, altText: command.decorative ? '' : command.altText, decorative: command.decorative })
   } else if (command.kind === 'setSpreadsheetCell') {
     if (next.family !== 'spreadsheet') throw new Error('setSpreadsheetCell requires a spreadsheet')
     const sheet = next.worksheets.find((candidate) => candidate.id === command.sheetId)
@@ -143,6 +205,23 @@ function applySingle(snapshot: OfficeArtifactSnapshot, command: Exclude<OfficeCo
     else delete cell.formula
     delete cell.calculatedValue
     delete cell.error
+  } else if (command.kind === 'setSpreadsheetDimension') {
+    if (next.family !== 'spreadsheet') throw new Error('setSpreadsheetDimension requires a spreadsheet')
+    const sheet = next.worksheets.find((candidate) => candidate.id === command.sheetId)
+    if (!sheet) throw new Error(`Worksheet ${command.sheetId} was not found`)
+    if (command.axis === 'column' && command.index > 16_384) throw new Error('Spreadsheet column dimension index exceeds the XLSX limit')
+    if (command.axis === 'column' && command.size > 255) throw new Error('Spreadsheet column width exceeds the XLSX limit')
+    if (command.axis === 'row') {
+      const dimension = sheet.rowDimensions.find((candidate) => candidate.index === command.index)
+      if (dimension) Object.assign(dimension, { heightPt: command.size, hidden: false })
+      else sheet.rowDimensions.push({ index: command.index, heightPt: command.size, hidden: false })
+      sheet.rowDimensions.sort((left, right) => left.index - right.index)
+    } else {
+      const dimension = sheet.columnDimensions.find((candidate) => candidate.index === command.index)
+      if (dimension) Object.assign(dimension, { widthChars: command.size, hidden: false })
+      else sheet.columnDimensions.push({ index: command.index, widthChars: command.size, hidden: false })
+      sheet.columnDimensions.sort((left, right) => left.index - right.index)
+    }
   } else if (command.kind === 'addWorksheet') {
     if (next.family !== 'spreadsheet') throw new Error('addWorksheet requires a spreadsheet')
     next.worksheets.splice(Math.min(command.index, next.worksheets.length), 0, command.worksheet)
@@ -166,18 +245,16 @@ function applySingle(snapshot: OfficeArtifactSnapshot, command: Exclude<OfficeCo
     if (next.activeSheetId === command.sheetId) next.activeSheetId = next.worksheets[Math.min(index, next.worksheets.length - 1)].id
   }
 
-  const calculated = next.family === 'spreadsheet' ? recalculateSpreadsheet(next).snapshot : next
-  return OfficeArtifactSnapshotSchema.parse(calculated)
 }
 
 export function applyOfficeCommand(snapshot: OfficeArtifactSnapshot, input: OfficeCommand): OfficeArtifactSnapshot {
   const command = OfficeCommandSchema.parse(input)
-  if (command.kind !== 'batch') return applySingle(snapshot, command)
-  let next = snapshot
-  for (const child of command.commands) {
-    const parsed = OfficeCommandSchema.parse(child)
-    if (parsed.kind === 'batch') throw new Error('Nested Office command batches are not supported')
-    next = applySingle(next, parsed)
+  if (command.kind === 'replaceTextRange' && command.to < command.from) throw new Error('Range end must not precede range start')
+  const next = clone(snapshot) as OfficeArtifactSnapshot
+  if (command.kind !== 'batch') applySingleMutable(next, command)
+  else {
+    for (const child of command.commands) applySingleMutable(next, child)
   }
-  return next
+  const calculated = next.family === 'spreadsheet' ? recalculateSpreadsheet(next).snapshot : next
+  return OfficeArtifactSnapshotSchema.parse(calculated)
 }

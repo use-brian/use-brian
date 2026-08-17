@@ -162,10 +162,10 @@ describe('[COMP:brain/default-rules] Default ingest rule templates', () => {
     })
 
     it('Email (assistant inboxes)', () => {
-      // Allowlisted senders (the conversational path) file realtime;
-      // everything else — strangers, noreply, at-cap / rate-capped overflow
-      // — lands in the daily digest. `gate_match` reads the webhook route's
-      // sender-gate verdict. See docs/architecture/integrations/agentmail.md.
+      // Workspace-member mail files realtime; isolated external guests,
+      // strangers, noreply, and at-cap / rate-capped overflow land in the
+      // daily digest. `gate_match` reads the webhook route's sender-gate
+      // verdict. See docs/architecture/integrations/agentmail.md.
       expect(DEFAULT_INGEST_RULES.email).toEqual([
         {
           filter_type: 'gate_match',

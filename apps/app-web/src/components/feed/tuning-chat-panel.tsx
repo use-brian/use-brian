@@ -1,10 +1,10 @@
 "use client";
 
 /**
- * Tuning chat panel — ported faithfully from
+ * Feed chat panel — evolved from
  * `apps/feed-web/src/components/tuning-chat-panel.tsx`
  * (docs/plans/feed-web-consolidation.md §7.3): the chat surface where the
- * operator teaches the assistant voice rules over `@use-brian/chat-ui` +
+ * operator directs planning, ideation, writing, and voice work over `@use-brian/chat-ui` +
  * `POST /api/chat` SSE, with session resume (`channelId='tuning'`), the shared
  * dock recorder, copy/retry, a model-tier picker gated by the workspace plan, and
  * the research-mode toggle gated by the free-research quota.
@@ -28,6 +28,7 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -67,6 +68,10 @@ import {
 import { ChevronDownIcon } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
+import {
+  describeToolFromInput,
+  type NarrationDict,
+} from "@/lib/tool-narration";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -90,6 +95,86 @@ type AssistantSavedEvent = { id?: string };
 type ErrorEvent = { error?: string; code?: string };
 type ResearchQuotaEvent = { used?: number; quota?: number; isPaid?: boolean };
 type StatusEvent = { message?: string };
+
+export type TuningToolActivity = {
+  id: string;
+  name: string;
+  description: string;
+  status: "running" | "done" | "retried";
+};
+
+export type TuningChatActivity = {
+  isStreaming: boolean;
+  streamingText: string;
+  /** Safe, user-facing status or input-aware tool narration. */
+  activeLabel: string | null;
+};
+
+/**
+ * Reduce the SSE tool lifecycle into the current turn's calls so the
+ * collapsed Feed launcher can retain the newest useful narration until the
+ * turn finishes. Returning null means the event was malformed or a duplicate.
+ */
+export function reduceTuningToolActivity(
+  current: readonly TuningToolActivity[],
+  event: string,
+  payload: Record<string, unknown>,
+  narration: NarrationDict,
+): TuningToolActivity[] | null {
+  const id = typeof payload.id === "string" ? payload.id : "";
+  if (!id) return null;
+
+  if (event === "tool_start") {
+    const name = typeof payload.name === "string" ? payload.name : "";
+    if (!name || current.some((tool) => tool.id === id)) return null;
+    return [
+      ...current,
+      {
+        id,
+        name,
+        description: describeToolFromInput(name, {}, narration).description,
+        status: "running",
+      },
+    ];
+  }
+
+  if (event === "tool_input") {
+    const existing = current.find((tool) => tool.id === id);
+    if (!existing) return null;
+    const name =
+      typeof payload.name === "string" && payload.name
+        ? payload.name
+        : existing.name;
+    const input =
+      payload.input && typeof payload.input === "object"
+        ? (payload.input as Record<string, unknown>)
+        : {};
+    const description = describeToolFromInput(
+      name,
+      input,
+      narration,
+    ).description;
+    return current.map((tool) =>
+      tool.id === id ? { ...tool, name, description } : tool,
+    );
+  }
+
+  if (event === "tool_result") {
+    if (!current.some((tool) => tool.id === id)) return null;
+    return current.map((tool) =>
+      tool.id === id
+        ? { ...tool, status: payload.isError === true ? "retried" : "done" }
+        : tool,
+    );
+  }
+
+  if (event === "tool_dropped") {
+    if (!current.some((tool) => tool.id === id)) return null;
+    return current.filter((tool) => tool.id !== id);
+  }
+
+  return null;
+}
 
 export type TuningChatPanelHandle = {
   /** Drop a draft into the composer and focus it. Optionally flip research mode on. */
@@ -124,6 +209,8 @@ export const TuningChatPanel = forwardRef<
     onClose?: () => void;
     /** Sticky channel to resume. Defaults to the tuning conversation. */
     channelId?: string;
+    /** Hard-lock sending while the host provisions a required fixed session. */
+    ready?: boolean;
     /**
      * Resume THIS session instead of looking one up by channel. The post
      * editor hosts a per-post refine chat, which is a session id, not a
@@ -132,6 +219,8 @@ export const TuningChatPanel = forwardRef<
     sessionId?: string;
     /** Fired when a turn finishes, so a host can re-read what it produced. */
     onTurnComplete?: () => void;
+    /** Mirror safe live activity into the collapsed floating launcher. */
+    onActivityChange?: (activity: TuningChatActivity) => void;
     /** Override the panel's name. The post editor hosts a REFINE chat, not
      *  the voice-tuning chat, and the header is the only thing that says so. */
     title?: string;
@@ -161,8 +250,10 @@ export const TuningChatPanel = forwardRef<
     emptySuggestionsLabel,
     onClose,
     channelId = TUNING_CHANNEL_ID,
+    ready = true,
     sessionId: fixedSessionId,
     onTurnComplete,
+    onActivityChange,
     renderPlanGate,
     title: titleOverride,
     composerPlaceholder,
@@ -171,6 +262,7 @@ export const TuningChatPanel = forwardRef<
   } = props;
 
   const t = useT().feedPage.tuningChat;
+  const tChat = useT().chat;
   const tQueue = useT().chat.queue;
   const session = useChatSession();
   const stream = useMessageStream();
@@ -199,6 +291,8 @@ export const TuningChatPanel = forwardRef<
   const [researchQuota, setResearchQuota] = useState<{ used: number; quota: number; isPaid: boolean } | null>(null);
   const [researchExhausted, setResearchExhausted] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const turnToolsRef = useRef<TuningToolActivity[]>([]);
+  const [activeTool, setActiveTool] = useState<TuningToolActivity | null>(null);
   const sessionIdRef = useRef<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -367,6 +461,7 @@ export const TuningChatPanel = forwardRef<
 
   const sendMessage = useCallback(
     async (text: string, fileIds: string[], truncateFromMessageId?: string) => {
+      if (!ready) return false;
       const trimmed = text.trim();
       if (!trimmed && fileIds.length === 0) return false;
 
@@ -381,6 +476,8 @@ export const TuningChatPanel = forwardRef<
       setError(null);
       setErrorCode(null);
       setStatusMessage(null);
+      turnToolsRef.current = [];
+      setActiveTool(null);
       session.dispatch({ type: "stream/start" });
 
       let finalText = "";
@@ -419,6 +516,25 @@ export const TuningChatPanel = forwardRef<
             case "status": {
               const data = payload as StatusEvent;
               if (data.message) setStatusMessage(data.message);
+              break;
+            }
+            case "tool_start":
+            case "tool_input":
+            case "tool_result":
+            case "tool_dropped": {
+              const next = reduceTuningToolActivity(
+                turnToolsRef.current,
+                event.event,
+                payload,
+                tChat.toolNarration,
+              );
+              if (!next) break;
+              turnToolsRef.current = next;
+              setActiveTool(
+                next.find((tool) => tool.status === "running")
+                  ?? next.at(-1)
+                  ?? null,
+              );
               break;
             }
             case "text_delta": {
@@ -500,6 +616,8 @@ export const TuningChatPanel = forwardRef<
               );
               setErrorCode((data.code as string | undefined) ?? null);
               setStatusMessage(null);
+              turnToolsRef.current = [];
+              setActiveTool(null);
               session.dispatch({ type: "stream/abort" });
               break;
             }
@@ -519,6 +637,9 @@ export const TuningChatPanel = forwardRef<
           } else {
             session.dispatch({ type: "stream/abort" });
           }
+          setStatusMessage(null);
+          turnToolsRef.current = [];
+          setActiveTool(null);
           // Anything still queued was never taken by this turn — send it as an
           // ordinary one. See mid-turn-input.md → "the client is the holder".
           flushQueuedInputs();
@@ -526,13 +647,16 @@ export const TuningChatPanel = forwardRef<
         },
         onError: (err) => {
           setError(err instanceof Error ? err.message : t.streamFailed);
+          setStatusMessage(null);
+          turnToolsRef.current = [];
+          setActiveTool(null);
           session.dispatch({ type: "stream/abort" });
           flushQueuedInputs();
         },
       });
       return true;
     },
-    [assistantId, session, stream, model, researchMode, workspaceId, t, applyQueuedInput, flushQueuedInputs],
+    [assistantId, session, stream, model, researchMode, workspaceId, t, tChat.toolNarration, applyQueuedInput, flushQueuedInputs, ready],
   );
 
   useEffect(() => {
@@ -540,6 +664,7 @@ export const TuningChatPanel = forwardRef<
   }, [sendMessage]);
 
   const onSend = useCallback(async (steer = false) => {
+    if (!ready) return;
     if (!input.trim()) return;
     // A turn is already running: hand this to it rather than starting a
     // second one. See docs/architecture/engine/mid-turn-input.md.
@@ -548,7 +673,7 @@ export const TuningChatPanel = forwardRef<
       return;
     }
     await sendMessage(input, []);
-  }, [input, midTurn, sendMessage, stream]);
+  }, [input, midTurn, ready, sendMessage, stream]);
 
   // Feed hides the global chat chrome but keeps its recorder controller alive.
   // While this floating tuning panel owns the replacement dock, short captures
@@ -600,12 +725,33 @@ export const TuningChatPanel = forwardRef<
   const messages = session.state.messages;
   const isStreaming = session.state.isStreaming;
   const streamingText = session.state.streamingText;
+  const activity = useMemo<TuningChatActivity>(
+    () =>
+      isStreaming
+        ? {
+            isStreaming: true,
+            streamingText,
+            activeLabel: activeTool?.description ?? null,
+          }
+        : { isStreaming: false, streamingText: "", activeLabel: null },
+    [activeTool?.description, isStreaming, streamingText],
+  );
+  const onActivityChangeRef = useRef(onActivityChange);
+  useEffect(() => {
+    onActivityChangeRef.current = onActivityChange;
+  }, [onActivityChange]);
+  useEffect(() => {
+    onActivityChangeRef.current?.(activity);
+  }, [activity]);
   const lastAssistantIdx = [...messages].reverse().findIndex((m) => m.role === "assistant");
   const lastAssistantId = lastAssistantIdx >= 0 ? messages[messages.length - 1 - lastAssistantIdx].id : null;
   const showEmpty = messages.length === 0 && !isStreaming;
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-border bg-popover shadow-2xl">
+    <div
+      aria-busy={!ready}
+      className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-border bg-popover shadow-2xl"
+    >
       <div className="relative shrink-0 border-b border-border/60 px-4 py-3">
         <div className="flex items-center gap-2.5">
           <span className="relative shrink-0" aria-hidden>
@@ -771,7 +917,7 @@ export const TuningChatPanel = forwardRef<
           </>
         ) : null}
 
-        <div className="rounded-xl border border-border/70 bg-background/60 shadow-sm focus-within:border-primary/50 focus-within:ring-2 focus-within:ring-primary/15 transition-all">
+        <div className="rounded-xl border border-border/70 bg-background/60 shadow-sm focus-within:border-primary/50 focus-within:ring-2 focus-within:ring-primary/15 transition-all [&_:focus-visible]:shadow-none">
           <div className="px-3.5 pt-2.5">
             <textarea
               ref={inputRef}
@@ -782,6 +928,7 @@ export const TuningChatPanel = forwardRef<
               // `stream.inFlight()`, so Enter can't double-send; the message
               // list carries the thinking indicator.
               placeholder={composerPlaceholder ?? t.composerPlaceholder}
+              disabled={!ready}
               rows={1}
               className="w-full bg-transparent text-[14px] text-foreground placeholder:text-muted-foreground/60 resize-none outline-none focus-visible:shadow-none min-h-[24px] max-h-[140px] py-0.5 leading-relaxed"
               style={{ fieldSizing: "content" } as React.CSSProperties}
@@ -848,7 +995,7 @@ export const TuningChatPanel = forwardRef<
                 (muted to mark the difference). See mid-turn-input.md. */}
             <button
               onClick={() => void onSend()}
-              disabled={!input.trim()}
+              disabled={!ready || !input.trim()}
               className={cn(
                 "p-2 rounded-xl transition-colors shadow-sm shrink-0",
                 "disabled:opacity-30 disabled:cursor-not-allowed",
@@ -896,15 +1043,7 @@ function EmptyState({
               {title ?? t.tuningChat.emptyTitle}
             </p>
             <p className="text-[12px] leading-relaxed text-muted-foreground">
-              {body ? (
-                body
-              ) : (
-                <>
-                  {t.tuningChat.emptyBodyBefore}{" "}
-                  <span className="font-medium text-foreground">{t.voice.discuss}</span>{" "}
-                  {t.tuningChat.emptyBodyAfter}
-                </>
-              )}
+              {body ?? t.tuningChat.emptyBody}
             </p>
           </div>
         </div>

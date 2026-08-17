@@ -93,11 +93,31 @@ describe('[COMP:api/office-store] Office stores', () => {
     expect(db.calls[0]?.params.slice(0, 5)).toEqual(['a1', 'v1', 2, 'u1', 'Restore v1'])
   })
 
+  it('names versions and manages explicit and inherited sharing roles', async () => {
+    const db = fakeDb({
+      'UPDATE office_artifact_versions': [{ id: 'v1' }],
+      'FROM office_artifact_grants': [{ userId: 'u2', role: 'comment', revokedAt: null }],
+      'UPDATE office_artifact_grants': [{ artifactId: 'a1' }],
+      'UPDATE office_artifacts SET default_workspace_role': [{ id: 'a1' }],
+    })
+    const store = createOfficeArtifactStore(db.query)
+    await expect(store.nameVersion({ userId: 'u1', artifactId: 'a1', versionId: 'v1', summary: 'Approved draft' })).resolves.toBe(true)
+    await store.setGrant({ userId: 'u1', artifactId: 'a1', workspaceId: 'w1', targetUserId: 'u2', role: 'comment' })
+    await expect(store.listGrants('u1', 'a1')).resolves.toEqual([{ userId: 'u2', role: 'comment', revokedAt: null }])
+    await expect(store.revokeGrant({ userId: 'u1', artifactId: 'a1', targetUserId: 'u2' })).resolves.toBe(true)
+    await expect(store.setDefaultWorkspaceRole({ userId: 'u1', artifactId: 'a1', role: 'view' })).resolves.toBe(true)
+    expect(db.calls[0]?.sql).toContain("checkpoint_kind='named'")
+    expect(db.calls[1]?.sql).toContain('ON CONFLICT (artifact_id, user_id) DO UPDATE')
+    expect(db.calls[4]?.params).toEqual(['a1', 'view'])
+  })
+
   it('creates immutable template versions and declarative resources', async () => {
-    const db = fakeDb({ 'WITH next': [{ id: 'tv1', version: 1 }], 'INSERT INTO office_resources': [{ id: 'r1' }] })
+    const db = fakeDb({ 'WITH next': [{ id: 'tv1', version: 1 }], 'INSERT INTO office_resources': [{ id: 'r1', sensitivity: 'internal' }] })
     const store = createOfficeTemplateStore(db.query)
     expect(await store.addVersion({ userId: 'u1', templateId: 't1', workspaceId: 'w1', bundleFileId: 'f1', bundleHash: 'c'.repeat(64), capabilityVersion: 1, locales: ['en-US'], tags: [], whenToUse: ['reports'], whenNotToUse: ['slides'], exampleRequests: ['make a report'], fieldSchema: {}, admissionReceipt: {}, provenance: {}, status: 'admitted' })).toEqual({ id: 'tv1', version: 1 })
-    expect(await store.addResource({ userId: 'u1', workspaceId: 'w1', kind: 'font', name: 'Brand', fileId: 'f2', hash: 'd'.repeat(64), mime: 'font/otf', licence: {}, embeddingRights: 'allowed', sensitivity: 'internal' })).toEqual({ id: 'r1' })
+    expect(await store.addResource({ userId: 'u1', workspaceId: 'w1', kind: 'font', name: 'Brand', fileId: 'f2', hash: 'd'.repeat(64), mime: 'font/otf', licence: {}, provenance: { source: 'workspace-upload' }, embeddingRights: 'allowed', sensitivity: 'internal' })).toEqual({ id: 'r1', sensitivity: 'internal' })
+    expect(db.calls.at(-1)?.sql).toContain('ON CONFLICT (workspace_id, kind, content_hash)')
+    expect(db.calls.at(-1)?.sql).toContain('WHEN office_resources.sensitivity')
   })
 
   it('links a scratch template to its draft artifact and only deletes an empty draft', async () => {

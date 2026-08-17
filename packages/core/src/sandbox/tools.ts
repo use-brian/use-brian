@@ -133,7 +133,7 @@ const DEFAULT_FUSE_IDLE_RESET_MS = 5 * 60 * 1000
  * Profile plumbing for the browse tools (R2-4/R2-10): the store + vault used
  * by `resolveProfileForCall`, and the acting assistant's clearance (boot
  * resolves it from the assistant row — never model input). Null → the
- * profile-less posture (OSS boot without the closed store).
+ * profile-less posture when no profile store is configured.
  */
 export type ComputerToolProfiles = {
   store: BrowserProfileStore
@@ -493,19 +493,33 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     }
   }
 
-  function renderSnapshot(snapshot: BrowserSnapshot): string {
+  function renderSnapshot(
+    snapshot: BrowserSnapshot,
+    window: { offset?: number; limit?: number; mode?: 'interactive' | 'full' } = {},
+  ): string {
+    const offset = window.offset ?? 0
+    const limit = window.limit ?? SNAPSHOT_MAX_LINES
+    const mode = window.mode ?? 'interactive'
+    const end = Math.min(offset + limit, snapshot.nodes.length)
     const lines = snapshot.nodes
-      .slice(0, SNAPSHOT_MAX_LINES)
+      .slice(offset, end)
       .map((n) => {
         const value = n.value ? ` value=${JSON.stringify(n.value)}` : ''
         const disabled = n.disabled ? ' (disabled)' : ''
-        return `${n.ref} ${n.role} ${JSON.stringify(n.name)}${value}${disabled}`
+        return `${n.ref ? `${n.ref} ` : ''}${n.role} ${JSON.stringify(n.name)}${value}${disabled}`
       })
-    const truncated =
-      snapshot.nodes.length > SNAPSHOT_MAX_LINES
-        ? `\n… ${snapshot.nodes.length - SNAPSHOT_MAX_LINES} more interactive nodes (act on what you see, or navigate closer)`
+    const noun = mode === 'full' ? 'accessibility nodes' : 'interactive nodes'
+    const range =
+      snapshot.nodes.length > limit || offset > 0
+        ? `\nShowing ${noun} ${lines.length > 0 ? `${offset + 1}-${end}` : 'none'} of ${snapshot.nodes.length}.`
         : ''
-    return `Page: ${snapshot.title || '(untitled)'}\nURL: ${snapshot.url}\n${lines.join('\n')}${truncated}`
+    const more =
+      end < snapshot.nodes.length
+        ? mode === 'full'
+          ? `\n… ${snapshot.nodes.length - end} more ${noun} (call browserSnapshot with mode "full" and offset ${end})`
+          : `\n… ${snapshot.nodes.length - end} more ${noun} (call browserSnapshot with offset ${end})`
+        : ''
+    return `Page: ${snapshot.title || '(untitled)'}\nURL: ${snapshot.url}\n${lines.join('\n')}${range}${more}`
   }
 
   /**
@@ -582,7 +596,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
   ): Promise<{ snapshot: BrowserSnapshot; rendered: string } | null> {
     try {
       const snapshot = await providerFor(backend).snapshot(callCtx(context, state))
-      state.refLabels = new Map(snapshot.nodes.map((n) => [n.ref, n.name]))
+      state.refLabels = new Map(snapshot.nodes.flatMap((n) => n.ref ? [[n.ref, n.name]] : []))
       const rendered = renderSnapshot(snapshot)
       // This is the expensive one: navigate and click fold their follow-up
       // snapshot in here to save a model turn, so they cost snapshot-sized
@@ -929,8 +943,12 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     name: 'browserSnapshot',
     requiresCapability: 'computer',
     description:
-      'Re-list the interactive elements of the current browser page as refs (@e1 button "Send"). browserNavigate and browserClick already return a fresh snapshot — use this only when the page changed on its own (slow load, redirect, dynamic content). Refs are valid until the next navigation or snapshot — act on the latest snapshot only.',
-    inputSchema: z.object({}),
+      'Read the current browser page through accessibility data. mode:"interactive" (default) returns concise actionable controls with refs such as @e1 button "Send". mode:"full" also returns headings, tables, cells, labels, and static text for gathering visible information; informational rows have no refs and cannot be clicked or typed into. Returns at most 150 nodes per call; use the reported offset with the same mode for later ranges. browserNavigate and browserClick already return a fresh interactive snapshot. Refs are valid until the next navigation or snapshot — act on the latest snapshot only.',
+    inputSchema: z.object({
+      mode: z.enum(['interactive', 'full']).default('interactive').describe('Interactive controls only, or a full curated accessibility view including static information'),
+      offset: z.number().int().min(0).default(0).describe('Zero-based node offset; use the next offset reported by the previous snapshot with the same mode'),
+      limit: z.number().int().min(1).max(SNAPSHOT_MAX_LINES).default(SNAPSHOT_MAX_LINES).describe('Maximum nodes to return (1-150)'),
+    }),
     isReadOnly: true,
     isConcurrencySafe: false,
     requiresConfirmation: false,
@@ -941,16 +959,17 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     resolveConfirmation: policyAsk('browserSnapshot'),
     timeoutMs: 45_000,
     maxResultSizeChars: 24_000,
-    async execute(_input, context) {
+    async execute(input, context) {
       const gate = await gates('browserSnapshot', context)
       if ('error' in gate) return gate.error
       const backend = gate.state.backend
       const fused = backendFuseGate(gate.state, backend)
       if (fused) return fused
       try {
-        const snapshot = await providerFor(backend).snapshot(callCtx(context, gate.state))
-        gate.state.refLabels = new Map(snapshot.nodes.map((n) => [n.ref, n.name]))
-        const data = renderSnapshot(snapshot) + pageAdvice(context, gate.state, snapshot)
+        const snapshot = await providerFor(backend).snapshot(callCtx(context, gate.state), { mode: input.mode })
+        gate.state.refLabels = new Map(snapshot.nodes.flatMap((n) => n.ref ? [[n.ref, n.name]] : []))
+        const data = renderSnapshot(snapshot, input) + pageAdvice(context, gate.state, snapshot)
+        const end = Math.min(input.offset + input.limit, snapshot.nodes.length)
         emit(
           {
             type: 'browser_action',
@@ -962,7 +981,17 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
           },
           context,
         )
-        return { data, meta: { backend, nodes: snapshot.nodes.length } }
+        return {
+          data,
+          meta: {
+            backend,
+            mode: input.mode,
+            nodes: snapshot.nodes.length,
+            offset: input.offset,
+            shown: Math.max(0, end - input.offset),
+            ...(end < snapshot.nodes.length ? { nextOffset: end } : {}),
+          },
+        }
       } catch (err) {
         emit(
           {

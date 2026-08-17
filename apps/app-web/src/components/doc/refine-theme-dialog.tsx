@@ -104,7 +104,7 @@ export function RefineThemeDialog({
                 void submit();
               }
             }}
-            className="mt-4 w-full resize-none rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60"
+            className="mt-4 w-full resize-none rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground outline-none placeholder:text-muted-foreground disabled:opacity-60"
           />
           {error ? <p className="mt-2 text-sm text-destructive">{error}</p> : null}
           <div className="mt-6 flex justify-end gap-2">

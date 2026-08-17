@@ -1,5 +1,6 @@
 /**
- * [COMP:app-web/plan-slot-chip] [COMP:app-web/plan-list]
+ * [COMP:app-web/plan-slot-chip] [COMP:app-web/plan-calendar]
+ * [COMP:app-web/plan-list]
  *
  * Static render contracts for the two calendar-depth surfaces. Both are
  * rendered with `renderToString`, so what is pinned here is what the operator
@@ -11,9 +12,11 @@ import { renderToString } from "react-dom/server";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
-import { PlanSlotChip } from "../plan-slot-chip";
+import { PlanProposalChip, PlanSlotChip } from "../plan-slot-chip";
+import { PlanCalendar } from "../plan-calendar";
 import { PlanList } from "../plan-list";
 import type { PlanSlot } from "@/lib/feed-plan";
+import type { ProposedSlot } from "@/lib/feed-plan-proposal";
 
 const dict = en as unknown as Dictionary;
 const TODAY = new Date(2026, 7, 15);
@@ -87,6 +90,82 @@ describe("[COMP:app-web/plan-slot-chip] Slot chip", () => {
 
   it("hides the actions menu when the operator cannot edit", () => {
     expect(chip(slot(), false)).not.toContain(en.feedPage.plan.slotActions);
+  });
+});
+
+describe("[COMP:app-web/plan-slot-chip] Proposal chip", () => {
+  const proposal: ProposedSlot = {
+    index: 1,
+    date: "2026-08-18",
+    platform: "threads",
+    title: "What changed after launch",
+  };
+
+  it("looks pending and repeats the explicit Add / Dismiss boundary", () => {
+    const html = render(
+      <PlanProposalChip
+        proposal={proposal}
+        canEdit
+        accepting={false}
+        onAccept={() => {}}
+        onDismiss={() => {}}
+      />,
+    );
+
+    expect(html).toContain('data-plan-proposal-chip="1"');
+    expect(html).toContain("border-dashed");
+    expect(html).toContain("What changed after launch");
+    expect(html).toContain(
+      `${en.feedPage.plan.acceptSlot}: What changed after launch`,
+    );
+    expect(html).toContain(
+      `${en.feedPage.plan.dismissSlot}: What changed after launch`,
+    );
+    expect(html).not.toContain('draggable="true"');
+  });
+});
+
+describe("[COMP:app-web/plan-calendar] proposal previews", () => {
+  it("places pending proposals on their dates without turning them into slots", () => {
+    const proposals: ProposedSlot[] = [
+      {
+        index: 1,
+        date: "2026-08-18",
+        platform: "threads",
+        title: "What changed after launch",
+      },
+      {
+        index: 2,
+        date: "2026-08-20",
+        platform: "twitter",
+        title: "Three sharp lessons",
+      },
+    ];
+    const html = render(
+      <PlanCalendar
+        month="2026-08"
+        slots={[]}
+        proposals={proposals}
+        today={TODAY}
+        selectedSlotId={null}
+        canEdit
+        onMonthChange={() => {}}
+        onAddOnDay={() => {}}
+        onSelectSlot={() => {}}
+        onReschedule={() => {}}
+        onAcceptProposal={() => {}}
+        onAcceptAllProposals={() => {}}
+        onDismissProposal={() => {}}
+      />,
+    );
+
+    expect(html).toContain("data-plan-proposal-summary");
+    expect(html).toContain(en.feedPage.plan.proposedHeading);
+    expect(html).toContain(en.feedPage.plan.acceptAll);
+    expect(html.match(/data-plan-proposal-chip=/g)).toHaveLength(2);
+    expect(html).toContain("What changed after launch");
+    expect(html).toContain("Three sharp lessons");
+    expect(html).not.toContain("data-status-dot");
   });
 });
 

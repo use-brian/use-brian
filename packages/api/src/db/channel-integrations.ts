@@ -23,6 +23,7 @@ import {
   encryptCredentials as _encryptCredentials,
   decryptCredentials as _decryptCredentials,
 } from './credential-crypto.js'
+import { parseTopicChannelId } from '@use-brian/channels'
 import { query, queryWithRLS } from './client.js'
 
 // ── Types ──────────────────────────────────────────────────────
@@ -39,6 +40,18 @@ export type TelegramCredentials = {
 
 export type WhatsAppCredentials = {
   phone_number: string  // for display only; actual auth state lives in GCS
+}
+
+/** Official Meta WhatsApp Cloud API credentials, encrypted per channel. */
+export type WhatsAppCloudCredentials = {
+  provider: 'cloud_api'
+  access_token: string
+  app_secret: string
+  verify_token: string
+  phone_number_id: string
+  waba_id: string
+  display_phone_number: string
+  graph_api_version: string
 }
 
 /**
@@ -141,6 +154,7 @@ export type ChannelCredentials =
   | SlackCredentials
   | TelegramCredentials
   | WhatsAppCredentials
+  | WhatsAppCloudCredentials
   | DiscordCredentials
   | MsTeamsCredentials
   | ThreadsCredentials
@@ -209,6 +223,8 @@ export type ChannelIntegrationConfig = {
   userAccessMode?: UserAccessMode // default: 'allow_all'
   // Slack sender filter; Telegram owner-plus-guest grants. @handle or numeric ID.
   allowedUserIds?: string[]
+  /** WhatsApp Cloud public business number, safe to expose for chat links. */
+  whatsappDisplayPhoneNumber?: string
   /**
    * Telegram BYO only. When true, explicitly allowlisted private-DM guests
    * may use connector tools enabled for the routed assistant. Their shadow
@@ -270,6 +286,22 @@ export type ChannelIntegration = {
 export type ChannelIntegrationWithCredentials = ChannelIntegration & {
   credentials: ChannelCredentials
 }
+
+export type AssistantIntegrationRoutingDiagnostic =
+  | { status: 'available'; channelLabel: string }
+  | { status: 'integration_unavailable'; channelLabel: string | null }
+  | { status: 'assistant_unavailable'; channelLabel: string }
+  | {
+      status: 'destination_unassigned'
+      channelLabel: string
+      requestedAssistantName: string
+    }
+  | {
+      status: 'assistant_mismatch'
+      channelLabel: string
+      requestedAssistantName: string
+      routedAssistantName: string
+    }
 
 // ── Crypto ─────────────────────────────────────────────────────
 
@@ -361,6 +393,24 @@ export type ChannelIntegrationStore = {
     assistantId: string,
     channelType: string,
   ): Promise<ChannelIntegrationWithCredentials | null>
+
+  /** Resolve one exact integration, proving its routing covers this assistant + surface. */
+  getCredentialsForAssistantIntegrationSystem(
+    workspaceId: string,
+    assistantId: string,
+    integrationId: string,
+    channelType: string,
+    externalSurfaceId: string,
+  ): Promise<ChannelIntegrationWithCredentials | null>
+
+  /** Explain why an exact assistant/integration/surface credential lookup missed. */
+  diagnoseAssistantIntegrationRoutingSystem(
+    workspaceId: string,
+    assistantId: string,
+    integrationId: string,
+    channelType: string,
+    externalSurfaceId: string,
+  ): Promise<AssistantIntegrationRoutingDiagnostic>
 
   /**
    * Lookup by bot username. Used by the Mini App verify route to resolve
@@ -610,6 +660,173 @@ export function createDbChannelIntegrationStore(key: Buffer): ChannelIntegration
         connectorInstanceId: row.connectorInstanceId,
         credentials,
       }
+    },
+
+    async getCredentialsForAssistantIntegrationSystem(
+      workspaceId,
+      assistantId,
+      integrationId,
+      channelType,
+      externalSurfaceId,
+    ) {
+      const parsedSurface = parseTopicChannelId(externalSurfaceId)
+      const parentSurfaceId = parsedSurface.messageThreadId == null
+        ? externalSurfaceId
+        : parsedSurface.chatId
+      const result = await query<CiRow & { credentials: Buffer }>(
+        `SELECT ${CI_PUBLIC_COLS}, credentials
+         FROM channel_integrations
+         WHERE id = (
+           SELECT ci.id FROM channel_integrations ci
+           JOIN channels c ON c.id = ci.channel_id
+           JOIN channel_assistants ca ON ca.channel_id = ci.channel_id
+           WHERE ca.assistant_id = $1
+             AND ci.id = $2
+             AND ci.channel_type = $3
+             AND ci.status = 'active'
+             AND c.status = 'active'
+             AND c.workspace_id = $6
+             AND ca.id = (
+               SELECT winning.id
+               FROM channel_assistants winning
+               WHERE winning.channel_id = ci.channel_id
+                 AND (
+                   winning.external_surface_id IS NULL
+                   OR winning.external_surface_id = $4
+                   OR winning.external_surface_id = $5
+                 )
+               ORDER BY CASE
+                 WHEN winning.external_surface_id = $4 THEN 0
+                 WHEN winning.external_surface_id = $5 THEN 1
+                 ELSE 2
+               END
+               LIMIT 1
+             )
+           LIMIT 1
+         )`,
+        [assistantId, integrationId, channelType, externalSurfaceId, parentSurfaceId, workspaceId],
+      )
+      if (result.rows.length === 0) return null
+      const row = result.rows[0]
+      const credentials = decryptCredentials(row.credentials, key)
+      return {
+        id: row.id,
+        channelId: row.channelId,
+        channelType: row.channelType,
+        teamId: row.teamId,
+        teamName: row.teamName,
+        botUserId: row.botUserId,
+        botUsername: row.botUsername,
+        config: row.config ?? {},
+        status: row.status,
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt,
+        lastEventAt: row.lastEventAt,
+        connectorInstanceId: row.connectorInstanceId,
+        credentials,
+      }
+    },
+
+    async diagnoseAssistantIntegrationRoutingSystem(
+      workspaceId,
+      assistantId,
+      integrationId,
+      channelType,
+      externalSurfaceId,
+    ) {
+      const parsedSurface = parseTopicChannelId(externalSurfaceId)
+      const parentSurfaceId = parsedSurface.messageThreadId == null
+        ? externalSurfaceId
+        : parsedSurface.chatId
+      const result = await query<{
+        integrationStatus: string
+        channelStatus: string
+        channelLabel: string
+        requestedAssistantName: string | null
+        routedAssistantId: string | null
+        routedAssistantName: string | null
+      }>(
+        `WITH selected AS (
+           SELECT
+             ci.channel_id,
+             ci.status AS integration_status,
+             c.status AS channel_status,
+             COALESCE(
+               '@' || NULLIF(ci.bot_username, ''),
+               NULLIF(c.display_name, ''),
+               NULLIF(ci.team_name, ''),
+               'Telegram channel'
+             ) AS channel_label
+           FROM channel_integrations ci
+           JOIN channels c ON c.id = ci.channel_id
+           WHERE ci.id = $2
+             AND ci.channel_type = $3
+             AND c.workspace_id = $6
+           LIMIT 1
+         ), winner AS (
+           SELECT candidate.assistant_id
+           FROM selected s
+           JOIN LATERAL (
+             SELECT ca.assistant_id
+             FROM channel_assistants ca
+             WHERE ca.channel_id = s.channel_id
+               AND (
+                 ca.external_surface_id IS NULL
+                 OR ca.external_surface_id = $4
+                 OR ca.external_surface_id = $5
+               )
+             ORDER BY CASE
+               WHEN ca.external_surface_id = $4 THEN 0
+               WHEN ca.external_surface_id = $5 THEN 1
+               ELSE 2
+             END
+             LIMIT 1
+           ) candidate ON true
+         )
+         SELECT
+           s.integration_status AS "integrationStatus",
+           s.channel_status AS "channelStatus",
+           s.channel_label AS "channelLabel",
+           requested.name AS "requestedAssistantName",
+           winner.assistant_id AS "routedAssistantId",
+           routed.name AS "routedAssistantName"
+         FROM selected s
+         LEFT JOIN winner ON true
+         LEFT JOIN assistants requested
+           ON requested.id = $1 AND requested.workspace_id = $6
+         LEFT JOIN assistants routed ON routed.id = winner.assistant_id`,
+        [assistantId, integrationId, channelType, externalSurfaceId, parentSurfaceId, workspaceId],
+      )
+      const row = result.rows[0]
+      if (!row || row.integrationStatus !== 'active' || row.channelStatus !== 'active') {
+        return {
+          status: 'integration_unavailable',
+          channelLabel: row?.channelLabel ?? null,
+        }
+      }
+      if (!row.requestedAssistantName) {
+        return {
+          status: 'assistant_unavailable',
+          channelLabel: row.channelLabel,
+        }
+      }
+      const requestedAssistantName = row.requestedAssistantName
+      if (!row.routedAssistantId) {
+        return {
+          status: 'destination_unassigned',
+          channelLabel: row.channelLabel,
+          requestedAssistantName,
+        }
+      }
+      if (row.routedAssistantId !== assistantId) {
+        return {
+          status: 'assistant_mismatch',
+          channelLabel: row.channelLabel,
+          requestedAssistantName,
+          routedAssistantName: row.routedAssistantName ?? row.routedAssistantId,
+        }
+      }
+      return { status: 'available', channelLabel: row.channelLabel }
     },
 
     async getByBotUsernameSystem(botUsername, channelType) {

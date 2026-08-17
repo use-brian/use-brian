@@ -5,13 +5,9 @@
  * it (feed-revamp.md §3.1). Owns the bare `/feed` index (D5), so it also
  * renders the first-run onboarding when the workspace has no brand voice.
  *
- * Layout is calendar + one right rail. The rail shows the month brief by
- * default and swaps to the selected slot's editor, rather than opening a
- * third pane: the operator is always looking at either "what is this month
- * about" or "what is this one post", never both at once.
- *
- * The pipeline counts that used to be the retired home dashboard's stat cards
- * live at the top of the rail, where they annotate the calendar they describe.
+ * Layout is calendar + one contextual right rail. Its reusable overview is
+ * the default; the once-per-month brief and selected-slot editor open on
+ * demand and return to that overview, rather than becoming permanent chrome.
  *
  * [COMP:app-web/feed-plan-surface]
  */
@@ -45,12 +41,14 @@ import {
   draftFromPlanSlot,
   ensurePlanSession,
   fetchFeedIdeas,
+  fetchFeedSessionIdByChannel,
   fetchPlanBrief,
   fetchPlanSlots,
   savePlanBrief,
   updateFeedIdea,
   updatePlanSlot,
 } from "@/lib/api/feed";
+import { fetchSessionMessages } from "@/lib/api/sessions";
 import {
   defaultFeedPlatform,
   feedPath,
@@ -67,14 +65,19 @@ import {
   type PlanSlot,
 } from "@/lib/feed-plan";
 import { requestFeedChatSeed } from "@/lib/feed-chat-seed";
+import {
+  pendingProposedSlots,
+  replayPlanProposal,
+  type ProposedSlot,
+} from "@/lib/feed-plan-proposal";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
-import { isHostedEdition } from "@/lib/edition";
 
 export function FeedPlan() {
   const team = useFeedWorkspace();
   const { openConnect, dialog, isAdmin } = useConnectAccount();
-  const canConnect = isAdmin && isHostedEdition();
+  const router = useRouter();
+  const canConnect = isAdmin;
   const [onboarded, setOnboarded] = useState(false);
   const handleReady = useCallback(() => setOnboarded(true), []);
 
@@ -87,7 +90,18 @@ export function FeedPlan() {
         <FeedOnboarding
           canCreateBrand={isAdmin}
           canConnect={canConnect}
-          onConnect={() => void openConnect()}
+          onConnect={() => {
+            const cloudState = team.cloudLink?.state ?? "native";
+            if (cloudState === "native" || cloudState === "linked") {
+              void openConnect();
+              return;
+            }
+            const platform = defaultFeedPlatform(
+              team.workspaceId,
+              team.profiles.map((profile) => profile.platform),
+            );
+            router.push(feedPath(team.workspaceId, { platform, segment: "settings" }));
+          }}
           onReady={handleReady}
         />
       ) : (
@@ -97,7 +111,16 @@ export function FeedPlan() {
   );
 }
 
-type RailView = { kind: "brief" } | { kind: "slot"; draft: PlanSlotDraft };
+type RailView =
+  | { kind: "overview" }
+  | { kind: "brief" }
+  | { kind: "slot"; draft: PlanSlotDraft };
+
+/** Sticky conversation identity (server twin: PLAN_CHANNEL_ID). */
+const PLAN_CHANNEL_ID = "plan";
+/** Bounded proposal watch: fast enough to feel live, never an idle poller. */
+const PROPOSAL_WATCH_INTERVAL_MS = 4_000;
+const PROPOSAL_WATCH_TIMEOUT_MS = 120_000;
 
 function PlanBoard({ assistantId }: { assistantId: string }) {
   const team = useFeedWorkspace();
@@ -133,10 +156,18 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [rail, setRail] = useState<RailView>({ kind: "brief" });
-  // Bumped when the operator asks for a plan; the rail then watches for the
-  // assistant's `proposePlan` cardboard instead of polling all the time.
+  const [rail, setRail] = useState<RailView>({ kind: "overview" });
+  // Bumped when the operator asks for a plan; the board watches for the
+  // assistant's `proposePlan` cardboard so calendar and rail share one set.
   const [watchToken, setWatchToken] = useState(0);
+  const [proposed, setProposed] = useState<ProposedSlot[]>([]);
+  const [dismissedProposals, setDismissedProposals] = useState<Set<number>>(
+    new Set(),
+  );
+  const [pullingProposals, setPullingProposals] = useState(false);
+  const [acceptingProposalIndex, setAcceptingProposalIndex] = useState<
+    number | null
+  >(null);
 
   // Open the sticky `mode='plan'` conversation so the dock resumes it and the
   // assistant gets the proposePlan tool. Idempotent, so a remount is free.
@@ -173,6 +204,71 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
   useEffect(() => {
     void load();
   }, [load]);
+
+  const pullProposal = useCallback(async () => {
+    setPullingProposals(true);
+    try {
+      const sessionId = await fetchFeedSessionIdByChannel(
+        assistantId,
+        PLAN_CHANNEL_ID,
+      );
+      if (!sessionId) {
+        setProposed([]);
+        return;
+      }
+      const rows = await fetchSessionMessages(sessionId);
+      const proposal = replayPlanProposal(rows);
+      setProposed(
+        proposal?.month === month
+          ? pendingProposedSlots(proposal, slots)
+          : [],
+      );
+    } finally {
+      setPullingProposals(false);
+    }
+  }, [assistantId, month, slots]);
+
+  useEffect(() => {
+    void pullProposal();
+  }, [pullProposal]);
+
+  // Poll only after a planning request, and stop after two minutes. The same
+  // callback updates both the rail and calendar previews atomically.
+  const proposalWatchRef = useRef(0);
+  useEffect(() => {
+    if (watchToken === 0 || watchToken === proposalWatchRef.current) return;
+    proposalWatchRef.current = watchToken;
+    const startedAt = Date.now();
+    let stopped = false;
+    const timer = setInterval(() => {
+      if (
+        stopped ||
+        Date.now() - startedAt > PROPOSAL_WATCH_TIMEOUT_MS
+      ) {
+        clearInterval(timer);
+        return;
+      }
+      void pullProposal();
+    }, PROPOSAL_WATCH_INTERVAL_MS);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [watchToken, pullProposal]);
+
+  const visibleProposals = useMemo(
+    () => proposed.filter((slot) => !dismissedProposals.has(slot.index)),
+    [dismissedProposals, proposed],
+  );
+
+  // A month change resets the contextual detail. Carrying an editor from the
+  // previous month into a new calendar is surprising and makes the rail feel
+  // permanent rather than tied to what the operator is viewing now.
+  useEffect(() => {
+    setRail({ kind: "overview" });
+    setProposed([]);
+    setDismissedProposals(new Set());
+  }, [month]);
 
   // Keep `?month=` in the URL so a month is linkable and survives a reload,
   // without pushing a history entry per arrow click.
@@ -362,7 +458,7 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
         return;
       }
       setSlots((prev) => prev.filter((s) => s.id !== slot.id));
-      setRail({ kind: "brief" });
+      setRail({ kind: "overview" });
     } finally {
       setBusy(false);
     }
@@ -460,6 +556,7 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
         return;
       }
       setBrief(result.brief);
+      setRail({ kind: "overview" });
     } finally {
       setBusy(false);
     }
@@ -509,6 +606,57 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
     });
     setWatchToken((n) => n + 1);
   }
+
+  /**
+   * The only proposal-to-calendar write boundary. Both the calendar preview
+   * and rail call this function, so Add cannot behave differently by surface.
+   */
+  async function acceptProposal(slot: ProposedSlot) {
+    setAcceptingProposalIndex(slot.index);
+    try {
+      // A card carrying slotId fills an existing empty slot. Creating beside
+      // it would defeat the opt-in fill flow and produce a duplicate.
+      const result = slot.slotId
+        ? await updatePlanSlot(assistantId, slot.slotId, {
+            title: slot.title,
+            brief: slot.brief ?? null,
+          })
+        : await createPlanSlot(assistantId, {
+            platform: slot.platform,
+            scheduledFor: slot.date,
+            title: slot.title,
+            ...(slot.brief ? { brief: slot.brief } : {}),
+          });
+      if (!result.ok) {
+        setError(result.error ?? tp.saveFailed);
+        return;
+      }
+      setDismissedProposals((prev) => new Set(prev).add(slot.index));
+      setSlots((prev) => {
+        const next = prev.filter((existing) => existing.id !== result.slot.id);
+        next.push(result.slot);
+        return next.sort(
+          (a, b) =>
+            a.scheduledFor.localeCompare(b.scheduledFor) ||
+            a.createdAt.localeCompare(b.createdAt),
+        );
+      });
+    } finally {
+      setAcceptingProposalIndex(null);
+    }
+  }
+
+  async function acceptAllProposals() {
+    for (const slot of visibleProposals) {
+      await acceptProposal(slot);
+    }
+  }
+
+  function dismissProposal(slot: ProposedSlot) {
+    setDismissedProposals((prev) => new Set(prev).add(slot.index));
+  }
+
+  const showProposals = watchToken > 0 || visibleProposals.length > 0;
 
   return (
     <div className="flex h-full min-h-0">
@@ -598,6 +746,7 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
                 <PlanCalendar
                   month={month}
                   slots={slots}
+                  proposals={visibleProposals}
                   today={today}
                   cadencePerWeek={brief?.cadencePerWeek ?? null}
                   selectedSlotId={rail.kind === "slot" ? rail.draft.id : null}
@@ -608,6 +757,10 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
                   onReschedule={(slot, iso) => void reschedule(slot, iso)}
                   onDuplicateSlot={(slot) => void duplicateSlot(slot)}
                   onDeleteSlot={(slot) => void removeSlot(slot)}
+                  acceptingProposalIndex={acceptingProposalIndex}
+                  onAcceptProposal={(proposal) => void acceptProposal(proposal)}
+                  onAcceptAllProposals={() => void acceptAllProposals()}
+                  onDismissProposal={dismissProposal}
                 />
               ) : view === "week" ? (
                 <PlanWeek
@@ -667,24 +820,31 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
                 }),
               })
             }
-            onBack={() => setRail({ kind: "brief" })}
+            onBack={() => setRail({ kind: "overview" })}
           />
         ) : (
           <PlanBriefRail
+            view={rail.kind}
             month={month}
             brief={brief}
             counts={counts}
             canEdit={canEdit}
             busy={busy}
-            assistantId={assistantId}
-            existingSlots={slots}
+            proposals={visibleProposals}
+            showProposals={showProposals}
+            pullingProposals={pullingProposals}
+            acceptingProposalIndex={acceptingProposalIndex}
             ideas={ideas}
-            watchToken={watchToken}
             onSave={(next) => void saveBrief(next)}
-            onSlotsAccepted={() => void load()}
+            onRefreshProposals={() => void pullProposal()}
+            onAcceptProposal={(proposal) => void acceptProposal(proposal)}
+            onAcceptAllProposals={() => void acceptAllProposals()}
+            onDismissProposal={dismissProposal}
             onAddIdea={addIdea}
             onDiscardIdea={(idea) => void discardIdea(idea)}
             onPlanIdea={planIdea}
+            onOpenBrief={() => setRail({ kind: "brief" })}
+            onCloseBrief={() => setRail({ kind: "overview" })}
           />
         )}
       </aside>

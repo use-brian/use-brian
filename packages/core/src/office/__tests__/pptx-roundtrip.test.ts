@@ -1,8 +1,9 @@
 import JSZip from 'jszip'
+import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import { fitOfficeArtifact } from '@use-brian/office-renderer'
 import { exportOfficePresentation, importOfficePresentation, reparseOfficePresentation } from '../pptx/index.js'
-import { completePresentationSnapshot, id, resolveFixtureResource } from './fixtures.js'
+import { completePresentationSnapshot, formattedPresentationSnapshot, id, resolveFixtureResource } from './fixtures.js'
 
 describe('[COMP:office/pptx-engine] PPTX engine', () => {
   it('exports, safely reparses, and preserves canonical semantics plus layout', async () => {
@@ -18,6 +19,27 @@ describe('[COMP:office/pptx-engine] PPTX engine', () => {
     const zip = await JSZip.loadAsync(exported.bytes)
     expect(zip.file('ppt/presentation.xml')).not.toBeNull()
     expect(zip.file('customXml/brian-office.json')).not.toBeNull()
+  })
+
+  it('preserves the complete manually editable Presentation fixture', async () => {
+    const source = formattedPresentationSnapshot()
+
+    const image = source.slides[0].objects.find((object) => object.kind === 'image')
+    if (!image || image.kind !== 'image') throw new Error('image fixture drift')
+    const admitted = await resolveFixtureResource(image.resourceId)
+    if (!admitted) throw new Error('image resource fixture drift')
+    const admittedHash = createHash('sha256').update(admitted.bytes).digest('hex')
+    const imageRef = source.resources.find((resource) => resource.id === image.resourceId)
+    if (!imageRef) throw new Error('image resource ref fixture drift')
+    expect(imageRef.hash).toBe(admittedHash)
+
+    const exported = await exportOfficePresentation(source, resolveFixtureResource)
+    const reopened = await reparseOfficePresentation(exported.bytes)
+    expect(reopened.snapshot).toEqual(source)
+    expect(reopened.layoutSerialization).toBe(exported.layoutSerialization)
+    const zip = await JSZip.loadAsync(exported.bytes)
+    const media = await Promise.all(Object.values(zip.files).filter((entry) => !entry.dir && entry.name.startsWith('ppt/media/')).map(async (entry) => new Uint8Array(await entry.async('uint8array'))))
+    expect(media.some((bytes) => createHash('sha256').update(bytes).digest('hex') === admittedHash)).toBe(true)
   })
 
   it('normalizes a conventional external PPTX and rejects external media relationships', async () => {

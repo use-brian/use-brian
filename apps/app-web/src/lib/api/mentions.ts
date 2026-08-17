@@ -64,6 +64,13 @@ async function loadMembers(workspaceId: string): Promise<PersonMentionItem[]> {
   return promise;
 }
 
+/** Full workspace roster for assignment controls that must not use the mention popup cap. */
+export async function listWorkspaceMembers(
+  workspaceId: string,
+): Promise<PersonMentionItem[]> {
+  return loadMembers(workspaceId);
+}
+
 /** `@person` resolver — workspace members, substring-filtered by name/email. */
 export async function fetchMembers(
   workspaceId: string,

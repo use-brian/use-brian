@@ -95,12 +95,13 @@ query loop, and localized Settings surface:
   availability on every call, so completing OAuth activates Codex-only
   background and extraction work without a process restart.
 - Authenticated local routes expose masked status, browser/device login,
-  cancellation, logout, and atomically persisted provider preference. No token
-  shape is present in the route or browser types.
+  cancellation, and logout. No token shape is present in the route or browser
+  types.
 - The launcher permits a credential-free ChatGPT choice and hands the user to
-  Settings → AI providers. The localized card opens the validated browser URL,
-  supports device-code fallback, polls masked status, lists only reviewed live
-  models, and can switch the preferred backend even while Codex is unavailable.
+  Settings → Models → Providers. The localized card opens the validated browser
+  URL, supports device-code fallback, polls masked status, and lists only
+  reviewed live models. Provider connection and tier routing are deliberately
+  separate operations on the same Models surface.
 
 The account surface remains incapable of starting a model turn. Only the
 hardened inference surface can do so, and provider routing exposes it only
@@ -201,18 +202,22 @@ same account-specific catalog. Unknown models returned by Codex stay hidden
 until Brian has a reviewed registry row; discovery is an entitlement gate, not
 an uncontrolled registry extension.
 
-OSS setup records a **preferred provider** (`gemini`, `openai-codex`,
-`dashscope-intl`, or `auto`) in `~/.usebrian/config.json`. Tier aliases resolve
-within that provider first, then apply the existing same-class fallback rule.
-This lets an OAuth user choose ChatGPT without changing hosted plan tiers or
-making OpenAI the default for existing installs.
+The old OSS setup recorded a global **preferred provider** (`gemini`,
+`openai-codex`, `dashscope-intl`, or `auto`) in
+`~/.usebrian/config.json`. That was a soft resolver hint, not an enforceable
+workspace route, and could therefore select another provider when the hinted
+provider was unavailable. It remains readable only as migration input.
 
-The preference is process-restart durable for every OSS boot path, not only
-the all-in-one launcher. The standalone API entry restores it from
-`~/.usebrian/config.json` before composition; an explicit
-`USEBRIAN_PREFERRED_PROVIDER` environment value wins. The Settings write path
-updates both the live routing gate and that same file, so reopening a remote
-self-host cannot reset the selector to `auto`.
+Settings → Models now owns one workspace route per Brian tier. A route is one
+of: `Auto`, an exact active registry alias, or a verified custom profile.
+`Auto` is the only mode that permits provider substitution. An exact managed
+alias reaches the routing provider with substitution disabled, so a missing
+Codex entitlement, disconnected account, quota error, or provider failure
+surfaces as an actionable error instead of falling through to Gemini. Existing
+custom tier defaults are migrated in place. On the first Models load, an owner
+or admin with no workspace routes has any non-`auto` legacy preference promoted
+to the corresponding exact provider models; the migration is idempotent and
+the workspace routes are authoritative afterward.
 
 The pinned runtime's reviewed 2026-07-27 public catalog establishes the initial
 OSS auto-routing map: Luna → Standard, Terra → Pro, Sol → Max, and GPT-5.5 →
@@ -273,9 +278,9 @@ matching Brian's current liveness contract.
 The launcher changes from "prompt for one Gemini key" to a provider choice:
 
 1. **Sign in with ChatGPT** — starts the API without requiring a model API key,
-   opens the authenticated local app, and points the user to Settings → AI
-   providers. The Settings card starts the browser authorization and polls the
-   callback result.
+   opens the authenticated local app, and points the user to Settings → Models
+   → Providers. The Settings card starts the browser authorization and polls
+   the callback result.
 2. **Gemini API key** — the persisted key path.
 3. **Vertex AI or DashScope** — remain environment-configured paths and skip
    the interactive credential prompt when present.
@@ -285,13 +290,14 @@ Non-interactive/headless setup uses the app-server's
 and one-time user code. The launcher must not print tokens or raw account
 objects.
 
-Settings → AI providers gains a localized provider card with:
+Settings → Models → Providers contains a localized provider card with:
 
 - connected/disconnected state;
 - masked email when the user consents to display it;
 - provider-reported plan label and quota status as informational data only;
 - Connect, Reconnect, and Disconnect actions;
-- the account-scoped model list and preferred-provider choice.
+- the account-scoped model list. Exact model assignment happens in the Routing
+  view, not on the connection card.
 
 Every string lands in all locale dictionaries in the same commit.
 
@@ -308,6 +314,8 @@ Every string lands in all locale dictionaries in the same commit.
   claim Brian credits were exhausted.
 - Analytics records provider/model, latency, terminal status, and token counts.
   It never records auth URLs, login IDs, email, tokens, or raw RPC payloads.
+  Recording the terminal provider/model is independent of the optional billing
+  usage store, so an OSS deployment can prove which model served a channel turn.
 - Disconnect invokes app-server logout and removes the isolated Brian Codex
   credential store through the app-server-owned flow. Files are not manually
   deleted while the process is running.
@@ -381,8 +389,8 @@ Every string lands in all locale dictionaries in the same commit.
 | `providers/codex-catalog` | `packages/core/src/providers/codex-app-server/catalog.ts` | pagination, normalization, account-scoped availability |
 | `providers/codex-native-tool-boundary` | pinned app-server + isolated local mock Responses endpoint | captures the exact model-visible tool schema after every supported native feature is disabled |
 | `providers/codex-app-server` | `packages/core/src/providers/codex-app-server/provider.ts` | streaming, tool parking/resume, usage, abort, native-action refusal |
-| `api/codex-provider` | `packages/api/src/boot.ts` + new local provider routes | OSS gating, status, reconnect, preferred provider |
-| `app-web/codex-provider` | Settings → Models + launcher handoff | localized states and actions |
+| `api/codex-provider` | `packages/api/src/boot.ts` + local provider routes + workspace model routes | OSS gating, status, reconnect, exact fail-closed routing |
+| `app-web/codex-provider` | Settings → Models → Providers + launcher handoff | localized connection states and actions |
 
 Add every row to the platform
 [`docs/workflow/component-map.md`](../../../docs/workflow/component-map.md) in
