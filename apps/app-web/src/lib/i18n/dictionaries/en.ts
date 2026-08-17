@@ -1792,6 +1792,8 @@ export const en = {
       savingBtn: "Saving...",
       tabTools: "Tools",
       tabSettings: "Settings",
+      wsOwnedEditorUnavailable:
+        "This connector is owned by the workspace. Its name, address and sign-in details can't be changed here yet - remove it and add it again to change them.",
       addAnother: "+ Add another",
       addAnotherAccount: "Add another {name} account",
       nicknamePlaceholder: "Nickname (e.g. Work, Personal)",
