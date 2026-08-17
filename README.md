@@ -190,7 +190,9 @@ URL and verify token to register under Meta App Dashboard → WhatsApp →
 Configuration and subscribes the app to the Business Account. The API verifies
 `X-Hub-Signature-256` on every event. Add
 permitted sender numbers to the channel allowlist before they can invoke the
-assistant. Free-form outbound replies are subject to Meta's 24-hour
+assistant. Enable **Guest connected tools** only when those allowlisted numbers
+should use the assistant's configured connectors. Free-form outbound replies are
+subject to Meta's 24-hour
 customer-service window; proactive workflow delivery is disabled until approved
 template-message support is available.
 

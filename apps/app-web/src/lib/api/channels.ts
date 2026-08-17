@@ -57,7 +57,7 @@ export type ChannelIntegrationConfig = {
   seenChats?: SeenChat[];
   userAccessMode?: UserAccessMode;
   allowedUserIds?: string[];
-  /** Telegram BYO: allow explicitly listed DM guests to use enabled connectors. */
+  /** Telegram BYO / WhatsApp Cloud: allow listed guests to use enabled connectors. */
   allowGuestConnectorTools?: boolean;
   blockedUserIds?: string[];
 };

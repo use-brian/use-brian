@@ -3,7 +3,11 @@ import express from 'express'
 import request from 'supertest'
 import { describe, expect, it, vi } from 'vitest'
 import type { ChannelIntegrationStore, WhatsAppCloudCredentials } from '../../db/channel-integrations.js'
-import { whatsappCloudRoutes, whatsappCloudUserAllowed } from '../whatsapp-cloud.js'
+import {
+  whatsappCloudGuestConnectorToolsAllowed,
+  whatsappCloudRoutes,
+  whatsappCloudUserAllowed,
+} from '../whatsapp-cloud.js'
 
 const credentials: WhatsAppCloudCredentials = {
   provider: 'cloud_api', access_token: 'token', app_secret: 'app-secret', verify_token: 'verify-token',
@@ -37,6 +41,13 @@ describe('[COMP:api/whatsapp-cloud-route]', () => {
     expect(whatsappCloudUserAllowed({}, '15551234567')).toBe(false)
     expect(whatsappCloudUserAllowed({ userAccessMode: 'allowlist', allowedUserIds: [] }, '15551234567')).toBe(false)
     expect(whatsappCloudUserAllowed({ userAccessMode: 'allowlist', allowedUserIds: ['15551234567'] }, '15551234567')).toBe(true)
+  })
+
+  it('enables connector tools for external guests only with an explicit opt-in', () => {
+    expect(whatsappCloudGuestConnectorToolsAllowed({}, false)).toBe(false)
+    expect(whatsappCloudGuestConnectorToolsAllowed({ userAccessMode: 'allow_all', allowGuestConnectorTools: true }, false)).toBe(false)
+    expect(whatsappCloudGuestConnectorToolsAllowed({ userAccessMode: 'allowlist', allowGuestConnectorTools: true }, false)).toBe(true)
+    expect(whatsappCloudGuestConnectorToolsAllowed({ userAccessMode: 'allowlist', allowGuestConnectorTools: true }, true)).toBe(false)
   })
   it('answers Meta subscription verification with the challenge', async () => {
     const res = await request(app()).get('/webhook/whatsapp/chan-1').query({

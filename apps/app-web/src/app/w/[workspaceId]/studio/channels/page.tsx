@@ -1218,7 +1218,11 @@ export function ChannelConfigSection({
     <div className="flex flex-col gap-1.5">
       <div className="flex items-center justify-between gap-3">
         <span className="text-sm">
-          {isTelegram ? cfg.accessLabelTelegram : cfg.accessLabel}
+          {isTelegram
+            ? cfg.accessLabelTelegram
+            : isWhatsAppCloud
+              ? cfg.accessLabelWhatsApp
+              : cfg.accessLabel}
         </span>
         <Select
           value={accessMode}
@@ -1254,16 +1258,22 @@ export function ChannelConfigSection({
         {accessMode === "allowlist"
           ? isTelegram
             ? cfg.accessAllowlistDescTelegram
-            : cfg.accessAllowlistDesc
+            : isWhatsAppCloud
+              ? cfg.accessAllowlistDescWhatsApp
+              : cfg.accessAllowlistDesc
           : accessMode === "blocklist"
             ? isTelegram
               ? cfg.accessBlocklistDescTelegram
-              : cfg.accessBlocklistDesc
+              : isWhatsAppCloud
+                ? cfg.accessBlocklistDescWhatsApp
+                : cfg.accessBlocklistDesc
             : isSlack
               ? cfg.accessAllDescSlack
               : isDiscord
                 ? cfg.accessAllDescDiscord
-                : cfg.accessAllDescTelegram}
+                : isWhatsAppCloud
+                  ? cfg.accessAllDescWhatsApp
+                  : cfg.accessAllDescTelegram}
       </p>
       {accessMode !== "allow_all" && (
         <div className="flex flex-col gap-1.5 pt-1">
@@ -1310,7 +1320,9 @@ export function ChannelConfigSection({
                   ? cfg.userIdPlaceholderSlack
                   : isDiscord
                     ? cfg.userIdPlaceholderDiscord
-                    : cfg.userIdPlaceholderTelegram
+                    : isWhatsAppCloud
+                      ? cfg.userIdPlaceholderWhatsApp
+                      : cfg.userIdPlaceholderTelegram
               }
               className="min-w-0 flex-1 rounded-md border border-border bg-background px-2 py-1.5 text-sm font-mono"
             />
@@ -1327,7 +1339,9 @@ export function ChannelConfigSection({
               ? cfg.userIdHintSlack
               : isDiscord
                 ? cfg.userIdHintDiscord
-                : cfg.userIdHintTelegram}
+                : isWhatsAppCloud
+                  ? cfg.userIdHintWhatsApp
+                  : cfg.userIdHintTelegram}
           </p>
         </div>
       )}
@@ -1496,6 +1510,16 @@ export function ChannelConfigSection({
       {!isDiscord && !isWhatsAppCloud && ackReactionControl}
 
       {accessControl}
+
+      {isWhatsAppCloud && accessMode === "allowlist" && (
+        <ConfigToggle
+          label={cfg.guestConnectorTools}
+          hint={cfg.guestConnectorToolsHintWhatsApp}
+          checked={config.allowGuestConnectorTools ?? false}
+          disabled={saving}
+          onChange={(v) => void save({ allowGuestConnectorTools: v })}
+        />
+      )}
 
       {saving && (
         <span className="text-xs text-muted-foreground">

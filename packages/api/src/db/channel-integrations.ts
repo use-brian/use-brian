@@ -224,7 +224,7 @@ export type ChannelIntegrationConfig = {
   // Slack sender filter; Telegram owner-plus-guest grants. @handle or numeric ID.
   allowedUserIds?: string[]
   /**
-   * Telegram BYO only. When true, explicitly allowlisted private-DM guests
+   * Telegram BYO and WhatsApp Cloud. When true, explicitly allowlisted guests
    * may use connector tools enabled for the routed assistant. Their shadow
    * identity/session and all non-connector external-guest boundaries remain.
    */

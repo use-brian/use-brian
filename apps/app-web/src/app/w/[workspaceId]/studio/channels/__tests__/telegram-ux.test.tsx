@@ -132,3 +132,80 @@ describe("[COMP:app-web/studio-channels] Telegram UX", () => {
     expect(cards[2].textContent).toContain("Working reaction");
   });
 });
+
+describe("[COMP:app-web/studio-channels] WhatsApp Cloud access UX", () => {
+  it("does not describe WhatsApp access as linked Telegram users", async () => {
+    const channel: Channel = {
+      id: "channel_1",
+      workspaceId: "workspace_1",
+      channelType: "whatsapp",
+      clearance: "internal",
+      enabledCapabilities: ["chat"],
+      status: "active",
+      displayName: "WhatsApp Business",
+      createdAt: "2026-08-09T00:00:00.000Z",
+      updatedAt: "2026-08-09T00:00:00.000Z",
+      integrationId: "integration_1",
+      integrationProvider: "cloud_api",
+      config: { userAccessMode: "allow_all" },
+    };
+
+    await act(async () => {
+      root.render(
+        localized(
+          <ChannelConfigSection
+            workspaceId="workspace_1"
+            channel={channel}
+            onUpdated={vi.fn()}
+          />,
+        ),
+      );
+    });
+
+    expect(host.textContent).toContain("Who can message");
+    expect(host.textContent).toContain(
+      "Anyone who messages this WhatsApp Business number can interact.",
+    );
+    expect(host.textContent).not.toContain("Linked Telegram users only.");
+  });
+
+  it("uses phone-number guidance and offers connector access for the allowlist", async () => {
+    const channel: Channel = {
+      id: "channel_1",
+      workspaceId: "workspace_1",
+      channelType: "whatsapp",
+      clearance: "internal",
+      enabledCapabilities: ["chat"],
+      status: "active",
+      displayName: "WhatsApp Business",
+      createdAt: "2026-08-09T00:00:00.000Z",
+      updatedAt: "2026-08-09T00:00:00.000Z",
+      integrationId: "integration_1",
+      integrationProvider: "cloud_api",
+      config: {
+        userAccessMode: "allowlist",
+        allowedUserIds: ["15551234567"],
+      },
+    };
+
+    await act(async () => {
+      root.render(
+        localized(
+          <ChannelConfigSection
+            workspaceId="workspace_1"
+            channel={channel}
+            onUpdated={vi.fn()}
+          />,
+        ),
+      );
+    });
+
+    expect(host.textContent).toContain("Only the phone numbers listed below");
+    expect(host.textContent).toContain("Guest connected tools");
+    expect(host.textContent).toContain("listed WhatsApp numbers");
+    expect(
+      host.querySelector<HTMLInputElement>('input[placeholder="15551234567"]'),
+    ).not.toBeNull();
+    expect(host.textContent).not.toContain("@userinfobot");
+  });
+});

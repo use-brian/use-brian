@@ -7183,7 +7183,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         memoryStore, usageStore, checkCreditBudget: ports.checkCreditBudget,
         integrationStore, channelUserStore,
         workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
-        connectorInstanceStore, knowledgeStore, gdriveFilesStore, workspaceFilesStore,
+        connectorInstanceStore, workspaceToolPolicyStore, knowledgeStore, gdriveFilesStore, workspaceFilesStore,
         filesApi: filesApi ?? undefined, analytics, skillStore,
         episodicStore, sessionStateStore, artifactPromoter, fileStore,
       }))

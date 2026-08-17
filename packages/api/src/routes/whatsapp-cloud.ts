@@ -59,6 +59,7 @@ export type WhatsAppCloudRouteOptions = {
   assistantConnectorStore?: import('../db/assistant-connector-store.js').AssistantConnectorStore
   connectorGrantStore?: import('../db/connector-grant-store.js').ConnectorGrantStore
   connectorInstanceStore?: import('../db/connector-instance-store.js').ConnectorInstanceStore
+  workspaceToolPolicyStore?: import('../db/workspace-tool-policy-store.js').WorkspaceToolPolicyStore
   knowledgeStore?: import('@use-brian/core').KnowledgeStoreInterface
   gdriveFilesStore?: import('@use-brian/core').GDriveFilesStore
   workspaceFilesStore?: import('@use-brian/core').WorkspaceFilesStore
@@ -96,6 +97,15 @@ export function whatsappCloudUserAllowed(config: ChannelIntegrationConfig, userI
   }
   if (config.userAccessMode === 'blocklist') return !(config.blockedUserIds ?? []).includes(userId)
   return config.userAccessMode === 'allow_all'
+}
+
+export function whatsappCloudGuestConnectorToolsAllowed(
+  config: ChannelIntegrationConfig,
+  isIdentified: boolean,
+): boolean {
+  return !isIdentified
+    && config.userAccessMode === 'allowlist'
+    && config.allowGuestConnectorTools === true
 }
 
 export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router {
@@ -214,6 +224,7 @@ export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router 
 
     await withChatLock(`whatsapp-cloud:${confirmKey}`, () => processMessage({
       credentials, incoming, assistant, ownerId, channelUserId, isIdentified,
+      guestConnectorToolsAllowed: whatsappCloudGuestConnectorToolsAllowed(config, isIdentified),
       routing, confirmKey,
     }))
   }
@@ -225,10 +236,14 @@ export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router 
     ownerId: string
     channelUserId: string
     isIdentified: boolean
+    guestConnectorToolsAllowed: boolean
     routing: { modelAlias: string }
     confirmKey: string
   }): Promise<void> {
-    const { credentials, incoming, assistant, ownerId, channelUserId, isIdentified, routing, confirmKey } = params
+    const {
+      credentials, incoming, assistant, ownerId, channelUserId, isIdentified,
+      guestConnectorToolsAllowed, routing, confirmKey,
+    } = params
     const apiOptions = {
       accessToken: credentials.access_token,
       phoneNumberId: credentials.phone_number_id,
@@ -280,6 +295,7 @@ export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router 
       assistant: { ...assistant, ownerUserId: ownerId },
       isIdentified,
       externalGuest: !isIdentified,
+      externalGuestConnectorTools: guestConnectorToolsAllowed,
       channelType: 'whatsapp',
       channelId: incoming.channelId,
       actorChannelId: incoming.userId,
@@ -306,6 +322,7 @@ export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router 
       assistantConnectorStore: options.assistantConnectorStore,
       connectorGrantStore: options.connectorGrantStore,
       connectorInstanceStore: options.connectorInstanceStore,
+      workspaceToolPolicyStore: options.workspaceToolPolicyStore,
       knowledgeStore: options.knowledgeStore,
       gdriveFilesStore: options.gdriveFilesStore,
       workspaceFilesStore: options.workspaceFilesStore,
