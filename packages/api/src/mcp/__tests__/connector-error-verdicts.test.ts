@@ -1,6 +1,6 @@
 /**
  * [COMP:tools/connector-error] — the D2 half for GitHub / Notion / Microsoft
- * Teams / Shopify: the connector-health classifier must return the SAME
+ * Teams / Shopify / WordPress: the connector-health classifier must return the SAME
  * verdict on the rewritten failure copy as it did on the raw
  * `<Provider> error: <Provider> API error (<status>): <body>` passthrough,
  * and each api client's parser must produce the structured error the copy is
@@ -15,11 +15,12 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { ConnectorApiError, connectorError, describeConnectorError } from '@use-brian/core'
+import { ConnectorApiError, connectorError, describeConnectorError, createWordPressTools, type WordPressApi } from '@use-brian/core'
 import { classifyConnectorAuthError } from '../connector-health.js'
 import { githubApiError } from '../../github/client.js'
 import { notionApiError } from '../../notion/client.js'
 import { MsGraphAuthError, MsGraphError } from '../../msgraph/client.js'
+import { WordPressConnectorError } from '../../wordpress/client.js'
 
 function fakeRes(status: number, body: string, headers: Record<string, string> = {}): Response {
   return {
@@ -167,6 +168,44 @@ describe('[COMP:tools/connector-error] Shopify — structured client errors + ve
     for (const err of cases) {
       expect(classifyConnectorAuthError(`Shopify error: ${err.message}`), err.message).toBe(false)
       expect(classifyConnectorAuthError(render('Shopify', err)), err.message).toBe(false)
+    }
+  })
+})
+
+// ── WordPress ───────────────────────────────────────────────
+
+describe('[COMP:tools/connector-error] WordPress — invalid_credentials now flips auth_failed; other codes stay healthy', () => {
+  const api = (err: unknown): WordPressApi => ({
+    getManagedPage: async () => { throw err },
+    updatePageText: async () => { throw err },
+    replacePageImage: async () => { throw err },
+  })
+  const run = async (err: unknown) => {
+    const tool = createWordPressTools(api(err)).find((t) => t.name === 'wordpressGetManagedPage')!
+    return String((await tool.execute({ page: 'home' }, {} as never)).data)
+  }
+
+  it('invalid_credentials → auth_failed (the old `WordPress error: <message>` copy never flipped)', async () => {
+    const err = new WordPressConnectorError('invalid_credentials', 'The WordPress username or Application Password is invalid', 401)
+    // The defect the audit found: no status, no dead-credential phrase → false.
+    expect(classifyConnectorAuthError(`WordPress error: ${err.message}`)).toBe(false)
+    const copy = await run(err)
+    expect(copy).toContain('(401)')
+    expect(copy).toContain('invalid or expired')
+    expect(classifyConnectorAuthError(copy)).toBe(true)
+  })
+
+  it('forbidden / bridge_required / managed_page_not_found / timeout / revision_conflict → healthy', async () => {
+    const cases: Array<[ConstructorParameters<typeof WordPressConnectorError>[0], number | undefined]> = [
+      ['forbidden', 403],
+      ['bridge_required', 404],
+      ['managed_page_not_found', 404],
+      ['timeout', undefined],
+      ['revision_conflict', 409],
+    ]
+    for (const [code, status] of cases) {
+      const copy = await run(new WordPressConnectorError(code, 'x', status))
+      expect(classifyConnectorAuthError(copy), code).toBe(false)
     }
   })
 })

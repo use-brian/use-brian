@@ -10,37 +10,24 @@
  */
 
 import { ImapFlow } from 'imapflow'
+import {
+  MAILBOX_UNREACHABLE_CODES,
+  classifyMailboxAuthFailure,
+  mailboxErrorCode,
+  mailboxErrorText,
+} from '@use-brian/core'
 import { attachSessionErrorSink, type ImapClientLike } from './imap-session.js'
 import { verifySmtpLogin } from './smtp.js'
 import type { MailboxAccountSettings, MailboxVerifyResult } from './types.js'
 
-const DISABLED_MARKERS = /disabled|not enabled|unavailable|suspend|forbidden|denied|拒绝|禁用|未开启|未启用/i
-const UNREACHABLE_CODES = new Set([
-  'ENOTFOUND',
-  'ECONNREFUSED',
-  'ETIMEDOUT',
-  'EHOSTUNREACH',
-  'ECONNRESET',
-  'EDNS',
-  'ESOCKET',
-  'ECONNECTION',
-])
-
-function errText(err: unknown): string {
-  if (err instanceof Error) {
-    const withResponse = err as Error & { response?: string; responseText?: string }
-    return [err.message, withResponse.response, withResponse.responseText].filter(Boolean).join(' ')
-  }
-  return String(err)
-}
-
-function errCode(err: unknown): string | undefined {
-  return (err as { code?: string })?.code
-}
-
-function classifyAuthFailure(err: unknown): 'auth_failed' | 'access_disabled' {
-  return DISABLED_MARKERS.test(errText(err)) ? 'access_disabled' : 'auth_failed'
-}
+// The classifier (disabled-account markers, unreachable-host codes, server
+// text extraction) is shared with the runtime tools' failure copy — one
+// vocabulary for the connect dialog and for what the model reads. It lives in
+// core (`tools/base/_mailbox-error.ts`) so both sides can import it.
+const UNREACHABLE_CODES = MAILBOX_UNREACHABLE_CODES
+const errText = mailboxErrorText
+const errCode = mailboxErrorCode
+const classifyAuthFailure = classifyMailboxAuthFailure
 
 export type VerifyMailboxDeps = {
   /** Injectable legs for unit tests. Defaults hit the network. */

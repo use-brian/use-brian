@@ -18,6 +18,18 @@ export type {
   GoogleMapsErrorCode,
 } from './base/google-maps.js'
 export {
+  MAILBOX_DISABLED_MARKERS,
+  MAILBOX_UNREACHABLE_CODES,
+  classifyMailboxAuthFailure,
+  classifyMailboxFailure,
+  describeMailboxError,
+  isMailboxAuthError,
+  mailboxErrorCode,
+  mailboxErrorText,
+  mailboxFailure,
+} from './base/_mailbox-error.js'
+export type { MailboxFailureContext, MailboxFailureKind } from './base/_mailbox-error.js'
+export {
   CONNECTOR_ERROR_MESSAGE_CAP,
   ConnectorApiError,
   capConnectorMessage,
