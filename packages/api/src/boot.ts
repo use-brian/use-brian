@@ -3884,6 +3884,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     connectorInstanceStore,
     connectorGrantStore,
     workspaceSkillStore,
+    channelIntegrationStore: integrationStore ?? undefined,
   })
   const resolveAgentApprover = async (ctx: { channelType: string; channelId: string; userId: string }) => {
     try {

@@ -3139,6 +3139,7 @@ export const en = {
       sessionHint:
         "Persistent reuses one assistant session every time this step runs, so a recurring workflow remembers earlier runs and avoids repeating itself. Fresh starts clean each run.",
       deliverLabel: "Send output to a channel",
+      deliverReplyToTrigger: "Replies to the WhatsApp conversation that triggered this workflow run.",
       deliverChannelTelegram: "Telegram",
       deliverChannelSlack: "Slack",
       deliverChannelWhatsApp: "WhatsApp",

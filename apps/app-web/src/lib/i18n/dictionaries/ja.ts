@@ -2940,6 +2940,7 @@ export const ja: Dictionary = {
       sessionHint:
         "「永続」にすると、このステップは毎回同じアシスタントセッションを再利用します。定期実行のワークフローが過去の実行を記憶し、同じ内容の繰り返しを避けられます。「新規」は毎回まっさらな状態で開始します。",
       deliverLabel: "出力をチャンネルに送信",
+      deliverReplyToTrigger: "このワークフロー実行を開始した WhatsApp の会話に返信します。",
       deliverChannelTelegram: "Telegram",
       deliverChannelSlack: "Slack",
       deliverChannelWhatsApp: "WhatsApp",

@@ -145,12 +145,19 @@ export type AssistantCallStep = WorkflowStepCommon & {
    * those two platforms only, same channel on both steps — schema-enforced).
    * See `docs/architecture/engine/scheduled-jobs.md` → "Channel delivery".
    */
-  deliver?: {
-    channelType: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams'
-    channelId: string
-    channelIntegrationId?: string
-    thread?: { fromStep: string }
-  }
+  deliver?:
+    | {
+        channelType: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams'
+        channelId: string
+        channelIntegrationId?: string
+        thread?: { fromStep: string }
+        replyToTrigger?: never
+      }
+    | {
+        /** Resolve the exact integration + recipient from a trusted event run. */
+        channelType: 'whatsapp'
+        replyToTrigger: true
+      }
   /**
    * Session continuity. `persistent` reuses one durable callee session
    * across fires (recurring-workflow memory); `per_run` (default) is a

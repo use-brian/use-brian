@@ -31,11 +31,13 @@ import {
   createSlackAdapter,
   createTelegramAdapter,
   createWhatsAppAdapter,
+  createWhatsAppCloudAdapter,
   createMsTeamsAdapter,
 } from '@use-brian/channels'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import { findOrCreateSession, addSessionMessage } from '../db/sessions.js'
 import { query } from './../db/client.js'
+import { whatsappCloudUserAllowed } from '../whatsapp/cloud-access.js'
 
 export type WorkflowChannelDeliveryOptions = {
   /** BYO Telegram + Slack credentials. */
@@ -45,6 +47,8 @@ export type WorkflowChannelDeliveryOptions = {
   /** WhatsApp delivery via the wa-connector. */
   waConnectorUrl?: string
   waConnectorSecret?: string
+  /** Injectable clock for customer-service-window checks. */
+  now?: () => number
 }
 
 export function createWorkflowChannelDelivery(
@@ -59,6 +63,7 @@ export function createWorkflowChannelDelivery(
     channelIntegrationId,
     text,
     threadRef,
+    replyToTrigger,
   }): Promise<DeliveryOutcome> => {
     // Strip any model scaffolding / meta-commentary before it is persisted to
     // the delivery session OR pushed to the channel — a cron-framed turn can
@@ -75,6 +80,70 @@ export function createWorkflowChannelDelivery(
     // typed `web_not_a_target` skip so the run-detail page shows the no-op
     // (and the authoring guard steers new workflows away from `web`).
     if (channelType === 'web') return { status: 'skipped', channelType, reason: 'web_not_a_target' }
+
+    if (replyToTrigger) {
+      if (channelType !== 'whatsapp' || !channelIntegrationId) {
+        return { status: 'skipped', channelType, reason: 'provider_mismatch' }
+      }
+      const occurredAt = Date.parse(replyToTrigger.occurredAt)
+      const now = options.now?.() ?? Date.now()
+      if (!Number.isFinite(occurredAt) || now - occurredAt >= 24 * 60 * 60 * 1000) {
+        return { status: 'skipped', channelType, reason: 'customer_service_window_expired' }
+      }
+      if (!options.integrationStore) {
+        return { status: 'skipped', channelType, reason: 'no_integration' }
+      }
+      const integration = await options.integrationStore.getCredentialsForAssistantIntegrationSystem(
+        workspaceId,
+        assistantId,
+        channelIntegrationId,
+        'whatsapp',
+        channelId,
+      )
+      if (!integration) return { status: 'skipped', channelType, reason: 'no_integration' }
+      const credentials = integration.credentials as {
+        provider?: unknown
+        access_token?: unknown
+        phone_number_id?: unknown
+        graph_api_version?: unknown
+      }
+      if (
+        credentials.provider !== 'cloud_api'
+        || typeof credentials.access_token !== 'string'
+        || typeof credentials.phone_number_id !== 'string'
+        || credentials.phone_number_id !== replyToTrigger.providerAccountId
+      ) {
+        return { status: 'skipped', channelType, reason: 'provider_mismatch' }
+      }
+      if (!whatsappCloudUserAllowed(integration.config ?? {}, channelId)) {
+        return { status: 'skipped', channelType, reason: 'access_denied' }
+      }
+
+      const session = await findOrCreateSession({
+        assistantId,
+        userId,
+        channelType,
+        channelId,
+      })
+      await addSessionMessage({
+        sessionId: session.id,
+        role: 'assistant',
+        content: [{ type: 'text', text: deliverable }],
+      })
+      const messageId = await createWhatsAppCloudAdapter({
+        accessToken: credentials.access_token,
+        phoneNumberId: credentials.phone_number_id,
+        graphApiVersion: typeof credentials.graph_api_version === 'string'
+          ? credentials.graph_api_version
+          : undefined,
+      }).sendMessage(channelId, { text: deliverable, format: 'markdown' })
+      return {
+        status: 'delivered',
+        channelType,
+        channelId,
+        messageId: messageId || undefined,
+      }
+    }
 
     // DB-first: persist into the messaging-channel delivery session so the
     // message survives a failed channel push.

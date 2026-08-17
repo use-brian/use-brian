@@ -69,6 +69,7 @@ describe('[COMP:api/whatsapp-cloud-route]', () => {
       workspaceId: 'ws-1',
       channelIntegrationId: 'int-1',
       config: { userAccessMode: 'allowlist', allowedUserIds: ['15551234567'] },
+      providerAccountId: 'phone-1',
       incoming: {
         userId: '15551234567',
         channelId: '15551234567',
@@ -91,6 +92,8 @@ describe('[COMP:api/whatsapp-cloud-route]', () => {
       channelId: '15551234567',
       mentions: [],
       isBot: false,
+      providerAccountId: 'phone-1',
+      occurredAt: '1970-01-01T00:00:01.000Z',
       payload: {
         text: 'Need help with my order',
         message_id: 'wamid-1',
@@ -109,6 +112,7 @@ describe('[COMP:api/whatsapp-cloud-route]', () => {
       workspaceId: 'ws-1',
       channelIntegrationId: 'int-1',
       config: { userAccessMode: 'allowlist', allowedUserIds: [] },
+      providerAccountId: 'phone-1',
       incoming: {
         userId: '15551234567',
         channelId: '15551234567',

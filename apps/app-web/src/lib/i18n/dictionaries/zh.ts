@@ -2916,6 +2916,7 @@ export const zh: Dictionary = {
       sessionHint:
         "持續保留會讓此步驟每次執行都沿用同一個助理工作階段，因此週期性工作流程能記得先前的執行、避免重複。重新開始則每次執行都從乾淨狀態開始。",
       deliverLabel: "將輸出傳送至管道",
+      deliverReplyToTrigger: "回覆觸發此工作流程執行的 WhatsApp 對話。",
       deliverChannelTelegram: "Telegram",
       deliverChannelSlack: "Slack",
       deliverChannelWhatsApp: "WhatsApp",

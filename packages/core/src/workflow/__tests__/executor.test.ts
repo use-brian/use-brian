@@ -691,6 +691,78 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
     expect(audits.find((a) => a.type === 'workflow.step_delivered')).toBeUndefined()
   })
 
+  it('resolves a WhatsApp trigger reply from trusted event input', async () => {
+    const stores = makeFakeStores()
+    const deliveries: Array<Parameters<NonNullable<ExecutorDeps['deliverToChannel']>>[0]> = []
+    const consultDeliveries: unknown[] = []
+    const deps: ExecutorDeps = {
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      consultTransport: {
+        async send(request: ConsultRequest): Promise<ConsultResponse> {
+          consultDeliveries.push(request.deliver)
+          return makeConsultTransport({ responseText: 'The 2pm slot is available.' }).send(request)
+        },
+      },
+      resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+      buildToolRegistry: async () => new Map(),
+      deliverToChannel: async (params) => {
+        deliveries.push(params)
+        return { status: 'delivered', channelType: params.channelType, channelId: params.channelId }
+      },
+    }
+    const definition: WorkflowDefinition = {
+      startStepId: 'reply',
+      steps: [{
+        id: 'reply',
+        type: 'assistant_call',
+        target: { assistantId: 'primary' },
+        prompt: 'Answer {{input.event.text}}',
+        deliver: { channelType: 'whatsapp', replyToTrigger: true },
+      }],
+    }
+    const { workflow, run } = await seedWorkflowAndRun(deps, definition, 'event', {
+      trigger: {
+        sourceType: 'channel',
+        provider: 'whatsapp',
+        channelIntegrationId: 'ci-wa',
+        channelId: '15551234567',
+        actorId: '15551234567',
+        providerAccountId: 'phone-1',
+        occurredAt: '2026-08-17T11:00:00.000Z',
+      },
+      event: { text: 'Is 2pm available?' },
+    })
+    await stores.workflowStore.update(USER_ID, workflow.id, {
+      trigger: {
+        kind: 'event',
+        event: {
+          sources: [{
+            source: {
+              type: 'channel',
+              channelIntegrationId: 'ci-wa',
+              channel: 'whatsapp',
+            },
+          }],
+        },
+      },
+    })
+
+    const outcome = await advanceWorkflowRun(deps, run.id)
+
+    expect(outcome.kind).toBe('completed')
+    expect(consultDeliveries).toEqual([undefined])
+    expect(deliveries).toEqual([expect.objectContaining({
+      channelType: 'whatsapp',
+      channelId: '15551234567',
+      channelIntegrationId: 'ci-wa',
+      replyToTrigger: {
+        providerAccountId: 'phone-1',
+        occurredAt: '2026-08-17T11:00:00.000Z',
+      },
+    })])
+  })
+
   it('pins a stable contextId on the consult for a persistent-session step', async () => {
     const stores = makeFakeStores()
     const seenContextIds: Array<string | undefined> = []

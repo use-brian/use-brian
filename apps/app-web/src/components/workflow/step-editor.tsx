@@ -282,7 +282,9 @@ export function StepEditor({
                     onChange({
                       ...step,
                       target: { ...step.target, assistantId: v },
-                      deliver: step.deliver?.channelIntegrationId
+                      deliver: step.deliver
+                        && "channelIntegrationId" in step.deliver
+                        && step.deliver.channelIntegrationId
                         ? { ...step.deliver, channelIntegrationId: undefined }
                         : step.deliver,
                     });
@@ -1475,9 +1477,38 @@ function DeliverField({
   t: Dictionary;
 }) {
   const b = t.workflowPage.builder;
+  const isTriggerReply = !!step.deliver && "replyToTrigger" in step.deliver;
+  const staticDeliver = step.deliver && "channelId" in step.deliver
+    ? step.deliver
+    : undefined;
   const channelType = step.deliver?.channelType ?? "telegram";
-  const channelId = step.deliver?.channelId ?? "";
-  const channelIntegrationId = step.deliver?.channelIntegrationId;
+  const channelId = staticDeliver?.channelId ?? "";
+  const channelIntegrationId = staticDeliver?.channelIntegrationId;
+  const [stickyCustom, setStickyCustom] = useState(false);
+
+  if (isTriggerReply) {
+    return (
+      <div className="flex flex-col gap-2">
+        <SwitchRow
+          label={b.deliverLabel}
+          hint={b.deliverHint}
+          control={
+            <Switch
+              checked
+              onCheckedChange={(checked) => {
+                if (!checked) onChange({ ...step, deliver: undefined });
+              }}
+              disabled={disabled}
+              aria-label={b.deliverLabel}
+            />
+          }
+        />
+        <div className="rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+          {b.deliverReplyToTrigger}
+        </div>
+      </div>
+    );
+  }
 
   // Known destinations for the picked channel type. Slack is sourced live from
   // the workspace's real channels by NAME (`#dev-work`), so authors never see
@@ -1528,7 +1559,6 @@ function DeliverField({
 
   // Custom-mode is sticky once toggled (so the input stays visible while
   // empty) — derived from data otherwise.
-  const [stickyCustom, setStickyCustom] = useState(false);
   const showCustom = stickyCustom || (!matchesKnown && channelId !== "");
 
   const items: SearchableSelectItem[] = [

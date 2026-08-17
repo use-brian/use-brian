@@ -35,6 +35,8 @@ import { withChatLock } from '../db/chat-lock.js'
 import { billingPartyForAssistant } from '../billing-party.js'
 import { cacheInboundImageTag } from './channel-file-cache.js'
 import { processChannelMessage } from './channel-pipeline.js'
+import { whatsappCloudUserAllowed } from '../whatsapp/cloud-access.js'
+export { whatsappCloudUserAllowed } from '../whatsapp/cloud-access.js'
 
 const MAX_MEDIA_BYTES = 25 * 1024 * 1024
 const DECISIONS: Record<string, ConfirmationDecision> = {
@@ -89,19 +91,6 @@ function xmlAttribute(value: string): string {
   return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
-export function whatsappCloudUserAllowed(config: ChannelIntegrationConfig, userId: string): boolean {
-  // Cloud business numbers are public entry points. Missing config must deny,
-  // including the partial-provisioning window between credential upsert and
-  // the first allowlist write.
-  if (!config.userAccessMode) return false
-  if (config.userAccessMode === 'allowlist') {
-    const allowed = config.allowedUserIds ?? []
-    return allowed.includes(userId)
-  }
-  if (config.userAccessMode === 'blocklist') return !(config.blockedUserIds ?? []).includes(userId)
-  return config.userAccessMode === 'allow_all'
-}
-
 export function whatsappCloudExternalConnectorToolsAllowed(
   config: ChannelIntegrationConfig,
   isIdentified: boolean,
@@ -115,9 +104,10 @@ export async function dispatchWhatsAppCloudWorkflowEvent(input: {
   workspaceId: string
   channelIntegrationId: string
   config: ChannelIntegrationConfig
+  providerAccountId: string
   incoming: IncomingMessage
 }): Promise<void> {
-  const { dispatcher, workspaceId, channelIntegrationId, config, incoming } = input
+  const { dispatcher, workspaceId, channelIntegrationId, config, providerAccountId, incoming } = input
   if (!whatsappCloudUserAllowed(config, incoming.userId)) return
 
   const raw = incoming.raw as {
@@ -132,6 +122,8 @@ export async function dispatchWhatsAppCloudWorkflowEvent(input: {
     channelId: incoming.channelId,
     mentions: [],
     isBot: false,
+    providerAccountId,
+    occurredAt: new Date(incoming.timestamp * 1000).toISOString(),
     payload: {
       text: incoming.text,
       message_id: incoming.messageId,
@@ -272,6 +264,7 @@ export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router 
           workspaceId: channel.workspaceId,
           channelIntegrationId,
           config,
+          providerAccountId: credentials.phone_number_id,
           incoming,
         }).catch((err) => console.error('[whatsapp-cloud] workflow event dispatch failed:', err))
       }

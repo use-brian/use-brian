@@ -1959,6 +1959,72 @@ describe('[COMP:workflow/tools] trigger capability surface (closed-world, derive
     expect(persisted?.trigger.kind).toBe('event')
   })
 
+  it('proposes a source-bound reply for a WhatsApp channel event', async () => {
+    const { tools } = makeAllTools({
+      validateDeliveryTarget: async () => {
+        throw new Error('static delivery preflight must not run')
+      },
+    })
+    const definition = {
+      startStepId: 'reply',
+      steps: [{
+        id: 'reply',
+        type: 'assistant_call',
+        target: { assistantId: 'primary' },
+        prompt: 'Answer {{input.event.text}}',
+        deliver: { channelType: 'whatsapp', replyToTrigger: true },
+      }],
+    }
+    const trigger = {
+      kind: 'event',
+      event: {
+        sources: [{
+          source: {
+            type: 'channel',
+            channelIntegrationId: '00000000-0000-4000-8000-000000000001',
+            channel: 'whatsapp',
+          },
+        }],
+      },
+    }
+
+    const result = await tools.proposeWorkflow.execute(
+      { name: 'WhatsApp availability', definition, trigger },
+      makeContext(),
+    )
+
+    expect(result.isError).toBeFalsy()
+    expect((result.data as { summary: string }).summary).toContain(
+      'replies to the originating WhatsApp conversation',
+    )
+  })
+
+  it('rejects replyToTrigger without a WhatsApp-only channel event trigger', async () => {
+    const { tools } = makeAllTools({})
+    const result = await tools.proposeWorkflow.execute(
+      {
+        name: 'Invalid reply',
+        definition: {
+          startStepId: 'reply',
+          steps: [{
+            id: 'reply',
+            type: 'assistant_call',
+            target: { assistantId: 'primary' },
+            prompt: 'Reply',
+            deliver: { channelType: 'whatsapp', replyToTrigger: true },
+          }],
+        },
+        trigger: { kind: 'manual' },
+      },
+      makeContext(),
+    )
+
+    expect(result.isError).toBe(true)
+    expect((result.data as { errors: string[] }).errors.join(' ')).toContain(
+      'requires an event trigger containing only WhatsApp channel sources',
+    )
+  })
+
   it('proposeWorkflow warns that a chat-authored webhook trigger starts unprovisioned', async () => {
     const { tools } = makeAllTools({})
     const r = await tools.proposeWorkflow.execute(
