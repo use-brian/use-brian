@@ -135,7 +135,7 @@ const analyticsRow = (r: Json) => ({
   position: num(r, 'position') ?? 0,
 })
 
-export function projectSearchAnalytics(
+function projectSearchAnalytics(
   raw: unknown,
   ctx: { siteUrl: string; startDate: string; endDate: string; dimensions: string[]; rowLimit: number; startRow: number },
 ) {
@@ -151,7 +151,7 @@ export function projectSearchAnalytics(
   }
 }
 
-export function projectInspection(raw: unknown, url: string) {
+function projectInspection(raw: unknown, url: string) {
   const result = obj(raw as Json, 'inspectionResult') ?? {}
   const index = obj(result, 'indexStatusResult') ?? {}
   return {
@@ -172,7 +172,7 @@ export function projectInspection(raw: unknown, url: string) {
   }
 }
 
-export function projectSitemaps(raw: unknown, siteUrl: string) {
+function projectSitemaps(raw: unknown, siteUrl: string) {
   return {
     siteUrl,
     sitemaps: asRows((raw as Json | null)?.sitemap).map((s) => ({
@@ -188,7 +188,7 @@ export function projectSitemaps(raw: unknown, siteUrl: string) {
   }
 }
 
-export function projectSites(raw: unknown) {
+function projectSites(raw: unknown) {
   return {
     sites: asRows((raw as Json | null)?.siteEntry).map((s) => ({
       siteUrl: str(s, 'siteUrl'),
