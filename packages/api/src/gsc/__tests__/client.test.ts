@@ -119,7 +119,7 @@ describe('[COMP:api/gsc-client] Search Console service-account client', () => {
   })
 
   it('addresses the four fixed endpoints with the property URL-encoded', async () => {
-    const fetchMock = vi.fn(async (url: string) => {
+    const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
       if (url === 'https://oauth2.googleapis.com/token') return jsonResponse({ access_token: 't', expires_in: 3600 })
       return jsonResponse({ ok: true, url })
     })
