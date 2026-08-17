@@ -19,7 +19,7 @@
  */
 
 import type { AccessContext, CachedFile } from '@use-brian/core'
-import { promoteCachedFile, wrapMcpTools, buildToolIndex, createMcpSearchTools, legacyMcpToolName, createGoogleCalendarTools, createGmailTools, createGoogleTasksTools, createGoogleDriveTools, createGoogleDocsTools, createGoogleSheetsTools, createGoogleSlidesTools, createGDriveFilesTools, createGitHubTools, createNotionTools, createFathomTools, createShopifyTools, createWordPressTools, createMsGraphTools, createKnowledgeTools, createAgentmailTools, createMailboxTools, workspaceFilesCtxFor, workspaceFilesErrorMessage, workspaceFilesGate, GOOGLE_MAPS_TOOL_NAMES } from '@use-brian/core'
+import { promoteCachedFile, wrapMcpTools, buildToolIndex, createMcpSearchTools, legacyMcpToolName, createGoogleCalendarTools, createGmailTools, createGoogleTasksTools, createGoogleDriveTools, createGoogleDocsTools, createGoogleSheetsTools, createGoogleSlidesTools, createGDriveFilesTools, createGitHubTools, createNotionTools, createFathomTools, createShopifyTools, createWordPressTools, createSearchConsoleTools, createMsGraphTools, createKnowledgeTools, createAgentmailTools, createMailboxTools, workspaceFilesCtxFor, workspaceFilesErrorMessage, workspaceFilesGate, GOOGLE_MAPS_TOOL_NAMES } from '@use-brian/core'
 import type { Tool, McpSettingsStore, McpServerConfig, KnowledgeStoreInterface, KnowledgeRepoWriter, AuthorizedFile, GDriveFilesStore, GDriveFileKind, LocalSource, RemoteSource, EngineHooks, FilesApi, AgentmailToolApi, MailboxApi, MailboxAccountRouter } from '@use-brian/core'
 import { getGlobalEmailInboxProvider, type EmailInboxProvider } from '../agentmail/provider.js'
 import { renderEmailBody } from '@use-brian/channels'
@@ -130,6 +130,7 @@ import {
   setProductTemplate as setShopifyProductTemplate,
 } from '../shopify/client.js'
 import { createWordPressApi, unpackWordPressCredentials, type WordPressCredentials } from '../wordpress/client.js'
+import { createSearchConsoleApi, unpackSearchConsoleCredentials, type SearchConsoleCredentials } from '../gsc/client.js'
 import { createMsGraphClient } from '../msgraph/client.js'
 import {
   createMsGraphTokenManager,
@@ -342,6 +343,12 @@ export const INJECTED_BUILTIN_TOOLS_BY_CONNECTOR: Record<string, readonly string
     'wordpressGetManagedPage',
     'wordpressUpdatePageText',
     'wordpressReplacePageImage',
+  ],
+  gsc: [
+    'searchConsoleListSites',
+    'searchConsoleQuery',
+    'searchConsoleInspectUrl',
+    'searchConsoleListSitemaps',
   ],
   msgraph: [
     'msTeamsListTeams',
@@ -1043,6 +1050,7 @@ export async function injectMcpTools(params: {
   await injectFathomTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, undefined, extrasByProvider.get('fathom'), resolveInstanceCreds, persistInstanceCreds)
   await injectShopifyTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, undefined, extrasByProvider.get('shopify'), resolveInstanceCreds, persistInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore, filesApi, readCachedFile)
   await injectWordPressTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, extrasByProvider.get('wordpress'), resolveInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore, filesApi, readCachedFile)
+  await injectSearchConsoleTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, extrasByProvider.get('gsc'), resolveInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore)
   // No extras argument: `msgraph` is `single_instance` in OFFICIAL_CONNECTORS
   // (one Microsoft identity per user), so it is never in
   // MULTI_INSTANCE_CONNECTOR_IDS and `extrasByProvider` never holds it.
@@ -1248,6 +1256,13 @@ export async function injectMcpTools(params: {
             assistantConnectorStore, tools, undefined, boundGrantCreds, extraInstances,
             resolveGrantedInstanceCreds, { report: reportHealth, instanceId: g.instance.id },
             assistantConnectorGrantsStore, filesApi,
+          )
+        } else if (p === 'gsc') {
+          await injectSearchConsoleTools(
+            grantorConnectors, connectorStore, settingsStore, g.grantedByUserId, assistantId,
+            assistantConnectorStore, tools, undefined, boundGrantCreds, extraInstances,
+            resolveGrantedInstanceCreds, { report: reportHealth, instanceId: g.instance.id },
+            assistantConnectorGrantsStore,
           )
         } else if (p === 'msgraph') {
           // Read-only Teams over a rotating refresh token. The synthetic
@@ -1536,6 +1551,18 @@ export async function injectMcpTools(params: {
             extraInstances, resolveTeamInstanceCreds,
             { report: reportHealth, instanceId: inst.id },
             assistantConnectorGrantsStore, filesApi,
+          )
+        } else if (p === 'gsc') {
+          await injectSearchConsoleTools(
+            syntheticConnectors, connectorStore, teamPolicyStore, userId, assistantId,
+            assistantConnectorStore, tools, undefined,
+            async () => {
+              const creds = await connectorInstanceStore.getCredentialsSystem(inst.id)
+              return creds?.client_secret ?? null
+            },
+            extraInstances, resolveTeamInstanceCreds,
+            { report: reportHealth, instanceId: inst.id },
+            assistantConnectorGrantsStore,
           )
         } else if (p === 'msgraph') {
           // A workspace-owned Microsoft identity. Reads and the rotated tuple
@@ -2162,6 +2189,7 @@ export const NOT_CONNECTED_DISPLAY_NAMES: Record<string, string> = {
   fathom: 'Fathom',
   shopify: 'Shopify',
   wordpress: 'WordPress',
+  gsc: 'Google Search Console',
 }
 
 /**
@@ -2218,6 +2246,7 @@ const NOT_CONNECTED_DISPLAY_NAME: Record<string, string> = {
   fathom: 'Fathom',
   shopify: 'Shopify',
   wordpress: 'WordPress',
+  gsc: 'Google Search Console',
   msgraph: 'Microsoft Teams',
   imap: 'Company email (IMAP)',
 }
@@ -4133,6 +4162,116 @@ async function injectWordPressTools(
     console.debug(`[mcp-inject] WordPress: injected tools${extraInstances?.length ? ` (+${extraInstances.length} extra site(s))` : ''}`)
   } catch (err) {
     console.error('[mcp-inject] WordPress injection failed:', err)
+  }
+}
+
+// ── Built-in Google Search Console connector ────────────────
+// Four read-only tools over a BYO service-account key. Cloned from the
+// WordPress injector minus the files plumbing (nothing here reads or writes
+// workspace files). The default property rides in the credential envelope,
+// so `defaultSite()` never touches instance config. One instance per
+// service account (multi-instance via `extraInstances`).
+// See docs/architecture/integrations/search-console.md.
+
+async function injectSearchConsoleTools(
+  connectors: Array<{ connectorId: string; connected: boolean; url?: string | null }>,
+  connectorStore: ConnectorStore,
+  settingsStore: McpSettingsStore,
+  userId: string,
+  assistantId: string,
+  assistantConnectorStore: AssistantConnectorStore | undefined,
+  tools: Map<string, Tool>,
+  unavailable?: string[],
+  /** Exact-instance credential override for a grant/team-native overlay. */
+  credsOverride?: () => Promise<string | null>,
+  /** Additional connected service accounts for the personal base load. */
+  extraInstances?: ConnectorInstanceRef[],
+  resolveInstanceCreds?: (instanceId: string) => Promise<string | null>,
+  healthProbe?: { report: HealthReporter; instanceId?: string | null },
+  assistantConnectorGrantsStore?: import('../db/assistant-connector-grants-store.js').AssistantConnectorGrantsStore,
+): Promise<void> {
+  const gsc = connectors.find((c) => c.connectorId === 'gsc' && c.connected)
+  const gscEnabled = gsc && (!assistantConnectorStore || await assistantConnectorStore.isEnabled(assistantId, 'gsc'))
+
+  if (!gsc) {
+    unavailable?.push(notConnectedNotice('Google Search Console', 'search performance, URL index status, sitemaps'))
+    return
+  }
+
+  const primaryCredentials = async (): Promise<string | null> => {
+    if (credsOverride) return credsOverride()
+    return (await connectorStore.getCredentials(userId, 'gsc'))?.client_secret ?? null
+  }
+
+  const resolveEnvelope = async (load: () => Promise<string | null>): Promise<SearchConsoleCredentials> => {
+    const encoded = await load()
+    const envelope = encoded ? unpackSearchConsoleCredentials(encoded) : null
+    if (!envelope) throw new Error('Google Search Console connector credentials are missing or invalid')
+    return envelope
+  }
+
+  function buildTools(
+    load: () => Promise<string | null>,
+    governanceId: string = 'gsc',
+  ): Tool[] {
+    // One api (and so one token cache) per tool set: the envelope is
+    // resolved lazily on first call and the client reused after that.
+    let apiPromise: Promise<{ api: ReturnType<typeof createSearchConsoleApi>; defaultSite: string | null }> | null = null
+    const bound = () => {
+      if (!apiPromise) {
+        apiPromise = resolveEnvelope(load).then((envelope) => ({
+          api: createSearchConsoleApi(envelope),
+          defaultSite: envelope.defaultSite,
+        })).catch((err: unknown) => {
+          apiPromise = null
+          throw err
+        })
+      }
+      return apiPromise
+    }
+    return gateToolsOnActionGrants(createSearchConsoleTools({
+      listSites: async () => (await bound()).api.listSites(),
+      query: async (siteUrl, body) => (await bound()).api.querySearchAnalytics(siteUrl, body),
+      inspectUrl: async (siteUrl, url, languageCode) => (await bound()).api.inspectUrl(siteUrl, url, languageCode),
+      listSitemaps: async (siteUrl) => (await bound()).api.listSitemaps(siteUrl),
+      defaultSite: async () => (await bound()).defaultSite,
+    }), 'gsc', assistantConnectorGrantsStore, assistantId, governanceId)
+  }
+
+  const primaryInstanceId = healthProbe?.instanceId ?? (gsc as { id?: string }).id ?? null
+  try {
+    if (gscEnabled) {
+      const encoded = await primaryCredentials()
+      if (!encoded || !unpackSearchConsoleCredentials(encoded)) {
+        unavailable?.push(expiredCredentialsNotice('Google Search Console'))
+      } else {
+        const built = buildTools(primaryCredentials)
+        const gscTools = healthProbe && primaryInstanceId
+          ? wrapToolsWithHealthProbe(built, primaryInstanceId, healthProbe.report)
+          : built
+        for (const tool of gscTools) {
+          if (await applyPolicyOrSkip(tool, 'gsc', settingsStore, assistantId, userId, unavailable) === 'include') {
+            tools.set(tool.name, tool)
+          }
+        }
+      }
+    }
+
+    if (extraInstances?.length && resolveInstanceCreds) {
+      await injectInstanceVariants({
+        provider: 'gsc',
+        extras: extraInstances,
+        settingsStore, assistantId, userId, assistantConnectorStore, tools,
+        buildToolsForInstance: (instance, governanceId) => {
+          const variant = buildTools(() => resolveInstanceCreds(instance.id), governanceId)
+          return healthProbe ? wrapToolsWithHealthProbe(variant, instance.id, healthProbe.report) : variant
+        },
+      })
+    }
+
+    console.debug(`[mcp-inject] Google Search Console: injected tools${extraInstances?.length ? ` (+${extraInstances.length} extra account(s))` : ''}`)
+  } catch (err) {
+    console.error('[mcp-inject] Google Search Console injection failed:', err)
   }
 }
 
