@@ -74,6 +74,26 @@ describe('document extraction dispatch', () => {
     expect(result.texts).toEqual([])
   })
 
+  it('does not index the parser\'s failure notice as if it were the document', async () => {
+    // parseFileContent never throws for an unreadable file: it returns a short
+    // bracketed sentence for a human to read. That text is non-empty, so
+    // indexing it verbatim would embed the apology and rank "could not parse"
+    // against every question about a document.
+    //
+    // Drives the real parser, not a stub — a legacy .doc that the library
+    // cannot read — so if those notices are ever reworded upstream this fails
+    // rather than silently filling the index.
+    const notAWordFile = Buffer.concat([
+      Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]), // OLE magic
+      Buffer.alloc(512, 0x42),
+    ])
+    const result = await service().extract(
+      doc(notAWordFile, 'application/octet-stream', 'legacy.doc'),
+    )
+    expect(result.unsupported).toBe(true)
+    expect(result.texts).toEqual([])
+  })
+
   it('rejects an unknown modality rather than guessing', async () => {
     const result = await service().extract({
       modality: 'nonsense' as never,

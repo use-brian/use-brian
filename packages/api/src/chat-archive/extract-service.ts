@@ -56,6 +56,27 @@ function looksLikeText(buffer: Buffer): boolean {
   return !new TextDecoder('utf-8', { fatal: false }).decode(head).includes('\uFFFD')
 }
 
+/**
+ * Is this `parseFileContent` output a failure notice rather than the document?
+ *
+ * The parser never throws for an unreadable file; it returns a short bracketed
+ * sentence meant for a human reading a chat — "[Document: x.doc. Could not parse
+ * this document.]" or "[File: x, type: y. Content type not supported for text
+ * extraction.]". That text is non-empty, so indexing it verbatim would embed the
+ * apology and rank it against real queries: an archive full of "could not parse"
+ * segments matching every question about a document. Exactly the failure the
+ * media-stub segments had, where placeholder text displaced real content.
+ *
+ * Matched on both shape and phrase. `TestUnparseableDocument` drives the real
+ * parser rather than a stub, so rewording these notices upstream fails loudly
+ * here instead of silently filling the index again.
+ */
+function isParserFailureNotice(text: string): boolean {
+  const trimmed = text.trim()
+  if (!trimmed.startsWith('[') || !trimmed.endsWith(']') || trimmed.includes('\n')) return false
+  return /could not parse|not supported for text extraction/i.test(trimmed)
+}
+
 export type ExtractModality = 'ocr' | 'transcript' | 'document' | 'video_frames'
 
 export type ExtractedText = {
@@ -362,6 +383,12 @@ export function createExtractService(deps: ExtractServiceDeps): ExtractService {
     // A registry hit, or a text-ish MIME, means `parseFileContent` has a lane.
     if (format !== undefined || request.mime.startsWith('text/') || request.mime === 'application/json') {
       const parsed = await parseFileContent(request.buffer, request.mime, filename)
+      // A reader exists but could not read this one — a corrupt file, an
+      // encrypted one, or a format the library only partly supports. Report it
+      // as unsupported rather than indexing the notice: the text is not the
+      // document, and the verdict leaves the asset re-queueable if the parser
+      // later gains the ability.
+      if (isParserFailureNotice(parsed.text)) return { texts: [], unsupported: true }
       return { texts: parsed.text.trim() ? [{ text: parsed.text, metadata: { modality: 'document' } }] : [] }
     }
 
