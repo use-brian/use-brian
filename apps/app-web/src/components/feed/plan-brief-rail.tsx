@@ -21,7 +21,7 @@
  * [COMP:app-web/plan-brief-rail]
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ArrowLeft,
   CalendarPlus,
@@ -39,38 +39,15 @@ import { PlatformIcon } from "@/components/feed/platform-icon";
 import { StatusDot } from "@/components/feed/feed-status";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { Tooltip } from "@/components/ui/tooltip";
-import {
-  createPlanSlot,
-  updatePlanSlot,
-  fetchFeedSessionIdByChannel,
-} from "@/lib/api/feed";
-import { fetchSessionMessages } from "@/lib/api/sessions";
-import {
-  pendingProposedSlots,
-  replayPlanProposal,
-  type ProposedSlot,
-} from "@/lib/feed-plan-proposal";
+import type { ProposedSlot } from "@/lib/feed-plan-proposal";
 import {
   PLAN_SLOT_STATUSES,
   PLAN_RAIL_DOCK_CLEARANCE_CLASS,
   parseIsoDay,
   type FeedIdea,
   type PlanBrief,
-  type PlanSlot,
   type PlanSlotStatus,
 } from "@/lib/feed-plan";
-
-/** The sticky channel the plan conversation lives on (server twin: PLAN_CHANNEL_ID). */
-const PLAN_CHANNEL_ID = "plan";
-
-/**
- * How long to keep watching for a proposal after the operator asks for one.
- * A bounded poll rather than an open-ended one: the assistant either answers
- * within a couple of minutes or the operator can pull manually, and a rail
- * left open overnight should not keep hitting the API.
- */
-const WATCH_INTERVAL_MS = 4_000;
-const WATCH_TIMEOUT_MS = 120_000;
 
 /**
  * The cadence field is a free text input, so anything can arrive. Out-of-range
@@ -126,12 +103,16 @@ export function PlanBriefRail({
   counts,
   canEdit,
   busy,
-  assistantId,
-  existingSlots,
+  proposals,
+  showProposals,
+  pullingProposals,
+  acceptingProposalIndex,
   ideas,
-  watchToken,
   onSave,
-  onSlotsAccepted,
+  onRefreshProposals,
+  onAcceptProposal,
+  onAcceptAllProposals,
+  onDismissProposal,
   onAddIdea,
   onDiscardIdea,
   onPlanIdea,
@@ -144,18 +125,22 @@ export function PlanBriefRail({
   counts: Record<PlanSlotStatus, number>;
   canEdit: boolean;
   busy: boolean;
-  assistantId: string;
-  existingSlots: readonly PlanSlot[];
+  /** Shared with the Month calendar; neither surface owns a private copy. */
+  proposals: readonly ProposedSlot[];
+  showProposals: boolean;
+  pullingProposals: boolean;
+  acceptingProposalIndex: number | null;
   /** The open backlog, newest first. */
   ideas: readonly FeedIdea[];
-  /** Bumped when the operator asks the assistant to plan; starts the watch. */
-  watchToken: number;
   onSave: (next: {
     brief: string;
     themes: string[];
     cadencePerWeek: number | null;
   }) => void;
-  onSlotsAccepted: () => void;
+  onRefreshProposals: () => void;
+  onAcceptProposal: (proposal: ProposedSlot) => void;
+  onAcceptAllProposals: () => void;
+  onDismissProposal: (proposal: ProposedSlot) => void;
   /** Resolves true when the jot saved, so the input knows to clear. */
   onAddIdea: (text: string) => Promise<boolean>;
   onDiscardIdea: (idea: FeedIdea) => void;
@@ -195,96 +180,6 @@ export function PlanBriefRail({
     body !== (brief?.brief ?? "") ||
     themes !== (brief?.themes ?? []).join(", ") ||
     cadence !== (brief?.cadencePerWeek ? String(brief.cadencePerWeek) : "");
-
-  // ── Proposal cardboard ────────────────────────────────────────────────
-  const [proposed, setProposed] = useState<ProposedSlot[]>([]);
-  const [dismissed, setDismissed] = useState<Set<number>>(new Set());
-  const [pulling, setPulling] = useState(false);
-  const [accepting, setAccepting] = useState<number | null>(null);
-
-  const pullProposal = useCallback(async () => {
-    setPulling(true);
-    try {
-      const sessionId = await fetchFeedSessionIdByChannel(
-        assistantId,
-        PLAN_CHANNEL_ID,
-      );
-      if (!sessionId) return;
-      const rows = await fetchSessionMessages(sessionId);
-      const proposal = replayPlanProposal(rows);
-      setProposed(
-        proposal?.month === month
-          ? pendingProposedSlots(proposal, existingSlots)
-          : [],
-      );
-    } finally {
-      setPulling(false);
-    }
-  }, [assistantId, month, existingSlots]);
-
-  useEffect(() => {
-    void pullProposal();
-  }, [pullProposal]);
-
-  // Bounded watch: poll only after the operator asked for a plan, and stop
-  // once something arrives or the window closes.
-  const watchRef = useRef(0);
-  useEffect(() => {
-    if (watchToken === 0 || watchToken === watchRef.current) return;
-    watchRef.current = watchToken;
-    const startedAt = Date.now();
-    let stopped = false;
-    const timer = setInterval(() => {
-      if (stopped || Date.now() - startedAt > WATCH_TIMEOUT_MS) {
-        clearInterval(timer);
-        return;
-      }
-      void pullProposal();
-    }, WATCH_INTERVAL_MS);
-    return () => {
-      stopped = true;
-      clearInterval(timer);
-    };
-  }, [watchToken, pullProposal]);
-
-  const visibleProposals = useMemo(
-    () => proposed.filter((s) => !dismissed.has(s.index)),
-    [proposed, dismissed],
-  );
-
-  async function acceptProposal(slot: ProposedSlot) {
-    setAccepting(slot.index);
-    try {
-      // D31. A card carrying a slotId fills a slot the operator already has;
-      // creating a second one beside it is exactly the duplicate the opt-in
-      // fill exists to avoid.
-      const result = slot.slotId
-        ? await updatePlanSlot(assistantId, slot.slotId, {
-            title: slot.title,
-            brief: slot.brief ?? null,
-          })
-        : await createPlanSlot(assistantId, {
-            platform: slot.platform,
-            scheduledFor: slot.date,
-            title: slot.title,
-            ...(slot.brief ? { brief: slot.brief } : {}),
-          });
-      if (result.ok) {
-        setDismissed((prev) => new Set(prev).add(slot.index));
-        onSlotsAccepted();
-      }
-    } finally {
-      setAccepting(null);
-    }
-  }
-
-  async function acceptAll() {
-    for (const slot of visibleProposals) {
-      await acceptProposal(slot);
-    }
-  }
-
-  const showProposals = watchToken > 0 || visibleProposals.length > 0;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -584,29 +479,29 @@ export function PlanBriefRail({
               </div>
               <button
                 type="button"
-                onClick={() => void pullProposal()}
-                disabled={pulling}
+                onClick={onRefreshProposals}
+                disabled={pullingProposals}
                 className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md border border-border px-2 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
               >
                 <RefreshCw
-                  className={cn("size-3", pulling && "animate-spin")}
+                  className={cn("size-3", pullingProposals && "animate-spin")}
                   aria-hidden
                 />
                 {tp.refreshProposals}
               </button>
             </div>
 
-            {visibleProposals.length === 0 ? (
+            {proposals.length === 0 ? (
               <p className="rounded-lg border border-dashed border-border p-2.5 text-[11px] leading-relaxed text-muted-foreground">
                 {tp.proposalsPending}
               </p>
             ) : (
               <>
-                {canEdit && visibleProposals.length > 1 ? (
+                {canEdit && proposals.length > 1 ? (
                   <div className="flex justify-end">
                     <button
                       type="button"
-                      onClick={() => void acceptAll()}
+                      onClick={onAcceptAllProposals}
                       className="text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground"
                     >
                       {tp.acceptAll}
@@ -614,7 +509,7 @@ export function PlanBriefRail({
                   </div>
                 ) : null}
                 <ul className="space-y-1.5">
-                  {visibleProposals.map((slot) => {
+                  {proposals.map((slot) => {
                     const parsed = parseIsoDay(slot.date);
                     const dayLabel = parsed
                       ? new Intl.DateTimeFormat(undefined, {
@@ -649,8 +544,8 @@ export function PlanBriefRail({
                           <div className="mt-2 flex items-center gap-1">
                             <button
                               type="button"
-                              disabled={accepting === slot.index}
-                              onClick={() => void acceptProposal(slot)}
+                              disabled={acceptingProposalIndex === slot.index}
+                              onClick={() => onAcceptProposal(slot)}
                               className="inline-flex h-7 flex-1 items-center justify-center gap-1 rounded-md border border-border px-2 text-[11px] font-medium transition-colors hover:bg-accent disabled:opacity-50"
                             >
                               <Check className="size-3" aria-hidden />
@@ -658,11 +553,7 @@ export function PlanBriefRail({
                             </button>
                             <button
                               type="button"
-                              onClick={() =>
-                                setDismissed((prev) =>
-                                  new Set(prev).add(slot.index),
-                                )
-                              }
+                              onClick={() => onDismissProposal(slot)}
                               aria-label={tp.dismissSlot}
                               title={tp.dismissSlot}
                               className="inline-flex size-7 items-center justify-center rounded-md border border-border text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"

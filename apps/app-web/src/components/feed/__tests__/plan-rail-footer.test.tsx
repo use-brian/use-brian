@@ -32,11 +32,11 @@ function expectDockClearance(html: string) {
 
 function renderBriefRail({
   view = "overview",
-  watchToken = 0,
+  showProposals = false,
   brief = null,
 }: {
   view?: "overview" | "brief";
-  watchToken?: number;
+  showProposals?: boolean;
   brief?: React.ComponentProps<typeof PlanBriefRail>["brief"];
 } = {}): string {
   return render(
@@ -47,12 +47,16 @@ function renderBriefRail({
       counts={{ planned: 0, drafting: 0, ready: 0, posted: 0, skipped: 0 }}
       canEdit
       busy={false}
-      assistantId="assistant-1"
-      existingSlots={[]}
+      proposals={[]}
+      showProposals={showProposals}
+      pullingProposals={false}
+      acceptingProposalIndex={null}
       ideas={[]}
-      watchToken={watchToken}
       onSave={vi.fn()}
-      onSlotsAccepted={vi.fn()}
+      onRefreshProposals={vi.fn()}
+      onAcceptProposal={vi.fn()}
+      onAcceptAllProposals={vi.fn()}
+      onDismissProposal={vi.fn()}
       onAddIdea={async () => true}
       onDiscardIdea={vi.fn()}
       onPlanIdea={vi.fn()}
@@ -132,7 +136,7 @@ describe("[COMP:app-web/plan-brief-rail] contextual planning companion", () => {
   });
 
   it("reveals assistant proposals only after a planning request", () => {
-    const html = renderBriefRail({ watchToken: 1 });
+    const html = renderBriefRail({ showProposals: true });
 
     expect(html).toContain(en.feedPage.plan.proposedHeading);
     expect(html).toContain(en.feedPage.plan.proposedDescription);
