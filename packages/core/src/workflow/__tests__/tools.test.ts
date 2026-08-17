@@ -300,6 +300,7 @@ function makeAllTools(opts?: {
     | { ok: false; reason: string }
   >
   listAuthorableSkills?: (userId: string, workspaceId: string) => Promise<Array<{ slug: string; name: string }>>
+  allowLegacyDirectWrites?: boolean
 }) {
   const events: WorkflowToolEvent[] = []
   const stores = fakeStores()
@@ -328,6 +329,7 @@ function makeAllTools(opts?: {
     listSlackChannels: opts?.listSlackChannels,
     listSlackMembers: opts?.listSlackMembers,
     listAuthorableSkills: opts?.listAuthorableSkills,
+    allowLegacyDirectWrites: opts?.allowLegacyDirectWrites ?? true,
   })
   return { tools, stores, events, jobStore }
 }
@@ -732,21 +734,60 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     expect(data.warnings).toEqual([])
   })
 
-  it('continues an approved proposal without restarting discovery or misrouting edits to create', async () => {
-    const { tools } = makeAllTools()
-    const r = await tools.proposeWorkflow.execute({ name: 'X', definition: SIMPLE_DEF }, makeContext())
-    const hint = (r.data as { confirmationHint: string }).confirmationHint
+  it('applies the exact proposed create/update payload through an opaque receipt', async () => {
+    const { tools, stores } = makeAllTools({ allowLegacyDirectWrites: false })
+    const definition: WorkflowDefinition = {
+      startStepId: 's1',
+      steps: [{ id: 's1', type: 'assistant_call', target: { assistantId: 'primary' }, prompt: 'Create the block.' }],
+    }
+    const proposed = await tools.proposeWorkflow.execute({ name: 'Calendar block', definition }, makeContext())
+    const proposal = proposed.data as { proposalReceipt: string; proposedAction: string; confirmationHint: string }
 
-    expect(hint).toContain('createWorkflow for a new workflow')
-    expect(hint).toContain('updateWorkflow with the previously read workflowId for an edit')
-    expect(hint).toContain('Do not repeat discovery or proposeWorkflow')
-    expect(hint).not.toContain('Only call createWorkflow')
-    expect(tools.createWorkflow.description).toContain('call this tool directly')
-    expect(tools.updateWorkflow.description).toContain('Never use `createWorkflow` to apply an edit')
+    expect(proposal.proposedAction).toBe('create')
+    expect(proposal.confirmationHint).toContain('pass only proposalReceipt')
+    expect(proposal.confirmationHint).toContain('listAssistants')
+    expect(tools.createWorkflow.inputSchema.safeParse({ proposalReceipt: proposal.proposalReceipt }).success).toBe(true)
+    expect(tools.createWorkflow.inputSchema.safeParse({ name: 'Calendar block', definition }).success).toBe(false)
+    const raw = await tools.createWorkflow.execute({ name: 'Calendar block', definition }, makeContext())
+    expect(raw.isError).toBe(true)
+    expect(raw.data).toContain('proposalReceipt is required')
+
+    const created = await tools.createWorkflow.execute({ proposalReceipt: proposal.proposalReceipt }, makeContext())
+    expect(created.isError).toBeFalsy()
+    const workflowId = (created.data as { id: string }).id
+    expect(stores.workflows.get(workflowId)?.definition.steps[0]).toMatchObject({
+      target: { assistantId: 'primary' },
+      prompt: 'Create the block.',
+    })
+
+    const editedDefinition: WorkflowDefinition = {
+      startStepId: 's1',
+      steps: [{ id: 's1', type: 'assistant_call', target: { assistantId: 'primary' }, prompt: 'Create the approved block.' }],
+    }
+    const proposedEdit = await tools.proposeWorkflow.execute(
+      { workflowId, name: 'Calendar block', definition: editedDefinition },
+      makeContext(),
+    )
+    const editProposal = proposedEdit.data as { proposalReceipt: string; proposedAction: string }
+    expect(editProposal.proposedAction).toBe('update')
+    const updated = await tools.updateWorkflow.execute({ proposalReceipt: editProposal.proposalReceipt }, makeContext())
+    expect(updated.isError).toBeFalsy()
+    expect(stores.workflows.get(workflowId)?.definition.steps[0]).toMatchObject({
+      target: { assistantId: 'primary' },
+      prompt: 'Create the approved block.',
+    })
+
+    const changedReceipt = `${proposal.proposalReceipt.slice(0, -1)}x`
+    const changed = await tools.createWorkflow.execute({ proposalReceipt: changedReceipt }, makeContext())
+    expect(changed.isError).toBe(true)
+    expect(changed.data).toContain('receipt changed after validation')
+
+    expect(tools.createWorkflow.description).toContain('pass ONLY the opaque `proposalReceipt`')
+    expect(tools.updateWorkflow.description).toContain('never repeat discovery or listAssistants')
 
     const builder = loadBuiltinSkills().find((skill) => skill.id === 'workflow-builder')
     expect(builder?.content).toMatch(/Treat approval as continuation, not a restart/)
-    expect(builder?.content).toMatch(/Do not repeat `listWorkflows`, `getWorkflow`/)
+    expect(builder?.content).toMatch(/copy ONLY that receipt/)
   })
 
   it('proposeWorkflow surfaces the researchMode advisory (parity with the REST path)', async () => {
@@ -1097,6 +1138,7 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
       async execute() { return { data: 'nope', isError: true } },
     })
     const tools = createWorkflowTools({
+      allowLegacyDirectWrites: true,
       workflowStore: stores.workflowStore,
       runStore: stores.runStore,
       executorDeps: {
@@ -1344,6 +1386,7 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     const stores = fakeStores()
     const longText = 'x'.repeat(2000)
     const tools = createWorkflowTools({
+      allowLegacyDirectWrites: true,
       workflowStore: stores.workflowStore,
       runStore: stores.runStore,
       executorDeps: {
@@ -1385,6 +1428,7 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
       },
     }
     const tools = createWorkflowTools({
+      allowLegacyDirectWrites: true,
       workflowStore: stores.workflowStore,
       runStore: stores.runStore,
       executorDeps: {
@@ -1731,6 +1775,7 @@ describe('[COMP:workflow/tools] page anchor authoring checks', () => {
     )
     const wf = created.data as { id: string }
     const toolsWithJobs = createWorkflowTools({
+      allowLegacyDirectWrites: true,
       workflowStore: stores.workflowStore,
       runStore: stores.runStore,
       executorDeps: {
