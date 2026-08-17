@@ -40,6 +40,11 @@ function fakeIntegrationStore(botToken: string | null): ChannelIntegrationStore 
         ? null
         : ({ credentials: { bot_token: botToken }, botUserId: 'U1' } as never),
     ),
+    getCredentialsForAssistantIntegrationSystem: vi.fn(async () =>
+      botToken === null
+        ? null
+        : ({ credentials: { bot_token: botToken }, botUserId: 'U1' } as never),
+    ),
   } as unknown as ChannelIntegrationStore
 }
 
@@ -81,6 +86,39 @@ describe('[COMP:scheduling/confirmation-prompt] resolveTelegramBotToken', () => 
       integrationStore: fakeIntegrationStore(null),
     })
     expect(token).toBeUndefined()
+  })
+
+  it('resolves an explicitly selected integration without shared-bot fallback', async () => {
+    const store = fakeIntegrationStore('selected-tok')
+    const token = await resolveTelegramBotToken(
+      'a_1',
+      { integrationStore: store, defaultTelegramBotToken: 'shared-tok' },
+      '00000000-0000-4000-8000-000000000001',
+      '-100555:topic:42',
+      'ws-1',
+    )
+
+    expect(token).toBe('selected-tok')
+    expect(store.getCredentialsForAssistantIntegrationSystem).toHaveBeenCalledWith(
+      'ws-1',
+      'a_1',
+      '00000000-0000-4000-8000-000000000001',
+      'telegram',
+      '-100555:topic:42',
+    )
+  })
+
+  it('fails closed when an explicit integration has no authoritative workspace scope', async () => {
+    const store = fakeIntegrationStore('foreign-tok')
+    const token = await resolveTelegramBotToken(
+      'a_1',
+      { integrationStore: store, defaultTelegramBotToken: 'shared-tok' },
+      '00000000-0000-4000-8000-000000000001',
+      '-100555',
+    )
+    expect(token).toBeUndefined()
+    expect(store.getCredentialsForAssistantSystem).not.toHaveBeenCalled()
+    expect(store.getCredentialsForAssistantIntegrationSystem).not.toHaveBeenCalled()
   })
 })
 

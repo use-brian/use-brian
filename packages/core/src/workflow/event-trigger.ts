@@ -85,6 +85,10 @@ export type DispatchEvent = {
   tags?: string[]
   /** Whether a bot authored the event — gated by `EventMatch.fromBots`. */
   isBot: boolean
+  /** Provider account that received the event (for source-bound replies). */
+  providerAccountId?: string
+  /** Provider-authored occurrence time, normalized to ISO-8601. */
+  occurredAt?: string
   /** Raw normalized payload, written verbatim to `workflow_runs.input.event`. */
   payload: Record<string, unknown>
 }
@@ -144,6 +148,10 @@ export type WorkflowEventInput = {
     channelId: string | null
     /** Event actor id, or null. */
     actorId: string | null
+    /** Trusted provider account id, when the producer supplies one. */
+    providerAccountId?: string
+    /** Trusted provider event time, normalized to ISO-8601. */
+    occurredAt?: string
   }
   /** The source-normalized event payload. */
   event: Record<string, unknown>
@@ -340,6 +348,8 @@ function buildInput(event: DispatchEvent): WorkflowEventInput {
       channelIntegrationId: src.channelIntegrationId,
       channelId: event.channelId,
       actorId: event.actorId,
+      ...(event.providerAccountId ? { providerAccountId: event.providerAccountId } : {}),
+      ...(event.occurredAt ? { occurredAt: event.occurredAt } : {}),
     }
   } else if (src.type === 'page') {
     trigger = {

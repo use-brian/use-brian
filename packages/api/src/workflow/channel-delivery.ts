@@ -31,11 +31,13 @@ import {
   createSlackAdapter,
   createTelegramAdapter,
   createWhatsAppAdapter,
+  createWhatsAppCloudAdapter,
   createMsTeamsAdapter,
 } from '@use-brian/channels'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import { findOrCreateSession, addSessionMessage } from '../db/sessions.js'
 import { query } from './../db/client.js'
+import { whatsappCloudUserAllowed } from '../whatsapp/cloud-access.js'
 
 export type WorkflowChannelDeliveryOptions = {
   /** BYO Telegram + Slack credentials. */
@@ -45,12 +47,24 @@ export type WorkflowChannelDeliveryOptions = {
   /** WhatsApp delivery via the wa-connector. */
   waConnectorUrl?: string
   waConnectorSecret?: string
+  /** Injectable clock for customer-service-window checks. */
+  now?: () => number
 }
 
 export function createWorkflowChannelDelivery(
   options: WorkflowChannelDeliveryOptions,
 ): DeliverToChannel {
-  return async ({ assistantId, userId, channelType, channelId, text, threadRef }): Promise<DeliveryOutcome> => {
+  return async ({
+    workspaceId,
+    assistantId,
+    userId,
+    channelType,
+    channelId,
+    channelIntegrationId,
+    text,
+    threadRef,
+    replyToTrigger,
+  }): Promise<DeliveryOutcome> => {
     // Strip any model scaffolding / meta-commentary before it is persisted to
     // the delivery session OR pushed to the channel — a cron-framed turn can
     // echo a "Message body:" planning preamble and a duplicated body (see
@@ -67,6 +81,70 @@ export function createWorkflowChannelDelivery(
     // (and the authoring guard steers new workflows away from `web`).
     if (channelType === 'web') return { status: 'skipped', channelType, reason: 'web_not_a_target' }
 
+    if (replyToTrigger) {
+      if (channelType !== 'whatsapp' || !channelIntegrationId) {
+        return { status: 'skipped', channelType, reason: 'provider_mismatch' }
+      }
+      const occurredAt = Date.parse(replyToTrigger.occurredAt)
+      const now = options.now?.() ?? Date.now()
+      if (!Number.isFinite(occurredAt) || now - occurredAt >= 24 * 60 * 60 * 1000) {
+        return { status: 'skipped', channelType, reason: 'customer_service_window_expired' }
+      }
+      if (!options.integrationStore) {
+        return { status: 'skipped', channelType, reason: 'no_integration' }
+      }
+      const integration = await options.integrationStore.getCredentialsForAssistantIntegrationSystem(
+        workspaceId,
+        assistantId,
+        channelIntegrationId,
+        'whatsapp',
+        channelId,
+      )
+      if (!integration) return { status: 'skipped', channelType, reason: 'no_integration' }
+      const credentials = integration.credentials as {
+        provider?: unknown
+        access_token?: unknown
+        phone_number_id?: unknown
+        graph_api_version?: unknown
+      }
+      if (
+        credentials.provider !== 'cloud_api'
+        || typeof credentials.access_token !== 'string'
+        || typeof credentials.phone_number_id !== 'string'
+        || credentials.phone_number_id !== replyToTrigger.providerAccountId
+      ) {
+        return { status: 'skipped', channelType, reason: 'provider_mismatch' }
+      }
+      if (!whatsappCloudUserAllowed(integration.config ?? {}, channelId)) {
+        return { status: 'skipped', channelType, reason: 'access_denied' }
+      }
+
+      const session = await findOrCreateSession({
+        assistantId,
+        userId,
+        channelType,
+        channelId,
+      })
+      await addSessionMessage({
+        sessionId: session.id,
+        role: 'assistant',
+        content: [{ type: 'text', text: deliverable }],
+      })
+      const messageId = await createWhatsAppCloudAdapter({
+        accessToken: credentials.access_token,
+        phoneNumberId: credentials.phone_number_id,
+        graphApiVersion: typeof credentials.graph_api_version === 'string'
+          ? credentials.graph_api_version
+          : undefined,
+      }).sendMessage(channelId, { text: deliverable, format: 'markdown' })
+      return {
+        status: 'delivered',
+        channelType,
+        channelId,
+        messageId: messageId || undefined,
+      }
+    }
+
     // DB-first: persist into the messaging-channel delivery session so the
     // message survives a failed channel push.
     const session = await findOrCreateSession({
@@ -82,24 +160,43 @@ export function createWorkflowChannelDelivery(
     })
 
     if (channelType === 'telegram') {
-      let token = options.defaultTelegramBotToken
+      const tokens: string[] = []
       if (options.integrationStore) {
-        const integ = await options.integrationStore.getCredentialsForAssistantSystem(
-          assistantId,
-          'telegram',
-        )
-        if (integ) token = (integ.credentials as { bot_token: string }).bot_token
+        const integ = channelIntegrationId
+          ? await options.integrationStore.getCredentialsForAssistantIntegrationSystem(
+              workspaceId,
+              assistantId,
+              channelIntegrationId,
+              'telegram',
+              channelId,
+            )
+          : await options.integrationStore.getCredentialsForAssistantSystem(assistantId, 'telegram')
+        const byoToken = integ && (integ.credentials as { bot_token?: string }).bot_token
+        if (byoToken) tokens.push(byoToken)
       }
-      if (!token) return { status: 'skipped', channelType, reason: 'no_integration' }
+      if (!channelIntegrationId && options.defaultTelegramBotToken && !tokens.includes(options.defaultTelegramBotToken)) {
+        tokens.push(options.defaultTelegramBotToken)
+      }
+      if (tokens.length === 0) return { status: 'skipped', channelType, reason: 'no_integration' }
       // `threadRef` (an earlier delivery's message id) posts this one as a
       // reply; the returned message id lets a later `deliver.thread` step
       // reply under THIS message. See workflow.md → deliver `thread`.
-      const tgMessageId = await createTelegramAdapter({ token }).sendMessage(
-        channelId,
-        { text: deliverable, format: 'markdown' },
-        threadRef ? { threadTs: threadRef } : undefined,
-      )
-      return { status: 'delivered', channelType, channelId, messageId: tgMessageId || undefined }
+      for (const [index, token] of tokens.entries()) {
+        try {
+          const tgMessageId = await createTelegramAdapter({ token }).sendMessage(
+            channelId,
+            { text: deliverable, format: 'markdown' },
+            threadRef ? { threadTs: threadRef } : undefined,
+          )
+          return { status: 'delivered', channelType, channelId, messageId: tgMessageId || undefined }
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          const canTryNext = index < tokens.length - 1
+            && /Telegram API sendMessage:.*chat not found/i.test(message)
+          if (!canTryNext) throw err
+        }
+      }
+      throw new Error('Telegram delivery exhausted all configured bots')
     }
 
     if (channelType === 'slack') {
@@ -150,16 +247,19 @@ export function createWorkflowChannelDelivery(
       // channelId may be a placeholder ('notifications') when the workflow
       // wasn't authored from a WhatsApp chat — resolve a real JID.
       let waChannelId = channelId
-      if (!waChannelId.includes('@')) {
+      if (waChannelId === 'notifications') {
         const waSession = await query<{ channel_id: string }>(
           `SELECT channel_id FROM sessions
            WHERE assistant_id = $1 AND user_id = $2 AND channel_type = 'whatsapp'
-             AND channel_id != 'notifications'
+              AND channel_id LIKE '%@%'
            ORDER BY last_active_at DESC LIMIT 1`,
           [assistantId, userId],
         )
         if (!waSession.rows[0]) return { status: 'skipped', channelType, reason: 'no_recipient' }
         waChannelId = waSession.rows[0].channel_id
+      }
+      if (!waChannelId.includes('@')) {
+        return { status: 'skipped', channelType, reason: 'no_integration' }
       }
       await createWhatsAppAdapter({
         connectorUrl: options.waConnectorUrl,

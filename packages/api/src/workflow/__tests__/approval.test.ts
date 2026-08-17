@@ -415,15 +415,19 @@ describe('[COMP:workflow/approval] Phase C — pause + resume', () => {
       async execute() { postCalled = true; return { data: { ok: true } } },
     })
 
+    const registryUsers: Array<string | null> = []
     const executorDeps: ExecutorDeps = {
       workflowStore: stores.workflowStore,
       runStore: stores.runStore,
       consultTransport: FAKE_TRANSPORT,
       resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
-      buildToolRegistry: async () => new Map([
-        ['gmailSendMessage', askTool],
-        ['noop', followupTool],
-      ]),
+      buildToolRegistry: async ({ userId }) => {
+        registryUsers.push(userId)
+        return new Map([
+          ['gmailSendMessage', askTool],
+          ['noop', followupTool],
+        ])
+      },
     }
     const bridgeDeps: ApprovalBridgeDeps = {
       approvalsStore: approvals, auditStore: audit,
@@ -450,7 +454,7 @@ describe('[COMP:workflow/approval] Phase C — pause + resume', () => {
     })
     const run = await stores.runStore.createRun({
       workflowId: workflow.id, workspaceId: WORKSPACE_ID,
-      triggeredBy: USER_ID, triggerKind: 'manual',
+      triggeredBy: null, triggerKind: 'schedule',
       input: { email: 'frozen@example.com' },
     })
 
@@ -466,6 +470,8 @@ describe('[COMP:workflow/approval] Phase C — pause + resume', () => {
     expect(capturedArgs).toEqual({ to: 'frozen@example.com', body: 'hi' })
     // Follow-up tool ran.
     expect(postCalled).toBe(true)
+    expect(registryUsers).toHaveLength(3)
+    expect(new Set(registryUsers)).toEqual(new Set([USER_ID]))
     // Final run state.
     expect(stores.runs.get(run.id)?.status).toBe('completed')
     // Audit recorded approval_approved.
@@ -511,6 +517,59 @@ describe('[COMP:workflow/approval] Phase C — pause + resume', () => {
     expect(result.status).toBe('failed')
     expect(stores.runs.get(run.id)?.status).toBe('failed')
     expect(audit.events.find((e) => e.eventType === 'workflow.approval_rejected')).toBeTruthy()
+  })
+
+  it('fails the run instead of stranding it when registry rebuild throws after approval', async () => {
+    const stores = makeStores()
+    const approvals = fakeApprovalsStore()
+    const audit = fakeAuditStore()
+    const askTool = askPolicyTool('send_report')
+    let registryBuilds = 0
+    const executorDeps: ExecutorDeps = {
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      consultTransport: FAKE_TRANSPORT,
+      resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+      buildToolRegistry: async () => {
+        registryBuilds += 1
+        if (registryBuilds > 1) throw new Error('connector discovery unavailable')
+        return new Map([['send_report', askTool]])
+      },
+    }
+    const bridgeDeps: ApprovalBridgeDeps = {
+      approvalsStore: approvals,
+      auditStore: audit,
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      buildToolRegistry: executorDeps.buildToolRegistry,
+      resolvePrimary: executorDeps.resolvePrimary,
+      deliveries: async () => {},
+      executorDeps,
+    }
+    executorDeps.requestApproval = makeRequestApproval(bridgeDeps)
+    const workflow = await stores.workflowStore.create({
+      userId: USER_ID,
+      workspaceId: WORKSPACE_ID,
+      name: 'registry failure',
+      definition: {
+        startStepId: 'send',
+        steps: [{ id: 'send', type: 'tool_call', toolName: 'send_report', arguments: {} }],
+      },
+    })
+    const run = await stores.runStore.createRun({
+      workflowId: workflow.id,
+      workspaceId: WORKSPACE_ID,
+      triggeredBy: USER_ID,
+      triggerKind: 'manual',
+    })
+    await advanceWorkflowRun(executorDeps, run.id)
+
+    const result = await resumeFromApproval(bridgeDeps, approvals.rows[0].id, 'approved', USER_ID)
+
+    expect(result.status).toBe('failed')
+    expect(stores.runs.get(run.id)?.error).toMatchObject({
+      reason: 'tool_registry_unavailable_after_resume',
+    })
   })
 
   it('resume is idempotent — second approve/reject is a no-op', async () => {

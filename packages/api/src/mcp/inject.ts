@@ -19,7 +19,7 @@
  */
 
 import type { AccessContext, CachedFile } from '@use-brian/core'
-import { promoteCachedFile, wrapMcpTools, buildToolIndex, createMcpSearchTools, createGoogleCalendarTools, createGmailTools, createGoogleTasksTools, createGoogleDriveTools, createGoogleDocsTools, createGoogleSheetsTools, createGoogleSlidesTools, createGDriveFilesTools, createGitHubTools, createNotionTools, createFathomTools, createShopifyTools, createWordPressTools, createMsGraphTools, createKnowledgeTools, createAgentmailTools, createMailboxTools, workspaceFilesCtxFor, workspaceFilesErrorMessage, workspaceFilesGate } from '@use-brian/core'
+import { promoteCachedFile, wrapMcpTools, buildToolIndex, createMcpSearchTools, legacyMcpToolName, createGoogleCalendarTools, createGmailTools, createGoogleTasksTools, createGoogleDriveTools, createGoogleDocsTools, createGoogleSheetsTools, createGoogleSlidesTools, createGDriveFilesTools, createGitHubTools, createNotionTools, createFathomTools, createShopifyTools, createWordPressTools, createMsGraphTools, createKnowledgeTools, createAgentmailTools, createMailboxTools, workspaceFilesCtxFor, workspaceFilesErrorMessage, workspaceFilesGate } from '@use-brian/core'
 import type { Tool, McpSettingsStore, McpServerConfig, KnowledgeStoreInterface, KnowledgeRepoWriter, AuthorizedFile, GDriveFilesStore, GDriveFileKind, LocalSource, RemoteSource, EngineHooks, FilesApi, AgentmailToolApi, MailboxApi, MailboxAccountRouter } from '@use-brian/core'
 import { getGlobalEmailInboxProvider, type EmailInboxProvider } from '../agentmail/provider.js'
 import { renderEmailBody } from '@use-brian/channels'
@@ -471,6 +471,8 @@ export async function injectMcpTools(params: {
    * See `docs/architecture/integrations/mcp.md` → "Tool search pattern".
    */
   keepBuiltinsDirect?: boolean
+  /** Emit canonical + legacy dynamic aliases for workflow tool_call lookup. */
+  keepDynamicToolsDirect?: boolean
   /**
    * Restrict folded custom/CLI sources to these canonical tool names. The
    * workflow callee uses this with a pinned allow-list so retaining
@@ -542,7 +544,7 @@ export async function injectMcpTools(params: {
     gdriveFilesStore,
     connectorGrantStore, connectorInstanceStore, workspaceToolPolicyStore, assistantTeamId,
     connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain,
-    keepBuiltinsDirect = false, restrictSearchToToolNames,
+    keepBuiltinsDirect = false, keepDynamicToolsDirect = false, restrictSearchToToolNames,
     engineHooks, actorIdentity, filesApi, readCachedFile,
     introspectionTools, emailInboxProvider,
   } = params
@@ -589,6 +591,9 @@ export async function injectMcpTools(params: {
     console.error('[mcp-inject] failed to list connectors:', err)
     return { enrichConfirmation: async (_t, input) => input, unavailable }
   }
+  const teamPolicyStore = assistantTeamId && workspaceToolPolicyStore
+    ? workspacePolicyAsSettingsStore(workspaceToolPolicyStore, assistantTeamId)
+    : settingsStore
 
   // Layer 1: connected connectors with a remote URL (custom + directory).
   // Built-in connectors (gcal, gmail) are handled separately below. We
@@ -610,9 +615,13 @@ export async function injectMcpTools(params: {
     sendActorIdentity: boolean
     /** Opt-in: send the acting user's `X-UseBrian-Media-Token` capability to this connector. */
     sendMediaToken: boolean
+    policyStore: McpSettingsStore
+    policyUserId: string
+    policyServerName?: string
+    governanceId: string
   }> = connectors
     .filter((c) => c.connected && c.url)
-    .map((c) => ({ connectorId: c.connectorId, name: c.name, url: c.url!, instanceId: c.id, updatedAt: c.updatedAt, preflightHeaders: preflightHeadersToRecord(c.config), sendActorIdentity: c.config?.sendActorIdentity === true, sendMediaToken: c.config?.sendMediaToken === true }))
+    .map((c) => ({ connectorId: c.connectorId, name: c.name, url: c.url!, instanceId: c.id, updatedAt: c.updatedAt, preflightHeaders: preflightHeadersToRecord(c.config), sendActorIdentity: c.config?.sendActorIdentity === true, sendMediaToken: c.config?.sendMediaToken === true, policyStore: settingsStore, policyUserId: userId, governanceId: c.connectorId }))
 
   // Team-native custom MCP instances live as separate `connector_instance`
   // rows scoped to the team. The `provider` column is a UUID for custom
@@ -633,6 +642,10 @@ export async function injectMcpTools(params: {
           preflightHeaders: preflightHeadersToRecord(inst.config),
           sendActorIdentity: inst.config?.sendActorIdentity === true,
           sendMediaToken: inst.config?.sendMediaToken === true,
+          policyStore: teamPolicyStore,
+          policyUserId: userId,
+          policyServerName: inst.provider,
+          governanceId: connectorInstanceGovernanceId(inst.provider, inst.id),
         })
       }
     } catch (err) {
@@ -646,7 +659,7 @@ export async function injectMcpTools(params: {
     const checks = await Promise.all(
       connectedCustom.map(async (c) => ({
         connector: c,
-        enabled: await assistantConnectorStore.isEnabled(assistantId, c.connectorId),
+        enabled: await assistantConnectorStore.isEnabled(assistantId, c.governanceId, c.connectorId),
       })),
     )
     active = checks.filter((c) => c.enabled).map((c) => c.connector)
@@ -683,6 +696,7 @@ export async function injectMcpTools(params: {
   const discoveredServers: Array<{
     server: McpServerConfig
     connectorUrl: string
+    policy: NonNullable<RemoteSource['policy']>
   }> = []
 
   // Resolve per-connector auth headers up front and register them in the
@@ -735,8 +749,16 @@ export async function injectMcpTools(params: {
       const cached = getCachedDiscovery(cacheKey)
       if (cached) {
         console.debug(`[mcp-inject] ${connector.name}: cache hit (${cached.tools.length} tools)`)
-        discoveredServers.push({ server: cached, connectorUrl: connector.url })
-        return
+        return {
+          server: cached,
+          connectorUrl: connector.url,
+          policy: {
+            settingsStore: connector.policyStore,
+            userId: connector.policyUserId,
+            serverName: connector.policyServerName,
+            appLevelAssistantId: APP_LEVEL_ASSISTANT_ID,
+          },
+        }
       }
 
       // Discover with timeout
@@ -748,16 +770,26 @@ export async function injectMcpTools(params: {
       ])
 
       setCachedDiscovery(cacheKey, server)
-      discoveredServers.push({ server, connectorUrl: connector.url })
-
       console.debug(
         `[mcp-inject] ${connector.name}: discovered ${server.tools.length} tools`,
       )
+      return {
+        server,
+        connectorUrl: connector.url,
+        policy: {
+          settingsStore: connector.policyStore,
+          userId: connector.policyUserId,
+          serverName: connector.policyServerName,
+          appLevelAssistantId: APP_LEVEL_ASSISTANT_ID,
+        },
+      }
     }),
   )
 
   for (const result of discoveries) {
-    if (result.status === 'rejected') {
+    if (result.status === 'fulfilled') {
+      discoveredServers.push(result.value)
+    } else {
       console.error('[mcp-inject] server discovery failed:', result.reason)
     }
   }
@@ -771,12 +803,13 @@ export async function injectMcpTools(params: {
   // (`keepBuiltinsDirect: true`) still gets `mcp_search` / `mcp_call`
   // here for custom MCP only — built-ins stay direct so the workflow
   // executor's per-tool `requiresConfirmation` inspection still works.
-  const remoteSources: RemoteSource[] = discoveredServers.map(({ server, connectorUrl }) => ({
+  const remoteSources: RemoteSource[] = discoveredServers.map(({ server, connectorUrl, policy }) => ({
     kind: 'remote' as const,
     server,
     serverUrl: connectorUrl,
     callMcpTool: (url: string, toolName: string, input: Record<string, unknown>) =>
       callRemoteMcpTool(url, toolName, input, headersByUrl.get(url)),
+    policy,
   }))
 
   // Discover a custom remote MCP shared to this workspace via a grant and add
@@ -791,6 +824,7 @@ export async function injectMcpTools(params: {
     cacheUserId: string,
     instanceId?: string | null,
     updatedAt?: Date | null,
+    policyServerName?: string,
   ): Promise<void> {
     if (remoteSources.some((s) => s.serverUrl === url)) return
     try {
@@ -813,6 +847,12 @@ export async function injectMcpTools(params: {
         serverUrl: url,
         callMcpTool: (u: string, toolName: string, input: Record<string, unknown>) =>
           callRemoteMcpTool(u, toolName, input, headersByUrl.get(u)),
+        policy: {
+          settingsStore,
+          userId: cacheUserId,
+          serverName: policyServerName,
+          appLevelAssistantId: APP_LEVEL_ASSISTANT_ID,
+        },
       })
       console.debug(`[mcp-inject] granted custom MCP ${name}: discovered ${server.tools.length} tools`)
     } catch (err) {
@@ -834,9 +874,19 @@ export async function injectMcpTools(params: {
       name: string
       updatedAt: Date | null
       config?: Record<string, unknown>
+      policyStore: McpSettingsStore
+      policyUserId: string
+      policyServerName?: string
     }> = connectors
       .filter((c) => c.connectorId === 'cli' && c.connected)
-      .map((c) => ({ id: c.id, name: c.name, updatedAt: c.updatedAt, config: c.config }))
+      .map((c) => ({
+        id: c.id,
+        name: c.name,
+        updatedAt: c.updatedAt,
+        config: c.config,
+        policyStore: settingsStore,
+        policyUserId: userId,
+      }))
 
     // Workspace assistants suppress all owner-personal base loading. A CLI
     // reaches them only through an explicit workspace grant or team ownership,
@@ -850,10 +900,31 @@ export async function injectMcpTools(params: {
           : Promise.resolve([]),
       ])
       const seen = new Set(cliInstances.map((inst) => inst.id))
-      for (const inst of [...teamNative, ...grants.map((grant) => grant.instance)]) {
+      for (const inst of teamNative) {
         if (inst.provider !== 'cli' || !inst.connected || seen.has(inst.id)) continue
         seen.add(inst.id)
-        cliInstances.push({ id: inst.id, name: inst.label, updatedAt: inst.updatedAt, config: inst.config })
+        cliInstances.push({
+          id: inst.id,
+          name: inst.label,
+          updatedAt: inst.updatedAt,
+          config: inst.config,
+          policyStore: teamPolicyStore,
+          policyUserId: userId,
+          policyServerName: connectorInstanceGovernanceId('cli', inst.id),
+        })
+      }
+      for (const grant of grants) {
+        const inst = grant.instance
+        if (inst.provider !== 'cli' || !inst.connected || seen.has(inst.id)) continue
+        seen.add(inst.id)
+        cliInstances.push({
+          id: inst.id,
+          name: inst.label,
+          updatedAt: inst.updatedAt,
+          config: inst.config,
+          policyStore: settingsStore,
+          policyUserId: grant.grantedByUserId,
+        })
       }
     }
     if (cliInstances.length > 0 && connectorInstanceStore) {
@@ -891,9 +962,11 @@ export async function injectMcpTools(params: {
 
           const wrappedTools = wrapMcpTools({
             server,
-            settingsStore,
+            settingsStore: inst.policyStore,
             assistantId,
-            userId,
+            userId: inst.policyUserId,
+            appLevelAssistantId: APP_LEVEL_ASSISTANT_ID,
+            policyServerName: inst.policyServerName,
             callMcpTool: (_serverName, toolName, input) =>
               callCliMcpTool(serverParams, toolName, input),
           })
@@ -1220,7 +1293,9 @@ export async function injectMcpTools(params: {
           // (keyed on the provider UUID, like the team-native custom path),
           // then discover it and add it to the search index. Without this the
           // grant is a no-op for workspace assistants — the tools never appear.
-          const enabled = !assistantConnectorStore || await assistantConnectorStore.isEnabled(assistantId, p)
+          const governanceId = connectorInstanceGovernanceId(p, g.instance.id)
+          const enabled = !assistantConnectorStore
+            || await assistantConnectorStore.isEnabled(assistantId, governanceId, p)
           if (enabled) {
             await addGrantedCustomMcp(g.instance.url, g.instance.label ?? p, g.grantedByUserId, g.instance.id, g.instance.updatedAt)
           }
@@ -1263,10 +1338,6 @@ export async function injectMcpTools(params: {
       // workspace-keyed adapter so allow/ask/block resolves from
       // workspace_tool_policy. Falls back to the per-user store when the shared
       // policy store isn't wired (legacy call sites / tests).
-      const teamPolicyStore = workspaceToolPolicyStore
-        ? workspacePolicyAsSettingsStore(workspaceToolPolicyStore, assistantTeamId)
-        : settingsStore
-
       // Synthesize a "connectors" array that looks like the legacy per-user
       // one, so the per-provider injectors' enable checks and discovery
       // logic don't need to change. `credsOverride` / `credsOverridePerConnector`
@@ -1766,18 +1837,42 @@ export async function injectMcpTools(params: {
   const searchAllowList = restrictSearchToToolNames
     ? new Set(restrictSearchToToolNames)
     : null
+  const restrictedNameCounts = new Map<string, number>()
+  if (searchAllowList) {
+    for (const source of [...remoteSources, ...localSources]) {
+      const serverName = source.kind === 'remote' ? source.server.name : source.serverName
+      const sourceTools = source.kind === 'remote' ? source.server.tools : source.tools
+      for (const tool of sourceTools) {
+        for (const name of new Set([tool.name, legacyMcpToolName(serverName, tool.name)])) {
+          restrictedNameCounts.set(name, (restrictedNameCounts.get(name) ?? 0) + 1)
+        }
+      }
+    }
+  }
   const searchSources = [...remoteSources, ...localSources].flatMap((source) => {
     if (!searchAllowList) return [source]
 
     if (source.kind === 'remote') {
-      const matchedTools = source.server.tools.filter((tool) => searchAllowList.has(tool.name))
-      for (const tool of matchedTools) restrictedSearchToolNames.add(tool.name)
+      const matchedTools = source.server.tools.filter((tool) => {
+        const legacyName = legacyMcpToolName(source.server.name, tool.name)
+        const canonicalMatch = searchAllowList.has(tool.name) && restrictedNameCounts.get(tool.name) === 1
+        const legacyMatch = searchAllowList.has(legacyName) && restrictedNameCounts.get(legacyName) === 1
+        if (canonicalMatch) restrictedSearchToolNames.add(tool.name)
+        if (legacyMatch) restrictedSearchToolNames.add(legacyName)
+        return canonicalMatch || legacyMatch
+      })
       if (matchedTools.length === 0) return []
       return [{ ...source, server: { ...source.server, tools: matchedTools } }]
     }
 
-    const matchedTools = source.tools.filter((tool) => searchAllowList.has(tool.name))
-    for (const tool of matchedTools) restrictedSearchToolNames.add(tool.name)
+    const matchedTools = source.tools.filter((tool) => {
+      const legacyName = legacyMcpToolName(source.serverName, tool.name)
+      const canonicalMatch = searchAllowList.has(tool.name) && restrictedNameCounts.get(tool.name) === 1
+      const legacyMatch = searchAllowList.has(legacyName) && restrictedNameCounts.get(legacyName) === 1
+      if (canonicalMatch) restrictedSearchToolNames.add(tool.name)
+      if (legacyMatch) restrictedSearchToolNames.add(legacyName)
+      return canonicalMatch || legacyMatch
+    })
     if (matchedTools.length === 0) return []
     return [{ ...source, tools: matchedTools }]
   })
@@ -1798,8 +1893,20 @@ export async function injectMcpTools(params: {
       callMcpTool: (serverUrl, toolName, input, overrides) =>
         callRemoteMcpTool(serverUrl, toolName, input, mergeValidatedHeaders(headersByUrl.get(serverUrl), overrides)),
       hooks: engineHooks,
+      keepDynamicToolsDirect,
     })
     for (const tool of searchTools) {
+      // A dynamic MCP can choose a generic canonical name such as `search`.
+      // Never let that replace an existing first-party registry entry; its
+      // server-prefixed compatibility alias remains available to tool_call.
+      if (
+        keepDynamicToolsDirect
+        && tool.name !== 'mcp_search'
+        && tool.name !== 'mcp_call'
+        && tools.has(tool.name)
+      ) {
+        continue
+      }
       tools.set(tool.name, tool)
     }
 

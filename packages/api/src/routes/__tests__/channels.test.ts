@@ -30,6 +30,9 @@ vi.mock('@use-brian/channels', () => ({
   validateTelegramCredentials: vi.fn(),
   validateDiscordCredentials: vi.fn(),
   validateMsTeamsCredentials: vi.fn(),
+  validateWhatsAppCloudCredentials: vi.fn(),
+  subscribeWhatsAppCloudApp: vi.fn(),
+  DEFAULT_WHATSAPP_GRAPH_API_VERSION: 'v26.0',
   TELEGRAM_BOT_COMMANDS: [{ command: 'ask', description: 'Ask Brian anything' }],
   createTelegramApi: vi.fn(),
   createSlackApi: vi.fn(),
@@ -62,10 +65,12 @@ import {
   validateTelegramCredentials,
   validateDiscordCredentials,
   validateMsTeamsCredentials,
+  validateWhatsAppCloudCredentials,
+  subscribeWhatsAppCloudApp,
   createTelegramApi,
   createSlackApi,
 } from '@use-brian/channels'
-import { channelsRoutes } from '../channels.js'
+import { channelsRoutes, normalizeWhatsAppPhoneNumber } from '../channels.js'
 import { queryWithRLS } from '../../db/client.js'
 import type { WorkspaceStore } from '../../db/workspace-store.js'
 import type { ChannelIntegrationStore } from '../../db/channel-integrations.js'
@@ -273,6 +278,15 @@ describe('[COMP:api/channels-route] DELETE channel', () => {
 })
 
 describe('[COMP:api/channels-route] channel config', () => {
+  it('normalizes common WhatsApp phone formatting without guessing a country code', () => {
+    expect(normalizeWhatsAppPhoneNumber('+1 (555) 123-4567')).toBe('15551234567')
+    expect(normalizeWhatsAppPhoneNumber('44 20 7946 0958')).toBe('442079460958')
+    expect(normalizeWhatsAppPhoneNumber('0044 20 7946 0958')).toBe('442079460958')
+    expect(normalizeWhatsAppPhoneNumber('09123 45678')).toBeNull()
+    expect(normalizeWhatsAppPhoneNumber('555-1234')).toBeNull()
+    expect(normalizeWhatsAppPhoneNumber('call-me')).toBeNull()
+  })
+
   it('GET enriches each channel with its integration config + integrationId', async () => {
     vi.mocked(listChannelsForWorkspace).mockResolvedValue([makeChannel()])
     const integrationStore = {
@@ -286,7 +300,37 @@ describe('[COMP:api/channels-route] channel config', () => {
     )
     expect(res.status).toBe(200)
     expect(res.body.channels[0].integrationId).toBe('int-1')
+    expect(res.body.channels[0].integrationStatus).toBe('active')
     expect(res.body.channels[0].config).toEqual({ requireMention: false })
+  })
+
+  it('GET projects the public WhatsApp number from legacy Cloud credentials', async () => {
+    vi.mocked(listChannelsForWorkspace).mockResolvedValue([
+      makeChannel({ channelType: 'whatsapp' }),
+    ])
+    const integration = makeIntegration({
+      channelType: 'whatsapp',
+      teamId: 'waba-1',
+      botUserId: 'phone-1',
+      config: {},
+    })
+    const integrationStore = {
+      listForWorkspace: vi.fn().mockResolvedValue([integration]),
+      getForUserWithCredentials: vi.fn().mockResolvedValue({
+        ...integration,
+        credentials: {
+          provider: 'cloud_api',
+          display_phone_number: '+1 555 123 4567',
+        },
+      }),
+    } as unknown as ChannelIntegrationStore
+
+    const res = await request(buildApp({ integrationStore })).get(
+      '/api/workspaces/ws-1/channels',
+    )
+
+    expect(res.status).toBe(200)
+    expect(res.body.channels[0].config.whatsappDisplayPhoneNumber).toBe('+1 555 123 4567')
   })
 
   it('GET returns null config when no integration store is configured', async () => {
@@ -295,6 +339,7 @@ describe('[COMP:api/channels-route] channel config', () => {
     expect(res.status).toBe(200)
     expect(res.body.channels[0].config).toBeNull()
     expect(res.body.channels[0].integrationId).toBeNull()
+    expect(res.body.channels[0].integrationStatus).toBeNull()
   })
 
   it('PATCH config 503s when no integration store is configured', async () => {
@@ -357,6 +402,35 @@ describe('[COMP:api/channels-route] channel config', () => {
     expect(res.body.channel.config).toEqual({
       ackReaction: 'eyes',
       requireMention: false,
+    })
+  })
+
+  it('PATCH config normalizes WhatsApp Cloud allowlist phone numbers', async () => {
+    vi.mocked(getChannelForUser).mockResolvedValue(makeChannel({ channelType: 'whatsapp' }))
+    const integration = makeIntegration({
+      channelType: 'whatsapp',
+      teamId: 'waba-1',
+      botUserId: 'phone-1',
+      config: { whatsappDisplayPhoneNumber: '+1 555 000 0000' },
+    })
+    const updateConfig = vi.fn().mockImplementation(async ({ config }) => ({ ...integration, config }))
+    const integrationStore = {
+      listForWorkspace: vi.fn().mockResolvedValue([integration]),
+      updateConfig,
+    } as unknown as ChannelIntegrationStore
+
+    const res = await request(buildApp({ integrationStore }))
+      .patch('/api/workspaces/ws-1/channels/chan-1/config')
+      .send({ allowedUserIds: ['+1 (555) 123-4567', '15551234567'] })
+
+    expect(res.status).toBe(200)
+    expect(updateConfig).toHaveBeenCalledWith({
+      actingUserId: 'user-1',
+      id: 'int-1',
+      config: {
+        whatsappDisplayPhoneNumber: '+1 555 000 0000',
+        allowedUserIds: ['15551234567'],
+      },
     })
   })
 
@@ -425,6 +499,62 @@ describe('[COMP:api/channels-route] workspace-driven connect', () => {
       .send({ appId: 'app-1', appPassword: 'bad', tenantId: 'tid-1' })
     expect(res.status).toBe(400)
     expect(res.body.detail).toContain('AADSTS7000215')
+  })
+
+  it('POST /whatsapp-cloud provisions official Meta credentials and callback', async () => {
+    vi.mocked(validateWhatsAppCloudCredentials).mockResolvedValue({
+      id: '123456789', displayPhoneNumber: '+1 555 123 4567', verifiedName: 'Acme Support',
+    })
+    vi.mocked(subscribeWhatsAppCloudApp).mockResolvedValue(undefined)
+    vi.mocked(findOrCreateChannelForWorkspaceConnect).mockResolvedValue({ channelId: 'chan-wa', reused: false })
+    vi.mocked(getChannelForUser).mockResolvedValue(
+      makeChannel({ id: 'chan-wa', channelType: 'whatsapp', displayName: 'Acme Support' }),
+    )
+    const integration = makeIntegration({ id: 'int-wa', channelId: 'chan-wa', channelType: 'whatsapp', botUserId: '123456789' })
+    const upsert = vi.fn().mockResolvedValue(integration)
+    const updateConfig = vi.fn().mockResolvedValue({
+      ...integration,
+      config: {
+        userAccessMode: 'allowlist',
+        allowedUserIds: [],
+        whatsappDisplayPhoneNumber: '+1 555 123 4567',
+      },
+    })
+    const integrationStore = {
+      upsert,
+      updateConfig,
+      listForWorkspace: vi.fn().mockResolvedValue([
+        integration,
+      ]),
+    } as unknown as ChannelIntegrationStore
+    const res = await request(buildApp({ integrationStore, apiUrl: 'https://api.example.com' }))
+      .post('/api/workspaces/ws-1/channels/whatsapp-cloud')
+      .send({
+        accessToken: 'permanent-token', appSecret: 'app-secret-value', verifyToken: 'verify-me-123',
+        phoneNumberId: '123456789', wabaId: '987654321',
+      })
+    expect(res.status).toBe(201)
+    expect(res.body.webhookUrl).toBe('https://api.example.com/webhook/whatsapp/chan-wa')
+    expect(res.body.verifyToken).toBe('verify-me-123')
+    expect(subscribeWhatsAppCloudApp).toHaveBeenCalledWith(
+      expect.objectContaining({ phoneNumberId: '123456789' }),
+      '987654321',
+    )
+    expect(upsert).toHaveBeenCalledWith(expect.objectContaining({
+      channelType: 'whatsapp',
+      botUserId: '123456789',
+      credentials: expect.objectContaining({
+        provider: 'cloud_api', phone_number_id: '123456789', waba_id: '987654321',
+      }),
+    }))
+    expect(updateConfig).toHaveBeenCalledWith({
+      actingUserId: 'user-1', id: 'int-wa',
+      config: {
+        userAccessMode: 'allowlist',
+        allowedUserIds: [],
+        whatsappDisplayPhoneNumber: '+1 555 123 4567',
+      },
+    })
   })
 
   it('POST /slack 400s when Slack rejects the credentials', async () => {
@@ -867,6 +997,7 @@ describe('[COMP:api/channel-destinations-route] GET channel-destinations', () =>
       listForWorkspace: vi.fn().mockResolvedValue([
         makeIntegration({
           channelType: 'telegram',
+          botUsername: 'project_bot',
           config: {
             seenChats: [{
               chatId: '-100555',
@@ -887,8 +1018,100 @@ describe('[COMP:api/channel-destinations-route] GET channel-destinations', () =>
     expect(res.body.destinations[0]).toMatchObject({
       channelId: '-100555:topic:42',
       title: 'Project Forum › Standups',
+      channelIntegrationId: 'int-1',
+      integrationLabel: '@project_bot',
     })
     expect(vi.mocked(createTelegramApi)).not.toHaveBeenCalled()
+  })
+
+  it('preserves a topic name when a newer bot has only seen the base group', async () => {
+    mockRows([destRow({ channelId: '-100555:topic:42' })])
+    const integrationStore = {
+      listForWorkspace: vi.fn().mockResolvedValue([
+        makeIntegration({
+          id: 'int-project',
+          channelType: 'telegram',
+          botUsername: 'project_bot',
+          config: {
+            seenChats: [{
+              chatId: '-100555',
+              chatTitle: 'Project Forum',
+              isForum: true,
+              topics: [{ topicId: 42, name: 'Standups', lastSeenAt: '2026-06-29T09:45:15Z' }],
+              lastSeenAt: '2026-06-29T09:45:15Z',
+            }],
+          },
+        }),
+        makeIntegration({
+          id: 'int-new',
+          channelType: 'telegram',
+          botUsername: 'new_bot',
+          config: {
+            seenChats: [{
+              chatId: '-100555',
+              chatTitle: 'Project Forum',
+              isForum: true,
+              topics: [],
+              lastSeenAt: '2026-08-16T09:45:15Z',
+            }],
+          },
+        }),
+      ]),
+    } as unknown as ChannelIntegrationStore
+
+    const res = await request(buildApp({ integrationStore }))
+      .get('/api/workspaces/ws-1/channel-destinations')
+
+    expect(res.status).toBe(200)
+    expect(res.body.destinations).toHaveLength(2)
+    expect(res.body.destinations.map((d: { title: string }) => d.title)).toEqual([
+      'Project Forum › Standups',
+      'Project Forum › Standups',
+    ])
+  })
+
+  it('returns one destination per Telegram channel that can reach the chat', async () => {
+    mockRows([destRow({ channelId: '-100555' })])
+    const seenChat = {
+      chatId: '-100555',
+      chatTitle: 'Project Forum',
+      isForum: false,
+      topics: [],
+      lastSeenAt: '2026-06-29T09:45:15Z',
+    }
+    const integrationStore = {
+      listForWorkspace: vi.fn().mockResolvedValue([
+        makeIntegration({
+          id: 'int-project',
+          channelType: 'telegram',
+          botUsername: 'project_bot',
+          config: { seenChats: [seenChat] },
+        }),
+        makeIntegration({
+          id: 'int-ops',
+          channelType: 'telegram',
+          botUsername: 'ops_bot',
+          config: { seenChats: [seenChat] },
+        }),
+      ]),
+    } as unknown as ChannelIntegrationStore
+
+    const res = await request(buildApp({ integrationStore }))
+      .get('/api/workspaces/ws-1/channel-destinations')
+
+    expect(res.status).toBe(200)
+    expect(res.body.destinations).toEqual([
+      expect.objectContaining({
+        channelId: '-100555',
+        channelIntegrationId: 'int-project',
+        integrationLabel: '@project_bot',
+      }),
+      expect.objectContaining({
+        channelId: '-100555',
+        channelIntegrationId: 'int-ops',
+        integrationLabel: '@ops_bot',
+      }),
+    ])
   })
 
   it('resolves a topic group by its base chat id and falls back to the topic number', async () => {
@@ -904,7 +1127,7 @@ describe('[COMP:api/channel-destinations-route] GET channel-destinations', () =>
     expect(res.body.destinations[0].title).toBe('Project Forum › #42')
   })
 
-  it('resolves a telegram group title via the BYO bot without consulting the default bot', async () => {
+  it('resolves a telegram group title while probing configured bots concurrently', async () => {
     mockRows([destRow({ channelId: '-100555' })])
     const getChat = vi.fn().mockResolvedValue({ id: -100555, type: 'supergroup', title: 'Dev Work' })
     vi.mocked(createTelegramApi).mockReturnValue(telegramApi(getChat))
@@ -913,9 +1136,9 @@ describe('[COMP:api/channel-destinations-route] GET channel-destinations', () =>
     ).get('/api/workspaces/ws-1/channel-destinations')
     expect(res.status).toBe(200)
     expect(res.body.destinations[0]).toMatchObject({ channelId: '-100555', title: 'Dev Work' })
-    // BYO token is tried first; the hit short-circuits the default bot.
+    // Both candidates start together so lookup stays within one timeout window.
     expect(vi.mocked(createTelegramApi).mock.calls[0][0]).toEqual({ token: 'byo-token' })
-    expect(getChat).toHaveBeenCalledTimes(1)
+    expect(getChat).toHaveBeenCalledTimes(2)
   })
 
   it('falls back to the hosted default bot when the BYO bot cannot see the chat', async () => {
@@ -934,6 +1157,29 @@ describe('[COMP:api/channel-destinations-route] GET channel-destinations', () =>
     expect(vi.mocked(createTelegramApi).mock.calls.map((c) => c[0])).toEqual([
       { token: 'byo-token' },
       { token: 'default-token' },
+    ])
+  })
+
+  it('keeps a private DM available when it cannot be attributed through seenChats', async () => {
+    mockRows([destRow({ channelId: '880211324' })])
+    const getChat = vi.fn().mockResolvedValue({
+      id: 880211324,
+      type: 'private',
+      first_name: 'Hinson',
+      last_name: 'Wong',
+    })
+    vi.mocked(createTelegramApi).mockReturnValue(telegramApi(getChat))
+
+    const res = await request(
+      buildApp({ integrationStore: telegramIntegrationStore() }),
+    ).get('/api/workspaces/ws-1/channel-destinations')
+
+    expect(res.body.destinations).toEqual([
+      expect.objectContaining({
+        channelId: '880211324',
+        title: 'Hinson Wong',
+        channelIntegrationId: null,
+      }),
     ])
   })
 

@@ -107,6 +107,7 @@ export type CalleeExecutorOptions = {
   /** Stage 5: enables team-native connector_instance consumption. */
   connectorInstanceStore?: import('../db/connector-instance-store.js').ConnectorInstanceStore
   workspaceToolPolicyStore?: import('../db/workspace-tool-policy-store.js').WorkspaceToolPolicyStore
+  assistantConnectorGrantsStore?: import('../db/assistant-connector-grants-store.js').AssistantConnectorGrantsStore
   knowledgeStore?: KnowledgeStoreInterface
   gdriveFilesStore?: GDriveFilesStore
   /**
@@ -230,8 +231,12 @@ export type CalleeExecutorOptions = {
 }
 
 export type CalleeQueryParams = {
+  /** Originating workflow workspace; authoritative for delivery integration scope. */
+  workspaceId?: string
   callerAssistantId: string
   calleeAssistantId: string
+  /** Authoritative workspace expected by the consult transport. */
+  expectedWorkspaceId?: string
   question: string
   callerSessionId: string
   /**
@@ -287,7 +292,11 @@ export type CalleeQueryParams = {
    * to this channel and waits in-process (5-min timeout). Absent → ordinary
    * A2A; confirmations are stripped (the approval was already granted).
    */
-  deliverTarget?: { channelType: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams'; channelId: string }
+  deliverTarget?: {
+    channelType: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams'
+    channelId: string
+    channelIntegrationId?: string
+  }
   /**
    * Page anchor — a concrete `saved_views` id resolved by the workflow
    * executor from the step's `page` binding. When set, the callee runs
@@ -348,6 +357,15 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // 1. Look up callee assistant and its billing/actor user.
     const calleeAssistant = await findAssistantById(params.calleeAssistantId)
     if (!calleeAssistant) throw new Error('Callee assistant not found')
+    if (
+      params.expectedWorkspaceId
+      && calleeAssistant.workspaceId !== params.expectedWorkspaceId
+    ) {
+      throw Object.assign(
+        new Error('Callee assistant does not belong to the requested workspace'),
+        { reason: 'assistant_workspace_mismatch' },
+      )
+    }
 
     const calleeActorUserId = await billingPartyForAssistant({
       id: calleeAssistant.id,
@@ -494,6 +512,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           connectorGrantStore: options.connectorGrantStore,
           connectorInstanceStore: options.connectorInstanceStore,
           workspaceToolPolicyStore: options.workspaceToolPolicyStore,
+          assistantConnectorGrantsStore: options.assistantConnectorGrantsStore,
           assistantTeamId: calleeAssistant.workspaceId ?? null,
           engineHooks: options.engineHooks,
           // KB write tools are chat-only (D2): the A2A callee path strips
@@ -829,6 +848,10 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     finalTools.delete('createWorkflow')
     finalTools.delete('updateWorkflow')
     finalTools.delete('runWorkflow')
+    finalTools.delete('scheduleWorkflow')
+    finalTools.delete('createScheduledJob')
+    finalTools.delete('updateScheduledJob')
+    finalTools.delete('deleteScheduledJob')
 
     // Fail fast only after every governance filter, including terminal-node
     // strips. A pin that names only a forbidden orchestration tool must not run
@@ -844,6 +867,10 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         'createWorkflow',
         'updateWorkflow',
         'runWorkflow',
+        'scheduleWorkflow',
+        'createScheduledJob',
+        'updateScheduledJob',
+        'deleteScheduledJob',
       ])
       const dropped = params.allowedTools.filter((t) => droppedAskTools.includes(t))
       const forbidden = params.allowedTools.filter((t) => orchestrationTools.has(t))
@@ -1674,9 +1701,11 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           if (params.deliverTarget) {
             await sendConfirmationPrompt(
               {
+                workspaceId: params.workspaceId,
                 assistantId: params.calleeAssistantId,
                 channelType: params.deliverTarget.channelType,
                 channelId: params.deliverTarget.channelId,
+                channelIntegrationId: params.deliverTarget.channelIntegrationId,
               },
               req,
               {
