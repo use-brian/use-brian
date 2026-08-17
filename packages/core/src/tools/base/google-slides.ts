@@ -11,6 +11,7 @@
 
 import { z } from 'zod'
 import { buildTool, type Tool } from '../types.js'
+import { googleFailure } from './_google-error.js'
 import type { AuthorizedFile } from './google-drive.js'
 
 // Keep these string unions in sync with the Slides REST API enums
@@ -115,13 +116,6 @@ function isAuthorized(id: string | undefined, authorized: AuthorizedFile[]): boo
   return authorized.some((f) => f.id === id)
 }
 
-function slidesError(err: unknown): { data: string; isError: true } {
-  return {
-    data: `Slides error: ${err instanceof Error ? err.message : String(err)}`,
-    isError: true,
-  }
-}
-
 export function createGoogleSlidesTools(
   api: GoogleSlidesApi,
   authorizedFiles: AuthorizedFile[] = [],
@@ -144,7 +138,7 @@ export function createGoogleSlidesTools(
         const data = await api.getPresentationInfo(input.presentationId)
         return { data }
       } catch (err) {
-        return slidesError(err)
+        return googleFailure(err, { tool: 'googleSlidesGetPresentation', product: 'Slides', target: `presentation \`${input.presentationId}\``, discoveryTool: 'googleDriveListFiles' })
       }
     },
   })
@@ -169,7 +163,7 @@ export function createGoogleSlidesTools(
         const data = await api.getSlideContent(input.presentationId, input.slideIndex)
         return { data }
       } catch (err) {
-        return slidesError(err)
+        return googleFailure(err, { tool: 'googleSlidesGetSlideContent', product: 'Slides', target: `slide #${input.slideIndex} in presentation \`${input.presentationId}\``, discoveryTool: 'googleSlidesGetPresentation' })
       }
     },
   })
@@ -196,7 +190,7 @@ export function createGoogleSlidesTools(
         })
         return { data }
       } catch (err) {
-        return slidesError(err)
+        return googleFailure(err, { tool: 'googleSlidesGetThumbnail', product: 'Slides', target: `slide \`${input.slideObjectId}\` in presentation \`${input.presentationId}\``, discoveryTool: 'googleSlidesGetPresentation' })
       }
     },
   })
@@ -246,7 +240,7 @@ export function createGoogleSlidesTools(
         })
         return { data }
       } catch (err) {
-        return slidesError(err)
+        return googleFailure(err, { tool: 'googleSlidesCreateSlide', product: 'Slides', target: `presentation \`${input.presentationId}\``, discoveryTool: 'googleDriveListFiles' })
       }
     },
   })
@@ -293,7 +287,7 @@ export function createGoogleSlidesTools(
         })
         return { data }
       } catch (err) {
-        return slidesError(err)
+        return googleFailure(err, { tool: 'googleSlidesUpdateSlideContent', product: 'Slides', target: `slide \`${input.slideObjectId}\` in presentation \`${input.presentationId}\``, discoveryTool: 'googleSlidesGetPresentation' })
       }
     },
   })
@@ -335,7 +329,7 @@ export function createGoogleSlidesTools(
         })
         return { data }
       } catch (err) {
-        return slidesError(err)
+        return googleFailure(err, { tool: 'googleSlidesInsertImage', product: 'Slides', target: `slide \`${input.slideObjectId}\` in presentation \`${input.presentationId}\``, discoveryTool: 'googleSlidesGetPresentation' })
       }
     },
   })
@@ -364,7 +358,7 @@ export function createGoogleSlidesTools(
         await api.deleteSlide(input.presentationId, input.slideObjectId)
         return { data: { deleted: input.slideObjectId } }
       } catch (err) {
-        return slidesError(err)
+        return googleFailure(err, { tool: 'googleSlidesDeleteSlide', product: 'Slides', target: `slide \`${input.slideObjectId}\` in presentation \`${input.presentationId}\``, discoveryTool: 'googleSlidesGetPresentation' })
       }
     },
   })
@@ -395,7 +389,7 @@ export function createGoogleSlidesTools(
         await api.reorderSlides(input.presentationId, input.slideObjectIds, input.insertionIndex)
         return { data: { moved: input.slideObjectIds.length, insertionIndex: input.insertionIndex } }
       } catch (err) {
-        return slidesError(err)
+        return googleFailure(err, { tool: 'googleSlidesReorderSlides', product: 'Slides', target: `presentation \`${input.presentationId}\``, discoveryTool: 'googleSlidesGetPresentation' })
       }
     },
   })
@@ -425,7 +419,7 @@ export function createGoogleSlidesTools(
         const data = await api.duplicateSlide(input.presentationId, input.slideObjectId, input.insertionIndex)
         return { data }
       } catch (err) {
-        return slidesError(err)
+        return googleFailure(err, { tool: 'googleSlidesDuplicateSlide', product: 'Slides', target: `slide \`${input.slideObjectId}\` in presentation \`${input.presentationId}\``, discoveryTool: 'googleSlidesGetPresentation' })
       }
     },
   })
@@ -454,7 +448,7 @@ export function createGoogleSlidesTools(
         const data = await api.batchUpdate(input.presentationId, input.requests)
         return { data }
       } catch (err) {
-        return slidesError(err)
+        return googleFailure(err, { tool: 'googleSlidesBatchUpdate', product: 'Slides', target: `presentation \`${input.presentationId}\``, discoveryTool: 'googleSlidesGetPresentation' })
       }
     },
   })
@@ -484,7 +478,7 @@ export function createGoogleSlidesTools(
         const data = await api.createPresentation(input.title)
         return { data }
       } catch (err) {
-        return slidesError(err)
+        return googleFailure(err, { tool: 'googleSlidesCreatePresentation', product: 'Slides' })
       }
     },
   })

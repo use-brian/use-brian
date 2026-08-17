@@ -97,8 +97,10 @@ export function createGDriveFilesTools(
         }))
         return { data: { count: data.length, files: data } }
       } catch (err) {
+        // A local-index read, not a Google call: nothing about the input is
+        // wrong, and no Drive reconnect can help.
         return {
-          data: `findGDriveFiles error: ${err instanceof Error ? err.message : String(err)}`,
+          data: `findGDriveFiles could not read the assistant's local index of Google Drive files it created (${err instanceof Error ? err.message : String(err)}). This is a local database failure, not a Google Drive rejection — the query and filters are fine. Retry once; if it persists, tell the user and fall back to asking them for the file link.`,
           isError: true,
         }
       }

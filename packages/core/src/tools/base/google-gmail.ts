@@ -22,6 +22,7 @@
 
 import { z } from 'zod'
 import { buildTool, type Tool } from '../types.js'
+import { googleFailure } from './_google-error.js'
 import { type Json, str } from './_connector-result.js'
 import type { FilesApi } from '../../workspace-files/api.js'
 import { ctxFor, errorMessage, idOrPathShape, workspaceGate } from '../../workspace-files/tool-helpers.js'
@@ -112,7 +113,7 @@ export function createGmailTools(
         })
         return { data }
       } catch (err) {
-        return { data: `Gmail error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return googleFailure(err, { tool: 'gmailListMessages', product: 'Gmail' })
       }
     },
   })
@@ -132,7 +133,7 @@ export function createGmailTools(
         const data = await api.getMessage(input.messageId)
         return { data }
       } catch (err) {
-        return { data: `Gmail error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return googleFailure(err, { tool: 'gmailGetMessage', product: 'Gmail', target: `message \`${input.messageId}\``, discoveryTool: 'gmailListMessages' })
       }
     },
   })
@@ -344,7 +345,10 @@ export function createGmailTools(
           },
         }
       } catch (err) {
-        return { data: `Gmail error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        // A send failure must say so outright — the model otherwise tells the
+        // user the mail went out on the strength of a retry that never ran.
+        const failure = googleFailure(err, { tool: 'gmailSendMessage', product: 'Gmail', target: `the message to ${input.to.join(', ')}` })
+        return { ...failure, data: `The email was NOT sent. ${failure.data}` }
       }
     },
   })

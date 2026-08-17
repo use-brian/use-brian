@@ -8,6 +8,7 @@
 
 import { z } from 'zod'
 import { buildTool, type Tool } from '../types.js'
+import { googleFailure } from './_google-error.js'
 
 /**
  * A file the user has explicitly picked via the Google Picker.
@@ -76,7 +77,7 @@ export function createGoogleDriveTools(api: GoogleDriveApi, authorizedFiles: Aut
         })
         return { data }
       } catch (err) {
-        return { data: `Drive error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return googleFailure(err, { tool: 'googleDriveListFiles', product: 'Drive', target: input.folderId ? `folder \`${input.folderId}\`` : undefined, discoveryTool: 'googleDriveListFiles' })
       }
     },
   })
@@ -96,7 +97,7 @@ export function createGoogleDriveTools(api: GoogleDriveApi, authorizedFiles: Aut
         const data = await api.getFile(input.fileId)
         return { data }
       } catch (err) {
-        return { data: `Drive error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return googleFailure(err, { tool: 'googleDriveGetFile', product: 'Drive', target: `file \`${input.fileId}\``, discoveryTool: 'googleDriveListFiles' })
       }
     },
   })
@@ -119,7 +120,7 @@ export function createGoogleDriveTools(api: GoogleDriveApi, authorizedFiles: Aut
         const data = await api.getFileContent(input.fileId, input.exportMimeType)
         return { data }
       } catch (err) {
-        return { data: `Drive error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return googleFailure(err, { tool: 'googleDriveGetFileContent', product: 'Drive', target: `file \`${input.fileId}\``, discoveryTool: 'googleDriveListFiles' })
       }
     },
   })
@@ -159,7 +160,7 @@ export function createGoogleDriveTools(api: GoogleDriveApi, authorizedFiles: Aut
         })
         return { data }
       } catch (err) {
-        return { data: `Drive error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return googleFailure(err, { tool: 'googleDriveCreateFile', product: 'Drive', target: input.folderId ? `folder \`${input.folderId}\`` : undefined, discoveryTool: 'googleDriveListFiles' })
       }
     },
   })
@@ -192,7 +193,7 @@ export function createGoogleDriveTools(api: GoogleDriveApi, authorizedFiles: Aut
         })
         return { data }
       } catch (err) {
-        return { data: `Drive error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return googleFailure(err, { tool: 'googleDriveUpdateFile', product: 'Drive', target: `file \`${input.fileId}\``, discoveryTool: 'googleDriveListFiles' })
       }
     },
   })

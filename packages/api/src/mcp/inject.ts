@@ -2223,6 +2223,19 @@ const NOT_CONNECTED_DISPLAY_NAME: Record<string, string> = {
 }
 
 /**
+ * The message a Google tool call sees when the grant it needs is missing at
+ * call time (the connector was disconnected between injection and execution,
+ * or the token was auto-revoked). It rides inside the tool's failure copy, so
+ * it names the product, says the connector is not connected — not that the
+ * argument was wrong — and gives the reconnect remedy. Formerly the internal
+ * id (`gcal not connected`), which the model could not map to a product.
+ */
+function googleNotConnectedForCall(connectorId: string): string {
+  const display = NOT_CONNECTED_DISPLAY_NAME[connectorId] ?? `Google (${connectorId})`
+  return `${display} is not connected for this assistant (no Google grant is stored for it), so the call could not be made. Nothing about the arguments is wrong and retrying will not help — ask the user to connect it (Studio → Connectors) and try again once they confirm.`
+}
+
+/**
  * `unavailable[]` copy for a connector that IS connected but whose stored
  * credentials no longer work. Distinct from {@link notConnectedNotice}: here
  * reconnecting genuinely is the remedy.
@@ -2325,7 +2338,12 @@ async function injectGoogleTools(
     const grant = unpackGoogleRefreshCredential(stored)
     const clientId = grant.appClientId ?? googleCfg?.clientId
     const clientSecret = grant.appClientSecret ?? googleCfg?.clientSecret
-    if (!clientId || !clientSecret) throw new Error('Google OAuth app is not configured for this grant')
+    // These three throws surface INSIDE a Google tool result (rendered by
+    // core's describeGoogleError as a plain-error frame), so each is a full
+    // sentence: what is missing, why no retry helps, and who can fix it.
+    if (!clientId || !clientSecret) {
+      throw new Error('this Google connection cannot be refreshed because the OAuth app that minted its grant is not configured on this deployment (no client id/secret for it). No retry or different argument helps — the workspace admin must reconnect Google (Studio → Connectors) under the configured app.')
+    }
     return refreshGoogleAccessToken(grant.refreshToken, clientId, clientSecret)
   }
 
@@ -2379,7 +2397,7 @@ async function injectGoogleTools(
     if (cached) return cached
     // Fallback: refresh on demand (transient prevalidation failure, or token expired mid-request)
     const refreshToken = await readRefreshToken(connectorId)
-    if (!refreshToken) throw new Error(`${connectorId} not connected`)
+    if (!refreshToken) throw new Error(googleNotConnectedForCall(connectorId))
     const token = await refreshStoredGoogleCredential(refreshToken)
     tokenCache.set(connectorId, token)
     return token
@@ -2397,7 +2415,9 @@ async function injectGoogleTools(
     const cached = tokenCache.get(cacheKey)
     if (cached) return cached
     const refreshToken = resolveInstanceCreds ? await resolveInstanceCreds(instanceId) : null
-    if (!refreshToken) throw new Error(`Google account instance ${instanceId} has no credentials`)
+    if (!refreshToken) {
+      throw new Error(`the additional Google account behind this tool (connector instance ${instanceId}) has no stored credentials — it was disconnected or its grant was never completed. Retrying will not help; the user must reconnect that account (Studio → Connectors) or use the primary account's tool of the same name.`)
+    }
     const token = await refreshStoredGoogleCredential(refreshToken)
     tokenCache.set(cacheKey, token)
     return token

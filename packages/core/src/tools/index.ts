@@ -17,6 +17,15 @@ export type {
   GoogleMapsToolName,
   GoogleMapsErrorCode,
 } from './base/google-maps.js'
+export {
+  GoogleApiError,
+  GOOGLE_ERROR_MESSAGE_CAP,
+  describeGoogleError,
+  googleFailure,
+  isGoogleApiError,
+  parseGoogleErrorBody,
+} from './base/_google-error.js'
+export type { GoogleApiProduct, GoogleApiErrorInit, GoogleFailureContext } from './base/_google-error.js'
 export { createGoogleCalendarTools } from './base/google-calendar.js'
 export type {
   GoogleCalendarApi,

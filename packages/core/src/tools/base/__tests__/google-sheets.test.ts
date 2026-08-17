@@ -3,7 +3,7 @@
  * Component tag: [COMP:tools/google-sheets].
  *
  * Verifies createGoogleSheetsTools: the seven-tool surface + flags, the
- * `Sheets error:` mapping, the authorized-file confirmation bypass, the
+ * failure-copy rendering, the authorized-file confirmation bypass, the
  * always-prompt create, the `format` refine (>=1 option required), and
  * the batchUpdate destructive-op gate — resolveConfirmation always
  * prompts on a destructive request and execute fail-closes unless
@@ -17,6 +17,7 @@ import {
   type GoogleSheetsApi,
 } from '../google-sheets.js'
 import type { AuthorizedFile } from '../google-drive.js'
+import { GoogleApiError } from '../_google-error.js'
 import type { Tool, ToolContext } from '../../types.js'
 
 const ctx: ToolContext = {
@@ -79,8 +80,12 @@ describe('[COMP:tools/google-sheets] createGoogleSheetsTools', () => {
     }
   })
 
-  it('readRange forwards the id + range and getInfo maps errors to the Sheets prefix', async () => {
-    const api = stubApi({ getSpreadsheetInfo: vi.fn().mockRejectedValue(new Error('gone')) })
+  it('readRange forwards the id + range and getInfo renders a Google failure as failure copy', async () => {
+    const api = stubApi({
+      getSpreadsheetInfo: vi.fn().mockRejectedValue(
+        new GoogleApiError({ api: 'Sheets', status: 403, message: 'The caller does not have permission', googleStatus: 'PERMISSION_DENIED' }),
+      ),
+    })
     const tools = createGoogleSheetsTools(api)
     await byName(tools, 'googleSheetsReadRange').execute(
       { spreadsheetId: 's-1', range: 'Sheet1!A1:B2' },
@@ -89,7 +94,11 @@ describe('[COMP:tools/google-sheets] createGoogleSheetsTools', () => {
     expect(api.readRange).toHaveBeenCalledWith('s-1', 'Sheet1!A1:B2')
     const res = await byName(tools, 'googleSheetsGetInfo').execute({ spreadsheetId: 's-1' }, ctx)
     expect(res.isError).toBe(true)
-    expect(res.data).toBe('Sheets error: gone')
+    // Per-item 403: names the spreadsheet, keeps the code, says it is NOT a connector-wide problem.
+    expect(res.data).toContain('Google Sheets refused `googleSheetsGetInfo` on spreadsheet `s-1`')
+    expect(res.data).toContain('Sheets API error (403)')
+    expect(res.data).toContain('not accessible')
+    expect(res.data).toContain('not a problem with the connector as a whole')
   })
 
   it('writeRange skips the prompt for an authorized spreadsheet only', async () => {
