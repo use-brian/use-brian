@@ -1577,6 +1577,8 @@ export const zh: Dictionary = {
       savingBtn: "儲存中…",
       tabTools: "工具",
       tabSettings: "設定",
+      wsOwnedEditorUnavailable:
+        "此連接器由工作區擁有。名稱、位址與登入資訊目前還無法在這裡修改，如需更改請先移除再重新新增。",
       addAnother: "+ 新增另一個帳戶",
       addAnotherAccount: "新增另一個 {name} 帳戶",
       nicknamePlaceholder: "暱稱（例如：工作、個人）",

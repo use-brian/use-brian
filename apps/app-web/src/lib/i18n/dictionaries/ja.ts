@@ -1591,6 +1591,8 @@ export const ja: Dictionary = {
       savingBtn: "保存中...",
       tabTools: "ツール",
       tabSettings: "設定",
+      wsOwnedEditorUnavailable:
+        "このコネクタはワークスペースが所有しています。名前・アドレス・サインイン情報はまだここでは変更できません。変更するには、いったん削除してから追加し直してください。",
       addAnother: "+ 別のアカウントを追加",
       addAnotherAccount: "別の {name} アカウントを追加",
       nicknamePlaceholder: "ニックネーム(例:仕事、個人)",

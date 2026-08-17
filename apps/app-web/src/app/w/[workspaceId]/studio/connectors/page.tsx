@@ -81,6 +81,7 @@ import {
   resolveConnectorAddAnotherFlow,
 } from "@/lib/connector-add-another";
 import { cn } from "@/lib/utils";
+import { configTarget, type ConfigTarget } from "@/lib/connector-config-target";
 import { GDRIVE_BYO_OAUTH_SCOPES, OFFICIAL_OAUTH_SCOPES, OFFICIAL_CONNECTOR_TOOLS, type ConnectorAuthType } from "@use-brian/shared/builtin-connectors";
 import { BUILTIN_PRIMITIVE_CONNECTOR_IDS, OFFICIAL_CONNECTORS } from "@use-brian/shared/connector-registry";
 import { useT } from "@/lib/i18n/client";
@@ -154,6 +155,7 @@ function isBuiltinPrimitive(c: { id: string; custom?: boolean }): boolean {
 
 /** Built-in connectors that have a configurable settings tab. */
 const CONFIGURABLE_CONNECTORS = new Set(["gcal", "gdrive", "cli"]);
+
 
 /** Storage bindings route Workspace Files bytes and expose no tools of their own. */
 const STORAGE_CONNECTOR_IDS = new Set(
@@ -1298,6 +1300,9 @@ function ConnectorsList() {
   const [wsEditLabel, setWsEditLabel] = useState("");
   const [wsEditSensitivity, setWsEditSensitivity] = useState<SensitivityTier>("internal");
   const [wsReconnectId, setWsReconnectId] = useState<string | null>(null);
+  // The workspace-owned instance whose Settings body is open (the owner panel
+  // uses its Settings TAB for the same body; this panel has no tab strip).
+  const [wsSettingsId, setWsSettingsId] = useState<string | null>(null);
   const [wsReconnectSecret, setWsReconnectSecret] = useState("");
   // Inline error under the workspace-owned management panel.
   const [wsManageError, setWsManageError] = useState<string | null>(null);
@@ -1544,12 +1549,12 @@ function ConnectorsList() {
     }
   }, []);
 
-  const loadConfig = useCallback(async (connectorId: string) => {
+  const loadConfig = useCallback(async (target: ConfigTarget) => {
     try {
-      const res = await authFetch(`${API_URL}/api/connectors/${connectorId}/config`);
+      const res = await authFetch(`${API_URL}/api/connectors/${target.path}/config`);
       if (res.ok) {
         const data = await res.json();
-        setConfigMap((prev) => ({ ...prev, [connectorId]: data.config ?? {} }));
+        setConfigMap((prev) => ({ ...prev, [target.key]: data.config ?? {} }));
       }
     } catch {}
   }, []);
@@ -1570,16 +1575,16 @@ function ConnectorsList() {
     } catch {}
   }, []);
 
-  async function saveConfig(connectorId: string, config: Record<string, unknown>) {
+  async function saveConfig(target: ConfigTarget, config: Record<string, unknown>) {
     try {
-      const res = await authFetch(`${API_URL}/api/connectors/${connectorId}/config`, {
+      const res = await authFetch(`${API_URL}/api/connectors/${target.path}/config`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(config),
       });
       if (res.ok) {
         const data = await res.json();
-        setConfigMap((prev) => ({ ...prev, [connectorId]: data.config ?? {} }));
+        setConfigMap((prev) => ({ ...prev, [target.key]: data.config ?? {} }));
       }
     } catch {}
   }
@@ -2248,6 +2253,321 @@ function ConnectorsList() {
     setMsGraphError(null);
     setMsGraphShowHelp(false);
     setMsGraphConnectOpts(null);
+  }
+
+
+  /**
+   * The connector-specific settings body — custom MCP, CLI, Calendar, Drive.
+   * Rendered by BOTH detail panels: the owner panel puts it behind its Settings
+   * tab, the workspace-owned panel behind its Settings disclosure. Extracted
+   * rather than copied, so an edit here cannot reach one panel and miss the
+   * other. `cfg` decides whether reads/writes go to the provider-keyed or the
+   * instance-scoped config route — see `configTarget`.
+   * Spec: docs/architecture/integrations/connector-configuration.md.
+   */
+  function connectorSettingsBody(sel: Connector, rid: string) {
+    const cfg = configTarget(sel);
+    // A workspace-owned row reaches its `connector_instance.config` through the
+    // instance-scoped pair (see `configTarget`), but the custom-MCP identity
+    // routes (`PATCH /custom/:id`, `POST /custom/:id/test`) and the CLI routes
+    // (`GET|PATCH /cli/:id`) still resolve through the user-scoped shim, so they
+    // 404 for a row whose `user_id` is NULL. Rendering those editors here would
+    // reproduce the exact failure this whole surface exists to prevent — a form
+    // that saves into the void — so they are withheld with a reason until the
+    // routes learn workspace scope. Config-only toggles below are unaffected.
+    const wsOwned = cfg.path.startsWith("instances/");
+    return (
+      <>
+    {/* Settings tab — custom connector or built-in config */}
+    {sel.custom && wsOwned && (
+      <p className="text-[11px] text-muted-foreground">{tc.wsOwnedEditorUnavailable}</p>
+    )}
+    {sel.custom && !wsOwned && (
+      <div className="space-y-3">
+        <input
+          type="text" placeholder={tc.namePlaceholder} value={editName}
+          onChange={(e) => setEditName(e.target.value)}
+          className="w-full text-sm bg-background border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+        />
+        <input
+          type="url" placeholder={tc.remoteUrlPlaceholder} value={editUrl}
+          onChange={(e) => setEditUrl(e.target.value)}
+          className="w-full text-sm bg-background border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+        />
+        <ConnectorAuthSection
+          fieldClass="w-full text-sm bg-background border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+          authType={editAuthType} onAuthType={setEditAuthType}
+          oauthId={editOauthId} onOauthId={setEditOauthId}
+          oauthSecret={editOauthSecret} onOauthSecret={setEditOauthSecret}
+          bearerToken={editBearerToken} onBearerToken={setEditBearerToken}
+          headerName={editHeaderName} onHeaderName={setEditHeaderName}
+          headerValue={editHeaderValue} onHeaderValue={setEditHeaderValue}
+          editing={editAuthType === (sel.authType ?? "none")}
+          error={editAuthError}
+        />
+        {(() => {
+          const probe = probeState[sel.id];
+          if (!probe) return null;
+          if (probe.status === "testing") {
+            return <div className="text-[11px] text-muted-foreground">{tc.testingConnection}</div>;
+          }
+          if (probe.status === "ok") {
+            return (
+              <div className="text-[11px] text-emerald-600 dark:text-emerald-400">
+                {tc.testOk.replace("{count}", String(probe.toolCount ?? 0))}
+              </div>
+            );
+          }
+          return (
+            <div className="text-[11px] text-destructive bg-destructive/10 border border-destructive/30 rounded-lg px-3 py-2">
+              {tc.testFailed.replace("{error}", probe.error ?? "")}
+            </div>
+          );
+        })()}
+        <div className="flex items-center justify-end gap-2">
+          <button
+            onClick={() => handleTestConnection(sel.id)}
+            disabled={probeState[sel.id]?.status === "testing"}
+            className="text-xs font-medium border border-border px-4 py-1.5 rounded-lg text-muted-foreground hover:bg-muted disabled:opacity-50 transition-colors"
+          >
+            {tc.testConnection}
+          </button>
+          <button
+            onClick={() => handleSaveCustom(sel.id)}
+            disabled={!editName.trim() || !editUrl.trim()}
+            className="text-xs font-medium bg-action text-action-foreground px-4 py-1.5 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
+          >
+            {tc.saveBtn}
+          </button>
+        </div>
+        {configMap[cfg.key] !== undefined && (
+          <PreflightHeadersSection
+            key={sel.id}
+            initial={readPreflightHeaders(configMap[cfg.key])}
+            onSave={(rows) => saveConfig(cfg, { preflightHeaders: rows })}
+          />
+        )}
+        {configMap[cfg.key] !== undefined && (
+          <ActorIdentityToggle
+            key={`actor-${sel.id}`}
+            initial={configMap[cfg.key]?.sendActorIdentity === true}
+            hasAuth={!!sel.authType && sel.authType !== "none"}
+            onSave={(enabled) => saveConfig(cfg, { sendActorIdentity: enabled })}
+          />
+        )}
+        {configMap[cfg.key] !== undefined && (
+          <MediaTokenToggle
+            key={`media-${sel.id}`}
+            initial={configMap[cfg.key]?.sendMediaToken === true}
+            onSave={(enabled) => saveConfig(cfg, { sendMediaToken: enabled })}
+          />
+        )}
+      </div>
+    )}
+
+    {sel.id === "cli" && wsOwned && (
+      <p className="text-[11px] text-muted-foreground">{tc.wsOwnedEditorUnavailable}</p>
+    )}
+    {sel.id === "cli" && !wsOwned && sel.connectorInstanceId && (
+      <div className="space-y-2">
+        <input type="text" placeholder={tc.cli.labelPlaceholder} value={cliLabel} onChange={(e) => setCliLabel(e.target.value)} className="w-full text-sm bg-background border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30" />
+        <input type="text" placeholder={tc.cli.pathPlaceholder} value={cliBinaryPath} onChange={(e) => setCliBinaryPath(e.target.value)} className="w-full text-sm font-mono bg-background border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30" />
+        <input type="text" placeholder={tc.cli.argsPlaceholder} value={cliArgs} onChange={(e) => setCliArgs(e.target.value)} className="w-full text-sm font-mono bg-background border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30" />
+        <input type="text" placeholder={tc.cli.cwdPlaceholder} value={cliCwd} onChange={(e) => setCliCwd(e.target.value)} className="w-full text-sm font-mono bg-background border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30" />
+        <input type="number" min={1000} max={300000} step={1000} placeholder={tc.cli.timeoutPlaceholder} value={cliTimeoutMs} onChange={(e) => setCliTimeoutMs(e.target.value)} className="w-full text-sm font-mono bg-background border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30" />
+        {cliEnvKeys.length > 0 && <p className="text-[11px] text-muted-foreground">{tc.cli.envKeys.replace("{keys}", cliEnvKeys.join(", "))}</p>}
+        <p className="text-[11px] text-muted-foreground">{tc.cli.updateNote}</p>
+        {cliError && <p className="text-xs text-destructive">{cliError}</p>}
+        <button onClick={() => handleUpdateCli(sel)} disabled={!cliLabel.trim() || !cliBinaryPath.trim() || connecting === rid} className="text-xs font-medium bg-action text-action-foreground px-3 py-1.5 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors">
+          {connecting === rid ? tc.cli.connectingBtn : tc.cli.updateBtn}
+        </button>
+      </div>
+    )}
+
+    {/* Google Calendar settings */}
+    {sel.id === "gcal" && !sel.custom && (
+      <div className="space-y-4 py-1">
+        <div className="flex items-center justify-between">
+          <div className="min-w-0 flex-1">
+            <div className="text-[13px] font-medium">{tc.gcalNotifyTitle}</div>
+            <div className="text-[11px] text-muted-foreground mt-0.5">
+              {tc.gcalNotifyDesc}
+            </div>
+          </div>
+          <div className="flex items-center bg-muted rounded-md p-0.5 shrink-0">
+            {([
+              { value: "all", label: tc.gcalNotifyAll },
+              { value: "externalOnly", label: tc.gcalNotifyExternal },
+              { value: "none", label: tc.gcalNotifyNone },
+            ] as const).map(({ value, label }) => (
+              <button
+                key={value}
+                onClick={() => saveConfig(cfg, { sendUpdates: value })}
+                className={`text-[11px] font-medium px-2.5 py-0.5 rounded transition-colors ${
+                  (configMap[cfg.key]?.sendUpdates ?? "all") === value
+                    ? "bg-background text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+    )}
+
+    {/* Google Drive settings — authorized files (Picker-managed) */}
+    {sel.id === "gdrive" && !sel.custom && (
+      sel.driveAccessMode === "full_drive_readonly" ? (
+        <div className="space-y-1 py-1">
+          <div className="text-[13px] font-medium">{tc.gdriveConnect.fullAccessTitle}</div>
+          <p className="text-[11px] leading-relaxed text-muted-foreground">{tc.gdriveConnect.fullAccessDesc}</p>
+          {sel.connectorInstanceId && (
+            <>
+              <GDriveCatalogScopePanel
+                workspaceId={workspaceId}
+                connectorInstanceId={sel.connectorInstanceId}
+              />
+              <GDriveEnrichmentImport
+                workspaceId={workspaceId}
+                connectorInstanceId={sel.connectorInstanceId}
+              />
+            </>
+          )}
+        </div>
+      ) : <GDriveAuthorizedFiles />
+    )}
+      </>
+    );
+  }
+
+  // ── Connector configuration, rendered by BOTH detail panels ──────
+  //
+  // The page draws a connector two different ways - the owner panel and the
+  // workspace-owned panel (`readonly && source === 'team_native'`, which is
+  // what an instance becomes after Transfer). Configuration belongs to the
+  // CONNECTOR, not to whoever happens to hold the instance, so anything a
+  // member needs in order to change how the connector talks to its provider
+  // has to render in both. Writing it into one panel only means Transfer
+  // silently removes it - the connector still works, but nobody can fix it
+  // when the provider-side registration changes.
+  //
+  // These two renderers exist so that guarantee survives edits: the owner
+  // panel and the workspace panel call the SAME code, so a change to the
+  // editor cannot land in one place and miss the other.
+  // See docs/architecture/integrations/connector-configuration.md.
+
+  /** The "Edit app registration" affordance. Lives in each panel's action row. */
+  function msGraphConfigButton(sel: Connector, rid: string) {
+    if (sel.id !== "msgraph" || showMsGraphForm === rid) return null;
+    return (
+      <button
+        type="button"
+        onClick={() => void openMsGraphAppEditor(sel)}
+        disabled={connecting === rid}
+        className="text-xs font-medium border border-border px-3 py-1 rounded-lg text-muted-foreground hover:text-foreground hover:border-primary/30 transition-colors disabled:opacity-50"
+      >
+        {tc.msgraph.editLink}
+      </button>
+    );
+  }
+
+  /**
+   * The Entra app-registration form. Public ids can be loaded for editing; the
+   * secret is always write-only. The registration is workspace-scoped
+   * (`connector_app_credentials`) and outlives every instance, so this must
+   * stay reachable independently of the Connect / Remove / Transfer lifecycle.
+   */
+  function msGraphConfigForm(sel: Connector, rid: string) {
+    if (sel.id !== "msgraph" || showMsGraphForm !== rid) return null;
+    return (
+      <div className="space-y-2">
+        <p className="text-xs text-muted-foreground">{tc.msgraph.formHelp}</p>
+        {msgraphStatus?.workspaceOwned && (
+          <p className="text-[11px] text-muted-foreground">
+            {tc.msgraph.workspaceCredentialNote}
+          </p>
+        )}
+        <input
+          type="text"
+          placeholder={tc.msgraph.appIdPlaceholder}
+          value={msgraphAppId}
+          onChange={(e) => setMsGraphAppId(e.target.value)}
+          autoComplete="off"
+          autoFocus
+          className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+        />
+        <input
+          type="password"
+          placeholder={tc.msgraph.appSecretPlaceholder}
+          value={msgraphAppSecret}
+          onChange={(e) => setMsGraphAppSecret(e.target.value)}
+          autoComplete="off"
+          className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+        />
+        <input
+          type="text"
+          placeholder={tc.msgraph.tenantPlaceholder}
+          value={msgraphTenantId}
+          onChange={(e) => setMsGraphTenantId(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") saveMsGraphApp(sel); }}
+          autoComplete="off"
+          className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+        />
+        <p className="text-[11px] text-muted-foreground">{tc.msgraph.tenantHelp}</p>
+        {/* Where the values come from. The admin has to register the app and
+            allow our redirect URI before any of this works, so the redirect
+            URI is shown verbatim to copy. */}
+        <button
+          onClick={() => setMsGraphShowHelp((v) => !v)}
+          className="text-[11px] text-muted-foreground underline underline-offset-2 hover:text-foreground transition-colors"
+        >
+          {tc.msgraph.helpTitle}
+        </button>
+        {msgraphShowHelp && (
+          <div className="space-y-1">
+            <p className="text-[11px] text-muted-foreground">{tc.msgraph.helpBody}</p>
+            <p className="text-[11px] text-muted-foreground">
+              {tc.msgraph.helpRedirect}
+              <span className="font-medium text-foreground break-all">
+                {typeof window === "undefined" ? "" : `${window.location.origin}/api/auth/callback/msgraph`}
+              </span>
+            </p>
+            <p className="text-[11px] text-muted-foreground">{tc.msgraph.helpScopes}</p>
+            <p className="text-[11px] text-muted-foreground">{tc.msgraph.helpConsent}</p>
+          </div>
+        )}
+        {msgraphError && <p className="text-xs text-destructive">{msgraphError}</p>}
+        <div className="flex gap-2">
+          <button
+            onClick={closeMsGraphForm}
+            className="text-xs font-medium border border-border px-3 py-1 rounded-lg text-muted-foreground hover:bg-muted transition-colors"
+          >
+            {tc.cancel}
+          </button>
+          <button
+            onClick={() => saveMsGraphApp(sel)}
+            disabled={!msgraphAppId.trim() || !msgraphAppSecret.trim() || connecting === rid}
+            className="text-xs font-medium bg-action text-action-foreground px-3 py-1 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
+          >
+            {connecting === rid ? tc.msgraph.connectingBtn : tc.msgraph.connectBtn}
+          </button>
+        </div>
+        {/* Only offered once a workspace row exists: removing falls the
+            workspace back to deployment config, and live connections are
+            unaffected (their app pair rides in the grant envelope, not in
+            this row). */}
+        {msgraphStatus?.workspaceOwned && (
+          <button
+            onClick={removeMsGraphApp}
+            className="text-[11px] text-muted-foreground underline underline-offset-2 hover:text-foreground transition-colors"
+          >
+            {tc.msgraph.removeLink}
+          </button>
+        )}
+      </div>
+    );
   }
 
   async function startShopifyByoConnect(c: Connector) {
@@ -3428,6 +3748,12 @@ function ConnectorsList() {
                     >
                       {tc.editDetailsBtn}
                     </button>
+                    {/* Provider configuration survives the Transfer. The
+                        registration this edits belongs to the WORKSPACE, so
+                        handing the instance to the workspace must not be what
+                        takes the editor away. Same renderer the owner panel
+                        uses - see the note beside its definition. */}
+                    {msGraphConfigButton(sel, rid)}
                     <button
                       type="button"
                       onClick={() => handleRemoveWorkspaceConnector(sel)}
@@ -3438,6 +3764,35 @@ function ConnectorsList() {
                         : tc.removeBtn}
                     </button>
                   </div>
+
+                  {msGraphConfigForm(sel, rid)}
+
+                  {/* Settings — the same body the owner panel renders behind
+                      its Settings tab. Transfer changes who owns the
+                      connector, not whether it can be configured. Reads and
+                      writes route through `configTarget`, which sends a
+                      workspace-owned row to the instance-scoped config pair. */}
+                  {(sel.custom || CONFIGURABLE_CONNECTORS.has(sel.id)) && (
+                    <div className="space-y-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const opening = wsSettingsId !== iid;
+                          setWsSettingsId(opening ? iid : null);
+                          if (!opening) return;
+                          if (sel.id === "cli") void loadCliConfig(iid);
+                          else {
+                            const cfg = configTarget(sel);
+                            if (!configMap[cfg.key]) void loadConfig(cfg);
+                          }
+                        }}
+                        className="text-xs font-medium border border-border px-3 py-1 rounded-lg text-muted-foreground hover:text-foreground hover:border-primary/30 transition-colors"
+                      >
+                        {tc.tabSettings}
+                      </button>
+                      {wsSettingsId === iid && connectorSettingsBody(sel, rid)}
+                    </div>
+                  )}
 
                   {isOauth && (
                     <div className="space-y-2">
@@ -3837,17 +4192,9 @@ function ConnectorsList() {
                       already have a connected primary. Shown once, on the primary row. */}
                   {/* Workspace Entra credentials outlive connector instances,
                       so their editor must remain reachable independently of the
-                      Connect/Remove lifecycle. */}
-                  {sel.id === "msgraph" && showMsGraphForm !== rid && (
-                    <button
-                      type="button"
-                      onClick={() => void openMsGraphAppEditor(sel)}
-                      disabled={connecting === rid}
-                      className="text-xs font-medium border border-border px-3 py-1 rounded-lg text-muted-foreground hover:text-foreground hover:border-primary/30 transition-colors disabled:opacity-50"
-                    >
-                      {tc.msgraph.editLink}
-                    </button>
-                  )}
+                      Connect/Remove/Transfer lifecycle — which is why this is a
+                      shared renderer the workspace-owned panel calls too. */}
+                  {msGraphConfigButton(sel, rid)}
                   {sel.connected && sel.addable && sel.isPrimary && (
                     <button
                       onClick={() => handleAddAnother(sel)}
@@ -4085,95 +4432,9 @@ function ConnectorsList() {
                   </div>
                 )}
 
-                {/* Microsoft Teams workspace app registration. Public ids can
-                    be loaded for editing; the secret is always write-only. */}
-                {showMsGraphForm === rid && (
-                  <div className="space-y-2">
-                    <p className="text-xs text-muted-foreground">{tc.msgraph.formHelp}</p>
-                    {msgraphStatus?.workspaceOwned && (
-                      <p className="text-[11px] text-muted-foreground">
-                        {tc.msgraph.workspaceCredentialNote}
-                      </p>
-                    )}
-                    <input
-                      type="text"
-                      placeholder={tc.msgraph.appIdPlaceholder}
-                      value={msgraphAppId}
-                      onChange={(e) => setMsGraphAppId(e.target.value)}
-                      autoComplete="off"
-                      autoFocus
-                      className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
-                    />
-                    <input
-                      type="password"
-                      placeholder={tc.msgraph.appSecretPlaceholder}
-                      value={msgraphAppSecret}
-                      onChange={(e) => setMsGraphAppSecret(e.target.value)}
-                      autoComplete="off"
-                      className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
-                    />
-                    <input
-                      type="text"
-                      placeholder={tc.msgraph.tenantPlaceholder}
-                      value={msgraphTenantId}
-                      onChange={(e) => setMsGraphTenantId(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === "Enter") saveMsGraphApp(sel); }}
-                      autoComplete="off"
-                      className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
-                    />
-                    <p className="text-[11px] text-muted-foreground">{tc.msgraph.tenantHelp}</p>
-                    {/* Where the values come from. The admin has to register the
-                        app and allow our redirect URI before any of this works,
-                        so the redirect URI is shown verbatim to copy. */}
-                    <button
-                      onClick={() => setMsGraphShowHelp((v) => !v)}
-                      className="text-[11px] text-muted-foreground underline underline-offset-2 hover:text-foreground transition-colors"
-                    >
-                      {tc.msgraph.helpTitle}
-                    </button>
-                    {msgraphShowHelp && (
-                      <div className="space-y-1">
-                        <p className="text-[11px] text-muted-foreground">{tc.msgraph.helpBody}</p>
-                        <p className="text-[11px] text-muted-foreground">
-                          {tc.msgraph.helpRedirect}
-                          <span className="font-medium text-foreground break-all">
-                            {typeof window === "undefined" ? "" : `${window.location.origin}/api/auth/callback/msgraph`}
-                          </span>
-                        </p>
-                        <p className="text-[11px] text-muted-foreground">{tc.msgraph.helpScopes}</p>
-                        <p className="text-[11px] text-muted-foreground">{tc.msgraph.helpConsent}</p>
-                      </div>
-                    )}
-                    {msgraphError && <p className="text-xs text-destructive">{msgraphError}</p>}
-                    <div className="flex gap-2">
-                      <button
-                        onClick={closeMsGraphForm}
-                        className="text-xs font-medium border border-border px-3 py-1 rounded-lg text-muted-foreground hover:bg-muted transition-colors"
-                      >
-                        {tc.cancel}
-                      </button>
-                      <button
-                        onClick={() => saveMsGraphApp(sel)}
-                        disabled={!msgraphAppId.trim() || !msgraphAppSecret.trim() || connecting === rid}
-                        className="text-xs font-medium bg-action text-action-foreground px-3 py-1 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
-                      >
-                        {connecting === rid ? tc.msgraph.connectingBtn : tc.msgraph.connectBtn}
-                      </button>
-                    </div>
-                    {/* Only offered once a workspace row exists: removing falls
-                        the workspace back to deployment config, and live
-                        connections are unaffected (their app pair rides in the
-                        grant envelope, not in this row). */}
-                    {msgraphStatus?.workspaceOwned && (
-                      <button
-                        onClick={removeMsGraphApp}
-                        className="text-[11px] text-muted-foreground underline underline-offset-2 hover:text-foreground transition-colors"
-                      >
-                        {tc.msgraph.removeLink}
-                      </button>
-                    )}
-                  </div>
-                )}
+                {/* Entra app registration - shared with the workspace-owned
+                    panel so a transferred connector stays configurable. */}
+                {msGraphConfigForm(sel, rid)}
                 {showShopifyForm === rid && (
                   <div className="space-y-2">
                     <p className="text-xs text-muted-foreground">{tc.shopify.formHelp}</p>
@@ -4771,7 +5032,10 @@ function ConnectorsList() {
                           onClick={() => {
                             setExpandTab("settings");
                             if (sel.id === "cli" && sel.connectorInstanceId) void loadCliConfig(sel.connectorInstanceId);
-                            else if ((CONFIGURABLE_CONNECTORS.has(sel.id) || sel.custom) && !configMap[sel.id]) loadConfig(sel.id);
+                            else if (CONFIGURABLE_CONNECTORS.has(sel.id) || sel.custom) {
+                              const cfg = configTarget(sel);
+                              if (!configMap[cfg.key]) void loadConfig(cfg);
+                            }
                           }}
                           className={`text-xs font-medium px-3 py-1.5 border-b-2 transition-colors ${expandTab === "settings" ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"}`}
                         >
@@ -4801,160 +5065,7 @@ function ConnectorsList() {
                       );
                     })()}
 
-                    {/* Settings tab — custom connector or built-in config */}
-                    {expandTab === "settings" && sel.custom && (
-                      <div className="space-y-3">
-                        <input
-                          type="text" placeholder={tc.namePlaceholder} value={editName}
-                          onChange={(e) => setEditName(e.target.value)}
-                          className="w-full text-sm bg-background border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
-                        />
-                        <input
-                          type="url" placeholder={tc.remoteUrlPlaceholder} value={editUrl}
-                          onChange={(e) => setEditUrl(e.target.value)}
-                          className="w-full text-sm bg-background border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
-                        />
-                        <ConnectorAuthSection
-                          fieldClass="w-full text-sm bg-background border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
-                          authType={editAuthType} onAuthType={setEditAuthType}
-                          oauthId={editOauthId} onOauthId={setEditOauthId}
-                          oauthSecret={editOauthSecret} onOauthSecret={setEditOauthSecret}
-                          bearerToken={editBearerToken} onBearerToken={setEditBearerToken}
-                          headerName={editHeaderName} onHeaderName={setEditHeaderName}
-                          headerValue={editHeaderValue} onHeaderValue={setEditHeaderValue}
-                          editing={editAuthType === (sel.authType ?? "none")}
-                          error={editAuthError}
-                        />
-                        {(() => {
-                          const probe = probeState[sel.id];
-                          if (!probe) return null;
-                          if (probe.status === "testing") {
-                            return <div className="text-[11px] text-muted-foreground">{tc.testingConnection}</div>;
-                          }
-                          if (probe.status === "ok") {
-                            return (
-                              <div className="text-[11px] text-emerald-600 dark:text-emerald-400">
-                                {tc.testOk.replace("{count}", String(probe.toolCount ?? 0))}
-                              </div>
-                            );
-                          }
-                          return (
-                            <div className="text-[11px] text-destructive bg-destructive/10 border border-destructive/30 rounded-lg px-3 py-2">
-                              {tc.testFailed.replace("{error}", probe.error ?? "")}
-                            </div>
-                          );
-                        })()}
-                        <div className="flex items-center justify-end gap-2">
-                          <button
-                            onClick={() => handleTestConnection(sel.id)}
-                            disabled={probeState[sel.id]?.status === "testing"}
-                            className="text-xs font-medium border border-border px-4 py-1.5 rounded-lg text-muted-foreground hover:bg-muted disabled:opacity-50 transition-colors"
-                          >
-                            {tc.testConnection}
-                          </button>
-                          <button
-                            onClick={() => handleSaveCustom(sel.id)}
-                            disabled={!editName.trim() || !editUrl.trim()}
-                            className="text-xs font-medium bg-action text-action-foreground px-4 py-1.5 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
-                          >
-                            {tc.saveBtn}
-                          </button>
-                        </div>
-                        {configMap[sel.id] !== undefined && (
-                          <PreflightHeadersSection
-                            key={sel.id}
-                            initial={readPreflightHeaders(configMap[sel.id])}
-                            onSave={(rows) => saveConfig(sel.id, { preflightHeaders: rows })}
-                          />
-                        )}
-                        {configMap[sel.id] !== undefined && (
-                          <ActorIdentityToggle
-                            key={`actor-${sel.id}`}
-                            initial={configMap[sel.id]?.sendActorIdentity === true}
-                            hasAuth={!!sel.authType && sel.authType !== "none"}
-                            onSave={(enabled) => saveConfig(sel.id, { sendActorIdentity: enabled })}
-                          />
-                        )}
-                        {configMap[sel.id] !== undefined && (
-                          <MediaTokenToggle
-                            key={`media-${sel.id}`}
-                            initial={configMap[sel.id]?.sendMediaToken === true}
-                            onSave={(enabled) => saveConfig(sel.id, { sendMediaToken: enabled })}
-                          />
-                        )}
-                      </div>
-                    )}
-
-                    {expandTab === "settings" && sel.id === "cli" && sel.connectorInstanceId && (
-                      <div className="space-y-2">
-                        <input type="text" placeholder={tc.cli.labelPlaceholder} value={cliLabel} onChange={(e) => setCliLabel(e.target.value)} className="w-full text-sm bg-background border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30" />
-                        <input type="text" placeholder={tc.cli.pathPlaceholder} value={cliBinaryPath} onChange={(e) => setCliBinaryPath(e.target.value)} className="w-full text-sm font-mono bg-background border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30" />
-                        <input type="text" placeholder={tc.cli.argsPlaceholder} value={cliArgs} onChange={(e) => setCliArgs(e.target.value)} className="w-full text-sm font-mono bg-background border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30" />
-                        <input type="text" placeholder={tc.cli.cwdPlaceholder} value={cliCwd} onChange={(e) => setCliCwd(e.target.value)} className="w-full text-sm font-mono bg-background border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30" />
-                        <input type="number" min={1000} max={300000} step={1000} placeholder={tc.cli.timeoutPlaceholder} value={cliTimeoutMs} onChange={(e) => setCliTimeoutMs(e.target.value)} className="w-full text-sm font-mono bg-background border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30" />
-                        {cliEnvKeys.length > 0 && <p className="text-[11px] text-muted-foreground">{tc.cli.envKeys.replace("{keys}", cliEnvKeys.join(", "))}</p>}
-                        <p className="text-[11px] text-muted-foreground">{tc.cli.updateNote}</p>
-                        {cliError && <p className="text-xs text-destructive">{cliError}</p>}
-                        <button onClick={() => handleUpdateCli(sel)} disabled={!cliLabel.trim() || !cliBinaryPath.trim() || connecting === rid} className="text-xs font-medium bg-action text-action-foreground px-3 py-1.5 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors">
-                          {connecting === rid ? tc.cli.connectingBtn : tc.cli.updateBtn}
-                        </button>
-                      </div>
-                    )}
-
-                    {/* Google Calendar settings */}
-                    {expandTab === "settings" && sel.id === "gcal" && !sel.custom && (
-                      <div className="space-y-4 py-1">
-                        <div className="flex items-center justify-between">
-                          <div className="min-w-0 flex-1">
-                            <div className="text-[13px] font-medium">{tc.gcalNotifyTitle}</div>
-                            <div className="text-[11px] text-muted-foreground mt-0.5">
-                              {tc.gcalNotifyDesc}
-                            </div>
-                          </div>
-                          <div className="flex items-center bg-muted rounded-md p-0.5 shrink-0">
-                            {([
-                              { value: "all", label: tc.gcalNotifyAll },
-                              { value: "externalOnly", label: tc.gcalNotifyExternal },
-                              { value: "none", label: tc.gcalNotifyNone },
-                            ] as const).map(({ value, label }) => (
-                              <button
-                                key={value}
-                                onClick={() => saveConfig("gcal", { sendUpdates: value })}
-                                className={`text-[11px] font-medium px-2.5 py-0.5 rounded transition-colors ${
-                                  (configMap.gcal?.sendUpdates ?? "all") === value
-                                    ? "bg-background text-foreground shadow-sm"
-                                    : "text-muted-foreground hover:text-foreground"
-                                }`}
-                              >
-                                {label}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Google Drive settings — authorized files (Picker-managed) */}
-                    {expandTab === "settings" && sel.id === "gdrive" && !sel.custom && (
-                      sel.driveAccessMode === "full_drive_readonly" ? (
-                        <div className="space-y-1 py-1">
-                          <div className="text-[13px] font-medium">{tc.gdriveConnect.fullAccessTitle}</div>
-                          <p className="text-[11px] leading-relaxed text-muted-foreground">{tc.gdriveConnect.fullAccessDesc}</p>
-                          {sel.connectorInstanceId && (
-                            <>
-                              <GDriveCatalogScopePanel
-                                workspaceId={workspaceId}
-                                connectorInstanceId={sel.connectorInstanceId}
-                              />
-                              <GDriveEnrichmentImport
-                                workspaceId={workspaceId}
-                                connectorInstanceId={sel.connectorInstanceId}
-                              />
-                            </>
-                          )}
-                        </div>
-                      ) : <GDriveAuthorizedFiles />
-                    )}
+                    {expandTab === "settings" && connectorSettingsBody(sel, rid)}
                   </>
                 )}
               </div>
