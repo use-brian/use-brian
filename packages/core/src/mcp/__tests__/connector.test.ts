@@ -117,6 +117,42 @@ describe('[COMP:mcp/connector] wrapMcpTools', () => {
     expect(callMcpTool).not.toHaveBeenCalled()
   })
 
+  it('applies the strictest app-level and assistant-level policy', async () => {
+    const settingsStore: McpSettingsStore = {
+      async getPolicy(params) {
+        if (params.assistantId !== 'app-level') return null
+        return {
+          id: 'set-app',
+          assistantId: params.assistantId,
+          userId: params.userId,
+          serverName: params.serverName,
+          toolName: params.toolName,
+          policy: 'block',
+          classification: 'read',
+          timesAllowed: 0,
+          timesDenied: 0,
+        }
+      },
+      async setPolicy() {},
+      async recordUsage() {},
+      async recordUsageAndGetCount() { return { timesAllowed: 0, timesDenied: 0 } },
+    }
+    const callMcpTool = vi.fn(async () => ({}))
+    const [tool] = wrapMcpTools({
+      server: readToolServer,
+      settingsStore,
+      assistantId: 'a1',
+      appLevelAssistantId: 'app-level',
+      userId: 'u1',
+      callMcpTool,
+    })
+
+    expect(await tool.resolveConfirmation?.(ctx, {})).toBe(false)
+    const result = await tool.execute({ query: 'foo' }, ctx)
+    expect(result.isError).toBe(true)
+    expect(callMcpTool).not.toHaveBeenCalled()
+  })
+
   it('surfaces MCP client errors as tool errors', async () => {
     const [tool] = wrapMcpTools({
       server: readToolServer,

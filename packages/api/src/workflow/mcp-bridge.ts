@@ -18,7 +18,7 @@
  * [COMP:workflow/mcp-bridge]
  */
 
-import type { Tool, KnowledgeStoreInterface, KnowledgeRepoWriter, GDriveFilesStore, McpSettingsStore, FilesApi } from '@use-brian/core'
+import type { Tool, KnowledgeStoreInterface, KnowledgeRepoWriter, GDriveFilesStore, McpSettingsStore, FilesApi, EngineHooks } from '@use-brian/core'
 import { injectMcpTools } from '../mcp/inject.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
@@ -47,6 +47,28 @@ export type WorkflowToolRegistryDeps = {
   /** Workspace-files byte layer — `gmailSendMessage` attachments on workflow
    *  `tool_call` steps (`docs/architecture/integrations/gmail.md`). */
   filesApi?: FilesApi
+  engineHooks?: EngineHooks
+  assistantConnectorGrantsStore?: import('../db/assistant-connector-grants-store.js').AssistantConnectorGrantsStore
+}
+
+const FORBIDDEN_WORKFLOW_REGISTRY_TOOLS = [
+  'askAssistant',
+  'listConnectedAssistants',
+  'spawnWorker',
+  'sendWorkerMessage',
+  'stopWorker',
+  'proposeWorkflow',
+  'createWorkflow',
+  'updateWorkflow',
+  'runWorkflow',
+  'scheduleWorkflow',
+  'createScheduledJob',
+  'updateScheduledJob',
+  'deleteScheduledJob',
+] as const
+
+function stripOrchestrationTools(tools: Map<string, Tool>): void {
+  for (const name of FORBIDDEN_WORKFLOW_REGISTRY_TOOLS) tools.delete(name)
 }
 
 /**
@@ -78,6 +100,7 @@ export async function buildWorkflowToolRegistry(
     // keyed by user). Skip MCP entirely; first-party tools still work.
     // Phase B's scheduled trigger always passes the workflow.created_by
     // here so this branch is a defensive no-op.
+    stripOrchestrationTools(tools)
     return tools
   }
 
@@ -89,11 +112,14 @@ export async function buildWorkflowToolRegistry(
   // ability to inspect each built-in's `requiresConfirmation` and route
   // ask-policy pauses through the `kind='workflow_step'` unified-approvals
   // surface + per-step permission grants. Routing built-ins through
-  // `mcp_call` would hide those flags from the executor. Custom MCP
-  // still goes through `mcp_search` / `mcp_call` here for the token
-  // win. See docs/architecture/integrations/mcp.md → "Tool search
-  // pattern" and docs/architecture/features/workflow.md → "Unified
-  // approvals".
+  // `mcp_call` would hide those flags from the executor.
+  //
+  // `keepDynamicToolsDirect: true` adds server-side registry adapters for
+  // custom HTTP/CLI tools. A deterministic tool_call cannot perform a model
+  // search/call sequence, and the adapter keeps policy + hooks intact while
+  // exposing the metadata the workflow approval gate needs. See
+  // docs/architecture/integrations/mcp.md → "Tool search pattern" and
+  // docs/architecture/features/workflow.md → "Unified approvals".
   await injectMcpTools({
     userId: scope.userId,
     assistantId: scope.assistantId,
@@ -109,6 +135,7 @@ export async function buildWorkflowToolRegistry(
     workspaceToolPolicyStore: deps.workspaceToolPolicyStore,
     assistantTeamId: scope.workspaceId,
     keepBuiltinsDirect: true,
+    keepDynamicToolsDirect: true,
     // KB writes ARE exposed here, and are governed by the executor's own
     // approval pause rather than a chat Approve/Deny card. Both write tools
     // carry `requiresConfirmation: true`, and `keepBuiltinsDirect` (above) is
@@ -130,7 +157,10 @@ export async function buildWorkflowToolRegistry(
     allowKnowledgeWrites: true,
     knowledgeRepoWriter: deps.knowledgeRepoWriter,
     filesApi: deps.filesApi,
+    engineHooks: deps.engineHooks,
+    assistantConnectorGrantsStore: deps.assistantConnectorGrantsStore,
   })
 
+  stripOrchestrationTools(tools)
   return tools
 }
