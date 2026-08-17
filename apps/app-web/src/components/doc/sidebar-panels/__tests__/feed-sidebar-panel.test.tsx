@@ -124,14 +124,15 @@ describe("[COMP:app-web/sidebar-panel-feed] FeedSidebarPanel", () => {
     expect(html).not.toContain('href="/w/ws-1/feed/twitter/insights"');
   });
 
-  it("keeps Company and Platform but hides the hosted group in OSS", () => {
+  it("keeps the managed Settings entry reachable in OSS", () => {
     const previous = process.env.NEXT_PUBLIC_USEBRIAN_EDITION;
     try {
       process.env.NEXT_PUBLIC_USEBRIAN_EDITION = "oss";
-      const html = render([], "/w/ws-1/feed");
+      const html = render([], "/w/ws-1/feed/threads/voice");
       expect(html).toContain(en.feedPage.groups.company);
       expect(html).toContain(en.feedPage.groups.platform);
       expect(html).toContain(en.feedPage.groups.drafts);
+      expect(html).toContain('href="/w/ws-1/feed/threads/settings"');
       expect(html).not.toContain('href="/w/ws-1/feed/instagram/settings"');
       expect(html).not.toContain(en.feedPage.groups.platforms);
     } finally {

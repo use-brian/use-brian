@@ -1,15 +1,11 @@
 /**
- * Provider-backed Feed pages are part of the hosted platform integration.
- * Route groups do not affect the public URL, so the existing deep links stay
- * stable while OSS receives a hard 404 for hand-entered integration routes.
+ * Provider-backed Feed pages render in both editions. OSS calls are gated by
+ * verified paid Cloud Link capabilities at the API boundary; keeping this
+ * route group avoids breaking existing deep links.
  */
-
-import { notFound } from "next/navigation";
-import { isOssEdition } from "@/lib/edition";
 
 export default function HostedFeedPlatformLayout(props: {
   children: React.ReactNode;
 }) {
-  if (isOssEdition()) notFound();
   return props.children;
 }

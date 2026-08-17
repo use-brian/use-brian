@@ -242,6 +242,30 @@ describe("[COMP:app-web/chat-confirmation-card] ChatConfirmationCard", () => {
     expect(host!.textContent).toContain("Change: correct the maker fee");
   });
 
+  it("renders Brain entry field diffs with Apply and Keep editing actions", () => {
+    renderCard(
+      confirmation({
+        toolName: "updateBrainEntry",
+        displayName: "Edit with assistant",
+        input: { primitive: "memory", rowId: "m-1" },
+        displayLines: [
+          "Entry: Application essay draft",
+          "@@ detail",
+          "- Third-year student.",
+          "+ Recent graduate.",
+        ],
+      }),
+    );
+    expect(host!.querySelector("pre")?.textContent).toContain(
+      "+ Recent graduate.",
+    );
+    const labels = Array.from(host!.querySelectorAll("button")).map(
+      (button) => button.textContent,
+    );
+    expect(labels).toContain("Apply changes");
+    expect(labels).toContain("Keep editing");
+  });
+
   it("keeps plain-list rendering for other tools even when a line looks diff-shaped", () => {
     renderCard(
       confirmation({

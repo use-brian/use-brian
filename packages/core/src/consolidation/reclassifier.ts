@@ -39,6 +39,7 @@ import type {
 } from '../entities/types.js'
 import type { MemoryRecord, MemoryStore } from '../memory/types.js'
 import type { LLMProvider } from '../providers/types.js'
+import type { TokenUsage } from '../providers/types.js'
 import type { Sensitivity } from '../security/sensitivity.js'
 import type { TaskStore } from '../tasks/types.js'
 import { collectStream } from '../providers/accumulator.js'
@@ -143,6 +144,7 @@ export interface ReclassificationDeps {
   /** LLM. */
   provider: LLMProvider
   model: string
+  onUsage?: (model: string, usage: TokenUsage) => void | Promise<void>
 }
 
 export interface ReclassificationResult {
@@ -198,7 +200,9 @@ export async function runReclassification(
 
   let raw: string
   try {
-    raw = await callLLM(deps.provider, deps.model, prompt)
+    const response = await callLLM(deps.provider, deps.model, prompt)
+    raw = response.text
+    if (response.usage) await deps.onUsage?.(response.model, response.usage)
   } catch (err) {
     console.warn(
       `[reclassifier] LLM call failed for workspace ${deps.workspaceId}: ${
@@ -485,7 +489,7 @@ async function callLLM(
   provider: LLMProvider,
   model: string,
   prompt: string,
-): Promise<string> {
+): Promise<{ text: string; model: string; usage: TokenUsage | null }> {
   const response = await collectStream(
     provider.stream({
       model,
@@ -495,10 +499,14 @@ async function callLLM(
       maxTokens: 4_000,
     }),
   )
-  return response.content
-    .filter((b) => b.type === 'text')
-    .map((b) => (b.type === 'text' ? b.text : ''))
-    .join('')
+  return {
+    text: response.content
+      .filter((b) => b.type === 'text')
+      .map((b) => (b.type === 'text' ? b.text : ''))
+      .join(''),
+    model: response.model || model,
+    usage: response.usage,
+  }
 }
 
 function parseDecisions(raw: string): ReclassificationDecision[] | null {

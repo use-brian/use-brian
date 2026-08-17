@@ -1,5 +1,6 @@
 /** Firefox popup with the same layout/actions as the Chromium popup. */
 import { buildLine, buildWarning } from './popup-status.js'
+import { PREAPPROVE_TAB_CONTROL_KEY } from './consent-preapproval.js'
 
 const ext = (globalThis as unknown as { browser: typeof chrome }).browser
 
@@ -34,6 +35,7 @@ const tokenInput = el<HTMLInputElement>('pairing-token')
 const grantRow = el<HTMLDivElement>('grant-row')
 const buildWarningBox = el<HTMLDivElement>('build-warning')
 const buildLineBox = el<HTMLParagraphElement>('build-line')
+const preapproveInput = el<HTMLInputElement>('preapprove-tab-control')
 
 function statusLine(status: Status): string {
   if (status.hasControl === false) {
@@ -62,9 +64,29 @@ async function refreshStatus(): Promise<void> {
 }
 
 async function loadStored(): Promise<void> {
-  const stored = await ext.storage.local.get(['relayUrl'])
+  const stored = await ext.storage.local.get(['relayUrl', PREAPPROVE_TAB_CONTROL_KEY])
   if (typeof stored.relayUrl === 'string') relayUrlInput.value = stored.relayUrl
+  preapproveInput.checked = stored[PREAPPROVE_TAB_CONTROL_KEY] === true
 }
+
+preapproveInput.addEventListener('change', () => {
+  const enabled = preapproveInput.checked
+  preapproveInput.disabled = true
+  void (async () => {
+    try {
+      await ext.storage.local.set({ [PREAPPROVE_TAB_CONTROL_KEY]: enabled })
+      await ext.runtime.sendMessage({
+        type: 'consent-preapproval-changed',
+        preapproveEnabled: enabled,
+      })
+    } catch {
+      await ext.storage.local.set({ [PREAPPROVE_TAB_CONTROL_KEY]: !enabled }).catch(() => undefined)
+      preapproveInput.checked = !enabled
+    } finally {
+      preapproveInput.disabled = false
+    }
+  })()
+})
 
 el<HTMLButtonElement>('grant').addEventListener('click', () => {
   void ext.runtime

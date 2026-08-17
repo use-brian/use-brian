@@ -58,6 +58,8 @@ import {
   recorderStateMessage,
 } from "./recorder-broadcast";
 import { desktopBridge } from "@/lib/desktop-auth-source";
+import type { LiveRecordingPage } from "@/lib/api/recordings";
+import type { LiveWindow } from "@/lib/recordings/use-live-recording-page";
 
 /**
  * Ask the browser to protect this origin's storage from eviction — the
@@ -265,6 +267,9 @@ export type DockRecorderApi = {
   includeComputerAudio: boolean;
   /** Changes the next-capture source choice; ignored while recording. */
   setIncludeComputerAudio: (include: boolean) => void;
+  /** Opt-in live page path for the next capture. */
+  livePageEnabled: boolean;
+  setLivePageEnabled: (enabled: boolean) => void;
   /** Visible trust signal for desktop remote-call capture. */
   includesSystemAudio: () => boolean;
   recovery: SpoolSessionMeta[];
@@ -283,9 +288,13 @@ export function useDockRecorder(opts: {
   /** Session id accessor for the voice-clip cache upload (best-effort). */
   getSessionId?: () => string | undefined;
   /** Long-lane hand-off: the recording ingestion flow (`useRecordingUpload.run`). */
-  onMeetingCapture: (file: File) => Promise<unknown>;
+  onMeetingCapture: (file: File, livePageId?: string) => Promise<unknown>;
+  /** Pre-flight confirm + destination creation; null means the user cancelled. */
+  prepareLivePage?: () => Promise<LiveRecordingPage | null>;
+  /** Sequential provisional-window upload. */
+  streamLiveWindow?: (window: LiveWindow) => Promise<void>;
 }): DockRecorderApi {
-  const { enabled, workspaceId, assistantId, captureNamePrefix, sendVoiceClip, getSessionId, onMeetingCapture } =
+  const { enabled, workspaceId, assistantId, captureNamePrefix, sendVoiceClip, getSessionId, onMeetingCapture, prepareLivePage, streamLiveWindow } =
     opts;
   const [phase, setPhase] = useState<RecorderPhase>(IDLE);
   const [notice, setNotice] = useState<RecorderNotice | null>(null);
@@ -297,9 +306,14 @@ export function useDockRecorder(opts: {
   const [computerAudioAvailable, setComputerAudioAvailable] = useState(false);
   const [includeComputerAudio, setIncludeComputerAudioState] = useState(true);
   const includeComputerAudioRef = useRef(true);
+  const [livePageEnabled, setLivePageEnabledState] = useState(false);
+  const livePageEnabledRef = useRef(false);
+  const livePageRef = useRef<LiveRecordingPage | null>(null);
 
   const phaseRef = useRef<RecorderPhase>(IDLE);
   const engineRef = useRef<RecorderEngine | null>(null);
+  /** Invalidates an async permission/pre-flight arm that was cancelled or superseded. */
+  const armAttemptRef = useRef(0);
   const pressStartedAtRef = useRef(0);
   /** Set by the auto-stop guards: the next stop goes straight to the spool, no hand-off. */
   const skipHandOffRef = useRef(false);
@@ -387,8 +401,9 @@ export function useDockRecorder(opts: {
    * (voice turn sent / recording queued) releases it.
    */
   const handOff = useCallback(
-    async (blob: Blob, mime: string, durationMs: number): Promise<boolean> => {
-      const lane: CaptureLane = stopLane(durationMs);
+    async (blob: Blob, mime: string, durationMs: number, recoveredLivePageId?: string): Promise<boolean> => {
+      const livePageId = recoveredLivePageId ?? livePageRef.current?.pageId;
+      const lane: CaptureLane = livePageId && durationMs >= 2_000 ? "recording" : stopLane(durationMs);
       if (lane === "discard") return true;
       const name = captureFileName(captureNamePrefix, new Date(), mime);
       if (lane === "voice") {
@@ -404,7 +419,7 @@ export function useDockRecorder(opts: {
       // BOTH cancel and failure — either way the audio must survive, and the
       // "kept" notice tells the user so (the generic failure copy would read
       // as "your recording might be lost").
-      const queued = await onMeetingCapture(file);
+      const queued = await onMeetingCapture(file, livePageId);
       if (!queued) setNotice("kept");
       return Boolean(queued);
     },
@@ -417,8 +432,21 @@ export function useDockRecorder(opts: {
       switch (effect) {
         case "start-capture":
           void (async () => {
+            const attempt = ++armAttemptRef.current;
             try {
-              engineRef.current = await createRecorderEngine({
+              let livePage: LiveRecordingPage | null = null;
+              if (livePageEnabledRef.current) {
+                livePage = livePageRef.current ?? (await prepareLivePage?.()) ?? null;
+                if (!livePage) {
+                  dispatchRef.current({ type: "arm-failed" });
+                  return;
+                }
+                livePageRef.current = livePage;
+              }
+              // The user may slide away while the destination modal or API is
+              // open. Never proceed to microphone access for a cancelled arm.
+              if (attempt !== armAttemptRef.current || phaseRef.current.kind !== "arming") return;
+              const armedEngine = await createRecorderEngine({
                 // New macOS/Windows shells advertise this capability, but
                 // the device-local split-button choice owns whether THIS
                 // capture uses it. OFF bypasses getDisplayMedia completely.
@@ -427,6 +455,9 @@ export function useDockRecorder(opts: {
                   desktopBridge()?.systemAudioCapture,
                   includeComputerAudioRef.current,
                 ),
+                ...(livePage && streamLiveWindow
+                  ? { onLiveWindow: streamLiveWindow }
+                  : {}),
                 // The capture died underneath us (mic unplugged / input
                 // switched / system stream ended / recorder error). Finalize
                 // instead of ticking a zombie clock: a latched meeting stops-
@@ -441,6 +472,14 @@ export function useDockRecorder(opts: {
                   }
                 },
               });
+              // Likewise, permission may resolve after a cancel or a newer
+              // capture started. Release the stale stream instead of leaving a
+              // recorder running with no state-machine owner.
+              if (attempt !== armAttemptRef.current || phaseRef.current.kind !== "arming") {
+                armedEngine.cancel();
+                return;
+              }
+              engineRef.current = armedEngine;
               dispatchRef.current({ type: "armed" });
             } catch (err) {
               setNotice(
@@ -462,6 +501,7 @@ export function useDockRecorder(opts: {
               workspaceId,
               assistantId,
               startedAt: Date.now(),
+              ...(livePageRef.current ? { livePageId: livePageRef.current.pageId } : {}),
             });
           }
           return;
@@ -472,11 +512,13 @@ export function useDockRecorder(opts: {
           engine?.resume();
           return;
         case "cancel-with-hint":
+          armAttemptRef.current += 1;
           setNotice("micHint");
           engine?.cancel();
           engineRef.current = null;
           return;
         case "cancel-capture": {
+          armAttemptRef.current += 1;
           const sessionId = engine?.spoolSessionId() ?? null;
           engine?.cancel();
           engineRef.current = null;
@@ -531,6 +573,7 @@ export function useDockRecorder(opts: {
                 setTimeout(() => void refreshRecovery(), LIVE_SESSION_GRACE_MS + 5_000);
               }
               dispatchRef.current({ type: "finished" });
+              if (!rollOverRef.current) livePageRef.current = null;
               if (rollOverRef.current) {
                 // Segment rollover (2-hour limit): the meeting is still
                 // happening — start the next latched segment immediately.
@@ -542,7 +585,7 @@ export function useDockRecorder(opts: {
           return;
       }
     },
-    [workspaceId, assistantId, handOff, refreshRecovery],
+    [workspaceId, assistantId, handOff, refreshRecovery, prepareLivePage, streamLiveWindow],
   );
 
   const dispatch = useCallback(
@@ -741,7 +784,9 @@ export function useDockRecorder(opts: {
     setNotice(null);
     if (phaseRef.current.kind === "idle") {
       pressStartedAtRef.current = Date.now();
-      dispatch({ type: "press" });
+      // Live transcription is meeting intent, so it always latches and never
+      // resolves as a walkie-talkie gesture after pre-flight.
+      dispatch({ type: livePageEnabledRef.current ? "auto-start" : "press" });
     }
   }, [enabled, dispatch]);
 
@@ -764,13 +809,24 @@ export function useDockRecorder(opts: {
     [computerAudioAvailable],
   );
 
+  const setLivePageEnabled = useCallback((next: boolean) => {
+    if (phaseRef.current.kind !== "idle") return;
+    livePageEnabledRef.current = next;
+    setLivePageEnabledState(next);
+  }, []);
+
   const saveRecovery = useCallback(
     async (sessionId: string) => {
       const meta = recovery.find((s) => s.id === sessionId);
       if (!meta) return;
       try {
         const chunks = await spool().readChunks(sessionId);
-        const safeToDrop = await handOff(assembleSpooledBlob(meta, chunks), meta.mime, meta.elapsedMs);
+        const safeToDrop = await handOff(
+          assembleSpooledBlob(meta, chunks),
+          meta.mime,
+          meta.elapsedMs,
+          meta.livePageId,
+        );
         // Same retention contract as a live stop: a cancelled confirm or a
         // failed upload keeps the session so Save can be retried.
         if (safeToDrop) await spool().deleteSession(sessionId);
@@ -806,6 +862,8 @@ export function useDockRecorder(opts: {
     computerAudioAvailable,
     includeComputerAudio,
     setIncludeComputerAudio,
+    livePageEnabled,
+    setLivePageEnabled,
     includesSystemAudio: useCallback(
       () => engineRef.current?.includesSystemAudio() ?? false,
       [],

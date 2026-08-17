@@ -137,6 +137,22 @@ export const OFFICIAL_CONNECTORS: ConnectorEntry[] = [
     tags: ['commerce', 'shopify'],
   },
   {
+    id: 'wordpress',
+    name: 'WordPress',
+    description: 'Read and update explicitly managed text and image locations on your WordPress site.',
+    category: 'official',
+    // Application Password credentials are verified against the OSS bridge
+    // before storage. `oauth_required` is also the Directory's signal to hand
+    // Connect back to the provider-specific setup flow; without it the modal
+    // calls the generic mark-connected route and skips credential collection.
+    // Not single_instance: one connector instance per site.
+    // See docs/architecture/integrations/wordpress.md.
+    auth_type: 'api_key',
+    oauth_required: true,
+    enabled: true,
+    tags: ['website', 'cms', 'wordpress'],
+  },
+  {
     id: 'msgraph',
     name: 'Microsoft Teams',
     description: 'Read Teams channels, chats, and members, and search your Teams history, including messages from before the assistant joined. Read-only.',

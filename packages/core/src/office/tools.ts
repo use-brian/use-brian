@@ -18,12 +18,15 @@ export type OfficeArtifactToolProjection = {
   version: number
   lifecycleState: 'active' | 'archived' | 'trash' | 'retained'
   role: 'view' | 'comment' | 'edit'
+  targets?: Array<{ id: string; kind: string; label: string; parentId?: string; locked?: boolean }>
+  targetsTruncated?: boolean
+  nextTargetOffset?: number
   job?: { id: string; status: string; stage: string; errorCode: string | null }
 }
 
 export type OfficeToolPort = {
-  create(params: { userId: string; assistantId: string; workspaceId: string; family: 'document' | 'presentation' | 'spreadsheet'; outcome: string; audience: string; sourceHandles: string[]; templateId?: string; canonicalWebsite?: string; companyHasNoWebsite: boolean; idempotencyKey: string }): Promise<{ artifactId: string; jobId: string }>
-  get(params: { userId: string; artifactId: string }): Promise<OfficeArtifactToolProjection | null>
+  create(params: { userId: string; assistantId: string; workspaceId: string; family: 'document' | 'presentation' | 'spreadsheet'; outcome: string; audience: string; additionalContext?: string; sourceHandles: string[]; templateId?: string; idempotencyKey: string }): Promise<{ artifactId: string; jobId: string }>
+  get(params: { userId: string; artifactId: string; targetOffset?: number }): Promise<OfficeArtifactToolProjection | null>
   revise(params: { userId: string; assistantId: string; artifactId: string; instruction: string; targetIds: string[]; expectedVersion: number; idempotencyKey: string }): Promise<{ jobId: string; mode: 'direct' | 'proposal' } | 'version_conflict' | null>
 }
 
@@ -84,15 +87,14 @@ export function createOfficeTools(params: {
     resolveConfirmation: askGate('createOfficeArtifact'),
     isConcurrencySafe: false,
     isReadOnly: false,
-    description: 'Start a durable Brian-native Document, Presentation, or Spreadsheet only after an explicit user request to create/build/draft one. Returns an artifact shell and background job immediately. The worker requires an admitted template, permission-filtered brain grounding, and a canonical public website unless the user explicitly says the company has none. This tool creates inside the workspace; it does not export, share, send, publish, or bypass a missing-fact/template/permission gate.',
+    description: 'Start a durable Brian-native Document, Presentation, or Spreadsheet only after an explicit user request to create/build/draft one. Returns an artifact shell and background job immediately. The worker requires an admitted template and permission-filtered brain grounding. Optional additional context can carry user-supplied facts, constraints, examples, or reference URLs. This tool creates inside the workspace; it does not export, share, send, publish, or bypass a missing-fact/template/permission gate.',
     inputSchema: z.object({
       family: z.enum(['document', 'presentation', 'spreadsheet']),
       outcome: z.string().min(1).max(4_000).describe('The requested deliverable and intended outcome'),
       audience: z.string().min(1).max(1_000),
+      additionalContext: z.string().min(1).max(4_000).optional().describe('Optional user-supplied facts, constraints, examples, or reference URLs for this artifact'),
       sourceHandles: z.array(z.string().min(1).max(1_000)).max(100).default([]).describe('Explicit accessible page/file/URL handles named by the user or resolved during the turn'),
       templateId: z.string().uuid().optional(),
-      canonicalWebsite: z.string().url().refine((url) => url.startsWith('https:')).optional(),
-      companyHasNoWebsite: z.boolean().default(false),
       idempotencyKey: z.string().min(8).max(255),
     }),
     async execute(input, context) {
@@ -111,12 +113,12 @@ export function createOfficeTools(params: {
     resolveConfirmation: askGate('getOfficeArtifact'),
     isConcurrencySafe: true,
     isReadOnly: true,
-    description: 'Read the current permission-filtered metadata, collaboration role, version, lifecycle, and generation state for one Brian-native Office artifact. Returns no existence signal when the caller is ineligible.',
-    inputSchema: z.object({ artifactId: z.string().uuid() }),
+    description: 'Read the current permission-filtered metadata, collaboration role, version, lifecycle, generation state, and one bounded page of the semantic target outline for a Brian-native Office artifact. Use the returned stable target IDs with reviseOfficeArtifact. When nextTargetOffset is present, call again with that targetOffset to continue discovery. Returns no existence signal when the caller is ineligible and never returns binary resources or the complete canonical snapshot.',
+    inputSchema: z.object({ artifactId: z.string().uuid(), targetOffset: z.number().int().min(0).optional() }),
     async execute(input, context) {
       const blocked = await blockGate('getOfficeArtifact', context)
       if (blocked) return blocked
-      const artifact = await params.port.get({ userId: context.userId, artifactId: input.artifactId })
+      const artifact = await params.port.get({ userId: context.userId, artifactId: input.artifactId, targetOffset: input.targetOffset })
       if (!artifact) return { data: 'Office artifact not found or unavailable.', isError: true }
       return { data: { ...artifact, editorUrl: context.workspaceId ? link(params.appOrigin, context.workspaceId, artifact.artifactId) : undefined } }
     },
@@ -128,11 +130,11 @@ export function createOfficeTools(params: {
     resolveConfirmation: askGate('reviseOfficeArtifact'),
     isConcurrencySafe: false,
     isReadOnly: false,
-    description: 'Start a fresh context-clean revision job against an explicit Office artifact version and stable target IDs. The job rebases non-overlapping changes; overlaps become a proposal. Comment-only callers always receive a proposal. Never use this as implicit authorization to create, export, share, send, publish, or overwrite intervening edits.',
+    description: 'Start a fresh context-clean, command-native revision job against an explicit Office artifact version and stable target IDs returned by getOfficeArtifact or selected by the user in the editor. Brian may use the supported canonical Document, Presentation, or Spreadsheet command vocabulary inside those targets. If the artifact advances before the job runs, the validated commands become a proposal instead of overwriting intervening edits. Comment-only callers always receive a proposal. Never use this as implicit authorization to create, export, share, send, publish, or overwrite intervening edits.',
     inputSchema: z.object({
       artifactId: z.string().uuid(),
       instruction: z.string().min(1).max(10_000),
-      targetIds: z.array(z.string().uuid()).max(1_000).default([]),
+      targetIds: z.array(z.string().uuid()).min(1).max(1_000),
       expectedVersion: z.number().int().min(0),
       idempotencyKey: z.string().min(8).max(255),
     }),

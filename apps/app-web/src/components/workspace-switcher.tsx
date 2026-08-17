@@ -44,6 +44,11 @@ import { authFetch } from "@/lib/auth-fetch";
 import { primaryAuthUrl, webAppUrl } from "@/lib/primary-auth";
 import { getUserInfo, getInitials } from "@/lib/user";
 import { signOutActiveAccount } from "@/lib/account-logout";
+import { updateWorkspacePickerPreferences } from "@/lib/api/workspaces";
+import {
+  organizeWorkspacePicker,
+  usesScalableWorkspacePicker,
+} from "@/lib/workspace-picker";
 import { getAccountsDir, type AccountDirEntry } from "@/lib/accounts";
 import { TeamAvatar } from "@/components/team-avatar";
 import {
@@ -91,6 +96,9 @@ type Workspace = {
   iconSeed: number | null;
   iconUrl?: string | null;
   plan?: string | null;
+  pickerPinnedAt?: string | null;
+  pickerHiddenAt?: string | null;
+  pickerLastOpenedAt?: string | null;
 };
 
 function cn(...parts: Array<string | false | null | undefined>): string {
@@ -124,6 +132,7 @@ export function WorkspaceSwitcher() {
   );
   const [switching, setSwitching] = useState<string | null>(null);
   const [accountError, setAccountError] = useState<string | null>(null);
+  const [workspaceQuery, setWorkspaceQuery] = useState("");
 
   const user = getUserInfo();
   const activeAccountId = user?.id ?? null;
@@ -220,6 +229,7 @@ export function WorkspaceSwitcher() {
     if (!open) {
       setSwitching(null);
       setCreating(false);
+      setWorkspaceQuery("");
       return;
     }
     setAccountsDir(getAccountsDir());
@@ -332,6 +342,19 @@ export function WorkspaceSwitcher() {
   function switchTo(workspaceId: string) {
     setOpen(false);
     if (workspaceId === ctx.workspaceId) return;
+    const now = new Date().toISOString();
+    setWorkspaces((current) =>
+      current
+        ? current.map((workspace) =>
+            workspace.id === workspaceId
+              ? { ...workspace, pickerLastOpenedAt: now }
+              : workspace,
+          )
+        : current,
+    );
+    void updateWorkspacePickerPreferences(workspaceId, { opened: true }).catch(
+      () => {},
+    );
     // Button-driven nav (no `<a>` for the document click listener to catch).
     routeProgress.start();
     router.push(docPagePath(workspaceId));
@@ -359,6 +382,20 @@ export function WorkspaceSwitcher() {
     setOpen(false);
     signOutActiveAccount();
   }
+
+  const scalableWorkspaceList =
+    workspaces !== null && usesScalableWorkspacePicker(workspaces.length);
+  const switcherGroups = organizeWorkspacePicker(
+    workspaces ?? [],
+    workspaceQuery,
+  );
+  const switcherRows = scalableWorkspaceList
+    ? [
+        ...switcherGroups.pinned,
+        ...switcherGroups.recent,
+        ...switcherGroups.all,
+      ]
+    : workspaces ?? [];
 
   return (
     <>
@@ -504,8 +541,38 @@ export function WorkspaceSwitcher() {
           {error && (
             <div className="px-2 py-1 text-xs text-destructive">{error}</div>
           )}
-          <ul className="flex flex-col gap-0.5">
-            {(workspaces ?? []).map((ws) => (
+          {scalableWorkspaceList ? (
+            <label className="relative block">
+              <span className="sr-only">{t.searchPlaceholder}</span>
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                aria-hidden
+                className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground"
+              >
+                <circle cx="11" cy="11" r="7" />
+                <path d="m20 20-3.5-3.5" />
+              </svg>
+              <input
+                type="search"
+                value={workspaceQuery}
+                onChange={(event) => setWorkspaceQuery(event.target.value)}
+                placeholder={t.searchPlaceholder}
+                className="h-8 w-full rounded-md border border-border bg-background pl-8 pr-2 text-xs outline-none placeholder:text-muted-foreground"
+              />
+            </label>
+          ) : null}
+          <ul
+            className={cn(
+              "flex flex-col gap-0.5",
+              scalableWorkspaceList && "max-h-60 overflow-y-auto pr-1",
+            )}
+          >
+            {switcherRows.map((ws) => (
               <li key={ws.id}>
                 <WorkspaceRow
                   workspace={ws}
@@ -514,6 +581,27 @@ export function WorkspaceSwitcher() {
                 />
               </li>
             ))}
+            {scalableWorkspaceList && switcherRows.length === 0 ? (
+              <li className="px-2 py-3 text-xs text-muted-foreground">
+                {t.empty}
+              </li>
+            ) : null}
+            {scalableWorkspaceList ? (
+              <li>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setOpen(false);
+                    routeProgress.start();
+                    router.push("/teams");
+                  }}
+                  className="w-full px-2 py-1.5 text-left text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground rounded"
+                >
+                  {t.manageWorkspaces}
+                </button>
+              </li>
+            ) : null}
             <li>
               <button
                 type="button"

@@ -114,7 +114,7 @@ import {
   INJECTED_BUILTIN_TOOLS_BY_CONNECTOR,
   _getMcpDiscoveryCacheSize,
 } from '../inject.js'
-import { createGmailTools, createGoogleDriveTools } from '@use-brian/core'
+import { createGmailTools, createGoogleDriveTools, createGoogleMapsTools } from '@use-brian/core'
 import { OFFICIAL_CONNECTOR_TOOLS } from '@use-brian/shared/builtin-connectors'
 import { buildUnavailableCapabilitiesPrompt } from '../../routes/route-helpers.js'
 import { packMsGraphTokens } from '../../msgraph/token.js'
@@ -332,6 +332,7 @@ describe('[COMP:api/mcp-inject] granted custom MCP overlay', () => {
         },
       ]),
     }
+    const isEnabled = vi.fn().mockResolvedValue(true)
 
     await injectMcpTools({
       userId: 'owner-1',
@@ -340,6 +341,7 @@ describe('[COMP:api/mcp-inject] granted custom MCP overlay', () => {
       connectorStore: { list: vi.fn().mockResolvedValue([]) } as never,
       settingsStore: settingsStoreStub() as never,
       connectorGrantStore: connectorGrantStore as never,
+      assistantConnectorStore: { isEnabled } as never,
       assistantTeamId: 'ws-shared',
     })
 
@@ -349,6 +351,51 @@ describe('[COMP:api/mcp-inject] granted custom MCP overlay', () => {
     // the grant were dropped — no other source exists for this workspace.)
     expect(tools.has('mcp_search')).toBe(true)
     expect(tools.has('mcp_call')).toBe(true)
+    expect(isEnabled).toHaveBeenCalledWith('a-1', 'mcp-uuid-123:ci-mcp', 'mcp-uuid-123')
+  })
+
+  it('restricts a custom MCP search index to pinned workflow tool names', async () => {
+    callRemoteMcpTool.mockResolvedValueOnce('customer found')
+    discoverMcpServer.mockResolvedValueOnce({
+      name: 'CRM MCP',
+      tools: [
+        { name: 'readCustomer', description: 'Read a customer', inputSchema: { type: 'object' } },
+        { name: 'deleteCustomer', description: 'Delete a customer', inputSchema: { type: 'object' } },
+      ],
+    })
+    const tools = new Map()
+    const result = await injectMcpTools({
+      userId: 'owner-1',
+      assistantId: 'a-1',
+      tools,
+      connectorStore: { list: vi.fn().mockResolvedValue([]) } as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorGrantStore: {
+        listForTargetSystem: vi.fn().mockResolvedValue([{
+          grantedByUserId: 'grantor-1',
+          instance: {
+            id: 'ci-crm', provider: 'mcp-crm', label: 'CRM MCP',
+            url: 'http://localhost:8772/mcp', custom: true, connected: true, config: {},
+          },
+        }]),
+      } as never,
+      assistantTeamId: 'ws-shared',
+      restrictSearchToToolNames: ['readCustomer'],
+    })
+
+    expect(result.restrictedSearchToolNames).toEqual(['readCustomer'])
+    const search = tools.get('mcp_search') as { execute: (i: unknown, c: unknown) => Promise<{ data: unknown }> }
+    const hits = await search.execute({ query: 'customer', limit: 8 }, {} as never)
+    expect(JSON.stringify(hits.data)).toContain('readCustomer')
+    expect(JSON.stringify(hits.data)).not.toContain('deleteCustomer')
+    const call = tools.get('mcp_call') as { execute: (i: unknown, c: unknown) => Promise<unknown> }
+    await call.execute({ server: 'CRM MCP', tool: 'readCustomer', args: { id: 'cust-1' } }, {} as never)
+    expect(callRemoteMcpTool).toHaveBeenCalledWith(
+      'http://localhost:8772/mcp',
+      'readCustomer',
+      { id: 'cust-1' },
+      undefined,
+    )
   })
 
   it('skips a disconnected granted custom MCP', async () => {
@@ -417,6 +464,66 @@ describe('[COMP:api/mcp-inject] granted CLI MCP overlay', () => {
     expect(tools.has('mcp_call')).toBe(true)
   })
 
+  it('matches pinned CLI tools by persisted legacy MCP names', async () => {
+    callCliMcpTool.mockResolvedValueOnce('local customer found')
+    discoverCliServer.mockResolvedValueOnce({
+      name: 'Local CRM',
+      url: 'stdio://Local CRM',
+      tools: [
+        { name: 'readLocalCustomer', description: 'Read a local customer', inputSchema: { type: 'object' } },
+        { name: 'deleteLocalCustomer', description: 'Delete a local customer', inputSchema: { type: 'object' } },
+      ],
+    })
+    const tools = new Map()
+    const result = await injectMcpTools({
+      userId: 'owner-1', assistantId: 'a-1', tools,
+      connectorStore: { list: vi.fn().mockResolvedValue([]) } as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorGrantStore: {
+        listForTargetSystem: vi.fn().mockResolvedValue([{
+          grantedByUserId: 'grantor-1',
+          instance: {
+            id: 'cli-local', provider: 'cli', label: 'Local CRM',
+            connected: true, config: {}, updatedAt: new Date(0),
+          },
+        }]),
+      } as never,
+      connectorInstanceStore: {
+        listByWorkspaceSystem: vi.fn().mockResolvedValue([]),
+        getAuthCredentialsSystem: vi.fn().mockResolvedValue({
+          type: 'cli', binaryPath: '/usr/bin/node', args: ['/tmp/local-crm.js'],
+        }),
+      } as never,
+      assistantTeamId: 'ws-shared',
+      restrictSearchToToolNames: ['mcp_Local_CRM_readLocalCustomer'],
+      keepDynamicToolsDirect: true,
+    })
+
+    expect(result.restrictedSearchToolNames).toEqual(['mcp_Local_CRM_readLocalCustomer'])
+    const search = tools.get('mcp_search') as { execute: (i: unknown, c: unknown) => Promise<{ data: unknown }> }
+    const hits = await search.execute({ query: 'local customer', limit: 8 }, {} as never)
+    expect(JSON.stringify(hits.data)).toContain('readLocalCustomer')
+    expect(JSON.stringify(hits.data)).not.toContain('deleteLocalCustomer')
+    expect(tools.has('readLocalCustomer')).toBe(true)
+    expect(tools.has('mcp_Local_CRM_readLocalCustomer')).toBe(true)
+    const call = tools.get('mcp_call') as { execute: (i: unknown, c: unknown) => Promise<unknown> }
+    await call.execute({ server: 'Local CRM', tool: 'readLocalCustomer', args: { id: 'cust-2' } }, {} as never)
+    expect(callCliMcpTool).toHaveBeenCalledWith(
+      expect.objectContaining({ binaryPath: '/usr/bin/node' }),
+      'readLocalCustomer',
+      { id: 'cust-2' },
+    )
+    const legacy = tools.get('mcp_Local_CRM_readLocalCustomer') as {
+      execute: (i: unknown, c: unknown) => Promise<unknown>
+    }
+    await legacy.execute({ id: 'cust-3' }, {} as never)
+    expect(callCliMcpTool).toHaveBeenLastCalledWith(
+      expect.objectContaining({ binaryPath: '/usr/bin/node' }),
+      'readLocalCustomer',
+      { id: 'cust-3' },
+    )
+  })
+
   it('skips only the CLI instance disabled for this assistant', async () => {
     discoverCliServer.mockImplementation(async (_params, name) => ({
       name,
@@ -453,6 +560,41 @@ describe('[COMP:api/mcp-inject] granted CLI MCP overlay', () => {
     expect(isEnabled).toHaveBeenCalledWith('a-1', 'cli:cli-enabled-2', 'cli')
     expect(discoverCliServer).toHaveBeenCalledTimes(1)
     expect(discoverCliServer).toHaveBeenCalledWith(expect.anything(), 'Two')
+  })
+
+  it('does not broaden a restricted legacy name across duplicate CLI labels', async () => {
+    discoverCliServer.mockImplementation(async (_params, name) => ({
+      name,
+      url: `stdio://${name}`,
+      tools: [{ name: 'readEvents', description: 'Read events', inputSchema: { type: 'object' } }],
+    }))
+    const instances = ['cli-a', 'cli-b'].map((id) => ({
+      id, provider: 'cli', label: 'Calendar', connected: true, config: {}, updatedAt: new Date(0),
+    }))
+    const tools = new Map()
+    const result = await injectMcpTools({
+      userId: 'owner-1', assistantId: 'a-1', tools,
+      connectorStore: { list: vi.fn().mockResolvedValue([]) } as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorGrantStore: {
+        listForTargetSystem: vi.fn().mockResolvedValue(instances.map((instance) => ({
+          grantedByUserId: 'grantor-1', instance,
+        }))),
+      } as never,
+      connectorInstanceStore: {
+        listByWorkspaceSystem: vi.fn().mockResolvedValue([]),
+        getAuthCredentialsSystem: vi.fn().mockResolvedValue({
+          type: 'cli', binaryPath: '/usr/bin/node', args: ['/tmp/calendar.js'],
+        }),
+      } as never,
+      assistantTeamId: 'ws-shared',
+      keepBuiltinsDirect: true,
+      restrictSearchToToolNames: ['mcp_Calendar_readEvents'],
+    })
+
+    expect(result.restrictedSearchToolNames).toEqual([])
+    expect(tools.has('mcp_search')).toBe(false)
+    expect(tools.has('mcp_call')).toBe(false)
   })
 })
 
@@ -769,7 +911,7 @@ describe('[COMP:api/mcp-inject] INJECTED_BUILTIN_TOOLS_BY_CONNECTOR', () => {
   it('maps each built-in connector to a non-empty, duplicate-free tool list', () => {
     const connectors = Object.keys(INJECTED_BUILTIN_TOOLS_BY_CONNECTOR)
     expect(connectors).toEqual(
-      expect.arrayContaining(['gcal', 'gmail', 'gdrive', 'github', 'notion', 'fathom', 'msgraph']),
+      expect.arrayContaining(['gcal', 'gmail', 'gdrive', 'github', 'notion', 'fathom', 'wordpress', 'msgraph']),
     )
     for (const [connector, toolNames] of Object.entries(INJECTED_BUILTIN_TOOLS_BY_CONNECTOR)) {
       expect(toolNames.length, connector).toBeGreaterThan(0)
@@ -880,6 +1022,56 @@ describe('[COMP:api/mcp-inject] multi-instance built-ins', () => {
     const names = [...tools.keys()]
     expect(names).toContain('githubSearchRepositories')
     expect(names.some((n) => n.includes('__'))).toBe(false)
+  })
+
+  it('injects canonical WordPress tools for the primary site and labelled variants for an extra site', async () => {
+    const primaryCredentials = JSON.stringify({
+      siteUrl: 'https://primary.example',
+      username: 'site_editor',
+      applicationPassword: 'primary app password',
+    })
+    const extraCredentials = JSON.stringify({
+      siteUrl: 'https://docs.example',
+      username: 'site_editor',
+      applicationPassword: 'docs app password',
+    })
+    const tools = new Map()
+    const connectorStore = {
+      list: vi.fn().mockResolvedValue([
+        { id: 'ci-wp1', connectorId: 'wordpress', name: 'Primary site', connected: true, url: null, custom: false, createdAt: new Date('2026-01-01T00:00:00Z') },
+        { id: 'ci-wp2', connectorId: 'wordpress', name: 'Docs site', connected: true, url: null, custom: false, createdAt: new Date('2026-02-01T00:00:00Z') },
+      ]),
+      getCredentials: vi.fn().mockResolvedValue({
+        client_id: 'wordpress_application_password',
+        client_secret: primaryCredentials,
+      }),
+    }
+    const connectorInstanceStore = {
+      getCredentialsSystem: vi.fn().mockResolvedValue({
+        client_id: 'wordpress_application_password',
+        client_secret: extraCredentials,
+      }),
+      markHealth: vi.fn(),
+    }
+
+    await injectMcpTools({
+      userId: 'u-1',
+      assistantId: 'a-1',
+      tools,
+      connectorStore: connectorStore as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorInstanceStore: connectorInstanceStore as never,
+      keepBuiltinsDirect: true,
+    })
+
+    const names = [...tools.keys()]
+    expect(names).toContain('wordpressGetManagedPage')
+    expect(names).toContain('wordpressUpdatePageText')
+    expect(names).toContain('wordpressReplacePageImage')
+    const variant = names.find((name) => name.startsWith('wordpressGetManagedPage__'))
+    expect(variant).toBeTruthy()
+    expect((tools.get(variant!) as { description: string }).description).toMatch(/^\[Docs site\]/)
+    expect(names.filter((name) => name.startsWith('wordpressGetManagedPage')).length).toBe(2)
   })
 })
 
@@ -1620,7 +1812,7 @@ describe('[COMP:integrations/connector-health] team-native connector health gate
       keepBuiltinsDirect: true,
     })
     expect([...tools.keys()].some((n) => n.startsWith('githubSearchRepositories'))).toBe(false)
-    expect(result.unavailable.some((u) => /stopped working/i.test(u) && /github/i.test(u))).toBe(true)
+    expect(result.unavailable.some((u) => /reconnect required/i.test(u) && /github/i.test(u))).toBe(true)
   })
 })
 
@@ -1977,7 +2169,7 @@ describe('[COMP:api/mcp-inject] msgraph workspace overlays', () => {
     // The reconnect wording specifically — a bare "Microsoft Teams" match also
     // passes on the not-connected notice the suppressed base load emits, which
     // is what this suite exists to distinguish.
-    expect(result.unavailable.join('\n')).toMatch(/Microsoft Teams .*credentials failed/)
+    expect(result.unavailable.join('\n')).toMatch(/Microsoft Teams .*reconnect required/)
   })
 
   it('retracts the base pass\'s not-connected advert once the grant overlay injects', async () => {
@@ -2039,6 +2231,58 @@ describe('[COMP:api/mcp-inject] _getMcpDiscoveryCacheSize', () => {
     const size = _getMcpDiscoveryCacheSize()
     expect(typeof size).toBe('number')
     expect(size).toBeGreaterThanOrEqual(0)
+  })
+})
+
+describe('[COMP:tools/google-maps] built-in Maps discovery', () => {
+  const ctx = {
+    userId: 'u-1', assistantId: 'a-1', sessionId: 's-1', appId: 'test',
+    channelType: 'web', channelId: 'c-1', abortSignal: new AbortController().signal,
+  }
+
+  async function injectMaps(keepBuiltinsDirect: boolean) {
+    const callTool = vi.fn().mockResolvedValue({ weather: 'sunny' })
+    const tools = new Map(createGoogleMapsTools({ callTool }).map((tool) => [tool.name, tool]))
+    await injectMcpTools({
+      userId: 'u-1', assistantId: 'a-1', tools,
+      connectorStore: { list: vi.fn().mockResolvedValue([]) } as never,
+      settingsStore: settingsStoreStub() as never,
+      keepBuiltinsDirect,
+    })
+    return { tools, callTool }
+  }
+
+  it('folds Maps behind mcp_search and preserves underlying result metadata', async () => {
+    const { tools, callTool } = await injectMaps(false)
+    expect(tools.has('googleMapsSearchPlaces')).toBe(false)
+    expect(tools.has('googleMapsLookupWeather')).toBe(false)
+    expect(tools.has('googleMapsComputeRoute')).toBe(false)
+
+    const search = tools.get('mcp_search')!
+    const hits = await search.execute({ query: 'Google Maps weather' }, ctx)
+    expect(JSON.stringify(hits.data)).toContain('googleMapsLookupWeather')
+
+    const call = tools.get('mcp_call')!
+    const result = await call.execute({
+      server: 'google-maps',
+      tool: 'googleMapsLookupWeather',
+      args: { location: { address: 'Hong Kong' } },
+    }, ctx)
+    expect(callTool).toHaveBeenCalledWith(
+      'lookup_weather',
+      { location: { address: 'Hong Kong' } },
+      ctx.abortSignal,
+    )
+    expect(result.meta?.transientProviderContent).toBe(true)
+  })
+
+  it('keeps canonical Maps names direct for workflow allow-lists', async () => {
+    const { tools } = await injectMaps(true)
+    expect([...tools.keys()]).toEqual(expect.arrayContaining([
+      'googleMapsSearchPlaces',
+      'googleMapsLookupWeather',
+      'googleMapsComputeRoute',
+    ]))
   })
 })
 

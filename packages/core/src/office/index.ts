@@ -1,4 +1,5 @@
 export * from './package.js'
+export * from './image-resource.js'
 export * from './docx/index.js'
 export * from './pptx/index.js'
 export * from './xlsx/index.js'

@@ -44,11 +44,15 @@ const MFA_PATTERN =
   /\b(one[- ]time|otp|verification code|security code|authenticator|two[- ]factor|2fa|passkey)\b/i
 const SUBMIT_PATTERN = /\b(sign[ -]?in|log[ -]?in|continue|next|submit)\b/i
 
-type PickResult = { kind: 'none' } | { kind: 'one'; node: BrowserSnapshotNode } | { kind: 'many' }
+type ActionableSnapshotNode = BrowserSnapshotNode & { ref: string }
+type PickResult = { kind: 'none' } | { kind: 'one'; node: ActionableSnapshotNode } | { kind: 'many' }
 
 function pick(nodes: BrowserSnapshotNode[], pattern: RegExp, roles?: Set<string>): PickResult {
-  const matches = nodes.filter(
-    (node) => !node.disabled && (!roles || roles.has(node.role.toLowerCase())) && pattern.test(node.name),
+  const matches = nodes.filter((node): node is ActionableSnapshotNode =>
+    typeof node.ref === 'string' &&
+    !node.disabled &&
+    (!roles || roles.has(node.role.toLowerCase())) &&
+    pattern.test(node.name),
   )
   if (matches.length === 0) return { kind: 'none' }
   if (matches.length > 1) return { kind: 'many' }

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type { DocumentSnapshot, OfficeTemplateBundle, PresentationSnapshot, SpreadsheetSnapshot } from '@use-brian/office-model'
 import type { OfficeResourceResolver } from '../package.js'
 
@@ -6,16 +7,17 @@ const style = (fontSizePt = 11) => ({ fontFamily: 'Arial', fontSizePt, bold: fal
 const imageId = id(90)
 const videoId = id(91)
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64')
+const mp4 = Buffer.from('000000186674797069736f6d0000020069736f6d69736f32', 'hex')
 
 export const resolveFixtureResource: OfficeResourceResolver = async (resourceId) => {
   if (resourceId === imageId) return { bytes: png, mime: 'image/png' }
-  if (resourceId === videoId) return { bytes: Buffer.from('000000186674797069736f6d0000020069736f6d69736f32', 'hex'), mime: 'video/mp4' }
+  if (resourceId === videoId) return { bytes: mp4, mime: 'video/mp4' }
   return null
 }
 
 const resources = [
-  { id: imageId, kind: 'image' as const, hash: 'a'.repeat(64), mime: 'image/png', sensitivity: 'internal' as const },
-  { id: videoId, kind: 'video' as const, hash: 'b'.repeat(64), mime: 'video/mp4', sensitivity: 'internal' as const },
+  { id: imageId, kind: 'image' as const, hash: createHash('sha256').update(png).digest('hex'), mime: 'image/png', sensitivity: 'internal' as const },
+  { id: videoId, kind: 'video' as const, hash: createHash('sha256').update(mp4).digest('hex'), mime: 'video/mp4', sensitivity: 'internal' as const },
 ]
 
 export function completeDocumentSnapshot(): DocumentSnapshot {
@@ -104,6 +106,23 @@ export function completePresentationSnapshot(): PresentationSnapshot {
       id: id(52), title: 'Closing', masterId, layoutId, notes: [], objects: [{ id: id(53), kind: 'text', geometry: { xPt: 72, yPt: 72, widthPt: 816, heightPt: 72, rotationDeg: 0 }, locked: false, alignment: 'center', verticalAlignment: 'middle', runs: [{ id: id(54), text: 'Thank you', style: style(32) }] }], readingOrder: [id(53)],
     }],
   }
+}
+
+export function formattedPresentationSnapshot(): PresentationSnapshot {
+  const source = completePresentationSnapshot()
+  const text = source.slides[0].objects.find((object) => object.kind === 'text')
+  const shape = source.slides[0].objects.find((object) => object.kind === 'shape')
+  const connector = source.slides[0].objects.find((object) => object.kind === 'connector')
+  const table = source.slides[0].objects.find((object) => object.kind === 'table')
+  const chart = source.slides[0].objects.find((object) => object.kind === 'chart')
+  if (!text || text.kind !== 'text' || !shape || shape.kind !== 'shape' || !connector || connector.kind !== 'connector' || !table || table.kind !== 'table' || !chart || chart.kind !== 'chart') throw new Error('complete Presentation fixture drift')
+  text.runs[0].style = { ...text.runs[0].style, fontFamily: 'Aptos', fontSizePt: 30, italic: true, underline: true, strike: true, color: '#123456' }
+  text.alignment = 'center'; text.verticalAlignment = 'middle'
+  shape.shape = 'ellipse'; shape.fill = '#ABCDEF'; shape.stroke = '#654321'; shape.strokeWidthPt = 3
+  connector.connector = 'elbow'; connector.stroke = '#C2410C'
+  table.rows[0].cells[0].runs[0].text = 'Edited metric'; table.rows[0].cells[0].fill = '#FDE68A'
+  chart.chartType = 'doughnut'; chart.title = 'Edited growth'; chart.altText = 'Edited growth chart'
+  return source
 }
 
 export function completeSpreadsheetSnapshot(): SpreadsheetSnapshot {

@@ -71,7 +71,10 @@ def _make_llm(model):
             from browser_use import ChatOpenAI
         except ImportError:
             from browser_use.llm import ChatOpenAI
-        return ChatOpenAI(model=model)
+        kwargs = {'model': model}
+        if os.environ.get('OPENAI_BASE_URL'):
+            kwargs['base_url'] = os.environ['OPENAI_BASE_URL']
+        return ChatOpenAI(**kwargs)
     raise RuntimeError('no LLM API key in the driver environment')
 
 

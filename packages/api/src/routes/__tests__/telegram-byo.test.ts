@@ -129,6 +129,7 @@ const pipelineCalls: Array<{
   messageText?: string
   userContentBlocks?: Array<{ type: string; mimeType?: string }>
 }> = []
+let pipelineError: Error | undefined
 vi.mock('../channel-pipeline.js', () => ({
   processChannelMessage: vi.fn(async (params: {
     channelId: string
@@ -154,7 +155,11 @@ vi.mock('../channel-pipeline.js', () => ({
       messageText: params.messageText,
       userContentBlocks: params.userContentBlocks,
     })
-    await params.hooks.sendResponse('ok', pipelineDocuments)
+    if (pipelineError) {
+      await params.hooks.sendError?.(pipelineError)
+    } else {
+      await params.hooks.sendResponse('ok', pipelineDocuments)
+    }
   }),
 }))
 
@@ -189,6 +194,22 @@ vi.mock('../../db/channels-store.js', () => ({
   })),
   resolveAssistantForSurface: vi.fn(async () => 'assistant_1'),
   resolveRoutingForSurface: vi.fn(async () => ({
+    id: 'ca_1',
+    channelId: 'channel_1',
+    assistantId: 'assistant_1',
+    externalSurfaceId: null,
+    modelAlias: 'standard',
+    createdAt: new Date('2026-05-18T00:00:00Z'),
+  })),
+  resolveTelegramRoutingForSurface: vi.fn(async () => ({
+    id: 'ca_1',
+    channelId: 'channel_1',
+    assistantId: 'assistant_1',
+    externalSurfaceId: null,
+    modelAlias: 'standard',
+    createdAt: new Date('2026-05-18T00:00:00Z'),
+  })),
+  resolveAnyRoutingForChannel: vi.fn(async () => ({
     id: 'ca_1',
     channelId: 'channel_1',
     assistantId: 'assistant_1',
@@ -240,8 +261,14 @@ import {
   shouldUseUniversalTelegramIntake,
 } from '../telegram-byo.js'
 import { findOrCreateSession } from '../../db/sessions.js'
+import {
+  resolveAnyRoutingForChannel,
+  resolveTelegramRoutingForSurface,
+} from '../../db/channels-store.js'
 
 const mockFindOrCreateSession = vi.mocked(findOrCreateSession)
+const mockResolveAnyRouting = vi.mocked(resolveAnyRoutingForChannel)
+const mockResolveTelegramRouting = vi.mocked(resolveTelegramRoutingForSurface)
 
 // ── Test setup ──────────────────────────────────────────────────
 
@@ -290,11 +317,76 @@ beforeEach(() => {
   pipelineCalls.length = 0
   adapterSendCalls.length = 0
   pipelineDocuments = undefined
+  pipelineError = undefined
   leaveChatCalls.length = 0
   teamRoleCalls.length = 0
   teamRoleResponse = null
   setWebhookCalls.length = 0
   mergeShadowUser.mockClear()
+})
+
+describe('[COMP:api/telegram-byo-route] safe error delivery', () => {
+  function makeApp() {
+    return createTestApp(
+      '/webhook/telegram-byo',
+      telegramByoRoutes({
+        provider: {} as never,
+        systemPrompt: '',
+        tools: new Map(),
+        memoryStore: {} as never,
+        integrationStore: makeIntegrationStore() as never,
+        capabilityStore: {} as never,
+        apiUrl: 'http://test',
+      }),
+    )
+  }
+
+  it('explains that a custom text-only model cannot inspect an inbound image', async () => {
+    pipelineError = new Error(
+      'Custom model endpoints currently support text and tools only. Remove the inline image or use the web app to choose a built-in model.',
+    )
+
+    await postUpdate(makeApp(), {
+      update_id: 700,
+      message: {
+        message_id: 700,
+        from: { id: 42, first_name: 'Casey', username: 'casey' },
+        chat: { id: 42, type: 'private' },
+        date: Math.floor(Date.now() / 1000),
+        caption: 'Summarize this customer feedback.',
+        photo: [{ file_id: 'feedback_screenshot' }],
+      },
+    })
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    expect(pipelineCalls).toHaveLength(1)
+    expect(pipelineCalls[0].userContentBlocks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'image', mimeType: 'image/jpeg' }),
+    ]))
+    expect(adapterSendCalls.at(-1)?.text).toBe(pipelineError.message)
+  })
+
+  it('keeps arbitrary provider errors out of the Telegram reply', async () => {
+    pipelineError = new Error(
+      'Custom model endpoints currently support text and tools only. Upstream vendor detail that must stay private.',
+    )
+
+    await postUpdate(makeApp(), {
+      update_id: 701,
+      message: {
+        message_id: 701,
+        from: { id: 42, first_name: 'Casey', username: 'casey' },
+        chat: { id: 42, type: 'private' },
+        date: Math.floor(Date.now() / 1000),
+        text: 'hello',
+      },
+    })
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    expect(adapterSendCalls.at(-1)?.text).toBe('Something went wrong. Please try again.')
+  })
 })
 
 describe('[COMP:api/telegram-byo-route] OSS owner pairing', () => {
@@ -627,6 +719,55 @@ describe('[COMP:api/telegram-byo-route] forum-topic routing', () => {
     expect(chatLockCalls).toEqual(['tg-byo:-1001234567890'])
     expect(pipelineCalls).toHaveLength(1)
     expect(pipelineCalls[0]).toMatchObject({ channelId: '-1001234567890', isGroupChat: true })
+  })
+
+  it('boots from a surface route when the channel has no default assistant', async () => {
+    const app = createTestApp(
+      '/webhook/telegram-byo',
+      telegramByoRoutes({
+        provider: {} as never,
+        systemPrompt: '',
+        tools: new Map(),
+        memoryStore: {} as never,
+        integrationStore: makeIntegrationStore() as never,
+        capabilityStore: {} as never,
+        apiUrl: 'http://test',
+      }),
+    )
+    mockResolveTelegramRouting.mockResolvedValueOnce(null)
+
+    await postUpdate(app, buildForumUpdate({ updateId: 51, messageId: 501, threadId: 42 }))
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    expect(mockResolveAnyRouting).toHaveBeenCalledWith('channel_1')
+    expect(pipelineCalls).toHaveLength(1)
+    expect(pipelineCalls[0]).toMatchObject({ channelId: '-1001234567890:topic:42' })
+  })
+
+  it('drops an unmatched topic when a surface-only channel has no default', async () => {
+    const app = createTestApp(
+      '/webhook/telegram-byo',
+      telegramByoRoutes({
+        provider: {} as never,
+        systemPrompt: '',
+        tools: new Map(),
+        memoryStore: {} as never,
+        integrationStore: makeIntegrationStore() as never,
+        capabilityStore: {} as never,
+        apiUrl: 'http://test',
+      }),
+    )
+    mockResolveTelegramRouting
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null)
+
+    await postUpdate(app, buildForumUpdate({ updateId: 52, messageId: 502, threadId: 99 }))
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    expect(mockResolveAnyRouting).toHaveBeenCalledWith('channel_1')
+    expect(pipelineCalls).toHaveLength(0)
   })
 })
 

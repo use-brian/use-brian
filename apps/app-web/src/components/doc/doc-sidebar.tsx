@@ -743,7 +743,7 @@ export function DocSidebar(props: Props) {
             onChange={(e) => setQuery(e.target.value)}
             placeholder={t.sidebarSearchPlaceholder}
             aria-label={t.iconSearchAria}
-            className="h-7 w-full rounded-md border border-border bg-background px-2 text-sm text-foreground outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40"
+            className="h-7 w-full rounded-md border border-border bg-background px-2 text-sm text-foreground outline-none placeholder:text-muted-foreground"
           />
         </div>
       )}

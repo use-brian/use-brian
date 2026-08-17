@@ -5,7 +5,7 @@ import { runOfficeEdit } from '../generation/edit-runner.js'
 import { documentSnapshot, id, templateBundle } from './fixtures.js'
 
 function brief(overrides: Record<string, unknown> = {}) {
-  return { workspaceId: id(2), actingUserId: id(80), assistantId: id(81), family: 'document', outcome: 'Create a board update', audience: 'Board', sourceHandles: ['page:plan'], requestedSensitivityFloor: 'internal', canonicalWebsite: 'https://example.com', companyHasNoWebsite: false, idempotencyKey: 'request-12345678', ...overrides }
+  return { workspaceId: id(2), actingUserId: id(80), assistantId: id(81), family: 'document', outcome: 'Create a board update', audience: 'Board', additionalContext: 'Prioritize retention. Reference https://reports.example.com/q2.', sourceHandles: ['page:plan'], requestedSensitivityFloor: 'internal', idempotencyKey: 'request-12345678', ...overrides }
 }
 
 function deps() {
@@ -15,7 +15,7 @@ function deps() {
     resolveAuthority: vi.fn(async () => ({ sensitivity: 'internal' as const, visibilityUserIds: [], compartments: [], sourceHandles: ['page:plan'] })),
     selectTemplate: vi.fn(async () => ({ template: { ...templateBundle(), status: 'admitted' as const } })),
     retrieveBrain: vi.fn(async () => [{ handle: 'page:plan', excerpt: 'ARR grew.', sensitivity: 'internal' as const }]),
-    inspectWebsite: vi.fn(async (url) => [{ url, excerpt: 'Acme builds dependable software.' }]),
+    inspectUrl: vi.fn(async (url) => [{ url, excerpt: 'Example Labs publishes its Q2 report.' }]),
     planClaims: vi.fn(async () => [{ objectHint: 'summary', text: 'ARR grew.', classification: 'evidence_supported' as const, confidence: 0.95, sourceHandles: ['page:plan'] }]),
     construct: vi.fn(async () => documentSnapshot()),
     processMedia: vi.fn(async (snapshot) => snapshot),
@@ -34,17 +34,28 @@ describe('[COMP:office/generation] Office generation pipeline', () => {
     const test = deps()
     const result = await runOfficeGenerationPipeline(brief(), test.value)
     expect(result).toMatchObject({ status: 'completed', version: 1 })
-    expect(test.events).toContain('office.job.website_inspected')
+    expect(test.events).toContain('office.job.reference_url_inspected')
+    expect(test.events).toContain('office.job.context_grounded')
     expect(test.events.at(-1)).toBe('office.job.completed')
     expect(test.checkpoints).toEqual(['queued', 'template', 'grounding', 'claim_plan', 'construct', 'media', 'fit_render', 'validate', 'export_reparse', 'completed'])
   })
 
-  it('stops at the mandatory website gate without replaying later work', async () => {
+  it('continues without additional context after the template has been selected', async () => {
     const test = deps()
-    const result = await runOfficeGenerationPipeline(brief({ canonicalWebsite: undefined }), test.value)
-    expect(result).toMatchObject({ status: 'needs_input', code: 'website_required' })
-    expect(test.value.retrieveBrain).not.toHaveBeenCalled()
-    expect(test.value.construct).not.toHaveBeenCalled()
+    const result = await runOfficeGenerationPipeline(brief({ additionalContext: undefined }), test.value)
+    expect(result).toMatchObject({ status: 'completed' })
+    expect(test.value.inspectUrl).not.toHaveBeenCalled()
+    expect(test.value.construct).toHaveBeenCalled()
+  })
+
+  it('treats an unavailable reference URL as best-effort context', async () => {
+    const test = deps()
+    test.value.inspectUrl = vi.fn(async () => { throw new Error('Reference unavailable') })
+    const result = await runOfficeGenerationPipeline(brief(), test.value)
+    expect(result).toMatchObject({ status: 'completed' })
+    expect(test.events).not.toContain('office.job.reference_url_inspected')
+    expect(test.events).toContain('office.job.context_grounded')
+    expect(test.value.construct).toHaveBeenCalled()
   })
 
   it('keeps sub-floor typography only when the same object was admitted by the template', async () => {
@@ -88,8 +99,17 @@ describe('[COMP:office/generation] Explicit Office revision lane', () => {
     const snapshot = documentSnapshot()
     const targetId = snapshot.sections[0].nodes[0].id
     const command = { commandId: id(90), artifactId: snapshot.artifactId, baseVersion: 1, actor: { type: 'assistant' as const, id: id(91) }, origin: 'ai' as const, kind: 'deleteObject' as const, targetId }
-    const base = { artifactId: snapshot.artifactId, baseVersion: 1, currentVersion: 2, instruction: 'Remove it', targetIds: [targetId], threadExcerpt: [], templateConstraints: [], evidencePacket: [], snapshot }
+    const base = { artifactId: snapshot.artifactId, assistantId: id(91), baseVersion: 1, currentVersion: 2, instruction: 'Remove it', targetIds: [targetId], threadExcerpt: [], templateConstraints: [], evidencePacket: [], snapshot }
     await expect(runOfficeEdit({ ...base, role: 'comment', changedObjectIdsSinceBase: [] }, async () => [command])).resolves.toMatchObject({ mode: 'proposal', reason: 'comment_role' })
     await expect(runOfficeEdit({ ...base, role: 'edit', changedObjectIdsSinceBase: [targetId] }, async () => [command])).resolves.toMatchObject({ mode: 'proposal', reason: 'overlap_conflict' })
+  })
+
+  it('applies only commands attributed to the authorized Brian assistant', async () => {
+    const snapshot = documentSnapshot()
+    const targetId = snapshot.sections[0].nodes[0].id
+    const base = { artifactId: snapshot.artifactId, assistantId: id(91), baseVersion: 1, currentVersion: 1, role: 'edit' as const, instruction: 'Remove it', targetIds: [targetId], changedObjectIdsSinceBase: [], threadExcerpt: [], templateConstraints: [], evidencePacket: [], snapshot }
+    const valid = { commandId: id(90), artifactId: snapshot.artifactId, baseVersion: 1, actor: { type: 'assistant' as const, id: id(91) }, origin: 'ai' as const, kind: 'deleteObject' as const, targetId }
+    await expect(runOfficeEdit(base, async () => [valid])).resolves.toMatchObject({ mode: 'direct', reason: 'applied', affectedObjectIds: [targetId] })
+    await expect(runOfficeEdit(base, async () => [{ ...valid, actor: { type: 'assistant' as const, id: id(92) } }])).rejects.toThrow('actor does not match')
   })
 })

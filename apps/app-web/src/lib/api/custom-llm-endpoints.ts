@@ -104,6 +104,21 @@ export async function createCustomLlmProfile(
   return ((await res.json()) as { profile: CustomLlmProfile }).profile;
 }
 
+export async function updateCustomLlmProfile(
+  workspaceId: string,
+  endpointId: string,
+  profileId: string,
+  input: CustomLlmProfileInput,
+): Promise<CustomLlmProfile> {
+  const res = await authFetch(`${API_URL}/api/workspaces/${workspaceId}/custom-llm-endpoints/${endpointId}/profiles/${profileId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) throw await responseError(res, `profile update failed (${res.status})`);
+  return ((await res.json()) as { profile: CustomLlmProfile }).profile;
+}
+
 export async function deleteCustomLlmProfile(
   workspaceId: string,
   endpointId: string,

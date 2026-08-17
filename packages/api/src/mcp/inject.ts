@@ -19,7 +19,7 @@
  */
 
 import type { AccessContext, CachedFile } from '@use-brian/core'
-import { promoteCachedFile, wrapMcpTools, buildToolIndex, createMcpSearchTools, createGoogleCalendarTools, createGmailTools, createGoogleTasksTools, createGoogleDriveTools, createGoogleDocsTools, createGoogleSheetsTools, createGoogleSlidesTools, createGDriveFilesTools, createGitHubTools, createNotionTools, createFathomTools, createShopifyTools, createMsGraphTools, createKnowledgeTools, createAgentmailTools, createMailboxTools, workspaceFilesCtxFor, workspaceFilesErrorMessage, workspaceFilesGate } from '@use-brian/core'
+import { promoteCachedFile, wrapMcpTools, buildToolIndex, createMcpSearchTools, legacyMcpToolName, createGoogleCalendarTools, createGmailTools, createGoogleTasksTools, createGoogleDriveTools, createGoogleDocsTools, createGoogleSheetsTools, createGoogleSlidesTools, createGDriveFilesTools, createGitHubTools, createNotionTools, createFathomTools, createShopifyTools, createWordPressTools, createMsGraphTools, createKnowledgeTools, createAgentmailTools, createMailboxTools, workspaceFilesCtxFor, workspaceFilesErrorMessage, workspaceFilesGate, GOOGLE_MAPS_TOOL_NAMES } from '@use-brian/core'
 import type { Tool, McpSettingsStore, McpServerConfig, KnowledgeStoreInterface, KnowledgeRepoWriter, AuthorizedFile, GDriveFilesStore, GDriveFileKind, LocalSource, RemoteSource, EngineHooks, FilesApi, AgentmailToolApi, MailboxApi, MailboxAccountRouter } from '@use-brian/core'
 import { getGlobalEmailInboxProvider, type EmailInboxProvider } from '../agentmail/provider.js'
 import { renderEmailBody } from '@use-brian/channels'
@@ -36,6 +36,7 @@ import {
 } from '../db/gdrive-catalog-store.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
+import { listAgentmailConnectorInstanceIdsForAssistantSystem } from '../db/channels-store.js'
 import type { ConnectorActionAudit, ConnectorActionPreflight } from '../connector-action-port.js'
 import { workspacePolicyAsSettingsStore } from '../db/workspace-tool-policy-store.js'
 import { discoverMcpServer, callRemoteMcpTool } from './client.js'
@@ -49,7 +50,7 @@ import { buildConnectorAuthHeaders, mergeValidatedHeaders, preflightHeadersToRec
 import {
   refreshGoogleAccessToken,
   unpackGoogleRefreshCredential,
-  listCalendarList, listCalendarEvents, getCalendarEvent, queryCalendarFreeBusy,
+  listCalendarList, listCalendarEventColors, listCalendarEvents, getCalendarEvent, queryCalendarFreeBusy,
   createCalendarEvent, updateCalendarEvent, deleteCalendarEvent,
   listGmailMessages, getGmailMessage, sendGmailMessage,
   listTaskLists, listGoogleTasks, getGoogleTask, createGoogleTask, updateGoogleTask, deleteGoogleTask,
@@ -128,6 +129,7 @@ import {
   createProductTemplate as createShopifyProductTemplate,
   setProductTemplate as setShopifyProductTemplate,
 } from '../shopify/client.js'
+import { createWordPressApi, unpackWordPressCredentials, type WordPressCredentials } from '../wordpress/client.js'
 import { createMsGraphClient } from '../msgraph/client.js'
 import {
   createMsGraphTokenManager,
@@ -211,6 +213,7 @@ export function _getMcpDiscoveryCacheSize(): number {
 export const INJECTED_BUILTIN_TOOLS_BY_CONNECTOR: Record<string, readonly string[]> = {
   gcal: [
     'googleCalendarListCalendars',
+    'googleCalendarListEventColors',
     'googleCalendarListEvents',
     'googleCalendarGetEvent',
     'googleCalendarQueryFreeBusy',
@@ -335,6 +338,11 @@ export const INJECTED_BUILTIN_TOOLS_BY_CONNECTOR: Record<string, readonly string
     'shopifyRefundOrder',
     'shopifyCompleteDraftOrder',
   ],
+  wordpress: [
+    'wordpressGetManagedPage',
+    'wordpressUpdatePageText',
+    'wordpressReplacePageImage',
+  ],
   msgraph: [
     'msTeamsListTeams',
     'msTeamsListChannels',
@@ -374,6 +382,8 @@ export type McpInjectionResult = {
   enrichConfirmation: ConfirmationEnricher
   /** Capabilities that are unavailable (not connected, disabled, or blocked). Injected into the system prompt so the model doesn't waste turns searching for them. */
   unavailable: string[]
+  /** Names from `restrictSearchToToolNames` that survived connector discovery and policy scoping. */
+  restrictedSearchToolNames?: string[]
 }
 
 export async function injectMcpTools(params: {
@@ -461,6 +471,14 @@ export async function injectMcpTools(params: {
    * See `docs/architecture/integrations/mcp.md` → "Tool search pattern".
    */
   keepBuiltinsDirect?: boolean
+  /** Emit canonical + legacy dynamic aliases for workflow tool_call lookup. */
+  keepDynamicToolsDirect?: boolean
+  /**
+   * Restrict folded custom/CLI sources to these canonical tool names. The
+   * workflow callee uses this with a pinned allow-list so retaining
+   * `mcp_search`/`mcp_call` cannot expose unpinned connector tools.
+   */
+  restrictSearchToToolNames?: readonly string[]
   /**
    * Tool-use interception port (remote MCP only). Threaded into
    * `createMcpSearchTools` so `preToolUse` can inject/overwrite outbound
@@ -526,7 +544,8 @@ export async function injectMcpTools(params: {
     gdriveFilesStore,
     connectorGrantStore, connectorInstanceStore, workspaceToolPolicyStore, assistantTeamId,
     connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain,
-    keepBuiltinsDirect = false, engineHooks, actorIdentity, filesApi, readCachedFile,
+    keepBuiltinsDirect = false, keepDynamicToolsDirect = false, restrictSearchToToolNames,
+    engineHooks, actorIdentity, filesApi, readCachedFile,
     introspectionTools, emailInboxProvider,
   } = params
 
@@ -572,6 +591,9 @@ export async function injectMcpTools(params: {
     console.error('[mcp-inject] failed to list connectors:', err)
     return { enrichConfirmation: async (_t, input) => input, unavailable }
   }
+  const teamPolicyStore = assistantTeamId && workspaceToolPolicyStore
+    ? workspacePolicyAsSettingsStore(workspaceToolPolicyStore, assistantTeamId)
+    : settingsStore
 
   // Layer 1: connected connectors with a remote URL (custom + directory).
   // Built-in connectors (gcal, gmail) are handled separately below. We
@@ -593,9 +615,13 @@ export async function injectMcpTools(params: {
     sendActorIdentity: boolean
     /** Opt-in: send the acting user's `X-UseBrian-Media-Token` capability to this connector. */
     sendMediaToken: boolean
+    policyStore: McpSettingsStore
+    policyUserId: string
+    policyServerName?: string
+    governanceId: string
   }> = connectors
     .filter((c) => c.connected && c.url)
-    .map((c) => ({ connectorId: c.connectorId, name: c.name, url: c.url!, instanceId: c.id, updatedAt: c.updatedAt, preflightHeaders: preflightHeadersToRecord(c.config), sendActorIdentity: c.config?.sendActorIdentity === true, sendMediaToken: c.config?.sendMediaToken === true }))
+    .map((c) => ({ connectorId: c.connectorId, name: c.name, url: c.url!, instanceId: c.id, updatedAt: c.updatedAt, preflightHeaders: preflightHeadersToRecord(c.config), sendActorIdentity: c.config?.sendActorIdentity === true, sendMediaToken: c.config?.sendMediaToken === true, policyStore: settingsStore, policyUserId: userId, governanceId: c.connectorId }))
 
   // Team-native custom MCP instances live as separate `connector_instance`
   // rows scoped to the team. The `provider` column is a UUID for custom
@@ -616,6 +642,10 @@ export async function injectMcpTools(params: {
           preflightHeaders: preflightHeadersToRecord(inst.config),
           sendActorIdentity: inst.config?.sendActorIdentity === true,
           sendMediaToken: inst.config?.sendMediaToken === true,
+          policyStore: teamPolicyStore,
+          policyUserId: userId,
+          policyServerName: inst.provider,
+          governanceId: connectorInstanceGovernanceId(inst.provider, inst.id),
         })
       }
     } catch (err) {
@@ -629,7 +659,7 @@ export async function injectMcpTools(params: {
     const checks = await Promise.all(
       connectedCustom.map(async (c) => ({
         connector: c,
-        enabled: await assistantConnectorStore.isEnabled(assistantId, c.connectorId),
+        enabled: await assistantConnectorStore.isEnabled(assistantId, c.governanceId, c.connectorId),
       })),
     )
     active = checks.filter((c) => c.enabled).map((c) => c.connector)
@@ -666,6 +696,7 @@ export async function injectMcpTools(params: {
   const discoveredServers: Array<{
     server: McpServerConfig
     connectorUrl: string
+    policy: NonNullable<RemoteSource['policy']>
   }> = []
 
   // Resolve per-connector auth headers up front and register them in the
@@ -718,8 +749,16 @@ export async function injectMcpTools(params: {
       const cached = getCachedDiscovery(cacheKey)
       if (cached) {
         console.debug(`[mcp-inject] ${connector.name}: cache hit (${cached.tools.length} tools)`)
-        discoveredServers.push({ server: cached, connectorUrl: connector.url })
-        return
+        return {
+          server: cached,
+          connectorUrl: connector.url,
+          policy: {
+            settingsStore: connector.policyStore,
+            userId: connector.policyUserId,
+            serverName: connector.policyServerName,
+            appLevelAssistantId: APP_LEVEL_ASSISTANT_ID,
+          },
+        }
       }
 
       // Discover with timeout
@@ -731,16 +770,26 @@ export async function injectMcpTools(params: {
       ])
 
       setCachedDiscovery(cacheKey, server)
-      discoveredServers.push({ server, connectorUrl: connector.url })
-
       console.debug(
         `[mcp-inject] ${connector.name}: discovered ${server.tools.length} tools`,
       )
+      return {
+        server,
+        connectorUrl: connector.url,
+        policy: {
+          settingsStore: connector.policyStore,
+          userId: connector.policyUserId,
+          serverName: connector.policyServerName,
+          appLevelAssistantId: APP_LEVEL_ASSISTANT_ID,
+        },
+      }
     }),
   )
 
   for (const result of discoveries) {
-    if (result.status === 'rejected') {
+    if (result.status === 'fulfilled') {
+      discoveredServers.push(result.value)
+    } else {
       console.error('[mcp-inject] server discovery failed:', result.reason)
     }
   }
@@ -754,12 +803,13 @@ export async function injectMcpTools(params: {
   // (`keepBuiltinsDirect: true`) still gets `mcp_search` / `mcp_call`
   // here for custom MCP only — built-ins stay direct so the workflow
   // executor's per-tool `requiresConfirmation` inspection still works.
-  const remoteSources: RemoteSource[] = discoveredServers.map(({ server, connectorUrl }) => ({
+  const remoteSources: RemoteSource[] = discoveredServers.map(({ server, connectorUrl, policy }) => ({
     kind: 'remote' as const,
     server,
     serverUrl: connectorUrl,
     callMcpTool: (url: string, toolName: string, input: Record<string, unknown>) =>
       callRemoteMcpTool(url, toolName, input, headersByUrl.get(url)),
+    policy,
   }))
 
   // Discover a custom remote MCP shared to this workspace via a grant and add
@@ -774,6 +824,7 @@ export async function injectMcpTools(params: {
     cacheUserId: string,
     instanceId?: string | null,
     updatedAt?: Date | null,
+    policyServerName?: string,
   ): Promise<void> {
     if (remoteSources.some((s) => s.serverUrl === url)) return
     try {
@@ -796,6 +847,12 @@ export async function injectMcpTools(params: {
         serverUrl: url,
         callMcpTool: (u: string, toolName: string, input: Record<string, unknown>) =>
           callRemoteMcpTool(u, toolName, input, headersByUrl.get(u)),
+        policy: {
+          settingsStore,
+          userId: cacheUserId,
+          serverName: policyServerName,
+          appLevelAssistantId: APP_LEVEL_ASSISTANT_ID,
+        },
       })
       console.debug(`[mcp-inject] granted custom MCP ${name}: discovered ${server.tools.length} tools`)
     } catch (err) {
@@ -817,9 +874,19 @@ export async function injectMcpTools(params: {
       name: string
       updatedAt: Date | null
       config?: Record<string, unknown>
+      policyStore: McpSettingsStore
+      policyUserId: string
+      policyServerName?: string
     }> = connectors
       .filter((c) => c.connectorId === 'cli' && c.connected)
-      .map((c) => ({ id: c.id, name: c.name, updatedAt: c.updatedAt, config: c.config }))
+      .map((c) => ({
+        id: c.id,
+        name: c.name,
+        updatedAt: c.updatedAt,
+        config: c.config,
+        policyStore: settingsStore,
+        policyUserId: userId,
+      }))
 
     // Workspace assistants suppress all owner-personal base loading. A CLI
     // reaches them only through an explicit workspace grant or team ownership,
@@ -833,10 +900,31 @@ export async function injectMcpTools(params: {
           : Promise.resolve([]),
       ])
       const seen = new Set(cliInstances.map((inst) => inst.id))
-      for (const inst of [...teamNative, ...grants.map((grant) => grant.instance)]) {
+      for (const inst of teamNative) {
         if (inst.provider !== 'cli' || !inst.connected || seen.has(inst.id)) continue
         seen.add(inst.id)
-        cliInstances.push({ id: inst.id, name: inst.label, updatedAt: inst.updatedAt, config: inst.config })
+        cliInstances.push({
+          id: inst.id,
+          name: inst.label,
+          updatedAt: inst.updatedAt,
+          config: inst.config,
+          policyStore: teamPolicyStore,
+          policyUserId: userId,
+          policyServerName: connectorInstanceGovernanceId('cli', inst.id),
+        })
+      }
+      for (const grant of grants) {
+        const inst = grant.instance
+        if (inst.provider !== 'cli' || !inst.connected || seen.has(inst.id)) continue
+        seen.add(inst.id)
+        cliInstances.push({
+          id: inst.id,
+          name: inst.label,
+          updatedAt: inst.updatedAt,
+          config: inst.config,
+          policyStore: settingsStore,
+          policyUserId: grant.grantedByUserId,
+        })
       }
     }
     if (cliInstances.length > 0 && connectorInstanceStore) {
@@ -874,14 +962,24 @@ export async function injectMcpTools(params: {
 
           const wrappedTools = wrapMcpTools({
             server,
-            settingsStore,
+            settingsStore: inst.policyStore,
             assistantId,
-            userId,
+            userId: inst.policyUserId,
+            appLevelAssistantId: APP_LEVEL_ASSISTANT_ID,
+            policyServerName: inst.policyServerName,
             callMcpTool: (_serverName, toolName, input) =>
               callCliMcpTool(serverParams, toolName, input),
           })
 
-          return { label: inst.name, tools: wrappedTools }
+          // The search gateway already scopes tools by server, so expose the
+          // MCP server's canonical names. `wrapMcpTools` prefixes names for
+          // legacy direct injection, which does not match workflow catalog ids.
+          const searchableTools = wrappedTools.map((tool, index) => ({
+            ...tool,
+            name: server.tools[index]?.name ?? tool.name,
+          }))
+
+          return { label: inst.name, tools: searchableTools }
         }),
       )
 
@@ -944,6 +1042,7 @@ export async function injectMcpTools(params: {
   await injectNotionTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, extrasByProvider.get('notion'), resolveInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore)
   await injectFathomTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, undefined, extrasByProvider.get('fathom'), resolveInstanceCreds, persistInstanceCreds)
   await injectShopifyTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, undefined, extrasByProvider.get('shopify'), resolveInstanceCreds, persistInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore, filesApi, readCachedFile)
+  await injectWordPressTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, extrasByProvider.get('wordpress'), resolveInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore, filesApi, readCachedFile)
   // No extras argument: `msgraph` is `single_instance` in OFFICIAL_CONNECTORS
   // (one Microsoft identity per user), so it is never in
   // MULTI_INSTANCE_CONNECTOR_IDS and `extrasByProvider` never holds it.
@@ -1143,6 +1242,13 @@ export async function injectMcpTools(params: {
             assistantConnectorGrantsStore,
             filesApi,
           )
+        } else if (p === 'wordpress') {
+          await injectWordPressTools(
+            grantorConnectors, connectorStore, settingsStore, g.grantedByUserId, assistantId,
+            assistantConnectorStore, tools, undefined, boundGrantCreds, extraInstances,
+            resolveGrantedInstanceCreds, { report: reportHealth, instanceId: g.instance.id },
+            assistantConnectorGrantsStore, filesApi,
+          )
         } else if (p === 'msgraph') {
           // Read-only Teams over a rotating refresh token. The synthetic
           // one-provider list mirrors the Google branch: the exposed instance
@@ -1187,7 +1293,9 @@ export async function injectMcpTools(params: {
           // (keyed on the provider UUID, like the team-native custom path),
           // then discover it and add it to the search index. Without this the
           // grant is a no-op for workspace assistants — the tools never appear.
-          const enabled = !assistantConnectorStore || await assistantConnectorStore.isEnabled(assistantId, p)
+          const governanceId = connectorInstanceGovernanceId(p, g.instance.id)
+          const enabled = !assistantConnectorStore
+            || await assistantConnectorStore.isEnabled(assistantId, governanceId, p)
           if (enabled) {
             await addGrantedCustomMcp(g.instance.url, g.instance.label ?? p, g.grantedByUserId, g.instance.id, g.instance.updatedAt)
           }
@@ -1230,10 +1338,6 @@ export async function injectMcpTools(params: {
       // workspace-keyed adapter so allow/ask/block resolves from
       // workspace_tool_policy. Falls back to the per-user store when the shared
       // policy store isn't wired (legacy call sites / tests).
-      const teamPolicyStore = workspaceToolPolicyStore
-        ? workspacePolicyAsSettingsStore(workspaceToolPolicyStore, assistantTeamId)
-        : settingsStore
-
       // Synthesize a "connectors" array that looks like the legacy per-user
       // one, so the per-provider injectors' enable checks and discovery
       // logic don't need to change. `credsOverride` / `credsOverridePerConnector`
@@ -1421,6 +1525,18 @@ export async function injectMcpTools(params: {
             assistantConnectorGrantsStore,
             filesApi,
           )
+        } else if (p === 'wordpress') {
+          await injectWordPressTools(
+            syntheticConnectors, connectorStore, teamPolicyStore, userId, assistantId,
+            assistantConnectorStore, tools, undefined,
+            async () => {
+              const creds = await connectorInstanceStore.getCredentialsSystem(inst.id)
+              return creds?.client_secret ?? null
+            },
+            extraInstances, resolveTeamInstanceCreds,
+            { report: reportHealth, instanceId: inst.id },
+            assistantConnectorGrantsStore, filesApi,
+          )
         } else if (p === 'msgraph') {
           // A workspace-owned Microsoft identity. Reads and the rotated tuple
           // both bind to this team-scoped row; the shared workspace policy
@@ -1487,24 +1603,35 @@ export async function injectMcpTools(params: {
         console.debug(`[mcp-inject] team-native overlay: re-injected ${overlaidByTeam.size} provider(s) from team-scoped connector_instance rows`)
       }
 
-      // ── Assistant Email (agentmail) — one tool set over ALL inboxes ──
+      // ── Assistant Email (agentmail) — Channel-owned handler scope ──
       // Instances are one-per-inbox (decision D1); the tools take an
-      // optional `fromInbox` instead of per-instance variant suffixes. Dark
-      // without the provider (no AGENTMAIL_API_KEY) — nothing is announced.
+      // optional `fromInbox` instead of per-instance variant suffixes. Only
+      // inboxes whose Channel default points at this assistant are exposed.
+      // Dark without the provider (no AGENTMAIL_API_KEY) — nothing is announced.
       // Explicit param wins; otherwise the boot-bound global (the late-bound
       // seam — see provider.ts).
       const effectiveEmailProvider = emailInboxProvider ?? getGlobalEmailInboxProvider()
       if (effectiveEmailProvider) {
+        const handledInstanceIds = new Set(
+          await listAgentmailConnectorInstanceIdsForAssistantSystem(
+            assistantTeamId,
+            assistantId,
+          ),
+        )
         const inboxInstances = teamNative
-          .filter((i) => i.provider === 'agentmail' && i.connected && i.healthStatus !== 'auth_failed')
+          .filter((i) =>
+            i.provider === 'agentmail'
+            && i.connected
+            && i.healthStatus !== 'auth_failed'
+            && handledInstanceIds.has(i.id),
+          )
           .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
-        const agentmailEnabled =
-          !assistantConnectorStore || await assistantConnectorStore.isEnabled(assistantId, 'agentmail')
-        if (inboxInstances.length > 0 && agentmailEnabled) {
+        if (inboxInstances.length > 0) {
           await injectAgentmailTools({
             provider: effectiveEmailProvider,
             inboxes: inboxInstances.map((i) => ({
               address: (i.connectedEmail ?? i.label).toLowerCase(),
+              governanceId: connectorInstanceGovernanceId('agentmail', i.id),
             })),
             settingsStore: workspaceToolPolicyStore
               ? workspacePolicyAsSettingsStore(workspaceToolPolicyStore, assistantTeamId)
@@ -1516,9 +1643,9 @@ export async function injectMcpTools(params: {
             connectorActionAudit,
             assistantConnectorGrantsStore,
           })
-        } else if (inboxInstances.length === 0) {
+        } else {
           unavailable.push(
-            'Assistant Email (no assistant inbox provisioned in this workspace) — if the user wants the assistant to have its own email address, point them to Studio → Channels → Add channel → Email.',
+            'Assistant Email (this assistant does not handle an inbox) - assign an inbox to it in Studio → Channels, or create one with Add channel → Email.',
           )
         }
       }
@@ -1666,6 +1793,23 @@ export async function injectMcpTools(params: {
       }
     }
 
+    // Google Maps is a deployment-keyed first-party read capability rather
+    // than a connector instance, so it deliberately does not appear in
+    // OFFICIAL_CONNECTOR_TOOLS / INJECTED_BUILTIN_TOOLS_BY_CONNECTOR. Fold its
+    // env-gated tools into the same on-demand index under their own source.
+    // `keepBuiltinsDirect=true` skips this block, preserving exact canonical
+    // names for workflow allow-lists.
+    const googleMapsTools: Tool[] = []
+    for (const name of GOOGLE_MAPS_TOOL_NAMES) {
+      const tool = tools.get(name)
+      if (!tool) continue
+      googleMapsTools.push(tool)
+      tools.delete(name)
+    }
+    if (googleMapsTools.length > 0) {
+      localSources.push({ kind: 'local', serverName: 'google-maps', tools: googleMapsTools })
+    }
+
     // KB tools — separate bucket; the assistant-scoped enablement check
     // above already gated whether they were emitted this turn.
     if (kbToolNames.length > 0) {
@@ -1706,8 +1850,52 @@ export async function injectMcpTools(params: {
   // Build + inject the search pair whenever **any** source is present.
   // Direct-injection-only paths (workflow, smoke tests with no custom MCP)
   // still skip when both lists are empty.
-  if (remoteSources.length > 0 || localSources.length > 0) {
-    const index = buildToolIndex([...remoteSources, ...localSources])
+  const restrictedSearchToolNames = new Set<string>()
+  const searchAllowList = restrictSearchToToolNames
+    ? new Set(restrictSearchToToolNames)
+    : null
+  const restrictedNameCounts = new Map<string, number>()
+  if (searchAllowList) {
+    for (const source of [...remoteSources, ...localSources]) {
+      const serverName = source.kind === 'remote' ? source.server.name : source.serverName
+      const sourceTools = source.kind === 'remote' ? source.server.tools : source.tools
+      for (const tool of sourceTools) {
+        for (const name of new Set([tool.name, legacyMcpToolName(serverName, tool.name)])) {
+          restrictedNameCounts.set(name, (restrictedNameCounts.get(name) ?? 0) + 1)
+        }
+      }
+    }
+  }
+  const searchSources = [...remoteSources, ...localSources].flatMap((source) => {
+    if (!searchAllowList) return [source]
+
+    if (source.kind === 'remote') {
+      const matchedTools = source.server.tools.filter((tool) => {
+        const legacyName = legacyMcpToolName(source.server.name, tool.name)
+        const canonicalMatch = searchAllowList.has(tool.name) && restrictedNameCounts.get(tool.name) === 1
+        const legacyMatch = searchAllowList.has(legacyName) && restrictedNameCounts.get(legacyName) === 1
+        if (canonicalMatch) restrictedSearchToolNames.add(tool.name)
+        if (legacyMatch) restrictedSearchToolNames.add(legacyName)
+        return canonicalMatch || legacyMatch
+      })
+      if (matchedTools.length === 0) return []
+      return [{ ...source, server: { ...source.server, tools: matchedTools } }]
+    }
+
+    const matchedTools = source.tools.filter((tool) => {
+      const legacyName = legacyMcpToolName(source.serverName, tool.name)
+      const canonicalMatch = searchAllowList.has(tool.name) && restrictedNameCounts.get(tool.name) === 1
+      const legacyMatch = searchAllowList.has(legacyName) && restrictedNameCounts.get(legacyName) === 1
+      if (canonicalMatch) restrictedSearchToolNames.add(tool.name)
+      if (legacyMatch) restrictedSearchToolNames.add(legacyName)
+      return canonicalMatch || legacyMatch
+    })
+    if (matchedTools.length === 0) return []
+    return [{ ...source, tools: matchedTools }]
+  })
+
+  if (searchSources.length > 0) {
+    const index = buildToolIndex(searchSources)
     const searchTools = createMcpSearchTools({
       index,
       settingsStore,
@@ -1722,19 +1910,41 @@ export async function injectMcpTools(params: {
       callMcpTool: (serverUrl, toolName, input, overrides) =>
         callRemoteMcpTool(serverUrl, toolName, input, mergeValidatedHeaders(headersByUrl.get(serverUrl), overrides)),
       hooks: engineHooks,
+      keepDynamicToolsDirect,
     })
     for (const tool of searchTools) {
+      // A dynamic MCP can choose a generic canonical name such as `search`.
+      // Never let that replace an existing first-party registry entry; its
+      // server-prefixed compatibility alias remains available to tool_call.
+      if (
+        keepDynamicToolsDirect
+        && tool.name !== 'mcp_search'
+        && tool.name !== 'mcp_call'
+        && tools.has(tool.name)
+      ) {
+        continue
+      }
       tools.set(tool.name, tool)
     }
 
-    const remoteCount = remoteSources.reduce((sum, s) => sum + s.server.tools.length, 0)
-    const localCount = localSources.reduce((sum, s) => sum + s.tools.length, 0)
+    const remoteCount = searchSources.reduce(
+      (sum, source) => sum + (source.kind === 'remote' ? source.server.tools.length : 0),
+      0,
+    )
+    const localCount = searchSources.reduce(
+      (sum, source) => sum + (source.kind === 'local' ? source.tools.length : 0),
+      0,
+    )
     console.debug(
-      `[mcp-inject] tool search: ${remoteCount} remote + ${localCount} local across ${remoteSources.length + localSources.length} sources → mcp_search + mcp_call`,
+      `[mcp-inject] tool search: ${remoteCount} remote + ${localCount} local across ${searchSources.length} sources → mcp_search + mcp_call`,
     )
   }
 
-  return { enrichConfirmation: enricher, unavailable }
+  return {
+    enrichConfirmation: enricher,
+    unavailable,
+    restrictedSearchToolNames: [...restrictedSearchToolNames],
+  }
 }
 
 /**
@@ -1951,6 +2161,7 @@ export const NOT_CONNECTED_DISPLAY_NAMES: Record<string, string> = {
   notion: 'Notion',
   fathom: 'Fathom',
   shopify: 'Shopify',
+  wordpress: 'WordPress',
 }
 
 /**
@@ -1986,13 +2197,7 @@ export function clearStaleNotConnectedNotices(
 }
 
 function notConnectedNotice(displayName: string, capabilities: string): string {
-  return (
-    `${displayName}: not connected for this assistant, so only this connector's ${capabilities} are unavailable this turn. ` +
-    'Another connected service may still provide the broader capability. Use an available tool that matches the requested account and identity; ' +
-    'do not mention this missing service when another available tool can fulfill the task. ' +
-    'If the task truly requires this service and no available tool can fulfill it, say so plainly in your own words and point the user to Studio then Connectors to connect it. ' +
-    'Do not quote this notice back to them, and do not claim a tool call failed.'
-  )
+  return `${displayName}: not connected for this assistant (${capabilities})`
 }
 
 /**
@@ -2012,6 +2217,7 @@ const NOT_CONNECTED_DISPLAY_NAME: Record<string, string> = {
   notion: 'Notion',
   fathom: 'Fathom',
   shopify: 'Shopify',
+  wordpress: 'WordPress',
   msgraph: 'Microsoft Teams',
   imap: 'Company email (IMAP)',
 }
@@ -2022,10 +2228,7 @@ const NOT_CONNECTED_DISPLAY_NAME: Record<string, string> = {
  * reconnecting genuinely is the remedy.
  */
 function expiredCredentialsNotice(displayName: string): string {
-  return (
-    `${displayName}: connected, but its stored credentials expired or were revoked, so its tools are not loaded this turn. ` +
-    'Tell the user it needs reconnecting in Studio then Connectors. Do not offer any other cause.'
-  )
+  return `${displayName}: reconnect required (credentials expired or revoked; Studio → Connectors)`
 }
 
 async function injectGoogleTools(
@@ -2292,6 +2495,8 @@ async function injectGoogleTools(
         focusTimeProperties?: unknown
         outOfOfficeProperties?: unknown
         workingLocationProperties?: unknown
+        eventLabelId?: string
+        colorId?: string
         start?: { dateTime?: string; date?: string }
         end?: { dateTime?: string; date?: string }
       }
@@ -2335,6 +2540,10 @@ async function injectGoogleTools(
         listCalendars: async () => {
           const token = await getToken()
           return listCalendarList(token)
+        },
+        listEventColors: async (calendarId) => {
+          const token = await getToken()
+          return listCalendarEventColors(token, calendarId)
         },
         listEvents: async (params) => {
           const token = await getToken()
@@ -2435,6 +2644,8 @@ async function injectGoogleTools(
                   focus_time_properties: snapshot.focusTimeProperties,
                   out_of_office_properties: snapshot.outOfOfficeProperties,
                   working_location_properties: snapshot.workingLocationProperties,
+                  event_label_id: snapshot.eventLabelId,
+                  color_id: snapshot.colorId,
                 }
               : null,
           }
@@ -3775,6 +3986,136 @@ async function injectShopifyTools(
   }
 }
 
+// ── Built-in WordPress managed-content connector ────────────
+// Three fixed tools over the OSS Use Brian Bridge. The bridge's registered
+// page/slot catalog is the write boundary; credentials are a static WordPress
+// Application Password tuple, one independently-bound tuple per site.
+
+async function injectWordPressTools(
+  connectors: Array<{ connectorId: string; connected: boolean; url?: string | null }>,
+  connectorStore: ConnectorStore,
+  settingsStore: McpSettingsStore,
+  userId: string,
+  assistantId: string,
+  assistantConnectorStore: AssistantConnectorStore | undefined,
+  tools: Map<string, Tool>,
+  unavailable?: string[],
+  /** Exact-instance credential override for a grant/team-native overlay. */
+  credsOverride?: () => Promise<string | null>,
+  /** Additional connected WordPress sites for the personal base load. */
+  extraInstances?: ConnectorInstanceRef[],
+  resolveInstanceCreds?: (instanceId: string) => Promise<string | null>,
+  healthProbe?: { report: HealthReporter; instanceId?: string | null },
+  assistantConnectorGrantsStore?: import('../db/assistant-connector-grants-store.js').AssistantConnectorGrantsStore,
+  filesApi?: FilesApi,
+  readCachedFile?: (id: string, ctx: AccessContext) => Promise<CachedFile | null>,
+): Promise<void> {
+  const wordpress = connectors.find((c) => c.connectorId === 'wordpress' && c.connected)
+  const wordpressEnabled = wordpress && (!assistantConnectorStore || await assistantConnectorStore.isEnabled(assistantId, 'wordpress'))
+
+  if (!wordpress) {
+    unavailable?.push(notConnectedNotice('WordPress', 'managed page text and images'))
+    return
+  }
+
+  const primaryCredentials = async (): Promise<string | null> => {
+    if (credsOverride) return credsOverride()
+    return (await connectorStore.getCredentials(userId, 'wordpress'))?.client_secret ?? null
+  }
+
+  const resolveTuple = async (load: () => Promise<string | null>): Promise<WordPressCredentials> => {
+    const encoded = await load()
+    const tuple = encoded ? unpackWordPressCredentials(encoded) : null
+    if (!tuple) throw new Error('WordPress connector credentials are missing or invalid')
+    return tuple
+  }
+
+  function buildTools(
+    load: () => Promise<string | null>,
+    governanceId: string = 'wordpress',
+  ): Tool[] {
+    const withApi = async <T>(call: (api: ReturnType<typeof createWordPressApi>) => Promise<T>): Promise<T> => {
+      return call(createWordPressApi(await resolveTuple(load)))
+    }
+    return gateToolsOnActionGrants(createWordPressTools({
+      getManagedPage: (page) => withApi((api) => api.getManagedPage(page)),
+      updatePageText: (params) => withApi((api) => api.updatePageText(params)),
+      replacePageImage: (params) => withApi((api) => api.replacePageImage(params)),
+    }, {
+      readFileBytes: filesApi
+        ? async (context, idOrPath) => {
+            const gate = workspaceFilesGate(context.workspaceId)
+            if (gate) return { error: gate.data }
+            const ctx = workspaceFilesCtxFor(context)
+            let result = await filesApi.readBytes(ctx, idOrPath)
+            if (!result.ok && result.error.kind === 'not_found' && readCachedFile) {
+              const cached = await readCachedFile(idOrPath, {
+                workspaceId: context.workspaceId!,
+                userId: context.userId,
+                assistantId: context.assistantId,
+                assistantKind: context.assistantKind ?? 'standard',
+                clearance: context.clearance,
+                compartments: context.compartments,
+              })
+              if (cached) {
+                const promoted = await promoteCachedFile(filesApi, ctx, cached)
+                if (!promoted.ok) return { error: workspaceFilesErrorMessage(promoted.error) }
+                result = await filesApi.readBytes(ctx, promoted.value.id)
+              }
+            }
+            if (!result.ok) {
+              return {
+                error: workspaceFilesErrorMessage(result.error),
+                notFound: result.error.kind === 'not_found',
+              }
+            }
+            return {
+              bytes: result.value.bytes,
+              fileName: result.value.file.name,
+              mimeType: result.value.file.mime,
+            }
+          }
+        : undefined,
+    }), 'wordpress', assistantConnectorGrantsStore, assistantId, governanceId)
+  }
+
+  const primaryInstanceId = healthProbe?.instanceId ?? (wordpress as { id?: string }).id ?? null
+  try {
+    if (wordpressEnabled) {
+      const encoded = await primaryCredentials()
+      if (!encoded || !unpackWordPressCredentials(encoded)) {
+        unavailable?.push(expiredCredentialsNotice('WordPress'))
+      } else {
+        const built = buildTools(primaryCredentials)
+        const wordpressTools = healthProbe && primaryInstanceId
+          ? wrapToolsWithHealthProbe(built, primaryInstanceId, healthProbe.report)
+          : built
+        for (const tool of wordpressTools) {
+          if (await applyPolicyOrSkip(tool, 'wordpress', settingsStore, assistantId, userId, unavailable) === 'include') {
+            tools.set(tool.name, tool)
+          }
+        }
+      }
+    }
+
+    if (extraInstances?.length && resolveInstanceCreds) {
+      await injectInstanceVariants({
+        provider: 'wordpress',
+        extras: extraInstances,
+        settingsStore, assistantId, userId, assistantConnectorStore, tools,
+        buildToolsForInstance: (instance, governanceId) => {
+          const variant = buildTools(() => resolveInstanceCreds(instance.id), governanceId)
+          return healthProbe ? wrapToolsWithHealthProbe(variant, instance.id, healthProbe.report) : variant
+        },
+      })
+    }
+
+    console.debug(`[mcp-inject] WordPress: injected tools${extraInstances?.length ? ` (+${extraInstances.length} extra site(s))` : ''}`)
+  } catch (err) {
+    console.error('[mcp-inject] WordPress injection failed:', err)
+  }
+}
+
 // ── Built-in Microsoft Graph (Teams) connector ─────────────
 //
 // READ-ONLY Teams access (docs/architecture/integrations/msgraph.md). Two
@@ -4231,8 +4572,8 @@ async function injectMailboxTools(params: {
 // ── Assistant Email (agentmail) injection ─────────────────────
 //
 // The assistant's OWN mailbox tools (agentmail.md → "Connector tools").
-// One tool set covers every workspace inbox (decision D1): the tools take an
-// optional `fromInbox` and default to the workspace's first (oldest) inbox.
+// One tool set covers every inbox handled by this assistant (decision D1): the
+// tools take an optional `fromInbox` and default to its first (oldest) inbox.
 // Sends and drafts reuse the Gmail governance chain — `ask` classification
 // (OFFICIAL_CONNECTOR_TOOLS), the connector_actions audit + payload
 // classifier preflight here, and the confidential-turn egress refusal inside
@@ -4240,15 +4581,15 @@ async function injectMailboxTools(params: {
 
 async function injectAgentmailTools(params: {
   provider: EmailInboxProvider
-  /** Workspace inboxes, oldest first — the first is the default sender. */
-  inboxes: Array<{ address: string }>
+  /** Handled inboxes, oldest first — the first is the default sender. */
+  inboxes: Array<{ address: string; governanceId: string }>
   settingsStore: McpSettingsStore
   userId: string
   assistantId: string
   tools: Map<string, Tool>
   unavailable?: string[]
   connectorActionAudit?: ConnectorActionAudit
-  /** Per-assistant write-grant gate — see `gateToolsOnActionGrants`. */
+  /** Exact per-inbox write grants, edited from Studio → Channels. */
   assistantConnectorGrantsStore?: import('../db/assistant-connector-grants-store.js').AssistantConnectorGrantsStore
 }): Promise<void> {
   const { provider, inboxes, settingsStore, userId, assistantId, tools, unavailable, connectorActionAudit, assistantConnectorGrantsStore } = params
@@ -4308,11 +4649,35 @@ async function injectAgentmailTools(params: {
     }
   }
 
+  const governanceByAddress = new Map(
+    inboxes.map((inbox) => [inbox.address.toLowerCase(), inbox.governanceId]),
+  )
+  const assertInboxAction = async (
+    inboxAddress: string,
+    action: 'agentmailSendMessage' | 'agentmailCreateDraft',
+  ): Promise<void> => {
+    if (!assistantConnectorGrantsStore) return
+    const governanceId = governanceByAddress.get(inboxAddress.toLowerCase())
+    if (!governanceId) {
+      throw new Error(`This assistant does not handle ${inboxAddress}.`)
+    }
+    const grant = await assistantConnectorGrantsStore.getForAssistantSystem(
+      assistantId,
+      governanceId,
+    )
+    if (!grant?.allowedActions.includes(action)) {
+      throw new Error(
+        `This assistant is not allowed to use ${action} for ${inboxAddress}. Enable it from the inbox in Studio → Channels.`,
+      )
+    }
+  }
+
   const api: AgentmailToolApi = {
     async listInboxes() {
       return inboxes.map((inbox, i) => ({ address: inbox.address, isDefault: i === 0 }))
     },
     async send(p) {
+      await assertInboxAction(p.inboxAddress, 'agentmailSendMessage')
       const payload = {
         from: p.inboxAddress,
         to: p.to,
@@ -4361,6 +4726,7 @@ async function injectAgentmailTools(params: {
       }))
     },
     async createDraft(p) {
+      await assertInboxAction(p.inboxAddress, 'agentmailCreateDraft')
       const payload = {
         from: p.inboxAddress,
         to: p.to,
@@ -4396,7 +4762,28 @@ async function injectAgentmailTools(params: {
   }
 
   try {
-    for (const tool of gateToolsOnActionGrants(createAgentmailTools(api), 'agentmail', assistantConnectorGrantsStore, assistantId)) {
+    const grantedActions = new Set<string>()
+    if (assistantConnectorGrantsStore) {
+      const grants = await Promise.all(
+        inboxes.map((inbox) =>
+          assistantConnectorGrantsStore.getForAssistantSystem(
+            assistantId,
+            inbox.governanceId,
+          ),
+        ),
+      )
+      for (const grant of grants) {
+        for (const action of grant?.allowedActions ?? []) grantedActions.add(action)
+      }
+    }
+    for (const tool of createAgentmailTools(api)) {
+      if (
+        assistantConnectorGrantsStore
+        && (tool.name === 'agentmailSendMessage' || tool.name === 'agentmailCreateDraft')
+        && !grantedActions.has(tool.name)
+      ) {
+        continue
+      }
       if (await applyPolicyOrSkip(tool, 'agentmail', settingsStore, assistantId, userId, unavailable) === 'include') {
         tools.set(tool.name, tool)
       }

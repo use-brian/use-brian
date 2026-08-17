@@ -186,6 +186,12 @@ export type ProactiveCompactionParams = {
    */
   unconditional?: boolean
   provider: LLMProvider
+  /** Model selector for both pre-compaction extraction and summarization. */
+  model?: string
+  /** Declared provider context limit; defaults to the selected model registry limit. */
+  inputTokenLimit?: number
+  modelTier?: string
+  providerKeySource?: 'user' | 'platform'
   systemPrompt: string
   assistantId: string
   /** Channel user — owns memory, sessions, episodic rows. */
@@ -313,6 +319,7 @@ export async function runProactiveCompaction(
     workspaceId, chatEpisodeIngestor,
   } = params
   const persistLongTermContext = params.persistLongTermContext !== false
+  const compactionModel = params.model ?? 'gemini-flash'
 
   const breaker = params.circuitBreaker ?? defaultCompactionBreaker
   const sessionId = session.id
@@ -349,7 +356,7 @@ export async function runProactiveCompaction(
   // receives over-limit history, even when the summariser is unavailable.
   // All turn models are Gemini (Anthropic is the outage-only fallback), so the
   // Gemini frontier window is the hard limit that would 400 the next turn.
-  const modelHardLimit = resolveInputTokenLimit('gemini-flash')
+  const modelHardLimit = params.inputTokenLimit ?? resolveInputTokenLimit(compactionModel)
   const fitBudget = Math.floor(modelHardLimit * MODEL_CONTEXT_FIT_RATIO)
   const preTokens = estimateTokens(stampedWithSummary)
   const wasOverLimit = preTokens > modelHardLimit
@@ -435,7 +442,7 @@ export async function runProactiveCompaction(
         const existingSummaries = existingIndex.map((m) => m.summary)
         const extracted = await extractMemoriesBeforeCompaction({
           provider,
-          model: 'gemini-flash',
+          model: compactionModel,
           messages: compactableForLLM,
           existingMemories: existingSummaries,
         })
@@ -468,6 +475,8 @@ export async function runProactiveCompaction(
           model: extracted.model, usage: extracted.usage,
           source: 'overhead:extraction',
           triggerKey: 'pattern_extractor',
+          modelTier: params.modelTier,
+          providerKeySource: params.providerKeySource,
         })
       } catch (err) {
         console.error('[pre-compaction extraction] Failed:', err)
@@ -477,7 +486,7 @@ export async function runProactiveCompaction(
     // 8. Summarize.
     const compactResult = await compactConversation({
       provider,
-      model: 'gemini-flash',
+      model: compactionModel,
       messages: compactableForLLM,
       systemPrompt,
       profile,
@@ -489,6 +498,8 @@ export async function runProactiveCompaction(
       model: compactResult.model, usage: compactResult.usage,
       source: 'overhead:compaction',
       triggerKey: 'compaction_full',
+      modelTier: params.modelTier,
+      providerKeySource: params.providerKeySource,
     })
 
     // Defensive cap: if the summarizer exceeded the budget (unusual for
@@ -560,6 +571,12 @@ export async function runProactiveCompaction(
               compactedRows[0]!.id,
               compactedRows[compactedRows.length - 1]!.id,
             ],
+            llm: {
+              provider,
+              model: compactionModel,
+              modelTier: params.modelTier,
+              providerKeySource: params.providerKeySource,
+            },
           }).catch((err) => {
             console.error('[compaction] chat episode ingest failed:', err)
           })

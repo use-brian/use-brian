@@ -3,7 +3,8 @@
  * (`GET /api/brain/tasks`, [COMP:brain/tasks-list-http]) plus the typed
  * priority accessor. Mutations reuse the existing brain-inbox wire
  * (`adjustBrainRow` / `deleteBrainRow` in `lib/api/brain-inbox.ts`) and the
- * server bulk lane (`bulkTasks` below) for large selections.
+ * server bulk lane (`bulkTasks` below) for large uniform edits and every
+ * multi-delete.
  *
  * Spec: docs/architecture/features/tasks.md → "Operator surface".
  * [COMP:app-web/tasks-surface]
@@ -117,9 +118,10 @@ export type BulkTasksResult = {
 };
 
 /**
- * One round-trip bulk mutation — the server loops the same per-row update /
- * soft-delete the single-row endpoints use. The surface reaches for this on
- * LARGE selections; small ones keep the client loop (per-row retry UX).
+ * One round-trip bulk mutation. Uniform updates preserve the per-row
+ * supersession contract; plain deletes execute set-wise with hosted-goal and
+ * audit cascades. The surface uses this for every multi-delete, regardless of
+ * selection size.
  */
 export async function bulkTasks(
   workspaceId: string,

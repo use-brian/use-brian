@@ -92,12 +92,11 @@ function textOf(blocks: ContentBlock[]): string {
  * Map engine `Message[]` to chat-completions messages. `tool_result` blocks
  * become their own `role: 'tool'` messages (emitted before any user text in
  * the same engine message, preserving block order after the assistant turn
- * that issued the calls). Images ride as data-URL `image_url` parts — the
- * wave-1 models are text-only (the capability gate routes vision turns away
- * before this provider is reached), but the mapping is correct for any
- * future vision-capable compat model.
+ * that issued the calls). Verified vision-capable providers receive images
+ * as data-URL `image_url` parts. Text-only providers receive an honest note
+ * instead, including for images replayed from older conversation history.
  */
-function toCCMessages(messages: Message[]): CCMessage[] {
+function toCCMessages(messages: Message[], supportsVision: boolean): CCMessage[] {
   const out: CCMessage[] = []
   for (const msg of messages) {
     if (typeof msg.content === 'string') {
@@ -140,8 +139,10 @@ function toCCMessages(messages: Message[]): CCMessage[] {
         // Content must be distilled to text upstream (chat.ts
         // `inlineDocumentDistill`); this guard degrades an undistilled or
         // history-replayed non-image block to a note so it can't wedge a turn.
-        if (block.mimeType.startsWith('image/')) {
+        if (block.mimeType.startsWith('image/') && supportsVision) {
           parts.push({ type: 'image_url', image_url: { url: `data:${block.mimeType};base64,${block.data}` } })
+        } else if (block.mimeType.startsWith('image/')) {
+          parts.push({ type: 'text', text: '[An image was attached earlier in this conversation, but this text-only model cannot inspect it.]' })
         } else {
           parts.push({ type: 'text', text: `[A ${block.mimeType} document was attached but cannot be read inline by this model.]` })
         }
@@ -236,6 +237,7 @@ type CompatConfig = {
   includeStreamUsage: boolean
   enableThinkingField: boolean
   supportsJsonMode: boolean
+  supportsVision: boolean
   includeErrorDetail: boolean
 }
 
@@ -256,7 +258,7 @@ async function* streamCompat(
 ): AsyncGenerator<StreamChunk> {
   const ccMessages: CCMessage[] = [
     ...(systemPrompt ? [{ role: 'system' as const, content: systemPrompt }] : []),
-    ...toCCMessages(messages),
+    ...toCCMessages(messages, cfg.supportsVision),
   ]
   const tools = toCCTools(options.tools)
   const body: Record<string, unknown> = {
@@ -366,6 +368,8 @@ export type OpenAICompatProviderOptions = {
   includeStreamUsage?: boolean
   enableThinkingField?: boolean
   supportsJsonMode?: boolean
+  /** Whether image blocks may be sent as image_url parts. Defaults to true. */
+  supportsVision?: boolean
   /** Keep upstream response text out of user-facing errors for custom endpoints. */
   includeErrorDetail?: boolean
 }
@@ -382,6 +386,7 @@ export function createOpenAICompatProvider(options: OpenAICompatProviderOptions)
     includeStreamUsage: options.includeStreamUsage ?? true,
     enableThinkingField: options.enableThinkingField ?? true,
     supportsJsonMode: options.supportsJsonMode ?? true,
+    supportsVision: options.supportsVision ?? true,
     includeErrorDetail: options.includeErrorDetail ?? true,
   }
 

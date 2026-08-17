@@ -51,7 +51,11 @@ vi.mock('../../db/workspace-store.js', () => ({
     .mockResolvedValue({ clearance: 'confidential', compartments: null }),
 }))
 vi.mock('../../mcp/inject.js', () => ({
-  injectMcpTools: vi.fn().mockResolvedValue({ enrichConfirmation: async (_t: string, i: unknown) => i, unavailable: [] }),
+  injectMcpTools: vi.fn().mockResolvedValue({
+    enrichConfirmation: async (_t: string, i: unknown) => i,
+    unavailable: [],
+    restrictedSearchToolNames: [],
+  }),
 }))
 vi.mock('../../routes/proactive-compaction.js', () => ({
   runProactiveCompaction: vi.fn().mockResolvedValue({ messages: [], compacted: false, episodes: [] }),
@@ -195,6 +199,14 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
   it('throws when the callee assistant does not exist', async () => {
     mockFindAssistant.mockResolvedValueOnce(null as never)
     await expect(executor()(baseParams)).rejects.toThrow('Callee assistant not found')
+  })
+
+  it('rejects a callee outside the transport-authorized workspace', async () => {
+    await expect(executor()({
+      ...baseParams,
+      expectedWorkspaceId: 'ws-expected',
+    })).rejects.toMatchObject({ reason: 'assistant_workspace_mismatch' })
+    expect(mockSession).not.toHaveBeenCalled()
   })
 
   it('throws when the callee owner cannot be resolved', async () => {
@@ -358,7 +370,7 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     ])
     await executor()(baseParams)
     const systemPrompt = mockQueryLoop.mock.calls[0][0].systemPrompt as string
-    expect(systemPrompt).toContain('## Automated context — tools execute directly')
+    expect(systemPrompt).toContain('## Automated tool policy')
   })
 
   it('omits the direct-execution framing when confirmations are deferred (deliverTarget set)', async () => {
@@ -378,7 +390,7 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
       deliverTarget: { channelType: 'telegram', channelId: 'tg-1' },
     })
     const systemPrompt = mockQueryLoop.mock.calls[0][0].systemPrompt as string
-    expect(systemPrompt).not.toContain('## Automated context — tools execute directly')
+    expect(systemPrompt).not.toContain('## Automated tool policy')
   })
 
   it('tells the callee which capabilities are unavailable (2026-07-19/20 GM Bro incident)', async () => {
@@ -392,9 +404,8 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     // hunting for the tool the next. The entry carries the user-actionable fix,
     // so the callee can report something the user can act on.
     const notice =
-      'Google Calendar & Tasks (not connected or disabled for this assistant) — ' +
-      'if the user asks to add/check tasks, calendar events, or reminders, reply: ' +
-      '"I\'ll need Calendar access first. Type /connect gcal to authorize."'
+      'Google Calendar and Google Tasks: not connected for this assistant ' +
+      '(calendar events, tasks, and reminders)'
     mockInjectMcp.mockResolvedValueOnce({
       enrichConfirmation: async (_t: string, i: unknown) => i,
       unavailable: [notice],
@@ -405,10 +416,10 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     await executorWithMcp()(baseParams)
     const systemPrompt = mockQueryLoop.mock.calls[0][0].systemPrompt as string
     expect(systemPrompt).toContain('# Unavailable capabilities')
-    expect(systemPrompt).toContain('Type /connect gcal to authorize')
+    expect(systemPrompt).toContain('Google Calendar and Google Tasks')
     // The directive half matters as much as the list: without it the model
     // treats absence as "keep looking".
-    expect(systemPrompt).toContain('Do not attempt to use them or search for them')
+    expect(systemPrompt).toContain('Do not call, search for, or simulate them')
   })
 
   it('omits the unavailable-capabilities block when everything is reachable', async () => {
@@ -558,7 +569,7 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     expect(passedTools.has('gmailSendMessage')).toBe(false)
     expect(passedTools.has('searchThings')).toBe(true)
     const systemPrompt = call.systemPrompt as string
-    expect(systemPrompt).toContain('## Approval-gated tools are NOT available in this step')
+    expect(systemPrompt).toContain('## Automated tool policy')
     expect(systemPrompt).toContain('gmailSendMessage')
     expect(systemPrompt).toContain('tool_call')
   })
@@ -577,6 +588,34 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     expect(passedTools.has('notionCreatePage')).toBe(false)
   })
 
+  it('drops ask-policy tools added after base and connector injection', async () => {
+    yieldsText()
+    const fillBlueprintFromBrain = {
+      ...plainTool('fillBlueprintFromBrain'),
+      requiresConfirmation: true,
+    }
+    const callee = createCalleeExecutor({
+      provider: {} as never,
+      tools: new Map(),
+      memoryStore: memoryStore() as never,
+      capabilityStore: { listActive: vi.fn().mockResolvedValue([]) } as never,
+      blueprintRecordTools: [fillBlueprintFromBrain] as never,
+    })
+
+    mockFindAssistant.mockImplementation(async (id: string) =>
+      (id === 'callee-1'
+        ? { ...calleeAssistant, workspaceId: 'ws-1' }
+        : id === 'caller-1'
+          ? callerAssistant
+          : null) as never,
+    )
+    await callee({ ...baseParams, callerChannelType: 'workflow' })
+
+    const call = mockQueryLoop.mock.calls[0][0]
+    expect((call.tools as Map<string, unknown>).has('fillBlueprintFromBrain')).toBe(false)
+    expect(call.systemPrompt as string).toContain('fillBlueprintFromBrain')
+  })
+
   it('keeps the legacy strip on ordinary A2A: ask tools stay callable, no drop note', async () => {
     yieldsText()
     const tool = askTool()
@@ -585,9 +624,8 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     const passedTools = call.tools as Map<string, { requiresConfirmation?: boolean }>
     expect(passedTools.has('gmailSendMessage')).toBe(true)
     expect(passedTools.get('gmailSendMessage')?.requiresConfirmation).toBe(false)
-    expect(call.systemPrompt as string).not.toContain(
-      '## Approval-gated tools are NOT available in this step',
-    )
+    expect(call.systemPrompt as string).toContain('## Automated tool policy')
+    expect(call.systemPrompt as string).not.toContain('Removed approval-gated tools')
   })
 
   it('the confirmation strip NEVER mutates the shared tool singletons (chat gates survive consults)', async () => {
@@ -772,6 +810,29 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     expect(mockInjectMcp.mock.calls[0][0].keepBuiltinsDirect).toBe(false)
   })
 
+  it('keeps a restricted MCP gateway when a custom or CLI tool is pinned', async () => {
+    yieldsText()
+    mockInjectMcp.mockImplementationOnce(async (params) => {
+      params.tools.set('mcp_search', plainTool('mcp_search') as never)
+      params.tools.set('mcp_call', plainTool('mcp_call') as never)
+      return {
+        enrichConfirmation: async (_toolName: string, input: Record<string, unknown>) => input,
+        unavailable: [],
+        restrictedSearchToolNames: ['lookupCustomer'],
+      }
+    })
+
+    await injectingExecutor(new Map())({
+      ...baseParams,
+      callerChannelType: 'workflow',
+      allowedTools: ['lookupCustomer'],
+    })
+
+    expect(mockInjectMcp.mock.calls[0][0].restrictSearchToToolNames).toEqual(['lookupCustomer'])
+    const passed = mockQueryLoop.mock.calls[0][0].tools as Map<string, unknown>
+    expect([...passed.keys()].sort()).toEqual(['mcp_call', 'mcp_search'])
+  })
+
   it('persists the assistant turn on turn_complete', async () => {
     yields([
       { type: 'text_delta', text: 'done' },
@@ -816,6 +877,7 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
       assistantId: 'callee-1',
       sessionId: 'sess-1',
       model: 'gemini-3-flash-preview',
+      modelTier: 'pro',
       inputTokens: 1000,
       outputTokens: 200,
       cacheReadTokens: 5000,
@@ -1143,6 +1205,41 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     expect(passedTools.has('stopWorker')).toBe(false)
     // The strip is selective — a callee's own in-loop tools survive.
     expect(passedTools.has('search')).toBe(true)
+  })
+
+  it('strips workflow orchestration tools from every callee', async () => {
+    yieldsText()
+    const stub = (name: string) => [name, { name }] as const
+    const callee = createCalleeExecutor({
+      provider: {} as never,
+      tools: new Map([
+        stub('proposeWorkflow'),
+        stub('createWorkflow'),
+        stub('updateWorkflow'),
+        stub('runWorkflow'),
+        stub('scheduleWorkflow'),
+        stub('createScheduledJob'),
+        stub('getWorkflow'),
+      ]) as never,
+      memoryStore: memoryStore() as never,
+      capabilityStore: { listActive: vi.fn().mockResolvedValue([]) } as never,
+    })
+
+    await callee(baseParams)
+
+    const passedTools = mockQueryLoop.mock.calls[0][0].tools as Map<string, unknown>
+    expect(passedTools.has('proposeWorkflow')).toBe(false)
+    expect(passedTools.has('createWorkflow')).toBe(false)
+    expect(passedTools.has('updateWorkflow')).toBe(false)
+    expect(passedTools.has('runWorkflow')).toBe(false)
+    expect(passedTools.has('scheduleWorkflow')).toBe(false)
+    expect(passedTools.has('createScheduledJob')).toBe(false)
+    expect(passedTools.has('getWorkflow')).toBe(true)
+
+    await expect(
+      callee({ ...baseParams, allowedTools: ['createScheduledJob'] }),
+    ).rejects.toMatchObject({ reason: 'tools_unavailable' })
+    expect(mockQueryLoop).toHaveBeenCalledTimes(1)
   })
 
   describe('app callees execute end-to-end', () => {
@@ -1485,6 +1582,12 @@ describe('[COMP:api/inter-assistant-executor] workflow research fan-out + memory
 
   it('injects prior-run workflow memories with a save-only-new instruction', async () => {
     const store = wsMemoryStore({
+      getIndex: vi.fn().mockResolvedValue([
+        { id: 'abcd1234-0000-0000-0000-000000000000', summary: 'HK TVP subsidy fact', tags: [] },
+      ]),
+      getWorkspaceIndex: vi.fn().mockResolvedValue([
+        { id: 'abcd1234-0000-0000-0000-000000000000', summary: 'HK TVP subsidy fact', tags: [] },
+      ]),
       getWorkspaceMemoriesByCategory: vi.fn().mockResolvedValue([
         { id: 'abcd1234-0000-0000-0000-000000000000', summary: 'HK TVP subsidy fact' },
       ]),
@@ -1504,6 +1607,7 @@ describe('[COMP:api/inter-assistant-executor] workflow research fan-out + memory
     expect(sp).toContain('Already recorded by this workflow')
     expect(sp).toContain('HK TVP subsidy fact')
     expect(sp).toContain('[id:abcd1234]')
+    expect(sp.match(/HK TVP subsidy fact/g)).toHaveLength(1)
   })
 
   it('does not fetch prior-run memories for an ordinary (non-workflow) consult', async () => {

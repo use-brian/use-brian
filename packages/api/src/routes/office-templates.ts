@@ -34,6 +34,24 @@ export type OfficeTemplatesRouteDeps = {
   transitionLifecycle(params: { userId: string; templateId: string; action: 'deprecate' | 'restore' | 'trash' | 'purge'; reason: string }): Promise<unknown | null>
 }
 
+const CreateTemplateSchema = z.object({
+  workspaceId: z.string().uuid(),
+  family: z.enum(['document', 'presentation', 'spreadsheet']),
+  name: z.string().min(1).max(255),
+  description: z.string().min(1).max(4_000),
+  creationMethod: z.enum(['guided', 'upload']).default('guided'),
+  sensitivity: z.enum(['public', 'internal', 'confidential']).default('internal'),
+  canonicalWebsite: z.string().url().refine((url) => url.startsWith('https:'), 'Company website must use HTTPS').optional(),
+  companyHasNoWebsite: z.boolean().default(false),
+}).strict().superRefine((value, context) => {
+  if (value.canonicalWebsite && value.companyHasNoWebsite) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'canonicalWebsite and companyHasNoWebsite are mutually exclusive' })
+  }
+  if (value.creationMethod === 'guided' && !value.canonicalWebsite && !value.companyHasNoWebsite) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'Guided template creation requires a company website or an explicit no-website choice' })
+  }
+})
+
 export function officeTemplateRoutes(deps: OfficeTemplatesRouteDeps): Router {
   const router = Router()
   router.get('/templates', async (req, res) => {
@@ -47,16 +65,16 @@ export function officeTemplateRoutes(deps: OfficeTemplatesRouteDeps): Router {
   router.post('/templates', async (req, res) => {
     const userId = (req as { userId?: string }).userId
     if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
-    const body = z.object({ workspaceId: z.string().uuid(), family: z.enum(['document', 'presentation', 'spreadsheet']), name: z.string().min(1).max(255), description: z.string().min(1).max(4_000), creationMethod: z.enum(['guided', 'upload']).default('guided'), sensitivity: z.enum(['public', 'internal', 'confidential']).default('internal') }).strict().safeParse(req.body)
+    const body = CreateTemplateSchema.safeParse(req.body)
     if (!body.success) return void res.status(400).json({ error: 'Invalid template draft', issues: body.error.issues })
     let artifact: { id: string } | null = null
     let template: { id: string } | null = null
     try {
       artifact = await deps.createTemplateShell({ userId, workspaceId: body.data.workspaceId, family: body.data.family, title: body.data.name, templateVersionId: null, capabilityVersion: 1, sensitivity: body.data.sensitivity, mode: 'template' })
-      const { creationMethod, ...draft } = body.data
-      template = await deps.createDraft({ userId, ...draft, draftArtifactId: artifact.id })
+      const { creationMethod, canonicalWebsite } = body.data
+      template = await deps.createDraft({ userId, workspaceId: body.data.workspaceId, family: body.data.family, name: body.data.name, description: body.data.description, sensitivity: body.data.sensitivity, draftArtifactId: artifact.id })
       const snapshot = creationMethod === 'guided'
-        ? guidedTemplateSnapshot({ artifactId: artifact.id, workspaceId: body.data.workspaceId, family: body.data.family, title: body.data.name, guidance: body.data.description })
+        ? guidedTemplateSnapshot({ artifactId: artifact.id, workspaceId: body.data.workspaceId, family: body.data.family, title: body.data.name, guidance: body.data.description, canonicalWebsite })
         : blankTemplateSnapshot({ artifactId: artifact.id, workspaceId: body.data.workspaceId, family: body.data.family, title: body.data.name })
       await deps.initializeDraft({
         userId,
@@ -214,14 +232,16 @@ const templateTextStyle = (fontSizePt: number, bold = false) => ({
 /** Seeds a useful, editable template draft from the member's guidance.
  * Artifact generation still requires the resulting draft to pass normal
  * template compilation and publish as an admitted immutable version. */
-export function guidedTemplateSnapshot(params: { artifactId: string; workspaceId: string; family: 'document' | 'presentation' | 'spreadsheet'; title: string; guidance: string }): OfficeArtifactSnapshot {
+export function guidedTemplateSnapshot(params: { artifactId: string; workspaceId: string; family: 'document' | 'presentation' | 'spreadsheet'; title: string; guidance: string; canonicalWebsite?: string }): OfficeArtifactSnapshot {
   const base = blankTemplateSnapshot(params)
   const guidance = params.guidance.trim().replace(/\s+/g, ' ').slice(0, 480)
+  const website = params.canonicalWebsite?.trim()
   if (base.family === 'document') {
     return {
       ...base,
       sections: base.sections.map((section, index) => index === 0 ? {
         ...section,
+        footer: website ? [{ id: randomUUID(), text: website, style: templateTextStyle(9) }] : section.footer,
         nodes: [
           { id: randomUUID(), kind: 'heading', level: 1, styleName: 'Heading 1', runs: [{ id: randomUUID(), text: params.title, style: templateTextStyle(28, true) }] },
           { id: randomUUID(), kind: 'paragraph', styleName: 'Body', alignment: 'start', runs: [{ id: randomUUID(), text: guidance, style: templateTextStyle(11) }] },
@@ -240,9 +260,12 @@ export function guidedTemplateSnapshot(params: { artifactId: string; workspaceId
         cells: [
           { id: randomUUID(), address: 'A1', valueType: 'string', value: params.title, style: { font: { family: 'Arial', sizePt: 18, bold: true, italic: false, underline: false, strike: false, color: '#131A24' } }, locked: false },
           { id: randomUUID(), address: 'A3', valueType: 'string', value: guidance, style: { font: { family: 'Arial', sizePt: 10, bold: false, italic: false, underline: false, strike: false, color: '#526577' }, alignment: { wrapText: true, textRotation: 0, indent: 0 } }, locked: false },
+          ...(website ? [{ id: randomUUID(), address: 'A4', valueType: 'string' as const, value: website, style: { font: { family: 'Arial', sizePt: 9, bold: false, italic: false, underline: false, strike: false, color: '#526577' } }, locked: true }] : []),
+          { id: randomUUID(), address: 'A6', valueType: 'string', value: 'Content', style: { font: { family: 'Arial', sizePt: 10, bold: true, italic: false, underline: false, strike: false, color: '#131A24' } }, locked: true },
+          { id: randomUUID(), address: 'B6', valueType: 'string', value: '{{CONTENT}}', style: { font: { family: 'Arial', sizePt: 10, bold: false, italic: false, underline: false, strike: false, color: '#131A24' }, alignment: { wrapText: true, textRotation: 0, indent: 0 } }, locked: false },
         ],
-        columnDimensions: [{ index: 1, widthChars: 42, hidden: false }],
-        rowDimensions: [{ index: 1, heightPt: 28, hidden: false }, { index: 3, heightPt: 42, hidden: false }],
+        columnDimensions: [{ index: 1, widthChars: 18, hidden: false }, { index: 2, widthChars: 42, hidden: false }],
+        rowDimensions: [{ index: 1, heightPt: 28, hidden: false }, { index: 3, heightPt: 42, hidden: false }, ...(website ? [{ index: 4, heightPt: 18, hidden: false }] : []), { index: 6, heightPt: 42, hidden: false }],
       }],
     }
   }
@@ -252,6 +275,7 @@ export function guidedTemplateSnapshot(params: { artifactId: string; workspaceId
   const subtitleId = randomUUID()
   const contentTitleId = randomUUID()
   const contentBodyId = randomUUID()
+  const websiteId = website ? randomUUID() : null
   return {
     ...base,
     layouts: [{ ...base.layouts[0], name: 'General', placeholderIds: [] }],
@@ -260,8 +284,9 @@ export function guidedTemplateSnapshot(params: { artifactId: string; workspaceId
       objects: [
         { id: titleId, kind: 'text', geometry: { xPt: 72, yPt: 150, widthPt: 816, heightPt: 72, rotationDeg: 0 }, locked: false, alignment: 'center', verticalAlignment: 'middle', runs: [{ id: randomUUID(), text: params.title, style: templateTextStyle(34, true) }] },
         { id: subtitleId, kind: 'text', geometry: { xPt: 144, yPt: 240, widthPt: 672, heightPt: 90, rotationDeg: 0 }, locked: false, alignment: 'center', verticalAlignment: 'top', runs: [{ id: randomUUID(), text: guidance, style: templateTextStyle(16) }] },
+        ...(website && websiteId ? [{ id: websiteId, kind: 'text' as const, geometry: { xPt: 144, yPt: 492, widthPt: 672, heightPt: 20, rotationDeg: 0 }, locked: true, alignment: 'center' as const, verticalAlignment: 'middle' as const, runs: [{ id: randomUUID(), text: website, style: templateTextStyle(9) }] }] : []),
       ],
-      readingOrder: [titleId, subtitleId],
+      readingOrder: [titleId, subtitleId, ...(websiteId ? [websiteId] : [])],
     }, {
       id: randomUUID(), title: 'Content', masterId, layoutId, notes: [],
       objects: [

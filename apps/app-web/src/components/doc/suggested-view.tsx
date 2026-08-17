@@ -196,7 +196,7 @@ export function SuggestedView({
       </div>
 
       {/* Slim build bar — keeps the type-a-prompt build flow in the new rhythm */}
-      <div className="mt-5 flex items-center gap-2.5 rounded-xl border border-border bg-card px-3 py-2 shadow-sm transition-[border-color,box-shadow] focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30">
+      <div className="mt-5 flex items-center gap-2.5 rounded-xl border border-border bg-card px-3 py-2 shadow-sm transition-[border-color,box-shadow] focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30 [&_:focus-visible]:shadow-none">
         <Sparkles className="size-[17px] shrink-0 text-muted-foreground/60" aria-hidden />
         <input
           value={q}

@@ -32,7 +32,8 @@ describe('[COMP:api/office-access] Office access predicate', () => {
   it('gives eligible peers Comment and creators Edit without admin magic', () => {
     expect(resolveOfficeAccessProjection(USER, projection())).toMatchObject({ role: 'comment', canComment: true, canEdit: false })
     expect(resolveOfficeAccessProjection(USER, projection({ creatorUserId: USER }))).toMatchObject({ role: 'edit', canEdit: true })
-    expect(resolveOfficeAccessProjection(USER, projection({ memberRole: 'admin' }))).toMatchObject({ role: 'comment', canEdit: false, canElevate: true })
+    expect(resolveOfficeAccessProjection(USER, projection({ memberRole: 'admin' }))).toMatchObject({ role: 'comment', canEdit: false, canElevate: true, canManageSharing: true })
+    expect(resolveOfficeAccessProjection(USER, projection())).toMatchObject({ canManageSharing: false })
   })
 
   it('hard-denies insufficient clearance, source visibility, compartments, and explicit deny', () => {

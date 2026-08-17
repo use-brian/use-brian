@@ -67,7 +67,7 @@ export function ScrollableNav({
       {/* Scrollable content */}
       <div
         ref={scrollRef}
-        className={`overflow-x-auto scrollbar-none ${className}`}
+        className={`overflow-x-auto overflow-y-hidden [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${className}`}
         style={{ touchAction: "pan-x", overscrollBehaviorY: "none" }}
       >
         {children}

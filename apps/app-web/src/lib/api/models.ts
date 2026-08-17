@@ -16,6 +16,7 @@ export type MenuModel = {
   displayName: string;
   apiModelId: string;
   class: string;
+  tier: "standard" | "pro" | "max" | "research" | "embedding" | "other";
   provider: string;
   contextWindow: number;
   capabilities: { tools: boolean; vision: boolean; thinking: boolean };
@@ -36,6 +37,16 @@ export type WorkspaceModelDefault = {
   modelClass: "standard-pro" | "max" | "research";
   modelAlias: string | null;
   meteredProfileId: string | null;
+  updatedAt: string;
+};
+
+export type WorkspaceModelRoute = {
+  workspaceId: string;
+  tier: "standard" | "pro" | "max" | "research";
+  profileId: string | null;
+  modelAlias: string | null;
+  modelDisplayName?: string | null;
+  provider?: string | null;
   updatedAt: string;
 };
 
@@ -60,6 +71,7 @@ export type ModelMenu = {
     profileId: string;
     updatedAt: string;
   }>;
+  modelRoutes: WorkspaceModelRoute[];
   meteredBillingAvailable: boolean;
 };
 
@@ -74,6 +86,33 @@ export async function fetchModelMenu(workspaceId: string): Promise<ModelMenu> {
   const res = await authFetch(`${API_URL}/api/models/menu?workspaceId=${encodeURIComponent(workspaceId)}`);
   if (!res.ok) throw new Error(`model menu failed (${res.status})`);
   return (await res.json()) as ModelMenu;
+}
+
+export async function setWorkspaceModelRoute(
+  workspaceId: string,
+  tier: WorkspaceModelRoute["tier"],
+  target: { modelAlias: string } | { profileId: string },
+): Promise<WorkspaceModelRoute> {
+  const res = await authFetch(`${API_URL}/api/workspaces/${workspaceId}/model-routes/${tier}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(target),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `model route update failed (${res.status})`);
+  }
+  return ((await res.json()) as { route: WorkspaceModelRoute }).route;
+}
+
+export async function clearWorkspaceModelRoute(
+  workspaceId: string,
+  tier: WorkspaceModelRoute["tier"],
+): Promise<void> {
+  const res = await authFetch(`${API_URL}/api/workspaces/${workspaceId}/model-routes/${tier}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error(`model route clear failed (${res.status})`);
 }
 
 export async function fetchMeteredEstimate(

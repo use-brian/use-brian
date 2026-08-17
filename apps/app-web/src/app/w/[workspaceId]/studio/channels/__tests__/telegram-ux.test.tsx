@@ -9,7 +9,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { Channel } from "@/lib/api/channels";
-import { AddChannelForm, ChannelConfigSection } from "../page";
+import {
+  AddChannelForm,
+  ChannelConfigSection,
+  normalizeWhatsAppPhoneNumberInput,
+  WhatsAppCloudChatSection,
+} from "../page";
 
 vi.mock("@/lib/api/channels", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api/channels")>();
@@ -130,5 +135,106 @@ describe("[COMP:app-web/studio-channels] Telegram UX", () => {
     expect(cards[1].textContent).toContain("Require @mention");
     expect(cards[2].textContent).toContain("DMs + groups");
     expect(cards[2].textContent).toContain("Working reaction");
+  });
+});
+
+describe("[COMP:app-web/studio-channels] WhatsApp Cloud access UX", () => {
+  it("normalizes allowlist input and renders a persistent chat QR", async () => {
+    expect(normalizeWhatsAppPhoneNumberInput("+1 (555) 123-4567")).toBe(
+      "15551234567",
+    );
+    expect(normalizeWhatsAppPhoneNumberInput("0044 20 7946 0958")).toBe(
+      "442079460958",
+    );
+    expect(normalizeWhatsAppPhoneNumberInput("09123 45678")).toBeNull();
+    expect(normalizeWhatsAppPhoneNumberInput("555-1234")).toBeNull();
+
+    await act(async () => {
+      root.render(
+        localized(<WhatsAppCloudChatSection phoneNumber="+1 555 123 4567" />),
+      );
+    });
+
+    expect(host.textContent).toContain("Chat with this number");
+    expect(host.querySelector("svg")).not.toBeNull();
+    expect(
+      host.querySelector<HTMLAnchorElement>(
+        'a[href="https://wa.me/15551234567"]',
+      ),
+    ).not.toBeNull();
+  });
+
+  it("does not describe WhatsApp access as linked Telegram users", async () => {
+    const channel: Channel = {
+      id: "channel_1",
+      workspaceId: "workspace_1",
+      channelType: "whatsapp",
+      clearance: "internal",
+      enabledCapabilities: ["chat"],
+      status: "active",
+      displayName: "WhatsApp Business",
+      createdAt: "2026-08-09T00:00:00.000Z",
+      updatedAt: "2026-08-09T00:00:00.000Z",
+      integrationId: "integration_1",
+      integrationProvider: "cloud_api",
+      config: { userAccessMode: "allow_all" },
+    };
+
+    await act(async () => {
+      root.render(
+        localized(
+          <ChannelConfigSection
+            workspaceId="workspace_1"
+            channel={channel}
+            onUpdated={vi.fn()}
+          />,
+        ),
+      );
+    });
+
+    expect(host.textContent).toContain("Who can message");
+    expect(host.textContent).toContain(
+      "Anyone who messages this WhatsApp Business number can interact.",
+    );
+    expect(host.textContent).not.toContain("Linked Telegram users only.");
+  });
+
+  it("uses phone-number guidance without a second tool-access toggle", async () => {
+    const channel: Channel = {
+      id: "channel_1",
+      workspaceId: "workspace_1",
+      channelType: "whatsapp",
+      clearance: "internal",
+      enabledCapabilities: ["chat"],
+      status: "active",
+      displayName: "WhatsApp Business",
+      createdAt: "2026-08-09T00:00:00.000Z",
+      updatedAt: "2026-08-09T00:00:00.000Z",
+      integrationId: "integration_1",
+      integrationProvider: "cloud_api",
+      config: {
+        userAccessMode: "allowlist",
+        allowedUserIds: ["15551234567"],
+      },
+    };
+
+    await act(async () => {
+      root.render(
+        localized(
+          <ChannelConfigSection
+            workspaceId="workspace_1"
+            channel={channel}
+            onUpdated={vi.fn()}
+          />,
+        ),
+      );
+    });
+
+    expect(host.textContent).toContain("Only the phone numbers listed below");
+    expect(host.textContent).not.toContain("Guest connected tools");
+    expect(
+      host.querySelector<HTMLInputElement>('input[placeholder="15551234567"]'),
+    ).not.toBeNull();
+    expect(host.textContent).not.toContain("@userinfobot");
   });
 });

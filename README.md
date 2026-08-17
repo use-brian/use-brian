@@ -59,8 +59,9 @@ pnpm dev                    # choose ChatGPT or an API-key backend; opens your b
 That is it. There is no step three. The store defaults to an embedded PGLite
 database under `~/.usebrian/`; point `DATABASE_URL` at a local Postgres if you
 prefer a container. Self-host overrides live in [`.env.example`](./.env.example).
-Binary data can stay local too: set `LOCAL_FILES_DIR` to a durable directory and
-workspace files, recordings, avatars, and channel media use it. Browser uploads,
+Binary data defaults to the durable `~/.usebrian/files` directory; set
+`LOCAL_FILES_DIR` to override it. Workspace files, recordings, avatars, and
+channel media use this store. Browser uploads,
 public media, and audio/video seeking use short-lived signed API URLs, so GCS is
 optional. The exception is Vertex AI long-recording transcription: because
 Vertex has no Files API, set `GCS_FILES_BUCKET` so temporary audio can be passed
@@ -182,6 +183,24 @@ WhatsApp BYON also needs no tunnel: choose WhatsApp under **Studio → Channels*
 scan the QR code, and the local bridge on port `8091` persists the pairing across
 restarts. Set `WA_CONNECTOR_URL` and `WA_CONNECTOR_SECRET` only when using an
 external bridge instead.
+
+For an official WhatsApp Business connection, choose **Official Cloud API** in
+the same WhatsApp tab and enter the Meta app secret, permanent access token,
+phone number ID, and WhatsApp Business Account ID. Studio returns the callback
+URL and verify token to register under Meta App Dashboard → WhatsApp →
+Configuration and subscribes the app to the Business Account. The API verifies
+`X-Hub-Signature-256` on every event. Add
+permitted sender numbers to the channel allowlist before they can invoke the
+assistant or its configured connectors. Their chats and memory remain isolated
+from the workspace owner's account. Studio normalizes common international phone
+formatting in that allowlist and shows a `wa.me` QR code for starting a chat with
+the connected business number. Authorized inbound messages can also trigger
+workflows that watch this channel integration; a workflow step using
+`deliver: { channelType: "whatsapp", replyToTrigger: true }` answers the exact
+originating conversation. Free-form outbound replies are subject to Meta's
+24-hour
+customer-service window; proactive workflow delivery is disabled until approved
+template-message support is available.
 
 ### What it asks before doing
 

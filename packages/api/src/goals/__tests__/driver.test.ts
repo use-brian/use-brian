@@ -180,11 +180,16 @@ describe('[COMP:workflow/goal-seeker] goal driver tick', () => {
   })
 
   it('blocks an unconfirmed goal and asks for clarification, without running work — autopilot enforcement', async () => {
-    const { driver, h } = makeDriver({ goal: makeGoal({ confirmedAt: null }) })
+    const transitionRunningStatus = vi.fn().mockResolvedValue(false)
+    const { driver, h } = makeDriver({
+      goal: makeGoal({ confirmedAt: null }),
+      overrides: { transitionRunningStatus },
+    })
     await driver.tickGoal('g1')
     expect(h.dispatch).not.toHaveBeenCalled() // never starts autonomous work on an unconfirmed goal
     expect(h.statuses.at(-1)).toEqual({ status: 'blocked', reason: 'unconfirmed_needs_clarification' })
     expect(h.delivered).toEqual([{ terminal: 'blocked', reason: 'unconfirmed_needs_clarification' }])
+    expect(transitionRunningStatus).not.toHaveBeenCalled() // no claim exists to hand off yet
   })
 
   it('is single-flight: a lost claim returns without dispatching', async () => {
@@ -192,6 +197,35 @@ describe('[COMP:workflow/goal-seeker] goal driver tick', () => {
     await driver.tickGoal('g1')
     expect(h.dispatch).not.toHaveBeenCalled()
     expect(h.statuses).toHaveLength(0)
+  })
+
+  it('does not re-arm when explicit task deletion retires the running goal mid-iteration', async () => {
+    const transitionRunningStatus = vi.fn().mockResolvedValue(false)
+    const { driver, h } = makeDriver({
+      openSubGoals: 1,
+      overrides: { transitionRunningStatus },
+    })
+
+    await driver.tickGoal('g1')
+
+    expect(h.dispatch).toHaveBeenCalledOnce()
+    expect(transitionRunningStatus).toHaveBeenCalledWith('g1', 'active')
+    expect(h.ticks).toHaveLength(0)
+    expect(h.delivered).toHaveLength(0)
+  })
+
+  it('does not write back or deliver when deletion wins a terminal transition', async () => {
+    const transitionRunningStatus = vi.fn().mockResolvedValue(false)
+    const { driver, h } = makeDriver({
+      openSubGoals: 0,
+      overrides: { transitionRunningStatus },
+    })
+
+    await driver.tickGoal('g1')
+
+    expect(transitionRunningStatus).toHaveBeenCalledWith('g1', 'done', null)
+    expect(h.delivered).toHaveLength(0)
+    expect(h.ticks).toHaveLength(0)
   })
 
   it('blocks when the workspace is over its budget (no iteration), and escalates', async () => {

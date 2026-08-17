@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "dist-firefox",
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false
+  },
+  "files": ["src/firefox-allow.ts", "src/firefox-background.ts", "src/firefox-popup.ts"],
+  "include": []
+}

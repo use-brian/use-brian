@@ -6,7 +6,7 @@ import type { MemoryStore } from './types.js'
 import { createHash } from 'node:crypto'
 import type { AccessContext } from '../security/access-context.js'
 import type { Sensitivity } from '../security/sensitivity.js'
-import { researchWriteFloor } from '../security/sensitivity.js'
+import { maxSensitivity, researchWriteFloor } from '../security/sensitivity.js'
 import { unionCompartments } from '../security/compartments.js'
 import { looksLikeCronOperationalState } from '../consolidation/phases.js'
 import type { EntityStore, EntityLinksStore } from '../entities/types.js'
@@ -34,6 +34,7 @@ function viewerCtx(context: ToolContext): AccessContext {
     assistantKind: context.assistantKind ?? 'standard',
     clearance: context.clearance,
     compartments: context.compartments,
+    clientSelfMemory: context.clientSelfMemory,
   }
 }
 
@@ -277,7 +278,10 @@ export function createMemoryTools(
       // rules govern Pipeline B extraction + the chat tool + future
       // self-heal sweeps.
       const stampedSensitivityForScope: 'public' | 'internal' | 'confidential' =
-        researchWriteFloor(context.sensitivity?.max, context.researchMode)
+        maxSensitivity(
+          researchWriteFloor(context.sensitivity?.max, context.researchMode),
+          context.memoryWriteSensitivityFloor ?? 'public',
+        )
       const scopeDecision = decideMemoryScope({
         assistantKind: context.assistantKind ?? 'standard',
         workspaceId: context.workspaceId,
@@ -312,9 +316,9 @@ export function createMemoryTools(
       // Research turns are the provenance exception: findings come from the
       // public web, so internal-tier brain-first orientation reads don't
       // raise the floor (confidential still does). See researchWriteFloor.
-      const stampedSensitivity: Sensitivity = researchWriteFloor(
-        context.sensitivity?.max,
-        context.researchMode,
+      const stampedSensitivity: Sensitivity = maxSensitivity(
+        researchWriteFloor(context.sensitivity?.max, context.researchMode),
+        context.memoryWriteSensitivityFloor ?? 'public',
       )
       // Compartment stamp (MLS category axis): the high-water union of
       // compartments READ this turn (the laundering guard) + the assistant's
@@ -322,7 +326,7 @@ export function createMemoryTools(
       // with the tool-surface slice. See docs/plans/compartment-axis.md.
       const stampedCompartments = unionCompartments(
         context.compartmentAccumulator?.compartments,
-        context.assistantDefaultCompartments,
+        context.memoryWriteCompartments ?? context.assistantDefaultCompartments,
       )
 
       // Voice tag is a team-scope-only concept — voice rules apply to

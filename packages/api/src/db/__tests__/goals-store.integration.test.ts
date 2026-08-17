@@ -754,15 +754,18 @@ describeIf('[COMP:goals/host-cascade] host-lifecycle cascade (integration)', () 
     expect((await goals.getGoalByIdSystem(keptDraft.id))?.status).toBe('active')
   })
 
-  it('never touches a RUNNING goal — the acting loop owns a claimed goal (single-flight)', async () => {
+  it('explicit task deletion retires a RUNNING goal so its Auto-pilot row disappears', async () => {
     const { userId, workspaceId } = await seed()
     const stamp = `${Date.now()}-${Math.round(performance.now())}`
     const task = await tasks.createTask(userId, { workspaceId, title: `cascade-run-${stamp}` })
     const running = await draftOn(workspaceId, userId, task.id, { confirmed: true })
     await goals.setGoalStatusSystem(running.id, 'running')
 
-    expect(await goals.abandonGoalsForHostTaskSystem(task.id, 'host_task_deleted')).toBe(0)
-    expect((await goals.getGoalByIdSystem(running.id))?.status).toBe('running')
+    expect(await goals.abandonGoalsForHostTaskSystem(task.id, 'host_task_deleted')).toBe(1)
+    expect((await goals.getGoalByIdSystem(running.id))?.status).toBe('abandoned')
+    expect((await goals.getGoalByIdSystem(running.id))?.blockerReason).toBe('host_task_deleted')
+    expect(await goals.transitionRunningGoalStatusSystem(running.id, 'active')).toBe(false)
+    expect((await goals.getGoalByIdSystem(running.id))?.status).toBe('abandoned')
   })
 
   it('closing a task retires its DRAFT but leaves a CONFIRMED goal to the rollup', async () => {

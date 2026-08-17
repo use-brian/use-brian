@@ -204,6 +204,12 @@ const FLASH36_RATES: ModelRates = {
   cacheWritePerMTok: 1.50,
 }
 
+const FLASH37_RATES: ModelRates = {
+  brackets: [{ upToInputTokens: Infinity, inPerMTok: 1.50, outPerMTok: 7.50 }],
+  cacheReadPerMTok: 0.15,
+  cacheWritePerMTok: 1.50,
+}
+
 const PRO31_RATES: ModelRates = {
   brackets: [
     { upToInputTokens: 200_000, inPerMTok: 2.00, outPerMTok: 12.00 },
@@ -275,25 +281,27 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     capabilities: { tools: true, vision: true, thinking: true, nativePdf: true },
   },
   {
-    // Max tier default — Gemini Flash 3.6 (GA 2026-07-21).
-    alias: 'gemini-3.6-flash',
-    displayName: 'Gemini 3.6 Flash',
+    // Max tier default — Gemini Flash 3.7 (GA 2026-08-13).
+    alias: 'gemini-3.7-flash',
+    displayName: 'Gemini 3.7 Flash',
     provider: 'gemini',
-    apiModelId: 'gemini-3.6-flash',
+    apiModelId: 'gemini-3.7-flash',
     class: 'max',
     tier: 'max',
     status: 'active',
     chatTierKey: 'max',
     menu: true,
     idAliases: ['max'],
-    rates: FLASH36_RATES,
+    rates: FLASH37_RATES,
     contextWindow: 1_048_576,
     maxOutput: 65_536,
     capabilities: { tools: true, vision: true, thinking: true, nativePdf: true },
   },
   {
-    // Research tier — Pro 3.1 on the deep budget. Synthetic id keeps it
-    // billable-distinct from Max and from historical Pro-3.1-as-Max rows.
+    // Research tier automatic default — Pro 3.1 on the deep budget. It is
+    // intentionally absent from the curated picker while its list-price
+    // effective rate exceeds the frozen research anchor. The synthetic id
+    // keeps it billable-distinct from Max and historical Pro-3.1-as-Max rows.
     alias: 'gemini-3-pro-research',
     displayName: 'Gemini 3.1 Pro',
     provider: 'gemini',
@@ -302,7 +310,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     tier: 'research',
     status: 'active',
     chatTierKey: 'research',
-    menu: true,
+    menu: false,
     idAliases: ['research'],
     recordAlias: true,
     rates: PRO31_RATES,
@@ -332,6 +340,22 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
   },
 
   // ── Legacy rows (classification/pricing of historical usage only) ──
+  {
+    // Prior Max default (2026-07-27 through 2026-08-15). Keep its original
+    // list rates and Max classification so historical rows never reprice
+    // when the active default moves to Flash 3.7.
+    alias: 'gemini-3.6-flash',
+    displayName: 'Gemini 3.6 Flash',
+    provider: 'gemini',
+    apiModelId: 'gemini-3.6-flash',
+    class: 'max',
+    tier: 'max',
+    status: 'legacy',
+    rates: FLASH36_RATES,
+    contextWindow: 1_048_576,
+    maxOutput: 65_536,
+    capabilities: { tools: true, vision: true, thinking: true, nativePdf: true },
+  },
   {
     // Prior Max default (2026-05 through 2026-07-27). Keep its original
     // $1.50/$9.00 rates and Max classification so historical rows never

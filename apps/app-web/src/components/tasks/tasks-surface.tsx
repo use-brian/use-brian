@@ -11,14 +11,17 @@
  * filter row for the bulk bar: Status / Assign / Priority / Project /
  * Archive / Delete over the whole selection.
  *
- * State model: the URL is the single source of truth for the view
+ * State model: the URL is the durable source of truth for the view
  * (`tasks-view.ts` codec) — the sidebar panel and the Home dock card
- * (`?filter=stale`) deep-link into it. Mutations ride the existing
+ * (`?filter=stale`) deep-link into it. Search keeps an optimistic local mirror
+ * and writes through `history.replaceState`, so typing filters immediately
+ * without starting an RSC navigation per character. Mutations ride the existing
  * brain-inbox wire (`adjustBrainRow` / `deleteBrainRow`, supersession-aware:
- * every edit mints a new row id) — a client loop for small selections
- * (per-row retry UX), the server bulk lane (`bulkTasks`) past
- * `SERVER_BULK_THRESHOLD`. Destructive bulk collects a required reason so
- * every rejected task teaches the workspace independently.
+ * every edit mints a new row id). Small non-destructive selections keep the
+ * per-row retry loop; every multi-delete uses `bulkTasks`, removes the complete
+ * selection optimistically, and restores only failed rows. Destructive bulk
+ * may collect one shared reason so every rejected task teaches the workspace
+ * independently.
  *
  * Spec: docs/architecture/features/tasks.md → "Operator surface".
  * [COMP:app-web/tasks-surface]
@@ -112,8 +115,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
-/** Above this many selected rows the surface uses the server bulk endpoint
- *  instead of the per-row client loop. */
+/** Above this many selected rows a uniform non-destructive edit uses the server
+ * bulk endpoint instead of the per-row client loop. Delete always uses it. */
 const SERVER_BULK_THRESHOLD = 50;
 /** The server route accepts 1-200 ids per request. The operator list can
  *  contain 500 rows, so a filter-scoped selection may need three batches. */
@@ -186,9 +189,27 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
   }, [workspaceId]);
 
   // ── View state (URL is the source of truth) ───────────────────────────
-  const view = useMemo(
+  const urlView = useMemo(
     () => viewStateFromSearch(searchParams),
     [searchParams],
+  );
+  // Search is a rapid, client-only filter over rows already in memory. Keeping
+  // the input controlled directly by `useSearchParams` made each keystroke
+  // start a Next RSC navigation; the URL response then fed one stale character
+  // back into the field and overwrote everything typed after it. The local
+  // mirror paints and filters synchronously, while the native History API keeps
+  // deep-link state current without a server navigation. Incoming URL changes
+  // (saved views, sidebar links, back/forward) still reconcile the mirror.
+  const [searchDraft, setSearchDraft] = useState(urlView.q);
+  useEffect(() => {
+    setSearchDraft(urlView.q);
+  }, [urlView.q]);
+  const view = useMemo(
+    () =>
+      urlView.q === searchDraft
+        ? urlView
+        : { ...urlView, q: searchDraft },
+    [searchDraft, urlView],
   );
   const setView = useCallback(
     (patch: Partial<TasksViewState>) => {
@@ -199,6 +220,15 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
       });
     },
     [view, router, pathname],
+  );
+  const setSearch = useCallback(
+    (q: string) => {
+      setSearchDraft(q);
+      const search = searchFromViewState({ ...urlView, q });
+      const href = search ? `${pathname}?${search}` : pathname;
+      window.history.replaceState(window.history.state, "", href);
+    },
+    [pathname, urlView],
   );
 
   // ── Derived ───────────────────────────────────────────────────────────
@@ -271,6 +301,17 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
     [rows, openTaskId],
   );
 
+  const handleSuggestionAccepted = useCallback(
+    (task: TaskRow, openEditor: boolean) => {
+      // The accept endpoint returns the canonical created row, so paint it
+      // immediately instead of making Add-and-edit wait for a list round trip.
+      setRows((current) => [task, ...current.filter((row) => row.id !== task.id)]);
+      if (openEditor) setOpenTaskId(task.id);
+      void refreshTasks();
+    },
+    [setRows, refreshTasks],
+  );
+
   const setTaskRulesOpen = useCallback(
     (open: boolean) => {
       const next = new URLSearchParams(searchParams.toString());
@@ -327,10 +368,10 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
     [workspaceId, patchRow],
   );
 
-  /** Run a bulk mutation over the selection. Small selections loop the
-   *  per-row wire (failed ids STAY SELECTED for a retry — the Reviews-queue
-   *  contract); large ones take the server lane WHEN the change is uniform
-   *  (`serverSet` — project bulk is per-row tags, so it always loops). */
+  /** Run a bulk mutation over the selection. Delete always takes the server
+   * lane and disappears in one optimistic paint; failed ids are restored and
+   * stay selected. Non-destructive edits keep the small client-loop / large
+   * uniform-server split (`serverSet` — project bulk is per-row tags). */
   const runBulk = useCallback(
     async (
       apply:
@@ -347,12 +388,41 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
     ) => {
       const ids = selectedVisible;
       if (ids.length === 0 || bulkBusy) return;
+      const deleteSnapshot =
+        apply.kind === "delete"
+          ? (rows ?? []).filter((row) => ids.includes(row.id))
+          : [];
+      const restoreDeletedRows = (failedIds: string[]) => {
+        if (apply.kind !== "delete" || failedIds.length === 0) return;
+        const failed = new Set(failedIds);
+        setRows((current) => {
+          const present = new Set(current.map((row) => row.id));
+          return [
+            ...current,
+            ...deleteSnapshot.filter(
+              (row) => failed.has(row.id) && !present.has(row.id),
+            ),
+          ];
+        });
+      };
+      const confirmedDeleted = new Set<string>();
       setBulkBusy(true);
       setBulkError(null);
+      if (apply.kind === "delete") {
+        const deleting = new Set(ids);
+        setRows((current) => current.filter((row) => !deleting.has(row.id)));
+        setSelected(new Set());
+        setOpenTaskId((current) =>
+          current && deleting.has(current) ? null : current,
+        );
+      }
       try {
         const serverEligible =
           apply.kind === "delete" || apply.serverSet !== null;
-        if (ids.length > SERVER_BULK_THRESHOLD && serverEligible) {
+        if (
+          apply.kind === "delete" ||
+          (ids.length > SERVER_BULK_THRESHOLD && serverEligible)
+        ) {
           // Server lane — ≤200 ids per request, then refetch (supersession
           // ids). A transport failure keeps that batch + every unattempted
           // id selected while preserving successes from earlier batches.
@@ -385,10 +455,20 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
               requestError = result.error;
               break;
             }
-            failed.push(
-              ...result.results.filter((row) => !row.ok).map((row) => row.id),
+            const resultById = new Map(
+              result.results.map((row) => [row.id, row] as const),
             );
+            for (const id of batchIds) {
+              if (resultById.get(id)?.ok) {
+                if (apply.kind === "delete") confirmedDeleted.add(id);
+              } else {
+                // A missing per-id outcome is a failure too. The optimistic
+                // delete must never hide a row the server did not confirm.
+                failed.push(id);
+              }
+            }
           }
+          restoreDeletedRows(failed);
           setSelected(new Set(failed));
           if (requestError) {
             setBulkError(requestError);
@@ -408,33 +488,14 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
         for (const id of ids) {
           const row = (rows ?? []).find((r) => r.id === id);
           if (!row) continue;
-          if (apply.kind === "delete") {
-            const result = await deleteBrainRow(
-              workspaceId,
-              "task",
-              id,
-              apply.reason
-                ? { reason: apply.reason, createRule: true }
-                : undefined,
-            );
-            if (result.ok) {
-              setRows((prev) => prev.filter((r) => r.id !== id));
-              setSelected((prev) => {
-                const next = new Set(prev);
-                next.delete(id);
-                return next;
-              });
-            } else failed.push(id);
-          } else {
-            const result = await adjustBrainRow(
-              workspaceId,
-              "task",
-              id,
-              apply.changesFor(row),
-            );
-            if (result.ok) patchRow(id, result.newId, apply.patch(row));
-            else failed.push(id);
-          }
+          const result = await adjustBrainRow(
+            workspaceId,
+            "task",
+            id,
+            apply.changesFor(row),
+          );
+          if (result.ok) patchRow(id, result.newId, apply.patch(row));
+          else failed.push(id);
         }
         if (failed.length > 0) {
           setSelected(new Set(failed));
@@ -444,9 +505,23 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
               total: String(ids.length),
             }),
           );
-        } else if (apply.kind !== "delete") {
+        } else {
           setSelected(new Set());
         }
+      } catch {
+        let failedCount = ids.length;
+        if (apply.kind === "delete") {
+          const retryIds = ids.filter((id) => !confirmedDeleted.has(id));
+          restoreDeletedRows(retryIds);
+          setSelected(new Set(retryIds));
+          failedCount = retryIds.length;
+        }
+        setBulkError(
+          format(t.bulkPartialFail, {
+            failed: String(failedCount),
+            total: String(ids.length),
+          }),
+        );
       } finally {
         setBulkBusy(false);
         // Other surfaces (Brain list, dock badge) repaint off this signal.
@@ -911,8 +986,8 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
               else if (key === "project") setView({ project: values });
               else if (key === "due") setView({ due: values as TasksViewState["due"] });
             }}
-            search={view.q}
-            onSearch={(q) => setView({ q })}
+            search={searchDraft}
+            onSearch={setSearch}
             searchPlaceholder={t.searchPlaceholder}
             viewOptions={
               <>
@@ -961,7 +1036,7 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
       {view.view === "suggestions" ? (
         <TaskSuggestionsView
           workspaceId={workspaceId}
-          onAccepted={reload}
+          onAccepted={handleSuggestionAccepted}
           onCountChange={setSuggestionCount}
         />
       ) : (

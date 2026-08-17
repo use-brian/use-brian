@@ -1181,7 +1181,7 @@ function BrainPageInner() {
 
       {/* The assistant chat dock is mounted ONCE by WorkspaceChrome across all
           non-doc surfaces (it stamps `appOrigin: 'brain'` here). The brain
-          pristine-nudge CTAs seed it via `requestBrainChatSeed`. */}
+          pristine-nudge CTAs seed it via `requestSurfaceChatSeed`. */}
 
       {/* Provenance sheet host — entity surfaces call `useProvenance().open()`. */}
       <ProvenanceSheetHost />

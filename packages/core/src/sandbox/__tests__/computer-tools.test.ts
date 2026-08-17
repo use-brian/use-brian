@@ -30,8 +30,8 @@ function fakeProvider(kind: 'local' | 'cloud'): BrowserProvider & { calls: strin
       calls.push(`navigate:${url}`)
       return { url }
     },
-    async snapshot() {
-      calls.push('snapshot')
+    async snapshot(_ctx, options) {
+      calls.push(options?.mode === 'full' ? 'snapshot:full' : 'snapshot')
       return {
         url: 'https://www.linkedin.com/messaging/',
         title: 'Messaging',
@@ -369,6 +369,58 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
     const res = await run(tools.browserSnapshot, {})
     expect(String(res.data)).toContain('@e2 button "Send"')
     expect(String(res.data)).toContain('URL: https://www.linkedin.com/messaging/')
+  })
+
+  it('pages through snapshots beyond the first 150 interactive nodes', async () => {
+    const local = fakeProvider('local')
+    local.snapshot = async () => ({
+      url: 'https://example.com/large',
+      title: 'Large page',
+      nodes: Array.from({ length: 320 }, (_, index) => ({
+        ref: `@e${index + 1}`,
+        role: 'button',
+        name: `Action ${index + 1}`,
+      })),
+    })
+    const tools = createComputerTools({ local, cloud: fakeProvider('cloud') })
+
+    const res = await run(tools.browserSnapshot, { offset: 150 })
+
+    expect(String(res.data)).toContain('@e151 button "Action 151"')
+    expect(String(res.data)).toContain('@e300 button "Action 300"')
+    expect(String(res.data)).not.toContain('@e301 button "Action 301"')
+    expect(String(res.data)).toContain('Showing interactive nodes 151-300 of 320')
+    expect(String(res.data)).toContain('call browserSnapshot with offset 300')
+    expect(res.meta).toMatchObject({ nodes: 320, offset: 150, shown: 150, nextOffset: 300 })
+    expect(() => tools.browserSnapshot.inputSchema.parse({ limit: 151 })).toThrow()
+  })
+
+  it('returns paginated static accessibility information in full mode without inventing refs', async () => {
+    const local = fakeProvider('local')
+    local.snapshot = async (_ctx, options) => ({
+      url: 'https://www.mtr.com.hk/en/customer/jp/index.php',
+      title: 'MTR > Route Suggestion',
+      nodes: [
+        { ref: '@e1', role: 'button', name: 'Hide' },
+        ...Array.from({ length: 160 }, (_, index) => ({
+          role: index % 2 === 0 ? 'cell' : 'statictext',
+          name: index === 150 ? 'Adult fare 5.9' : `Fare text ${index + 1}`,
+        })),
+      ],
+      ...(options?.mode === 'full' ? {} : { nodes: [] }),
+    })
+    const tools = createComputerTools({ local, cloud: fakeProvider('cloud') })
+
+    const first = await run(tools.browserSnapshot, { mode: 'full' })
+    const second = await run(tools.browserSnapshot, { mode: 'full', offset: 150 })
+
+    expect(String(first.data)).toContain('@e1 button "Hide"')
+    expect(String(first.data)).toContain('cell "Fare text 1"')
+    expect(String(first.data)).toContain('Showing accessibility nodes 1-150 of 161')
+    expect(String(first.data)).toContain('mode "full" and offset 150')
+    expect(String(second.data)).toContain('cell "Adult fare 5.9"')
+    expect(String(second.data)).not.toContain('undefined cell')
+    expect(second.meta).toMatchObject({ mode: 'full', nodes: 161, offset: 150, shown: 11 })
   })
 
   describe('send gate (P1.7 / §8 no unattended state-change)', () => {

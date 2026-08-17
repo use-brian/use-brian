@@ -49,8 +49,8 @@
  * `./custom-connectors.ts` — the same factory the closed edition mounts, so the
  * feature has one implementation across both editions.
  *
- * Out of scope for the open edition (handled by the closed route): Google Drive
- * authorized-files (`/gdrive/*`).
+ * Google Drive Picker authorization mounts from the open shared
+ * `gdrive-authorized-files.ts` factory; hosted consumes the same router.
  *
  * Component tag: [COMP:api/connectors-route].
  */
@@ -78,6 +78,12 @@ import type { GcsServiceAccountCredentials } from '../files/gcs-client.js'
 import { validateS3ByoBinding } from '../files/s3-byo-validate.js'
 import type { S3Credentials } from '../files/s3-client.js'
 import { normalizeShopDomain, packShopifyTokens, packShopifyAppCredentials, unpackShopifyAppCredentials, getShopIdentity, verifyShopifyOAuthQueryHmac, exchangeShopifyAuthorizationCode } from '../shopify/client.js'
+import {
+  getWordPressSiteIdentity,
+  normalizeWordPressSiteUrl,
+  packWordPressCredentials,
+  WordPressConnectorError,
+} from '../wordpress/client.js'
 import type { ConnectorAppCredentialStore } from '../db/connector-app-credential-store.js'
 import { ConnectorAppCredentialAuthError } from '../db/connector-app-credential-store.js'
 import { getConnectorAppConfigStatus, resolveConnectorAppConfig } from '../connectors/app-credentials.js'
@@ -86,8 +92,6 @@ import { decodeMsGraphIdToken } from '../msgraph/oauth.js'
 import {
   exchangeGoogleAuthorizationCode,
   packGoogleRefreshCredential,
-  refreshGoogleAccessToken,
-  unpackGoogleRefreshCredential,
 } from '../google/client.js'
 import { parseGDriveOfflineEnrichmentBundle } from '../google/enrichment-bundle.js'
 import {
@@ -106,7 +110,7 @@ import {
   getGDriveCatalogStatus,
   listGDriveCatalogArtifactsOutsideGeneration,
 } from '../db/gdrive-catalog-store.js'
-import { getConnectorConfig } from '../connector-config.js'
+import { gdriveAuthorizedFilesRoutes } from './gdrive-authorized-files.js'
 import { resolveShopifyDomain, type ShopifyDomainResolution } from '../shopify/resolve-domain.js'
 import { DESKTOP_OAUTH_EXCHANGERS, type DesktopOAuthExchangeResult } from '../connectors/desktop-oauth-exchange.js'
 import { resolveMailboxPreset } from '../mailbox/presets.js'
@@ -209,6 +213,8 @@ type ConnectorRouteOptions = {
    * → "Auth model".
    */
   shopifyVerifyToken?: typeof getShopIdentity
+  /** Verify-before-store seam for the fixed Use Brian WordPress Bridge site probe. */
+  wordpressVerifyConnection?: typeof getWordPressSiteIdentity
   /**
    * Enables the workspace-owned OAuth *app* credential endpoints
    * (`GET/PUT/DELETE /:provider/app-credentials`) and the server-side
@@ -352,6 +358,7 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
   // `/custom/:id` paths resolve before the `/:provider` catch-all routes below
   // (otherwise `/custom/:id` would be captured by `DELETE /:provider`).
   router.use(customConnectorRoutes({ connectorStore }))
+  router.use('/gdrive', gdriveAuthorizedFilesRoutes({ connectorStore, connectorInstanceStore }))
 
   // ── Bring-your-own GCS storage (workspace-scoped) ──────────────
   //
@@ -2144,45 +2151,6 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     }
   })
 
-  // Short-lived token for either the managed file Picker or the BYO folder
-  // Picker. An explicit instance id prevents multi-account token ambiguity.
-  router.get('/gdrive/access-token', async (req, res) => {
-    const userId = req.userId
-    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
-    const connectorInstanceId = typeof req.query.connectorInstanceId === 'string'
-      ? req.query.connectorInstanceId
-      : ''
-    if (connectorInstanceId && !UUID_RE.test(connectorInstanceId)) {
-      res.status(400).json({ error: 'Invalid connectorInstanceId' }); return
-    }
-    try {
-      const creds = connectorInstanceId
-        ? await connectorInstanceStore.getCredentials(userId, connectorInstanceId)
-        : await connectorStore.getCredentials(userId, 'gdrive')
-      if (!creds || creds.client_id !== 'google_refresh' || !creds.client_secret) {
-        res.status(409).json({ error: 'gdrive not connected' }); return
-      }
-      const grant = unpackGoogleRefreshCredential(creds.client_secret)
-      const deployment = getConnectorConfig('google')
-      const clientId = grant.appClientId ?? deployment?.clientId
-      const clientSecret = grant.appClientSecret ?? deployment?.clientSecret
-      if (!clientId || !clientSecret) {
-        res.status(500).json({ error: 'Google OAuth not configured' }); return
-      }
-      const accessToken = await refreshGoogleAccessToken(grant.refreshToken, clientId, clientSecret)
-      res.json({
-        accessToken,
-        expiresIn: 3000,
-        ...(grant.pickerAppId && grant.pickerApiKey
-          ? { pickerAppId: grant.pickerAppId, pickerApiKey: grant.pickerApiKey }
-          : {}),
-      })
-    } catch (err) {
-      console.error('[connectors] gdrive access-token failed:', err)
-      res.status(500).json({ error: 'Failed to mint access token' })
-    }
-  })
-
   // POST /msgraph/oauth-callback — the code exchange, server-side.
   //
   // Same split as `/shopify/oauth-callback` and for the same reason: app-web
@@ -2323,6 +2291,8 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
        * docs/architecture/integrations/shopify.md → "Per-merchant app credentials".
        */
       shopifyApp?: { clientId?: string; clientSecret?: string }
+      /** WordPress Application Password tuple. Stored only after bridge verification. */
+      wordpressCredentials?: { siteUrl?: string; username?: string; applicationPassword?: string }
       /**
        * Microsoft Graph's rotating tuple (docs/architecture/integrations/msgraph.md).
        * Graph replaces the refresh token on every use, so access + refresh +
@@ -2415,6 +2385,35 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
       email = verifiedDomain ?? email ?? storedDomain
       label = label ?? storedDomain
       configPatch = { shopDomain: storedDomain }
+    } else if (provider === 'wordpress') {
+      const candidate = body.wordpressCredentials
+      const siteUrl = normalizeWordPressSiteUrl(candidate?.siteUrl ?? '')
+      const username = candidate?.username?.trim()
+      const applicationPassword = candidate?.applicationPassword?.trim()
+      if (!siteUrl || !username || !applicationPassword) {
+        res.status(400).json({ error: 'invalid_site_url' })
+        return
+      }
+      try {
+        const tuple = { siteUrl, username, applicationPassword }
+        const identity = await (opts.wordpressVerifyConnection ?? getWordPressSiteIdentity)(tuple)
+        credentials = {
+          type: 'oauth',
+          client_id: 'wordpress_application_password',
+          client_secret: packWordPressCredentials({ ...tuple, siteUrl: identity.siteUrl }),
+        }
+        email = identity.siteUrl
+        label = label ?? identity.name
+        configPatch = {
+          siteUrl: identity.siteUrl,
+          bridgeVersion: identity.bridgeVersion,
+        }
+      } catch (err) {
+        const code = err instanceof WordPressConnectorError ? err.code : 'verification_failed'
+        console.warn(`[connectors] wordpress verification failed for ${siteUrl}:`, code)
+        res.status(400).json({ error: code })
+        return
+      }
     } else if (provider === 'msgraph') {
       const t = body.msgraphTokens
       if (

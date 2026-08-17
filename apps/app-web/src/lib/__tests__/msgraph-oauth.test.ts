@@ -117,11 +117,19 @@ describe("[COMP:msgraph/oauth] Microsoft Graph connector OAuth", () => {
       resolve(process.cwd(), "src/app/w/[workspaceId]/studio/connectors/page.tsx"),
       "utf8",
     );
+    const directory = readFileSync(
+      resolve(process.cwd(), "src/app/w/[workspaceId]/studio/connectors/browse-directory.tsx"),
+      "utf8",
+    );
 
     expect(page).toContain("openMsGraphAppEditor");
     expect(page).toContain("tc.msgraph.editLink");
     expect(page).toContain('setMsGraphAppId(status?.workspaceOwned ? (status.clientId ?? "") : "")');
     expect(page).toContain('setMsGraphTenantId(status?.workspaceOwned ? (status.tenantId ?? "") : "")');
+    expect(page).toContain("onConfigureApp={(entry) =>");
+    expect(directory).toContain("onConfigureApp?:");
+    expect(directory).toContain('entry.id !== "msgraph"');
+    expect(directory).toContain("t.browseDirectory.configure");
   });
 
   /**

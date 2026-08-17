@@ -24,6 +24,61 @@ export type RecordingEstimate = {
   surchargeCredits: number;
 };
 
+export type LiveRecordingPage = {
+  pageId: string;
+  title: string;
+  notesBlockId: string;
+  transcriptAfterId: string;
+};
+
+/** Prepare the collaborative page before opening the microphone. */
+export async function startLiveRecordingPage(params: {
+  workspaceId: string;
+  destination: "existing" | "new";
+  pageId?: string;
+  parentPageId?: string | null;
+  title?: string;
+}): Promise<LiveRecordingPage> {
+  const res = await authFetch(`${API_URL}/api/recordings/live/start`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) throw await asError(res, "Could not prepare the live meeting page");
+  return res.json();
+}
+
+/** Upload one complete, independently decodable live-audio window. */
+export async function streamLiveRecordingWindow(params: {
+  workspaceId: string;
+  assistantId: string;
+  page: LiveRecordingPage;
+  chunkId: string;
+  blob: Blob;
+  mime: string;
+  startMs: number;
+  endMs: number;
+  missedWindows?: number;
+}): Promise<{ transcriptAfterId: string; transcript?: string; notes?: string; duplicate?: boolean }> {
+  const body = new FormData();
+  body.set("workspaceId", params.workspaceId);
+  body.set("assistantId", params.assistantId);
+  body.set("pageId", params.page.pageId);
+  body.set("notesBlockId", params.page.notesBlockId);
+  body.set("transcriptAfterId", params.page.transcriptAfterId);
+  body.set("chunkId", params.chunkId);
+  body.set("offsetMs", String(params.startMs));
+  body.set("durationMs", String(params.endMs - params.startMs));
+  if (params.missedWindows) body.set("missedWindows", String(params.missedWindows));
+  body.set("audio", params.blob, `live-${params.chunkId}.webm`);
+  const res = await authFetch(`${API_URL}/api/recordings/live/chunk`, {
+    method: "POST",
+    body,
+  });
+  if (!res.ok) throw await asError(res, "Could not process this live transcript window");
+  return res.json();
+}
+
 /**
  * The `/process` 202 body — the job is QUEUED for the worker service, not
  * done. (The old synchronous shape with `utteranceCount`/`truncated` died

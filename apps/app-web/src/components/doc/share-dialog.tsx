@@ -341,7 +341,7 @@ function SlugRow({
     <div className="space-y-1.5 border-t border-border pt-3">
       <p className="text-xs font-medium text-muted-foreground">{t.site.pageLinkLabel}</p>
       <div className="flex items-center gap-2">
-        <div className="flex min-w-0 flex-1 items-center rounded-md border border-border bg-background text-sm transition-[border-color,box-shadow] focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30">
+        <div className="flex min-w-0 flex-1 items-center rounded-md border border-border bg-background text-sm transition-[border-color,box-shadow] focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30 [&_:focus-visible]:shadow-none">
           <span className="shrink-0 pl-3 text-muted-foreground">/</span>
           <input
             value={draft}
@@ -646,7 +646,7 @@ export function ShareDialog({
                   }
                 }}
                 placeholder={t.invitePlaceholder}
-                className="min-w-0 flex-1 rounded-md border border-border bg-background px-3 py-1.5 text-sm outline-none focus:border-primary"
+                className="min-w-0 flex-1 rounded-md border border-border bg-background px-3 py-1.5 text-sm outline-none"
               />
               <button
                 type="button"

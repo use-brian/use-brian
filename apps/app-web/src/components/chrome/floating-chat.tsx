@@ -76,7 +76,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   docPagePath,
   pageIdFromInAppHref,
@@ -171,7 +171,13 @@ import {
   describeToolFromInput,
   type NarrationDict,
 } from "@/lib/tool-narration";
-import { requestBrainRefresh } from "@/lib/brain-events";
+import {
+  BRAIN_ENTRY_VIEW_EVENT,
+  requestBrainRefresh,
+  type BrainEntryViewDetail,
+} from "@/lib/brain-events";
+import { viewingBrainEntryFromLocation } from "@/lib/brain-deep-link";
+import type { BrainPrimitive } from "@/lib/api/brain-inbox";
 import { requestApprovalsRefresh } from "@/lib/approvals-events";
 import {
   SURFACE_CHAT_SEED_EVENT,
@@ -208,6 +214,7 @@ import {
   type StagedRecording,
 } from "@/lib/recordings/use-recording-upload";
 import { useDockRecorder } from "@/lib/recorder/use-dock-recorder";
+import { useLiveRecordingPage } from "@/lib/recordings/use-live-recording-page";
 import {
   getDockRecorderSessionId,
   publishDockRecorderController,
@@ -480,8 +487,12 @@ export function FloatingChat({
   const tRecorder = useT().recorder;
   const router = useRouter();
   const pathname = usePathname();
+  const searchParams = useSearchParams();
   const [expanded, setExpanded] = useState(false);
   const [input, setInput] = useState("");
+  const [pendingSurfaceSeed, setPendingSurfaceSeed] =
+    useState<SurfaceChatSeed | null>(null);
+  const surfaceSeedAttemptRef = useRef<SurfaceChatSeed | null>(null);
 
   // ── Assistant switcher ───────────────────────────────────────────────────
   // The chat talks to the workspace PRIMARY by default (the `assistantId`
@@ -820,19 +831,26 @@ export function FloatingChat({
 
   // ── Surface chat seeds ───────────────────────────────────────────────────
   // Any surface can open + prefill this dock via the shared seed bus
-  // (`requestSurfaceChatSeed`; the brain pristine-nudge CTAs use the
-  // `requestBrainChatSeed` alias). A nudge means "start a new conversation
-  // about X" — reset the thread, expand, prefill, and arm research either for
-  // this turn (`researchMode`) or the one after the first reply
-  // (`deferResearch`). Listened for at every origin now that one unified dock
-  // serves all surfaces — a brain nudge must still reach it on the doc origin.
+  // (`requestSurfaceChatSeed`, including the brain pristine-nudge CTAs). A
+  // nudge means "start a new conversation
+  // about X" — reset the thread, expand, prefill (or queue the explicitly
+  // confirmed auto-send), and arm research either for this turn
+  // (`researchMode`) or the one after the first reply (`deferResearch`).
+  // Listened for at every origin now that one unified dock serves all surfaces
+  // — a brain nudge must still reach it on the doc origin.
   useEffect(() => {
     function onSeed(e: Event) {
       const seed = (e as CustomEvent<SurfaceChatSeed>).detail;
       if (!seed?.prefill?.trim()) return;
       resetThread();
       setExpanded(true);
-      setInput(seed.prefill);
+      if (seed.autoSend) {
+        setInput("");
+        setPendingSurfaceSeed(seed);
+      } else {
+        setPendingSurfaceSeed(null);
+        setInput(seed.prefill);
+      }
       deferResearchRef.current = !seed.researchMode && !!seed.deferResearch;
       setResearchMode(!!seed.researchMode);
     }
@@ -1029,6 +1047,35 @@ export function FloatingChat({
   useEffect(() => {
     viewingSkillRowIdRef.current = skillRowIdFromPathname(pathname);
   }, [pathname]);
+
+  // Seed from the canonical Brain deep link, then let the detail drawer's
+  // live event override it for Review rows opened from local page state.
+  // Every turn carries that exact pair so "this entry" cannot be mistaken
+  // for a Doc title.
+  const viewingBrainEntryRef = useRef<{
+    primitive: BrainPrimitive;
+    rowId: string;
+  } | null>(null);
+  useEffect(() => {
+    viewingBrainEntryRef.current = viewingBrainEntryFromLocation(
+      pathname,
+      new URLSearchParams(searchParams.toString()),
+    );
+  }, [pathname, searchParams]);
+  useEffect(() => {
+    const onEntryView = (event: Event) => {
+      const detail = (event as CustomEvent<BrainEntryViewDetail>).detail;
+      if (detail.workspaceId !== workspaceId) return;
+      viewingBrainEntryRef.current = detail.entry
+        ? {
+            primitive: detail.entry.primitive as BrainPrimitive,
+            rowId: detail.entry.rowId,
+          }
+        : null;
+    };
+    window.addEventListener(BRAIN_ENTRY_VIEW_EVENT, onEntryView);
+    return () => window.removeEventListener(BRAIN_ENTRY_VIEW_EVENT, onEntryView);
+  }, [workspaceId]);
 
   // Per-turn buffers — keyed by toolUseId / URL so re-emits replace prior entry.
   const turnViewsRef = useRef<ViewAttachment[]>([]);
@@ -1610,6 +1657,9 @@ export function FloatingChat({
           ...(viewingSkillRowIdRef.current
             ? { viewingSkillRowId: viewingSkillRowIdRef.current }
             : {}),
+          ...(viewingBrainEntryRef.current
+            ? { viewingBrainEntry: viewingBrainEntryRef.current }
+            : {}),
           // The custom theme the user currently has applied (a per-user
           // localStorage value). Lets the server inject `refineActiveTheme` so
           // "make my theme warmer" works in chat. Only sent on a custom
@@ -1938,6 +1988,42 @@ export function FloatingChat({
                 status: "pending",
               };
               session.addConfirmation(conf);
+              break;
+            }
+            case "brain_entry_updated": {
+              const primitive =
+                typeof payload.primitive === "string"
+                  ? (payload.primitive as BrainPrimitive)
+                  : null;
+              const previousRowId =
+                typeof payload.previousRowId === "string"
+                  ? payload.previousRowId
+                  : null;
+              const liveRowId =
+                typeof payload.liveRowId === "string"
+                  ? payload.liveRowId
+                  : null;
+              requestBrainRefresh(workspaceId);
+              const open = viewingBrainEntryRef.current;
+              if (
+                primitive &&
+                previousRowId &&
+                liveRowId &&
+                open?.primitive === primitive &&
+                open.rowId === previousRowId
+              ) {
+                viewingBrainEntryRef.current = {
+                  primitive,
+                  rowId: liveRowId,
+                };
+                const params = new URLSearchParams(window.location.search);
+                params.set("row", liveRowId);
+                if (primitive === "task") params.delete("kind");
+                else params.set("kind", primitive);
+                router.replace(`${pathname}?${params.toString()}`, {
+                  scroll: false,
+                });
+              }
               break;
             }
             case "awaiting_approval": {
@@ -2367,6 +2453,25 @@ export function FloatingChat({
     sendMessageRef.current = sendMessage;
   }, [sendMessage]);
 
+  // Surface auto-send is intentionally a two-effect handoff: the event
+  // listener above first resets the thread and records the seed, then this
+  // effect runs on the settled render where `sendMessage` sees the fresh
+  // session ref. A failed start (for example, a suspended question) leaves the
+  // seed pending and retries when the chat state changes. The ref prevents a
+  // render during one async attempt from dispatching the same turn twice.
+  useEffect(() => {
+    const seed = pendingSurfaceSeed;
+    if (!seed?.autoSend || surfaceSeedAttemptRef.current === seed) return;
+    surfaceSeedAttemptRef.current = seed;
+    void sendMessage(seed.prefill, {
+      researchMode: !!seed.researchMode,
+    }).then((started) => {
+      surfaceSeedAttemptRef.current = null;
+      if (!started) return;
+      setPendingSurfaceSeed((current) => (current === seed ? null : current));
+    });
+  }, [pendingSurfaceSeed, sendMessage]);
+
   /**
    * Hand a message to the turn that is already running (mid-turn input), and
    * clear the composer as an ordinary send would.
@@ -2389,6 +2494,7 @@ export function FloatingChat({
   // the recording ingestion flow (`rec.run`, the full cost + blueprint +
   // destination confirm), stamped kind='meeting' — a recorder-originated
   // long capture is a meeting, and kind routes the transcriber ladder.
+  const liveRecording = useLiveRecordingPage(workspaceId, activeAssistantId);
   const recorder = useDockRecorder({
     enabled: !!workspaceId && !!activeAssistantId,
     workspaceId,
@@ -2401,7 +2507,13 @@ export function FloatingChat({
         fileId,
         (fallbackFileId) => sendMessage("", { fileIds: [fallbackFileId] }),
       ),
-    onMeetingCapture: (file: File) => rec.run(file, undefined, { kind: "meeting" }),
+    prepareLivePage: liveRecording.prepare,
+    streamLiveWindow: liveRecording.streamWindow,
+    onMeetingCapture: (file: File, livePageId?: string) =>
+      rec.run(file, {
+        kind: "meeting",
+        ...(livePageId ? { existingPageId: livePageId } : {}),
+      }),
   });
 
   // Feed replaces this dock's CHAT chrome, not its universal recorder. Publish
@@ -3201,7 +3313,6 @@ export function FloatingChat({
               "flex-1 min-w-0 min-h-[36px] max-h-[240px] resize-none overflow-y-auto rounded-md border border-border bg-background",
               "px-3 py-2 text-sm leading-relaxed outline-none",
               "placeholder:text-muted-foreground",
-              "focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40",
               "disabled:opacity-60",
             )}
           />

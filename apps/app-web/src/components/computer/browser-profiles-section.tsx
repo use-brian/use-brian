@@ -17,8 +17,10 @@ import { useParams, useRouter } from "next/navigation";
 import { Cloud, Laptop, Settings2, Trash2 } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
+import { normalizeCaptureSite } from "@/lib/computer-takeover";
 import { ConnectBrowserPanel } from "./connect-browser-panel";
 import {
+  captureProfileSession,
   createBrowserProfile,
   deleteBrowserProfile,
   listBrowserProfiles,
@@ -63,19 +65,22 @@ export function isValidProxyUrl(raw: string): boolean {
 }
 
 /**
- * Which surfaces a profile card shows, by backend.
+ * Which surfaces a profile card shows, by backend and ownership.
  *
  * A profile is "ONE cookie jar" only on the CLOUD backend, where the session
  * vault holds its logins. A `local` ("My Browser") profile rides the logins
- * already in the user's real Chrome — nothing is captured and the vault is
+ * already in the user's real Chrome — the local profile itself owns no vault
  * never read — so the sign-in box and the signed-in-sites list would both
  * mislead: they imply the user must sign in through us, and that a profile
- * with working logins has none. Tested as a decision table.
+ * with working logins has none. Owners may still pair any profile so a cloud
+ * identity can switch live to My Browser or explicitly copy one site's session
+ * into its cloud vault. Tested as a decision table.
  */
 export function profileSurfaces(profile: BrowserProfile): {
   signIn: boolean;
   vaultSessions: boolean;
   pairBrowser: boolean;
+  captureFromBrowser: boolean;
   localControl: boolean;
   ownBrowserNote: boolean;
 } {
@@ -83,8 +88,9 @@ export function profileSurfaces(profile: BrowserProfile): {
   return {
     signIn: !local,
     vaultSessions: !local,
-    pairBrowser: local,
-    localControl: local,
+    pairBrowser: profile.canManage === true,
+    captureFromBrowser: !local && profile.canManage === true,
+    localControl: profile.canManage === true,
     ownBrowserNote: local,
   };
 }
@@ -128,6 +134,17 @@ export function BrowserProfilesSection({
   // "Sign in to a site" drafts + in-flight flag, keyed by profile id.
   const [loginDrafts, setLoginDrafts] = useState<Record<string, string>>({});
   const [loginBusyId, setLoginBusyId] = useState<string | null>(null);
+  const [captureDrafts, setCaptureDrafts] = useState<Record<string, string>>({});
+  const [captureBusyId, setCaptureBusyId] = useState<string | null>(null);
+  const [captureResults, setCaptureResults] = useState<
+    Record<string, { kind: "saved" | "failed"; site?: string; capturedAt?: string | null }>
+  >({});
+  const [connectedProfiles, setConnectedProfiles] = useState<Record<string, boolean>>({});
+  const onBrowserConnectionChange = useCallback((profileId: string, connected: boolean) => {
+    setConnectedProfiles((current) =>
+      current[profileId] === connected ? current : { ...current, [profileId]: connected },
+    );
+  }, []);
   // Proxy URL drafts (D7) - undefined until the user edits, so the input
   // falls back to the saved value.
   const [proxyDrafts, setProxyDrafts] = useState<Record<string, string>>({});
@@ -275,6 +292,37 @@ export function BrowserProfilesSection({
       );
     },
     [loginBusyId, loginDrafts, t, workspaceId],
+  );
+
+  const onCaptureFromBrowser = useCallback(
+    async (profile: BrowserProfile) => {
+      const site = normalizeCaptureSite(captureDrafts[profile.id] ?? "");
+      if (!site || captureBusyId) return;
+      setCaptureBusyId(profile.id);
+      setCaptureResults((current) => {
+        const next = { ...current };
+        delete next[profile.id];
+        return next;
+      });
+      const result = await captureProfileSession(profile.id, site).catch(() => ({
+        ok: false,
+        site: undefined,
+        capturedAt: undefined,
+      }));
+      setCaptureBusyId(null);
+      setCaptureResults((current) => ({
+        ...current,
+        [profile.id]: result.ok
+          ? {
+              kind: "saved",
+              site: result.site ?? site,
+              capturedAt: result.capturedAt ?? null,
+            }
+          : { kind: "failed" },
+      }));
+      if (result.ok) void reload();
+    },
+    [captureBusyId, captureDrafts, reload],
   );
 
   // Proxy URL (D7): free-text, validated client-side as a URL, saved through
@@ -537,7 +585,81 @@ export function BrowserProfilesSection({
                       profile uses another extension instance concurrently. */}
                   {profileSurfaces(profile).pairBrowser ? (
                     <div className="mt-3">
-                      <ConnectBrowserPanel profileId={profile.id} profileName={profile.name} />
+                      <ConnectBrowserPanel
+                        profileId={profile.id}
+                        profileName={profile.name}
+                        onConnectionChange={onBrowserConnectionChange}
+                      />
+                    </div>
+                  ) : null}
+
+                  {profileSurfaces(profile).captureFromBrowser ? (
+                    <div className="mt-3 rounded-md border border-border bg-muted/20 p-3">
+                      <p className="text-[11px] font-medium text-foreground">
+                        {t.computer.profiles.captureLabel}
+                      </p>
+                      {connectedProfiles[profile.id] ? (
+                        <>
+                          <div className="mt-2 flex items-center gap-2">
+                            <input
+                              type="text"
+                              value={captureDrafts[profile.id] ?? ""}
+                              onChange={(event) =>
+                                setCaptureDrafts((current) => ({
+                                  ...current,
+                                  [profile.id]: event.target.value,
+                                }))
+                              }
+                              onKeyDown={(event) => {
+                                if (event.key === "Enter") void onCaptureFromBrowser(profile);
+                              }}
+                              placeholder={t.computer.profiles.capturePlaceholder}
+                              className="h-8 flex-1 rounded-md border border-border bg-background px-2.5 text-sm outline-none focus:ring-1 focus:ring-ring"
+                            />
+                            <button
+                              type="button"
+                              disabled={
+                                captureBusyId !== null ||
+                                normalizeCaptureSite(captureDrafts[profile.id] ?? "") === null
+                              }
+                              onClick={() => void onCaptureFromBrowser(profile)}
+                              className="h-8 shrink-0 rounded-md bg-action px-3 text-xs font-medium text-action-foreground disabled:opacity-50"
+                            >
+                              {captureBusyId === profile.id
+                                ? t.computer.profiles.captureSaving
+                                : t.computer.profiles.captureAction}
+                            </button>
+                          </div>
+                          <p className="mt-1 text-[11px] text-muted-foreground">
+                            {t.computer.profiles.captureHint}
+                          </p>
+                        </>
+                      ) : (
+                        <p className="mt-1 text-[11px] text-muted-foreground">
+                          {t.computer.profiles.captureNoSession}
+                        </p>
+                      )}
+                      {captureResults[profile.id]?.kind === "saved" ? (
+                        <p role="status" className="mt-1 text-[11px] text-primary">
+                          {captureResults[profile.id].capturedAt
+                            ? t.computer.profiles.captureSuccess
+                                .replace("{site}", captureResults[profile.id].site ?? "")
+                                .replace(
+                                  "{date}",
+                                  new Date(
+                                    captureResults[profile.id].capturedAt as string,
+                                  ).toLocaleDateString(),
+                                )
+                            : t.computer.profiles.captureSuccessNoDate.replace(
+                                "{site}",
+                                captureResults[profile.id].site ?? "",
+                              )}
+                        </p>
+                      ) : captureResults[profile.id]?.kind === "failed" ? (
+                        <p role="status" className="mt-1 text-[11px] text-destructive">
+                          {t.computer.profiles.captureFailed}
+                        </p>
+                      ) : null}
                     </div>
                   ) : null}
 

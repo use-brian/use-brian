@@ -27,6 +27,13 @@ const MSGRAPH_TOOLS = [
 ]
 
 describe('[COMP:shared/connector-registry] Official connector registry', () => {
+  it('routes WordPress Directory Connect through its credential form', () => {
+    expect(OFFICIAL_CONNECTORS.find((connector) => connector.id === 'wordpress')).toMatchObject({
+      auth_type: 'api_key',
+      oauth_required: true,
+    })
+  })
+
   it('registers Office as a first-party governed primitive', () => {
     expect(OFFICIAL_CONNECTORS.find((connector) => connector.id === 'office')).toMatchObject({
       auth_type: 'none',

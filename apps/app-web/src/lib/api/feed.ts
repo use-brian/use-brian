@@ -33,6 +33,74 @@ import type {
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
+export type FeedCloudLink = {
+  state: "native" | "unlinked" | "pending" | "linked" | "plan_required" | "error";
+  assistantId?: string;
+  userCode?: string | null;
+  verificationUrl?: string | null;
+  expiresAt?: string | null;
+  hostedWorkspaceName?: string | null;
+  hostedAssistantName?: string | null;
+  plan?: string | null;
+  entitlements?: Record<string, boolean>;
+  lastCheckedAt?: string | null;
+  error?: string | null;
+  disclosure?: {
+    sendsPostContent: boolean;
+    sendsAccountMetadata: boolean;
+    sendsCompanyBrain: boolean;
+  };
+};
+
+export async function fetchFeedCloudLink(workspaceId: string): Promise<FeedCloudLink> {
+  const res = await authFetch(
+    `${API_URL}/api/self-host-feed/${encodeURIComponent(workspaceId)}/status`,
+  );
+  if (res.status === 404) return { state: "unlinked" };
+  if (!res.ok) throw new Error(`Feed Cloud Link API ${res.status}`);
+  return (await res.json()) as FeedCloudLink;
+}
+
+export async function startFeedCloudLink(
+  workspaceId: string,
+  assistantId: string,
+): Promise<FeedCloudLink> {
+  const res = await authFetch(
+    `${API_URL}/api/self-host-feed/${encodeURIComponent(workspaceId)}/start`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ assistantId }),
+    },
+  );
+  const body = (await res.json().catch(() => ({}))) as FeedCloudLink & { error?: string };
+  if (!res.ok) throw new Error(body.error ?? `Feed Cloud Link start failed (${res.status})`);
+  return body;
+}
+
+export async function pollFeedCloudLink(workspaceId: string): Promise<FeedCloudLink> {
+  const res = await authFetch(
+    `${API_URL}/api/self-host-feed/${encodeURIComponent(workspaceId)}/poll`,
+    { method: "POST" },
+  );
+  const body = (await res.json().catch(() => ({}))) as FeedCloudLink & { error?: string };
+  if (!res.ok && res.status !== 202) {
+    throw new Error(body.error ?? `Feed Cloud Link approval failed (${res.status})`);
+  }
+  return body;
+}
+
+export async function unlinkFeedCloud(workspaceId: string): Promise<void> {
+  const res = await authFetch(
+    `${API_URL}/api/self-host-feed/${encodeURIComponent(workspaceId)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `Feed Cloud Link unlink failed (${res.status})`);
+  }
+}
+
 /**
  * Build an `/api/...` URL with query params.
  *
@@ -224,7 +292,7 @@ export async function fetchFeedAssistantApprovals(
  * callers pick their own user-facing copy; network failures still throw.
  */
 export type FeedApprovalActionResult =
-  | { ok: true }
+  | { ok: true; status?: string; error?: string }
   | { ok: false; error: string | null; code: string | null };
 
 async function postFeedApprovalAction(
@@ -236,7 +304,15 @@ async function postFeedApprovalAction(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (res.ok) return { ok: true };
+  if (res.ok) {
+    const data = (await res.json().catch(() => ({}))) as {
+      status?: string;
+      error?: string;
+    };
+    return data.error
+      ? { ok: true, status: data.status, error: data.error }
+      : { ok: true };
+  }
   const data = (await res.json().catch(() => ({}))) as {
     error?: string;
     code?: string;

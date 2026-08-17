@@ -5,8 +5,8 @@
  * session deltas to the vault, pull downloads, kill the sandbox. Holds no
  * live browser: every op goes back through `SandboxProvider.connect(id)`.
  *
- * The task store is a port: the platform backs it with the `sandbox_tasks`
- * table; tests and OSS use the in-memory impl below (sandboxes are
+ * The task store is a port: production backs it with the open `sandbox_tasks`
+ * table; tests use the in-memory impl below (sandboxes are
  * task-scoped and disposable, so lost in-memory state costs a re-login at
  * worst — the vault is the durable thing).
  */
@@ -57,7 +57,7 @@ export type SandboxTaskStore = {
   /** Tasks still running/paused whose last activity is older than the cutoff. */
   listStale(cutoffMs: number): Promise<SandboxTaskRecord[]>
   /**
-   * Per-task spend accumulator for the §4.9 dollar cap (the closed impl
+   * Per-task spend accumulator for the §4.9 dollar cap (the DB impl
    * backs it with `sandbox_tasks.spent_usd`). Optional — absent, boot falls
    * back to an in-memory accumulator.
    */
@@ -174,11 +174,11 @@ export function registrableSiteOf(url: string): string | null {
 export type SandboxOrchestratorDeps = {
   provider: SandboxProvider
   taskStore: SandboxTaskStore
-  /** Closed platform impl; null → no session reuse (first-party OSS posture). */
+  /** Encrypted DB impl; null means session reuse is not configured. */
   vault?: SessionVault | null
   /**
    * Profile lookups (R2-3/R2-4): per-profile BYOP proxy at create time. Null →
-   * profile-less posture (OSS without the closed store).
+   * profile-less posture when no profile store is configured.
    */
   profileStore?: Pick<BrowserProfileStore, 'get'> | null
   /**

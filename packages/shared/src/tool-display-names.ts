@@ -14,8 +14,14 @@
  * it; `getToolDisplayName` is the accessor.
  */
 export const TOOL_DISPLAY_NAMES: Record<string, string> = {
+  // Google Maps
+  googleMapsSearchPlaces: 'Search Google Maps',
+  googleMapsLookupWeather: 'Check Google Maps weather',
+  googleMapsComputeRoute: 'Compute Google Maps route',
+
   // Google Calendar
   googleCalendarListCalendars: 'List calendars',
+  googleCalendarListEventColors: 'List calendar event colours',
   googleCalendarListEvents: 'List calendar events',
   googleCalendarGetEvent: 'View calendar event',
   googleCalendarQueryFreeBusy: 'Check calendar availability',
@@ -146,6 +152,11 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   shopifyRefundOrder: 'Refund order',
   shopifyCompleteDraftOrder: 'Complete draft order',
 
+  // WordPress managed content
+  wordpressGetManagedPage: 'View managed WordPress page',
+  wordpressUpdatePageText: 'Update WordPress page text',
+  wordpressReplacePageImage: 'Replace WordPress page image',
+
   // Assistant Email (AgentMail) — the assistant's own mailbox
   agentmailSendMessage: 'Send email as the assistant',
   agentmailSearchThreads: 'Search the assistant\'s mailbox',
@@ -236,6 +247,8 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
 
   // Workspace skills
   updateViewedSkill: 'Update workspace skill',
+  updateBrainEntry: 'Edit Brain entry',
+  findEditableBrainEntries: 'Find Brain entries',
 }
 
 /**
@@ -265,6 +278,9 @@ const TOOL_STATUS_NAMES: Record<string, string> = {
   updateViewedSkill: 'Updating workspace skill',
   getMemory: 'Recalling memories',
   webSearch: 'Searching the web',
+  googleMapsSearchPlaces: 'Searching Google Maps',
+  googleMapsLookupWeather: 'Checking weather',
+  googleMapsComputeRoute: 'Computing a route',
   urlReader: 'Reading a page',
   mcp_search: 'Searching tools',
   mcp_call: 'Using a tool',
@@ -311,6 +327,10 @@ export function describeToolInput(name: string, input: Record<string, unknown>):
   if (name === 'webSearch') {
     const q = input.query as string | undefined
     return q ? `Searching "${q}"` : undefined
+  }
+  if (name === 'googleMapsSearchPlaces') {
+    const query = input.query as string | undefined
+    return query ? `Searching Google Maps for "${query}"` : undefined
   }
   if (name === 'urlReader') {
     const url = input.url as string | undefined

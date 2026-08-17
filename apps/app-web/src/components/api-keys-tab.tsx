@@ -45,6 +45,7 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 type ApiKeyScope = "chat" | "agent";
 type ApiKeyAudience = "external" | "internal";
 type ApiKeyAnonContext = "thin" | "full";
+type ApiKeyToolPolicy = "assistant" | "public_research";
 
 type ApiKeyRow = {
   id: string;
@@ -57,6 +58,7 @@ type ApiKeyRow = {
    *  undefined as 'external'/'thin', the behavior those keys always had. */
   audience?: ApiKeyAudience;
   anonymousContext?: ApiKeyAnonContext;
+  toolPolicy?: ApiKeyToolPolicy;
   status: "active" | "revoked";
   createdAt: string;
   lastUsedAt: string | null;
@@ -608,6 +610,11 @@ function KeyRow({
               {t.apiKeys.anonContextBadgeFull}
             </span>
           )}
+          {row.toolPolicy === "public_research" && (
+            <span className="text-[11px] uppercase tracking-wide text-muted-foreground border border-border rounded px-1.5 py-0.5">
+              {t.apiKeys.toolPolicyBadgePublicResearch}
+            </span>
+          )}
           {isRevoked && (
             <span className="text-[11px] uppercase tracking-wide text-muted-foreground border border-border rounded px-1.5 py-0.5">
               {t.apiKeys.statusRevoked}
@@ -665,6 +672,7 @@ function CreateKeyForm({
   const [scope, setScope] = useState<ApiKeyScope>("chat");
   const [audience, setAudience] = useState<ApiKeyAudience>("external");
   const [anonContext, setAnonContext] = useState<ApiKeyAnonContext>("thin");
+  const [toolPolicy, setToolPolicy] = useState<ApiKeyToolPolicy>("public_research");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -684,6 +692,7 @@ function CreateKeyForm({
           // The anonymous lane only exists on external keys; the route 400s
           // the contradictory internal+full pair, so normalize here.
           anonymousContext: audience === "external" ? anonContext : "thin",
+          toolPolicy: audience === "external" && scope === "chat" ? toolPolicy : "assistant",
         }),
       });
       if (!r.ok) {
@@ -700,74 +709,104 @@ function CreateKeyForm({
   }
 
   return (
-    <form onSubmit={submit} className="space-y-4 max-w-md">
+    <form onSubmit={submit} className="w-full max-w-5xl space-y-5">
       <header>
         <h2 className="text-[15px] font-semibold tracking-tight">{t.apiKeys.create.title}</h2>
-        <p className="text-[13px] text-muted-foreground mt-1">{t.apiKeys.create.description}</p>
+        <p className="text-[13px] text-muted-foreground mt-1 max-w-prose">{t.apiKeys.create.description}</p>
       </header>
 
-      <div role="radiogroup" aria-label={t.apiKeys.scopeLabel} className="space-y-2">
-        <span className="text-[13px] text-muted-foreground">{t.apiKeys.scopeLabel}</span>
-        <ScopeCard
-          selected={scope === "chat"}
-          label={t.apiKeys.scopeChatLabel}
-          description={t.apiKeys.scopeChatDesc}
-          disabled={submitting}
-          onSelect={() => setScope("chat")}
-        />
-        <ScopeCard
-          selected={scope === "agent"}
-          label={t.apiKeys.scopeAgentLabel}
-          description={t.apiKeys.scopeAgentDesc}
-          disabled={submitting}
-          onSelect={() => setScope("agent")}
-        />
-      </div>
-
-      <div role="radiogroup" aria-label={t.apiKeys.audienceLabel} className="space-y-2">
-        <span className="text-[13px] text-muted-foreground">{t.apiKeys.audienceLabel}</span>
-        <ScopeCard
-          selected={audience === "external"}
-          label={t.apiKeys.audienceExternalLabel}
-          description={t.apiKeys.audienceExternalDesc}
-          disabled={submitting}
-          onSelect={() => setAudience("external")}
-        />
-        <ScopeCard
-          selected={audience === "internal"}
-          label={t.apiKeys.audienceInternalLabel}
-          description={t.apiKeys.audienceInternalDesc}
-          disabled={submitting}
-          onSelect={() => setAudience("internal")}
-        />
-      </div>
-
-      {audience === "external" && (
-        <div role="radiogroup" aria-label={t.apiKeys.anonContextLabel} className="space-y-2">
-          <span className="text-[13px] text-muted-foreground">{t.apiKeys.anonContextLabel}</span>
+      <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
+        <div role="radiogroup" aria-label={t.apiKeys.scopeLabel} className="space-y-2">
+          <span className="text-[13px] text-muted-foreground">{t.apiKeys.scopeLabel}</span>
           <ScopeCard
-            selected={anonContext === "thin"}
-            label={t.apiKeys.anonContextThinLabel}
-            description={t.apiKeys.anonContextThinDesc}
+            selected={scope === "chat"}
+            label={t.apiKeys.scopeChatLabel}
+            description={t.apiKeys.scopeChatDesc}
             disabled={submitting}
-            onSelect={() => setAnonContext("thin")}
+            onSelect={() => setScope("chat")}
           />
           <ScopeCard
-            selected={anonContext === "full"}
-            label={t.apiKeys.anonContextFullLabel}
-            description={t.apiKeys.anonContextFullDesc}
+            selected={scope === "agent"}
+            label={t.apiKeys.scopeAgentLabel}
+            description={t.apiKeys.scopeAgentDesc}
             disabled={submitting}
-            onSelect={() => setAnonContext("full")}
+            onSelect={() => {
+              setScope("agent");
+              setToolPolicy("assistant");
+            }}
           />
-          {anonContext === "full" && (
-            <p className="text-[12px] text-amber-600 dark:text-amber-500 border border-amber-500/30 rounded-lg px-3 py-2">
-              {t.apiKeys.anonContextFullWarning}
-            </p>
-          )}
         </div>
-      )}
 
-      <label className="block">
+        <div role="radiogroup" aria-label={t.apiKeys.audienceLabel} className="space-y-2">
+          <span className="text-[13px] text-muted-foreground">{t.apiKeys.audienceLabel}</span>
+          <ScopeCard
+            selected={audience === "external"}
+            label={t.apiKeys.audienceExternalLabel}
+            description={t.apiKeys.audienceExternalDesc}
+            disabled={submitting}
+            onSelect={() => setAudience("external")}
+          />
+          <ScopeCard
+            selected={audience === "internal"}
+            label={t.apiKeys.audienceInternalLabel}
+            description={t.apiKeys.audienceInternalDesc}
+            disabled={submitting}
+            onSelect={() => setAudience("internal")}
+          />
+        </div>
+
+        {audience === "external" && scope === "chat" && (
+          <div role="radiogroup" aria-label={t.apiKeys.anonContextLabel} className="space-y-2">
+            <span className="text-[13px] text-muted-foreground">{t.apiKeys.anonContextLabel}</span>
+            <ScopeCard
+              selected={anonContext === "thin"}
+              label={t.apiKeys.anonContextThinLabel}
+              description={t.apiKeys.anonContextThinDesc}
+              disabled={submitting}
+              onSelect={() => setAnonContext("thin")}
+            />
+            <ScopeCard
+              selected={anonContext === "full"}
+              label={t.apiKeys.anonContextFullLabel}
+              description={t.apiKeys.anonContextFullDesc}
+              disabled={submitting}
+              onSelect={() => setAnonContext("full")}
+            />
+            {anonContext === "full" && (
+              <p className="text-[12px] text-amber-600 dark:text-amber-500 border border-amber-500/30 rounded-lg px-3 py-2">
+                {t.apiKeys.anonContextFullWarning}
+              </p>
+            )}
+          </div>
+        )}
+
+        {audience === "external" && (
+          <div role="radiogroup" aria-label={t.apiKeys.toolPolicyLabel} className="space-y-2">
+            <span className="text-[13px] text-muted-foreground">{t.apiKeys.toolPolicyLabel}</span>
+            <ScopeCard
+              selected={toolPolicy === "public_research"}
+              label={t.apiKeys.toolPolicyPublicResearchLabel}
+              description={t.apiKeys.toolPolicyPublicResearchDesc}
+              disabled={submitting}
+              onSelect={() => setToolPolicy("public_research")}
+            />
+            <ScopeCard
+              selected={toolPolicy === "assistant"}
+              label={t.apiKeys.toolPolicyAssistantLabel}
+              description={t.apiKeys.toolPolicyAssistantDesc}
+              disabled={submitting}
+              onSelect={() => setToolPolicy("assistant")}
+            />
+            {toolPolicy === "assistant" && (
+              <p className="text-[12px] text-amber-600 dark:text-amber-500 border border-amber-500/30 rounded-lg px-3 py-2">
+                {t.apiKeys.toolPolicyAssistantWarning}
+              </p>
+            )}
+          </div>
+        )}
+      </div>
+
+      <label className="block max-w-xl">
         <span className="text-[13px] text-muted-foreground">{t.apiKeys.create.nameLabel}</span>
         <input
           autoFocus

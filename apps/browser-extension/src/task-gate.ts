@@ -18,7 +18,12 @@ export type ConsentOutcome =
   | { allowed: true; tabId: number }
   | { allowed: false; reason: ConsentDenialReason }
 
-export type ConsentPrompter = () => Promise<ConsentOutcome>
+export type ConsentPromptOptions = {
+  /** False after Stop: only a fresh manual Allow may release the kill switch. */
+  allowPreApproval: boolean
+}
+
+export type ConsentPrompter = (options: ConsentPromptOptions) => Promise<ConsentOutcome>
 
 type TabOrigin = 'approved' | 'created' | 'full'
 type TabEntry = { handle: string; tabId: number; origin: TabOrigin }
@@ -49,6 +54,7 @@ export class TaskGate {
   private nextHandle = 1
   private mode: LocalControlMode = 'task_tabs'
   private stopped = false
+  private manualApprovalRequired = false
   private stopGeneration = 0
   private lastCommandAt = 0
   private promptInFlight: Promise<ConsentOutcome> | null = null
@@ -76,7 +82,9 @@ export class TaskGate {
     this.clearAuthorization(true)
     if (!this.promptInFlight) {
       this.promptStopGeneration = this.stopGeneration
-      this.promptInFlight = this.prompt().finally(() => {
+      this.promptInFlight = this.prompt({
+        allowPreApproval: !this.stopped && !this.manualApprovalRequired,
+      }).finally(() => {
         this.promptInFlight = null
       })
     }
@@ -92,6 +100,7 @@ export class TaskGate {
       })
     }
     this.stopped = false
+    this.manualApprovalRequired = false
     const existing = this.entryForTab(outcome.tabId)
     if (existing) this.activeHandle = existing.handle
     else this.register(outcome.tabId, 'approved', true)
@@ -166,9 +175,10 @@ export class TaskGate {
   }
 
   /** Drop consent without latching Stop, so the next command asks again. */
-  revokeConsent(): void {
+  revokeConsent(options: { requireManualApproval?: boolean } = {}): void {
     this.clearAuthorization(true)
     this.lastCommandAt = 0
+    if (options.requireManualApproval) this.manualApprovalRequired = true
   }
 
   /** Persistent Stop. Returns only task-created tabs for caller-side cleanup. */

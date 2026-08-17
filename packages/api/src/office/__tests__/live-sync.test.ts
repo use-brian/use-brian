@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { replaceLiveOfficeSnapshot } from '../live-sync.js'
+import { applyLiveOfficeSuggestion, replaceLiveOfficeSnapshot } from '../live-sync.js'
 
 const snapshot = { artifactId: 'artifact-1', family: 'spreadsheet' } as never
 
@@ -32,5 +32,15 @@ describe('[COMP:api/office-live-sync] Office live snapshot bridge', () => {
     const unavailable = vi.fn(async () => new Response('busy', { status: 503 }))
     await expect(replaceLiveOfficeSnapshot(snapshot, { syncUrl: 'ws://localhost:8080', syncSecret: 'secret', fetchImpl: unavailable as unknown as typeof fetch })).rejects.toThrow(/HTTP 503/)
     expect(unavailable).toHaveBeenCalledTimes(3)
+  })
+
+  it('posts suggestion application to the atomic doc-sync boundary and reports conflicts', async () => {
+    const command = { artifactId: 'artifact-1', commandId: 'command-1' } as never
+    const applied = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }))
+    await expect(applyLiveOfficeSuggestion('artifact-1', 'suggestion-1', command, { syncUrl: 'ws://localhost:8080', syncSecret: 'secret', fetchImpl: applied as unknown as typeof fetch })).resolves.toBe('applied')
+    const [url, init] = applied.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toBe('http://localhost:8080/internal/office/suggestion')
+    expect(JSON.parse(init.body as string)).toEqual({ artifactId: 'artifact-1', suggestionId: 'suggestion-1', command })
+    await expect(applyLiveOfficeSuggestion('artifact-1', 'suggestion-1', command, { syncUrl: 'ws://localhost:8080', syncSecret: 'secret', fetchImpl: vi.fn(async () => new Response('{}', { status: 409 })) as unknown as typeof fetch })).resolves.toBe('conflict')
   })
 })

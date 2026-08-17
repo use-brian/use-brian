@@ -29,6 +29,15 @@ const ACTIVE_PART_PATTERNS = [
   /(^|\/)xl\/(?:queryTables|model)\//i,
 ]
 
+const UNSUPPORTED_SPREADSHEET_PARTS: Array<{ pattern: RegExp; capabilityId: string; message: string }> = [
+  { pattern: /(^|\/)xl\/charts\//i, capabilityId: 'spreadsheetChart', message: 'Spreadsheet charts are not yet preserved; remove them before import' },
+  { pattern: /(^|\/)xl\/tables\//i, capabilityId: 'spreadsheetTable', message: 'Spreadsheet tables are not yet preserved; convert them to ordinary ranges before import' },
+  { pattern: /(^|\/)xl\/(?:threadedComments|persons)\//i, capabilityId: 'spreadsheetNote', message: 'Threaded spreadsheet comments are not yet preserved; remove them before import' },
+  { pattern: /(^|\/)xl\/comments[^/]*\.xml$/i, capabilityId: 'spreadsheetNote', message: 'Spreadsheet notes are not yet preserved; remove them before import' },
+  { pattern: /(^|\/)xl\/(?:slicers|slicerCaches|ctrlProps)\//i, capabilityId: 'spreadsheetFilter', message: 'Spreadsheet slicers and controls are not yet preserved; remove them before import' },
+  { pattern: /(^|\/)xl\/drawings\/vmlDrawing[^/]*\.vml$/i, capabilityId: 'spreadsheetDrawing', message: 'Legacy spreadsheet drawings are not yet preserved; remove them before import' },
+]
+
 const XML_REJECTIONS: Array<{ pattern: RegExp; capabilityId: string; message: string }> = [
   { pattern: /<(?:w:)?(?:ins|del|moveFrom|moveTo)\b/i, capabilityId: 'trackedChanges', message: 'Accept or reject tracked changes before import' },
   { pattern: /<(?:w:)?(?:altChunk|customXml|dataBinding|mailMerge|documentProtection)\b/i, capabilityId: 'externalRelationship', message: 'Bound, protected, or externally populated Word content is not supported' },
@@ -87,6 +96,36 @@ function relationshipAttributes(tag: string): Record<string, string> {
   )
 }
 
+function unsupportedSpreadsheetXml(path: string, xml: string): Array<{ capabilityId: string; message: string }> {
+  const rejected: Array<{ capabilityId: string; message: string }> = []
+  const add = (capabilityId: string, message: string) => rejected.push({ capabilityId, message })
+  if (/^xl\/workbook\.xml$/i.test(path)) {
+    if (/<(?:\w+:)?workbookProtection\b/i.test(xml)) add('spreadsheetProtection', 'Workbook protection is not yet preserved; remove it before import')
+    for (const match of xml.matchAll(/<(?:\w+:)?definedName\b([^>]*)>/gi)) {
+      const name = /\bname="([^"]+)"/i.exec(match[1] ?? '')?.[1]
+      if (name && name !== '_xlnm.Print_Area') add('spreadsheetName', `Defined name ${name} is not yet preserved; remove it before import`)
+    }
+  }
+  if (/^xl\/worksheets\/[^/]+\.xml$/i.test(path)) {
+    if (/<(?:\w+:)?autoFilter\b/i.test(xml)) add('spreadsheetFilter', 'Worksheet filters are not yet preserved; remove them before import')
+    if (/<(?:\w+:)?sheetProtection\b/i.test(xml)) add('spreadsheetProtection', 'Worksheet protection is not yet preserved; remove it before import')
+    if (/<(?:\w+:)?hyperlinks?\b/i.test(xml)) add('spreadsheetHyperlink', 'Spreadsheet hyperlinks are not yet preserved; remove them before import')
+    if (/<(?:\w+:)?sparkline(?:Group|Groups)?\b/i.test(xml)) add('spreadsheetSparkline', 'Sparklines are not yet preserved; remove them before import')
+    if (/<(?:\w+:)?f\b[^>]*\bt="(?:array|dataTable)"/i.test(xml)) add('spreadsheetArrayFormula', 'Array and data-table formulas are not yet supported; replace them before import')
+    for (const match of xml.matchAll(/<(?:\w+:)?cfRule\b([^>]*)>/gi)) {
+      const type = /\btype="([^"]+)"/i.exec(match[1] ?? '')?.[1]
+      if (type && !['cellIs', 'containsText', 'expression'].includes(type)) add('conditionalFormatting', `Conditional-format rule ${type} is not yet preserved; remove it before import`)
+    }
+  }
+  if (/^xl\/(?:sharedStrings|worksheets\/[^/]+)\.xml$/i.test(path) && /<(?:\w+:)?r\b/i.test(xml)) {
+    add('spreadsheetRichText', 'Rich text inside spreadsheet cells is not yet preserved; convert it to plain cell text before import')
+  }
+  if (/^xl\/drawings\/[^/]+\.xml$/i.test(path) && /<(?:xdr:)?(?:sp|cxnSp|graphicFrame|grpSp)\b/i.test(xml)) {
+    add('spreadsheetDrawing', 'Spreadsheet shapes and drawing objects are not yet preserved; remove them before import')
+  }
+  return rejected
+}
+
 export async function preflightOfficePackage(
   bytes: Uint8Array,
   family: OfficeFamily,
@@ -110,6 +149,11 @@ export async function preflightOfficePackage(
     const safePath = entry.name.replaceAll('\\', '/')
     if (safePath.startsWith('/') || safePath.split('/').includes('..')) diagnostics.push(error('package.unsafe_path', entry.name, 'OOXML part path escapes the package root'))
     if (ACTIVE_PART_PATTERNS.some((pattern) => pattern.test(safePath))) diagnostics.push(error('package.active_content', entry.name, 'Executable, embedded, signed, or encrypted Office content is rejected', 'macro'))
+    if (family === 'spreadsheet') {
+      for (const rejected of UNSUPPORTED_SPREADSHEET_PARTS) {
+        if (rejected.pattern.test(safePath)) diagnostics.push(error('package.unsupported_construct', entry.name, rejected.message, rejected.capabilityId))
+      }
+    }
     if (/(^|\/)embeddings\//i.test(safePath) && !entry.dir && !/^ppt\/embeddings\/Microsoft_Excel_Worksheet\d+\.xlsx$/i.test(safePath)) diagnostics.push(error('package.embedded_package', entry.name, 'Only the inert workbook backing a supported native chart may be embedded', 'embeddedWorksheet'))
     const size = (entry as ZipEntryWithSize)._data?.uncompressedSize ?? 0
     uncompressedBytes += size
@@ -135,11 +179,15 @@ export async function preflightOfficePackage(
         const attrs = relationshipAttributes(match[0])
         if (attrs.TargetMode !== 'External') continue
         const hyperlink = attrs.Type?.endsWith('/hyperlink') && /^(https:|mailto:)/.test(attrs.Target ?? '')
-        if (!hyperlink) diagnostics.push(error('package.external_relationship', entry.name, 'External templates, data, media, and unknown relationships are rejected', 'externalRelationship'))
+        if (hyperlink && family === 'spreadsheet') diagnostics.push(error('package.unsupported_construct', entry.name, 'Spreadsheet hyperlinks are not yet preserved; remove them before import', 'spreadsheetHyperlink'))
+        else if (!hyperlink) diagnostics.push(error('package.external_relationship', entry.name, 'External templates, data, media, and unknown relationships are rejected', 'externalRelationship'))
       }
     }
     for (const rejected of XML_REJECTIONS) {
       if (rejected.pattern.test(xml)) diagnostics.push(error('package.unsupported_construct', entry.name, rejected.message, rejected.capabilityId))
+    }
+    if (family === 'spreadsheet') {
+      for (const rejected of unsupportedSpreadsheetXml(entry.name, xml)) diagnostics.push(error('package.unsupported_construct', entry.name, rejected.message, rejected.capabilityId))
     }
   }
 

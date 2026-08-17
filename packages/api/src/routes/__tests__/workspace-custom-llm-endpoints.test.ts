@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { workspaceCustomLlmEndpointsRoutes } from '../workspace-custom-llm-endpoints.js'
 import type { WorkspaceCustomLlmEndpointStore } from '../../db/workspace-custom-llm-endpoints.js'
 import type { WorkspaceStore } from '../../db/workspace-store.js'
-import type { CustomLlmNetworkPolicy } from '../../custom-llm-runtime.js'
+import { CustomLlmProbeError, type CustomLlmNetworkPolicy } from '../../custom-llm-runtime.js'
 
 const workspaceId = '00000000-0000-4000-8000-000000000010'
 const endpointId = '00000000-0000-4000-8000-000000000001'
@@ -39,6 +39,7 @@ function setup(networkPolicy: CustomLlmNetworkPolicy = 'private-network') {
     listTierDefaults: vi.fn().mockResolvedValue([]),
     create: vi.fn().mockResolvedValue(endpoint),
     createProfile: vi.fn().mockResolvedValue({ ...profile, id: profileId, endpointId }),
+    updateProfile: vi.fn().mockResolvedValue({ ...profile, id: profileId, endpointId }),
     delete: vi.fn().mockResolvedValue(true),
     deleteProfile: vi.fn().mockResolvedValue(true),
     setTierDefault: vi.fn().mockResolvedValue({ workspaceId, tier: 'max', profileId, updatedAt: new Date() }),
@@ -46,6 +47,14 @@ function setup(networkPolicy: CustomLlmNetworkPolicy = 'private-network') {
     getEndpointRuntimeSystem: vi.fn().mockResolvedValue({
       ...endpoint,
       profiles: undefined,
+      apiKey: null,
+    }),
+    getRuntimeSystem: vi.fn().mockResolvedValue({
+      ...profile,
+      id: profileId,
+      endpointId,
+      endpointName: endpoint.name,
+      baseUrl: endpoint.baseUrl,
       apiKey: null,
     }),
   } as unknown as WorkspaceCustomLlmEndpointStore
@@ -132,6 +141,48 @@ describe('[COMP:api/custom-llm-endpoints] custom endpoint route', () => {
       baseUrl: endpoint.baseUrl, apiKey: null, modelId: 'sol-max',
     })
     expect(res.body.profile.selector).toBe(`custom:${profileId}`)
+  })
+
+  it('reverifies and updates a profile without changing its selector or tier identity', async () => {
+    const { app, endpointStore, probe } = setup()
+    const res = await request(app)
+      .patch(`/api/workspaces/${workspaceId}/custom-llm-endpoints/${endpointId}/profiles/${profileId}`)
+      .send({ name: 'High context', modelId: 'terra-high', contextWindow: 1048576, maxOutputTokens: 65536 })
+      .expect(200)
+
+    expect(endpointStore.getRuntimeSystem).toHaveBeenCalledWith({ workspaceId, profileId })
+    expect(probe).toHaveBeenCalledWith({
+      baseUrl: endpoint.baseUrl,
+      apiKey: null,
+      modelId: 'terra-high',
+    })
+    expect(endpointStore.updateProfile).toHaveBeenCalledWith({
+      actingUserId: 'user-1',
+      workspaceId,
+      endpointId,
+      profileId,
+      input: expect.objectContaining({
+        name: 'High context',
+        contextWindow: 1048576,
+        maxOutputTokens: 65536,
+        supportsTools: true,
+      }),
+    })
+    expect(res.body.profile.selector).toBe(`custom:${profileId}`)
+  })
+
+  it('keeps the stored profile unchanged when edit verification fails', async () => {
+    const { app, endpointStore, probe } = setup()
+    vi.mocked(probe).mockRejectedValueOnce(
+      new CustomLlmProbeError('endpoint_tools_unsupported', 'The endpoint did not return the required streamed tool call'),
+    )
+
+    await request(app)
+      .patch(`/api/workspaces/${workspaceId}/custom-llm-endpoints/${endpointId}/profiles/${profileId}`)
+      .send({ name: 'Broken', modelId: 'chat-only', contextWindow: 32768, maxOutputTokens: 4096 })
+      .expect(422)
+
+    expect(endpointStore.updateProfile).not.toHaveBeenCalled()
   })
 
   it('assigns and clears a custom profile independently for one Brian tier', async () => {

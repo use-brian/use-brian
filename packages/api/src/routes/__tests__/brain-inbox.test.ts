@@ -31,6 +31,10 @@ vi.mock('../../db/memories.js', () => ({
 }))
 vi.mock('../../db/memory-verifications-store.js', () => ({ recordVerification: vi.fn() }))
 vi.mock('../../db/task-admission-store.js', () => ({ rejectTask: vi.fn() }))
+vi.mock('../../db/sessions.js', () => ({
+  createInspectionSession: vi.fn(),
+  createBrainEditSession: vi.fn(),
+}))
 
 import { brainInboxRoutes } from '../brain-inbox.js'
 import { query } from '../../db/client.js'
@@ -38,6 +42,7 @@ import { updateTask } from '../../db/tasks.js'
 import { updateMemory, getMemoryByIdSystem, markVerifiedDirect } from '../../db/memories.js'
 import { recordVerification } from '../../db/memory-verifications-store.js'
 import { rejectTask } from '../../db/task-admission-store.js'
+import { createBrainEditSession } from '../../db/sessions.js'
 
 const mockQuery = vi.mocked(query)
 const mockUpdateTask = vi.mocked(updateTask)
@@ -106,6 +111,53 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
   it('rejects a non-member with 403', async () => {
     const res = await request(makeApp(null)).get(`/api/brain-inbox/${WS}/memory/${ROW}`)
     expect(res.status).toBe(403)
+  })
+
+  it('creates a server-bound transient edit session for an editable row', async () => {
+    mockQuery
+      .mockResolvedValueOnce({
+        rows: [{
+          primitive: 'memory',
+          id: ROW,
+          workspaceId: WS,
+          createdAt: new Date('2026-08-10T00:00:00Z'),
+          updatedAt: new Date('2026-08-11T00:00:00Z'),
+          createdByAssistantId: 'assistant-1',
+          verifiedByUserId: null,
+          verifiedAt: null,
+          body: { summary: 'Essay', detail: 'Old detail' },
+        }],
+      } as never)
+      .mockResolvedValueOnce({
+        rows: [{ id: 'assistant-1', name: 'Primary Assistant' }],
+      } as never)
+    vi.mocked(createBrainEditSession).mockResolvedValueOnce({
+      id: 'session-1',
+      assistantId: 'assistant-1',
+      channelType: 'brain_edit',
+      channelId: `memory:${ROW}:nonce`,
+    } as never)
+
+    const res = await request(makeApp())
+      .post(`/api/brain-inbox/${WS}/memory/${ROW}/edit-session`)
+      .send({})
+
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({
+      sessionId: 'session-1',
+      assistantId: 'assistant-1',
+      entryContext: {
+        primitive: 'memory',
+        rowId: ROW,
+        updatedAt: '2026-08-11T00:00:00.000Z',
+      },
+    })
+    expect(createBrainEditSession).toHaveBeenCalledWith({
+      primaryAssistantId: 'assistant-1',
+      userId: 'u_caller',
+      primitive: 'memory',
+      rowId: ROW,
+    })
   })
 
   it('file content endpoint returns 501 when no files API is wired', async () => {
@@ -420,19 +472,39 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
   const ASSISTANT = 'a1b2c3d4-0000-4000-8000-000000000001'
   const NEW_ROW = 'f4b30b32-1771-4c90-b5af-b1b42311f999'
 
-  it('memory adjust 308-redirects to the per-assistant route when the memory has an owning assistant', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [{ assistantId: ASSISTANT }] } as never)
+  it('memory adjust uses the shared mutation seam for an assistant-owned row', async () => {
+    mockGetMemoryByIdSystem.mockResolvedValueOnce({
+      id: ROW,
+      assistantId: ASSISTANT,
+      workspaceId: WS,
+      scope: 'shared',
+      sensitivity: 'confidential',
+      summary: 'old',
+      detail: null,
+    } as never)
+    mockUpdateMemory.mockResolvedValueOnce({
+      id: NEW_ROW,
+      workspaceId: WS,
+      scope: 'shared',
+      sensitivity: 'confidential',
+      summary: 'new',
+      detail: null,
+    } as never)
+    mockMarkVerifiedDirect.mockResolvedValueOnce({ id: NEW_ROW, summary: 'new' } as never)
+
     const res = await request(makeApp())
       .post(`/api/brain-inbox/${WS}/memory/${ROW}/adjust`)
       .send({ summary: 'new' })
-    expect(res.status).toBe(308)
-    expect(res.headers.location).toBe(`/api/assistants/${ASSISTANT}/memories/${ROW}/adjust`)
-    // Delegated — the inline path must not run.
-    expect(mockUpdateMemory).not.toHaveBeenCalled()
+
+    expect(res.status).toBe(200)
+    expect(res.headers.location).toBeUndefined()
+    expect(mockUpdateMemory).toHaveBeenCalledWith(
+      ROW,
+      expect.objectContaining({ summary: 'new' }),
+    )
   })
 
-  it('memory adjust handles a null-assistant (workspace-shared) memory inline, no redirect', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [{ assistantId: null }] } as never)
+  it('memory adjust handles a null-assistant (workspace-shared) memory through the same seam', async () => {
     mockGetMemoryByIdSystem.mockResolvedValueOnce({
       id: ROW,
       assistantId: null,
@@ -470,7 +542,6 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
   })
 
   it('null-assistant memory adjust returns 404 when the memory is in another workspace', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [{ assistantId: null }] } as never)
     mockGetMemoryByIdSystem.mockResolvedValueOnce({
       id: ROW,
       assistantId: null,
@@ -488,7 +559,6 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
   })
 
   it('null-assistant memory adjust requires at least one field', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [{ assistantId: null }] } as never)
     const res = await request(makeApp())
       .post(`/api/brain-inbox/${WS}/memory/${ROW}/adjust`)
       .send({})
@@ -653,8 +723,9 @@ describe('[COMP:api/brain-inbox-explain] Source descriptor', () => {
     expect(cascadeSql).toMatch(/UPDATE goals/)
     expect(cascadeSql).toMatch(/status = 'abandoned'/)
     expect(cascadeSql).toMatch(/host_type = 'task'/)
-    // Never a `running` goal — the acting loop owns a claimed goal.
-    expect(mockQuery.mock.calls[2][1]).toEqual([ROW, 'host_task_deleted', ['done', 'abandoned', 'running']])
+    // Explicit deletion also retires a running goal; guarded driver status
+    // handoffs prevent the bounded in-flight iteration from resurrecting it.
+    expect(mockQuery.mock.calls[2][1]).toEqual([ROW, 'host_task_deleted', ['done', 'abandoned']])
   })
 
   it('reasoned task DELETE creates a tombstone and explicitly activates a narrow rule', async () => {

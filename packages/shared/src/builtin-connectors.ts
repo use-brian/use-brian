@@ -88,6 +88,7 @@ export type BuiltinConnectorTool = {
 export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = {
   gcal: [
     { name: 'googleCalendarListCalendars', description: 'List available calendars and access roles', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'googleCalendarListEventColors', description: 'List named event labels and legacy event colours for a calendar', classification: 'read', defaultPolicy: 'allow' },
     { name: 'googleCalendarListEvents', description: 'List upcoming calendar events', classification: 'read', defaultPolicy: 'allow' },
     { name: 'googleCalendarGetEvent', description: 'Get a specific calendar event', classification: 'read', defaultPolicy: 'allow' },
     { name: 'googleCalendarQueryFreeBusy', description: 'Find common availability across calendars or attendees', classification: 'read', defaultPolicy: 'allow' },
@@ -222,6 +223,13 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'shopifySalesReport', description: 'Aggregate sales over a date range (count, revenue, top items)', classification: 'read', defaultPolicy: 'allow', group: 'analytics' },
     { name: 'shopifyStorefrontFunnel', description: 'Storefront conversion funnel: sessions, cart additions, checkouts reached and completed', classification: 'read', defaultPolicy: 'allow', group: 'analytics' },
     { name: 'shopifyAnalyticsQuery', description: 'Run a read-only ShopifyQL query against store analytics', classification: 'read', defaultPolicy: 'allow', group: 'analytics' },
+  ],
+  // WordPress managed content. Every write is limited again by the bridge's
+  // registered page/slot catalog and its WordPress capability callback.
+  wordpress: [
+    { name: 'wordpressGetManagedPage', description: 'Read a managed page and its registered text and image slots', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'wordpressUpdatePageText', description: 'Replace one registered text slot on a managed page', classification: 'write', defaultPolicy: 'ask' },
+    { name: 'wordpressReplacePageImage', description: 'Upload an image and replace one registered image slot on a managed page', classification: 'write', defaultPolicy: 'ask' },
   ],
   // Microsoft Teams (Graph) — READ-ONLY, permanently (decision D1). Graph
   // publishes no application permission for sending, so every Graph write is

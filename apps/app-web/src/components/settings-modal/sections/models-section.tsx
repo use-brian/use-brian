@@ -2,10 +2,10 @@
 
 /**
  * Workspace Models section (model-registry.md L15, §4.4). The page is split
- * by user intent: Routing shows the four runtime tier assignments, Custom
- * models owns OpenAI-compatible connections and their verified profiles, and
- * Advanced contains picker preferences, metered profiles, and the hosted
- * Gemini key. Creation forms stay collapsed until explicitly requested.
+ * by user intent: Routing shows the four runtime tier assignments, Providers
+ * owns OAuth/API/custom connections and their verified profiles, and Advanced
+ * contains picker preferences and metered profiles. Creation forms stay
+ * collapsed until explicitly requested.
  *
  * The two kinds of defaults remain deliberately separate. Custom tier
  * assignments change what serves a Brian tier at runtime; model-menu defaults
@@ -18,6 +18,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Gauge, Layers3, Pencil, Plus, Trash2 } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { useWorkspaceContext } from "@/lib/workspace-context";
+import { isOssEdition } from "@/lib/edition";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { promptDialog } from "@/components/ui/prompt-dialog";
 import { Button } from "@/components/ui/button";
@@ -33,23 +34,25 @@ import {
 } from "@/components/ui/searchable-select";
 import {
   clearWorkspaceModelDefault,
+  clearWorkspaceModelRoute,
   createMeteredProfile,
   deleteMeteredProfile,
   fetchMeteredEstimate,
   fetchModelMenu,
   setWorkspaceModelDefault,
+  setWorkspaceModelRoute,
   updateMeteredProfile,
   type MenuModel,
   type MeteredEstimate,
   type MeteredProfile,
   type WorkspaceModelDefault,
+  type WorkspaceModelRoute,
 } from "@/lib/api/models";
 import {
-  clearCustomLlmTierDefault,
   createCustomLlmProfile,
   deleteCustomLlmProfile,
   getCustomLlmConfiguration,
-  setCustomLlmTierDefault,
+  updateCustomLlmProfile,
   type CustomLlmEndpoint,
   type CustomLlmProfile,
   type CustomLlmTier,
@@ -57,10 +60,19 @@ import {
 } from "@/lib/api/custom-llm-endpoints";
 import { CustomLlmEndpointsBlock } from "./custom-llm-endpoints-block";
 import { WorkspaceLlmKeyBlock } from "./llm-key-block";
+import { CodexProviderCard } from "./codex-provider-card";
 
 const DEFAULTABLE_CLASSES: WorkspaceModelDefault["modelClass"][] = ["standard-pro", "max", "research"];
 const CUSTOM_TIERS: CustomLlmTier[] = ["standard", "pro", "max", "research"];
-type ModelsView = "routing" | "custom" | "advanced";
+type ModelsView = "routing" | "providers" | "advanced";
+type CustomProfileDraft = {
+  endpointId: string;
+  profileId: string;
+  name: string;
+  modelId: string;
+  contextWindow: number;
+  maxOutputTokens: number;
+};
 
 export function ModelsSection() {
   const t = useT().chrome.settingsModal.models;
@@ -74,6 +86,7 @@ export function ModelsSection() {
   const [estimates, setEstimates] = useState<Record<string, MeteredEstimate | null>>({});
   const [customEndpoints, setCustomEndpoints] = useState<CustomLlmEndpoint[]>([]);
   const [customTierDefaults, setCustomTierDefaults] = useState<CustomLlmTierDefault[]>([]);
+  const [modelRoutes, setModelRoutes] = useState<WorkspaceModelRoute[]>([]);
   const [loading, setLoading] = useState(true);
   // Create form state.
   const [newModel, setNewModel] = useState<string>("");
@@ -85,6 +98,7 @@ export function ModelsSection() {
   const [newCustomContextWindow, setNewCustomContextWindow] = useState(32768);
   const [newCustomMaxOutput, setNewCustomMaxOutput] = useState(4096);
   const [customSaving, setCustomSaving] = useState(false);
+  const [editingCustomProfile, setEditingCustomProfile] = useState<CustomProfileDraft | null>(null);
   const [saving, setSaving] = useState(false);
   const [activeView, setActiveView] = useState<ModelsView>("routing");
   const [showCustomCreate, setShowCustomCreate] = useState(false);
@@ -104,6 +118,7 @@ export function ModelsSection() {
       setProfiles(menu.profiles);
       setCustomEndpoints(custom.endpoints);
       setCustomTierDefaults(custom.tierDefaults);
+      setModelRoutes(menu.modelRoutes ?? []);
       setBillingAvailable(menu.meteredBillingAvailable);
       if (menu.meteredBillingAvailable) {
         const pairs = await Promise.all(
@@ -116,6 +131,7 @@ export function ModelsSection() {
       setProfiles([]);
       setCustomEndpoints([]);
       setCustomTierDefaults([]);
+      setModelRoutes([]);
     } finally {
       setLoading(false);
     }
@@ -189,12 +205,54 @@ export function ModelsSection() {
     }
   }, [workspaceId, newCustomEndpointId, newCustomName, newCustomModelId, newCustomContextWindow, newCustomMaxOutput, reload, t]);
 
-  const onCustomTierChange = useCallback(async (tier: CustomLlmTier, value: string) => {
+  const startCustomProfileEdit = useCallback((endpoint: CustomLlmEndpoint, profile: CustomLlmProfile) => {
+    setShowCustomCreate(false);
+    setError(null);
+    setEditingCustomProfile((current) => current?.profileId === profile.id ? null : {
+      endpointId: endpoint.id,
+      profileId: profile.id,
+      name: profile.name,
+      modelId: profile.modelId,
+      contextWindow: profile.contextWindow,
+      maxOutputTokens: profile.maxOutputTokens,
+    });
+  }, []);
+
+  const onUpdateCustomProfile = useCallback(async () => {
+    if (!workspaceId || !editingCustomProfile || !editingCustomProfile.name.trim() || !editingCustomProfile.modelId.trim()) return;
+    setCustomSaving(true);
+    setError(null);
+    try {
+      await updateCustomLlmProfile(
+        workspaceId,
+        editingCustomProfile.endpointId,
+        editingCustomProfile.profileId,
+        {
+          name: editingCustomProfile.name.trim(),
+          modelId: editingCustomProfile.modelId.trim(),
+          contextWindow: editingCustomProfile.contextWindow,
+          maxOutputTokens: editingCustomProfile.maxOutputTokens,
+        },
+      );
+      setEditingCustomProfile(null);
+      await reload();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t.saveError);
+    } finally {
+      setCustomSaving(false);
+    }
+  }, [workspaceId, editingCustomProfile, reload, t]);
+
+  const onModelRouteChange = useCallback(async (tier: CustomLlmTier, value: string) => {
     if (!workspaceId) return;
     setError(null);
     try {
-      if (!value || value === "managed") await clearCustomLlmTierDefault(workspaceId, tier);
-      else await setCustomLlmTierDefault(workspaceId, tier, value);
+      if (!value || value === "auto") await clearWorkspaceModelRoute(workspaceId, tier);
+      else if (value.startsWith("managed:")) {
+        await setWorkspaceModelRoute(workspaceId, tier, { modelAlias: value.slice("managed:".length) });
+      } else if (value.startsWith("custom:")) {
+        await setWorkspaceModelRoute(workspaceId, tier, { profileId: value.slice("custom:".length) });
+      }
       await reload();
     } catch (err) {
       setError(err instanceof Error ? err.message : t.saveError);
@@ -262,8 +320,8 @@ export function ModelsSection() {
       </div>
 
       <div role="tablist" aria-label={t.viewsLabel} className="grid grid-cols-3 gap-1 rounded-xl bg-muted/55 p-1">
-        {(["routing", "custom", "advanced"] as ModelsView[]).map((view) => {
-          const label = view === "routing" ? t.viewRouting : view === "custom" ? t.viewCustom : t.viewAdvanced;
+        {(["routing", "providers", "advanced"] as ModelsView[]).map((view) => {
+          const label = view === "routing" ? t.viewRouting : view === "providers" ? t.viewProviders : t.viewAdvanced;
           const selected = activeView === view;
           return (
             <button
@@ -297,7 +355,7 @@ export function ModelsSection() {
             </div>
             <div className="grid gap-3 sm:grid-cols-2">
               {CUSTOM_TIERS.map((tier) => {
-                const current = customTierDefaults.find((setting) => setting.tier === tier);
+                const current = modelRoutes.find((setting) => setting.tier === tier);
                 const tierLabel = tier === "standard"
                   ? t.classStandard
                   : tier === "pro"
@@ -305,27 +363,60 @@ export function ModelsSection() {
                     : tier === "max"
                       ? t.classMax
                       : t.classResearch;
+                const managedModels = Object.values(menuClasses)
+                  .flat()
+                  .filter((model, index, all) =>
+                    model.tier === tier &&
+                    model.class !== "metered" &&
+                    all.findIndex((candidate) => candidate.alias === model.alias) === index,
+                  );
+                const providerName = (provider: string) => provider === "openai-codex"
+                  ? t.providerChatGpt
+                  : provider === "gemini"
+                    ? t.providerGemini
+                    : provider.startsWith("openai-compat:")
+                      ? t.providerOpenAiCompatible
+                      : provider;
                 const items: SearchableSelectItem[] = [
-                  { value: "managed", label: t.brianManaged, badge: t.defaultBadge },
+                  { value: "auto", label: t.autoRouting, hint: t.autoRoutingHint, badge: t.defaultBadge },
+                  ...managedModels.map((model) => ({
+                    value: `managed:${model.alias}`,
+                    label: model.displayName,
+                    hint: providerName(model.provider),
+                    badge: t.exactBadge,
+                  })),
                   ...customProfiles.map(({ endpoint, profile }) => ({
-                    value: profile.id,
+                    value: `custom:${profile.id}`,
                     label: customProfileLabel(endpoint, profile),
                     hint: profile.modelId,
                   })),
                 ];
+                if (current?.modelAlias && !managedModels.some((model) => model.alias === current.modelAlias)) {
+                  items.push({
+                    value: `managed:${current.modelAlias}`,
+                    label: t.unavailableModel.replace("{model}", current.modelDisplayName ?? t.unknownModel),
+                    hint: t.unavailableModelHint,
+                    badge: t.exactBadge,
+                  });
+                }
+                const value = current?.modelAlias
+                  ? `managed:${current.modelAlias}`
+                  : current?.profileId
+                    ? `custom:${current.profileId}`
+                    : "auto";
                 return (
                   <div key={tier} className="space-y-2 rounded-xl border border-border/70 bg-muted/15 p-3">
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-[12.5px] font-medium">{tierLabel}</span>
                       <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
-                        {current ? t.viewCustom : t.brianManaged}
+                        {current?.modelAlias ? t.exactBadge : current?.profileId ? t.customBadge : t.autoRouting}
                       </span>
                     </div>
                     <SearchableSelect
-                      value={current?.profileId ?? "managed"}
-                      onValueChange={(value) => void onCustomTierChange(tier, value)}
+                      value={value}
+                      onValueChange={(next) => void onModelRouteChange(tier, next)}
                       items={items}
-                      placeholder={t.brianManaged}
+                      placeholder={t.autoRouting}
                       aria-label={tierLabel}
                     />
                   </div>
@@ -335,18 +426,28 @@ export function ModelsSection() {
             {customProfiles.length === 0 ? (
               <div className="flex items-center justify-between gap-3 rounded-xl border border-dashed border-border px-3.5 py-3">
                 <p className="text-[11.5px] text-muted-foreground">{t.noCustomProfiles}</p>
-                <Button variant="outline" size="sm" onClick={() => setActiveView("custom")}>{t.routingEmptyCta}</Button>
+                <Button variant="outline" size="sm" onClick={() => setActiveView("providers")}>{t.routingEmptyCta}</Button>
               </div>
             ) : null}
           </section>
         )
       ) : null}
 
-      {activeView === "custom" ? (
+      {activeView === "providers" ? (
         loading ? (
           <p className="text-[12.5px] text-muted-foreground">{t.loading}</p>
         ) : (
           <div className="space-y-4" role="tabpanel">
+            {isOssEdition() ? (
+              <section className="rounded-xl border border-border/70 px-4 pb-4">
+                <CodexProviderCard />
+              </section>
+            ) : null}
+
+            <section className="rounded-xl border border-border/70 p-4">
+              <WorkspaceLlmKeyBlock embedded showCustomEndpoints={false} />
+            </section>
+
             <section className="rounded-xl border border-border/70 p-4">
               <CustomLlmEndpointsBlock embedded onChanged={reload} />
             </section>
@@ -361,7 +462,10 @@ export function ModelsSection() {
                   variant="outline"
                   size="sm"
                   disabled={customEndpoints.length === 0}
-                  onClick={() => setShowCustomCreate((current) => !current)}
+                  onClick={() => {
+                    setEditingCustomProfile(null);
+                    setShowCustomCreate((current) => !current);
+                  }}
                 >
                   <Plus className="mr-1 size-3.5" aria-hidden />
                   {showCustomCreate ? t.cancelCreateCta : t.addProfileCta}
@@ -380,18 +484,68 @@ export function ModelsSection() {
                           ? t.classMax
                           : t.classResearch);
                   return (
-                    <li key={profile.id} className="flex items-center gap-3 rounded-lg bg-muted/25 px-3 py-2.5">
-                      <Layers3 className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate text-[13px] font-medium">{customProfileLabel(endpoint, profile)}</div>
-                        <div className="truncate text-[11.5px] text-muted-foreground">
-                          {profile.modelId}
-                          {assigned.length > 0 ? ` · ${t.assignedTo.replace("{tiers}", assigned.join(", "))}` : ""}
+                    <li key={profile.id} className="space-y-3 rounded-lg bg-muted/25 px-3 py-2.5">
+                      <div className="flex items-center gap-3">
+                        <Layers3 className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-[13px] font-medium">{customProfileLabel(endpoint, profile)}</div>
+                          <div className="truncate text-[11.5px] text-muted-foreground">
+                            {profile.modelId}
+                            {assigned.length > 0 ? ` · ${t.assignedTo.replace("{tiers}", assigned.join(", "))}` : ""}
+                          </div>
                         </div>
+                        <Button variant="ghost" size="icon" aria-label={t.editProfileCta} onClick={() => startCustomProfileEdit(endpoint, profile)}>
+                          <Pencil className="size-3.5" aria-hidden />
+                        </Button>
+                        <Button variant="ghost" size="icon" aria-label={t.deleteCta} onClick={() => void onDeleteCustomProfile(endpoint, profile)}>
+                          <Trash2 className="size-3.5" aria-hidden />
+                        </Button>
                       </div>
-                      <Button variant="ghost" size="icon" aria-label={t.deleteCta} onClick={() => void onDeleteCustomProfile(endpoint, profile)}>
-                        <Trash2 className="size-3.5" aria-hidden />
-                      </Button>
+                      {editingCustomProfile?.profileId === profile.id ? (
+                        <div className="space-y-3 border-t border-border/60 pt-3">
+                          <div>
+                            <div className="text-[12.5px] font-medium">{t.customEditTitle}</div>
+                            <p className="mt-0.5 text-[11.5px] text-muted-foreground">{t.customEditBlurb}</p>
+                          </div>
+                          <div className="grid gap-2 sm:grid-cols-2">
+                            <label className="space-y-1 text-[11.5px] text-muted-foreground">
+                              {t.profileNameLabel}
+                              <input value={editingCustomProfile.name} onChange={(event) => setEditingCustomProfile((current) => current ? { ...current, name: event.target.value } : current)} maxLength={80} className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-[12.5px] text-foreground" />
+                            </label>
+                            <label className="space-y-1 text-[11.5px] text-muted-foreground">
+                              {t.modelIdLabel}
+                              <input value={editingCustomProfile.modelId} onChange={(event) => setEditingCustomProfile((current) => current ? { ...current, modelId: event.target.value } : current)} maxLength={200} spellCheck={false} className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-[12.5px] text-foreground" />
+                            </label>
+                            <label className="space-y-1 text-[11.5px] text-muted-foreground">
+                              {t.contextLabel}
+                              <input type="number" min={1024} max={4000000} value={editingCustomProfile.contextWindow} onChange={(event) => setEditingCustomProfile((current) => current ? { ...current, contextWindow: Number(event.target.value) } : current)} className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-[12.5px] text-foreground" />
+                            </label>
+                            <label className="space-y-1 text-[11.5px] text-muted-foreground">
+                              {t.outputLabel}
+                              <input type="number" min={64} max={262144} value={editingCustomProfile.maxOutputTokens} onChange={(event) => setEditingCustomProfile((current) => current ? { ...current, maxOutputTokens: Number(event.target.value) } : current)} className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-[12.5px] text-foreground" />
+                            </label>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <Button
+                              size="sm"
+                              disabled={customSaving
+                                || !editingCustomProfile.name.trim()
+                                || !editingCustomProfile.modelId.trim()
+                                || editingCustomProfile.contextWindow < 1024
+                                || editingCustomProfile.contextWindow > 4000000
+                                || editingCustomProfile.maxOutputTokens < 64
+                                || editingCustomProfile.maxOutputTokens > 262144}
+                              onClick={() => void onUpdateCustomProfile()}
+                            >
+                              <Pencil className="mr-1 size-3.5" aria-hidden />
+                              {customSaving ? t.testingProfile : t.updateProfileCta}
+                            </Button>
+                            <Button variant="ghost" size="sm" disabled={customSaving} onClick={() => setEditingCustomProfile(null)}>
+                              {t.cancelCreateCta}
+                            </Button>
+                          </div>
+                        </div>
+                      ) : null}
                     </li>
                   );
                 })}
@@ -563,9 +717,6 @@ export function ModelsSection() {
             </section>
           )}
 
-          <section className="rounded-xl border border-border/70 p-4">
-            <WorkspaceLlmKeyBlock embedded showCustomEndpoints={false} />
-          </section>
         </div>
       ) : null}
     </div>

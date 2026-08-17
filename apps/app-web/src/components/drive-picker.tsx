@@ -121,6 +121,7 @@ export function DrivePicker({
   const [apiLoaded, setApiLoaded] = useState(false);
   const [pickerLoaded, setPickerLoaded] = useState(false);
   const [isOpening, setIsOpening] = useState(false);
+  const markApiLoaded = useCallback(() => setApiLoaded(true), []);
   const lastTokenRef = useRef<{
     token: string;
     expiresAt: number;
@@ -227,7 +228,11 @@ export function DrivePicker({
       <Script
         src="https://apis.google.com/js/api.js"
         strategy="afterInteractive"
-        onLoad={() => setApiLoaded(true)}
+        // onLoad covers the first mounted trigger while the remote script is
+        // loading. onReady covers triggers mounted later after Next.js has
+        // cached it (for example, opening the connector's Settings tab).
+        onLoad={markApiLoaded}
+        onReady={markApiLoaded}
       />
       {children({ open, isOpening, disabled, disabledReason, ready })}
     </>
