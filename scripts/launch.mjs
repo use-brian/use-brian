@@ -25,8 +25,8 @@
  */
 import { spawn } from 'node:child_process'
 import { connect, createServer } from 'node:net'
-import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync, readdirSync, statSync, rmSync } from 'node:fs'
-import { homedir, platform, arch, userInfo } from 'node:os'
+import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync, readdirSync, statSync, rmSync, cpSync } from 'node:fs'
+import { homedir, platform, arch, userInfo, tmpdir } from 'node:os'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomBytes } from 'node:crypto'
@@ -52,6 +52,7 @@ try {
 }
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
 const BRAIN_DIR = join(CONFIG_DIR, 'brain')
+const FILES_DIR = join(CONFIG_DIR, 'files')
 
 // Load use-brian/.env into process.env BEFORE any env read below, so `pnpm
 // start` honors it the same way the standalone migrate + doc-sync paths
@@ -123,6 +124,19 @@ const PORTS = { pglite: 54329, api: 4000, docSync: 8080, appWeb: 3003, discordCo
 
 // ── config (ChatGPT sign-in OR one API credential) ──────────────────
 mkdirSync(CONFIG_DIR, { recursive: true })
+// Older launcher versions persisted blob pointers in PGLite but left the bytes
+// in /tmp. Preserve any blobs that still exist before selecting the durable path.
+if (!process.env.LOCAL_FILES_DIR?.trim() && !process.env.GCS_FILES_BUCKET?.trim()) {
+  const legacyFilesDir = join(tmpdir(), 'sidanclaw-files')
+  if (!existsSync(FILES_DIR) && existsSync(legacyFilesDir)) {
+    try {
+      cpSync(legacyFilesDir, FILES_DIR, { recursive: true })
+      console.log(`[launch] migrated local files ${legacyFilesDir} -> ${FILES_DIR}`)
+    } catch (err) {
+      console.warn(`[launch] could not migrate local files from ${legacyFilesDir}:`, err?.message ?? err)
+    }
+  }
+}
 const config = existsSync(CONFIG_FILE) ? JSON.parse(readFileSync(CONFIG_FILE, 'utf8')) : {}
 
 // `.env` was already merged into process.env by loadDotEnv() above, and
@@ -242,6 +256,7 @@ const env = {
   USEBRIAN_PREFERRED_PROVIDER: preferredProvider,
   JWT_SECRET: jwtSecret,
   DATABASE_URL: databaseUrl,
+  LOCAL_FILES_DIR: process.env.LOCAL_FILES_DIR?.trim() || FILES_DIR,
   USEBRIAN_SINGLE_PROCESS: '1',
   // API <-> doc-sync internal auth + the base URL doc-sync POSTs back to for the
   // auto-on-save brain ingest. 127.0.0.1 (not localhost) avoids the IPv6 ::1

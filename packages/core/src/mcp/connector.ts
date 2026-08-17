@@ -31,8 +31,30 @@ export function wrapMcpTools(params: {
   assistantId: string
   userId: string
   callMcpTool: (serverName: string, toolName: string, input: Record<string, unknown>) => Promise<unknown>
+  appLevelAssistantId?: string
+  policyServerName?: string
 }): Tool[] {
-  const { server, settingsStore, assistantId, userId, callMcpTool } = params
+  const {
+    server, settingsStore, assistantId, userId, callMcpTool,
+    appLevelAssistantId, policyServerName = server.name,
+  } = params
+
+  async function resolveEffectivePolicy(toolName: string, fallback: 'allow' | 'ask' | 'block') {
+    const assistantSetting = await settingsStore.getPolicy({
+      assistantId, userId, serverName: policyServerName, toolName,
+    })
+    if (!appLevelAssistantId) return assistantSetting?.policy ?? fallback
+
+    const appSetting = await settingsStore.getPolicy({
+      assistantId: appLevelAssistantId, userId, serverName: policyServerName, toolName,
+    })
+    const strictness: Record<string, number> = { allow: 0, ask: 1, block: 2 }
+    const appPolicy = appSetting?.policy ?? fallback
+    const assistantPolicy = assistantSetting?.policy ?? fallback
+    return (strictness[appPolicy] ?? 0) >= (strictness[assistantPolicy] ?? 0)
+      ? appPolicy
+      : assistantPolicy
+  }
 
   return server.tools.map((mcpTool) => {
     const classification = classifyTool(mcpTool.name, mcpTool.description)
@@ -49,24 +71,13 @@ export function wrapMcpTools(params: {
       // Dynamic policy check — the user may have overridden the default
       // policy via the web UI since this tool was wrapped.
       async resolveConfirmation() {
-        const override = await settingsStore.getPolicy({
-          assistantId, userId,
-          serverName: server.name,
-          toolName: mcpTool.name,
-        })
-        const effective = override?.policy ?? policy
+        const effective = await resolveEffectivePolicy(mcpTool.name, policy)
         return effective === 'ask'
       },
 
       async execute(input, context) {
         // Check user's policy override
-        const setting = await settingsStore.getPolicy({
-          assistantId, userId,
-          serverName: server.name,
-          toolName: mcpTool.name,
-        })
-
-        const effectivePolicy = setting?.policy ?? policy
+        const effectivePolicy = await resolveEffectivePolicy(mcpTool.name, policy)
 
         if (effectivePolicy === 'block') {
           return { data: `ERROR: "${mcpTool.name}" is blocked by settings. Capability unavailable.`, isError: true }
@@ -78,7 +89,7 @@ export function wrapMcpTools(params: {
           // Track usage
           settingsStore.recordUsage({
             assistantId, userId,
-            serverName: server.name,
+            serverName: policyServerName,
             toolName: mcpTool.name,
             allowed: true,
           }).catch((err) => console.debug('MCP usage tracking failed:', err))

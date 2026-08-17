@@ -55,6 +55,9 @@ export type ControlPlaneSkill = {
 
 export type ControlPlaneChannel = {
   id: string
+  /** channel_integrations.id for workflow event sources; distinct from id. */
+  integrationId: string | null
+  integrationStatus: string | null
   channelType: string
   displayName: string | null
   clearance: 'public' | 'internal' | 'confidential'

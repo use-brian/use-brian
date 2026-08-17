@@ -25,6 +25,9 @@ import {
   validateTelegramCredentials,
   validateDiscordCredentials,
   validateMsTeamsCredentials,
+  validateWhatsAppCloudCredentials,
+  subscribeWhatsAppCloudApp,
+  DEFAULT_WHATSAPP_GRAPH_API_VERSION,
   createTelegramApi,
   TELEGRAM_BOT_COMMANDS,
   createSlackApi,
@@ -34,7 +37,11 @@ import type { LinkCodeStore } from '../db/link-codes.js'
 import type { DiscordConnectorClient } from '../discord/connector-client.js'
 import type { WhatsappConnectorClient } from '../whatsapp/connector-client.js'
 import type { WechatConnectorClient } from '../wechat/connector-client.js'
-import type { ChannelIntegration, ChannelIntegrationStore } from '../db/channel-integrations.js'
+import type {
+  ChannelIntegration,
+  ChannelIntegrationStore,
+  SeenChat,
+} from '../db/channel-integrations.js'
 import {
   listChannelsForWorkspace,
   getChannelForUser,
@@ -76,6 +83,26 @@ export const channelConfigSchema = z.object({
   allowGuestConnectorTools: z.boolean().optional(),
   blockedUserIds: z.array(z.string().max(50)).max(100).optional(),
 }).strict()
+
+const WHATSAPP_E164_DIGITS = /^[1-9]\d{7,14}$/
+
+export function normalizeWhatsAppPhoneNumber(value: string): string | null {
+  const trimmed = value.trim()
+  if (!/^\+?[\d\s().-]+$/.test(trimmed)) return null
+  const rawDigits = trimmed.replace(/\D/g, '')
+  const digits = trimmed.startsWith('00') ? rawDigits.slice(2) : rawDigits
+  return WHATSAPP_E164_DIGITS.test(digits) ? digits : null
+}
+
+function normalizeWhatsAppPhoneNumbers(values: string[]): string[] | null {
+  const normalized: string[] = []
+  for (const value of values) {
+    const phoneNumber = normalizeWhatsAppPhoneNumber(value)
+    if (!phoneNumber) return null
+    if (!normalized.includes(phoneNumber)) normalized.push(phoneNumber)
+  }
+  return normalized
+}
 
 export type ChannelsRouteOptions = {
   workspaceStore: WorkspaceStore
@@ -177,6 +204,17 @@ const connectMsTeamsSchema = z.object({
   displayName: z.string().min(1).max(200).optional(),
 }).strict()
 
+const connectWhatsAppCloudSchema = z.object({
+  accessToken: z.string().min(1),
+  appSecret: z.string().min(8),
+  verifyToken: z.string().min(8).max(256).optional(),
+  phoneNumberId: z.string().regex(/^\d+$/),
+  wabaId: z.string().regex(/^\d+$/),
+  graphApiVersion: z.string().regex(/^v\d+\.\d+$/).default(DEFAULT_WHATSAPP_GRAPH_API_VERSION),
+  defaultAssistantId: z.string().uuid().nullish(),
+  displayName: z.string().min(1).max(200).optional(),
+}).strict()
+
 const wechatPairStartSchema = z.object({
   defaultAssistantId: z.string().uuid().nullish(),
 }).strict()
@@ -200,6 +238,9 @@ const TELEGRAM_DESTINATION_ID_PATTERN = /^(-?\d+)(?::topic:([1-9]\d*))?$/
 const DESTINATION_ID_SHAPE: Record<string, RegExp> = {
   telegram: TELEGRAM_DESTINATION_ID_PATTERN,
   slack: /^[CDG][A-Z0-9]+$/,
+  // Only linked-number JIDs support proactive delivery today. Official Cloud
+  // API phone numbers are omitted until approved template sends exist.
+  whatsapp: /@/,
 }
 
 function parseTelegramDestinationId(channelId: string): {
@@ -241,6 +282,17 @@ function serializeChannel(
     // Per-integration behavior config. `null` when the channel has no
     // `channel_integrations` row — the UI then renders no config section.
     integrationId: integration?.id ?? null,
+    integrationStatus: integration?.status ?? null,
+    integrationLabel: integration?.botUsername
+      ? `@${integration.botUsername}`
+      : integration?.teamName ?? null,
+    // Non-secret transport discriminator. Existing WhatsApp linked-number
+    // rows have no provider marker; official Meta rows are `cloud_api`.
+    integrationProvider: integration?.channelType === 'whatsapp'
+      && integration.botUserId
+      && integration.teamId
+      ? 'cloud_api'
+      : null,
     config: integration?.config ?? null,
   }
 }
@@ -290,7 +342,35 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
   ): Promise<Map<string, ChannelIntegration>> {
     if (!opts.integrationStore) return new Map()
     const rows = await opts.integrationStore.listForWorkspace(userId, workspaceId)
-    return new Map(rows.map((r) => [r.channelId, r]))
+    const hydrated = await Promise.all(rows.map(async (row) => {
+      if (
+        row.channelType !== 'whatsapp'
+        || row.config.whatsappDisplayPhoneNumber
+        || !row.botUserId
+        || !row.teamId
+      ) return row
+
+      try {
+        const withCredentials = await opts.integrationStore!.getForUserWithCredentials(userId, row.id)
+        const credentials = withCredentials?.credentials as {
+          provider?: unknown
+          display_phone_number?: unknown
+        } | undefined
+        if (credentials?.provider !== 'cloud_api' || typeof credentials.display_phone_number !== 'string') {
+          return row
+        }
+        return {
+          ...row,
+          config: {
+            ...row.config,
+            whatsappDisplayPhoneNumber: credentials.display_phone_number,
+          },
+        }
+      } catch {
+        return row
+      }
+    }))
+    return new Map(hydrated.map((r) => [r.channelId, r]))
   }
 
   /**
@@ -323,12 +403,38 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
       }
     }
 
-    const seenByChatId = new Map(
-      integrations
-        .filter((r) => r.channelType === 'telegram')
-        .flatMap((r) => r.config.seenChats ?? [])
-        .map((chat) => [chat.chatId, chat] as const),
-    )
+    const seenByChatId = new Map<string, SeenChat>()
+    for (const integration of integrations.filter((r) => r.channelType === 'telegram')) {
+      for (const chat of integration.config.seenChats ?? []) {
+        const current = seenByChatId.get(chat.chatId)
+        if (!current) {
+          seenByChatId.set(chat.chatId, chat)
+          continue
+        }
+        const topics = new Map(current.topics.map((topic) => [topic.topicId, topic]))
+        for (const topic of chat.topics) {
+          const existing = topics.get(topic.topicId)
+          if (!existing) {
+            topics.set(topic.topicId, topic)
+            continue
+          }
+          const incomingIsNewer = topic.lastSeenAt >= existing.lastSeenAt
+          topics.set(topic.topicId, incomingIsNewer
+            ? { ...topic, name: topic.name ?? existing.name }
+            : { ...existing, name: existing.name ?? topic.name })
+        }
+        const incomingIsNewer = chat.lastSeenAt >= current.lastSeenAt
+        seenByChatId.set(chat.chatId, {
+          ...current,
+          chatTitle: incomingIsNewer
+            ? chat.chatTitle ?? current.chatTitle
+            : current.chatTitle ?? chat.chatTitle,
+          isForum: current.isForum || chat.isForum,
+          topics: [...topics.values()],
+          lastSeenAt: incomingIsNewer ? chat.lastSeenAt : current.lastSeenAt,
+        })
+      }
+    }
     const unresolvedChatIds = [...new Set(
       parsed
         .filter(({ chatId }) => !seenByChatId.get(chatId)?.chatTitle)
@@ -336,15 +442,20 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
     )]
 
     if (unresolvedChatIds.length > 0 && opts.integrationStore) {
-      const telegram = integrations.find((r) => r.channelType === 'telegram')
-      if (telegram) {
+      const telegramIntegrations = integrations.filter(
+        (r) => r.channelType === 'telegram' && r.status === 'active',
+      )
+      const byoTokens = await Promise.all(telegramIntegrations.map(async (telegram) => {
         try {
-          const withCreds = await opts.integrationStore.getForUserWithCredentials(userId, telegram.id)
-          const byoToken = withCreds && (withCreds.credentials as { bot_token?: string }).bot_token
-          if (byoToken) tokens.push(byoToken)
+          const withCreds = await opts.integrationStore!.getForUserWithCredentials(userId, telegram.id)
+          return withCreds && (withCreds.credentials as { bot_token?: string }).bot_token
         } catch (err) {
           console.warn('[channels/channel-destinations] BYO telegram credential lookup failed:', err instanceof Error ? err.message : err)
+          return undefined
         }
+      }))
+      for (const byoToken of byoTokens) {
+        if (byoToken && !tokens.includes(byoToken)) tokens.push(byoToken)
       }
     }
     if (opts.telegramBotToken && !tokens.includes(opts.telegramBotToken)) tokens.push(opts.telegramBotToken)
@@ -352,15 +463,17 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
     const chatNames = new Map<string, string>()
     const apis = tokens.map((token) => createTelegramApi({ token }))
     await Promise.all(unresolvedChatIds.map(async (chatId) => {
-      for (const api of apis) {
-        try {
+      try {
+        const name = await Promise.any(apis.map(async (api) => {
           const chat = await withTimeout(api.getChat(chatId), TELEGRAM_GETCHAT_TIMEOUT_MS)
           const personal = [chat.first_name, chat.last_name].filter(Boolean).join(' ')
           const name = chat.title ?? (personal || (chat.username ? `@${chat.username}` : ''))
-          if (name) { chatNames.set(chatId, name); return }
-        } catch {
-          // Not this bot's chat (or transient failure) — try the next token.
-        }
+          if (!name) throw new Error('Telegram chat has no display name')
+          return name
+        }))
+        chatNames.set(chatId, name)
+      } catch {
+        // No configured bot could resolve this chat within the shared timeout.
       }
     }))
 
@@ -426,15 +539,41 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
         .map((r) => r.channelId),
     )]
     const telegramNames = await resolveTelegramTitles(userId, workspaceId, telegramIdsToResolve)
+    let telegramIntegrations: ChannelIntegration[] = []
+    if (opts.integrationStore) {
+      try {
+        telegramIntegrations = (await opts.integrationStore.listForWorkspace(userId, workspaceId))
+          .filter((integration) => integration.channelType === 'telegram' && integration.status === 'active')
+      } catch {
+        // Destination discovery stays best-effort; unresolved rows remain usable
+        // through the shared/default bot path.
+      }
+    }
     res.json({
-      destinations: rows.map((r) => ({
-        channelType: r.channelType,
-        channelId: r.channelId,
-        title: parseTelegramDestinationId(r.channelId)?.topicId != null
+      destinations: rows.flatMap((r) => {
+        const title = parseTelegramDestinationId(r.channelId)?.topicId != null
           ? telegramNames.get(r.channelId) ?? r.title
-          : r.title ?? telegramNames.get(r.channelId) ?? null,
-        lastActiveAt: r.lastActiveAt.toISOString(),
-      })),
+          : r.title ?? telegramNames.get(r.channelId) ?? null
+        const base = {
+          channelType: r.channelType,
+          channelId: r.channelId,
+          title,
+          lastActiveAt: r.lastActiveAt.toISOString(),
+        }
+        if (r.channelType !== 'telegram') return [base]
+        const parsed = parseTelegramDestinationId(r.channelId)
+        const owners = parsed
+          ? telegramIntegrations.filter((integration) =>
+              integration.config.seenChats?.some((chat) => chat.chatId === parsed.chatId),
+            )
+          : []
+        if (owners.length === 0) return [{ ...base, channelIntegrationId: null, integrationLabel: null }]
+        return owners.map((integration) => ({
+          ...base,
+          channelIntegrationId: integration.id,
+          integrationLabel: integration.botUsername ? `@${integration.botUsername}` : integration.teamName,
+        }))
+      }),
     })
   })
 
@@ -591,7 +730,29 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
     // Merge into the existing config so webhook-only fields (e.g. `seenChats`,
     // populated opportunistically by the BYO webhook) survive a UI PATCH that
     // doesn't echo them back. Mirrors the legacy per-assistant endpoint.
-    const merged = { ...integration.config, ...parsed.data }
+    let patch = parsed.data
+    const isWhatsAppCloud = integration.channelType === 'whatsapp'
+      && integration.botUserId
+      && integration.teamId
+    if (isWhatsAppCloud) {
+      const allowedUserIds = parsed.data.allowedUserIds
+        ? normalizeWhatsAppPhoneNumbers(parsed.data.allowedUserIds)
+        : undefined
+      const blockedUserIds = parsed.data.blockedUserIds
+        ? normalizeWhatsAppPhoneNumbers(parsed.data.blockedUserIds)
+        : undefined
+      if (allowedUserIds === null || blockedUserIds === null) {
+        res.status(400).json({ error: 'WhatsApp phone numbers must include a country code and contain 8 to 15 digits' })
+        return
+      }
+      patch = {
+        ...parsed.data,
+        ...(allowedUserIds ? { allowedUserIds } : {}),
+        ...(blockedUserIds ? { blockedUserIds } : {}),
+      }
+    }
+
+    const merged = { ...integration.config, ...patch }
     try {
       const updated = await opts.integrationStore.updateConfig({
         actingUserId: userId,
@@ -1054,6 +1215,131 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
     })
   })
 
+  // POST /workspaces/:workspaceId/channels/whatsapp-cloud — official Meta
+  // Cloud API transport. The operator registers the returned callback URL and
+  // verify token in Meta's WhatsApp webhook settings.
+  router.post('/workspaces/:workspaceId/channels/whatsapp-cloud', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const { workspaceId } = req.params
+    const role = await opts.workspaceStore.getRole(userId, workspaceId)
+    if (!role) { res.status(403).json({ error: 'Not a member of this workspace' }); return }
+    if (!opts.integrationStore) {
+      res.status(503).json({ error: 'Channel integrations are not configured on this server' })
+      return
+    }
+
+    const parsed = connectWhatsAppCloudSchema.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Invalid input', detail: parsed.error.message })
+      return
+    }
+
+    const graphOptions = {
+      accessToken: parsed.data.accessToken,
+      phoneNumberId: parsed.data.phoneNumberId,
+      graphApiVersion: parsed.data.graphApiVersion,
+    }
+    let info
+    try {
+      info = await validateWhatsAppCloudCredentials(graphOptions)
+    } catch (err) {
+      res.status(400).json({ error: 'Meta rejected the WhatsApp credentials', detail: (err as Error).message })
+      return
+    }
+
+    try {
+      await subscribeWhatsAppCloudApp(graphOptions, parsed.data.wabaId)
+    } catch (err) {
+      res.status(400).json({
+        error: 'Meta could not subscribe the app to this WhatsApp Business Account',
+        detail: (err as Error).message,
+      })
+      return
+    }
+
+    let provisioned
+    try {
+      provisioned = await findOrCreateChannelForWorkspaceConnect({
+        workspaceId,
+        channelType: 'whatsapp',
+        displayName: parsed.data.displayName ?? `${info.verifiedName} (${info.displayPhoneNumber})`,
+        // phone_number_id is globally stable and distinguishes Cloud API rows
+        // from linked-number rows, whose botUserId is null.
+        externalIdentity: { botUserId: info.id },
+        defaultAssistantId: parsed.data.defaultAssistantId ?? null,
+        // Free-form Cloud API messages are valid only inside Meta's 24-hour
+        // customer-service window. Do not advertise proactive broadcast until
+        // template-message delivery is implemented.
+        enabledCapabilities: ['chat'],
+      })
+    } catch (err) {
+      const msg = (err as Error).message
+      console.error('[channels] WhatsApp Cloud channel provisioning failed:', err)
+      if (msg.toLowerCase().includes('workspace')) {
+        res.status(400).json({ error: 'defaultAssistantId must belong to this workspace' })
+        return
+      }
+      res.status(500).json({ error: 'Failed to provision channel' })
+      return
+    }
+
+    const verifyToken = parsed.data.verifyToken ?? randomBytes(32).toString('hex')
+    try {
+      const integration = await opts.integrationStore.upsert({
+        channelId: provisioned.channelId,
+        channelType: 'whatsapp',
+        teamId: parsed.data.wabaId,
+        teamName: info.verifiedName,
+        botUserId: info.id,
+        botUsername: null,
+        credentials: {
+          provider: 'cloud_api',
+          access_token: parsed.data.accessToken,
+          app_secret: parsed.data.appSecret,
+          verify_token: verifyToken,
+          phone_number_id: info.id,
+          waba_id: parsed.data.wabaId,
+          display_phone_number: info.displayPhoneNumber,
+          graph_api_version: parsed.data.graphApiVersion,
+        },
+        actingUserId: userId,
+      })
+      // A public business number is fail-closed. Operators explicitly add
+      // phone numbers before those callers can reach Brian. Keep the public
+      // number in non-secret config so Studio can render a persistent chat QR.
+      await opts.integrationStore.updateConfig({
+        actingUserId: userId,
+        id: integration.id,
+        config: {
+          ...integration.config,
+          ...(!provisioned.reused ? { userAccessMode: 'allowlist' as const, allowedUserIds: [] } : {}),
+          whatsappDisplayPhoneNumber: info.displayPhoneNumber,
+        },
+      })
+    } catch (err) {
+      console.error('[channels] WhatsApp Cloud integration upsert failed:', err)
+      res.status(500).json({ error: 'Failed to save integration' })
+      return
+    }
+
+    const channel = await getChannelForUser(userId, provisioned.channelId)
+    if (!channel) {
+      res.status(500).json({ error: 'Channel created but no longer visible' })
+      return
+    }
+    const integrations = await loadIntegrations(userId, workspaceId)
+    const webhookPath = `/webhook/whatsapp/${provisioned.channelId}`
+    res.status(provisioned.reused ? 200 : 201).json({
+      channel: serializeChannel(channel, integrations.get(provisioned.channelId)),
+      reused: provisioned.reused,
+      displayPhoneNumber: info.displayPhoneNumber,
+      webhookPath,
+      webhookUrl: opts.apiUrl ? `${opts.apiUrl}${webhookPath}` : null,
+      verifyToken,
+    })
+  })
+
   // ── WeChat — BYON iLink bot, QR pairing ─────────────────────────
   //
   // Unlike the token-paste platforms, WeChat binds a bot identity by QR scan:
@@ -1300,13 +1586,19 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
     const channel = await loadChannel(userId, workspaceId, channelId, res)
     if (!channel) return
 
-    if (channel.channelType === 'whatsapp' && opts.whatsappConnector) {
+    const integrations = await loadIntegrations(userId, workspaceId)
+    const channelIntegration = integrations.get(channelId)
+    const isWhatsAppCloud = channel.channelType === 'whatsapp' && channelIntegration
+      ? ((await opts.integrationStore?.getForUserWithCredentials(userId, channelIntegration.id))?.credentials as { provider?: string } | undefined)?.provider === 'cloud_api'
+      : false
+
+    if (channel.channelType === 'whatsapp' && !isWhatsAppCloud && opts.whatsappConnector) {
       await opts.whatsappConnector.disconnect(channelId).catch((err) => {
         console.error('[channels] whatsapp connector disconnect failed:', err)
       })
     }
 
-    if (channel.channelType === 'whatsapp') {
+    if (channel.channelType === 'whatsapp' && !isWhatsAppCloud) {
       await query('DELETE FROM wa_auth_state WHERE channel_id = $1', [channelId])
     }
 

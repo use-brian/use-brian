@@ -110,6 +110,8 @@ describeIf('[COMP:api/channel-integrations-store] getByChannelForWebhook', () =>
     channelType: 'telegram' | 'slack'
     status?: 'active' | 'revoked'
   }): Promise<{
+    ownerId: string
+    workspaceId: string
     channelId: string
     assistantId: string
     integrationId: string
@@ -169,7 +171,7 @@ describeIf('[COMP:api/channel-integrations-store] getByChannelForWebhook', () =>
       }
     }
 
-    return { channelId, assistantId, integrationId: integration.id, key, store }
+    return { ownerId, workspaceId, channelId, assistantId, integrationId: integration.id, key, store }
   }
 
   it('resolves an active integration by channel_id and decrypts credentials', async () => {
@@ -214,5 +216,109 @@ describeIf('[COMP:api/channel-integrations-store] getByChannelForWebhook', () =>
     })
     const found = await store.getByChannelForWebhook(channelId, 'telegram')
     expect(found).toBeNull()
+  })
+
+  it('uses exact-surface routing precedence over the channel default', async () => {
+    const seeded = await seedChannelWithIntegration({ channelType: 'telegram' })
+    const client = await pool!.connect()
+    let surfaceAssistantId: string
+    try {
+      surfaceAssistantId = await makeAssistant(client, seeded.ownerId, seeded.workspaceId)
+    } finally {
+      client.release()
+    }
+    await channelsStore.attachAssistant(seeded.ownerId, {
+      channelId: seeded.channelId,
+      assistantId: surfaceAssistantId,
+      externalSurfaceId: '-100555:topic:42',
+    })
+
+    const defaultAssistant = await seeded.store.getCredentialsForAssistantIntegrationSystem(
+      seeded.workspaceId,
+      seeded.assistantId,
+      seeded.integrationId,
+      'telegram',
+      '-100555:topic:42',
+    )
+    const surfaceAssistant = await seeded.store.getCredentialsForAssistantIntegrationSystem(
+      seeded.workspaceId,
+      surfaceAssistantId,
+      seeded.integrationId,
+      'telegram',
+      '-100555:topic:42',
+    )
+
+    expect(defaultAssistant).toBeNull()
+    expect(surfaceAssistant?.id).toBe(seeded.integrationId)
+  })
+
+  it('lets a base-chat route authorize delivery to one of its topics', async () => {
+    const seeded = await seedChannelWithIntegration({ channelType: 'telegram' })
+    await channelsStore.attachAssistant(seeded.ownerId, {
+      channelId: seeded.channelId,
+      assistantId: seeded.assistantId,
+      externalSurfaceId: '-100555',
+    })
+
+    const found = await seeded.store.getCredentialsForAssistantIntegrationSystem(
+      seeded.workspaceId,
+      seeded.assistantId,
+      seeded.integrationId,
+      'telegram',
+      '-100555:topic:42',
+    )
+
+    expect(found?.id).toBe(seeded.integrationId)
+  })
+
+  it('diagnoses when the destination routes to a different assistant', async () => {
+    const seeded = await seedChannelWithIntegration({ channelType: 'telegram' })
+    const client = await pool!.connect()
+    let otherAssistantId: string
+    try {
+      otherAssistantId = await makeAssistant(client, seeded.ownerId, seeded.workspaceId)
+    } finally {
+      client.release()
+    }
+
+    const diagnostic = await seeded.store.diagnoseAssistantIntegrationRoutingSystem(
+      seeded.workspaceId,
+      otherAssistantId,
+      seeded.integrationId,
+      'telegram',
+      '-100555:topic:42',
+    )
+
+    expect(diagnostic).toMatchObject({
+      status: 'assistant_mismatch',
+      requestedAssistantName: 'ci-test-assistant',
+      routedAssistantName: 'ci-test-assistant',
+    })
+  })
+
+  it('hides a valid assistant/integration pair from a foreign workspace', async () => {
+    const seeded = await seedChannelWithIntegration({ channelType: 'telegram' })
+    const foreignWorkspaceId = randomUUID()
+
+    const credentials = await seeded.store.getCredentialsForAssistantIntegrationSystem(
+      foreignWorkspaceId,
+      seeded.assistantId,
+      seeded.integrationId,
+      'telegram',
+      '-100555',
+    )
+    const diagnostic = await seeded.store.diagnoseAssistantIntegrationRoutingSystem(
+      foreignWorkspaceId,
+      seeded.assistantId,
+      seeded.integrationId,
+      'telegram',
+      '-100555',
+    )
+
+    expect(credentials).toBeNull()
+    expect(diagnostic).toEqual({
+      status: 'integration_unavailable',
+      channelLabel: null,
+    })
   })
 })

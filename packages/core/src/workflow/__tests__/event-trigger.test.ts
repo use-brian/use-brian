@@ -178,6 +178,38 @@ describe('[COMP:workflow/event-trigger] createWorkflowEventDispatcher', () => {
     })
   })
 
+  it('carries trusted provider account and occurrence metadata for channel replies', async () => {
+    let input: WorkflowEventInput | null = null
+    const event: DispatchEvent = {
+      ...SLACK_EVENT,
+      source: { type: 'channel', channelIntegrationId: 'ci-wa', channel: 'whatsapp' },
+      actorId: '15551234567',
+      channelId: '15551234567',
+      providerAccountId: 'phone-1',
+      occurredAt: '2026-08-17T11:00:00.000Z',
+    }
+    const dispatcher = createWorkflowEventDispatcher({
+      findEventTriggeredWorkflows: async () => [{
+        workflowId: 'wf1',
+        workspaceId: 'ws1',
+        sources: [{ source: event.source }],
+      }],
+      startWorkflowRun: async (params) => { input = params.input },
+    })
+
+    await dispatcher.dispatch(event)
+
+    expect((input as WorkflowEventInput | null)?.trigger).toMatchObject({
+      sourceType: 'channel',
+      provider: 'whatsapp',
+      channelIntegrationId: 'ci-wa',
+      channelId: '15551234567',
+      actorId: '15551234567',
+      providerAccountId: 'phone-1',
+      occurredAt: '2026-08-17T11:00:00.000Z',
+    })
+  })
+
   it('passes a connector-shaped WorkflowEventInput to the run', async () => {
     let input: WorkflowEventInput | null = null
     const ev: DispatchEvent = {

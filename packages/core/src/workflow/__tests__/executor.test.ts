@@ -518,6 +518,7 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
       assistantId: string
       channelType: string
       channelId: string
+      channelIntegrationId?: string
       text: string
     }> = []
     const deps: ExecutorDeps = {
@@ -531,6 +532,7 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
           assistantId: p.assistantId,
           channelType: p.channelType,
           channelId: p.channelId,
+          channelIntegrationId: p.channelIntegrationId,
           text: p.text,
         })
         return { status: 'delivered' as const, channelType: p.channelType, channelId: p.channelId }
@@ -545,7 +547,11 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
           type: 'assistant_call',
           target: { assistantId: 'primary' },
           prompt: 'brief me',
-          deliver: { channelType: 'telegram', channelId: 'chat-42' },
+          deliver: {
+            channelType: 'telegram',
+            channelId: 'chat-42',
+            channelIntegrationId: '00000000-0000-4000-8000-000000000001',
+          },
         },
       ],
     }
@@ -560,6 +566,7 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
         assistantId: PRIMARY_ASSISTANT_ID,
         channelType: 'telegram',
         channelId: 'chat-42',
+        channelIntegrationId: '00000000-0000-4000-8000-000000000001',
         text: 'your morning briefing',
       },
     ])
@@ -682,6 +689,78 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
       (stepRun?.output as { __delivery?: { status: string } } | undefined)?.__delivery?.status,
     ).toBe('delivered')
     expect(audits.find((a) => a.type === 'workflow.step_delivered')).toBeUndefined()
+  })
+
+  it('resolves a WhatsApp trigger reply from trusted event input', async () => {
+    const stores = makeFakeStores()
+    const deliveries: Array<Parameters<NonNullable<ExecutorDeps['deliverToChannel']>>[0]> = []
+    const consultDeliveries: unknown[] = []
+    const deps: ExecutorDeps = {
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      consultTransport: {
+        async send(request: ConsultRequest): Promise<ConsultResponse> {
+          consultDeliveries.push(request.deliver)
+          return makeConsultTransport({ responseText: 'The 2pm slot is available.' }).send(request)
+        },
+      },
+      resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+      buildToolRegistry: async () => new Map(),
+      deliverToChannel: async (params) => {
+        deliveries.push(params)
+        return { status: 'delivered', channelType: params.channelType, channelId: params.channelId }
+      },
+    }
+    const definition: WorkflowDefinition = {
+      startStepId: 'reply',
+      steps: [{
+        id: 'reply',
+        type: 'assistant_call',
+        target: { assistantId: 'primary' },
+        prompt: 'Answer {{input.event.text}}',
+        deliver: { channelType: 'whatsapp', replyToTrigger: true },
+      }],
+    }
+    const { workflow, run } = await seedWorkflowAndRun(deps, definition, 'event', {
+      trigger: {
+        sourceType: 'channel',
+        provider: 'whatsapp',
+        channelIntegrationId: 'ci-wa',
+        channelId: '15551234567',
+        actorId: '15551234567',
+        providerAccountId: 'phone-1',
+        occurredAt: '2026-08-17T11:00:00.000Z',
+      },
+      event: { text: 'Is 2pm available?' },
+    })
+    await stores.workflowStore.update(USER_ID, workflow.id, {
+      trigger: {
+        kind: 'event',
+        event: {
+          sources: [{
+            source: {
+              type: 'channel',
+              channelIntegrationId: 'ci-wa',
+              channel: 'whatsapp',
+            },
+          }],
+        },
+      },
+    })
+
+    const outcome = await advanceWorkflowRun(deps, run.id)
+
+    expect(outcome.kind).toBe('completed')
+    expect(consultDeliveries).toEqual([undefined])
+    expect(deliveries).toEqual([expect.objectContaining({
+      channelType: 'whatsapp',
+      channelId: '15551234567',
+      channelIntegrationId: 'ci-wa',
+      replyToTrigger: {
+        providerAccountId: 'phone-1',
+        occurredAt: '2026-08-17T11:00:00.000Z',
+      },
+    })])
   })
 
   it('pins a stable contextId on the consult for a persistent-session step', async () => {
@@ -1048,21 +1127,21 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
 
   it('Phase B (simulated): pauses the run on a `wait` step', async () => {
     const stores = makeFakeStores()
-    let pauseCall: { runId: string; stepRunId: string; dueAt: Date } | null = null
+    let pauseCall: { runId: string; stepRunId: string; triggeredBy: string | null; dueAt: Date } | null = null
     const deps: ExecutorDeps = {
       workflowStore: stores.workflowStore,
       runStore: stores.runStore,
       consultTransport: makeConsultTransport(),
       resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
       buildToolRegistry: async () => new Map(),
-      pauseRunForWait: async ({ runId, stepRunId, dueAt }) => {
-        pauseCall = { runId, stepRunId, dueAt }
+      pauseRunForWait: async ({ runId, stepRunId, triggeredBy, dueAt }) => {
+        pauseCall = { runId, stepRunId, triggeredBy, dueAt }
       },
     }
     const { run } = await seedWorkflowAndRun(deps, {
       startStepId: 'sleep',
       steps: [{ id: 'sleep', type: 'wait', until: { duration: { minutes: 5 } } }],
-    })
+    }, 'schedule')
     const outcome = await advanceWorkflowRun(deps, run.id)
     expect(outcome.kind).toBe('paused')
     if (outcome.kind === 'paused') {
@@ -1071,6 +1150,7 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
     }
     expect(pauseCall).not.toBeNull()
     expect(pauseCall!.runId).toBe(run.id)
+    expect(pauseCall!.triggeredBy).toBe(USER_ID)
     expect(stores.runs.get(run.id)!.status).toBe('awaiting_wait')
   })
 

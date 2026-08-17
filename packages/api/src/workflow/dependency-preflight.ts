@@ -23,7 +23,7 @@
  * [COMP:workflow/dependency-preflight]
  */
 
-import { createSlackApi } from '@use-brian/channels'
+import { createSlackApi, createTelegramApi, parseTopicChannelId } from '@use-brian/channels'
 import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTOR_TOOLS } from '@use-brian/shared'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import type { ConnectorStore } from '../db/connector-store.js'
@@ -185,9 +185,11 @@ async function resolveConnectorCredential(
 }
 
 export type ValidateDeliveryTarget = (args: {
+  workspaceId?: string
   assistantId: string
   channelType: 'telegram' | 'slack' | 'whatsapp'
   channelId: string
+  channelIntegrationId?: string
 }) => Promise<{ ok: boolean; reason?: string }>
 
 export type PreflightConnectorTool = (args: {
@@ -257,7 +259,13 @@ export function createWorkflowDependencyPreflight(options: WorkflowDependencyPre
   listSlackChannels: ListSlackChannels
   listSlackMembers: ListSlackMembers
 } {
-  const validateDeliveryTarget: ValidateDeliveryTarget = async ({ assistantId, channelType, channelId }) => {
+  const validateDeliveryTarget: ValidateDeliveryTarget = async ({
+    workspaceId,
+    assistantId,
+    channelType,
+    channelId,
+    channelIntegrationId,
+  }) => {
     if (channelType === 'slack') {
       if (!options.integrationStore) return { ok: true } // can't check → don't block
       const integ = await options.integrationStore.getCredentialsForAssistantSystem(assistantId, 'slack')
@@ -281,15 +289,116 @@ export function createWorkflowDependencyPreflight(options: WorkflowDependencyPre
     }
 
     if (channelType === 'telegram') {
-      let hasToken = !!options.defaultTelegramBotToken
-      if (!hasToken && options.integrationStore) {
-        const integ = await options.integrationStore.getCredentialsForAssistantSystem(assistantId, 'telegram')
-        hasToken = !!integ
+      const tokens: string[] = []
+      if (options.integrationStore) {
+        const integ = channelIntegrationId
+          ? workspaceId
+            ? await options.integrationStore.getCredentialsForAssistantIntegrationSystem(
+              workspaceId,
+              assistantId,
+              channelIntegrationId,
+              'telegram',
+              channelId,
+            )
+            : null
+          : await options.integrationStore.getCredentialsForAssistantSystem(assistantId, 'telegram')
+        const byoToken = integ && (integ.credentials as { bot_token?: string }).bot_token
+        if (byoToken) tokens.push(byoToken)
       }
-      return hasToken ? { ok: true } : { ok: false, reason: 'Telegram is not connected for this assistant' }
+      if (!channelIntegrationId && options.defaultTelegramBotToken && !tokens.includes(options.defaultTelegramBotToken)) {
+        tokens.push(options.defaultTelegramBotToken)
+      }
+      if (tokens.length === 0) {
+        if (workspaceId && channelIntegrationId && options.integrationStore) {
+          try {
+            const diagnostic = await options.integrationStore
+              .diagnoseAssistantIntegrationRoutingSystem(
+                workspaceId,
+                assistantId,
+                channelIntegrationId,
+                'telegram',
+                channelId,
+              )
+            if (diagnostic.status === 'assistant_mismatch') {
+              return {
+                ok: false,
+                reason:
+                  `Selected Telegram channel "${diagnostic.channelLabel}" routes this destination to ` +
+                  `assistant "${diagnostic.routedAssistantName}", but the workflow step uses ` +
+                  `assistant "${diagnostic.requestedAssistantName}". In Studio > Channels, route this ` +
+                  `group/topic to "${diagnostic.requestedAssistantName}"; or select a Telegram channel ` +
+                  `assigned to that assistant; or change the workflow step assistant to ` +
+                  `"${diagnostic.routedAssistantName}".`,
+              }
+            }
+            if (diagnostic.status === 'destination_unassigned') {
+              return {
+                ok: false,
+                reason:
+                  `Selected Telegram channel "${diagnostic.channelLabel}" has no assistant assigned ` +
+                  `for destination "${channelId}". In Studio > Channels, set ` +
+                  `"${diagnostic.requestedAssistantName}" as the channel default or assign this ` +
+                  'group/topic to it.',
+              }
+            }
+            if (diagnostic.status === 'assistant_unavailable') {
+              return {
+                ok: false,
+                reason:
+                  `The workflow step assistant is not available in this workspace for Telegram ` +
+                  `channel "${diagnostic.channelLabel}". Choose an assistant from this workspace, ` +
+                  'then select the Telegram channel again.',
+              }
+            }
+            if (diagnostic.status === 'integration_unavailable') {
+              const label = diagnostic.channelLabel
+                ? ` "${diagnostic.channelLabel}"`
+                : ''
+              return {
+                ok: false,
+                reason:
+                  `The selected Telegram channel${label} is disconnected, inactive, or no longer ` +
+                  'available. Reconnect it in Studio > Channels, then select it again.',
+              }
+            }
+            return {
+              ok: false,
+              reason:
+                `Selected Telegram channel "${diagnostic.channelLabel}" could not load its bot ` +
+                'credentials. Reconnect it in Studio > Channels, then try again.',
+            }
+          } catch (err) {
+            console.warn('[workflow/dependencyIssues] Telegram routing diagnostic failed:', err)
+          }
+        }
+        return {
+          ok: false,
+          reason: channelIntegrationId
+            ? 'The selected Telegram channel is not connected to this assistant or destination'
+            : 'Telegram is not connected for this assistant',
+        }
+      }
+
+      const { chatId } = parseTopicChannelId(channelId)
+      for (const token of tokens) {
+        try {
+          await createTelegramApi({ token }).getChat(chatId)
+          return { ok: true }
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          if (/Telegram API getChat:.*chat not found/i.test(message)) continue
+          // Network, rate-limit, and other transient failures do not block
+          // authoring. Runtime delivery remains authoritative.
+          return { ok: true }
+        }
+      }
+      return { ok: false, reason: `Telegram: chat not found (${chatId})` }
     }
 
     if (channelType === 'whatsapp') {
+      if (!channelId.includes('@')) {
+        return { ok: false, reason: 'Proactive WhatsApp Cloud API delivery requires an approved template and is not supported yet' }
+      }
       return options.waConnectorUrl && options.waConnectorSecret
         ? { ok: true }
         : { ok: false, reason: 'WhatsApp is not connected' }

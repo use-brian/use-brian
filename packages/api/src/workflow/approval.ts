@@ -211,11 +211,24 @@ export async function resumeFromApproval(
     return { status: 'failed', runId: run.id }
   }
 
-  const registry = await deps.buildToolRegistry({
-    workspaceId: run.workspaceId,
-    assistantId: primaryAssistantId,
-    userId: run.triggeredBy,
-  })
+  let registry: Awaited<ReturnType<ApprovalBridgeDeps['buildToolRegistry']>>
+  try {
+    registry = await deps.buildToolRegistry({
+      workspaceId: run.workspaceId,
+      assistantId: primaryAssistantId,
+      userId: run.triggeredBy ?? workflow.createdBy,
+    })
+  } catch (err) {
+    await failStep(
+      deps,
+      run,
+      workflow,
+      updated,
+      'tool_registry_unavailable_after_resume',
+      err instanceof Error ? err.message : String(err),
+    )
+    return { status: 'failed', runId: run.id }
+  }
 
   const tool = registry.get(updated.toolName)
   if (!tool) {

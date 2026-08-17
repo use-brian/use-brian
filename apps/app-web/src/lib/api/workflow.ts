@@ -191,7 +191,16 @@ export type AssistantCallStep = {
    */
   blueprintId?: string;
   /** When set, the step's text output is pushed to this channel after the consult. */
-  deliver?: { channelType: DeliverChannelType; channelId: string };
+  deliver?:
+    | {
+        channelType: DeliverChannelType;
+        channelId: string;
+        channelIntegrationId?: string;
+      }
+    | {
+        channelType: "whatsapp";
+        replyToTrigger: true;
+      };
   /** `persistent` reuses one callee session across runs; `per_run` (default) is fresh. */
   session?: "per_run" | "persistent";
   /** Per-step model alias. Backfilled from workflow-level on read for legacy rows. */
@@ -819,11 +828,11 @@ export async function listConnectedWorkflowToolSources(
         };
       }
 
-      // Custom MCP providers are addressed by their generated provider UUID.
-      // CLI catalogs need the assistant-scoped route: unlike the personal
-      // connector endpoint, it resolves workspace-owned and granted instances.
-      const discoveryUrl = instance.provider === "cli" && assistantId
-        ? `${API_URL}/api/assistants/${encodeURIComponent(assistantId)}/connectors/${encodeURIComponent(`cli:${instance.id}`)}/tools`
+      // Dynamic catalogs use the assistant-scoped exact-instance route so
+      // workspace-owned and granted custom HTTP/CLI instances resolve through
+      // the same exposure and assistant-membership boundary as runtime.
+      const discoveryUrl = assistantId
+        ? `${API_URL}/api/assistants/${encodeURIComponent(assistantId)}/connectors/${encodeURIComponent(`${instance.provider}:${instance.id}`)}/tools`
         : `${API_URL}/api/connectors/${encodeURIComponent(instance.provider === "cli" ? instance.id : instance.provider)}/tools`;
       try {
         const toolRes = await authFetch(discoveryUrl);
@@ -916,6 +925,8 @@ export async function listWorkspaceMemberOptions(
 export type ChannelDestination = {
   channelType: "telegram" | "slack" | "whatsapp";
   channelId: string;
+  channelIntegrationId?: string | null;
+  integrationLabel?: string | null;
   title: string | null;
   lastActiveAt: string;
 };
@@ -967,16 +978,26 @@ export async function listWorkspaceChannelOptions(
     displayName: string;
     status: "active" | "revoked" | "invalid";
     integrationId: string | null;
+    integrationStatus: "active" | "revoked" | "invalid" | null;
+    integrationLabel: string | null;
   };
   const data = (await res.json()) as { channels?: Row[] } | null;
   const rows = Array.isArray(data?.channels) ? data!.channels : [];
   // The event dispatcher routes through `channel_integrations.id`, so a
   // channel without an attached integration row is unselectable.
   return rows
-    .filter((r) => r.status === "active" && r.integrationId)
+    .filter(
+      (r) =>
+        r.status === "active" &&
+        r.integrationStatus === "active" &&
+        r.integrationId,
+    )
     .map((r) => ({
       id: r.integrationId!,
       channelType: r.channelType,
-      displayName: r.displayName,
+      displayName:
+        r.channelType === "telegram" && r.integrationLabel
+          ? `${r.displayName} (${r.integrationLabel})`
+          : r.displayName,
     }));
 }

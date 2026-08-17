@@ -174,13 +174,18 @@ const assistantCallStepSchema = z.object({
    * outcome records `thread: 'parent_missing'`.
    * See docs/architecture/engine/scheduled-jobs.md → "Channel delivery".
    */
-  deliver: z
-    .object({
+  deliver: z.union([
+    z.object({
       channelType: z.enum(['web', 'telegram', 'slack', 'whatsapp', 'msteams']),
       channelId: z.string().min(1).max(256),
+      channelIntegrationId: z.string().uuid().optional(),
       thread: z.object({ fromStep: stepIdSchema }).strict().optional(),
-    })
-    .optional(),
+    }).strict(),
+    z.object({
+      channelType: z.literal('whatsapp'),
+      replyToTrigger: z.literal(true),
+    }).strict(),
+  ]).optional(),
   /**
    * Session continuity. `per_run` (default) — each fire is a fresh consult.
    * `persistent` — the callee reuses one durable session keyed on the
@@ -227,7 +232,7 @@ const toolCallStepSchema = z.object({
     .string()
     .min(1)
     .max(128)
-    .regex(/^[a-zA-Z_][a-zA-Z0-9_]*$/, 'toolName must be a valid identifier.'),
+    .regex(/^[a-zA-Z0-9_.:-]+$/, 'toolName contains unsupported characters.'),
   arguments: z.record(z.unknown()),
   approval: approvalSchema.optional(),
 })
@@ -544,6 +549,25 @@ export const WorkflowDefinitionSchema = z
       }
     }
 
+    // Bot integrations are currently an explicit part of Telegram delivery
+    // identity only. Reject inert ids on other channel types instead of
+    // persisting a selection runtime would ignore.
+    for (const [i, step] of def.steps.entries()) {
+      if (
+        step.type === 'assistant_call' &&
+        step.deliver &&
+        'channelIntegrationId' in step.deliver &&
+        step.deliver.channelIntegrationId &&
+        step.deliver.channelType !== 'telegram'
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `step "${step.id}".deliver.channelIntegrationId is only supported for telegram delivery.`,
+          path: ['steps', i, 'deliver', 'channelIntegrationId'],
+        })
+      }
+    }
+
     // `deliver.thread.fromStep` must reference a DIFFERENT assistant_call step
     // that delivers to the SAME channel — the thread parent is the message
     // that step posted this run. Also platform-gated: only Slack (thread_ts)
@@ -552,11 +576,24 @@ export const WorkflowDefinitionSchema = z
     // silent top-level fallback on every run.
     const deliverSteps = new Map(
       def.steps
-        .filter((s) => s.type === 'assistant_call' && s.deliver !== undefined)
-        .map((s) => [s.id, (s as { deliver: { channelType: string; channelId: string } }).deliver]),
+        .filter((s) =>
+          s.type === 'assistant_call' &&
+          s.deliver !== undefined &&
+          'channelId' in s.deliver,
+        )
+        .map((s) => [s.id, (s as { deliver: {
+          channelType: string
+          channelId: string
+          channelIntegrationId?: string
+        } }).deliver]),
     )
     for (const [i, step] of def.steps.entries()) {
-      if (step.type !== 'assistant_call' || !step.deliver?.thread) continue
+      if (
+        step.type !== 'assistant_call' ||
+        !step.deliver ||
+        !('thread' in step.deliver) ||
+        !step.deliver.thread
+      ) continue
       const ref = step.deliver.thread.fromStep
       if (step.deliver.channelType !== 'slack' && step.deliver.channelType !== 'telegram') {
         ctx.addIssue({
@@ -583,7 +620,8 @@ export const WorkflowDefinitionSchema = z
         })
       } else if (
         parent.channelType !== step.deliver.channelType ||
-        parent.channelId !== step.deliver.channelId
+        parent.channelId !== step.deliver.channelId ||
+        parent.channelIntegrationId !== step.deliver.channelIntegrationId
       ) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,

@@ -57,6 +57,8 @@ export type ChannelIntegrationConfig = {
   seenChats?: SeenChat[];
   userAccessMode?: UserAccessMode;
   allowedUserIds?: string[];
+  /** WhatsApp Cloud public business number used for wa.me chat links. */
+  whatsappDisplayPhoneNumber?: string;
   /** Telegram BYO: allow explicitly listed DM guests to use enabled connectors. */
   allowGuestConnectorTools?: boolean;
   blockedUserIds?: string[];
@@ -77,6 +79,8 @@ export type Channel = {
   updatedAt: string;
   /** The channel's `channel_integrations` row id — null when it has none. */
   integrationId: string | null;
+  /** Transport discriminator for channels with multiple provider paths. */
+  integrationProvider?: "cloud_api" | null;
   /** Per-integration behavior config — null when the channel has no integration. */
   config: ChannelIntegrationConfig | null;
 };
@@ -349,6 +353,46 @@ export async function connectMsTeamsChannel(
     );
   }
   return (await res.json()) as ConnectMsTeamsResult;
+}
+
+export type ConnectWhatsAppCloudInput = {
+  accessToken: string;
+  appSecret: string;
+  verifyToken?: string;
+  phoneNumberId: string;
+  wabaId: string;
+  graphApiVersion?: string;
+  defaultAssistantId?: string | null;
+  displayName?: string;
+};
+
+export type ConnectWhatsAppCloudResult = {
+  channel: Channel;
+  reused: boolean;
+  displayPhoneNumber: string;
+  webhookPath: string;
+  webhookUrl: string | null;
+  verifyToken: string;
+};
+
+/** Connect an official Meta WhatsApp Cloud API phone number. */
+export async function connectWhatsAppCloudChannel(
+  workspaceId: string,
+  input: ConnectWhatsAppCloudInput,
+): Promise<ConnectWhatsAppCloudResult> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/channels/whatsapp-cloud`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string; detail?: string };
+    throw new Error(data.detail ?? data.error ?? `WhatsApp connect failed (${res.status})`);
+  }
+  return (await res.json()) as ConnectWhatsAppCloudResult;
 }
 
 // ── WeChat — QR pairing (poll-based) ────────────────────────────
