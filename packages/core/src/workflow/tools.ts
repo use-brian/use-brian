@@ -1390,7 +1390,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
     name: 'proposeWorkflow',
     description:
       `Propose a workflow definition for the user to approve. Validates the draft against the schema and returns a summary the user can read. ` +
-      `No database writes. After this returns, present the proposal to the user verbatim and ask for explicit confirmation ("yes / create it / go ahead") before calling \`createWorkflow\`. ` +
+      `No database writes. After this returns, present the proposal to the user verbatim and ask for explicit confirmation ("yes / create it / go ahead"). On approval, call \`createWorkflow\` for a new workflow or \`updateWorkflow\` for an edit, using the already-validated payload from conversation history. Do not repeat workflow reads, tool searches, connector discovery, or this proposal unless the user changes it or the prior payload is unavailable. ` +
       `Step types (V1): assistant_call (free-mode A2A), tool_call (first-party + MCP allow-policy), wait (not yet available), branch (JSONLogic condition). ` +
       `There is no loop / for-each step: to process each item in a list, propose a recurring schedule trigger that handles one batch per run and carries a cursor across runs via storeOutputAs + {{lastRun.<var>}}, or a research fan-out step for a read-only gather; name these routes when you decline a loop request. ` +
       `Parallel fan-out: set a step's nextStepId to an ARRAY of step ids (max 5, distinct) to start those steps IN PARALLEL when it completes. A downstream step that several branches point at is the implicit JOIN — it runs once, after every branch that can still reach it settles, and can read every branch's {{vars.<name>}}. The graph must stay acyclic, and a wait step may not sit on a parallel branch that some sibling branch never rejoins (pausing needs the only live cursor — put waits before the fan-out or after the join). startStepId accepts the same shape: an ARRAY of step ids (max 5, distinct) starts every listed step IN PARALLEL the moment the trigger fires — a trigger-level fan-out with the same join and wait rules. ` +
@@ -1511,7 +1511,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
           ],
           definition,
           confirmationHint:
-            'Show the user this proposal (and the trigger / schedule) and the warnings. Ask for explicit confirmation. Only call createWorkflow after they agree.',
+            'Show the user this proposal (and the trigger / schedule) and the warnings. Ask for explicit confirmation. On approval, immediately call createWorkflow for a new workflow or updateWorkflow with the previously read workflowId for an edit, using this validated payload. Do not repeat discovery or proposeWorkflow unless the user changes the proposal or this payload is unavailable.',
         },
       }
     },
@@ -1522,6 +1522,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
     description:
       `Persist a workflow definition that the user has explicitly approved. ` +
       `You MUST first call \`proposeWorkflow\`, present the proposal verbatim, get the user's explicit OK ("yes", "create it", "go ahead"), and only then call \`createWorkflow\`. Never call this tool from a fresh user description without proposing first. ` +
+      `When the user's current message approves the immediately preceding successful proposal, call this tool directly with that proposal's exact name, description, definition, and trigger from conversation history. Do not rerun discovery or \`proposeWorkflow\` unless the user changed the proposal or the payload is unavailable. ` +
       `\n\nTriggering is built in: pass \`trigger\` to create AND wire the trigger in one call — \`{ kind: "schedule", schedule, ... }\` schedules it (no separate scheduling step), and \`{ kind: "event", event: { sources } }\` subscribes it to workspace signals (connector / channel / page / task events) right here — event triggers are NOT web-builder-only. A one-step assistant_call workflow with \`trigger.delivery\` IS a reminder ("remind me at 2pm"); a multi-step workflow is an automation. Confirm the schedule with the user first (mention the returned relativeTime / deliveryTarget so timezone or destination mistakes are caught).`,
     inputSchema: z.object({
       name: z.string().min(1).max(120),
@@ -1682,6 +1683,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       `Edit an existing workflow — add a step, remove a step, reorder steps, rewrite a step's fields, OR change its trigger / schedule. Patches any subset of name / description / definition / enabled / trigger. ` +
       `Pass \`trigger: { kind: "schedule", schedule, ... }\` to (re)schedule the workflow, \`{ kind: "event", event: { sources } }\` to (re)wire its event subscriptions, or \`{ kind: "manual" }\` to unschedule it. (Only the webhook URL slug + signing secret are provisioned in the web builder; every trigger kind is editable here.) ` +
       `Workflow: first call \`getWorkflow\` to read the current definition, construct the edited definition, then call \`proposeWorkflow\` to validate + preview it, present the change to the user, get explicit confirmation ("yes", "go ahead"), and only then call \`updateWorkflow\`. Never edit a definition you have not read with \`getWorkflow\` first. ` +
+      `When the user's current message approves the immediately preceding successful edit proposal, call this tool directly with the previously read workflowId and approved patch from conversation history. Do not repeat \`listWorkflows\`, \`getWorkflow\`, discovery, or \`proposeWorkflow\` unless the user changed the proposal or the payload is unavailable. Never use \`createWorkflow\` to apply an edit. ` +
       `Editing does not affect runs already in flight — the change applies to the next run.`,
     inputSchema: z.object({
       workflowId: idShape,

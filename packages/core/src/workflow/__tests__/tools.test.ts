@@ -15,6 +15,7 @@ import { buildTool, type Tool, type ToolContext } from '../../tools/types.js'
 import type { ConsultRequest, ConsultResponse, ConsultTransport } from '../../a2a/types.js'
 import type { JobStore, ScheduledJob } from '../../scheduling/types.js'
 import type { DeliverToChannel } from '../executor.js'
+import { loadBuiltinSkills } from '../../skills/loader.js'
 
 const WORKSPACE_ID = '00000000-0000-0000-0000-000000000001'
 const PRIMARY_ASSISTANT_ID = '00000000-0000-0000-0000-000000000002'
@@ -729,6 +730,23 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     expect(data.proposedName).toBe('X')
     expect(data.summary).toContain('echo')
     expect(data.warnings).toEqual([])
+  })
+
+  it('continues an approved proposal without restarting discovery or misrouting edits to create', async () => {
+    const { tools } = makeAllTools()
+    const r = await tools.proposeWorkflow.execute({ name: 'X', definition: SIMPLE_DEF }, makeContext())
+    const hint = (r.data as { confirmationHint: string }).confirmationHint
+
+    expect(hint).toContain('createWorkflow for a new workflow')
+    expect(hint).toContain('updateWorkflow with the previously read workflowId for an edit')
+    expect(hint).toContain('Do not repeat discovery or proposeWorkflow')
+    expect(hint).not.toContain('Only call createWorkflow')
+    expect(tools.createWorkflow.description).toContain('call this tool directly')
+    expect(tools.updateWorkflow.description).toContain('Never use `createWorkflow` to apply an edit')
+
+    const builder = loadBuiltinSkills().find((skill) => skill.id === 'workflow-builder')
+    expect(builder?.content).toMatch(/Treat approval as continuation, not a restart/)
+    expect(builder?.content).toMatch(/Do not repeat `listWorkflows`, `getWorkflow`/)
   })
 
   it('proposeWorkflow surfaces the researchMode advisory (parity with the REST path)', async () => {
