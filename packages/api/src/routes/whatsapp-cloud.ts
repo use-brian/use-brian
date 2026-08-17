@@ -99,13 +99,12 @@ export function whatsappCloudUserAllowed(config: ChannelIntegrationConfig, userI
   return config.userAccessMode === 'allow_all'
 }
 
-export function whatsappCloudGuestConnectorToolsAllowed(
+export function whatsappCloudExternalConnectorToolsAllowed(
   config: ChannelIntegrationConfig,
   isIdentified: boolean,
 ): boolean {
   return !isIdentified
     && config.userAccessMode === 'allowlist'
-    && config.allowGuestConnectorTools === true
 }
 
 export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router {
@@ -224,7 +223,7 @@ export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router 
 
     await withChatLock(`whatsapp-cloud:${confirmKey}`, () => processMessage({
       credentials, incoming, assistant, ownerId, channelUserId, isIdentified,
-      guestConnectorToolsAllowed: whatsappCloudGuestConnectorToolsAllowed(config, isIdentified),
+      externalConnectorToolsAllowed: whatsappCloudExternalConnectorToolsAllowed(config, isIdentified),
       routing, confirmKey,
     }))
   }
@@ -236,13 +235,13 @@ export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router 
     ownerId: string
     channelUserId: string
     isIdentified: boolean
-    guestConnectorToolsAllowed: boolean
+    externalConnectorToolsAllowed: boolean
     routing: { modelAlias: string }
     confirmKey: string
   }): Promise<void> {
     const {
       credentials, incoming, assistant, ownerId, channelUserId, isIdentified,
-      guestConnectorToolsAllowed, routing, confirmKey,
+      externalConnectorToolsAllowed, routing, confirmKey,
     } = params
     const apiOptions = {
       accessToken: credentials.access_token,
@@ -295,7 +294,7 @@ export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router 
       assistant: { ...assistant, ownerUserId: ownerId },
       isIdentified,
       externalGuest: !isIdentified,
-      externalGuestConnectorTools: guestConnectorToolsAllowed,
+      externalGuestConnectorTools: externalConnectorToolsAllowed,
       channelType: 'whatsapp',
       channelId: incoming.channelId,
       actorChannelId: incoming.userId,

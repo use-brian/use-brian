@@ -7279,7 +7279,6 @@ export const ja: Dictionary = {
         accessBlocklistDescWhatsApp: "下記の電話番号を除く全員が利用できます。",
         guestConnectorTools: "ゲストの接続ツール",
         guestConnectorToolsHint: "リスト内の Telegram ゲストが、このアシスタントで有効な接続ツールを使えるようにします。チャットとメモリはオーナーとは分離されたままです。",
-        guestConnectorToolsHintWhatsApp: "リスト内の WhatsApp 番号が、このアシスタントで有効な接続ツールを使えるようにします。チャットとメモリはオーナーとは分離されたままです。",
         addUser: "追加",
         blockUser: "ブロック",
         removeUser: "ユーザーを削除",

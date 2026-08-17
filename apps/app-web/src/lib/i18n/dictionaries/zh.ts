@@ -7222,7 +7222,6 @@ export const zh: Dictionary = {
         accessBlocklistDescWhatsApp: "除下列電話號碼外,所有人都能使用。",
         guestConnectorTools: "訪客連接工具",
         guestConnectorToolsHint: "允許清單中的 Telegram 訪客使用此助理已啟用的連接工具。其聊天與記憶仍會與擁有者分開。",
-        guestConnectorToolsHintWhatsApp: "允許清單中的 WhatsApp 號碼使用此助理已啟用的連接工具。其聊天與記憶仍會與擁有者分開。",
         addUser: "新增",
         blockUser: "封鎖",
         removeUser: "移除使用者",

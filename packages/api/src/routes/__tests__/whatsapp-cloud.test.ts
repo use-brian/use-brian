@@ -4,7 +4,7 @@ import request from 'supertest'
 import { describe, expect, it, vi } from 'vitest'
 import type { ChannelIntegrationStore, WhatsAppCloudCredentials } from '../../db/channel-integrations.js'
 import {
-  whatsappCloudGuestConnectorToolsAllowed,
+  whatsappCloudExternalConnectorToolsAllowed,
   whatsappCloudRoutes,
   whatsappCloudUserAllowed,
 } from '../whatsapp-cloud.js'
@@ -43,11 +43,11 @@ describe('[COMP:api/whatsapp-cloud-route]', () => {
     expect(whatsappCloudUserAllowed({ userAccessMode: 'allowlist', allowedUserIds: ['15551234567'] }, '15551234567')).toBe(true)
   })
 
-  it('enables connector tools for external guests only with an explicit opt-in', () => {
-    expect(whatsappCloudGuestConnectorToolsAllowed({}, false)).toBe(false)
-    expect(whatsappCloudGuestConnectorToolsAllowed({ userAccessMode: 'allow_all', allowGuestConnectorTools: true }, false)).toBe(false)
-    expect(whatsappCloudGuestConnectorToolsAllowed({ userAccessMode: 'allowlist', allowGuestConnectorTools: true }, false)).toBe(true)
-    expect(whatsappCloudGuestConnectorToolsAllowed({ userAccessMode: 'allowlist', allowGuestConnectorTools: true }, true)).toBe(false)
+  it('enables connector tools for allowlisted external users', () => {
+    expect(whatsappCloudExternalConnectorToolsAllowed({}, false)).toBe(false)
+    expect(whatsappCloudExternalConnectorToolsAllowed({ userAccessMode: 'allow_all' }, false)).toBe(false)
+    expect(whatsappCloudExternalConnectorToolsAllowed({ userAccessMode: 'allowlist' }, false)).toBe(true)
+    expect(whatsappCloudExternalConnectorToolsAllowed({ userAccessMode: 'allowlist' }, true)).toBe(false)
   })
   it('answers Meta subscription verification with the challenge', async () => {
     const res = await request(app()).get('/webhook/whatsapp/chan-1').query({

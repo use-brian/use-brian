@@ -7493,7 +7493,6 @@ export const en = {
         accessBlocklistDescWhatsApp: "Everyone can interact except the phone numbers listed below.",
         guestConnectorTools: "Guest connected tools",
         guestConnectorToolsHint: "Let listed Telegram guests use connected tools enabled for this assistant. Their chats and memory stay separate from yours.",
-        guestConnectorToolsHintWhatsApp: "Let listed WhatsApp numbers use connected tools enabled for this assistant. Their chats and memory stay separate from yours.",
         addUser: "Add",
         blockUser: "Block",
         removeUser: "Remove user",

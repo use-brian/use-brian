@@ -169,7 +169,7 @@ describe("[COMP:app-web/studio-channels] WhatsApp Cloud access UX", () => {
     expect(host.textContent).not.toContain("Linked Telegram users only.");
   });
 
-  it("uses phone-number guidance and offers connector access for the allowlist", async () => {
+  it("uses phone-number guidance without a second tool-access toggle", async () => {
     const channel: Channel = {
       id: "channel_1",
       workspaceId: "workspace_1",
@@ -201,8 +201,7 @@ describe("[COMP:app-web/studio-channels] WhatsApp Cloud access UX", () => {
     });
 
     expect(host.textContent).toContain("Only the phone numbers listed below");
-    expect(host.textContent).toContain("Guest connected tools");
-    expect(host.textContent).toContain("listed WhatsApp numbers");
+    expect(host.textContent).not.toContain("Guest connected tools");
     expect(
       host.querySelector<HTMLInputElement>('input[placeholder="15551234567"]'),
     ).not.toBeNull();

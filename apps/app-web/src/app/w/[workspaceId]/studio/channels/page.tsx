@@ -1511,16 +1511,6 @@ export function ChannelConfigSection({
 
       {accessControl}
 
-      {isWhatsAppCloud && accessMode === "allowlist" && (
-        <ConfigToggle
-          label={cfg.guestConnectorTools}
-          hint={cfg.guestConnectorToolsHintWhatsApp}
-          checked={config.allowGuestConnectorTools ?? false}
-          disabled={saving}
-          onChange={(v) => void save({ allowGuestConnectorTools: v })}
-        />
-      )}
-
       {saving && (
         <span className="text-xs text-muted-foreground">
           {t.studioPage.channels.saving}
