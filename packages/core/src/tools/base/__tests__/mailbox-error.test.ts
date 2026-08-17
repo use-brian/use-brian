@@ -97,6 +97,7 @@ describe('[COMP:tools/mailbox-error] wired into the mailbox tools', () => {
     const api: MailboxApi = {
       searchMessages: async () => ({ hits: [] }),
       getMessage: async () => { throw new Error('unused') },
+      getAttachment: async () => { throw new Error('unused') },
       sendMessage: async () => { throw smtpAuth },
     }
     const tools = createMailboxTools(singleMailboxRouter(api, 'ops@example.com'))

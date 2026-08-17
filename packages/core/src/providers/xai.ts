@@ -73,8 +73,17 @@ export async function postXaiResponses(req: XaiResponsesRequest): Promise<XaiRes
   })
 
   if (!res.ok) {
+    // The body stays on `cause` (logs / debugging), never in the message: a
+    // Grok error page or JSON envelope is noise the model cannot act on. The
+    // message names the status and what it means for the caller.
     const snippet = (await res.text().catch(() => '')).slice(0, 500)
-    throw new Error(`xAI HTTP ${res.status}: ${snippet || res.statusText}`)
+    const meaning =
+      res.status === 401 || res.status === 403 ? 'the xAI API key was rejected'
+        : res.status === 429 ? 'xAI rate limit hit — transient'
+          : res.status >= 500 ? 'xAI server error — transient'
+            : res.status === 400 || res.status === 422 ? 'xAI rejected the request shape'
+              : res.statusText || 'request rejected'
+    throw new Error(`xAI HTTP ${res.status} (${meaning})`, { cause: snippet || res.statusText })
   }
   return (await res.json()) as XaiResponsesData
 }

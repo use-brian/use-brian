@@ -101,8 +101,14 @@ export const urlReaderTool = buildTool({
           : undefined,
       }
     } catch (err) {
+      // `FetchStackExhaustedError` already reads "Could not read <url>.
+      // Extractors tried: … <verdict>"; anything else (abort, an unexpected
+      // throw) is framed the same way from the message.
       const message = err instanceof Error ? err.message : String(err)
-      return { data: `Failed to read URL: ${message}`, isError: true }
+      const data = message.startsWith('Could not read ')
+        ? message
+        : `Could not read ${input.url}: ${message}. ${/abort/i.test(message) ? 'The read was cancelled before it finished; retry once if the answer still matters.' : 'Retrying the same URL is unlikely to help; use the webSearch snippet or ask the user.'}`
+      return { data, isError: true }
     }
   },
 })
