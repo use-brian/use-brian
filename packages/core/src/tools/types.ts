@@ -75,6 +75,12 @@ export type ToolContext = {
    */
   userTimezone?: string
   /**
+   * Latest unconsumed workflow proposal receipt recovered by the route from
+   * persisted tool-result history. Workflow writes consume this trusted value
+   * so the model never has to copy or reconstruct proposal arguments.
+   */
+  workflowProposalReceipt?: string
+  /**
    * The originating workflow RUN id when this turn executes a workflow
    * `assistant_call` step (set by the callee executor from
    * `ConsultRequest.workflowRunId`). Blueprint record saves use it as their

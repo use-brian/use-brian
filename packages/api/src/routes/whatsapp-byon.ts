@@ -1,5 +1,8 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto'
 import { Router } from 'express'
+import type { ChatArchiveLiveMedia } from '../chat-archive/live-media.js'
+import { archiveMediaRef } from '../chat-archive/live-media.js'
+import { resolveChatArchiveInstanceId } from '../chat-archive/live-writer.js'
 import { z } from 'zod'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import type { WhatsappIngestor } from '../ingest/whatsapp-ingest.js'
@@ -10,9 +13,6 @@ import { getChannelForWebhook } from '../db/channels-store.js'
 import type { FilesClientResolver } from '../files/files-api.js'
 import { buildStorageKey, buildStorageUri } from '../files/gcs-client.js'
 import { query } from '../db/client.js'
-import type { ChatArchiveMediaService } from '../chat-archive/media-service.js'
-import { archiveMediaRef } from '../chat-archive/media-service.js'
-import { signedChatArchiveMediaUploadUrl } from '../chat-archive/media-routes.js'
 import type { IncomingMessage } from '@use-brian/channels'
 
 const inboundSchema = z.object({
@@ -54,14 +54,13 @@ async function resolveWorkspaceOwnerUserId(workspaceId: string): Promise<string 
 }
 
 export type WhatsappByonRoutesOptions = {
+  /** Stages inbound attachment bytes into the archive. */
+  archiveMedia?: ChatArchiveLiveMedia
   connectorSecret: string
   integrationStore: ChannelIntegrationStore
   ingestor: WhatsappIngestor
   bot: WhatsappBot
   filesResolver?: FilesClientResolver
-  archiveMedia?: ChatArchiveMediaService
-  archiveMediaHmacSecret?: string
-  archiveMediaBaseUrl?: string
   archiveIncoming?: (input: {
     workspaceId: string
     ownerUserId: string
@@ -110,52 +109,21 @@ export function whatsappByonRoutes(opts: WhatsappByonRoutesOptions): Router {
       return
     }
 
-    if (
-      opts.archiveMedia
-      && opts.archiveMediaHmacSecret
-      && opts.archiveMediaBaseUrl
-      && parsed.data.providerMessageId
-      && parsed.data.kind
-    ) {
-      const integration = await opts.integrationStore.getByChannelForWebhook(parsed.data.channelId, 'whatsapp')
-      const ownerUserId = await (opts.getWorkspaceOwnerUserId ?? resolveWorkspaceOwnerUserId)(channel.workspaceId)
-      if (ownerUserId) {
-        try {
-          const instanceId = await opts.archiveMedia.resolveBinding({
-            workspaceId: channel.workspaceId,
-            ownerUserId,
-            source: 'whatsapp',
-            instanceId: integration?.connectorInstanceId,
-          })
-          const initialized = await opts.archiveMedia.init({
-            workspaceId: channel.workspaceId,
-            instanceId,
-            ownerUserId,
-            source: 'whatsapp',
-            providerMessageId: parsed.data.providerMessageId,
-            kind: parsed.data.kind,
-            filename: parsed.data.fileName ?? '',
-            mime: parsed.data.mime,
-            sizeBytes: parsed.data.sizeBytes ?? 0,
-          })
-          res.json({
-            assetId: initialized.asset.id,
-            alreadyStored: initialized.alreadyStored,
-            gcsKey: initialized.asset.storageKey,
-            storageUri: initialized.asset.storageUri,
-            sizeBytes: initialized.asset.sizeBytes,
-            uploadUrl: signedChatArchiveMediaUploadUrl({
-              secret: opts.archiveMediaHmacSecret,
-              baseUrl: opts.archiveMediaBaseUrl,
-              assetId: initialized.asset.id,
-            }),
-          })
-          return
-        } catch (err) {
-          console.error('[whatsapp] archive media init failed; using generic storage:', err)
-        }
-      }
-    }
+    // KNOWN GAP — live BYON WhatsApp media no longer reaches the archive.
+    //
+    // This route handed the external connector a pre-signed URL so it could
+    // upload bytes directly, in a two-phase init-then-upload flow. The archive's
+    // contract is single-shot: metadata and bytes arrive together, signed with a
+    // secret the connector does not hold and should not be given.
+    //
+    // Bridging the two needs a decision rather than a guess — either the store
+    // issues its own signed upload URLs, or the platform proxies the bytes on
+    // the connector's behalf. Until then BYON media falls through to generic
+    // workspace storage below: messages and attachments are unaffected, but the
+    // attachment is not archived and so is not searchable by its contents.
+    //
+    // Media on the managed WhatsApp and WeChat paths is unaffected; those
+    // proxy bytes through the platform and go straight to the archive.
 
     const fileId = `channel-media/${randomUUID()}`
     const key = buildStorageKey(channel.workspaceId, fileId)
@@ -219,7 +187,10 @@ export function whatsappByonRoutes(opts: WhatsappByonRoutesOptions): Router {
       return
     }
 
-    if (opts.archiveMedia && (input.mediaBase64 || input.mediaRef?.assetId)) {
+    // Bytes that pass through the platform still reach the archive. Only the
+    // pre-signed direct-upload path above lost that, because the connector
+    // cannot hold the archive's secret.
+    if (opts.archiveMedia && input.mediaBase64) {
       try {
         const integration = await opts.integrationStore.getByChannelForWebhook(input.channelId, 'whatsapp')
         const channel = await (opts.getChannel ?? getChannelForWebhook)(input.channelId)
@@ -227,30 +198,35 @@ export function whatsappByonRoutes(opts: WhatsappByonRoutesOptions): Router {
           ? await (opts.getWorkspaceOwnerUserId ?? resolveWorkspaceOwnerUserId)(channel.workspaceId)
           : null
         if (channel && ownerUserId) {
-          const instanceId = await opts.archiveMedia.resolveBinding({
-            workspaceId: channel.workspaceId,
-            ownerUserId,
-            source: 'whatsapp',
-            instanceId: integration?.connectorInstanceId,
-          })
           const mime = input.mediaMimeType ?? input.mediaRef?.mimeType ?? 'application/octet-stream'
           const kind = mime.startsWith('image/') ? 'image'
             : mime.startsWith('video/') ? 'video'
               : mime.startsWith('audio/') ? 'voice' : 'file'
-          const asset = input.mediaRef?.assetId
-            ? await opts.archiveMedia.complete(input.mediaRef.assetId)
-            : await opts.archiveMedia.storeBuffer({
-              workspaceId: channel.workspaceId,
-              instanceId,
-              ownerUserId,
+          // `connector_instance_id` on the integration row is frequently null;
+          // the append path mints the archive instance lazily instead. Reuse
+          // that same memoized resolver so bytes and message row share one id
+          // (assets key on `(instance_id, provider_message_id)`).
+          const instanceId = integration?.connectorInstanceId
+            ?? await resolveChatArchiveInstanceId({
               source: 'whatsapp',
-              providerMessageId: input.messageId,
-              kind,
-              filename: input.mediaFileName ?? '',
-              mime,
-              sizeBytes: 0,
-              bytes: Buffer.from(input.mediaBase64!, 'base64'),
+              ownerUserId,
+              workspaceId: channel.workspaceId,
+              assistantId: '',
+              assistantName: '',
+              conversationId: input.chatJid ?? input.channelId,
             })
+          if (!instanceId) throw new Error('whatsapp archive instance could not be resolved')
+          const asset = await opts.archiveMedia.storeBuffer({
+            workspaceId: channel.workspaceId,
+            instanceId,
+            ownerUserId,
+            source: 'whatsapp',
+            providerMessageId: input.messageId,
+            kind,
+            filename: input.mediaFileName ?? '',
+            mime,
+            bytes: Buffer.from(input.mediaBase64!, 'base64'),
+          })
           const ref = archiveMediaRef(asset)
           input.archiveMediaRef = {
             assetId: ref.asset_id!, sha256: ref.sha256!, filename: ref.filename,

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { createTelegramAdapter, parseTopicChannelId, type TelegramAdapterConfig } from '../telegram/adapter.js'
-import { createTelegramApi, isTelegramThreadNotFoundError, TELEGRAM_BOT_COMMANDS, TelegramApiError } from '../telegram/api.js'
+import { createTelegramApi, isTelegramThreadNotFoundError, describeTelegramDownloadFailure, TELEGRAM_BOT_COMMANDS, TelegramApiError } from '../telegram/api.js'
 import { chunkText } from '../chunking.js'
 import { createDedupBuffer } from '../dedup.js'
 import { createTelegramWebhookHandler, verifyTelegramWebhook } from '../telegram/webhook.js'
@@ -915,6 +915,209 @@ describe('[COMP:channels/telegram] api 429 retry', () => {
     } finally {
       vi.unstubAllGlobals()
     }
+  })
+})
+
+describe('[COMP:channels/telegram/voice] api transient retry', () => {
+  // Telegram's own gateway, not our request. On 2026-08-17 a `getFile` came
+  // back 504 and — because only 429 was retried — the voice note behind it was
+  // lost outright. See docs/architecture/media/transcription.md → "The
+  // download leg".
+  function make5xx(code: number, description: string) {
+    return { ok: false, error_code: code, description }
+  }
+
+  it('retries getFile on 504 and succeeds on a later attempt', async () => {
+    let calls = 0
+    const responses = [
+      make5xx(504, 'Gateway Timeout'),
+      make5xx(502, 'Bad Gateway'),
+      { ok: true, result: { file_id: 'f', file_unique_id: 'u', file_path: 'voice/file_1.oga' } },
+    ]
+    const mock = vi.fn(async () => {
+      const body = responses[calls++]
+      return { ok: true, json: async () => body } as unknown as Response
+    })
+    vi.stubGlobal('fetch', mock)
+    try {
+      const api = createTelegramApi({ token: 'test-token' })
+      const result = await api.getFile('file-id')
+      expect(result.file_path).toBe('voice/file_1.oga')
+      expect(calls).toBe(3)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('surfaces Telegram’s own status code after exhausting 5xx retries', async () => {
+    let calls = 0
+    const mock = vi.fn(async () => {
+      calls++
+      return { ok: true, json: async () => make5xx(504, 'Gateway Timeout') } as unknown as Response
+    })
+    vi.stubGlobal('fetch', mock)
+    try {
+      const api = createTelegramApi({ token: 'test-token' })
+      const err = await api.getFile('file-id').catch((e: unknown) => e)
+      expect(err).toBeInstanceOf(TelegramApiError)
+      expect((err as TelegramApiError).errorCode).toBe(504)
+      expect((err as TelegramApiError).method).toBe('getFile')
+      expect(calls).toBe(3)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('never replays a 4xx verdict on the request', async () => {
+    let calls = 0
+    const mock = vi.fn(async () => {
+      calls++
+      return {
+        ok: true,
+        json: async () => ({ ok: false, error_code: 400, description: 'Bad Request: file is too big' }),
+      } as unknown as Response
+    })
+    vi.stubGlobal('fetch', mock)
+    try {
+      const api = createTelegramApi({ token: 'test-token' })
+      await expect(api.getFile('file-id')).rejects.toThrow(/file is too big/)
+      expect(calls).toBe(1)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('falls back to the HTTP status when the 5xx body is not JSON', async () => {
+    let calls = 0
+    const mock = vi.fn(async () => {
+      calls++
+      return {
+        ok: false,
+        status: 503,
+        statusText: 'Service Unavailable',
+        json: async () => { throw new SyntaxError('Unexpected token <') },
+      } as unknown as Response
+    })
+    vi.stubGlobal('fetch', mock)
+    try {
+      const api = createTelegramApi({ token: 'test-token' })
+      const err = await api.getFile('file-id').catch((e: unknown) => e)
+      // The SyntaxError naming a stray '<' must never BE the explanation.
+      expect((err as TelegramApiError).errorCode).toBe(503)
+      expect((err as TelegramApiError).description).toBe('Service Unavailable')
+      expect(calls).toBe(3)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('retries a transport failure, whose cause reaches the message', async () => {
+    let calls = 0
+    const mock = vi.fn(async () => {
+      calls++
+      const err = new TypeError('fetch failed')
+      ;(err as Error & { cause?: unknown }).cause = Object.assign(new Error('other side closed'), {
+        code: 'UND_ERR_SOCKET',
+      })
+      throw err
+    })
+    vi.stubGlobal('fetch', mock)
+    try {
+      const api = createTelegramApi({ token: 'test-token' })
+      const err = await api.getFile('file-id').catch((e: unknown) => e)
+      expect(calls).toBe(3)
+      expect((err as TelegramApiError).message).toContain('other side closed')
+      expect((err as TelegramApiError).message).toContain('UND_ERR_SOCKET')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('retries downloadFile — the second half of every voice note', async () => {
+    let calls = 0
+    const mock = vi.fn(async () => {
+      calls++
+      if (calls === 1) {
+        return { ok: false, status: 502, statusText: 'Bad Gateway' } as unknown as Response
+      }
+      return {
+        ok: true,
+        arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+      } as unknown as Response
+    })
+    vi.stubGlobal('fetch', mock)
+    try {
+      const api = createTelegramApi({ token: 'test-token' })
+      const buf = await api.downloadFile('voice/file_1.oga')
+      expect(Array.from(buf)).toEqual([1, 2, 3])
+      expect(calls).toBe(2)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('throws a TelegramApiError carrying the HTTP status when downloadFile keeps failing', async () => {
+    let calls = 0
+    const mock = vi.fn(async () => {
+      calls++
+      return { ok: false, status: 500, statusText: 'Internal Server Error' } as unknown as Response
+    })
+    vi.stubGlobal('fetch', mock)
+    try {
+      const api = createTelegramApi({ token: 'test-token' })
+      const err = await api.downloadFile('voice/file_1.oga').catch((e: unknown) => e)
+      expect(err).toBeInstanceOf(TelegramApiError)
+      expect((err as TelegramApiError).errorCode).toBe(500)
+      expect(calls).toBe(3)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+})
+
+describe('[COMP:channels/telegram/voice] describeTelegramDownloadFailure', () => {
+  // The regression: Telegram's "Gateway Timeout" used to reach
+  // `describeTranscriptionFailure`, match its /timeout|abort/i branch, and come
+  // out as "transcription timed out" — blaming the transcriber for a file it
+  // was never handed.
+  it('names Telegram and its status code for a 5xx', () => {
+    const reason = describeTelegramDownloadFailure(
+      new TelegramApiError('getFile', 'Gateway Timeout', 504),
+    )
+    expect(reason).toContain('504')
+    expect(reason).toContain('Telegram')
+    expect(reason).not.toMatch(/transcription timed out/)
+  })
+
+  it('clears the transcriber instead of blaming it', () => {
+    const reason = describeTelegramDownloadFailure(
+      new TelegramApiError('downloadFile', 'Service Unavailable', 503),
+    )
+    // The exact sentence the old path produced, in either tense.
+    expect(reason).not.toMatch(/transcription (timed out|failed|is unavailable)/i)
+    // And it must say WHY the transcriber is not the suspect.
+    expect(reason).toMatch(/never reached the transcriber/i)
+  })
+
+  it('reports the bot download ceiling for an oversize file', () => {
+    const reason = describeTelegramDownloadFailure(
+      new TelegramApiError('getFile', 'Bad Request: file is too big', 400),
+    )
+    expect(reason).toMatch(/20 MB/)
+  })
+
+  it('reports an expired file reference for a 400/404', () => {
+    const reason = describeTelegramDownloadFailure(
+      new TelegramApiError('getFile', 'Bad Request: wrong file_id', 400),
+    )
+    expect(reason).toMatch(/send it again/)
+    expect(reason).toContain('400')
+  })
+
+  it('stays honest about a non-Telegram error rather than inventing a cause', () => {
+    const reason = describeTelegramDownloadFailure(new Error('boom'))
+    expect(reason).toContain('boom')
+    expect(reason).toContain('Telegram')
   })
 })
 

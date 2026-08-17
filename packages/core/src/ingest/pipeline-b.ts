@@ -1065,7 +1065,7 @@ const JSON_SHORT_ESCAPES: Record<string, string> = {
   '\t': '\\t',
 }
 
-type BalancedScan = { ok: true; json: string } | { ok: false; reason: string }
+type BalancedScan = { ok: true; json: string; salvaged?: boolean } | { ok: false; reason: string }
 
 /**
  * Walk from the first `{` to its MATCHING `}`, escaping raw ASCII control
@@ -1105,6 +1105,15 @@ function scanBalancedJsonObject(text: string): BalancedScan {
   let depth = 0
   let inString = false
   let escaped = false
+  // Salvage state. `stack` is the open containers in order; `safeCut` is the
+  // length of `out` at the last point a nested value CLOSED, which is the last
+  // position where truncating leaves a well-formed prefix.
+  const stack: string[] = []
+  let safeCut = 0
+  // Containers open AT the cut point. The live stack cannot be reused: between
+  // the cut and EOF the model may have opened further containers, and closing
+  // those would append brackets for structures the truncated text never began.
+  let safeStackLen = 0
 
   for (let i = start; i < text.length; i++) {
     const ch = text[i]
@@ -1137,16 +1146,44 @@ function scanBalancedJsonObject(text: string): BalancedScan {
       out += ch
       continue
     }
-    if (ch === '{') depth++
-    else if (ch === '}') {
+    if (ch === '{') {
+      depth++
+      stack.push('}')
+    } else if (ch === '[') {
+      stack.push(']')
+    } else if (ch === ']') {
+      stack.pop()
+      out += ch
+      safeCut = out.length
+      safeStackLen = stack.length
+      continue
+    } else if (ch === '}') {
       depth--
+      stack.pop()
       out += ch
       if (depth === 0) return { ok: true, json: out }
+      safeCut = out.length
+      safeStackLen = stack.length
       continue
     }
     out += ch
   }
 
+  // The object never closed. Rather than discard the whole window — which is
+  // what used to happen, and cost ~92% of extractions on a provider without
+  // constrained decoding — rewind to the last complete nested value and close
+  // the containers that are still open. The trailing partial item is dropped;
+  // every complete one before it survives. Every field on the Zod side is
+  // nullish-with-default, so a payload missing later keys still validates.
+  if (safeCut > 0) {
+    const head = out.slice(0, safeCut).replace(/,\s*$/, '')
+    // `stack` still holds the containers open at the cut point, outermost
+    // first; closing in reverse yields a balanced object.
+    const closers = stack.slice(0, safeStackLen).reverse().join('')
+    if (closers) {
+      return { ok: true, json: head + closers, salvaged: true }
+    }
+  }
   return {
     ok: false,
     reason: `incomplete JSON: model output ended mid-object with ${depth} unclosed brace${depth === 1 ? '' : 's'}${inString ? ' inside an unterminated string' : ''}`,
@@ -1157,6 +1194,13 @@ function parseExtraction(rawText: string): ParseResult {
   const cleaned = rawText.replace(/^```(?:json)?\s*|\s*```$/g, '').trim()
   const scan = scanBalancedJsonObject(cleaned)
   if (!scan.ok) return { ok: false, reason: scan.reason }
+  if (scan.salvaged) {
+    // Worth a line: the window produced records, but the tail of the model's
+    // output was discarded, so this episode is under-extracted rather than
+    // wrong. A rising count here means the output budget or the window size
+    // needs attention.
+    console.warn('[pipeline-b] recovered a truncated extraction payload; trailing items were dropped')
+  }
 
   // Drop trailing commas (`,]` / `,}`) — a common LLM output tic that
   // `JSON.parse` rejects and that carries no semantics.
@@ -1471,6 +1515,12 @@ export async function processEpisode(
     for (let attempt = 1; attempt <= 2 && !windowPayload; attempt++) {
       let rawText = ''
       let truncated = false
+      // Recorded for the failure log: without the stop reason and the token
+      // count, "parse failed" is indistinguishable from "hit the output cap",
+      // and those need opposite fixes. Diagnosing this cost a full round of
+      // instrumentation that the log should have answered directly.
+      let stopReason = 'unset'
+      let outTokens = -1
       try {
         const response = await collectStream(
           deps.provider.stream({
@@ -1502,6 +1552,8 @@ export async function processEpisode(
         // as truncation gets the concision retry instead of the misleading
         // "failed validation" message, which re-runs the same doomed shape.
         truncated = response.stopReason === 'max_tokens' || response.stopReason === 'incomplete'
+        stopReason = String(response.stopReason)
+        outTokens = response.usage?.outputTokens ?? -1
         rawText = response.content
           .filter((b) => b.type === 'text')
           .map((b) => (b.type === 'text' ? b.text : ''))
@@ -1531,7 +1583,9 @@ export async function processEpisode(
         reason = parseRes.reason
       }
       console.warn(
-        `[pipeline-b] extraction ${truncated ? 'truncated' : 'parse failed'} for episode ${episode.id} (window ${wi + 1}/${windows.length}, attempt ${attempt}/2): ${reason}`,
+        `[pipeline-b] extraction ${truncated ? 'truncated' : 'parse failed'} for episode ${episode.id} `
+        + `(window ${wi + 1}/${windows.length}, attempt ${attempt}/2, stop=${stopReason}, `
+        + `out=${outTokens}/${EXTRACTION_MAX_OUTPUT_TOKENS}): ${reason}`,
       )
       if (attempt === 1) {
         // No echo of the bad output — re-anchoring on garbage hurts more than

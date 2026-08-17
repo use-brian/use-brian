@@ -27,7 +27,7 @@
  */
 
 import { Router } from 'express'
-import { createTelegramAdapter, createTelegramApi, verifyTelegramWebhook, validateTelegramCredentials, TELEGRAM_BOT_DOWNLOAD_LIMIT_BYTES } from '@use-brian/channels'
+import { createTelegramAdapter, createTelegramApi, verifyTelegramWebhook, validateTelegramCredentials, describeTelegramDownloadFailure, TELEGRAM_BOT_DOWNLOAD_LIMIT_BYTES } from '@use-brian/channels'
 import type { IncomingMessage, TelegramAdapterConfig, RequireMentionConfig, ChatSeenEvent } from '@use-brian/channels'
 import { findAssistantById, findUserById } from '../db/users.js'
 import { getWorkspaceRoleSystem } from '../db/workspace-store.js'
@@ -1388,8 +1388,20 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     if (!params.voiceTranscription?.enabled) {
       transcribeFailure = TRANSCRIPTION_DISABLED_REASON
     } else {
+      // The download is its OWN try, separate from the transcribe below, so a
+      // Telegram-side failure can never be described in the transcriber's
+      // vocabulary. One shared catch is what shipped `504 Gateway Timeout` to a
+      // user as "transcription timed out" on 2026-08-17. See
+      // docs/architecture/media/transcription.md → "The download leg".
+      let voice: { buffer: Buffer; mime: string } | undefined
       try {
-        const { buffer, mime } = await adapter.downloadVoice(incoming.mediaUrl)
+        voice = await adapter.downloadVoice(incoming.mediaUrl)
+      } catch (err) {
+        console.error('[telegram-byo] voice download failed:', err)
+        transcribeFailure = describeTelegramDownloadFailure(err)
+      }
+      if (voice) try {
+        const { buffer, mime } = voice
         const result = await transcribeFirstAudio(
           [
             {
@@ -1431,9 +1443,10 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
           transcribeFailure = 'the audio was silent or unintelligible'
         }
       } catch (err) {
-        // The download leg (getFile + fetch) throws here; transcription failures
-        // arrive via onFailure. Either way the turn must say so.
-        console.error('[telegram-byo] voice download/transcribe failed:', err)
+        // `transcribeFirstAudio` reports through `onFailure` and does not
+        // throw, so reaching this is a defect in the transcription path itself
+        // — described in ITS vocabulary, never Telegram's.
+        console.error('[telegram-byo] voice transcription threw:', err)
         transcribeFailure = describeTranscriptionFailure(err)
       }
     }

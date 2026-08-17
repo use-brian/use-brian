@@ -204,14 +204,15 @@ describe('[COMP:brain/embedding-store] withClaimedRows', () => {
     }
   })
 
-  it('keys chat history on the provider message time, not the append clock', async () => {
-    await store.withClaimedRows('chat_segment', 10, async () => undefined)
-    for (const claim of claims()) {
-      expect(claim.text).toContain('FROM chat_archive_segments')
-      expect(claim.text).toContain('ORDER BY valid_from ASC')
-      expect(claim.text).toContain("valid_from > now() - INTERVAL '12 months'")
-      expect(claim.text).not.toContain('created_at')
-    }
+  it('refuses chat history, which is embedded in the message store', async () => {
+    // The chat archive lives in its own database and embeds its own corpus,
+    // because it also executes search — keeping both sides of every cosine
+    // comparison behind one embedder makes vector compatibility structural.
+    // Claiming here would query a table this database no longer has.
+    await expect(
+      store.withClaimedRows('chat_segment' as never, 10, async () => undefined),
+    ).rejects.toThrow()
+    expect(claims()).toHaveLength(0)
   })
 
   it('keys a primitive whose row IS the event on created_at', async () => {
@@ -304,7 +305,6 @@ describe('[COMP:brain/embedding-store] withClaimedRows', () => {
       ['workspace_files', 'FROM workspace_files'],
       ['transcript_segment', 'FROM transcript_segments'],
       ['file_segment', 'FROM file_segments'],
-      ['chat_segment', 'FROM chat_archive_segments'],
     ] as const) {
       queries.length = 0
       await store.withClaimedRows(primitive, 10, async () => undefined)

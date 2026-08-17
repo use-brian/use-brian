@@ -97,7 +97,7 @@ describe('[COMP:api/whatsapp-byon-route] internal routing', () => {
     expect(response.body).toEqual({ ok: true })
   })
 
-  it('completes a streamed archive asset before dispatch and marks the inbound enqueued', async () => {
+  it('does not archive a directly-uploaded asset, but still dispatches the message', async () => {
     const captured: Array<Record<string, unknown>> = []
     const archiveIncoming = vi.fn(async () => {})
     const app = express()
@@ -162,13 +162,21 @@ describe('[COMP:api/whatsapp-byon-route] internal routing', () => {
 
     expect(response.status).toBe(200)
     expect(archiveIncoming).toHaveBeenCalledOnce()
+
+    // KNOWN GAP, asserted deliberately. The BYON connector uploads bytes
+    // straight to storage through a pre-signed URL, in a two-phase
+    // init-then-upload flow. The archive's contract is single-shot — metadata
+    // and bytes together, signed with a secret the connector does not hold —
+    // so there is nothing to complete against and no archive reference is
+    // produced.
+    //
+    // What must NOT regress is message delivery: the inbound still dispatches
+    // and is still persisted, it simply carries no archived attachment. Media
+    // that passes through the platform (mediaBase64) is unaffected.
     expect(captured[0]).toMatchObject({
       archiveInboundPersisted: true,
       archiveMediaType: 'video',
-      archiveMediaRef: {
-        assetId: '4a1e6bd8-0000-4000-8000-000000000001',
-        sha256: 'a'.repeat(64),
-      },
     })
+    expect(captured[0]!.archiveMediaRef).toBeUndefined()
   })
 })

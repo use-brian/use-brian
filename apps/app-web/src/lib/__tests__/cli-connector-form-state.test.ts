@@ -26,8 +26,12 @@ describe("[COMP:web/settings-connectors] CLI connector form state", () => {
       "{showCliForm === rid && (",
       "{/* Company mailbox (imap) connected card",
     );
+    // The settings body moved into `connectorSettingsBody`, the renderer BOTH
+    // detail panels call, so the per-block `expandTab === "settings"` gate now
+    // lives at the two call sites instead of on the block itself. The draft
+    // separation this test pins is unchanged.
     const settingsForm = section(
-      '{expandTab === "settings" && sel.id === "cli"',
+      '{sel.id === "cli" && !wsOwned && sel.connectorInstanceId && (',
       "{/* Google Calendar settings */}",
     );
 

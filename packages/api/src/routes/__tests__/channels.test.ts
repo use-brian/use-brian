@@ -194,6 +194,35 @@ describe('[COMP:api/channels-route] PATCH channel', () => {
     expect(res.body.channel.displayName).toBe('Renamed')
   })
 
+  it('403s a plain member renaming the channel', async () => {
+    vi.mocked(getChannelForUser).mockResolvedValue(makeChannel())
+    const res = await request(buildApp({ role: 'member' }))
+      .patch('/api/workspaces/ws-1/channels/chan-1')
+      .send({ displayName: 'Renamed' })
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe('rename_requires_admin')
+    expect(updateChannel).not.toHaveBeenCalled()
+  })
+
+  it('lets a plain member still edit clearance and capabilities', async () => {
+    vi.mocked(getChannelForUser).mockResolvedValue(makeChannel())
+    vi.mocked(updateChannel).mockResolvedValue(makeChannel({ clearance: 'public' }))
+    const res = await request(buildApp({ role: 'member' }))
+      .patch('/api/workspaces/ws-1/channels/chan-1')
+      .send({ clearance: 'public' })
+    expect(res.status).toBe(200)
+  })
+
+  it('lets the workspace owner rename the channel', async () => {
+    vi.mocked(getChannelForUser).mockResolvedValue(makeChannel())
+    vi.mocked(updateChannel).mockResolvedValue(makeChannel({ displayName: 'Renamed' }))
+    const res = await request(buildApp({ role: 'owner' }))
+      .patch('/api/workspaces/ws-1/channels/chan-1')
+      .send({ displayName: 'Renamed' })
+    expect(res.status).toBe(200)
+    expect(res.body.channel.displayName).toBe('Renamed')
+  })
+
   it('403s when RLS rejects the write (clearance raised above the user\'s)', async () => {
     vi.mocked(getChannelForUser).mockResolvedValue(makeChannel())
     vi.mocked(updateChannel).mockResolvedValue(null)

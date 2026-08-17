@@ -82,6 +82,7 @@ export {
 
 export {
   createWorkflowTools,
+  latestWorkflowProposalReceipt,
   type WorkflowToolDeps,
   type WorkflowToolEvent,
 } from './tools.js'
@@ -172,4 +173,3 @@ export {
   type GenerateWorkflowTitleParams,
   type GenerateWorkflowTitleResult,
 } from './auto-title.js'
-

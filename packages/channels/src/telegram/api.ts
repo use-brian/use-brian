@@ -19,16 +19,52 @@ export const TELEGRAM_BOT_COMMANDS = [
   { command: 'ask', description: 'Ask Brian anything' },
 ] as const
 
-// Retry tuning — see docs/architecture/channels/adapter-pattern.md § "Rate-limit retry".
+// Retry tuning — see docs/architecture/channels/adapter-pattern.md § "Transient retry".
 // Cap honours the chat-lock's held PG connection: waiting much longer would
 // stall the pool for no user-visible benefit.
 const MAX_RETRY_ATTEMPTS = 3
 const DEFAULT_RETRY_DELAY_MS = 1000
 const MAX_RETRY_DELAY_MS = 10_000
 
+// A 5xx / socket reset carries no `retry_after`, so the backoff is ours to
+// pick. Kept much shorter than the rate-limit delay for the same reason the
+// cap above exists: an inbound webhook holds a chat-lock connection for the
+// whole download, so ~2s of total patience is the budget. Delay per attempt is
+// `TRANSIENT_RETRY_DELAY_MS * attempt` (500ms, then 1000ms).
+const TRANSIENT_RETRY_DELAY_MS = 500
+
 // Typing keepalives: retrying a stale indicator wastes rate budget and stalls
 // the query-loop event handler. The next 4s cycle retries naturally.
 const METHODS_SKIP_RETRY = new Set(['sendChatAction'])
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/**
+ * Is this failure worth another attempt?
+ *
+ * A 5xx is Telegram's own infrastructure, not our request: on 2026-08-17 a
+ * `getFile` came back `504 Gateway Timeout` and, because only 429 was retried,
+ * the voice note behind it was lost outright — the same file downloaded fine
+ * minutes later. A 4xx (other than 429) is a verdict on the request and must
+ * NOT be replayed.
+ */
+function isTransientStatus(status: number | undefined): boolean {
+  return status !== undefined && status >= 500
+}
+
+/**
+ * undici surfaces a connection reset / DNS blip as an opaque
+ * `TypeError: fetch failed`, with the real cause nested. Flatten it so the log
+ * line and the `TelegramApiError.description` say what actually happened
+ * instead of "fetch failed".
+ */
+function transportMessage(err: unknown): string {
+  if (!(err instanceof Error)) return String(err)
+  const cause = (err as { cause?: unknown }).cause
+  const causeMsg = cause instanceof Error ? cause.message : undefined
+  const code = (cause as { code?: string } | undefined)?.code
+  return [err.message, causeMsg, code ? `(${code})` : undefined].filter(Boolean).join(' - ')
+}
 
 type TelegramResponse<T> = {
   ok: boolean
@@ -63,6 +99,51 @@ export function isTelegramThreadNotFoundError(err: unknown): boolean {
     && err.description.toLowerCase().includes('message thread not found')
 }
 
+/**
+ * A short, user-facing reason for a failure on the inbound *download* leg
+ * (`getFile` + `downloadFile`), carrying Telegram's own status code.
+ *
+ * This exists because a download failure used to be described by the
+ * transcription describer. Telegram's `504 Gateway Timeout` matched that
+ * function's `/timeout|abort/i` branch and came out as "transcription timed
+ * out", so on 2026-08-17 an assistant told a user their voice note was too
+ * long for the transcriber and asked them to re-record something shorter —
+ * about a file the transcriber had never been handed. A vendor's wording must
+ * never fall through into another layer's vocabulary; the code is what makes
+ * the difference legible, so it is always named.
+ *
+ * Callers pass the raw error: anything that is not a `TelegramApiError` still
+ * gets an honest download-leg sentence rather than being re-described as a
+ * model failure.
+ */
+export function describeTelegramDownloadFailure(err: unknown): string {
+  if (!(err instanceof TelegramApiError)) {
+    const message = err instanceof Error ? err.message : String(err)
+    return `the file could not be downloaded from Telegram: ${message.slice(0, 200)}`
+  }
+
+  const code = err.errorCode
+  const detail = `Telegram API error ${code ?? 'unknown'}${err.description ? `: ${err.description}` : ''}`
+
+  if (isTransientStatus(code)) {
+    return (
+      `Telegram's own file service failed (${detail}) after ${MAX_RETRY_ATTEMPTS} attempts, ` +
+      'so the file never reached the transcriber. This is a temporary Telegram fault, not a ' +
+      'problem with the recording - ask the user to send it again'
+    )
+  }
+  if (code === 429) {
+    return `Telegram is rate-limiting this bot (${detail}), so the file could not be fetched. Ask the user to send it again shortly`
+  }
+  if (err.description && /too big/i.test(err.description)) {
+    return `the file is larger than Telegram's ${TELEGRAM_BOT_DOWNLOAD_LIMIT_BYTES / (1024 * 1024)} MB bot download limit (${detail}), so a bot cannot fetch it at all`
+  }
+  if (code === 400 || code === 404) {
+    return `Telegram no longer has that file reference (${detail}). Ask the user to send it again`
+  }
+  return `the file could not be downloaded from Telegram (${detail})`
+}
+
 export function createTelegramApi(options: TelegramApiOptions) {
   const base = options.baseUrl ?? `https://api.telegram.org/bot${options.token}`
   // Telegram serves file downloads from a different subpath than the bot API.
@@ -81,25 +162,55 @@ export function createTelegramApi(options: TelegramApiOptions) {
     const maxAttempts = allowRetry ? MAX_RETRY_ATTEMPTS : 1
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const res = await fetch(`${base}/${method}`, makeInit())
+      let res: Response
+      try {
+        res = await fetch(`${base}/${method}`, makeInit())
+      } catch (err) {
+        // No response exists, so nothing was consumed and a replay is safe.
+        if (allowRetry && attempt < maxAttempts) {
+          console.warn(
+            `[telegram-api] ${method} transport failure, retrying in ${TRANSIENT_RETRY_DELAY_MS * attempt}ms ` +
+            `(attempt ${attempt}/${maxAttempts}): ${transportMessage(err)}`,
+          )
+          await sleep(TRANSIENT_RETRY_DELAY_MS * attempt)
+          continue
+        }
+        throw new TelegramApiError(method, transportMessage(err), undefined)
+      }
 
-      const data = await res.json() as TelegramResponse<T>
+      // A 5xx from Telegram's edge is not always JSON. `res.json()` would throw
+      // a SyntaxError naming the stray character, which then reaches the caller
+      // as the entire explanation of the failure.
+      let data: TelegramResponse<T>
+      try {
+        data = await res.json() as TelegramResponse<T>
+      } catch {
+        data = { ok: false, description: res.statusText || 'non-JSON response', error_code: res.status }
+      }
       if (data.ok) return data.result as T
 
-      const isRateLimited = data.error_code === 429 || res.status === 429
-      if (allowRetry && isRateLimited && attempt < maxAttempts) {
+      // `error_code` is Telegram's; `res.status` is the transport's. Prefer
+      // Telegram's and fall back, so the code we surface is never `undefined`
+      // just because the body was malformed.
+      const status = data.error_code ?? res.status
+      const isRateLimited = status === 429
+
+      if (allowRetry && (isRateLimited || isTransientStatus(status)) && attempt < maxAttempts) {
         const retryAfterSec = data.parameters?.retry_after
-        const delayMs = typeof retryAfterSec === 'number'
-          ? Math.min(retryAfterSec * 1000, MAX_RETRY_DELAY_MS)
-          : DEFAULT_RETRY_DELAY_MS
+        const delayMs = isRateLimited
+          ? (typeof retryAfterSec === 'number'
+              ? Math.min(retryAfterSec * 1000, MAX_RETRY_DELAY_MS)
+              : DEFAULT_RETRY_DELAY_MS)
+          : TRANSIENT_RETRY_DELAY_MS * attempt
         console.warn(
-          `[telegram-api] ${method} rate-limited, retrying in ${delayMs}ms (attempt ${attempt}/${maxAttempts - 1})`,
+          `[telegram-api] ${method} failed with ${status}${data.description ? ` (${data.description})` : ''}, ` +
+          `retrying in ${delayMs}ms (attempt ${attempt}/${maxAttempts})`,
         )
-        await new Promise((resolve) => setTimeout(resolve, delayMs))
+        await sleep(delayMs)
         continue
       }
 
-      throw new TelegramApiError(method, data.description, data.error_code)
+      throw new TelegramApiError(method, data.description, status)
     }
 
     // Exhausted retries — the final attempt already threw; this line is unreachable
@@ -270,12 +381,42 @@ export function createTelegramApi(options: TelegramApiOptions) {
      * with them (e.g. transcribe audio, parse a document).
      */
     async downloadFile(filePath: string): Promise<Buffer> {
-      const res = await fetch(`${fileBase}/${filePath}`)
-      if (!res.ok) {
-        throw new Error(`Telegram downloadFile failed (HTTP ${res.status})`)
+      // Not routed through `perform` — this host returns raw bytes, not the
+      // `{ ok, result }` envelope — but it needs the same transient patience:
+      // it is the second half of every inbound voice note, and a blip here
+      // loses the content just as completely as one on `getFile`. Throws a
+      // `TelegramApiError` so callers can tell a Telegram fault from ours.
+      for (let attempt = 1; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
+        let res: Response
+        try {
+          res = await fetch(`${fileBase}/${filePath}`)
+        } catch (err) {
+          if (attempt < MAX_RETRY_ATTEMPTS) {
+            console.warn(
+              `[telegram-api] downloadFile transport failure, retrying in ${TRANSIENT_RETRY_DELAY_MS * attempt}ms ` +
+              `(attempt ${attempt}/${MAX_RETRY_ATTEMPTS}): ${transportMessage(err)}`,
+            )
+            await sleep(TRANSIENT_RETRY_DELAY_MS * attempt)
+            continue
+          }
+          throw new TelegramApiError('downloadFile', transportMessage(err), undefined)
+        }
+
+        if (res.ok) return Buffer.from(await res.arrayBuffer())
+
+        if ((isTransientStatus(res.status) || res.status === 429) && attempt < MAX_RETRY_ATTEMPTS) {
+          console.warn(
+            `[telegram-api] downloadFile failed with ${res.status}, ` +
+            `retrying in ${TRANSIENT_RETRY_DELAY_MS * attempt}ms (attempt ${attempt}/${MAX_RETRY_ATTEMPTS})`,
+          )
+          await sleep(TRANSIENT_RETRY_DELAY_MS * attempt)
+          continue
+        }
+
+        throw new TelegramApiError('downloadFile', res.statusText || `HTTP ${res.status}`, res.status)
       }
-      const arrayBuffer = await res.arrayBuffer()
-      return Buffer.from(arrayBuffer)
+
+      throw new TelegramApiError('downloadFile', 'retry budget exhausted', undefined)
     },
   }
 }

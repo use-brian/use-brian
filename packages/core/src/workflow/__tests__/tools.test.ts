@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { z } from 'zod'
-import { createWorkflowTools, TRIGGER_INPUT_DESCRIPTION, type WorkflowToolEvent } from '../tools.js'
+import { createWorkflowTools, latestWorkflowProposalReceipt, TRIGGER_INPUT_DESCRIPTION, type WorkflowToolEvent } from '../tools.js'
 import { WORKFLOW_TRIGGER_KINDS, WORKFLOW_EVENT_SOURCE_TYPES, STEP_TYPE_VALUES } from '../schemas.js'
 import { TASK_LIFECYCLE_ACTIONS } from '../task-event-trigger.js'
 import type {
@@ -15,6 +15,7 @@ import { buildTool, type Tool, type ToolContext } from '../../tools/types.js'
 import type { ConsultRequest, ConsultResponse, ConsultTransport } from '../../a2a/types.js'
 import type { JobStore, ScheduledJob } from '../../scheduling/types.js'
 import type { DeliverToChannel } from '../executor.js'
+import { loadBuiltinSkills } from '../../skills/loader.js'
 
 const WORKSPACE_ID = '00000000-0000-0000-0000-000000000001'
 const PRIMARY_ASSISTANT_ID = '00000000-0000-0000-0000-000000000002'
@@ -300,6 +301,7 @@ function makeAllTools(opts?: {
   >
   listAuthorableSkills?: (userId: string, workspaceId: string) => Promise<Array<{ slug: string; name: string }>>
   resolveViewWorkspace?: (args: { userId: string; viewId: string }) => Promise<string | null>
+  allowLegacyDirectWrites?: boolean
 }) {
   const events: WorkflowToolEvent[] = []
   const stores = fakeStores()
@@ -328,6 +330,7 @@ function makeAllTools(opts?: {
     listSlackChannels: opts?.listSlackChannels,
     listSlackMembers: opts?.listSlackMembers,
     listAuthorableSkills: opts?.listAuthorableSkills,
+    allowLegacyDirectWrites: opts?.allowLegacyDirectWrites ?? true,
   })
   return { tools, stores, events, jobStore }
 }
@@ -467,6 +470,7 @@ describe('[COMP:workflow/tools] inline schedule trigger', () => {
   })
 
   it('a dropped targetViewId is surfaced as targetViewWarning on the success payload (create + update)', async () => {
+    const PAGE_ELSEWHERE = '11111111-2222-4333-8444-555555555555'
     // The page link is non-fatal (a bad page id must never fail an otherwise
     // valid schedule), but silently dropping it made a partial success read
     // as a total one: `targetViewId: null` and the model told the user the
@@ -477,26 +481,26 @@ describe('[COMP:workflow/tools] inline schedule trigger', () => {
         name: 'Page keeper',
         definition: ASSISTANT_DEF,
         trigger: { kind: 'schedule', schedule: { type: 'daily', time: '07:00' } },
-        targetViewId: 'page-elsewhere',
+        targetViewId: PAGE_ELSEWHERE,
       },
       makeContext(),
     )
     expect(created.isError).toBeFalsy()
     const data = created.data as Record<string, unknown>
     expect(data.targetViewId).toBeNull()
-    expect(String(data.targetViewWarning)).toContain('page-elsewhere')
+    expect(String(data.targetViewWarning)).toContain(PAGE_ELSEWHERE)
     expect(String(data.targetViewWarning)).toContain('NOT linked')
 
     const up = await tools.updateWorkflow.execute(
       {
         workflowId: data.id as string,
         trigger: { kind: 'schedule', schedule: { type: 'daily', time: '08:00' } },
-        targetViewId: 'page-elsewhere',
+        targetViewId: PAGE_ELSEWHERE,
       },
       makeContext(),
     )
     expect(up.isError).toBeFalsy()
-    expect(String((up.data as Record<string, unknown>).targetViewWarning)).toContain('page-elsewhere')
+    expect(String((up.data as Record<string, unknown>).targetViewWarning)).toContain(PAGE_ELSEWHERE)
   })
 
   it('updateWorkflow attaches a schedule trigger (workflow-trigger row) and clears it on manual', async () => {
@@ -763,6 +767,86 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     expect(data.proposedName).toBe('X')
     expect(data.summary).toContain('echo')
     expect(data.warnings).toEqual([])
+  })
+
+  it('applies the exact proposed create/update payload through an opaque receipt', async () => {
+    const { tools, stores } = makeAllTools({ allowLegacyDirectWrites: false })
+    const definition: WorkflowDefinition = {
+      startStepId: 's1',
+      steps: [{ id: 's1', type: 'assistant_call', target: { assistantId: 'primary' }, prompt: 'Create the block.' }],
+    }
+    const proposed = await tools.proposeWorkflow.execute(
+      { name: 'Calendar block', definition, targetViewId: null },
+      makeContext(),
+    )
+    const proposal = proposed.data as { proposalReceipt: string; proposedAction: string; confirmationHint: string }
+
+    expect(proposal.proposedAction).toBe('create')
+    expect(proposal.confirmationHint).toContain('call createWorkflow with {}')
+    expect(proposal.confirmationHint).toContain('listAssistants')
+    expect(tools.createWorkflow.inputSchema.safeParse({}).success).toBe(true)
+    expect(tools.createWorkflow.inputSchema.safeParse({ name: 'Calendar block', definition }).success).toBe(false)
+    const raw = await tools.createWorkflow.execute({ name: 'Calendar block', definition }, makeContext())
+    expect(raw.isError).toBe(true)
+    expect(raw.data).toContain('proposalReceipt is required')
+
+    const recoveredReceipt = latestWorkflowProposalReceipt([
+      { content: [{ type: 'tool_result', toolUseId: 'proposal-1', name: 'proposeWorkflow', content: JSON.stringify(proposed.data) }] },
+    ])
+    expect(recoveredReceipt).toBe(proposal.proposalReceipt)
+    const serializedProposal = JSON.stringify(proposed.data)
+    const truncatedProposal = serializedProposal.slice(0, serializedProposal.indexOf('"proposedAction"'))
+    expect(latestWorkflowProposalReceipt([
+      { content: [{ type: 'tool_result', toolUseId: 'proposal-truncated', name: 'proposeWorkflow', content: truncatedProposal }] },
+    ])).toBe(proposal.proposalReceipt)
+    const confirmationContext = makeContext({ workflowProposalReceipt: recoveredReceipt })
+    const created = await tools.createWorkflow.execute({}, confirmationContext)
+    expect(created.isError).toBeFalsy()
+    expect(confirmationContext.workflowProposalReceipt).toBeUndefined()
+    const workflowId = (created.data as { id: string }).id
+    expect(stores.workflows.get(workflowId)?.definition.steps[0]).toMatchObject({
+      target: { assistantId: 'primary' },
+      prompt: 'Create the block.',
+    })
+
+    const editedDefinition: WorkflowDefinition = {
+      startStepId: 's1',
+      steps: [{ id: 's1', type: 'assistant_call', target: { assistantId: 'primary' }, prompt: 'Create the approved block.' }],
+    }
+    const proposedEdit = await tools.proposeWorkflow.execute(
+      { workflowId, name: 'Calendar block', definition: editedDefinition },
+      makeContext(),
+    )
+    const editProposal = proposedEdit.data as { proposalReceipt: string; proposedAction: string }
+    expect(editProposal.proposedAction).toBe('update')
+    const updateContext = makeContext({
+      workflowProposalReceipt: latestWorkflowProposalReceipt([
+        { content: [{ type: 'tool_result', toolUseId: 'proposal-2', name: 'proposeWorkflow', content: JSON.stringify(proposedEdit.data) }] },
+      ]),
+    })
+    const updated = await tools.updateWorkflow.execute({}, updateContext)
+    expect(updated.isError).toBeFalsy()
+    expect(stores.workflows.get(workflowId)?.definition.steps[0]).toMatchObject({
+      target: { assistantId: 'primary' },
+      prompt: 'Create the approved block.',
+    })
+
+    const changedReceipt = `${proposal.proposalReceipt.slice(0, -1)}x`
+    const changed = await tools.createWorkflow.execute({}, makeContext({ workflowProposalReceipt: changedReceipt }))
+    expect(changed.isError).toBe(true)
+    expect(changed.data).toContain('receipt changed after validation')
+
+    expect(latestWorkflowProposalReceipt([
+      { content: [{ type: 'tool_result', toolUseId: 'proposal-1', name: 'proposeWorkflow', content: JSON.stringify(proposed.data) }] },
+      { content: [{ type: 'tool_result', toolUseId: 'create-1', name: 'createWorkflow', content: JSON.stringify(created.data) }] },
+    ])).toBeUndefined()
+
+    expect(tools.createWorkflow.description).toContain('call it immediately with {}')
+    expect(tools.updateWorkflow.description).toContain('runtime recovers the exact validated receipt')
+
+    const builder = loadBuiltinSkills().find((skill) => skill.id === 'workflow-builder')
+    expect(builder?.content).toMatch(/Treat approval as continuation, not a restart/)
+    expect(builder?.content).toMatch(/call the matching write tool with no arguments/)
   })
 
   it('proposeWorkflow surfaces the researchMode advisory (parity with the REST path)', async () => {
@@ -1186,6 +1270,7 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
       async execute() { return { data: 'nope', isError: true } },
     })
     const tools = createWorkflowTools({
+      allowLegacyDirectWrites: true,
       workflowStore: stores.workflowStore,
       runStore: stores.runStore,
       executorDeps: {
@@ -1433,6 +1518,7 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     const stores = fakeStores()
     const longText = 'x'.repeat(2000)
     const tools = createWorkflowTools({
+      allowLegacyDirectWrites: true,
       workflowStore: stores.workflowStore,
       runStore: stores.runStore,
       executorDeps: {
@@ -1474,6 +1560,7 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
       },
     }
     const tools = createWorkflowTools({
+      allowLegacyDirectWrites: true,
       workflowStore: stores.workflowStore,
       runStore: stores.runStore,
       executorDeps: {
@@ -1724,6 +1811,47 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     expect(stores.workflows.get(wf.id)?.definition.steps[0]).not.toHaveProperty('deliver')
   })
 
+  it('the deliver-strip guard also holds on the receipt path, and confirmDeliveryRemoval travels in the receipt', async () => {
+    // Receipt-only mode (production): updateWorkflow takes no arguments, so
+    // the confirmation flag has to ride proposeWorkflow's receipt.
+    const { tools, stores } = makeAllTools({ allowLegacyDirectWrites: false })
+    const DELIVERING_DEF: WorkflowDefinition = {
+      startStepId: 'post',
+      steps: [
+        { id: 'post', type: 'assistant_call', target: { assistantId: 'primary' }, prompt: 'Compose the digest.', deliver: { channelType: 'slack', channelId: 'C0TESTCC333' } },
+      ],
+    }
+    const strippedDef: WorkflowDefinition = {
+      startStepId: 'post',
+      steps: [{ id: 'post', type: 'assistant_call', target: { assistantId: 'primary' }, prompt: 'Compose the digest and post it.' }],
+    }
+    const ctx = makeContext()
+    const proposed = await tools.proposeWorkflow.execute({ name: 'standup', definition: DELIVERING_DEF }, ctx)
+    expect(proposed.isError).toBeFalsy()
+    const created = await tools.createWorkflow.execute({}, ctx)
+    expect(created.isError).toBeFalsy()
+    const wf = created.data as { id: string }
+
+    // Unconfirmed strip: proposal is fine, the write is blocked with the receipt remedy.
+    const strip = await tools.proposeWorkflow.execute({ workflowId: wf.id, name: 'standup', definition: strippedDef }, ctx)
+    expect(strip.isError).toBeFalsy()
+    const blocked = await tools.updateWorkflow.execute({}, ctx)
+    expect(blocked.isError).toBe(true)
+    const errors = (blocked.data as { errors: string[] }).errors
+    expect(errors.some((e) => e.includes('proposeWorkflow') && e.includes('confirmDeliveryRemoval: true'))).toBe(true)
+    expect(stores.workflows.get(wf.id)?.definition.steps[0]).toHaveProperty('deliver')
+
+    // Confirmed strip: the flag rides the receipt into updateWorkflow.
+    const confirmedProposal = await tools.proposeWorkflow.execute(
+      { workflowId: wf.id, name: 'standup', definition: strippedDef, confirmDeliveryRemoval: true },
+      ctx,
+    )
+    expect(confirmedProposal.isError).toBeFalsy()
+    const applied = await tools.updateWorkflow.execute({}, ctx)
+    expect(applied.isError).toBeFalsy()
+    expect(stores.workflows.get(wf.id)?.definition.steps[0]).not.toHaveProperty('deliver')
+  })
+
   it('updateWorkflow does not block when at least one deliver binding survives the edit', async () => {
     const { tools } = makeAllTools()
     const TWO_DELIVER_DEF: WorkflowDefinition = {
@@ -1920,6 +2048,7 @@ describe('[COMP:workflow/tools] page anchor authoring checks', () => {
     )
     const wf = created.data as { id: string }
     const toolsWithJobs = createWorkflowTools({
+      allowLegacyDirectWrites: true,
       workflowStore: stores.workflowStore,
       runStore: stores.runStore,
       executorDeps: {
