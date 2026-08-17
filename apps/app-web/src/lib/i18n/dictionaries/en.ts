@@ -945,6 +945,7 @@ export const en = {
     copiedAsMarkdown: "Copied as Markdown",
     exportMarkdown: "Export as Markdown",
     exportWord: "Export as Word",
+    exportPdf: "Export as PDF",
     exportFailed: "Export failed: {message}",
     copyFailed: "Copy failed: {message}",
     importFile: "Import file",

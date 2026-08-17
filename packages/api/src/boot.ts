@@ -3388,6 +3388,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       entityLinks: entityLinksStore,
       readCachedFile: (id, ctx) => fileStore.get(id, ctx),
       resolvePolicy: resolveFilesToolPolicy,
+      // renderPdf({ pageId }): read the live merged doc page (RLS by userId)
+      // and hand its Block[] to the PDF spoke. Same reader the doc tools use.
+      readDocPage: async (userId, pageId) => {
+        const current = await docPageStore.getVersionedPage(userId, pageId)
+        return current ? { title: current.title, page: current.page } : null
+      },
       onEvent: (evt, ctx) => {
         const base = { userId: ctx.userId, assistantId: ctx.assistantId, sessionId: ctx.sessionId, channelType: ctx.channelType }
         if (evt.type === 'file_created') {
@@ -3411,6 +3417,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     allTools.set('fileDelete', fileTools.fileDelete)
     allTools.set('saveFileToBrain', fileTools.saveFileToBrain)
     allTools.set('sendFile', fileTools.sendFile)
+    allTools.set('renderPdf', fileTools.renderPdf)
     brainFileTools = {
       fileWrite: fileTools.fileWrite,
       fileAppend: fileTools.fileAppend,

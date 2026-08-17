@@ -52,6 +52,9 @@ import {
   pageToMarkdown,
   markdownToBlocks,
   blocksToDocx,
+  defaultPdfRenderer,
+  PdfRenderError,
+  type PdfRenderer,
   parseDocxToMarkdown,
   sanitize,
   softDelete,
@@ -124,6 +127,12 @@ export type ViewsRouteOptions = {
    */
   provider?: LLMProvider
   docPageStore?: DocPageStore
+  /**
+   * PDF spoke for `GET /views/:id/export?format=pdf` (doc-conversion.md →
+   * "PDF spoke"). Defaults to the real LibreOffice-backed renderer; tests
+   * inject a fake so the route is testable without the binary.
+   */
+  pdfRenderer?: PdfRenderer
   /**
    * Scheduled-jobs store (migration 229). When wired, `GET /views/:id`
    * attaches the page's `scheduledJobs` — the owner's enabled jobs that
@@ -268,7 +277,7 @@ function badRequest(res: import('express').Response, message: string): void {
  *  filename; fall back to 'document' when nothing usable remains. */
 function safeFilename(title: string): string {
   // eslint-disable-next-line no-control-regex
-  const cleaned = title.replace(/[\\/?%*:|"<> -]/g, '').trim().slice(0, 100)
+  const cleaned = title.replace(/[\\/?%*:|"<>\x00-\x1f]/g, '').trim().slice(0, 100)
   return cleaned || 'document'
 }
 
@@ -1821,16 +1830,19 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
   const DOCX_MIME =
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
 
-  // GET /views/:id/export?format=md|docx — serialize the live page to a
+  // GET /views/:id/export?format=md|docx|pdf — serialize the live page to a
   // downloadable file. Prefers the merged Yjs page (so a human's edits are
-  // included); falls back to the frozen `saved_views.page`.
+  // included); falls back to the frozen `saved_views.page`. `pdf` runs the
+  // doc-conversion PDF spoke (Block[] → .docx → headless LibreOffice) and
+  // answers 503 `pdf_unavailable` when the deployment has no renderer —
+  // never a blank file.
   router.get('/views/:id/export', async (req, res) => {
     const userId = (req as { userId?: string }).userId
     if (!userId) return unauthorized(res)
 
     const format = String(req.query.format ?? 'md').toLowerCase()
-    if (format !== 'md' && format !== 'docx') {
-      return badRequest(res, "format must be 'md' or 'docx'")
+    if (format !== 'md' && format !== 'docx' && format !== 'pdf') {
+      return badRequest(res, "format must be 'md', 'docx', or 'pdf'")
     }
 
     const view = await opts.savedViewStore.getById(userId, req.params.id)
@@ -1848,6 +1860,22 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
       res.setHeader('Content-Type', 'text/markdown; charset=utf-8')
       res.setHeader('Content-Disposition', `attachment; filename="${filename}.md"`)
       return res.send(md)
+    }
+    if (format === 'pdf') {
+      try {
+        const rendered = await (opts.pdfRenderer ?? defaultPdfRenderer).fromPage(page, { title })
+        res.setHeader('Content-Type', 'application/pdf')
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}.pdf"`)
+        res.setHeader('X-Pdf-Page-Count', String(rendered.pageCount))
+        return res.send(Buffer.from(rendered.bytes.buffer, rendered.bytes.byteOffset, rendered.bytes.byteLength))
+      } catch (err) {
+        if (err instanceof PdfRenderError) {
+          console.warn(`[views/export] pdf ${err.code}:`, err.cause ?? err.message)
+          res.status(err.code === 'timeout' ? 504 : 503).json({ error: err.message, code: err.code === 'converter_unavailable' ? 'pdf_unavailable' : `pdf_${err.code}` })
+          return
+        }
+        throw err
+      }
     }
     // docx
     const buf = await blocksToDocx(page, { title })

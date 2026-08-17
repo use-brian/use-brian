@@ -48,6 +48,7 @@ export * from './markdown.js'
 export * from './to-markdown.js'
 export * from './rich-text.js'
 export * from './convert/to-docx.js'
+export * from './convert/to-pdf.js'
 
 // Page templates — Notion-style starter layouts shared by the editor slash
 // menu and the brain-MCP template tools. See doc-templates.md.

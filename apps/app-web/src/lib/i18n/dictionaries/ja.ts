@@ -852,6 +852,7 @@ export const ja: Dictionary = {
     copiedAsMarkdown: "Markdown をコピーしました",
     exportMarkdown: "Markdown でエクスポート",
     exportWord: "Word でエクスポート",
+    exportPdf: "PDF でエクスポート",
     exportFailed: "エクスポートに失敗しました: {message}",
     copyFailed: "コピーに失敗しました: {message}",
     importFile: "ファイルをインポート",

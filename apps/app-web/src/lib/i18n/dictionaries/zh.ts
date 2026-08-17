@@ -841,6 +841,7 @@ export const zh: Dictionary = {
     copiedAsMarkdown: "已複製為 Markdown",
     exportMarkdown: "匯出為 Markdown",
     exportWord: "匯出為 Word",
+    exportPdf: "匯出為 PDF",
     exportFailed: "匯出失敗：{message}",
     copyFailed: "複製失敗：{message}",
     importFile: "匯入檔案",
