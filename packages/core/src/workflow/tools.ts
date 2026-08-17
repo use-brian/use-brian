@@ -149,6 +149,17 @@ export type WorkflowToolDeps = {
    */
   isKnownTool?: (toolName: string) => boolean
   /**
+   * Authoring-time exact lookup against the scoped runtime registry. Unlike
+   * `isKnownTool`, this resolves connected custom HTTP/CLI tools for the
+   * workflow's workspace and acting assistant.
+   */
+  resolveKnownWorkflowTools?: (args: {
+    userId: string
+    workspaceId: string
+    assistantId: string
+    toolNames: string[]
+  }) => Promise<string[]>
+  /**
    * Scheduling substrate — lets the authoring tools attach a schedule trigger
    * in one call (scheduling-authoring-unification). `jobStore` + `resolvePrimary`
    * back the workflow-trigger row; the delivery resolvers port the reminder
@@ -395,7 +406,11 @@ function summarize(def: WorkflowDefinition): string {
 
 function warningsFor(
   def: WorkflowDefinition,
-  opts: { phaseBActive: boolean; isKnownTool?: (name: string) => boolean },
+  opts: {
+    phaseBActive: boolean
+    isKnownTool?: (name: string) => boolean
+    runtimeKnownToolNames?: ReadonlySet<string>
+  },
 ): string[] {
   const warnings: string[] = []
   for (const step of def.steps) {
@@ -403,7 +418,12 @@ function warningsFor(
     // `tool_not_found` / hallucinated-tool failure class (prod: `search`).
     // Skipped when the registry check is unavailable. A connector action is
     // not a built-in, so the message stays accurate for that case too.
-    if (step.type === 'tool_call' && opts.isKnownTool && !opts.isKnownTool(step.toolName)) {
+    if (
+      step.type === 'tool_call'
+      && opts.isKnownTool
+      && !opts.isKnownTool(step.toolName)
+      && !opts.runtimeKnownToolNames?.has(step.toolName)
+    ) {
       warnings.push(
         `Step "${step.id}" calls tool "${step.toolName}", which is not a built-in tool. The run fails with \`tool_not_found\` unless it is a connector action whose connector is connected in this workspace. Built-in brain search is \`searchBrain\`; web search / fetch is \`mcp_search\`. Double-check the tool name.`,
       )
@@ -477,6 +497,37 @@ function warningsFor(
     }
   }
   return warnings
+}
+
+async function runtimeKnownToolNames(
+  def: WorkflowDefinition,
+  context: ToolContext,
+  deps: Pick<WorkflowToolDeps, 'isKnownTool' | 'resolveKnownWorkflowTools' | 'resolvePrimary'>,
+): Promise<Set<string>> {
+  if (!context.workspaceId || !deps.resolveKnownWorkflowTools || !deps.resolvePrimary) {
+    return new Set()
+  }
+  const toolNames = [...new Set(def.steps.flatMap((step) => (
+    step.type === 'tool_call'
+    && (!deps.isKnownTool || !deps.isKnownTool(step.toolName))
+      ? [step.toolName]
+      : []
+  )))]
+  if (toolNames.length === 0) return new Set()
+
+  try {
+    const assistantId = await deps.resolvePrimary(context.workspaceId)
+    if (!assistantId) return new Set()
+    return new Set(await deps.resolveKnownWorkflowTools({
+      userId: context.userId,
+      workspaceId: context.workspaceId,
+      assistantId,
+      toolNames,
+    }))
+  } catch (err) {
+    console.warn('[workflow/tools] runtime tool-name lookup threw:', err)
+    return new Set()
+  }
 }
 
 /** "Tag/mention someone" intent in a Slack-delivering step's prompt. */
@@ -1433,6 +1484,8 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
         }
       }
 
+      const knownRuntimeTools = await runtimeKnownToolNames(definition, context, deps)
+
       return {
         data: {
           ok: true,
@@ -1441,7 +1494,11 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
           proposedTrigger: trigger ?? null,
           summary: summarize(definition),
           warnings: [
-            ...warningsFor(definition, { phaseBActive, isKnownTool: deps.isKnownTool }),
+            ...warningsFor(definition, {
+              phaseBActive,
+              isKnownTool: deps.isKnownTool,
+              runtimeKnownToolNames: knownRuntimeTools,
+            }),
             ...anchorIssues.warnings,
             ...depIssues.warnings,
             ...skillIssues.warnings,

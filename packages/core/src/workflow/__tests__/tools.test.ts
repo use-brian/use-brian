@@ -262,6 +262,12 @@ function makeJobStore(overrides: Partial<JobStore> = {}): JobStore & { rows: Sch
 
 function makeAllTools(opts?: {
   isKnownTool?: (name: string) => boolean
+  resolveKnownWorkflowTools?: (args: {
+    userId: string
+    workspaceId: string
+    assistantId: string
+    toolNames: string[]
+  }) => Promise<string[]>
   resolvePageAnchor?: (
     userId: string,
     pageId: string,
@@ -310,6 +316,7 @@ function makeAllTools(opts?: {
     onEvent: (e) => events.push(e),
     resolvePageAnchor: opts?.resolvePageAnchor,
     isKnownTool: opts?.isKnownTool,
+    resolveKnownWorkflowTools: opts?.resolveKnownWorkflowTools,
     // Scheduling substrate (scheduling-authoring-unification).
     jobStore,
     resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
@@ -905,6 +912,114 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     const r = await tools.proposeWorkflow.execute({ name: 'X', definition: SIMPLE_DEF }, makeContext())
     const warnings = (r.data as Record<string, unknown>).warnings as string[]
     expect(warnings.some((w) => w.includes('tool_not_found'))).toBe(false)
+  })
+
+  it('proposeWorkflow accepts a connected dynamic CLI tool from the runtime registry', async () => {
+    const resolveKnownWorkflowTools = vi.fn(async ({ toolNames }: { toolNames: string[] }) => (
+      toolNames.filter((toolName) => toolName === 'list_events')
+    ))
+    const { tools } = makeAllTools({
+      isKnownTool: () => false,
+      resolveKnownWorkflowTools,
+      preflightConnectorTool: async () => null,
+    })
+    const r = await tools.proposeWorkflow.execute({
+      name: 'Calendar events',
+      definition: {
+        startStepId: 'events',
+        steps: [{
+          id: 'events',
+          type: 'tool_call',
+          toolName: 'list_events',
+          arguments: {},
+        }],
+      },
+    }, makeContext())
+
+    expect(r.isError).toBeFalsy()
+    const warnings = (r.data as Record<string, unknown>).warnings as string[]
+    expect(warnings.some((w) => w.includes('tool_not_found'))).toBe(false)
+    expect(resolveKnownWorkflowTools).toHaveBeenCalledWith({
+      userId: USER_ID,
+      workspaceId: WORKSPACE_ID,
+      assistantId: PRIMARY_ASSISTANT_ID,
+      toolNames: ['list_events'],
+    })
+  })
+
+  it('batches deterministic tool lookups and does not mix assistant_call scope', async () => {
+    const resolveKnownWorkflowTools = vi.fn(async ({ toolNames }: { toolNames: string[] }) => (
+      toolNames.filter((toolName) => toolName === 'list_events')
+    ))
+    const { tools } = makeAllTools({
+      isKnownTool: () => false,
+      resolveKnownWorkflowTools,
+    })
+    const r = await tools.proposeWorkflow.execute({
+      name: 'Scoped tools',
+      definition: {
+        startStepId: 'events',
+        steps: [
+          { id: 'events', type: 'tool_call', toolName: 'list_events', arguments: {}, nextStepId: 'missing' },
+          { id: 'missing', type: 'tool_call', toolName: 'missing_action', arguments: {}, nextStepId: 'summarize' },
+          {
+            id: 'summarize',
+            type: 'assistant_call',
+            target: { assistantId: '00000000-0000-0000-0000-000000000099' },
+            prompt: 'Summarize.',
+            tools: ['assistant_only'],
+          },
+        ],
+      },
+    }, makeContext())
+
+    expect(r.isError).toBeFalsy()
+    const warnings = (r.data as Record<string, unknown>).warnings as string[]
+    expect(warnings.some((w) => w.includes('list_events') && w.includes('tool_not_found'))).toBe(false)
+    expect(warnings.some((w) => w.includes('missing_action') && w.includes('tool_not_found'))).toBe(true)
+    expect(resolveKnownWorkflowTools).toHaveBeenCalledTimes(1)
+    expect(resolveKnownWorkflowTools).toHaveBeenCalledWith(expect.objectContaining({
+      assistantId: PRIMARY_ASSISTANT_ID,
+      toolNames: ['list_events', 'missing_action'],
+    }))
+  })
+
+  it('keeps the unknown warning when exact runtime lookup fails or disagrees with preflight', async () => {
+    const resolveKnownWorkflowTools = vi.fn(async () => [])
+    const { tools } = makeAllTools({
+      isKnownTool: () => false,
+      resolveKnownWorkflowTools,
+      preflightConnectorTool: async () => ({ ok: true, provider: 'CLI', policy: 'allow' }),
+    })
+    const r = await tools.proposeWorkflow.execute({
+      name: 'Missing dynamic tool',
+      definition: {
+        startStepId: 'missing',
+        steps: [{ id: 'missing', type: 'tool_call', toolName: 'missing_action', arguments: {} }],
+      },
+    }, makeContext())
+
+    expect(r.isError).toBeFalsy()
+    const warnings = (r.data as Record<string, unknown>).warnings as string[]
+    expect(warnings.some((w) => w.includes('missing_action') && w.includes('tool_not_found'))).toBe(true)
+  })
+
+  it('does not build the runtime tool registry during createWorkflow', async () => {
+    const resolveKnownWorkflowTools = vi.fn(async () => ['list_events'])
+    const { tools } = makeAllTools({
+      isKnownTool: () => false,
+      resolveKnownWorkflowTools,
+    })
+    const r = await tools.createWorkflow.execute({
+      name: 'Calendar events',
+      definition: {
+        startStepId: 'events',
+        steps: [{ id: 'events', type: 'tool_call', toolName: 'list_events', arguments: {} }],
+      },
+    }, makeContext())
+
+    expect(r.isError).toBeFalsy()
+    expect(resolveKnownWorkflowTools).not.toHaveBeenCalled()
   })
 
   it('proposeWorkflow rejects malformed definitions', async () => {

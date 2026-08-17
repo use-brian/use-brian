@@ -2868,6 +2868,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
     listTriggerJobs: (workflowId) => jobStore.listFiringJobsForWorkflowSystem(workflowId),
     isKnownTool: (name) => allTools.has(name),
+    resolveKnownWorkflowTools: async ({ userId, workspaceId, assistantId, toolNames }) => {
+      const registry = await workflowExecutorDeps.buildToolRegistry({
+        userId,
+        workspaceId,
+        assistantId,
+      })
+      return toolNames.filter((toolName) => registry.has(toolName))
+    },
     jobStore,
     resolvePrimary: resolvePrimaryAssistantForWorkspace,
     resolveDeliveryTarget: createDeliveryTargetResolver(integrationStore ?? undefined),
