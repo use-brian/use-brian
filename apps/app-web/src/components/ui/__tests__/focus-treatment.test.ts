@@ -38,19 +38,25 @@ function lineOf(node: ts.Node, sourceFile: ts.SourceFile): number {
   return sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
 }
 
+// This is a whole-app source contract. Build the syntax trees once during test
+// collection so each assertion only walks the same snapshot. Parsing every
+// `.tsx` file inside each assertion exceeded Vitest's 5s per-test limit on CI.
+const appSourceFiles = tsxFiles(SOURCE_ROOT).map((file) => ({
+  file,
+  sourceFile: ts.createSourceFile(
+    file,
+    readFileSync(file, "utf8"),
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  ),
+}));
+
 describe("[COMP:app-web/focus-treatment] source contract", () => {
   it("keeps standalone fields on one focus treatment", () => {
     const violations: string[] = [];
 
-    for (const file of tsxFiles(SOURCE_ROOT)) {
-      const source = readFileSync(file, "utf8");
-      const sourceFile = ts.createSourceFile(
-        file,
-        source,
-        ts.ScriptTarget.Latest,
-        true,
-        ts.ScriptKind.TSX,
-      );
+    for (const { file, sourceFile } of appSourceFiles) {
 
       function visit(node: ts.Node) {
         if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
@@ -104,15 +110,7 @@ describe("[COMP:app-web/focus-treatment] source contract", () => {
   it("makes every focus-within frame suppress nested halos", () => {
     const violations: string[] = [];
 
-    for (const file of tsxFiles(SOURCE_ROOT)) {
-      const source = readFileSync(file, "utf8");
-      const sourceFile = ts.createSourceFile(
-        file,
-        source,
-        ts.ScriptTarget.Latest,
-        true,
-        ts.ScriptKind.TSX,
-      );
+    for (const { file, sourceFile } of appSourceFiles) {
 
       function visit(node: ts.Node) {
         if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
