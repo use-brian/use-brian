@@ -4623,6 +4623,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     jobStore,
     skillStore,
     communitySkills: communitySkillRegistry,
+    workspaceSkillStore,
+    workspaceSkillEnablementStore,
     capabilityStore,
     assistantConnectorGrantsStore,
   }))
