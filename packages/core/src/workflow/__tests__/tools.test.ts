@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { z } from 'zod'
-import { createWorkflowTools, TRIGGER_INPUT_DESCRIPTION, type WorkflowToolEvent } from '../tools.js'
+import { createWorkflowTools, latestWorkflowProposalReceipt, TRIGGER_INPUT_DESCRIPTION, type WorkflowToolEvent } from '../tools.js'
 import { WORKFLOW_TRIGGER_KINDS, WORKFLOW_EVENT_SOURCE_TYPES } from '../schemas.js'
 import { TASK_LIFECYCLE_ACTIONS } from '../task-event-trigger.js'
 import type {
@@ -740,20 +740,34 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
       startStepId: 's1',
       steps: [{ id: 's1', type: 'assistant_call', target: { assistantId: 'primary' }, prompt: 'Create the block.' }],
     }
-    const proposed = await tools.proposeWorkflow.execute({ name: 'Calendar block', definition }, makeContext())
+    const proposed = await tools.proposeWorkflow.execute(
+      { name: 'Calendar block', definition, targetViewId: null },
+      makeContext(),
+    )
     const proposal = proposed.data as { proposalReceipt: string; proposedAction: string; confirmationHint: string }
 
     expect(proposal.proposedAction).toBe('create')
-    expect(proposal.confirmationHint).toContain('pass only proposalReceipt')
+    expect(proposal.confirmationHint).toContain('call createWorkflow with {}')
     expect(proposal.confirmationHint).toContain('listAssistants')
-    expect(tools.createWorkflow.inputSchema.safeParse({ proposalReceipt: proposal.proposalReceipt }).success).toBe(true)
+    expect(tools.createWorkflow.inputSchema.safeParse({}).success).toBe(true)
     expect(tools.createWorkflow.inputSchema.safeParse({ name: 'Calendar block', definition }).success).toBe(false)
     const raw = await tools.createWorkflow.execute({ name: 'Calendar block', definition }, makeContext())
     expect(raw.isError).toBe(true)
     expect(raw.data).toContain('proposalReceipt is required')
 
-    const created = await tools.createWorkflow.execute({ proposalReceipt: proposal.proposalReceipt }, makeContext())
+    const recoveredReceipt = latestWorkflowProposalReceipt([
+      { content: [{ type: 'tool_result', toolUseId: 'proposal-1', name: 'proposeWorkflow', content: JSON.stringify(proposed.data) }] },
+    ])
+    expect(recoveredReceipt).toBe(proposal.proposalReceipt)
+    const serializedProposal = JSON.stringify(proposed.data)
+    const truncatedProposal = serializedProposal.slice(0, serializedProposal.indexOf('"proposedAction"'))
+    expect(latestWorkflowProposalReceipt([
+      { content: [{ type: 'tool_result', toolUseId: 'proposal-truncated', name: 'proposeWorkflow', content: truncatedProposal }] },
+    ])).toBe(proposal.proposalReceipt)
+    const confirmationContext = makeContext({ workflowProposalReceipt: recoveredReceipt })
+    const created = await tools.createWorkflow.execute({}, confirmationContext)
     expect(created.isError).toBeFalsy()
+    expect(confirmationContext.workflowProposalReceipt).toBeUndefined()
     const workflowId = (created.data as { id: string }).id
     expect(stores.workflows.get(workflowId)?.definition.steps[0]).toMatchObject({
       target: { assistantId: 'primary' },
@@ -770,7 +784,12 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     )
     const editProposal = proposedEdit.data as { proposalReceipt: string; proposedAction: string }
     expect(editProposal.proposedAction).toBe('update')
-    const updated = await tools.updateWorkflow.execute({ proposalReceipt: editProposal.proposalReceipt }, makeContext())
+    const updateContext = makeContext({
+      workflowProposalReceipt: latestWorkflowProposalReceipt([
+        { content: [{ type: 'tool_result', toolUseId: 'proposal-2', name: 'proposeWorkflow', content: JSON.stringify(proposedEdit.data) }] },
+      ]),
+    })
+    const updated = await tools.updateWorkflow.execute({}, updateContext)
     expect(updated.isError).toBeFalsy()
     expect(stores.workflows.get(workflowId)?.definition.steps[0]).toMatchObject({
       target: { assistantId: 'primary' },
@@ -778,16 +797,21 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     })
 
     const changedReceipt = `${proposal.proposalReceipt.slice(0, -1)}x`
-    const changed = await tools.createWorkflow.execute({ proposalReceipt: changedReceipt }, makeContext())
+    const changed = await tools.createWorkflow.execute({}, makeContext({ workflowProposalReceipt: changedReceipt }))
     expect(changed.isError).toBe(true)
     expect(changed.data).toContain('receipt changed after validation')
 
-    expect(tools.createWorkflow.description).toContain('pass ONLY the opaque `proposalReceipt`')
-    expect(tools.updateWorkflow.description).toContain('never repeat discovery or listAssistants')
+    expect(latestWorkflowProposalReceipt([
+      { content: [{ type: 'tool_result', toolUseId: 'proposal-1', name: 'proposeWorkflow', content: JSON.stringify(proposed.data) }] },
+      { content: [{ type: 'tool_result', toolUseId: 'create-1', name: 'createWorkflow', content: JSON.stringify(created.data) }] },
+    ])).toBeUndefined()
+
+    expect(tools.createWorkflow.description).toContain('call it immediately with {}')
+    expect(tools.updateWorkflow.description).toContain('runtime recovers the exact validated receipt')
 
     const builder = loadBuiltinSkills().find((skill) => skill.id === 'workflow-builder')
     expect(builder?.content).toMatch(/Treat approval as continuation, not a restart/)
-    expect(builder?.content).toMatch(/copy ONLY that receipt/)
+    expect(builder?.content).toMatch(/call the matching write tool with no arguments/)
   })
 
   it('proposeWorkflow surfaces the researchMode advisory (parity with the REST path)', async () => {

@@ -25,6 +25,7 @@ import {
   modelToCompactionTier, SensitivityAccumulator, CompartmentAccumulator,
   buildWorkspaceFilesContext, buildUploadPolicyBlock, AttachmentCollector,
   EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote,
+  latestWorkflowProposalReceipt,
 } from '@use-brian/core'
 import type { FilesApi, OutboundAttachment } from '@use-brian/core'
 import { resolveBrandContext } from '../brand/prompt-context.js'
@@ -952,6 +953,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   const dbMessages = await getSessionMessages(session.id, {
     fromSequence: session.compactBoundarySequence,
   })
+  const workflowProposalReceipt = latestWorkflowProposalReceipt(dbMessages)
 
   // ── Proactive compaction (messaging: 0.5× threshold + multi-topic profile) ──
   // runProactiveCompaction owns stamping + tool-result pairing + summary
@@ -1622,6 +1624,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         assistantKind: assistant.kind,
         preferredChannel,
         userTimezone,
+        workflowProposalReceipt,
         abortSignal: abortController.signal,
         sessionStateStore,
         requestTools: allTools,

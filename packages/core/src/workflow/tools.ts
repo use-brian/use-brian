@@ -380,6 +380,33 @@ const workflowProposalReceiptSchema = z.discriminatedUnion('action', [
 
 type WorkflowProposalReceipt = z.infer<typeof workflowProposalReceiptSchema>
 
+/** Recover the latest proposal unless a later successful workflow write consumed it. */
+export function latestWorkflowProposalReceipt(messages: readonly { content: unknown }[]): string | undefined {
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex--) {
+    const content = messages[messageIndex]?.content
+    if (!Array.isArray(content)) continue
+    for (let blockIndex = content.length - 1; blockIndex >= 0; blockIndex--) {
+      const block = content[blockIndex]
+      if (!block || typeof block !== 'object' || (block as { type?: unknown }).type !== 'tool_result') continue
+      const result = block as { name?: unknown; content?: unknown; isError?: unknown }
+      if (result.isError === true) continue
+      if (result.name === 'createWorkflow' || result.name === 'updateWorkflow') return undefined
+      if (result.name !== 'proposeWorkflow' || typeof result.content !== 'string') continue
+      try {
+        const parsed = JSON.parse(result.content) as { proposalReceipt?: unknown }
+        return typeof parsed.proposalReceipt === 'string' ? parsed.proposalReceipt : undefined
+      } catch {
+        // Oversized tool results may be capped after the receipt field, leaving
+        // invalid trailing JSON. The receipt alphabet needs no JSON escapes, so
+        // recover that first field without accepting arbitrary prose.
+        const match = result.content.match(/"proposalReceipt":"(wf1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)"/)
+        return match?.[1]
+      }
+    }
+  }
+  return undefined
+}
+
 function encodeProposalReceipt(receipt: WorkflowProposalReceipt): string {
   const compressed = deflateRawSync(Buffer.from(JSON.stringify(receipt), 'utf8'))
   const body = compressed.toString('base64url')
@@ -1567,8 +1594,8 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       if (!input.workflowId && input.description === null) {
         return { data: { ok: false, errors: ['description: null is only valid when editing an existing workflow.'] }, isError: true }
       }
-      if (!input.workflowId && (input.enabled !== undefined || input.targetViewId === null)) {
-        return { data: { ok: false, errors: ['enabled and targetViewId:null are only valid when editing an existing workflow.'] }, isError: true }
+      if (!input.workflowId && input.enabled !== undefined) {
+        return { data: { ok: false, errors: ['enabled is only valid when editing an existing workflow.'] }, isError: true }
       }
       if (input.workflowId) {
         const existing = await deps.workflowStore.getById(context.userId, input.workflowId)
@@ -1633,6 +1660,8 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
             },
           })
 
+      context.workflowProposalReceipt = proposalReceipt
+
       return {
         data: {
           ok: true,
@@ -1660,20 +1689,21 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
           ],
           definition,
           confirmationHint:
-            'Show the user this proposal (and the trigger / schedule) and the warnings. Ask for explicit confirmation. On approval, immediately pass only proposalReceipt to createWorkflow when proposedAction is create, or updateWorkflow when proposedAction is update. Copy the receipt exactly. Do not repeat discovery, listAssistants, or proposeWorkflow unless the user changes the proposal or receipt validation fails.',
+            'Show the user this proposal (and the trigger / schedule) and the warnings. Ask for explicit confirmation. On approval, immediately call createWorkflow with {} when proposedAction is create, or updateWorkflow with {} when proposedAction is update. The runtime recovers the receipt from session history. Do not repeat discovery, listAssistants, or proposeWorkflow unless the user changes the proposal or the write reports no valid pending proposal.',
         },
       }
     },
   })
 
+  const pendingWriteInputSchema = z.object({}).strict().describe('No arguments. Applies the latest approved proposal in this session.')
   const createWorkflowInputSchema = deps.allowLegacyDirectWrites
     ? z.union([receiptWriteInputSchema, legacyCreateWorkflowInputSchema])
-    : receiptWriteInputSchema
+    : pendingWriteInputSchema
 
   const createWorkflow = buildTool({
     name: 'createWorkflow',
     description:
-      `Persist a new workflow that the user explicitly approved. You MUST first call \`proposeWorkflow\`, present the proposal, and get an explicit OK. Then pass ONLY the opaque \`proposalReceipt\` returned by that successful proposal. Copy it exactly. Never reconstruct or resend name, definition, target, trigger, or assistant ids, and never run discovery or listAssistants to rebuild them. A production call without a valid create receipt is rejected. ` +
+      `Persist the latest new-workflow proposal that the user explicitly approved. This tool takes NO arguments: the runtime recovers the exact validated receipt from this session's persisted history. After approval call it immediately with {}. Never re-run proposeWorkflow, reconstruct or resend workflow fields, or run discovery/listAssistants. A call with no pending create proposal is rejected. ` +
       `\n\nTriggering is built into the receipt: proposeWorkflow freezes \`trigger: { kind: "schedule", schedule, ... }\` to schedule it, or \`{ kind: "event", event: { sources } }\` to subscribe to workspace signals. A one-step assistant_call workflow with \`trigger.delivery\` is a reminder; a multi-step workflow is an automation. Confirm the schedule with the user before applying the receipt.`,
     inputSchema: createWorkflowInputSchema,
     requiresConfirmation: false,
@@ -1682,8 +1712,11 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       if (gate) return gate
 
       let createInput: z.infer<typeof createProposalInputSchema>
-      if ('proposalReceipt' in input) {
-        const decoded = decodeProposalReceipt(input.proposalReceipt)
+      const pendingReceipt = 'proposalReceipt' in input
+        ? input.proposalReceipt
+        : context.workflowProposalReceipt
+      if (pendingReceipt) {
+        const decoded = decodeProposalReceipt(pendingReceipt)
         if (!decoded.ok) return { data: decoded.error, isError: true }
         if (decoded.receipt.action !== 'create') {
           return { data: 'This receipt is for an existing workflow edit. Apply it with updateWorkflow.', isError: true }
@@ -1795,6 +1828,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
         definition,
         trigger,
       })
+      context.workflowProposalReceipt = undefined
 
       deps.onEvent?.({
         type: 'workflow_created',
@@ -1835,13 +1869,13 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
 
   const updateWorkflowInputSchema = deps.allowLegacyDirectWrites
     ? z.union([receiptWriteInputSchema, legacyUpdateWorkflowInputSchema])
-    : receiptWriteInputSchema
+    : pendingWriteInputSchema
 
   const updateWorkflow = buildTool({
     name: 'updateWorkflow',
     description:
       `Edit an existing workflow — add a step, remove a step, reorder steps, rewrite a step's fields, OR change its trigger / schedule. Patches any subset of name / description / definition / enabled / trigger. ` +
-      `First call \`getWorkflow\`, then call \`proposeWorkflow\` with that workflowId and the complete edited values. Present the proposal and get explicit confirmation. Then pass ONLY the opaque \`proposalReceipt\` returned by that proposal. Copy it exactly; never reconstruct workflowId, definition, target, trigger, or assistant ids, and never repeat discovery or listAssistants to rebuild them. A production call without a valid update receipt is rejected. Never use \`createWorkflow\` to apply an edit. ` +
+      `First call \`getWorkflow\`, then \`proposeWorkflow\` with that workflowId and the complete edited values. After explicit confirmation call this tool immediately with {}. It takes NO arguments: the runtime recovers the exact validated receipt from persisted session history. Never re-run proposal/discovery/listAssistants or reconstruct workflow fields. A call with no pending update proposal is rejected. Never use \`createWorkflow\` for an edit. ` +
       `Editing does not affect runs already in flight — the change applies to the next run.`,
     inputSchema: updateWorkflowInputSchema,
     requiresConfirmation: false,
@@ -1850,8 +1884,11 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       if (gate) return gate
 
       let updateInput: z.infer<typeof updateProposalInputSchema>
-      if ('proposalReceipt' in input) {
-        const decoded = decodeProposalReceipt(input.proposalReceipt)
+      const pendingReceipt = 'proposalReceipt' in input
+        ? input.proposalReceipt
+        : context.workflowProposalReceipt
+      if (pendingReceipt) {
+        const decoded = decodeProposalReceipt(pendingReceipt)
         if (!decoded.ok) return { data: decoded.error, isError: true }
         if (decoded.receipt.action !== 'update') {
           return { data: 'This receipt is for a new workflow. Apply it with createWorkflow.', isError: true }
@@ -1976,6 +2013,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       if (!updated) {
         return { data: `Workflow ${updateInput.workflowId} not found in workspace.`, isError: true }
       }
+      context.workflowProposalReceipt = undefined
 
       // Reconcile the firing scheduled_jobs row with the new trigger.
       let schedule: { nextRun: string; relativeTime?: string } | undefined
