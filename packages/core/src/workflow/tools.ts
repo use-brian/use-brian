@@ -308,7 +308,7 @@ export const TRIGGER_INPUT_DESCRIPTION =
   `\n- \`{ kind: "schedule", schedule: {type: "daily"|"weekly"|"monthly"|"once"|"cron", ...}, timezone?, mode?, delivery?: { channel: "telegram"|"slack"|"whatsapp" }, policy?: { silentUntilFire?, nagIntervalMins?, nagUntilKeyword? } }\` ` +
   `fires on a cadence in ONE call — scheduling is a workflow trigger, so no separate scheduling step or tool is needed. \`delivery.channel\` pushes the result to the user (for a recurring reminder the exact chat + Telegram topic are captured automatically from this session); \`policy\` covers "remind every N min until <keyword>" and silent-until-fire. ` +
   `\n- \`{ kind: "event", event: { sources: [{ source, match? }, ...] } }\` fires from a workspace signal and IS fully authorable here. The ONLY source types: ${WORKFLOW_EVENT_SOURCE_TYPES.join(' | ')}. ` +
-  `Shapes: \`{ type: "connector", connectorInstanceId, provider }\` (a CONNECTED connector instance), \`{ type: "channel", channelIntegrationId, channel }\` (a connected chat integration), \`{ type: "page", pageId }\` (a doc page + its direct children), \`{ type: "task" }\` (the workspace's tasks — id-less), \`{ type: "knowledge" }\` (the workspace's knowledge base — id-less). ` +
+  `Shapes: \`{ type: "connector", connectorInstanceId, provider }\` (a CONNECTED connector instance), \`{ type: "channel", channelIntegrationId, channel }\` (a connected chat integration; get channelIntegrationId from listChannels.integrationId, never listChannels.id), \`{ type: "page", pageId }\` (a doc page + its direct children), \`{ type: "task" }\` (the workspace's tasks — id-less), \`{ type: "knowledge" }\` (the workspace's knowledge base — id-less). ` +
   `\`match\` narrows firing: keywords / fromActors / inChannels / mentions / tags (task and knowledge events only) / fromBots (default false — bot- or assistant-authored events only fire with \`fromBots: true\`). ` +
   `Task lifecycle actions are matched via \`match.inChannels\`: ${TASK_LIFECYCLE_ACTIONS.join(' / ')}. Knowledge lifecycle actions, same axis: ${KNOWLEDGE_LIFECYCLE_ACTIONS.join(' / ')} — for knowledge, \`keywords\` matches the entry TITLE and \`tags\` its frontmatter tags; there is no path filter, so scope by path with a \`branch\` step on \`{{input.event.path}}\`. A connector/channel source id that does not reference a live connected source never fires — verify it is connected first. ` +
   `Each entry nests the source under a \`source\` key — e.g. a task tagged 'triage' is \`{ source: { type: "task" }, match: { inChannels: ["tagged"], tags: ["triage"] } }\` (do NOT flatten \`type\` to the entry top level). ` +
@@ -367,6 +367,9 @@ function summarize(def: WorkflowDefinition): string {
     switch (step.type) {
       case 'assistant_call':
         detail = `assistant_call → ${step.target.assistantId}${step.page ? pageAnchorSummary(step.page) : ''}`
+        if (step.deliver && 'replyToTrigger' in step.deliver) {
+          detail += ' (replies to the originating WhatsApp conversation)'
+        }
         break
       case 'tool_call':
         detail = `tool_call → ${step.toolName}`
@@ -708,6 +711,28 @@ async function dependencyIssues(
   const errors: string[] = []
   const warnings: string[] = []
 
+  const triggerReplySteps = def.steps.filter(
+    (step): step is AssistantCallStep =>
+      step.type === 'assistant_call'
+      && !!step.deliver
+      && 'replyToTrigger' in step.deliver,
+  )
+  if (triggerReplySteps.length > 0) {
+    const sources = trigger?.kind === 'event' ? trigger.event.sources : []
+    const allSourcesAreWhatsApp = sources.length > 0 && sources.every(
+      (subscription) =>
+        subscription.source.type === 'channel'
+        && subscription.source.channel === 'whatsapp',
+    )
+    if (!allSourcesAreWhatsApp) {
+      for (const step of triggerReplySteps) {
+        errors.push(
+          `Step "${step.id}" uses replyToTrigger, which requires an event trigger containing only WhatsApp channel sources. Use the selected channel's integrationId as source.channelIntegrationId; do not author a recipient phone number.`,
+        )
+      }
+    }
+  }
+
   // ── A. Delivery-target reachability ──────────────────────────────────────
   if (deps.validateDeliveryTarget) {
     const targets: Array<{
@@ -721,6 +746,7 @@ async function dependencyIssues(
       if (
         step.type === 'assistant_call' &&
         step.deliver &&
+        'channelId' in step.deliver &&
         step.deliver.channelType !== 'web' &&
         // Teams targets have no channel-enumeration API to preflight against
         // (the listTeamsChannels equivalent is a P5 follow-up), so they skip
@@ -1062,7 +1088,7 @@ function terminalExplicitDeliverId(
   const termStep = termId ? def.steps.find((s) => s.id === termId) : undefined
   if (termStep?.type !== 'assistant_call') return null
   const d = termStep.deliver
-  return d && d.channelType === channel && d.channelId ? d.channelId : null
+  return d && 'channelId' in d && d.channelType === channel && d.channelId ? d.channelId : null
 }
 
 /**
@@ -1324,7 +1350,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       `The callee then runs with the doc tools (getCurrentPage / patchPage / renderPage) against that page.` +
       `\n\nSkills: when a step should follow a saved brain skill, ATTACH it on the step — NEVER just name the skill in the prompt (a workflow callee has no skill surface unless the step attaches one, so a prose-only reference silently does nothing on every run). \`enforcedSkills: ["<slug>"]\` force-loads the skill's instructions every run (the usual choice for workflows); \`skills: ["<slug>"]\` offers it via useSkill and the callee chooses. Use exact skill slugs; an attached slug that matches no workspace skill or built-in id is rejected. ` +
       `For structured output, an assistant_call research step may also set \`blueprintId: "<workspace skill slug | page-template id>"\` together with a \`page\` anchor to fill that blueprint instead of free-form authoring — blueprints themselves are created in the web app (Brain → Blueprints) or minted from a skill's extraction spec; they cannot be created from chat, so never claim otherwise.` +
-      `\n\nChannel delivery: a step's \`deliver: { channelType, channelId }\` pushes that step's output to a messaging channel (Slack channelId from listSlackChannels). To post a THREAD — one parent message with replies under it — use one deliver-step per message and give each follow-up step \`deliver: { ..., thread: { fromStep: "<parent step id>" } }\`: it replies under the message that earlier step posted this run (same channel required; slack + telegram only). Do NOT concatenate multiple messages into one step's output and expect threading. ` +
+      `\n\nChannel delivery: a step's \`deliver: { channelType, channelId }\` pushes that step's output to a static messaging destination (Slack channelId from listSlackChannels). For a WhatsApp channel-event workflow that must answer the customer who triggered this run, use exactly \`deliver: { channelType: "whatsapp", replyToTrigger: true }\`; never add a channelId or phone number. This variant is valid only when every event source is a WhatsApp channel integration. To post a THREAD — one parent message with replies under it — use one deliver-step per message and give each follow-up step \`deliver: { ..., thread: { fromStep: "<parent step id>" } }\`: it replies under the message that earlier step posted this run (same channel required; slack + telegram only). Do NOT concatenate multiple messages into one step's output and expect threading. ` +
       `To MENTION people in a Slack delivery, first call \`listSlackMembers\` and embed the literal \`<@MEMBER_ID>\` ids in the step prompt — plain @name renders as text and notifies nobody.`,
     inputSchema: z.object({
       name: z

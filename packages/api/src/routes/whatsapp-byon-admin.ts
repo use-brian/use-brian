@@ -271,13 +271,18 @@ export function whatsappIngestAdminRoutes(opts: WhatsappIngestAdminOptions): Rou
         return
       }
 
-      // One WhatsApp channel per workspace: reuse an existing one, else
-      // create an INGEST-ONLY channel (responder capabilities stay off so
-      // the dormant chat path can never fire for a read-only number).
+      // One linked-number WhatsApp channel per workspace: reuse a BYON row,
+      // never an official Cloud API row (Cloud rows have bot_user_id set to
+      // Meta's phone_number_id). This keeps QR pairing from replacing the
+      // official channel's encrypted credentials.
       let channelId: string
       try {
         const existing = await query<{ id: string }>(
-          `SELECT id FROM channels WHERE workspace_id = $1 AND channel_type = 'whatsapp' LIMIT 1`,
+          `SELECT c.id FROM channels c
+           LEFT JOIN channel_integrations ci ON ci.channel_id = c.id
+           WHERE c.workspace_id = $1 AND c.channel_type = 'whatsapp'
+             AND ci.bot_user_id IS NULL
+           LIMIT 1`,
           [workspaceId],
         )
         if (existing.rows[0]) {

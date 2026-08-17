@@ -76,6 +76,7 @@ import {
   connectTelegramChannel,
   connectDiscordChannel,
   connectMsTeamsChannel,
+  connectWhatsAppCloudChannel,
   startWechatPairing,
   getWechatPairingStatus,
   submitWechatVerifyCode,
@@ -207,6 +208,14 @@ function pillCls(tone: "on" | "off" | "attention"): string {
 // History (1<<16) + Add Reactions (1<<6) = 68672.
 function discordInviteUrl(botId: string): string {
   return `https://discord.com/oauth2/authorize?client_id=${encodeURIComponent(botId)}&scope=bot&permissions=68672`;
+}
+
+export function normalizeWhatsAppPhoneNumberInput(value: string): string | null {
+  const trimmed = value.trim();
+  if (!/^\+?[\d\s().-]+$/.test(trimmed)) return null;
+  const rawDigits = trimmed.replace(/\D/g, "");
+  const digits = trimmed.startsWith("00") ? rawDigits.slice(2) : rawDigits;
+  return /^[1-9]\d{7,14}$/.test(digits) ? digits : null;
 }
 
 const CLEARANCES: ChannelClearance[] = ["public", "internal", "confidential"];
@@ -804,7 +813,8 @@ export function ChannelDetail({
 
       {(channel.channelType === "slack" ||
         channel.channelType === "telegram" ||
-        channel.channelType === "discord") &&
+        channel.channelType === "discord" ||
+        (channel.channelType === "whatsapp" && channel.integrationProvider === "cloud_api")) &&
         channel.integrationId && (
           <ChannelConfigSection
             workspaceId={workspaceId}
@@ -816,8 +826,19 @@ export function ChannelDetail({
       {/* WhatsApp config — connection state (surfaces a phone-side logout) +
           per-group ingest list + the replies (bot) section, like the other
           channels' config sections. */}
-      {channel.channelType === "whatsapp" && (
+      {channel.channelType === "whatsapp" && channel.integrationProvider !== "cloud_api" && (
         <WhatsappCardSection workspaceId={workspaceId} />
+      )}
+
+      {channel.channelType === "whatsapp" && channel.integrationProvider === "cloud_api" && (
+        <>
+          <div className="rounded-lg border border-border px-4 py-3 text-xs text-muted-foreground">
+            {t.studioPage.channels.add.whatsappCloudConnectedDetail}
+          </div>
+          <WhatsAppCloudChatSection
+            phoneNumber={channel.config?.whatsappDisplayPhoneNumber ?? null}
+          />
+        </>
       )}
 
       {/* WeChat — the iLink bot limits, stated plainly on the connected card
@@ -1154,6 +1175,8 @@ export function ChannelConfigSection({
   const cfg = t.studioPage.channels.config;
   const isSlack = channel.channelType === "slack";
   const isTelegram = channel.channelType === "telegram";
+  const isWhatsAppCloud =
+    channel.channelType === "whatsapp" && channel.integrationProvider === "cloud_api";
   // Discord's config surface today is access-control only: `requireMention` is
   // enforced connector-side (not from this config) and there is no ack-reaction
   // on the Discord inbound path, so both are hidden for Discord channels.
@@ -1184,7 +1207,8 @@ export function ChannelConfigSection({
     }
   }
 
-  const accessMode: UserAccessMode = config.userAccessMode ?? "allow_all";
+  const accessMode: UserAccessMode =
+    config.userAccessMode ?? (isWhatsAppCloud ? "allowlist" : "allow_all");
   const accessIds =
     accessMode === "blocklist"
       ? (config.blockedUserIds ?? [])
@@ -1207,7 +1231,11 @@ export function ChannelConfigSection({
     <div className="flex flex-col gap-1.5">
       <div className="flex items-center justify-between gap-3">
         <span className="text-sm">
-          {isTelegram ? cfg.accessLabelTelegram : cfg.accessLabel}
+          {isTelegram
+            ? cfg.accessLabelTelegram
+            : isWhatsAppCloud
+              ? cfg.accessLabelWhatsApp
+              : cfg.accessLabel}
         </span>
         <Select
           value={accessMode}
@@ -1243,16 +1271,22 @@ export function ChannelConfigSection({
         {accessMode === "allowlist"
           ? isTelegram
             ? cfg.accessAllowlistDescTelegram
-            : cfg.accessAllowlistDesc
+            : isWhatsAppCloud
+              ? cfg.accessAllowlistDescWhatsApp
+              : cfg.accessAllowlistDesc
           : accessMode === "blocklist"
             ? isTelegram
               ? cfg.accessBlocklistDescTelegram
-              : cfg.accessBlocklistDesc
+              : isWhatsAppCloud
+                ? cfg.accessBlocklistDescWhatsApp
+                : cfg.accessBlocklistDesc
             : isSlack
               ? cfg.accessAllDescSlack
               : isDiscord
                 ? cfg.accessAllDescDiscord
-                : cfg.accessAllDescTelegram}
+                : isWhatsAppCloud
+                  ? cfg.accessAllDescWhatsApp
+                  : cfg.accessAllDescTelegram}
       </p>
       {accessMode !== "allow_all" && (
         <div className="flex flex-col gap-1.5 pt-1">
@@ -1285,7 +1319,18 @@ export function ChannelConfigSection({
               const input = e.currentTarget.elements.namedItem(
                 "accessUserId",
               ) as HTMLInputElement;
-              addAccessId(input.value);
+              let value = input.value;
+              if (isWhatsAppCloud) {
+                const normalized = normalizeWhatsAppPhoneNumberInput(value);
+                if (!normalized) {
+                  input.setCustomValidity(cfg.userIdInvalidWhatsApp);
+                  input.reportValidity();
+                  return;
+                }
+                value = normalized;
+              }
+              input.setCustomValidity("");
+              addAccessId(value);
               input.value = "";
             }}
             className="flex items-center gap-2"
@@ -1293,13 +1338,17 @@ export function ChannelConfigSection({
             <input
               name="accessUserId"
               type="text"
+              inputMode={isWhatsAppCloud ? "tel" : undefined}
               disabled={saving}
+              onInput={(e) => e.currentTarget.setCustomValidity("")}
               placeholder={
                 isSlack
                   ? cfg.userIdPlaceholderSlack
                   : isDiscord
                     ? cfg.userIdPlaceholderDiscord
-                    : cfg.userIdPlaceholderTelegram
+                    : isWhatsAppCloud
+                      ? cfg.userIdPlaceholderWhatsApp
+                      : cfg.userIdPlaceholderTelegram
               }
               className="min-w-0 flex-1 rounded-md border border-border bg-background px-2 py-1.5 text-sm font-mono"
             />
@@ -1316,7 +1365,9 @@ export function ChannelConfigSection({
               ? cfg.userIdHintSlack
               : isDiscord
                 ? cfg.userIdHintDiscord
-                : cfg.userIdHintTelegram}
+                : isWhatsAppCloud
+                  ? cfg.userIdHintWhatsApp
+                  : cfg.userIdHintTelegram}
           </p>
         </div>
       )}
@@ -1471,7 +1522,7 @@ export function ChannelConfigSection({
         />
       )}
 
-      {!isDiscord && (
+      {!isDiscord && !isWhatsAppCloud && (
         <ConfigToggle
           label={cfg.requireMention}
           hint={cfg.requireMentionHintSlack}
@@ -1482,7 +1533,7 @@ export function ChannelConfigSection({
       )}
 
       {/* Acknowledgment reaction — not wired on the Discord inbound path. */}
-      {!isDiscord && ackReactionControl}
+      {!isDiscord && !isWhatsAppCloud && ackReactionControl}
 
       {accessControl}
 
@@ -1497,6 +1548,55 @@ export function ChannelConfigSection({
         </span>
       )}
     </div>
+  );
+}
+
+export function WhatsAppCloudChatSection({
+  phoneNumber,
+}: {
+  phoneNumber: string | null;
+}) {
+  const t = useT();
+  const add = t.studioPage.channels.add;
+  const normalized = phoneNumber
+    ? normalizeWhatsAppPhoneNumberInput(phoneNumber)
+    : null;
+  if (!normalized) return null;
+
+  const chatUrl = `https://wa.me/${normalized}`;
+  return (
+    <section className="flex flex-col gap-3 rounded-lg border border-border px-4 py-3">
+      <div>
+        <h3 className="text-sm font-semibold">{add.whatsappCloudChatTitle}</h3>
+        <p className="mt-1 text-xs text-muted-foreground">
+          {add.whatsappCloudChatHint}
+        </p>
+      </div>
+      <div className="flex flex-col items-start gap-4 sm:flex-row sm:items-center">
+        <a
+          href={chatUrl}
+          target="_blank"
+          rel="noreferrer"
+          aria-label={add.whatsappCloudOpenChat}
+          className="rounded-xl border border-border bg-white p-3"
+        >
+          <QRCodeSVG value={chatUrl} size={160} />
+        </a>
+        <div className="flex min-w-0 flex-col gap-2">
+          <code className="break-all rounded bg-muted px-2 py-1.5 text-xs">
+            +{normalized}
+          </code>
+          <a
+            href={chatUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="self-start rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-muted"
+          >
+            {add.whatsappCloudOpenChat}
+          </a>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -1687,7 +1787,9 @@ export function AddChannelForm({
     for (let attempt = 0; attempt < 8; attempt++) {
       try {
         const chans = await listChannels(workspaceId);
-        const wa = chans.find((c) => c.channelType === "whatsapp");
+        const wa = chans.find(
+          (c) => c.channelType === "whatsapp" && c.integrationProvider !== "cloud_api",
+        );
         if (wa) {
           await onCreated(wa);
           return;
@@ -1967,7 +2069,9 @@ export function AddChannelForm({
       {platform === "whatsapp" ? (
         <WhatsappConnectTab
           workspaceId={workspaceId}
+          assistants={assistants}
           onConnected={handleWhatsappConnected}
+          onCloudConnected={(channel) => void onCreated(channel)}
         />
       ) : platform === "wechat" ? (
         <WechatConnectTab
@@ -2538,14 +2642,31 @@ type WaConnectPhase =
  */
 function WhatsappConnectTab({
   workspaceId,
+  assistants = [],
   onConnected,
+  onCloudConnected,
+  initialMode = "cloud",
 }: {
   workspaceId: string;
+  assistants?: StudioAssistantSummary[];
   onConnected: () => void;
+  onCloudConnected?: (channel: Channel) => void;
+  initialMode?: "cloud" | "linked";
 }) {
   const t = useT();
   const wa = t.studioPage.ingestRules.whatsapp;
+  const add = t.studioPage.channels.add;
   const [phase, setPhase] = useState<WaConnectPhase>({ kind: "idle" });
+  const [mode, setMode] = useState<"cloud" | "linked">(initialMode);
+  const [accessToken, setAccessToken] = useState("");
+  const [appSecret, setAppSecret] = useState("");
+  const [phoneNumberId, setPhoneNumberId] = useState("");
+  const [wabaId, setWabaId] = useState("");
+  const [assistantId, setAssistantId] = useState("");
+  const [cloudSubmitting, setCloudSubmitting] = useState(false);
+  const [cloudError, setCloudError] = useState<string | null>(null);
+  const [cloudResult, setCloudResult] = useState<{ webhookUrl: string; verifyToken: string } | null>(null);
+  const [copiedCloud, setCopiedCloud] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
   const start = useCallback(() => {
@@ -2574,8 +2695,119 @@ function WhatsappConnectTab({
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
+  async function connectCloud(): Promise<void> {
+    setCloudSubmitting(true);
+    setCloudError(null);
+    try {
+      const result = await connectWhatsAppCloudChannel(workspaceId, {
+        accessToken,
+        appSecret,
+        phoneNumberId: phoneNumberId.trim(),
+        wabaId: wabaId.trim(),
+        defaultAssistantId: assistantId || null,
+      });
+      onCloudConnected?.(result.channel);
+      setCloudResult({ webhookUrl: result.webhookUrl ?? result.webhookPath, verifyToken: result.verifyToken });
+    } catch (e) {
+      setCloudError((e as Error).message);
+    } finally {
+      setCloudSubmitting(false);
+    }
+  }
+
+  function copyCloudSetup(): void {
+    if (!cloudResult) return;
+    void navigator.clipboard.writeText(`${cloudResult.webhookUrl}\n${cloudResult.verifyToken}`).then(() => {
+      setCopiedCloud(true);
+      setTimeout(() => setCopiedCloud(false), 2000);
+    });
+  }
+
   return (
     <div className="flex flex-col gap-3">
+      <div className="flex gap-1 rounded-md bg-muted p-1 self-start">
+        <button
+          type="button"
+          onClick={() => setMode("cloud")}
+          className={cn("rounded px-2.5 py-1 text-xs", mode === "cloud" ? "bg-background font-medium shadow-sm" : "text-muted-foreground")}
+        >
+          {add.whatsappCloudMode}
+        </button>
+        <button
+          type="button"
+          onClick={() => setMode("linked")}
+          className={cn("rounded px-2.5 py-1 text-xs", mode === "linked" ? "bg-background font-medium shadow-sm" : "text-muted-foreground")}
+        >
+          {add.whatsappLinkedMode}
+        </button>
+      </div>
+
+      {mode === "cloud" ? (
+        cloudResult ? (
+          <div className="flex flex-col gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3">
+            <p className="text-sm font-medium text-emerald-600 dark:text-emerald-400">{add.connectedWhatsAppCloud}</p>
+            <p className="text-xs text-muted-foreground">{add.whatsappCloudWebhookHint}</p>
+            <code className="break-all rounded bg-muted px-2 py-1.5 text-xs">{cloudResult.webhookUrl}</code>
+            <p className="text-xs text-muted-foreground">{add.whatsappCloudVerifyHint}</p>
+            <code className="break-all rounded bg-muted px-2 py-1.5 text-xs">{cloudResult.verifyToken}</code>
+            <button type="button" onClick={copyCloudSetup} className="self-start rounded-md border border-border px-2 py-1 text-xs hover:bg-muted">
+              {copiedCloud ? add.copied : add.whatsappCloudCopySetup}
+            </button>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-3">
+            <p className="text-xs text-muted-foreground">{add.whatsappCloudHint}</p>
+            <a href="https://developers.facebook.com/apps/" target="_blank" rel="noreferrer" className="self-start text-xs text-primary hover:underline">
+              {add.whatsappCloudPortalLink}
+            </a>
+            {[
+              [add.whatsappAccessTokenLabel, accessToken, setAccessToken, "EAAB...", "password"],
+              [add.whatsappAppSecretLabel, appSecret, setAppSecret, "••••••••••••••••", "password"],
+              [add.whatsappPhoneNumberIdLabel, phoneNumberId, setPhoneNumberId, "123456789012345", "text"],
+              [add.whatsappWabaIdLabel, wabaId, setWabaId, "123456789012345", "text"],
+            ].map(([label, value, setter, placeholder, type]) => (
+              <label key={label as string} className="flex flex-col gap-1">
+                <span className="text-xs font-medium">{label as string}</span>
+                <input
+                  type={type as string}
+                  value={value as string}
+                  onChange={(e) => (setter as (v: string) => void)(e.target.value)}
+                  placeholder={placeholder as string}
+                  disabled={cloudSubmitting}
+                  className="rounded-md border border-border bg-background px-2 py-1.5 font-mono text-sm disabled:opacity-50"
+                />
+              </label>
+            ))}
+            <label className="flex flex-col gap-1">
+              <span className="text-xs font-medium">{add.defaultAssistantLabel}</span>
+              <Select
+                value={assistantId || "__none__"}
+                onValueChange={(v) => setAssistantId(v && v !== "__none__" ? v : "")}
+                items={{ __none__: add.defaultAssistantNone, ...Object.fromEntries(assistants.map((a) => [a.id, a.name])) }}
+                disabled={cloudSubmitting}
+              >
+                <SelectTrigger size="sm"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__none__">{add.defaultAssistantNone}</SelectItem>
+                  {assistants.map((a) => <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </label>
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => void connectCloud()}
+                disabled={cloudSubmitting || !accessToken || appSecret.length < 8 || !/^\d+$/.test(phoneNumberId) || !/^\d+$/.test(wabaId)}
+                className="self-start rounded-md bg-action px-3 py-1.5 text-sm font-medium text-action-foreground disabled:opacity-50"
+              >
+                {cloudSubmitting ? add.connecting : add.connect}
+              </button>
+              {cloudError && <span className="text-xs text-destructive">{cloudError}</span>}
+            </div>
+          </div>
+        )
+      ) : (
+        <>
       <p className="text-xs text-muted-foreground">{wa.subtitle}</p>
 
       {phase.kind === "qr" ? (
@@ -2616,6 +2848,8 @@ function WhatsappConnectTab({
         >
           {wa.connectAction}
         </button>
+      )}
+        </>
       )}
     </div>
   );
@@ -3471,7 +3705,7 @@ function WhatsappCardSection({ workspaceId }: { workspaceId: string }) {
         <p className="text-xs text-amber-600 dark:text-amber-400">
           {wa.disconnectedNote}
         </p>
-        <WhatsappConnectTab workspaceId={workspaceId} onConnected={refresh} />
+        <WhatsappConnectTab workspaceId={workspaceId} onConnected={refresh} initialMode="linked" />
       </div>
     );
   }

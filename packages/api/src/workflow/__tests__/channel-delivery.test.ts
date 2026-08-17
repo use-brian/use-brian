@@ -19,18 +19,26 @@ vi.mock('../../db/client.js', () => ({
   query: vi.fn(async () => ({ rows: [] })),
 }))
 
-const { sendMessage, createTelegramAdapter } = vi.hoisted(() => {
+const { sendMessage, createTelegramAdapter, createWhatsAppCloudAdapter } = vi.hoisted(() => {
   const send = vi.fn()
-  return { sendMessage: send, createTelegramAdapter: vi.fn(() => ({ sendMessage: send })) }
+  return {
+    sendMessage: send,
+    createTelegramAdapter: vi.fn(() => ({ sendMessage: send })),
+    createWhatsAppCloudAdapter: vi.fn(() => ({ sendMessage: send })),
+  }
 })
 vi.mock('@use-brian/channels', () => ({
   createSlackAdapter: vi.fn(() => ({ sendMessage })),
   createTelegramAdapter,
   createWhatsAppAdapter: vi.fn(() => ({ sendMessage })),
+  createWhatsAppCloudAdapter,
 }))
 
 import { createWorkflowChannelDelivery } from '../channel-delivery.js'
-import { createTelegramAdapter as mockedCreateTelegramAdapter } from '@use-brian/channels'
+import {
+  createTelegramAdapter as mockedCreateTelegramAdapter,
+  createWhatsAppCloudAdapter as mockedCreateWhatsAppCloudAdapter,
+} from '@use-brian/channels'
 import type { ChannelIntegrationStore } from '../../db/channel-integrations.js'
 
 const integrationStore = {
@@ -58,6 +66,7 @@ beforeEach(() => {
   sendMessage.mockReset()
   sendMessage.mockResolvedValue('1751970000.111111')
   vi.mocked(mockedCreateTelegramAdapter).mockClear()
+  vi.mocked(mockedCreateWhatsAppCloudAdapter).mockClear()
   vi.mocked(integrationStore.getCredentialsForAssistantSystem).mockClear()
   vi.mocked(integrationStore.getCredentialsForAssistantIntegrationSystem).mockClear()
 })
@@ -160,5 +169,88 @@ describe('[COMP:workflow/channel-delivery] thread-reply pass-through', () => {
       '-100555:topic:42',
     )
     expect(outcome).toMatchObject({ status: 'delivered' })
+  })
+
+  it('whatsapp cloud: replies through the exact triggering integration', async () => {
+    vi.mocked(integrationStore.getCredentialsForAssistantIntegrationSystem).mockResolvedValueOnce({
+      id: 'int-wa',
+      channelId: 'channel-wa',
+      channelType: 'whatsapp',
+      teamId: 'waba-1',
+      teamName: 'Support',
+      botUserId: 'phone-1',
+      botUsername: null,
+      config: { userAccessMode: 'allowlist', allowedUserIds: ['15551234567'] },
+      status: 'active',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      lastEventAt: null,
+      connectorInstanceId: null,
+      credentials: {
+        provider: 'cloud_api',
+        access_token: 'cloud-token',
+        app_secret: 'app-secret',
+        verify_token: 'verify-token',
+        phone_number_id: 'phone-1',
+        waba_id: 'waba-1',
+        display_phone_number: '+15550000000',
+        graph_api_version: 'v26.0',
+      },
+    })
+    const deliver = createWorkflowChannelDelivery({
+      integrationStore,
+      now: () => Date.parse('2026-08-17T12:00:00.000Z'),
+    })
+
+    const outcome = await deliver({
+      ...baseParams(),
+      channelType: 'whatsapp',
+      channelId: '15551234567',
+      channelIntegrationId: 'int-wa',
+      replyToTrigger: {
+        providerAccountId: 'phone-1',
+        occurredAt: '2026-08-17T11:00:00.000Z',
+      },
+    })
+
+    expect(mockedCreateWhatsAppCloudAdapter).toHaveBeenCalledWith({
+      accessToken: 'cloud-token',
+      phoneNumberId: 'phone-1',
+      graphApiVersion: 'v26.0',
+    })
+    expect(sendMessage).toHaveBeenCalledWith(
+      '15551234567',
+      { text: 'per-person update', format: 'markdown' },
+    )
+    expect(outcome).toMatchObject({
+      status: 'delivered',
+      channelType: 'whatsapp',
+      channelId: '15551234567',
+      messageId: '1751970000.111111',
+    })
+  })
+
+  it('whatsapp cloud: refuses replies after the customer-service window', async () => {
+    const deliver = createWorkflowChannelDelivery({
+      integrationStore,
+      now: () => Date.parse('2026-08-18T12:00:00.000Z'),
+    })
+    const outcome = await deliver({
+      ...baseParams(),
+      channelType: 'whatsapp',
+      channelId: '15551234567',
+      channelIntegrationId: 'int-wa',
+      replyToTrigger: {
+        providerAccountId: 'phone-1',
+        occurredAt: '2026-08-17T11:59:59.000Z',
+      },
+    })
+
+    expect(outcome).toEqual({
+      status: 'skipped',
+      channelType: 'whatsapp',
+      reason: 'customer_service_window_expired',
+    })
+    expect(mockedCreateWhatsAppCloudAdapter).not.toHaveBeenCalled()
   })
 })

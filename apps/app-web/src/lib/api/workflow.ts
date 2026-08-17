@@ -191,11 +191,16 @@ export type AssistantCallStep = {
    */
   blueprintId?: string;
   /** When set, the step's text output is pushed to this channel after the consult. */
-  deliver?: {
-    channelType: DeliverChannelType;
-    channelId: string;
-    channelIntegrationId?: string;
-  };
+  deliver?:
+    | {
+        channelType: DeliverChannelType;
+        channelId: string;
+        channelIntegrationId?: string;
+      }
+    | {
+        channelType: "whatsapp";
+        replyToTrigger: true;
+      };
   /** `persistent` reuses one callee session across runs; `per_run` (default) is fresh. */
   session?: "per_run" | "persistent";
   /** Per-step model alias. Backfilled from workflow-level on read for legacy rows. */

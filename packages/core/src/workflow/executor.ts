@@ -151,7 +151,15 @@ export type DeliveryOutcome =
        * JID. `empty_text` — the step produced nothing to send. `not_wired` —
        * the executor has no `deliverToChannel` port (Phase A / tests).
        */
-      reason: 'web_not_a_target' | 'no_integration' | 'no_recipient' | 'empty_text' | 'not_wired'
+      reason:
+        | 'web_not_a_target'
+        | 'no_integration'
+        | 'no_recipient'
+        | 'empty_text'
+        | 'not_wired'
+        | 'provider_mismatch'
+        | 'access_denied'
+        | 'customer_service_window_expired'
     }
   | { status: 'failed'; channelType: string; error: string }
 
@@ -179,6 +187,11 @@ export type DeliverToChannel = (params: {
    * `deliver.thread.fromStep`. Absent = top-level post.
    */
   threadRef?: string
+  /** Trusted source metadata resolved by the executor, never authored. */
+  replyToTrigger?: {
+    providerAccountId: string
+    occurredAt: string
+  }
 }) => Promise<DeliveryOutcome>
 
 export type WorkflowAuditEvent =
@@ -1074,6 +1087,60 @@ async function dispatchAssistantCall(
     }
   }
 
+  let triggerReplyTarget: {
+    channelId: string
+    channelIntegrationId: string
+    providerAccountId: string
+    occurredAt: string
+  } | undefined
+  if (step.deliver && 'replyToTrigger' in step.deliver) {
+    const trigger = ctx.run.input.trigger as {
+      sourceType?: unknown
+      provider?: unknown
+      channelIntegrationId?: unknown
+      channelId?: unknown
+      actorId?: unknown
+      providerAccountId?: unknown
+      occurredAt?: unknown
+    } | undefined
+    const integrationId = typeof trigger?.channelIntegrationId === 'string'
+      ? trigger.channelIntegrationId
+      : null
+    const sourceStillConfigured = ctx.workflow.trigger.kind === 'event'
+      && integrationId !== null
+      && ctx.workflow.trigger.event.sources.some((subscription) =>
+        subscription.source.type === 'channel'
+        && subscription.source.channel === 'whatsapp'
+        && subscription.source.channelIntegrationId === integrationId,
+      )
+    if (
+      ctx.run.triggerKind !== 'event'
+      || trigger?.sourceType !== 'channel'
+      || trigger.provider !== 'whatsapp'
+      || integrationId === null
+      || !sourceStillConfigured
+      || typeof trigger.channelId !== 'string'
+      || typeof trigger.actorId !== 'string'
+      || trigger.channelId !== trigger.actorId
+      || typeof trigger.providerAccountId !== 'string'
+      || typeof trigger.occurredAt !== 'string'
+    ) {
+      return {
+        kind: 'failed',
+        error: {
+          message: `assistant_call step "${step.id}" can reply to a trigger only from the configured WhatsApp channel event that started this run.`,
+          reason: 'invalid_trigger_reply',
+        },
+      }
+    }
+    triggerReplyTarget = {
+      channelId: trigger.actorId,
+      channelIntegrationId: integrationId,
+      providerAccountId: trigger.providerAccountId,
+      occurredAt: trigger.occurredAt,
+    }
+  }
+
   const prompt = interpolateString(step.prompt, ctx.scope)
 
   // Page anchor — resolve whichever variant to one concrete page uuid
@@ -1213,7 +1280,7 @@ async function dispatchAssistantCall(
     // Delivery target: a `deliver`-carrying step (scheduled-job reminders)
     // rides its channel through so the callee can surface `ask`-policy tool
     // confirmations there. Undefined = ordinary A2A (confirmations stripped).
-    deliver: step.deliver,
+    deliver: step.deliver && !('replyToTrigger' in step.deliver) ? step.deliver : undefined,
     // Page anchor — resolved above to a concrete saved_views id. The callee
     // executor gates access + injects doc tools + sets ToolContext.docViewId.
     pageAnchorId,
@@ -1283,7 +1350,7 @@ async function dispatchAssistantCall(
         // back to a top-level post, recorded as `thread: 'parent_missing'`.
         let threadRef: string | undefined
         let threadNote: 'applied' | 'parent_missing' | undefined
-        if (step.deliver.thread) {
+        if ('thread' in step.deliver && step.deliver.thread) {
           const parentMsg = ctx.scope.vars[`__deliveryMsg_${step.deliver.thread.fromStep}`]
           if (typeof parentMsg === 'string' && parentMsg) {
             threadRef = parentMsg
@@ -1303,10 +1370,20 @@ async function dispatchAssistantCall(
               assistantId: targetAssistantId,
               userId: ctx.run.triggeredBy ?? ctx.workflow.createdBy,
               channelType,
-              channelId: step.deliver.channelId,
-              channelIntegrationId: step.deliver.channelIntegrationId,
+              channelId: triggerReplyTarget?.channelId
+                ?? ('channelId' in step.deliver ? step.deliver.channelId : ''),
+              channelIntegrationId: triggerReplyTarget?.channelIntegrationId
+                ?? ('channelIntegrationId' in step.deliver
+                  ? step.deliver.channelIntegrationId
+                  : undefined),
               text: deliveredText,
               threadRef,
+              replyToTrigger: triggerReplyTarget
+                ? {
+                    providerAccountId: triggerReplyTarget.providerAccountId,
+                    occurredAt: triggerReplyTarget.occurredAt,
+                  }
+                : undefined,
             })
             if (delivery.status === 'delivered') {
               if (threadNote) delivery = { ...delivery, thread: threadNote }
@@ -1873,9 +1950,10 @@ async function surfaceConnectorHealth(
       !(await healthAlreadySurfaced(deps, userId, workflow.id, run.id))
     ) {
       const deliverStep = workflow.definition.steps.find(
-        (s): s is AssistantCallStep => s.type === 'assistant_call' && !!s.deliver,
+        (s): s is AssistantCallStep =>
+          s.type === 'assistant_call' && !!s.deliver && 'channelId' in s.deliver,
       )
-      if (deliverStep?.deliver) {
+      if (deliverStep?.deliver && 'channelId' in deliverStep.deliver) {
         try {
           await deps.deliverToChannel({
             workspaceId: run.workspaceId,
@@ -1996,9 +2074,10 @@ async function maybeDisableForDeadAnchor(
     // = audit + the builder's enabled toggle are the signal.
     if (deps.deliverToChannel) {
       const deliverStep = workflow.definition.steps.find(
-        (s): s is AssistantCallStep => s.type === 'assistant_call' && !!s.deliver,
+        (s): s is AssistantCallStep =>
+          s.type === 'assistant_call' && !!s.deliver && 'channelId' in s.deliver,
       )
-      if (deliverStep?.deliver) {
+      if (deliverStep?.deliver && 'channelId' in deliverStep.deliver) {
         try {
           await deps.deliverToChannel({
             workspaceId: run.workspaceId,
