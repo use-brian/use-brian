@@ -59,8 +59,9 @@ pnpm dev                    # choose ChatGPT or an API-key backend; opens your b
 That is it. There is no step three. The store defaults to an embedded PGLite
 database under `~/.usebrian/`; point `DATABASE_URL` at a local Postgres if you
 prefer a container. Self-host overrides live in [`.env.example`](./.env.example).
-Binary data can stay local too: set `LOCAL_FILES_DIR` to a durable directory and
-workspace files, recordings, avatars, and channel media use it. Browser uploads,
+Binary data defaults to the durable `~/.usebrian/files` directory; set
+`LOCAL_FILES_DIR` to override it. Workspace files, recordings, avatars, and
+channel media use this store. Browser uploads,
 public media, and audio/video seeking use short-lived signed API URLs, so GCS is
 optional. The exception is Vertex AI long-recording transcription: because
 Vertex has no Files API, set `GCS_FILES_BUCKET` so temporary audio can be passed
