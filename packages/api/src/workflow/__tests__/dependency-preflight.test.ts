@@ -629,7 +629,8 @@ describe('[COMP:workflow/dependency-preflight] listSlackChannels', () => {
       channels: [{ id: 'C0PRIVATE1', name: 'engineering-private', isMember: true }],
     })
     expect(String(fetchMock.mock.calls[0]?.[0])).toContain('/conversations.info')
-    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({ channel: 'C0PRIVATE1' })
+    // `conversations.info` is form-encoded (a JSON body is ignored by Slack).
+    expect(new URLSearchParams(String(fetchMock.mock.calls[0]?.[1]?.body)).get('channel')).toBe('C0PRIVATE1')
   })
 
   it('surfaces a missing_scope error instead of throwing', async () => {

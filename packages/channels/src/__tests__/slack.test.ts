@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createSlackAdapter } from '../slack/adapter.js'
 import { createSlackApi } from '../slack/api.js'
 import { verifySlackSignature } from '../slack/verify.js'
@@ -439,5 +439,68 @@ describe('[COMP:channels/slack] conversationsList', () => {
       json: async () => ({ ok: false, error: 'missing_scope' }),
     } as unknown as Response)
     await expect(createSlackApi({ botToken: 'xoxb-test' }).conversationsList()).rejects.toThrow('missing_scope')
+  })
+})
+
+describe('[COMP:channels/slack] read-method form encoding', () => {
+  // Slack's GET-family read methods IGNORE a JSON body: a required arg goes
+  // missing (`conversations.info` → unconditional `invalid_arguments`, prod
+  // 2026-08-17) and an optional arg silently reverts to its default
+  // (`conversations.list` lost `types`, hiding private channels). These tests
+  // pin the content type so the regression cannot come back quietly.
+  type Recorded = { url: string; contentType?: string; body?: string }
+  let calls: Recorded[]
+
+  beforeEach(() => {
+    calls = []
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: { headers?: Record<string, string>; body?: unknown }) => {
+      calls.push({
+        url,
+        contentType: init?.headers?.['Content-Type'],
+        body: typeof init?.body === 'string' ? init.body : undefined,
+      })
+      return {
+        json: async () => ({
+          ok: true,
+          channel: { id: 'C0TESTFORM1', name: 'test' },
+          channels: [],
+          members: [],
+          messages: [],
+        }),
+      } as unknown as Response
+    }))
+  })
+
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('conversations.info sends the channel form-encoded, never as JSON', async () => {
+    await createSlackApi({ botToken: 'xoxb-test' }).conversationsInfo('C0TESTFORM1')
+    expect(calls).toHaveLength(1)
+    expect(calls[0].contentType).toBe('application/x-www-form-urlencoded')
+    expect(calls[0].body).toBe('channel=C0TESTFORM1')
+  })
+
+  it('conversations.list sends types/limit form-encoded and drops undefined cursor', async () => {
+    await createSlackApi({ botToken: 'xoxb-test' }).conversationsList()
+    expect(calls[0].contentType).toBe('application/x-www-form-urlencoded')
+    const params = new URLSearchParams(calls[0].body)
+    expect(params.get('types')).toBe('public_channel,private_channel')
+    expect(params.get('exclude_archived')).toBe('true')
+    expect(params.get('limit')).toBe('200')
+    expect(params.has('cursor')).toBe(false)
+  })
+
+  it('users.list and conversations.history are form-encoded too', async () => {
+    const api = createSlackApi({ botToken: 'xoxb-test' })
+    await api.usersList()
+    await api.conversationsHistory('C0TESTFORM1', { limit: 5 })
+    expect(calls.map((c) => c.contentType)).toEqual([
+      'application/x-www-form-urlencoded',
+      'application/x-www-form-urlencoded',
+    ])
+    const history = new URLSearchParams(calls[1].body)
+    expect(history.get('channel')).toBe('C0TESTFORM1')
+    expect(history.get('limit')).toBe('5')
+    expect(history.has('latest')).toBe(false)
   })
 })
