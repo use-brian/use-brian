@@ -23,7 +23,14 @@
  * [COMP:workflow/dependency-preflight]
  */
 
-import { createSlackApi, createTelegramApi, parseTopicChannelId } from '@use-brian/channels'
+import {
+  createSlackApi,
+  createTelegramApi,
+  describeSlackError,
+  isSlackApiError,
+  looksLikeSlackConversationId,
+  parseTopicChannelId,
+} from '@use-brian/channels'
 import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTOR_TOOLS } from '@use-brian/shared'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import type { ConnectorStore } from '../db/connector-store.js'
@@ -231,10 +238,24 @@ export type PreflightConnectorTool = (args: {
  */
 export type ListSlackChannels = (args: {
   assistantId: string
-  /** Exact Slack id supplied by the user. When present, bypass enumeration. */
+  /**
+   * A concrete channel supplied by the user. A Slack id (`C…`/`G…`/`D…`)
+   * bypasses enumeration for an authoritative `conversations.info` lookup;
+   * a `#name` / bare name is resolved against the enumeration instead of
+   * being sent to Slack (which would answer the opaque `invalid_arguments`).
+   */
   channelId?: string
 }) => Promise<
-  | { ok: true; channels: Array<{ id: string; name: string; isMember: boolean }> }
+  | {
+      ok: true
+      channels: Array<{ id: string; name: string; isMember: boolean }>
+      /**
+       * Set when the caller asked for a name that did not match exactly: the
+       * returned `channels` are then the browse list (so the model can pick
+       * without a second round-trip) and `note` says what happened.
+       */
+      note?: string
+    }
   | { ok: false; reason: string }
 >
 
@@ -253,6 +274,18 @@ export type ListSlackMembers = (args: {
   | { ok: false; reason: string }
 >
 
+/**
+ * Failure copy for the Slack discovery tools. Each string carries the three
+ * parts the model needs (what / why / next step) so it does not have to
+ * guess whether to retry, reconnect, or ask.
+ */
+const SLACK_DISCOVERY_UNAVAILABLE =
+  'Slack channel/member discovery is not wired in this deployment (no integration store), so Slack ids cannot be looked up here. Ask the user for the exact Slack channel id (`C…`/`G…`) or member id (`U…`); retrying this tool will not help.'
+
+function slackNotConnected(assistantId: string): string {
+  return `Slack is not connected for assistant ${assistantId}, so its bot cannot list channels or members. Either connect Slack for that assistant (Studio → Channels → Slack) or pass the \`assistantId\` of an assistant that already has Slack (see \`listConnectedAssistants\`). Retrying with the same assistant will fail the same way.`
+}
+
 export function createWorkflowDependencyPreflight(options: WorkflowDependencyPreflightOptions): {
   validateDeliveryTarget: ValidateDeliveryTarget
   preflightConnectorTool: PreflightConnectorTool
@@ -269,19 +302,23 @@ export function createWorkflowDependencyPreflight(options: WorkflowDependencyPre
     if (channelType === 'slack') {
       if (!options.integrationStore) return { ok: true } // can't check → don't block
       const integ = await options.integrationStore.getCredentialsForAssistantSystem(assistantId, 'slack')
-      if (!integ) return { ok: false, reason: 'Slack is not connected for this assistant' }
+      if (!integ) return { ok: false, reason: slackNotConnected(assistantId) }
       const botToken = (integ.credentials as { bot_token?: string }).bot_token
-      if (!botToken) return { ok: false, reason: 'Slack is not connected for this assistant' }
+      if (!botToken) return { ok: false, reason: slackNotConnected(assistantId) }
       try {
         const res = await createSlackApi({ botToken }).conversationsInfo(channelId)
         if (res.channel?.is_archived) return { ok: false, reason: `channel "${channelId}" is archived` }
         return { ok: true }
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        // `Slack API conversations.info: channel_not_found` (or invalid_auth) →
-        // the exact misconfiguration we are guarding against. Surface it.
-        if (/channel_not_found|invalid_auth|not_in_channel|account_inactive|missing_scope/.test(msg)) {
-          return { ok: false, reason: msg.replace(/^Slack API conversations\.info:\s*/, 'Slack: ') }
+        // `channel_not_found` (or an auth/scope failure) is the exact
+        // misconfiguration we are guarding against — surface it, translated
+        // (`describeSlackError` names the id, the diagnosis, and the
+        // discovery tool) rather than as the bare Slack code.
+        if (
+          isSlackApiError(err)
+          && /^(channel_not_found|invalid_auth|not_in_channel|account_inactive|missing_scope)$/.test(err.code)
+        ) {
+          return { ok: false, reason: describeSlackError(err) }
         }
         // Anything else (network blip, rate limit) → don't block authoring.
         return { ok: true }
@@ -485,21 +522,27 @@ export function createWorkflowDependencyPreflight(options: WorkflowDependencyPre
 
   const listSlackChannels: ListSlackChannels = async ({ assistantId, channelId }) => {
     if (!options.integrationStore) {
-      return { ok: false, reason: 'Slack channel listing is unavailable in this context' }
+      return { ok: false, reason: SLACK_DISCOVERY_UNAVAILABLE }
     }
     const integ = await options.integrationStore.getCredentialsForAssistantSystem(assistantId, 'slack')
     const botToken = integ && (integ.credentials as { bot_token?: string }).bot_token
-    if (!botToken) return { ok: false, reason: 'Slack is not connected for this assistant' }
+    if (!botToken) return { ok: false, reason: slackNotConnected(assistantId) }
     try {
       const slack = createSlackApi({ botToken })
-      if (channelId) {
+      const wanted = channelId?.trim()
+      if (wanted && looksLikeSlackConversationId(wanted)) {
         // `conversations.list` is a browsing surface, not an authorization
         // oracle. A concrete user-supplied private channel can be absent from
         // an enumeration snapshot while `conversations.info` resolves it. The
         // exact-id path must therefore bypass the list entirely (prod
         // 2026-08-11: Brian falsely asked for an invite to a member channel).
-        const { channel } = await slack.conversationsInfo(channelId)
-        if (channel.is_archived) return { ok: false, reason: `channel "${channelId}" is archived` }
+        const { channel } = await slack.conversationsInfo(wanted)
+        if (channel.is_archived) {
+          return {
+            ok: false,
+            reason: `Slack channel \`${wanted}\`${channel.name ? ` (#${channel.name})` : ''} is archived, so nothing can be posted there. Pick a different channel: call \`listSlackChannels\` with no \`channelId\` to browse.`,
+          }
+        }
         return {
           ok: true,
           channels: [{
@@ -516,20 +559,41 @@ export function createWorkflowDependencyPreflight(options: WorkflowDependencyPre
         // Member channels first (postable without a join), then by name.
         .sort((a, b) => (a.isMember === b.isMember ? a.name.localeCompare(b.name) : a.isMember ? -1 : 1))
         .map((c) => ({ id: c.id, name: c.name, isMember: c.isMember }))
-      return { ok: true, channels: usable }
+      if (!wanted) return { ok: true, channels: usable }
+
+      // Not an id — a `#name`, bare name, or an internal channel UUID. Slack's
+      // `conversations.info` would answer `invalid_arguments` (prod
+      // 2026-08-17), which tells the model nothing. Resolve by name here, and
+      // on a miss hand back the browse list with a note so the model can pick
+      // in the same turn instead of retrying blind.
+      const name = wanted.replace(/^#/, '').toLowerCase()
+      const byName = usable.filter((c) => c.name.toLowerCase() === name)
+      if (byName.length === 1) return { ok: true, channels: byName }
+      const looksLikeUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(wanted)
+      const near = usable.filter((c) => c.name.toLowerCase().includes(name)).slice(0, 5)
+      const what = looksLikeUuid
+        ? `\`${wanted}\` is an internal channel UUID (from \`listChannels\`), not a Slack channel id`
+        : `\`${wanted}\` is not a Slack channel id and no channel named \`#${name}\` is visible to the bot`
+      const nearText = near.length
+        ? ` Closest visible names: ${near.map((c) => `#${c.name} (${c.id})`).join(', ')}.`
+        : ''
+      return {
+        ok: true,
+        channels: usable,
+        note: `${what}.${nearText} The channels below are everything the bot can see: pick one and use its \`id\` (a \`C…\`/\`G…\` id) as the delivery \`channelId\`. A private channel the bot has not been invited to will not appear here — ask the user to run \`/invite @<bot>\` in it, or ask them for the channel's id.`,
+      }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      return { ok: false, reason: msg.replace(/^Slack API conversations\.(?:list|info):\s*/, 'Slack: ') }
+      return { ok: false, reason: describeSlackError(err) }
     }
   }
 
   const listSlackMembers: ListSlackMembers = async ({ assistantId }) => {
     if (!options.integrationStore) {
-      return { ok: false, reason: 'Slack member listing is unavailable in this context' }
+      return { ok: false, reason: SLACK_DISCOVERY_UNAVAILABLE }
     }
     const integ = await options.integrationStore.getCredentialsForAssistantSystem(assistantId, 'slack')
     const botToken = integ && (integ.credentials as { bot_token?: string }).bot_token
-    if (!botToken) return { ok: false, reason: 'Slack is not connected for this assistant' }
+    if (!botToken) return { ok: false, reason: slackNotConnected(assistantId) }
     try {
       const { members } = await createSlackApi({ botToken }).usersList()
       return {
@@ -539,8 +603,7 @@ export function createWorkflowDependencyPreflight(options: WorkflowDependencyPre
           .sort((a, b) => (a.handle || a.realName).localeCompare(b.handle || b.realName)),
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      return { ok: false, reason: msg.replace(/^Slack API users\.list:\s*/, 'Slack: ') }
+      return { ok: false, reason: describeSlackError(err) }
     }
   }
 

@@ -23,6 +23,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { actionableInputSchema } from '../brain-mcp/actionable-input-schema.js'
 import { Router } from 'express'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
@@ -152,7 +153,10 @@ export function assistantMcpRoutes(opts: Options): Router {
     for (const tool of tools) {
       server.registerTool(
         tool.name,
-        { description: tool.description, inputSchema: tool.inputSchema },
+        // A ZodObject whose failed parse renders compact `path: message` lines
+        // (+ retry verdict) instead of the SDK default `ZodError.message` JSON
+        // blob — see ./actionable-input-schema.ts.
+        { description: tool.description, inputSchema: actionableInputSchema(tool.inputSchema, tool.name) },
         tool.handler,
       )
     }

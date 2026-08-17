@@ -1,6 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createSlackAdapter } from '../slack/adapter.js'
 import { createSlackApi } from '../slack/api.js'
+import {
+  describeSlackError,
+  isSlackApiError,
+  looksLikeSlackConversationId,
+  looksLikeSlackMemberId,
+} from '../slack/errors.js'
 import { verifySlackSignature } from '../slack/verify.js'
 import { createHmac } from 'node:crypto'
 
@@ -502,5 +508,96 @@ describe('[COMP:channels/slack] read-method form encoding', () => {
     expect(history.get('channel')).toBe('C0TESTFORM1')
     expect(history.get('limit')).toBe('5')
     expect(history.has('latest')).toBe(false)
+  })
+})
+
+describe('[COMP:channels/slack-errors] SlackApiError + describeSlackError', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  function slackFailure(body: Record<string, unknown>, init?: ResponseInit) {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body), { status: 200, ...init })))
+  }
+
+  it('keeps the code, the validator detail, and the call target on the thrown error', async () => {
+    slackFailure({
+      ok: false,
+      error: 'invalid_arguments',
+      response_metadata: { messages: ['[ERROR] invalid `channel` value'] },
+    })
+    const api = createSlackApi({ botToken: 'xoxb-test' })
+    const err = await api.conversationsInfo('#general').catch((e: unknown) => e)
+    expect(isSlackApiError(err)).toBe(true)
+    if (!isSlackApiError(err)) return
+    expect(err.method).toBe('conversations.info')
+    expect(err.code).toBe('invalid_arguments')
+    expect(err.detail).toEqual(['[ERROR] invalid `channel` value'])
+    expect(err.target).toEqual({ channel: '#general' })
+    // The legacy `Slack API <method>: <code>` prefix survives for log/grep parity.
+    expect(err.message).toMatch(/^Slack API conversations\.info: invalid_arguments/)
+  })
+
+  it('invalid_arguments with a non-id channel names the value and points at listSlackChannels', async () => {
+    slackFailure({ ok: false, error: 'invalid_arguments' })
+    const err = await createSlackApi({ botToken: 'x' }).conversationsInfo('#general').catch((e: unknown) => e)
+    const text = describeSlackError(err)
+    expect(text).toContain('`#general` is not a Slack conversation id')
+    expect(text).toContain('`listSlackChannels`')
+    expect(text).toContain('invalid_arguments')
+  })
+
+  it('missing_scope carries needed/provided and says a retry cannot help', async () => {
+    slackFailure({ ok: false, error: 'missing_scope', needed: 'channels:read', provided: 'chat:write,users:read' })
+    const err = await createSlackApi({ botToken: 'x' }).conversationsList().catch((e: unknown) => e)
+    const text = describeSlackError(err)
+    expect(text).toContain('`channels:read`')
+    expect(text).toContain('token has: chat:write,users:read')
+    expect(text).toMatch(/retrying will not help/i)
+  })
+
+  it('ratelimited reads Retry-After and says how long to wait', async () => {
+    slackFailure({ ok: false, error: 'ratelimited' }, { status: 429, headers: { 'retry-after': '7' } })
+    const err = await createSlackApi({ botToken: 'x' }).conversationsList().catch((e: unknown) => e)
+    expect(isSlackApiError(err) && err.retryAfterSec).toBe(7)
+    expect(describeSlackError(err)).toMatch(/wait 7s, then retry the same call once/)
+  })
+
+  it('auth-class codes are diagnosed as a dead token with a reconnect remedy', async () => {
+    slackFailure({ ok: false, error: 'token_revoked' })
+    const err = await createSlackApi({ botToken: 'x' }).conversationsList().catch((e: unknown) => e)
+    const text = describeSlackError(err)
+    expect(text).toContain('token_revoked')
+    expect(text).toMatch(/Reconnect Slack/)
+    expect(text).toMatch(/retrying the same call will not help/)
+  })
+
+  it('a non-JSON transport failure becomes an http_<status> code instead of a JSON parse throw', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('<html>bad gateway</html>', { status: 502 })))
+    const err = await createSlackApi({ botToken: 'x' }).conversationsList().catch((e: unknown) => e)
+    expect(isSlackApiError(err) && err.code).toBe('http_502')
+    expect(describeSlackError(err)).toMatch(/HTTP 502/)
+  })
+
+  it('an unknown code still gets the what/where and a pointer to the method reference', async () => {
+    slackFailure({ ok: false, error: 'some_new_code' })
+    const err = await createSlackApi({ botToken: 'x' }).conversationsInfo('C123').catch((e: unknown) => e)
+    const text = describeSlackError(err)
+    expect(text).toContain('`some_new_code`')
+    expect(text).toContain('conversations.info')
+    expect(text).toContain('https://docs.slack.dev/reference/methods/conversations.info')
+  })
+
+  it('passes non-Slack errors through as their message', () => {
+    expect(describeSlackError(new Error('fetch failed'))).toBe('fetch failed')
+  })
+
+  it('id shape helpers accept real ids and reject names / UUIDs', () => {
+    expect(looksLikeSlackConversationId('C0123ABCD')).toBe(true)
+    expect(looksLikeSlackConversationId('G0123ABCD')).toBe(true)
+    expect(looksLikeSlackConversationId('D0123ABCD')).toBe(true)
+    expect(looksLikeSlackConversationId('#general')).toBe(false)
+    expect(looksLikeSlackConversationId('general')).toBe(false)
+    expect(looksLikeSlackConversationId('3f2a9c1e-7b4d-4e8a-9c2b-1d5e6f7a8b9c')).toBe(false)
+    expect(looksLikeSlackMemberId('U0123ABCD')).toBe(true)
+    expect(looksLikeSlackMemberId('@alice')).toBe(false)
   })
 })

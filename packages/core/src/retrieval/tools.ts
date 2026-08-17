@@ -112,7 +112,10 @@ export type RetrievalToolOptions = {
  */
 export function actorFromContext(context: ToolContext): RetrievalActor | RetrievalErrorBody {
   if (!context.workspaceId) {
-    return { error: 'Retrieval requires a workspace-scoped session.' }
+    return {
+      error:
+        'This chat is not bound to a workspace, so the company brain cannot be read here — brain rows are workspace-scoped and there is no permission boundary to evaluate. No argument change or retry will help in this session. Answer from what is already in context, or tell the user to ask from a workspace chat.',
+    }
   }
   return {
     workspaceId: context.workspaceId,

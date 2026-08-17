@@ -1,6 +1,16 @@
 export { createSlackAdapter } from './adapter.js'
 export type { SlackAdapterOptions, SlackAdapterConfig, SlackOutboundAudit } from './adapter.js'
 export { createSlackApi } from './api.js'
+export {
+  SlackApiError,
+  isSlackApiError,
+  describeSlackError,
+  looksLikeSlackConversationId,
+  looksLikeSlackMemberId,
+  SLACK_AUTH_ERROR_CODES,
+  SLACK_TRANSIENT_ERROR_CODES,
+} from './errors.js'
+export type { SlackErrorTarget } from './errors.js'
 export type { SlackApi } from './api.js'
 export {
   resolveMentionsInText,

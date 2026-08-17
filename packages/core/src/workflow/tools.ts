@@ -236,7 +236,7 @@ export type WorkflowToolDeps = {
    * reports that discovery is unavailable. See docs/architecture/features/workflow.md.
    */
   listSlackChannels?: (args: { assistantId: string; channelId?: string }) => Promise<
-    | { ok: true; channels: Array<{ id: string; name: string; isMember: boolean }> }
+    | { ok: true; channels: Array<{ id: string; name: string; isMember: boolean }>; note?: string }
     | { ok: false; reason: string }
   >
   /**
@@ -345,6 +345,19 @@ const triggerInputSchemaRef = z
     `Optional trigger — same contract as proposeWorkflow's \`trigger\` parameter (see it for the full shapes, event sources, and task actions). ` +
       `The ONLY kinds: ${WORKFLOW_TRIGGER_KINDS.join(' | ')}; anything else does not exist. All kinds are authorable here; only webhook slug/secret provisioning happens in the web builder.`,
   )
+
+/**
+ * Schedule-trigger failure when the scheduling backend is not wired on this
+ * surface. The workflow itself is unaffected — say so, and name the
+ * recovery (author without a trigger; add the schedule in the web builder).
+ */
+const SCHEDULING_UNAVAILABLE =
+  'The scheduling backend is not wired on this surface, so a schedule trigger cannot be created or updated here. The workflow definition itself is fine — retry without `trigger` (or with `trigger: null`) to save it, and tell the user to add the schedule in the web Workflow builder. Retrying with the same trigger here will fail the same way.'
+
+/** Workflow-id miss: name the id, the discovery tool, and the retry verdict. */
+function workflowNotFound(workflowId: string): string {
+  return `Workflow ${workflowId} not found in this workspace. Call listWorkflows to see the workflows that exist and re-issue with an id from that list. Do NOT retry this exact id.`
+}
 
 function workspaceGate(workspaceId: string | null | undefined): { data: string; isError: true } | null {
   if (!workspaceId) {
@@ -1293,7 +1306,7 @@ async function applyScheduleTrigger(
   trigger: ScheduleTrigger,
   targetViewId: string | null | undefined,
 ): Promise<ScheduleApplyResult | { error: string }> {
-  if (!deps.jobStore) return { error: 'Scheduling is not available in this context.' }
+  if (!deps.jobStore) return { error: SCHEDULING_UNAVAILABLE }
   const timezone = trigger.timezone ?? context.userTimezone ?? 'UTC'
   const schedule = trigger.schedule as StructuredSchedule
   const nextRunAt = computeNextRun(schedule, timezone)
@@ -1371,7 +1384,7 @@ async function applyScheduleTrigger(
   }
 
   // WORKFLOW-TRIGGER row (workspace-visible) — the team-automation path.
-  if (!deps.resolvePrimary) return { error: 'Scheduling is not available in this context.' }
+  if (!deps.resolvePrimary) return { error: SCHEDULING_UNAVAILABLE }
   const synced = await syncWorkflowScheduleTrigger(
     { jobStore: deps.jobStore, resolvePrimary: deps.resolvePrimary },
     {
@@ -1603,7 +1616,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
         }
         trigger = t.data
         if (trigger.kind === 'schedule' && !deps.jobStore) {
-          return { data: 'Scheduling is not available in this context.', isError: true }
+          return { data: SCHEDULING_UNAVAILABLE, isError: true }
         }
       }
 
@@ -1749,7 +1762,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
 
       const existing = await deps.workflowStore.getById(context.userId, input.workflowId)
       if (!existing || existing.workspaceId !== context.workspaceId) {
-        return { data: `Workflow ${input.workflowId} not found in workspace.`, isError: true }
+        return { data: workflowNotFound(input.workflowId), isError: true }
       }
 
       // Validate the optional trigger up front (before any write).
@@ -1761,7 +1774,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
         }
         trigger = t.data
         if (!deps.jobStore) {
-          return { data: 'Scheduling is not available in this context.', isError: true }
+          return { data: SCHEDULING_UNAVAILABLE, isError: true }
         }
       }
 
@@ -1881,7 +1894,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
 
       const updated = await deps.workflowStore.update(context.userId, input.workflowId, fields)
       if (!updated) {
-        return { data: `Workflow ${input.workflowId} not found in workspace.`, isError: true }
+        return { data: workflowNotFound(input.workflowId), isError: true }
       }
 
       // Reconcile the firing scheduled_jobs row with the new trigger.
@@ -1890,7 +1903,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       if (trigger !== undefined && deps.jobStore) {
         if (trigger.kind === 'schedule') {
           if (!deps.resolvePrimary) {
-            scheduleError = 'Scheduling is not available in this context.'
+            scheduleError = SCHEDULING_UNAVAILABLE
           } else if (
             // A reminder fires from a messaging/doc-channel row the sync helper
             // does not own (it manages only `channel_type='workflow'` rows). It
@@ -1984,7 +1997,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
 
       const workflow = await deps.workflowStore.getById(context.userId, input.workflowId)
       if (!workflow || workflow.workspaceId !== context.workspaceId) {
-        return { data: `Workflow ${input.workflowId} not found in workspace.`, isError: true }
+        return { data: workflowNotFound(input.workflowId), isError: true }
       }
 
       // The ACTUAL scheduled-trigger rows, any creator — `workflows.trigger`
@@ -2062,10 +2075,13 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
 
       const workflow = await deps.workflowStore.getById(context.userId, input.workflowId)
       if (!workflow || workflow.workspaceId !== context.workspaceId) {
-        return { data: `Workflow ${input.workflowId} not found in workspace.`, isError: true }
+        return { data: workflowNotFound(input.workflowId), isError: true }
       }
       if (!workflow.enabled) {
-        return { data: `Workflow "${workflow.name}" is disabled.`, isError: true }
+        return {
+          data: `Workflow "${workflow.name}" is disabled, so it will not run. Someone turned it off deliberately — ask the user before re-enabling (updateWorkflow with { workflowId: "${workflow.id}", enabled: true }). Retrying runWorkflow without enabling it will fail the same way.`,
+          isError: true,
+        }
       }
 
       const run = await deps.runStore.createRun({
@@ -2168,7 +2184,13 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
     if (UUID_RE.test(rawId)) {
       const run = await deps.runStore.getRunById(context.userId, rawId)
       if (!run || run.workspaceId !== context.workspaceId) {
-        return { ok: false, result: { data: `Run ${rawId} not found in workspace.`, isError: true } }
+        return {
+          ok: false,
+          result: {
+            data: `Could not resolve run ${rawId} in this workspace — the id did not match any run visible here. This is NOT proof the run failed or never happened; it only means this identifier didn't resolve. Call getWorkflow on the relevant workflow to see its recentRuns and use an id from there.`,
+            isError: true,
+          },
+        }
       }
       return { ok: true, run }
     }
@@ -2297,7 +2319,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
     name: 'listSlackChannels',
     description:
       "Browse Slack channels visible to the delivering assistant's bot: each channel's id (a Slack `C…`/`G…` id) and name. " +
-      'If the user supplied a concrete channel id, pass it as `channelId`: that performs an authoritative direct lookup for the exact channel. A channel missing from the browse list is NOT proof the bot lacks access; never ask for an invite or reconnect from list absence alone. Use the direct lookup or `proposeWorkflow` to check it. ' +
+      'If the user supplied a concrete channel, pass it as `channelId`: a Slack id (`C…`/`G…`) performs an authoritative direct lookup for that exact channel; a `#name` is resolved by name against the browse list, and on a miss the browse list comes back with a `note` explaining why. A channel missing from the browse list is NOT proof the bot lacks access; never ask for an invite or reconnect from list absence alone. Use the direct lookup or `proposeWorkflow` to check it. ' +
       'When choosing by name, call this before setting a Slack delivery target, then use the chosen channel\'s `id` on the terminal step\'s `deliver` as `{ channelType: "slack", channelId: "<id>" }`. ' +
       'The internal channel UUID from `listChannels` is NOT a Slack channel id and fails `channel_not_found` — always use an id from here. ' +
       '`isMember: true` marks channels the bot is already in (postable without a join).',
@@ -2319,14 +2341,17 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
       if (!deps.listSlackChannels) {
-        return { data: 'Slack channel discovery is not available in this context.', isError: true }
+        return {
+          data: 'Slack channel discovery is not wired on this surface (no Slack lookup dependency), so channel ids cannot be looked up here. Ask the user for the exact Slack channel id (`C…`/`G…`) and set it directly on the step `deliver`; retrying this tool will not help.',
+          isError: true,
+        }
       }
       const res = await deps.listSlackChannels({
         assistantId: input.assistantId ?? context.assistantId,
         channelId: input.channelId,
       })
       if (!res.ok) return { data: res.reason, isError: true }
-      return { data: { channels: res.channels } }
+      return { data: res.note ? { note: res.note, channels: res.channels } : { channels: res.channels } }
     },
   })
 
@@ -2350,7 +2375,10 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
       if (!deps.listSlackMembers) {
-        return { data: 'Slack member discovery is not available in this context.', isError: true }
+        return {
+          data: 'Slack member discovery is not wired on this surface (no Slack lookup dependency), so member ids cannot be looked up here. Ask the user for the exact Slack member id (`U…`) to mention; retrying this tool will not help.',
+          isError: true,
+        }
       }
       const res = await deps.listSlackMembers({ assistantId: input.assistantId ?? context.assistantId })
       if (!res.ok) return { data: res.reason, isError: true }

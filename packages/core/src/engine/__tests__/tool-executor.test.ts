@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { z } from 'zod'
-import { createToolExecutor } from '../tool-executor.js'
+import { createToolExecutor, renderToolResultData } from '../tool-executor.js'
 import { createLoopDetector } from '../loop-detector.js'
 import { buildTool, type Tool, type ToolContext } from '../../tools/types.js'
 import { EvidenceAccumulator } from '../../security/evidence.js'
@@ -1285,5 +1285,28 @@ describe('[COMP:engine/decline-copy] Declined-confirmation tool_result copy', ()
     const content = toolResultContent(second[0])
     expectHonestDeclineCopy(content, 'sensitiveTool')
     expect(content).toContain('earlier in this same turn')
+  })
+})
+
+describe('[COMP:engine/tool-executor] renderToolResultData — failure-object unwrapping', () => {
+  it('unwraps a one-key { error } failure object to its bare string', () => {
+    expect(renderToolResultData({ error: 'Retrieval requires a workspace.' }, true))
+      .toBe('Retrieval requires a workspace.')
+    expect(renderToolResultData({ message: 'Thread not found.' }, true))
+      .toBe('Thread not found.')
+  })
+
+  it('keeps multi-key failure objects as JSON (their extra keys are load-bearing)', () => {
+    const data = { kind: 'stale_page', message: 'Stale page', expectedVersion: 3 }
+    expect(renderToolResultData(data, true)).toBe(JSON.stringify(data))
+  })
+
+  it('never unwraps success payloads or non-string error values', () => {
+    expect(renderToolResultData({ error: 'looks like a failure' }, false))
+      .toBe(JSON.stringify({ error: 'looks like a failure' }))
+    expect(renderToolResultData({ error: { code: 7 } }, true))
+      .toBe(JSON.stringify({ error: { code: 7 } }))
+    expect(renderToolResultData(['a', 'b'], true)).toBe(JSON.stringify(['a', 'b']))
+    expect(renderToolResultData('plain', true)).toBe('plain')
   })
 })

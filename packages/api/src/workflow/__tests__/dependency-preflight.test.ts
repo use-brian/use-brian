@@ -647,3 +647,115 @@ describe('[COMP:workflow/dependency-preflight] listSlackChannels', () => {
     expect(r.reason).toMatch(/missing_scope/)
   })
 })
+
+describe('[COMP:workflow/dependency-preflight] listSlackChannels — actionable failure copy', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  const LIST_BODY = {
+    ok: true,
+    channels: [
+      { id: 'C0GENERAL1', name: 'general', is_member: true },
+      { id: 'C0DEVTEAM1', name: 'dev-team', is_member: false },
+    ],
+    response_metadata: { next_cursor: '' },
+  }
+
+  it('resolves a `#name` against the browse list instead of sending it to conversations.info', async () => {
+    const fetchMock = vi.fn(async (..._args: unknown[]) => new Response(JSON.stringify(LIST_BODY), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const { listSlackChannels } = createWorkflowDependencyPreflight({
+      integrationStore: integrationStoreWith({ slack: { credentials: { bot_token: 'xoxb-1' } } }),
+    })
+    const r = await listSlackChannels({ assistantId: ASSISTANT_ID, channelId: '#Dev-Team' })
+    expect(r).toEqual({ ok: true, channels: [{ id: 'C0DEVTEAM1', name: 'dev-team', isMember: false }] })
+    // Only conversations.list was hit — never conversations.info with a non-id.
+    expect(fetchMock.mock.calls.map((c) => String(c[0]))).toEqual(['https://slack.com/api/conversations.list'])
+  })
+
+  it('on a name miss returns the browse list plus a note naming the miss and the nearest channels', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(LIST_BODY), { status: 200 })))
+    const { listSlackChannels } = createWorkflowDependencyPreflight({
+      integrationStore: integrationStoreWith({ slack: { credentials: { bot_token: 'xoxb-1' } } }),
+    })
+    const r = await listSlackChannels({ assistantId: ASSISTANT_ID, channelId: 'dev' })
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.channels).toHaveLength(2)
+    expect(r.note).toMatch(/no channel named `#dev`/)
+    expect(r.note).toMatch(/#dev-team \(C0DEVTEAM1\)/)
+    expect(r.note).toMatch(/\/invite @<bot>/)
+  })
+
+  it('names an internal channel UUID for what it is (the listChannels cross-wiring)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(LIST_BODY), { status: 200 })))
+    const { listSlackChannels } = createWorkflowDependencyPreflight({
+      integrationStore: integrationStoreWith({ slack: { credentials: { bot_token: 'xoxb-1' } } }),
+    })
+    const r = await listSlackChannels({
+      assistantId: ASSISTANT_ID,
+      channelId: '3f2a9c1e-7b4d-4e8a-9c2b-1d5e6f7a8b9c',
+    })
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.note).toMatch(/internal channel UUID \(from `listChannels`\), not a Slack channel id/)
+  })
+
+  it('translates a Slack error code into a diagnosis + next step, keeping the code for grep', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            ok: false,
+            error: 'invalid_arguments',
+            response_metadata: { messages: ['[ERROR] invalid `channel` value'] },
+          }),
+          { status: 200 },
+        ),
+      ),
+    )
+    const { listSlackChannels } = createWorkflowDependencyPreflight({
+      integrationStore: integrationStoreWith({ slack: { credentials: { bot_token: 'xoxb-1' } } }),
+    })
+    // A well-formed id that Slack nonetheless rejects → the direct path runs
+    // and the model sees Slack's own validator line, not the bare code.
+    const r = await listSlackChannels({ assistantId: ASSISTANT_ID, channelId: 'C0BADVALUE' })
+    expect(r.ok).toBe(false)
+    if (r.ok) return
+    expect(r.reason).toMatch(/invalid_arguments/)
+    expect(r.reason).toMatch(/invalid `channel` value/)
+    expect(r.reason).not.toBe('Slack: invalid_arguments')
+  })
+
+  it('a missing_scope failure names the scope Slack wanted and says a retry cannot help', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({ ok: false, error: 'missing_scope', needed: 'channels:read', provided: 'chat:write' }),
+          { status: 200 },
+        ),
+      ),
+    )
+    const { listSlackChannels } = createWorkflowDependencyPreflight({
+      integrationStore: integrationStoreWith({ slack: { credentials: { bot_token: 'xoxb-1' } } }),
+    })
+    const r = await listSlackChannels({ assistantId: ASSISTANT_ID })
+    expect(r.ok).toBe(false)
+    if (r.ok) return
+    expect(r.reason).toMatch(/`channels:read`/)
+    expect(r.reason).toMatch(/token has: chat:write/)
+    expect(r.reason).toMatch(/retrying will not help/i)
+  })
+
+  it('a not-connected assistant is told how to fix it (connect, or pick another assistantId)', async () => {
+    const { listSlackChannels } = createWorkflowDependencyPreflight({
+      integrationStore: integrationStoreWith({}),
+    })
+    const r = await listSlackChannels({ assistantId: ASSISTANT_ID })
+    expect(r.ok).toBe(false)
+    if (r.ok) return
+    expect(r.reason).toContain(ASSISTANT_ID)
+    expect(r.reason).toMatch(/listConnectedAssistants/)
+  })
+})

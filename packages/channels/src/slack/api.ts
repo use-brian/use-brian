@@ -1,6 +1,70 @@
 /**
  * Lightweight Slack Web API client using fetch.
+ *
+ * Every non-`ok` response is thrown as a `SlackApiError` (see ./errors.ts)
+ * that keeps Slack's error code, its `response_metadata.messages` validator
+ * detail, the `missing_scope` needed/provided pair, and the rate-limit
+ * `Retry-After` — so a tool catching it can render a diagnosis instead of the
+ * bare code.
  */
+
+import { SlackApiError, type SlackErrorTarget } from './errors.js'
+
+type SlackFailureBody = {
+  ok: boolean
+  error?: string
+  needed?: string
+  provided?: string
+  response_metadata?: { messages?: unknown }
+}
+
+/** Pick the call arguments worth echoing back in a failure message. */
+function targetOf(params?: Record<string, unknown>): SlackErrorTarget {
+  const target: SlackErrorTarget = {}
+  const channel = params?.channel ?? params?.channel_id
+  if (typeof channel === 'string') target.channel = channel
+  if (typeof params?.user === 'string') target.user = params.user
+  const ts = params?.ts ?? params?.thread_ts ?? params?.timestamp
+  if (typeof ts === 'string') target.ts = ts
+  return target
+}
+
+/**
+ * Parse a Slack Web API response and throw a structured `SlackApiError` on
+ * failure. Slack signals failure with `{ ok: false, error }` at HTTP 200; a
+ * non-2xx status (429 rate limit, 5xx) may carry the same JSON body or none.
+ */
+async function readSlackResponse<T>(
+  method: string,
+  res: Response,
+  params?: Record<string, unknown>,
+): Promise<T> {
+  let data: (SlackFailureBody & T) | undefined
+  try {
+    data = await res.json() as SlackFailureBody & T
+  } catch {
+    data = undefined
+  }
+  if (data?.ok) return data
+  // Defensive reads: test doubles (and some fetch polyfills) hand back a
+  // partial Response without `headers` / `ok` / `status`.
+  const httpFailed = typeof res.status === 'number' && (res.status < 200 || res.status >= 300)
+  const retryAfterHeader = typeof res.headers?.get === 'function' ? res.headers.get('retry-after') : null
+  const retryAfterSec = retryAfterHeader && /^\d+$/.test(retryAfterHeader)
+    ? Number(retryAfterHeader)
+    : undefined
+  const messages = data?.response_metadata?.messages
+  throw new SlackApiError({
+    method,
+    code: data?.error ?? (httpFailed ? `http_${res.status}` : 'unknown_error'),
+    detail: Array.isArray(messages) ? messages.filter((m): m is string => typeof m === 'string') : undefined,
+    needed: typeof data?.needed === 'string' ? data.needed : undefined,
+    provided: typeof data?.provided === 'string' ? data.provided : undefined,
+    retryAfterSec,
+    httpStatus: httpFailed ? res.status : undefined,
+    target: targetOf(params),
+  })
+}
 
 export type SlackOutboundAudit = {
   kind: 'post_message' | 'update_message'
@@ -48,12 +112,7 @@ export function createSlackApi(options: SlackApiOptions) {
       },
       body: params ? JSON.stringify(params) : undefined,
     })
-
-    const data = await res.json() as { ok: boolean; error?: string } & T
-    if (!data.ok) {
-      throw new Error(`Slack API ${method}: ${data.error ?? 'unknown error'}`)
-    }
-    return data
+    return readSlackResponse<T>(method, res, params)
   }
 
   /**
@@ -92,12 +151,7 @@ export function createSlackApi(options: SlackApiOptions) {
       },
       body: form.toString(),
     })
-
-    const data = await res.json() as { ok: boolean; error?: string } & T
-    if (!data.ok) {
-      throw new Error(`Slack API ${method}: ${data.error ?? 'unknown error'}`)
-    }
-    return data
+    return readSlackResponse<T>(method, res, params)
   }
 
   async function safeAudit(event: SlackOutboundAudit): Promise<void> {
@@ -337,7 +391,13 @@ export function createSlackApi(options: SlackApiOptions) {
         body: data,
       })
       if (!res.ok) {
-        throw new Error(`Slack file upload: HTTP ${res.status}`)
+        // Structured like every other Slack failure so describeSlackError's
+        // `http_*` branch renders it (transient upload-host error, retry once).
+        throw new SlackApiError({
+          method: 'files.uploadToExternalURL',
+          code: `http_${res.status}`,
+          httpStatus: res.status,
+        })
       }
     },
 

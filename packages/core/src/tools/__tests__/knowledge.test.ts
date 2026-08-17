@@ -106,7 +106,11 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
       const tools = createKnowledgeTools(mockStore)
       const result = await tools[0].execute({ query: 'anything' }, { ...ctx, workspaceId: null })
 
-      expect(result.data).toContain('not in a team')
+      // A real failure (isError), not an empty-result success the model would
+      // report as "the knowledge base is empty".
+      expect(result.isError).toBe(true)
+      expect(result.data).toContain('not attached to a workspace')
+      expect(result.data).toContain('do not retry')
       expect(mockStore.search).not.toHaveBeenCalled()
     })
   })
@@ -261,7 +265,7 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
       )
 
       expect(result.isError).toBe(true)
-      expect(result.data).toContain('not in a team')
+      expect(result.data).toContain('not attached to a workspace')
       expect(mockStore.create).not.toHaveBeenCalled()
     })
 

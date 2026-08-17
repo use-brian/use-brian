@@ -19,6 +19,18 @@ export function createDbCacheStore(): CacheStore {
       return result.rows[0]?.result ?? null
     },
 
+    async listToolNames(sessionId, actorUserId = null) {
+      const result = await query<{ tool_name: string }>(
+        `SELECT DISTINCT tool_name FROM tool_result_cache
+         WHERE session_id = $1
+           AND actor_user_id IS NOT DISTINCT FROM $2
+           AND expires_at > now()
+         ORDER BY tool_name`,
+        [sessionId, actorUserId],
+      )
+      return result.rows.map((r) => r.tool_name)
+    },
+
     async set(sessionId, toolName, _input, result, expiryHours, actorUserId = null) {
       await query(
         `INSERT INTO tool_result_cache (session_id, tool_name, result, expires_at, actor_user_id)

@@ -17,6 +17,7 @@
  */
 
 import { Router } from 'express'
+import { actionableInputSchema } from './actionable-input-schema.js'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import type { Tool, Embedder } from '@use-brian/core'
@@ -247,7 +248,10 @@ export function brainMcpRoutes(opts: Options): Router {
     })) {
       server.registerTool(
         tool.name,
-        { description: tool.description, inputSchema: tool.inputSchema },
+        // A ZodObject whose failed parse renders compact `path: message` lines
+        // (+ retry verdict) instead of the SDK default `ZodError.message` JSON
+        // blob — see ./actionable-input-schema.ts.
+        { description: tool.description, inputSchema: actionableInputSchema(tool.inputSchema, tool.name) },
         tool.handler,
       )
     }

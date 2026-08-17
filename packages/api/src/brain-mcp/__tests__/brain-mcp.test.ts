@@ -720,6 +720,69 @@ describe('[COMP:api/brain-mcp] buildBrainTools — bridged ToolContext shape', (
   })
 })
 
+describe('[COMP:api/brain-mcp] bridgeCoreTool — failure copy reaches the external agent compact and actionable', () => {
+  const WS = '33333333-3333-3333-3333-333333333333'
+  const KEY = '982d4a41-c568-4a5d-8614-833c7594bc1a'
+
+  it('renders a schema failure as `path: message` lines, never the ZodError issues JSON', async () => {
+    const strictSaveMemory: Tool = buildTool({
+      name: 'saveMemory',
+      description: 'strict schema for the assertion',
+      inputSchema: z.object({
+        summary: z.string().min(1),
+        scope: z.enum(['user', 'team']).optional(),
+      }),
+      async execute() {
+        return { data: 'ok' }
+      },
+    })
+    const tools = buildBrainTools({
+      workspaceId: WS,
+      scope: 'read_write',
+      keyId: KEY,
+      maxClearance: null,
+      ...ALL_STUBS,
+      memoryTools: { ...MEMORY_TOOLS_STUB, saveMemory: strictSaveMemory },
+    })
+    const saveMemory = tools.find((t) => t.name === 'saveMemory')!
+    const result = await saveMemory.handler({ summary: '', scope: 'workspace' })
+    expect(result.isError).toBe(true)
+    const body = (result.content[0] as { text: string }).text
+    expect(body).toMatch(/^Invalid input for `saveMemory`\. Validation failed:/)
+    expect(body).toMatch(/summary: /)
+    expect(body).toMatch(/scope: /)
+    // The pathological shape: `ZodError.message` is the issues array as JSON.
+    expect(body).not.toMatch(/"code":\s*"/)
+    expect(body).not.toMatch(/"path":\s*\[/)
+  })
+
+  it('a throw from execute() is caught and rendered through the same chokepoint (isError, no raw JSON)', async () => {
+    const throwingSaveMemory: Tool = buildTool({
+      name: 'saveMemory',
+      description: 'throws a ZodError from its own re-parse',
+      inputSchema: z.object({ summary: z.string() }),
+      async execute() {
+        z.object({ tags: z.array(z.string()) }).parse({ tags: 'not-an-array' })
+        return { data: 'unreachable' }
+      },
+    })
+    const tools = buildBrainTools({
+      workspaceId: WS,
+      scope: 'read_write',
+      keyId: KEY,
+      maxClearance: null,
+      ...ALL_STUBS,
+      memoryTools: { ...MEMORY_TOOLS_STUB, saveMemory: throwingSaveMemory },
+    })
+    const saveMemory = tools.find((t) => t.name === 'saveMemory')!
+    const result = await saveMemory.handler({ summary: 'hi' })
+    expect(result.isError).toBe(true)
+    const body = (result.content[0] as { text: string }).text
+    expect(body).toMatch(/^Validation failed:\ntags: /)
+    expect(body).not.toMatch(/"code":\s*"/)
+  })
+})
+
 describe('[COMP:api/brain-mcp] agent capability toolset gating (agent-facing capability surface §5)', () => {
   const AGENT_TOOLS = {
     reads: new Map([['listAssistants', stubCoreTool('listAssistants', true)]]),

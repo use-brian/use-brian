@@ -207,6 +207,17 @@ const idShape = z.string().uuid()
 const tagShape = z.array(z.string().min(1).max(64)).max(20)
 const externalRefShape = z.record(z.unknown())
 
+/**
+ * Supersession-aware not-found copy (the CRM twin of tasks'
+ * `taskNotFoundMessage`): every update mints a NEW row id, so the dominant
+ * miss is a stale id from an earlier edit. Name the id, the mechanic, the
+ * discovery tools, and forbid the blind retry.
+ */
+function crmNotFound(kind: 'Contact' | 'Company' | 'Deal', id: string): string {
+  const listTool = kind === 'Contact' ? 'listContacts' : kind === 'Company' ? 'listCompanies' : 'listDeals'
+  return `${kind} ${id} not found in this workspace. If you edited this ${kind.toLowerCase()} earlier, that edit returned a NEW id (every update supersedes the row) — reuse the id from that result, or call ${listTool} / searchBrain to re-resolve. Do NOT retry this exact id.`
+}
+
 function workspaceGate(workspaceId: string | null | undefined): { data: string; isError: true } | null {
   if (!workspaceId) {
     return {
@@ -486,22 +497,39 @@ function fullDeal(row: DealRecord): {
   }
 }
 
-function translateLinkError(err: unknown): { data: string; isError: true } | null {
+function translateLinkError(
+  err: unknown,
+  input?: { company_id?: string | null; contact_id?: string | null },
+): { data: string; isError: true } | null {
   const msg = err instanceof Error ? err.message : String(err)
-  if (msg.includes('company_id must reference a company in the same workspace')) {
-    return { data: 'company_id must reference a company in the same workspace.', isError: true }
+  const companyId = input?.company_id ? ` \`${input.company_id}\`` : ''
+  const contactId = input?.contact_id ? ` \`${input.contact_id}\`` : ''
+  if (
+    msg.includes('company_id must reference a company in the same workspace')
+    || (msg.includes('foreign key') && msg.includes('company'))
+  ) {
+    return {
+      data: `company_id${companyId} does not reference a company in this workspace. Call listCompanies (or searchBrain) to get a valid company id, fix that one field, or omit company_id. Retrying the same id will fail the same way.`,
+      isError: true,
+    }
   }
-  if (msg.includes('contact_id must reference a contact in the same workspace')) {
-    return { data: 'contact_id must reference a contact in the same workspace.', isError: true }
-  }
-  if (msg.includes('foreign key') && msg.includes('company')) {
-    return { data: 'company_id not found in this workspace.', isError: true }
-  }
-  if (msg.includes('foreign key') && msg.includes('contact')) {
-    return { data: 'contact_id not found in this workspace.', isError: true }
+  if (
+    msg.includes('contact_id must reference a contact in the same workspace')
+    || (msg.includes('foreign key') && msg.includes('contact'))
+  ) {
+    return {
+      data: `contact_id${contactId} does not reference a contact in this workspace. Call listContacts (or searchBrain) to get a valid contact id, fix that one field, or omit contact_id. Retrying the same id will fail the same way.`,
+      isError: true,
+    }
   }
   if (msg.includes('invalid input syntax for type uuid')) {
-    return { data: 'Invalid UUID — pass an id from a prior list/get call.', isError: true }
+    const offender = [input?.company_id, input?.contact_id]
+      .filter((v): v is string => typeof v === 'string' && !/^[0-9a-f-]{36}$/i.test(v))
+    const named = offender.length ? ` (${offender.map((v) => `\`${v}\``).join(', ')})` : ''
+    return {
+      data: `An id argument is not a UUID${named}. Ids come from listContacts / listCompanies / listDeals or a prior save result — never a name, email, or domain. Re-check the ids in your call.`,
+      isError: true,
+    }
   }
   return null
 }
@@ -628,7 +656,7 @@ export function createCrmTools(
             formatSuggestions(suggestions),
         }
       } catch (err) {
-        const translated = translateLinkError(err)
+        const translated = translateLinkError(err, input as { company_id?: string | null; contact_id?: string | null })
         if (translated) return translated
         throw err
       }
@@ -650,7 +678,7 @@ export function createCrmTools(
         input.id,
       )
       if (!contact || contact.workspaceId !== context.workspaceId) {
-        return { data: `Contact ${input.id} not found in workspace.`, isError: true }
+        return { data: crmNotFound('Contact', input.id), isError: true }
       }
       return { data: fullContact(contact) }
     },
@@ -747,11 +775,11 @@ export function createCrmTools(
             }),
           )
         } catch (err) {
-          const translated = translateLinkError(err)
+          const translated = translateLinkError(err, input as { company_id?: string | null; contact_id?: string | null })
           if (translated) return translated
           throw err
         }
-        if (!updated) return { data: `Contact ${input.id} not found in workspace.`, isError: true }
+        if (!updated) return { data: crmNotFound('Contact', input.id), isError: true }
       } else {
         updated = await store.getContactById(
           ctxFor({
@@ -764,7 +792,7 @@ export function createCrmTools(
           }),
           input.id,
         )
-        if (!updated) return { data: `Contact ${input.id} not found in workspace.`, isError: true }
+        if (!updated) return { data: crmNotFound('Contact', input.id), isError: true }
       }
       if (hasFieldChange) {
         opts?.onEvent?.({ type: 'contact_updated', contactId: updated.id, fields: Object.keys(fields) }, eventCtx(context))
@@ -898,7 +926,7 @@ export function createCrmTools(
         input.id,
       )
       if (!company || company.workspaceId !== context.workspaceId) {
-        return { data: `Company ${input.id} not found in workspace.`, isError: true }
+        return { data: crmNotFound('Company', input.id), isError: true }
       }
       return { data: fullCompany(company) }
     },
@@ -982,7 +1010,7 @@ export function createCrmTools(
             compartments: context.compartments,
           }),
         )
-        if (!updated) return { data: `Company ${input.id} not found in workspace.`, isError: true }
+        if (!updated) return { data: crmNotFound('Company', input.id), isError: true }
         opts?.onEvent?.({ type: 'company_updated', companyId: updated.id, fields: Object.keys(fields) }, eventCtx(context))
       } else {
         updated = await store.getCompanyById(
@@ -996,7 +1024,7 @@ export function createCrmTools(
           }),
           input.id,
         )
-        if (!updated) return { data: `Company ${input.id} not found in workspace.`, isError: true }
+        if (!updated) return { data: crmNotFound('Company', input.id), isError: true }
       }
       const linksSummary = await applyExplicitLinks({
         entityLinks: opts?.entityLinks,
@@ -1092,7 +1120,7 @@ export function createCrmTools(
         const entitySuffix = deal.entityId ? `, entityId=${deal.entityId}` : ''
         return { data: `Created deal [${deal.id}${entitySuffix}]: ${summary}${formatLinksSummary(linksSummary)}` }
       } catch (err) {
-        const translated = translateLinkError(err)
+        const translated = translateLinkError(err, input as { company_id?: string | null; contact_id?: string | null })
         if (translated) return translated
         throw err
       }
@@ -1114,7 +1142,7 @@ export function createCrmTools(
         input.id,
       )
       if (!deal || deal.workspaceId !== context.workspaceId) {
-        return { data: `Deal ${input.id} not found in workspace.`, isError: true }
+        return { data: crmNotFound('Deal', input.id), isError: true }
       }
       return { data: fullDeal(deal) }
     },
@@ -1207,11 +1235,11 @@ export function createCrmTools(
             }),
           )
         } catch (err) {
-          const translated = translateLinkError(err)
+          const translated = translateLinkError(err, input as { company_id?: string | null; contact_id?: string | null })
           if (translated) return translated
           throw err
         }
-        if (!updated) return { data: `Deal ${input.id} not found in workspace.`, isError: true }
+        if (!updated) return { data: crmNotFound('Deal', input.id), isError: true }
         opts?.onEvent?.({ type: 'deal_updated', dealId: updated.id, fields: Object.keys(fields) }, eventCtx(context))
       } else {
         updated = await store.getDealById(
@@ -1225,7 +1253,7 @@ export function createCrmTools(
           }),
           input.id,
         )
-        if (!updated) return { data: `Deal ${input.id} not found in workspace.`, isError: true }
+        if (!updated) return { data: crmNotFound('Deal', input.id), isError: true }
       }
       const linksSummary = await applyExplicitLinks({
         entityLinks: opts?.entityLinks,
@@ -1278,7 +1306,7 @@ export function createCrmTools(
           compartments: context.compartments,
         }),
       )
-      if (!updated) return { data: `Deal ${input.id} not found in workspace.`, isError: true }
+      if (!updated) return { data: crmNotFound('Deal', input.id), isError: true }
       opts?.onEvent?.({ type: 'deal_stage_advanced', dealId: updated.id, stage: input.stage }, eventCtx(context))
       return { data: `Moved deal [${updated.id}] to ${input.stage}` }
     },

@@ -43,6 +43,14 @@ export type KnowledgeToolOptions = {
   requesterLabel?: string | null
 }
 
+/**
+ * Read tools' no-workspace failure. Returned WITH `isError` — before
+ * 2026-08-17 it was a plain success payload, so the model read three
+ * failures as "the knowledge base is empty" and reported that to users.
+ */
+const NO_WORKSPACE_KB =
+  'This assistant is not attached to a workspace, and the knowledge base is a workspace resource — so there is no knowledge base to read here (this is not an empty result). Nothing you pass will change that in this conversation: do not retry searchKnowledge / browseKnowledge / readKnowledgeEntry. Answer from what you already know and tell the user this assistant has no knowledge base.'
+
 const EXPLICIT_ASK_RULE =
   'Only use this when the user has explicitly asked, in this conversation, to change the knowledge base — never proactively.'
 
@@ -102,7 +110,7 @@ export function createKnowledgeTools(
 
     async execute(input, context) {
       if (!context.workspaceId) {
-        return { data: 'This assistant is not in a team — no knowledge base is available.' }
+        return { data: NO_WORKSPACE_KB, isError: true }
       }
       try {
         const results = await store.search(
@@ -149,7 +157,7 @@ export function createKnowledgeTools(
 
     async execute(input, context) {
       if (!context.workspaceId) {
-        return { data: 'This assistant is not in a team — no knowledge base is available.' }
+        return { data: NO_WORKSPACE_KB, isError: true }
       }
       try {
         const entries = await store.listByPath(
@@ -194,7 +202,7 @@ export function createKnowledgeTools(
 
     async execute(input, context) {
       if (!context.workspaceId) {
-        return { data: 'This assistant is not in a team — no knowledge base is available.' }
+        return { data: NO_WORKSPACE_KB, isError: true }
       }
       try {
         const entry = await store.getById(
@@ -301,7 +309,7 @@ export function createKnowledgeTools(
     async execute(input, context) {
       if (!context.workspaceId) {
         return {
-          data: 'This assistant is not in a team — knowledge entries can only be created under a team.',
+          data: `Cannot create knowledge entry "${input.path}": this assistant is not attached to a workspace, and knowledge entries are stored per workspace. Retrying will not help and no argument fixes it — tell the user the entry cannot be saved here, and offer the content directly instead.`,
           isError: true,
         }
       }
@@ -446,7 +454,7 @@ export function createKnowledgeTools(
 
     async execute(input, context) {
       if (!context.workspaceId) {
-        return { data: 'This assistant is not in a team — no knowledge base is available.', isError: true }
+        return { data: NO_WORKSPACE_KB, isError: true }
       }
       let entry
       try {

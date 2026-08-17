@@ -210,7 +210,7 @@ describe('[COMP:mcp/tool-search] createMcpSearchTools', () => {
 
     const result = await direct.execute({ title: 'Blocked' }, ctx as never)
     expect(result.isError).toBe(true)
-    expect(String(result.data)).toContain('blocked by policy')
+    expect(String(result.data)).toContain("set to the 'block' policy")
     expect(callMcpTool).not.toHaveBeenCalled()
   })
 
@@ -251,7 +251,7 @@ describe('[COMP:mcp/tool-search] createMcpSearchTools', () => {
     const direct = tools.find((tool) => tool.name === 'search_pages')!
     const result = await direct.execute({ query: 'private' }, ctx as never)
     expect(result.isError).toBe(true)
-    expect(String(result.data)).toContain('blocked by policy')
+    expect(String(result.data)).toContain("set to the 'block' policy")
     expect(callMcpTool).not.toHaveBeenCalled()
   })
 

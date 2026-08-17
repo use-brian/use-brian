@@ -114,7 +114,10 @@ export function createSessionStateTools(
           hit: false,
         })
         return {
-          data: `No open commitment with key "${input.key}" in this session.`,
+          // Informational no-op, deliberately NOT an error: the model often
+          // re-resolves things it forgot were already closed (see
+          // docs/architecture/context-engine/session-state.md).
+          data: `No open commitment with key "${input.key}" in this session — it is already resolved, or the key differs (commitment keys are the ones you passed to trackCommitment this session). Nothing to do; move on, or retry with the exact key if you meant a different commitment.`,
         }
       }
 

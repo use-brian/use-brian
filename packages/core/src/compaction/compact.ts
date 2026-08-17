@@ -75,7 +75,7 @@ Your summary should include:
 IMPORTANT: Be specific. "User wants to visit Tokyo" is not enough.
 "User is planning 5-day Tokyo trip March 10-15, vegetarian, budget ¥15,000/day food, Day 1-2 complete, Day 3 in progress" preserves continuity.
 
-Note: Search results from this conversation are cached server-side. If the user references previous results, use retrieveCachedResults instead of re-searching.
+Note: Pages fetched with urlReader in this conversation are cached server-side (latest per tool, 24h) — retrieveCachedResults({ toolName: "urlReader" }) returns the most recent one. Other tool results (webSearch, listings, lookups) are NOT cached; re-run those tools instead of calling retrieveCachedResults for them.
 
 Do NOT call any tools. Respond with text only.`
 

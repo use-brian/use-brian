@@ -268,7 +268,8 @@ describe('[COMP:tools/crm-contacts] saveContact / getContact / listContacts / up
     const tools = createCrmTools(store)
     const res = await tools.saveContact.execute({ name: 'Sam', company_id: otherCompanyId }, ctx)
     expect(res.isError).toBe(true)
-    expect(res.data as string).toContain('same workspace')
+    expect(res.data as string).toContain('does not reference a')
+    expect(res.data as string).toContain('Retrying the same id will fail the same way')
   })
 
   it('saveContact email schema rejects invalid email', async () => {
@@ -611,7 +612,8 @@ describe('[COMP:tools/crm-deals] saveDeal / getDeal / listDeals / updateDeal / a
     const tools = createCrmTools(store)
     const res = await tools.saveDeal.execute({ contact_id: store.data.contacts[0].id }, ctx)
     expect(res.isError).toBe(true)
-    expect(res.data as string).toContain('same workspace')
+    expect(res.data as string).toContain('does not reference a')
+    expect(res.data as string).toContain('Retrying the same id will fail the same way')
   })
 })
 

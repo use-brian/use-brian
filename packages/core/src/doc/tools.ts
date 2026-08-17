@@ -114,6 +114,15 @@ import type {
 // prompt-level prevention (gating the addendum to chip-capable clients)
 // lives in `packages/api/src/routes/chat.ts`.
 
+/**
+ * Page-id miss with the recovery path attached: the diagnosis alone
+ * ("deleted or no access") left the model with nothing to do but retry the
+ * same dead id. Point at the discovery tools and forbid the blind retry.
+ */
+function pageNotFound(pageId: string): string {
+  return `Page not found: ${pageId}. It may have been deleted, superseded, or above this assistant's clearance. Retrying this exact id will keep failing — call findPage with the page title (or listPages) to get a current pageId.`
+}
+
 /** Strip the chip tag from a block's `text` field if present. Accepts a
  *  full `Block` or an `edit` op's `Partial<Block>` patch (only text-bearing
  *  kinds carry `text`; the rest pass through untouched). Returns a new
@@ -718,7 +727,7 @@ export function createPatchPageTool(deps: DocToolDeps): Tool {
       )
       if (!current) {
         return {
-          data: `Page not found: ${input.pageId}. It may have been deleted or you may not have access.`,
+          data: pageNotFound(input.pageId),
           isError: true,
         }
       }
@@ -1131,7 +1140,7 @@ export function createGetBlockTool(deps: DocToolDeps): Tool {
       )
       if (!page) {
         return {
-          data: `Page not found: ${input.pageId}. It may have been deleted or you may not have access.`,
+          data: pageNotFound(input.pageId),
           isError: true,
         }
       }
@@ -1203,7 +1212,7 @@ export function createQueryDataBlockTool(deps: DocToolDeps): Tool {
       )
       if (!page) {
         return {
-          data: `Page not found: ${input.pageId}. It may have been deleted or you may not have access.`,
+          data: pageNotFound(input.pageId),
           isError: true,
         }
       }
@@ -1319,7 +1328,7 @@ export function createGetCurrentPageTool(deps: DocToolDeps): Tool {
       )
       if (!current) {
         return {
-          data: `Page not found: ${input.pageId}. It may have been deleted or you may not have access.`,
+          data: pageNotFound(input.pageId),
           isError: true,
         }
       }
@@ -1383,7 +1392,7 @@ export function createGetSectionTool(deps: DocToolDeps): Tool {
       )
       if (!current) {
         return {
-          data: `Page not found: ${input.pageId}. It may have been deleted or you may not have access.`,
+          data: pageNotFound(input.pageId),
           isError: true,
         }
       }
@@ -1448,7 +1457,7 @@ export function createGetBlockRangeTool(deps: DocToolDeps): Tool {
       )
       if (!current) {
         return {
-          data: `Page not found: ${input.pageId}. It may have been deleted or you may not have access.`,
+          data: pageNotFound(input.pageId),
           isError: true,
         }
       }
@@ -1527,7 +1536,7 @@ export function createExportPageTool(deps: DocToolDeps): Tool {
       const current = await deps.docPageStore.getVersionedPage(context.userId, pageId)
       if (!current) {
         return {
-          data: `Page not found: ${pageId}. It may have been deleted or you may not have access.`,
+          data: pageNotFound(pageId),
           isError: true,
         }
       }
