@@ -812,8 +812,13 @@ describe('[COMP:tools/msgraph-read] Microsoft Graph read tools', () => {
   })
 
   it('surfaces an api failure as an error result on every tool, never as a throw', async () => {
+    // Shaped like the api client's MsGraphError: a typed status + the
+    // Retry-After the service asked for, riding in the detail.
     const boom = async () => {
-      throw new Error('429 Too Many Requests, Retry-After 12')
+      throw Object.assign(new Error('Microsoft Graph API error (429): retry after 12s. Too Many Requests'), {
+        name: 'MsGraphError',
+        status: 429,
+      })
     }
     const failing: MsGraphApi = {
       listTeams: boom,
@@ -831,10 +836,78 @@ describe('[COMP:tools/msgraph-read] Microsoft Graph read tools', () => {
     for (const name of TOOL_NAMES) {
       const res = await byName(tools, name).execute(VALID_INPUT[name], ctx)
       expect(res.isError, name).toBe(true)
-      expect(res.data, name).toBe(
-        'Microsoft Teams error: 429 Too Many Requests, Retry-After 12',
-      )
+      // Rendered through connectorError: names the tool, keeps the status
+      // for grep + the health classifier, says how long to wait, and that
+      // nothing about the input is wrong.
+      expect(res.data, name).toContain('Microsoft Teams throttled this call')
+      expect(res.data, name).toContain('(429)')
+      expect(res.data, name).toContain('rate limit')
+      expect(res.data, name).toContain('Wait 12s, then retry the same call once')
     }
+  })
+
+  it('renders a dead credential (401) with the reconnect remedy and the classifier markers', async () => {
+    const tools = createMsGraphTools(
+      stubApi({
+        listTeams: async () => {
+          throw Object.assign(
+            new Error('Microsoft Graph API error (401): Microsoft 365 token is invalid or expired. Please reconnect Microsoft Teams in Settings > Connectors. {"error":{"code":"InvalidAuthenticationToken"}}'),
+            { name: 'MsGraphAuthError', status: 401 },
+          )
+        },
+      }),
+    )
+    const res = await byName(tools, 'msTeamsListTeams').execute({}, ctx)
+    expect(res.isError).toBe(true)
+    expect(res.data).toContain('Microsoft Teams rejected this connector\'s credential')
+    expect(res.data).toContain('(401)')
+    expect(res.data).toContain('invalid or expired')
+    expect(res.data).toContain('Reconnect Microsoft Teams (Studio → Connectors)')
+  })
+
+  it('renders a per-resource 403 as a permission on that team, not a connector-wide failure', async () => {
+    const tools = createMsGraphTools(
+      stubApi({
+        listChannels: async () => {
+          throw Object.assign(new Error('Microsoft Graph API error (403): {"error":{"code":"Forbidden","message":"Missing role permissions"}}'), {
+            name: 'MsGraphError',
+            status: 403,
+          })
+        },
+      }),
+    )
+    const res = await byName(tools, 'msTeamsListChannels').execute({ teamId: 'team-1' }, ctx)
+    expect(res.data).toContain('team `team-1`')
+    expect(res.data).toContain('not accessible')
+    expect(res.data).toContain('not a problem with the connector as a whole')
+  })
+
+  it('a not-found chat names the id, the discovery tool, and forbids the blind retry', async () => {
+    const tools = createMsGraphTools(
+      stubApi({
+        listChatMessages: async () => {
+          throw Object.assign(new Error('Microsoft Graph API error (404): {"error":{"code":"NotFound"}}'), { name: 'MsGraphError', status: 404 })
+        },
+      }),
+    )
+    const res = await byName(tools, 'msTeamsReadChatMessages').execute({ chatId: 'chat-9' }, ctx)
+    expect(res.data).toContain('Microsoft Teams has no chat `chat-9`')
+    expect(res.data).toContain('Call `msTeamsListChats`')
+    expect(res.data).toContain('Retrying this exact id will keep failing')
+  })
+
+  it('a dead refresh token (invalid_grant) says the whole connector needs reconnecting', async () => {
+    const tools = createMsGraphTools(
+      stubApi({
+        listTeams: async () => {
+          throw new Error('Microsoft token refresh failed (invalid_grant): AADSTS700082: The refresh token has expired.')
+        },
+      }),
+    )
+    const res = await byName(tools, 'msTeamsListTeams').execute({}, ctx)
+    expect(res.data).toContain('invalid_grant')
+    expect(res.data).toContain('reconnects it (Studio → Connectors)')
+    expect(res.data).toContain('Do not retry')
   })
 
   it('renders a non-Error rejection without stringifying it as [object Object]', async () => {
@@ -846,7 +919,9 @@ describe('[COMP:tools/msgraph-read] Microsoft Graph read tools', () => {
       }),
     )
     const res = await byName(tools, 'msTeamsListTeams').execute({}, ctx)
-    expect(res).toEqual({ data: 'Microsoft Teams error: token expired', isError: true })
+    expect(res.isError).toBe(true)
+    expect(res.data).toContain('Microsoft Teams `msTeamsListTeams` failed: token expired')
+    expect(res.data).not.toContain('[object Object]')
   })
 
   it('msTeamsFindPerson drops the fields a guest has none of instead of blanking them', async () => {

@@ -98,7 +98,7 @@ describe('[COMP:tools/google-docs] createGoogleDocsTools', () => {
     const res = await byName(tools, 'googleDocsGetContent').execute({ documentId: 'd-x' }, ctx)
     expect(res.isError).toBe(true)
     expect(res.data).toContain('Google Docs `googleDocsGetContent` on document `d-x` failed: not found')
-    expect(res.data).toContain('retrying the same arguments will not help')
+    expect(res.data).toContain('Retrying the same arguments will not help')
   })
 
   it('appendText prompts for an un-authorized doc and skips for an authorized one', async () => {

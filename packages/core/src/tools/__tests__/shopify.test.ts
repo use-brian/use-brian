@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { createShopifyTools, type ShopifyApi } from '../base/shopify.js'
+import { ConnectorApiError } from '../base/_connector-result.js'
 import { SHOPIFYQL_SCHEMAS } from '../base/shopify-analytics-catalog.js'
 
 function mockApi(overrides: Partial<ShopifyApi> = {}): ShopifyApi {
@@ -774,12 +775,36 @@ describe('[COMP:tools/shopify] Shopify tools', () => {
     })
   })
 
-  it('returns isError when the api rejects, with the Shopify error prefix', async () => {
-    const api = mockApi({ listOrders: vi.fn().mockRejectedValue(new Error('THROTTLED')) })
+  it('returns isError when the api rejects, rendered as failure copy (throttle → wait + retry once)', async () => {
+    const api = mockApi({
+      listOrders: vi.fn().mockRejectedValue(
+        new ConnectorApiError({ provider: 'Shopify', code: 'THROTTLED', kind: 'rate_limit', message: 'THROTTLED — the store\'s GraphQL query-cost budget is exhausted; it refills within seconds.' }),
+      ),
+    })
     const tool = createShopifyTools(api).find((t) => t.name === 'shopifyListOrders')!
     const result = await tool.execute({}, {} as never)
     expect(result.isError).toBe(true)
-    expect(result.data).toBe('Shopify error: THROTTLED')
+    expect(String(result.data)).toContain('Shopify rate limit hit while running `shopifyListOrders`')
+    expect(String(result.data)).toContain('THROTTLED')
+    expect(String(result.data)).toContain('retry the same call once')
+  })
+
+  it('renders a dead token with (status) + "invalid or expired" + reconnect, and userErrors with the field path + nothing changed', async () => {
+    const dead = new ConnectorApiError({ provider: 'Shopify', status: 401, kind: 'auth', message: 'the access token is invalid or expired (the app was uninstalled, or the token was rotated). Reconnect Shopify in Studio → Connectors.' })
+    const list = createShopifyTools(mockApi({ listOrders: vi.fn().mockRejectedValue(dead) })).find((t) => t.name === 'shopifyListOrders')!
+    const auth = await list.execute({}, {} as never)
+    expect(String(auth.data)).toContain('(401)')
+    expect(String(auth.data)).toContain('invalid or expired')
+    expect(String(auth.data)).toContain('Reconnect Shopify (Studio → Connectors)')
+
+    const userErrors = new ConnectorApiError({ provider: 'Shopify', kind: 'validation', code: 'productUpdate.userErrors', field: 'title', message: 'title: Title can\'t be blank' })
+    const update = createShopifyTools(mockApi({ updateProduct: vi.fn().mockRejectedValue(userErrors) })).find((t) => t.name === 'shopifyUpdateProduct')!
+    const res = await update.execute({ productId: '8', title: '' }, {} as never)
+    expect(res.isError).toBe(true)
+    expect(String(res.data)).toContain('product `8`')
+    expect(String(res.data)).toContain('The field Shopify named is `title`')
+    expect(String(res.data)).toContain('Nothing was changed on the provider side')
+    expect(String(res.data)).toContain('the same input will fail the same way')
   })
 
   it('shopifyGetOrder flags a not-found order instead of returning an empty row', async () => {

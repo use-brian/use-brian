@@ -211,7 +211,7 @@ describe('[COMP:tools/google-error] describeGoogleError', () => {
   it('a plain error is framed with product + tool + target and a no-retry verdict; a network blip is transient', () => {
     const plain = describeGoogleError(new Error('Use eventLabelId or colorId, not both'), ctx)
     expect(plain).toBe(
-      'Google Calendar `googleCalendarGetEvent` on event `evt_1` on calendar `primary` failed: Use eventLabelId or colorId, not both This was refused before or after the Google call rather than by Google itself, so retrying the same arguments will not help — fix what the message names, or ask the user.',
+      'Google Calendar `googleCalendarGetEvent` on event `evt_1` on calendar `primary` failed: Use eventLabelId or colorId, not both. Retrying the same arguments will not help — fix what the message names, or ask the user.',
     )
     const blip = describeGoogleError(new TypeError('fetch failed'), ctx)
     expect(blip).toContain('could not be reached')

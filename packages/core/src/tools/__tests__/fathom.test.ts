@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { createFathomTools, type FathomApi } from '../base/fathom.js'
+import { ConnectorApiError } from '../base/_connector-result.js'
 
 function fakeApi(overrides: Partial<FathomApi> = {}): FathomApi {
   return {
@@ -112,7 +113,32 @@ describe('[COMP:tools/fathom] Fathom tools', () => {
     const result = await tool.execute({ meetingId: 'm1' }, NULL_CTX)
 
     expect(result.isError).toBe(true)
-    expect(String(result.data)).toContain('Fathom error')
+    expect(String(result.data)).toContain('Fathom `fathomGetMeeting` on recording `m1` failed')
     expect(String(result.data)).toContain('Fathom token is invalid')
+  })
+
+  it('renders a 404 on the summary endpoint as "still processing" with the list-with-summary pointer', async () => {
+    const api = fakeApi({
+      getSummary: vi.fn().mockRejectedValue(new ConnectorApiError({ provider: 'Fathom', status: 404, message: 'Not Found' })),
+    })
+    const tool = createFathomTools(api).find((t) => t.name === 'fathomGetSummary')!
+    const result = await tool.execute({ meetingId: 'm1' }, NULL_CTX)
+    expect(result.isError).toBe(true)
+    expect(String(result.data)).toContain('STILL PROCESSING')
+    expect(String(result.data)).toContain('fathomListMeetings')
+    expect(String(result.data)).toContain('includeSummary: true')
+  })
+
+  it('renders a dead token with (401) + "invalid or expired" + reconnect', async () => {
+    const api = fakeApi({
+      getMeeting: vi.fn().mockRejectedValue(
+        new ConnectorApiError({ provider: 'Fathom', status: 401, kind: 'auth', message: 'the Fathom token is invalid or expired. Reconnect Fathom in Studio → Connectors.' }),
+      ),
+    })
+    const tool = createFathomTools(api).find((t) => t.name === 'fathomGetMeeting')!
+    const result = await tool.execute({ meetingId: 'm1' }, NULL_CTX)
+    expect(String(result.data)).toContain('(401)')
+    expect(String(result.data)).toContain('invalid or expired')
+    expect(String(result.data)).toContain('Reconnect Fathom (Studio → Connectors)')
   })
 })

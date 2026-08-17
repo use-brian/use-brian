@@ -98,7 +98,12 @@ describe('[COMP:fathom/client] Fathom OAuth + API client', () => {
     mockFetch.mockResolvedValue(jsonResponse({ error: 'invalid_grant' }, 400))
     await expect(refreshFathomTokens({
       refreshToken: REFRESH, clientId: 'cid', clientSecret: 'csec',
-    })).rejects.toThrow(/Fathom token endpoint failed \(400\)/)
+    })).rejects.toMatchObject({ name: 'ConnectorApiError', status: 400, code: 'invalid_grant', kind: 'auth' })
+    // The literal `invalid_grant` survives in the message: the health
+    // classifier and inject.ts key on it.
+    await expect(refreshFathomTokens({
+      refreshToken: REFRESH, clientId: 'cid', clientSecret: 'csec',
+    })).rejects.toThrow(/\(400\).*invalid_grant/)
   })
 
   // ── Token packing ────────────────────────────────────────

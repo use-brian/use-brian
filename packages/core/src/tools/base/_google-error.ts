@@ -259,7 +259,7 @@ export function describeGoogleError(rawErr: unknown, ctx: GoogleFailureContext):
     if (looksLikeNetworkBlip(message)) {
       return `${product} could not be reached for ${doing} (${message}). Nothing about the input is wrong — this is a network blip. Retry once after a short wait; if it persists, tell the user.`
     }
-    return `${product} ${doing} failed: ${message} This was refused before or after the Google call rather than by Google itself, so retrying the same arguments will not help — fix what the message names, or ask the user.`
+    return `${product} ${doing} failed: ${message}${/[.!?]$/.test(message) ? '' : '.'} Retrying the same arguments will not help — fix what the message names, or ask the user.`
   }
 
   const code = `${err.api} API${err.operation ? ` ${err.operation}` : ''} error (${err.status})${err.reason ? `, ${err.reason}` : ''}`

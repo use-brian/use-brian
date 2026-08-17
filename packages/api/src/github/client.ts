@@ -5,7 +5,65 @@
  * See docs/architecture/integrations/github.md.
  */
 
+import { ConnectorApiError, type ConnectorFailureKind } from '@use-brian/core'
+
 const GITHUB_API = 'https://api.github.com'
+
+// ── Errors ───────────────────────────────────────────────────
+
+/**
+ * Turn a non-2xx GitHub response into a structured `ConnectorApiError`
+ * (core `_connector-result.ts`) — parsed once here, rendered by the tools
+ * through `connectorError()`. GitHub's body is `{ message, errors?: [{
+ * resource, field, code, message }], documentation_url }`; the first
+ * `errors[]` entry names the field and code on a 422 (`Validation Failed`
+ * alone says nothing). Three 403 families are told apart because the health
+ * classifier must not conflate them: SAML / SSO (`kind: 'auth'` — reconnect
+ * really is the fix, and the message keeps GitHub's SAML wording so
+ * `classifyConnectorAuthError` agrees), rate limits (`rate_limit`), and the
+ * per-resource `Resource not accessible by personal access token`
+ * (`forbidden` — the 2026-07-20 incident: this must NEVER mark the connector
+ * dead). The 401 keeps `(401)` + `invalid or revoked` for the same reason.
+ */
+export async function githubApiError(res: Response): Promise<ConnectorApiError> {
+  let raw = ''
+  try { raw = await res.text() } catch { raw = '' }
+  let message = raw
+  let field: string | undefined
+  let code: string | undefined
+  try {
+    const parsed = JSON.parse(raw) as { message?: unknown; errors?: unknown }
+    if (typeof parsed.message === 'string') message = parsed.message
+    const first = Array.isArray(parsed.errors) ? parsed.errors[0] as { field?: unknown; code?: unknown; message?: unknown; resource?: unknown } | undefined : undefined
+    if (first) {
+      if (typeof first.code === 'string') code = first.code
+      if (typeof first.field === 'string') field = typeof first.resource === 'string' ? `${first.resource}.${first.field}` : first.field
+      if (typeof first.message === 'string' && first.message) message = `${message}: ${first.message}`
+      else if (code) message = `${message} (${code}${field ? ` on ${field}` : ''})`
+    }
+  } catch {
+    // non-JSON body — the raw text is the message
+  }
+  let kind: ConnectorFailureKind | undefined
+  if (res.status === 401) {
+    kind = 'auth'
+    message = `GitHub PAT is invalid or revoked: ${message}`
+  } else if (res.status === 403) {
+    if (/saml|single sign-on|sso|must grant your personal access token/i.test(message)) kind = 'auth'
+    else if (/rate limit|abuse detection/i.test(message)) kind = 'rate_limit'
+    else kind = 'forbidden'
+  }
+  const retryAfter = res.headers?.get?.('retry-after')
+  return new ConnectorApiError({
+    provider: 'GitHub',
+    status: res.status,
+    code,
+    field,
+    message,
+    kind,
+    retryAfterSec: retryAfter && /^\d+$/.test(retryAfter) ? Number(retryAfter) : undefined,
+  })
+}
 
 // ── Shared fetch helper ──────────────────────────────────────
 
@@ -19,11 +77,7 @@ async function ghFetch(pat: string, path: string, init?: RequestInit): Promise<R
       ...init?.headers,
     },
   })
-  if (!res.ok) {
-    const err = await res.text()
-    const prefix = res.status === 401 ? 'GitHub PAT is invalid or revoked' : 'GitHub API error'
-    throw new Error(`${prefix} (${res.status}): ${err}`)
-  }
+  if (!res.ok) throw await githubApiError(res)
   return res
 }
 
@@ -270,7 +324,7 @@ export async function createOrUpdateFile(
   if (probe.ok) {
     sha = ((await probe.json()) as { sha?: string }).sha
   } else if (probe.status !== 404) {
-    throw new Error(`GitHub API error (${probe.status}): ${await probe.text()}`)
+    throw await githubApiError(probe)
   }
 
   const body: Record<string, unknown> = {

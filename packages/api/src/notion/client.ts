@@ -7,6 +7,8 @@
  * See docs/architecture/integrations/notion.md.
  */
 
+import { ConnectorApiError, type ConnectorFailureKind } from '@use-brian/core'
+
 const NOTION_API = 'https://api.notion.com/v1'
 const NOTION_VERSION = '2022-06-28'
 const MAX_BLOCK_PAGES = 5 // Cap block pagination at ~500 blocks
@@ -29,15 +31,67 @@ async function notionFetch(
     headers: { ...headers(accessToken), ...(init?.headers as Record<string, string> | undefined) },
   })
 
-  if (!res.ok) {
-    const err = await res.text()
-    if (res.status === 401) {
-      throw new Error('Notion token is invalid or expired. Please reconnect Notion in Settings > Connectors.')
-    }
-    throw new Error(`Notion API error (${res.status}): ${err}`)
-  }
+  if (!res.ok) throw await notionApiError(res)
 
   return res.json()
+}
+
+/**
+ * Turn a non-2xx Notion response into a structured `ConnectorApiError`
+ * (core `_connector-result.ts`), rendered by the tools through
+ * `connectorError()`. Notion's body is `{ object: 'error', status, code,
+ * message }` and `message` already carries the property path on a
+ * `validation_error` (`body.properties.Status.select.name should be …`), so
+ * it is kept verbatim (capped). The code maps onto the failure kind:
+ * `object_not_found` / `restricted_resource` (the integration was not shared
+ * the page — a 404 in Notion's model), `unauthorized` / `invalid_grant`,
+ * `rate_limited` (with `Retry-After`), `conflict_error`,
+ * `internal_server_error` / `service_unavailable`. The 401 keeps `(401)` +
+ * `invalid or expired` for the health classifier.
+ */
+export async function notionApiError(res: Response): Promise<ConnectorApiError> {
+  let raw = ''
+  try { raw = await res.text() } catch { raw = '' }
+  let message = raw
+  let code: string | undefined
+  try {
+    const parsed = JSON.parse(raw) as { message?: unknown; code?: unknown }
+    if (typeof parsed.message === 'string' && parsed.message) message = parsed.message
+    if (typeof parsed.code === 'string') code = parsed.code
+  } catch {
+    // non-JSON body — raw text is the message
+  }
+  const KIND: Record<string, ConnectorFailureKind> = {
+    unauthorized: 'auth',
+    invalid_grant: 'auth',
+    restricted_resource: 'not_found',
+    object_not_found: 'not_found',
+    rate_limited: 'rate_limit',
+    conflict_error: 'conflict',
+    validation_error: 'validation',
+    invalid_json: 'validation',
+    invalid_request_url: 'validation',
+    invalid_request: 'validation',
+    missing_version: 'validation',
+    internal_server_error: 'transient',
+    service_unavailable: 'transient',
+    database_connection_unavailable: 'transient',
+    gateway_timeout: 'transient',
+  }
+  let kind = code ? KIND[code] : undefined
+  if (res.status === 401) {
+    kind = 'auth'
+    message = `Notion token is invalid or expired: ${message}`
+  }
+  const retryAfter = res.headers?.get?.('retry-after')
+  return new ConnectorApiError({
+    provider: 'Notion',
+    status: res.status,
+    code,
+    message,
+    kind,
+    retryAfterSec: retryAfter && /^\d+$/.test(retryAfter) ? Number(retryAfter) : undefined,
+  })
 }
 
 // ── Search ───────────────────────────────────────────────────

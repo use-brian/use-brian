@@ -18,6 +18,16 @@ export type {
   GoogleMapsErrorCode,
 } from './base/google-maps.js'
 export {
+  CONNECTOR_ERROR_MESSAGE_CAP,
+  ConnectorApiError,
+  capConnectorMessage,
+  coerceConnectorError,
+  connectorError,
+  describeConnectorError,
+  isConnectorApiError,
+} from './base/_connector-result.js'
+export type { ConnectorApiErrorInit, ConnectorErrorContext, ConnectorFailureKind } from './base/_connector-result.js'
+export {
   GoogleApiError,
   GOOGLE_ERROR_MESSAGE_CAP,
   describeGoogleError,

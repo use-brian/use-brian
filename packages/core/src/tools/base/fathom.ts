@@ -10,7 +10,7 @@
 
 import { z } from 'zod'
 import { buildTool, type Tool } from '../types.js'
-import { type Json, str, idStr, asRows, projectList } from './_connector-result.js'
+import { type Json, str, idStr, asRows, projectList, connectorError, type ConnectorApiError } from './_connector-result.js'
 
 // Fathom meeting objects carry host / share-settings / per-participant user
 // objects the model never needs. Project to the documented fields, but
@@ -55,6 +55,19 @@ export type FathomApi = {
   getSummary(meetingId: string): Promise<unknown>
 }
 
+/**
+ * A 404 on the summary endpoint means "still processing", not "no such
+ * recording" (the tool description says so, but the failure copy is what the
+ * model actually reads at the moment it matters): point at the list call
+ * with `includeSummary`, and forbid the transcript retry.
+ */
+function summaryTranslate(err: ConnectorApiError): string | undefined {
+  if (err.status === 404) {
+    return `Fathom has no summary for this recording yet (Fathom API error (404) on the summary endpoint): for a recording under ~30 minutes old this means it is STILL PROCESSING, not missing. Call \`fathomListMeetings\` with \`includeSummary: true\` (it returns the summary once ready, and confirms the recording exists); do not retry \`fathomGetSummary\` in a loop and do not fall back to \`fathomGetTranscript\` for the same question.`
+  }
+  return undefined
+}
+
 export function createFathomTools(api: FathomApi): Tool[] {
   const listMeetings = buildTool({
     name: 'fathomListMeetings',
@@ -96,7 +109,7 @@ export function createFathomTools(api: FathomApi): Tool[] {
           next_cursor: str(r, 'next_cursor'),
         } }
       } catch (err) {
-        return { data: `Fathom error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Fathom', tool: 'fathomListMeetings', err })
       }
     },
   })
@@ -118,7 +131,7 @@ export function createFathomTools(api: FathomApi): Tool[] {
         const data = await api.getMeeting(input.meetingId)
         return { data: meetingRow((data ?? {}) as Json, true) }
       } catch (err) {
-        return { data: `Fathom error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Fathom', tool: 'fathomGetMeeting', target: `recording \`${input.meetingId}\``, discoveryTool: 'fathomListMeetings', err })
       }
     },
   })
@@ -140,7 +153,7 @@ export function createFathomTools(api: FathomApi): Tool[] {
         const data = await api.getTranscript(input.meetingId)
         return { data }
       } catch (err) {
-        return { data: `Fathom error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Fathom', tool: 'fathomGetTranscript', target: `recording \`${input.meetingId}\``, discoveryTool: 'fathomListMeetings', err })
       }
     },
   })
@@ -164,7 +177,7 @@ export function createFathomTools(api: FathomApi): Tool[] {
         const data = await api.getSummary(input.meetingId)
         return { data }
       } catch (err) {
-        return { data: `Fathom error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Fathom', tool: 'fathomGetSummary', target: `recording \`${input.meetingId}\``, discoveryTool: 'fathomListMeetings', translate: summaryTranslate, err })
       }
     },
   })

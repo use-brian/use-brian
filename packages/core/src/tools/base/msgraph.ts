@@ -17,7 +17,7 @@
 
 import { z } from 'zod'
 import { buildTool, type Tool, type ToolResult } from '../types.js'
-import { type Json, str, obj, asRows, projectList } from './_connector-result.js'
+import { type Json, str, obj, asRows, projectList, connectorError, type ConnectorApiError } from './_connector-result.js'
 
 // ── Graph result projections ───────────────────────────────────
 // Graph bodies are heavy: every collection carries `@odata.context` /
@@ -252,17 +252,52 @@ function rowsOf(data: unknown): Json[] {
  * Turn an api-layer rejection into a tool result the model can act on. A
  * throw out of `execute()` reaches the model as a generic executor failure
  * with no room to say "the token expired" or "back off"; a string result
- * keeps the turn going. Same convention as the other connectors.
+ * keeps the turn going. Same convention as the other connectors, rendered
+ * through `connectorError()`: `MsGraphError` carries a typed `status`, so a
+ * 401 (`MsGraphAuthError` — message keeps `(401)` + `invalid or expired`),
+ * a 403 per-resource refusal, a 404, a 429 (with the `Retry-After` Graph
+ * asked for) and a 5xx each get their own diagnosis + verdict; a
+ * `MsGraphTokenError` whose message carries `invalid_grant` means the
+ * refresh token is dead — reconnect, never retry.
  */
-async function guard(run: () => Promise<unknown>): Promise<ToolResult> {
+async function guard(tool: string, target: string | undefined, run: () => Promise<unknown>): Promise<ToolResult> {
   try {
     return { data: await run() }
   } catch (err) {
-    return {
-      data: `Microsoft Teams error: ${err instanceof Error ? err.message : String(err)}`,
-      isError: true,
-    }
+    return connectorError({
+      provider: 'Microsoft Teams',
+      tool,
+      target,
+      discoveryTool: DISCOVERY[tool],
+      translate: msTeamsTranslate,
+      err,
+    })
   }
+}
+
+/** Which sibling discovers a valid id for each tool's target. */
+const DISCOVERY: Record<string, string> = {
+  msTeamsListChannels: 'msTeamsListTeams',
+  msTeamsReadChannelMessages: 'msTeamsListChannels',
+  msTeamsReadThreadReplies: 'msTeamsReadChannelMessages',
+  msTeamsReadChatMessages: 'msTeamsListChats',
+  msTeamsListMembers: 'msTeamsListTeams',
+}
+
+function msTeamsTranslate(err: ConnectorApiError): string | undefined {
+  // The refresh token itself is dead (MsGraphTokenError → invalid_grant): a
+  // whole-connector condition, not a per-call one. Keep the literal
+  // `invalid_grant` so the health classifier flips the instance.
+  if (/invalid_grant/.test(err.detail)) {
+    return `The Microsoft 365 grant behind this connector has expired or been revoked (invalid_grant), so no Microsoft Teams call can succeed until the user reconnects it (Studio → Connectors). ${err.detail} Do not retry; tell the user to reconnect.`
+  }
+  // Retry-After rides in the MsGraphError detail ("retry after 12s. …") when
+  // the injected retry gave up; surface the wait as the verdict.
+  const wait = /retry after (\d+)s/i.exec(err.detail)
+  if (err.status === 429 && wait) {
+    return `Microsoft Teams throttled this call (Microsoft Graph API error (429), rate limit): Graph asked for a ${wait[1]}s wait. Nothing about the input is wrong. Wait ${wait[1]}s, then retry the same call once; do not loop.`
+  }
+  return undefined
 }
 
 /**
@@ -314,7 +349,7 @@ export function createMsGraphTools(api: MsGraphApi): Tool[] {
     }),
     ...read,
     execute(input) {
-      return guard(async () => {
+      return guard('msTeamsListTeams', undefined, async () => {
         const data = await api.listTeams({ search: input.search, limit: input.limit })
         return projectList(rowsOf(data), input.limit ?? 25, teamRow)
       })
@@ -338,7 +373,7 @@ export function createMsGraphTools(api: MsGraphApi): Tool[] {
     }),
     ...read,
     execute(input) {
-      return guard(async () => {
+      return guard('msTeamsListChannels', `team \`${input.teamId}\``, async () => {
         const data = await api.listChannels({ teamId: input.teamId, limit: input.limit })
         return projectList(rowsOf(data), input.limit ?? 50, channelRow(input.teamId))
       })
@@ -364,7 +399,7 @@ export function createMsGraphTools(api: MsGraphApi): Tool[] {
     }),
     ...read,
     execute(input) {
-      return guard(async () => {
+      return guard('msTeamsReadChannelMessages', `channel \`${input.channelId}\` in team \`${input.teamId}\``, async () => {
         const data = await api.listChannelMessages({
           teamId: input.teamId,
           channelId: input.channelId,
@@ -397,7 +432,7 @@ export function createMsGraphTools(api: MsGraphApi): Tool[] {
     }),
     ...read,
     execute(input) {
-      return guard(async () => {
+      return guard('msTeamsReadThreadReplies', `message \`${input.messageId}\` in channel \`${input.channelId}\` of team \`${input.teamId}\``, async () => {
         const data = await api.listMessageReplies({
           teamId: input.teamId,
           channelId: input.channelId,
@@ -427,7 +462,7 @@ export function createMsGraphTools(api: MsGraphApi): Tool[] {
     }),
     ...read,
     execute(input) {
-      return guard(async () => {
+      return guard('msTeamsListChats', undefined, async () => {
         const data = await api.listChats({ limit: input.limit })
         return projectList(rowsOf(data), input.limit ?? 20, chatRow)
       })
@@ -452,7 +487,7 @@ export function createMsGraphTools(api: MsGraphApi): Tool[] {
     }),
     ...read,
     execute(input) {
-      return guard(async () => {
+      return guard('msTeamsReadChatMessages', `chat \`${input.chatId}\``, async () => {
         const data = await api.listChatMessages({ chatId: input.chatId, limit: input.limit })
         return projectList(rowsOf(data), input.limit ?? 20, messageRow)
       })
@@ -479,7 +514,7 @@ export function createMsGraphTools(api: MsGraphApi): Tool[] {
     }),
     ...read,
     execute(input) {
-      return guard(async () => {
+      return guard('msTeamsSearchMessages', `search \`${input.query}\``, async () => {
         const data = await api.searchMessages({ query: input.query, limit: input.limit })
         const container = asRows(((data ?? {}) as Json).value)
           .flatMap((r) => asRows(r.hitsContainers))
@@ -514,7 +549,7 @@ export function createMsGraphTools(api: MsGraphApi): Tool[] {
     }),
     ...read,
     execute(input) {
-      return guard(async () => {
+      return guard('msTeamsListMembers', input.channelId ? `channel \`${input.channelId}\` in team \`${input.teamId}\`` : `team \`${input.teamId}\``, async () => {
         const data = await api.listMembers({
           teamId: input.teamId,
           channelId: input.channelId,
@@ -560,7 +595,7 @@ export function createMsGraphTools(api: MsGraphApi): Tool[] {
     }),
     ...read,
     execute(input) {
-      return guard(async () => {
+      return guard('msTeamsFindPerson', `search \`${input.query}\``, async () => {
         const data = await api.findPeople({
           query: input.query,
           teamId: input.teamId,
