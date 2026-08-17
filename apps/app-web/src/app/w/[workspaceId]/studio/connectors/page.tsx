@@ -1255,6 +1255,16 @@ function ConnectorsList() {
   const [wordpressShowHelp, setWordpressShowHelp] = useState(false);
   const [wordpressConnectOpts, setWordpressConnectOpts] = useState<ConnectorConnectOptions | null>(null);
 
+  // Google Search Console (gsc) - a pasted service-account key. The server
+  // verifies the key against Search Console (token + property list) before
+  // storing it; the default property is packed into the credential envelope.
+  const [showGscForm, setShowGscForm] = useState<string | null>(null);
+  const [gscKeyJson, setGscKeyJson] = useState("");
+  const [gscDefaultSite, setGscDefaultSite] = useState("");
+  const [gscError, setGscError] = useState<string | null>(null);
+  const [gscShowHelp, setGscShowHelp] = useState(false);
+  const [gscConnectOpts, setGscConnectOpts] = useState<ConnectorConnectOptions | null>(null);
+
   // Microsoft Teams (msgraph) — the workspace's own Entra app registration.
   // Same two-hop shape as Shopify BYO: store the app pair server-side FIRST,
   // then redirect to consent against it. The secret is write-only by design;
@@ -1846,6 +1856,15 @@ function ConnectorsList() {
       return;
     }
 
+    if (id === "gsc") {
+      setShowGscForm(rid);
+      revealConnectForm(rid);
+      setGscConnectOpts(opts ?? null);
+      setGscError(null);
+      setConnecting(null);
+      return;
+    }
+
     // Google OAuth connectors — build Google OAuth URL client-side. The
     // connector id + workspaceId ride in `state` (`gcal[:add]:<workspaceId>`,
     // the same `:add` intent Notion/Fathom carry — the callback creates a
@@ -1916,6 +1935,10 @@ function ConnectorsList() {
       return;
     }
     if (flow === "wordpress-form") {
+      await handleConnect(c, { addAnother: true });
+      return;
+    }
+    if (flow === "gsc-form") {
       await handleConnect(c, { addAnother: true });
       return;
     }
@@ -2762,6 +2785,58 @@ function ConnectorsList() {
       }
     } catch {
       setWordpressError(tc.wordpress.errSave);
+    }
+    setConnecting(null);
+  }
+
+  function closeGscForm() {
+    setShowGscForm(null);
+    setGscKeyJson("");
+    setGscDefaultSite("");
+    setGscError(null);
+    setGscShowHelp(false);
+    setGscConnectOpts(null);
+  }
+
+  async function handleSaveGsc(c: Connector) {
+    const keyJson = gscKeyJson.trim();
+    const defaultSite = gscDefaultSite.trim();
+    if (!keyJson) return;
+    const rid = rowId(c);
+    const opts = gscConnectOpts;
+    setConnecting(rid);
+    setGscError(null);
+    try {
+      const instanceId = opts?.instanceId ?? c.connectorInstanceId;
+      const response = await authFetch(`${API_URL}/api/connectors/gsc/store-credentials`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          gscCredentials: { keyJson, ...(defaultSite ? { defaultSite } : {}) },
+          ...(opts?.addAnother ? { createNew: true } : instanceId ? { instanceId } : {}),
+        }),
+      });
+      if (response.ok) {
+        const data = (await response.json().catch(() => ({}))) as { connectorInstanceId?: string };
+        setConnectors((prev) => prev.map((item) => (isSameRow(item, c) ? { ...item, connected: true } : item)));
+        closeGscForm();
+        setSelected(rid);
+        loadTools(c.id);
+        fetchConnectors();
+        setJustConnected({ slug: c.id, instanceId: data.connectorInstanceId ?? c.connectorInstanceId });
+      } else {
+        const body = (await response.json().catch(() => ({}))) as { error?: string; clientEmail?: string };
+        setGscError(
+          body.error === "invalid_key_json" ? tc.gsc.errKeyJson :
+          body.error === "invalid_credentials" ? tc.gsc.errCredentials :
+          body.error === "no_properties" ? tc.gsc.errNoProperties.replace("{email}", body.clientEmail ?? "the service account") :
+          body.error === "unknown_property" ? tc.gsc.errUnknownProperty :
+          body.error === "forbidden" ? tc.gsc.errForbidden :
+          tc.gsc.errSave,
+        );
+      }
+    } catch {
+      setGscError(tc.gsc.errSave);
     }
     setConnecting(null);
   }
@@ -4566,6 +4641,60 @@ function ConnectorsList() {
                         className="text-xs font-medium bg-action text-action-foreground px-3 py-1 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
                       >
                         {connecting === rid ? tc.wordpress.verifyingBtn : tc.wordpress.connectBtn}
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {showGscForm === rid && (
+                  <div className="space-y-2">
+                    <p className="text-xs text-muted-foreground">{tc.gsc.formHelp}</p>
+                    <textarea
+                      placeholder={tc.gsc.keyJsonPlaceholder}
+                      value={gscKeyJson}
+                      onChange={(event) => { setGscKeyJson(event.target.value); setGscError(null); }}
+                      autoComplete="off"
+                      spellCheck={false}
+                      autoFocus
+                      rows={5}
+                      className="w-full text-xs font-mono bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30 resize-y"
+                    />
+                    <input
+                      type="text"
+                      placeholder={tc.gsc.defaultSitePlaceholder}
+                      value={gscDefaultSite}
+                      onChange={(event) => { setGscDefaultSite(event.target.value); setGscError(null); }}
+                      onKeyDown={(event) => { if (event.key === "Enter") handleSaveGsc(sel); }}
+                      autoComplete="off"
+                      spellCheck={false}
+                      className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                    />
+                    <button
+                      onClick={() => setGscShowHelp((visible) => !visible)}
+                      className="text-[11px] text-muted-foreground underline underline-offset-2 hover:text-foreground transition-colors"
+                    >
+                      {tc.gsc.helpTitle}
+                    </button>
+                    {gscShowHelp && (
+                      <div className="space-y-1 text-[11px] text-muted-foreground">
+                        <p>{tc.gsc.helpStep1}</p>
+                        <p>{tc.gsc.helpStep2}</p>
+                        <p>{tc.gsc.helpStep3}</p>
+                      </div>
+                    )}
+                    {gscError && <p className="text-xs text-destructive">{gscError}</p>}
+                    <div className="flex gap-2">
+                      <button
+                        onClick={closeGscForm}
+                        className="text-xs font-medium border border-border px-3 py-1 rounded-lg text-muted-foreground hover:bg-muted transition-colors"
+                      >
+                        {tc.cancel}
+                      </button>
+                      <button
+                        onClick={() => handleSaveGsc(sel)}
+                        disabled={!gscKeyJson.trim() || connecting === rid}
+                        className="text-xs font-medium bg-action text-action-foreground px-3 py-1 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
+                      >
+                        {connecting === rid ? tc.gsc.verifyingBtn : tc.gsc.connectBtn}
                       </button>
                     </div>
                   </div>

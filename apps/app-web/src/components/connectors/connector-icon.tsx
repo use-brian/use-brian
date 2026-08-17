@@ -204,6 +204,21 @@ function WordPressIcon() {
   );
 }
 
+function SearchConsoleIcon() {
+  // Google Search Console mark: a magnifier over a small bar chart, in the
+  // Google blue / green pair. Inline so no remote asset is fetched.
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <rect x="1" y="1" width="22" height="22" rx="5" fill="#EAF1FB" />
+      <rect x="6" y="13" width="2.4" height="5" rx="0.6" fill="#34A853" />
+      <rect x="9.8" y="10.5" width="2.4" height="7.5" rx="0.6" fill="#34A853" />
+      <rect x="13.6" y="12" width="2.4" height="6" rx="0.6" fill="#34A853" />
+      <circle cx="13.5" cy="8.5" r="4.2" stroke="#4285F4" strokeWidth="1.8" fill="#EAF1FB" />
+      <path d="m16.6 11.6 2.9 2.9" stroke="#4285F4" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 function WhatsAppIcon() {
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
@@ -344,6 +359,7 @@ export function ConnectorIcon({
     case "fathom": return <FathomIcon />;
     case "shopify": return <ShopifyIcon />;
     case "wordpress": return <WordPressIcon />;
+    case "gsc": return <SearchConsoleIcon />;
     case "whatsapp": return <WhatsAppIcon />;
     case "files": return <FilesIcon />;
     case "computer": return <ComputerIcon />;

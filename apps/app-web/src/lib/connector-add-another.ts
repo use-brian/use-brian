@@ -12,6 +12,7 @@ export type ConnectorAddAnotherFlow =
   | "pat-form"
   | "imap-form"
   | "wordpress-form"
+  | "gsc-form"
   | "oauth"
   | "directory";
 
@@ -29,6 +30,7 @@ export function resolveConnectorAddAnotherFlow(connector: {
   if (isPatConnector(connector.id)) return "pat-form";
   if (connector.id === "imap") return "imap-form";
   if (connector.id === "wordpress") return "wordpress-form";
+  if (connector.id === "gsc") return "gsc-form";
   if (connector.oauthRequired) return "oauth";
   return "directory";
 }
