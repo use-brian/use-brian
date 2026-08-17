@@ -102,6 +102,14 @@ export { createShopifyTools } from './base/shopify.js'
 export type { ShopifyApi } from './base/shopify.js'
 export { createWordPressTools, WORDPRESS_IMAGE_MIME_TYPES, WORDPRESS_MAX_IMAGE_BYTES } from './base/wordpress.js'
 export type { WordPressApi, WordPressFileBytesReader } from './base/wordpress.js'
+export {
+  createSearchConsoleTools,
+  SEARCH_CONSOLE_DIMENSIONS,
+  SEARCH_CONSOLE_FILTER_OPERATORS,
+  SEARCH_CONSOLE_SEARCH_TYPES,
+  SEARCH_CONSOLE_TOOL_NAMES,
+} from './base/gsc.js'
+export type { SearchConsoleToolsApi, SearchConsoleQueryBody } from './base/gsc.js'
 export { createAgentmailTools } from './base/agentmail.js'
 export type { AgentmailToolApi, AgentmailInboxRef, AgentmailThreadSummary } from './base/agentmail.js'
 export {

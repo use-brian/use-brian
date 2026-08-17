@@ -231,6 +231,15 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'wordpressUpdatePageText', description: 'Replace one registered text slot on a managed page', classification: 'write', defaultPolicy: 'ask' },
     { name: 'wordpressReplacePageImage', description: 'Upload an image and replace one registered image slot on a managed page', classification: 'write', defaultPolicy: 'ask' },
   ],
+  // Google Search Console — read-only over a BYO service-account key. No
+  // write tool exists (scope stays webmasters.readonly); see
+  // docs/architecture/integrations/search-console.md.
+  gsc: [
+    { name: 'searchConsoleListSites', description: 'List the Search Console properties the service account can read', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'searchConsoleQuery', description: 'Query search performance (clicks, impressions, CTR, position) by dimension over a date range', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'searchConsoleInspectUrl', description: 'Inspect one URL\'s Google index status, canonical and crawl state', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'searchConsoleListSitemaps', description: 'List submitted sitemaps with their status and error counts', classification: 'read', defaultPolicy: 'allow' },
+  ],
   // Microsoft Teams (Graph) — READ-ONLY, permanently (decision D1). Graph
   // publishes no application permission for sending, so every Graph write is
   // attributed to a human rather than to the assistant; sending stays on the

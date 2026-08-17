@@ -153,6 +153,22 @@ export const OFFICIAL_CONNECTORS: ConnectorEntry[] = [
     tags: ['website', 'cms', 'wordpress'],
   },
   {
+    id: 'gsc',
+    name: 'Google Search Console',
+    description: 'Read search performance, URL index status and sitemaps for the properties your service account can see.',
+    category: 'official',
+    // BYO service-account key (no Google OAuth: `webmasters.readonly` is a
+    // sensitive scope). `api_key` + `oauth_required` is the WordPress trick:
+    // the Directory hands Connect to the provider-specific paste form and the
+    // key is verified against Search Console before it is stored. Not
+    // single_instance: one instance per service account, which may see many
+    // properties. See docs/architecture/integrations/search-console.md.
+    auth_type: 'api_key',
+    oauth_required: true,
+    enabled: true,
+    tags: ['seo', 'search', 'google', 'analytics'],
+  },
+  {
     id: 'msgraph',
     name: 'Microsoft Teams',
     description: 'Read Teams channels, chats, and members, and search your Teams history, including messages from before the assistant joined. Read-only.',

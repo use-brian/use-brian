@@ -157,6 +157,12 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   wordpressUpdatePageText: 'Update WordPress page text',
   wordpressReplacePageImage: 'Replace WordPress page image',
 
+  // Google Search Console (read-only)
+  searchConsoleListSites: 'View Search Console properties',
+  searchConsoleQuery: 'Query Search Console performance',
+  searchConsoleInspectUrl: 'Inspect URL in Search Console',
+  searchConsoleListSitemaps: 'List Search Console sitemaps',
+
   // Assistant Email (AgentMail) — the assistant's own mailbox
   agentmailSendMessage: 'Send email as the assistant',
   agentmailSearchThreads: 'Search the assistant\'s mailbox',
