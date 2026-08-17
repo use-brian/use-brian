@@ -150,6 +150,7 @@ describe('[COMP:goals/work-tools] waitForEvent (until:event park)', () => {
     const r = await waitForEvent.execute({ goal_id: 'g1', event: EVENT }, ctx)
 
     expect(r.isError).toBe(true)
+    expect(String(r.data)).toMatch(/not parked and no event subscription was written/i)
     expect(mockSetAwaiting).not.toHaveBeenCalled()
   })
 
@@ -162,5 +163,140 @@ describe('[COMP:goals/work-tools] waitForEvent (until:event park)', () => {
     expect(r.isError).toBe(true)
     expect(mockGet).not.toHaveBeenCalled()
     expect(mockSetAwaiting).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * [COMP:goals/work-tools] Failure copy — docs/architecture/engine/tool-executor.md
+ * → "Failure copy". Every miss and gate on these four tools must name the goal
+ * id, say what did NOT happen, point at the tool that re-resolves a live id,
+ * and give the retry verdict. Goal ids are STABLE (`updateGoalSystem` updates
+ * in place), which is the one thing a model reaching for a "newer id" needs
+ * told, so it is asserted explicitly.
+ */
+describe('[COMP:goals/work-tools] failure copy — misses carry the discovery pointer', () => {
+  const EVENT: EventSubscription = {
+    source: { type: 'channel', channelIntegrationId: 'ci1', channel: 'slack' },
+    match: { keywords: ['approved'] },
+  }
+
+  function expectGoalMiss(data: string) {
+    expect(data).toContain('g1')
+    expect(data).toMatch(/Goal g1 not found/i)
+    expect(data).toContain('listGoals')
+    expect(data).toMatch(/include_terminal/)
+    // The supersession clause tasks/CRM carry is INVERTED here on purpose.
+    expect(data).toMatch(/never mints a new id/i)
+    expect(data).toMatch(/Do NOT retry this exact id/i)
+  }
+
+  it.each([
+    ['workTask', (t: ReturnType<typeof makeTools>) => t.workTask.execute({ goal_id: 'g1' }, ctx)],
+    [
+      'waitForEvent',
+      (t: ReturnType<typeof makeTools>) => t.waitForEvent.execute({ goal_id: 'g1', event: EVENT }, ctx),
+    ],
+  ])('%s: a missing goal names the id, listGoals, and the no-retry verdict', async (_name, run) => {
+    mockGet.mockResolvedValue(null as never)
+    expectGoalMiss(String((await run(makeTools())).data))
+  })
+
+  it('markGoalComplete: a missing goal says nothing was verified or stamped', async () => {
+    mockGet.mockResolvedValue(null as never)
+    const verify: GoalVerifier = vi.fn().mockResolvedValue({ verified: true })
+    const r = await makeTools(verify).markGoalComplete.execute(
+      { goal_id: 'g1', because: 'done' },
+      ctx,
+    )
+    expect(r.isError).toBe(true)
+    expectGoalMiss(String(r.data))
+    expect(String(r.data)).toMatch(/Nothing was verified and nothing was stamped/i)
+    expect(verify).not.toHaveBeenCalled()
+  })
+
+  it('markGoalComplete: a verifier PASS that cannot be stamped is not reported as a miss', async () => {
+    mockGet.mockResolvedValue(GOAL as never)
+    mockStamp.mockResolvedValue(null as never)
+    const verify: GoalVerifier = vi.fn().mockResolvedValue({ verified: true })
+
+    const r = await makeTools(verify).markGoalComplete.execute(
+      { goal_id: 'g1', because: 'sent it' },
+      ctx,
+    )
+
+    expect(r.isError).toBe(true)
+    const data = String(r.data)
+    expect(data).toMatch(/verifier ACCEPTED/i)
+    expect(data).toMatch(/did not close/i)
+    expect(data).toMatch(/deleted while the claim was being verified/i)
+    expect(data).toMatch(/Do NOT retry this exact id/i)
+    // It is NOT a plain not-found: there is nothing to re-resolve to.
+    expect(data).not.toMatch(/never mints a new id/i)
+  })
+
+  it('markGoalComplete: no verifier wired names the missing dependency and the remedy', async () => {
+    const r = await makeTools(undefined).markGoalComplete.execute(
+      { goal_id: 'g1', because: 'done' },
+      ctx,
+    )
+    expect(r.isError).toBe(true)
+    const data = String(r.data)
+    expect(data).toContain('g1')
+    expect(data).toMatch(/no completion verifier wired/i)
+    expect(data).toMatch(/only close on a verifier PASS/i)
+    expect(data).toMatch(/Nothing was saved/i)
+    expect(data).toMatch(/goals board/i)
+    expect(data).toMatch(/fail the same way/i)
+    // Never the banned shape.
+    expect(data).not.toMatch(/not available in this context/i)
+  })
+
+  it('markGoalComplete: a refutation names the outcome it was judged against', async () => {
+    mockGet.mockResolvedValue(GOAL as never)
+    const verify: GoalVerifier = vi
+      .fn()
+      .mockResolvedValue({ verified: false, refutation: 'no evidence the email was sent' })
+
+    const r = await makeTools(verify).markGoalComplete.execute(
+      { goal_id: 'g1', because: 'I think it is done' },
+      ctx,
+    )
+
+    expect(r.isError).toBe(true)
+    const data = String(r.data)
+    expect(data).toContain(GOAL.outcome)
+    expect(data).toContain('no evidence the email was sent')
+    expect(data).toMatch(/nothing was stamped and the goal stays open/i)
+    expect(data).toMatch(/same `because` unchanged will be rejected/i)
+    expect(mockStamp).not.toHaveBeenCalled()
+  })
+
+  it('workTask: an unconfirmed goal names the draft state, confirmGoal, and the verdict', async () => {
+    mockGet.mockResolvedValue({ ...GOAL, confirmedAt: null } as never)
+
+    const r = await makeTools().workTask.execute({ goal_id: 'g1' }, ctx)
+
+    expect(r.isError).toBe(true)
+    const data = String(r.data)
+    expect(data).toContain('g1')
+    expect(data).toMatch(/still a DRAFT/i)
+    expect(data).toContain(GOAL.outcome)
+    expect(data).toContain('confirmGoal')
+    expect(data).toMatch(/nothing was started/i)
+    expect(data).toMatch(/refused the same way/i)
+  })
+
+  it('the workspace gate names the missing binding and the remedy, not "this context"', async () => {
+    const r = await makeTools().workTask.execute(
+      { goal_id: 'g1' },
+      { workspaceId: null, userId: 'u1' } as never,
+    )
+    expect(r.isError).toBe(true)
+    const data = String(r.data)
+    expect(data).toMatch(/not bound to one/i)
+    expect(data).toMatch(/no goal was read or changed/i)
+    expect(data).toMatch(/workspace-scoped chat/i)
+    expect(data).toMatch(/fail the same way/i)
+    expect(data).not.toMatch(/not available in this context/i)
   })
 })

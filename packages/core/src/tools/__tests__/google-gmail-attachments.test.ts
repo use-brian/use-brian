@@ -266,7 +266,10 @@ describe('[COMP:tools/gmail-attachments] gmailSendMessage attachments', () => {
     )
 
     expect(result.isError).toBe(true)
-    expect(result.data).toContain('/uploads/missing.pdf not found')
+    // The reference is named, and (since the 2026-08 failure-copy pass) the
+    // path branch also points at fileSearch instead of dead-ending.
+    expect(result.data).toContain('/uploads/missing.pdf')
+    expect(result.data).toContain('fileSearch')
     expect(sent).toHaveLength(0)
   })
 

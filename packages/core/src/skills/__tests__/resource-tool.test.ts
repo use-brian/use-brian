@@ -25,14 +25,33 @@ describe('[COMP:skills/resource-tool] bundle resource tools', () => {
     expect(result.data).toMatchObject({ path: 'references/margins.md', content: skill.resources![0]!.content })
   })
 
+  // Failures are message-first TEXT, never a `{ error, validPaths }` object the
+  // model has to parse JSON to read (docs/architecture/engine/tool-executor.md
+  // → "Failure copy"). The valid paths are the remedy, so they stay in the text.
   it('fails closed for unavailable skills and lists valid paths on a miss', async () => {
     const hidden = createReadSkillResourceTool({ getAvailableSkills: () => [] })
-    expect((await hidden.execute({ skill: 'finance', path: 'references/margins.md' }, ctx)).isError).toBe(true)
+    const unavailable = await hidden.execute({ skill: 'finance', path: 'references/margins.md' }, ctx)
+    expect(unavailable.isError).toBe(true)
+    expect(typeof unavailable.data).toBe('string')
+    expect(unavailable.data as string).toContain('no skill with the id "finance" is available')
+    expect(unavailable.data as string).toContain('Do NOT retry this exact skill id.')
 
     const visible = createReadSkillResourceTool({ getAvailableSkills: () => [skill] })
     const miss = await visible.execute({ skill: 'finance', path: 'references/nope.md' }, ctx)
     expect(miss.isError).toBe(true)
-    expect(miss.data).toMatchObject({ validPaths: ['references/margins.md'] })
+    expect(typeof miss.data).toBe('string')
+    expect(miss.data as string).toContain('found no resource "references/nope.md" in skill "finance"')
+    expect(miss.data as string).toContain('Valid paths in this bundle: references/margins.md')
+    expect(miss.data as string).toContain('Do NOT retry this exact path.')
+  })
+
+  it('says a legacy bundle has no addressable resources rather than "not found"', async () => {
+    const legacy: SkillContent = { ...skill, bundleVersion: 1, resources: undefined }
+    const tool = createReadSkillResourceTool({ getAvailableSkills: () => [legacy] })
+    const res = await tool.execute({ skill: 'finance', path: 'references/margins.md' }, ctx)
+    expect(res.isError).toBe(true)
+    expect(res.data as string).toContain('legacy (v1) bundle')
+    expect(res.data as string).toContain('Call useSkill with skill "finance"')
   })
 
   it('searches within one offerable bundle', async () => {
@@ -50,7 +69,9 @@ describe('[COMP:skills/resource-tool] bundle resource tools', () => {
     })
     const blocked = await tool.execute({ skill: 'finance', path: 'references/margins.md' }, ctx)
     expect(blocked.isError).toBe(true)
-    expect(blocked.data).toMatchObject({ error: expect.stringContaining('useSkill') })
+    expect(typeof blocked.data).toBe('string')
+    expect(blocked.data as string).toContain('not activated in this turn')
+    expect(blocked.data as string).toContain('Call useSkill with skill "finance" first')
 
     activated = true
     const allowed = await tool.execute({ skill: 'finance', path: 'references/margins.md' }, ctx)

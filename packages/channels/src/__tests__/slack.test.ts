@@ -6,6 +6,7 @@ import {
   isSlackApiError,
   looksLikeSlackConversationId,
   looksLikeSlackMemberId,
+  SlackApiError,
 } from '../slack/errors.js'
 import { verifySlackSignature } from '../slack/verify.js'
 import { createHmac } from 'node:crypto'
@@ -588,6 +589,110 @@ describe('[COMP:channels/slack-errors] SlackApiError + describeSlackError', () =
 
   it('passes non-Slack errors through as their message', () => {
     expect(describeSlackError(new Error('fetch failed'))).toBe('fetch failed')
+  })
+
+  // ── Message / shape / file / reaction codes ────────────────────────────
+  // These reach the model from the run-time senders (workflow delivery, A2A
+  // relay, confirmation prompts, reactions), where the only thing it can act
+  // on is the sentence. Each must name the target, diagnose, give the next
+  // step, and state whether the same input can ever succeed.
+  const err = (code: string, target?: { channel?: string; ts?: string }, method = 'chat.update') =>
+    new SlackApiError({ method, code, target })
+
+  it('message_not_found names the ts + channel and forbids the blind retry', () => {
+    const text = describeSlackError(err('message_not_found', { channel: 'C0BB4AK5BHB', ts: '1751970000.111111' }))
+    expect(text).toContain('`1751970000.111111`')
+    expect(text).toContain('`C0BB4AK5BHB`')
+    expect(text).toMatch(/per-channel message id/i)
+    expect(text).toContain('Retrying this exact (channel, ts) pair will keep failing.')
+  })
+
+  it('invalid_ts_latest names the offending argument and the ts format', () => {
+    const text = describeSlackError(err('invalid_ts_latest', { channel: 'C1' }, 'conversations.history'))
+    expect(text).toContain('`latest`')
+    expect(text).toContain('1751970000.111111')
+    expect(text).toMatch(/same value will fail the same way/i)
+  })
+
+  it('invalid_ts_oldest names the oldest argument instead', () => {
+    expect(describeSlackError(err('invalid_ts_oldest', {}, 'conversations.history'))).toContain('`oldest`')
+  })
+
+  it('cant_update_message explains bot-authored-only and says to post a new message', () => {
+    const text = describeSlackError(err('cant_update_message', { channel: 'C1', ts: '1751970000.111111' }))
+    expect(text).toMatch(/SAME bot token/)
+    expect(text).toMatch(/Post a new message/i)
+    expect(text).toMatch(/Retrying the edit will keep failing/i)
+  })
+
+  it('edit_window_closed is permanent — post a new message instead', () => {
+    const text = describeSlackError(err('edit_window_closed', { channel: 'C1', ts: '1751970000.111111' }))
+    expect(text).toMatch(/can never be edited again/i)
+    expect(text).toMatch(/Post a NEW message/)
+    expect(text).toMatch(/no retry of this edit can ever succeed/i)
+  })
+
+  it('no_text says nothing was posted and names the field to fill', () => {
+    const text = describeSlackError(err('no_text', { channel: 'C1' }, 'chat.postMessage'))
+    expect(text).toMatch(/no message text/i)
+    expect(text).toMatch(/nothing was posted to `C1`/)
+    expect(text).toContain('`text`')
+    expect(text).toMatch(/will fail the same way/i)
+  })
+
+  it('invalid_blocks carries Slack detail and offers plain text as the fallback', () => {
+    const text = describeSlackError(new SlackApiError({
+      method: 'chat.postMessage',
+      code: 'invalid_blocks',
+      detail: ['[ERROR] missing required field: type'],
+      target: { channel: 'C1' },
+    }))
+    expect(text).toContain('missing required field: type')
+    expect(text).toContain('plain `text`')
+    expect(text).toMatch(/nothing was posted/i)
+  })
+
+  it('invalid_cursor says to restart pagination with no cursor', () => {
+    const text = describeSlackError(err('invalid_cursor', {}, 'conversations.list'))
+    expect(text).toMatch(/with NO cursor/)
+    expect(text).toContain('next_cursor')
+    expect(text).toMatch(/Retrying with this cursor will keep failing/i)
+  })
+
+  it('file_not_found points at re-running the upload rather than reusing the id', () => {
+    const text = describeSlackError(err('file_not_found', { channel: 'C1' }, 'files.completeUploadExternal'))
+    expect(text).toMatch(/attachment was not delivered/i)
+    expect(text).toMatch(/Re-run the upload/i)
+    expect(text).toMatch(/Retrying with this id will keep failing/i)
+  })
+
+  it('file_uploads_disabled blames the workspace admin setting and says to tell the user', () => {
+    const text = describeSlackError(err('file_uploads_disabled', { channel: 'C1' }, 'files.getUploadURLExternal'))
+    expect(text).toMatch(/NOT delivered/)
+    expect(text).toMatch(/workspace admin setting/i)
+    expect(text).toMatch(/Tell the user/i)
+  })
+
+  it('thread_not_found explains thread_ts must be the parent message ts', () => {
+    const text = describeSlackError(err('thread_not_found', { channel: 'C1', ts: '1751960000.000100' }, 'chat.postMessage'))
+    expect(text).toContain('`1751960000.000100`')
+    expect(text).toMatch(/PARENT message/)
+    expect(text).toMatch(/post at top level/i)
+    expect(text).toMatch(/nothing was posted/i)
+  })
+
+  it('already_reacted is a no-op: nothing to do, do not retry', () => {
+    const text = describeSlackError(err('already_reacted', { channel: 'C1', ts: '1751970000.111111' }, 'reactions.add'))
+    expect(text).toMatch(/already added that reaction/i)
+    expect(text).toMatch(/nothing to do/i)
+    expect(text).toMatch(/do not retry/i)
+  })
+
+  it('no_reaction is a no-op: the end state is already true', () => {
+    const text = describeSlackError(err('no_reaction', { channel: 'C1', ts: '1751970000.111111' }, 'reactions.remove'))
+    expect(text).toMatch(/no such reaction/i)
+    expect(text).toMatch(/already true/i)
+    expect(text).toMatch(/do not retry/i)
   })
 
   it('id shape helpers accept real ids and reject names / UUIDs', () => {

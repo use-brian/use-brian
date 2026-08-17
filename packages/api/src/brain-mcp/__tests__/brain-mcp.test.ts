@@ -8,12 +8,15 @@
 
 import { describe, it, expect, vi } from 'vitest'
 import { randomUUID } from 'node:crypto'
+import express from 'express'
+import request from 'supertest'
 import type { Request } from 'express'
 import { z } from 'zod'
 import { buildTool, type PipelineBResult, type Tool, type ToolContext } from '@use-brian/core'
 import { hashSecret } from '../../db/api-key-store.js'
 import { mintBrainPlaintext, type BrainKeyStore } from '../../db/brain-keys-store.js'
 import { authenticateBrainRequest } from '../auth.js'
+import { brainMcpRoutes } from '../server.js'
 import {
   buildBrainTools,
   effectiveBrainClearance,
@@ -33,6 +36,21 @@ import {
 // Partial mock: `query` is stubbed, but the agent-clearance ALS helpers
 // (`runWithAgentClearance` / `currentAgentClearance`) stay REAL so the
 // agent-principal wrap tests observe the actual context propagation.
+// The Streamable HTTP transport is the SDK's; the route's job around it is the
+// error BODY it emits when the transport blows up. Faking `start()` into a
+// throw is the only way to reach that catch from a unit test — nothing else in
+// this file constructs a transport, so the mock is inert everywhere else.
+vi.mock('@modelcontextprotocol/sdk/server/streamableHttp.js', () => ({
+  StreamableHTTPServerTransport: class {
+    async start(): Promise<void> {
+      throw new Error('transport failed to start')
+    }
+    async send(): Promise<void> {}
+    async handleRequest(): Promise<void> {}
+    async close(): Promise<void> {}
+  },
+}))
+
 vi.mock('../../db/client.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../db/client.js')>()),
   query: vi.fn().mockImplementation(async (sql: string) => {
@@ -1480,5 +1498,111 @@ describe('[COMP:api/brain-mcp] brand surface', () => {
     }).map((t) => t.name)
     expect(names).not.toContain('getBrand')
     expect(names).not.toContain('saveBrandDraft')
+  })
+})
+
+describe('[COMP:api/brain-mcp] HTTP error bodies reach the external agent with a remedy', () => {
+  // The body is the ONLY account an MCP client gets — a bare `invalid_brain_key`
+  // slug names the condition and stops, which leaves retrying as the agent's
+  // only move. Each refusal now carries what a working request looks like.
+  const WORKSPACE = '33333333-3333-3333-3333-333333333333'
+
+  async function fakeBrainKey(opts: { status?: 'active' | 'revoked' } = {}) {
+    const id = randomUUID()
+    const { plaintext, secret } = mintBrainPlaintext(id)
+    const keyHash = await hashSecret(secret)
+    const row = {
+      id,
+      workspaceId: WORKSPACE,
+      scope: 'read_write' as const,
+      status: opts.status ?? ('active' as const),
+      keyHash,
+      maxClearance: null,
+    }
+    const store = {
+      getByIdSystem: vi.fn(async (lookupId: string) => (lookupId === id ? row : null)),
+      touchLastUsedAt: vi.fn(async () => {}),
+    } as unknown as BrainKeyStore
+    return { plaintext, store }
+  }
+
+  function makeApp(store: BrainKeyStore) {
+    const app = express()
+    app.use(express.json())
+    app.use('/api/brain/mcp', brainMcpRoutes({ brainKeyStore: store, ...ALL_STUBS }))
+    return app
+  }
+
+  it('the uniform 401 names both accepted credential forms, the refresh path, and where a key comes from', async () => {
+    const { store } = await fakeBrainKey()
+    const res = await request(makeApp(store)).post('/api/brain/mcp').send({})
+    expect(res.status).toBe(401)
+    expect(res.body.error).toBe('invalid_brain_key')
+    expect(res.body.message).toContain('Bearer sk_brain_')
+    expect(res.body.message).toContain('oat_')
+    expect(res.body.message).toContain('grant_type=refresh_token')
+    expect(res.body.message).toContain('Studio → Programmatic access')
+    expect(res.body.message).toContain('fail identically')
+  })
+
+  it('a revoked key gets the SAME 401 body as a malformed one — the remedy travels, the discrimination does not', async () => {
+    const { store: goodStore } = await fakeBrainKey()
+    const { plaintext, store: revokedStore } = await fakeBrainKey({ status: 'revoked' })
+    const malformed = await request(makeApp(goodStore))
+      .post('/api/brain/mcp')
+      .set('Authorization', 'Bearer sk_brain_not-a-key')
+      .send({})
+    const revoked = await request(makeApp(revokedStore))
+      .post('/api/brain/mcp')
+      .set('Authorization', `Bearer ${plaintext}`)
+      .send({})
+    expect(malformed.status).toBe(401)
+    expect(revoked.status).toBe(401)
+    expect(revoked.body).toEqual(malformed.body)
+  })
+
+  it('a transport failure returns 500 with the credential explicitly cleared and a bounded retry verdict', async () => {
+    const { plaintext, store } = await fakeBrainKey()
+    const res = await request(makeApp(store))
+      .post('/api/brain/mcp')
+      .set('Authorization', `Bearer ${plaintext}`)
+      .send({ jsonrpc: '2.0', id: 1, method: 'tools/list' })
+    expect(res.status).toBe(500)
+    expect(res.body.error).toBe('brain_mcp_error')
+    // Tells the agent NOT to go hunting in its own arguments or credential.
+    expect(res.body.message).toContain('the credential is fine')
+    expect(res.body.message).toContain('retry the same request once')
+    expect(res.body.message).toContain('rather than looping')
+  })
+})
+
+describe('[COMP:api/brain-mcp] scoped-search workspace gate', () => {
+  // searchRecording / searchFileContent are hand-rolled (not bridged), so they
+  // carry their own gate. It used to say "No workspace is bound to this call."
+  // — a condition with no remedy, on a surface whose caller is a KEY and can
+  // do nothing about it except retry.
+  function toolsWithoutWorkspace() {
+    return buildBrainTools({
+      workspaceId: '',
+      scope: 'read_write',
+      keyId: '982d4a41-c568-4a5d-8614-833c7594bc1a',
+      maxClearance: null,
+      ...ALL_STUBS,
+    })
+  }
+
+  it.each([
+    ['searchRecording', { recordingId: '55555555-5555-5555-5555-555555555555', query: 'x' }],
+    ['searchFileContent', { fileId: '55555555-5555-5555-5555-555555555555', query: 'x' }],
+  ])('%s names itself, diagnoses the credential, and forbids the retry', async (name, args) => {
+    const tool = toolsWithoutWorkspace().find((t) => t.name === name)!
+    const result = await tool.handler(args as Record<string, unknown>)
+    expect(result.isError).toBe(true)
+    const body = textBody(result as never)
+    expect(body).toContain(`\`${name}\` cannot run`)
+    expect(body).toContain('not bound to a workspace')
+    expect(body).toContain('Studio → Programmatic access')
+    expect(body).toContain('fail identically')
+    expect(body).not.toContain('No workspace is bound to this call')
   })
 })

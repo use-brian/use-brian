@@ -63,6 +63,7 @@
 import { z } from 'zod'
 import { stripFollowUps } from '@use-brian/shared'
 import { buildTool, type Tool } from '../tools/types.js'
+import { formatToolError } from '../engine/tool-executor.js'
 import type { CrmStore } from '../crm/types.js'
 import type { TaskStore } from '../tasks/types.js'
 import type { WorkflowRunStore } from '../workflow/types.js'
@@ -1147,7 +1148,10 @@ export function createGetBlockTool(deps: DocToolDeps): Tool {
       const block = page.blocks.find(b => b.id === input.blockId)
       if (!block) {
         return {
-          data: `Block "${input.blockId}" not found on page ${input.pageId}. The page may have been edited since you last saw the outline — refetch via getCurrentPage.`,
+          data:
+            `No block "${input.blockId}" on page ${input.pageId} (the page has ${page.blocks.length} block(s)). ` +
+            'Block ids change when a block is replaced rather than edited, so an id from an outline you saw earlier can be stale — the page may have been edited by a human or by patchPage since. ' +
+            'Call getCurrentPage to re-read the outline and take the block id from there. Do NOT retry this exact block id.',
           isError: true,
         }
       }
@@ -1157,8 +1161,15 @@ export function createGetBlockTool(deps: DocToolDeps): Tool {
       // in the JSONB column at read time, surfaces cleanly to the model).
       const parsed = blockSchema.safeParse(block)
       if (!parsed.success) {
+        // `parsed.error.message` is a JSON dump of the whole issue array;
+        // formatToolError renders the compact `path: message` lines instead.
+        // This is a STORED-DATA fault, not a bad argument — the block exists
+        // and does not satisfy the wire format — so the remedy is to read the
+        // page another way, never to re-send the same id.
         return {
-          data: `Block "${input.blockId}" failed schema validation: ${parsed.error.message}`,
+          data:
+            `Block "${input.blockId}" on page ${input.pageId} is stored in a shape that does not match the doc wire format, so it cannot be returned. ${formatToolError(parsed.error)} ` +
+            'Nothing is wrong with your arguments and retrying this exact id will keep failing — read the block\'s text through getCurrentPage or getSection instead, and tell the user this block looks corrupted if you still cannot use it.',
           isError: true,
         }
       }

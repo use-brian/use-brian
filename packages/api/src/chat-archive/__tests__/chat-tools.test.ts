@@ -39,11 +39,46 @@ describe('[COMP:tools/chat-archive] native chat archive tools', () => {
 	})
   })
 
-  it('rejects an invalid time before calling the store', async () => {
+  it('rejects an invalid time before calling the store, naming the field and the accepted shapes', async () => {
     const search = vi.fn()
     const tool = createChatArchiveTools({ search: search as never })[0]!
     const result = await tool.execute({ query: 'deposit', since: 'not-a-date' }, context)
     expect(result.isError).toBe(true)
     expect(search).not.toHaveBeenCalled()
+    const body = String(result.data)
+    expect(body).toContain('`since` is not a date this tool can read')
+    expect(body).toContain('not-a-date')
+    expect(body).toContain('YYYY-MM-DD')
+    expect(body).toContain('the same value will fail the same way')
+  })
+
+  // docs/architecture/engine/tool-executor.md → "Failure copy". The old
+  // wrapper was `searchChatHistory failed: ${err.message}` — the provider's
+  // sentence and nothing else, so a store error read as "there is no history".
+  it('a store failure names the tool, the query, a next step and the retry verdict', async () => {
+    const search = vi.fn(async () => {
+      throw new Error('relation "chat_messages" does not exist')
+    })
+    const tool = createChatArchiveTools({ search: search as never })[0]!
+    const result = await tool.execute({ query: 'deposit', source: 'whatsapp' }, context)
+    expect(result.isError).toBe(true)
+    const body = String(result.data)
+    expect(body).toContain('searchChatHistory')
+    expect(body).toContain('query "deposit"')
+    expect(body).toContain('relation "chat_messages" does not exist')
+    expect(body).toContain('only chats that have been synced')
+    expect(body).toContain('never present a public-web answer as if it came from')
+  })
+
+  it('a transient store blip is marked retryable rather than "fix your arguments"', async () => {
+    const search = vi.fn(async () => {
+      throw new Error('Connection terminated unexpectedly')
+    })
+    const tool = createChatArchiveTools({ search: search as never })[0]!
+    const result = await tool.execute({ query: 'deposit' }, context)
+    expect(result.isError).toBe(true)
+    const body = String(result.data)
+    expect(body).toContain('transient infrastructure error')
+    expect(body).toContain('Retry once')
   })
 })

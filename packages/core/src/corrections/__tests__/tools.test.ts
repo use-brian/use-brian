@@ -193,7 +193,12 @@ describe('[COMP:corrections/tools] createCorrectionTools', () => {
         makeContext(),
       )
       expect(result.isError).toBe(true)
-      expect(String(result.data)).toMatch(/no memory with that id/i)
+      // The miss ships the discovery pointer + supersession + the verdict,
+      // not just the orchestrator's sentence.
+      expect(String(result.data)).toContain(ROW_ID)
+      expect(String(result.data)).toMatch(/searchBrain/)
+      expect(String(result.data)).toMatch(/returned a NEW id/)
+      expect(String(result.data)).toMatch(/Do NOT retry this exact id/)
     })
 
     it('errors without a workspace context', async () => {
@@ -204,7 +209,10 @@ describe('[COMP:corrections/tools] createCorrectionTools', () => {
         makeContext({ workspaceId: null }),
       )
       expect(result.isError).toBe(true)
-      expect(String(result.data)).toMatch(/workspace/i)
+      // The gate names the missing surface and the remedy, and rules out a retry.
+      expect(String(result.data)).toMatch(/not bound to a workspace/)
+      expect(String(result.data)).toMatch(/from a workspace chat/)
+      expect(String(result.data)).toMatch(/do not retry/i)
     })
 
     it('rejects a non-uuid memory_id and an empty reason at the schema', () => {
@@ -287,7 +295,9 @@ describe('[COMP:corrections/tools] createCorrectionTools', () => {
       )
 
       expect(result.isError).toBe(true)
-      expect(String(result.data)).toMatch(/admin/i)
+      expect(String(result.data)).toMatch(/restricted to workspace owners and admins/)
+      expect(String(result.data)).toMatch(/Nothing was changed/)
+      expect(String(result.data)).toMatch(/an admin has to make this change/)
       expect(rec.reclassify).toHaveLength(0)
     })
 
@@ -334,5 +344,72 @@ describe('[COMP:corrections/tools] createCorrectionTools', () => {
         }).success,
       ).toBe(false)
     })
+  })
+})
+
+// ── Failure copy ─────────────────────────────────────────────────────
+// docs/architecture/engine/tool-executor.md → "Failure copy". Two shapes the
+// old bare `err.message` could not distinguish: a MISS (wrong id — re-resolve
+// and try again) and a TERMINAL state (the end state already holds — stop).
+
+describe('[COMP:corrections/tools] failure copy', () => {
+  it('retractMemory reports an already-retracted memory as terminal, not as a bad id', async () => {
+    const { deps } = makeDeps({
+      memorySnapshot: {
+        id: ROW_ID,
+        workspaceId: WORKSPACE_ID,
+        retractedAt: new Date('2026-08-01T00:00:00Z'),
+        validTo: null,
+        sourceEpisodeId: null,
+        semanticHash: null,
+        createdByUserId: USER_ID,
+      },
+    })
+    const { retractMemory } = byName(createCorrectionTools(deps))
+    const result = await retractMemory.execute({ memory_id: ROW_ID, reason: 'wrong' }, makeContext())
+    expect(result.isError).toBe(true)
+    const body = String(result.data)
+    expect(body).toContain(`Memory ${ROW_ID} is ALREADY retracted`)
+    expect(body).toContain('nothing changed and nothing needed to')
+    expect(body).toContain('Do NOT retry this id')
+    // It must NOT send the model hunting for a different tool.
+    expect(body).toContain('do not look for another retract tool')
+  })
+
+  it('deleteBrainRow ships the per-primitive discovery tool on a miss', async () => {
+    const { deps } = makeDeps({ rowSnapshot: null })
+    const { deleteBrainRow } = byName(createCorrectionTools(deps))
+    const result = await deleteBrainRow.execute(
+      { primitive: 'contact', row_id: ROW_ID, reason: 'gone' },
+      makeContext(),
+    )
+    expect(result.isError).toBe(true)
+    const body = String(result.data)
+    expect(body).toContain(ROW_ID)
+    expect(body).toContain('Nothing was deleted')
+    expect(body).toContain('listContacts')
+    expect(body).toContain('returned a NEW id')
+    expect(body).toContain('Do NOT retry this exact id')
+  })
+
+  it('deleteBrainRow reports an already-deleted row as terminal', async () => {
+    const { deps } = makeDeps({
+      rowSnapshot: {
+        primitive: 'entity',
+        rowId: ROW_ID,
+        workspaceId: WORKSPACE_ID,
+        validTo: new Date('2026-08-01T00:00:00Z'),
+        retractedAt: null,
+        createdByUserId: USER_ID,
+      },
+    })
+    const { deleteBrainRow } = byName(createCorrectionTools(deps))
+    const result = await deleteBrainRow.execute(
+      { primitive: 'entity', row_id: ROW_ID, reason: 'gone' },
+      makeContext(),
+    )
+    expect(result.isError).toBe(true)
+    expect(String(result.data)).toContain('is ALREADY deleted')
+    expect(String(result.data)).toContain('Do NOT retry this id')
   })
 })

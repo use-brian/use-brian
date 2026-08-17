@@ -12,6 +12,7 @@ import { looksLikeCronOperationalState } from '../consolidation/phases.js'
 import type { EntityStore, EntityLinksStore } from '../entities/types.js'
 import { applyExplicitLinks, explicitLinksField, formatLinksSummary } from '../entities/explicit-links.js'
 import type { MemoryRecallBuffer } from './recall-buffer.js'
+import { notFoundMessage } from '../tools/tool-failure.js'
 
 /**
  * Build an `AccessContext` from the live `ToolContext`. The four-axis
@@ -135,6 +136,33 @@ export type MemoryToolOptions = {
 }
 
 /**
+ * The one "memory not found" sentence — the `taskNotFoundMessage` /
+ * `crmNotFound` shape, hand-written because memory supersession has a twist
+ * the generic `notFoundFailure({ supersession: true })` clause gets wrong.
+ *
+ * `MemoryStore.update` is bi-temporal: it stamps `valid_to` on the row it
+ * locked and INSERTs a new one with a NEW uuid, and every read filters
+ * `valid_to IS NULL`. So a memory id is dead the moment it is edited — by
+ * this tool, by the Memory-tab edit route, or by a consolidation pass. But
+ * unlike tasks and CRM rows, `saveMemory`'s own success line echoes the id
+ * the CALLER passed, not the new one, so "reuse the id from that result" is
+ * the one piece of advice that is guaranteed to fail here. Point at the
+ * re-resolution path instead.
+ *
+ * `search` (scope `memory`) is the sibling that re-resolves; the per-turn
+ * memory index carries current 8-char prefixes and this tool accepts those.
+ */
+function memoryNotFound(id: string): string {
+  return (
+    `Memory ${id} not found in this workspace. ` +
+    'Every edit to a memory supersedes the row and mints a NEW id, so an id you held from before an edit (or from an older turn\'s memory index) is permanently dead — and the id echoed back by a previous saveMemory update is the pre-edit one, so do not reuse that either. ' +
+    'It may also have been deleted, or be above this assistant\'s clearance. ' +
+    'Call `search` with scope `memory` to re-resolve a current id, or read the current id off the memory index in your context. ' +
+    'Do NOT retry this exact id.'
+  )
+}
+
+/**
  * Create saveMemory, getMemory, and deleteMemory tools backed by a MemoryStore.
  *
  * `deleteMemory` sets `requiresConfirmation: true` — the tool executor
@@ -206,7 +234,9 @@ export function createMemoryTools(
       // so the model retries with one or the other.
       if (input.id && input.entityId) {
         return {
-          data: 'Cannot combine `id` with `entityId`. Use entityId to create a new note; use id alone to update an existing memory.',
+          data:
+            'Cannot combine `id` with `entityId` — one updates an existing memory, the other anchors a NEW CRM note, and saveMemory cannot do both in one call. Nothing was saved. ' +
+            'Retry with `entityId` alone to create the note, or with `id` alone to update the memory. This exact combination will keep failing.',
           isError: true,
         }
       }
@@ -248,11 +278,11 @@ export function createMemoryTools(
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
           if (msg.includes('invalid input syntax for type uuid')) {
-            return { data: `Memory ${input.id} not found`, isError: true }
+            return { data: memoryNotFound(input.id), isError: true }
           }
           throw err
         }
-        if (!updated) return { data: `Memory ${input.id} not found`, isError: true }
+        if (!updated) return { data: memoryNotFound(input.id), isError: true }
         opts?.onEvent?.({ type: 'memory_updated', memoryId: resolvedId })
         return { data: `Updated memory [${resolvedId}]: ${updated.summary}` }
       }
@@ -262,7 +292,9 @@ export function createMemoryTools(
       // enforce the create-time requirement here.
       if (!input.summary) {
         return {
-          data: 'saveMemory requires `summary` when creating a new memory. Pass an `id` to update an existing memory, or include a one-line summary to create a new one.',
+          data:
+            'saveMemory requires `summary` when creating a new memory, and this call had neither `summary` nor an `id` to update. Nothing was saved. ' +
+            'Retry with a one-line `summary` to create, or with the `id` of the memory you meant to update. The same arguments will keep failing.',
           isError: true,
         }
       }
@@ -298,7 +330,13 @@ export function createMemoryTools(
         input.scope === 'team' &&
         scopeDecision.ruleId === 'memory-scope-no-workspace-blocks-team'
       ) {
-        return { data: 'Cannot save team memories — this assistant is not part of a team.', isError: true }
+        return {
+          data:
+            'Cannot save a team-scoped memory: this assistant is not bound to a workspace, and `scope: "team"` means "shared with every member of the workspace" — there is no workspace here to share it with. ' +
+            'Save it with `scope: "user"` (it stays readable to this user), or ask the user to move the assistant into a workspace in Studio. ' +
+            'Retrying with `scope: "team"` from this session will keep failing.',
+          isError: true,
+        }
       }
 
       // Map model-facing scope to DB scope. Migration 110 renamed the
@@ -335,7 +373,9 @@ export function createMemoryTools(
       // misuse without requiring the API layer to second-guess.
       if (input.tags?.includes('voice') && effectiveScope !== 'team') {
         return {
-          data: "The 'voice' tag is only valid for team-scoped memories on a distribution assistant. Drop the tag or save with scope='team'.",
+          data:
+            "The 'voice' tag is only valid on a team-scoped memory (voice rules belong to a workspace's distribution assistant, not to one user), and this save resolved to scope='user'. Nothing was saved. " +
+            "Retry without the 'voice' tag, or with scope='team' if this really is a workspace-wide voice rule. The same tag + scope pair will keep failing.",
           isError: true,
         }
       }
@@ -373,23 +413,38 @@ export function createMemoryTools(
       if (input.entityId) {
         if (!opts?.entityStore || !opts?.entityLinksStore) {
           return {
-            data: 'CRM-note anchoring is not available on this server (entity wiring missing). Save the memory without entityId, or use CRM tools to record the note context another way.',
+            data:
+              'CRM-note anchoring is not wired on this server: this build of saveMemory has no entity store, so the memory-to-entity link cannot be written. Nothing was saved. ' +
+              'This is a server configuration gap, not something your arguments can fix — retry the SAME call without `entityId` to save the memory itself, name the person or company in the summary so it is still findable, and tell the user the note is not attached to their CRM record.',
             isError: true,
           }
         }
         if (!context.workspaceId) {
           return {
-            data: 'CRM-note anchoring requires a workspace context. saveContact / saveCompany / saveDeal are only available to workspace-scoped sessions.',
+            data:
+              `Cannot anchor a CRM note on entity ${input.entityId}: this assistant is not bound to a workspace, and CRM entities live in a workspace. Nothing was saved. ` +
+              'Retry without `entityId` to save the memory itself, or ask the user to move this assistant into a workspace in Studio. Retrying with `entityId` from this session will keep failing.',
             isError: true,
           }
         }
         const entity = await opts.entityStore.getById(viewerCtx(context), input.entityId)
         if (!entity) {
-          return { data: `Entity ${input.entityId} not found.`, isError: true }
+          return {
+            data: notFoundMessage({
+              kind: 'Entity',
+              id: input.entityId,
+              supersession: true,
+              extra: 'It may also be above this assistant\'s clearance. Nothing was saved.',
+              discoveryTool: 'getContact / getCompany / getDeal (they return the mirrored entity id), or `search`',
+            }),
+            isError: true,
+          }
         }
         if (!CRM_NOTE_ENTITY_KINDS.has(entity.kind)) {
           return {
-            data: `Cannot anchor a note on entity kind '${entity.kind}' — CRM notes anchor to person, company, or deal entities only (the kinds mirrored from CRM rows).`,
+            data:
+              `Cannot anchor a note on entity ${input.entityId}: its kind is '${entity.kind}', and CRM notes anchor to person, company, or deal entities only (the kinds mirrored from CRM rows). Nothing was saved. ` +
+              'Pass the entity id of the person/company/deal this note is about, or drop `entityId` and save it as a plain memory. Retrying this exact entityId will keep failing — its kind will not change.',
             isError: true,
           }
         }
@@ -532,7 +587,7 @@ export function createMemoryTools(
         }
         if (!memory) {
           opts?.onEvent?.({ type: 'memory_retrieved', source: 'id', resultCount: 0 })
-          return { data: `Memory ${input.id} not found`, isError: true }
+          return { data: memoryNotFound(input.id), isError: true }
         }
 
         // Track recall (fire-and-forget) — aggregate counters on the
@@ -602,7 +657,14 @@ export function createMemoryTools(
         }
       }
 
-      return { data: 'Provide either an id or a query.', isError: true }
+      return {
+        data:
+          'getMemory ran with neither `id` nor `query`, so there was nothing to fetch. ' +
+          'Pass `id` (a full uuid or the 8-char prefix shown in the memory index) to read one memory. ' +
+          'To find memories by topic, call `search` with scope `memory` instead — getMemory is not a search tool. ' +
+          'Retrying with no arguments will keep failing.',
+        isError: true,
+      }
     },
   })
 
@@ -688,11 +750,22 @@ export function createMemoryTools(
       }
 
       if (deleted.length === 0) {
-        return { data: `No memories deleted. Not found: ${missing.join(', ')}`, isError: true }
+        return {
+          data:
+            `No memories were deleted — none of these ids resolved in this workspace: ${missing.join(', ')}. ` +
+            'Every edit to a memory supersedes the row and mints a NEW id, so an id from before an edit (or from an older turn\'s memory index) is permanently dead; the row may also already be deleted or above this assistant\'s clearance. ' +
+            'Call `search` with scope `memory` (or read the memory index in your context) to re-resolve current ids, then delete those. ' +
+            'Do NOT retry these exact ids.',
+          isError: true,
+        }
       }
 
       const parts = [`Deleted ${deleted.length} memor${deleted.length === 1 ? 'y' : 'ies'}: ${deleted.join('; ')}`]
-      if (missing.length > 0) parts.push(`Not found: ${missing.join(', ')}`)
+      if (missing.length > 0) {
+        parts.push(
+          `Not found (nothing was deleted for these): ${missing.join(', ')}. An edit supersedes a memory and mints a NEW id, so an id held from before an edit is dead — re-resolve via \`search\` with scope \`memory\` before retrying, and do NOT retry these exact ids`,
+        )
+      }
       return { data: parts.join('. ') }
     },
   })

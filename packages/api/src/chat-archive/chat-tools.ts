@@ -7,7 +7,7 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Embedder, type Tool } from '@use-brian/core'
+import { buildTool, toolFailure, type Embedder, type Tool } from '@use-brian/core'
 import { searchChatArchive } from '../db/chat-archive-store.js'
 import { CHAT_ARCHIVE_SEARCH_TOOL } from './tool-catalog.js'
 
@@ -37,13 +37,14 @@ function parseTime(value: string | undefined, field: string): string | undefined
   if (value === undefined) return undefined
   const parsed = new Date(value)
   if (Number.isNaN(parsed.getTime())) {
-    return { error: `${field} is not a valid ISO 8601 date/time: ${value}` }
+    return {
+      error:
+        `searchChatHistory did not run: \`${field}\` is not a date this tool can read — got "${value}". Nothing was searched. ` +
+        'Pass an ISO 8601 value: a bare date "YYYY-MM-DD", or a full timestamp with a zone such as "2026-08-17T09:30:00Z". ' +
+        `Fix \`${field}\` or drop it (an omitted bound means "unbounded on that side") and call again — the same value will fail the same way.`,
+    }
   }
   return parsed.toISOString()
-}
-
-function toolError(name: string, err: unknown): { data: string; isError: true } {
-  return { data: `${name} failed: ${err instanceof Error ? err.message : String(err)}`, isError: true }
 }
 
 export function createChatArchiveTools(deps: ChatArchiveToolDeps = {}): Tool[] {
@@ -97,7 +98,13 @@ export function createChatArchiveTools(deps: ChatArchiveToolDeps = {}): Tool[] {
           },
         }
       } catch (err) {
-        return toolError('searchChatHistory', err)
+        return toolFailure(err, {
+          tool: 'searchChatHistory',
+          target: `query "${input.query}"`,
+          next:
+            'The archive holds only chats that have been synced for THIS user, so a narrow `source` / `instanceId` / `conversationId` that was never synced finds nothing to search. ' +
+            'Widen or drop those filters before deciding the history is empty, and never present a public-web answer as if it came from the user\'s own chats.',
+        })
       }
     },
   })

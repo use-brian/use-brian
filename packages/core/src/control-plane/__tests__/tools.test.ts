@@ -101,6 +101,23 @@ describe('[COMP:control-plane/read-tools] createControlPlaneTools', () => {
     expect(result.isError).toBe(true)
   })
 
+  it('the workspace gate names the tool, diagnoses the CREDENTIAL, gives the admin remedy, and forbids the retry', async () => {
+    // These reads are reachable only from the agent surfaces (brain MCP,
+    // assistant MCP, public-api chat), so "no workspace" is always a property
+    // of the key. The old copy stated the condition and stopped, which leaves
+    // retrying as the model's only move (tool-executor.md → "Failure copy").
+    const tools = createControlPlaneTools(makeReader())
+    for (const [name, tool] of Object.entries(tools)) {
+      const result = await tool.execute({ assistantId: ASSISTANT } as never, ctx({ workspaceId: null }))
+      expect(result.isError, name).toBe(true)
+      const text = String(result.data)
+      expect(text, name).toContain(`\`${name}\` cannot run`)
+      expect(text, name).toContain('not bound to a workspace')
+      expect(text, name).toContain('re-issue or re-scope the key')
+      expect(text, name).toContain('will fail identically')
+    }
+  })
+
   it('getAssistant returns an error result for an unknown id', async () => {
     const tools = createControlPlaneTools(makeReader())
     const parsed = tools.getAssistant.inputSchema.parse({
@@ -108,6 +125,21 @@ describe('[COMP:control-plane/read-tools] createControlPlaneTools', () => {
     })
     const result = await tools.getAssistant.execute(parsed, ctx())
     expect(result.isError).toBe(true)
+  })
+
+  it('an assistant-id miss ships the discovery pointer, not a bare "No such assistant"', async () => {
+    const tools = createControlPlaneTools(makeReader())
+    const missing = '99999999-9999-9999-9999-999999999999'
+    const result = await tools.getAssistant.execute(
+      tools.getAssistant.inputSchema.parse({ assistantId: missing }),
+      ctx(),
+    )
+    const text = String(result.data)
+    expect(text).toContain(missing)
+    expect(text).toContain('listAssistants')
+    expect(text).toContain('Do NOT retry this exact id')
+    // The two reasons an id can miss are different diagnoses; say both.
+    expect(text).toContain('not visible to the acting principal')
   })
 
   it('listConnectors surfaces the oauthRequired flag the agent uses for connect-link handoff', async () => {

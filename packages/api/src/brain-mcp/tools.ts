@@ -1145,7 +1145,20 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       if ('error' in ctx) return text(ctx.error, true)
       const recordingId = String(args.recordingId ?? '')
       if (!recordingId) return text('recordingId is required', true)
-      if (!ctx.workspaceId) return text('No workspace is bound to this call.', true)
+      if (!ctx.workspaceId) {
+        // Canonical workspace-gate copy (same account as the agent-surface
+        // tools): this never clears on a retry — it is a property of the
+        // credential, not of the arguments.
+        return text(
+          '`searchRecording` cannot run: the brain credential this call authenticated with (brain key / OAuth ' +
+            'grant / Home-app bridge token) is not bound to a workspace, so there is no workspace ' +
+            'to search the recording in. This is a provisioning problem with the credential, not a problem ' +
+            'with the arguments — no argument change helps and retrying this call will fail ' +
+            'identically. Remedy: a workspace admin must re-issue or re-scope the key against the ' +
+            'workspace in Studio → Programmatic access. Report that to the user instead of retrying.',
+          true,
+        )
+      }
       const actor = {
         workspaceId: ctx.workspaceId,
         userId: ctx.userId,
@@ -1199,7 +1212,20 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       if ('error' in ctx) return text(ctx.error, true)
       const fileId = String(args.fileId ?? '')
       if (!fileId) return text('fileId is required', true)
-      if (!ctx.workspaceId) return text('No workspace is bound to this call.', true)
+      if (!ctx.workspaceId) {
+        // Canonical workspace-gate copy (same account as the agent-surface
+        // tools): this never clears on a retry — it is a property of the
+        // credential, not of the arguments.
+        return text(
+          '`searchFileContent` cannot run: the brain credential this call authenticated with (brain key / OAuth ' +
+            'grant / Home-app bridge token) is not bound to a workspace, so there is no workspace ' +
+            'to search the document in. This is a provisioning problem with the credential, not a problem ' +
+            'with the arguments — no argument change helps and retrying this call will fail ' +
+            'identically. Remedy: a workspace admin must re-issue or re-scope the key against the ' +
+            'workspace in Studio → Programmatic access. Report that to the user instead of retrying.',
+          true,
+        )
+      }
       const actor = {
         workspaceId: ctx.workspaceId,
         userId: ctx.userId,

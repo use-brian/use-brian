@@ -140,6 +140,7 @@ export function describeSlackError(err: unknown): string {
   }
   const { method, code, detail, target } = err
   const channel = target.channel ? `\`${target.channel}\`` : 'the requested channel'
+  const messageTs = target.ts ? `\`${target.ts}\`` : 'the timestamp that was passed'
   const detailText = detail.length ? ` Slack's detail: ${detail.join('; ')}.` : ''
 
   switch (code) {
@@ -180,6 +181,44 @@ export function describeSlackError(err: unknown): string {
       return `Slack workspace policy blocks the bot from this action in ${channel} (${code} on \`${method}\`). A Slack admin must change the channel posting permissions; retrying will not help. Tell the user.`
     case 'channel_is_archived':
       return `Slack channel ${channel} is archived (${code} on \`${method}\`); pick a different channel — ${BROWSE_HINT}`
+
+    // ── Message-targeted failures (chat.update / chat.delete / reactions) ──
+    // These name a MESSAGE, not a channel: the `ts` is the id. A Slack ts is
+    // per-channel and per-message, so the remedy is almost always "re-read the
+    // ts from the thing that produced it", never "retry".
+    case 'message_not_found':
+      return `Slack has no message ${messageTs} in ${channel} (message_not_found on \`${method}\`), so nothing was edited, deleted, or reacted to. A Slack \`ts\` is a per-channel message id: it is valid ONLY in the channel the message was posted to, it is different for every message, and it stops resolving once the message is deleted. Re-read the ts from the Slack event that delivered that message (or from the result of the send that created it) and pass it together with the channel id that message lives in. Retrying this exact (channel, ts) pair will keep failing.`
+    case 'invalid_ts_latest':
+    case 'invalid_ts_oldest':
+      return `Slack rejected the \`${code === 'invalid_ts_oldest' ? 'oldest' : 'latest'}\` timestamp passed to \`${method}\` as malformed (${code})${target.ts ? ` — the value was ${messageTs}` : ''}. A Slack timestamp is the literal string Slack returns for a message: ten digits, a dot, six digits (e.g. \`1751970000.111111\`). An ISO date, epoch milliseconds, or a plain number is not accepted. Pass the exact ts string Slack gave for that message, or omit the argument to read from the newest message. The same value will fail the same way.`
+    case 'cant_update_message':
+      return `Slack will not let this bot edit message ${messageTs} in ${channel} (cant_update_message on \`${method}\`); the message is unchanged. \`chat.update\` can only edit messages posted by the SAME bot token — never a person's message, another app's message, or one posted before this bot was connected. Post a new message with the corrected content instead. Retrying the edit will keep failing.`
+    case 'edit_window_closed':
+      return `The workspace's message-edit window has closed for message ${messageTs} in ${channel} (edit_window_closed on \`${method}\`); the message is unchanged and can never be edited again. Slack admins can cap how long a message stays editable, and that limit has already passed for this message. Post a NEW message carrying the correction instead — no retry of this edit can ever succeed.`
+
+    // ── Request-shape failures — the same input always fails ──────────────
+    case 'no_text':
+      return `Slack rejected \`${method}\` because the request carried no message text (no_text), so nothing was posted to ${channel}. Slack needs a non-empty \`text\` (an empty string, whitespace-only text, or an omitted field all land here). Put the actual message content in \`text\` and send again; resending this exact request will fail the same way.`
+    case 'invalid_blocks':
+      return `Slack rejected the Block Kit payload sent to \`${method}\` (invalid_blocks), so nothing was posted to ${channel}.${detailText} The blocks JSON is malformed, or uses a block/element type or field Block Kit does not accept. Fix the block structure named above, or send the same content as plain \`text\` (always accepted), then resend. This exact payload will fail the same way.`
+    case 'invalid_cursor':
+      return `Slack rejected the pagination cursor passed to \`${method}\` (invalid_cursor), so this page was not returned. A cursor is only valid for the exact query that produced it and it expires — a cursor kept from an earlier call, or from a call with different arguments, lands here. Restart the pagination: call \`${method}\` again with NO cursor and follow \`response_metadata.next_cursor\` from that run. Retrying with this cursor will keep failing.`
+
+    // ── Files ─────────────────────────────────────────────────────────────
+    case 'file_not_found':
+      return `Slack has no file with that id for \`${method}\` (file_not_found), so the attachment was not delivered${target.channel ? ` to ${channel}` : ''}. A Slack file id (\`F…\`) only becomes valid once \`files.completeUploadExternal\` has finalized the upload, and it stops resolving once the file is deleted or its retention expires. Re-run the upload from the start (mint a fresh upload URL, POST the bytes, then complete the upload) instead of reusing the old id. Retrying with this id will keep failing.`
+    case 'file_uploads_disabled':
+      return `File uploads are turned off for this Slack workspace (file_uploads_disabled on \`${method}\`), so the attachment was NOT delivered to ${channel}. This is a workspace admin setting — no scope, reconnect, or retry by the bot can change it. Tell the user that Slack file uploads are disabled in their workspace, and send the content as message text or a link instead.`
+
+    // ── Threads ───────────────────────────────────────────────────────────
+    case 'thread_not_found':
+      return `Slack has no thread at ${messageTs} in ${channel} (thread_not_found on \`${method}\`), so nothing was posted. \`thread_ts\` must be the ts of the thread's PARENT message in this same channel — a reply's own ts, a ts from a different channel, or the ts of a deleted parent all land here. Use the ts Slack returned when the parent message was posted, or drop \`thread_ts\` and post at top level. Retrying with this value will keep failing.`
+
+    // ── Reaction no-ops — the requested end state is ALREADY true ─────────
+    case 'already_reacted':
+      return `This bot has already added that reaction to message ${messageTs} in ${channel} (already_reacted on \`${method}\`). The end state you asked for is already true, so there is nothing to do — do not retry and do not substitute a different emoji.`
+    case 'no_reaction':
+      return `This bot has no such reaction on message ${messageTs} in ${channel} to remove (no_reaction on \`${method}\`) — it was never added by this bot, or it has already been removed. The end state you asked for is already true, so there is nothing to do — do not retry.`
     default:
       break
   }

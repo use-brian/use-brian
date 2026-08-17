@@ -351,7 +351,12 @@ describe('[COMP:files/tools] fileRead', () => {
     const { fileRead } = createFileTools(api)
     const result = await fileRead.execute({ file: '/missing.md' }, ctx)
     expect(result.isError).toBe(true)
-    expect(String(result.data)).toContain('not found')
+    const data = String(result.data)
+    // A PATH miss (the non-UUID branch) now carries the same discovery
+    // pointer + verdict the UUID branch has had since the 2026-08-05 incident.
+    expect(data).toContain('/missing.md')
+    expect(data).toContain('fileSearch')
+    expect(data).toContain('Do NOT retry this exact path')
   })
 
   it('rejects when workspace is missing', async () => {

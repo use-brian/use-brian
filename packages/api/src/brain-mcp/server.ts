@@ -161,8 +161,22 @@ export function brainMcpRoutes(opts: Options): Router {
       homeApps: opts.homeApps,
     })
     if (!auth) {
-      // Uniform 401 — a probe cannot tell a bad key from a revoked one.
-      res.status(401).json({ error: 'invalid_brain_key' })
+      // Uniform 401 — a probe cannot tell a bad key from a revoked one. That
+      // is a security property, not a reason to say nothing: the ONE message
+      // covers every cause (so it leaks no more than the code does) while
+      // still telling an honest client which header to send and where the
+      // credential comes from.
+      res.status(401).json({
+        error: 'invalid_brain_key',
+        message:
+          'Authenticate with `Authorization: Bearer sk_brain_<keyId>_<secret>` (an API key) or ' +
+          '`Bearer oat_<authorizationId>_<secret>` (an OAuth 2.1 access token from ' +
+          '/api/brain/oauth/token). The credential is missing, malformed, revoked, or expired — ' +
+          'these are deliberately indistinguishable, so check all four. An OAuth access token ' +
+          'expires after 10 minutes: refresh it with `grant_type=refresh_token` rather than ' +
+          'retrying. An API key is issued and rotated in Studio → Programmatic access. Retrying ' +
+          'the same credential unchanged will fail identically.',
+      })
       return
     }
 
@@ -269,7 +283,14 @@ export function brainMcpRoutes(opts: Options): Router {
     } catch (err) {
       console.error('[brain-mcp] request failed:', err)
       if (!res.headersSent) {
-        res.status(500).json({ error: 'brain_mcp_error' })
+        res.status(500).json({
+          error: 'brain_mcp_error',
+          message:
+            'The MCP transport failed while handling this request. Authentication and tool-surface ' +
+            'construction had already succeeded, so the credential is fine and changing it will not ' +
+            'help. The cause is server-side and may be transient: retry the same request once after ' +
+            'a short wait, and if it persists report it rather than looping.',
+        })
       }
     }
   })

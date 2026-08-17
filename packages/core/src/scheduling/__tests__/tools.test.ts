@@ -1132,11 +1132,44 @@ describe('[COMP:scheduling/tools] workspace visibility + cross-member management
 
     const updated = await updateScheduledJob.execute({ jobId: reminder.id, enabled: false }, ctx)
     expect(updated.isError).toBe(true)
-    expect(updated.data).toContain('not found')
+    // The copy must NOT confirm the job exists (existence leak) while still
+    // carrying the id, the discovery pointer, and the retry verdict.
+    expect(String(updated.data)).toContain(reminder.id)
+    expect(String(updated.data)).toContain('not available to this assistant')
+    expect(String(updated.data)).toContain('does not distinguish the two on purpose')
+    expect(String(updated.data)).toContain('searchScheduledJobs')
+    expect(String(updated.data)).toContain('Do NOT retry this exact id')
 
     const deleted = await deleteScheduledJob.execute({ jobId: reminder.id }, ctx)
     expect(deleted.isError).toBe(true)
     expect(store.rows.find((r) => r.id === reminder.id)).toBeDefined()
+  })
+
+  it('says exactly the same thing for "no such job" as for "not yours" (byte-identical)', async () => {
+    // The discovery pointer and the retry verdict are additions the failure-copy
+    // standard requires; the no-existence-leak property is the constraint they
+    // must not break. The only way to hold both is ONE sentence used at every
+    // miss — so this asserts equality, not just the absence of a keyword.
+    const { store, wfStore } = seed()
+    const teammates = await store.create({
+      assistantId: 'a1', userId: 'u2',
+      schedule: { type: 'daily', time: '08:00' }, timezone: 'UTC',
+      instructions: 'take the pill', channelType: 'telegram', channelId: 'c9',
+      nextRunAt: new Date(Date.now() + 60_000),
+    })
+    const { deleteScheduledJob } = createSchedulingTools({ jobStore: store, workflowStore: wfStore })
+
+    const notYours = await deleteScheduledJob.execute({ jobId: teammates.id }, ctx)
+    const noSuchJob = await deleteScheduledJob.execute({ jobId: teammates.id.replace(/.$/, 'z') }, ctx)
+
+    expect(notYours.isError).toBe(true)
+    expect(noSuchJob.isError).toBe(true)
+    // Same sentence modulo the id, which each one legitimately names.
+    expect(String(notYours.data).replace(teammates.id, '<id>')).toBe(
+      String(noSuchJob.data).replace(teammates.id.replace(/.$/, 'z'), '<id>'),
+    )
+    expect(String(notYours.data)).toContain('searchScheduledJobs')
+    expect(String(notYours.data)).toContain('Do NOT retry this exact id')
   })
 
   it('a trigger whose workflow lives in ANOTHER workspace is not manageable', async () => {

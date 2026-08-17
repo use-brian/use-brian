@@ -39,6 +39,7 @@ import {
   classifyTool,
   CONFIGURE_CAPABILITY,
   minSensitivity,
+  notFoundFailure,
   type McpSettingsStore,
   type Sensitivity,
   type Tool,
@@ -83,8 +84,102 @@ function slugify(name: string): string {
     .slice(0, 60)
 }
 
-function requireWorkspace(ctx: ToolContext): string | null {
-  return ctx.workspaceId ?? null
+/**
+ * The canonical workspace-gate failure for the agent surfaces.
+ *
+ * Every one of these tools used to answer "No workspace bound to this
+ * surface." — which names neither the operation nor a remedy, so the only
+ * move the sentence leaves the model is to try again. This failure NEVER
+ * clears on a retry: it is a property of the CREDENTIAL the call
+ * authenticated with (a brain key / assistant key / OAuth grant that carries
+ * no workspace, or an assistant attached to none), not of the arguments. So
+ * the copy names what could not run, why, who fixes it, and that retrying is
+ * pointless (docs/architecture/engine/tool-executor.md → "Failure copy").
+ *
+ * Exported so `toolset.ts`'s Approve-band wrapper returns the identical
+ * sentence — the wrapper hits the same gate before staging, and two
+ * different accounts of one condition is how copy drifts.
+ */
+export function workspaceGateFailure(tool: string, verb = 'change'): { data: string; isError: true } {
+  return {
+    data:
+      `\`${tool}\` cannot run: the credential this call authenticated with (brain key / assistant ` +
+      'key / OAuth grant) is not bound to a workspace, so there is no workspace apparatus to ' +
+      `${verb}. This is a provisioning problem with the key, not a problem with the arguments — ` +
+      'no argument change helps and retrying this call will fail identically. Remedy: a workspace ' +
+      'admin must re-issue or re-scope the key against the workspace, or attach the acting ' +
+      'assistant to a workspace in Studio. Report that to the user instead of retrying.',
+    isError: true,
+  }
+}
+
+/**
+ * The bound workspace id, or the canonical gate failure to return as-is.
+ * Returns the RESULT OBJECT (not a bare string the caller re-wraps) so every
+ * call site is physically unable to invent its own wording.
+ */
+function requireWorkspace(ctx: ToolContext, tool: string): string | { data: string; isError: true } {
+  return ctx.workspaceId ?? workspaceGateFailure(tool)
+}
+
+/**
+ * Live workspace-skill row behind an id, scoped to the bound workspace.
+ *
+ * `enableSkill` / `disableSkill` used to write straight through: the
+ * enablement row is keyed by (skill, assistant) with no FK check the tool
+ * observed, so a hallucinated or stale skill id reported SUCCESS and enabled
+ * nothing. The model then told the user the skill was on. `workspace_skills`
+ * is also VERSIONED (`valid_to` / `superseded_by`), so an id that was valid
+ * before an edit now points at a superseded row — that is a different
+ * diagnosis from "no such skill" and gets its own sentence.
+ */
+async function findWorkspaceSkill(
+  skillId: string,
+  workspaceId: string,
+): Promise<{ name: string; isCurrent: boolean } | null> {
+  const result = await query<{ name: string; isCurrent: boolean }>(
+    `SELECT name, (valid_to IS NULL) AS "isCurrent"
+       FROM workspace_skills
+      WHERE id = $1 AND workspace_id = $2
+      LIMIT 1`,
+    [skillId, workspaceId],
+  )
+  return result.rows[0] ?? null
+}
+
+/**
+ * Resolve a skill id to a live row, or the failure copy explaining which of
+ * the two misses happened. Shared by `enableSkill` / `disableSkill` so the
+ * pair cannot disagree about what a bad id means.
+ */
+async function resolveSkillOrFailure(
+  skillId: string,
+  workspaceId: string,
+  tool: string,
+): Promise<{ name: string } | { data: string; isError: true }> {
+  const skill = await findWorkspaceSkill(skillId, workspaceId)
+  if (!skill) {
+    return notFoundFailure({
+      kind: 'Workspace skill',
+      id: skillId,
+      discoveryTool: 'listSkills',
+      extra:
+        `Nothing was enabled or disabled by \`${tool}\`. Either no skill with that id has ever ` +
+        'existed, or it belongs to a different workspace than the one this credential is bound to.',
+      idSource: 'a listSkills result (the `id` field), never a slug or a skill name',
+    })
+  }
+  if (!skill.isCurrent) {
+    return {
+      data:
+        `Workspace skill ${skillId} ("${skill.name}") is a SUPERSEDED version — workspace skills are ` +
+        'versioned, and every edit closes the old row and mints a new id, so this id can no longer be ' +
+        `enabled or disabled. Nothing was changed. Call listSkills to get the CURRENT id for "${skill.name}" ` +
+        `and re-issue \`${tool}\` with it. Do NOT retry this exact id.`,
+      isError: true,
+    }
+  }
+  return { name: skill.name }
 }
 
 /** The acting assistant's write ceiling — the no-escalation bound (§2). */
@@ -117,10 +212,19 @@ export function createAgentWriteTools(deps: AgentWriteToolDeps): Tool[] {
     }),
     requiresCapability: CONFIGURE_CAPABILITY,
     async execute(input, ctx) {
-      const workspaceId = requireWorkspace(ctx)
-      if (!workspaceId) return { data: 'No workspace bound to this surface.', isError: true }
+      const workspaceId = requireWorkspace(ctx, 'proposeSkill')
+      if (typeof workspaceId !== 'string') return workspaceId
       const slug = slugify(input.name)
-      if (!slug) return { data: 'Skill name must contain alphanumeric characters.', isError: true }
+      if (!slug) {
+        return {
+          data:
+            `proposeSkill did not stage anything: the name "${input.name}" produces an empty slug — ` +
+            'a skill slug is built from the letters and digits of the name, and this name has none. ' +
+            'Re-issue with a `name` containing at least one ASCII letter or digit. The same name will ' +
+            'fail the same way.',
+          isError: true,
+        }
+      }
       const approverUserId = await deps.resolveApprover(ctx)
       const approval = await deps.approvalsStore.createStagedSkillCreation({
         workspaceId,
@@ -155,11 +259,17 @@ export function createAgentWriteTools(deps: AgentWriteToolDeps): Tool[] {
     }),
     requiresCapability: CONFIGURE_CAPABILITY,
     async execute(input, ctx) {
-      const workspaceId = requireWorkspace(ctx)
-      if (!workspaceId) return { data: 'No workspace bound to this surface.', isError: true }
+      const workspaceId = requireWorkspace(ctx, 'enableSkill')
+      if (typeof workspaceId !== 'string') return workspaceId
+      // Existence check BEFORE the write: the enablement row is keyed by
+      // (skill, assistant) and the insert happily accepts an id no skill has,
+      // so without this the tool reported "enabled" for a skill that does not
+      // exist and the model passed that on to the user.
+      const skill = await resolveSkillOrFailure(input.skillId, workspaceId, 'enableSkill')
+      if ('isError' in skill) return skill
       const assistantId = input.assistantId ?? ctx.assistantId
       await deps.enablementStore.enable(input.skillId, assistantId, ctx.userId)
-      return { data: `Skill ${input.skillId} enabled for assistant ${assistantId}.` }
+      return { data: `Skill ${input.skillId} ("${skill.name}") enabled for assistant ${assistantId}.` }
     },
   })
 
@@ -174,11 +284,22 @@ export function createAgentWriteTools(deps: AgentWriteToolDeps): Tool[] {
     }),
     requiresCapability: CONFIGURE_CAPABILITY,
     async execute(input, ctx) {
-      const workspaceId = requireWorkspace(ctx)
-      if (!workspaceId) return { data: 'No workspace bound to this surface.', isError: true }
+      const workspaceId = requireWorkspace(ctx, 'disableSkill')
+      if (typeof workspaceId !== 'string') return workspaceId
+      // Same existence check as enableSkill: a DELETE that matches nothing is
+      // indistinguishable from "already off", so without this a bad id read as
+      // a successful no-op.
+      const skill = await resolveSkillOrFailure(input.skillId, workspaceId, 'disableSkill')
+      if ('isError' in skill) return skill
       const assistantId = input.assistantId ?? ctx.assistantId
       const removed = await deps.enablementStore.disable(input.skillId, assistantId, ctx.userId)
-      return { data: removed ? `Skill disabled for assistant ${assistantId}.` : 'Skill was not enabled — nothing to do.' }
+      // The skill EXISTS and is now off either way — an already-off skill is
+      // the requested end state, not a failure (tool-executor.md → D7).
+      return {
+        data: removed
+          ? `Skill ${input.skillId} ("${skill.name}") disabled for assistant ${assistantId}.`
+          : `Skill ${input.skillId} ("${skill.name}") was already not enabled for assistant ${assistantId} — it is off, nothing to do.`,
+      }
     },
   })
 
@@ -197,8 +318,8 @@ export function createAgentWriteTools(deps: AgentWriteToolDeps): Tool[] {
     }),
     requiresCapability: CONFIGURE_CAPABILITY,
     async execute(input, ctx) {
-      const workspaceId = requireWorkspace(ctx)
-      if (!workspaceId) return { data: 'No workspace bound to this surface.', isError: true }
+      const workspaceId = requireWorkspace(ctx, 'setConnectorPolicy')
+      if (typeof workspaceId !== 'string') return workspaceId
       const assistantId = input.assistantId ?? ctx.assistantId
       await deps.mcpSettingsStore.setPolicy({
         assistantId,
@@ -228,14 +349,16 @@ export function createAgentWriteTools(deps: AgentWriteToolDeps): Tool[] {
     }),
     requiresCapability: CONFIGURE_CAPABILITY,
     async execute(input, ctx) {
-      const workspaceId = requireWorkspace(ctx)
-      if (!workspaceId) return { data: 'No workspace bound to this surface.', isError: true }
+      const workspaceId = requireWorkspace(ctx, 'addPatConnector')
+      if (typeof workspaceId !== 'string') return workspaceId
       const entry = OFFICIAL_CONNECTORS.find((c) => c.id === input.provider)
       if (entry && (entry.oauth_required || entry.auth_type === 'oauth')) {
         return {
           data:
-            `'${input.provider}' is an OAuth connector — a human must complete the browser ` +
-            'consent in Studio > Connectors. No instance was created.',
+            `addPatConnector cannot create '${input.provider}': it is an OAuth connector, and OAuth ` +
+            'credentials can only be minted by a human completing the browser consent in Studio → ' +
+            'Connectors. No instance and no grant were created. There is no token you can pass that ' +
+            'changes this — tell the user to connect it in Studio, and do not retry this provider here.',
           isError: true,
         }
       }
@@ -286,15 +409,26 @@ export function createAgentWriteTools(deps: AgentWriteToolDeps): Tool[] {
     }),
     requiresCapability: CONFIGURE_CAPABILITY,
     async execute(input, ctx) {
-      const workspaceId = requireWorkspace(ctx)
-      if (!workspaceId) return { data: 'No workspace bound to this surface.', isError: true }
+      const workspaceId = requireWorkspace(ctx, 'configureConnectorInstance')
+      if (typeof workspaceId !== 'string') return workspaceId
       const updated = await deps.connectorInstanceStore.update(ctx.userId, input.instanceId, {
         label: input.label,
         sensitivity: input.sensitivity,
         connected: input.connected ?? (input.token ? true : undefined),
         credentials: input.token ? { client_id: '', client_secret: input.token } : undefined,
       })
-      if (!updated) return { data: 'No such connector instance in this workspace.', isError: true }
+      if (!updated) {
+        return notFoundFailure({
+          kind: 'Connector instance',
+          id: input.instanceId,
+          discoveryTool: 'listConnectors',
+          extra:
+            'Nothing was updated. `configureConnectorInstance` only reaches instances the acting user ' +
+            'OWNS — an instance shared into this workspace by a teammate is visible to listConnectors ' +
+            'but can only be reconfigured by its owner, so tell the user to ask that owner.',
+          idSource: 'a listConnectors result (the `instanceId` field), never the provider id',
+        })
+      }
       return { data: `Connector instance ${updated.id} updated.` }
     },
   })
@@ -314,8 +448,8 @@ export function createAgentWriteTools(deps: AgentWriteToolDeps): Tool[] {
     }),
     requiresCapability: CONFIGURE_CAPABILITY,
     async execute(input, ctx) {
-      const workspaceId = requireWorkspace(ctx)
-      if (!workspaceId) return { data: 'No workspace bound to this surface.', isError: true }
+      const workspaceId = requireWorkspace(ctx, 'createAssistant')
+      if (typeof workspaceId !== 'string') return workspaceId
       // No-escalation invariant (§2): cap at the acting assistant's clearance.
       const ceiling = actingClearance(ctx)
       const clearance = minSensitivity(input.clearance ?? 'internal', ceiling)
@@ -377,8 +511,8 @@ export function createAgentWriteTools(deps: AgentWriteToolDeps): Tool[] {
     }),
     requiresCapability: CONFIGURE_CAPABILITY,
     async execute(input, ctx) {
-      const workspaceId = requireWorkspace(ctx)
-      if (!workspaceId) return { data: 'No workspace bound to this surface.', isError: true }
+      const workspaceId = requireWorkspace(ctx, 'updateAssistant')
+      if (typeof workspaceId !== 'string') return workspaceId
       const sets: string[] = []
       const values: unknown[] = []
       const push = (sql: string, v: unknown) => {
@@ -392,7 +526,16 @@ export function createAgentWriteTools(deps: AgentWriteToolDeps): Tool[] {
         // No-escalation invariant (§2).
         push('clearance', minSensitivity(input.clearance, actingClearance(ctx)))
       }
-      if (sets.length === 0) return { data: 'Nothing to update.', isError: true }
+      if (sets.length === 0) {
+        return {
+          data:
+            `updateAssistant on assistant ${input.assistantId} did nothing: the call carried only the ` +
+            'id, with no field to change. Nothing was saved. Re-issue with at least one of `name`, ' +
+            '`systemPrompt`, `bio`, or `clearance` set to its new value; call getAssistant first if you ' +
+            'need the current values to decide. Retrying with the same arguments will fail identically.',
+          isError: true,
+        }
+      }
       values.push(input.assistantId, workspaceId)
       const result = await queryWithRLS<{ id: string }>(
         ctx.userId,
@@ -402,7 +545,16 @@ export function createAgentWriteTools(deps: AgentWriteToolDeps): Tool[] {
         values,
       )
       if (result.rows.length === 0) {
-        return { data: 'No such assistant in this workspace (or not visible to this principal).', isError: true }
+        return notFoundFailure({
+          kind: 'Assistant',
+          id: input.assistantId,
+          discoveryTool: 'listAssistants',
+          extra:
+            'Nothing was saved. Either no assistant with that id exists in the workspace this ' +
+            'credential is bound to, or it exists but is not visible to the acting principal — ' +
+            'listAssistants shows exactly the ones that are reachable.',
+          idSource: 'a listAssistants result (the `id` field), never an assistant name',
+        })
       }
       return { data: `Assistant ${input.assistantId} updated (${sets.length} field(s)).` }
     },

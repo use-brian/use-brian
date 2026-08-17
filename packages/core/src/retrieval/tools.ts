@@ -1,5 +1,7 @@
 import { z } from 'zod'
 import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
+import { describeToolFailure } from '../tools/tool-failure.js'
+import { tolerantIsoTimestamp } from '../tools/schema-tolerance.js'
 import type {
   AggregateInput,
   AggregateMeasure,
@@ -29,7 +31,14 @@ const limitsSchema = z.object({
   kb_chunks: z.number().int().positive().max(LIST_LIMIT_CAP).optional(),
 })
 
-const isoTimestamp = z.string().datetime({ offset: true })
+/**
+ * Point-in-time reads accept a bare `YYYY-MM-DD` (widened to midnight UTC) as
+ * well as a full ISO timestamp. A model asked "what did we know on the 14th"
+ * emits the bare date, and the old strict shape rejected it with zod's
+ * "Invalid datetime" — a message that names neither the accepted shape nor the
+ * fix, so the retry was a guess. See `tolerantIsoTimestamp`.
+ */
+const isoTimestamp = tolerantIsoTimestamp()
 
 const getEntitySchema = z.object({
   id_or_name: z.string().min(1, 'id_or_name is required'),
@@ -127,9 +136,32 @@ export function actorFromContext(context: ToolContext): RetrievalActor | Retriev
   }
 }
 
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
+/**
+ * Retrieval's `catch` frame. The body stays the canonical one-key
+ * `RetrievalErrorBody` (the executor unwraps `{ error }` to bare prose, and
+ * the HTTP / MCP wrapper surfaces the same shape) — only the string inside it
+ * changes, from a bare `err.message` to the shared first-party failure copy:
+ * what ran on which target, why, the next step, and whether a retry can ever
+ * work. Reads are non-mutating, so no "nothing was saved" clause.
+ */
+function retrievalFailure(
+  err: unknown,
+  tool: string,
+  target: string | undefined,
+  next?: string,
+): { data: RetrievalErrorBody; isError: true } {
+  const body: RetrievalErrorBody = {
+    error: describeToolFailure(err, { tool, target, next }),
+  }
+  return { data: body, isError: true }
 }
+
+/**
+ * The brain search tool's name differs by surface — `search` in chat,
+ * `searchBrain` on brain-MCP — so every discovery pointer names both rather
+ * than sending the model hunting for a tool this surface does not expose.
+ */
+const BRAIN_SEARCH = '`search` (`searchBrain` on the brain-MCP surface)'
 
 /**
  * Build the 7 retrieval tools. Each tool's `data` payload is the canonical
@@ -173,12 +205,20 @@ export function createRetrievalTools(
           found: result !== null,
         })
         if (result === null) {
-          const body: RetrievalErrorBody = { error: `Entity ${input.id_or_name} not found` }
+          const body: RetrievalErrorBody = {
+            error:
+              `getEntity found no brain entity matching "${input.id_or_name}"` +
+              (input.as_of ? ` as of ${input.as_of}` : '') +
+              ". It may never have existed under that name, may have been merged into another record (a merge supersedes the old id), may have been deleted, or may sit above this assistant's clearance. " +
+              `Call ${BRAIN_SEARCH} with a describing phrase to find the real record, then retry getEntity with the id it returns` +
+              (input.as_of ? ', or drop `as_of` to check whether it exists now' : '') +
+              '. Do NOT retry this exact id_or_name — it will miss the same way.',
+          }
           return { data: body, isError: true }
         }
         return { data: result satisfies RetrievalResult<unknown> }
       } catch (err) {
-        return { data: { error: errorMessage(err) } satisfies RetrievalErrorBody, isError: true }
+        return retrievalFailure(err, 'getEntity', `entity \`${input.id_or_name}\``)
       }
     },
   })
@@ -208,7 +248,12 @@ export function createRetrievalTools(
         })
         return { data: result satisfies RetrievalResult<unknown> }
       } catch (err) {
-        return { data: { error: errorMessage(err) } satisfies RetrievalErrorBody, isError: true }
+        return retrievalFailure(
+          err,
+          'search',
+          `query "${input.query}"`,
+          'Narrow the query, or drop `filters` / `scope` if the message names one of them.',
+        )
       }
     },
   })
@@ -234,7 +279,7 @@ export function createRetrievalTools(
         })
         return { data: result satisfies RetrievalResult<unknown> }
       } catch (err) {
-        return { data: { error: errorMessage(err) } satisfies RetrievalErrorBody, isError: true }
+        return retrievalFailure(err, 'recentEpisodes', input.entity ? `entity \`${input.entity}\`` : 'the recent-episode feed')
       }
     },
   })
@@ -261,12 +306,18 @@ export function createRetrievalTools(
           found: result !== null,
         })
         if (result === null) {
-          const body: RetrievalErrorBody = { error: `Row ${input.row_id} not found` }
+          const body: RetrievalErrorBody = {
+            error:
+              `provenance found no brain row with id ${input.row_id}, so there is no source to trace. ` +
+              "Either no row carries that id, or the row is above this assistant's clearance. " +
+              `Row ids come from a ${BRAIN_SEARCH} / getEntity result (its \`row_id\` field), never from a title or a guess — re-run one of those and pass the id it returns. ` +
+              'Do NOT retry this exact row_id.',
+          }
           return { data: body, isError: true }
         }
         return { data: result satisfies RetrievalResult<unknown> }
       } catch (err) {
-        return { data: { error: errorMessage(err) } satisfies RetrievalErrorBody, isError: true }
+        return retrievalFailure(err, 'provenance', `row ${input.row_id}`)
       }
     },
   })
@@ -291,7 +342,12 @@ export function createRetrievalTools(
         })
         return { data: result satisfies RetrievalResult<unknown> }
       } catch (err) {
-        return { data: { error: errorMessage(err) } satisfies RetrievalErrorBody, isError: true }
+        return retrievalFailure(
+          err,
+          'markUseful',
+          `${input.primitive} row ${input.row_id}`,
+          'The usefulness signal is advisory, so if it keeps failing carry on with the answer instead of retrying.',
+        )
       }
     },
   })
@@ -318,7 +374,12 @@ export function createRetrievalTools(
         })
         return { data: result satisfies RetrievalResult<unknown> }
       } catch (err) {
-        return { data: { error: errorMessage(err) } satisfies RetrievalErrorBody, isError: true }
+        return retrievalFailure(
+          err,
+          'aggregate',
+          `${input.measure.fn} over ${input.dimensions.join(', ')}`,
+          '`measure.path` and every dimension are validated against the per-primitive allowlist; if the message names one, fix that field.',
+        )
       }
     },
   })
@@ -347,12 +408,23 @@ export function createRetrievalTools(
           chainLength: result === null ? 0 : result.data.chain.length,
         })
         if (result === null) {
-          const body: RetrievalErrorBody = { error: `Row ${input.row_id} not found` }
+          const body: RetrievalErrorBody = {
+            error:
+              `getRowHistory found no ${input.primitive} row with id ${input.row_id}, so there is no version chain to return. ` +
+              `The id may belong to a DIFFERENT primitive (\`primitive\` is part of the lookup, so an entity id misses under \`${input.primitive}\`), the row may not exist, or it may sit above this assistant's clearance. ` +
+              `Fix \`primitive\` if you know the row's kind, or call ${BRAIN_SEARCH} / getEntity to re-resolve the id (their results carry the primitive). ` +
+              'Do NOT retry this exact primitive + row_id pair.',
+          }
           return { data: body, isError: true }
         }
         return { data: result satisfies RetrievalResult<unknown> }
       } catch (err) {
-        return { data: { error: errorMessage(err) } satisfies RetrievalErrorBody, isError: true }
+        return retrievalFailure(
+          err,
+          'getRowHistory',
+          `${input.primitive} row ${input.row_id}`,
+          'If it persists, answer from what you already have rather than re-walking the chain.',
+        )
       }
     },
   })

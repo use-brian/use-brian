@@ -254,7 +254,13 @@ describe('[COMP:retrieval/tool-surface] createRetrievalTools', () => {
       const tools = createRetrievalTools(store)
       const result = await tools.getEntity.execute({ id_or_name: 'missing' }, makeContext())
       expect(result.isError).toBe(true)
-      expect((result.data as { error: string }).error).toContain('missing')
+      const body = (result.data as { error: string }).error
+      expect(body).toContain('missing')
+      // A miss ships the supersession explanation, the discovery pointer, and
+      // the verdict — never a bare "not found".
+      expect(body).toContain('merged into another record')
+      expect(body).toContain('searchBrain')
+      expect(body).toContain('Do NOT retry this exact id_or_name')
     })
 
     it('rejects input missing id_or_name', () => {
@@ -448,7 +454,12 @@ describe('[COMP:retrieval/tool-surface] createRetrievalTools', () => {
         makeContext(),
       )
       expect(result.isError).toBe(true)
-      expect((result.data as { error: string }).error).toContain('22222222')
+      const body = (result.data as { error: string }).error
+      expect(body).toContain('22222222')
+      // `primitive` is half the lookup key, so the miss has to name that as a
+      // candidate fix before the model concludes the row does not exist.
+      expect(body).toContain('may belong to a DIFFERENT primitive')
+      expect(body).toContain('Do NOT retry this exact primitive + row_id pair')
     })
 
     it('rejects an unknown primitive', () => {
@@ -469,6 +480,46 @@ describe('[COMP:retrieval/tool-surface] createRetrievalTools', () => {
     })
   })
 
+  describe('as_of tolerance', () => {
+    // A model asked "what did we know on the 14th" emits the bare date. The
+    // strict `z.string().datetime({offset:true})` rejected it with zod's
+    // "Invalid datetime", which names neither the shape nor the fix.
+    it('accepts a bare YYYY-MM-DD on every as_of-bearing tool and widens it to midnight UTC', () => {
+      const { store } = makeFakeStore()
+      const tools = createRetrievalTools(store)
+      const getEntity = tools.getEntity.inputSchema.safeParse({ id_or_name: 'Acme', as_of: '2026-08-14' })
+      expect(getEntity.success).toBe(true)
+      expect(getEntity.success && (getEntity.data as { as_of?: string }).as_of).toBe('2026-08-14T00:00:00Z')
+      expect(tools.search.inputSchema.safeParse({ query: 'x', as_of: '2026-08-14' }).success).toBe(true)
+      expect(tools.recentEpisodes.inputSchema.safeParse({ as_of: '2026-08-14' }).success).toBe(true)
+      expect(
+        tools.getRowHistory.inputSchema.safeParse({
+          primitive: 'memories',
+          row_id: '11111111-1111-4111-8111-111111111111',
+          as_of: '2026-08-14',
+        }).success,
+      ).toBe(true)
+    })
+
+    it('still accepts a full ISO timestamp unchanged', () => {
+      const { store } = makeFakeStore()
+      const tools = createRetrievalTools(store)
+      const parsed = tools.search.inputSchema.safeParse({ query: 'x', as_of: '2026-08-14T09:30:00+08:00' })
+      expect(parsed.success).toBe(true)
+      expect(parsed.success && (parsed.data as { as_of?: string }).as_of).toBe('2026-08-14T09:30:00+08:00')
+    })
+
+    it('rejects an unreadable as_of with a message naming the accepted shapes', () => {
+      const { store } = makeFakeStore()
+      const tools = createRetrievalTools(store)
+      const parsed = tools.search.inputSchema.safeParse({ query: 'x', as_of: 'last Tuesday' })
+      expect(parsed.success).toBe(false)
+      const message = parsed.success ? '' : parsed.error.issues[0]!.message
+      expect(message).toContain('YYYY-MM-DD')
+      expect(message).toContain('ISO 8601')
+    })
+  })
+
   describe('error and context handling', () => {
     it('returns a plain error body when the store throws', async () => {
       const fake = makeFakeStore()
@@ -481,7 +532,12 @@ describe('[COMP:retrieval/tool-surface] createRetrievalTools', () => {
       const tools = createRetrievalTools(store)
       const result = await tools.search.execute({ query: 'x' }, makeContext())
       expect(result.isError).toBe(true)
-      expect((result.data as { error: string }).error).toBe('db down')
+      // Still the canonical one-key body, but the string now carries what ran,
+      // on what, the store's own words, a next step, and the retry verdict.
+      const body = (result.data as { error: string }).error
+      expect(body).toContain('`search` on query "x" failed')
+      expect(body).toContain('db down')
+      expect(body).toContain('do not retry unchanged')
     })
 
     it('refuses retrieval without a workspace-scoped context', async () => {

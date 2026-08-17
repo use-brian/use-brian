@@ -275,9 +275,20 @@ describe('[COMP:api/synthesize] structural-synthesis runner', () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const bad = await wf.execute({ key: 'budget', value: 'lots' } as any, {} as any)
         expect(bad.isError).toBe(true)
+        // Message-first text: which key failed, that nothing was written for
+        // it, the shape to re-send, and the retry verdict.
+        // docs/architecture/engine/tool-executor.md → "Failure copy".
+        expect(bad.data as string).toContain('writeField did not save field "budget"')
+        expect(bad.data as string).toContain('Nothing was written for that key')
+        expect(bad.data as string).toContain('shaped as a number')
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const unknown = await wf.execute({ key: 'nope', value: 1 } as any, {} as any)
         expect(unknown.isError).toBe(true)
+        // An off-contract key can never work — the record cannot be widened —
+        // so the copy lists the keys that exist and closes the retry loop.
+        expect(unknown.data as string).toContain('writeField did not save "nope"')
+        expect(unknown.data as string).toContain('Valid keys: summary')
+        expect(unknown.data as string).toContain('Do NOT retry this exact key.')
         yield* gen(HAPPY)
       })(),
     )

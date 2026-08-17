@@ -26,6 +26,7 @@ import type {
   EntityMergeRecord,
   EntityMergeSnapshot,
 } from '../../corrections/entity-merge.js'
+import type { BrainCandidate, BrainCandidateAction } from '../candidates-types.js'
 
 // ── Minimal fakes — only the reads describeConfirmation touches ────────
 
@@ -366,7 +367,11 @@ describe('[COMP:brain/healing-tools] mergeEntities scoped pairwise merge (D.1)',
     const tools = byName(mergeDeps(store, fakeEntityMergeDeps({ onApply: (i) => applied.push(i) })))
     const res = await tools.mergeEntities.execute({ survivor_id: 'e1', merged_id: 'e2' }, ctxInteractive)
     expect(res.isError).toBe(true)
-    expect(String(res.data)).toContain('not visible')
+    // Names WHICH id missed, that nothing changed, the discovery tool, and the verdict.
+    expect(String(res.data)).toContain('merged_id e2 is not a record you can see')
+    expect(String(res.data)).toContain('Nothing was changed')
+    expect(String(res.data)).toContain('searchBrain / getEntity')
+    expect(String(res.data)).toContain('Do NOT retry this exact id')
     expect(applied).toHaveLength(0) // never reached the merge
   })
 
@@ -375,7 +380,9 @@ describe('[COMP:brain/healing-tools] mergeEntities scoped pairwise merge (D.1)',
     const tools = byName(mergeDeps(store, fakeEntityMergeDeps()))
     const res = await tools.mergeEntities.execute({ survivor_id: 'e1', merged_id: 'e1' }, ctxInteractive)
     expect(res.isError).toBe(true)
-    expect(String(res.data)).toContain('two different records')
+    expect(String(res.data)).toContain('survivor_id and merged_id are both e1')
+    expect(String(res.data)).toContain('cannot be merged into itself')
+    expect(String(res.data)).toContain('will keep failing')
   })
 
   it('surfaces conflicting fields in the default "ask" mode instead of losing data', async () => {
@@ -414,7 +421,11 @@ describe('[COMP:brain/healing-tools] mergeEntities scoped pairwise merge (D.1)',
     const tools = byName(makeDeps(entitiesWithGetById([entity('e1', 'A', 'person'), entity('e2', 'B', 'person')])))
     const res = await tools.mergeEntities.execute({ survivor_id: 'e1', merged_id: 'e2' }, ctxInteractive)
     expect(res.isError).toBe(true)
-    expect(String(res.data)).toContain('unavailable')
+    // A capability gate names the missing surface and the remedy, never
+    // "not available in this context".
+    expect(String(res.data)).toContain('entity-merge ports are not wired in this deployment')
+    expect(String(res.data)).toContain('Nothing was changed')
+    expect(String(res.data)).toContain('No argument change or retry will make it work here')
   })
 })
 
@@ -469,7 +480,10 @@ describe('[COMP:brain/healing-tools] undoEntityMerge (D.2)', () => {
     const tools = byName(deps)
     const res = await tools.undoEntityMerge.execute({ merge_id: '00000000-0000-0000-0000-000000000000' }, ctxInteractive)
     expect(res.isError).toBe(true)
-    expect(String(res.data)).toContain('No merge with that id')
+    // Names the id, where a real merge_id comes from, and forbids the retry.
+    expect(String(res.data)).toContain('found no merge with id 00000000-0000-0000-0000-000000000000')
+    expect(String(res.data)).toContain('merge_id comes from the mergeEntities result')
+    expect(String(res.data)).toContain('Do NOT retry this exact id')
   })
 
   it('refuses a merge outside the 7-day window with a clear message', async () => {
@@ -481,6 +495,135 @@ describe('[COMP:brain/healing-tools] undoEntityMerge (D.2)', () => {
     const tools = byName(deps)
     const res = await tools.undoEntityMerge.execute({ merge_id: 'merge-xyz' }, ctxInteractive)
     expect(res.isError).toBe(true)
-    expect(String(res.data)).toContain('7-day undo window')
+    expect(String(res.data)).toContain('outside the 7-day undo window')
+    // An unrecoverable state must say so outright, or the model loops on the
+    // one tool that is supposed to be the user's recovery path.
+    expect(String(res.data)).toContain('will never succeed')
+    expect(String(res.data)).toContain('Do NOT retry')
+  })
+})
+
+// ── Failure copy: terminal states + the workspace gate ────────────────
+// docs/architecture/engine/tool-executor.md → "Failure copy". A candidate in
+// a terminal state (applied / dismissed / undone) can NEVER be acted on
+// again, so the rejection has to say so and point at the open ones —
+// otherwise the model re-poked the same id, which is exactly what
+// "Candidate already applied." invited.
+
+function candidate(over: Partial<BrainCandidate> & { suggestedAction?: BrainCandidateAction } = {}): BrainCandidate {
+  return {
+    id: 'cand-1',
+    workspaceId: 'ws-1',
+    memoryId: 'mem-1',
+    suggestedAction: 'attribute',
+    targetKind: 'entity',
+    targetId: 'e1',
+    suggestedKey: 'role',
+    suggestedValue: 'CEO',
+    reason: null,
+    confidence: null,
+    createdAt: new Date('2026-08-01T00:00:00Z'),
+    appliedAt: null,
+    appliedByUserId: null,
+    dismissedAt: null,
+    dismissedByUserId: null,
+    undoneAt: null,
+    undoneByUserId: null,
+    createdByUserId: 'u1',
+    createdByAssistantId: null,
+    ...over,
+  }
+}
+
+function candidateDeps(row: BrainCandidate | null, over: Partial<HealingToolsDeps> = {}): HealingToolsDeps {
+  return {
+    ...makeDeps(fakeEntityStore({})),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    candidates: {
+      getById: async () => row,
+      markDismissed: async () => null,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any,
+    ...over,
+  }
+}
+
+describe('[COMP:brain/healing-tools] failure copy', () => {
+  it('acceptBrainCandidate names the terminal state and forbids the retry (applied)', async () => {
+    const tools = byName(candidateDeps(candidate({ appliedAt: new Date('2026-08-02T03:04:05Z') })))
+    const res = await tools.acceptBrainCandidate.execute({ candidate_id: 'cand-1' }, ctxInteractive)
+    expect(res.isError).toBe(true)
+    const body = String(res.data)
+    expect(body).toContain('cand-1')
+    expect(body).toContain('ALREADY applied')
+    expect(body).toContain('2026-08-02T03:04:05.000Z')
+    expect(body).toContain('Do NOT retry this id')
+    expect(body).toContain('listBrainCandidates')
+  })
+
+  it('acceptBrainCandidate names the terminal state and forbids the retry (dismissed)', async () => {
+    const tools = byName(candidateDeps(candidate({ dismissedAt: new Date('2026-08-02T00:00:00Z') })))
+    const res = await tools.acceptBrainCandidate.execute({ candidate_id: 'cand-1' }, ctxInteractive)
+    expect(res.isError).toBe(true)
+    expect(String(res.data)).toContain('ALREADY dismissed')
+    expect(String(res.data)).toContain('a dismissal is terminal')
+    expect(String(res.data)).toContain('Do NOT retry this id')
+  })
+
+  it('acceptBrainCandidate ships the discovery pointer on a miss, not a bare "not found"', async () => {
+    const tools = byName(candidateDeps(null))
+    const res = await tools.acceptBrainCandidate.execute({ candidate_id: 'cand-404' }, ctxInteractive)
+    expect(res.isError).toBe(true)
+    const body = String(res.data)
+    expect(body).toContain('cand-404')
+    expect(body).toContain('Nothing was applied')
+    expect(body).toContain('listBrainCandidates')
+    expect(body).toContain('never a memory id or an entity id')
+    expect(body).toContain('Do NOT retry this exact id')
+  })
+
+  it('undoReclassification distinguishes "never applied" from "already undone"', async () => {
+    const never = byName(candidateDeps(candidate({ appliedAt: null })))
+    const a = await never.undoReclassification.execute({ candidate_id: 'cand-1' }, ctxInteractive)
+    expect(a.isError).toBe(true)
+    expect(String(a.data)).toContain('it was never applied')
+    expect(String(a.data)).toContain('dismissBrainCandidate')
+
+    const undone = byName(
+      candidateDeps(
+        candidate({ appliedAt: new Date('2026-08-01T00:00:00Z'), undoneAt: new Date('2026-08-03T00:00:00Z') }),
+      ),
+    )
+    const b = await undone.undoReclassification.execute({ candidate_id: 'cand-1' }, ctxInteractive)
+    expect(b.isError).toBe(true)
+    expect(String(b.data)).toContain('ALREADY undone')
+    expect(String(b.data)).toContain('Do NOT retry this id')
+  })
+
+  it('dismissBrainCandidate explains that a miss may be a terminal state, and names the list tool', async () => {
+    const tools = byName(candidateDeps(null))
+    const res = await tools.dismissBrainCandidate.execute({ candidate_id: 'cand-9' }, ctxInteractive)
+    expect(res.isError).toBe(true)
+    const body = String(res.data)
+    expect(body).toContain('cand-9')
+    expect(body).toContain('TERMINAL state')
+    expect(body).toContain('Do NOT retry this exact id')
+    expect(body).toContain('listBrainCandidates')
+  })
+
+  it('the workspace gate names the missing surface and the remedy, and RETURNS (never throws)', async () => {
+    const tools = byName(candidateDeps(candidate()))
+    const noWorkspace: ToolContext = { ...ctxInteractive, workspaceId: null }
+    for (const name of ['listBrainCandidates', 'acceptBrainCandidate', 'undoReclassification', 'noteAlias', 'splitAlias']) {
+      const res = await tools[name]!.execute(
+        { candidate_id: 'cand-1', limit: 5, entity_id: 'e1', alias: 'AC' },
+        noWorkspace,
+      )
+      expect(res.isError).toBe(true)
+      expect(String(res.data)).toContain(`\`${name}\` did not run`)
+      expect(String(res.data)).toContain('not bound to a workspace')
+      expect(String(res.data)).toContain('from a workspace chat')
+      expect(String(res.data)).toContain('do not retry')
+    }
   })
 })

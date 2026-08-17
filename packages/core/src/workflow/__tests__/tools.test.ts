@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { z } from 'zod'
 import { createWorkflowTools, TRIGGER_INPUT_DESCRIPTION, type WorkflowToolEvent } from '../tools.js'
-import { WORKFLOW_TRIGGER_KINDS, WORKFLOW_EVENT_SOURCE_TYPES } from '../schemas.js'
+import { WORKFLOW_TRIGGER_KINDS, WORKFLOW_EVENT_SOURCE_TYPES, STEP_TYPE_VALUES } from '../schemas.js'
 import { TASK_LIFECYCLE_ACTIONS } from '../task-event-trigger.js'
 import type {
   WorkflowDefinition,
@@ -299,6 +299,7 @@ function makeAllTools(opts?: {
     | { ok: false; reason: string }
   >
   listAuthorableSkills?: (userId: string, workspaceId: string) => Promise<Array<{ slug: string; name: string }>>
+  resolveViewWorkspace?: (args: { userId: string; viewId: string }) => Promise<string | null>
 }) {
   const events: WorkflowToolEvent[] = []
   const stores = fakeStores()
@@ -321,7 +322,7 @@ function makeAllTools(opts?: {
     jobStore,
     resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
     deliverToChannel: opts?.deliverToChannel,
-    resolveViewWorkspace: async () => WORKSPACE_ID,
+    resolveViewWorkspace: opts?.resolveViewWorkspace ?? (async () => WORKSPACE_ID),
     validateDeliveryTarget: opts?.validateDeliveryTarget,
     preflightConnectorTool: opts?.preflightConnectorTool,
     listSlackChannels: opts?.listSlackChannels,
@@ -463,6 +464,39 @@ describe('[COMP:workflow/tools] inline schedule trigger', () => {
     )
     expect(r.isError).toBe(true)
     expect(JSON.stringify(r.data)).toContain('no assistant_call step')
+  })
+
+  it('a dropped targetViewId is surfaced as targetViewWarning on the success payload (create + update)', async () => {
+    // The page link is non-fatal (a bad page id must never fail an otherwise
+    // valid schedule), but silently dropping it made a partial success read
+    // as a total one: `targetViewId: null` and the model told the user the
+    // schedule would maintain their page.
+    const { tools } = makeAllTools({ resolveViewWorkspace: async () => 'other-workspace' })
+    const created = await tools.createWorkflow.execute(
+      {
+        name: 'Page keeper',
+        definition: ASSISTANT_DEF,
+        trigger: { kind: 'schedule', schedule: { type: 'daily', time: '07:00' } },
+        targetViewId: 'page-elsewhere',
+      },
+      makeContext(),
+    )
+    expect(created.isError).toBeFalsy()
+    const data = created.data as Record<string, unknown>
+    expect(data.targetViewId).toBeNull()
+    expect(String(data.targetViewWarning)).toContain('page-elsewhere')
+    expect(String(data.targetViewWarning)).toContain('NOT linked')
+
+    const up = await tools.updateWorkflow.execute(
+      {
+        workflowId: data.id as string,
+        trigger: { kind: 'schedule', schedule: { type: 'daily', time: '08:00' } },
+        targetViewId: 'page-elsewhere',
+      },
+      makeContext(),
+    )
+    expect(up.isError).toBeFalsy()
+    expect(String((up.data as Record<string, unknown>).targetViewWarning)).toContain('page-elsewhere')
   })
 
   it('updateWorkflow attaches a schedule trigger (workflow-trigger row) and clears it on manual', async () => {
@@ -2469,5 +2503,105 @@ describe('[COMP:workflow/tools] skill attachment authoring checks', () => {
     expect(r.isError).toBe(true)
     const errors = (r.data as { errors: string[] }).errors
     expect(errors.some((e) => e.includes('steps.0.enforcedSkills') && e.includes('ghost'))).toBe(true)
+  })
+})
+
+describe('[COMP:workflow/tools] authoring failures carry the vocabulary and a followable remedy', () => {
+  // A definition that fails the schema on `steps[].type` — the one class of
+  // rejection the model cannot fix without the closed set of valid types.
+  const BAD_TYPE_DEF = {
+    startStepId: 's1',
+    steps: [{ id: 's1', type: 'llm_call', prompt: 'do the thing' }],
+  }
+
+  it('createWorkflow ships stepTypes alongside the validation errors, exactly as proposeWorkflow does', async () => {
+    const { tools } = makeAllTools()
+    const r = await tools.createWorkflow.execute(
+      { name: 'x', definition: BAD_TYPE_DEF as never },
+      makeContext(),
+    )
+    expect(r.isError).toBe(true)
+    const data = r.data as { errors: string[]; stepTypes?: readonly string[] }
+    expect(data.errors.length).toBeGreaterThan(0)
+    expect(data.stepTypes).toEqual(STEP_TYPE_VALUES)
+    // Same payload shape the read-only sibling already returned.
+    const proposed = await tools.proposeWorkflow.execute(
+      { name: 'x', definition: BAD_TYPE_DEF as never },
+      makeContext(),
+    )
+    expect((proposed.data as { stepTypes?: readonly string[] }).stepTypes).toEqual(data.stepTypes)
+  })
+
+  it('updateWorkflow ships stepTypes alongside the validation errors', async () => {
+    const { tools } = makeAllTools()
+    const created = await tools.createWorkflow.execute(
+      { name: 'briefing', definition: SIMPLE_DEF },
+      makeContext(),
+    )
+    const wf = created.data as { id: string }
+    const r = await tools.updateWorkflow.execute(
+      { workflowId: wf.id, definition: BAD_TYPE_DEF as never },
+      makeContext(),
+    )
+    expect(r.isError).toBe(true)
+    const data = r.data as { errors: string[]; stepTypes?: readonly string[] }
+    expect(data.errors.length).toBeGreaterThan(0)
+    expect(data.stepTypes).toEqual(STEP_TYPE_VALUES)
+  })
+
+  it('the workspace gate tells a KEYED agent to get the key re-scoped, never to "switch to a chat"', async () => {
+    // An external MCP agent has no chat to switch to — the old remedy was an
+    // instruction it could not follow, so the only move left was to retry.
+    const { tools } = makeAllTools()
+    for (const channelType of ['programmatic', 'assistant_mcp', 'api']) {
+      const r = await tools.listWorkflows.execute(
+        {},
+        makeContext({ workspaceId: null, channelType }),
+      )
+      expect(r.isError, channelType).toBe(true)
+      const text = String(r.data)
+      expect(text, channelType).toContain('re-issue or re-scope the key')
+      expect(text, channelType).not.toContain('workspace-scoped chat')
+      expect(text, channelType).toContain('fail identically')
+    }
+  })
+
+  it('the workspace gate tells a CHAT user to open a workspace-scoped chat', async () => {
+    const { tools } = makeAllTools()
+    for (const channelType of ['web', 'telegram', 'slack']) {
+      const r = await tools.listWorkflows.execute(
+        {},
+        makeContext({ workspaceId: null, channelType }),
+      )
+      expect(r.isError, channelType).toBe(true)
+      const text = String(r.data)
+      expect(text, channelType).toContain('workspace-scoped chat')
+      expect(text, channelType).not.toContain('re-scope the key')
+    }
+  })
+
+  it('an unrecognised surface gets the neutral both-ways remedy rather than a guess', async () => {
+    const { tools } = makeAllTools()
+    const r = await tools.listWorkflows.execute(
+      {},
+      makeContext({ workspaceId: null, channelType: 'cron' }),
+    )
+    expect(r.isError).toBe(true)
+    const text = String(r.data)
+    expect(text).toContain('workspace-scoped chat')
+    expect(text).toContain('re-issue or re-scope that credential')
+  })
+
+  it('every branch still says nothing happened and that a bare retry is pointless', async () => {
+    const { tools } = makeAllTools()
+    for (const channelType of ['programmatic', 'web', 'cron']) {
+      const r = await tools.listWorkflows.execute(
+        {},
+        makeContext({ workspaceId: null, channelType }),
+      )
+      const text = String(r.data)
+      expect(text, channelType).toContain('Nothing was read or changed')
+      expect(text, channelType).toContain('Retrying this call unchanged will fail identically')
+    }
   })
 })

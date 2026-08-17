@@ -66,7 +66,7 @@ import {
   describeDelivery,
   formatRelativeTime,
   resolveDeliveryChannel,
-  resolveTargetView,
+  resolveTargetViewDetailed,
   sendDeliveryConfirmation,
   type DeliveryTargetResolver,
   type ViewWorkspaceResolver,
@@ -359,10 +359,55 @@ function workflowNotFound(workflowId: string): string {
   return `Workflow ${workflowId} not found in this workspace. Call listWorkflows to see the workflows that exist and re-issue with an id from that list. Do NOT retry this exact id.`
 }
 
-function workspaceGate(workspaceId: string | null | undefined): { data: string; isError: true } | null {
+/**
+ * Channel types whose principal is a KEY, not a person in a chat: the brain
+ * MCP (`programmatic`), the assistant MCP, and the public API. On those, the
+ * old remedy ("switch to a workspace-scoped chat") is an instruction the
+ * caller cannot follow — an external MCP agent has no chat to switch to, and
+ * the missing binding is a property of the credential it authenticated with.
+ */
+const KEYED_AGENT_CHANNELS = new Set(['programmatic', 'assistant_mcp', 'api'])
+
+/** Chat surfaces where a human genuinely can move to a workspace-scoped chat. */
+const INTERACTIVE_CHAT_CHANNELS = new Set([
+  'web',
+  'telegram',
+  'slack',
+  'whatsapp',
+  'discord',
+  'msteams',
+  'wechat',
+  'imessage',
+])
+
+/**
+ * The workspace gate for every workflow tool. The REMEDY branches on who is
+ * calling (`ToolContext.channelType`), because the two principals fix this
+ * differently and an unfollowable instruction is worse than none: a chat user
+ * opens a workspace-scoped chat; a keyed agent cannot, and needs its key
+ * re-scoped. Unknown surfaces get the neutral both-ways sentence rather than
+ * a guess (docs/architecture/engine/tool-executor.md → "Failure copy").
+ */
+function workspaceGate(
+  workspaceId: string | null | undefined,
+  channelType?: string,
+): { data: string; isError: true } | null {
   if (!workspaceId) {
+    const remedy = KEYED_AGENT_CHANNELS.has(channelType ?? '')
+      ? 'The credential this call authenticated with is not workspace-scoped, and no argument change ' +
+        'can make it so: a workspace admin must re-issue or re-scope the key against the workspace. ' +
+        'Report that to the user.'
+      : INTERACTIVE_CHAT_CHANNELS.has(channelType ?? '')
+        ? 'Open a workspace-scoped chat (pick the workspace in the app, or message the workspace ' +
+          'assistant) and re-issue the call there. Personal chats have no workflow store to read or write.'
+        : 'This surface is not workspace-scoped. If a human is driving it, re-issue the call from a ' +
+          'workspace-scoped chat; if it is a key or an automated principal, a workspace admin must ' +
+          're-issue or re-scope that credential against the workspace.'
     return {
-      data: 'Workflows require a workspace. This assistant is not bound to one — switch to a workspace-scoped chat to manage workflows.',
+      data:
+        'Workflows live in a workspace, and this call is not bound to one, so there is no workflow ' +
+        `store to reach. Nothing was read or changed. ${remedy} Retrying this call unchanged will ` +
+        'fail identically.',
       isError: true,
     }
   }
@@ -1282,6 +1327,13 @@ type ScheduleApplyResult = {
   deliveryTarget?: { channelType: string; label: string; topicId?: number }
   confirmationSent?: boolean
   targetViewId: string | null
+  /**
+   * Set when a requested / inherited page link was dropped: the schedule
+   * still applied, but it will not maintain the page the caller expected.
+   * Surfaced on the tool payload so a partial success never reads as a
+   * total one (see delivery-resolution.ts `resolveTargetViewDetailed`).
+   */
+  targetViewWarning?: string
   timezone: string
 }
 
@@ -1312,7 +1364,7 @@ async function applyScheduleTrigger(
   const nextRunAt = computeNextRun(schedule, timezone)
   const policy = trigger.policy
 
-  const viewId = await resolveTargetView(
+  const { viewId, warning: targetViewWarning } = await resolveTargetViewDetailed(
     deps.resolveViewWorkspace,
     targetViewId ?? context.docViewId ?? staticPageAnchorId(definition),
     context,
@@ -1358,6 +1410,7 @@ async function applyScheduleTrigger(
       ...delivery,
       confirmationSent,
       targetViewId: viewId,
+      ...(targetViewWarning ? { targetViewWarning } : {}),
       timezone,
     }
   }
@@ -1380,7 +1433,7 @@ async function applyScheduleTrigger(
       workflowId,
       viewId,
     })
-    return { nextRun: nextRunAt.toISOString(), ...formatRelativeTime(nextRunAt), targetViewId: viewId, timezone }
+    return { nextRun: nextRunAt.toISOString(), ...formatRelativeTime(nextRunAt), targetViewId: viewId, ...(targetViewWarning ? { targetViewWarning } : {}), timezone }
   }
 
   // WORKFLOW-TRIGGER row (workspace-visible) — the team-automation path.
@@ -1401,7 +1454,7 @@ async function applyScheduleTrigger(
     },
   )
   if ('error' in synced) return { error: synced.error }
-  return { nextRun: synced.nextRunAt.toISOString(), ...formatRelativeTime(synced.nextRunAt), targetViewId: viewId, timezone }
+  return { nextRun: synced.nextRunAt.toISOString(), ...formatRelativeTime(synced.nextRunAt), targetViewId: viewId, ...(targetViewWarning ? { targetViewWarning } : {}), timezone }
 }
 
 /**
@@ -1468,7 +1521,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
     isConcurrencySafe: true,
     isReadOnly: true,
     async execute(input, context) {
-      const gate = workspaceGate(context.workspaceId)
+      const gate = workspaceGate(context.workspaceId, context.channelType)
       if (gate) return gate
 
       const parsed = WorkflowDefinitionSchema.safeParse(input.definition)
@@ -1590,7 +1643,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
     }),
     requiresConfirmation: false,
     async execute(input, context) {
-      const gate = workspaceGate(context.workspaceId)
+      const gate = workspaceGate(context.workspaceId, context.channelType)
       if (gate) return gate
 
       const parsed = WorkflowDefinitionSchema.safeParse(input.definition)
@@ -1599,6 +1652,10 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
           data: {
             ok: false,
             errors: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`),
+            // Same tail proposeWorkflow ships: a `steps[].type` issue is
+            // unfixable without the closed set of valid types, and the model
+            // has no other way to enumerate them.
+            stepTypes: STEP_TYPE_VALUES,
           },
           isError: true,
         }
@@ -1757,7 +1814,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
     }),
     requiresConfirmation: false,
     async execute(input, context) {
-      const gate = workspaceGate(context.workspaceId)
+      const gate = workspaceGate(context.workspaceId, context.channelType)
       if (gate) return gate
 
       const existing = await deps.workflowStore.getById(context.userId, input.workflowId)
@@ -1795,6 +1852,9 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
             data: {
               ok: false,
               errors: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`),
+              // See createWorkflow: the valid step types travel with the
+              // rejection, the same way proposeWorkflow's do.
+              stepTypes: STEP_TYPE_VALUES,
             },
             isError: true,
           }
@@ -1898,7 +1958,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       }
 
       // Reconcile the firing scheduled_jobs row with the new trigger.
-      let schedule: { nextRun: string; relativeTime?: string } | undefined
+      let schedule: { nextRun: string; relativeTime?: string; targetViewWarning?: string } | undefined
       let scheduleError: string | undefined
       if (trigger !== undefined && deps.jobStore) {
         if (trigger.kind === 'schedule') {
@@ -1927,13 +1987,20 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
               input.targetViewId,
             )
             if ('error' in applied) scheduleError = applied.error
-            else schedule = { nextRun: applied.nextRun, relativeTime: applied.relativeTime }
+            else {
+              schedule = {
+                nextRun: applied.nextRun,
+                relativeTime: applied.relativeTime,
+                ...(applied.targetViewWarning ? { targetViewWarning: applied.targetViewWarning } : {}),
+              }
+            }
           } else {
             const timezone = trigger.timezone ?? context.userTimezone ?? 'UTC'
-            const viewIdToSet =
+            const viewResolution =
               input.targetViewId !== undefined
-                ? await resolveTargetView(deps.resolveViewWorkspace, input.targetViewId, context)
+                ? await resolveTargetViewDetailed(deps.resolveViewWorkspace, input.targetViewId, context)
                 : undefined
+            const viewIdToSet = viewResolution?.viewId
             const synced = await syncWorkflowScheduleTrigger(
               { jobStore: deps.jobStore, resolvePrimary: deps.resolvePrimary },
               {
@@ -1950,7 +2017,13 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
               },
             )
             if ('error' in synced) scheduleError = synced.error
-            else schedule = { nextRun: synced.nextRunAt.toISOString(), ...formatRelativeTime(synced.nextRunAt) }
+            else {
+              schedule = {
+                nextRun: synced.nextRunAt.toISOString(),
+                ...formatRelativeTime(synced.nextRunAt),
+                ...(viewResolution?.warning ? { targetViewWarning: viewResolution.warning } : {}),
+              }
+            }
           }
         } else {
           // Trigger left `schedule` (manual / webhook / event) → stop firing.
@@ -1992,7 +2065,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
     isConcurrencySafe: true,
     isReadOnly: true,
     async execute(input, context) {
-      const gate = workspaceGate(context.workspaceId)
+      const gate = workspaceGate(context.workspaceId, context.channelType)
       if (gate) return gate
 
       const workflow = await deps.workflowStore.getById(context.userId, input.workflowId)
@@ -2070,7 +2143,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
     }),
     timeoutMs: 90_000,
     async execute(input, context) {
-      const gate = workspaceGate(context.workspaceId)
+      const gate = workspaceGate(context.workspaceId, context.channelType)
       if (gate) return gate
 
       const workflow = await deps.workflowStore.getById(context.userId, input.workflowId)
@@ -2130,7 +2203,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
     isConcurrencySafe: true,
     isReadOnly: true,
     async execute(_input, context) {
-      const gate = workspaceGate(context.workspaceId)
+      const gate = workspaceGate(context.workspaceId, context.channelType)
       if (gate) return gate
 
       const rows = await deps.workflowStore.list(context.userId, context.workspaceId!)
@@ -2288,7 +2361,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
     isConcurrencySafe: true,
     isReadOnly: true,
     async execute(input, context) {
-      const gate = workspaceGate(context.workspaceId)
+      const gate = workspaceGate(context.workspaceId, context.channelType)
       if (gate) return gate
 
       const resolved = await resolveRunId(context, input.runId)
@@ -2338,7 +2411,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
     isReadOnly: true,
     isConcurrencySafe: true,
     async execute(input, context) {
-      const gate = workspaceGate(context.workspaceId)
+      const gate = workspaceGate(context.workspaceId, context.channelType)
       if (gate) return gate
       if (!deps.listSlackChannels) {
         return {
@@ -2372,7 +2445,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
     isReadOnly: true,
     isConcurrencySafe: true,
     async execute(input, context) {
-      const gate = workspaceGate(context.workspaceId)
+      const gate = workspaceGate(context.workspaceId, context.channelType)
       if (gate) return gate
       if (!deps.listSlackMembers) {
         return {

@@ -18,7 +18,7 @@ import {
   describeDelivery,
   formatRelativeTime,
   resolveDeliveryChannel,
-  resolveTargetView,
+  resolveTargetViewDetailed,
   sendDeliveryConfirmation,
 } from './delivery-resolution.js'
 
@@ -27,6 +27,30 @@ import {
 // external callers (apps/api wiring, scheduling/index.ts) import them here.
 // See docs/architecture/features/workflow.md §3.
 export type { DeliveryTargetLabel, DeliveryTargetResolver, ViewWorkspaceResolver }
+
+/**
+ * The ONE "job id did not resolve" sentence — deliberately identical whether
+ * the row is missing, deleted, or owned by someone this caller cannot manage
+ * (`canManageJob` returns false). Job ids are cross-user, so distinguishing
+ * "no such job" from "not yours" would leak the existence of another user's
+ * reminder. The copy therefore says nothing about which of the two happened,
+ * while still carrying what the failure-copy standard requires: the id, why a
+ * valid-looking id can miss, where a current id comes from, and the retry
+ * verdict.
+ *
+ * `searchScheduledJobs` is the sibling reader in this file (hidden from the
+ * model, callable); `listWorkflows` / `getWorkflow` are the model-facing
+ * surface that replaced these verbs and show each workflow's firing rows.
+ */
+function jobNotFound(jobId: string): string {
+  return (
+    `Job ${jobId} is not available to this assistant. ` +
+    'Either no scheduled job has that id, or it belongs to someone whose jobs this session cannot manage — this tool does not distinguish the two on purpose, so do not infer that the job exists. ' +
+    'Nothing was changed. ' +
+    'Re-resolve a current id with searchScheduledJobs, or with listWorkflows / getWorkflow (scheduling is a workflow trigger, and getWorkflow shows the firing rows for one workflow). ' +
+    'Do NOT retry this exact id.'
+  )
+}
 
 const scheduleSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('once'), datetime: z.string().describe('Datetime in the user\'s local timezone (no Z or offset), e.g. 2026-04-09T15:30:00. The timezone param handles UTC conversion.') }),
@@ -192,7 +216,9 @@ export function createSchedulingTools(deps: SchedulingToolDeps): {
       // it stays as a defensive mirror of the `scheduleWorkflow` tool.
       if (!context.workspaceId) {
         return {
-          data: 'Scheduled jobs require a workspace-scoped chat. This assistant is not bound to a workspace.',
+          data:
+            'Scheduled jobs require a workspace-scoped chat, and this assistant is not bound to a workspace — the `scheduled_jobs` row is workspace-scoped, so there is nowhere to write it. No job was created. ' +
+            'Ask the user to move this assistant into a workspace in Studio, or schedule from a workspace-scoped chat. Retrying from this session will keep failing, whatever the schedule.',
           isError: true,
         }
       }
@@ -202,7 +228,9 @@ export function createSchedulingTools(deps: SchedulingToolDeps): {
       const hasKeyword = input.nagUntilKeyword !== undefined
       if (hasInterval !== hasKeyword) {
         return {
-          data: 'nagIntervalMins and nagUntilKeyword must be set together (or both omitted).',
+          data:
+            'nagIntervalMins and nagUntilKeyword must be set together (or both omitted) — a repeat interval with no resolution keyword would nag forever, and a keyword with no interval never fires. No job was created. ' +
+            'Retry with both (e.g. nagIntervalMins: 15 with nagUntilKeyword: "done") or with neither. The same one-sided pair will keep failing.',
           isError: true,
         }
       }
@@ -221,7 +249,9 @@ export function createSchedulingTools(deps: SchedulingToolDeps): {
         const enabledRecurring = await jobStore.countEnabledRecurring(context.userId)
         if (enabledRecurring >= 100) {
           return {
-            data: 'You have reached the cap of 100 active recurring reminders. Use searchScheduledJobs to find and delete unused ones first.',
+            data:
+              'No job was created: this user is at the cap of 100 active recurring reminders. ' +
+              'Call searchScheduledJobs to list them, delete the ones the user no longer wants with deleteScheduledJob, then retry — this exact call will keep failing until a slot is free. A `once` schedule is not capped, if the user only needs a single fire.',
             isError: true,
           }
         }
@@ -233,7 +263,7 @@ export function createSchedulingTools(deps: SchedulingToolDeps): {
       // workspace so a stale/foreign id is dropped rather than failing the job.
       // Resolved before the channel decision: a doc-page job is the one
       // case where a web-context job is still allowed (the page is its surface).
-      const viewId = await resolveTargetView(deps.resolveViewWorkspace, input.targetViewId ?? context.docViewId, context)
+      const { viewId, warning: targetViewWarning } = await resolveTargetViewDetailed(deps.resolveViewWorkspace, input.targetViewId ?? context.docViewId, context)
 
       // Resolve delivery channel: explicit override > preferred messaging channel > current channel.
       const { channelType: deliveryChannelType, channelId: deliveryChannelId } =
@@ -257,7 +287,10 @@ export function createSchedulingTools(deps: SchedulingToolDeps): {
       if (coercedChannel === 'web') {
         if (!viewId) {
           return {
-            data: 'Scheduled results are not delivered to the web chat. Connect a messaging channel (Telegram, Slack, or WhatsApp) and schedule from there, or schedule from a doc page so the job updates that page in place.',
+            data:
+              `${targetViewWarning ? `${targetViewWarning} ` : ''}` +
+              'No job was created: this session resolves to the web chat, and scheduled results are never pushed there (the web UI is a pull surface), and no doc page was in scope to update instead. ' +
+              'Tell the user to connect Telegram, Slack, or WhatsApp and schedule from that chat, or to schedule from a doc page so the job maintains the page in place. Retrying this call from this session will keep failing.',
             isError: true,
           }
         }
@@ -273,7 +306,9 @@ export function createSchedulingTools(deps: SchedulingToolDeps): {
         // wrong-type id — the `channel_not_found` cross-wiring fix). Reject with
         // guidance instead of persisting an empty channel that fails every fire.
         return {
-          data: `Cannot resolve which ${coercedChannel} chat to deliver to from this session. Schedule from inside the ${coercedChannel} chat you want the reminder delivered to, so the correct channel is captured.`,
+          data:
+            `No job was created: ${coercedChannel} delivery was requested, but this session carries no ${coercedChannel} chat id to deliver to (the resolver refuses to borrow a different channel's id, which is what used to produce a job that failed on every fire). ` +
+            `Ask the user to schedule from inside the ${coercedChannel} chat they want the reminder in, so the exact chat is captured. Retrying this call from this session will keep failing.`,
           isError: true,
         }
       } else {
@@ -392,6 +427,7 @@ export function createSchedulingTools(deps: SchedulingToolDeps): {
           // Echo the linked doc page so the model can tell the user the
           // schedule now shows on that page. Null when not a doc-page job.
           targetViewId: job.viewId,
+          ...(targetViewWarning ? { targetViewWarning } : {}),
           mode: job.mode,
           timezone: job.timezone,
           silentUntilFire: job.silentUntilFire,
@@ -430,11 +466,11 @@ export function createSchedulingTools(deps: SchedulingToolDeps): {
 
     async execute(input, context) {
       const existing = await jobStore.get(input.jobId)
-      if (!existing) return { data: `Job ${input.jobId} not found`, isError: true }
+      if (!existing) return { data: jobNotFound(input.jobId), isError: true }
       // Owner or workspace teammate (workflow-trigger jobs only). Same
       // not-found wording as a missing row — no existence leak.
       if (!(await canManageJob(existing, context))) {
-        return { data: `Job ${input.jobId} not found`, isError: true }
+        return { data: jobNotFound(input.jobId), isError: true }
       }
 
       const updates: {
@@ -460,10 +496,15 @@ export function createSchedulingTools(deps: SchedulingToolDeps): {
       // Doc page link (migration 229). `null` clears it; a UUID repoints it
       // (validated against this context's workspace, dropped to null if it
       // doesn't resolve). Omitted → unchanged.
+      let targetViewWarning: string | undefined
       if (input.targetViewId !== undefined) {
-        updates.viewId = input.targetViewId === null
-          ? null
-          : await resolveTargetView(deps.resolveViewWorkspace, input.targetViewId, context)
+        if (input.targetViewId === null) {
+          updates.viewId = null
+        } else {
+          const resolution = await resolveTargetViewDetailed(deps.resolveViewWorkspace, input.targetViewId, context)
+          updates.viewId = resolution.viewId
+          targetViewWarning = resolution.warning
+        }
       }
 
       // Validation: post-merge, the (interval, keyword) pair must be both set
@@ -476,7 +517,9 @@ export function createSchedulingTools(deps: SchedulingToolDeps): {
         : existing.nagUntilKeyword
       if ((effectiveInterval === null) !== (effectiveKeyword === null)) {
         return {
-          data: 'nagIntervalMins and nagUntilKeyword must be set together (or both null).',
+          data:
+            'After merging your patch onto the stored job, nagIntervalMins and nagUntilKeyword would not both be set (or both null) — a repeat interval with no resolution keyword nags forever, and a keyword with no interval never fires. Nothing was saved. ' +
+            'Retry passing BOTH fields explicitly (or both as null to clear the nag). Sending just one of them will keep failing, because the other is inherited from the existing job.',
           isError: true,
         }
       }
@@ -495,7 +538,9 @@ export function createSchedulingTools(deps: SchedulingToolDeps): {
         const { channelId } = resolveDeliveryChannel(context, input.deliveryChannel)
         if (!channelId) {
           return {
-            data: `Cannot resolve which ${input.deliveryChannel} chat to deliver to from this session. Update the job from inside the ${input.deliveryChannel} chat you want the reminder delivered to.`,
+            data:
+              `Nothing was saved: ${input.deliveryChannel} delivery was requested, but this session carries no ${input.deliveryChannel} chat id to deliver to (the resolver refuses to borrow a different channel's id, which is what used to produce a job that failed on every fire). ` +
+              `Ask the user to make the change from inside the ${input.deliveryChannel} chat they want the reminder in, so the exact chat is captured. Retrying this call from this session will keep failing; the job's other fields are unchanged.`,
             isError: true,
           }
         }
@@ -511,7 +556,17 @@ export function createSchedulingTools(deps: SchedulingToolDeps): {
       }
 
       const job = await jobStore.update(input.jobId, updates)
-      if (!job) return { data: `Job ${input.jobId} not found`, isError: true }
+      if (!job) {
+        // Distinct from `jobNotFound`: the row resolved and passed the manage
+        // check a few statements ago, so the uniform "not available to this
+        // assistant" sentence would be a lie — it was deleted underneath us.
+        return {
+          data:
+            `Job ${input.jobId} was readable a moment ago but the update matched no row — something else deleted it between the read and the write. None of your changes were saved. ` +
+            'Do NOT retry this id; confirm with searchScheduledJobs whether the schedule still exists, and re-create it if the user still wants it.',
+          isError: true,
+        }
+      }
 
       // Keep the one-step reminder workflow in sync with the trigger row.
       // Only a single-step assistant_call workflow is rewritten — a
@@ -575,6 +630,7 @@ export function createSchedulingTools(deps: SchedulingToolDeps): {
           ...delivery,
           confirmationSent,
           targetViewId: job.viewId,
+          ...(targetViewWarning ? { targetViewWarning } : {}),
           timezone: job.timezone,
           mode: job.mode,
           silentUntilFire: job.silentUntilFire,
@@ -717,15 +773,22 @@ export function createSchedulingTools(deps: SchedulingToolDeps): {
 
     async execute(input, context) {
       const job = await jobStore.get(input.jobId)
-      if (!job) return { data: `Job ${input.jobId} not found`, isError: true }
+      if (!job) return { data: jobNotFound(input.jobId), isError: true }
       // Owner or workspace teammate (workflow-trigger jobs only). Same
       // not-found wording as a missing row — no existence leak.
       if (!(await canManageJob(job, context))) {
-        return { data: `Job ${input.jobId} not found`, isError: true }
+        return { data: jobNotFound(input.jobId), isError: true }
       }
 
       const deleted = await jobStore.delete(input.jobId)
-      if (!deleted) return { data: `Job ${input.jobId} not found`, isError: true }
+      if (!deleted) {
+        return {
+          data:
+            `Job ${input.jobId} was readable a moment ago but the delete removed no row — something else deleted it between the two statements. The job is gone, which is the end state you asked for; this call simply did not do it. ` +
+            'Do NOT retry this id (there is nothing left to delete) and do not report a failure to the user — confirm the schedule is off, verifying with searchScheduledJobs if you need to.',
+          isError: true,
+        }
+      }
 
       // Cascade-delete the implicit one-step reminder workflow. A
       // `scheduleWorkflow`-backed job (channelType 'workflow') points at a

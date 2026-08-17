@@ -5,7 +5,7 @@ import type { AccessContext } from '../security/access-context.js'
 import { researchWriteFloor } from '../security/sensitivity.js'
 import { unionCompartments } from '../security/compartments.js'
 import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
-import { tolerantInt } from '../tools/schema-tolerance.js'
+import { tolerantInt, uuidId } from '../tools/schema-tolerance.js'
 import {
   applyExplicitCloses,
   applyExplicitLinks,
@@ -143,33 +143,30 @@ function runChatToolClassifier(
     const decision = classifier.decide({ ...candidate, proposed: expectedKind }, 'tool')
     if (decision.kind === 'override' && decision.match.value !== expectedKind) {
       const suggestedTool = TOOL_NAME_FOR_KIND[decision.match.value]
-      const explanation =
-        `Classifier rule ${decision.match.rule_id} indicates this input is a ${decision.match.value}, ` +
-        `not a ${expectedKind}.` +
-        (suggestedTool ? ` Re-call ${suggestedTool} with the same arguments.` : ' Ask the user how to record it.')
+      // D5: prose FIRST, structured tail after. This used to be a
+      // JSON.stringify'd object, so the one sentence telling the model what to
+      // do next arrived as a value inside a blob it had to parse first.
       return {
-        data: JSON.stringify({
-          ok: false,
-          reason: 'reclassified',
-          blocking_rule_id: decision.match.rule_id,
-          explanation,
-          suggested_tool: suggestedTool,
-          suggested_kind: decision.match.value,
-        }),
+        data:
+          `The save was rejected before anything was written: classifier rule \`${decision.match.rule_id}\` reads "${candidate.primary}" as a ${decision.match.value}, not a ${expectedKind}. Nothing was saved. ` +
+          (suggestedTool
+            ? `Re-call ${suggestedTool} with the same arguments — that is the tool that owns ${decision.match.value} records. Do NOT retry this tool with these arguments; the rule will reject them the same way.`
+            : `There is no CRM tool for a ${decision.match.value}, so ask the user how they want it recorded. Do NOT retry this tool with these arguments; the rule will reject them the same way.`) +
+          ` (reason: reclassified; blocking_rule_id: ${decision.match.rule_id}; suggested_kind: ${decision.match.value}${suggestedTool ? `; suggested_tool: ${suggestedTool}` : ''})`,
         isError: true,
       }
     }
     if (decision.kind === 'blocked') {
       const block = decision.suppressedBy[0]
+      // D5: prose FIRST, structured tail after (see the override branch above).
+      const blockReason =
+        block?.reason ?? `it does not match the shape a ${expectedKind} record is expected to have`
       return {
-        data: JSON.stringify({
-          ok: false,
-          reason: 'reclassified',
-          blocking_rule_id: block?.rule_id ?? 'unknown',
-          explanation:
-            block?.reason ??
-            `Classifier blocked save${expectedKind ? ` as ${expectedKind}` : ''} — input does not match the expected shape.`,
-        }),
+        data:
+          `The save was rejected before anything was written: a classifier rule blocked recording "${candidate.primary}" as a ${expectedKind} — ${blockReason}. Nothing was saved. ` +
+          'Do NOT retry this tool with these arguments — the same rule will block them again. ' +
+          'If this really is a record the user wants, ask them which kind it is (person / company / deal) and use that tool, or tell them plainly that it was refused and why. ' +
+          `(reason: reclassified; blocking_rule_id: ${block?.rule_id ?? 'unknown'})`,
         isError: true,
       }
     }
@@ -203,7 +200,13 @@ function formatSuggestions(
 const STAGE_VALUES = [...DEAL_STAGES] as [DealStage, ...DealStage[]]
 const stageEnum = z.enum(STAGE_VALUES)
 
-const idShape = z.string().uuid()
+/**
+ * CRM ids are UUIDs minted by a save / list call. `uuidId()` (not a bare
+ * `z.string().uuid()`) so the rejection tells the model what a valid value
+ * looks like and where to get one, instead of zod's "Invalid uuid" — the
+ * production miss was a NAME or a domain passed where an id belongs.
+ */
+const idShape = uuidId()
 const tagShape = z.array(z.string().min(1).max(64)).max(20)
 const externalRefShape = z.record(z.unknown())
 

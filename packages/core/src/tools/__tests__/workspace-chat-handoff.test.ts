@@ -96,6 +96,42 @@ describe('[COMP:api/workspace-chat-handoff] shareCurrentWorkToWorkspace', () => 
     expect(create).not.toHaveBeenCalled()
   })
 
+  it('names the surface that is missing rather than "not available in this context"', async () => {
+    const tool = createWorkspaceChatHandoffTool({ create: vi.fn() })
+
+    const noWorkspace = await tool.execute(
+      { title: 'Room', handoff: 'Context' },
+      context({ workspaceId: null }),
+    )
+    expect(String(noWorkspace.data)).toContain('not bound to a workspace')
+    expect(String(noWorkspace.data)).toMatch(/Nothing was shared/)
+
+    const onTelegram = await tool.execute(
+      { title: 'Room', handoff: 'Context' },
+      context({ channelType: 'telegram' }),
+    )
+    expect(String(onTelegram.data)).toContain('"telegram"')
+    expect(String(onTelegram.data)).toMatch(/from the web app/i)
+    expect(String(onTelegram.data)).toMatch(/no argument change or retry will help/i)
+  })
+
+  it('a create failure says no room exists and no teammate has seen the handoff', async () => {
+    const create = vi.fn().mockRejectedValue(new Error('sessions insert rejected'))
+    const tool = createWorkspaceChatHandoffTool({ create } as unknown as WorkspaceChatHandoffPort)
+
+    const result = await tool.execute(
+      { title: 'Wholesale pricing launch', handoff: 'Context' },
+      context(),
+    )
+
+    expect(result.isError).toBe(true)
+    const data = String(result.data)
+    expect(data).toContain('Wholesale pricing launch')
+    expect(data).toContain('sessions insert rejected')
+    expect(data).toMatch(/NO room was created/)
+    expect(data).toMatch(/do not tell the user the work was shared or offer a link/i)
+  })
+
   it('bounds the user-visible disclosure payload', () => {
     expect(
       workspaceChatHandoffInputSchema.safeParse({

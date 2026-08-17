@@ -93,6 +93,20 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
       ])
     })
 
+    it('a failed search is never reported as an empty knowledge base', async () => {
+      vi.mocked(mockStore.search).mockRejectedValueOnce(new Error('ETIMEDOUT'))
+
+      const tools = createKnowledgeTools(mockStore)
+      const result = await tools[0].execute({ query: 'vault fees' }, ctx)
+
+      expect(result.isError).toBe(true)
+      const data = String(result.data)
+      expect(data).toContain('searchKnowledge')
+      expect(data).toContain('vault fees')
+      expect(data).toMatch(/NOT an empty knowledge base/i)
+      expect(data).toMatch(/Retry once/i)
+    })
+
     it('returns guidance when no results found', async () => {
       vi.mocked(mockStore.search).mockResolvedValueOnce([])
 
@@ -116,6 +130,22 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
   })
 
   describe('browseKnowledge', () => {
+    it('a failed listing is never reported as an empty knowledge base', async () => {
+      vi.mocked(mockStore.listByPath).mockRejectedValueOnce(new Error('ECONNREFUSED'))
+
+      const tools = createKnowledgeTools(mockStore)
+      const result = await tools[1].execute({ path: 'products' }, ctx)
+
+      expect(result.isError).toBe(true)
+      const data = String(result.data)
+      expect(data).toContain('browseKnowledge')
+      expect(data).toContain('products')
+      expect(data).toMatch(/NOT an empty knowledge base/i)
+      expect(data).toMatch(/Retry once/i)
+      // The raw client message is kept, but never alone.
+      expect(data).toContain('ECONNREFUSED')
+    })
+
     it('lists top-level when no path given', async () => {
       vi.mocked(mockStore.listByPath).mockResolvedValueOnce([
         { id: 'id1', path: 'products', title: 'Products', summary: 'All products', tags: [], sensitivity: 'internal' },
@@ -171,13 +201,32 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
       })
     })
 
-    it('returns error for missing entry', async () => {
+    it('returns error for missing entry, naming the id and how to re-resolve it', async () => {
       vi.mocked(mockStore.getById).mockResolvedValueOnce(null)
 
       const tools = createKnowledgeTools(mockStore)
       const result = await tools[2].execute({ id: 'missing' }, ctx)
 
       expect(result.isError).toBe(true)
+      const data = String(result.data)
+      expect(data).toContain('missing')
+      expect(data).toContain('searchKnowledge or browseKnowledge')
+      expect(data).toMatch(/above your clearance/i)
+      expect(data).toMatch(/Do NOT retry this exact id/i)
+    })
+
+    it('a read failure is not reported as a missing entry', async () => {
+      vi.mocked(mockStore.getById).mockRejectedValueOnce(new Error('ECONNRESET'))
+
+      const tools = createKnowledgeTools(mockStore)
+      const result = await tools[2].execute({ id: 'e1' }, ctx)
+
+      expect(result.isError).toBe(true)
+      const data = String(result.data)
+      expect(data).toContain('readKnowledgeEntry')
+      expect(data).toMatch(/read failure, not a missing entry/i)
+      expect(data).toMatch(/Retry once/i)
+      expect(data).not.toMatch(/not found/i)
     })
   })
 
@@ -243,6 +292,46 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
       )
 
       expect(mockStore.create).toHaveBeenCalledWith(expect.objectContaining({ sensitivity: 'confidential' }))
+    })
+
+    it('a create rejected by the source carries its reason verdict', async () => {
+      const writer = makeWriter()
+      vi.mocked(writer.commitEntryCreate).mockResolvedValueOnce({
+        ok: false, reason: 'file_exists', message: 'A file already exists at docs/new.',
+      })
+      const tools = createKnowledgeTools(mockStore, {
+        repoConnected: true,
+        allowWrites: true,
+        repoWriter: writer,
+        writableSources: [{ id: 'src1', repo: 'acme/kb', sourceType: 'github' }],
+      })
+      const result = await byName(tools, 'addKnowledgeEntry').execute(
+        { path: 'docs/new', title: 'New', content: 'Body' },
+        ctx,
+      )
+      expect(result.isError).toBe(true)
+      const data = String(result.data)
+      expect(data).toContain('(file_exists)')
+      expect(data).toMatch(/Do NOT retry the same path/i)
+      expect(data).toContain('updateKnowledgeEntry')
+    })
+
+    it('a store failure on create says nothing was saved', async () => {
+      vi.mocked(mockStore.create).mockRejectedValueOnce(new Error('violates unique constraint'))
+
+      const tools = createKnowledgeTools(mockStore, { repoConnected: false })
+      const result = await tools[3].execute(
+        { path: 'docs/new', title: 'New', content: 'Body' },
+        ctx,
+      )
+
+      expect(result.isError).toBe(true)
+      const data = String(result.data)
+      expect(data).toContain('addKnowledgeEntry')
+      expect(data).toContain('docs/new')
+      expect(data).toContain('violates unique constraint')
+      expect(data).toMatch(/Nothing was saved or changed/)
+      expect(data).toMatch(/do not tell the user it was saved/i)
     })
 
     it('rejects writes when repo is connected', async () => {
@@ -420,7 +509,7 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
       expect(mockStore.updateManualEntryContent).not.toHaveBeenCalled()
     })
 
-    it('relays writer failures (e.g. staleness) as tool errors', async () => {
+    it('relays writer failures (e.g. staleness) with the reason-specific retry verdict', async () => {
       vi.mocked(mockStore.getById).mockResolvedValueOnce(repoEntry)
       const opts = writeOpts()
       vi.mocked(opts.repoWriter.commitEntryUpdate).mockResolvedValueOnce({
@@ -432,7 +521,39 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
         ctx,
       )
       expect(result.isError).toBe(true)
-      expect(result.data).toContain('moved ahead')
+      const data = String(result.data)
+      expect(data).toContain('moved ahead')
+      expect(data).toContain('(stale_entry)')
+      expect(data).toContain('re-read it after the next sync')
+      expect(data).toContain('readKnowledgeEntry')
+      expect(data).toMatch(/retry once with current content/i)
+    })
+
+    it('a push_denied is never retried; an error is retried once', async () => {
+      const run = async (reason: 'push_denied' | 'error', message: string) => {
+        vi.mocked(mockStore.getById).mockResolvedValueOnce(repoEntry)
+        const opts = writeOpts()
+        vi.mocked(opts.repoWriter.commitEntryUpdate).mockResolvedValueOnce({ ok: false, reason, message })
+        const tools = createKnowledgeTools(mockStore, opts)
+        return await byName(tools, 'updateKnowledgeEntry').execute(
+          { id: 'e1', content: 'New body', changeSummary: 'x' },
+          ctx,
+        )
+      }
+
+      const denied = await run('push_denied', 'GitHub rejected the write.')
+      expect(denied.isError).toBe(true)
+      expect(String(denied.data)).toContain('(push_denied)')
+      expect(String(denied.data)).toMatch(/never retry/i)
+      expect(String(denied.data)).toMatch(/tell the user/i)
+
+      const transient = await run('error', 'GitHub returned 502.')
+      expect(transient.isError).toBe(true)
+      expect(String(transient.data)).toContain('(error)')
+      expect(String(transient.data)).toMatch(/transient/i)
+      expect(String(transient.data)).toMatch(/Retry once/i)
+      // The two must not read the same way to the model.
+      expect(String(transient.data)).not.toBe(String(denied.data))
     })
 
     it('refuses to update a lower-tier entry after higher-tier reads (no laundering)', async () => {
@@ -477,6 +598,47 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
       )
       expect(result.isError).toBe(true)
       expect(result.data).toContain('source write-back is unavailable')
+    })
+
+    it('a failed pre-read is not reported as a missing entry, and says nothing was written', async () => {
+      vi.mocked(mockStore.getById).mockRejectedValueOnce(new Error('ETIMEDOUT'))
+
+      const tools = createKnowledgeTools(mockStore, { repoConnected: false, allowWrites: true })
+      const result = await byName(tools, 'updateKnowledgeEntry').execute(
+        { id: 'e1', content: 'New body', changeSummary: 'x' },
+        ctx,
+      )
+
+      expect(result.isError).toBe(true)
+      const data = String(result.data)
+      expect(data).toContain('updateKnowledgeEntry')
+      expect(data).toContain('e1')
+      expect(data).toMatch(/Nothing was written/i)
+      expect(data).toMatch(/never got as far as the write/i)
+      expect(data).not.toMatch(/not found/i)
+      // The pre-read runs BEFORE any write, so the mutating-transient line
+      // ("the write may or may not have been applied") must never appear.
+      expect(data).not.toMatch(/may or may not have been applied/i)
+      expect(mockStore.updateManualEntryContent).not.toHaveBeenCalled()
+    })
+
+    it('a manual-update store failure says the previous body still stands', async () => {
+      vi.mocked(mockStore.getById).mockResolvedValueOnce({ ...repoEntry, id: 'm1', sourceId: null })
+      vi.mocked(mockStore.updateManualEntryContent).mockRejectedValueOnce(new Error('deadlock detected'))
+
+      const tools = createKnowledgeTools(mockStore, { repoConnected: false, allowWrites: true })
+      const result = await byName(tools, 'updateKnowledgeEntry').execute(
+        { id: 'm1', content: 'New body', changeSummary: 'x' },
+        ctx,
+      )
+
+      expect(result.isError).toBe(true)
+      const data = String(result.data)
+      expect(data).toContain('updateKnowledgeEntry')
+      expect(data).toContain('m1')
+      expect(data).toContain('deadlock detected')
+      expect(data).toMatch(/still holds its previous body/i)
+      expect(data).toMatch(/do not tell the user the change was saved/i)
     })
 
     it('describes the confirmation with entry title, repo, and preview', async () => {

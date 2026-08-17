@@ -88,13 +88,43 @@ describe('[COMP:files/ingest-stored-file-tool] ingestFile', () => {
     expect(r2.isError).toBe(true)
   })
 
-  it('errors outside a workspace', async () => {
+  it('errors outside a workspace with the same sentence the retrieval gate uses', async () => {
     const deps = makeDeps()
     const res = await createIngestStoredFileTool(deps).execute(
       { fileId: 'f-1' },
       { ...ctx, workspaceId: null },
     )
     expect(res.isError).toBe(true)
+    expect(deps.enqueue).not.toHaveBeenCalled()
+    const data = String(res.data)
+    expect(data).toContain('This chat is not bound to a workspace')
+    expect(data).toContain('brain rows are workspace-scoped')
+    expect(data).toMatch(/No argument change or retry will help/i)
+    expect(data).toMatch(/workspace chat/i)
+  })
+
+  it('an enqueue failure says ingestion did NOT start and not to re-ask for consent', async () => {
+    const deps = makeDeps()
+    deps.enqueue.mockRejectedValueOnce(new Error('file_ingest_jobs insert rejected'))
+    const res = await createIngestStoredFileTool(deps).execute(
+      { fileId: 'f-1', confirm: true },
+      ctx,
+    )
+    expect(res.isError).toBe(true)
+    const data = String(res.data)
+    expect(data).toContain('file_ingest_jobs insert rejected')
+    expect(data).toContain('notes.md')
+    expect(data).toMatch(/did NOT start/)
+    expect(data).toMatch(/do not ask them again/i)
+  })
+
+  it('a lookup failure is not reported as a missing file', async () => {
+    const deps = makeDeps()
+    deps.getFile.mockRejectedValueOnce(new Error('ECONNRESET'))
+    const res = await createIngestStoredFileTool(deps).execute({ fileId: 'f-1' }, ctx)
+    expect(res.isError).toBe(true)
+    expect(String(res.data)).toContain('stored-file lookup')
+    expect(String(res.data)).toMatch(/retry once/i)
     expect(deps.enqueue).not.toHaveBeenCalled()
   })
 })
@@ -158,6 +188,50 @@ describe('[COMP:recordings/reprocess-recording-tool] reprocessRecording', () => 
     expect(deps.enqueue).toHaveBeenCalledWith(
       expect.objectContaining({ blueprintSlug: 'meeting-notes' }),
     )
+  })
+
+  it('separates "no such recording" from "that id is not a recording"', async () => {
+    const missing = makeDeps(null)
+    const r1 = await createReprocessRecordingTool(missing).execute({ recordingId: 'rec-x' }, ctx)
+    expect(r1.isError).toBe(true)
+    const d1 = String(r1.data)
+    expect(d1).toContain('rec-x')
+    expect(d1).toContain('fileSearch')            // discovery pointer
+    expect(d1).toMatch(/Do NOT retry this exact id/i)
+    expect(d1).not.toMatch(/ingestFile/)          // wrong remedy for a missing id
+
+    const wrongKind = makeDeps({ sourceKind: 'document' })
+    const r2 = await createReprocessRecordingTool(wrongKind).execute({ recordingId: 'rec-1' }, ctx)
+    expect(r2.isError).toBe(true)
+    const d2 = String(r2.data)
+    expect(d2).toContain('"document"')            // names the actual kind
+    expect(d2).toContain('ingestFile')            // names what DOES accept it
+    expect(d2).toMatch(/fail the same way/i)
+    expect(d1).not.toBe(d2)
+  })
+
+  it('an enqueue failure says processing did NOT start and preserves the consent already given', async () => {
+    const deps = makeDeps({}, false)
+    deps.enqueue.mockRejectedValueOnce(new Error('recording_jobs insert rejected'))
+    const res = await createReprocessRecordingTool(deps).execute(
+      { recordingId: 'rec-1', confirm: true },
+      ctx,
+    )
+    expect(res.isError).toBe(true)
+    const data = String(res.data)
+    expect(data).toContain('recording_jobs insert rejected')
+    expect(data).toMatch(/did NOT start/)
+    expect(data).toMatch(/do not ask them again/i)
+  })
+
+  it('a previous-run check failure does not become a silent re-transcription', async () => {
+    const deps = makeDeps({}, false)
+    deps.hasProcessed.mockRejectedValueOnce(new Error('ETIMEDOUT'))
+    const res = await createReprocessRecordingTool(deps).execute({ recordingId: 'rec-1' }, ctx)
+    expect(res.isError).toBe(true)
+    expect(String(res.data)).toContain('previous-run check')
+    expect(String(res.data)).toMatch(/do not skip it by passing confirm: true/i)
+    expect(deps.enqueue).not.toHaveBeenCalled()
   })
 
   it('refuses a recording from another workspace, a non-recording episode, and missing audio', async () => {

@@ -58,7 +58,9 @@ export function createHomeTools(deps: HomeToolDeps): { setHomeDock: Tool } {
     async execute(input, context) {
       if (!context.workspaceId) {
         return {
-          data: 'The home dock is workspace-scoped, and this turn is not bound to a workspace.',
+          data:
+            'The home dock is workspace-scoped and this turn is not bound to a workspace, so there is no dock to write — the layout is stored per (user, workspace). Nothing was saved. ' +
+            'Nothing in your arguments can fix this: setHomeDock is only reachable from the workspace home-refresh turn. Do NOT retry this call.',
           isError: true,
         }
       }

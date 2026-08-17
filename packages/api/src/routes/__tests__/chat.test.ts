@@ -653,7 +653,7 @@ describe('[COMP:api/chat-route] updateViewedSkill', () => {
     ])
     await expect(tool.execute(input, context)).resolves.toMatchObject({
       isError: true,
-      data: expect.stringContaining('changed while this update was awaiting approval'),
+      data: expect.stringContaining('while this change waited for the user\'s approval'),
     })
     expect(update).not.toHaveBeenCalled()
   })
@@ -676,9 +676,114 @@ describe('[COMP:api/chat-route] updateViewedSkill', () => {
       description: 'Updated',
     }, context)).resolves.toMatchObject({
       isError: true,
-      data: expect.stringContaining('does not have clearance'),
+      data: expect.stringContaining('this assistant\'s clearance is public'),
     })
     expect(update).not.toHaveBeenCalled()
+  })
+
+  /**
+   * Failure copy (docs/architecture/engine/tool-executor.md → "Failure copy").
+   * This tool is scoped to ONE open skill and there is no skill-listing tool on
+   * the surface, so the only honest discovery pointer is the
+   * "Currently viewing — workspace skill" prompt block. Every refusal must name
+   * it (or say plainly that no retry can pass), say nothing was saved, and give
+   * the retry verdict — the old copy was five bare statements of fact.
+   */
+  describe('failure copy', () => {
+    function scopedTool(overrides: Record<string, unknown> = {}) {
+      return createUpdateViewedSkillTool({
+        workspaceSkillStore: {
+          getByIdSystem: vi.fn(async () => original),
+          update: vi.fn(),
+        } as never,
+        workspaceId: 'workspace-1',
+        skillRowId: 'skill-1',
+        skillName: 'Original skill',
+        expectedRevision: revision,
+        ...overrides,
+      })
+    }
+
+    it('a workspace mismatch names the remedy and forbids the retry', async () => {
+      const result = await scopedTool().execute(
+        { skillRowId: 'skill-1', expectedRevision: revision, description: 'New' },
+        { ...context, workspaceId: 'workspace-2' },
+      )
+      const data = String((result as { data: string }).data)
+      expect(data).toContain('"Original skill"')
+      expect(data).toMatch(/was NOT updated/i)
+      expect(data).toMatch(/reopen the skill in the Brain skill editor/i)
+      expect(data).toMatch(/refused the same way/i)
+    })
+
+    it('a wrong rowId names both ids and points at the viewing block', async () => {
+      const result = await scopedTool().execute(
+        { skillRowId: 'skill-2', expectedRevision: revision, description: 'New' },
+        context,
+      )
+      const data = String((result as { data: string }).data)
+      expect(data).toContain('skill-2')
+      expect(data).toContain('skill-1')
+      expect(data).toMatch(/Nothing was saved/i)
+      expect(data).toMatch(/no tool here that lists skills/i)
+      expect(data).toContain('Currently viewing — workspace skill')
+      expect(data).toMatch(/Do NOT retry this row id/i)
+    })
+
+    it('a wrong revision explains the guard and where the right one is', async () => {
+      const result = await scopedTool().execute(
+        { skillRowId: 'skill-1', expectedRevision: 'f'.repeat(64), description: 'New' },
+        context,
+      )
+      const data = String((result as { data: string }).data)
+      expect(data).toContain('ffffffffffff')
+      expect(data).toMatch(/stops an approved edit from overwriting a newer version/i)
+      expect(data).toContain('Currently viewing — workspace skill')
+      expect(data).toMatch(/Do NOT retry this revision/i)
+    })
+
+    it('an archived or deleted skill says so and forbids the retry', async () => {
+      const result = await scopedTool({
+        workspaceSkillStore: {
+          getByIdSystem: vi.fn(async () => ({ ...original, state: 'archived' })),
+          update: vi.fn(),
+        } as never,
+      }).execute({ skillRowId: 'skill-1', expectedRevision: revision, description: 'New' }, context)
+      const data = String((result as { data: string }).data)
+      expect(data).toContain('skill-1')
+      expect(data).toMatch(/deleted, archived, or moved to another workspace/i)
+      expect(data).toMatch(/Nothing was saved/i)
+      expect(data).toMatch(/Do NOT retry this row id/i)
+    })
+
+    it('a clearance refusal names both levels and says no retry can pass', async () => {
+      const result = await scopedTool({
+        workspaceSkillStore: {
+          getByIdSystem: vi.fn(async () => ({ ...original, sensitivity: 'confidential' })),
+          update: vi.fn(),
+        } as never,
+        assistantClearance: 'public',
+      }).execute({ skillRowId: 'skill-1', expectedRevision: revision, description: 'New' }, context)
+      const data = String((result as { data: string }).data)
+      expect(data).toMatch(/classified confidential/i)
+      expect(data).toMatch(/clearance is public/i)
+      expect(data).toMatch(/No wording of this call gets past a clearance gate/i)
+      expect(data).toMatch(/Studio/)
+    })
+
+    it('a lost write race is reported as unsaved, not as saved', async () => {
+      const result = await scopedTool({
+        workspaceSkillStore: {
+          getByIdSystem: vi.fn(async () => original),
+          update: vi.fn(async () => null),
+        } as never,
+      }).execute({ skillRowId: 'skill-1', expectedRevision: revision, description: 'New' }, context)
+      const data = String((result as { data: string }).data)
+      expect(data).toContain('"Original skill"')
+      expect(data).toMatch(/another editor saved the skill/i)
+      expect(data).toMatch(/Nothing was saved/i)
+      expect(data).toMatch(/will fail the same way/i)
+    })
   })
 })
 

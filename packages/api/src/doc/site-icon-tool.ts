@@ -26,7 +26,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
-import { buildTool, type FilesApi, type Tool } from '@use-brian/core'
+import { buildTool, workspaceFilesErrorMessage, type FilesApi, type Tool } from '@use-brian/core'
 import { imageIconToken } from '@use-brian/shared'
 
 import { fetchSiteIconImage, type BytesFetchFn } from './site-icon.js'
@@ -51,13 +51,25 @@ const inputSchema = z.object({
     ),
 })
 
-const ERROR_HINTS: Record<string, string> = {
-  invalid_url:
-    'That URL is not fetchable (malformed, non-http, or a private address). Pass a public domain or image URL.',
-  fetch_failed:
-    'The site did not respond (or kept redirecting). Check the domain, or pass a direct image URL instead.',
-  no_icon_found:
-    'The site answered but exposed no usable icon (no apple-touch-icon / favicon / og:image in an accepted image format). Pass a direct image URL, or fall back to an emoji via patchPage setIcon.',
+/**
+ * Per-cause failure copy. Every branch names WHAT did not happen (no icon was
+ * fetched and no page changed), WHY, the NEXT step, and whether the same `url`
+ * can ever succeed — a bare "fetch failed" sent the model round the same
+ * domain again. `patchPage setIcon` with an emoji is the standing fallback,
+ * and it is named because this tool only runs on doc-surface turns where
+ * `patchPage` is injected alongside it.
+ */
+const ERROR_HINTS: Record<string, (url: string) => string> = {
+  invalid_url: (url) =>
+    `No icon was fetched for ${JSON.stringify(url)} and no page was changed: that value is not a fetchable public web address (malformed, not http/https, or it resolves to a private/internal address that this tool refuses on purpose). ` +
+    'Re-issue with a public domain ("theground.io"), a full site URL, or a direct image URL. This exact value will be rejected the same way every time.',
+  fetch_failed: (url) =>
+    `No icon was fetched for ${JSON.stringify(url)} and no page was changed: the site never answered, or it redirected in a loop. ` +
+    'Check the domain is spelled right and is actually live; if it is, pass a direct image URL for the logo instead. ' +
+    'A single retry is worth it only if the site is known to be up - otherwise change the argument rather than repeating it.',
+  no_icon_found: (url) =>
+    `No icon was fetched for ${JSON.stringify(url)} and no page was changed: the site answered, but published no usable icon (no apple-touch-icon, no rel=icon, no og:image in an accepted image format). ` +
+    'Retrying this domain will keep finding nothing. Pass a direct image URL for the logo if you have one, or set an emoji icon instead with patchPage { op: "setIcon", icon: "<emoji>" }.',
 }
 
 export function createFetchSiteIconTool(deps: FetchSiteIconDeps): Tool {
@@ -77,7 +89,8 @@ export function createFetchSiteIconTool(deps: FetchSiteIconDeps): Tool {
     async execute(input, context) {
       const result = await fetchSiteIconImage(input.url, deps.fetchFn, deps.validate)
       if (!result.ok) {
-        return { data: ERROR_HINTS[result.error] ?? ERROR_HINTS.fetch_failed, isError: true }
+        const hint = ERROR_HINTS[result.error] ?? ERROR_HINTS.fetch_failed
+        return { data: hint(input.url), isError: true }
       }
 
       let host = 'site'
@@ -101,8 +114,13 @@ export function createFetchSiteIconTool(deps: FetchSiteIconDeps): Tool {
         },
       )
       if (!stored.ok) {
+        // The bytes are in hand but the workspace-files write refused. Reuse
+        // the files vocabulary rather than dumping `error.kind` at the model.
         return {
-          data: `Fetched the icon but could not store it: ${stored.error.kind}. Fall back to an emoji via patchPage setIcon.`,
+          data:
+            `The icon was fetched from ${result.sourceUrl}, but storing it as a workspace file failed, so no icon token was produced and no page was changed. ` +
+            `${workspaceFilesErrorMessage(stored.error)} ` +
+            'Re-running fetchSiteIcon hits the same storage failure. Set an emoji icon instead with patchPage { op: "setIcon", icon: "<emoji>" }, and tell the user the real logo could not be saved.',
           isError: true,
         }
       }

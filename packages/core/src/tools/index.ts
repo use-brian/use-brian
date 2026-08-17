@@ -18,6 +18,14 @@ export type {
   GoogleMapsErrorCode,
 } from './base/google-maps.js'
 export {
+  describeToolFailure,
+  isTransientToolError,
+  notFoundFailure,
+  notFoundMessage,
+  toolFailure,
+} from './tool-failure.js'
+export type { NotFoundContext, ToolFailureContext } from './tool-failure.js'
+export {
   MAILBOX_DISABLED_MARKERS,
   MAILBOX_UNREACHABLE_CODES,
   classifyMailboxAuthFailure,

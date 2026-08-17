@@ -28,6 +28,7 @@
 import { z } from 'zod'
 import { buildTool, type Tool } from '../tools/types.js'
 import { tolerantBoolean } from '../tools/schema-tolerance.js'
+import { notFoundMessage } from '../tools/tool-failure.js'
 import {
   validateRulePredicate,
   type TaskLane,
@@ -90,7 +91,10 @@ function workspaceGate(
 ): { data: string; isError: true } | null {
   if (!workspaceId) {
     return {
-      data: 'Task guardrails require a workspace. This assistant is not bound to one.',
+      data:
+        'Task guardrails require a workspace, and this assistant is not bound to one — rejections and task rules are stored per workspace, so there is no place to write or read them from here. ' +
+        'Nothing was changed. Ask the user to move this assistant into a workspace in Studio, or continue from a workspace-scoped chat. ' +
+        'Retrying from this session will keep failing, whatever the arguments.',
       isError: true,
     }
   }
@@ -185,7 +189,16 @@ export function createTaskGuardrailTools(
         reason: input.reason,
       })
       if (!result) {
-        return { data: `No live task found with id ${input.id}.`, isError: true }
+        return {
+          data: notFoundMessage({
+            kind: 'Task',
+            id: input.id,
+            supersession: true,
+            extra: 'It may also already be deleted, or be above this assistant\'s clearance. Nothing was rejected and no tombstone was written.',
+            discoveryTool: 'listTasks (or getTask)',
+          }),
+          isError: true,
+        }
       }
 
       opts?.onEvent?.(
@@ -238,7 +251,12 @@ export function createTaskGuardrailTools(
 
       const predicate = input.when as TaskRulePredicate
       const invalid = validateRulePredicate(input.effect, predicate)
-      if (invalid) return { data: invalid, isError: true }
+      if (invalid) {
+        return {
+          data: `${invalid} No rule was saved. Fix the \`when\` predicate the message names and retry — the same predicate will be rejected the same way.`,
+          isError: true,
+        }
+      }
 
       const rule = await store.createRule({
         workspaceId: context.workspaceId!,
@@ -315,7 +333,16 @@ export function createTaskGuardrailTools(
       })
       return deleted
         ? { data: `Deleted task rule [${input.id}].` }
-        : { data: `No task rule found with id ${input.id}.`, isError: true }
+        : {
+            data: notFoundMessage({
+              kind: 'Task rule',
+              id: input.id,
+              extra: 'Rule ids are stable (a rule is never superseded, only created or deleted), so this one was either already deleted or belongs to another workspace. Nothing was changed.',
+              discoveryTool: 'listTaskRules',
+              idSource: 'a listTaskRules result — never a rule\'s wording',
+            }),
+            isError: true,
+          }
     },
   })
 

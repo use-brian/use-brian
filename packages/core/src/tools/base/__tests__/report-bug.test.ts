@@ -48,4 +48,18 @@ describe('[COMP:tools/report-bug] createReportBugTool', () => {
     })
     expect(res.data).toContain('abcdef12')
   })
+
+  it('a store failure says NOTHING was recorded, so the user is never told it was received', async () => {
+    const create = vi.fn().mockRejectedValue(new Error('bug_reports insert rejected'))
+    const tool = createReportBugTool({ create } as unknown as BugReportStore)
+    const res = await tool.execute({ title: 'Login broken', severity: 'high' }, ctx)
+
+    expect(res.isError).toBe(true)
+    const data = String(res.data)
+    expect(data).toContain('Login broken')
+    expect(data).toContain('bug_reports insert rejected')
+    expect(data).toMatch(/NOTHING was recorded/)
+    expect(data).toMatch(/do not tell the user their report was received/i)
+    expect(data).toMatch(/support/i)
+  })
 })

@@ -593,15 +593,31 @@ function buildWriteFieldTool(
       const field =
         spec.fields.find((f) => f.key === needle) ??
         spec.fields.find((f) => f.key === needle.toLowerCase())
+      // Message-first failure copy (docs/architecture/engine/tool-executor.md →
+      // "Failure copy"). The record is the deliverable of a bounded run, so a
+      // rejected write has to say plainly that the field is NOT on the record,
+      // name the keys that exist, and close the retry loop — a fill that keeps
+      // re-sending a key the contract does not have burns its whole budget.
       if (!field) {
         return {
-          data: { error: `No field "${input.key}". Valid keys: ${spec.fields.map((f) => f.key).join(', ')}` },
+          data:
+            `writeField did not save "${input.key}": this blueprint's contract has no such field, and the record ` +
+            'cannot be widened beyond its contract. Nothing was written for that key. Valid keys: ' +
+            `${spec.fields.map((f) => `${f.key} (${f.type}${f.required ? ', required' : ''})`).join(', ')}. ` +
+            'Re-send the value under the closest key above, or drop it. Do NOT retry this exact key.',
           isError: true,
         }
       }
       const validated = validateFieldValue(field, input.value)
       if (!validated.ok) {
-        return { data: { error: validated.error }, isError: true }
+        return {
+          data:
+            `writeField did not save field "${field.key}": ${validated.error.replace(/\.$/, '')}. Nothing was written for that key, and ` +
+            `the field is still ${written.has(field.key) ? 'set to its previous value' : 'empty'}. ` +
+            `Re-send "${field.key}" shaped as a ${field.type}${field.type === 'enum' && field.options ? ` (one of: ${field.options.join(', ')})` : ''}. ` +
+            'The same value will be rejected the same way.',
+          isError: true,
+        }
       }
       written.set(field.key, validated.value)
       // Resolve the moments this text cites into typed pointers. Keyed even when

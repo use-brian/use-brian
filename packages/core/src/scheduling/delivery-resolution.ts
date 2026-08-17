@@ -156,27 +156,84 @@ export function resolveDeliveryChannel(
 }
 
 /**
+ * Result of resolving a job's doc-page link. `viewId` is the link that was
+ * actually stored (`null` = unlinked); `warning` is present ONLY when a
+ * candidate id was supplied and then DROPPED.
+ *
+ * The drop is the point. Linking is deliberately non-fatal — a bad page id
+ * must never fail an otherwise-valid schedule — but silently discarding an id
+ * the model explicitly asked for turns a partial success into an invisible
+ * one: the tool answers `{ ok: true, targetViewId: null }`, the model tells
+ * the user "scheduled, and it will update your page", and nothing ever
+ * touches that page. Worse, when the delivery channel resolves to `web` the
+ * dropped link is what makes the job unschedulable at all, and the caller
+ * then reports the *channel* as the problem ("connect a messaging channel"),
+ * naming a cause that has nothing to do with the actual failure.
+ *
+ * `warning` carries the standard failure shape (what was dropped, why, the
+ * next step, whether the same id can ever work) so the caller can surface it
+ * on the SUCCESS payload. See docs/architecture/engine/tool-executor.md →
+ * "Failure copy".
+ */
+export type TargetViewResolution = {
+  viewId: string | null
+  warning?: string
+}
+
+/**
  * Resolve the doc page a job should be linked to (migration 229). When a
  * `resolveViewWorkspace` validator is wired, the candidate is kept only if it
  * resolves to a page in the *same* workspace as the scheduling context —
  * otherwise it's dropped to `null` (never fail the job over a bad page id).
  * Without a validator the candidate is trusted (the FK still protects
  * integrity).
+ *
+ * Returns the drop REASON alongside the id — see `TargetViewResolution`.
+ * `resolveTargetView` is the id-only wrapper kept for call sites that have
+ * nowhere to surface a warning.
  */
+export async function resolveTargetViewDetailed(
+  resolver: ViewWorkspaceResolver | undefined,
+  candidate: string | null | undefined,
+  ctx: { userId: string; workspaceId?: string | null },
+): Promise<TargetViewResolution> {
+  if (!candidate) return { viewId: null }
+  if (!resolver) return { viewId: candidate }
+  let viewWorkspace: string | null
+  try {
+    viewWorkspace = await resolver({ userId: ctx.userId, viewId: candidate })
+  } catch (err) {
+    // The lookup itself broke — distinct from "no such page". Degrading both
+    // to the same silent null is what makes an infrastructure failure read as
+    // a bad id (and vice versa), so say which one happened.
+    console.warn('[scheduling/resolveTargetView] failed:', err)
+    return {
+      viewId: null,
+      warning: `Could not verify the doc page \`${candidate}\` (the page lookup itself failed), so this schedule was saved WITHOUT a page link and will not update that page. The schedule itself is live. This is transient: retry the page link once with the same id; if it fails again, tell the user the page could not be linked.`,
+    }
+  }
+  if (viewWorkspace && viewWorkspace === ctx.workspaceId) return { viewId: candidate }
+  if (!ctx.workspaceId) {
+    return {
+      viewId: null,
+      warning: `The doc page \`${candidate}\` was NOT linked to this schedule: this session has no workspace context, so a page link cannot be verified or stored. The schedule itself is live but will not update that page. Schedule from inside the workspace that owns the page; re-sending this same id from here will drop it again.`,
+    }
+  }
+  return {
+    viewId: null,
+    warning: viewWorkspace
+      ? `The doc page \`${candidate}\` was NOT linked to this schedule: it lives in a different workspace than the one this schedule was created in, and a job can only maintain a page in its own workspace. The schedule itself is live but will not update that page. Pick a page in this workspace (\`findPage\` with the title, or \`listPages\`) and set targetViewId to that id; re-sending this same id will drop it again.`
+      : `The doc page \`${candidate}\` was NOT linked to this schedule: no page with that id is visible here — it may have been deleted, superseded (every page edit can mint a new id), or be above this assistant's clearance. The schedule itself is live but will not update that page. Get a current page id from \`findPage\` (by title) or \`listPages\` and set targetViewId to that; re-sending this same id will drop it again.`,
+  }
+}
+
+/** Id-only form of {@link resolveTargetViewDetailed}. */
 export async function resolveTargetView(
   resolver: ViewWorkspaceResolver | undefined,
   candidate: string | null | undefined,
   ctx: { userId: string; workspaceId?: string | null },
 ): Promise<string | null> {
-  if (!candidate) return null
-  if (!resolver) return candidate
-  try {
-    const viewWorkspace = await resolver({ userId: ctx.userId, viewId: candidate })
-    if (viewWorkspace && viewWorkspace === ctx.workspaceId) return candidate
-  } catch (err) {
-    console.warn('[scheduling/resolveTargetView] failed:', err)
-  }
-  return null
+  return (await resolveTargetViewDetailed(resolver, candidate, ctx)).viewId
 }
 
 /**

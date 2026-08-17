@@ -34,7 +34,7 @@ import {
 } from '@use-brian/core'
 import type { PendingApprovalsStore } from '../db/pending-approvals-store.js'
 import { bandOf } from './banding.js'
-import { createAgentWriteTools, type AgentWriteToolDeps } from './write-tools.js'
+import { createAgentWriteTools, workspaceGateFailure, type AgentWriteToolDeps } from './write-tools.js'
 
 /** BRIDGE candidates pulled from the boot allTools map, by name. */
 const BRIDGE_READ_NAMES = [
@@ -146,8 +146,12 @@ function wrapApproveBand(
     isConcurrencySafe: false,
     requiresCapability: tool.requiresCapability ?? CONFIGURE_CAPABILITY,
     async execute(input, ctx) {
+      // Same canonical gate copy as the unwrapped tool (`write-tools.ts`) —
+      // the wrapper is reached FIRST for an Approve-band write, so a divergent
+      // sentence here would be the only one the model ever sees for those
+      // tools. Nothing is staged, which is what `stage` names.
       if (!ctx.workspaceId) {
-        return { data: 'No workspace bound to this surface.', isError: true }
+        return workspaceGateFailure(tool.name, 'stage this call against')
       }
       const origin = deps.resolveOrigin(ctx)
       const approverUserId = await deps.resolveApprover(ctx)

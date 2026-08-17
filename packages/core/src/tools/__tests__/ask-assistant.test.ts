@@ -151,7 +151,7 @@ describe('[COMP:tools/ask-assistant] Inter-assistant tools', () => {
   })
 
   describe('askAssistant', () => {
-    it('rejects when not following the target', async () => {
+    it('rejects an unknown target with the id, the discovery tool, and a no-retry verdict', async () => {
       const deps = makeDeps({
         isFollowing: vi.fn().mockResolvedValue(false),
       })
@@ -159,7 +159,25 @@ describe('[COMP:tools/ask-assistant] Inter-assistant tools', () => {
       const ask = tools.find((t) => t.name === 'askAssistant')!
       const result = await ask.execute({ targetAssistantId: 'a_other', question: 'hi' }, ctx)
       expect(result.isError).toBe(true)
-      expect(result.data).toMatch(/Not connected/i)
+      const data = String(result.data)
+      expect(data).toMatch(/Not connected/i)
+      expect(data).toContain('a_other')
+      expect(data).toContain('listConnectedAssistants')
+      expect(data).toMatch(/Do NOT retry/i)
+    })
+
+    it('gives the same account whichever pre-check catches the unknown target', async () => {
+      const ask = (deps: InterAssistantDeps) =>
+        createInterAssistantTools(deps).find((t) => t.name === 'askAssistant')!
+
+      const notFollowing = await ask(makeDeps({ isFollowing: vi.fn().mockResolvedValue(false) }))
+        .execute({ targetAssistantId: 'a_other', question: 'hi' }, ctx)
+      // isFollowing says yes but the connections list has no such row.
+      const notInList = await ask(makeDeps({ getFollowing: vi.fn().mockResolvedValue([]) }))
+        .execute({ targetAssistantId: 'a_other', question: 'hi' }, ctx)
+
+      expect(notInList.isError).toBe(true)
+      expect(String(notInList.data)).toBe(String(notFollowing.data))
     })
 
     it('builds a free-mode ConsultRequest and returns the agent text on completed', async () => {
@@ -220,7 +238,70 @@ describe('[COMP:tools/ask-assistant] Inter-assistant tools', () => {
       const ask = tools.find((t) => t.name === 'askAssistant')!
       const result = await ask.execute({ targetAssistantId: 'a_target', question: 'q' }, ctx)
       expect(result.isError).toBe(true)
-      expect(result.data).toMatch(/Cross-workspace/i)
+      const data = String(result.data)
+      expect(data).toMatch(/Cross-workspace/i)          // the callee's own words
+      expect(data).toContain('a_target')                // echoes the target id
+      expect(data).toMatch(/The connection is fine/i)   // NOT an unknown-target failure
+      expect(data).toMatch(/fail the same way/i)        // its own verdict
+      expect(data).not.toMatch(/Not connected/i)
+    })
+
+    it('a transport failure reads differently from an unknown target', async () => {
+      const deps = makeDeps({
+        getFollowing: vi.fn().mockResolvedValue([
+          {
+            followingAssistantId: 'a_target',
+            followingWorkspaceId: 'ws_caller',
+            followingAssistantName: 'Target',
+            followingOwnerHandle: 'target',
+          },
+        ]),
+        consultTransport: {
+          send: vi.fn().mockRejectedValue(new Error('consult transport unavailable')),
+        },
+      })
+      const ask = createInterAssistantTools(deps).find((t) => t.name === 'askAssistant')!
+      const result = await ask.execute({ targetAssistantId: 'a_target', question: 'q' }, ctx)
+
+      expect(result.isError).toBe(true)
+      const data = String(result.data)
+      expect(data).toContain('a_target')
+      expect(data).toContain('consult transport unavailable')
+      expect(data).toMatch(/failed in transit/i)
+      expect(data).toMatch(/not a wrong target id/i)
+      expect(data).toMatch(/Retry once/i)
+      expect(data).not.toMatch(/Not connected/i)
+    })
+
+    it('a timeout is not offered as a retry', async () => {
+      const deps = makeDeps({
+        getFollowing: vi.fn().mockResolvedValue([
+          {
+            followingAssistantId: 'a_target',
+            followingWorkspaceId: 'ws_caller',
+            followingAssistantName: 'Target',
+            followingOwnerHandle: 'target',
+          },
+        ]),
+        consultTransport: { send: vi.fn().mockRejectedValue(new Error('Tool timed out after 60000ms')) },
+      })
+      const ask = createInterAssistantTools(deps).find((t) => t.name === 'askAssistant')!
+      const result = await ask.execute({ targetAssistantId: 'a_target', question: 'q' }, ctx)
+
+      expect(String(result.data)).toMatch(/timed out before it answered/i)
+      expect(String(result.data)).toMatch(/Do not repeat a long-running ask/i)
+    })
+
+    it('a failed listing is never reported as "no connections"', async () => {
+      const deps = makeDeps({ getFollowing: vi.fn().mockRejectedValue(new Error('ECONNRESET')) })
+      const list = createInterAssistantTools(deps).find((t) => t.name === 'listConnectedAssistants')!
+      const result = await list.execute({}, ctx)
+
+      expect(result.isError).toBe(true)
+      const data = String(result.data)
+      expect(data).toContain('listConnectedAssistants')
+      expect(data).toMatch(/unknown, not empty/i)
+      expect(data).toMatch(/do not guess an id/i)
     })
   })
 })

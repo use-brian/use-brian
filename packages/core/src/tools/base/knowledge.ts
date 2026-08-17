@@ -16,7 +16,12 @@
 
 import { z } from 'zod'
 import { buildTool, type Tool, type ToolContext } from '../types.js'
-import type { KnowledgeStoreInterface, KnowledgeRepoWriter } from '../../knowledge/types.js'
+import { notFoundMessage, toolFailure } from '../tool-failure.js'
+import type {
+  KnowledgeStoreInterface,
+  KnowledgeRepoWriter,
+  KnowledgeRepoWriteResult,
+} from '../../knowledge/types.js'
 import { unifiedDiffLines } from '../../knowledge/text-diff.js'
 import { RANK, researchWriteFloor, type Sensitivity } from '../../security/sensitivity.js'
 import { unionCompartments } from '../../security/compartments.js'
@@ -53,6 +58,45 @@ const NO_WORKSPACE_KB =
 
 const EXPLICIT_ASK_RULE =
   'Only use this when the user has explicitly asked, in this conversation, to change the knowledge base — never proactively.'
+
+/**
+ * Retry verdict per repo-write rejection reason.
+ *
+ * `KnowledgeRepoWriteResult` carries a machine-readable `reason` next to its
+ * `message`, and both write tools threw the `reason` away and relayed the
+ * message alone. The messages are written for a human reading a diff, so the
+ * model could not tell "the repo moved under you, re-read and try again"
+ * (recoverable in one turn) from "GitHub refused the push" (never
+ * recoverable) — and it retried both, repeatedly, on the same content.
+ * See docs/architecture/features/knowledge-base.md → "Assistant direct edits".
+ */
+const REPO_WRITE_VERDICT: Record<KnowledgeRepoWriteReason, string> = {
+  error:
+    'This is a transient failure (network, or a source-side 5xx); nothing was committed. Retry once — if it fails again, tell the user rather than looping.',
+  stale_entry:
+    'The entry changed since it was read; re-read it after the next sync (or via readKnowledgeEntry) and retry once with current content.',
+  push_denied:
+    'The source repository refused the push (permissions / branch protection); never retry — tell the user.',
+  not_writable:
+    'This source is read-only for this workspace (its stored token has no push access), so no retry can succeed. Tell the user, and offer the content in chat instead.',
+  no_credentials:
+    'The source has no working token, so nothing can be committed and no retry will change that. Tell the user to reconnect the knowledge source in Studio → Knowledge.',
+  source_missing:
+    'The entry\'s source row is gone or malformed, so there is nowhere to write. Do not retry; tell the user the knowledge source needs to be reconnected.',
+  file_missing:
+    'No file in the source resolves to that entry path, so there is nothing to update. Do NOT retry this id — re-resolve the entry with searchKnowledge / readKnowledgeEntry, or create it with addKnowledgeEntry.',
+  file_exists:
+    'A file already exists at that path, so this create cannot proceed. Do NOT retry the same path — update the existing entry with updateKnowledgeEntry, or choose a different path.',
+}
+
+type KnowledgeRepoWriteFailure = Extract<KnowledgeRepoWriteResult, { ok: false }>
+type KnowledgeRepoWriteReason = KnowledgeRepoWriteFailure['reason']
+
+/** The writer's own message plus the verdict its `reason` implies. */
+function repoWriteFailure(result: KnowledgeRepoWriteFailure): { data: string; isError: true } {
+  const verdict = REPO_WRITE_VERDICT[result.reason] ?? REPO_WRITE_VERDICT.error
+  return { data: `${result.message} (${result.reason}) ${verdict}`, isError: true }
+}
 
 /** One-line YAML scalar (JSON string quoting is valid YAML). */
 function yamlString(value: string): string {
@@ -139,7 +183,11 @@ export function createKnowledgeTools(
           })),
         }
       } catch (err) {
-        return { data: `Knowledge search error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return toolFailure(err, {
+          tool: 'searchKnowledge',
+          target: `query "${input.query}"`,
+          next: 'This is a failed search, NOT an empty knowledge base — do not tell the user nothing was found.',
+        })
       }
     },
   })
@@ -184,7 +232,11 @@ export function createKnowledgeTools(
           })),
         }
       } catch (err) {
-        return { data: `Browse error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return toolFailure(err, {
+          tool: 'browseKnowledge',
+          target: input.path ? `path "${input.path}"` : 'the top level',
+          next: 'This is a failed listing, NOT an empty knowledge base — do not tell the user there are no entries.',
+        })
       }
     },
   })
@@ -217,7 +269,16 @@ export function createKnowledgeTools(
           input.id,
         )
         if (!entry) {
-          return { data: `Knowledge entry "${input.id}" not found.`, isError: true }
+          return {
+            data: notFoundMessage({
+              kind: 'Knowledge entry',
+              id: `"${input.id}"`,
+              discoveryTool: 'searchKnowledge or browseKnowledge',
+              extra: 'It may also sit above your clearance, which reads the same as absent.',
+              idSource: 'searchKnowledge / browseKnowledge results and are full UUIDs, never a path or a title',
+            }),
+            isError: true,
+          }
         }
         context.sensitivity?.note(entry.sensitivity)
         return {
@@ -231,7 +292,11 @@ export function createKnowledgeTools(
           },
         }
       } catch (err) {
-        return { data: `Read error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return toolFailure(err, {
+          tool: 'readKnowledgeEntry',
+          target: `entry "${input.id}"`,
+          next: 'The entry may well exist — this is a read failure, not a missing entry.',
+        })
       }
     },
   })
@@ -256,13 +321,25 @@ export function createKnowledgeTools(
     requestedRepo: string | undefined,
   ): NonNullable<KnowledgeToolOptions['writableSources']>[number] | string {
     const writable = opts?.writableSources ?? []
-    if (writable.length === 0) return 'No writable knowledge source is available.'
+    if (writable.length === 0) {
+      return (
+        'No writable knowledge source is available: every connected source is read-only from here, so there is nowhere to commit this entry. ' +
+        'No argument change or retry will fix that. Tell the user the knowledge base cannot be written to from this assistant, and offer the content in chat instead.'
+      )
+    }
     if (requestedRepo) {
       const found = writable.find((s) => s.repo === requestedRepo.trim())
-      return found ?? `"${requestedRepo}" is not a writable knowledge source. Writable: ${writable.map((s) => s.repo).join(', ')}.`
+      return (
+        found ??
+        `"${requestedRepo}" is not a writable knowledge source. Writable: ${writable.map((s) => s.repo).join(', ')}. ` +
+          `Retry with "repo" set to one of those exact values; retrying "${requestedRepo}" will fail the same way.`
+      )
     }
     if (writable.length > 1) {
-      return `Multiple knowledge sources are writable — pass "repo" to choose one of: ${writable.map((s) => s.repo).join(', ')}.`
+      return (
+        `Multiple knowledge sources are writable — pass "repo" to choose one of: ${writable.map((s) => s.repo).join(', ')}. ` +
+        'Nothing was written. Retry the same call with "repo" set, or ask the user which source the entry belongs in; the call cannot succeed without it.'
+      )
     }
     return writable[0]
   }
@@ -335,7 +412,11 @@ export function createKnowledgeTools(
         // edits"); its absence here is a normal, explainable state.
         if (!opts.repoWriter || (opts.writableSources ?? []).length === 0) {
           return {
-            data: 'No writable knowledge source is available on this surface. GitHub sources require a read-write token; local sources require filesystem write-back to be enabled.',
+            data:
+              'No writable knowledge source is available on this surface, so the entry was not created. ' +
+              'GitHub sources require a read-write token; local sources require filesystem write-back to be enabled. ' +
+              'This is a workspace setup gap, not an argument problem: no retry will change it. ' +
+              'Tell the user the knowledge base is read-only here and that a read-write source must be connected in Studio → Knowledge, and offer the content in chat instead.',
             isError: true,
           }
         }
@@ -358,7 +439,7 @@ export function createKnowledgeTools(
           requestedBy: { userId: context.userId, label: opts.requesterLabel ?? null },
         })
         if (!result.ok) {
-          return { data: result.message, isError: true }
+          return repoWriteFailure(result)
         }
         return {
           data: {
@@ -392,7 +473,12 @@ export function createKnowledgeTools(
         })
         return { data: { id: entry.id, path: entry.path, sensitivity: stamp, message: 'Knowledge entry created.' } }
       } catch (err) {
-        return { data: `Create error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return toolFailure(err, {
+          tool: 'addKnowledgeEntry',
+          target: `path "${input.path}"`,
+          mutating: true,
+          next: 'The entry does not exist, so do not tell the user it was saved.',
+        })
       }
     },
   })
@@ -460,10 +546,27 @@ export function createKnowledgeTools(
       try {
         entry = await readEntry(context, input.id)
       } catch (err) {
-        return { data: `Read error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        // NOT `mutating` — this catch fires on the pre-read, strictly before
+        // any write, so the transient branch's "the write may or may not have
+        // been applied, read it back" would be a false statement.
+        return toolFailure(err, {
+          tool: 'updateKnowledgeEntry',
+          target: `entry "${input.id}"`,
+          next:
+            'Nothing was written: it never got as far as the write. The entry may well exist — this is a read failure, not a missing entry.',
+        })
       }
       if (!entry) {
-        return { data: `Knowledge entry "${input.id}" not found.`, isError: true }
+        return {
+            data: notFoundMessage({
+              kind: 'Knowledge entry',
+              id: `"${input.id}"`,
+              discoveryTool: 'searchKnowledge or browseKnowledge',
+              extra: 'It may also sit above your clearance, which reads the same as absent.',
+              idSource: 'searchKnowledge / browseKnowledge results and are full UUIDs, never a path or a title',
+            }),
+            isError: true,
+          }
       }
 
       // No-laundering guard: an update never reclassifies the entry
@@ -485,7 +588,10 @@ export function createKnowledgeTools(
         // Repo-synced entry — direct commit through the write-back port.
         if (!opts?.repoWriter) {
           return {
-            data: 'This source-backed entry cannot be edited from here because source write-back is unavailable on this surface.',
+            data:
+              'This source-backed entry cannot be edited from here because source write-back is unavailable on this surface, so nothing was changed. ' +
+              'Repo-synced entries are edited by committing to their source, which needs a read-write connection this surface does not have. ' +
+              'No retry and no argument change will help. Tell the user the entry must be edited in its source repository, or hand them the revised text.',
             isError: true,
           }
         }
@@ -497,7 +603,7 @@ export function createKnowledgeTools(
           requestedBy: { userId: context.userId, label: opts.requesterLabel ?? null },
         })
         if (!result.ok) {
-          return { data: result.message, isError: true }
+          return repoWriteFailure(result)
         }
         return {
           data: {
@@ -517,11 +623,25 @@ export function createKnowledgeTools(
       try {
         const updated = await store.updateManualEntryContent(context.workspaceId, entry.id, input.content)
         if (!updated) {
-          return { data: `Knowledge entry "${input.id}" not found.`, isError: true }
+          return {
+            data: notFoundMessage({
+              kind: 'Knowledge entry',
+              id: `"${input.id}"`,
+              discoveryTool: 'searchKnowledge or browseKnowledge',
+              extra: 'It may also sit above your clearance, which reads the same as absent.',
+              idSource: 'searchKnowledge / browseKnowledge results and are full UUIDs, never a path or a title',
+            }),
+            isError: true,
+          }
         }
         return { data: { id: updated.id, path: updated.path, message: 'Knowledge entry updated.' } }
       } catch (err) {
-        return { data: `Update error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return toolFailure(err, {
+          tool: 'updateKnowledgeEntry',
+          target: `entry "${input.id}"`,
+          mutating: true,
+          next: 'The entry still holds its previous body, so do not tell the user the change was saved.',
+        })
       }
     },
   })

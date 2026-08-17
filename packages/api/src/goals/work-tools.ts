@@ -16,7 +16,7 @@
  * [COMP:goals/work-tools]
  */
 import { z } from 'zod'
-import { buildTool, EventSubscriptionSchema, type GoalClarityAssessor, type GoalRecord, type GoalVerifier, type Tool } from '@use-brian/core'
+import { buildTool, EventSubscriptionSchema, notFoundFailure, type GoalClarityAssessor, type GoalRecord, type GoalVerifier, type Tool } from '@use-brian/core'
 import { getGoalByIdSystem, setGoalAwaitingEventSystem, stampGoalCompletionSystem, updateGoalSystem } from '../db/goals.js'
 
 export type GoalWorkToolsDeps = {
@@ -44,9 +44,34 @@ export type GoalWorkToolsDeps = {
 
 function workspaceGate(workspaceId: string | null | undefined): { data: string; isError: true } | null {
   if (!workspaceId) {
-    return { data: 'Goals require a workspace. Switch to a workspace-scoped chat.', isError: true }
+    return {
+      data:
+        'Goals require a workspace, and this conversation is not bound to one, so no goal was read or changed. ' +
+        'Switch to a workspace-scoped chat (or ask the user to open this assistant inside a workspace) and run the goal tools there. ' +
+        'Retrying on this surface will fail the same way.',
+      isError: true,
+    }
   }
   return null
+}
+
+/**
+ * Goal-id miss — the D6 discovery-pointer shape.
+ *
+ * Unlike tasks / CRM rows / brain entries, a goal id is NEVER superseded:
+ * `updateGoalSystem` is an in-place `UPDATE … RETURNING`, so an edit hands
+ * back the SAME id. That matters for the model's next move — there is no
+ * "newer id from my last write" to reach for, so the only repair is to
+ * re-list. `caveat` carries the per-call-site consequence (what did not
+ * happen), which is the half a bare "Goal not found." always dropped.
+ */
+function goalNotFound(goalId: string, caveat: string): { data: string; isError: true } {
+  return notFoundFailure({
+    kind: 'Goal',
+    id: goalId,
+    discoveryTool: 'listGoals (pass include_terminal: true to also see done/abandoned goals)',
+    extra: `${caveat} The goal was never created, or it has since been deleted. Goal ids are stable — editing a goal updates it in place and never mints a new id — so a superseded id is not the explanation here.`,
+  })
 }
 
 export function createGoalWorkTools(
@@ -69,7 +94,7 @@ export function createGoalWorkTools(
       // refinement, or the current one) plus the triage brief when present.
       if (deps.assessClarity) {
         const existing = await getGoalByIdSystem(input.goal_id)
-        if (!existing) return { data: 'Goal not found.', isError: true }
+        if (!existing) return goalNotFound(input.goal_id, 'Nothing was confirmed.')
         const outcome = input.outcome?.trim() || existing.outcome
         const verdict = await deps.assessClarity({
           outcome,
@@ -80,14 +105,15 @@ export function createGoalWorkTools(
         if (!verdict.clear) {
           return {
             data:
-              `This goal isn't clear enough to work autonomously yet. ${verdict.clarifyingQuestion} ` +
-              `Refine the outcome with the user, then call confirmGoal again with a clearer outcome.`,
+              `Goal ${input.goal_id} was NOT confirmed: its outcome is not concrete enough for an agent to recognise as done. ${verdict.clarifyingQuestion} ` +
+              `Ask the user that question, then call confirmGoal again with a sharper \`outcome\`. ` +
+              `Re-sending the same outcome will be rejected the same way.`,
             isError: true,
           }
         }
       }
       const goal = await updateGoalSystem(input.goal_id, { confirm: true, outcome: input.outcome })
-      if (!goal) return { data: 'Goal not found.', isError: true }
+      if (!goal) return goalNotFound(input.goal_id, 'The goal was not confirmed and its outcome was not changed.')
       return {
         data: `Confirmed goal [${goal.id}]: ${goal.outcome}. Spin it up with workTask to have me work the task to done.`,
       }
@@ -111,20 +137,26 @@ export function createGoalWorkTools(
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
       const goal = await getGoalByIdSystem(input.goal_id)
-      if (!goal) return { data: 'Goal not found.', isError: true }
+      if (!goal) return goalNotFound(input.goal_id, 'No work was started.')
       if (!goal.confirmedAt) {
         // Do NOT start autonomous work on an unconfirmed goal — clarify with the
         // user first (autopilot enforcement).
         return {
           data:
-            `This task's goal is not confirmed yet, so I won't start working it autonomously. ` +
-            `Clarify with the user: confirm the outcome "${goal.outcome}" is what they want (call confirmGoal), then workTask.`,
+            `Goal ${goal.id} is still a DRAFT (never confirmed), so autonomous work on it was refused and nothing was started. ` +
+            `Check with the user that the outcome "${goal.outcome}" is what they want, call confirmGoal with this goal id, then call workTask again. ` +
+            `Calling workTask again before confirmGoal will be refused the same way.`,
           isError: true,
         }
       }
       const workflowId = input.workflow_id ?? (await deps.createCompletionWorkflow(goal, context.userId))
       const updated = await updateGoalSystem(input.goal_id, { means: { ...goal.means, workflowId } })
-      if (!updated) return { data: 'Goal not found.', isError: true }
+      if (!updated) {
+        return goalNotFound(
+          input.goal_id,
+          `The goal disappeared between being read and being armed, so no work was started${input.workflow_id ? '' : ` (workflow ${workflowId} was created for it and is now unused)`}.`,
+        )
+      }
       await deps.kickoffGoal(updated.id)
       return { data: `Working the task via goal [${updated.id}] — I'll keep running the workflow until it's done.` }
     },
@@ -157,12 +189,16 @@ export function createGoalWorkTools(
         // No verifier wired → cannot verify → do NOT stamp (fail-safe: a goal
         // reaches done only via a verifier pass).
         return {
-          data: 'Completion verification is unavailable here; keep working toward the outcome.',
+          data:
+            `Goal ${input.goal_id} was NOT marked complete: this deployment has no completion verifier wired (the verifier needs a configured model provider — a keyless self-host has none), ` +
+            `and a goal may only close on a verifier PASS, so the tool refuses to stamp rather than close it unchecked. ` +
+            `Nothing was saved. Keep working toward the outcome, or tell the user the goal has to be closed by hand from the goals board (Studio → Goals). ` +
+            `Calling markGoalComplete again on this deployment will fail the same way.`,
           isError: true,
         }
       }
       const goal = await getGoalByIdSystem(input.goal_id)
-      if (!goal) return { data: 'Goal not found.', isError: true }
+      if (!goal) return goalNotFound(input.goal_id, 'Nothing was verified and nothing was stamped complete.')
       // Gather read-only host evidence so the verifier checks the claim against
       // reality. Best-effort — a failure never blocks the verify path (the
       // gatherer itself fails soft; the `.catch` guards a throwing dep too).
@@ -178,12 +214,26 @@ export function createGoalWorkTools(
       if (!verdict.verified) {
         // Refuted → feed the refutation back; do NOT stamp. The agent continues.
         return {
-          data: `Not verified as complete yet. ${verdict.refutation ?? ''} Keep working, then call markGoalComplete again once that is addressed.`,
+          data:
+            `Goal ${goal.id} was NOT marked complete: the verifier rejected the completion claim against the outcome "${goal.outcome}", so nothing was stamped and the goal stays open. ` +
+            `${verdict.refutation ? `What is still missing: ${verdict.refutation} ` : ''}` +
+            `Do that work, then call markGoalComplete again with a \`because\` that names it. ` +
+            `Re-sending the same \`because\` unchanged will be rejected the same way.`,
           isError: true,
         }
       }
       const stamped = await stampGoalCompletionSystem(input.goal_id, input.because)
-      if (!stamped) return { data: 'Goal not found.', isError: true }
+      if (!stamped) {
+        // The verifier passed but the row vanished mid-call — a genuinely
+        // different outcome from "the id was wrong", so it does not get the
+        // discovery-pointer copy: there is nothing to re-resolve to.
+        return {
+          data:
+            `The verifier ACCEPTED the completion claim, but goal ${input.goal_id} no longer exists, so the verified-done marker could not be written and the goal did not close. ` +
+            `It was deleted while the claim was being verified. Do NOT retry this exact id — call listGoals to see what remains, and tell the user the goal is gone.`,
+          isError: true,
+        }
+      }
       return { data: `Verified complete: ${goal.outcome}. The goal will close.` }
     },
   })
@@ -210,7 +260,7 @@ export function createGoalWorkTools(
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
       const goal = await getGoalByIdSystem(input.goal_id)
-      if (!goal) return { data: 'Goal not found.', isError: true }
+      if (!goal) return goalNotFound(input.goal_id, 'The goal was not parked and no event subscription was written.')
       // Write just the subscriptions; the driver's re-arm overwrites this with
       // `{ subscriptions, state }` so the loop-state handoff survives the wait.
       await setGoalAwaitingEventSystem(input.goal_id, { subscriptions: [input.event] })
