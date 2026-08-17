@@ -253,8 +253,11 @@ async function* streamCompat(
     temperature?: number
     thinkingLevel?: ThinkingLevel
     responseFormat?: 'json'
+    responseSchema?: Record<string, unknown>
     signal?: AbortSignal
   },
+  // Set by the fail-open retry below; suppresses the schema on the second try.
+  omitSchema = false,
 ): AsyncGenerator<StreamChunk> {
   const ccMessages: CCMessage[] = [
     ...(systemPrompt ? [{ role: 'system' as const, content: systemPrompt }] : []),
@@ -275,8 +278,22 @@ async function* streamCompat(
       ? { enable_thinking: options.thinkingLevel === 'high' }
       : {}),
     // JSON mode and tools are mutually exclusive (same rule as Gemini).
+    //
+    // `json_object` guarantees only that the output is *syntactically* JSON;
+    // it does not engage constrained decoding, and a model that stops early
+    // still returns an unclosed object. `json_schema` does constrain the
+    // decoder. Callers that supply a schema were previously ignored here —
+    // `responseSchema` never reached the wire for any openai-compat provider,
+    // so Gemini deployments got constrained extraction and Qwen deployments
+    // silently did not. `strict` is deliberately NOT set: the schemas in this
+    // codebase are Gemini's OpenAPI subset and carry `nullable`, which strict
+    // mode rejects outright.
     ...(cfg.supportsJsonMode && options.responseFormat === 'json' && !tools
-      ? { response_format: { type: 'json_object' } }
+      ? {
+        response_format: options.responseSchema && !omitSchema
+          ? { type: 'json_schema', json_schema: { name: 'response', schema: options.responseSchema } }
+          : { type: 'json_object' },
+      }
       : {}),
   }
 
@@ -289,6 +306,18 @@ async function* streamCompat(
     body: JSON.stringify(body),
     signal: options.signal,
   })
+  // Fail open on a rejected schema. "OpenAI-compatible" is a broad church and
+  // json_schema is one of the first things a smaller endpoint drops; degrading
+  // to json_object costs output quality, whereas propagating the 400 would
+  // break every extraction call on that deployment.
+  if (res.status === 400 && options.responseSchema && !omitSchema) {
+    const detail = (await res.text().catch(() => '')).slice(0, 300)
+    console.warn(
+      `[openai-compat:${cfg.label}] endpoint rejected response_format json_schema; retrying with json_object${detail ? `: ${detail}` : ''}`,
+    )
+    yield* streamCompat(cfg, wireModel, recordedModel, systemPrompt, messages, options, true)
+    return
+  }
   if (!res.ok || !res.body) {
     const detail = (await res.text().catch(() => '')).slice(0, 500)
     const suffix = cfg.includeErrorDetail && detail ? `: ${detail}` : ''
@@ -404,6 +433,7 @@ export function createOpenAICompatProvider(options: OpenAICompatProviderOptions)
         temperature: request.temperature,
         thinkingLevel: request.thinkingLevel,
         responseFormat: request.responseFormat,
+        responseSchema: request.responseSchema,
         signal: request.signal,
       })
     },
