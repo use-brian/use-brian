@@ -1179,6 +1179,39 @@ function deriveReminderInstructions(def: WorkflowDefinition): string {
 }
 
 /** Authoring warnings specific to a schedule trigger's delivery sugar. */
+/** A Slack channel id in prompt prose (`C0…`/`G0…` — real ids carry the `0`). */
+const SLACK_CHANNEL_ID_PROSE = /\b[CG]0[A-Z0-9]{6,}\b/
+/** Compose-a-message phrasing ("Your response IS the Slack message"). The
+ *  singular `message\b` is deliberate — reading contexts say "messages". */
+const MESSAGING_OUTPUT_PHRASE = /\b(?:the|a|your|this)\s+(?:slack|telegram|whatsapp)\s+message\b/i
+
+/**
+ * Messaging output composed with nothing bound to send it — the 2026-08-11
+ * Dev Standup incident class. Steps whose prompts carry Slack mention ids
+ * (`<@U…>`), a channel id in prose, or "the Slack message" phrasing are
+ * message COMPOSERS; if no step in the workflow has a `deliver` binding and
+ * the trigger has no `delivery` sugar, every run completes "green" while
+ * sending nothing, and nothing downstream can tell a lost message from one
+ * never sent. The sibling of the prose-only page-anchor and skill-attachment
+ * lints: channel ids in prompt prose do not deliver.
+ */
+function deliveryIntentWarnings(def: WorkflowDefinition, trigger?: WorkflowTrigger): string[] {
+  const anyDeliver = def.steps.some((s) => s.type === 'assistant_call' && s.deliver !== undefined)
+  if (anyDeliver) return []
+  if (trigger?.kind === 'schedule' && trigger.delivery) return [] // sugar stamps the terminal step at persist
+  const composers = def.steps.filter((s): s is AssistantCallStep =>
+    s.type === 'assistant_call'
+    && (SLACK_MENTION_ID.test(s.prompt)
+      || SLACK_CHANNEL_ID_PROSE.test(s.prompt)
+      || MESSAGING_OUTPUT_PHRASE.test(s.prompt)),
+  )
+  if (composers.length === 0) return []
+  const names = composers.map((s) => `"${s.id}"`).join(', ')
+  return [
+    `Step(s) ${names} compose messaging-channel output (a Slack mention id, channel id, or "the Slack message" phrasing in the prompt), but NO step has a \`deliver\` binding and the trigger has no \`delivery\` — every run will complete without sending anything. Channel ids or send instructions in prompt prose do not deliver. Set \`deliver: { channelType: "slack", channelId: "<C… id>" }\` on each posting step (use \`listSlackChannels\` for real ids), or use \`trigger.delivery\` for a simple reminder.`,
+  ]
+}
+
 function triggerWarnings(def: WorkflowDefinition, trigger?: WorkflowTrigger): string[] {
   const warnings: string[] = []
   if (trigger?.kind !== 'schedule' || !trigger.delivery) return warnings
@@ -1503,6 +1536,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
             ...depIssues.warnings,
             ...skillIssues.warnings,
             ...triggerWarnings(definition, trigger),
+            ...deliveryIntentWarnings(definition, trigger),
             ...reservedOutcomeVarWarnings(definition, trigger),
             // Same non-blocking advisories the REST/web-builder path returns
             // (researchMode fan-out trap; contact research on the default
@@ -1697,6 +1731,10 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
         .describe('Full replacement DAG. Omit to leave the steps unchanged. See proposeWorkflow tool docs for the schema.'),
       enabled: z.boolean().optional().describe('Disable (false) or re-enable (true) the workflow.'),
       trigger: triggerInputSchemaRef.optional(),
+      confirmDeliveryRemoval: z
+        .boolean()
+        .optional()
+        .describe('Required (true) when the replacement definition removes every `deliver` binding the workflow currently has. Only pass it after the user explicitly confirms the workflow should stop delivering to its channel.'),
       targetViewId: z
         .string()
         .uuid()
@@ -1761,6 +1799,37 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
         if (anchorIssues.errors.length > 0 || skillIssues.errors.length > 0) {
           return { data: { ok: false, errors: [...anchorIssues.errors, ...skillIssues.errors] }, isError: true }
         }
+
+        // Deliver-strip guard — the 2026-08-11 Dev Standup incident: a
+        // full-definition rewrite (fan-out restructure) dropped every
+        // `deliver` binding, validation passed (nothing left to validate),
+        // and the workflow ran "green" for days while sending nothing. A
+        // replacement that removes ALL of the workflow's current deliver
+        // bindings is almost never intentional, so it must be confirmed
+        // explicitly rather than slip through as a side effect of an edit.
+        const deliverSteps = (d: WorkflowDefinition) =>
+          d.steps.filter((s): s is AssistantCallStep => s.type === 'assistant_call' && s.deliver !== undefined)
+        const oldDelivers = deliverSteps(existing.definition)
+        const newDelivers = deliverSteps(parsed.data)
+        const sugarStampsDeliver = trigger?.kind === 'schedule' && !!trigger.delivery
+        if (
+          oldDelivers.length > 0
+          && newDelivers.length === 0
+          && !sugarStampsDeliver
+          && !input.confirmDeliveryRemoval
+        ) {
+          const channels = [...new Set(oldDelivers.map((s) => s.deliver!.channelType))].join(', ')
+          return {
+            data: {
+              ok: false,
+              errors: [
+                `This replacement definition removes EVERY \`deliver\` binding the workflow currently has (${oldDelivers.length} step(s) deliver to ${channels} today; the new definition delivers nowhere, and no \`trigger.delivery\` is being set). This is how workflows silently stop sending — runs complete without posting anywhere. If the removal is intentional (the workflow now writes to a page, or delivery moves to a new channel later), confirm with the user and retry with \`confirmDeliveryRemoval: true\`. Otherwise read the current definition with \`getWorkflow\` and copy its \`deliver\` fields onto the posting steps of your edit.`,
+              ],
+            },
+            isError: true,
+          }
+        }
+
         fields.definition = parsed.data
       }
 

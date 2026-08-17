@@ -791,6 +791,79 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     expect(warnings.some((w) => w.includes('`web`') && w.includes('not'))).toBe(true)
   })
 
+  it('proposeWorkflow warns when steps compose messaging output but nothing delivers (deliver-less standup class)', async () => {
+    const { tools } = makeAllTools()
+    // The 2026-08-11 shape: Slack mention ids + a channel id live in prompt
+    // prose, no step has `deliver`, no trigger.delivery — runs go nowhere.
+    const r = await tools.proposeWorkflow.execute({
+      name: 'Standup',
+      definition: {
+        startStepId: 'mention',
+        steps: [
+          {
+            id: 'mention',
+            type: 'assistant_call',
+            target: { assistantId: 'primary' },
+            prompt: 'Output exactly: <@U0TESTAA111>',
+            nextStepId: 'thread',
+          },
+          {
+            id: 'thread',
+            type: 'assistant_call',
+            target: { assistantId: 'primary' },
+            prompt: 'Your response IS the Slack message, verbatim. Post the digest for C0TESTBB222.',
+          },
+        ],
+      },
+    }, makeContext())
+    expect(r.isError).toBeFalsy()
+    const warnings = (r.data as { warnings: string[] }).warnings
+    const hit = warnings.find((w) => w.includes('`deliver` binding'))
+    expect(hit).toBeTruthy()
+    // Both composing steps are named so the model knows where to bind.
+    expect(hit).toContain('"mention"')
+    expect(hit).toContain('"thread"')
+  })
+
+  it('the missing-deliver warning stays quiet when any step delivers or nothing is messaging-shaped', async () => {
+    const { tools } = makeAllTools()
+    // One step delivers → the workflow has a send path; no warning.
+    const delivering = await tools.proposeWorkflow.execute({
+      name: 'Standup',
+      definition: {
+        startStepId: 's',
+        steps: [
+          {
+            id: 's',
+            type: 'assistant_call',
+            target: { assistantId: 'primary' },
+            prompt: 'Output exactly: <@U0TESTAA111>',
+            deliver: { channelType: 'telegram', channelId: '123456' },
+          },
+        ],
+      },
+    }, makeContext())
+    // No messaging signal in any prompt → quiet even with no deliver.
+    const plain = await tools.proposeWorkflow.execute({
+      name: 'Notes',
+      definition: {
+        startStepId: 's',
+        steps: [
+          {
+            id: 's',
+            type: 'assistant_call',
+            target: { assistantId: 'primary' },
+            prompt: 'Summarize yesterday\'s Slack messages into a page draft.',
+          },
+        ],
+      },
+    }, makeContext())
+    for (const r of [delivering, plain]) {
+      const warnings = (r.data as { warnings: string[] }).warnings
+      expect(warnings.some((w) => w.includes('`deliver` binding'))).toBe(false)
+    }
+  })
+
   it('proposeWorkflow warns when a blueprint-bound step\'s tools allow-list strips saveBlueprintRecord', async () => {
     const { tools } = makeAllTools()
     const step = {
@@ -1563,6 +1636,106 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
       makeContext(),
     )
     expect(r.isError).toBe(true)
+  })
+
+  it('updateWorkflow blocks a replacement that strips every deliver binding unless confirmed', async () => {
+    const { tools, stores } = makeAllTools()
+    // Delivering workflow (the pre-2026-08-11 Dev Standup shape).
+    const DELIVERING_DEF: WorkflowDefinition = {
+      startStepId: 'post',
+      steps: [
+        {
+          id: 'post',
+          type: 'assistant_call',
+          target: { assistantId: 'primary' },
+          prompt: 'Compose the morning digest.',
+          deliver: { channelType: 'slack', channelId: 'C0TESTCC333' },
+        },
+      ],
+    }
+    const created = await tools.createWorkflow.execute(
+      { name: 'standup', definition: DELIVERING_DEF },
+      makeContext(),
+    )
+    const wf = created.data as { id: string }
+
+    // A full rewrite that silently drops the deliver — the incident shape.
+    const strippedDef: WorkflowDefinition = {
+      startStepId: 'post',
+      steps: [
+        {
+          id: 'post',
+          type: 'assistant_call',
+          target: { assistantId: 'primary' },
+          prompt: 'Compose the morning digest and post it to C0TESTCC333.',
+        },
+      ],
+    }
+    const blocked = await tools.updateWorkflow.execute(
+      { workflowId: wf.id, definition: strippedDef },
+      makeContext(),
+    )
+    expect(blocked.isError).toBe(true)
+    const errors = (blocked.data as { errors: string[] }).errors
+    expect(errors.some((e) => e.includes('confirmDeliveryRemoval') && e.includes('slack'))).toBe(true)
+    // Nothing was written.
+    expect(stores.workflows.get(wf.id)?.definition.steps[0]).toHaveProperty('deliver')
+
+    // The explicit confirmation flag lets an intentional removal through.
+    const confirmed = await tools.updateWorkflow.execute(
+      { workflowId: wf.id, definition: strippedDef, confirmDeliveryRemoval: true },
+      makeContext(),
+    )
+    expect(confirmed.isError).toBeFalsy()
+    expect(stores.workflows.get(wf.id)?.definition.steps[0]).not.toHaveProperty('deliver')
+  })
+
+  it('updateWorkflow does not block when at least one deliver binding survives the edit', async () => {
+    const { tools } = makeAllTools()
+    const TWO_DELIVER_DEF: WorkflowDefinition = {
+      startStepId: 'a',
+      steps: [
+        {
+          id: 'a',
+          type: 'assistant_call',
+          target: { assistantId: 'primary' },
+          prompt: 'Post the main message.',
+          deliver: { channelType: 'slack', channelId: 'C0TESTCC333' },
+          nextStepId: 'b',
+        },
+        {
+          id: 'b',
+          type: 'assistant_call',
+          target: { assistantId: 'primary' },
+          prompt: 'Post the follow-up.',
+          deliver: { channelType: 'slack', channelId: 'C0TESTCC333' },
+        },
+      ],
+    }
+    const created = await tools.createWorkflow.execute(
+      { name: 'two', definition: TWO_DELIVER_DEF },
+      makeContext(),
+    )
+    const wf = created.data as { id: string }
+    // Dropping ONE deliver (keeping the other) is an ordinary edit.
+    const oneKept: WorkflowDefinition = {
+      startStepId: 'a',
+      steps: [
+        TWO_DELIVER_DEF.steps[0],
+        {
+          id: 'b',
+          type: 'assistant_call',
+          target: { assistantId: 'primary' },
+          prompt: 'Store the follow-up for later.',
+          storeOutputAs: 'followUp',
+        },
+      ],
+    }
+    const r = await tools.updateWorkflow.execute(
+      { workflowId: wf.id, definition: oneKept },
+      makeContext(),
+    )
+    expect(r.isError).toBeFalsy()
   })
 
   it('updateWorkflow rejects an empty patch', async () => {
