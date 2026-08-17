@@ -2,7 +2,7 @@
 
 /**
  * Settings -> Domains (Notion-style, workspace-first lifecycle): the owner
- * surface for every hostname the workspace serves pages on. Three moves:
+ * surface for workspace website and assistant-email hostnames. Four moves:
  *   - Workspace subdomain (platform-subdomains.md): claim with a random
  *     fruit+digits default (grape209.usebrian.page), rename, Reset (re-roll
  *     a fresh random name), release. No page required to claim.
@@ -10,13 +10,16 @@
  *     DNS instructions + re-check, disconnect.
  *   - Default page per domain: what serves at `/`. Pages get their aliases
  *     from their own Share dialog; this surface owns the domain lifecycle.
+ *   - Assistant email domains (agentmail.md): register separately with the
+ *     email provider, show its exact MX/authentication records, verify, remove.
+ *     These never enter the page-domain/Vercel provisioner.
  *
  * [COMP:app-web/settings-domains]
  */
 
 import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
-import { Dices, Globe } from "lucide-react";
+import { Dices, Globe, Mail } from "lucide-react";
 import { useT, format } from "@/lib/i18n/client";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { SearchableSelect } from "@/components/ui/searchable-select";
@@ -36,6 +39,13 @@ import {
   type ViewListRow,
   type WorkspaceDomainRow,
 } from "@/lib/api/views";
+import {
+  connectEmailDomain,
+  probeEmailInboxes,
+  removeEmailDomain,
+  verifyEmailDomain,
+  type EmailDomainSummary,
+} from "@/lib/api/email-inboxes";
 
 const NONE = "__none__";
 
@@ -47,6 +57,8 @@ type LoadState =
       domains: WorkspaceDomainRow[];
       subdomainApex: string | null;
       pages: ViewListRow[];
+      /** Null means the AgentMail provider is not configured on this edition. */
+      emailDomains: EmailDomainSummary[] | null;
     };
 
 function StatusChip({ status }: { status: WorkspaceDomainRow["status"] }) {
@@ -238,7 +250,7 @@ export function SubdomainRow({
       <div className="flex items-center gap-2">
         <Globe className="size-4 shrink-0 text-muted-foreground" aria-hidden />
         {editing ? (
-          <div className="flex min-w-0 flex-1 items-center rounded-md border border-border bg-background transition-[border-color,box-shadow] focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30">
+          <div className="flex min-w-0 flex-1 items-center rounded-md border border-border bg-background transition-[border-color,box-shadow] focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30 [&_:focus-visible]:shadow-none">
             <input
               value={label}
               onChange={(e) => setLabel(e.target.value)}
@@ -415,7 +427,7 @@ export function SubdomainClaim({
   return (
     <div className="space-y-1.5">
       <div className="flex items-center gap-2">
-        <div className="flex min-w-0 flex-1 items-center rounded-md border border-border bg-background transition-[border-color,box-shadow] focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30">
+        <div className="flex min-w-0 flex-1 items-center rounded-md border border-border bg-background transition-[border-color,box-shadow] focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30 [&_:focus-visible]:shadow-none">
           <input
             value={label}
             onChange={(e) => setLabel(e.target.value)}
@@ -536,7 +548,7 @@ export function CustomDomainRow({
 }
 
 /** Connect input for a BYO hostname; shows the DNS rows right after connect. */
-function ConnectDomainForm({
+export function ConnectDomainForm({
   workspaceId,
   onChanged,
 }: {
@@ -594,7 +606,7 @@ function ConnectDomainForm({
             }
           }}
           placeholder={shareT.site.domainPlaceholder}
-          className="min-w-0 flex-1 rounded-md border border-border bg-background px-3 py-1.5 text-sm outline-none focus:border-primary"
+          className="min-w-0 flex-1 rounded-md border border-border bg-background px-3 py-1.5 text-sm outline-none"
         />
         <button
           type="button"
@@ -615,6 +627,222 @@ function ConnectDomainForm({
   );
 }
 
+function EmailDomainStatusChip({ status }: { status: EmailDomainSummary["status"] }) {
+  const t = useT().chrome.settingsModal.domains;
+  const label =
+    status === "verified"
+      ? t.emailStatusVerified
+      : status === "failed"
+        ? t.emailStatusFailed
+        : t.emailStatusPending;
+  const cls =
+    status === "verified"
+      ? "text-emerald-600 dark:text-emerald-400"
+      : status === "failed"
+        ? "text-destructive"
+        : "text-muted-foreground";
+  return <span className={`shrink-0 text-xs font-medium ${cls}`}>{label}</span>;
+}
+
+function EmailDnsRows({ records }: { records: EmailDomainSummary["records"] }) {
+  const t = useT().chrome.settingsModal.domains;
+  if (records.length === 0) return null;
+  return (
+    <div className="rounded-md border border-border bg-muted/40 p-2 text-xs">
+      <p className="mb-2 text-muted-foreground">{t.emailDnsHint}</p>
+      <div className="space-y-2 font-mono">
+        {records.map((record, index) => (
+          <div
+            key={`${record.type}-${record.name}-${index}`}
+            className="grid gap-x-3 gap-y-0.5 sm:grid-cols-[auto_minmax(0,0.8fr)_minmax(0,1.5fr)]"
+          >
+            <span className="font-semibold">
+              {record.type}
+              {record.priority === null
+                ? ""
+                : ` ${format(t.emailDnsPriority, { priority: record.priority })}`}
+            </span>
+            <span className="min-w-0 break-all">{record.name}</span>
+            <span className="min-w-0 break-all text-muted-foreground">{record.value}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+export function EmailDomainRow({
+  workspaceId,
+  domain,
+  onChanged,
+}: {
+  workspaceId: string;
+  domain: EmailDomainSummary;
+  onChanged: () => Promise<void>;
+}) {
+  const t = useT().chrome.settingsModal.domains;
+  const [busy, setBusy] = useState<"verify" | "remove" | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  const verify = async () => {
+    setBusy("verify");
+    setErr(null);
+    try {
+      await verifyEmailDomain({ workspaceId, domainId: domain.id });
+      await onChanged();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const remove = async () => {
+    const ok = await confirmDialog({
+      title: t.emailRemoveConfirmTitle,
+      description: format(t.emailRemoveConfirmBody, { domain: domain.domain }),
+      confirmLabel: t.emailRemove,
+      variant: "destructive",
+    });
+    if (!ok) return;
+    setBusy("remove");
+    setErr(null);
+    try {
+      await removeEmailDomain({ workspaceId, domainId: domain.id });
+      await onChanged();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="space-y-2 rounded-md border border-border p-3">
+      <div className="flex items-center gap-2">
+        <Mail className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+        <span className="min-w-0 flex-1 truncate text-sm">{domain.domain}</span>
+        <EmailDomainStatusChip status={domain.status} />
+        <div className="flex shrink-0 items-center gap-1">
+          {domain.status !== "verified" ? (
+            <button
+              type="button"
+              onClick={() => void verify()}
+              disabled={busy !== null}
+              className="rounded px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
+            >
+              {busy === "verify" ? t.emailVerifying : t.emailVerify}
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => void remove()}
+            disabled={busy !== null}
+            className="rounded px-2 py-1 text-xs text-destructive hover:bg-destructive/10 disabled:opacity-50"
+          >
+            {busy === "remove" ? t.emailRemoving : t.emailRemove}
+          </button>
+        </div>
+      </div>
+      {domain.status === "verified" ? (
+        <p className="text-xs text-muted-foreground">{t.emailReadyHint}</p>
+      ) : (
+        <EmailDnsRows records={domain.records} />
+      )}
+      {err ? (
+        <p role="alert" className="break-all text-xs text-destructive">
+          {err}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+export function EmailDomainsPanel({
+  workspaceId,
+  domains,
+  onChanged,
+}: {
+  workspaceId: string;
+  domains: EmailDomainSummary[];
+  onChanged: () => Promise<void>;
+}) {
+  const t = useT().chrome.settingsModal.domains;
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const connect = async () => {
+    const domain = input.trim().toLowerCase();
+    if (!domain) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      await connectEmailDomain({ workspaceId, domain });
+      setInput("");
+      await onChanged();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setErr(message === "email_domain_reserved" ? t.emailReservedError : message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="space-y-3 border-t border-border pt-6">
+      <div>
+        <h3 className="text-sm font-medium">{t.emailHeading}</h3>
+        <p className="mt-0.5 text-xs text-muted-foreground">{t.emailHint}</p>
+      </div>
+      <div className="space-y-2">
+        <div className="flex items-center gap-2">
+          <input
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void connect();
+              }
+            }}
+            aria-label={t.emailHeading}
+            placeholder={t.emailPlaceholder}
+            className="min-w-0 flex-1 rounded-md border border-border bg-background px-3 py-1.5 text-sm outline-none"
+          />
+          <button
+            type="button"
+            onClick={() => void connect()}
+            disabled={busy || !input.trim()}
+            className="shrink-0 rounded-md border border-border px-3 py-1.5 text-sm font-medium transition-colors hover:bg-muted disabled:opacity-50"
+          >
+            {busy ? t.emailConnecting : t.emailConnect}
+          </button>
+        </div>
+        {err ? (
+          <p role="alert" className="break-all text-xs text-destructive">
+            {err}
+          </p>
+        ) : null}
+      </div>
+      {domains.length === 0 ? (
+        <p className="text-sm text-muted-foreground">{t.emailEmpty}</p>
+      ) : (
+        <div className="space-y-2">
+          {domains.map((domain) => (
+            <EmailDomainRow
+              key={domain.id}
+              workspaceId={workspaceId}
+              domain={domain}
+              onChanged={onChanged}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function DomainsSection() {
   const t = useT().chrome.settingsModal.domains;
   const params = useParams<{ workspaceId?: string }>();
@@ -624,11 +852,18 @@ export function DomainsSection() {
   const reload = useCallback(async () => {
     if (!workspaceId) return;
     try {
-      const [r, pages] = await Promise.all([
+      const [r, pages, emailProbe] = await Promise.all([
         listWorkspaceDomains(workspaceId),
         listViews({ workspaceId, state: "saved" }).catch(() => [] as ViewListRow[]),
+        probeEmailInboxes(workspaceId).catch(() => ({ configured: false }) as const),
       ]);
-      setState({ kind: "ready", domains: r.domains, subdomainApex: r.subdomainApex, pages });
+      setState({
+        kind: "ready",
+        domains: r.domains,
+        subdomainApex: r.subdomainApex,
+        pages,
+        emailDomains: emailProbe.configured ? emailProbe.domains : null,
+      });
     } catch {
       setState({ kind: "error" });
     }
@@ -693,6 +928,14 @@ export function DomainsSection() {
           </div>
         )}
       </section>
+
+      {state.emailDomains ? (
+        <EmailDomainsPanel
+          workspaceId={workspaceId}
+          domains={state.emailDomains}
+          onChanged={reload}
+        />
+      ) : null}
     </div>
   );
 }

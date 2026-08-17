@@ -11,8 +11,9 @@
  *
  * Design + locked decisions: docs/plans/behavioral-evals.md (§1 D1-D4, §3).
  * Probes: src/evals/probes/*.json (transcribed from the WS9 battery).
- * SUT: gemini-flash (the prod chat alias) via the real queryLoop, one turn,
- * every tool execute stubbed — probes grade PROPOSALS, nothing runs.
+ * SUT: gemini-flash (the prod chat alias) by default, or EVAL_SUT_MODEL for
+ * candidate cutovers, via the real queryLoop, one turn, every tool execute
+ * stubbed — probes grade PROPOSALS, nothing runs.
  * [COMP:evals/capability-probes]
  */
 
@@ -41,7 +42,7 @@ const EVALS_DIR = join(__dirname, '..', 'src', 'evals')
 const RESULTS_ROOT = join(__dirname, '..', 'eval-results')
 const BASELINES_DIR = join(EVALS_DIR, 'baselines')
 
-const SUT_MODEL = 'gemini-flash' // prod chat alias → gemini-3-flash-preview
+const SUT_MODEL = process.env.EVAL_SUT_MODEL?.trim() || 'gemini-flash'
 const HEADLESS_JUDGE_MODEL = 'gemini-pro' // → gemini-3.1-pro-preview (D1 fallback)
 
 const RUBRICS: Array<{ dimension: 'justification-grounding' | 'nearest-route' | 'no-invented-ui'; question: string }> = [

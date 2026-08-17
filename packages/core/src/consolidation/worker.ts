@@ -160,6 +160,21 @@ export type ReclassificationScope = {
   provider: LLMProvider
   /** Reclassifier model — Flash-class is fine. */
   model: string
+  resolveLlm?: (workspaceId: string) => Promise<{
+    provider: LLMProvider
+    model: string
+    modelTier?: string
+    providerKeySource?: 'user' | 'platform'
+  }>
+  onUsage?: (params: {
+    workspaceId: string
+    userId: string
+    assistantId: string
+    model: string
+    modelTier?: string
+    providerKeySource?: 'user' | 'platform'
+    usage: import('../providers/types.js').TokenUsage
+  }) => void | Promise<void>
   /** Resolve the workspaceId an assistant belongs to. Returns null
    *  when the assistant has no workspace partition (legacy rows). */
   resolveWorkspaceId(assistantId: string): Promise<string | null>
@@ -579,6 +594,9 @@ async function runPostRemReclassification(
     assistantKind: 'primary' as const,
   }
   const entities = await scope.entityStore.listForWorkspace(ctx, { limit: 200 })
+  const llm = scope.resolveLlm
+    ? await scope.resolveLlm(workspaceId)
+    : { provider: scope.provider, model: scope.model }
 
   await runReclassification({
     memories: filtered,
@@ -590,7 +608,16 @@ async function runPostRemReclassification(
     taskStore: scope.tasks,
     entityLinks: scope.entityLinks,
     candidates: scope.candidates,
-    provider: scope.provider,
-    model: scope.model,
+    provider: llm.provider,
+    model: llm.model,
+    onUsage: (model, usage) => scope.onUsage?.({
+      workspaceId,
+      userId,
+      assistantId,
+      model,
+      modelTier: llm.modelTier,
+      providerKeySource: llm.providerKeySource,
+      usage,
+    }),
   })
 }

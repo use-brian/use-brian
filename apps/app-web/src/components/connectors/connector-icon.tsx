@@ -191,6 +191,19 @@ function ShopifyIcon() {
   );
 }
 
+function WordPressIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <circle cx="12" cy="12" r="11" fill="#3858E9" />
+      <circle cx="12" cy="12" r="8.8" stroke="#fff" strokeWidth="1.1" />
+      <path
+        d="M6.4 8.1h3.9v1H9.2l2.35 6.7 1.63-4.82-.67-1.88h-1v-1h4.22v1h-1.08l2.18 6.48c.47-1.56 1.27-3.74 1.27-5.1 0-.75-.24-1.28-.58-1.76A6.95 6.95 0 0 0 12 5.9a6.95 6.95 0 0 0-5.6 2.2Zm-.85 3.9A6.45 6.45 0 0 0 10 18.15L6.25 8.95A6.95 6.95 0 0 0 5.55 12Zm6.58 6.88c.72 0 1.42-.11 2.07-.32l-1.97-5.4-1.88 5.47c.57.16 1.16.25 1.78.25Zm3.58-.98A6.45 6.45 0 0 0 18.5 12c0-.55-.07-1.08-.2-1.58-.1.83-.43 1.76-.83 2.86l-1.76 4.62Z"
+        fill="#fff"
+      />
+    </svg>
+  );
+}
+
 function WhatsAppIcon() {
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
@@ -330,6 +343,7 @@ export function ConnectorIcon({
     case "notion": return <NotionIcon />;
     case "fathom": return <FathomIcon />;
     case "shopify": return <ShopifyIcon />;
+    case "wordpress": return <WordPressIcon />;
     case "whatsapp": return <WhatsAppIcon />;
     case "files": return <FilesIcon />;
     case "computer": return <ComputerIcon />;

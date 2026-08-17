@@ -380,7 +380,7 @@ export function SkillImportDialog({ workspaceId, open, onClose, onImported }: Pr
                       // Hand-edited text is no longer the picked file.
                       setPasteFileName(null);
                     }}
-                    className="mt-1.5 w-full resize-y rounded-md border border-border bg-background px-3 py-2 font-mono text-xs leading-relaxed text-foreground outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40"
+                    className="mt-1.5 w-full resize-y rounded-md border border-border bg-background px-3 py-2 font-mono text-xs leading-relaxed text-foreground outline-none placeholder:text-muted-foreground"
                   />
                   <p className="mt-1.5 text-xs text-muted-foreground">
                     {pasteFileName
@@ -405,7 +405,7 @@ export function SkillImportDialog({ workspaceId, open, onClose, onImported }: Pr
                         void runImport({ kind: "url", url: url.trim() });
                       }
                     }}
-                    className="mt-1.5 h-9 w-full rounded-md border border-border bg-background px-3 text-sm text-foreground outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40"
+                    className="mt-1.5 h-9 w-full rounded-md border border-border bg-background px-3 text-sm text-foreground outline-none placeholder:text-muted-foreground"
                   />
                   <p className="mt-1.5 text-xs text-muted-foreground">{copy.urlHint}</p>
                 </div>

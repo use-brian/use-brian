@@ -22,6 +22,7 @@ export type OfficeArtifactRow = {
   headVersion: number
   capabilityVersion: number
   sensitivity: 'public' | 'internal' | 'confidential'
+  defaultWorkspaceRole: 'view' | 'comment' | 'edit'
   lifecycleState: 'active' | 'archived' | 'trash' | 'retained' | 'purged'
   updatedAt: Date
 }
@@ -35,6 +36,7 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
                template_version_id AS "templateVersionId",
                head_version_id AS "headVersionId", head_version::int AS "headVersion",
                capability_version AS "capabilityVersion", sensitivity,
+               default_workspace_role AS "defaultWorkspaceRole",
                lifecycle_state AS "lifecycleState", updated_at AS "updatedAt"
           FROM office_artifacts
          WHERE workspace_id = $1 AND lifecycle_state = $2
@@ -67,6 +69,7 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
                   template_version_id AS "templateVersionId",
                   head_version_id AS "headVersionId", head_version::int AS "headVersion",
                   capability_version AS "capabilityVersion", sensitivity,
+                  default_workspace_role AS "defaultWorkspaceRole",
                   lifecycle_state AS "lifecycleState", updated_at AS "updatedAt"
       `, [params.workspaceId, params.family, params.title, params.userId, params.templateVersionId, params.capabilityVersion, params.sensitivity, params.visibilityUserIds ?? [], params.requiredCompartments ?? [], params.mode ?? 'artifact'])
       const row = result.rows[0]
@@ -95,6 +98,7 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
                template_version_id AS "templateVersionId",
                head_version_id AS "headVersionId", head_version::int AS "headVersion",
                capability_version AS "capabilityVersion", sensitivity,
+               default_workspace_role AS "defaultWorkspaceRole",
                lifecycle_state AS "lifecycleState", updated_at AS "updatedAt"
           FROM office_artifacts WHERE id = $1
       `, [artifactId])
@@ -127,11 +131,31 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
       const result = await db<{ snapshotFileId: string; snapshotHash: string; workspaceId: string }>(userId, `
         SELECT v.snapshot_file_id AS "snapshotFileId", v.snapshot_hash AS "snapshotHash",
                v.workspace_id AS "workspaceId"
-          FROM office_artifact_versions v
+         FROM office_artifact_versions v
           JOIN office_artifacts a ON a.id=v.artifact_id
-         WHERE v.artifact_id=$1 AND v.id=$2 AND a.lifecycle_state='active'
+         WHERE v.artifact_id=$1 AND v.id=$2 AND a.lifecycle_state<>'purged'
       `, [artifactId, versionId])
       return result.rows[0] ?? null
+    },
+
+    async nameVersion(params: { userId: string; artifactId: string; versionId: string; summary: string }): Promise<boolean> {
+      const result = await db<{ id: string }>(params.userId, `
+        UPDATE office_artifact_versions
+           SET summary=$3,named=TRUE,checkpoint_kind='named'
+         WHERE artifact_id=$1 AND id=$2
+         RETURNING id
+      `, [params.artifactId, params.versionId, params.summary])
+      return result.rows.length === 1
+    },
+
+    async listGrants(userId: string, artifactId: string): Promise<Array<{ userId: string; role: 'view' | 'comment' | 'edit' | 'deny'; revokedAt: Date | null }>> {
+      const result = await db<{ userId: string; role: 'view' | 'comment' | 'edit' | 'deny'; revokedAt: Date | null }>(userId, `
+        SELECT user_id AS "userId",role,revoked_at AS "revokedAt"
+          FROM office_artifact_grants
+         WHERE artifact_id=$1
+         ORDER BY granted_at DESC
+      `, [artifactId])
+      return result.rows
     },
 
     async commitVersion(params: {
@@ -240,6 +264,24 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
       `, [params.artifactId, params.workspaceId, params.targetUserId, params.role, params.userId, params.reason ?? null])
     },
 
+    async revokeGrant(params: { userId: string; artifactId: string; targetUserId: string }): Promise<boolean> {
+      const result = await db<{ artifactId: string }>(params.userId, `
+        UPDATE office_artifact_grants SET revoked_at=now()
+         WHERE artifact_id=$1 AND user_id=$2 AND revoked_at IS NULL
+         RETURNING artifact_id AS "artifactId"
+      `, [params.artifactId, params.targetUserId])
+      return result.rows.length === 1
+    },
+
+    async setDefaultWorkspaceRole(params: { userId: string; artifactId: string; role: 'view' | 'comment' | 'edit' }): Promise<boolean> {
+      const result = await db<{ id: string }>(params.userId, `
+        UPDATE office_artifacts SET default_workspace_role=$2,updated_at=now()
+         WHERE id=$1 AND lifecycle_state='active'
+         RETURNING id
+      `, [params.artifactId, params.role])
+      return result.rows.length === 1
+    },
+
     async addSource(params: { userId: string; artifactId: string; artifactVersionId: string; workspaceId: string; sourceArtifactId: string; sourceVersion: string; sensitivity: 'public' | 'internal' | 'confidential' }): Promise<void> {
       await db(params.userId, `
         INSERT INTO office_artifact_sources
@@ -283,7 +325,8 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
                creator_user_id AS "creatorUserId", owner_user_id AS "ownerUserId",
                template_version_id AS "templateVersionId", head_version_id AS "headVersionId",
                head_version::int AS "headVersion", capability_version AS "capabilityVersion",
-               sensitivity,lifecycle_state AS "lifecycleState",updated_at AS "updatedAt"
+               sensitivity,default_workspace_role AS "defaultWorkspaceRole",
+               lifecycle_state AS "lifecycleState",updated_at AS "updatedAt"
           FROM updated
       `, [params.artifactId, params.action, params.userId, params.reason])
       return result.rows[0] ?? null

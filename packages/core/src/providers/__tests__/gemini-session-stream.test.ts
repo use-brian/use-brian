@@ -121,7 +121,7 @@ describe('[COMP:providers/gemini-session-stream] Gemini session streaming', () =
       ]),
     )
     const session = createGeminiProvider('test-key').createSession({
-      model: 'gemini-3.6-flash',
+      model: 'gemini-3.7-flash',
       systemPrompt: 'sys',
     })
 
@@ -143,7 +143,7 @@ describe('[COMP:providers/gemini-session-stream] Gemini session streaming', () =
       ]),
     )
     const session = createGeminiProvider('test-key').createSession({
-      model: 'gemini-3.6-flash',
+      model: 'gemini-3.7-flash',
       systemPrompt: 'sys',
     })
 

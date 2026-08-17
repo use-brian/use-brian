@@ -20,6 +20,26 @@ export function takeoverStartsPolled(backend: "local" | "cloud"): boolean {
   return backend === "local";
 }
 
+/** Session routing needs a profile identity and never applies to the one-off cloud login flow. */
+export function canSwitchSessionBackend(
+  task: { profileId: string | null },
+  loginFlow: boolean,
+): boolean {
+  return !loginFlow && task.profileId !== null;
+}
+
+/** Session capture names one domain, not a URL or an arbitrary page path. */
+export function normalizeCaptureSite(raw: string): string | null {
+  const site = raw.trim().replace(/^\.+/, "").toLowerCase();
+  if (!site || site.includes("/") || site.includes(":")) return null;
+  try {
+    const hostname = new URL(`https://${site}`).hostname;
+    return hostname === site && hostname.includes(".") ? hostname : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Map a client-space click to frame coordinates through the `object-contain`
  * fit. Returns null for clicks in the letterbox bars (nothing under them).

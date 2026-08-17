@@ -5,9 +5,9 @@
  *
  * The workspace-channels operator surface (Phase D of
  * docs/architecture/channels/adapter-pattern.md → "Workspace channels").
- * Channels are owned by the workspace — this page lists them, edits each
- * one's clearance and enabled capabilities, and wires per-surface assistant
- * routing. Channels are *created* by connecting a bot from the inline
+ * Channels are owned by the workspace — this page lists them, renames them,
+ * edits each one's clearance and enabled capabilities, and wires per-surface
+ * assistant routing. Channels are *created* by connecting a bot from the inline
  * "+ Add channel" form; there is no separate "new channel" page.
  *
  * Mirrors Studio → Connectors / Events: a left rail groups every channel by
@@ -76,6 +76,7 @@ import {
   connectTelegramChannel,
   connectDiscordChannel,
   connectMsTeamsChannel,
+  connectWhatsAppCloudChannel,
   startWechatPairing,
   getWechatPairingStatus,
   submitWechatVerifyCode,
@@ -94,6 +95,7 @@ import {
   type UserAccessMode,
 } from "@/lib/api/channels";
 import { listAssistants, type StudioAssistantSummary } from "@/lib/api/studio";
+import type { WorkspaceRole } from "@/lib/api/workspaces";
 import {
   probeEmailInboxes,
   createEmailInbox,
@@ -121,6 +123,7 @@ import {
   ExternalLink,
   KeyRound,
   MessageCircle,
+  Pencil,
   SmilePlus,
   UsersRound,
 } from "lucide-react";
@@ -209,6 +212,14 @@ function discordInviteUrl(botId: string): string {
   return `https://discord.com/oauth2/authorize?client_id=${encodeURIComponent(botId)}&scope=bot&permissions=68672`;
 }
 
+export function normalizeWhatsAppPhoneNumberInput(value: string): string | null {
+  const trimmed = value.trim();
+  if (!/^\+?[\d\s().-]+$/.test(trimmed)) return null;
+  const rawDigits = trimmed.replace(/\D/g, "");
+  const digits = trimmed.startsWith("00") ? rawDigits.slice(2) : rawDigits;
+  return /^[1-9]\d{7,14}$/.test(digits) ? digits : null;
+}
+
 const CLEARANCES: ChannelClearance[] = ["public", "internal", "confidential"];
 const CAPABILITIES: ChannelCapability[] = ["chat", "broadcast", "ingest"];
 
@@ -222,29 +233,42 @@ function clearanceRank(c: ChannelClearance): number {
 }
 
 /**
- * Pull the caller's `workspace_members.clearance` for `workspaceId` off the
+ * Pull the caller's own `workspace_members` row for `workspaceId` off the
  * existing `GET /workspaces/:id` endpoint. The endpoint returns `members[]`
  * with one row per workspace member; we match on `me.id` to find ours.
- * Returns null on any failure so the UI keeps its safe 'internal' default.
+ *
+ * Two fields are read from it. `clearance` filters the clearance dropdown to
+ * the caller's own tier (RLS would reject a higher one anyway). `role` gates
+ * the rename affordance — the PATCH route refuses `displayName` from a plain
+ * member, so showing the pencil to one would only produce a 403.
+ *
+ * Returns nulls on any failure: the UI then keeps its safe 'internal' default
+ * and treats the caller as a non-admin, so a failed probe never *grants* an
+ * affordance the server would reject.
  */
-async function fetchWorkspaceClearance(
-  workspaceId: string,
-): Promise<ChannelClearance | null> {
+async function fetchWorkspaceMembership(workspaceId: string): Promise<{
+  clearance: ChannelClearance | null;
+  role: WorkspaceRole | null;
+}> {
   try {
     const res = await authFetch(
       `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}`,
     );
-    if (!res.ok) return null;
+    if (!res.ok) return { clearance: null, role: null };
     const data = (await res.json()) as {
       me?: { id?: string };
-      members?: { userId: string; clearance?: ChannelClearance }[];
+      members?: {
+        userId: string;
+        clearance?: ChannelClearance;
+        role?: WorkspaceRole;
+      }[];
     };
     const meId = data.me?.id;
-    if (!meId || !Array.isArray(data.members)) return null;
+    if (!meId || !Array.isArray(data.members)) return { clearance: null, role: null };
     const mine = data.members.find((m) => m.userId === meId);
-    return mine?.clearance ?? null;
+    return { clearance: mine?.clearance ?? null, role: mine?.role ?? null };
   } catch {
-    return null;
+    return { clearance: null, role: null };
   }
 }
 
@@ -260,6 +284,10 @@ export default function StudioChannelsPage() {
   // dropdown to options at or below the user's own tier, mirroring the RLS
   // WITH CHECK on `channels`.
   const [myClearance, setMyClearance] = useState<ChannelClearance>("internal");
+  // The caller's workspace role, from the same GET /workspaces/:id read.
+  // Null until it resolves (and on failure) — rename stays hidden until we
+  // positively know the caller is an owner or admin.
+  const [myRole, setMyRole] = useState<WorkspaceRole | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   // Master-detail selection — a rail row key (channel UUID or "official");
@@ -307,15 +335,16 @@ export default function StudioChannelsPage() {
     setError(null);
     void (async () => {
       try {
-        const [chans, asts, ws] = await Promise.all([
+        const [chans, asts, me] = await Promise.all([
           listChannels(activeId),
           listAssistants(activeId),
-          fetchWorkspaceClearance(activeId),
+          fetchWorkspaceMembership(activeId),
         ]);
         if (cancelled) return;
         setAssistants(asts);
         setChannels(chans);
-        if (ws) setMyClearance(ws);
+        if (me.clearance) setMyClearance(me.clearance);
+        setMyRole(me.role);
         const entries = await Promise.all(
           chans.map(
             async (c) =>
@@ -537,6 +566,7 @@ export default function StudioChannelsPage() {
                 routing={routing[sel.channel.id] ?? []}
                 assistants={assistants}
                 myClearance={myClearance}
+                canRename={myRole === "owner" || myRole === "admin"}
                 onUpdated={onChannelUpdated}
                 onRoutingChanged={() => refreshRouting(sel.channel.id)}
                 onDeleted={onChannelDeleted}
@@ -557,15 +587,22 @@ export default function StudioChannelsPage() {
 
 /**
  * The selected channel's management panel — the master-detail right pane.
- * Header (platform mark, name, status pill), clearance + capabilities, the
- * per-platform bot-behavior config, assistant routing, and disconnect.
+ * Header (platform mark, click-to-edit name, status pill), clearance +
+ * capabilities, the per-platform bot-behavior config, assistant routing, and
+ * disconnect.
+ *
+ * The name is `channels.display_name` — the workspace's own label, seeded from
+ * the platform on connect (Slack team name, Telegram bot username, …). It is
+ * editable here through the same `PATCH .../channels/:id` that carries
+ * clearance and capabilities; the platform-side bot name is untouched.
  */
-function ChannelDetail({
+export function ChannelDetail({
   workspaceId,
   channel,
   routing,
   assistants,
   myClearance,
+  canRename,
   onUpdated,
   onRoutingChanged,
   onDeleted,
@@ -577,6 +614,12 @@ function ChannelDetail({
   routing: ChannelAssistant[];
   assistants: StudioAssistantSummary[];
   myClearance: ChannelClearance;
+  /**
+   * Whether the caller may rename the channel — workspace owner or admin only,
+   * mirroring the `rename_requires_admin` gate on the PATCH route. Everything
+   * else in this panel stays open to any member.
+   */
+  canRename: boolean;
   onUpdated: (c: Channel) => void;
   onRoutingChanged: () => void;
   onDeleted: (channelId: string) => void;
@@ -589,7 +632,15 @@ function ChannelDetail({
   // case so the inline message can explain *why* a save was rejected. The
   // server returns `error: 'clearance_exceeds_member_tier'` for this; any
   // other failure falls back to the generic saveError copy.
-  const [saveError, setSaveError] = useState<boolean | "clearanceTooHigh">(false);
+  const [saveError, setSaveError] = useState<
+    boolean | "clearanceTooHigh" | "renameNotAllowed"
+  >(false);
+  // Header rename. The panel is keyed by channel id upstream, so this state is
+  // per-channel by construction; the draft is seeded when the user opens the
+  // editor rather than mirrored from the prop, so an in-flight edit survives
+  // an unrelated refresh of the channel row.
+  const [renaming, setRenaming] = useState(false);
+  const [nameDraft, setNameDraft] = useState("");
   const [attachAssistantId, setAttachAssistantId] = useState("");
   const [attachSurface, setAttachSurface] = useState("");
   const [attaching, setAttaching] = useState(false);
@@ -638,23 +689,52 @@ function ChannelDetail({
   );
 
   async function patch(
-    p: Partial<Pick<Channel, "clearance" | "enabledCapabilities">>,
-  ): Promise<void> {
+    p: Partial<Pick<Channel, "clearance" | "enabledCapabilities" | "displayName">>,
+  ): Promise<boolean> {
     setSaving(true);
     setSaveError(false);
     try {
       onUpdated(await updateChannel(workspaceId, channel.id, p));
+      return true;
     } catch (e) {
       // The route now translates RLS clearance rejections into a 403 with
       // `error: 'clearance_exceeds_member_tier'`; pick that up so we can
       // explain *why* it failed instead of the generic "couldn't save".
       const msg = (e as Error).message;
       setSaveError(
-        msg.includes("clearance_exceeds_member_tier") ? "clearanceTooHigh" : true,
+        msg.includes("clearance_exceeds_member_tier")
+          ? "clearanceTooHigh"
+          : // Belt-and-braces: the pencil is hidden for non-admins, so this
+            // only fires for a role that changed under a stale page.
+            msg.includes("rename_requires_admin")
+            ? "renameNotAllowed"
+            : true,
       );
+      return false;
     } finally {
       setSaving(false);
     }
+  }
+
+  /**
+   * Commit the header rename. The name is the workspace's own label for the
+   * channel (`channels.display_name`), seeded from the platform on connect —
+   * renaming here never touches the bot or team name on the platform side.
+   * Owner / admin only, matching the route's `rename_requires_admin` gate.
+   * Empty / unchanged drafts are dropped rather than sent: the route's zod
+   * `displayName` is `min(1)`, so a blank submit would 400.
+   */
+  async function onRename(): Promise<void> {
+    if (!canRename) {
+      setRenaming(false);
+      return;
+    }
+    const next = nameDraft.trim();
+    if (!next || next === channel.displayName) {
+      setRenaming(false);
+      return;
+    }
+    if (await patch({ displayName: next })) setRenaming(false);
   }
 
   async function onAttach(): Promise<void> {
@@ -701,13 +781,85 @@ function ChannelDetail({
           <ChannelTypeIcon type={channel.channelType} />
         </div>
         <div className="min-w-0 flex-1">
-          <h2 className="truncate text-[15px] font-semibold tracking-tight">
-            {channel.displayName}
-          </h2>
-          <p className="truncate text-[12px] text-muted-foreground">
-            {(t.studioPage.channels.platforms as Partial<Record<Channel["channelType"], string>>)[
-              channel.channelType
-            ] ?? channel.channelType}
+          {renaming ? (
+            <form
+              className="flex items-center gap-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void onRename();
+              }}
+            >
+              <input
+                type="text"
+                autoFocus
+                value={nameDraft}
+                onChange={(e) => setNameDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") {
+                    e.preventDefault();
+                    setRenaming(false);
+                  }
+                }}
+                disabled={saving}
+                // Matches the route's zod cap (displayName: max 200).
+                maxLength={200}
+                placeholder={t.studioPage.channels.rename.placeholder}
+                aria-label={t.studioPage.channels.rename.placeholder}
+                className="min-w-0 flex-1 rounded-md border border-border bg-muted/50 px-2 py-1 text-[15px] font-semibold tracking-tight text-foreground placeholder:font-normal placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
+              />
+              <button
+                type="submit"
+                disabled={saving || !nameDraft.trim()}
+                className="shrink-0 rounded-md bg-action px-2.5 py-1 text-[12px] font-medium text-action-foreground transition-colors hover:bg-action/80 disabled:pointer-events-none disabled:opacity-50"
+              >
+                {saving
+                  ? t.studioPage.channels.saving
+                  : t.studioPage.channels.rename.save}
+              </button>
+              <button
+                type="button"
+                onClick={() => setRenaming(false)}
+                disabled={saving}
+                className="shrink-0 rounded-md px-2 py-1 text-[12px] text-muted-foreground transition-colors hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+              >
+                {t.studioPage.channels.rename.cancel}
+              </button>
+            </form>
+          ) : (
+            <div className="flex min-w-0 items-center gap-1.5">
+              <h2 className="truncate text-[15px] font-semibold tracking-tight">
+                {channel.displayName}
+              </h2>
+              {canRename && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setNameDraft(channel.displayName);
+                    setSaveError(false);
+                    setRenaming(true);
+                  }}
+                  aria-label={t.studioPage.channels.rename.action}
+                  title={t.studioPage.channels.rename.action}
+                  className="shrink-0 rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                >
+                  <Pencil className="h-3.5 w-3.5" aria-hidden />
+                </button>
+              )}
+            </div>
+          )}
+          <p
+            className={cn(
+              "text-[12px] text-muted-foreground",
+              // The platform line is one word; the rename hint is a sentence
+              // and must wrap rather than clip.
+              renaming ? "mt-1" : "truncate",
+            )}
+          >
+            {renaming
+              ? t.studioPage.channels.rename.hint
+              : (t.studioPage.channels.platforms as Partial<Record<Channel["channelType"], string>>)[
+                  channel.channelType
+                ] ?? channel.channelType}
           </p>
         </div>
         <span className={pillCls(statusActive ? "on" : "attention")}>
@@ -777,6 +929,10 @@ function ChannelDetail({
           <span className="text-xs text-destructive">
             {t.studioPage.channels.clearanceTooHighError}
           </span>
+        ) : saveError === "renameNotAllowed" ? (
+          <span className="text-xs text-destructive">
+            {t.studioPage.channels.rename.notAllowedError}
+          </span>
         ) : saveError ? (
           <span className="text-xs text-destructive">
             {t.studioPage.channels.saveError}
@@ -804,7 +960,8 @@ function ChannelDetail({
 
       {(channel.channelType === "slack" ||
         channel.channelType === "telegram" ||
-        channel.channelType === "discord") &&
+        channel.channelType === "discord" ||
+        (channel.channelType === "whatsapp" && channel.integrationProvider === "cloud_api")) &&
         channel.integrationId && (
           <ChannelConfigSection
             workspaceId={workspaceId}
@@ -816,8 +973,19 @@ function ChannelDetail({
       {/* WhatsApp config — connection state (surfaces a phone-side logout) +
           per-group ingest list + the replies (bot) section, like the other
           channels' config sections. */}
-      {channel.channelType === "whatsapp" && (
+      {channel.channelType === "whatsapp" && channel.integrationProvider !== "cloud_api" && (
         <WhatsappCardSection workspaceId={workspaceId} />
+      )}
+
+      {channel.channelType === "whatsapp" && channel.integrationProvider === "cloud_api" && (
+        <>
+          <div className="rounded-lg border border-border px-4 py-3 text-xs text-muted-foreground">
+            {t.studioPage.channels.add.whatsappCloudConnectedDetail}
+          </div>
+          <WhatsAppCloudChatSection
+            phoneNumber={channel.config?.whatsappDisplayPhoneNumber ?? null}
+          />
+        </>
       )}
 
       {/* WeChat — the iLink bot limits, stated plainly on the connected card
@@ -844,10 +1012,16 @@ function ChannelDetail({
           workspaceId={workspaceId}
           channel={channel}
           inbox={emailInbox}
-          onChanged={onEmailChanged}
+          assistants={assistants}
+          onChannelUpdated={onUpdated}
+          onChanged={async () => {
+            await onEmailChanged?.();
+            onRoutingChanged();
+          }}
         />
       )}
 
+      {channel.channelType !== "email" && (
       <div className="flex flex-col gap-2 rounded-lg border border-border px-4 py-3">
         <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
           {t.studioPage.channels.routingTitle}
@@ -930,6 +1104,7 @@ function ChannelDetail({
           <p className="text-xs text-destructive">{attachError}</p>
         )}
       </div>
+      )}
 
       {/* Disconnect — destructive, confirmed via the shared confirmDialog. */}
       <div className="flex flex-col gap-2 border-t border-border pt-3">
@@ -1147,6 +1322,8 @@ export function ChannelConfigSection({
   const cfg = t.studioPage.channels.config;
   const isSlack = channel.channelType === "slack";
   const isTelegram = channel.channelType === "telegram";
+  const isWhatsAppCloud =
+    channel.channelType === "whatsapp" && channel.integrationProvider === "cloud_api";
   // Discord's config surface today is access-control only: `requireMention` is
   // enforced connector-side (not from this config) and there is no ack-reaction
   // on the Discord inbound path, so both are hidden for Discord channels.
@@ -1177,7 +1354,8 @@ export function ChannelConfigSection({
     }
   }
 
-  const accessMode: UserAccessMode = config.userAccessMode ?? "allow_all";
+  const accessMode: UserAccessMode =
+    config.userAccessMode ?? (isWhatsAppCloud ? "allowlist" : "allow_all");
   const accessIds =
     accessMode === "blocklist"
       ? (config.blockedUserIds ?? [])
@@ -1200,7 +1378,11 @@ export function ChannelConfigSection({
     <div className="flex flex-col gap-1.5">
       <div className="flex items-center justify-between gap-3">
         <span className="text-sm">
-          {isTelegram ? cfg.accessLabelTelegram : cfg.accessLabel}
+          {isTelegram
+            ? cfg.accessLabelTelegram
+            : isWhatsAppCloud
+              ? cfg.accessLabelWhatsApp
+              : cfg.accessLabel}
         </span>
         <Select
           value={accessMode}
@@ -1236,16 +1418,22 @@ export function ChannelConfigSection({
         {accessMode === "allowlist"
           ? isTelegram
             ? cfg.accessAllowlistDescTelegram
-            : cfg.accessAllowlistDesc
+            : isWhatsAppCloud
+              ? cfg.accessAllowlistDescWhatsApp
+              : cfg.accessAllowlistDesc
           : accessMode === "blocklist"
             ? isTelegram
               ? cfg.accessBlocklistDescTelegram
-              : cfg.accessBlocklistDesc
+              : isWhatsAppCloud
+                ? cfg.accessBlocklistDescWhatsApp
+                : cfg.accessBlocklistDesc
             : isSlack
               ? cfg.accessAllDescSlack
               : isDiscord
                 ? cfg.accessAllDescDiscord
-                : cfg.accessAllDescTelegram}
+                : isWhatsAppCloud
+                  ? cfg.accessAllDescWhatsApp
+                  : cfg.accessAllDescTelegram}
       </p>
       {accessMode !== "allow_all" && (
         <div className="flex flex-col gap-1.5 pt-1">
@@ -1278,7 +1466,18 @@ export function ChannelConfigSection({
               const input = e.currentTarget.elements.namedItem(
                 "accessUserId",
               ) as HTMLInputElement;
-              addAccessId(input.value);
+              let value = input.value;
+              if (isWhatsAppCloud) {
+                const normalized = normalizeWhatsAppPhoneNumberInput(value);
+                if (!normalized) {
+                  input.setCustomValidity(cfg.userIdInvalidWhatsApp);
+                  input.reportValidity();
+                  return;
+                }
+                value = normalized;
+              }
+              input.setCustomValidity("");
+              addAccessId(value);
               input.value = "";
             }}
             className="flex items-center gap-2"
@@ -1286,13 +1485,17 @@ export function ChannelConfigSection({
             <input
               name="accessUserId"
               type="text"
+              inputMode={isWhatsAppCloud ? "tel" : undefined}
               disabled={saving}
+              onInput={(e) => e.currentTarget.setCustomValidity("")}
               placeholder={
                 isSlack
                   ? cfg.userIdPlaceholderSlack
                   : isDiscord
                     ? cfg.userIdPlaceholderDiscord
-                    : cfg.userIdPlaceholderTelegram
+                    : isWhatsAppCloud
+                      ? cfg.userIdPlaceholderWhatsApp
+                      : cfg.userIdPlaceholderTelegram
               }
               className="min-w-0 flex-1 rounded-md border border-border bg-background px-2 py-1.5 text-sm font-mono"
             />
@@ -1309,7 +1512,9 @@ export function ChannelConfigSection({
               ? cfg.userIdHintSlack
               : isDiscord
                 ? cfg.userIdHintDiscord
-                : cfg.userIdHintTelegram}
+                : isWhatsAppCloud
+                  ? cfg.userIdHintWhatsApp
+                  : cfg.userIdHintTelegram}
           </p>
         </div>
       )}
@@ -1464,7 +1669,7 @@ export function ChannelConfigSection({
         />
       )}
 
-      {!isDiscord && (
+      {!isDiscord && !isWhatsAppCloud && (
         <ConfigToggle
           label={cfg.requireMention}
           hint={cfg.requireMentionHintSlack}
@@ -1475,7 +1680,7 @@ export function ChannelConfigSection({
       )}
 
       {/* Acknowledgment reaction — not wired on the Discord inbound path. */}
-      {!isDiscord && ackReactionControl}
+      {!isDiscord && !isWhatsAppCloud && ackReactionControl}
 
       {accessControl}
 
@@ -1490,6 +1695,55 @@ export function ChannelConfigSection({
         </span>
       )}
     </div>
+  );
+}
+
+export function WhatsAppCloudChatSection({
+  phoneNumber,
+}: {
+  phoneNumber: string | null;
+}) {
+  const t = useT();
+  const add = t.studioPage.channels.add;
+  const normalized = phoneNumber
+    ? normalizeWhatsAppPhoneNumberInput(phoneNumber)
+    : null;
+  if (!normalized) return null;
+
+  const chatUrl = `https://wa.me/${normalized}`;
+  return (
+    <section className="flex flex-col gap-3 rounded-lg border border-border px-4 py-3">
+      <div>
+        <h3 className="text-sm font-semibold">{add.whatsappCloudChatTitle}</h3>
+        <p className="mt-1 text-xs text-muted-foreground">
+          {add.whatsappCloudChatHint}
+        </p>
+      </div>
+      <div className="flex flex-col items-start gap-4 sm:flex-row sm:items-center">
+        <a
+          href={chatUrl}
+          target="_blank"
+          rel="noreferrer"
+          aria-label={add.whatsappCloudOpenChat}
+          className="rounded-xl border border-border bg-white p-3"
+        >
+          <QRCodeSVG value={chatUrl} size={160} />
+        </a>
+        <div className="flex min-w-0 flex-col gap-2">
+          <code className="break-all rounded bg-muted px-2 py-1.5 text-xs">
+            +{normalized}
+          </code>
+          <a
+            href={chatUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="self-start rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-muted"
+          >
+            {add.whatsappCloudOpenChat}
+          </a>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -1680,7 +1934,9 @@ export function AddChannelForm({
     for (let attempt = 0; attempt < 8; attempt++) {
       try {
         const chans = await listChannels(workspaceId);
-        const wa = chans.find((c) => c.channelType === "whatsapp");
+        const wa = chans.find(
+          (c) => c.channelType === "whatsapp" && c.integrationProvider !== "cloud_api",
+        );
         if (wa) {
           await onCreated(wa);
           return;
@@ -1749,6 +2005,10 @@ export function AddChannelForm({
       ...Object.fromEntries(assistants.map((a) => [a.id, a.name])),
     }),
     [assistants, add.defaultAssistantNone],
+  );
+  const requiredAssistantItems = useMemo(
+    () => Object.fromEntries(assistants.map((a) => [a.id, a.name])),
+    [assistants],
   );
 
   function copyManifest(): void {
@@ -1956,7 +2216,9 @@ export function AddChannelForm({
       {platform === "whatsapp" ? (
         <WhatsappConnectTab
           workspaceId={workspaceId}
+          assistants={assistants}
           onConnected={handleWhatsappConnected}
+          onCloudConnected={(channel) => void onCreated(channel)}
         />
       ) : platform === "wechat" ? (
         <WechatConnectTab
@@ -2283,20 +2545,40 @@ export function AddChannelForm({
 
       {platform !== "whatsapp" && platform !== "telegram" && (
         <label className="flex flex-col gap-1">
-          <span className="text-xs font-medium">{add.defaultAssistantLabel}</span>
+          <span className="text-xs font-medium">
+            {platform === "email"
+              ? add.emailHandlerLabel
+              : add.defaultAssistantLabel}
+          </span>
           <Select
-            value={defaultAssistantId || "__none__"}
+            value={
+              platform === "email"
+                ? defaultAssistantId
+                : defaultAssistantId || "__none__"
+            }
             onValueChange={(v) =>
               setDefaultAssistantId(v && v !== "__none__" ? v : "")
             }
-            items={defaultAssistantItems}
+            items={
+              platform === "email"
+                ? requiredAssistantItems
+                : defaultAssistantItems
+            }
             disabled={submitting || !!success}
           >
             <SelectTrigger size="sm" className="text-sm">
-              <SelectValue />
+              <SelectValue
+                placeholder={
+                  platform === "email"
+                    ? add.emailHandlerPlaceholder
+                    : undefined
+                }
+              />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="__none__">{add.defaultAssistantNone}</SelectItem>
+              {platform !== "email" && (
+                <SelectItem value="__none__">{add.defaultAssistantNone}</SelectItem>
+              )}
               {assistants.map((a) => (
                 <SelectItem key={a.id} value={a.id}>
                   {a.name}
@@ -2305,7 +2587,9 @@ export function AddChannelForm({
             </SelectContent>
           </Select>
           <span className="text-xs text-muted-foreground">
-            {add.defaultAssistantHint}
+            {platform === "email"
+              ? add.emailHandlerHint
+              : add.defaultAssistantHint}
           </span>
         </label>
       )}
@@ -2505,14 +2789,31 @@ type WaConnectPhase =
  */
 function WhatsappConnectTab({
   workspaceId,
+  assistants = [],
   onConnected,
+  onCloudConnected,
+  initialMode = "cloud",
 }: {
   workspaceId: string;
+  assistants?: StudioAssistantSummary[];
   onConnected: () => void;
+  onCloudConnected?: (channel: Channel) => void;
+  initialMode?: "cloud" | "linked";
 }) {
   const t = useT();
   const wa = t.studioPage.ingestRules.whatsapp;
+  const add = t.studioPage.channels.add;
   const [phase, setPhase] = useState<WaConnectPhase>({ kind: "idle" });
+  const [mode, setMode] = useState<"cloud" | "linked">(initialMode);
+  const [accessToken, setAccessToken] = useState("");
+  const [appSecret, setAppSecret] = useState("");
+  const [phoneNumberId, setPhoneNumberId] = useState("");
+  const [wabaId, setWabaId] = useState("");
+  const [assistantId, setAssistantId] = useState("");
+  const [cloudSubmitting, setCloudSubmitting] = useState(false);
+  const [cloudError, setCloudError] = useState<string | null>(null);
+  const [cloudResult, setCloudResult] = useState<{ webhookUrl: string; verifyToken: string } | null>(null);
+  const [copiedCloud, setCopiedCloud] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
   const start = useCallback(() => {
@@ -2541,8 +2842,119 @@ function WhatsappConnectTab({
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
+  async function connectCloud(): Promise<void> {
+    setCloudSubmitting(true);
+    setCloudError(null);
+    try {
+      const result = await connectWhatsAppCloudChannel(workspaceId, {
+        accessToken,
+        appSecret,
+        phoneNumberId: phoneNumberId.trim(),
+        wabaId: wabaId.trim(),
+        defaultAssistantId: assistantId || null,
+      });
+      onCloudConnected?.(result.channel);
+      setCloudResult({ webhookUrl: result.webhookUrl ?? result.webhookPath, verifyToken: result.verifyToken });
+    } catch (e) {
+      setCloudError((e as Error).message);
+    } finally {
+      setCloudSubmitting(false);
+    }
+  }
+
+  function copyCloudSetup(): void {
+    if (!cloudResult) return;
+    void navigator.clipboard.writeText(`${cloudResult.webhookUrl}\n${cloudResult.verifyToken}`).then(() => {
+      setCopiedCloud(true);
+      setTimeout(() => setCopiedCloud(false), 2000);
+    });
+  }
+
   return (
     <div className="flex flex-col gap-3">
+      <div className="flex gap-1 rounded-md bg-muted p-1 self-start">
+        <button
+          type="button"
+          onClick={() => setMode("cloud")}
+          className={cn("rounded px-2.5 py-1 text-xs", mode === "cloud" ? "bg-background font-medium shadow-sm" : "text-muted-foreground")}
+        >
+          {add.whatsappCloudMode}
+        </button>
+        <button
+          type="button"
+          onClick={() => setMode("linked")}
+          className={cn("rounded px-2.5 py-1 text-xs", mode === "linked" ? "bg-background font-medium shadow-sm" : "text-muted-foreground")}
+        >
+          {add.whatsappLinkedMode}
+        </button>
+      </div>
+
+      {mode === "cloud" ? (
+        cloudResult ? (
+          <div className="flex flex-col gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3">
+            <p className="text-sm font-medium text-emerald-600 dark:text-emerald-400">{add.connectedWhatsAppCloud}</p>
+            <p className="text-xs text-muted-foreground">{add.whatsappCloudWebhookHint}</p>
+            <code className="break-all rounded bg-muted px-2 py-1.5 text-xs">{cloudResult.webhookUrl}</code>
+            <p className="text-xs text-muted-foreground">{add.whatsappCloudVerifyHint}</p>
+            <code className="break-all rounded bg-muted px-2 py-1.5 text-xs">{cloudResult.verifyToken}</code>
+            <button type="button" onClick={copyCloudSetup} className="self-start rounded-md border border-border px-2 py-1 text-xs hover:bg-muted">
+              {copiedCloud ? add.copied : add.whatsappCloudCopySetup}
+            </button>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-3">
+            <p className="text-xs text-muted-foreground">{add.whatsappCloudHint}</p>
+            <a href="https://developers.facebook.com/apps/" target="_blank" rel="noreferrer" className="self-start text-xs text-primary hover:underline">
+              {add.whatsappCloudPortalLink}
+            </a>
+            {[
+              [add.whatsappAccessTokenLabel, accessToken, setAccessToken, "EAAB...", "password"],
+              [add.whatsappAppSecretLabel, appSecret, setAppSecret, "••••••••••••••••", "password"],
+              [add.whatsappPhoneNumberIdLabel, phoneNumberId, setPhoneNumberId, "123456789012345", "text"],
+              [add.whatsappWabaIdLabel, wabaId, setWabaId, "123456789012345", "text"],
+            ].map(([label, value, setter, placeholder, type]) => (
+              <label key={label as string} className="flex flex-col gap-1">
+                <span className="text-xs font-medium">{label as string}</span>
+                <input
+                  type={type as string}
+                  value={value as string}
+                  onChange={(e) => (setter as (v: string) => void)(e.target.value)}
+                  placeholder={placeholder as string}
+                  disabled={cloudSubmitting}
+                  className="rounded-md border border-border bg-background px-2 py-1.5 font-mono text-sm disabled:opacity-50"
+                />
+              </label>
+            ))}
+            <label className="flex flex-col gap-1">
+              <span className="text-xs font-medium">{add.defaultAssistantLabel}</span>
+              <Select
+                value={assistantId || "__none__"}
+                onValueChange={(v) => setAssistantId(v && v !== "__none__" ? v : "")}
+                items={{ __none__: add.defaultAssistantNone, ...Object.fromEntries(assistants.map((a) => [a.id, a.name])) }}
+                disabled={cloudSubmitting}
+              >
+                <SelectTrigger size="sm"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__none__">{add.defaultAssistantNone}</SelectItem>
+                  {assistants.map((a) => <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </label>
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => void connectCloud()}
+                disabled={cloudSubmitting || !accessToken || appSecret.length < 8 || !/^\d+$/.test(phoneNumberId) || !/^\d+$/.test(wabaId)}
+                className="self-start rounded-md bg-action px-3 py-1.5 text-sm font-medium text-action-foreground disabled:opacity-50"
+              >
+                {cloudSubmitting ? add.connecting : add.connect}
+              </button>
+              {cloudError && <span className="text-xs text-destructive">{cloudError}</span>}
+            </div>
+          </div>
+        )
+      ) : (
+        <>
       <p className="text-xs text-muted-foreground">{wa.subtitle}</p>
 
       {phase.kind === "qr" ? (
@@ -2583,6 +2995,8 @@ function WhatsappConnectTab({
         >
           {wa.connectAction}
         </button>
+      )}
+        </>
       )}
     </div>
   );
@@ -3438,7 +3852,7 @@ function WhatsappCardSection({ workspaceId }: { workspaceId: string }) {
         <p className="text-xs text-amber-600 dark:text-amber-400">
           {wa.disconnectedNote}
         </p>
-        <WhatsappConnectTab workspaceId={workspaceId} onConnected={refresh} />
+        <WhatsappConnectTab workspaceId={workspaceId} onConnected={refresh} initialMode="linked" />
       </div>
     );
   }
@@ -3448,30 +3862,106 @@ function WhatsappCardSection({ workspaceId }: { workspaceId: string }) {
 
 /**
  * Assistant inbox management — the email channel's detail section: the
- * address (copyable) and the sender allowlist. The gate is fail-closed:
- * workspace members' emails always converse; these extra contacts join them;
- * every other sender files into the brain and surfaces as an attention card
- * with an "allowlist this sender" action (Approvals).
+ * address, incoming access mode, exact sender routing, and mailbox authority.
+ * Non-members always use the isolated external-guest lane, even when the
+ * operator opens the inbox to anyone.
  */
-function EmailInboxSection({
+const AGENTMAIL_SEND_ACTION = "agentmailSendMessage";
+const AGENTMAIL_DRAFT_ACTION = "agentmailCreateDraft";
+
+type AssistantConnectorGrant = {
+  connectorId: string;
+  allowedActions: string[];
+};
+
+export function EmailInboxSection({
   workspaceId,
   channel,
   inbox,
+  assistants,
+  onChannelUpdated,
   onChanged,
 }: {
   workspaceId: string;
   channel: Channel;
   inbox: EmailInbox | null;
+  assistants: StudioAssistantSummary[];
+  onChannelUpdated?: (channel: Channel) => void;
   onChanged?: () => void | Promise<void>;
 }) {
   const t = useT();
   const em = t.studioPage.channels.email;
   const address = inbox?.address ?? channel.displayName;
   const allowlist = useMemo(() => inbox?.allowlist ?? [], [inbox]);
+  const senderRoutes = useMemo(() => inbox?.senderRoutes ?? [], [inbox]);
   const [newContact, setNewContact] = useState("");
   const [saving, setSaving] = useState(false);
+  const [accessSaving, setAccessSaving] = useState(false);
+  const [handlerSaving, setHandlerSaving] = useState(false);
+  const [ingestSaving, setIngestSaving] = useState(false);
+  const [grantsLoading, setGrantsLoading] = useState(false);
+  const [grantsSaving, setGrantsSaving] = useState(false);
+  const [selectedHandlerId, setSelectedHandlerId] = useState(
+    inbox?.assistantId ?? "",
+  );
+  const [selectedAccessMode, setSelectedAccessMode] = useState<
+    "allowlist" | "allow_all"
+  >(inbox?.accessMode ?? "allowlist");
+  const [allowedActions, setAllowedActions] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const governanceId = inbox?.connectorInstanceId
+    ? `agentmail:${inbox.connectorInstanceId}`
+    : null;
+  const assistantItems = useMemo(
+    () => Object.fromEntries(assistants.map((assistant) => [assistant.id, assistant.name])),
+    [assistants],
+  );
+  const senderRoutingItems = useMemo(
+    () => ({ __default__: em.defaultHandlerOption, ...assistantItems }),
+    [assistantItems, em.defaultHandlerOption],
+  );
+
+  useEffect(() => {
+    setSelectedHandlerId(inbox?.assistantId ?? "");
+  }, [inbox?.assistantId]);
+
+  useEffect(() => {
+    setSelectedAccessMode(inbox?.accessMode ?? "allowlist");
+  }, [inbox?.accessMode]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!selectedHandlerId || !governanceId) {
+      setAllowedActions(new Set());
+      setGrantsLoading(false);
+      return;
+    }
+    setGrantsLoading(true);
+    authFetch(
+      `${API_URL}/api/assistant-connector-grants/${encodeURIComponent(selectedHandlerId)}`,
+    )
+      .then(async (res) => {
+        if (!res.ok) throw new Error(em.saveError);
+        return (await res.json()) as { grants?: AssistantConnectorGrant[] };
+      })
+      .then((data) => {
+        if (cancelled) return;
+        const exact = data.grants?.find(
+          (grant) => grant.connectorId === governanceId,
+        );
+        setAllowedActions(new Set(exact?.allowedActions ?? []));
+      })
+      .catch(() => {
+        if (!cancelled) setAllowedActions(new Set());
+      })
+      .finally(() => {
+        if (!cancelled) setGrantsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedHandlerId, governanceId, em.saveError]);
 
   function copyAddress(): void {
     void navigator.clipboard.writeText(address).then(() => {
@@ -3490,6 +3980,123 @@ function EmailInboxSection({
       setError((e as Error).message);
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function saveAccessMode(next: "allowlist" | "allow_all"): Promise<void> {
+    const previous = selectedAccessMode;
+    setSelectedAccessMode(next);
+    setAccessSaving(true);
+    setError(null);
+    try {
+      await updateEmailInbox({ workspaceId, channelId: channel.id, accessMode: next });
+      await onChanged?.();
+    } catch {
+      setSelectedAccessMode(previous);
+      setError(em.saveError);
+    } finally {
+      setAccessSaving(false);
+    }
+  }
+
+  async function saveSenderRoute(email: string, assistantId: string | null): Promise<void> {
+    const next = senderRoutes.filter((route) => route.email !== email);
+    if (assistantId) next.push({ email, assistantId });
+    setSaving(true);
+    setError(null);
+    try {
+      await updateEmailInbox({ workspaceId, channelId: channel.id, senderRoutes: next });
+      await onChanged?.();
+    } catch {
+      setError(em.saveError);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function removeContact(email: string): Promise<void> {
+    setSaving(true);
+    setError(null);
+    try {
+      await updateEmailInbox({
+        workspaceId,
+        channelId: channel.id,
+        allowlist: allowlist.filter((entry) => entry !== email),
+        senderRoutes: senderRoutes.filter((route) => route.email !== email),
+      });
+      await onChanged?.();
+    } catch {
+      setError(em.saveError);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function saveHandler(nextAssistantId: string): Promise<void> {
+    if (!nextAssistantId || nextAssistantId === selectedHandlerId) return;
+    const previous = selectedHandlerId;
+    setSelectedHandlerId(nextAssistantId);
+    setHandlerSaving(true);
+    setError(null);
+    try {
+      await updateEmailInbox({
+        workspaceId,
+        channelId: channel.id,
+        assistantId: nextAssistantId,
+      });
+      await onChanged?.();
+    } catch {
+      setSelectedHandlerId(previous);
+      setError(em.saveError);
+    } finally {
+      setHandlerSaving(false);
+    }
+  }
+
+  async function saveIngest(next: boolean): Promise<void> {
+    setIngestSaving(true);
+    setError(null);
+    try {
+      const updated = await updateChannel(workspaceId, channel.id, {
+        enabledCapabilities: next
+          ? [...new Set([...channel.enabledCapabilities, "ingest" as const])]
+          : channel.enabledCapabilities.filter((capability) => capability !== "ingest"),
+      });
+      onChannelUpdated?.(updated);
+    } catch {
+      setError(em.saveError);
+    } finally {
+      setIngestSaving(false);
+    }
+  }
+
+  async function toggleAction(action: string): Promise<void> {
+    if (!selectedHandlerId || !governanceId) return;
+    const previous = allowedActions;
+    const next = new Set(previous);
+    if (next.has(action)) next.delete(action);
+    else next.add(action);
+    setAllowedActions(next);
+    setGrantsSaving(true);
+    setError(null);
+    try {
+      const res = await authFetch(
+        `${API_URL}/api/assistant-connector-grants/${encodeURIComponent(selectedHandlerId)}/${encodeURIComponent(governanceId)}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            readAllowed: true,
+            allowedActions: Array.from(next),
+          }),
+        },
+      );
+      if (!res.ok) throw new Error(em.saveError);
+    } catch {
+      setAllowedActions(previous);
+      setError(em.saveError);
+    } finally {
+      setGrantsSaving(false);
     }
   }
 
@@ -3523,28 +4130,153 @@ function EmailInboxSection({
         </button>
       </div>
 
-      <div className="flex flex-col gap-1.5">
-        <span className="text-xs font-medium">{em.allowlistLabel}</span>
-        <p className="text-xs text-muted-foreground">{em.allowlistHint}</p>
-        {allowlist.length > 0 && (
-          <ul className="flex flex-wrap gap-1.5">
-            {allowlist.map((entry) => (
-              <li
-                key={entry}
-                className="flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs"
-              >
-                <span className="font-mono">{entry}</span>
-                <button
-                  type="button"
-                  aria-label={em.removeContact}
-                  disabled={saving}
-                  onClick={() => void saveAllowlist(allowlist.filter((a) => a !== entry))}
-                  className="text-muted-foreground hover:text-foreground disabled:opacity-50"
-                >
-                  ×
-                </button>
-              </li>
+      <div className="flex flex-col gap-1.5 border-t border-border pt-3">
+        <span className="text-xs font-medium">{em.handledByLabel}</span>
+        <Select
+          value={selectedHandlerId}
+          items={assistantItems}
+          disabled={handlerSaving || assistants.length === 0}
+          onValueChange={(value) => {
+            if (value) void saveHandler(value);
+          }}
+        >
+          <SelectTrigger size="sm" className="w-fit min-w-48 text-sm">
+            <SelectValue placeholder={em.handledByPlaceholder} />
+          </SelectTrigger>
+          <SelectContent>
+            {assistants.map((assistant) => (
+              <SelectItem key={assistant.id} value={assistant.id}>
+                {assistant.name}
+              </SelectItem>
             ))}
+          </SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground">{em.handledByHint}</p>
+      </div>
+
+      <div className="flex flex-col gap-1.5 border-t border-border pt-3">
+        <span className="text-xs font-medium">{em.accessModeLabel}</span>
+        <Select
+          value={selectedAccessMode}
+          items={{
+            allowlist: em.accessModeApprovedOnly,
+            allow_all: em.accessModeAnyone,
+          }}
+          disabled={accessSaving}
+          onValueChange={(value) => {
+            if (value === "allowlist" || value === "allow_all") {
+              void saveAccessMode(value);
+            }
+          }}
+        >
+          <SelectTrigger size="sm" className="w-fit min-w-56 text-sm">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="allowlist">{em.accessModeApprovedOnly}</SelectItem>
+            <SelectItem value="allow_all">{em.accessModeAnyone}</SelectItem>
+          </SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground">
+          {selectedAccessMode === "allow_all"
+            ? em.accessModeAnyoneHint
+            : em.accessModeApprovedHint}
+        </p>
+      </div>
+
+      <label className="flex items-start gap-2 border-t border-border pt-3 text-sm">
+        <input
+          type="checkbox"
+          checked={channel.enabledCapabilities.includes("ingest")}
+          disabled={ingestSaving}
+          onChange={(event) => void saveIngest(event.target.checked)}
+          className="mt-0.5"
+        />
+        <span className="flex flex-col gap-0.5">
+          <span className="text-xs font-medium">{em.brainIngestLabel}</span>
+          <span className="text-xs text-muted-foreground">{em.brainIngestHint}</span>
+        </span>
+      </label>
+
+      <div className="flex flex-col gap-2 border-t border-border pt-3">
+        <div>
+          <div className="text-xs font-medium">{em.outboundActionsLabel}</div>
+          <p className="text-xs text-muted-foreground">{em.outboundActionsHint}</p>
+        </div>
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={allowedActions.has(AGENTMAIL_SEND_ACTION)}
+            disabled={grantsLoading || grantsSaving || !governanceId || !selectedHandlerId}
+            onChange={() => void toggleAction(AGENTMAIL_SEND_ACTION)}
+          />
+          <span>{em.sendEmailAction}</span>
+        </label>
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={allowedActions.has(AGENTMAIL_DRAFT_ACTION)}
+            disabled={grantsLoading || grantsSaving || !governanceId || !selectedHandlerId}
+            onChange={() => void toggleAction(AGENTMAIL_DRAFT_ACTION)}
+          />
+          <span>{em.createDraftAction}</span>
+        </label>
+      </div>
+
+      <div className="flex flex-col gap-1.5 border-t border-border pt-3">
+        <span className="text-xs font-medium">{em.senderRoutingLabel}</span>
+        <p className="text-xs text-muted-foreground">
+          {selectedAccessMode === "allow_all"
+            ? em.senderRoutingAnyoneHint
+            : em.senderRoutingApprovedHint}
+        </p>
+        {allowlist.length > 0 && (
+          <ul className="flex flex-col gap-1.5">
+            {allowlist.map((entry) => {
+              const route = senderRoutes.find((candidate) => candidate.email === entry);
+              return (
+                <li
+                  key={entry}
+                  className="flex flex-wrap items-center gap-2 rounded-md border border-border px-2 py-1.5"
+                >
+                  <span className="min-w-52 flex-1 break-all font-mono text-xs">{entry}</span>
+                  <Select
+                    value={route?.assistantId ?? "__default__"}
+                    items={senderRoutingItems}
+                    disabled={saving}
+                    onValueChange={(value) => {
+                      if (value) {
+                        void saveSenderRoute(
+                          entry,
+                          value === "__default__" ? null : value,
+                        );
+                      }
+                    }}
+                  >
+                    <SelectTrigger size="sm" className="w-fit min-w-48 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__default__">{em.defaultHandlerOption}</SelectItem>
+                      {assistants.map((assistant) => (
+                        <SelectItem key={assistant.id} value={assistant.id}>
+                          {assistant.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <button
+                    type="button"
+                    aria-label={em.removeContact}
+                    disabled={saving}
+                    onClick={() => void removeContact(entry)}
+                    className="text-muted-foreground hover:text-foreground disabled:opacity-50"
+                  >
+                    ×
+                  </button>
+                </li>
+              );
+            })}
           </ul>
         )}
         <div className="flex items-center gap-2">
@@ -3555,7 +4287,7 @@ function EmailInboxSection({
             onKeyDown={(e) => {
               if (e.key === "Enter") void addContact();
             }}
-            placeholder="partner@example.com"
+            placeholder={em.contactPlaceholder}
             disabled={saving}
             className="text-sm rounded-md border border-border bg-background px-2 py-1.5 font-mono disabled:opacity-50 min-w-[220px]"
           />
@@ -3568,8 +4300,14 @@ function EmailInboxSection({
             {saving ? em.saving : em.addContact}
           </button>
         </div>
-        {error && <span className="text-xs text-destructive">{error}</span>}
       </div>
+
+      <div className="rounded-md bg-muted/50 px-3 py-2">
+        <div className="text-xs font-medium">{em.guestSafetyLabel}</div>
+        <p className="mt-0.5 text-xs text-muted-foreground">{em.guestSafetyHint}</p>
+      </div>
+
+      {error && <span className="text-xs text-destructive">{error}</span>}
     </div>
   );
 }

@@ -274,6 +274,9 @@ describe('[COMP:api/workspace-store] createWorkspaceStore', () => {
       // The RLS query must not count members (capped at 1 under RLS).
       const rlsSql = mockQueryWithRLS.mock.calls[0][1] as string
       expect(rlsSql).not.toMatch(/count\(/i)
+      expect(rlsSql).toContain('wm.picker_pinned_at AS "pickerPinnedAt"')
+      expect(rlsSql).toContain('wm.picker_hidden_at AS "pickerHiddenAt"')
+      expect(rlsSql).toContain('wm.picker_last_opened_at AS "pickerLastOpenedAt"')
       // The count comes from the owner pool, grouped by workspace.
       const countSql = mockQuery.mock.calls[0][0] as string
       expect(countSql).toMatch(/count\(\*\)/i)
@@ -298,6 +301,56 @@ describe('[COMP:api/workspace-store] createWorkspaceStore', () => {
       const teams = await store.list('u_1')
       expect(teams).toEqual([])
       expect(mockQuery).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('updatePickerPreferences (migration 443)', () => {
+    it('pins the caller membership and restores it from hidden', async () => {
+      mockQueryWithRLS.mockResolvedValueOnce({
+        rows: [{
+          pickerPinnedAt: '2026-08-17T08:00:00.000Z',
+          pickerHiddenAt: null,
+          pickerLastOpenedAt: null,
+        }],
+        rowCount: 1,
+      } as never)
+
+      const preferences = await store.updatePickerPreferences(
+        'u_1',
+        't_1',
+        { pinned: true },
+      )
+
+      expect(preferences?.pickerPinnedAt).toBe('2026-08-17T08:00:00.000Z')
+      const sql = mockQueryWithRLS.mock.calls[0][1] as string
+      expect(sql).toContain('picker_pinned_at = now()')
+      expect(sql).toContain('picker_hidden_at = NULL')
+      expect(sql).toContain('workspace_id = $1')
+      expect(sql).toContain('user_id = $2')
+      expect(mockQueryWithRLS.mock.calls[0][2]).toEqual(['t_1', 'u_1'])
+    })
+
+    it('hides and stamps recency without changing workspace lifecycle', async () => {
+      mockQueryWithRLS.mockResolvedValueOnce({
+        rows: [{
+          pickerPinnedAt: null,
+          pickerHiddenAt: '2026-08-17T08:00:00.000Z',
+          pickerLastOpenedAt: '2026-08-17T08:00:00.000Z',
+        }],
+        rowCount: 1,
+      } as never)
+
+      await store.updatePickerPreferences('u_1', 't_1', {
+        hidden: true,
+        opened: true,
+      })
+
+      const sql = mockQueryWithRLS.mock.calls[0][1] as string
+      expect(sql).toContain('UPDATE workspace_members')
+      expect(sql).toContain('picker_hidden_at = now()')
+      expect(sql).toContain('picker_pinned_at = NULL')
+      expect(sql).toContain('picker_last_opened_at = now()')
+      expect(sql).not.toContain('UPDATE workspaces')
     })
   })
 

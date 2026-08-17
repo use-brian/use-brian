@@ -45,9 +45,11 @@ import { useT } from "@/lib/i18n/client";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import {
   LOCAL_ONLY_KEYS,
+  canSwitchSessionBackend,
   createFrameGate,
   createWheelForwarder,
   mapClickToFrame,
+  normalizeCaptureSite,
   normalizeNavigateUrl,
   takeoverStartsPolled,
 } from "@/lib/computer-takeover";
@@ -65,6 +67,8 @@ import {
   resumeComputerTask,
   sendComputerInput,
   sendStreamInput,
+  setComputerSessionBackend,
+  type BrowserBackend,
   type ComputerTask,
   type TakeoverInput,
   type TakeoverStreamSession,
@@ -133,6 +137,9 @@ export default function ComputerTakeoverPage(props: {
   // Profile the session saves into when the task started identity-less (R2-4).
   const [profileItems, setProfileItems] = useState<SearchableSelectItem[]>([]);
   const [profileId, setProfileId] = useState<string>("");
+  const [backendChoice, setBackendChoice] = useState<BrowserBackend | null>(null);
+  const [backendSwitching, setBackendSwitching] = useState(false);
+  const [backendSwitchFailed, setBackendSwitchFailed] = useState(false);
   // The take-over toolbar's address bar (§5). Local until submitted — never
   // forwarded as keystrokes, only as a `navigate` goto.
   const [address, setAddress] = useState("");
@@ -633,10 +640,11 @@ export default function ComputerTakeoverPage(props: {
     forwardInput({ kind: "navigate", action: "goto", url });
   }, [address, forwardInput]);
 
-  // An identity-less task needs a profile to save into (409 profile_required)
-  // — offer the workspace's profiles to pick from.
+  // An identity-less cloud task may pick the profile its captured session
+  // belongs to. Profile-level My Browser capture lives in Profile Management.
   useEffect(() => {
-    if (!task || task === "loading" || task.backend === "local" || task.profileId) return;
+    if (!task || task === "loading") return;
+    if (task.backend !== "cloud" || task.profileId) return;
     let cancelled = false;
     void listBrowserProfiles(workspaceId)
       .then((res) => {
@@ -651,7 +659,7 @@ export default function ComputerTakeoverPage(props: {
   }, [task, workspaceId]);
 
   const onCaptured = useCallback(async () => {
-    const target = site.trim();
+    const target = normalizeCaptureSite(site);
     if (!target) return;
     setCapturing(true);
     const result = await markComputerSessionCaptured(
@@ -662,6 +670,31 @@ export default function ComputerTakeoverPage(props: {
     setCapturing(false);
     setCaptureStatus(result.ok ? "saved" : result.profileRequired ? "profile_required" : "failed");
   }, [profileId, sessionId, site]);
+
+  const onBackendChange = useCallback(
+    async (backend: BrowserBackend) => {
+      const activeBackend = task && task !== "loading" ? task.backend : null;
+      if (backendSwitching || backend === (backendChoice ?? activeBackend)) return;
+      setBackendSwitching(true);
+      setBackendSwitchFailed(false);
+      const ok = await setComputerSessionBackend(sessionId, backend).catch(() => false);
+      setBackendSwitching(false);
+      if (!ok) {
+        setBackendSwitchFailed(true);
+        return;
+      }
+      setBackendChoice(backend);
+      if (task && task !== "loading" && task.backend === "local" && backend === "cloud") {
+        const active = await getComputerTask(sessionId).catch(() => null);
+        setTask(active);
+        if (active) {
+          setStream(null);
+          setMode(takeoverStartsPolled(active.backend) ? "poll" : "connecting");
+        }
+      }
+    },
+    [backendChoice, backendSwitching, sessionId, task],
+  );
 
   // Login-flow exit: the sandbox existed only for this sign-in, so a
   // successful capture can complete the task (capture + kill) and go home.
@@ -741,6 +774,59 @@ export default function ComputerTakeoverPage(props: {
           {t.computer.stopTask}
         </button>
       </div>
+
+      {canSwitchSessionBackend(task, loginFlow.isLogin) ? (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-muted/20 px-3 py-2">
+          <div>
+            <p className="text-xs font-medium">{t.computer.backendSwitchLabel}</p>
+            <p className="mt-0.5 text-[11px] text-muted-foreground">
+              {t.computer.backendSwitchHint}
+            </p>
+          </div>
+          <div
+            role="radiogroup"
+            aria-label={t.computer.backendSwitchLabel}
+            className="flex gap-1"
+          >
+            {(["cloud", "local"] as const).map((backend) => {
+              const selected = (backendChoice ?? task.backend) === backend;
+              return (
+                <button
+                  key={backend}
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  disabled={backendSwitching || selected}
+                  onClick={() => void onBackendChange(backend)}
+                  className={
+                    selected
+                      ? "rounded-md bg-primary/10 px-2.5 py-1.5 text-xs font-medium text-primary"
+                      : "rounded-md border border-border px-2.5 py-1.5 text-xs text-muted-foreground hover:bg-accent disabled:opacity-50"
+                  }
+                >
+                  {backend === "cloud"
+                    ? t.computer.profiles.backendCloud
+                    : t.computer.profiles.backendLocal}
+                </button>
+              );
+            })}
+          </div>
+          {backendSwitchFailed ? (
+            <p role="status" className="w-full text-[11px] text-destructive">
+              {t.computer.backendSwitchFailed}
+            </p>
+          ) : backendChoice && backendChoice !== task.backend ? (
+            <p role="status" className="w-full text-[11px] text-primary">
+              {t.computer.backendSwitchSaved.replace(
+                "{browser}",
+                backendChoice === "cloud"
+                  ? t.computer.profiles.backendCloud
+                  : t.computer.profiles.backendLocal,
+              )}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
 
       {/* Browser chrome (§5) — back/forward/reload + address bar. Kept OUTSIDE
           the frame box so typing an address never forwards as page keystrokes. */}
@@ -914,7 +1000,7 @@ export default function ComputerTakeoverPage(props: {
           <input
             value={site}
             onChange={(e) => setSite(e.target.value)}
-            placeholder="github.com"
+            placeholder={t.computer.profiles.capturePlaceholder}
             className="rounded-md border border-border bg-background px-2 py-1.5 text-sm font-normal"
           />
         </label>
@@ -932,7 +1018,7 @@ export default function ComputerTakeoverPage(props: {
         ) : null}
         <button
           type="button"
-          disabled={capturing || site.trim().length === 0}
+          disabled={capturing || normalizeCaptureSite(site) === null}
           onClick={() => void onCaptured()}
           className="rounded-md bg-action px-3 py-1.5 text-xs font-medium text-action-foreground disabled:opacity-50"
         >
@@ -966,6 +1052,7 @@ export default function ComputerTakeoverPage(props: {
         ) : null}
       </div>
       ) : null}
+
     </div>
   );
 }

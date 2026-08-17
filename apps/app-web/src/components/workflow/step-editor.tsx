@@ -34,6 +34,7 @@ import { buildBlueprintPickerItems } from "@/lib/blueprints";
 import type {
   ChannelDestination,
   SlackChannelOption,
+  WorkspaceChannelOption,
   DeliverChannelType,
   PageAnchor,
   WorkflowModelAlias,
@@ -62,12 +63,12 @@ import {
   SwitchRow,
 } from "@/components/workflow/field";
 import {
-  buildToolCatalog,
   catalogToolNames,
   filterToolGroups,
   normalizeToolName,
   BUILTIN_GROUP_ID,
   MAX_TOOLS,
+  type ToolGroup,
 } from "@/lib/workflow-tools";
 import {
   fieldUnderlineCls,
@@ -98,6 +99,8 @@ type Props = {
    * `deliver.channelId` dropdown so users don't paste raw platform IDs.
    */
   destinations: ChannelDestination[];
+  /** Active workspace channel integrations used to pin Telegram delivery. */
+  channelOptions: WorkspaceChannelOption[];
   /**
    * Workspace Slack channels (by name, from `conversations.list`) — backs the
    * deliver picker when the channel type is Slack, so authors pick `#name`
@@ -122,6 +125,8 @@ type Props = {
    * hides itself and any already-selected slugs are preserved.
    */
   skills: WorkspaceSkillSummary[];
+  /** Connected workspace connector tools for the Restrict tools picker. */
+  toolGroups: ToolGroup[];
   /**
    * All steps in the draft definition — backs the page-anchor "from
    * earlier step" picker (steps with `page.create` other than this one).
@@ -140,10 +145,12 @@ export function StepEditor({
   step,
   assistants,
   destinations,
+  channelOptions,
   slackChannels,
   pages,
   blueprints,
   skills,
+  toolGroups,
   steps,
   onChange,
   onMoveUp,
@@ -272,10 +279,15 @@ export function StepEditor({
                     value={step.target.assistantId}
                     onValueChange={(v) => {
                       if (v)
-                        onChange({
-                          ...step,
-                          target: { ...step.target, assistantId: v },
-                        });
+                    onChange({
+                      ...step,
+                      target: { ...step.target, assistantId: v },
+                      deliver: step.deliver
+                        && "channelIntegrationId" in step.deliver
+                        && step.deliver.channelIntegrationId
+                        ? { ...step.deliver, channelIntegrationId: undefined }
+                        : step.deliver,
+                    });
                     }}
                     disabled={disabled}
                     // Label-map so the trigger shows the name, not a UUID.
@@ -352,6 +364,7 @@ export function StepEditor({
               <RailCard title={b.stepRailExecutionHeading}>
                 <ExecutionFields
                   step={step}
+                  toolGroups={toolGroups}
                   onChange={onChange}
                   disabled={disabled}
                   t={t}
@@ -365,6 +378,7 @@ export function StepEditor({
                   <DeliverField
                     step={step}
                     destinations={destinations}
+                    channelOptions={channelOptions}
                     slackChannels={slackChannels}
                     onChange={onChange}
                     disabled={disabled}
@@ -465,11 +479,13 @@ function InstructionBody({
 
 function ExecutionFields({
   step,
+  toolGroups,
   onChange,
   disabled,
   t,
 }: {
   step: Extract<WorkflowStep, { type: "assistant_call" }>;
+  toolGroups: ToolGroup[];
   onChange: (s: WorkflowStep) => void;
   disabled?: boolean;
   t: Dictionary;
@@ -642,7 +658,13 @@ function ExecutionFields({
 
       <div className="flex flex-col gap-1.5">
         <FieldLabel label={b.toolsFilterLabel} hint={b.toolsFilterHint} />
-        <ToolsField step={step} onChange={onChange} disabled={disabled} t={t} />
+        <ToolsField
+          step={step}
+          toolGroups={toolGroups}
+          onChange={onChange}
+          disabled={disabled}
+          t={t}
+        />
       </div>
     </div>
   );
@@ -664,11 +686,13 @@ function ExecutionFields({
  */
 function ToolsField({
   step,
+  toolGroups,
   onChange,
   disabled,
   t,
 }: {
   step: Extract<WorkflowStep, { type: "assistant_call" }>;
+  toolGroups: ToolGroup[];
   onChange: (s: WorkflowStep) => void;
   disabled?: boolean;
   t: Dictionary;
@@ -679,9 +703,9 @@ function ToolsField({
   const count = selected.length;
   const atMax = count >= MAX_TOOLS;
 
-  // Catalog is static; translate only the Built-in group label (connector
-  // labels are registry data, English — same as the connector-grants surface).
-  const catalog = useMemo(() => buildToolCatalog(), []);
+  // Translate only the Built-in group label. Connector labels come from the
+  // shared registry or the connected custom instance.
+  const catalog = toolGroups;
   const groups = useMemo(
     () =>
       catalog.map((g) =>
@@ -888,7 +912,7 @@ function ToolsField({
 
 /** Initial collapse set: a group is collapsed unless it holds a selected tool. */
 function collapseFor(
-  groups: ReturnType<typeof buildToolCatalog>,
+  groups: ToolGroup[],
   selectedSet: Set<string>,
 ): Set<string> {
   const set = new Set<string>();
@@ -1364,7 +1388,7 @@ function SkillsField({
           {/* Search bar (template-gallery pattern). Composite field: the box
               draws the focus ring; the inner input opts out of the global
               :focus-visible ring (`focus-visible:shadow-none`). */}
-          <div className="flex items-center gap-2 rounded-md border border-border bg-muted/40 px-2.5 py-1.5 transition-[border-color,box-shadow] focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30">
+          <div className="flex items-center gap-2 rounded-md border border-border bg-muted/40 px-2.5 py-1.5 transition-[border-color,box-shadow] focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30 [&_:focus-visible]:shadow-none">
             <Search className="size-4 shrink-0 text-muted-foreground" aria-hidden />
             <input
               type="text"
@@ -1438,6 +1462,7 @@ function SkillsField({
 function DeliverField({
   step,
   destinations,
+  channelOptions,
   slackChannels,
   onChange,
   disabled,
@@ -1445,14 +1470,45 @@ function DeliverField({
 }: {
   step: Extract<WorkflowStep, { type: "assistant_call" }>;
   destinations: ChannelDestination[];
+  channelOptions: WorkspaceChannelOption[];
   slackChannels: SlackChannelOption[];
   onChange: (s: WorkflowStep) => void;
   disabled?: boolean;
   t: Dictionary;
 }) {
   const b = t.workflowPage.builder;
+  const isTriggerReply = !!step.deliver && "replyToTrigger" in step.deliver;
+  const staticDeliver = step.deliver && "channelId" in step.deliver
+    ? step.deliver
+    : undefined;
   const channelType = step.deliver?.channelType ?? "telegram";
-  const channelId = step.deliver?.channelId ?? "";
+  const channelId = staticDeliver?.channelId ?? "";
+  const channelIntegrationId = staticDeliver?.channelIntegrationId;
+  const [stickyCustom, setStickyCustom] = useState(false);
+
+  if (isTriggerReply) {
+    return (
+      <div className="flex flex-col gap-2">
+        <SwitchRow
+          label={b.deliverLabel}
+          hint={b.deliverHint}
+          control={
+            <Switch
+              checked
+              onCheckedChange={(checked) => {
+                if (!checked) onChange({ ...step, deliver: undefined });
+              }}
+              disabled={disabled}
+              aria-label={b.deliverLabel}
+            />
+          }
+        />
+        <div className="rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+          {b.deliverReplyToTrigger}
+        </div>
+      </div>
+    );
+  }
 
   // Known destinations for the picked channel type. Slack is sourced live from
   // the workspace's real channels by NAME (`#dev-work`), so authors never see
@@ -1463,19 +1519,46 @@ function DeliverField({
   // the chat/person name, so the label is human-readable with the raw id as
   // hint. 'web' has no destination surface — the custom-ID input takes over.
   const isSlack = channelType === "slack";
-  const relevant = destinations.filter((d) => d.channelType === channelType);
+  const allRelevant = destinations.filter((d) => d.channelType === channelType);
+  const telegramChannels = channelOptions.filter((channel) => channel.channelType === "telegram");
+  const relevant = channelType === "telegram" && channelIntegrationId
+    ? allRelevant.filter(
+        (d) =>
+          d.channelIntegrationId === channelIntegrationId ||
+          d.channelIntegrationId == null,
+      )
+    : allRelevant;
+  const destinationValue = (d: ChannelDestination) =>
+    d.channelIntegrationId
+      ? `${d.channelId}::integration::${d.channelIntegrationId}`
+      : d.channelId;
+  const destinationByValue = new Map(relevant.map((d) => [destinationValue(d), d]));
   const known: SearchableSelectItem[] = isSlack
     ? slackChannels.map((c) => ({ value: c.id, label: `#${c.name}`, hint: c.id }))
     : relevant.map((d) => ({
-        value: d.channelId,
-        label: d.title || d.channelId,
+        value: destinationValue(d),
+        label: d.integrationLabel
+          ? `${d.title || d.channelId} (${d.integrationLabel})`
+          : d.title || d.channelId,
         hint: d.title ? d.channelId : undefined,
       }));
-  const matchesKnown = known.some((k) => k.value === channelId);
+  const selectedDestination = relevant.find(
+    (d) =>
+      d.channelId === channelId &&
+      ((d.channelIntegrationId ?? undefined) === channelIntegrationId ||
+        (channelType === "telegram" && d.channelIntegrationId == null)),
+  ) ?? (
+    channelIntegrationId === undefined
+      ? allRelevant.filter((d) => d.channelId === channelId).length === 1
+        ? allRelevant.find((d) => d.channelId === channelId)
+        : undefined
+      : undefined
+  );
+  const knownValue = isSlack ? channelId : selectedDestination ? destinationValue(selectedDestination) : "";
+  const matchesKnown = known.some((k) => k.value === knownValue);
 
   // Custom-mode is sticky once toggled (so the input stays visible while
   // empty) — derived from data otherwise.
-  const [stickyCustom, setStickyCustom] = useState(false);
   const showCustom = stickyCustom || (!matchesKnown && channelId !== "");
 
   const items: SearchableSelectItem[] = [
@@ -1487,7 +1570,7 @@ function DeliverField({
   ];
 
   const selectValue = matchesKnown
-    ? channelId
+    ? knownValue
     : showCustom
       ? CUSTOM_DESTINATION_VALUE
       : "";
@@ -1545,6 +1628,53 @@ function DeliverField({
             </SelectContent>
           </Select>
 
+          {channelType === "telegram" && telegramChannels.length > 0 && (
+            <div className="flex flex-col gap-1.5">
+              <FieldLabel
+                label={b.deliverTelegramChannelLabel}
+                hint={b.deliverTelegramChannelHint}
+              />
+              <Select
+                value={channelIntegrationId ?? ""}
+                onValueChange={(v) => {
+                  if (!v) return;
+                  const currentIsKnown = allRelevant.some((d) => d.channelId === channelId);
+                  const nextChannelCanUseDestination = allRelevant.some(
+                    (d) =>
+                      d.channelId === channelId &&
+                      (d.channelIntegrationId === v || d.channelIntegrationId == null),
+                  );
+                  if (currentIsKnown && !nextChannelCanUseDestination) setStickyCustom(false);
+                  onChange({
+                    ...step,
+                    deliver: {
+                      ...step.deliver,
+                      channelType,
+                      channelId:
+                        currentIsKnown && !nextChannelCanUseDestination ? "" : channelId,
+                      channelIntegrationId: v,
+                    },
+                  });
+                }}
+                disabled={disabled}
+                items={Object.fromEntries(
+                  telegramChannels.map((channel) => [channel.id, channel.displayName]),
+                )}
+              >
+                <SelectTrigger size="sm" className="w-full">
+                  <SelectValue placeholder={b.deliverTelegramChannelPlaceholder} />
+                </SelectTrigger>
+                <SelectContent>
+                  {telegramChannels.map((channel) => (
+                    <SelectItem key={channel.id} value={channel.id}>
+                      {channel.displayName}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+
           <div className="flex flex-col gap-1.5">
             <FieldLabel label={b.deliverDestinationLabel} />
             <SearchableSelect
@@ -1558,14 +1688,25 @@ function DeliverField({
                     // intact across a same-platform destination edit — the
                     // type-change path above deliberately resets it (a thread
                     // parent can't live on another platform).
-                    deliver: { ...step.deliver, channelType, channelId: "" },
+                    deliver: {
+                      ...step.deliver,
+                      channelType,
+                      channelId: "",
+                    },
                   });
                   return;
                 }
                 setStickyCustom(false);
+                const destination = destinationByValue.get(v);
                 onChange({
                   ...step,
-                  deliver: { ...step.deliver, channelType, channelId: v },
+                  deliver: {
+                    ...step.deliver,
+                    channelType,
+                    channelId: destination?.channelId ?? v,
+                    channelIntegrationId:
+                      destination?.channelIntegrationId ?? channelIntegrationId,
+                  },
                 });
               }}
               items={items}
@@ -1603,7 +1744,11 @@ function DeliverField({
                   onChange({
                     ...step,
                     // Same thread-preserving spread as the picker above.
-                    deliver: { ...step.deliver, channelType, channelId: e.target.value },
+                    deliver: {
+                      ...step.deliver,
+                      channelType,
+                      channelId: e.target.value,
+                    },
                   })
                 }
                 disabled={disabled}

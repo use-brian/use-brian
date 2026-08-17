@@ -9,7 +9,16 @@
  */
 
 import type { EpisodeSensitivity } from './db/episodes-store.js'
-import type { PipelineBResult, SourceKind } from '@use-brian/core'
+import type { LLMProvider, PipelineBResult, SourceKind } from '@use-brian/core'
+
+export type WorkspaceLlmLane = {
+  provider: LLMProvider
+  model: string
+  modelTier?: string
+  providerKeySource?: 'user' | 'platform'
+  inputTokenLimit?: number
+  maxTokens?: number
+}
 
 export type ChatEpisodeInput = {
   workspaceId: string
@@ -19,6 +28,8 @@ export type ChatEpisodeInput = {
   content: string
   occurredAt: Date
   messageIdRange: [string, string]
+  /** Immutable workspace lane captured by the triggering compaction request. */
+  llm?: WorkspaceLlmLane
 }
 
 /** Materialize a compacted chat window as an Episode + run Pipeline B. */
@@ -65,6 +76,8 @@ export type BrainEpisodeInput = {
    * (`EpisodeFilters.parentEpisodeId`). Omitted for standalone ingests.
    */
   parentEpisodeId?: string
+  /** Immutable workspace lane for Pipeline B extraction. */
+  llm?: WorkspaceLlmLane
 }
 
 /** Ingest an arbitrary text Episode (e.g. an MCP `ingestToBrain` call). */

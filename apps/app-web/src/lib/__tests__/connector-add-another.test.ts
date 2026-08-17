@@ -12,6 +12,7 @@ describe("[COMP:app-web/connector-add-another] add-another routing", () => {
   it("preserves the other connector-specific flows", () => {
     expect(resolveConnectorAddAnotherFlow({ id: "cli" })).toBe("cli-form");
     expect(resolveConnectorAddAnotherFlow({ id: "github" })).toBe("pat-form");
+    expect(resolveConnectorAddAnotherFlow({ id: "wordpress" })).toBe("wordpress-form");
     expect(resolveConnectorAddAnotherFlow({ id: "notion", oauthRequired: true })).toBe("oauth");
     expect(resolveConnectorAddAnotherFlow({ id: "community-mcp" })).toBe("directory");
     expect(isPatConnector("github")).toBe(true);

@@ -21,6 +21,8 @@
  */
 
 import { useEffect, useState, type ReactNode } from "react";
+import { usePathname } from "next/navigation";
+import { MessageSquareText } from "lucide-react";
 import {
   FeedProfilesProvider,
   useFeedWorkspaceState,
@@ -30,6 +32,8 @@ import { FeedFloatingChat } from "@/components/feed/feed-floating-chat";
 import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { useT } from "@/lib/i18n/client";
 import { Button } from "@/components/ui/button";
+import { feedPostIdFromPathname } from "@/lib/feed-nav";
+import { requestFeedChatOpen } from "@/lib/feed-chat-seed";
 
 export function FeedSurfaceShell(props: {
   workspaceId: string;
@@ -46,7 +50,7 @@ export function FeedSurfaceShell(props: {
             owns the feed pane's one scroll container; pages with their own
             full-height scroller (Voice, draft detail) fill it with `h-full`
             so the outer never overflows. */}
-        <OperatorTopbar app="feed" />
+        <OperatorTopbar app="feed" right={<FeedChatTopbarAction />} />
         <div className="min-h-0 flex-1 overflow-y-auto">
           <FeedReadyGate onRetry={() => setEpoch((e) => e + 1)}>
             {props.children}
@@ -54,6 +58,33 @@ export function FeedSurfaceShell(props: {
         </div>
       </div>
     </FeedProfilesProvider>
+  );
+}
+
+/** Persistent, explicit entry to the Feed's one master control conversation. */
+function FeedChatTopbarAction() {
+  const pathname = usePathname() ?? "";
+  const state = useFeedWorkspaceState();
+  const t = useT().feedPage.tuningChat;
+  if (feedPostIdFromPathname(pathname) !== null || state.status !== "ready") {
+    return null;
+  }
+  if (state.value.profiles.length === 0 && state.value.assistants.length === 0) {
+    return null;
+  }
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="sm"
+      onClick={requestFeedChatOpen}
+      aria-label={t.openAria}
+      title={t.openAria}
+      className="h-8 gap-1.5 px-2.5 text-xs text-sidebar-foreground/75 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+    >
+      <MessageSquareText className="size-3.5" aria-hidden />
+      <span>{t.topbarAction}</span>
+    </Button>
   );
 }
 

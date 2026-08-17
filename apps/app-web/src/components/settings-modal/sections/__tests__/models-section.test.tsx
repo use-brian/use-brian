@@ -52,7 +52,7 @@ describe("[COMP:app-web/models-settings] Models section", () => {
       </I18nProvider>,
     );
     expect(html).toContain(tm.viewRouting);
-    expect(html).toContain(tm.viewCustom);
+    expect(html).toContain(tm.viewProviders);
     expect(html).toContain(tm.viewAdvanced);
     expect(html).not.toContain(en.workspaceLlmKey.heading);
   });

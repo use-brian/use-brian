@@ -21,6 +21,7 @@ import {
 } from "@use-brian/shared/home-apps";
 import { authFetch } from "@/lib/auth-fetch";
 import { getUserInfo } from "@/lib/user";
+import type { WorkspacePickerItem } from "@/lib/workspace-picker";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -28,6 +29,50 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 export const MAX_WORKSPACE_ICON_BYTES = 5 * 1024 * 1024;
 
 export type WorkspaceIconUpdate = { iconUrl: string | null };
+
+export type WorkspacePickerPreferencePatch = {
+  pinned?: boolean;
+  hidden?: boolean;
+  opened?: true;
+};
+
+export type WorkspacePickerPreferenceState = Pick<
+  WorkspacePickerItem,
+  "pickerPinnedAt" | "pickerHiddenAt" | "pickerLastOpenedAt"
+>;
+
+/**
+ * Persist the acting member's picker organization. This updates only the
+ * membership row; it never changes workspace lifecycle or access.
+ */
+export async function updateWorkspacePickerPreferences(
+  workspaceId: string,
+  patch: WorkspacePickerPreferencePatch,
+  apiUrl = API_URL,
+): Promise<WorkspacePickerPreferenceState> {
+  const res = await authFetch(
+    `${apiUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/picker-preferences`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+      keepalive: patch.opened === true,
+    },
+  );
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new WorkspaceApiError(
+      body.error ?? "Could not update workspace navigation",
+      res.status,
+    );
+  }
+  const body = (await res.json()) as WorkspacePickerPreferenceState;
+  return {
+    pickerPinnedAt: body.pickerPinnedAt ?? null,
+    pickerHiddenAt: body.pickerHiddenAt ?? null,
+    pickerLastOpenedAt: body.pickerLastOpenedAt ?? null,
+  };
+}
 
 /** Upload and activate a custom workspace picture. Admin/owner only. */
 export async function uploadWorkspaceIcon(

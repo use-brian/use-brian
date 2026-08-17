@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 /**
- * §6 guardrail (docs/plans/my-browser.md): the extension drives the allowed tab
+ * Governance guardrail: the extension drives the allowed tab
  * purely via `chrome.debugger` (CDP) — no content scripts, no cookies/scripting
  * APIs — so it needs NO host permissions. A broad `<all_urls>` grant is the
  * Manus Browser Operator anti-pattern (Mindgard "Rubra" credential-exfil +
@@ -30,7 +30,7 @@ const BRIAN_ICONS = {
   '128': 'icon-128.png',
 }
 
-describe('[COMP:ext/agent] Manifest — narrow permissions (my-browser.md §6)', () => {
+describe('[COMP:ext/agent] Manifest — narrow permissions', () => {
   it('requests no host_permissions (the CDP drive needs none)', () => {
     expect(manifest.host_permissions ?? []).toEqual([])
   })

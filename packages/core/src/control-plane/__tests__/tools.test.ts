@@ -62,7 +62,16 @@ function makeReader(): ControlPlaneReader {
       },
     ]),
     listSkills: vi.fn(async () => []),
-    listChannels: vi.fn(async () => []),
+    listChannels: vi.fn(async () => [{
+      id: '55555555-5555-4555-8555-555555555555',
+      integrationId: '66666666-6666-4666-8666-666666666666',
+      integrationStatus: 'active',
+      channelType: 'whatsapp',
+      displayName: 'Support',
+      clearance: 'internal' as const,
+      enabledCapabilities: ['chat'],
+      status: 'active',
+    }]),
   }
 }
 
@@ -106,5 +115,17 @@ describe('[COMP:control-plane/read-tools] createControlPlaneTools', () => {
     const result = await tools.listConnectors.execute({}, ctx())
     const rows = (result.data as { connectors: Array<{ oauthRequired: boolean }> }).connectors
     expect(rows[0].oauthRequired).toBe(false)
+  })
+
+  it('listChannels exposes the integration id used by workflow event sources', async () => {
+    const tools = createControlPlaneTools(makeReader())
+    const result = await tools.listChannels.execute({}, ctx())
+    const rows = (result.data as {
+      channels: Array<{ id: string; integrationId: string | null }>
+    }).channels
+    expect(rows[0]).toMatchObject({
+      id: '55555555-5555-4555-8555-555555555555',
+      integrationId: '66666666-6666-4666-8666-666666666666',
+    })
   })
 })

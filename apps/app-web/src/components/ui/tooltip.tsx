@@ -25,6 +25,9 @@ export function Tooltip({
   side = "bottom",
   sideOffset = 6,
   delay = 350,
+  closeOnClick = true,
+  open,
+  onOpenChange,
 }: {
   /** The trigger element (an icon button / link). Rendered as the tooltip anchor. */
   children: React.ReactElement;
@@ -34,11 +37,22 @@ export function Tooltip({
   side?: "top" | "right" | "bottom" | "left";
   sideOffset?: number;
   delay?: number;
+  /** Keep the popup open when the trigger is clicked and retains focus. */
+  closeOnClick?: boolean;
+  /** Optional controlled state for triggers that also disclose on press. */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }) {
+  // Base UI distinguishes an omitted `open` prop from `open={undefined}`.
+  // Only pass the controlled contract when a caller actually controls it;
+  // otherwise hover/focus tooltips must remain uncontrolled for their whole
+  // lifetime.
+  const rootControlProps =
+    open === undefined ? {} : { open, onOpenChange };
   return (
     <TooltipPrimitive.Provider delay={delay} closeDelay={0}>
-      <TooltipPrimitive.Root>
-        <TooltipPrimitive.Trigger render={children} />
+      <TooltipPrimitive.Root {...rootControlProps}>
+        <TooltipPrimitive.Trigger render={children} closeOnClick={closeOnClick} />
         <TooltipPrimitive.Portal>
           <TooltipPrimitive.Positioner
             side={side}

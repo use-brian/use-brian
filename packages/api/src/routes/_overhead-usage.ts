@@ -34,6 +34,10 @@ export type RecordOverheadUsageParams = {
   sessionId: string
   userMessageId?: string | null
   model: string | null
+  /** Logical tier for dynamic custom model aliases. */
+  modelTier?: string
+  /** User-owned providers have zero Brian platform COGS. */
+  providerKeySource?: 'user' | 'platform'
   usage: TokenUsage | null | undefined
   source: string
   /**
@@ -64,14 +68,18 @@ export async function recordOverheadUsage(
       assistantId: params.assistantId,
       sessionId: params.sessionId,
       model: params.model,
+      modelTier: params.modelTier,
       inputTokens: params.usage.inputTokens,
       outputTokens: params.usage.outputTokens,
       cacheReadTokens: params.usage.cacheReadTokens,
       cacheWriteTokens: params.usage.cacheWriteTokens,
-      actualCostUsd: calculateCost(params.model, params.usage),
+      actualCostUsd: params.providerKeySource === 'user'
+        ? 0
+        : calculateCost(params.model, params.usage),
       source: params.source,
       userMessageId: params.userMessageId ?? undefined,
       triggerKey: params.triggerKey,
+      providerKeySource: params.providerKeySource,
       ...(params.audioSeconds !== undefined ? { audioSeconds: params.audioSeconds } : {}),
     })
   } catch (err) {

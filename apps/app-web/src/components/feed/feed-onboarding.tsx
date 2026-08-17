@@ -310,7 +310,7 @@ export function FeedOnboarding({
                 value={voiceHandle}
                 onChange={(e) => setVoiceHandle(e.target.value)}
                 placeholder={t.home.onboardVoicePlaceholder}
-                className="h-9 w-full rounded-lg border border-border bg-background px-3 text-sm focus:border-primary/50 focus:outline-none"
+                className="h-9 w-full rounded-lg border border-border bg-background px-3 text-sm focus:outline-none"
               />
               <button
                 type="submit"
@@ -348,7 +348,7 @@ export function FeedOnboarding({
                   onChange={(e) => setName(e.target.value)}
                   placeholder={t.home.emptyNamePlaceholder}
                   disabled={busy}
-                  className="h-9 w-full rounded-lg border border-border bg-background px-3 text-sm focus:border-primary/50 focus:outline-none disabled:opacity-50"
+                  className="h-9 w-full rounded-lg border border-border bg-background px-3 text-sm focus:outline-none disabled:opacity-50"
                 />
                 <button
                   type="submit"

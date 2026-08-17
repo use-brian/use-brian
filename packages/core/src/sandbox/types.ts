@@ -17,12 +17,13 @@ import { z } from 'zod'
 // ── Browser snapshot ───────────────────────────────────────────
 
 /**
- * One interactive node of a ref-based accessibility snapshot
- * (`@e1 button "Send"`). Refs are stable within a single snapshot only —
- * the executor side (extension / agent-browser) rejects stale refs.
+ * One node of a curated accessibility snapshot. Interactive nodes carry refs
+ * (`@e1 button "Send"`); informational nodes in a full snapshot do not. Refs
+ * are stable within a single snapshot only — the executor side rejects stale
+ * refs.
  */
 export const BrowserSnapshotNodeSchema = z.object({
-  ref: z.string().min(1),
+  ref: z.string().min(1).optional(),
   role: z.string(),
   name: z.string(),
   value: z.string().optional(),
@@ -36,6 +37,8 @@ export const BrowserSnapshotSchema = z.object({
   nodes: z.array(BrowserSnapshotNodeSchema),
 })
 export type BrowserSnapshot = z.infer<typeof BrowserSnapshotSchema>
+export type BrowserSnapshotMode = 'interactive' | 'full'
+export type BrowserSnapshotOptions = { mode?: BrowserSnapshotMode }
 
 export const BrowserNavigateResultSchema = z.object({ url: z.string() })
 export type BrowserNavigateResult = z.infer<typeof BrowserNavigateResultSchema>
@@ -168,7 +171,7 @@ export const NO_EXTENSION_MESSAGE = `No Use Brian browser extension is connected
 export interface BrowserProvider {
   readonly kind: 'local' | 'cloud'
   navigate(ctx: BrowserCallContext, url: string): Promise<BrowserNavigateResult>
-  snapshot(ctx: BrowserCallContext): Promise<BrowserSnapshot>
+  snapshot(ctx: BrowserCallContext, options?: BrowserSnapshotOptions): Promise<BrowserSnapshot>
   click(ctx: BrowserCallContext, ref: string): Promise<void>
   type(ctx: BrowserCallContext, ref: string, text: string): Promise<void>
   currentUrl(ctx: BrowserCallContext): Promise<BrowserUrlResult>
@@ -269,7 +272,7 @@ export interface SessionVault {
   revoke(params: { profileId: string; site: string }): Promise<void>
   /**
    * Per-plan inactivity purge (§4.10: ~30 d free / 90 d paid). Optional —
-   * the closed impl derives the cutoff from the workspace plan; the reaper
+   * the DB impl derives the cutoff from the workspace plan; the reaper
    * runs it daily. Returns the number of purged bundles.
    */
   purgeInactive?(): Promise<number>
@@ -386,7 +389,7 @@ export type TakeoverStreamInfo = {
 /** The per-sandbox discrete browser surface (agent-browser glue lives behind it). */
 export type SandboxBrowser = {
   navigate(url: string): Promise<BrowserNavigateResult>
-  snapshot(): Promise<BrowserSnapshot>
+  snapshot(options?: BrowserSnapshotOptions): Promise<BrowserSnapshot>
   click(ref: string): Promise<void>
   type(ref: string, text: string): Promise<void>
   /**
@@ -447,7 +450,14 @@ export interface SandboxProvider {
    */
   runBrowserUse(
     sandboxId: string,
-    req: { goal: string; maxSteps?: number; timeoutMs?: number },
+    req: { goal: string; maxSteps?: number; timeoutMs?: number; llm?: BrowserUseLlmConfig },
   ): Promise<BrowserUseRunResult>
   bridge: SandboxBridge
+}
+
+export type BrowserUseLlmConfig = {
+  apiKeyEnvName: 'ANTHROPIC_API_KEY' | 'GOOGLE_API_KEY' | 'OPENAI_API_KEY'
+  apiKey: string
+  model: string
+  baseUrl?: string
 }

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import request from 'supertest'
 import { createTestApp } from './helpers.js'
+import { TelegramApiError } from '@use-brian/channels'
 
 /**
  * [COMP:api/telegram-byo-route]
@@ -29,6 +30,16 @@ const leaveChatCalls: string[] = []
 // Capture createTelegramApi().setWebhook calls so the legacy-URL self-heal
 // path can be asserted without touching api.telegram.org.
 const setWebhookCalls: Array<{ url: string; secret: string }> = []
+
+// Overridable so a test can fail the DOWNLOAD leg the way Telegram actually
+// does (a 5xx from its own file service) and assert the turn blames Telegram
+// rather than the transcriber. Reset in beforeEach.
+const DEFAULT_DOWNLOAD_VOICE = async () => ({
+  buffer: Buffer.from('voice'),
+  mime: 'audio/ogg; codecs=opus',
+})
+let downloadVoiceImpl: () => Promise<{ buffer: Buffer; mime: string }> = DEFAULT_DOWNLOAD_VOICE
+
 const { mergeShadowUser } = vi.hoisted(() => ({
   mergeShadowUser: vi.fn(async () => ({ merged: false })),
 }))
@@ -77,7 +88,7 @@ vi.mock('@use-brian/channels', async () => {
         // api.telegram.org which fails fast in unit tests but adds noise.
         // `downloadMedia` echoes the file_id into the buffer so tests can
         // assert each photo of a media group flowed through independently.
-        downloadVoice: vi.fn(async () => ({ buffer: Buffer.from('voice'), mime: 'audio/ogg; codecs=opus' })),
+        downloadVoice: vi.fn(() => downloadVoiceImpl()),
         downloadMedia: vi.fn(async (fileId: string) => ({
           buffer: Buffer.from(`bytes-of-${fileId}`),
           mime: 'image/jpeg',
@@ -129,6 +140,7 @@ const pipelineCalls: Array<{
   messageText?: string
   userContentBlocks?: Array<{ type: string; mimeType?: string }>
 }> = []
+let pipelineError: Error | undefined
 vi.mock('../channel-pipeline.js', () => ({
   processChannelMessage: vi.fn(async (params: {
     channelId: string
@@ -154,7 +166,11 @@ vi.mock('../channel-pipeline.js', () => ({
       messageText: params.messageText,
       userContentBlocks: params.userContentBlocks,
     })
-    await params.hooks.sendResponse('ok', pipelineDocuments)
+    if (pipelineError) {
+      await params.hooks.sendError?.(pipelineError)
+    } else {
+      await params.hooks.sendResponse('ok', pipelineDocuments)
+    }
   }),
 }))
 
@@ -189,6 +205,22 @@ vi.mock('../../db/channels-store.js', () => ({
   })),
   resolveAssistantForSurface: vi.fn(async () => 'assistant_1'),
   resolveRoutingForSurface: vi.fn(async () => ({
+    id: 'ca_1',
+    channelId: 'channel_1',
+    assistantId: 'assistant_1',
+    externalSurfaceId: null,
+    modelAlias: 'standard',
+    createdAt: new Date('2026-05-18T00:00:00Z'),
+  })),
+  resolveTelegramRoutingForSurface: vi.fn(async () => ({
+    id: 'ca_1',
+    channelId: 'channel_1',
+    assistantId: 'assistant_1',
+    externalSurfaceId: null,
+    modelAlias: 'standard',
+    createdAt: new Date('2026-05-18T00:00:00Z'),
+  })),
+  resolveAnyRoutingForChannel: vi.fn(async () => ({
     id: 'ca_1',
     channelId: 'channel_1',
     assistantId: 'assistant_1',
@@ -240,8 +272,14 @@ import {
   shouldUseUniversalTelegramIntake,
 } from '../telegram-byo.js'
 import { findOrCreateSession } from '../../db/sessions.js'
+import {
+  resolveAnyRoutingForChannel,
+  resolveTelegramRoutingForSurface,
+} from '../../db/channels-store.js'
 
 const mockFindOrCreateSession = vi.mocked(findOrCreateSession)
+const mockResolveAnyRouting = vi.mocked(resolveAnyRoutingForChannel)
+const mockResolveTelegramRouting = vi.mocked(resolveTelegramRoutingForSurface)
 
 // ── Test setup ──────────────────────────────────────────────────
 
@@ -290,11 +328,77 @@ beforeEach(() => {
   pipelineCalls.length = 0
   adapterSendCalls.length = 0
   pipelineDocuments = undefined
+  pipelineError = undefined
   leaveChatCalls.length = 0
   teamRoleCalls.length = 0
   teamRoleResponse = null
   setWebhookCalls.length = 0
+  downloadVoiceImpl = DEFAULT_DOWNLOAD_VOICE
   mergeShadowUser.mockClear()
+})
+
+describe('[COMP:api/telegram-byo-route] safe error delivery', () => {
+  function makeApp() {
+    return createTestApp(
+      '/webhook/telegram-byo',
+      telegramByoRoutes({
+        provider: {} as never,
+        systemPrompt: '',
+        tools: new Map(),
+        memoryStore: {} as never,
+        integrationStore: makeIntegrationStore() as never,
+        capabilityStore: {} as never,
+        apiUrl: 'http://test',
+      }),
+    )
+  }
+
+  it('explains that a custom text-only model cannot inspect an inbound image', async () => {
+    pipelineError = new Error(
+      'Custom model endpoints currently support text and tools only. Remove the inline image or use the web app to choose a built-in model.',
+    )
+
+    await postUpdate(makeApp(), {
+      update_id: 700,
+      message: {
+        message_id: 700,
+        from: { id: 42, first_name: 'Casey', username: 'casey' },
+        chat: { id: 42, type: 'private' },
+        date: Math.floor(Date.now() / 1000),
+        caption: 'Summarize this customer feedback.',
+        photo: [{ file_id: 'feedback_screenshot' }],
+      },
+    })
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    expect(pipelineCalls).toHaveLength(1)
+    expect(pipelineCalls[0].userContentBlocks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'image', mimeType: 'image/jpeg' }),
+    ]))
+    expect(adapterSendCalls.at(-1)?.text).toBe(pipelineError.message)
+  })
+
+  it('keeps arbitrary provider errors out of the Telegram reply', async () => {
+    pipelineError = new Error(
+      'Custom model endpoints currently support text and tools only. Upstream vendor detail that must stay private.',
+    )
+
+    await postUpdate(makeApp(), {
+      update_id: 701,
+      message: {
+        message_id: 701,
+        from: { id: 42, first_name: 'Casey', username: 'casey' },
+        chat: { id: 42, type: 'private' },
+        date: Math.floor(Date.now() / 1000),
+        text: 'hello',
+      },
+    })
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    expect(adapterSendCalls.at(-1)?.text).toBe('Something went wrong. Please try again.')
+  })
 })
 
 describe('[COMP:api/telegram-byo-route] OSS owner pairing', () => {
@@ -490,6 +594,43 @@ describe('[COMP:api/telegram-byo-route] voice note without a transcript', () => 
     expect(pipelineCalls).toHaveLength(1)
     expect(pipelineCalls[0].messageText).toMatch(/voice note received/i)
   })
+
+  it('blames Telegram, with its status code, when the download leg 5xxs', async () => {
+    // The 2026-08-17 regression: `getFile` returned 504, the shared catch ran
+    // the error through `describeTranscriptionFailure`, its /timeout|abort/i
+    // branch matched "Gateway Timeout", and the assistant told the user their
+    // voice note was too long for the transcriber — about audio the
+    // transcriber had never been handed.
+    downloadVoiceImpl = async () => {
+      throw new TelegramApiError('getFile', 'Gateway Timeout', 504)
+    }
+    await postUpdate(appWith({ enabled: true, apiKey: 'k' }), buildVoiceUpdate())
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    expect(pipelineCalls).toHaveLength(1)
+    const text = pipelineCalls[0].messageText
+    // Still arrives AS a voice note — an empty turn reads as "user sent nothing".
+    expect(text).toMatch(/voice note received/i)
+    // Names the real culprit and its code.
+    expect(text).toContain('504')
+    expect(text).toMatch(/Telegram/)
+    // And never re-describes a Telegram fault in the transcriber's vocabulary.
+    expect(text).not.toMatch(/transcription (timed out|failed)/i)
+  })
+
+  it('keeps the caption when the download leg fails', async () => {
+    downloadVoiceImpl = async () => {
+      throw new TelegramApiError('downloadFile', 'Bad Gateway', 502)
+    }
+    await postUpdate(appWith({ enabled: true, apiKey: 'k' }), buildVoiceUpdate('listen to this'))
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    expect(pipelineCalls).toHaveLength(1)
+    expect(pipelineCalls[0].messageText).toContain('listen to this')
+    expect(pipelineCalls[0].messageText).toContain('502')
+  })
 })
 
 describe('[COMP:api/telegram-byo-route] forum-topic routing', () => {
@@ -627,6 +768,55 @@ describe('[COMP:api/telegram-byo-route] forum-topic routing', () => {
     expect(chatLockCalls).toEqual(['tg-byo:-1001234567890'])
     expect(pipelineCalls).toHaveLength(1)
     expect(pipelineCalls[0]).toMatchObject({ channelId: '-1001234567890', isGroupChat: true })
+  })
+
+  it('boots from a surface route when the channel has no default assistant', async () => {
+    const app = createTestApp(
+      '/webhook/telegram-byo',
+      telegramByoRoutes({
+        provider: {} as never,
+        systemPrompt: '',
+        tools: new Map(),
+        memoryStore: {} as never,
+        integrationStore: makeIntegrationStore() as never,
+        capabilityStore: {} as never,
+        apiUrl: 'http://test',
+      }),
+    )
+    mockResolveTelegramRouting.mockResolvedValueOnce(null)
+
+    await postUpdate(app, buildForumUpdate({ updateId: 51, messageId: 501, threadId: 42 }))
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    expect(mockResolveAnyRouting).toHaveBeenCalledWith('channel_1')
+    expect(pipelineCalls).toHaveLength(1)
+    expect(pipelineCalls[0]).toMatchObject({ channelId: '-1001234567890:topic:42' })
+  })
+
+  it('drops an unmatched topic when a surface-only channel has no default', async () => {
+    const app = createTestApp(
+      '/webhook/telegram-byo',
+      telegramByoRoutes({
+        provider: {} as never,
+        systemPrompt: '',
+        tools: new Map(),
+        memoryStore: {} as never,
+        integrationStore: makeIntegrationStore() as never,
+        capabilityStore: {} as never,
+        apiUrl: 'http://test',
+      }),
+    )
+    mockResolveTelegramRouting
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null)
+
+    await postUpdate(app, buildForumUpdate({ updateId: 52, messageId: 502, threadId: 99 }))
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    expect(mockResolveAnyRouting).toHaveBeenCalledWith('channel_1')
+    expect(pipelineCalls).toHaveLength(0)
   })
 })
 

@@ -119,7 +119,6 @@ export function PendingQuestionPanel({
             "w-full min-h-[3.25rem] max-h-40 resize-none overflow-y-auto rounded-md border border-border bg-background",
             "px-2.5 py-1.5 text-[13px] leading-relaxed outline-none",
             "placeholder:text-muted-foreground",
-            "focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40",
             "disabled:opacity-60",
           )}
         />

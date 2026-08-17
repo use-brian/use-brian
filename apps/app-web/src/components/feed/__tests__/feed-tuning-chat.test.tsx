@@ -5,13 +5,14 @@
  * vitest in app-web is node-only — `renderToString` + module mocks (the
  * feed-inbox test shape). Covered here:
  *
- *   - `feed-chat-seed` pure logic: the event name (`feed:chat-seed`, which
- *     must NEVER equal the doc bus's `doc:chat-seed` — the two buses can't
- *     cross-fire), the payload shape, and the empty-prefill drop.
+ *   - Feed chat open + seed buses: distinct event names, seed payload, and
+ *     the empty-prefill drop.
  *   - The collapsed dock's static render: the launcher pill (open aria-label
- *     + the global dock's surface nudge — the app-standard pill idiom, not a
- *     FAB) AND the always-mounted (hidden) panel — header title, empty-state
- *     suggestions — plus the zero-assistant null render.
+ *     + explicit idle creation copy — the app-standard pill idiom, not a
+ *     FAB), live tool/text/thinking label priority, AND the always-mounted
+ *     (hidden) panel — header title, empty-state suggestions, and the global
+ *     dock's top/left/corner resize chrome — plus the zero-assistant null
+ *     render.
  *   - `FeedSurfaceShell` READY state mounts the feed dock alongside the
  *     children (the dock-swap contract; the `chatDockSuppression` hold is
  *     an effect, so its counter semantics are covered by
@@ -55,8 +56,8 @@ vi.mock("@/lib/recorder/dock-recorder-bridge", () => ({
 // sidebar state don't exist under bare SSR, so mock the hooks it reads.
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ back: vi.fn(), forward: vi.fn() }),
-  // The dock reads the pathname to pick its sticky channel: the Plan surface
-  // gets its own `mode='plan'` conversation (feed-revamp.md D9).
+  // The dock reads the pathname only to yield to a selected post's Refine
+  // chat. Every other route keeps the same Feed control conversation.
   usePathname: () => pathnameRef.current,
 }));
 vi.mock("@/components/doc/doc-sidebar-data", () => ({
@@ -71,11 +72,20 @@ import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
 import type { FeedProfile } from "@/lib/api/feed";
 import {
+  FEED_CHAT_OPEN_EVENT,
   FEED_CHAT_SEED_EVENT,
+  requestFeedChatOpen,
   requestFeedChatSeed,
 } from "@/lib/feed-chat-seed";
 import { CHAT_SEED_EVENT as DOC_CHAT_SEED_EVENT } from "@/lib/chat-seed";
-import { FeedFloatingChat } from "../feed-floating-chat";
+import {
+  FeedFloatingChat,
+  feedChatLauncherLabel,
+} from "../feed-floating-chat";
+import {
+  reduceTuningToolActivity,
+  type TuningChatActivity,
+} from "../tuning-chat-panel";
 import { FeedSurfaceShell } from "../feed-surface-shell";
 
 const dict = en as unknown as Dictionary;
@@ -127,6 +137,8 @@ function renderDock(profiles: FeedProfile[]): string {
     computerAudioAvailable: false,
     includeComputerAudio: false,
     setIncludeComputerAudio: vi.fn(),
+    livePageEnabled: false,
+    setLivePageEnabled: vi.fn(),
     includesSystemAudio: () => false,
     recovery: [],
     saveRecovery: vi.fn(),
@@ -140,13 +152,14 @@ function renderDock(profiles: FeedProfile[]): string {
   );
 }
 
-describe("[COMP:app-web/feed-tuning-chat] feed chat seed bus", () => {
-  it("uses its own event name, distinct from the doc chat-seed bus", () => {
+describe("[COMP:app-web/feed-tuning-chat] feed chat buses", () => {
+  it("uses Feed-specific event names, distinct from the doc chat-seed bus", () => {
+    expect(FEED_CHAT_OPEN_EVENT).toBe("feed:chat-open");
     expect(FEED_CHAT_SEED_EVENT).toBe("feed:chat-seed");
     expect(FEED_CHAT_SEED_EVENT).not.toBe(DOC_CHAT_SEED_EVENT);
   });
 
-  it("dispatches a one-shot CustomEvent with the seed payload; empty prefills are dropped", () => {
+  it("opens without changing the composer or dispatches a seed payload; empty prefills are dropped", () => {
     const dispatched: Array<{ type: string; detail: unknown }> = [];
     class FakeCustomEvent {
       type: string;
@@ -164,10 +177,15 @@ describe("[COMP:app-web/feed-tuning-chat] feed chat seed bus", () => {
       },
     });
 
+    requestFeedChatOpen();
     requestFeedChatSeed({ prefill: "About this voice rule…", researchMode: true });
     requestFeedChatSeed({ prefill: "   " });
 
     expect(dispatched).toEqual([
+      {
+        type: "feed:chat-open",
+        detail: undefined,
+      },
       {
         type: "feed:chat-seed",
         detail: { prefill: "About this voice rule…", researchMode: true },
@@ -177,18 +195,104 @@ describe("[COMP:app-web/feed-tuning-chat] feed chat seed bus", () => {
 });
 
 describe("[COMP:app-web/feed-tuning-chat] FeedFloatingChat", () => {
+  it("replaces the idle launcher copy with live tool, text, then thinking activity", () => {
+    const activity = (
+      patch: Partial<TuningChatActivity>,
+    ): TuningChatActivity => ({
+      isStreaming: true,
+      streamingText: "",
+      activeLabel: null,
+      ...patch,
+    });
+
+    expect(
+      feedChatLauncherLabel(
+        { isStreaming: false, streamingText: "", activeLabel: null },
+        "Create with Acme",
+        "Thinking...",
+      ),
+    ).toBe("Create with Acme");
+    expect(
+      feedChatLauncherLabel(
+        activity({
+          streamingText: "A reply that should lose to the tool",
+          activeLabel: "Searching launch notes",
+        }),
+        "Create with Acme",
+        "Thinking...",
+      ),
+    ).toBe("Searching launch notes");
+    expect(
+      feedChatLauncherLabel(
+        activity({ streamingText: "## Draft\n\nWriting the launch recap" }),
+        "Create with Acme",
+        "Thinking...",
+      ),
+    ).toBe("Draft Writing the launch recap");
+    expect(
+      feedChatLauncherLabel(
+        activity({}),
+        "Create with Acme",
+        "Thinking...",
+      ),
+    ).toBe("Thinking...");
+  });
+
+  it("reduces tool events into input-aware launcher narration", () => {
+    const started = reduceTuningToolActivity(
+      [],
+      "tool_start",
+      { id: "tool-1", name: "webSearch" },
+      en.chat.toolNarration,
+    );
+    expect(started).toEqual([
+      {
+        id: "tool-1",
+        name: "webSearch",
+        description: en.chat.toolNarration.webSearch,
+        status: "running",
+      },
+    ]);
+
+    const described = reduceTuningToolActivity(
+      started ?? [],
+      "tool_input",
+      {
+        id: "tool-1",
+        name: "webSearch",
+        input: { query: "August launch notes" },
+      },
+      en.chat.toolNarration,
+    );
+    expect(described?.[0]?.description).toContain("August launch notes");
+    expect(
+      reduceTuningToolActivity(
+        described ?? [],
+        "tool_result",
+        { id: "tool-1" },
+        en.chat.toolNarration,
+      )?.[0]?.status,
+    ).toBe("done");
+  });
+
   it("collapsed dock: renders the launcher pill and the always-mounted (hidden) panel", () => {
     const html = renderDock([profile("acme")]);
-    // Launcher pill (the collapsed state's only visible affordance) — carries
-    // the open aria-label and the global dock's surface nudge, so the feed
-    // dock reads as the same affordance as the app-wide chat dock.
+    // Launcher pill carries the open aria-label and says what Feed controls.
     expect(html).toContain(en.feedPage.tuningChat.openAria);
-    expect(html).toContain(en.chat.surfacePlaceholder);
+    expect(html).toContain("Create with acme");
+    expect(html).toContain('data-feed-chat-channel="plan"');
     // Panel is mounted even while collapsed — header + empty state ship in
     // the initial markup so an expand never remounts the conversation.
     expect(html).toContain(en.feedPage.tuningChat.title);
     expect(html).toContain(en.feedPage.tuningChat.emptyTitle);
     expect(html).toContain(en.feedPage.tuningChat.suggestion2);
+    // Feed's replacement dock must retain the global dock's resize contract:
+    // an accessible corner handle plus the full top and left drag targets.
+    expect(html).toContain(`aria-label="${en.chat.resizeHandle}"`);
+    expect(html).toContain("cursor-nwse-resize");
+    expect(html).toContain("cursor-ns-resize");
+    expect(html).toContain("cursor-ew-resize");
+    expect(html).toContain("width:460px;height:640px");
     // Feed replaces the global CHAT chrome, not the app-wide recorder. The
     // same record-dot affordance must remain beside the Feed launcher.
     expect(html).toContain(`aria-label="${en.recorder.start}"`);
@@ -196,6 +300,17 @@ describe("[COMP:app-web/feed-tuning-chat] FeedFloatingChat", () => {
     // the global :focus-visible shadow or the composer gets a second, sharp
     // blue rectangle inside its rounded ring.
     expect(html).toContain("focus-visible:shadow-none");
+  });
+
+  it("keeps the same master channel on Plan and Voice routes", () => {
+    pathnameRef.current = "/w/ws-1/feed";
+    expect(renderDock([profile("acme")])).toContain(
+      'data-feed-chat-channel="plan"',
+    );
+    pathnameRef.current = "/w/ws-1/feed/voice";
+    expect(renderDock([profile("acme")])).toContain(
+      'data-feed-chat-channel="plan"',
+    );
   });
 
   it("no connected assistant: renders nothing (feed home owns the empty state)", () => {
@@ -208,7 +323,7 @@ describe("[COMP:app-web/feed-tuning-chat] FeedFloatingChat", () => {
     pathnameRef.current = "/w/ws-1/feed/twitter/posts/session-1";
     const html = renderDock([profile("acme")]);
     expect(html).not.toContain(en.feedPage.tuningChat.openAria);
-    expect(html).not.toContain(en.chat.surfacePlaceholder);
+    expect(html).not.toContain("Create with acme");
     expect(html).not.toContain(`aria-label="${en.recorder.start}"`);
   });
 });
@@ -226,6 +341,23 @@ describe("[COMP:app-web/feed-tuning-chat] FeedSurfaceShell dock swap", () => {
     );
     expect(html).toContain("data-feed-page");
     expect(html).toContain(en.feedPage.tuningChat.openAria);
+    expect(html).toContain(en.feedPage.tuningChat.topbarAction);
+  });
+
+  it("selected post leaves both master-chat entries to the inline Refine rail", () => {
+    pathnameRef.current = "/w/ws-1/feed/twitter/posts/session-1";
+    ctxRef.workspace = workspace([profile("acme")]);
+    ctxRef.state = { status: "ready", value: ctxRef.workspace };
+    const html = renderToString(
+      <I18nProvider locale="en" dict={dict}>
+        <FeedSurfaceShell workspaceId="ws-1">
+          <div data-post-editor>post editor</div>
+        </FeedSurfaceShell>
+      </I18nProvider>,
+    );
+    expect(html).toContain("data-post-editor");
+    expect(html).not.toContain(en.feedPage.tuningChat.openAria);
+    expect(html).not.toContain(en.feedPage.tuningChat.topbarAction);
   });
 
   it("loading state renders neither the children nor the dock", () => {

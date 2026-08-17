@@ -241,7 +241,7 @@ export function TeamspaceCreateDialog({
               void create();
             }
           }}
-          className="mt-1.5 h-9 w-full rounded-md border border-border bg-background px-3 text-sm font-normal text-foreground outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40"
+          className="mt-1.5 h-9 w-full rounded-md border border-border bg-background px-3 text-sm font-normal text-foreground outline-none placeholder:text-muted-foreground"
         />
       </label>
       <div className="mt-3">
@@ -488,7 +488,7 @@ function GeneralTab({
               setName(e.target.value);
               setSaved(false);
             }}
-            className="h-9 w-full rounded-md border border-border bg-background px-3 text-sm text-foreground outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40"
+            className="h-9 w-full rounded-md border border-border bg-background px-3 text-sm text-foreground outline-none placeholder:text-muted-foreground"
           />
         </div>
       </div>
@@ -505,7 +505,7 @@ function GeneralTab({
             setDescription(e.target.value);
             setSaved(false);
           }}
-          className="mt-1.5 w-full resize-none rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40"
+          className="mt-1.5 w-full resize-none rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground outline-none placeholder:text-muted-foreground"
         />
       </div>
 
@@ -701,7 +701,7 @@ function MembersTab({
         value={query}
         placeholder={t.teamspaceMemberSearchPlaceholder}
         onChange={(e) => setQuery(e.target.value)}
-        className="h-8 w-full rounded-md border border-border bg-background px-3 text-sm text-foreground outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40"
+        className="h-8 w-full rounded-md border border-border bg-background px-3 text-sm text-foreground outline-none placeholder:text-muted-foreground"
       />
 
       {error && <div className="text-xs text-destructive">{error}</div>}

@@ -25,8 +25,11 @@ import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
 import type { ViewListRow, WorkspaceDomainRow } from "@/lib/api/views";
 import {
+  ConnectDomainForm,
   CustomDomainRow,
   DomainsSection,
+  EmailDomainRow,
+  EmailDomainsPanel,
   SubdomainClaim,
   SubdomainRow,
 } from "../domains-section";
@@ -145,5 +148,71 @@ describe("[COMP:app-web/settings-domains] CustomDomainRow", () => {
     expect(html).toContain(ts.statusLive);
     expect(html).not.toContain(ts.recheck);
     expect(html).toContain("Handbook");
+  });
+});
+
+describe("[COMP:app-web/settings-domains] Website domain connect", () => {
+  it("identifies the surface as website-only and uses one global focus treatment", () => {
+    const html = render(
+      <ConnectDomainForm workspaceId="ws-1" onChanged={async () => {}} />,
+    );
+    expect(td.customHeading).toBe("Website domains");
+    expect(html).not.toContain("focus:border-primary");
+    expect(html).toContain(ts.domainPlaceholder);
+  });
+});
+
+describe("[COMP:app-web/settings-domains] Assistant email domains", () => {
+  it("shows AgentMail's exact DNS records and the verify action", () => {
+    const html = render(
+      <EmailDomainsPanel
+        workspaceId="ws-1"
+        domains={[{
+          id: "mail-domain-1",
+          domain: "mail.usebrian.ai",
+          status: "pending",
+          records: [
+            {
+              type: "MX",
+              name: "mail.usebrian.ai",
+              value: "inbound-smtp.example.net",
+              status: null,
+              priority: 10,
+            },
+            {
+              type: "CNAME",
+              name: "agentmail._domainkey.mail.usebrian.ai",
+              value: "dkim.example.net",
+              status: null,
+              priority: null,
+            },
+          ],
+        }]}
+        onChanged={async () => {}}
+      />,
+    );
+    expect(html).toContain(td.emailHeading);
+    expect(html).toContain("mail.usebrian.ai");
+    expect(html).toContain("inbound-smtp.example.net");
+    expect(html).toContain("priority 10");
+    expect(html).toContain(td.emailVerify);
+  });
+
+  it("shows a verified domain as ready for Email channel creation", () => {
+    const html = render(
+      <EmailDomainRow
+        workspaceId="ws-1"
+        domain={{
+          id: "mail-domain-1",
+          domain: "mail.usebrian.ai",
+          status: "verified",
+          records: [],
+        }}
+        onChanged={async () => {}}
+      />,
+    );
+    expect(html).toContain(td.emailStatusVerified);
+    expect(html).toContain("This domain is ready.");
+    expect(html).not.toContain(`>${td.emailVerify}<`);
   });
 });

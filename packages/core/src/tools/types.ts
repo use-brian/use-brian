@@ -6,6 +6,8 @@ import type { Sensitivity, SensitivityAccumulator } from '../security/sensitivit
 import type { CompartmentAccumulator } from '../security/compartments.js'
 import type { EvidenceAccumulator } from '../security/evidence.js'
 import type { AttachmentCollector } from '../workspace-files/attachments.js'
+import type { LLMProvider } from '../providers/types.js'
+import type { AccessContext } from '../security/access-context.js'
 
 // ── Tool context ───────────────────────────────────────────────
 
@@ -18,6 +20,15 @@ export type ToolContext = {
   channelId: string
   /** Team ID when the assistant is team-owned. Used by saveMemory for team scope. */
   workspaceId?: string | null
+  /** Immutable provider lane captured by workers spawned from this turn. */
+  workerRuntime?: {
+    provider: LLMProvider
+    model: string
+    modelTier?: string
+    providerKeySource?: 'user' | 'platform'
+    inputTokenLimit?: number
+    maxTokens?: number
+  }
   /**
    * The calling assistant's kind. When 'app' (team-owned distribution
    * assistants), saveMemory defaults scope to 'team' instead of 'user' so
@@ -63,6 +74,12 @@ export type ToolContext = {
    * guess.
    */
   userTimezone?: string
+  /**
+   * Latest unconsumed workflow proposal receipt recovered by the route from
+   * persisted tool-result history. Workflow writes consume this trusted value
+   * so the model never has to copy or reconstruct proposal arguments.
+   */
+  workflowProposalReceipt?: string
   /**
    * The originating workflow RUN id when this turn executes a workflow
    * `assistant_call` step (set by the callee executor from
@@ -260,6 +277,20 @@ export type ToolContext = {
    * The read-side analogue of `clearance`. See docs/plans/compartment-axis.md.
    */
   compartments?: string[] | null
+  /**
+   * Authenticated external-client self-memory projection. Memory tools alone
+   * thread this onto their AccessContext; every other tool continues to see
+   * the ordinary public clearance + empty compartment grant.
+   */
+  clientSelfMemory?: AccessContext['clientSelfMemory']
+  /** Minimum sensitivity for memory creates on this turn. */
+  memoryWriteSensitivityFloor?: Sensitivity
+  /**
+   * Memory-specific compartment stamp. When present it replaces the
+   * assistant default source for saveMemory (the read high-water accumulator
+   * is still unioned), keeping client self-memory exactly client-scoped.
+   */
+  memoryWriteCompartments?: string[]
   /**
    * Threaded onto `AccessContext.systemRead` for this turn's brain READS.
    * Set only where `userId` is a synthetic principal that holds no

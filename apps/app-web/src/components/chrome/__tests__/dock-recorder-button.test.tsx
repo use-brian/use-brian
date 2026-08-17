@@ -19,6 +19,7 @@ vi.mock("@/lib/i18n/client", () => ({
       start: "Record",
       audioOptions: "Recording audio options",
       includeComputerAudio: "Include computer audio",
+      streamToPage: "Stream transcript and notes to a page",
     },
   }),
 }));
@@ -103,6 +104,8 @@ function recorder(overrides: Partial<DockRecorderApi> = {}): DockRecorderApi {
     computerAudioAvailable: false,
     includeComputerAudio: false,
     setIncludeComputerAudio: vi.fn(),
+    livePageEnabled: false,
+    setLivePageEnabled: vi.fn(),
     includesSystemAudio: () => false,
     recovery: [],
     saveRecovery: vi.fn(),
@@ -119,13 +122,15 @@ function mount(rec: DockRecorderApi): void {
 }
 
 describe("[COMP:app-web/dock-recorder] DockRecorderButton", () => {
-  it("keeps browsers and old shells as the unchanged one-button mic UI", () => {
+  it("offers live page streaming in browsers and old shells", () => {
     mount(recorder());
-    expect(container!.querySelectorAll("button")).toHaveLength(1);
     expect(container!.querySelector('[aria-label="Record"]')).toBeTruthy();
     expect(
       container!.querySelector('[aria-label="Recording audio options"]'),
-    ).toBeNull();
+    ).toBeTruthy();
+    expect(
+      container!.querySelector('[aria-label="Stream transcript and notes to a page"]'),
+    ).toBeTruthy();
   });
 
   it("starts capture from the main segment without opening an options step", () => {
@@ -154,10 +159,21 @@ describe("[COMP:app-web/dock-recorder] DockRecorderButton", () => {
       container!.querySelector('[aria-label="Recording audio options"]'),
     ).toBeTruthy();
     const toggle = container!.querySelector(
-      '[role="switch"]',
+      '[aria-label="Include computer audio"]',
     ) as HTMLButtonElement;
     expect(toggle.getAttribute("aria-checked")).toBe("true");
     act(() => toggle.click());
     expect(setIncludeComputerAudio).toHaveBeenCalledWith(false);
+  });
+
+  it("wires the live page option without changing audio capture yet", () => {
+    const setLivePageEnabled = vi.fn();
+    mount(recorder({ setLivePageEnabled }));
+    const toggle = container!.querySelector(
+      '[aria-label="Stream transcript and notes to a page"]',
+    ) as HTMLButtonElement;
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    act(() => toggle.click());
+    expect(setLivePageEnabled).toHaveBeenCalledWith(true);
   });
 });

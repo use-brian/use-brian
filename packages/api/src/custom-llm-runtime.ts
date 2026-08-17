@@ -5,11 +5,12 @@ import {
   wrapProvider,
   type LLMProvider,
 } from '@use-brian/core'
+import { registryRow } from '@use-brian/shared/model-registry'
 import type {
   WorkspaceCustomLlmProfileRuntime,
   WorkspaceCustomLlmEndpointStore,
 } from './db/workspace-custom-llm-endpoints.js'
-import { isCustomLlmTier } from './db/workspace-custom-llm-endpoints.js'
+import { CUSTOM_LLM_TIERS, isCustomLlmTier } from './db/workspace-custom-llm-endpoints.js'
 import {
   createPublicCustomLlmFetch,
   CustomLlmPublicEndpointError,
@@ -96,6 +97,18 @@ function providerFor(
   fetchFn: typeof fetch = fetch,
 ): LLMProvider {
   const recordedModel = customLlmAlias(profile.profileId)
+  const usageCompatibleFetch: typeof fetch = async (input, init) => {
+    const response = await fetchFn(input, init)
+    if (response.status !== 400 || typeof init?.body !== 'string') return response
+    try {
+      const body = JSON.parse(init.body) as Record<string, unknown>
+      if (!('stream_options' in body)) return response
+      delete body.stream_options
+      return fetchFn(input, { ...init, body: JSON.stringify(body) })
+    } catch {
+      return response
+    }
+  }
   return createOpenAICompatProvider({
     apiKey: profile.apiKey?.trim() || undefined,
     baseURL: profile.baseUrl,
@@ -103,8 +116,8 @@ function providerFor(
     wireModel: profile.modelId,
     recordedModel,
     models: [recordedModel],
-    fetchFn,
-    includeStreamUsage: false,
+    fetchFn: usageCompatibleFetch,
+    includeStreamUsage: true,
     enableThinkingField: false,
     supportsJsonMode: false,
     supportsVision: false,
@@ -197,10 +210,19 @@ export async function probeCustomLlmEndpoint(
 export type ResolvedWorkspaceCustomLlm = {
   provider: LLMProvider
   selector: string
-  profileId: string
+  profileId: string | null
+  modelTier: import('./db/workspace-custom-llm-endpoints.js').CustomLlmTier
   inputTokenLimit: number
   maxTokens: number
-  providerKeySource: 'user'
+  providerKeySource: 'user' | 'platform'
+  routeKind: 'custom' | 'managed'
+  /** Per-run connection for the isolated browser-use process. Never serialize. */
+  browserUse?: {
+    apiKeyEnvName: 'OPENAI_API_KEY'
+    apiKey: string
+    model: string
+    baseUrl: string
+  }
 }
 
 export type WorkspaceCustomLlmResolver = (params: {
@@ -208,6 +230,8 @@ export type WorkspaceCustomLlmResolver = (params: {
   requestedModel?: string
   requestedTier?: string
   allowDefault?: boolean
+  allowAnyDefault?: boolean
+  allowManagedRoutes?: boolean
 }) => Promise<ResolvedWorkspaceCustomLlm | null>
 
 export function createWorkspaceCustomLlmResolver(
@@ -215,31 +239,126 @@ export function createWorkspaceCustomLlmResolver(
   options?: {
     networkPolicy?: CustomLlmNetworkPolicy
     fetchFn?: typeof fetch
+    managedProvider?: LLMProvider
   },
 ): WorkspaceCustomLlmResolver {
   const networkPolicy = options?.networkPolicy ?? 'private-network'
-  return async ({ workspaceId, requestedModel, requestedTier, allowDefault = true }) => {
+  return async ({
+    workspaceId,
+    requestedModel,
+    requestedTier,
+    allowDefault = true,
+    allowAnyDefault = false,
+    allowManagedRoutes = true,
+  }) => {
     const explicitId = customLlmEndpointIdFromAlias(requestedModel)
-    const profile: WorkspaceCustomLlmProfileRuntime | null = explicitId
+    let profile: WorkspaceCustomLlmProfileRuntime | null = explicitId
       ? await store.getRuntimeSystem({ workspaceId, profileId: explicitId })
-      : allowDefault && requestedTier && isCustomLlmTier(requestedTier)
-        ? await store.getTierRuntimeSystem({ workspaceId, tier: requestedTier })
-        : null
+      : null
+    let managedModel: string | null = null
+    const modelTier = requestedTier && isCustomLlmTier(requestedTier) ? requestedTier : 'standard'
+    let routeTier = modelTier
+
+    const resolveTierRoute = async (tier: (typeof CUSTOM_LLM_TIERS)[number]) => {
+      const route = await store.getTierRouteSystem({ workspaceId, tier })
+      if (!route) return false
+      routeTier = tier
+      if (route.modelAlias) {
+        if (!allowManagedRoutes) return false
+        managedModel = route.modelAlias
+        return true
+      }
+      if (route.profileId) {
+        profile = await store.getRuntimeSystem({ workspaceId, profileId: route.profileId })
+        return profile !== null
+      }
+      return false
+    }
+
+    if (!explicitId && allowDefault && requestedTier && isCustomLlmTier(requestedTier)) {
+      await resolveTierRoute(requestedTier)
+    }
+    if (!profile && !managedModel && allowDefault && allowAnyDefault) {
+      for (const tier of CUSTOM_LLM_TIERS) {
+        if (tier === requestedTier) continue
+        if (await resolveTierRoute(tier)) break
+      }
+    }
+
+    if (managedModel) {
+      const row = registryRow(managedModel)
+      if (!row || row.status !== 'active' || !row.menu) {
+        throw new Error(`[workspace-model-route] '${managedModel}' is not an active selectable registry model`)
+      }
+      if (row.tier !== routeTier) {
+        throw new Error(`[workspace-model-route] '${managedModel}' cannot serve the '${routeTier}' tier`)
+      }
+      if (!options?.managedProvider) {
+        throw new Error('[workspace-model-route] managed provider routing is unavailable')
+      }
+      const exactProvider: LLMProvider = {
+        ...options.managedProvider,
+        stream: (request) => options.managedProvider!.stream({
+          ...request,
+          model: managedModel!,
+          allowProviderFallback: false,
+        }),
+        createSession: (sessionOptions) => options.managedProvider!.createSession({
+          ...sessionOptions,
+          model: managedModel!,
+          allowProviderFallback: false,
+        }),
+      }
+      return {
+        provider: exactProvider,
+        selector: managedModel,
+        profileId: null,
+        modelTier,
+        inputTokenLimit: row.contextWindow,
+        maxTokens: row.maxOutput,
+        providerKeySource: 'platform',
+        routeKind: 'managed',
+      }
+    }
+
     if (!profile) return null
-    const selector = customLlmAlias(profile.id)
+    const selectedProfile = profile
+    const selector = customLlmAlias(selectedProfile.id)
     const fetchFn = options?.fetchFn ?? (networkPolicy === 'public-only' ? createPublicCustomLlmFetch() : fetch)
+    const provider = wrapProvider(providerFor({
+      profileId: selectedProfile.id,
+      baseUrl: selectedProfile.baseUrl,
+      apiKey: selectedProfile.apiKey,
+      modelId: selectedProfile.modelId,
+    }, fetchFn))
+    const limitedProvider: LLMProvider = {
+      ...provider,
+      stream: (request) => provider.stream({
+        ...request,
+        maxTokens: Math.min(request.maxTokens ?? selectedProfile.maxOutputTokens, selectedProfile.maxOutputTokens),
+        inputTokenLimit: Math.min(request.inputTokenLimit ?? selectedProfile.contextWindow, selectedProfile.contextWindow),
+      }),
+      createSession: (sessionOptions) => provider.createSession({
+        ...sessionOptions,
+        maxTokens: Math.min(sessionOptions.maxTokens ?? selectedProfile.maxOutputTokens, selectedProfile.maxOutputTokens),
+        inputTokenLimit: Math.min(sessionOptions.inputTokenLimit ?? selectedProfile.contextWindow, selectedProfile.contextWindow),
+      }),
+    }
     return {
-      provider: wrapProvider(providerFor({
-        profileId: profile.id,
-        baseUrl: profile.baseUrl,
-        apiKey: profile.apiKey,
-        modelId: profile.modelId,
-      }, fetchFn)),
+      provider: limitedProvider,
       selector,
-      profileId: profile.id,
-      inputTokenLimit: profile.contextWindow,
-      maxTokens: profile.maxOutputTokens,
+      profileId: selectedProfile.id,
+      modelTier,
+      inputTokenLimit: selectedProfile.contextWindow,
+      maxTokens: selectedProfile.maxOutputTokens,
       providerKeySource: 'user',
+      routeKind: 'custom',
+      browserUse: {
+        apiKeyEnvName: 'OPENAI_API_KEY',
+        apiKey: selectedProfile.apiKey?.trim() || 'not-required',
+        model: selectedProfile.modelId,
+        baseUrl: selectedProfile.baseUrl,
+      },
     }
   }
 }

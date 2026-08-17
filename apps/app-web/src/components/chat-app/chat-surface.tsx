@@ -2738,7 +2738,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       <div
         className={cn(
           "rounded-2xl rounded-br-md border border-border bg-background shadow-sm",
-          "focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/35",
+          "focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/35 [&_:focus-visible]:shadow-none",
         )}
       >
         <ChatComposer
@@ -2943,7 +2943,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       ref={mentions.containerRef}
       className={cn(
         "relative rounded-xl border border-border bg-background shadow-sm",
-        "focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/35",
+        "focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/35 [&_:focus-visible]:shadow-none",
       )}
     >
       {/* Mention autocomplete — the workspace assistant roster; human mentions

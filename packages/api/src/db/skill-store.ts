@@ -325,11 +325,24 @@ export type WorkspaceSkillStore = {
   publish(userId: string, workspaceId: string, skillId: string): Promise<boolean>
   unpublish(userId: string, workspaceId: string, skillId: string): Promise<boolean>
 
-  // ── Legacy per-assistant enablement (built-in skills, slug-keyed) ─
-  // assistant_skill_settings is still TEXT skill_id, so it lives here for
-  // built-in skill toggles. Workspace skills use workspace_skill_enablement.
+  // ── Legacy per-assistant enablement (slug-keyed) ──────────────────
+  // `assistant_skill_settings.skill_id` is TEXT because it holds a SLUG, and
+  // `SkillContent.id` is the slug for workspace skills too — so despite the
+  // "built-in only" framing this table addresses BOTH groups and overrides
+  // `workspace_skill_enablement` in both directions at injection time. See
+  // docs/architecture/engine/skill-system.md → "How the two tables actually
+  // combine at runtime".
   listForAssistant(assistantId: string): Promise<Array<{ skillId: string; enabled: boolean }>>
   setEnabled(assistantId: string, skillId: string, enabled: boolean): Promise<void>
+  /**
+   * Remove the override row entirely, returning it to "use the source's
+   * default". The workspace-skill toggle uses this to clear a conflicting
+   * legacy row rather than writing the opposite boolean: a written `false`
+   * is a fresh veto that would silently defeat the skill editor's
+   * allowlist-only Access tab, and slugs are a shared keyspace so flipping a
+   * boolean can answer for a different skill. Resolves true if a row went.
+   */
+  clearEnabled(assistantId: string, skillId: string): Promise<boolean>
 
   // ── User-level UX stars ──────────────────────────────────────────
   listStarred(userId: string): Promise<string[]>
@@ -413,6 +426,8 @@ export type SkillStore = {
   getBySlug(slug: string): Promise<SkillContent | null>
   listForAssistant(assistantId: string): Promise<Array<{ skillId: string; enabled: boolean }>>
   setEnabled(assistantId: string, skillId: string, enabled: boolean): Promise<void>
+  /** See `WorkspaceSkillStore.clearEnabled` — removes the override row. */
+  clearEnabled(assistantId: string, skillId: string): Promise<boolean>
   listStarred(userId: string): Promise<string[]>
   star(userId: string, skillId: string): Promise<void>
   unstar(userId: string, skillId: string): Promise<void>
@@ -771,6 +786,15 @@ export function createDbWorkspaceSkillStore(hooks?: WorkspaceSkillStoreHooks): W
       )
     },
 
+    async clearEnabled(assistantId, skillId) {
+      const result = await query(
+        `DELETE FROM assistant_skill_settings
+         WHERE assistant_id = $1 AND skill_id = $2`,
+        [assistantId, skillId],
+      )
+      return (result.rowCount ?? 0) > 0
+    },
+
     // ── User-level UX stars ──────────────────────────────────────────
 
     async listStarred(userId) {
@@ -1104,6 +1128,10 @@ export function createDbSkillStore(): SkillStore {
 
     setEnabled(assistantId, skillId, enabled) {
       return ws.setEnabled(assistantId, skillId, enabled)
+    },
+
+    clearEnabled(assistantId, skillId) {
+      return ws.clearEnabled(assistantId, skillId)
     },
 
     listStarred(userId) {

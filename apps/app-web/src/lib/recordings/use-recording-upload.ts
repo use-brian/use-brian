@@ -45,7 +45,7 @@ import {
   RecordingApiError,
   type RecordingQueued,
 } from "@/lib/api/recordings";
-import { listCustomPageTemplates, createCustomPageTemplate, listViews } from "@/lib/api/views";
+import { listCustomPageTemplates, createCustomPageTemplate, listViews, setPageLinkedRecording } from "@/lib/api/views";
 import { getWorkspaceDefaultBlueprint } from "@/lib/api/workspaces";
 import {
   buildBlueprintPickerItems,
@@ -146,22 +146,16 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
 
   const run = useCallback(
     /**
-     * @param blueprintSelection The calling surface's RAW picker selection
-     *   (a blueprint id, `RECORDING_INGEST_ONLY`, or `RECORDING_UNSET`) —
-     *   NOT the submitted slug. It seeds the dialog picker; the user's final
-     *   in-dialog choice is what submits. Omit when the surface has no picker
-     *   (chat dock, landing) — the seed falls to the workspace default.
      * @param opts.kind Recording kind for the transcriber-ladder routing.
      *   The dock live recorder passes 'meeting'; omitted → the server's
-     *   'memo' column default (picked-file uploads, unchanged).
+     *   'memo' column default.
      * @returns The queued recording (`recordingId`) on success, or `null` if the
      *   user cancelled the cost confirm or the upload failed. The chat dock reads
      *   this to reference the recording in its turn; state-only callers ignore it.
      */
     async (
       file: File,
-      blueprintSelection?: string,
-      opts?: { kind?: "memo" | "meeting" },
+      opts?: { kind?: "memo" | "meeting"; existingPageId?: string },
     ): Promise<RecordingQueued | null> => {
       setResult(null);
       setMessage("");
@@ -209,13 +203,20 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
         ];
         // The user's live in-dialog selections. The picker component owns the
         // rendered state; these slots are what the hook reads after confirm.
-        let chosen = seedRecordingBlueprint(blueprintSelection, workspaceDefault);
+        let chosen = seedRecordingBlueprint(workspaceDefault);
         let destination = DESTINATION_ROOT;
         const minutes = Math.max(1, Math.round(est.durationSeconds / 60));
+        const pinnedPage = !!opts?.existingPageId;
         const ok = await confirmDialog({
           title: t.recordings.confirmTitle,
           description:
-            est.surchargeCredits > 0
+            pinnedPage
+              ? (est.surchargeCredits > 0
+                  ? t.recorder.liveFinalizeBody
+                      .replace("{minutes}", String(minutes))
+                      .replace("{credits}", String(est.surchargeCredits))
+                  : t.recorder.liveFinalizeFree)
+              : est.surchargeCredits > 0
               ? t.recordings.confirmBody
                   .replace("{minutes}", String(minutes))
                   .replace("{credits}", String(est.surchargeCredits))
@@ -224,18 +225,20 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
           // The blueprint + destination half of the pre-flight confirm (the
           // hook is a .ts file, so the node is built with createElement, not
           // JSX).
-          content: createElement(RecordingConfirmPicker, {
-            items,
-            initial: chosen,
-            onChange: (v: string) => {
-              chosen = v;
-            },
-            destinationItems,
-            initialDestination: destination,
-            onDestinationChange: (v: string) => {
-              destination = v;
-            },
-          }),
+          content: pinnedPage
+            ? undefined
+            : createElement(RecordingConfirmPicker, {
+                items,
+                initial: chosen,
+                onChange: (v: string) => {
+                  chosen = v;
+                },
+                destinationItems,
+                initialDestination: destination,
+                onDestinationChange: (v: string) => {
+                  destination = v;
+                },
+              }),
         });
         if (!ok) {
           setStatus("idle");
@@ -246,8 +249,9 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
         // The starter is a sentinel, not an id — install it and submit the id
         // it returns. Installing AFTER confirm ties the template write to
         // demonstrated intent; a failed install falls through to ingest-only.
-        const slug =
-          chosen === RECORDING_INSTALL_STARTER
+        const slug = pinnedPage
+          ? undefined
+          : chosen === RECORDING_INSTALL_STARTER
             ? await installStarter()
             : recordingBlueprintToSlug(chosen);
         // The root sentinel is a UI value, not a page id — send null so the
@@ -257,12 +261,24 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
           slug,
           destination === DESTINATION_ROOT ? null : destination,
         );
+        let liveLinkFailed = false;
+        if (opts?.existingPageId) {
+          try {
+            await setPageLinkedRecording(opts.existingPageId, res.recordingId);
+          } catch {
+            // The 202 queue hand-off already succeeded, so never report the
+            // whole capture as failed (and retain/re-upload its spool) merely
+            // because the lightweight page link missed. The recording board
+            // remains its recovery surface and the user can link it manually.
+            liveLinkFailed = true;
+          }
+        }
         setResult(res);
         setStatus("done");
         // The 202 means QUEUED — the worker transcribes in the background.
         // Claiming "transcribed and filed" here was the 2026-07-10 honesty
         // bug: the message showed before (or instead of) the actual work.
-        setMessage(t.recordings.queued);
+        setMessage(liveLinkFailed ? t.recorder.liveLinkFailed : t.recordings.queued);
         return res;
       } catch (e) {
         setStatus("error");

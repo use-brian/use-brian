@@ -29,12 +29,14 @@ import { listChannelsForWorkspace } from '../db/channels-store.js'
 import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
 import type { ConnectorInstanceStore, ConnectorInstance } from '../db/connector-instance-store.js'
 import type { WorkspaceSkillStore } from '../db/skill-store.js'
+import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 
 export type ControlPlaneReaderDeps = {
   capabilityStore: CapabilityStore
   connectorInstanceStore: ConnectorInstanceStore
   connectorGrantStore: ConnectorGrantStore
   workspaceSkillStore: WorkspaceSkillStore
+  channelIntegrationStore?: ChannelIntegrationStore
 }
 
 /** Project one connector_instance row into the agent-facing shape. */
@@ -130,8 +132,14 @@ export function createControlPlaneReader(deps: ControlPlaneReaderDeps): ControlP
 
     async listChannels(userId, workspaceId): Promise<ControlPlaneChannel[]> {
       const rows = await listChannelsForWorkspace(userId, workspaceId)
+      const integrations = deps.channelIntegrationStore
+        ? await deps.channelIntegrationStore.listForWorkspace(userId, workspaceId)
+        : []
+      const byChannel = new Map(integrations.map((integration) => [integration.channelId, integration]))
       return rows.map((c) => ({
         id: c.id,
+        integrationId: byChannel.get(c.id)?.id ?? null,
+        integrationStatus: byChannel.get(c.id)?.status ?? null,
         channelType: c.channelType,
         displayName: c.displayName ?? null,
         clearance: c.clearance,

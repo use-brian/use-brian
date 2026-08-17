@@ -42,6 +42,7 @@ export type ResolvedOfficeAccess = {
   canRestore: boolean
   canDeletePermanently: boolean
   canElevate: boolean
+  canManageSharing: boolean
 }
 
 const CLEARANCE_RANK: Record<OfficeClearance, number> = {
@@ -87,6 +88,7 @@ export function resolveOfficeAccessProjection(
     canRestore: (projection.lifecycleState === 'archived' || projection.lifecycleState === 'trash' || projection.lifecycleState === 'retained') && (role === 'edit' || projection.memberRole === 'owner' || projection.memberRole === 'admin'),
     canDeletePermanently: (projection.ownerUserId === userId || projection.memberRole === 'owner' || projection.memberRole === 'admin') && (projection.lifecycleState === 'trash' || projection.lifecycleState === 'retained'),
     canElevate: mutable && (projection.memberRole === 'owner' || projection.memberRole === 'admin') && role !== 'edit',
+    canManageSharing: mutable && (projection.memberRole === 'owner' || projection.memberRole === 'admin'),
   }
 }
 

@@ -10,6 +10,7 @@ function makeFakeStore(opts: {
   users: Array<{ assistantId: string; userId: string }>
   lastPhases: Record<string, { light?: Date; rem?: Date; deep?: Date; reflection?: Date }>
   memories?: MemoryWithMetrics[]
+  now?: () => Date
   /** Per-user activity override. Missing keys default to `true` so existing
    *  tests keep the old (ungated) behaviour. */
   recentActivity?: Record<string, boolean>
@@ -55,6 +56,10 @@ function makeFakeStore(opts: {
     async pruneStaleDomainSummaries() { return 0 },
     async logConsolidation(params) {
       runs.push({ phase: params.phase, userId: params.userId })
+      if (opts.now) {
+        const phases = opts.lastPhases[params.userId] ??= {}
+        phases[params.phase] = opts.now()
+      }
     },
 
     // Unused surface methods
@@ -152,7 +157,7 @@ describe('[COMP:consolidation/worker] createConsolidationWorker — cadence gati
       },
       recentActivity: { ghost: false, active: true },
       memories: [
-        // REM needs >= 5 entries to not early-return via its own guard.
+        // REM needs >= 15 entries and 3 tag clusters to reach its model call.
         { id: 'm1', type: 'fact', summary: 's1', tags: [], sensitivity: 'public' } as never,
         { id: 'm2', type: 'fact', summary: 's2', tags: [], sensitivity: 'public' } as never,
         { id: 'm3', type: 'fact', summary: 's3', tags: [], sensitivity: 'public' } as never,
@@ -173,18 +178,29 @@ describe('[COMP:consolidation/worker] createConsolidationWorker — cadence gati
     expect(store.runs.find((r) => r.phase === 'deep' && r.userId === 'active')).toBeDefined()
   })
 
-  it('skips REM when fewer than 5 memories are present', async () => {
-    const now = new Date('2026-04-10T12:00:00Z')
+  it('records an ineligible REM attempt so it does not repeat every tick', async () => {
+    let now = new Date('2026-04-10T12:00:00Z')
     const store = makeFakeStore({
       users: [{ assistantId: 'a1', userId: 'u1' }],
-      lastPhases: {},
-      // REM has its own early-return guard (< 5 memories). The worker
-      // still calls it because cadence is due, but REM writes no log.
+      lastPhases: {
+        u1: {
+          light: new Date(now.getTime() - HOUR),
+          deep: new Date(now.getTime() - HOUR),
+        },
+      },
+      now: () => now,
     })
     const worker = createConsolidationWorker({ store, callModel, now: () => now })
     await worker.tick()
 
-    expect(store.runs.find((r) => r.phase === 'rem')).toBeUndefined()
+    expect(store.runs.filter((r) => r.phase === 'rem')).toHaveLength(1)
+    expect(calls).toBe(0)
+
+    now = new Date(now.getTime() + 15 * 60 * 1000)
+    await worker.tick()
+
+    expect(store.runs.filter((r) => r.phase === 'rem')).toHaveLength(1)
+    expect(calls).toBe(0)
   })
 
   it('isolates per-user failures so one bad user does not abort the tick', async () => {

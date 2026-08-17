@@ -16,7 +16,6 @@ import { SensitivityBadge, type Sensitivity } from "@/components/sensitivity-bad
 import { ConnectorIcon } from "@/components/connectors/connector-icon";
 import { type ToolPolicy } from "@/components/connectors/connector-tool-list";
 import { ConnectorToolGovernance } from "@/components/connectors/connector-tool-governance";
-import { RecordingUploadButton } from "@/components/recordings/recording-upload-button";
 import { useT } from "@/lib/i18n/client";
 import type { Dictionary } from "@/lib/i18n";
 import { format } from "@/lib/i18n";
@@ -400,26 +399,6 @@ function BrainTab({ assistantId, workspaceId }: { assistantId: string; workspace
           </button>
         ))}
       </div>
-
-      {workspaceId ? (
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-muted/30 p-3">
-          <div className="min-w-0">
-            <p className="text-sm text-muted-foreground">{t.recordings.uploadHint}</p>
-            {/* The board's entry point. Upload is the only place a user thinks
-                about recordings, so "where did mine go?" is answered here
-                rather than from a nav row the panel deliberately has no slot
-                for. Panels open under the doc shell (`/p?panel=…`), so the tab
-                strip and chat dock persist around it. */}
-            <Link
-              href={`/w/${workspaceId}/p?panel=recordings`}
-              className="mt-1 inline-block text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
-            >
-              {t.recordings.viewAllLink}
-            </Link>
-          </div>
-          <RecordingUploadButton workspaceId={workspaceId} assistantId={assistantId} />
-        </div>
-      ) : null}
 
       {subTab === "memory" ? (
         <MemoryTab assistantId={assistantId} workspaceId={workspaceId} />
@@ -1242,6 +1221,8 @@ type UserConnector = {
   /** Canonical registry id when `id` is an instance governance key. */
   providerId?: string;
   name: string;
+  /** Non-secret identity for the connected account, when known. */
+  connectedEmail?: string;
   connected: boolean;  // Layer 1: user has authenticated/connected
   enabled: boolean;    // Layer 2: enabled for this assistant
   custom?: boolean;
@@ -1282,9 +1263,24 @@ type SkillItem = {
   starred?: boolean;
 };
 
+/**
+ * A `workspace_skills` row. Carries BOTH keys: `rowId` addresses the
+ * `workspace_skill_enablement` allowlist that the toggle writes, `id` is the
+ * slug that stars and the legacy override are keyed by. Kept as a separate
+ * type from `SkillItem` because the two groups are toggled through different
+ * routes and must never be mixed into one list - a shared shape is exactly how
+ * a toggle ends up writing the wrong table.
+ * Spec: docs/architecture/engine/skill-system.md -> "Per-assistant enablement".
+ */
+type WorkspaceSkillItem = SkillItem & { rowId: string };
+
 const SOURCE_ORDER: Record<string, number> = { builtin: 0, community: 1, user: 2 };
 
-function sortSkillsForDisplay(items: SkillItem[]): SkillItem[] {
+// Generic so a WorkspaceSkillItem[] keeps its `rowId` through the sort - the
+// key the toggle routes on. Narrowing to SkillItem[] here would force a cast
+// back at the call site, which is how a workspace toggle ends up on the
+// built-in route.
+function sortSkillsForDisplay<T extends SkillItem>(items: T[]): T[] {
   return [...items].sort((a, b) => {
     const aStar = a.starred ? 0 : 1;
     const bStar = b.starred ? 0 : 1;
@@ -1308,17 +1304,28 @@ function ConnectorsTab({ assistantId, workspaceId }: { assistantId: string; work
   const [expandedTools, setExpandedTools] = useState<string | null>(null);
   const [toolsMap, setToolsMap] = useState<Record<string, { tools: ToolPerm[]; serverName: string; loading: boolean }>>({});
 
-  // Skills state
+  // Skills state. Two groups, two tables, two routes - see WorkspaceSkillItem.
   const [skills, setSkills] = useState<SkillItem[]>([]);
+  const [workspaceSkills, setWorkspaceSkills] = useState<WorkspaceSkillItem[]>([]);
+  const [skillScope, setSkillScope] = useState<"builtin" | "workspace">("builtin");
   const [skillsLoading, setSkillsLoading] = useState(true);
+  const [skillsError, setSkillsError] = useState(false);
 
   const fetchSkills = useCallback(() => {
     authFetch(`${API_URL}/api/assistants/${assistantId}/skills`)
       .then((r) => (r.ok ? r.json() : null))
-      .then((data: { skills?: SkillItem[] } | null) => {
+      .then((data: { skills?: SkillItem[]; workspaceSkills?: WorkspaceSkillItem[] } | null) => {
         if (data?.skills) setSkills(data.skills);
+        // Always assign - an empty array is a real answer ("this workspace has
+        // no skills"), and skipping it would leave a stale list on screen.
+        if (data) setWorkspaceSkills(data.workspaceSkills ?? []);
+        // `null` means the response was not ok. The route 500s rather than
+        // returning a half list, so failing quietly here would put an empty
+        // Workspace tab on screen that reads as "no skills" - the same
+        // degrade-hides-a-failure shape the route was just fixed to avoid.
+        setSkillsError(!data);
       })
-      .catch(() => {})
+      .catch(() => setSkillsError(true))
       .finally(() => setSkillsLoading(false));
   }, [assistantId]);
 
@@ -1331,12 +1338,31 @@ function ConnectorsTab({ assistantId, workspaceId }: { assistantId: string; work
     }
   }
 
+  // Workspace skills go to the allowlist route, keyed by ROW UUID - not the
+  // slug the legacy route above takes. Mixing the two silently writes the
+  // wrong table, which is the bug this whole surface exists to fix.
+  async function toggleWorkspaceSkill(rowId: string, enabled: boolean) {
+    setWorkspaceSkills((prev) => prev.map((s) => (s.rowId === rowId ? { ...s, enabled } : s)));
+    const action = enabled ? "enable" : "disable";
+    const res = await authFetch(
+      `${API_URL}/api/assistants/${assistantId}/workspace-skills/${encodeURIComponent(rowId)}/${action}`,
+      { method: "POST" },
+    );
+    if (!res.ok) {
+      setWorkspaceSkills((prev) => prev.map((s) => (s.rowId === rowId ? { ...s, enabled: !enabled } : s)));
+    }
+  }
+
+  // Stars are keyed by slug and carry no table or workspace scope, so one
+  // handler serves both groups.
   async function toggleStar(skillId: string, starred: boolean) {
     setSkills((prev) => prev.map((s) => (s.id === skillId ? { ...s, starred } : s)));
+    setWorkspaceSkills((prev) => prev.map((s) => (s.id === skillId ? { ...s, starred } : s)));
     const action = starred ? "star" : "unstar";
     const res = await authFetch(`${API_URL}/api/skills/${encodeURIComponent(skillId)}/${action}`, { method: "POST" });
     if (!res.ok) {
       setSkills((prev) => prev.map((s) => (s.id === skillId ? { ...s, starred: !starred } : s)));
+      setWorkspaceSkills((prev) => prev.map((s) => (s.id === skillId ? { ...s, starred: !starred } : s)));
     }
   }
 
@@ -1525,37 +1551,83 @@ function ConnectorsTab({ assistantId, workspaceId }: { assistantId: string; work
               <Link href={studioHref("skills")} className="text-primary hover:underline font-medium">{t.assistant.toolsTab.skillsSettingsLink}</Link>.
             </p>
           </div>
-          {skillsLoading ? (
-            <div className="space-y-3">
-              {[1, 2, 3].map((i) => <div key={i} className="h-20 rounded-xl bg-muted/30 animate-pulse" />)}
-            </div>
-          ) : skills.length === 0 ? (
-            <div className="py-10 text-center space-y-2">
-              <p className="text-sm text-muted-foreground">{t.assistant.toolsTab.noSkillsYet}</p>
-              <Link
-                href={studioHref("skills")}
-                className="text-xs font-medium text-primary hover:underline"
+          {/*
+            One tab per enablement table. The two behave oppositely (built-ins
+            are on until turned off; workspace skills are off until added), so
+            each tab states its own default - a bare toggle grid cannot express
+            that, and guessing wrong is how a user concludes the switch is
+            broken.
+          */}
+          <div className="flex gap-1">
+            {(["builtin", "workspace"] as const).map((scope) => (
+              <button
+                key={scope}
+                onClick={() => setSkillScope(scope)}
+                className={`text-xs px-2.5 py-1 rounded-md transition-colors ${
+                  skillScope === scope ? "bg-muted text-foreground font-medium" : "text-muted-foreground hover:text-foreground"
+                }`}
               >
-                {t.assistant.toolsTab.createCustomSkill}
-              </Link>
-            </div>
-          ) : (
-            sortSkillsForDisplay(skills).map((skill) => (
-              <div key={skill.id} className="flex items-start gap-3 rounded-xl border border-border bg-card p-4 transition-colors">
+                {scope === "builtin"
+                  ? format(t.assistant.toolsTab.skillScopeBuiltin, { count: String(skills.length) })
+                  : format(t.assistant.toolsTab.skillScopeWorkspace, { count: String(workspaceSkills.length) })}
+              </button>
+            ))}
+          </div>
+          <p className="text-[11px] text-muted-foreground/80">
+            {skillScope === "builtin"
+              ? t.assistant.toolsTab.skillScopeBuiltinHint
+              : t.assistant.toolsTab.skillScopeWorkspaceHint}
+          </p>
+          {skillsError && (
+            <p className="text-xs text-destructive">{t.assistant.toolsTab.skillsLoadFailed}</p>
+          )}
+          {(() => {
+            const visible: Array<SkillItem & { rowId?: string }> =
+              skillScope === "builtin" ? skills : workspaceSkills;
+            if (skillsLoading) {
+              return (
+                <div className="space-y-3">
+                  {[1, 2, 3].map((i) => <div key={i} className="h-20 rounded-xl bg-muted/30 animate-pulse" />)}
+                </div>
+              );
+            }
+            // Do not render "no skills yet" over a failed load - the user
+            // cannot tell an empty workspace from a broken request.
+            if (skillsError && visible.length === 0) return null;
+            if (visible.length === 0) {
+              return (
+                <div className="py-10 text-center space-y-2">
+                  <p className="text-sm text-muted-foreground">
+                    {skillScope === "workspace"
+                      ? t.assistant.toolsTab.noWorkspaceSkillsYet
+                      : t.assistant.toolsTab.noSkillsYet}
+                  </p>
+                  <Link
+                    href={studioHref("skills")}
+                    className="text-xs font-medium text-primary hover:underline"
+                  >
+                    {t.assistant.toolsTab.createCustomSkill}
+                  </Link>
+                </div>
+              );
+            }
+            return sortSkillsForDisplay(visible).map((item) => {
+              return (
+              <div key={item.rowId ?? item.id} className="flex items-start gap-3 rounded-xl border border-border bg-card p-4 transition-colors">
                 <button
                   type="button"
-                  onClick={() => toggleStar(skill.id, !skill.starred)}
-                  aria-pressed={!!skill.starred}
-                  title={skill.starred ? "Unstar" : "Star"}
+                  onClick={() => toggleStar(item.id, !item.starred)}
+                  aria-pressed={!!item.starred}
+                  title={item.starred ? t.assistant.toolsTab.skillUnstar : t.assistant.toolsTab.skillStar}
                   className={`shrink-0 mt-0.5 p-1 rounded transition-colors ${
-                    skill.starred
+                    item.starred
                       ? "text-amber-600 hover:text-amber-500 dark:text-amber-400 dark:hover:text-amber-300"
                       : "text-muted-foreground/60 hover:text-amber-600 dark:hover:text-amber-400"
                   }`}
                 >
                   <svg
                     width="16" height="16" viewBox="0 0 20 20"
-                    fill={skill.starred ? "currentColor" : "none"}
+                    fill={item.starred ? "currentColor" : "none"}
                     stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"
                   >
                     <path d="M10 2l2.09 6.26H18l-4.77 3.48L15.18 18 10 14.27 4.82 18l1.95-6.26L2 8.26h5.91z" />
@@ -1563,31 +1635,34 @@ function ConnectorsTab({ assistantId, workspaceId }: { assistantId: string; work
                 </button>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 flex-wrap mb-1">
-                    <span className="text-sm font-medium text-foreground">{skill.name}</span>
-                    <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${SKILL_CATEGORY_COLORS[skill.category] ?? SKILL_CATEGORY_COLORS.custom}`}>
-                      {skill.category}
+                    <span className="text-sm font-medium text-foreground">{item.name}</span>
+                    <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${SKILL_CATEGORY_COLORS[item.category] ?? SKILL_CATEGORY_COLORS.custom}`}>
+                      {item.category}
                     </span>
-                    {skill.source !== "builtin" && (
+                    {item.source !== "builtin" && (
                       <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full border border-border text-muted-foreground">
-                        {skill.source === "community" ? t.assistant.toolsTab.skillCommunity : t.assistant.toolsTab.skillCustom}
+                        {item.source === "community" ? t.assistant.toolsTab.skillCommunity : t.assistant.toolsTab.skillCustom}
                       </span>
                     )}
                   </div>
-                  <p className="text-xs text-muted-foreground leading-relaxed">{skill.description}</p>
-                  {skill.requiresConnectors.length > 0 && (
-                    <p className="text-[11px] text-muted-foreground/70 mt-1">{format(t.assistant.toolsTab.skillRequires, { connectors: skill.requiresConnectors.join(", ") })}</p>
+                  <p className="text-xs text-muted-foreground leading-relaxed">{item.description}</p>
+                  {item.requiresConnectors.length > 0 && (
+                    <p className="text-[11px] text-muted-foreground/70 mt-1">{format(t.assistant.toolsTab.skillRequires, { connectors: item.requiresConnectors.join(", ") })}</p>
                   )}
                 </div>
                 <button
-                  type="button" role="switch" aria-checked={skill.enabled}
-                  onClick={() => toggleSkill(skill.id, !skill.enabled)}
-                  className={`shrink-0 relative inline-flex h-5 w-9 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ${skill.enabled ? "bg-primary" : "bg-muted"}`}
+                  type="button" role="switch" aria-checked={item.enabled}
+                  onClick={() => item.rowId
+                    ? toggleWorkspaceSkill(item.rowId, !item.enabled)
+                    : toggleSkill(item.id, !item.enabled)}
+                  className={`shrink-0 relative inline-flex h-5 w-9 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ${item.enabled ? "bg-primary" : "bg-muted"}`}
                 >
-                  <span className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-background shadow-sm transition-transform duration-200 ${skill.enabled ? "translate-x-4" : "translate-x-0"}`} />
+                  <span className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-background shadow-sm transition-transform duration-200 ${item.enabled ? "translate-x-4" : "translate-x-0"}`} />
                 </button>
               </div>
-            ))
-          )}
+              );
+            });
+          })()}
         </div>
       ) : (
       <div className="space-y-4">
@@ -1626,6 +1701,11 @@ function ConnectorsTab({ assistantId, workspaceId }: { assistantId: string; work
                     </div>
                     {c.custom && c.url && (
                       <div className="text-[11px] text-muted-foreground truncate">{c.url}</div>
+                    )}
+                    {c.connectedEmail && c.connectedEmail !== c.name && (
+                      <div className="text-[11px] text-muted-foreground truncate">
+                        {c.connectedEmail}
+                      </div>
                     )}
                   </div>
                 </button>

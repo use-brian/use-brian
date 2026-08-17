@@ -191,6 +191,7 @@ describe('[COMP:api/public-api-route] lane derivation (docs/plans/api-chat-modes
       ...activeKey,
       audience: 'external',
       anonymousContext: 'thin',
+      toolPolicy: 'public_research',
       createdBy: 'u-owner',
       ...overrides,
     }
@@ -209,6 +210,7 @@ describe('[COMP:api/public-api-route] lane derivation (docs/plans/api-chat-modes
     expect(input.contextScope).toBeUndefined()
     expect(input.internalActor).toBeUndefined()
     expect(input.delivery).toBe('json')
+    expect(input.toolPolicy).toBe('public_research')
   })
 
   it('forwards explicit SSE delivery without changing lane derivation', async () => {
@@ -234,7 +236,7 @@ describe('[COMP:api/public-api-route] lane derivation (docs/plans/api-chat-modes
   })
 
   it("internal key → 'internal-member' with the creator as default actor (D4)", async () => {
-    const res = await authedPost(keyRow({ audience: 'internal' }), {})
+    const res = await authedPost(keyRow({ audience: 'internal', toolPolicy: 'assistant' }), {})
     expect(res.status).toBe(200)
     const input = mockTurn.mock.calls[0][1]
     expect(input.contextScope).toBe('internal-member')
@@ -242,7 +244,10 @@ describe('[COMP:api/public-api-route] lane derivation (docs/plans/api-chat-modes
   })
 
   it('internal key forwards a per-request actorEmail attribution', async () => {
-    await authedPost(keyRow({ audience: 'internal' }), { actorEmail: 'jo@team.example' })
+    await authedPost(
+      keyRow({ audience: 'internal', toolPolicy: 'assistant' }),
+      { actorEmail: 'jo@team.example' },
+    )
     expect(mockTurn.mock.calls[0][1].internalActor).toEqual({
       email: 'jo@team.example',
       defaultUserId: 'u-owner',
@@ -254,8 +259,55 @@ describe('[COMP:api/public-api-route] lane derivation (docs/plans/api-chat-modes
       { identified: true },
       { claims: { email: 'x@client.example' } },
       { externalUserEmail: 'x@client.example' },
+      { clientMemory: { key: 'profile', summary: 'private client detail' } },
+      { allowPublicResearch: true },
     ]) {
-      const res = await authedPost(keyRow({ audience: 'internal' }), body)
+      const res = await authedPost(
+        keyRow({ audience: 'internal', toolPolicy: 'assistant' }),
+        body,
+      )
+      expect(res.status).toBe(400)
+      expect(res.body.error).toBe('invalid_input')
+    }
+    expect(mockTurn).not.toHaveBeenCalled()
+  })
+
+  it('validates and forwards deterministic client-memory input', async () => {
+    const body = {
+      identified: true,
+      clientMemory: {
+        key: 'studio-consultation:session-1',
+        summary: 'Interested in a product review.',
+        detail: 'Verified consultation transcript.',
+        tags: ['consultation', 'prospect'],
+      },
+    }
+    const res = await authedPost(keyRow(), body)
+    expect(res.status).toBe(200)
+    expect(mockTurn.mock.calls[0][1].body.clientMemory).toEqual(body.clientMemory)
+  })
+
+  it('forwards explicit research consent only for a public-research key', async () => {
+    const res = await authedPost(keyRow(), { allowPublicResearch: true })
+    expect(res.status).toBe(200)
+    expect(mockTurn.mock.calls[0][1].body.allowPublicResearch).toBe(true)
+
+    const rejected = await authedPost(
+      keyRow({ toolPolicy: 'assistant' }),
+      { allowPublicResearch: false },
+    )
+    expect(rejected.status).toBe(400)
+    expect(rejected.body.detail).toContain('public_research')
+  })
+
+  it('rejects malformed client-memory input before the turn runs', async () => {
+    for (const clientMemory of [
+      { key: 'contains spaces', summary: 'detail' },
+      { key: 'profile', summary: '' },
+      { key: 'profile', summary: 'detail', extra: true },
+      { key: 'profile', summary: 'detail', tags: Array.from({ length: 17 }, () => 'tag') },
+    ]) {
+      const res = await authedPost(keyRow(), { identified: true, clientMemory })
       expect(res.status).toBe(400)
       expect(res.body.error).toBe('invalid_input')
     }

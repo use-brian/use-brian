@@ -32,6 +32,7 @@ import {
   modelToCompactionTier,
   clientCompartment,
   unionCompartments,
+  canRead,
   buildWorkspaceFilesContext,
   buildSessionStateBlock,
 } from '@use-brian/core'
@@ -213,6 +214,20 @@ export type PublicTurnBody = {
   claims?: PublicTurnClaims
   /** Consumer-attested per-turn account context. Turn-scoped, never stored. */
   endUserContext?: string
+  /**
+   * Deterministic authenticated-client memory upsert. Accepted only for an
+   * identified external principal on an internal-or-higher, non-primary
+   * assistant. The server owns the internal sensitivity + exact client
+   * compartment stamp; callers cannot supply either.
+   */
+  clientMemory?: {
+    key: string
+    summary: string
+    detail?: string
+    tags?: string[]
+  }
+  /** Public-research-key tools are withheld unless this turn opts in. */
+  allowPublicResearch?: boolean
   sessionId?: string
   message: string
   truncateFromMessageId?: string
@@ -243,6 +258,8 @@ export type PublicTurnInput = {
    * with 403 `actor_not_member`.
    */
   internalActor?: { email: string | null; defaultUserId: string | null }
+  /** Immutable per-key capability ceiling. Chat links omit it. */
+  toolPolicy?: 'assistant' | 'public_research'
   /** JSON remains the default. SSE streams the same query loop when the keyed
    * route receives an explicit `Accept: text/event-stream`. */
   delivery?: 'json' | 'sse'
@@ -402,6 +419,101 @@ export function resolvePublicContextBlock(params: {
 /** Per-turn ceiling on the `# Workspace Files` index. Mirrors chat.ts. */
 const PUBLIC_TURN_FILES_INDEX_CAP = 50
 
+const CLIENT_MEMORY_TAG = 'client-self'
+
+export function resolveClientSelfMemory(params: {
+  isExternal: boolean
+  isIdentified: boolean
+  assistantKind: 'primary' | 'standard' | 'app'
+  assistantClearance: 'public' | 'internal' | 'confidential'
+  workspaceId: string | null
+  externalUserId: string
+}): { compartment: string } | null {
+  if (
+    !params.isExternal
+    || !params.isIdentified
+    || !params.workspaceId
+    || params.assistantKind === 'primary'
+    || !canRead(params.assistantClearance, 'internal')
+  ) return null
+  return { compartment: clientCompartment(params.externalUserId) }
+}
+
+/**
+ * Upsert one consumer-attested client memory before prompt construction.
+ * Reusing the consumer key supersedes the existing row. The sensitivity and
+ * compartment are server-owned and cannot be selected on the wire.
+ */
+export async function upsertClientMemory(params: {
+  store: MemoryStore
+  access: {
+    workspaceId: string
+    userId: string
+    assistantId: string
+    assistantKind: 'primary' | 'standard' | 'app'
+    clearance: 'public' | 'internal' | 'confidential'
+    compartments: string[]
+    clientSelfMemory: { compartment: string }
+  }
+  sessionId: string
+  value: NonNullable<PublicTurnBody['clientMemory']>
+}): Promise<void> {
+  const keyTag = `client-memory:${params.value.key}`
+  const callerTags = (params.value.tags ?? []).filter(
+    (tag) => tag !== CLIENT_MEMORY_TAG && !tag.startsWith('client-memory:'),
+  )
+  const tags = Array.from(new Set([
+    CLIENT_MEMORY_TAG,
+    keyTag,
+    ...callerTags,
+  ]))
+  const existing = (await params.store.getIndex(params.access, true))
+    .find((memory) => memory.tags.includes(keyTag))
+  if (existing) {
+    const updated = await params.store.update(existing.id, {
+      summary: params.value.summary,
+      detail: params.value.detail,
+      tags,
+    }, params.access)
+    if (updated) return
+  }
+  await params.store.create({
+    assistantId: params.access.assistantId,
+    userId: params.access.userId,
+    scope: 'shared',
+    tags,
+    summary: params.value.summary,
+    detail: params.value.detail,
+    source: 'user',
+    sourceSessionId: params.sessionId,
+    workspaceId: params.access.workspaceId,
+    sensitivity: 'internal',
+    compartments: [params.access.clientSelfMemory.compartment],
+    createdByUserId: params.access.userId,
+    createdByAssistantId: params.access.assistantId,
+  })
+}
+
+/**
+ * Apply the immutable key ceiling and the per-turn research-consent gate.
+ * Returning true tells the caller to skip MCP injection entirely.
+ */
+export function applyPublicResearchToolCeiling<T>(params: {
+  tools: Map<string, T>
+  toolPolicy: PublicTurnInput['toolPolicy']
+  internalScope: boolean
+  allowPublicResearch: boolean
+}): boolean {
+  if (params.toolPolicy !== 'public_research' || params.internalScope) return false
+  const allowed = params.allowPublicResearch
+    ? new Set(['webSearch', 'urlReader'])
+    : new Set<string>()
+  for (const name of params.tools.keys()) {
+    if (!allowed.has(name)) params.tools.delete(name)
+  }
+  return true
+}
+
 const RETRY_HINT =
   '[Note: the user retried this message. Your previous response did not satisfy them. Take a different angle — do not repeat the same structure, examples, or recommendations.]\n\n'
 const EDIT_HINT =
@@ -521,6 +633,24 @@ export async function executePublicTurn(
       authProviderId,
       name: body.externalUserName ?? fallbackName,
     }))
+  }
+
+  const externalPrincipal = !internalScope && isExternalPrincipal(user)
+  const clientSelfMemory = resolveClientSelfMemory({
+    isExternal: externalPrincipal,
+    isIdentified,
+    assistantKind: assistant.kind,
+    assistantClearance: assistant.clearance,
+    workspaceId: assistant.workspaceId ?? null,
+    externalUserId: body.externalUserId,
+  })
+  if (body.clientMemory && !clientSelfMemory) {
+    return fail(
+      res,
+      400,
+      'invalid_input',
+      'clientMemory requires an identified external client and a non-primary assistant with internal clearance',
+    )
   }
 
   // Ensure the user appears in the assistant's member list — same
@@ -650,6 +780,14 @@ export async function executePublicTurn(
         allowDefault: true,
       })
     : null
+  const backgroundLlmRuntime = assistant.workspaceId && deps.resolveWorkspaceCustomLlm
+    ? await deps.resolveWorkspaceCustomLlm({
+        workspaceId: assistant.workspaceId,
+        requestedTier: 'standard',
+        allowDefault: true,
+        allowAnyDefault: true,
+      })
+    : null
   const turnProvider = customLlmRuntime?.provider ?? deps.provider
 
   // ── 7. Persist user message ──────────────────────────────
@@ -672,10 +810,17 @@ export async function executePublicTurn(
   // the model would see the tool name in the prompt, find no such tool,
   // hallucinate or thought-burn into empty responses. See
   // docs/architecture/features/public-api.md → "Tools available".
+  const fullScope = input.contextScope === 'assistant-full'
   const activeCapabilities = new Set(
     await deps.capabilityStore.listActive(assistant.id),
   )
   const baseTools = filterToolsByCapabilities(new Map(deps.tools), activeCapabilities)
+  const limitedPublicResearch = applyPublicResearchToolCeiling({
+    tools: baseTools,
+    toolPolicy: input.toolPolicy,
+    internalScope,
+    allowPublicResearch: body.allowPublicResearch === true,
+  })
 
   const connectorUserId = await getConnectorUserId(user.id, assistant.workspaceId ?? null)
   // Read-side clearance (incident 2026-06-01): read ceiling =
@@ -695,7 +840,6 @@ export async function executePublicTurn(
   // one at a `confidential` assistant and that content is readable by anyone
   // holding the URL. The Studio create-link flow states the inherited
   // clearance for that reason — see docs/architecture/features/public-chat-link.md.
-  const fullScope = input.contextScope === 'assistant-full'
   const { clearance: readClearance, compartments: readCompartments } = fullScope
     ? { clearance: assistant.clearance, compartments: assistant.compartments }
     : await resolveReadCeilingsSystem(
@@ -704,48 +848,53 @@ export async function executePublicTurn(
         assistant.clearance,
         assistant.compartments,
       )
-  const mcpInjection = await applyMcpInjection({
-    scope: 'public-api',
-    connectorUserId,
-    assistant: { id: assistant.id, workspaceId: assistant.workspaceId ?? null },
-    userTimezone: owner.timezone ?? undefined,
-    tools: baseTools,
-    stores: deps,
-    engineHooks: deps.engineHooks,
-    // End-user identity on the wire. A consumer serving its own clients
-    // points this assistant at a bridge MCP server; the bridge maps
-    // `X-UseBrian-Actor-Id` back to its own user record and scopes every
-    // fetch to that person. Without it the bridge cannot tell one client
-    // from another and the scoping has to be attempted in the prompt,
-    // which is not a guarantee.
-    //
-    // `id` is the consumer's own opaque `externalUserId` — the value the
-    // bridge already indexes on — while `userId` is the stable Use Brian
-    // UUID that survives the same human arriving on another channel.
-    // Server-resolved from the authenticated key, never from model output;
-    // the `X-UseBrian-*` namespace is unsettable from user connector config
-    // (`preflightHeadersToRecord`) and merges at highest precedence, so
-    // neither the model nor the end user can forge it. Still opt-in per
-    // connector via `config.sendActorIdentity`.
-    //
-    // `roles` is deliberately absent: identity is forwarded, authorization
-    // is derived. See `ActorIdentity.org`.
-    actorIdentity: {
-      channel: 'api',
-      id: body.externalUserId,
-      // Internal lane: the actor is the resolved member, so the wire carries
-      // their real email (the tier fields that feed claimedEmail are rejected
-      // at the route for internal keys).
-      email: internalScope ? (user.email ?? null) : (claimedEmail ?? null),
-      userId: user.id,
-      org: body.claims?.orgId ?? null,
-    },
-    // KB write tools are chat-only (D2): the API consumer has no
-    // Approve/Deny loop, so this surface never exposes them. The
-    // confirmation-strip below would drop them anyway — this keeps
-    // them out of the injector's `mcp_search` index too.
-    allowKnowledgeWrites: false,
-  })
+  const mcpInjection = limitedPublicResearch
+    ? {
+        enrichConfirmation: async (_toolName: string, toolInput: Record<string, unknown>) => toolInput,
+        unavailable: [] as string[],
+      }
+    : await applyMcpInjection({
+        scope: 'public-api',
+        connectorUserId,
+        assistant: { id: assistant.id, workspaceId: assistant.workspaceId ?? null },
+        userTimezone: owner.timezone ?? undefined,
+        tools: baseTools,
+        stores: deps,
+        engineHooks: deps.engineHooks,
+        // End-user identity on the wire. A consumer serving its own clients
+        // points this assistant at a bridge MCP server; the bridge maps
+        // `X-UseBrian-Actor-Id` back to its own user record and scopes every
+        // fetch to that person. Without it the bridge cannot tell one client
+        // from another and the scoping has to be attempted in the prompt,
+        // which is not a guarantee.
+        //
+        // `id` is the consumer's own opaque `externalUserId` — the value the
+        // bridge already indexes on — while `userId` is the stable Use Brian
+        // UUID that survives the same human arriving on another channel.
+        // Server-resolved from the authenticated key, never from model output;
+        // the `X-UseBrian-*` namespace is unsettable from user connector config
+        // (`preflightHeadersToRecord`) and merges at highest precedence, so
+        // neither the model nor the end user can forge it. Still opt-in per
+        // connector via `config.sendActorIdentity`.
+        //
+        // `roles` is deliberately absent: identity is forwarded, authorization
+        // is derived. See `ActorIdentity.org`.
+        actorIdentity: {
+          channel: 'api',
+          id: body.externalUserId,
+          // Internal lane: the actor is the resolved member, so the wire carries
+          // their real email (the tier fields that feed claimedEmail are rejected
+          // at the route for internal keys).
+          email: internalScope ? (user.email ?? null) : (claimedEmail ?? null),
+          userId: user.id,
+          org: body.claims?.orgId ?? null,
+        },
+        // KB write tools are chat-only (D2): the API consumer has no
+        // Approve/Deny loop, so this surface never exposes them. The
+        // confirmation-strip below would drop them anyway — this keeps
+        // them out of the injector's `mcp_search` index too.
+        allowKnowledgeWrites: false,
+      })
 
   // Strip confirmation-required tools AFTER injection — MCP injectors
   // tag write-tools as `requiresConfirmation` and the API consumer has
@@ -766,8 +915,32 @@ export async function executePublicTurn(
   // external-principal namespace, so background consolidation cannot turn a
   // visitor's session into memories either. Withholding the tool is therefore
   // sufficient; there is no second write path to close.
+  const memoryViewerCtx = {
+    workspaceId: assistant.workspaceId ?? '',
+    userId: user.id,
+    assistantId: assistant.id,
+    assistantKind: assistant.kind,
+    clearance: readClearance,
+    compartments: readCompartments,
+    clientSelfMemory: clientSelfMemory ?? undefined,
+    systemRead: laneReadsSystemSide(input.contextScope) || undefined,
+  }
+  if (body.clientMemory && clientSelfMemory) {
+    await upsertClientMemory({
+      store: deps.memoryStore,
+      access: {
+        ...memoryViewerCtx,
+        workspaceId: assistant.workspaceId!,
+        compartments: readCompartments ?? [],
+        clientSelfMemory,
+      },
+      sessionId: session.id,
+      value: body.clientMemory,
+    })
+  }
+
   const { saveMemory, getMemory } = createMemoryTools(deps.memoryStore)
-  if (isIdentified) {
+  if (isIdentified && (!externalPrincipal || clientSelfMemory)) {
     baseTools.set('saveMemory', saveMemory)
   }
   if (isIdentified || fullScope) {
@@ -780,33 +953,20 @@ export async function executePublicTurn(
   // workspace/team memory is the assistant's knowledge of its own company and
   // is the substance of what the link is meant to expose.
   let memoryContext = ''
-  const viewerCtx = {
-    workspaceId: assistant.workspaceId ?? '',
-    userId: user.id,
-    assistantId: assistant.id,
-    assistantKind: assistant.kind,
-    clearance: readClearance,
-    compartments: readCompartments,
-    // See the `systemRead` note on the queryLoop context below. The ambient
-    // blocks are reads, so they take the same treatment; the per-visitor soul
-    // (`getSoul`, and the identity/index pair) still keys off `user.id`, so a
-    // visitor never inherits the owner's personal projection.
-    systemRead: laneReadsSystemSide(input.contextScope) || undefined,
-  }
   if (isIdentified || fullScope) {
     const [soul, identityMemories, memoryIndex, workspaceIdentityMemories, teamMemoryIndex] =
       await Promise.all([
         deps.memoryStore.getSoul(assistant.id, user.id, 'Use Brian'),
-        deps.memoryStore.getIdentity(viewerCtx),
-        deps.memoryStore.getIndex(viewerCtx),
+        deps.memoryStore.getIdentity(memoryViewerCtx),
+        deps.memoryStore.getIndex(memoryViewerCtx),
         // Team memory is what makes a full-scope link useful, and what makes
         // the internal lane a colleague rather than a stranger; the external
         // keyed lanes stay on their per-user projection.
         (fullScope || internalScope) && assistant.workspaceId
-          ? deps.memoryStore.getWorkspaceIdentity(viewerCtx)
+          ? deps.memoryStore.getWorkspaceIdentity(memoryViewerCtx)
           : Promise.resolve([]),
         (fullScope || internalScope) && assistant.workspaceId
-          ? deps.memoryStore.getWorkspaceIndex(viewerCtx)
+          ? deps.memoryStore.getWorkspaceIndex(memoryViewerCtx)
           : Promise.resolve([]),
       ])
     memoryContext = buildMemoryContext({
@@ -1025,7 +1185,11 @@ export async function executePublicTurn(
     tier: modelToCompactionTier(model),
     channelClass: 'web',
     profile: 'linear',
-    provider: deps.provider,
+    provider: backgroundLlmRuntime?.provider ?? deps.provider,
+    model: backgroundLlmRuntime?.selector,
+    inputTokenLimit: backgroundLlmRuntime?.inputTokenLimit,
+    modelTier: 'standard',
+    providerKeySource: backgroundLlmRuntime?.providerKeySource ?? 'platform',
     systemPrompt: fullSystemPrompt,
     assistantId: assistant.id,
     userId: user.id,
@@ -1113,6 +1277,13 @@ export async function executePublicTurn(
         // assistant's own clearance (incident 2026-06-01).
         clearance: readClearance,
         compartments: readCompartments,
+        // Memory-only authenticated-client carve-out. Other tools ignore this
+        // field and continue to receive the public/empty general projection.
+        clientSelfMemory: clientSelfMemory ?? undefined,
+        memoryWriteSensitivityFloor: clientSelfMemory ? 'internal' : undefined,
+        memoryWriteCompartments: clientSelfMemory
+          ? [clientSelfMemory.compartment]
+          : undefined,
         assistantClearance: assistant.clearance,
         assistantCompartments: assistant.compartments,
         // Every CRM / memory / task / knowledge write on this turn unions this
@@ -1124,6 +1295,16 @@ export async function executePublicTurn(
           accrual.compartments,
         ),
         workspaceId: assistant.workspaceId ?? undefined,
+        workerRuntime: customLlmRuntime
+          ? {
+              provider: customLlmRuntime.provider,
+              model: customLlmRuntime.selector,
+              modelTier: customLlmRuntime.modelTier,
+              providerKeySource: customLlmRuntime.providerKeySource,
+              inputTokenLimit: customLlmRuntime.inputTokenLimit,
+              maxTokens: customLlmRuntime.maxTokens,
+            }
+          : undefined,
         assistantKind: assistant.kind,
         // `assistant-full` runs as a synthetic non-member principal, so member
         // RLS hid every brain row before `clearance` was ever consulted — the
@@ -1210,13 +1391,16 @@ export async function executePublicTurn(
   // pivot to the shadow. See migration 100 and
   // docs/architecture/platform/analytics.md → "Actor vs billing party".
   if (deps.usageStore && totalUsage && responseModel) {
-    const cost = customLlmRuntime ? 0 : calculateCost(responseModel, totalUsage)
+    const cost = customLlmRuntime?.providerKeySource === 'user'
+      ? 0
+      : calculateCost(responseModel, totalUsage)
     deps.usageStore.recordUsage({
       userId: ownerId,
       actorUserId: user.id,
       assistantId: assistant.id,
       sessionId: session.id,
       model: responseModel,
+      modelTier: customLlmRuntime?.modelTier ?? tierForModel(model),
       inputTokens: totalUsage.inputTokens,
       outputTokens: totalUsage.outputTokens,
       cacheReadTokens: totalUsage.cacheReadTokens,
@@ -1224,7 +1408,8 @@ export async function executePublicTurn(
       actualCostUsd: cost,
       source: 'api',
       userMessageId: storedUserMsg.id,
-      providerKeySource: customLlmRuntime ? 'user' : 'platform',
+      triggerKey: 'main_response',
+      providerKeySource: customLlmRuntime?.providerKeySource ?? 'platform',
     }).catch((err) => {
       // Mirror chat.ts: log AND surface to analytics so the
       // failure isn't silent. The previous version only console

@@ -91,6 +91,27 @@ describe('[COMP:office/xlsx-engine] XLSX engine', () => {
     expect(rejected.ok).toBe(false)
     expect(rejected.diagnostics).toContainEqual(expect.objectContaining({ code: 'package.active_content' }))
   })
+
+  it('fails closed for accepted-but-unpreserved spreadsheet constructs', async () => {
+    const workbook = new ExcelJS.Workbook()
+    const sheet = workbook.addWorksheet('Operations')
+    sheet.getCell('A1').value = 'Name'
+    sheet.getCell('B1').value = 'Value'
+    sheet.getCell('A2').value = { text: 'Use Brian', hyperlink: 'https://example.com' }
+    sheet.getCell('B2').value = { richText: [{ text: 'Bold', font: { bold: true } }, { text: ' text' }] }
+    sheet.autoFilter = 'A1:B2'
+    await sheet.protect('fictional-password', {})
+    const zip = await JSZip.loadAsync(await workbook.xlsx.writeBuffer())
+    zip.file('xl/charts/chart1.xml', '<chartSpace/>')
+    zip.file('xl/tables/table1.xml', '<table/>')
+    zip.file('xl/comments1.xml', '<comments/>')
+    const rejected = await importOfficeSpreadsheet(await zip.generateAsync({ type: 'uint8array' }), { artifactId: id(123), workspaceId: id(2), templateVersionId: id(3), locale: 'en-US', defaultLanguage: 'en-US', title: 'Rejected constructs' })
+
+    expect(rejected.ok).toBe(false)
+    for (const capabilityId of ['spreadsheetChart', 'spreadsheetTable', 'spreadsheetNote', 'spreadsheetHyperlink', 'spreadsheetRichText', 'spreadsheetFilter', 'spreadsheetProtection']) {
+      expect(rejected.diagnostics).toContainEqual(expect.objectContaining({ code: 'package.unsupported_construct', capabilityId }))
+    }
+  })
 })
 
 describe('[COMP:office/spreadsheet-pdf] Spreadsheet PDF preflight', () => {

@@ -7,6 +7,7 @@
  *
  *   POST   /                                              — create workspace (non-personal; gated by plan)
  *   GET    /                                              — list user's workspaces
+ *   PATCH  /:workspaceId/picker-preferences               — update caller's pin/hide/recency
  *   GET    /:workspaceId                                  — get workspace details + members
  *   PATCH  /:workspaceId                                  — update workspace name
  *   DELETE /:workspaceId                                  — delete workspace (owner only, non-personal)
@@ -84,6 +85,25 @@ type WorkspaceRouteOptions = {
   blobClient?: GcsFilesClient
   filesResolver?: FilesClientResolver
 }
+
+const workspacePickerPreferencesSchema = z.object({
+  pinned: z.boolean().optional(),
+  hidden: z.boolean().optional(),
+  opened: z.literal(true).optional(),
+}).strict().superRefine((value, ctx) => {
+  if (value.pinned === undefined && value.hidden === undefined && !value.opened) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'At least one picker preference is required',
+    })
+  }
+  if (value.pinned === true && value.hidden === true) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'A workspace cannot be pinned and hidden at the same time',
+    })
+  }
+})
 
 export function workspaceRoutes({
   workspaceStore,
@@ -202,6 +222,40 @@ export function workspaceRoutes({
     } catch (err) {
       console.error('[workspaces] list failed:', err)
       res.status(500).json({ error: 'Failed to list workspaces' })
+    }
+  })
+
+  // ── PATCH /:workspaceId/picker-preferences ────────────────
+  //
+  // A member manages only their own navigation row. This is deliberately not
+  // admin-gated and has no workspace lifecycle side effects.
+
+  router.patch('/:workspaceId/picker-preferences', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+
+    const parsed = workspacePickerPreferencesSchema.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({
+        error: parsed.error.issues[0]?.message ?? 'Invalid picker preferences',
+      })
+      return
+    }
+
+    try {
+      const preferences = await workspaceStore.updatePickerPreferences(
+        userId,
+        req.params.workspaceId,
+        parsed.data,
+      )
+      if (!preferences) {
+        res.status(404).json({ error: 'Workspace membership not found' })
+        return
+      }
+      res.json(preferences)
+    } catch (err) {
+      console.error('[workspaces] picker preferences update failed:', err)
+      res.status(500).json({ error: 'Failed to update picker preferences' })
     }
   })
 

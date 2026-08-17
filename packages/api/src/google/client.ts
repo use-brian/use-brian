@@ -18,6 +18,7 @@ import type {
   CalendarRecurrenceScope,
   CalendarAttendeeInput,
   CalendarAttachmentInput,
+  CalendarEventColorOptions,
 } from '@use-brian/core'
 import { renderEmailBody } from '@use-brian/channels'
 
@@ -204,6 +205,8 @@ export type CalendarEvent = {
   guestsCanSeeOtherGuests?: boolean
   htmlLink?: string
   status?: string
+  eventLabelId?: string
+  colorId?: string
   [key: string]: unknown
 }
 
@@ -251,6 +254,40 @@ export async function listCalendarList(accessToken: string): Promise<CalendarLis
     pageToken = data.nextPageToken
   } while (pageToken)
   return items
+}
+
+export async function listCalendarEventColors(
+  accessToken: string,
+  calendarId = 'primary',
+): Promise<CalendarEventColorOptions> {
+  const calendarPromise = fetch(
+    `${CALENDAR_API}/calendars/${encodeURIComponent(calendarId)}`,
+    { headers: calendarHeaders(accessToken) },
+  ).then((response) => calendarJson<{
+    labelProperties?: {
+      eventLabels?: Array<{ id?: string; name?: string; backgroundColor?: string }>
+    }
+  }>(response))
+  const colorsPromise = fetch(`${CALENDAR_API}/colors`, {
+    headers: calendarHeaders(accessToken),
+  }).then((response) => calendarJson<{
+    event?: Record<string, { background?: string; foreground?: string }>
+  }>(response))
+  const [calendar, colors] = await Promise.all([calendarPromise, colorsPromise])
+
+  return {
+    calendarId,
+    eventLabels: (calendar.labelProperties?.eventLabels ?? []).flatMap((label) =>
+      label.id && label.backgroundColor
+        ? [{ id: label.id, ...(label.name ? { name: label.name } : {}), backgroundColor: label.backgroundColor }]
+        : [],
+    ),
+    palette: Object.entries(colors.event ?? {}).flatMap(([colorId, color]) =>
+      color.background && color.foreground
+        ? [{ colorId, background: color.background, foreground: color.foreground }]
+        : [],
+    ),
+  }
 }
 
 export async function listCalendarEvents(
@@ -409,6 +446,17 @@ function addGuestPermissions(body: Record<string, unknown>, permissions: Calenda
   if (permissions.canSeeOtherGuests !== undefined) body.guestsCanSeeOtherGuests = permissions.canSeeOtherGuests
 }
 
+function addEventMark(
+  body: Record<string, unknown>,
+  event: Pick<CalendarEventCreateInput, 'eventLabelId' | 'colorId'>,
+): void {
+  if (event.eventLabelId !== undefined && event.colorId !== undefined) {
+    throw new Error('Use eventLabelId or colorId, not both')
+  }
+  if (event.eventLabelId !== undefined) body.eventLabelId = event.eventLabelId
+  if (event.colorId !== undefined) body.colorId = event.colorId
+}
+
 function addStatusProperties(body: Record<string, unknown>, event: CalendarEventCreateInput): void {
   const eventType = event.eventType ?? 'default'
   if (eventType !== 'default' && (event.calendarId ?? 'primary') !== 'primary') {
@@ -467,6 +515,7 @@ function createEventBody(event: CalendarEventCreateInput): Record<string, unknow
   if (event.availability) body.transparency = event.availability === 'free' ? 'transparent' : 'opaque'
   if (event.visibility) body.visibility = event.visibility
   if (event.attachments) body.attachments = event.attachments
+  addEventMark(body, event)
   if (event.conference === 'google_meet') {
     body.conferenceData = {
       createRequest: {
@@ -482,11 +531,12 @@ function createEventBody(event: CalendarEventCreateInput): Record<string, unknow
 
 function eventMutationQuery(
   sendUpdates: CalendarSendUpdates,
-  options: { conference?: boolean; attachments?: boolean } = {},
+  options: { conference?: boolean; attachments?: boolean; eventLabels?: boolean } = {},
 ): string {
   const qs = new URLSearchParams({ sendUpdates })
   if (options.conference) qs.set('conferenceDataVersion', '1')
   if (options.attachments) qs.set('supportsAttachments', 'true')
+  if (options.eventLabels) qs.set('eventLabelVersion', '1')
   return qs.toString()
 }
 
@@ -499,6 +549,7 @@ async function insertCalendarEventBody(
   const query = eventMutationQuery(sendUpdates, {
     conference: Object.hasOwn(body, 'conferenceData'),
     attachments: Object.hasOwn(body, 'attachments'),
+    eventLabels: Object.hasOwn(body, 'eventLabelId'),
   })
   return calendarJson<CalendarEvent>(await fetch(
     `${CALENDAR_API}/calendars/${encodeURIComponent(calendarId)}/events?${query}`,
@@ -628,6 +679,7 @@ function updateEventBody(updates: CalendarEventUpdateInput, current: CalendarEve
   if (updates.reminders !== undefined) body.reminders = updates.reminders
   if (updates.availability !== undefined) body.transparency = updates.availability === 'free' ? 'transparent' : 'opaque'
   if (updates.visibility !== undefined) body.visibility = updates.visibility
+  addEventMark(body, updates)
   const attendees = mergeAttendees(current.attendees ?? [], updates)
   if (attendees) body.attendees = attendees
   const attachments = mergeAttachments(current.attachments ?? [], updates.attachmentChanges)
@@ -675,6 +727,7 @@ async function patchCalendarEventBody(
   const query = eventMutationQuery(sendUpdates, {
     conference: Object.hasOwn(body, 'conferenceData'),
     attachments: Object.hasOwn(body, 'attachments'),
+    eventLabels: Object.hasOwn(body, 'eventLabelId'),
   })
   return calendarJson<CalendarEvent>(await fetch(
     `${CALENDAR_API}/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}?${query}`,
@@ -818,7 +871,7 @@ function cloneSeriesBody(
   updates: CalendarEventUpdateInput,
 ): Record<string, unknown> {
   const copyFields = [
-    'summary', 'description', 'location', 'colorId', 'attendees', 'reminders',
+    'summary', 'description', 'location', 'eventLabelId', 'colorId', 'attendees', 'reminders',
     'visibility', 'transparency', 'guestsCanInviteOthers', 'guestsCanModify',
     'guestsCanSeeOtherGuests', 'attachments', 'conferenceData',
     'extendedProperties', 'source', 'eventType', 'focusTimeProperties',
@@ -828,6 +881,8 @@ function cloneSeriesBody(
   for (const field of copyFields) {
     if (parent[field] !== undefined) body[field] = parent[field]
   }
+  if (updates.eventLabelId !== undefined) delete body.colorId
+  if (updates.colorId !== undefined) delete body.eventLabelId
   body.start = target.start
   body.end = target.end
   body.recurrence = recurrence

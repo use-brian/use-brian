@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { deriveOfficeSnapshot, reviewOfficeRelease } from '../release.js'
+import { deriveOfficeSnapshot, prepareOfficeRelease, reviewOfficeRelease } from '../release.js'
 import { nextOfficeLifecycleState } from '../lifecycle-worker.js'
-import { completeSpreadsheetSnapshot, documentSnapshot, id } from '../../../../core/src/office/__tests__/fixtures.js'
+import { completePresentationSnapshot, completeSpreadsheetSnapshot, documentSnapshot, id, resolveFixtureResource } from '../../../../core/src/office/__tests__/fixtures.js'
 
 function input(overrides: Record<string, unknown> = {}) {
   return { snapshot: documentSnapshot(), expectedVersion: 3, currentVersion: 3, headVersionId: id(30), lifecycleState: 'active', canEdit: true, artifactSensitivity: 'internal' as const, action: 'export' as const, destination: { sensitivity: 'internal' as const, external: false }, claims: [], media: [], ...overrides }
@@ -32,6 +32,43 @@ describe('[COMP:api/office-release] Office exact-head release', () => {
     const snapshot = completeSpreadsheetSnapshot()
     const receipt = reviewOfficeRelease(input({ snapshot, format: 'pdf', spreadsheetPdf: { sheetId: snapshot.activeSheetId, printArea: 'A1:C20', calculationMode: 'automatic', expectedPageCount: 1, preset: 'worksheet' } }))
     expect(receipt).toMatchObject({ status: 'ready', spreadsheetPdf: { sheetId: snapshot.activeSheetId, sheetName: 'Invoice', printArea: 'A1:C20', expectedPageCount: 1, renderer: 'libreoffice', issues: [] } })
+  })
+
+  it('preflights and persists a Presentation PDF while native PPTX stays unchanged', async () => {
+    const snapshot = completePresentationSnapshot()
+    expect(reviewOfficeRelease(input({ snapshot, format: 'pdf' }))).toMatchObject({ status: 'ready' })
+    const bytes = new Uint8Array([37, 80, 68, 70])
+    const pdf = await prepareOfficeRelease({ ...input({ snapshot, format: 'pdf' }), resolveResource: resolveFixtureResource, presentationPdfPort: { convert: async () => bytes, pageCount: async () => snapshot.slides.length } })
+    expect(pdf).toMatchObject({ bytes, mime: 'application/pdf', extension: 'pdf', receipt: { status: 'ready', presentationPdf: { expectedPageCount: 2, actualPageCount: 2, issues: [] } } })
+    const native = await prepareOfficeRelease({ ...input({ snapshot, format: 'native' }), resolveResource: resolveFixtureResource })
+    expect(native).toMatchObject({ mime: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', extension: 'pptx' })
+    expect(Array.from(native.bytes?.slice(0, 2) ?? [])).toEqual([80, 75])
+  })
+
+  it('preflights and persists a Document PDF while native DOCX stays unchanged', async () => {
+    const snapshot = documentSnapshot()
+    expect(reviewOfficeRelease(input({ snapshot, format: 'pdf' }))).toMatchObject({ status: 'ready', blocks: [] })
+    const bytes = new Uint8Array([37, 80, 68, 70])
+    const expectedPageCount = 1
+    const pdf = await prepareOfficeRelease({ ...input({ snapshot, format: 'pdf' }), resolveResource: resolveFixtureResource, documentPdfPort: { convert: async () => bytes, pageCount: async () => expectedPageCount } })
+    expect(pdf).toMatchObject({ bytes, mime: 'application/pdf', extension: 'pdf', receipt: { status: 'ready', documentPdf: { expectedPageCount, actualPageCount: expectedPageCount, issues: [] } } })
+    const native = await prepareOfficeRelease({ ...input({ snapshot, format: 'native' }), resolveResource: resolveFixtureResource })
+    expect(native).toMatchObject({ mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', extension: 'docx' })
+    expect(Array.from(native.bytes?.slice(0, 2) ?? [])).toEqual([80, 75])
+  })
+
+  it('returns typed Document PDF failures', async () => {
+    const snapshot = documentSnapshot()
+    const result = await prepareOfficeRelease({ ...input({ snapshot, format: 'pdf' }), resolveResource: resolveFixtureResource, documentPdfPort: { convert: async () => new Uint8Array([1]), pageCount: async () => 2 } })
+    expect(result.bytes).toBeUndefined()
+    expect(result.receipt).toMatchObject({ status: 'blocked', blocks: [{ code: 'document.page_count_mismatch' }], documentPdf: { expectedPageCount: 1, actualPageCount: 2 } })
+  })
+
+  it('returns typed Presentation PDF failures', async () => {
+    const snapshot = completePresentationSnapshot()
+    const result = await prepareOfficeRelease({ ...input({ snapshot, format: 'pdf' }), resolveResource: resolveFixtureResource, presentationPdfPort: { convert: async () => new Uint8Array([1]), pageCount: async () => 1 } })
+    expect(result.bytes).toBeUndefined()
+    expect(result.receipt).toMatchObject({ status: 'blocked', blocks: [{ code: 'presentation.page_count_mismatch' }], presentationPdf: { expectedPageCount: 2, actualPageCount: 1 } })
   })
 
   it('advances the two retention clocks but never a legal hold', () => {

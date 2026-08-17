@@ -24,6 +24,8 @@
  */
 
 import { z } from 'zod'
+import { createHash, timingSafeEqual } from 'node:crypto'
+import { deflateRawSync, inflateRawSync } from 'node:zlib'
 import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
 import {
   WorkflowDefinitionSchema,
@@ -149,6 +151,17 @@ export type WorkflowToolDeps = {
    */
   isKnownTool?: (toolName: string) => boolean
   /**
+   * Authoring-time exact lookup against the scoped runtime registry. Unlike
+   * `isKnownTool`, this resolves connected custom HTTP/CLI tools for the
+   * workflow's workspace and acting assistant.
+   */
+  resolveKnownWorkflowTools?: (args: {
+    userId: string
+    workspaceId: string
+    assistantId: string
+    toolNames: string[]
+  }) => Promise<string[]>
+  /**
    * Scheduling substrate — lets the authoring tools attach a schedule trigger
    * in one call (scheduling-authoring-unification). `jobStore` + `resolvePrimary`
    * back the workflow-trigger row; the delivery resolvers port the reminder
@@ -175,9 +188,11 @@ export type WorkflowToolDeps = {
    * docs/architecture/engine/scheduled-jobs.md → "Channel delivery".
    */
   validateDeliveryTarget?: (args: {
+    workspaceId?: string
     assistantId: string
     channelType: 'telegram' | 'slack' | 'whatsapp'
     channelId: string
+    channelIntegrationId?: string
   }) => Promise<{ ok: boolean; reason?: string }>
   /**
    * Authoring-time connector preflight (the GitHub `Bad credentials` incident).
@@ -239,6 +254,8 @@ export type WorkflowToolDeps = {
     | { ok: true; members: Array<{ id: string; handle: string; displayName: string; realName: string }> }
     | { ok: false; reason: string }
   >
+  /** Internal/test escape hatch. Production authoring must consume a proposal receipt. */
+  allowLegacyDirectWrites?: boolean
 }
 
 const idShape = z.string().uuid()
@@ -306,7 +323,7 @@ export const TRIGGER_INPUT_DESCRIPTION =
   `\n- \`{ kind: "schedule", schedule: {type: "daily"|"weekly"|"monthly"|"once"|"cron", ...}, timezone?, mode?, delivery?: { channel: "telegram"|"slack"|"whatsapp" }, policy?: { silentUntilFire?, nagIntervalMins?, nagUntilKeyword? } }\` ` +
   `fires on a cadence in ONE call — scheduling is a workflow trigger, so no separate scheduling step or tool is needed. \`delivery.channel\` pushes the result to the user (for a recurring reminder the exact chat + Telegram topic are captured automatically from this session); \`policy\` covers "remind every N min until <keyword>" and silent-until-fire. ` +
   `\n- \`{ kind: "event", event: { sources: [{ source, match? }, ...] } }\` fires from a workspace signal and IS fully authorable here. The ONLY source types: ${WORKFLOW_EVENT_SOURCE_TYPES.join(' | ')}. ` +
-  `Shapes: \`{ type: "connector", connectorInstanceId, provider }\` (a CONNECTED connector instance), \`{ type: "channel", channelIntegrationId, channel }\` (a connected chat integration), \`{ type: "page", pageId }\` (a doc page + its direct children), \`{ type: "task" }\` (the workspace's tasks — id-less), \`{ type: "knowledge" }\` (the workspace's knowledge base — id-less). ` +
+  `Shapes: \`{ type: "connector", connectorInstanceId, provider }\` (a CONNECTED connector instance), \`{ type: "channel", channelIntegrationId, channel }\` (a connected chat integration; get channelIntegrationId from listChannels.integrationId, never listChannels.id), \`{ type: "page", pageId }\` (a doc page + its direct children), \`{ type: "task" }\` (the workspace's tasks — id-less), \`{ type: "knowledge" }\` (the workspace's knowledge base — id-less). ` +
   `\`match\` narrows firing: keywords / fromActors / inChannels / mentions / tags (task and knowledge events only) / fromBots (default false — bot- or assistant-authored events only fire with \`fromBots: true\`). ` +
   `Task lifecycle actions are matched via \`match.inChannels\`: ${TASK_LIFECYCLE_ACTIONS.join(' / ')}. Knowledge lifecycle actions, same axis: ${KNOWLEDGE_LIFECYCLE_ACTIONS.join(' / ')} — for knowledge, \`keywords\` matches the entry TITLE and \`tags\` its frontmatter tags; there is no path filter, so scope by path with a \`branch\` step on \`{{input.event.path}}\`. A connector/channel source id that does not reference a live connected source never fires — verify it is connected first. ` +
   `Each entry nests the source under a \`source\` key — e.g. a task tagged 'triage' is \`{ source: { type: "task" }, match: { inChannels: ["tagged"], tags: ["triage"] } }\` (do NOT flatten \`type\` to the entry top level). ` +
@@ -332,6 +349,134 @@ const triggerInputSchemaRef = z
     `Optional trigger — same contract as proposeWorkflow's \`trigger\` parameter (see it for the full shapes, event sources, and task actions). ` +
       `The ONLY kinds: ${WORKFLOW_TRIGGER_KINDS.join(' | ')}; anything else does not exist. All kinds are authorable here; only webhook slug/secret provisioning happens in the web builder.`,
   )
+
+const PROPOSAL_RECEIPT_PREFIX = 'wf1'
+const PROPOSAL_RECEIPT_MAX_CHARS = 500_000
+const PROPOSAL_RECEIPT_MAX_JSON_BYTES = 1_000_000
+const workflowTriggerReceiptSchema = WorkflowTriggerSchema as z.ZodType<WorkflowTrigger>
+
+const createProposalInputSchema = z.object({
+  name: z.string().min(1).max(120),
+  description: z.string().max(2000).optional(),
+  definition: WorkflowDefinitionSchema,
+  trigger: workflowTriggerReceiptSchema.optional(),
+  targetViewId: z.string().uuid().optional(),
+})
+
+const updateProposalInputSchema = z.object({
+  workflowId: idShape,
+  name: z.string().min(1).max(120).optional(),
+  description: z.string().max(2000).nullable().optional(),
+  definition: WorkflowDefinitionSchema.optional(),
+  enabled: z.boolean().optional(),
+  trigger: workflowTriggerReceiptSchema.optional(),
+  targetViewId: z.string().uuid().nullable().optional(),
+})
+
+const workflowProposalReceiptSchema = z.discriminatedUnion('action', [
+  z.object({ version: z.literal(1), action: z.literal('create'), input: createProposalInputSchema }),
+  z.object({ version: z.literal(1), action: z.literal('update'), input: updateProposalInputSchema }),
+])
+
+type WorkflowProposalReceipt = z.infer<typeof workflowProposalReceiptSchema>
+
+/** Recover the latest proposal unless a later successful workflow write consumed it. */
+export function latestWorkflowProposalReceipt(messages: readonly { content: unknown }[]): string | undefined {
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex--) {
+    const content = messages[messageIndex]?.content
+    if (!Array.isArray(content)) continue
+    for (let blockIndex = content.length - 1; blockIndex >= 0; blockIndex--) {
+      const block = content[blockIndex]
+      if (!block || typeof block !== 'object' || (block as { type?: unknown }).type !== 'tool_result') continue
+      const result = block as { name?: unknown; content?: unknown; isError?: unknown }
+      if (result.isError === true) continue
+      if (result.name === 'createWorkflow' || result.name === 'updateWorkflow') return undefined
+      if (result.name !== 'proposeWorkflow' || typeof result.content !== 'string') continue
+      try {
+        const parsed = JSON.parse(result.content) as { proposalReceipt?: unknown }
+        return typeof parsed.proposalReceipt === 'string' ? parsed.proposalReceipt : undefined
+      } catch {
+        // Oversized tool results may be capped after the receipt field, leaving
+        // invalid trailing JSON. The receipt alphabet needs no JSON escapes, so
+        // recover that first field without accepting arbitrary prose.
+        const match = result.content.match(/"proposalReceipt":"(wf1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)"/)
+        return match?.[1]
+      }
+    }
+  }
+  return undefined
+}
+
+function encodeProposalReceipt(receipt: WorkflowProposalReceipt): string {
+  const compressed = deflateRawSync(Buffer.from(JSON.stringify(receipt), 'utf8'))
+  const body = compressed.toString('base64url')
+  const checksum = createHash('sha256').update(compressed).digest('base64url')
+  return `${PROPOSAL_RECEIPT_PREFIX}.${body}.${checksum}`
+}
+
+function decodeProposalReceipt(value: string):
+  | { ok: true; receipt: WorkflowProposalReceipt }
+  | { ok: false; error: string } {
+  if (value.length > PROPOSAL_RECEIPT_MAX_CHARS) {
+    return { ok: false, error: 'The workflow proposal receipt is too large. Re-propose the workflow.' }
+  }
+  const [prefix, body, checksum, extra] = value.split('.')
+  if (prefix !== PROPOSAL_RECEIPT_PREFIX || !body || !checksum || extra !== undefined) {
+    return { ok: false, error: 'The workflow proposal receipt is malformed. Re-propose the workflow.' }
+  }
+  try {
+    const compressed = Buffer.from(body, 'base64url')
+    const expected = Buffer.from(createHash('sha256').update(compressed).digest('base64url'))
+    const received = Buffer.from(checksum)
+    if (expected.length !== received.length || !timingSafeEqual(expected, received)) {
+      return { ok: false, error: 'The workflow proposal receipt changed after validation. Re-propose the workflow.' }
+    }
+    const json = inflateRawSync(compressed, { maxOutputLength: PROPOSAL_RECEIPT_MAX_JSON_BYTES }).toString('utf8')
+    const parsed = workflowProposalReceiptSchema.safeParse(JSON.parse(json))
+    if (!parsed.success) {
+      return { ok: false, error: 'The workflow proposal receipt is invalid. Re-propose the workflow.' }
+    }
+    return { ok: true, receipt: parsed.data }
+  } catch {
+    return { ok: false, error: 'The workflow proposal receipt could not be read. Re-propose the workflow.' }
+  }
+}
+
+const proposalReceiptInput = z
+  .string()
+  .max(PROPOSAL_RECEIPT_MAX_CHARS)
+  .describe('Opaque receipt returned by the successful proposeWorkflow call. Copy it exactly; do not reconstruct workflow fields.')
+
+const receiptWriteInputSchema = z.object({ proposalReceipt: proposalReceiptInput })
+
+const legacyCreateWorkflowInputSchema = z.object({
+  name: z.string().min(1).max(120),
+  description: z.string().max(2000).optional(),
+  definition: z
+    .object({
+      startStepId: z.union([z.string(), z.array(z.string())]),
+      steps: z.array(z.unknown()),
+    })
+    .passthrough(),
+  trigger: triggerInputSchemaRef.optional(),
+  targetViewId: z.string().uuid().optional(),
+})
+
+const legacyUpdateWorkflowInputSchema = z.object({
+  workflowId: idShape,
+  name: z.string().min(1).max(120).optional(),
+  description: z.string().max(2000).nullable().optional(),
+  definition: z
+    .object({
+      startStepId: z.union([z.string(), z.array(z.string())]),
+      steps: z.array(z.unknown()),
+    })
+    .passthrough()
+    .optional(),
+  enabled: z.boolean().optional(),
+  trigger: triggerInputSchemaRef.optional(),
+  targetViewId: z.string().uuid().nullable().optional(),
+})
 
 function workspaceGate(workspaceId: string | null | undefined): { data: string; isError: true } | null {
   if (!workspaceId) {
@@ -365,6 +510,9 @@ function summarize(def: WorkflowDefinition): string {
     switch (step.type) {
       case 'assistant_call':
         detail = `assistant_call → ${step.target.assistantId}${step.page ? pageAnchorSummary(step.page) : ''}`
+        if (step.deliver && 'replyToTrigger' in step.deliver) {
+          detail += ' (replies to the originating WhatsApp conversation)'
+        }
         break
       case 'tool_call':
         detail = `tool_call → ${step.toolName}`
@@ -390,7 +538,11 @@ function summarize(def: WorkflowDefinition): string {
 
 function warningsFor(
   def: WorkflowDefinition,
-  opts: { phaseBActive: boolean; isKnownTool?: (name: string) => boolean },
+  opts: {
+    phaseBActive: boolean
+    isKnownTool?: (name: string) => boolean
+    runtimeKnownToolNames?: ReadonlySet<string>
+  },
 ): string[] {
   const warnings: string[] = []
   for (const step of def.steps) {
@@ -398,7 +550,12 @@ function warningsFor(
     // `tool_not_found` / hallucinated-tool failure class (prod: `search`).
     // Skipped when the registry check is unavailable. A connector action is
     // not a built-in, so the message stays accurate for that case too.
-    if (step.type === 'tool_call' && opts.isKnownTool && !opts.isKnownTool(step.toolName)) {
+    if (
+      step.type === 'tool_call'
+      && opts.isKnownTool
+      && !opts.isKnownTool(step.toolName)
+      && !opts.runtimeKnownToolNames?.has(step.toolName)
+    ) {
       warnings.push(
         `Step "${step.id}" calls tool "${step.toolName}", which is not a built-in tool. The run fails with \`tool_not_found\` unless it is a connector action whose connector is connected in this workspace. Built-in brain search is \`searchBrain\`; web search / fetch is \`mcp_search\`. Double-check the tool name.`,
       )
@@ -472,6 +629,37 @@ function warningsFor(
     }
   }
   return warnings
+}
+
+async function runtimeKnownToolNames(
+  def: WorkflowDefinition,
+  context: ToolContext,
+  deps: Pick<WorkflowToolDeps, 'isKnownTool' | 'resolveKnownWorkflowTools' | 'resolvePrimary'>,
+): Promise<Set<string>> {
+  if (!context.workspaceId || !deps.resolveKnownWorkflowTools || !deps.resolvePrimary) {
+    return new Set()
+  }
+  const toolNames = [...new Set(def.steps.flatMap((step) => (
+    step.type === 'tool_call'
+    && (!deps.isKnownTool || !deps.isKnownTool(step.toolName))
+      ? [step.toolName]
+      : []
+  )))]
+  if (toolNames.length === 0) return new Set()
+
+  try {
+    const assistantId = await deps.resolvePrimary(context.workspaceId)
+    if (!assistantId) return new Set()
+    return new Set(await deps.resolveKnownWorkflowTools({
+      userId: context.userId,
+      workspaceId: context.workspaceId,
+      assistantId,
+      toolNames,
+    }))
+  } catch (err) {
+    console.warn('[workflow/tools] runtime tool-name lookup threw:', err)
+    return new Set()
+  }
 }
 
 /** "Tag/mention someone" intent in a Slack-delivering step's prompt. */
@@ -706,6 +894,28 @@ async function dependencyIssues(
   const errors: string[] = []
   const warnings: string[] = []
 
+  const triggerReplySteps = def.steps.filter(
+    (step): step is AssistantCallStep =>
+      step.type === 'assistant_call'
+      && !!step.deliver
+      && 'replyToTrigger' in step.deliver,
+  )
+  if (triggerReplySteps.length > 0) {
+    const sources = trigger?.kind === 'event' ? trigger.event.sources : []
+    const allSourcesAreWhatsApp = sources.length > 0 && sources.every(
+      (subscription) =>
+        subscription.source.type === 'channel'
+        && subscription.source.channel === 'whatsapp',
+    )
+    if (!allSourcesAreWhatsApp) {
+      for (const step of triggerReplySteps) {
+        errors.push(
+          `Step "${step.id}" uses replyToTrigger, which requires an event trigger containing only WhatsApp channel sources. Use the selected channel's integrationId as source.channelIntegrationId; do not author a recipient phone number.`,
+        )
+      }
+    }
+  }
+
   // ── A. Delivery-target reachability ──────────────────────────────────────
   if (deps.validateDeliveryTarget) {
     const targets: Array<{
@@ -713,11 +923,13 @@ async function dependencyIssues(
       assistantTarget: AssistantCallStep['target']['assistantId']
       channelType: 'telegram' | 'slack' | 'whatsapp'
       channelId: string
+      channelIntegrationId?: string
     }> = []
     for (const step of def.steps) {
       if (
         step.type === 'assistant_call' &&
         step.deliver &&
+        'channelId' in step.deliver &&
         step.deliver.channelType !== 'web' &&
         // Teams targets have no channel-enumeration API to preflight against
         // (the listTeamsChannels equivalent is a P5 follow-up), so they skip
@@ -729,6 +941,7 @@ async function dependencyIssues(
           assistantTarget: step.target.assistantId,
           channelType: step.deliver.channelType,
           channelId: step.deliver.channelId,
+          channelIntegrationId: step.deliver.channelIntegrationId,
         })
       }
     }
@@ -772,19 +985,24 @@ async function dependencyIssues(
         const assistantId = t.assistantTarget === 'primary' ? primaryAssistantId : t.assistantTarget
         if (!assistantId) continue
         const res = await deps.validateDeliveryTarget({
+          workspaceId: context.workspaceId ?? undefined,
           assistantId,
           channelType: t.channelType,
           channelId: t.channelId,
+          channelIntegrationId: t.channelIntegrationId,
         })
         if (!res.ok) {
+          const guidance = t.channelType === 'slack'
+            ? ' Call `listSlackChannels` to get a real channel id and set it on the terminal step\'s `deliver` as `{ "channelType": "slack", "channelId": "<id>" }` (the internal id from `listChannels` is not a Slack channel id). Or author the workflow from inside the Slack channel you want the result posted to.'
+            : t.channelType === 'telegram'
+              ? /chat not found/i.test(res.reason ?? '')
+                ? ' Author from inside the Telegram chat you want the result delivered to so the correct destination is captured.'
+                : ''
+              : ' Author from inside the chat you want the result delivered to so the correct channel is captured.'
           errors.push(
             `Step "${t.stepId}" delivers to the ${t.channelType} channel "${t.channelId}", which is not reachable: ${
               res.reason ?? 'channel check failed'
-            }. ${
-              t.channelType === 'slack'
-                ? 'Call `listSlackChannels` to get a real channel id and set it on the terminal step\'s `deliver` as `{ "channelType": "slack", "channelId": "<id>" }` (the internal id from `listChannels` is not a Slack channel id). Or author the workflow from inside the Slack channel you want the result posted to.'
-                : 'Author from inside the chat you want the result delivered to so the correct channel is captured.'
-            }`,
+            }.${guidance}`,
           )
         }
       } catch (err) {
@@ -1053,7 +1271,7 @@ function terminalExplicitDeliverId(
   const termStep = termId ? def.steps.find((s) => s.id === termId) : undefined
   if (termStep?.type !== 'assistant_call') return null
   const d = termStep.deliver
-  return d && d.channelType === channel && d.channelId ? d.channelId : null
+  return d && 'channelId' in d && d.channelType === channel && d.channelId ? d.channelId : null
 }
 
 /**
@@ -1304,7 +1522,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
     name: 'proposeWorkflow',
     description:
       `Propose a workflow definition for the user to approve. Validates the draft against the schema and returns a summary the user can read. ` +
-      `No database writes. After this returns, present the proposal to the user verbatim and ask for explicit confirmation ("yes / create it / go ahead") before calling \`createWorkflow\`. ` +
+      `No database writes. For an edit, pass the workflowId previously returned by getWorkflow. After this returns, present the proposal and ask for explicit confirmation ("yes / create it / go ahead"). On approval, copy only the returned proposalReceipt into createWorkflow or updateWorkflow; never reconstruct name, definition, target, trigger, or assistant ids. Do not repeat workflow/assistant reads, tool searches, connector discovery, or this proposal unless the user changes it or receipt validation fails. ` +
       `Step types (V1): assistant_call (free-mode A2A), tool_call (first-party + MCP allow-policy), wait (not yet available), branch (JSONLogic condition). ` +
       `There is no loop / for-each step: to process each item in a list, propose a recurring schedule trigger that handles one batch per run and carries a cursor across runs via storeOutputAs + {{lastRun.<var>}}, or a research fan-out step for a read-only gather; name these routes when you decline a loop request. ` +
       `Parallel fan-out: set a step's nextStepId to an ARRAY of step ids (max 5, distinct) to start those steps IN PARALLEL when it completes. A downstream step that several branches point at is the implicit JOIN — it runs once, after every branch that can still reach it settles, and can read every branch's {{vars.<name>}}. The graph must stay acyclic, and a wait step may not sit on a parallel branch that some sibling branch never rejoins (pausing needs the only live cursor — put waits before the fan-out or after the join). startStepId accepts the same shape: an ARRAY of step ids (max 5, distinct) starts every listed step IN PARALLEL the moment the trigger fires — a trigger-level fan-out with the same join and wait rules. ` +
@@ -1315,7 +1533,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       `The callee then runs with the doc tools (getCurrentPage / patchPage / renderPage) against that page.` +
       `\n\nSkills: when a step should follow a saved brain skill, ATTACH it on the step — NEVER just name the skill in the prompt (a workflow callee has no skill surface unless the step attaches one, so a prose-only reference silently does nothing on every run). \`enforcedSkills: ["<slug>"]\` force-loads the skill's instructions every run (the usual choice for workflows); \`skills: ["<slug>"]\` offers it via useSkill and the callee chooses. Use exact skill slugs; an attached slug that matches no workspace skill or built-in id is rejected. ` +
       `For structured output, an assistant_call research step may also set \`blueprintId: "<workspace skill slug | page-template id>"\` together with a \`page\` anchor to fill that blueprint instead of free-form authoring — blueprints themselves are created in the web app (Brain → Blueprints) or minted from a skill's extraction spec; they cannot be created from chat, so never claim otherwise.` +
-      `\n\nChannel delivery: a step's \`deliver: { channelType, channelId }\` pushes that step's output to a messaging channel (Slack channelId from listSlackChannels). To post a THREAD — one parent message with replies under it — use one deliver-step per message and give each follow-up step \`deliver: { ..., thread: { fromStep: "<parent step id>" } }\`: it replies under the message that earlier step posted this run (same channel required; slack + telegram only). Do NOT concatenate multiple messages into one step's output and expect threading. ` +
+      `\n\nChannel delivery: a step's \`deliver: { channelType, channelId }\` pushes that step's output to a static messaging destination (Slack channelId from listSlackChannels). For a WhatsApp channel-event workflow that must answer the customer who triggered this run, use exactly \`deliver: { channelType: "whatsapp", replyToTrigger: true }\`; never add a channelId or phone number. This variant is valid only when every event source is a WhatsApp channel integration. To post a THREAD — one parent message with replies under it — use one deliver-step per message and give each follow-up step \`deliver: { ..., thread: { fromStep: "<parent step id>" } }\`: it replies under the message that earlier step posted this run (same channel required; slack + telegram only). Do NOT concatenate multiple messages into one step's output and expect threading. ` +
       `To MENTION people in a Slack delivery, first call \`listSlackMembers\` and embed the literal \`<@MEMBER_ID>\` ids in the step prompt — plain @name renders as text and notifies nobody.`,
     inputSchema: z.object({
       name: z
@@ -1323,7 +1541,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
         .min(1)
         .max(120)
         .describe('Human-readable name. Shown in audit, listings, and approval prompts.'),
-      description: z.string().max(2000).optional(),
+      description: z.string().max(2000).nullable().optional(),
       definition: z
         .object({
           startStepId: z.union([z.string(), z.array(z.string())]),
@@ -1332,6 +1550,9 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
         .passthrough()
         .describe('Workflow DAG. See proposeWorkflow tool docs for the schema.'),
       trigger: triggerInputSchema.optional(),
+      workflowId: idShape.optional().describe('Existing workflow id from getWorkflow. Include for an edit; omit for a new workflow.'),
+      enabled: z.boolean().optional().describe('Edited enabled state. Only meaningful with workflowId.'),
+      targetViewId: z.string().uuid().nullable().optional().describe('Scheduled doc target. Pass null only when clearing it on an edit.'),
     }),
     isConcurrencySafe: true,
     isReadOnly: true,
@@ -1370,6 +1591,19 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
         trigger = t.data
       }
 
+      if (!input.workflowId && input.description === null) {
+        return { data: { ok: false, errors: ['description: null is only valid when editing an existing workflow.'] }, isError: true }
+      }
+      if (!input.workflowId && input.enabled !== undefined) {
+        return { data: { ok: false, errors: ['enabled is only valid when editing an existing workflow.'] }, isError: true }
+      }
+      if (input.workflowId) {
+        const existing = await deps.workflowStore.getById(context.userId, input.workflowId)
+        if (!existing || existing.workspaceId !== context.workspaceId) {
+          return { data: `Workflow ${input.workflowId} not found in workspace.`, isError: true }
+        }
+      }
+
       // Store-backed page-anchor checks — fail the proposal on a dangling
       // anchor instead of authoring a workflow that fails 100% of its runs.
       const anchorIssues = await pageAnchorIssues(
@@ -1398,15 +1632,51 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
         }
       }
 
+      const knownRuntimeTools = await runtimeKnownToolNames(definition, context, deps)
+
+      const proposalReceipt = input.workflowId
+        ? encodeProposalReceipt({
+            version: 1,
+            action: 'update',
+            input: {
+              workflowId: input.workflowId,
+              name: input.name,
+              description: input.description,
+              definition,
+              enabled: input.enabled,
+              trigger,
+              targetViewId: input.targetViewId,
+            },
+          })
+        : encodeProposalReceipt({
+            version: 1,
+            action: 'create',
+            input: {
+              name: input.name,
+              description: input.description ?? undefined,
+              definition,
+              trigger,
+              targetViewId: input.targetViewId ?? undefined,
+            },
+          })
+
+      context.workflowProposalReceipt = proposalReceipt
+
       return {
         data: {
           ok: true,
+          proposalReceipt,
+          proposedAction: input.workflowId ? 'update' : 'create',
           proposedName: input.name,
           proposedDescription: input.description ?? null,
           proposedTrigger: trigger ?? null,
           summary: summarize(definition),
           warnings: [
-            ...warningsFor(definition, { phaseBActive, isKnownTool: deps.isKnownTool }),
+            ...warningsFor(definition, {
+              phaseBActive,
+              isKnownTool: deps.isKnownTool,
+              runtimeKnownToolNames: knownRuntimeTools,
+            }),
             ...anchorIssues.warnings,
             ...depIssues.warnings,
             ...skillIssues.warnings,
@@ -1419,42 +1689,54 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
           ],
           definition,
           confirmationHint:
-            'Show the user this proposal (and the trigger / schedule) and the warnings. Ask for explicit confirmation. Only call createWorkflow after they agree.',
+            'Show the user this proposal (and the trigger / schedule) and the warnings. Ask for explicit confirmation. On approval, immediately call createWorkflow with {} when proposedAction is create, or updateWorkflow with {} when proposedAction is update. The runtime recovers the receipt from session history. Do not repeat discovery, listAssistants, or proposeWorkflow unless the user changes the proposal or the write reports no valid pending proposal.',
         },
       }
     },
   })
 
+  const pendingWriteInputSchema = z.object({}).strict().describe('No arguments. Applies the latest approved proposal in this session.')
+  const createWorkflowInputSchema = deps.allowLegacyDirectWrites
+    ? z.union([receiptWriteInputSchema, legacyCreateWorkflowInputSchema])
+    : pendingWriteInputSchema
+
   const createWorkflow = buildTool({
     name: 'createWorkflow',
     description:
-      `Persist a workflow definition that the user has explicitly approved. ` +
-      `You MUST first call \`proposeWorkflow\`, present the proposal verbatim, get the user's explicit OK ("yes", "create it", "go ahead"), and only then call \`createWorkflow\`. Never call this tool from a fresh user description without proposing first. ` +
-      `\n\nTriggering is built in: pass \`trigger\` to create AND wire the trigger in one call — \`{ kind: "schedule", schedule, ... }\` schedules it (no separate scheduling step), and \`{ kind: "event", event: { sources } }\` subscribes it to workspace signals (connector / channel / page / task events) right here — event triggers are NOT web-builder-only. A one-step assistant_call workflow with \`trigger.delivery\` IS a reminder ("remind me at 2pm"); a multi-step workflow is an automation. Confirm the schedule with the user first (mention the returned relativeTime / deliveryTarget so timezone or destination mistakes are caught).`,
-    inputSchema: z.object({
-      name: z.string().min(1).max(120),
-      description: z.string().max(2000).optional(),
-      definition: z
-        .object({
-          startStepId: z.union([z.string(), z.array(z.string())]),
-          steps: z.array(z.unknown()),
-        })
-        .passthrough(),
-      trigger: triggerInputSchemaRef.optional(),
-      targetViewId: z
-        .string()
-        .uuid()
-        .optional()
-        .describe(
-          'Doc page (saved-view UUID) a scheduled workflow maintains, so that page shows a "scheduled" badge. Usually omit — when scheduling from inside a page it is captured automatically, or derived from a step\'s page anchor.',
-        ),
-    }),
+      `Persist the latest new-workflow proposal that the user explicitly approved. This tool takes NO arguments: the runtime recovers the exact validated receipt from this session's persisted history. After approval call it immediately with {}. Never re-run proposeWorkflow, reconstruct or resend workflow fields, or run discovery/listAssistants. A call with no pending create proposal is rejected. ` +
+      `\n\nTriggering is built into the receipt: proposeWorkflow freezes \`trigger: { kind: "schedule", schedule, ... }\` to schedule it, or \`{ kind: "event", event: { sources } }\` to subscribe to workspace signals. A one-step assistant_call workflow with \`trigger.delivery\` is a reminder; a multi-step workflow is an automation. Confirm the schedule with the user before applying the receipt.`,
+    inputSchema: createWorkflowInputSchema,
     requiresConfirmation: false,
     async execute(input, context) {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
 
-      const parsed = WorkflowDefinitionSchema.safeParse(input.definition)
+      let createInput: z.infer<typeof createProposalInputSchema>
+      const pendingReceipt = 'proposalReceipt' in input
+        ? input.proposalReceipt
+        : context.workflowProposalReceipt
+      if (pendingReceipt) {
+        const decoded = decodeProposalReceipt(pendingReceipt)
+        if (!decoded.ok) return { data: decoded.error, isError: true }
+        if (decoded.receipt.action !== 'create') {
+          return { data: 'This receipt is for an existing workflow edit. Apply it with updateWorkflow.', isError: true }
+        }
+        createInput = decoded.receipt.input
+      } else {
+        if (!deps.allowLegacyDirectWrites) {
+          return {
+            data: 'A validated proposalReceipt is required. Do not reconstruct workflow fields or search for assistants; call proposeWorkflow, show its proposal, then pass its receipt unchanged after approval.',
+            isError: true,
+          }
+        }
+        const legacy = createProposalInputSchema.safeParse(input)
+        if (!legacy.success) {
+          return { data: { ok: false, errors: legacy.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`) }, isError: true }
+        }
+        createInput = legacy.data
+      }
+
+      const parsed = WorkflowDefinitionSchema.safeParse(createInput.definition)
       if (!parsed.success) {
         return {
           data: {
@@ -1467,8 +1749,8 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
 
       // Validate the optional inline trigger.
       let trigger: WorkflowTrigger | undefined
-      if (input.trigger) {
-        const t = WorkflowTriggerSchema.safeParse(input.trigger)
+      if (createInput.trigger) {
+        const t = WorkflowTriggerSchema.safeParse(createInput.trigger)
         if (!t.success) {
           return {
             data: { ok: false, errors: t.error.issues.map((i) => `trigger.${i.path.join('.')}: ${i.message}`) },
@@ -1541,11 +1823,12 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       const record = await deps.workflowStore.create({
         userId: context.userId,
         workspaceId: context.workspaceId!,
-        name: input.name,
-        description: input.description ?? null,
+        name: createInput.name,
+        description: createInput.description ?? null,
         definition,
         trigger,
       })
+      context.workflowProposalReceipt = undefined
 
       deps.onEvent?.({
         type: 'workflow_created',
@@ -1559,7 +1842,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       let schedule: ScheduleApplyResult | undefined
       let scheduleError: string | undefined
       if (trigger?.kind === 'schedule') {
-        const res = await applyScheduleTrigger(deps, context, record.id, definition, trigger, input.targetViewId)
+        const res = await applyScheduleTrigger(deps, context, record.id, definition, trigger, createInput.targetViewId)
         if ('error' in res) scheduleError = res.error
         else schedule = res
       }
@@ -1584,48 +1867,56 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
     },
   })
 
+  const updateWorkflowInputSchema = deps.allowLegacyDirectWrites
+    ? z.union([receiptWriteInputSchema, legacyUpdateWorkflowInputSchema])
+    : pendingWriteInputSchema
+
   const updateWorkflow = buildTool({
     name: 'updateWorkflow',
     description:
       `Edit an existing workflow — add a step, remove a step, reorder steps, rewrite a step's fields, OR change its trigger / schedule. Patches any subset of name / description / definition / enabled / trigger. ` +
-      `Pass \`trigger: { kind: "schedule", schedule, ... }\` to (re)schedule the workflow, \`{ kind: "event", event: { sources } }\` to (re)wire its event subscriptions, or \`{ kind: "manual" }\` to unschedule it. (Only the webhook URL slug + signing secret are provisioned in the web builder; every trigger kind is editable here.) ` +
-      `Workflow: first call \`getWorkflow\` to read the current definition, construct the edited definition, then call \`proposeWorkflow\` to validate + preview it, present the change to the user, get explicit confirmation ("yes", "go ahead"), and only then call \`updateWorkflow\`. Never edit a definition you have not read with \`getWorkflow\` first. ` +
+      `First call \`getWorkflow\`, then \`proposeWorkflow\` with that workflowId and the complete edited values. After explicit confirmation call this tool immediately with {}. It takes NO arguments: the runtime recovers the exact validated receipt from persisted session history. Never re-run proposal/discovery/listAssistants or reconstruct workflow fields. A call with no pending update proposal is rejected. Never use \`createWorkflow\` for an edit. ` +
       `Editing does not affect runs already in flight — the change applies to the next run.`,
-    inputSchema: z.object({
-      workflowId: idShape,
-      name: z.string().min(1).max(120).optional(),
-      description: z.string().max(2000).nullable().optional(),
-      definition: z
-        .object({
-          startStepId: z.union([z.string(), z.array(z.string())]),
-          steps: z.array(z.unknown()),
-        })
-        .passthrough()
-        .optional()
-        .describe('Full replacement DAG. Omit to leave the steps unchanged. See proposeWorkflow tool docs for the schema.'),
-      enabled: z.boolean().optional().describe('Disable (false) or re-enable (true) the workflow.'),
-      trigger: triggerInputSchemaRef.optional(),
-      targetViewId: z
-        .string()
-        .uuid()
-        .nullable()
-        .optional()
-        .describe('Repoint (UUID) or clear (null) the doc page a scheduled workflow maintains. Omit to leave unchanged.'),
-    }),
+    inputSchema: updateWorkflowInputSchema,
     requiresConfirmation: false,
     async execute(input, context) {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
 
-      const existing = await deps.workflowStore.getById(context.userId, input.workflowId)
+      let updateInput: z.infer<typeof updateProposalInputSchema>
+      const pendingReceipt = 'proposalReceipt' in input
+        ? input.proposalReceipt
+        : context.workflowProposalReceipt
+      if (pendingReceipt) {
+        const decoded = decodeProposalReceipt(pendingReceipt)
+        if (!decoded.ok) return { data: decoded.error, isError: true }
+        if (decoded.receipt.action !== 'update') {
+          return { data: 'This receipt is for a new workflow. Apply it with createWorkflow.', isError: true }
+        }
+        updateInput = decoded.receipt.input
+      } else {
+        if (!deps.allowLegacyDirectWrites) {
+          return {
+            data: 'A validated update proposalReceipt is required. Do not reconstruct workflow fields or search for assistants; call getWorkflow, then proposeWorkflow with its workflowId, and pass the returned receipt unchanged after approval.',
+            isError: true,
+          }
+        }
+        const legacy = updateProposalInputSchema.safeParse(input)
+        if (!legacy.success) {
+          return { data: { ok: false, errors: legacy.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`) }, isError: true }
+        }
+        updateInput = legacy.data
+      }
+
+      const existing = await deps.workflowStore.getById(context.userId, updateInput.workflowId)
       if (!existing || existing.workspaceId !== context.workspaceId) {
-        return { data: `Workflow ${input.workflowId} not found in workspace.`, isError: true }
+        return { data: `Workflow ${updateInput.workflowId} not found in workspace.`, isError: true }
       }
 
       // Validate the optional trigger up front (before any write).
       let trigger: WorkflowTrigger | undefined
-      if (input.trigger) {
-        const t = WorkflowTriggerSchema.safeParse(input.trigger)
+      if (updateInput.trigger) {
+        const t = WorkflowTriggerSchema.safeParse(updateInput.trigger)
         if (!t.success) {
           return { data: { ok: false, errors: t.error.issues.map((i) => `trigger.${i.path.join('.')}: ${i.message}`) }, isError: true }
         }
@@ -1636,17 +1927,17 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       }
 
       const fields: Parameters<WorkflowStore['update']>[2] = {}
-      if (input.name !== undefined) {
-        fields.name = input.name
+      if (updateInput.name !== undefined) {
+        fields.name = updateInput.name
         // A user-initiated rename pins the title so the auto-titler stops
         // touching it — mirrors the REST PATCH path (mig 202).
         fields.nameManuallySet = true
       }
-      if (input.description !== undefined) fields.description = input.description
-      if (input.enabled !== undefined) fields.enabled = input.enabled
+      if (updateInput.description !== undefined) fields.description = updateInput.description
+      if (updateInput.enabled !== undefined) fields.enabled = updateInput.enabled
 
-      if (input.definition !== undefined) {
-        const parsed = WorkflowDefinitionSchema.safeParse(input.definition)
+      if (updateInput.definition !== undefined) {
+        const parsed = WorkflowDefinitionSchema.safeParse(updateInput.definition)
         if (!parsed.success) {
           return {
             data: {
@@ -1705,7 +1996,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       // when the definition or trigger is actually changing. A bare
       // `{ enabled: false }` (or rename) must never be blocked by a connector
       // token that has since expired; the runtime guards cover live runs.
-      if (input.definition !== undefined || trigger !== undefined) {
+      if (updateInput.definition !== undefined || trigger !== undefined) {
         const effectiveDef = fields.definition ?? existing.definition
         const effectiveTrigger = trigger ?? existing.trigger
         const depIssues = await dependencyIssues(effectiveDef, effectiveTrigger, context, deps)
@@ -1718,10 +2009,11 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
         return { data: 'Nothing to update — pass at least one of name / description / definition / enabled / trigger.', isError: true }
       }
 
-      const updated = await deps.workflowStore.update(context.userId, input.workflowId, fields)
+      const updated = await deps.workflowStore.update(context.userId, updateInput.workflowId, fields)
       if (!updated) {
-        return { data: `Workflow ${input.workflowId} not found in workspace.`, isError: true }
+        return { data: `Workflow ${updateInput.workflowId} not found in workspace.`, isError: true }
       }
+      context.workflowProposalReceipt = undefined
 
       // Reconcile the firing scheduled_jobs row with the new trigger.
       let schedule: { nextRun: string; relativeTime?: string } | undefined
@@ -1750,15 +2042,15 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
               updated.id,
               fields.definition ?? existing.definition,
               trigger,
-              input.targetViewId,
+              updateInput.targetViewId,
             )
             if ('error' in applied) scheduleError = applied.error
             else schedule = { nextRun: applied.nextRun, relativeTime: applied.relativeTime }
           } else {
             const timezone = trigger.timezone ?? context.userTimezone ?? 'UTC'
             const viewIdToSet =
-              input.targetViewId !== undefined
-                ? await resolveTargetView(deps.resolveViewWorkspace, input.targetViewId, context)
+              updateInput.targetViewId !== undefined
+                ? await resolveTargetView(deps.resolveViewWorkspace, updateInput.targetViewId, context)
                 : undefined
             const synced = await syncWorkflowScheduleTrigger(
               { jobStore: deps.jobStore, resolvePrimary: deps.resolvePrimary },
