@@ -30,10 +30,6 @@ describe('[COMP:billing/engine-rates] ENGINE_PROVIDER_COST_PER_1K', () => {
     expect(flatEngineCostUsd('not-an-engine')).toBe(0)
   })
 
-  it('records Search Console as an explicit $0 line, not an omission', () => {
-    expect(ENGINE_PROVIDER_COST_PER_1K.gsc).toBe(0)
-  })
-
   it('namespaces the usage_tracking model so an engine id cannot pass for a model id', () => {
     expect(engineCostModel('openai')).toBe('engine:openai')
   })

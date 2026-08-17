@@ -2,7 +2,7 @@
  * AI Engines MCP — the HTTP surface's thin adapter.
  *
  * The engine logic itself (per-engine `callOnce`, batch / samples / checkFor
- * / truncation / concurrency, the GSC service-account JWT) lives ONCE in
+ * / truncation / concurrency) lives ONCE in
  * `@use-brian/core` → `engines/ask-engines.ts`, shared with the in-process
  * base tools. This file adds only what the HTTP surface owns:
  *
@@ -22,14 +22,11 @@ import type { z } from 'zod'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import {
   createEngineAskers,
-  createGscQuerier,
   EngineInputError,
   EngineBudgetError,
   ASK_INPUT_SHAPE,
-  GSC_INPUT_SHAPE,
   type AskArgs,
   type EnginesEnv,
-  type GscQueryArgs,
 } from '@use-brian/core'
 
 export type { EnginesEnv }
@@ -107,22 +104,6 @@ export function createEngineTools(
           return text(JSON.stringify(run.payload, null, 2), run.allFailed)
         } catch (err) {
           return toolError(asker.name, err)
-        }
-      },
-    })
-  }
-
-  const gsc = createGscQuerier(env, fetchImpl)
-  if (gsc) {
-    tools.push({
-      name: gsc.name,
-      description: gsc.description,
-      inputSchema: { ...GSC_INPUT_SHAPE },
-      handler: async (args) => {
-        try {
-          return text(JSON.stringify(await gsc.query(args as GscQueryArgs, takeCallBudget), null, 2))
-        } catch (err) {
-          return toolError(gsc.name, err)
         }
       },
     })

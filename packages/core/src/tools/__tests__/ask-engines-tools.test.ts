@@ -1,5 +1,4 @@
 import { describe, it, expect, vi } from 'vitest'
-import { generateKeyPairSync } from 'node:crypto'
 import { createEngineBaseTools } from '../base/ask-engines.js'
 import { createBaseTools } from '../base/index.js'
 import { decodeExternalCostMeta } from '../../billing/external-cost.js'
@@ -41,9 +40,9 @@ describe('[COMP:tools/ask-engines] in-process engine tools', () => {
     it('registers only the tools whose credential exists', () => {
       const names = createEngineBaseTools({
         ENGINES_PERPLEXITY_API_KEY: 'k',
-        ENGINES_GSC_KEY_JSON: '{"client_email":"a@b.example","private_key":"x"}',
+        ENGINES_ANTHROPIC_API_KEY: 'k',
       }).map((t) => t.name)
-      expect(names).toEqual(['askPerplexity', 'searchConsoleQuery'])
+      expect(names).toEqual(['askPerplexity', 'askClaude'])
     })
 
     it('joins the base toolset when the credential is present', () => {
@@ -203,52 +202,6 @@ describe('[COMP:tools/ask-engines] in-process engine tools', () => {
       expect(result.isError).toBe(true)
       expect(result.data).toContain('question')
       expect(decodeExternalCostMeta(result.meta)).toBeUndefined()
-      expect(fetchMock).not.toHaveBeenCalled()
-    })
-  })
-
-  describe('searchConsoleQuery', () => {
-    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 })
-    const saJson = JSON.stringify({
-      client_email: 'watch@project.iam.gserviceaccount.com',
-      private_key: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
-      token_uri: 'https://oauth2.googleapis.com/token',
-    })
-
-    it('records a $0 audit row rather than no row at all', async () => {
-      const fetchMock = vi
-        .fn()
-        .mockResolvedValueOnce(fakeResponse({ access_token: 'ya29.tok', expires_in: 3600 }))
-        .mockResolvedValueOnce(fakeResponse({ rows: [{ keys: ['q'], clicks: 1 }] }))
-      const [tool] = createEngineBaseTools(
-        { ENGINES_GSC_KEY_JSON: saJson, ENGINES_GSC_SITE: 'sc-domain:example.com' },
-        fetchMock as unknown as typeof fetch,
-      )
-      const result = await tool.execute(
-        { startDate: '2026-08-01', endDate: '2026-08-07' },
-        ctx,
-      )
-
-      expect(result.isError).toBeFalsy()
-      expect(decodeExternalCostMeta(result.meta)).toEqual({
-        kind: 'flat',
-        model: 'engine:gsc',
-        flatCostUsd: 0,
-      })
-    })
-
-    it('surfaces a missing property as a tool error, not a crash', async () => {
-      const fetchMock = vi.fn()
-      const [tool] = createEngineBaseTools(
-        { ENGINES_GSC_KEY_JSON: saJson },
-        fetchMock as unknown as typeof fetch,
-      )
-      const result = await tool.execute(
-        { startDate: '2026-08-01', endDate: '2026-08-07' },
-        ctx,
-      )
-      expect(result.isError).toBe(true)
-      expect(String(result.data)).toContain('siteUrl')
       expect(fetchMock).not.toHaveBeenCalled()
     })
   })

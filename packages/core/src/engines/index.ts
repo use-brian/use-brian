@@ -1,11 +1,8 @@
 export {
   createEngineAskers,
-  createGscQuerier,
   EngineInputError,
   EngineBudgetError,
   ASK_INPUT_SHAPE,
-  GSC_INPUT_SHAPE,
-  GSC_TOOL_DESCRIPTION,
   MAX_BATCH_QUESTIONS,
   MAX_SAMPLES,
   UPSTREAM_TIMEOUT_MS,
@@ -20,7 +17,5 @@ export type {
   AskPayload,
   AskRun,
   Citation,
-  GscQuerier,
-  GscQueryArgs,
   TakeBudget,
 } from './ask-engines.js'

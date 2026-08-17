@@ -4236,7 +4236,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       askShopifyAssistant({ workspaceId, storeScope, task, callerSessionId: `home-app:${appId}` }),
   }))
 
-  // AI Engines MCP — read-only observation of external answer engines + GSC,
+  // AI Engines MCP — read-only observation of external answer engines,
   // registered in a workspace as a custom connector. Dark by default: the
   // route exists only when ENGINES_MCP_SECRET plus at least one engine
   // credential are set (docs/architecture/integrations/engines-mcp.md).

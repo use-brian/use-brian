@@ -2,10 +2,8 @@ import { z } from 'zod'
 import { buildTool, type Tool } from '../types.js'
 import {
   createEngineAskers,
-  createGscQuerier,
   EngineInputError,
   ASK_INPUT_SHAPE,
-  GSC_INPUT_SHAPE,
   type AskPayload,
   type EnginesEnv,
 } from '../../engines/ask-engines.js'
@@ -14,7 +12,7 @@ import { flatEngineCostUsd, engineCostModel } from '../../billing/engine-provide
 
 /**
  * In-process engine observation tools — `askOpenAI`, `askGemini`,
- * `askPerplexity`, `askClaude`, `searchConsoleQuery`.
+ * `askPerplexity`, `askClaude`.
  *
  * Same shape as `webSearch`: a base tool that talks to a paid external API
  * and reports what it spent on `ToolResult.meta`, which the shared
@@ -44,7 +42,6 @@ import { flatEngineCostUsd, engineCostModel } from '../../billing/engine-provide
 const ENGINE_TOOL_TIMEOUT_MS = 240_000
 
 const askInputSchema = z.object(ASK_INPUT_SHAPE)
-const gscInputSchema = z.object(GSC_INPUT_SHAPE)
 
 /** Credential / configuration rejections — no retry of any shape will clear these. */
 const CONFIG_SHAPED = /status=40[13]|unauthor|invalid[_ ]api[_ ]key|api key|no_token|forbidden|permission|credential/i
@@ -154,55 +151,6 @@ export function createEngineBaseTools(
             return { data: describeAllFailed(asker.name, run.payload), isError: true, meta }
           }
           return { data: run.payload, meta }
-        },
-      }),
-    )
-  }
-
-  const gsc = createGscQuerier(env, fetchImpl)
-  if (gsc) {
-    tools.push(
-      buildTool({
-        name: gsc.name,
-        description: gsc.description,
-        inputSchema: gscInputSchema,
-        isConcurrencySafe: true,
-        isReadOnly: true,
-        timeoutMs: ENGINE_TOOL_TIMEOUT_MS,
-
-        async execute(input) {
-          try {
-            const data = await gsc.query(input)
-            // Search Console is free; the $0 row is an audit trail, the same
-            // convention `duckduckgo` follows in the search rates table.
-            return {
-              data,
-              meta: encodeExternalCostMeta({
-                kind: 'flat',
-                model: engineCostModel('gsc'),
-                flatCostUsd: 0,
-              }),
-            }
-          } catch (err) {
-            if (err instanceof EngineInputError) {
-              return {
-                data: `${err.message} Fix the named argument and call again — the same arguments will be refused the same way. Nothing was queried.`,
-                isError: true,
-              }
-            }
-            const message = err instanceof Error ? err.message : 'unknown_error'
-            const verdict = CONFIG_SHAPED.test(message)
-              ? 'This is a credentials/configuration problem with the Search Console service account, not something the arguments can fix. Do NOT retry — tell the user Search Console is not connected properly.'
-              : QUOTA_SHAPED.test(message)
-                ? 'Search Console refused on quota or rate limits. Retrying now fails the same way — tell the user, or narrow the date range and try later.'
-                : TRANSIENT_SHAPED.test(message)
-                  ? 'This looks transient. Retry once; if it fails again, tell the user rather than looping.'
-                  : 'Retrying the same arguments is unlikely to help — fix what the message names, or tell the user what Search Console reported.'
-            return {
-              data: `\`searchConsoleQuery\` returned no data: ${message}. ${verdict}`,
-              isError: true,
-            }
-          }
         },
       }),
     )
