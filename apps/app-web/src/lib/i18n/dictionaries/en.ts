@@ -3266,7 +3266,7 @@ export const en = {
       stepMaxTurnsHint: "1-60. Leave empty to use the default budget.",
       stepTimeoutLabel: "Timeout (seconds)",
       stepTimeoutHint:
-        "Wall-clock limit for this step, 1-900 seconds. Leave empty for the default (90s; deep research 300s). When the limit is hit the run ends as timed out, keeping any partial output.",
+        "Optional hard wall-clock limit for this step, 1-900 seconds. Leave empty for none: the step is then bounded by its turn and tool-call budget and stops only if it stalls (no progress for a few minutes). When a limit is hit the run ends as timed out, keeping any partial output.",
       // ── Delivery destination picker ──────────────────────────────────
       deliverDestinationLabel: "Destination",
       deliverDestinationPlaceholder: "Pick a recent chat…",

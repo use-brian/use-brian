@@ -1310,3 +1310,121 @@ describe('[COMP:engine/tool-executor] renderToolResultData — failure-object un
     expect(renderToolResultData('plain', true)).toBe('plain')
   })
 })
+
+describe('[COMP:engine/tool-executor] liveness: per-tool timer vs abandonment', () => {
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+  it('a finite timeoutMs aborts the tool signal but does NOT abandon the call - a slow tool that ignores the signal still returns its real result', async () => {
+    let sawAbort = false
+    const slow = buildTool({
+      name: 'slow',
+      description: 'slow but successful',
+      inputSchema: z.record(z.unknown()),
+      timeoutMs: 20,
+      async execute(_input, context) {
+        context.abortSignal.addEventListener('abort', () => { sawAbort = true }, { once: true })
+        await sleep(80)
+        return { data: 'landed' }
+      },
+    })
+    const executor = createToolExecutor({
+      tools: new Map([['slow', slow]]),
+      context: ctx,
+      loopDetector: createLoopDetector(),
+    })
+    executor.addTool('call_1', 'slow', {})
+    const results = await drainResults(executor)
+    expect(sawAbort).toBe(true)
+    // The model sees what actually happened, never a "timed out" for a
+    // send that landed (a race here would turn a slow send into a double send).
+    expect(results[0]).toMatchObject({ content: 'landed' })
+    expect((results[0] as { isError?: boolean }).isError).not.toBe(true)
+  })
+
+  it('NO_TOOL_TIMEOUT arms no per-tool timer', async () => {
+    const { NO_TOOL_TIMEOUT } = await import('../tool-executor.js')
+    let aborted = false
+    const untimed = buildTool({
+      name: 'untimed',
+      description: 'no wall-clock',
+      inputSchema: z.record(z.unknown()),
+      timeoutMs: NO_TOOL_TIMEOUT,
+      async execute(_input, context) {
+        await sleep(60)
+        aborted = context.abortSignal.aborted
+        return { data: 'ok' }
+      },
+    })
+    const executor = createToolExecutor({
+      tools: new Map([['untimed', untimed]]),
+      context: ctx,
+      loopDetector: createLoopDetector(),
+    })
+    executor.addTool('call_1', 'untimed', {})
+    await drainResults(executor)
+    expect(aborted).toBe(false)
+  })
+
+  it('a parent abort ABANDONS a tool that ignores its signal - the loop is not pinned on it', async () => {
+    const parent = new AbortController()
+    const stuck = buildTool({
+      name: 'stuck',
+      description: 'never returns',
+      inputSchema: z.record(z.unknown()),
+      timeoutMs: Number.POSITIVE_INFINITY,
+      async execute() {
+        await new Promise(() => {})
+        return { data: 'unreachable' }
+      },
+    })
+    const executor = createToolExecutor({
+      tools: new Map([['stuck', stuck]]),
+      context: { ...ctx, abortSignal: parent.signal },
+      loopDetector: createLoopDetector(),
+    })
+    executor.addTool('call_1', 'stuck', {})
+    setTimeout(() => parent.abort(new Error('run stopped')), 30)
+    const started = Date.now()
+    const results = await drainResults(executor)
+    expect(Date.now() - started).toBeLessThan(2_000)
+    expect(results[0]).toMatchObject({ isError: true })
+    expect((results[0] as { content: string }).content).toMatch(/run stopped/)
+  })
+
+  it('a tool waiting on a human confirmation pauses the liveness clock', async () => {
+    const pause = vi.fn()
+    const resume = vi.fn()
+    const touch = vi.fn()
+    let decide: ((d: { decision: 'allow' | 'deny' | 'always_allow' | 'always_deny'; comment?: string }) => void) | undefined
+    const resolver: ConfirmationResolver = {
+      waitForDecision: () => new Promise((resolve) => { decide = resolve }),
+      resolve: () => {},
+    } as unknown as ConfirmationResolver
+    const gated = buildTool({
+      name: 'gated',
+      description: 'needs confirmation',
+      inputSchema: z.record(z.unknown()),
+      requiresConfirmation: true,
+      async execute() {
+        return { data: 'ran' }
+      },
+    })
+    const executor = createToolExecutor({
+      tools: new Map([['gated', gated]]),
+      context: { ...ctx, progress: { touch, pause, resume } },
+      loopDetector: createLoopDetector(),
+      confirmationResolver: resolver,
+      onConfirmationRequired: () => {},
+    })
+    executor.addTool('call_1', 'gated', {})
+    await sleep(20)
+    expect(pause).toHaveBeenCalledTimes(1)
+    expect(resume).not.toHaveBeenCalled()
+    decide!({ decision: 'allow' })
+    const results = await drainResults(executor)
+    expect(resume).toHaveBeenCalledTimes(1)
+    expect(results[0]).toMatchObject({ content: 'ran' })
+    expect(touch).toHaveBeenCalledWith('tool_start:gated')
+    expect(touch).toHaveBeenCalledWith('tool_end:gated')
+  })
+})

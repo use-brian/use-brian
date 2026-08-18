@@ -29,11 +29,17 @@ export type ResearchBudget = {
   /** Absolute tool-call cap for the whole run (the loop-detector hard stop). */
   maxToolCalls: number
   /**
-   * Wall-clock abort for a single bounded agentic step. Honoured only on the
-   * workflow `assistant_call` path; a legacy scheduled job's `queryLoop` is
-   * turn-bounded and ignores this field.
+   * EXPLICIT wall-clock abort for a single bounded agentic step, or `null`
+   * for none (2026-08-19). Every default and tier preset is `null`: a step is
+   * bounded by cost (`maxTurns` / `maxToolCalls`) and by liveness (the query
+   * loop's stall watchdog - no progress for the idle window aborts it), not
+   * by a guess about how fast the model is. Only an author-set
+   * `depth.timeoutMs` (or the `ASSISTANT_CALL_TIMEOUT_MS` env) arms a
+   * wall-clock, clamped to `[FLOOR, CEILING]`. Honoured on the workflow
+   * `assistant_call` path and the blueprint synthesis fill; a legacy
+   * scheduled job's `queryLoop` is turn-bounded and ignores this field.
    */
-  timeoutMs: number
+  timeoutMs: number | null
 }
 
 /**
@@ -52,59 +58,62 @@ export const RESEARCH_BUDGET_CEILING: ResearchBudget = {
   timeoutMs: 900_000,
 }
 
-/** Lower bounds — a depth of zero would make a step a no-op. */
+/** Lower bounds — a depth of zero would make a step a no-op. The
+ *  `timeoutMs` floor applies to an EXPLICIT wall-clock only. */
 export const RESEARCH_BUDGET_FLOOR: ResearchBudget = {
   maxTurns: 1,
   maxToolCalls: 1,
   timeoutMs: 1_000,
 }
 
-/** Tier presets. `standard` equals the historical query-loop default. */
+/**
+ * Tier presets. `standard` equals the historical query-loop default. Neither
+ * tier arms a wall-clock (2026-08-19): `standard` was 30s and `deep` 300s
+ * (itself raised from 180s after the slow `max` model aborted mid-turn), and
+ * every one of those numbers clipped legitimate work at the slow end while
+ * catching nothing the stall watchdog would not. Cost stays bounded by the
+ * turn / tool-call caps.
+ */
 const TIERS: Record<ResearchDepthTier, ResearchBudget> = {
-  standard: { maxTurns: 15, maxToolCalls: 10, timeoutMs: 30_000 },
-  // Wall-clock raised 180s → 300s (the ceiling): scheduled / workflow `deep`
-  // steps doing genuine multi-source synthesis on the slow `max` model were
-  // hitting the 180s abort mid-turn and failing with `dispatch_threw`
-  // ("This operation was aborted"). Turn / tool-call caps are unchanged, so
-  // cost stays bounded — only the wall-clock allowance widens.
-  deep: { maxTurns: 40, maxToolCalls: 35, timeoutMs: 300_000 },
+  standard: { maxTurns: 15, maxToolCalls: 10, timeoutMs: null },
+  deep: { maxTurns: 40, maxToolCalls: 35, timeoutMs: null },
 }
 
 /** The tier names, for UI / tool enumeration. */
 export const RESEARCH_DEPTH_TIERS = Object.keys(TIERS) as ResearchDepthTier[]
 
 /**
- * Default wall-clock abort (ms) for an `assistant_call` step with no `depth`.
- * Raised 30s → 90s (2026-07-08): a single step routinely gathers context,
- * drafts, AND writes a workspace file, and the old 30s abort clipped that
- * legitimate work mid-turn — which pushed authors to *degrade* the workflow
- * (drop the file write) just to fit the cap rather than give the step room.
- * Overridable via the `ASSISTANT_CALL_TIMEOUT_MS` env var, clamped to
- * [FLOOR.timeoutMs, CEILING.timeoutMs]. An explicit `step.depth.timeoutMs` or
- * a `deep` tier still wins field-by-field over this default.
+ * Default wall-clock for an `assistant_call` step with no `depth`: NONE
+ * (2026-08-19). It was 30s, then 90s (2026-07-08, after the 30s abort clipped
+ * the common gather-draft-write shape and pushed authors to degrade their
+ * workflows to fit) - each number a guess about model speed that failed on
+ * the slow end. A step is now progress-bounded (stall watchdog) and
+ * cost-bounded (turns / tool calls). An operator who still wants a hard
+ * wall-clock sets `ASSISTANT_CALL_TIMEOUT_MS` (clamped to
+ * [FLOOR.timeoutMs, CEILING.timeoutMs]); an explicit `step.depth.timeoutMs`
+ * still wins field-by-field.
  */
-export const DEFAULT_ASSISTANT_CALL_TIMEOUT_MS = 90_000
+export const DEFAULT_ASSISTANT_CALL_TIMEOUT_MS: number | null = null
 
 /**
  * Resolve the default step wall-clock from a raw env string. Pure (takes the
  * value, not `process.env`) so it's testable without env mutation. An unset,
- * blank, or non-numeric value falls back to {@link DEFAULT_ASSISTANT_CALL_TIMEOUT_MS};
- * a numeric value is clamped to the same [FLOOR, CEILING] as every other budget.
+ * blank, or non-numeric value means NO default wall-clock (`null`); a numeric
+ * value is clamped to the same [FLOOR, CEILING] as every other budget.
  */
-export function parseAssistantCallTimeoutMs(raw: string | undefined): number {
+export function parseAssistantCallTimeoutMs(raw: string | undefined): number | null {
   if (raw === undefined || raw.trim() === '') return DEFAULT_ASSISTANT_CALL_TIMEOUT_MS
   const parsed = Number(raw)
   if (!Number.isFinite(parsed)) return DEFAULT_ASSISTANT_CALL_TIMEOUT_MS
-  return clamp(parsed, RESEARCH_BUDGET_FLOOR.timeoutMs, RESEARCH_BUDGET_CEILING.timeoutMs)
+  return clamp(parsed, RESEARCH_BUDGET_FLOOR.timeoutMs!, RESEARCH_BUDGET_CEILING.timeoutMs!)
 }
 
 /**
  * Default budget for a workflow `assistant_call` step — and therefore for a
  * scheduled job, which post the scheduling⇄workflow cutover *is* a one-step
  * `assistant_call` workflow. Tighter than `standard` on turns / tool calls
- * (`maxTurns: 5`), but its wall-clock is the env-configurable default above
- * (90s out of the box). A step with no `depth` keeps this exactly; `depth` is
- * purely opt-in.
+ * (`maxTurns: 5`); no wall-clock unless `ASSISTANT_CALL_TIMEOUT_MS` sets one.
+ * A step with no `depth` keeps this exactly; `depth` is purely opt-in.
  */
 export const ASSISTANT_CALL_DEFAULT_BUDGET: ResearchBudget = {
   maxTurns: 5,
@@ -131,8 +140,8 @@ export const ResearchDepthConfigSchema = z
     timeoutMs: z
       .number()
       .int()
-      .min(RESEARCH_BUDGET_FLOOR.timeoutMs)
-      .max(RESEARCH_BUDGET_CEILING.timeoutMs)
+      .min(RESEARCH_BUDGET_FLOOR.timeoutMs!)
+      .max(RESEARCH_BUDGET_CEILING.timeoutMs!)
       .optional(),
   })
   .strict()
@@ -176,10 +185,13 @@ export function resolveResearchBudget(
       RESEARCH_BUDGET_FLOOR.maxToolCalls,
       RESEARCH_BUDGET_CEILING.maxToolCalls,
     ),
-    timeoutMs: clamp(
-      config?.timeoutMs ?? base.timeoutMs,
-      RESEARCH_BUDGET_FLOOR.timeoutMs,
-      RESEARCH_BUDGET_CEILING.timeoutMs,
-    ),
+    // `null` = no wall-clock (progress-bounded). Only an explicit number is
+    // clamped; the FLOOR is never applied to "none".
+    timeoutMs: (() => {
+      const raw = config?.timeoutMs ?? base.timeoutMs
+      return raw === null || raw === undefined
+        ? null
+        : clamp(raw, RESEARCH_BUDGET_FLOOR.timeoutMs!, RESEARCH_BUDGET_CEILING.timeoutMs!)
+    })(),
   }
 }

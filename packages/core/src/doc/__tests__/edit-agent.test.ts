@@ -8,9 +8,12 @@ import type {
   StreamChunk,
 } from '../../providers/types.js'
 import { buildTool, type Tool, type ToolContext } from '../../tools/types.js'
+import { NO_TOOL_TIMEOUT } from '../../engine/tool-executor.js'
 import {
   createDelegateDocEditTool,
-  DOC_EDIT_TIMEOUT_MS,
+  DOC_EDIT_MAX_TOOL_CALLS,
+  DOC_EDIT_MAX_TURNS,
+  resolveDocEditBudget,
   isolateDocEditToolContext,
   runDocEditAgent,
   toolsForDocEditIntent,
@@ -221,6 +224,57 @@ describe('[COMP:doc/edit-agent] context-clean Doc editor', () => {
     expect(requests.every((request) => request.model === 'cheap')).toBe(true)
   })
 
+  it('reports PARTIAL with a stall reason when the child stops making progress after mutating (no wall-clock)', async () => {
+    const requests: ProviderRequest[] = []
+    const provider: LLMProvider = {
+      name: 'fake',
+      models: ['cheap'],
+      async *stream(request) {
+        requests.push(request)
+        if (requests.length === 1) {
+          yield* toolTurn('patchPage', { pageId: 'page-1' })
+          return
+        }
+        // Second call: the provider goes silent for good (honouring abort,
+        // as a real fetch does).
+        yield { type: 'message_start', model: 'cheap' }
+        await new Promise<never>((_, reject) => {
+          request.signal?.addEventListener('abort', () => reject(request.signal!.reason), { once: true })
+        })
+      },
+      createSession(): ProviderSession {
+        return { async *send() { throw new Error('stateless only') } }
+      },
+    }
+    const started = Date.now()
+    const result = await runDocEditAgent({
+      provider,
+      model: 'cheap',
+      systemPrompt: 'isolated editor protocol',
+      instruction: 'Rewrite the intro.',
+      tools: new Map([['patchPage', patchTool([])]]),
+      context: parentContext,
+      loadPageContext: async () => 'pageId=page-1 version=1',
+      stallIdleMs: 60,
+    })
+    expect(Date.now() - started).toBeLessThan(5_000)
+    expect(result.status).toBe('partial')
+    expect(result.mutationTools).toEqual(['patchPage'])
+    expect(result.summary).toMatch(/STOPPED EARLY/)
+    expect(result.summary).toMatch(/it stalled - stalled: no progress/)
+    expect(result.error).toMatch(/stalled/)
+  })
+
+  it('cost budgets are env-tunable for a self-host and default to 24 turns / 40 tool calls', () => {
+    expect(resolveDocEditBudget({})).toEqual({ maxTurns: DOC_EDIT_MAX_TURNS, maxToolCalls: DOC_EDIT_MAX_TOOL_CALLS })
+    expect(DOC_EDIT_MAX_TURNS).toBe(24)
+    expect(DOC_EDIT_MAX_TOOL_CALLS).toBe(40)
+    expect(resolveDocEditBudget({ DOC_EDIT_MAX_TURNS: '40', DOC_EDIT_MAX_TOOL_CALLS: '80' }))
+      .toEqual({ maxTurns: 40, maxToolCalls: 80 })
+    expect(resolveDocEditBudget({ DOC_EDIT_MAX_TURNS: 'lots' })).toMatchObject({ maxTurns: DOC_EDIT_MAX_TURNS })
+    expect(resolveDocEditBudget({ DOC_EDIT_MAX_TURNS: '0' })).toMatchObject({ maxTurns: 2 })
+  })
+
   it('returns an error receipt when neither attempt mutates', async () => {
     const requests: ProviderRequest[] = []
     const provider = providerFrom((request) => (
@@ -263,7 +317,9 @@ describe('[COMP:doc/edit-agent] context-clean Doc editor', () => {
     })
 
     expect(tool.name).toBe('delegateDocEdit')
-    expect(tool.timeoutMs).toBe(DOC_EDIT_TIMEOUT_MS)
+    // No wall-clock on the gateway: the child is progress-bounded.
+    expect(tool.timeoutMs).toBe(NO_TOOL_TIMEOUT)
+    expect(Number.isFinite(tool.timeoutMs)).toBe(false)
     expect(tool.inputSchema.safeParse({
       intent: 'edit',
       pageId: 'page-1',

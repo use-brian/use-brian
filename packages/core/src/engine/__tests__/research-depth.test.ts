@@ -31,13 +31,13 @@ describe('[COMP:engine/research-depth] resolveResearchBudget', () => {
     expect(resolveResearchBudget({ tier: 'deep' }, ASSISTANT_CALL_DEFAULT_BUDGET)).toEqual({
       maxTurns: 40,
       maxToolCalls: 35,
-      timeoutMs: 300_000,
+      timeoutMs: null, // progress-bounded, no wall-clock (2026-08-19)
     })
     // `standard` from the 5-turn assistant_call fallback is also an upgrade.
     expect(resolveResearchBudget({ tier: 'standard' }, ASSISTANT_CALL_DEFAULT_BUDGET)).toEqual({
       maxTurns: 15,
       maxToolCalls: 10,
-      timeoutMs: 30_000,
+      timeoutMs: null,
     })
   })
 
@@ -55,8 +55,17 @@ describe('[COMP:engine/research-depth] resolveResearchBudget', () => {
     ).toEqual({
       maxTurns: 40, // from `deep`
       maxToolCalls: 20, // override
-      timeoutMs: 300_000, // from `deep`
+      timeoutMs: null, // from `deep`: none
     })
+  })
+
+  it('an explicit timeoutMs override still arms a (clamped) wall-clock', () => {
+    expect(
+      resolveResearchBudget({ tier: 'deep', timeoutMs: 240_000 }, ASSISTANT_CALL_DEFAULT_BUDGET),
+    ).toMatchObject({ timeoutMs: 240_000 })
+    expect(
+      resolveResearchBudget({ timeoutMs: 999_999_999 }, ASSISTANT_CALL_DEFAULT_BUDGET),
+    ).toMatchObject({ timeoutMs: RESEARCH_BUDGET_CEILING.timeoutMs })
   })
 
   it('clamps an over-ceiling override down to the ceiling', () => {
@@ -73,20 +82,24 @@ describe('[COMP:engine/research-depth] resolveResearchBudget', () => {
       ASSISTANT_CALL_DEFAULT_BUDGET,
     )
     expect(resolved).toEqual(RESEARCH_BUDGET_FLOOR)
+    // The floor never turns "no wall-clock" into a 1s one.
+    expect(
+      resolveResearchBudget({ maxTurns: 0 }, ASSISTANT_CALL_DEFAULT_BUDGET).timeoutMs,
+    ).toBeNull()
   })
 
-  it('ASSISTANT_CALL_DEFAULT_BUDGET is the 5-turn step budget with the 90s default wall-clock', () => {
+  it('ASSISTANT_CALL_DEFAULT_BUDGET is the 5-turn step budget with NO default wall-clock', () => {
     expect(ASSISTANT_CALL_DEFAULT_BUDGET).toEqual({
       maxTurns: 5,
       maxToolCalls: 10,
       timeoutMs: DEFAULT_ASSISTANT_CALL_TIMEOUT_MS,
     })
-    expect(DEFAULT_ASSISTANT_CALL_TIMEOUT_MS).toBe(90_000)
+    expect(DEFAULT_ASSISTANT_CALL_TIMEOUT_MS).toBeNull()
   })
 })
 
 describe('[COMP:engine/research-depth] parseAssistantCallTimeoutMs', () => {
-  it('falls back to the 90s default when unset, blank, or non-numeric', () => {
+  it('means no wall-clock (null) when unset, blank, or non-numeric', () => {
     expect(parseAssistantCallTimeoutMs(undefined)).toBe(DEFAULT_ASSISTANT_CALL_TIMEOUT_MS)
     expect(parseAssistantCallTimeoutMs('')).toBe(DEFAULT_ASSISTANT_CALL_TIMEOUT_MS)
     expect(parseAssistantCallTimeoutMs('   ')).toBe(DEFAULT_ASSISTANT_CALL_TIMEOUT_MS)

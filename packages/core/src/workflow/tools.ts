@@ -27,6 +27,7 @@ import { z } from 'zod'
 import { createHash, timingSafeEqual } from 'node:crypto'
 import { deflateRawSync, inflateRawSync } from 'node:zlib'
 import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
+import { NO_TOOL_TIMEOUT } from '../engine/tool-executor.js'
 import {
   WorkflowDefinitionSchema,
   WorkflowTriggerSchema,
@@ -2348,7 +2349,10 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       workflowId: idShape,
       input: z.record(z.unknown()).optional().describe('Optional trigger payload, accessible to steps as `{{input.X}}`.'),
     }),
-    timeoutMs: 90_000,
+    // No per-tool wall-clock (2026-08-19): the run's steps are each
+    // progress-bounded (stall watchdog) and cost-bounded; the tool returns
+    // the honest terminal outcome however long the run legitimately takes.
+    timeoutMs: NO_TOOL_TIMEOUT,
     async execute(input, context) {
       const gate = workspaceGate(context.workspaceId, context.channelType)
       if (gate) return gate

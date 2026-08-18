@@ -3,6 +3,7 @@ import type { LLMProvider, Message, ContentBlock, TokenUsage, AssistantResponse,
 import type { Tool, ToolContext, ToolResultMeta } from '../tools/types.js'
 import type { AwaitingApprovalEvent, ConfirmationResolver, ToolConfirmationRequest } from '../mcp/types.js'
 import { createAccumulator } from '../providers/accumulator.js'
+import { createStallWatchdog, withStallSignal, type StallWatchdog } from './stall-watchdog.js'
 import { createToolExecutor } from './tool-executor.js'
 import { createLoopDetector, DEFAULT_HARD_LIMIT } from './loop-detector.js'
 import {
@@ -220,6 +221,19 @@ export type QueryLoopOptions = {
    * see `packages/core/src/engine/research-depth.ts`.
    */
   maxToolCalls?: number
+  /**
+   * Progress-based liveness bound. When set, the loop runs under a stall
+   * watchdog: any `stallIdleMs` window with no provider chunk, no tool
+   * activity, and no loop event aborts the loop with a `StalledError`
+   * (`error` event, `isStalledError`). Waits on a human confirmation pause
+   * the clock. Touches forward to `context.progress` (a parent loop's
+   * clock), so a nested loop's progress keeps its parent alive. This is the
+   * mechanism that lets callers drop default wall-clock caps: bound cost with
+   * `maxTurns` / `maxToolCalls`, bound liveness here, never by the clock.
+   * See `stall-watchdog.ts` and docs/architecture/engine/query-loop.md ->
+   * "Liveness, not wall-clock".
+   */
+  stallIdleMs?: number
   onTurnStart?: (turn: number) => void
   /**
    * Fires after each turn finishes — after the assistant_turn event is
@@ -521,16 +535,35 @@ export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<Quer
   // runs when the consumer stops iterating early, the request is cancelled,
   // or provider/tool code throws before a terminal event can be emitted.
   const invocationFinalizers = new Map<string, () => void | Promise<void>>()
+  // Liveness: an opted-in loop gets its own stall watchdog whose signal is
+  // merged into the abort signal every provider call and tool sees, and
+  // whose clock every tool and nested loop touches through `context.progress`.
+  // A loop WITHOUT its own watchdog still forwards its tools' progress to the
+  // parent clock it was handed, so nesting composes either way.
+  const watchdog = options.stallIdleMs
+    ? createStallWatchdog({
+        idleMs: options.stallIdleMs,
+        parent: options.context.progress,
+        label: `queryLoop model=${options.model}`,
+      })
+    : null
   const toolContext: ToolContext = {
     ...options.context,
+    ...(watchdog
+      ? {
+          abortSignal: withStallSignal(options.context.abortSignal, watchdog),
+          progress: watchdog,
+        }
+      : {}),
     registerInvocationFinalizer: (key, finalizer) => {
       invocationFinalizers.set(key, finalizer)
     },
   }
 
   try {
-    yield* queryLoopCore({ ...options, context: toolContext })
+    yield* queryLoopCore({ ...options, context: toolContext, stallWatchdog: watchdog ?? undefined })
   } finally {
+    watchdog?.dispose()
     const results = await Promise.allSettled(
       [...invocationFinalizers.values()].map((finalize) => finalize()),
     )
@@ -542,7 +575,9 @@ export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<Quer
   }
 }
 
-async function* queryLoopCore(options: QueryLoopOptions): AsyncGenerator<QueryEvent> {
+async function* queryLoopCore(
+  options: QueryLoopOptions & { stallWatchdog?: StallWatchdog },
+): AsyncGenerator<QueryEvent> {
   const {
     provider,
     model,
@@ -551,7 +586,11 @@ async function* queryLoopCore(options: QueryLoopOptions): AsyncGenerator<QueryEv
     context,
     maxTurns = DEFAULT_MAX_TURNS,
     maxToolCalls = DEFAULT_HARD_LIMIT,
+    stallWatchdog,
   } = options
+  // Every event the loop hands its consumer is progress; so is every
+  // provider chunk (below) and every tool start / end (tool-executor).
+  const progress = context.progress
 
   const loopDetector = createLoopDetector({ hardLimit: maxToolCalls })
   const totalUsage: TokenUsage = { inputTokens: 0, outputTokens: 0 }
@@ -788,6 +827,7 @@ async function* queryLoopCore(options: QueryLoopOptions): AsyncGenerator<QueryEv
       let chunksSinceHeapCheck = 0
 
       for await (const chunk of modelStream) {
+        progress?.touch(`model:${chunk.type}`)
         chunksSinceHeapCheck++
         if (chunksSinceHeapCheck >= HEAP_CHECK_EVERY) {
           chunksSinceHeapCheck = 0
@@ -926,6 +966,14 @@ async function* queryLoopCore(options: QueryLoopOptions): AsyncGenerator<QueryEv
         }
       }
 
+      // The stall watchdog fired (its signal aborted the provider call): the
+      // loop is not transiently blipped, it is dead. Report the typed stall
+      // rather than the provider's AbortError so consumers can say why.
+      if (stallWatchdog?.error) {
+        yield { type: 'error', error: stallWatchdog.error }
+        return
+      }
+
       // Transient stream retry: provider stalled or upstream blipped before
       // any chunk reached the consumer. Retry once with a short backoff so a
       // single Gemini fetch hang doesn't surface as "I couldn't generate a
@@ -947,6 +995,7 @@ async function* queryLoopCore(options: QueryLoopOptions): AsyncGenerator<QueryEv
           `[query-loop] Transient stream error on turn ${turn}: ${errMsg} — retry ${transientRetries}/${MAX_TRANSIENT_RETRIES} after ${TRANSIENT_RETRY_BACKOFF_MS}ms`,
         )
         yield { type: 'status', message: 'Connection stalled, retrying...' }
+        progress?.touch('transient_retry')
         await new Promise((resolve) => setTimeout(resolve, TRANSIENT_RETRY_BACKOFF_MS))
         continue
       }
@@ -1069,6 +1118,14 @@ async function* queryLoopCore(options: QueryLoopOptions): AsyncGenerator<QueryEv
     }
     while (pendingAwaitingApprovals.length > 0) {
       yield pendingAwaitingApprovals.shift()!
+    }
+
+    // The watchdog fired during the tool phase (a tool sat silent past the
+    // idle window; the executor abandoned it on the abort). The turn's tool
+    // results are not a basis for another model call - stop here, typed.
+    if (stallWatchdog?.error) {
+      yield { type: 'error', error: stallWatchdog.error }
+      return
     }
 
     // askQuestion question-surfacing — runs BEFORE the assistant_turn yield

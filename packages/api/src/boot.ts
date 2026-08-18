@@ -131,7 +131,6 @@ import {
   createE2bRuntime,
   createSkillRunnerTools,
   createBuFallbackTool,
-  RESEARCH_BUDGET_CEILING,
   type BlockApprovalsPort,
   type BrowserSkillGrantStore,
   type ComputerToolPolicy,
@@ -2968,15 +2967,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       assistantId,
       name: isVerify ? 'Work a goal to done' : 'Complete a task',
       instructions,
-      // Goal iterations get the wall-clock CEILING (not the 90s reminder
-      // default): an autonomous iteration doing real work — a browser-skill
-      // run in the cloud sandbox, a research pass, file writes — routinely
-      // outlives 90s, and clipping it mid-tool made the goal loop burn
-      // iterations on timeouts. Cost stays bounded by the unchanged turn /
-      // tool-call caps + the driver's own spend guards (maxSpend,
-      // workspaceBudgetOk); only the wall-clock allowance widens. See
+      // No wall-clock on a goal iteration (2026-08-19). It used to pin the
+      // 900s ceiling because the 90s reminder default clipped real work (a
+      // browser-skill run in the cloud sandbox, a research pass, file writes)
+      // and made the goal loop burn iterations on timeouts; the default is
+      // now no wall-clock at all - the step is progress-bounded by the stall
+      // watchdog and cost-bounded by the unchanged turn / tool-call caps + the
+      // driver's own spend guards (maxSpend, workspaceBudgetOk). See
       // docs/architecture/engine/computer-use.md → "Working a task's goal".
-      depth: { timeoutMs: RESEARCH_BUDGET_CEILING.timeoutMs },
     })
   }
 

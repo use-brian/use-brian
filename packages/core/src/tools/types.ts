@@ -1,3 +1,4 @@
+import type { ProgressClock } from '../engine/stall-watchdog.js'
 import type { z } from 'zod'
 import type { CacheStore } from '../compaction/cache-tool.js'
 import type { SessionStateStore } from '../memory/session-state-types.js'
@@ -90,6 +91,15 @@ export type ToolContext = {
    */
   workflowRunId?: string | null
   abortSignal: AbortSignal
+  /**
+   * The enclosing loop's liveness clock. A long-running tool calls
+   * `progress?.touch('<what>')` while it works so the loop's stall watchdog
+   * (and every parent loop's, transitively) sees it as alive; a nested loop
+   * created inside a tool passes this as its watchdog's `parent`. Absent
+   * when no loop above opted into a watchdog. See
+   * `packages/core/src/engine/stall-watchdog.ts`.
+   */
+  progress?: ProgressClock
   /**
    * Register best-effort resource cleanup for the enclosing `queryLoop`
    * invocation. Registrations are keyed: repeated tool calls replace the

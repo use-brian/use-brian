@@ -13,6 +13,7 @@
 
 import { z } from 'zod'
 import { buildTool, type Tool } from '../types.js'
+import { NO_TOOL_TIMEOUT } from '../../engine/tool-executor.js'
 import { toolFailure } from '../tool-failure.js'
 import { INITIAL_BUDGET, type ConsultRequest, type ConsultTransport } from '../../a2a/index.js'
 
@@ -151,7 +152,12 @@ If unsure whether to call this, do not call it. Answer with your own tools first
     }),
     isConcurrencySafe: false,
     isReadOnly: true,
-    timeoutMs: 60_000,
+    // No per-tool wall-clock (2026-08-19): the callee's consult loop is
+    // progress-bounded by its own stall watchdog and cost-bounded by its
+    // budget, so a slow-but-alive consult returns its real answer instead of
+    // being clipped at 60s here (with the callee left running orphaned).
+    // The parent's abort (Stop / disconnect / its own watchdog) still stops it.
+    timeoutMs: NO_TOOL_TIMEOUT,
 
     async execute(input, context) {
       try {
