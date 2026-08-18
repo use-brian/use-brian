@@ -2470,6 +2470,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     resolveWorkspaceCustomLlm,
     tools: allTools,
     memoryStore,
+    // Session-state bridge: a consult that delivers into a user channel reads
+    // that conversation's `# Open commitments` (read-only). See
+    // context-engine/session-state.md → "Delivery-conversation bridging".
+    sessionStateStore,
     // Lazy getter: `filesApi` is assigned further down (the workspace-
     // filesystem block) — a direct reference here would freeze `null`.
     // The executor reads `options.filesApi` per call, post-boot.

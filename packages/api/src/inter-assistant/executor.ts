@@ -31,10 +31,12 @@ import type {
   CapabilityStore,
   ResearchDepthConfig,
   WorkerRunsStore,
+  SessionStateStore,
 } from '@use-brian/core'
 import {
   queryLoop,
   buildMemoryContext,
+  buildDeliveryConversationStateBlock,
   buildCalleeSystemPrompt,
   buildDocSupervisorSkillBlock,
   calculateCost,
@@ -58,6 +60,7 @@ import {
   findOrCreateSession,
   addSessionMessage,
   getSessionMessages,
+  listSessionsByChannelForWorkspaceSystem,
 } from '../db/sessions.js'
 import { BACKGROUND_MODEL, MODEL_MAP, tierForModel } from '../model-resolution.js'
 import { notifyBrainWriteIfMatch, BRAIN_WRITE_TOOL_SIGNALS } from '../brain-stream/notify.js'
@@ -88,6 +91,19 @@ export type CalleeExecutorOptions = {
   /** Base tool set (will be cloned + MCP-injected per callee). */
   tools: Map<string, Tool>
   memoryStore: MemoryStore
+  /**
+   * Session-state tier (`# Open commitments`). When set, a consult that
+   * carries a `deliverTarget` (workflow `assistant_call` step / scheduled-job
+   * reminder) gets the READ-ONLY block of the conversation it delivers into
+   * — every workspace-assistant session on that `(channelType, channelId)`.
+   * A scheduled run's own session never holds rows, so without this bridge
+   * anything the interactive assistant tracked there (the daily meal /
+   * workout log behind the 2026-08-18 "found the records but not their
+   * content" health report) is invisible to the run. Absent → no block.
+   * See docs/architecture/context-engine/session-state.md →
+   * "Delivery-conversation bridging".
+   */
+  sessionStateStore?: SessionStateStore
   /**
    * Company-brain retrieval store. When set (and the callee is workspace-
    * scoped, free-mode), the 6 brain read tools (`recentEpisodes`, `search`,
@@ -1214,7 +1230,37 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       }
     }
 
-    const fullSystemPrompt = `${systemPrompt}${docAnchorBlock}${priorRunMemoryBlock}${workflowGuardBlock}${recordCreationGuardBlock}${automatedToolPolicyBlock}${unavailableBlock}${skillPromptFragment}${blueprintPromptFragment}\n\n# Context\nCurrent date and time: ${currentDateTime}\nTimezone: ${calleeOwner.timezone}\n\n${memoryContext}`
+    // Delivery-conversation commitments (read-only bridge). A consult that
+    // delivers into a user channel is a continuation of that conversation, so
+    // it reads the `# Open commitments` rows the interactive assistant(s)
+    // track there. Resolved by `(channelType, channelId)` across the callee
+    // workspace's assistants — the step may target `'primary'` while the
+    // conversation belongs to another assistant (the health-report case).
+    // Skipped for ordinary consults (no deliverTarget) and personal callees.
+    let deliveryConversationBlock = ''
+    if (params.deliverTarget && options.sessionStateStore && calleeAssistant.workspaceId) {
+      try {
+        const conversationSessions = await listSessionsByChannelForWorkspaceSystem({
+          workspaceId: calleeAssistant.workspaceId,
+          channelType: params.deliverTarget.channelType,
+          channelId: params.deliverTarget.channelId,
+        })
+        if (conversationSessions.length > 0) {
+          const block = await buildDeliveryConversationStateBlock({
+            store: options.sessionStateStore,
+            sessions: conversationSessions.map((s) => ({
+              sessionId: s.id,
+              assistantName: s.assistantName,
+            })),
+          })
+          if (block) deliveryConversationBlock = `\n\n${block}`
+        }
+      } catch (err) {
+        console.error('[inter-assistant] delivery-conversation commitments fetch failed (skipped):', err)
+      }
+    }
+
+    const fullSystemPrompt = `${systemPrompt}${docAnchorBlock}${priorRunMemoryBlock}${workflowGuardBlock}${recordCreationGuardBlock}${automatedToolPolicyBlock}${unavailableBlock}${skillPromptFragment}${blueprintPromptFragment}${deliveryConversationBlock}\n\n# Context\nCurrent date and time: ${currentDateTime}\nTimezone: ${calleeOwner.timezone}\n\n${memoryContext}`
     // 6. Build messages and run the query loop.
     //
     // Persist the user turn first, then build the message list. A durable

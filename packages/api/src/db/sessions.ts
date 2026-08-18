@@ -1485,6 +1485,44 @@ export async function listSessionsForWorkspaceSystem(
 }
 
 /**
+ * The sessions that make up ONE conversation on a user channel — every
+ * session whose `(channel_type, channel_id)` equals the given target and
+ * whose assistant belongs to `workspaceId` (same `assistants.workspace_id`
+ * join / §6-a boundary as `listSessionsForWorkspaceSystem`; a teammate's
+ * personal assistant bound to the same chat is never returned). A multi-bot
+ * chat yields one row per assistant, newest-active first.
+ *
+ * Used by the callee executor to bridge the session-state tier into a
+ * scheduled run that DELIVERS into this conversation (workflow
+ * `assistant_call` steps + scheduled-job reminders). System-level and
+ * read-only. See docs/architecture/context-engine/session-state.md →
+ * "Delivery-conversation bridging".
+ */
+export async function listSessionsByChannelForWorkspaceSystem(params: {
+  workspaceId: string
+  channelType: string
+  channelId: string
+  /** Defaults to 10; clamped to [1, 25]. */
+  limit?: number
+}): Promise<Array<{ id: string; assistantId: string; assistantName: string }>> {
+  const limit = Math.max(1, Math.min(params.limit ?? 10, 25))
+  const result = await query<{ id: string; assistantId: string; assistantName: string }>(
+    `SELECT s.id,
+            s.assistant_id AS "assistantId",
+            a.name         AS "assistantName"
+     FROM sessions s
+     JOIN assistants a ON a.id = s.assistant_id
+     WHERE a.workspace_id = $1
+       AND s.channel_type = $2
+       AND s.channel_id = $3
+     ORDER BY s.last_active_at DESC
+     LIMIT $4`,
+    [params.workspaceId, params.channelType, params.channelId, limit],
+  )
+  return result.rows
+}
+
+/**
  * Read the most-recent `limit` messages of ONE session, chronological, as
  * text-only gists — ONLY IF the session belongs to a workspace assistant of
  * `workspaceId`. Returns:

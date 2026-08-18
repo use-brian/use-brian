@@ -19,6 +19,7 @@ import {
   getSessionMessages,
   setCompactSummaryAndBoundary,
   listSessionsForWorkspaceSystem,
+  listSessionsByChannelForWorkspaceSystem,
   getSessionTranscriptForWorkspaceSystem,
   toStampedMessages,
 } from '../sessions.js'
@@ -309,6 +310,41 @@ describe('[COMP:api/sessions-route] listSessionsForWorkspaceSystem', () => {
     mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
     await listSessionsForWorkspaceSystem('ws_1', { limit: 999 })
     expect(mockQuery.mock.calls[0][1]).toEqual(['ws_1', 50])
+  })
+})
+
+describe('[COMP:api/sessions-route] listSessionsByChannelForWorkspaceSystem', () => {
+  // The delivery-conversation lookup behind the session-state bridge
+  // (context-engine/session-state.md → "Delivery-conversation bridging"):
+  // every workspace-assistant session on ONE (channel_type, channel_id).
+  it('scopes on assistants.workspace_id AND the exact channel tuple, newest-active first', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ id: 's_1', assistantId: 'a_1', assistantName: 'Trainer' }],
+      rowCount: 1,
+    } as never)
+    const rows = await listSessionsByChannelForWorkspaceSystem({
+      workspaceId: 'ws_1',
+      channelType: 'telegram',
+      channelId: '-100123:topic:2',
+    })
+    const [sql, params] = mockQuery.mock.calls[0]
+    expect(sql).toContain('JOIN assistants a ON a.id = s.assistant_id')
+    expect(sql).toContain('a.workspace_id = $1')
+    expect(sql).toContain('s.channel_type = $2')
+    expect(sql).toContain('s.channel_id = $3')
+    expect(sql).toContain('ORDER BY s.last_active_at DESC')
+    // Never filtered by user or assistant id: the conversation is the scope.
+    expect(sql).not.toMatch(/user_id|s\.assistant_id = \$/)
+    expect(params).toEqual(['ws_1', 'telegram', '-100123:topic:2', 10])
+    expect(rows).toEqual([{ id: 's_1', assistantId: 'a_1', assistantName: 'Trainer' }])
+  })
+
+  it('clamps the limit to [1, 25]', async () => {
+    mockQuery.mockResolvedValue({ rows: [], rowCount: 0 } as never)
+    await listSessionsByChannelForWorkspaceSystem({ workspaceId: 'ws_1', channelType: 'slack', channelId: 'C1', limit: 999 })
+    expect(mockQuery.mock.calls[0][1]).toEqual(['ws_1', 'slack', 'C1', 25])
+    await listSessionsByChannelForWorkspaceSystem({ workspaceId: 'ws_1', channelType: 'slack', channelId: 'C1', limit: 0 })
+    expect(mockQuery.mock.calls[1][1]).toEqual(['ws_1', 'slack', 'C1', 1])
   })
 })
 
